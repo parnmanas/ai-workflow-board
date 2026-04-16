@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-04-16)
 Phase: 7 of 9 (Admin Menu Restructure)
 Plan: —
 Status: Ready to plan
-Last activity: 2026-04-16 — GSD artifacts cleaned, v1.0 marked complete
+Last activity: 2026-04-17 — Completed quick task 260417-0qj: Fix global scroll architecture
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -50,3 +50,9 @@ Decisions are logged in PROJECT.md Key Decisions table.
 
 - Phase 8: ReBAC service implementation details — confirm if service exists or needs extension
 - Phase 9: Auth flow change (login redirect) may require AuthContext and routing updates
+
+### Quick Tasks Completed
+
+| # | Description | Date | Commit | Directory |
+|---|-------------|------|--------|-----------|
+| 260417-0qj | Fix global scroll architecture: sidebar+header fixed, main panel scrolls, ChatPage independent panel scroll | 2026-04-17 | 9a5f886 | [260417-0qj](./quick/260417-0qj-fix-global-scroll-architecture-sidebar-h/) |
