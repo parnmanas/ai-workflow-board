@@ -22,6 +22,7 @@ import { EventsModule } from './modules/events/events.module';
 import { SharedServicesModule } from './services/shared-services.module';
 import { ChatRoomsModule } from './modules/chat-rooms/chat-rooms.module';
 import { ResourcesModule } from './modules/resources/resources.module';
+import { CredentialsModule } from './modules/credentials/credentials.module';
 
 @Module({
   imports: [
@@ -50,6 +51,7 @@ import { ResourcesModule } from './modules/resources/resources.module';
     EventsModule,
     ChatRoomsModule,
     ResourcesModule,
+    CredentialsModule,
   ],
 })
 export class AppModule {}

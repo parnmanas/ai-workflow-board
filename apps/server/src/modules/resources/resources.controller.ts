@@ -53,7 +53,7 @@ export class ResourcesController {
   @Post()
   async create(@Body() body: any, @Res() res: Response) {
     const {
-      workspace_id, board_id = null, name, description = '', type = 'link',
+      workspace_id, board_id = null, credential_id = null, name, description = '', type = 'link',
       url = '', content = '', file_data = '', file_name = '', file_mimetype = '',
       tags = [],
     } = body;
@@ -64,6 +64,7 @@ export class ResourcesController {
       this.resourceRepo.create({
         workspace_id,
         board_id: board_id || null,
+        credential_id: credential_id || null,
         name: name.trim(),
         description,
         type,
@@ -100,6 +101,7 @@ export class ResourcesController {
     if (body.file_name !== undefined) resource.file_name = body.file_name;
     if (body.file_mimetype !== undefined) resource.file_mimetype = body.file_mimetype;
     if (body.board_id !== undefined) resource.board_id = body.board_id || null;
+    if (body.credential_id !== undefined) resource.credential_id = body.credential_id || null;
     if (body.tags !== undefined) resource.tags = JSON.stringify(Array.isArray(body.tags) ? body.tags : []);
 
     const saved = await this.resourceRepo.save(resource);

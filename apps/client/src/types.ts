@@ -78,6 +78,7 @@ export interface Resource {
   id: string;
   workspace_id: string;
   board_id: string | null;
+  credential_id: string | null;
   name: string;
   description: string;
   type: 'repository' | 'document' | 'image' | 'link';
@@ -87,6 +88,17 @@ export interface Resource {
   file_name: string;
   file_mimetype: string;
   tags: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Credential {
+  id: string;
+  workspace_id: string;
+  name: string;
+  description: string;
+  provider: string;
+  credential_fields: Record<string, string>;
   created_at: string;
   updated_at: string;
 }

@@ -1,6 +1,7 @@
 import type {
   PromptTemplate,
   Resource,
+  Credential,
   ChatMessage,
   ChatThread,
   DashboardAgent,
@@ -276,6 +277,7 @@ export const api = {
   createResource: (data: {
     workspace_id: string;
     board_id?: string | null;
+    credential_id?: string | null;
     name: string;
     description?: string;
     type?: string;
@@ -307,6 +309,38 @@ export const api = {
   deleteResource: (id: string, workspaceId: string) => {
     const params = new URLSearchParams({ workspace_id: workspaceId });
     return request<{ success: true; id: string }>(`/resources/${id}?${params.toString()}`, { method: 'DELETE' });
+  },
+
+  // ─── Credentials ──────────────────────────────────────
+  listCredentials: (workspaceId: string, provider?: string) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    if (provider) params.set('provider', provider);
+    return request<Credential[]>(`/credentials?${params.toString()}`);
+  },
+  getCredentialProviders: () =>
+    request<Record<string, { label: string; fields: string[] }>>('/credentials/providers'),
+  createCredential: (data: {
+    workspace_id: string;
+    name: string;
+    description?: string;
+    provider: string;
+    credentials: Record<string, string>;
+  }) =>
+    request<Credential>('/credentials', { method: 'POST', body: JSON.stringify(data) }),
+  updateCredential: (
+    id: string,
+    data: {
+      workspace_id: string;
+      name?: string;
+      description?: string;
+      provider?: string;
+      credentials?: Record<string, string>;
+    },
+  ) =>
+    request<Credential>(`/credentials/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteCredential: (id: string, workspaceId: string) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    return request<{ success: true; id: string }>(`/credentials/${id}?${params.toString()}`, { method: 'DELETE' });
   },
 
   // ─── Chat (Phase 2) ────────────────────────────────────

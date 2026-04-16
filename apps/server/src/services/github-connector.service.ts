@@ -21,13 +21,34 @@ async function getGitHubToken(): Promise<string> {
   return process.env.GITHUB_TOKEN || '';
 }
 
-export async function isGitHubEnabled(): Promise<boolean> {
-  const token = await getGitHubToken();
+export async function getTokenForCredential(credentialId: string): Promise<string> {
+  if (!_dataSource?.isInitialized) return '';
+  try {
+    const repo = _dataSource.getRepository('Credential');
+    const cred = await repo.findOne({ where: { id: credentialId } });
+    if (!cred) return '';
+    const data = JSON.parse(decrypt((cred as any).encrypted_data));
+    return data.token || data.api_key || '';
+  } catch {
+    return '';
+  }
+}
+
+export async function resolveGitHubToken(credentialId?: string | null): Promise<string> {
+  if (credentialId) {
+    const token = await getTokenForCredential(credentialId);
+    if (token) return token;
+  }
+  return getGitHubToken();
+}
+
+export async function isGitHubEnabled(credentialId?: string | null): Promise<boolean> {
+  const token = await resolveGitHubToken(credentialId);
   return !!token;
 }
 
-async function githubFetch(path: string): Promise<any> {
-  const token = await getGitHubToken();
+async function githubFetch(path: string, credentialId?: string | null): Promise<any> {
+  const token = await resolveGitHubToken(credentialId);
   if (!token) throw new Error('GitHub token not configured');
 
   const res = await fetch(`${GITHUB_API}${path}`, {
@@ -66,17 +87,18 @@ export function parseGitHubUrl(url: string): { owner: string; repo: string } | n
   return { owner: match[1], repo: match[2].replace(/\.git$/, '') };
 }
 
-export async function fetchRepoInfo(owner: string, repo: string): Promise<RepoInfo> {
-  const repoData = await githubFetch(`/repos/${owner}/${repo}`);
+export async function fetchRepoInfo(owner: string, repo: string, credentialId?: string | null): Promise<RepoInfo> {
+  const repoData = await githubFetch(`/repos/${owner}/${repo}`, credentialId);
 
   let readmeContent = '';
   try {
+    const token = await resolveGitHubToken(credentialId);
     const readmeRes = await fetch(
       `${GITHUB_API}/repos/${owner}/${repo}/readme`,
       {
         headers: {
           'Accept': 'application/vnd.github.v3.raw',
-          'Authorization': `Bearer ${await getGitHubToken()}`,
+          'Authorization': `Bearer ${token}`,
           'User-Agent': 'AWB-GitHub-Connector',
           'X-GitHub-Api-Version': '2022-11-28',
         },
@@ -94,6 +116,7 @@ export async function fetchRepoInfo(owner: string, repo: string): Promise<RepoIn
   try {
     const treeData = await githubFetch(
       `/repos/${owner}/${repo}/git/trees/${repoData.default_branch}?recursive=1`,
+      credentialId,
     );
     if (treeData.tree) {
       fileTree = treeData.tree
@@ -105,7 +128,7 @@ export async function fetchRepoInfo(owner: string, repo: string): Promise<RepoIn
 
   let topics: string[] = [];
   try {
-    const topicsData = await githubFetch(`/repos/${owner}/${repo}/topics`);
+    const topicsData = await githubFetch(`/repos/${owner}/${repo}/topics`, credentialId);
     topics = topicsData.names || [];
   } catch {}
 
@@ -128,11 +151,11 @@ export interface GitHubSearchResult {
   items: any[];
 }
 
-export async function searchGitHubRepos(query: string, opts?: { per_page?: number; sort?: string }): Promise<GitHubSearchResult> {
+export async function searchGitHubRepos(query: string, opts?: { per_page?: number; sort?: string; credential_id?: string | null }): Promise<GitHubSearchResult> {
   const perPage = opts?.per_page ?? 10;
   const sort = opts?.sort ?? 'best-match';
   const qs = new URLSearchParams({ q: query, per_page: String(perPage), sort });
-  const data = await githubFetch(`/search/repositories?${qs.toString()}`);
+  const data = await githubFetch(`/search/repositories?${qs.toString()}`, opts?.credential_id);
   return {
     total_count: data.total_count,
     items: (data.items || []).map((r: any) => ({
@@ -147,10 +170,10 @@ export async function searchGitHubRepos(query: string, opts?: { per_page?: numbe
   };
 }
 
-export async function searchGitHubCode(query: string, opts?: { per_page?: number }): Promise<GitHubSearchResult> {
+export async function searchGitHubCode(query: string, opts?: { per_page?: number; credential_id?: string | null }): Promise<GitHubSearchResult> {
   const perPage = opts?.per_page ?? 10;
   const qs = new URLSearchParams({ q: query, per_page: String(perPage) });
-  const data = await githubFetch(`/search/code?${qs.toString()}`);
+  const data = await githubFetch(`/search/code?${qs.toString()}`, opts?.credential_id);
   return {
     total_count: data.total_count,
     items: (data.items || []).map((r: any) => ({
@@ -163,11 +186,11 @@ export async function searchGitHubCode(query: string, opts?: { per_page?: number
   };
 }
 
-export async function searchGitHubIssues(query: string, opts?: { per_page?: number; sort?: string }): Promise<GitHubSearchResult> {
+export async function searchGitHubIssues(query: string, opts?: { per_page?: number; sort?: string; credential_id?: string | null }): Promise<GitHubSearchResult> {
   const perPage = opts?.per_page ?? 10;
   const sort = opts?.sort ?? 'best-match';
   const qs = new URLSearchParams({ q: query, per_page: String(perPage), sort });
-  const data = await githubFetch(`/search/issues?${qs.toString()}`);
+  const data = await githubFetch(`/search/issues?${qs.toString()}`, opts?.credential_id);
   return {
     total_count: data.total_count,
     items: (data.items || []).map((r: any) => ({

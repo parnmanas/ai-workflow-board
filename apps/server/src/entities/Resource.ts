@@ -11,6 +11,9 @@ export class Resource {
   @Column({ type: 'varchar', nullable: true, default: null })
   board_id: string | null;
 
+  @Column({ type: 'varchar', nullable: true, default: null })
+  credential_id: string | null;
+
   @Column({ type: 'varchar' })
   name: string;
 

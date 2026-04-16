@@ -2498,16 +2498,16 @@ Supported actions:
   server.tool(
     'fetch_github_info',
     'Fetch metadata about a GitHub repository (description, README, file tree, topics). ' +
-    'Requires a GitHub token configured in Admin Settings or GITHUB_TOKEN env var. ' +
-    'Does NOT create or modify any resource — use save_resource or sync_github_resource for that.',
+    'Uses credential_id for auth if provided, otherwise falls back to global GitHub token.',
     {
       url: z.string().optional().describe('GitHub repository URL (e.g. https://github.com/owner/repo)'),
       owner: z.string().optional().describe('Repository owner (alternative to url)'),
       repo: z.string().optional().describe('Repository name (alternative to url)'),
+      credential_id: z.string().optional().describe('Credential ID from workspace credentials (overrides global token)'),
     },
-    async ({ url, owner, repo }) => {
-      if (!(await isGitHubEnabled())) {
-        return err('GitHub token not configured. Set it in Admin Settings or GITHUB_TOKEN env var.');
+    async ({ url, owner, repo, credential_id }) => {
+      if (!(await isGitHubEnabled(credential_id))) {
+        return err('GitHub token not configured. Add a credential or set global token in Admin Settings.');
       }
       let o = owner;
       let r = repo;
@@ -2520,7 +2520,7 @@ Supported actions:
       if (!o || !r) return err('Provide either url or both owner and repo');
 
       try {
-        const info = await fetchRepoInfo(o, r);
+        const info = await fetchRepoInfo(o, r, credential_id);
         return ok(info);
       } catch (e: any) {
         return err(`GitHub API error: ${e.message}`);
@@ -2533,23 +2533,24 @@ Supported actions:
     'Sync a GitHub repository into a resource. Fetches repo metadata, README, and file tree, ' +
     'stores them as resource content, and auto-embeds for vector search. ' +
     'If resource_id is provided, updates the existing resource; otherwise creates a new one. ' +
-    'Requires GitHub token in Admin Settings.',
+    'Uses credential_id for auth if provided.',
     {
       workspace_id: z.string().describe('Workspace ID'),
       url: z.string().describe('GitHub repository URL'),
       resource_id: z.string().optional().describe('Existing resource ID to update (omit to create new)'),
       board_id: z.string().optional().describe('Board ID for board-scoped resource'),
+      credential_id: z.string().optional().describe('Credential ID for GitHub auth (overrides global token)'),
     },
-    async ({ workspace_id, url, resource_id, board_id }) => {
-      if (!(await isGitHubEnabled())) {
-        return err('GitHub token not configured. Set it in Admin Settings or GITHUB_TOKEN env var.');
+    async ({ workspace_id, url, resource_id, board_id, credential_id }) => {
+      if (!(await isGitHubEnabled(credential_id))) {
+        return err('GitHub token not configured. Add a credential or set global token in Admin Settings.');
       }
       const parsed = parseGitHubUrl(url);
       if (!parsed) return err('Invalid GitHub URL');
 
       let info;
       try {
-        info = await fetchRepoInfo(parsed.owner, parsed.repo);
+        info = await fetchRepoInfo(parsed.owner, parsed.repo, credential_id);
       } catch (e: any) {
         return err(`GitHub API error: ${e.message}`);
       }
@@ -2570,6 +2571,7 @@ Supported actions:
         existing.url = info.html_url;
         existing.content = content;
         existing.tags = JSON.stringify(tags);
+        if (credential_id) existing.credential_id = credential_id;
         const saved = await resourceRepo.save(existing);
         embedResource(saved).catch(() => {});
         mcpToolsLog(`Synced GitHub repo ${info.full_name} → resource ${saved.id}`);
@@ -2579,6 +2581,7 @@ Supported actions:
       const created = resourceRepo.create({
         workspace_id,
         board_id: board_id || null,
+        credential_id: credential_id || null,
         name: info.full_name,
         description: info.description,
         type: 'repository',
@@ -2599,30 +2602,30 @@ Supported actions:
   server.tool(
     'search_github',
     'Search GitHub for repositories, code, or issues using the GitHub Search API. ' +
-    'Requires GitHub token in Admin Settings. ' +
-    'This searches GitHub directly — not AWB resources. Use search_resources for local vector search.',
+    'Uses credential_id for auth if provided, otherwise falls back to global token.',
     {
       query: z.string().describe('Search query (uses GitHub search syntax, e.g. "react language:typescript stars:>100")'),
       scope: z.enum(['repositories', 'code', 'issues']).default('repositories')
         .describe('What to search: repositories, code, or issues'),
       per_page: z.number().optional().default(10).describe('Results per page (max 30, default 10)'),
       sort: z.string().optional().describe('Sort field — repos: stars/forks/updated; issues: created/updated/comments'),
+      credential_id: z.string().optional().describe('Credential ID for GitHub auth (overrides global token)'),
     },
-    async ({ query, scope, per_page, sort }) => {
-      if (!(await isGitHubEnabled())) {
-        return err('GitHub token not configured. Set it in Admin Settings or GITHUB_TOKEN env var.');
+    async ({ query, scope, per_page, sort, credential_id }) => {
+      if (!(await isGitHubEnabled(credential_id))) {
+        return err('GitHub token not configured. Add a credential or set global token in Admin Settings.');
       }
       const limit = Math.min(per_page ?? 10, 30);
       try {
         if (scope === 'code') {
-          const results = await searchGitHubCode(query, { per_page: limit });
+          const results = await searchGitHubCode(query, { per_page: limit, credential_id });
           return ok({ scope: 'code', total_count: results.total_count, items: results.items });
         }
         if (scope === 'issues') {
-          const results = await searchGitHubIssues(query, { per_page: limit, sort });
+          const results = await searchGitHubIssues(query, { per_page: limit, sort, credential_id });
           return ok({ scope: 'issues', total_count: results.total_count, items: results.items });
         }
-        const results = await searchGitHubRepos(query, { per_page: limit, sort });
+        const results = await searchGitHubRepos(query, { per_page: limit, sort, credential_id });
         return ok({ scope: 'repositories', total_count: results.total_count, items: results.items });
       } catch (e: any) {
         return err(`GitHub search error: ${e.message}`);
