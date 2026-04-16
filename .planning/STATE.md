@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-04-16)
 Phase: 7 of 9 (Admin Menu Restructure)
 Plan: —
 Status: Ready to plan
-Last activity: 2026-04-17 — Completed quick task 260417-0qj: Fix global scroll architecture
+Last activity: 2026-04-17 — Completed quick task 260417-122: Chat subagent UX improvements
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -56,3 +56,4 @@ Decisions are logged in PROJECT.md Key Decisions table.
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
 | 260417-0qj | Fix global scroll architecture: sidebar+header fixed, main panel scrolls, ChatPage independent panel scroll | 2026-04-17 | 9a5f886 | [260417-0qj](./quick/260417-0qj-fix-global-scroll-architecture-sidebar-h/) |
+| 260417-122 | Chat subagent UX: emoji ack + staged typing indicator | 2026-04-17 | 2986e57 | [260417-122](./quick/260417-122-chat-subagent-ux-emoji-ack-staged-typing/) |
