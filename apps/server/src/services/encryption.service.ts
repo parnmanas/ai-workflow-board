@@ -55,16 +55,21 @@ export function decrypt(ciphertext: string): string {
   if (!ciphertext) return '';
   if (!ciphertext.startsWith('enc:')) return ciphertext;
 
-  const key = getEncryptionKey();
-  const combined = Buffer.from(ciphertext.slice(4), 'base64');
-  const iv = combined.subarray(0, IV_LENGTH);
-  const authTag = combined.subarray(IV_LENGTH, IV_LENGTH + AUTH_TAG_LENGTH);
-  const encrypted = combined.subarray(IV_LENGTH + AUTH_TAG_LENGTH);
+  try {
+    const key = getEncryptionKey();
+    const combined = Buffer.from(ciphertext.slice(4), 'base64');
+    const iv = combined.subarray(0, IV_LENGTH);
+    const authTag = combined.subarray(IV_LENGTH, IV_LENGTH + AUTH_TAG_LENGTH);
+    const encrypted = combined.subarray(IV_LENGTH + AUTH_TAG_LENGTH);
 
-  const decipher = createDecipheriv(ALGORITHM, key, iv, { authTagLength: AUTH_TAG_LENGTH });
-  decipher.setAuthTag(authTag);
-  const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
-  return decrypted.toString('utf8');
+    const decipher = createDecipheriv(ALGORITHM, key, iv, { authTagLength: AUTH_TAG_LENGTH });
+    decipher.setAuthTag(authTag);
+    const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
+    return decrypted.toString('utf8');
+  } catch {
+    console.error('[Encryption] Failed to decrypt — key mismatch or corrupted data');
+    return '';
+  }
 }
 
 export function isEncrypted(value: string): boolean {
