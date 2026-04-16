@@ -1512,6 +1512,7 @@ interface ChatRoomViewProps {
   participantCount?: number;
   participants?: MentionParticipant[];
   typingAgents?: Record<string, string>; // agent_id -> agent_name
+  currentUserId?: string;
 }
 
 function ChatRoomView({
@@ -1527,6 +1528,7 @@ function ChatRoomView({
   participantCount = 0,
   participants = [],
   typingAgents = {},
+  currentUserId,
 }: ChatRoomViewProps) {
   const [isRenaming, setIsRenaming] = useState(false);
   const [showAddPeople, setShowAddPeople] = useState(false);
@@ -1687,7 +1689,7 @@ function ChatRoomView({
             </div>
           </div>
         ) : (
-          <MessageList messages={messages} participantCount={participantCount} participants={participants} />
+          <MessageList messages={messages} participantCount={participantCount} participants={participants} currentUserId={currentUserId} />
         )}
         <div ref={bottomRef} />
       </div>
@@ -1734,9 +1736,10 @@ interface MessageListProps {
   messages: ChatRoomMessageItem[];
   participantCount: number;
   participants?: MentionParticipant[];
+  currentUserId?: string;
 }
 
-function MessageList({ messages, participantCount, participants = [] }: MessageListProps) {
+function MessageList({ messages, participantCount, participants = [], currentUserId }: MessageListProps) {
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
 
   // Close lightbox on Escape key
@@ -1808,66 +1811,105 @@ function MessageList({ messages, participantCount, participants = [] }: MessageL
       }
     }
 
+    const isMe = msg.sender_type === 'user' && msg.sender_id === currentUserId;
+
     rendered.push(
-      <div key={msg.id} data-message-id={msg.id} style={{ padding: '6px 16px' }}>
-        {!prevSameWindow && (
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 2 }}>
-            <span
+      <div
+        key={msg.id}
+        data-message-id={msg.id}
+        style={{
+          padding: '3px 16px',
+          display: 'flex',
+          justifyContent: isMe ? 'flex-end' : 'flex-start',
+        }}
+      >
+        <div style={{ maxWidth: '75%' }}>
+          {!prevSameWindow && (
+            <div
               style={{
-                fontSize: 13,
-                fontWeight: 600,
-                color: isAgent ? COLORS.agentName : COLORS.textPrimary,
+                display: 'flex',
+                alignItems: 'baseline',
+                gap: 8,
+                marginBottom: 4,
+                justifyContent: isMe ? 'flex-end' : 'flex-start',
               }}
             >
-              {msg.sender_name}
-            </span>
-            {isAgent && (
-              <span style={{ fontSize: 11, color: COLORS.textSecondary }}>(agent)</span>
+              {isMe ? (
+                <>
+                  <span style={{ fontSize: 11, color: COLORS.textMuted }}>
+                    {formatClockTime(msg.created_at)}
+                  </span>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: COLORS.textPrimary }}>
+                    {msg.sender_name}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span
+                    style={{
+                      fontSize: 13,
+                      fontWeight: 600,
+                      color: isAgent ? COLORS.agentName : COLORS.textPrimary,
+                    }}
+                  >
+                    {msg.sender_name}
+                  </span>
+                  {isAgent && (
+                    <span style={{ fontSize: 11, color: COLORS.textSecondary }}>(agent)</span>
+                  )}
+                  <span style={{ fontSize: 11, color: COLORS.textMuted }}>
+                    {formatClockTime(msg.created_at)}
+                  </span>
+                </>
+              )}
+            </div>
+          )}
+          <div
+            style={{
+              fontSize: 14,
+              color: COLORS.textPrimary,
+              lineHeight: 1.5,
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+              background: isMe ? `${tokens.colors.accent}18` : COLORS.secondary,
+              padding: '8px 12px',
+              borderRadius: prevSameWindow
+                ? '12px'
+                : isMe
+                  ? '12px 12px 2px 12px'
+                  : '12px 12px 12px 2px',
+            }}
+          >
+            {renderMarkdown(msg.content, participants)}
+            {/* Inline image thumbnails */}
+            {msgImages.length > 0 && (
+              <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap', justifyContent: isMe ? 'flex-end' : 'flex-start' }}>
+                {msgImages.map((img, idx) => (
+                  <img
+                    key={idx}
+                    src={`data:${img.mimetype};base64,${img.data}`}
+                    alt={img.filename || `Image ${idx + 1}`}
+                    style={{
+                      width: 64,
+                      height: 64,
+                      borderRadius: tokens.radii.sm,
+                      objectFit: 'cover',
+                      cursor: 'pointer',
+                      border: `1px solid ${COLORS.border}`,
+                    }}
+                    onClick={() => setLightboxImage(`data:${img.mimetype};base64,${img.data}`)}
+                  />
+                ))}
+              </div>
             )}
-            <span style={{ fontSize: 11, color: COLORS.textMuted }}>
-              {formatClockTime(msg.created_at)}
-            </span>
           </div>
-        )}
-        <div
-          style={{
-            fontSize: 14,
-            color: COLORS.textPrimary,
-            lineHeight: 1.5,
-            margin: '2px 0 0 0',
-            whiteSpace: 'pre-wrap',
-            wordBreak: 'break-word',
-          }}
-        >
-          {renderMarkdown(msg.content, participants)}
+          {/* Read receipt below last message */}
+          {isLast && participantCount > 1 && (
+            <div style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 4, textAlign: isMe ? 'right' : 'left' }}>
+              Read by {participantCount - 1}
+            </div>
+          )}
         </div>
-        {/* Inline image thumbnails */}
-        {msgImages.length > 0 && (
-          <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
-            {msgImages.map((img, idx) => (
-              <img
-                key={idx}
-                src={`data:${img.mimetype};base64,${img.data}`}
-                alt={img.filename || `Image ${idx + 1}`}
-                style={{
-                  width: 64,
-                  height: 64,
-                  borderRadius: tokens.radii.sm,
-                  objectFit: 'cover',
-                  cursor: 'pointer',
-                  border: `1px solid ${COLORS.border}`,
-                }}
-                onClick={() => setLightboxImage(`data:${img.mimetype};base64,${img.data}`)}
-              />
-            ))}
-          </div>
-        )}
-        {/* Read receipt below last message */}
-        {isLast && participantCount > 1 && (
-          <div style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 4 }}>
-            Read by {participantCount - 1}
-          </div>
-        )}
       </div>,
     );
   }
@@ -2286,6 +2328,7 @@ export default function ChatPage() {
             participantCount={participantCount}
             participants={roomParticipants}
             typingAgents={typingAgents}
+            currentUserId={user?.id}
           />
         )}
         <NewChatModal
@@ -2328,6 +2371,7 @@ export default function ChatPage() {
             participantCount={participantCount}
             participants={roomParticipants}
             typingAgents={typingAgents}
+            currentUserId={user?.id}
           />
         </Panel>
       </Group>

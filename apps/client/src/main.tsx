@@ -24,7 +24,7 @@ style.textContent = `
   }
   .awb-content {
     flex: 1;
-    overflow: auto;
+    overflow: hidden;
   }
   .awb-sidebar-backdrop { display: none; }
   .awb-topbar { display: none; }
