@@ -1511,7 +1511,7 @@ interface ChatRoomViewProps {
   onBack?: () => void;
   participantCount?: number;
   participants?: MentionParticipant[];
-  typingAgents?: Record<string, string>; // agent_id -> agent_name
+  typingAgents?: Record<string, { name: string; status?: string }>; // agent_id -> { name, status }
   currentUserId?: string;
 }
 
@@ -1527,7 +1527,7 @@ function ChatRoomView({
   onBack,
   participantCount = 0,
   participants = [],
-  typingAgents = {},
+  typingAgents = {} as Record<string, { name: string; status?: string }>,
   currentUserId,
 }: ChatRoomViewProps) {
   const [isRenaming, setIsRenaming] = useState(false);
@@ -1703,8 +1703,16 @@ function ChatRoomView({
           fontStyle: 'italic',
           flexShrink: 0,
         }}>
-          {Object.values(typingAgents).join(', ')}
-          {Object.keys(typingAgents).length === 1 ? ' is typing' : ' are typing'}
+          {(() => {
+            const entries = Object.values(typingAgents);
+            const names = entries.map(e => e.name);
+            const statuses = entries.map(e => e.status).filter(Boolean);
+            // If any agent has a status message, show it
+            if (statuses.length > 0) {
+              return `${names.join(', ')} — ${statuses[0]}`;
+            }
+            return `${names.join(', ')}${entries.length === 1 ? ' is typing' : ' are typing'}`;
+          })()}
           <span style={{ display: 'inline-block', width: 20 }}>...</span>
         </div>
       )}
@@ -2007,7 +2015,7 @@ export default function ChatPage() {
   const [roomParticipants, setRoomParticipants] = useState<MentionParticipant[]>([]);
   const [chatProtocolVersion, setChatProtocolVersion] = useState<number | null>(null);
   const [scrollToMessageId, setScrollToMessageId] = useState<string | null>(null);
-  const [typingAgents, setTypingAgents] = useState<Record<string, string>>({}); // agent_id -> agent_name
+  const [typingAgents, setTypingAgents] = useState<Record<string, { name: string; status?: string }>>({}); // agent_id -> { name, status }
   const originalTitleRef = useRef(document.title);
   const activeRoomIdRef = useRef<string | null>(null);
 
@@ -2183,13 +2191,13 @@ export default function ChatPage() {
     });
   }, [showToast, playNotifySound]));
 
-  // SSE: chat_room_typing — agent typing indicator
+  // SSE: chat_room_typing — agent typing indicator with optional status
   useBoardStreamEvent('chat_room_typing', useCallback((data: any) => {
     if (!data || !data.room_id) return;
     if (data.room_id !== activeRoomIdRef.current) return;
     setTypingAgents((prev) => {
       if (data.is_typing) {
-        return { ...prev, [data.agent_id]: data.agent_name || 'Agent' };
+        return { ...prev, [data.agent_id]: { name: data.agent_name || 'Agent', status: data.status || undefined } };
       }
       const next = { ...prev };
       delete next[data.agent_id];

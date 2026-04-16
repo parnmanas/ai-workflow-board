@@ -6,7 +6,9 @@ import { Board } from '../../entities/Board';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { Ticket } from '../../entities/Ticket';
 import { Comment } from '../../entities/Comment';
+import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
+import { Agent } from '../../entities/Agent';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { ChatRoomsService } from '../chat-rooms/chat-rooms.service';
 import { activityEvents } from '../../services/activity.service';
@@ -238,7 +240,7 @@ export class AgentApiController {
 
   @Post('chat-rooms/:roomId/typing')
   async setChatRoomTyping(@Body() body: any, @Param('roomId') roomId: string, @Res() res: Response) {
-    const { agent_id, agent_name, is_typing } = body;
+    const { agent_id, agent_name, is_typing, status } = body;
     if (!agent_id) return res.status(400).json({ error: 'agent_id is required' });
     const memberIds = await this.chatRoomsService.getRoomMemberIds(roomId);
     const agentMemberIds = await this.chatRoomsService.getRoomAgentMemberIds(roomId);
@@ -247,10 +249,29 @@ export class AgentApiController {
       agent_id,
       agent_name: agent_name || 'Agent',
       is_typing: is_typing !== false,
+      status: status || null,
       member_ids: memberIds,
       agent_member_ids: agentMemberIds,
     });
     return res.json({ ok: true });
+  }
+
+  @Post('chat-rooms/:roomId/messages')
+  async sendChatRoomMessage(@Body() body: any, @Param('roomId') roomId: string, @Res() res: Response) {
+    const { agent_id, content } = body;
+    if (!agent_id) return res.status(400).json({ error: 'agent_id is required' });
+    if (!content) return res.status(400).json({ error: 'content is required' });
+
+    const room = await this.dataSource.getRepository(ChatRoom).findOne({ where: { id: roomId } });
+    if (!room) return res.status(404).json({ error: 'Room not found' });
+
+    const agent = await this.dataSource.getRepository(Agent).findOne({ where: { id: agent_id } });
+    const agentName = agent?.name || 'Agent';
+
+    const msg = await this.chatRoomsService.sendMessage(
+      roomId, room.workspace_id, 'agent', agent_id, agentName, content,
+    );
+    return res.status(201).json(msg);
   }
 
   @Get('chat-rooms/:roomId/messages')
