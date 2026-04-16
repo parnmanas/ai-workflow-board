@@ -1511,6 +1511,7 @@ interface ChatRoomViewProps {
   onBack?: () => void;
   participantCount?: number;
   participants?: MentionParticipant[];
+  typingAgents?: Record<string, string>; // agent_id -> agent_name
 }
 
 function ChatRoomView({
@@ -1525,6 +1526,7 @@ function ChatRoomView({
   onBack,
   participantCount = 0,
   participants = [],
+  typingAgents = {},
 }: ChatRoomViewProps) {
   const [isRenaming, setIsRenaming] = useState(false);
   const [showAddPeople, setShowAddPeople] = useState(false);
@@ -1689,6 +1691,21 @@ function ChatRoomView({
         )}
         <div ref={bottomRef} />
       </div>
+
+      {/* Typing indicator */}
+      {Object.keys(typingAgents).length > 0 && (
+        <div style={{
+          padding: '4px 16px',
+          fontSize: '13px',
+          color: COLORS.textSecondary,
+          fontStyle: 'italic',
+          flexShrink: 0,
+        }}>
+          {Object.values(typingAgents).join(', ')}
+          {Object.keys(typingAgents).length === 1 ? ' is typing' : ' are typing'}
+          <span style={{ display: 'inline-block', width: 20 }}>...</span>
+        </div>
+      )}
 
       {/* Message input */}
       <ChatMessageInput
@@ -1948,6 +1965,7 @@ export default function ChatPage() {
   const [roomParticipants, setRoomParticipants] = useState<MentionParticipant[]>([]);
   const [chatProtocolVersion, setChatProtocolVersion] = useState<number | null>(null);
   const [scrollToMessageId, setScrollToMessageId] = useState<string | null>(null);
+  const [typingAgents, setTypingAgents] = useState<Record<string, string>>({}); // agent_id -> agent_name
   const originalTitleRef = useRef(document.title);
   const activeRoomIdRef = useRef<string | null>(null);
 
@@ -1972,6 +1990,7 @@ export default function ChatPage() {
 
   // Load messages + mark read on room change
   useEffect(() => {
+    setTypingAgents({}); // clear stale typing indicators when switching rooms
     if (!activeRoomId) {
       setMessages([]);
       setRoomParticipants([]);
@@ -2064,6 +2083,16 @@ export default function ChatPage() {
 
     const currentActiveRoomId = activeRoomIdRef.current;
 
+    // Auto-clear typing indicator when the agent's message arrives
+    if ((msg as any).sender_type === 'agent' && (msg as any).sender_id) {
+      setTypingAgents((prev) => {
+        if (!((msg as any).sender_id in prev)) return prev;
+        const next = { ...prev };
+        delete next[(msg as any).sender_id];
+        return next;
+      });
+    }
+
     if (msg.room_id === currentActiveRoomId) {
       setMessages((prev) => {
         // Deduplicate: skip if this message was already appended optimistically
@@ -2111,6 +2140,28 @@ export default function ChatPage() {
       return [room, ...updated];
     });
   }, [showToast, playNotifySound]));
+
+  // SSE: chat_room_typing — agent typing indicator
+  useBoardStreamEvent('chat_room_typing', useCallback((data: any) => {
+    if (!data || !data.room_id) return;
+    if (data.room_id !== activeRoomIdRef.current) return;
+    setTypingAgents((prev) => {
+      if (data.is_typing) {
+        return { ...prev, [data.agent_id]: data.agent_name || 'Agent' };
+      }
+      const next = { ...prev };
+      delete next[data.agent_id];
+      return next;
+    });
+  }, []));
+
+  // Safety timeout: clear all typing indicators after 15s in case is_typing:false is lost
+  useEffect(() => {
+    const ids = Object.keys(typingAgents);
+    if (ids.length === 0) return;
+    const timer = setTimeout(() => setTypingAgents({}), 15000);
+    return () => clearTimeout(timer);
+  }, [typingAgents]);
 
   // SSE: chat_room_update
   useBoardStreamEvent('chat_room_update', useCallback((data: any) => {
@@ -2234,6 +2285,7 @@ export default function ChatPage() {
             }}
             participantCount={participantCount}
             participants={roomParticipants}
+            typingAgents={typingAgents}
           />
         )}
         <NewChatModal
@@ -2275,6 +2327,7 @@ export default function ChatPage() {
             isMobile={false}
             participantCount={participantCount}
             participants={roomParticipants}
+            typingAgents={typingAgents}
           />
         </Panel>
       </Group>

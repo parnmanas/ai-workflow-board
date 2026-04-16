@@ -34,7 +34,7 @@ import React, {
 type StreamNamedEventType =
   | 'board_update' | 'agent_typing' | 'agent_trigger'
   | 'chat_message' | 'agent_status'
-  | 'chat_room_message' | 'chat_room_update'  // Phase 7
+  | 'chat_room_message' | 'chat_room_update' | 'chat_room_typing'  // Phase 7
   | 'server_meta';  // Phase 8 — protocol version handshake (CHAT-20)
 
 interface BoardStreamContextValue {
@@ -168,6 +168,10 @@ export function BoardStreamProvider({ children }: ProviderProps) {
 
       eventSource.addEventListener('chat_room_update', (event: MessageEvent) => {
         dispatch('chat_room_update', event.data);
+      });
+
+      eventSource.addEventListener('chat_room_typing', (event: MessageEvent) => {
+        dispatch('chat_room_typing', event.data);
       });
 
       // Phase 8 CHAT-20: protocol version handshake — dispatch to subscribers
