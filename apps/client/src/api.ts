@@ -303,6 +303,7 @@ export const api = {
       file_mimetype?: string;
       tags?: string[];
       board_id?: string | null;
+      credential_id?: string | null;
     },
   ) =>
     request<Resource>(`/resources/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),

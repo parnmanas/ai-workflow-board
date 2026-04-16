@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '../../api';
-import type { Resource } from '../../types';
+import type { Resource, Credential } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 import { Button, Input, Modal, Badge, Card } from '../common';
@@ -65,7 +65,9 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
   const [formFileData, setFormFileData] = useState('');
   const [formFileName, setFormFileName] = useState('');
   const [formFileMimetype, setFormFileMimetype] = useState('');
+  const [formCredentialId, setFormCredentialId] = useState<string>('');
   const [formErrors, setFormErrors] = useState<{ name?: string }>({});
+  const [credentials, setCredentials] = useState<Credential[]>([]);
 
   const effectiveWorkspaceId = workspaceId ||
     (typeof window !== 'undefined' ? localStorage.getItem('currentWorkspaceId') || '' : '');
@@ -78,12 +80,16 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
     }
     setLoading(true);
     try {
-      const list = await api.listResources(
-        effectiveWorkspaceId,
-        boardId !== undefined ? (boardId || '') : undefined,
-        filterType || undefined,
-      );
+      const [list, creds] = await Promise.all([
+        api.listResources(
+          effectiveWorkspaceId,
+          boardId !== undefined ? (boardId || '') : undefined,
+          filterType || undefined,
+        ),
+        api.listCredentials(effectiveWorkspaceId).catch(() => [] as Credential[]),
+      ]);
       setResources(list);
+      setCredentials(creds);
     } catch (err: any) {
       showToast(err?.message || 'Failed to load resources', 'error');
     } finally {
@@ -105,6 +111,7 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
     setFormFileData('');
     setFormFileName('');
     setFormFileMimetype('');
+    setFormCredentialId('');
     setFormErrors({});
     setEditResource(null);
     setShowForm(true);
@@ -120,6 +127,7 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
     setFormFileData(resource.file_data || '');
     setFormFileName(resource.file_name || '');
     setFormFileMimetype(resource.file_mimetype || '');
+    setFormCredentialId(resource.credential_id || '');
     setFormErrors({});
     setEditResource(resource);
     setShowForm(true);
@@ -176,12 +184,14 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
           file_name: formFileName,
           file_mimetype: formFileMimetype,
           tags: parsedTags,
+          credential_id: formCredentialId || null,
         });
         showToast('Resource updated.', 'success');
       } else {
         await api.createResource({
           workspace_id: effectiveWorkspaceId,
           board_id: boardId || null,
+          credential_id: formCredentialId || null,
           name: formName.trim(),
           description: formDescription,
           type: formType,
@@ -505,6 +515,42 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
                   placeholder="https://example.com/image.png"
                 />
               </div>
+            </div>
+          )}
+
+          {credentials.length > 0 && (
+            <div>
+              <label style={{
+                fontSize: tokens.typography.fontSizeXs,
+                fontWeight: tokens.typography.fontWeightSemibold,
+                color: tokens.colors.textMuted,
+                textTransform: 'uppercase',
+                display: 'block',
+                marginBottom: tokens.spacing.xs,
+              }}>Credential</label>
+              <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginBottom: 4 }}>
+                Optional — used for authenticated access (e.g. GitHub sync)
+              </div>
+              <select
+                value={formCredentialId}
+                onChange={(e) => setFormCredentialId(e.target.value)}
+                style={{
+                  width: '100%',
+                  background: tokens.colors.surface,
+                  border: `1px solid ${tokens.colors.border}`,
+                  borderRadius: tokens.radii.md,
+                  padding: '8px 10px',
+                  color: tokens.colors.textStrong,
+                  fontSize: '12px',
+                  fontFamily: 'inherit',
+                  boxSizing: 'border-box',
+                }}
+              >
+                <option value="">None</option>
+                {credentials.map((c) => (
+                  <option key={c.id} value={c.id}>{c.name} ({c.provider})</option>
+                ))}
+              </select>
             </div>
           )}
 
