@@ -1,5 +1,5 @@
-import { Controller, Sse, Query, Req, Res, UnauthorizedException, OnModuleDestroy } from '@nestjs/common';
-import { Request, Response } from 'express';
+import { Controller, Sse, Query, Req, Header, UnauthorizedException, OnModuleDestroy } from '@nestjs/common';
+import { Request } from 'express';
 import { Observable, Subject, filter, map, finalize, of, merge } from 'rxjs';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -284,7 +284,8 @@ export class EventsController implements OnModuleDestroy {
   }
 
   @Sse('stream')
-  async stream(@Req() req: Request, @Res({ passthrough: true }) res: Response): Promise<Observable<MessageEvent>> {
+  @Header('X-Accel-Buffering', 'no')
+  async stream(@Req() req: Request): Promise<Observable<MessageEvent>> {
     // Manual auth check since SSE uses query param for token
     const token = (req.query.token as string) || req.headers['authorization']?.toString().replace('Bearer ', '');
     if (!token) {
@@ -320,9 +321,6 @@ export class EventsController implements OnModuleDestroy {
 
     this.clientCount++;
     this.logService.info('SSE', `Client connected (${identity.type}: ${identity.name}, board: ${boardId || 'all'}, total: ${this.clientCount})`);
-
-    // Disable nginx/proxy buffering for SSE (passthrough: true lets NestJS @Sse still control the response)
-    res.setHeader('X-Accel-Buffering', 'no');
 
     // Emit protocol version on connect so clients can detect legacy/mismatch (CHAT-20)
     const versionEvent = of({
