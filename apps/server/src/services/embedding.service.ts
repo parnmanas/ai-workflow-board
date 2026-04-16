@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
 import { DataSource } from 'typeorm';
+import { decrypt } from './encryption.service';
 
 export interface EmbeddingResult {
   embedding: number[];
@@ -26,9 +27,10 @@ async function getDbSetting(key: string): Promise<string | null> {
 
 async function getConfig() {
   const dbProvider = await getDbSetting('embedding.provider');
-  const dbApiKey = await getDbSetting('embedding.api_key');
+  const dbApiKeyRaw = await getDbSetting('embedding.api_key');
   const dbModel = await getDbSetting('embedding.model');
 
+  const dbApiKey = dbApiKeyRaw ? decrypt(dbApiKeyRaw) : '';
   const provider = (dbProvider || process.env.EMBEDDING_PROVIDER || 'none').toLowerCase();
   const apiKey = dbApiKey || process.env.OPENAI_API_KEY || '';
   const model = dbModel || process.env.EMBEDDING_MODEL || 'text-embedding-3-small';

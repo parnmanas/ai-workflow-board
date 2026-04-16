@@ -6,6 +6,7 @@ dist/
 
 # Database
 *.db
+.encryption_key
 
 # Environment
 .env

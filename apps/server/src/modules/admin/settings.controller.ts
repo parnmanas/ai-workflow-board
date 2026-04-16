@@ -4,11 +4,14 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { SystemSetting } from '../../entities/SystemSetting';
 import { AdminGuard } from '../../common/guards/admin.guard';
+import { encrypt, decrypt } from '../../services/encryption.service';
 
 const SETTING_DEFINITIONS: Record<string, { description: string; is_secret: boolean; default_value: string }> = {
   'embedding.provider': { description: 'Embedding provider (openai or none)', is_secret: false, default_value: 'none' },
   'embedding.api_key': { description: 'API key for the embedding provider', is_secret: true, default_value: '' },
   'embedding.model': { description: 'Embedding model name', is_secret: false, default_value: 'text-embedding-3-small' },
+  'github.token': { description: 'GitHub Personal Access Token for repository sync', is_secret: true, default_value: '' },
+  'github.default_org': { description: 'Default GitHub organization (optional)', is_secret: false, default_value: '' },
 };
 
 @Controller('api/admin/settings')
@@ -25,10 +28,13 @@ export class SettingsController {
 
     const settings = Object.entries(SETTING_DEFINITIONS).map(([key, def]) => {
       const row = rowMap.get(key);
-      const value = row?.value ?? def.default_value;
+      let value = row?.value ?? def.default_value;
+      if (def.is_secret && value) {
+        value = maskSecret(decrypt(value));
+      }
       return {
         key,
-        value: def.is_secret && value ? maskSecret(value) : value,
+        value,
         description: def.description,
         is_secret: def.is_secret,
         updated_at: row?.updated_at || null,
@@ -52,21 +58,23 @@ export class SettingsController {
 
       if (def.is_secret && value && isMasked(value)) continue;
 
+      const storeValue = def.is_secret && value ? encrypt(value) : (value ?? '');
+
       let existing = await this.settingRepo.findOne({ where: { key } });
       if (existing) {
-        existing.value = value ?? '';
+        existing.value = storeValue;
         existing = await this.settingRepo.save(existing);
       } else {
         existing = await this.settingRepo.save(this.settingRepo.create({
           key,
-          value: value ?? '',
+          value: storeValue,
           description: def.description,
           is_secret: def.is_secret ? 1 : 0,
         }));
       }
       results.push({
         key,
-        value: def.is_secret && existing.value ? maskSecret(existing.value) : existing.value,
+        value: def.is_secret && existing.value ? maskSecret(decrypt(existing.value)) : existing.value,
         updated_at: existing.updated_at,
       });
     }
@@ -76,6 +84,7 @@ export class SettingsController {
 }
 
 function maskSecret(value: string): string {
+  if (!value) return '';
   if (value.length <= 8) return '••••••••';
   return value.slice(0, 4) + '••••' + value.slice(-4);
 }

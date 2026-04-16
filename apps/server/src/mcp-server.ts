@@ -30,6 +30,7 @@ import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/
 import { initDb, AppDataSource } from './db';
 import { registerAllTools } from './modules/mcp/mcp-tools';
 import { setEmbeddingDataSource } from './services/embedding.service';
+import { setGitHubDataSource } from './services/github-connector.service';
 
 // ─── Helpers ───────────────────────────────────────────────
 
@@ -332,6 +333,7 @@ async function startHttp() {
 async function main() {
   await initDb();
   setEmbeddingDataSource(AppDataSource);
+  setGitHubDataSource(AppDataSource);
 
   const transport = (process.env.MCP_TRANSPORT || 'stdio').toLowerCase();
 
