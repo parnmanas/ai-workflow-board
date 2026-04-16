@@ -98,14 +98,16 @@ export default function Sidebar({ isMobile, isOpen, onClose, wsId, boards }: Sid
     { key: 'users',            path: `/ws/${wsId}/users`,            label: 'Users',            icon: 'U' },
     { key: 'agents',           path: `/ws/${wsId}/agents`,           label: 'AI Agents',        icon: 'A' },
     { key: 'prompt-templates', path: `/ws/${wsId}/prompt-templates`, label: 'Prompt Templates', icon: 'P' },
+    { key: 'resources',        path: `/ws/${wsId}/resources`,        label: 'Resources',        icon: 'R' },
     { key: 'channels',         path: `/ws/${wsId}/channels`,         label: 'Channels',         icon: 'H' },
     { key: 'api-keys',         path: `/ws/${wsId}/api-keys`,         label: 'API Keys',         icon: 'K' },
   ];
 
   const adminNavItems = [
-    { key: 'admin-users', path: '/admin/users', label: 'Users',       icon: 'U' },
-    { key: 'admin-qa',    path: '/admin/qa',    label: 'QA Tests',    icon: 'Q' },
-    { key: 'admin-logs',  path: '/admin/logs',  label: 'Server Logs', icon: 'L' },
+    { key: 'admin-users',    path: '/admin/users',    label: 'Users',       icon: 'U' },
+    { key: 'admin-qa',      path: '/admin/qa',      label: 'QA Tests',    icon: 'Q' },
+    { key: 'admin-logs',    path: '/admin/logs',    label: 'Server Logs', icon: 'L' },
+    { key: 'admin-settings', path: '/admin/settings', label: 'Settings',    icon: 'S' },
   ];
 
   const renderNavButton = (item: { key: string; path: string; label: string; icon: string }, active: boolean) => (

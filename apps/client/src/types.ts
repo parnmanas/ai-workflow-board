@@ -74,6 +74,23 @@ export interface PromptTemplate {
   updated_at: string;
 }
 
+export interface Resource {
+  id: string;
+  workspace_id: string;
+  board_id: string | null;
+  name: string;
+  description: string;
+  type: 'repository' | 'document' | 'image' | 'link';
+  url: string;
+  content: string;
+  file_data: string;
+  file_name: string;
+  file_mimetype: string;
+  tags: string[];
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Channel {
   id: string; // GUID
   name: string;

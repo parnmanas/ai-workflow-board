@@ -21,6 +21,7 @@ import { AdminModule } from './modules/admin/admin.module';
 import { EventsModule } from './modules/events/events.module';
 import { SharedServicesModule } from './services/shared-services.module';
 import { ChatRoomsModule } from './modules/chat-rooms/chat-rooms.module';
+import { ResourcesModule } from './modules/resources/resources.module';
 
 @Module({
   imports: [
@@ -48,6 +49,7 @@ import { ChatRoomsModule } from './modules/chat-rooms/chat-rooms.module';
     AdminModule,
     EventsModule,
     ChatRoomsModule,
+    ResourcesModule,
   ],
 })
 export class AppModule {}

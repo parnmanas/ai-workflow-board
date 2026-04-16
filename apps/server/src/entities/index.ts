@@ -15,3 +15,6 @@ export { RelationTuple } from './RelationTuple';
 export { ChatRoom } from './ChatRoom';
 export { ChatRoomParticipant } from './ChatRoomParticipant';
 export { ChatRoomMessage } from './ChatRoomMessage';
+export { Resource } from './Resource';
+export { ResourceEmbedding } from './ResourceEmbedding';
+export { SystemSetting } from './SystemSetting';

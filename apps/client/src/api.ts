@@ -1,5 +1,6 @@
 import type {
   PromptTemplate,
+  Resource,
   ChatMessage,
   ChatThread,
   DashboardAgent,
@@ -263,6 +264,51 @@ export const api = {
     return request<{ success: true; id: string }>(`/prompt-templates/${id}?${params.toString()}`, { method: 'DELETE' });
   },
 
+  // ─── Resources ─────────────────────────────────────────
+  listResources: (workspaceId: string, boardId?: string | null, type?: string) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    if (boardId !== undefined) params.set('board_id', boardId || '');
+    if (type) params.set('type', type);
+    return request<Resource[]>(`/resources?${params.toString()}`);
+  },
+  getResource: (id: string) =>
+    request<Resource>(`/resources/${id}`),
+  createResource: (data: {
+    workspace_id: string;
+    board_id?: string | null;
+    name: string;
+    description?: string;
+    type?: string;
+    url?: string;
+    content?: string;
+    file_data?: string;
+    file_name?: string;
+    file_mimetype?: string;
+    tags?: string[];
+  }) =>
+    request<Resource>('/resources', { method: 'POST', body: JSON.stringify(data) }),
+  updateResource: (
+    id: string,
+    data: {
+      workspace_id: string;
+      name?: string;
+      description?: string;
+      type?: string;
+      url?: string;
+      content?: string;
+      file_data?: string;
+      file_name?: string;
+      file_mimetype?: string;
+      tags?: string[];
+      board_id?: string | null;
+    },
+  ) =>
+    request<Resource>(`/resources/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteResource: (id: string, workspaceId: string) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    return request<{ success: true; id: string }>(`/resources/${id}?${params.toString()}`, { method: 'DELETE' });
+  },
+
   // ─── Chat (Phase 2) ────────────────────────────────────
   // Workspace context is read inline from localStorage per the established
   // client convention (matches Board.tsx and PromptTemplateManager.tsx).
@@ -320,6 +366,12 @@ export const api = {
   },
   getLogStats: () => request<any>('/admin/logs/stats'),
   getLogCategories: () => request<string[]>('/admin/logs/categories'),
+
+  // ─── Admin Settings ────────────────────────────────────
+  getSettings: () =>
+    request<{ key: string; value: string; description: string; is_secret: boolean; updated_at: string | null }[]>('/admin/settings'),
+  updateSettings: (settings: Record<string, string>) =>
+    request<any>('/admin/settings', { method: 'PATCH', body: JSON.stringify({ settings }) }),
 
   // ── Phase 7: Chat Rooms ─────────────────────────
   listChatRooms: () =>

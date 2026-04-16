@@ -9,8 +9,9 @@ import PageTabs from './PageTabs';
 import ColumnManager from './ColumnManager';
 import { tokens } from '../tokens';
 import { Button } from './common';
+import ResourceManager from './admin/ResourceManager';
 
-type TabKey = 'columns';
+type TabKey = 'columns' | 'resources';
 
 export default function BoardSettingsPage() {
   const { showToast } = useToast();
@@ -76,7 +77,10 @@ export default function BoardSettingsPage() {
         description={board.name}
       />
       <PageTabs
-        tabs={[{ id: 'columns', label: 'Columns', onClick: () => setActiveTab('columns') }]}
+        tabs={[
+          { id: 'columns', label: 'Columns', onClick: () => setActiveTab('columns') },
+          { id: 'resources', label: 'Resources', onClick: () => setActiveTab('resources') },
+        ]}
         activeId={activeTab}
       />
       <div style={{ ...pageStyle, flex: 1, overflow: 'auto', minHeight: 0 }}>
@@ -93,6 +97,9 @@ export default function BoardSettingsPage() {
               refresh();
             }}
           />
+        )}
+        {activeTab === 'resources' && (
+          <ResourceManager workspaceId={wsId} boardId={boardId} />
         )}
       </div>
     </div>

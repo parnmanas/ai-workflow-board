@@ -27,8 +27,9 @@ import { randomUUID } from 'crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
-import { initDb } from './db';
+import { initDb, AppDataSource } from './db';
 import { registerAllTools } from './modules/mcp/mcp-tools';
+import { setEmbeddingDataSource } from './services/embedding.service';
 
 // ─── Helpers ───────────────────────────────────────────────
 
@@ -330,6 +331,7 @@ async function startHttp() {
 
 async function main() {
   await initDb();
+  setEmbeddingDataSource(AppDataSource);
 
   const transport = (process.env.MCP_TRANSPORT || 'stdio').toLowerCase();
 

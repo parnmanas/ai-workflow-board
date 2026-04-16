@@ -4,12 +4,14 @@ import PageHeader from '../PageHeader';
 import UserManager from './UserManager';
 import QaRunner from './QaRunner';
 import LogViewer from './LogViewer';
+import SettingsManager from './SettingsManager';
 import { tokens } from '../../tokens';
 
 const pageTitles: Record<string, { title: string; description?: string }> = {
   users: { title: 'Users', description: 'Manage user accounts' },
   qa: { title: 'QA Tests', description: 'Run quality assurance tests' },
   logs: { title: 'Server Logs', description: 'View server logs' },
+  settings: { title: 'Settings', description: 'System configuration' },
 };
 
 function AdminRoute({ page, children }: { page: string; children: React.ReactNode }) {
@@ -31,6 +33,7 @@ export default function AdminPage() {
       <Route path="users" element={<AdminRoute page="users"><UserManager /></AdminRoute>} />
       <Route path="qa" element={<AdminRoute page="qa"><QaRunner /></AdminRoute>} />
       <Route path="logs" element={<AdminRoute page="logs"><LogViewer /></AdminRoute>} />
+      <Route path="settings" element={<AdminRoute page="settings"><SettingsManager /></AdminRoute>} />
       <Route path="*" element={<Navigate to="/admin/users" replace />} />
     </Routes>
   );
