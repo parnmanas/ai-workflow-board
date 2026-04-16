@@ -2298,7 +2298,7 @@ export default function ChatPage() {
   // Mobile layout: single panel
   if (isMobile) {
     return (
-      <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+      <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         {showUpgradeBanner && <ProtocolUpgradeBanner />}
         {mobileView === 'list' ? (
           <ChatRoomListPanel
@@ -2342,9 +2342,9 @@ export default function ChatPage() {
 
   // Desktop layout: two-panel
   return (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       {showUpgradeBanner && <ProtocolUpgradeBanner />}
-      <Group orientation="horizontal" style={{ height: '100%' }}>
+      <Group orientation="horizontal" style={{ height: '100%', flex: 1, overflow: 'hidden' }}>
         <Panel defaultSize="30" minSize="20">
           <ChatRoomListPanel
             rooms={rooms}
