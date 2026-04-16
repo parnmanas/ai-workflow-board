@@ -1,0 +1,19 @@
+{
+  "_comment": "Reference config — actual configs live in /.mcp.json (Claude) and /.codex/config.toml (Codex)",
+  "mcpServers": {
+    "ai-workflow-board-local": {
+      "command": "npx",
+      "args": ["tsx", "server/src/mcp-server.ts"],
+      "env": {
+        "DB_TYPE": "sqlite"
+      }
+    },
+    "ai-workflow-board-remote": {
+      "type": "http",
+      "url": "https://awb.beconngames.com:7700/mcp",
+      "headers": {
+        "Authorization": "Bearer ${AWB_API_KEY}"
+      }
+    }
+  }
+}

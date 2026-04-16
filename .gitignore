@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Database
+*.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Logs
+*.log
+
+# Source maps
+*.js.map
+*.d.ts.map
+
+# Vite
+.vite/
+
+# TurboRepo
+.turbo/
+
+# OS
+.DS_Store
+Thumbs.db

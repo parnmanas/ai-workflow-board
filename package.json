@@ -1,0 +1,20 @@
+{
+  "name": "ai-workflow-board",
+  "private": true,
+  "packageManager": "npm@11.6.1",
+  "workspaces": ["apps/*"],
+  "scripts": {
+    "predev": "node scripts/clear-ports.mjs",
+    "dev": "turbo run dev",
+    "dev:server": "turbo run dev --filter=server",
+    "dev:client": "turbo run dev --filter=client",
+    "clear-ports": "node scripts/clear-ports.mjs",
+    "build": "turbo run build",
+    "start": "npm start -w server",
+    "mcp": "npm run mcp -w server",
+    "mcp:http": "npm run mcp:http -w server"
+  },
+  "devDependencies": {
+    "turbo": "^2.4.0"
+  }
+}

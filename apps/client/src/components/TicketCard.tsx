@@ -1,0 +1,122 @@
+import React from 'react';
+import { Draggable } from '@hello-pangea/dnd';
+import { Ticket } from '../types';
+import { tokens } from '../tokens';
+import { Badge } from './common';
+
+interface TicketCardProps {
+  ticket: Ticket;
+  index: number;
+  onClick: () => void;
+}
+
+const priorityVariants: Record<string, 'neutral' | 'info' | 'warning' | 'danger'> = {
+  low: 'neutral',
+  medium: 'info',
+  high: 'warning',
+  critical: 'danger',
+};
+
+const priorityLabels: Record<string, string> = {
+  low: 'LOW',
+  medium: 'MED',
+  high: 'HIGH',
+  critical: 'CRIT',
+};
+
+export default function TicketCard({ ticket, index, onClick }: TicketCardProps) {
+  const doneChildren = (ticket.children || []).filter(c => c.status === 'done').length;
+  const totalChildren = (ticket.children || []).length;
+  const progress = totalChildren > 0 ? (doneChildren / totalChildren) * 100 : 0;
+
+  return (
+    <Draggable draggableId={`ticket-${ticket.id}`} index={index}>
+      {(provided, snapshot) => (
+        <div
+          ref={provided.innerRef}
+          {...provided.draggableProps}
+          {...provided.dragHandleProps}
+          onClick={onClick}
+          style={{
+            background: snapshot.isDragging ? tokens.colors.border : tokens.colors.surfaceCard,
+            borderRadius: tokens.radii.lg,
+            padding: 12,
+            border: `1px solid ${snapshot.isDragging ? tokens.colors.accent : tokens.colors.border}`,
+            cursor: 'pointer',
+            transition: 'border-color 0.2s, box-shadow 0.2s',
+            boxShadow: snapshot.isDragging ? tokens.shadows.card : 'none',
+            ...provided.draggableProps.style,
+          }}
+        >
+          {/* Priority + ID */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+            <Badge variant={priorityVariants[ticket.priority] ?? 'neutral'}>
+              {priorityLabels[ticket.priority]}
+            </Badge>
+            <span style={{ fontSize: '10px', color: tokens.colors.textMuted }}>#{ticket.id}</span>
+          </div>
+
+          {/* Title */}
+          <h4 style={{
+            fontSize: '13px',
+            fontWeight: 600,
+            color: tokens.colors.textStrong,
+            lineHeight: 1.4,
+            marginBottom: 8,
+          }}>{ticket.title}</h4>
+
+          {/* Bottom row */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            {/* Subtask progress */}
+            {totalChildren > 0 && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1 }}>
+                <div style={{
+                  flex: 1,
+                  height: 3,
+                  background: tokens.colors.border,
+                  borderRadius: tokens.radii.xs,
+                  maxWidth: 60,
+                  overflow: 'hidden',
+                }}>
+                  <div style={{
+                    height: '100%',
+                    width: `${progress}%`,
+                    background: progress === 100 ? tokens.colors.successLight : tokens.colors.accent,
+                    borderRadius: tokens.radii.xs,
+                  }} />
+                </div>
+                <span style={{ fontSize: '10px', color: tokens.colors.textMuted }}>
+                  {doneChildren}/{totalChildren}
+                </span>
+              </div>
+            )}
+
+            {/* Assignee */}
+            {ticket.assignee && (
+              <span style={{
+                fontSize: '10px',
+                color: tokens.colors.textSecondary,
+                background: tokens.colors.surface,
+                padding: '2px 8px',
+                borderRadius: 10,
+                maxWidth: 80,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}>
+                {ticket.assignee}
+              </span>
+            )}
+          </div>
+
+          {/* Comments indicator */}
+          {ticket.comments && ticket.comments.length > 0 && (
+            <div style={{ marginTop: 6, fontSize: '10px', color: tokens.colors.textMuted }}>
+              {ticket.comments.length} comment{ticket.comments.length > 1 ? 's' : ''}
+            </div>
+          )}
+        </div>
+      )}
+    </Draggable>
+  );
+}

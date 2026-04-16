@@ -1,0 +1,368 @@
+import type {
+  PromptTemplate,
+  ChatMessage,
+  ChatThread,
+  DashboardAgent,
+  AgentDetail,
+  ActivityRow,
+  ChatRoomListItem,
+  ChatRoomDetail,
+  ChatRoomMessageItem,
+  ChatRoomParticipantInfo,
+} from './types';
+
+const BASE = '/api';
+
+function getAuthHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const token = localStorage.getItem('auth_token');
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+  const wsId = localStorage.getItem('currentWorkspaceId');
+  if (wsId) {
+    headers['X-Workspace-Id'] = wsId;
+  }
+  return headers;
+}
+
+async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    headers: getAuthHeaders(),
+    ...options,
+  });
+  if (!res.ok) {
+    if (res.status === 401) {
+      localStorage.removeItem('auth_token');
+      window.dispatchEvent(new Event('auth-expired'));
+    }
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Request failed');
+  }
+  return res.json();
+}
+
+export const api = {
+  // ─── Auth ──────────────────────────────────────────────
+  login: (email: string, password: string) =>
+    request<any>('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
+
+  logout: () =>
+    request<any>('/auth/logout', { method: 'POST' }),
+
+  getMe: () =>
+    request<any>('/auth/me'),
+
+  getSetupStatus: () =>
+    request<{ needs_setup: boolean }>('/auth/setup-status'),
+
+  setup: (data: { name: string; email: string; password: string }) =>
+    request<any>('/auth/setup', { method: 'POST', body: JSON.stringify(data) }),
+
+  register: (name: string, email: string, password: string, requestedWorkspaceId?: string) =>
+    request<{ success: boolean; message: string }>('/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ name, email, password, requested_workspace_id: requestedWorkspaceId }),
+    }),
+
+  getPublicWorkspaces: () =>
+    request<{ id: string; name: string; slug: string }[]>('/auth/public-workspaces'),
+
+  // ─── Admin Pending Users ────────────────────────────────
+  getPendingUsers: () =>
+    request<any>('/admin/pending-users'),
+
+  approveUser: (userId: string) =>
+    request<any>(`/admin/pending-users/${userId}/approve`, { method: 'POST' }),
+
+  rejectUser: (userId: string, reason?: string) =>
+    request<any>(`/admin/pending-users/${userId}/reject`, {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    }),
+
+  assignUserWorkspace: (userId: string, workspaceId: string, relation: string = 'member') =>
+    request<any>(`/admin/pending-users/${userId}/assign`, {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: workspaceId, relation }),
+    }),
+
+  getPermissionsMeta: () =>
+    request<{ permissions: Record<string, { label: string; description: string; group: string }>; role_defaults: Record<string, string[]> }>('/auth/permissions'),
+
+  // ─── Workspaces ────────────────────────────────────────
+  getWorkspaces: () => request<any[]>('/workspaces'),
+  getWorkspace: (id: string) => request<any>(`/workspaces/${id}`),
+  createWorkspace: (data: { name: string; description?: string; board_name?: string }) =>
+    request<any>('/workspaces', { method: 'POST', body: JSON.stringify(data) }),
+  updateWorkspace: (id: string, data: { name?: string; description?: string }) =>
+    request<any>(`/workspaces/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteWorkspace: (id: string) =>
+    request<any>(`/workspaces/${id}`, { method: 'DELETE' }),
+  getWorkspaceMembers: (wsId: string) =>
+    request<any[]>(`/workspaces/${wsId}/members`),
+  addWorkspaceMember: (wsId: string, userId: string, relation: string = 'member') =>
+    request<any>(`/workspaces/${wsId}/members`, {
+      method: 'POST', body: JSON.stringify({ user_id: userId, relation }),
+    }),
+  updateWorkspaceMemberRole: (wsId: string, userId: string, relation: string) =>
+    request<any>(`/workspaces/${wsId}/members/${userId}`, {
+      method: 'PATCH', body: JSON.stringify({ relation }),
+    }),
+  removeWorkspaceMember: (wsId: string, userId: string) =>
+    request<any>(`/workspaces/${wsId}/members/${userId}`, { method: 'DELETE' }),
+
+  // ─── Boards ────────────────────────────────────────────
+  getBoard: (id: string) => request<any>(`/boards/${id}`),
+  getBoards: (workspaceId?: string) =>
+    request<any[]>(workspaceId ? `/boards?workspace_id=${workspaceId}` : '/boards'),
+  createBoard: (data: { name: string; description?: string; workspace_id: string }) =>
+    request<any>('/boards', { method: 'POST', body: JSON.stringify(data) }),
+  updateBoard: (id: string, data: { name?: string; description?: string; routing_config?: Record<string, string[]> }) =>
+    request<any>(`/boards/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteBoard: (id: string) =>
+    request<any>(`/boards/${id}`, { method: 'DELETE' }),
+  getArchivedBoards: (workspaceId: string) =>
+    request<any[]>(`/boards?workspace_id=${workspaceId}&include_archived=true`),
+  archiveBoard: async (boardId: string) =>
+    request<any>(`/boards/${boardId}/archive`, { method: 'POST' }),
+  restoreBoard: async (boardId: string) =>
+    request<any>(`/boards/${boardId}/restore`, { method: 'POST' }),
+
+  // ─── Columns ──────────────────────────────────────────
+  createColumn: (boardId: string, data: { name: string; color?: string; description?: string }) =>
+    request<any>(`/boards/${boardId}/columns`, { method: 'POST', body: JSON.stringify(data) }),
+  updateColumn: (id: string, data: { name?: string; color?: string; position?: number; description?: string }) =>
+    request<any>(`/columns/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteColumn: (id: string) =>
+    request<any>(`/columns/${id}`, { method: 'DELETE' }),
+
+  // ─── Tickets ───────────────────────────────────────────
+  createTicket: (columnId: string, data: {
+    title: string; description?: string; priority?: string;
+    assignee?: string; reporter?: string; assignee_id?: string; reporter_id?: string;
+  }) =>
+    request<any>(`/columns/${columnId}/tickets`, { method: 'POST', body: JSON.stringify(data) }),
+
+  updateTicket: (id: string, data: Record<string, any>) =>
+    request<any>(`/tickets/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+
+  moveTicket: (id: string, targetColumnId: string, targetPosition: number) =>
+    request<any>(`/tickets/${id}/move`, { method: 'PATCH', body: JSON.stringify({ targetColumnId, targetPosition }) }),
+
+  deleteTicket: (id: string) =>
+    request<any>(`/tickets/${id}`, { method: 'DELETE' }),
+
+  // ─── Child Tickets (Subtasks) ──────────────────────────
+  createChildTicket: (parentId: string, data: {
+    title: string; description?: string; priority?: string; status?: string;
+    assignee?: string; reporter?: string; assignee_id?: string; reporter_id?: string;
+    labels?: string[]; channel_ids?: string[];
+  }) =>
+    request<any>(`/tickets/${parentId}/children`, { method: 'POST', body: JSON.stringify(data) }),
+
+  // ─── Comments ──────────────────────────────────────────
+  addComment: (ticketId: string, content: string, images: { filename: string; mimetype: string; data: string }[] = []) =>
+    request<any>(`/tickets/${ticketId}/comments`, { method: 'POST', body: JSON.stringify({ content, images }) }),
+
+  // ─── Users ─────────────────────────────────────────────
+  getUsers: (workspaceId?: string) =>
+    request<any[]>(workspaceId ? `/users?workspace_id=${encodeURIComponent(workspaceId)}` : '/users'),
+  createUser: (data: { name: string; email?: string; role?: string; discord_user_id?: string; password?: string; permissions?: string[] }) =>
+    request<any>('/users', { method: 'POST', body: JSON.stringify(data) }),
+  updateUser: (id: string, data: Record<string, any>) =>
+    request<any>(`/users/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteUser: (id: string) =>
+    request<any>(`/users/${id}`, { method: 'DELETE' }),
+
+  // ─── Agents ────────────────────────────────────────────
+  getAgents: () => request<any[]>('/agents'),
+  getAgentsAll: () => request<any[]>('/agents?scope=all'),
+  // Phase 3 Plan 03-02: dashboard snapshot with current_task + bool-coerced is_online
+  getAgentDashboard: (workspaceId: string): Promise<DashboardAgent[]> =>
+    request<DashboardAgent[]>(`/agents/dashboard?workspace_id=${encodeURIComponent(workspaceId)}`),
+  // Phase 3 Plan 03-02: extended :id endpoint (role_prompt + redacted flag per D-44)
+  getAgent: (id: string): Promise<AgentDetail> =>
+    request<AgentDetail>(`/agents/${encodeURIComponent(id)}`),
+  // Phase 3 Plan 03-02: actor-scoped activity for the detail modal
+  getAgentActivity: (agentId: string, opts?: { limit?: number }): Promise<ActivityRow[]> => {
+    const limit = opts?.limit ?? 50;
+    return request<ActivityRow[]>(
+      `/agents/${encodeURIComponent(agentId)}/activity?limit=${limit}`,
+    );
+  },
+  createAgent: (data: { name: string; description?: string; type?: string }) =>
+    request<any>('/agents', { method: 'POST', body: JSON.stringify(data) }),
+  updateAgent: (id: string, data: Record<string, any>) =>
+    request<any>(`/agents/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteAgent: (id: string) =>
+    request<any>(`/agents/${id}`, { method: 'DELETE' }),
+  addAgentIdentity: (agentId: string, data: { channel_type: string; channel_external_id: string; display_name?: string }) =>
+    request<any>(`/agents/${agentId}/identities`, { method: 'POST', body: JSON.stringify(data) }),
+  deleteAgentIdentity: (identityId: string) =>
+    request<any>(`/agents/identities/${identityId}`, { method: 'DELETE' }),
+
+  // ─── Channels ──────────────────────────────────────────
+  getChannels: () => request<any[]>('/channels'),
+  createChannel: (data: {
+    name: string; type?: string; bot_token?: string; guild_id?: string;
+    channel_id?: string; board_id?: string;
+  }) =>
+    request<any>('/channels', { method: 'POST', body: JSON.stringify(data) }),
+  updateChannel: (id: string, data: Record<string, any>) =>
+    request<any>(`/channels/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteChannel: (id: string) =>
+    request<any>(`/channels/${id}`, { method: 'DELETE' }),
+  testChannel: (id: string) =>
+    request<any>(`/channels/${id}/test`, { method: 'POST' }),
+
+  // ─── API Keys ──────────────────────────────────────────
+  getApiKeys: () => request<any[]>('/keys'),
+  getApiKey: (id: string) => request<any>(`/keys/${id}`),
+  createApiKey: (data: { name: string; agent_id?: string | null; scope?: string; expires_in_days?: number }) =>
+    request<any>('/keys', { method: 'POST', body: JSON.stringify(data) }),
+  updateApiKey: (id: string, data: Record<string, any>) =>
+    request<any>(`/keys/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  revokeApiKey: (id: string) =>
+    request<any>(`/keys/${id}/revoke`, { method: 'POST' }),
+  deleteApiKey: (id: string) =>
+    request<any>(`/keys/${id}`, { method: 'DELETE' }),
+
+  // ─── Prompt Templates (Phase 1 ROLE-05) ────────────────
+  listPromptTemplates: (workspace_id: string, options?: { category?: string; id?: string }) => {
+    const params = new URLSearchParams({ workspace_id });
+    if (options?.category) params.set('category', options.category);
+    if (options?.id) params.set('id', options.id);
+    return request<PromptTemplate[]>(`/prompt-templates?${params.toString()}`);
+  },
+  getPromptTemplate: (id: string, workspace_id: string) => {
+    const params = new URLSearchParams({ workspace_id });
+    return request<PromptTemplate>(`/prompt-templates/${id}?${params.toString()}`);
+  },
+  createPromptTemplate: (data: {
+    workspace_id: string;
+    name: string;
+    description?: string;
+    content: string;
+    category?: string;
+  }) =>
+    request<PromptTemplate>('/prompt-templates', { method: 'POST', body: JSON.stringify(data) }),
+  updatePromptTemplate: (
+    id: string,
+    data: {
+      workspace_id: string;
+      name?: string;
+      description?: string;
+      content?: string;
+      category?: string;
+    },
+  ) =>
+    request<PromptTemplate>(`/prompt-templates/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deletePromptTemplate: (id: string, workspace_id: string) => {
+    const params = new URLSearchParams({ workspace_id });
+    return request<{ success: true; id: string }>(`/prompt-templates/${id}?${params.toString()}`, { method: 'DELETE' });
+  },
+
+  // ─── Chat (Phase 2) ────────────────────────────────────
+  // Workspace context is read inline from localStorage per the established
+  // client convention (matches Board.tsx and PromptTemplateManager.tsx).
+  listChatThreads: () => {
+    const workspace_id =
+      typeof window !== 'undefined' ? localStorage.getItem('currentWorkspaceId') || '' : '';
+    const params = new URLSearchParams({ workspace_id });
+    return request<ChatThread[]>(`/chat/threads?${params.toString()}`);
+  },
+  listChatMessages: (params: { agent_id: string; ticket_id?: string | null; limit?: number }) => {
+    const workspace_id =
+      typeof window !== 'undefined' ? localStorage.getItem('currentWorkspaceId') || '' : '';
+    const qs = new URLSearchParams({ workspace_id, agent_id: params.agent_id });
+    if (params.ticket_id) qs.set('ticket_id', params.ticket_id);
+    if (params.limit) qs.set('limit', String(params.limit));
+    return request<ChatMessage[]>(`/chat/messages?${qs.toString()}`);
+  },
+  sendChatMessage: (params: { agent_id: string; content: string; ticket_id?: string | null }) => {
+    const workspace_id =
+      typeof window !== 'undefined' ? localStorage.getItem('currentWorkspaceId') || '' : '';
+    return request<ChatMessage>('/chat/messages', {
+      method: 'POST',
+      body: JSON.stringify({
+        workspace_id,
+        agent_id: params.agent_id,
+        content: params.content,
+        ticket_id: params.ticket_id || undefined,
+      }),
+    });
+  },
+
+  // ─── Activity ──────────────────────────────────────────
+  getTicketActivity: (ticketId: string) => request<any[]>(`/tickets/${ticketId}/activity`),
+  getActivity: () => request<any[]>('/activity'),
+  // Phase 3 Plan 03-02: workspace-wide recent activity feed (capped server-side to 1..200)
+  getRecentActivity: (opts?: { limit?: number }): Promise<ActivityRow[]> => {
+    const limit = opts?.limit ?? 50;
+    return request<ActivityRow[]>(`/activity?limit=${limit}`);
+  },
+
+  // ─── QA (Quality Assurance) ────────────────────────────
+  getQaStatus: () => request<{ available: boolean; description: string; usage: string }>('/admin/qa/status'),
+  runQa: () => request<any>('/admin/qa/run', { method: 'POST' }),
+
+  // ─── Admin Logs ────────────────────────────────────────
+  getLogs: (params?: { level?: string; category?: string; since?: string; limit?: number; search?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.level) qs.set('level', params.level);
+    if (params?.category) qs.set('category', params.category);
+    if (params?.since) qs.set('since', params.since);
+    if (params?.limit) qs.set('limit', String(params.limit));
+    if (params?.search) qs.set('search', params.search);
+    const q = qs.toString();
+    return request<any[]>(`/admin/logs${q ? '?' + q : ''}`);
+  },
+  getLogStats: () => request<any>('/admin/logs/stats'),
+  getLogCategories: () => request<string[]>('/admin/logs/categories'),
+
+  // ── Phase 7: Chat Rooms ─────────────────────────
+  listChatRooms: () =>
+    request<ChatRoomListItem[]>('/chat-rooms'),
+
+  createChatRoom: (participants: { participant_type: string; participant_id: string }[], name?: string) =>
+    request<ChatRoomDetail>('/chat-rooms', {
+      method: 'POST',
+      body: JSON.stringify({ participants, name }),
+    }),
+
+  getChatRoom: (roomId: string) =>
+    request<ChatRoomDetail>(`/chat-rooms/${roomId}`),
+
+  getChatRoomMessages: (roomId: string, limit = 50, before?: string) =>
+    request<ChatRoomMessageItem[]>(
+      `/chat-rooms/${roomId}/messages?limit=${limit}${before ? `&before=${before}` : ''}`
+    ),
+
+  sendChatRoomMessage: (roomId: string, content: string, images?: Array<{ data: string; filename: string; mimetype: string }>) =>
+    request<ChatRoomMessageItem>(`/chat-rooms/${roomId}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({ content, images: images || [] }),
+    }),
+
+  markChatRoomRead: (roomId: string) =>
+    request<void>(`/chat-rooms/${roomId}/read`, { method: 'PATCH' }),
+
+  renameChatRoom: (roomId: string, name: string) =>
+    request<void>(`/chat-rooms/${roomId}/name`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name }),
+    }),
+
+  addChatRoomParticipants: (roomId: string, participants: { participant_type: string; participant_id: string }[]) =>
+    request<void>(`/chat-rooms/${roomId}/participants`, {
+      method: 'POST',
+      body: JSON.stringify({ participants }),
+    }),
+
+  leaveChatRoom: (roomId: string) =>
+    request<void>(`/chat-rooms/${roomId}/participants/me`, { method: 'DELETE' }),
+
+  searchChatMessages: (workspaceId: string, query: string): Promise<any[]> =>
+    request<any[]>(`/chat-rooms/search?q=${encodeURIComponent(query)}&workspace_id=${encodeURIComponent(workspaceId)}`),
+};

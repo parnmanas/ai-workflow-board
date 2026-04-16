@@ -1,0 +1,42 @@
+{
+  "name": "server",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "nest start --watch",
+    "build": "nest build",
+    "start": "node dist/main.js",
+    "start:prod": "node dist/main.js",
+    "mcp": "tsx src/mcp-server.ts",
+    "mcp:http": "MCP_TRANSPORT=http tsx src/mcp-server.ts",
+    "mcp:build": "nest build && node dist/mcp-server.js",
+    "migration:generate": "tsx ../../node_modules/typeorm/cli.js migration:generate -d src/db.ts",
+    "migration:create": "tsx ../../node_modules/typeorm/cli.js migration:create",
+    "migration:run": "tsx ../../node_modules/typeorm/cli.js migration:run -d src/db.ts",
+    "migration:revert": "tsx ../../node_modules/typeorm/cli.js migration:revert -d src/db.ts",
+    "test": "npm run build && node --test test/proxy-passthrough.test.mjs && node --test test/chat-roundtrip.test.mjs && node --test test/tickets-leak.test.mjs && node --test test/channels-leak.test.mjs && node --test test/api-keys-leak.test.mjs && node --test test/agents-leak.test.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@nestjs/common": "^11.0.0",
+    "@nestjs/core": "^11.0.0",
+    "@nestjs/platform-express": "^11.0.0",
+    "@nestjs/serve-static": "^5.0.0",
+    "@nestjs/typeorm": "^11.0.0",
+    "bcryptjs": "^3.0.3",
+    "sql.js": "^1.12.0",
+    "pg": "^8.20.0",
+    "reflect-metadata": "^0.2.0",
+    "rxjs": "^7.8.0",
+    "typeorm": "^0.3.20",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "^11.0.0",
+    "@nestjs/schematics": "^11.0.0",
+    "@types/bcryptjs": "^2.4.6",
+    "@types/express": "^5.0.0",
+    "@types/pg": "^8.20.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

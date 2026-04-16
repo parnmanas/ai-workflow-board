@@ -1,0 +1,10 @@
+node_modules
+dist
+*.db
+.env*
+.git
+.gitignore
+*.log
+.vite
+.turbo
+.ccwa
