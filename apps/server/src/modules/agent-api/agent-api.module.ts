@@ -4,12 +4,18 @@ import { Board } from '../../entities/Board';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { Ticket } from '../../entities/Ticket';
 import { Comment } from '../../entities/Comment';
+import { ChatRoom } from '../../entities/ChatRoom';
+import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
+import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
+import { User } from '../../entities/User';
+import { Agent } from '../../entities/Agent';
 import { AgentApiController } from './agent-api.controller';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
+import { ChatRoomsService } from '../chat-rooms/chat-rooms.service';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Board, BoardColumn, Ticket, Comment])],
+  imports: [TypeOrmModule.forFeature([Board, BoardColumn, Ticket, Comment, ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, Agent])],
   controllers: [AgentApiController],
-  providers: [AgentAuthGuard],
+  providers: [AgentAuthGuard, ChatRoomsService],
 })
 export class AgentApiModule {}

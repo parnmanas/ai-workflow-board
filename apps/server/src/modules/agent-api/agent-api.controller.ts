@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Body, Param, Res, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, Query, Res, UseGuards } from '@nestjs/common';
 import { Response } from 'express';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
@@ -6,7 +6,10 @@ import { Board } from '../../entities/Board';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { Ticket } from '../../entities/Ticket';
 import { Comment } from '../../entities/Comment';
+import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
+import { ChatRoomsService } from '../chat-rooms/chat-rooms.service';
+import { activityEvents } from '../../services/activity.service';
 
 async function findColumn(dataSource: DataSource, boardId: string, columnName: string) {
   return dataSource.getRepository(BoardColumn)
@@ -32,7 +35,9 @@ export class AgentApiController {
     @InjectRepository(BoardColumn) private readonly colRepo: Repository<BoardColumn>,
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
     @InjectRepository(Comment) private readonly commentRepo: Repository<Comment>,
+    @InjectRepository(ChatRoomMessage) private readonly messageRepo: Repository<ChatRoomMessage>,
     @InjectDataSource() private readonly dataSource: DataSource,
+    private readonly chatRoomsService: ChatRoomsService,
   ) {}
 
   @Get('board-summary')
@@ -229,5 +234,34 @@ export class AgentApiController {
     });
 
     return res.json({ results });
+  }
+
+  @Post('chat-rooms/:roomId/typing')
+  async setChatRoomTyping(@Body() body: any, @Param('roomId') roomId: string, @Res() res: Response) {
+    const { agent_id, agent_name, is_typing } = body;
+    if (!agent_id) return res.status(400).json({ error: 'agent_id is required' });
+    const memberIds = await this.chatRoomsService.getRoomMemberIds(roomId);
+    const agentMemberIds = await this.chatRoomsService.getRoomAgentMemberIds(roomId);
+    activityEvents.emit('chat_room_typing', {
+      room_id: roomId,
+      agent_id,
+      agent_name: agent_name || 'Agent',
+      is_typing: is_typing !== false,
+      member_ids: memberIds,
+      agent_member_ids: agentMemberIds,
+    });
+    return res.json({ ok: true });
+  }
+
+  @Get('chat-rooms/:roomId/messages')
+  async getChatRoomMessages(@Param('roomId') roomId: string, @Res() res: Response, @Query('limit') limitStr?: string) {
+    const limit = Math.min(parseInt(limitStr || '50', 10) || 50, 200);
+    const messages = await this.messageRepo
+      .createQueryBuilder('m')
+      .where('m.room_id = :roomId', { roomId })
+      .orderBy('m.created_at', 'DESC')
+      .limit(limit)
+      .getMany();
+    return res.json(messages.reverse());
   }
 }

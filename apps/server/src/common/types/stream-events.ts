@@ -11,7 +11,8 @@ export type StreamEventType =
   | 'agent_status'
   | 'chat_request'         // Phase 4 D-71/D-72 — proxy.mjs consumes this to spawn chat subagents
   | 'chat_room_message'    // Phase 7: new message in a chat room
-  | 'chat_room_update';    // Phase 7: room renamed / participant added / user left
+  | 'chat_room_update'     // Phase 7: room renamed / participant added / user left
+  | 'chat_room_typing';    // Phase 7+: agent typing indicator in a chat room
 
 export interface StreamEventScope {
   board_id?: string;
@@ -117,4 +118,11 @@ export interface ChatRoomUpdatePayload {
   new_name?: string;
   participant_id?: string;
   participant_ids?: string[];
+}
+
+export interface ChatRoomTypingPayload {
+  room_id: string;
+  agent_id: string;
+  agent_name: string;
+  is_typing: boolean;
 }

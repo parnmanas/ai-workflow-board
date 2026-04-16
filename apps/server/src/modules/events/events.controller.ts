@@ -19,6 +19,7 @@ import {
   ChatRequestPayload,      // Phase 4 D-71/D-72
   ChatRoomMessagePayload,  // Phase 7
   ChatRoomUpdatePayload,   // Phase 7
+  ChatRoomTypingPayload,   // Phase 7+
 } from '../../common/types/stream-events';
 
 @Controller('api/events')
@@ -33,6 +34,7 @@ export class EventsController implements OnModuleDestroy {
   private readonly chatRequestListener: (event: any) => void;
   private readonly chatRoomMessageListener: (event: any) => void;
   private readonly chatRoomUpdateListener: (event: any) => void;
+  private readonly chatRoomTypingListener: (event: any) => void;
 
   constructor(
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
@@ -235,6 +237,27 @@ export class EventsController implements OnModuleDestroy {
       this.eventSubject.next(envelope);
     };
     activityEvents.on('chat_room_update', this.chatRoomUpdateListener);
+
+    this.chatRoomTypingListener = (event: any) => {
+      const payload: ChatRoomTypingPayload = {
+        room_id: event.room_id,
+        agent_id: event.agent_id,
+        agent_name: event.agent_name || 'Agent',
+        is_typing: !!event.is_typing,
+      };
+      const envelope: StreamEvent<ChatRoomTypingPayload> = {
+        event_type: 'chat_room_typing',
+        scope: {
+          room_id: event.room_id,
+          member_ids: event.member_ids,
+          agent_member_ids: event.agent_member_ids,
+        },
+        payload,
+        timestamp: new Date().toISOString(),
+      };
+      this.eventSubject.next(envelope);
+    };
+    activityEvents.on('chat_room_typing', this.chatRoomTypingListener);
   }
 
   onModuleDestroy() {
@@ -246,6 +269,7 @@ export class EventsController implements OnModuleDestroy {
     activityEvents.removeListener('chat_request', this.chatRequestListener);
     activityEvents.removeListener('chat_room_message', this.chatRoomMessageListener);
     activityEvents.removeListener('chat_room_update', this.chatRoomUpdateListener);
+    activityEvents.removeListener('chat_room_typing', this.chatRoomTypingListener);
     this.eventSubject.complete();
   }
 
@@ -391,6 +415,18 @@ export class EventsController implements OnModuleDestroy {
             }
             return false;
           }
+          case 'chat_room_typing': {
+            // Same participant filter — only room members see typing indicators
+            if (identity.type === 'user') {
+              const memberSet3 = event.scope.member_ids as Set<string> | undefined;
+              return memberSet3 ? memberSet3.has(identity.userId!) : false;
+            }
+            if (identity.type === 'agent') {
+              const agentSet3 = event.scope.agent_member_ids as Set<string> | undefined;
+              return agentSet3 ? agentSet3.has(identity.agentId!) : false;
+            }
+            return false;
+          }
           default:
             return false;
         }
@@ -448,6 +484,9 @@ export class EventsController implements OnModuleDestroy {
           dataObj = { ...p, id: p.message_id };
         } else if (event.event_type === 'chat_room_update') {
           // Send payload directly — client expects ChatRoomUpdatePayload at top level
+          dataObj = event.payload;
+        } else if (event.event_type === 'chat_room_typing') {
+          // Send payload directly — client expects ChatRoomTypingPayload at top level
           dataObj = event.payload;
         } else {
           // New event types (chat_message, agent_status) ship the envelope natively.
