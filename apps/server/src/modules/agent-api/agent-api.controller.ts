@@ -9,6 +9,7 @@ import { Comment } from '../../entities/Comment';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
 import { Agent } from '../../entities/Agent';
+import { User } from '../../entities/User';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { ChatRoomsService } from '../chat-rooms/chat-rooms.service';
 import { activityEvents } from '../../services/activity.service';
@@ -283,6 +284,40 @@ export class AgentApiController {
       .orderBy('m.created_at', 'DESC')
       .limit(limit)
       .getMany();
-    return res.json(messages.reverse());
+
+    const ordered = messages.reverse();
+    const userRepo = this.dataSource.getRepository(User);
+    const agentRepo = this.dataSource.getRepository(Agent);
+    const nameCache = new Map<string, string>();
+
+    const resolved = await Promise.all(ordered.map(async (m) => {
+      const cacheKey = `${m.sender_type}:${m.sender_id}`;
+      let senderName = nameCache.get(cacheKey);
+      if (!senderName) {
+        if (m.sender_type === 'user') {
+          const u = await userRepo.findOne({ where: { id: m.sender_id } });
+          senderName = u ? (u.name || u.email || 'Unknown User') : 'Unknown User';
+        } else if (m.sender_type === 'agent') {
+          const a = await agentRepo.findOne({ where: { id: m.sender_id } });
+          senderName = a ? a.name : 'Unknown Agent';
+        } else {
+          senderName = 'Unknown';
+        }
+        nameCache.set(cacheKey, senderName);
+      }
+      return {
+        id: m.id,
+        room_id: m.room_id,
+        workspace_id: m.workspace_id,
+        sender_type: m.sender_type,
+        sender_id: m.sender_id,
+        sender_name: senderName,
+        content: m.content,
+        created_at: m.created_at,
+        updated_at: m.updated_at,
+      };
+    }));
+
+    return res.json(resolved);
   }
 }
