@@ -125,4 +125,5 @@ export interface ChatRoomTypingPayload {
   agent_id: string;
   agent_name: string;
   is_typing: boolean;
+  status?: string | null;
 }

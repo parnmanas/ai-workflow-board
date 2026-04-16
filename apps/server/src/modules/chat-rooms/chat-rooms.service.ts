@@ -373,7 +373,7 @@ export class ChatRoomsService {
     content: string,
     images?: Array<{ data: string; filename: string; mimetype: string }>,
   ): Promise<any> {
-    await this._requireActiveParticipant(roomId, senderId);
+    await this._requireActiveParticipant(roomId, senderId, senderType);
 
     if (!content || typeof content !== 'string') {
       throw makeError(400, 'content is required');
@@ -753,13 +753,16 @@ export class ChatRoomsService {
     return 'Unknown';
   }
 
-  private async _requireActiveParticipant(roomId: string, userId: string): Promise<void> {
-    // Find the most recently joined active row for this user (scoped to participant_type = 'user')
+  private async _requireActiveParticipant(
+    roomId: string,
+    participantId: string,
+    participantType: string = 'user',
+  ): Promise<void> {
     const participant = await this.participantRepo
       .createQueryBuilder('p')
       .where('p.room_id = :roomId', { roomId })
-      .andWhere('p.participant_id = :userId', { userId })
-      .andWhere("p.participant_type = 'user'")
+      .andWhere('p.participant_id = :participantId', { participantId })
+      .andWhere('p.participant_type = :participantType', { participantType })
       .andWhere('p.left_at IS NULL')
       .getOne();
 

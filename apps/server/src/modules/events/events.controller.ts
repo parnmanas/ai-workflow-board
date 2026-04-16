@@ -244,6 +244,7 @@ export class EventsController implements OnModuleDestroy {
         agent_id: event.agent_id,
         agent_name: event.agent_name || 'Agent',
         is_typing: !!event.is_typing,
+        status: event.status ?? null,
       };
       const envelope: StreamEvent<ChatRoomTypingPayload> = {
         event_type: 'chat_room_typing',
