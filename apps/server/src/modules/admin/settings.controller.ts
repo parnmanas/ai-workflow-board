@@ -10,8 +10,6 @@ const SETTING_DEFINITIONS: Record<string, { description: string; is_secret: bool
   'embedding.provider': { description: 'Embedding provider (openai or none)', is_secret: false, default_value: 'none' },
   'embedding.api_key': { description: 'API key for the embedding provider', is_secret: true, default_value: '' },
   'embedding.model': { description: 'Embedding model name', is_secret: false, default_value: 'text-embedding-3-small' },
-  'github.token': { description: 'GitHub Personal Access Token for repository sync', is_secret: true, default_value: '' },
-  'github.default_org': { description: 'Default GitHub organization (optional)', is_secret: false, default_value: '' },
 };
 
 @Controller('api/admin/settings')

@@ -68,7 +68,6 @@ export default function SettingsManager() {
   }
 
   const embeddingEnabled = formValues['embedding.provider'] === 'openai';
-  const githubConfigured = !!(formValues['github.token'] && !formValues['github.token'].startsWith('••'));
 
   const labelStyle: React.CSSProperties = {
     fontSize: tokens.typography.fontSizeXs,
@@ -187,48 +186,6 @@ export default function SettingsManager() {
           enabled={embeddingEnabled}
           enabledText="Vector search enabled — resources will be auto-embedded"
           disabledText="Vector search disabled — text search only"
-        />
-      </Card>
-
-      {/* ─── GitHub Connector ─── */}
-      <Card padding="20px">
-        <div style={{ fontSize: '15px', fontWeight: 700, color: tokens.colors.textStrong, marginBottom: 4 }}>
-          GitHub Connector
-        </div>
-        <div style={{ fontSize: '12px', color: tokens.colors.textSecondary, marginBottom: 20, lineHeight: 1.5 }}>
-          Connect to GitHub to sync repository metadata, README, and file trees into resources.
-          Without a token, repository resources store URL only — agents use their own GitHub access.
-          With a token, AWB fetches and indexes repo content for vector search.
-        </div>
-
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          <div>
-            <label style={labelStyle}>Personal Access Token</label>
-            <div style={hintStyle}>
-              GitHub PAT with <code style={{ fontSize: '11px', background: tokens.colors.border, padding: '1px 4px', borderRadius: 3 }}>repo</code> scope.
-              Encrypted at rest (AES-256-GCM).
-            </div>
-            <input
-              type="password"
-              value={formValues['github.token'] || ''}
-              onChange={(e) => handleChange('github.token', e.target.value)}
-              placeholder="ghp_..."
-              style={secretInputStyle}
-            />
-          </div>
-
-          <Input
-            label="Default Organization"
-            value={formValues['github.default_org'] || ''}
-            onChange={(e) => handleChange('github.default_org', e.target.value)}
-            placeholder="e.g. my-org (optional)"
-          />
-        </div>
-
-        <StatusDot
-          enabled={githubConfigured}
-          enabledText="GitHub connector active — repos will be synced and indexed"
-          disabledText="GitHub connector inactive — resources store URL metadata only"
         />
       </Card>
 

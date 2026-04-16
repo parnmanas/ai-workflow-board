@@ -10,14 +10,6 @@ export function setGitHubDataSource(ds: DataSource) {
 }
 
 async function getGitHubToken(): Promise<string> {
-  if (_dataSource?.isInitialized) {
-    try {
-      const repo = _dataSource.getRepository('SystemSetting');
-      const row = await repo.findOne({ where: { key: 'github.token' } });
-      const raw = (row as any)?.value || '';
-      if (raw) return decrypt(raw);
-    } catch {}
-  }
   return process.env.GITHUB_TOKEN || '';
 }
 
