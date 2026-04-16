@@ -12,7 +12,8 @@ style.textContent = `
   /* AppLayout responsive sidebar (D-12 / UI-SPEC) */
   .awb-shell {
     display: flex;
-    min-height: 100vh;
+    height: 100vh;
+    overflow: hidden;
     background: ${tokens.colors.surface};
   }
   .awb-main {
@@ -24,7 +25,7 @@ style.textContent = `
   }
   .awb-content {
     flex: 1;
-    overflow: hidden;
+    overflow-y: auto;
   }
   .awb-sidebar-backdrop { display: none; }
   .awb-topbar { display: none; }
