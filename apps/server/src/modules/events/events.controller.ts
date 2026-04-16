@@ -284,7 +284,7 @@ export class EventsController implements OnModuleDestroy {
   }
 
   @Sse('stream')
-  async stream(@Req() req: Request, @Res() res: Response): Promise<Observable<MessageEvent>> {
+  async stream(@Req() req: Request, @Res({ passthrough: true }) res: Response): Promise<Observable<MessageEvent>> {
     // Manual auth check since SSE uses query param for token
     const token = (req.query.token as string) || req.headers['authorization']?.toString().replace('Bearer ', '');
     if (!token) {
@@ -321,7 +321,7 @@ export class EventsController implements OnModuleDestroy {
     this.clientCount++;
     this.logService.info('SSE', `Client connected (${identity.type}: ${identity.name}, board: ${boardId || 'all'}, total: ${this.clientCount})`);
 
-    // Set headers for SSE
+    // Disable nginx/proxy buffering for SSE (passthrough: true lets NestJS @Sse still control the response)
     res.setHeader('X-Accel-Buffering', 'no');
 
     // Emit protocol version on connect so clients can detect legacy/mismatch (CHAT-20)
