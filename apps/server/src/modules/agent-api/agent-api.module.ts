@@ -9,6 +9,7 @@ import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
 import { User } from '../../entities/User';
 import { Agent } from '../../entities/Agent';
+import { UserMention } from '../../entities/UserMention';
 import { AgentApiController } from './agent-api.controller';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { ChatRoomsService } from '../chat-rooms/chat-rooms.service';
@@ -17,7 +18,7 @@ import { RoomMembershipService } from '../chat-rooms/room-membership.service';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Board, BoardColumn, Ticket, Comment, ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, Agent])],
+  imports: [TypeOrmModule.forFeature([Board, BoardColumn, Ticket, Comment, ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, Agent, UserMention])],
   controllers: [AgentApiController],
   providers: [AgentAuthGuard, ChatRoomsService, RoomCrudService, RoomMembershipService, RoomMessagingService],
 })
