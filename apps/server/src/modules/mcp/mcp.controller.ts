@@ -6,6 +6,7 @@ import { randomUUID } from 'crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { registerAllTools, setDataSource, setLogService as setMcpToolsLogService, setSessionAuth, removeSessionAuth } from './mcp-tools';
+import { normalizeJsonRpcBody } from './internal/json-rpc';
 import { ApiKeyService } from '../../services/api-key.service';
 import { LogService } from '../../services/log.service';
 import { AgentConnectionService } from '../agents/agent-connection.service';
@@ -60,25 +61,6 @@ function mcpLogError(message: string, meta?: Record<string, any>) {
   } else {
     console.error('[MCP]', message, meta || '');
   }
-}
-
-function reorderJsonRpc(msg: any): any {
-  if (!msg || typeof msg !== 'object' || !msg.jsonrpc) return msg;
-  const ordered: any = { jsonrpc: msg.jsonrpc };
-  if ('id' in msg) ordered.id = msg.id;
-  if ('method' in msg) { ordered.method = msg.method; if ('params' in msg) ordered.params = msg.params; }
-  if ('result' in msg) ordered.result = msg.result;
-  if ('error' in msg) ordered.error = msg.error;
-  return ordered;
-}
-
-function normalizeJsonRpcBody(raw: string): string {
-  try {
-    const obj = JSON.parse(raw);
-    if (!obj || typeof obj !== 'object') return raw;
-    if (Array.isArray(obj)) return JSON.stringify(obj.map(reorderJsonRpc));
-    return JSON.stringify(reorderJsonRpc(obj));
-  } catch { return raw; }
 }
 
 function expressToWebRequest(req: Request): globalThis.Request {

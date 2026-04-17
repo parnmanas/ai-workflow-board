@@ -29,6 +29,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { initDb, AppDataSource } from './db';
 import { registerAllTools } from './modules/mcp/mcp-tools';
+import { normalizeJsonRpcBody } from './modules/mcp/internal/json-rpc';
 import { setEmbeddingDataSource } from './services/embedding.service';
 import { setGitHubDataSource } from './services/github-connector.service';
 
@@ -36,30 +37,6 @@ import { setGitHubDataSource } from './services/github-connector.service';
 
 function mcpLog(...args: unknown[]) {
   console.error('[MCP]', ...args);
-}
-
-// ─── JSON-RPC field order normalization ────────────────────
-// Some MCP clients (OpenAI Codex/rmcp) are sensitive to field order.
-// Standard: jsonrpc → id → result/error
-// SDK emits: result → jsonrpc → id
-
-function reorderJsonRpc(msg: any): any {
-  if (!msg || typeof msg !== 'object' || !msg.jsonrpc) return msg;
-  const ordered: any = { jsonrpc: msg.jsonrpc };
-  if ('id' in msg) ordered.id = msg.id;
-  if ('method' in msg) { ordered.method = msg.method; if ('params' in msg) ordered.params = msg.params; }
-  if ('result' in msg) ordered.result = msg.result;
-  if ('error' in msg) ordered.error = msg.error;
-  return ordered;
-}
-
-function normalizeJsonRpcBody(raw: string): string {
-  try {
-    const obj = JSON.parse(raw);
-    if (!obj || typeof obj !== 'object') return raw;
-    if (Array.isArray(obj)) return JSON.stringify(obj.map(reorderJsonRpc));
-    return JSON.stringify(reorderJsonRpc(obj));
-  } catch { return raw; }
 }
 
 // ─── Create & configure MCP server ─────────────────────────
