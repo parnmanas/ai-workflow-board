@@ -159,6 +159,11 @@ export default function AppLayout() {
   }, [isMobile, mobileOpen]);
 
   return (
+    // BoardStreamProvider wraps the whole authenticated shell (Sidebar + main)
+    // because Sidebar now subscribes to `user_mention` SSE events for the unread
+    // badge. The provider itself is a singleton — moving it up does NOT add an
+    // extra EventSource connection.
+    <BoardStreamProvider>
     <div className="awb-shell">
       <Sidebar
         isMobile={isMobile}
@@ -237,11 +242,10 @@ export default function AppLayout() {
         )}
 
         <main className="awb-content">
-          <BoardStreamProvider>
-            <Outlet />
-          </BoardStreamProvider>
+          <Outlet />
         </main>
       </div>
     </div>
+    </BoardStreamProvider>
   );
 }
