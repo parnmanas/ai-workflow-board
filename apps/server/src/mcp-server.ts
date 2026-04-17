@@ -29,7 +29,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { initDb, AppDataSource } from './db';
 import { registerAllTools } from './modules/mcp/mcp-tools';
-import { normalizeJsonRpcBody } from './modules/mcp/internal/json-rpc';
+import { expressToWebRequest, sendWebResponse } from './modules/mcp/internal/express-bridge';
 import { setEmbeddingDataSource } from './services/embedding.service';
 import { setGitHubDataSource } from './services/github-connector.service';
 
@@ -97,97 +97,10 @@ async function startHttp() {
     }
   }, 2 * 60 * 1000);
 
-  // ── Express → Web Standard Request conversion ───────────
-  function expressToWebRequest(req: any): Request {
-    const protocol = req.protocol || 'http';
-    const host = req.get?.('host') || req.headers?.host || 'localhost';
-    const url = `${protocol}://${host}${req.originalUrl || req.url}`;
-
-    const headers = new Headers();
-    for (const [key, value] of Object.entries(req.headers as Record<string, string | string[]>)) {
-      if (value === undefined) continue;
-      if (Array.isArray(value)) {
-        for (const v of value) headers.append(key, v);
-      } else {
-        headers.set(key, value);
-      }
-    }
-
-    // Patch Accept header for MCP SDK compatibility
-    const accept = headers.get('accept') || '';
-    if (!accept.includes('application/json') || !accept.includes('text/event-stream')) {
-      const parts = [accept, 'application/json', 'text/event-stream'].filter(Boolean);
-      headers.set('accept', parts.join(', '));
-      mcpLog(`Accept patched: "${accept}" → "${headers.get('accept')}"`);
-    }
-
-    const init: RequestInit = { method: req.method, headers };
-    if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'DELETE') {
-      if (req.body !== undefined) {
-        init.body = JSON.stringify(req.body);
-      }
-    }
-
-    return new Request(url, init);
-  }
-
-  // ── Web Standard Response → Express response ────────────
-  async function sendWebResponse(webRes: Response, res: any): Promise<void> {
-    res.status(webRes.status);
-    webRes.headers.forEach((value: string, key: string) => {
-      res.setHeader(key, value);
-    });
-
-    if (!webRes.body) {
-      res.end();
-      return;
-    }
-
-    const contentType = webRes.headers.get('content-type') || '';
-
-    if (contentType.includes('text/event-stream')) {
-      res.flushHeaders();
-      const reader = webRes.body.getReader();
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          res.write(value);
-          if (typeof res.flush === 'function') res.flush();
-        }
-      } catch (err) {
-        mcpLog('SSE stream error:', err);
-      } finally {
-        res.end();
-      }
-    } else {
-      // Read full body
-      const reader = webRes.body.getReader();
-      const chunks: Uint8Array[] = [];
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value);
-      }
-
-      let bodyStr = Buffer.concat(chunks).toString('utf8');
-
-      // For JSON: normalize field order + charset
-      if (contentType.includes('application/json')) {
-        bodyStr = normalizeJsonRpcBody(bodyStr);
-        res.setHeader('content-type', 'application/json; charset=utf-8');
-      }
-
-      const bodyBuf = Buffer.from(bodyStr, 'utf8');
-      const hexPreview = bodyBuf.slice(0, 20).toString('hex').match(/../g)?.join(' ') || '';
-      mcpLog(`Response: status=${webRes.status}, type=${res.getHeader('content-type')}, size=${bodyBuf.length}`);
-      mcpLog(`  body: ${bodyStr.slice(0, 500)}`);
-      mcpLog(`  hex[0:20]: ${hexPreview}`);
-
-      res.setHeader('content-length', bodyBuf.length);
-      res.end(bodyBuf);
-    }
-  }
+  // ── Bridge logger (routes shared bridge diagnostics through mcpLog) ──
+  const bridgeLog = (msg: string, meta?: Record<string, any>) => mcpLog(msg, meta || '');
+  const bridgeErr = (msg: string, meta?: Record<string, any>) => mcpLog(msg, meta || '');
+  const bridgeOpts = { log: bridgeLog, logError: bridgeErr };
 
   // ── MCP endpoint ────────────────────────────────────────
   app.all('/mcp', express.json(), async (req: any, res: any) => {
@@ -223,7 +136,7 @@ async function startHttp() {
         const webRes = await session.transport.handleRequest(webReq, {
           parsedBody: req.body,
         });
-        await sendWebResponse(webRes, res);
+        await sendWebResponse(webRes, res, bridgeOpts);
         return;
       }
 
@@ -267,7 +180,7 @@ async function startHttp() {
         const webRes = await transport.handleRequest(webReq, {
           parsedBody: req.body,
         });
-        await sendWebResponse(webRes, res);
+        await sendWebResponse(webRes, res, bridgeOpts);
         return;
       }
 

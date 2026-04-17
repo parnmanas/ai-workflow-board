@@ -6,7 +6,7 @@ import { randomUUID } from 'crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { registerAllTools, setDataSource, setLogService as setMcpToolsLogService, setSessionAuth, removeSessionAuth } from './mcp-tools';
-import { normalizeJsonRpcBody } from './internal/json-rpc';
+import { expressToWebRequest, sendWebResponse } from './internal/express-bridge';
 import { ApiKeyService } from '../../services/api-key.service';
 import { LogService } from '../../services/log.service';
 import { AgentConnectionService } from '../agents/agent-connection.service';
@@ -63,83 +63,10 @@ function mcpLogError(message: string, meta?: Record<string, any>) {
   }
 }
 
-function expressToWebRequest(req: Request): globalThis.Request {
-  const protocol = req.protocol || 'http';
-  const host = req.get('host') || 'localhost';
-  const url = `${protocol}://${host}${req.originalUrl}`;
-
-  const headers = new Headers();
-  for (const [key, value] of Object.entries(req.headers)) {
-    if (value === undefined) continue;
-    if (Array.isArray(value)) {
-      for (const v of value) headers.append(key, v);
-    } else {
-      headers.set(key, value);
-    }
-  }
-
-  const accept = headers.get('accept') || '';
-  if (!accept.includes('application/json') || !accept.includes('text/event-stream')) {
-    const parts = [accept, 'application/json', 'text/event-stream'].filter(Boolean);
-    headers.set('accept', parts.join(', '));
-  }
-
-  const init: RequestInit = { method: req.method, headers };
-  if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'DELETE') {
-    if (req.body !== undefined) init.body = JSON.stringify(req.body);
-  }
-
-  return new globalThis.Request(url, init);
-}
-
-async function sendWebResponse(webRes: globalThis.Response, res: Response): Promise<void> {
-  res.status(webRes.status);
-  webRes.headers.forEach((value, key) => { res.setHeader(key, value); });
-
-  if (!webRes.body) { res.end(); return; }
-
-  const contentType = webRes.headers.get('content-type') || '';
-
-  if (contentType.includes('text/event-stream')) {
-    res.flushHeaders();
-    const reader = webRes.body.getReader();
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        res.write(value);
-        if (typeof (res as any).flush === 'function') (res as any).flush();
-      }
-    } catch (err) { mcpLogError('SSE stream error', { error: String(err) }); }
-    finally { res.end(); }
-  } else {
-    const reader = webRes.body.getReader();
-    const chunks: Uint8Array[] = [];
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-    }
-
-    let bodyStr = Buffer.concat(chunks).toString('utf8');
-    if (contentType.includes('application/json')) {
-      bodyStr = normalizeJsonRpcBody(bodyStr);
-      res.setHeader('content-type', 'application/json; charset=utf-8');
-    }
-
-    const bodyBuf = Buffer.from(bodyStr, 'utf8');
-    const hexPreview = bodyBuf.slice(0, 20).toString('hex').match(/../g)?.join(' ') || '';
-    mcpLog(`Response: status=${webRes.status}, type=${res.getHeader('content-type')}, size=${bodyBuf.length}`, {
-      body: bodyStr.slice(0, 500),
-      hex: hexPreview,
-    });
-
-    res.setHeader('content-length', bodyBuf.length);
-    res.end(bodyBuf);
-  }
-}
-
 const SESSION_TTL_MS = 10 * 60 * 1000; // 10 minutes idle timeout
+
+// Bridge logger options that route through the controller's logService-aware mcpLog.
+const bridgeLogOpts = { log: mcpLog, logError: mcpLogError };
 
 @Controller()
 export class McpController implements OnModuleInit, OnModuleDestroy {
@@ -358,7 +285,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
         const session = this.mcpSessions.get(sessionId)!;
         session.lastActivity = Date.now();
         const webRes = await session.transport.handleRequest(webReq, { parsedBody: req.body });
-        await sendWebResponse(webRes, res);
+        await sendWebResponse(webRes, res, bridgeLogOpts);
         return;
       }
 
@@ -424,7 +351,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
         await mcpServer.connect(transport);
 
         const webRes = await transport.handleRequest(webReq, { parsedBody: req.body });
-        await sendWebResponse(webRes, res);
+        await sendWebResponse(webRes, res, bridgeLogOpts);
         return;
       }
 
