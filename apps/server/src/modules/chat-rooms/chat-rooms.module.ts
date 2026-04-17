@@ -8,6 +8,7 @@ import { Agent } from '../../entities/Agent';
 import { Ticket } from '../../entities/Ticket';
 import { ChatRoomsController } from './chat-rooms.controller';
 import { ChatRoomsService } from './chat-rooms.service';
+import { RoomCrudService } from './room-crud.service';
 import { RoomMembershipService } from './room-membership.service';
 import { RoomMessagingService } from './room-messaging.service';
 import { SharedServicesModule } from '../../services/shared-services.module';
@@ -20,7 +21,14 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
     SharedServicesModule,
   ],
   controllers: [ChatRoomsController],
-  providers: [ChatRoomsService, RoomMembershipService, RoomMessagingService, AuthGuard, PermissionGuard],
-  exports: [ChatRoomsService, RoomMembershipService, RoomMessagingService],
+  providers: [
+    ChatRoomsService,
+    RoomCrudService,
+    RoomMembershipService,
+    RoomMessagingService,
+    AuthGuard,
+    PermissionGuard,
+  ],
+  exports: [ChatRoomsService, RoomCrudService, RoomMembershipService, RoomMessagingService],
 })
 export class ChatRoomsModule {}
