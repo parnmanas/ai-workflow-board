@@ -297,6 +297,10 @@ export const EVENT_TYPES: EventDefinition[] = [
         new_name: event.new_name,
         participant_id: event.participant_id,
         participant_ids: event.participant_ids,
+        // B3: read-event reader identity + marker, populated only when present.
+        participant_type: event.participant_type,
+        last_read_at: event.last_read_at,
+        last_read_message_id: event.last_read_message_id,
       };
       return {
         payload,

@@ -118,6 +118,14 @@ export interface ChatRoomUpdatePayload {
   new_name?: string;
   participant_id?: string;
   participant_ids?: string[];
+
+  // B3 fix: `read` events carry the reader's identity + the new marker so that
+  // other tabs / devices of the same user can sync their local unread_count
+  // without a round-trip to the room list. `participant_type` disambiguates
+  // user vs agent when the same UUID collides across domains.
+  participant_type?: 'user' | 'agent';
+  last_read_at?: string; // ISO-8601
+  last_read_message_id?: string | null;
 }
 
 export interface ChatRoomTypingPayload {
