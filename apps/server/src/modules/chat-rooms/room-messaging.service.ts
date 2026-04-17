@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, IsNull } from 'typeorm';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
@@ -221,15 +221,20 @@ export class RoomMessagingService {
    * so an agent's own messages don't count toward its unread (B1).
    */
   async markRead(roomId: string, participantId: string, participantType: string = 'user'): Promise<void> {
+    // CRITICAL: scope to active row only. addParticipants() / re-join flows can
+    // leave stale rows with left_at != null in place; findOne without this
+    // filter may return the stale row, hit the !== null guard below, and
+    // silently 403 — leaving unread_count stuck forever on the room list.
     const participant = await this.participantRepo.findOne({
       where: {
         room_id: roomId,
         participant_id: participantId,
         participant_type: participantType,
+        left_at: IsNull(),
       },
     });
 
-    if (!participant || participant.left_at !== null) {
+    if (!participant) {
       throw makeError(403, 'Not a participant in this room');
     }
 
@@ -374,11 +379,13 @@ export class RoomMessagingService {
     const room = await this.roomRepo.findOne({ where: { id: roomId } });
     if (!room || room.type !== 'dm') return;
 
-    // Find the agent participant in this DM room
+    // Find the agent participant in this DM room (active row only — a stale
+    // left_at-set row would otherwise mis-route to an agent who already left).
     const otherParticipant = await this.participantRepo.findOne({
       where: {
         room_id: roomId,
         participant_type: 'agent',
+        left_at: IsNull(),
       },
     });
     if (!otherParticipant) return; // DM is user-to-user, not user-to-agent
