@@ -197,7 +197,11 @@ export function MentionTextarea({
     style,
   };
 
-  const shouldRenderDropdown = open && filtered.length > 0 && anchorRect;
+  // Keep the portal alive while open so the user always gets feedback that
+  // `@` was detected — even if the candidate list is still loading or empty.
+  // The "no matches" row below replaces the old silent-drop behavior that
+  // made the feature look broken in the ticket comment flow.
+  const shouldRenderDropdown = open && anchorRect;
   // Height budget for the dropdown, then decide above/below based on viewport.
   const DROPDOWN_MAX_HEIGHT = 240;
   const spaceAbove = anchorRect ? anchorRect.top - 8 : 0;
@@ -233,6 +237,11 @@ export function MentionTextarea({
             padding: 4,
           }}
         >
+          {filtered.length === 0 && (
+            <div style={{ padding: '8px 10px', fontSize: 12, color: tokens.colors.textMuted }}>
+              {candidates.length === 0 ? 'Loading candidates…' : 'No matches'}
+            </div>
+          )}
           {filtered.map((c, i) => {
             const isActive = i === activeIdx;
             return (

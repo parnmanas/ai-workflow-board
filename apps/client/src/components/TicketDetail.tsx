@@ -117,28 +117,53 @@ export default function TicketDetail({
     }
   }, [activeTab, currentTicket.id]);
 
-  // Load @-mention candidates whenever the focused ticket changes so
-  // role shortcuts (@assignee/@reporter/@reviewer) resolve against THIS
-  // ticket's role_id fields.
+  // Build @-mention candidates. Agents + role shortcuts come from data
+  // already in memory (component props + the ticket itself) so the dropdown
+  // works even before the server endpoint responds — previously a slow /
+  // missing API call left the composer with no candidates and the dropdown
+  // rendered empty. The API call layers workspace users on top when it
+  // succeeds.
   useEffect(() => {
+    const roleItems: MentionCandidate[] = [];
+    const agentById = new Map(agents.map(a => [a.id, a]));
+    const pushRole = (key: 'assignee' | 'reporter' | 'reviewer', id: string | undefined) => {
+      if (!id) return;
+      const a = agentById.get(id);
+      roleItems.push({ type: 'role', id: key, name: key, sublabel: a ? a.name : id });
+    };
+    pushRole('assignee', currentTicket.assignee_id);
+    pushRole('reporter', currentTicket.reporter_id);
+    pushRole('reviewer', currentTicket.reviewer_id);
+
+    const agentItems: MentionCandidate[] = agents.map(a => ({ type: 'agent' as const, id: a.id, name: a.name }));
+
+    setMentionCandidates([...roleItems, ...agentItems]);
+
     const workspaceId = typeof window !== 'undefined'
       ? localStorage.getItem('currentWorkspaceId') || ''
       : '';
-    if (!workspaceId) {
-      setMentionCandidates([]);
-      return;
-    }
+    if (!workspaceId) return;
+
     api.getMentionCandidates(workspaceId, currentTicket.id)
       .then(data => {
-        const items: MentionCandidate[] = [
+        const next: MentionCandidate[] = [
           ...data.role_shortcuts.map(r => ({ type: 'role' as const, id: r.key, name: r.key, sublabel: r.label.replace(`${r.key} `, '') })),
           ...data.users.map(u => ({ type: 'user' as const, id: u.id, name: u.name })),
           ...data.agents.map(a => ({ type: 'agent' as const, id: a.id, name: a.name })),
         ];
-        setMentionCandidates(items);
+        // Dedupe by (type, id) — role shortcuts + agents may collide with the
+        // fallback list we seeded above.
+        const seen = new Set<string>();
+        const merged = next.filter(c => {
+          const k = `${c.type}:${c.id}`;
+          if (seen.has(k)) return false;
+          seen.add(k);
+          return true;
+        });
+        setMentionCandidates(merged);
       })
-      .catch(() => setMentionCandidates([]));
-  }, [currentTicket.id]);
+      .catch(() => { /* keep the fallback candidates we seeded above */ });
+  }, [currentTicket.id, currentTicket.assignee_id, currentTicket.reporter_id, currentTicket.reviewer_id, agents]);
 
   const navigateToChild = useCallback((child: Ticket) => {
     setNavStack(prev => [...prev, child]);
