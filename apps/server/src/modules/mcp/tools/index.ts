@@ -15,12 +15,14 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ToolContext } from './context';
 import { registerAllTools as registerMonolithTools } from '../mcp-tools';
 import { registerWorkspaceTools } from './workspace-tools';
+import { registerBoardTools } from './board-tools';
 
 export type { ToolContext } from './context';
 export { createStandaloneContext } from './context';
 
 export function registerAllTools(server: McpServer, ctx: ToolContext): void {
   registerWorkspaceTools(server, ctx);
+  registerBoardTools(server, ctx);
   // Monolithic fallback — remaining tools not yet moved to domain files.
   // Shrinks with every Phase 3 commit; removed once C15 lands.
   registerMonolithTools(server, ctx);
