@@ -13,7 +13,7 @@ import { Channel } from '../../../entities/Channel';
 import { Comment } from '../../../entities/Comment';
 import { Ticket } from '../../../entities/Ticket';
 import { ok, err } from '../shared/helpers';
-import { findColumnByName, maxTicketPosition } from '../shared/ticket-helpers';
+import { findColumnByName, maxTicketPosition, maxChildPosition, shiftTicketPositions } from '../shared/ticket-helpers';
 import type { ToolContext } from './context';
 
 export function registerMiscTools(server: McpServer, ctx: ToolContext): void {
@@ -129,9 +129,9 @@ Supported actions:
           try {
             switch (op.action) {
               case 'create-ticket': {
-                const col = await findColumnByName(dataSource, String(op.boardId), String(op.column));
+                const col = await findColumnByName(manager, String(op.boardId), String(op.column));
                 if (!col) { results.push({ error: `Column "${op.column}" not found` }); continue; }
-                const pos = await maxTicketPosition(dataSource, col.id);
+                const pos = await maxTicketPosition(manager, col.id);
                 const r = await tRepo.save(tRepo.create({
                   column_id: col.id, title: String(op.title), description: String(op.description || ''),
                   priority: String(op.priority || 'medium'), assignee: String(op.assignee || ''), labels: '[]', position: pos,
@@ -140,22 +140,18 @@ Supported actions:
                 break;
               }
               case 'move-ticket': {
-                const col = await findColumnByName(dataSource, String(op.boardId), String(op.toColumn));
+                const col = await findColumnByName(manager, String(op.boardId), String(op.toColumn));
                 if (!col) { results.push({ error: `Column "${op.toColumn}" not found` }); continue; }
                 const t = await tRepo.findOne({ where: { id: String(op.ticketId) } });
                 if (!t) { results.push({ error: 'Ticket not found' }); continue; }
 
-                await tRepo.createQueryBuilder().update()
-                  .set({ position: () => 'position - 1' })
-                  .where('column_id = :colId AND position > :pos', { colId: t.column_id, pos: t.position }).execute();
+                await shiftTicketPositions(tRepo, { column_id: t.column_id }, t.position, -1);
 
                 const cnt = await tRepo.createQueryBuilder('t')
-                  .where('t.column_id = :colId AND t.id != :id', { colId: col.id, id: t.id }).getCount();
+                  .where('t.column_id = :colId AND t.id != :id AND t.parent_id IS NULL', { colId: col.id, id: t.id }).getCount();
                 const pos = Number(op.position) || cnt;
 
-                await tRepo.createQueryBuilder().update()
-                  .set({ position: () => 'position + 1' })
-                  .where('column_id = :colId AND position >= :pos AND id != :id', { colId: col.id, pos, id: t.id }).execute();
+                await shiftTicketPositions(tRepo, { column_id: col.id }, pos, +1, { inclusive: true, excludeId: t.id });
 
                 await tRepo.update(t.id, { column_id: col.id, position: pos });
                 results.push({ success: true, ticketId: String(op.ticketId), movedTo: op.toColumn });
@@ -167,12 +163,10 @@ Supported actions:
                 if (!parentTicket) { results.push({ error: `Parent ticket not found: ${op.ticketId}` }); break; }
                 const newDepth = (parentTicket.depth || 0) + 1;
                 if (newDepth > 2) { results.push({ error: `Max nesting depth (2) exceeded` }); break; }
-                const maxP = await tRepo.createQueryBuilder('t')
-                  .select('COALESCE(MAX(t.position), -1)', 'max')
-                  .where('t.parent_id = :parentId', { parentId: String(op.ticketId) }).getRawOne();
+                const position = await maxChildPosition(manager, String(op.ticketId));
                 const r = await tRepo.save(tRepo.create({
                   parent_id: String(op.ticketId), depth: newDepth, column_id: null as any,
-                  title: String(op.title), position: (maxP?.max ?? -1) + 1, status: 'todo',
+                  title: String(op.title), position, status: 'todo',
                 }));
                 results.push({ success: true, ticketId: r.id });
                 break;

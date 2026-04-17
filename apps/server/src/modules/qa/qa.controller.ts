@@ -18,6 +18,7 @@ import { ActivityService } from '../../services/activity.service';
 import { ApiKeyService } from '../../services/api-key.service';
 import { AuthService } from '../../services/auth.service';
 import { DEFAULT_COLUMNS } from '../../database/database.module';
+import { maxTicketPosition, maxChildPosition } from '../mcp/shared/ticket-helpers';
 
 interface TestResult {
   name: string;
@@ -119,8 +120,7 @@ export class QaController {
     // === TICKET TESTS ===
     await runTest('Create Ticket', 'Ticket', async () => {
       if (qaColumnIds.length === 0) throw new Error('No columns');
-      const maxResult = await ticketRepo.createQueryBuilder('t').select('COALESCE(MAX(t.position), -1)', 'max').where('t.column_id = :cid', { cid: qaColumnIds[0] }).getRawOne();
-      const pos = (maxResult?.max ?? -1) + 1;
+      const pos = await maxTicketPosition(this.dataSource, qaColumnIds[0]);
       const t = await ticketRepo.save(ticketRepo.create({
         column_id: qaColumnIds[0], title: 'QA Test Ticket', description: 'Auto-created', priority: 'high', assignee: 'QA Bot', labels: '["qa"]', channel_ids: '[]', position: pos,
       }));
@@ -145,9 +145,9 @@ export class QaController {
 
     // === CHILD TICKET TESTS ===
     await runTest('Create Child Ticket', 'ChildTicket', async () => {
-      const maxP = await ticketRepo.createQueryBuilder('t').select('COALESCE(MAX(t.position), -1)', 'max').where('t.parent_id = :pid', { pid: qaTicketId }).getRawOne();
+      const position = await maxChildPosition(this.dataSource, qaTicketId);
       const child = await ticketRepo.save(ticketRepo.create({
-        parent_id: qaTicketId, depth: 1, column_id: null as any, title: 'QA Child Ticket', description: '', priority: 'medium', status: 'todo', assignee: '', reporter: '', labels: '[]', channel_ids: '[]', position: (maxP?.max ?? -1) + 1,
+        parent_id: qaTicketId, depth: 1, column_id: null as any, title: 'QA Child Ticket', description: '', priority: 'medium', status: 'todo', assignee: '', reporter: '', labels: '[]', channel_ids: '[]', position,
       }));
       qaChildTicketId = child.id;
       return `Child Ticket ${child.id}`;

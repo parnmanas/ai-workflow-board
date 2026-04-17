@@ -15,7 +15,7 @@ import { BoardColumn } from '../../../entities/BoardColumn';
 import { Ticket } from '../../../entities/Ticket';
 import { ok, err, safeJsonParse } from '../shared/helpers';
 import { loadTicketFull } from '../shared/ticket-parsing';
-import { findColumnByName, maxTicketPosition, maxChildPosition, resolveAgentId } from '../shared/ticket-helpers';
+import { findColumnByName, maxTicketPosition, maxChildPosition, resolveAgentId, shiftTicketPositions } from '../shared/ticket-helpers';
 import { getCallerAgent } from '../shared/session-auth';
 import type { ToolContext } from './context';
 
@@ -218,22 +218,14 @@ export function registerTicketTools(server: McpServer, ctx: ToolContext): void {
       await dataSource.transaction(async (manager) => {
         const tRepo = manager.getRepository(Ticket);
 
-        await tRepo.createQueryBuilder()
-          .update()
-          .set({ position: () => 'position - 1' })
-          .where('column_id = :colId AND position > :pos', { colId: ticket.column_id, pos: ticket.position })
-          .execute();
+        await shiftTicketPositions(tRepo, { column_id: ticket.column_id }, ticket.position, -1);
 
         const destCount = await tRepo.createQueryBuilder('t')
-          .where('t.column_id = :colId AND t.id != :id', { colId: destColumnId, id: ticket.id })
+          .where('t.column_id = :colId AND t.id != :id AND t.parent_id IS NULL', { colId: destColumnId, id: ticket.id })
           .getCount();
         const pos = Math.min(position ?? destCount, destCount);
 
-        await tRepo.createQueryBuilder()
-          .update()
-          .set({ position: () => 'position + 1' })
-          .where('column_id = :colId AND position >= :pos AND id != :id', { colId: destColumnId, pos, id: ticket.id })
-          .execute();
+        await shiftTicketPositions(tRepo, { column_id: destColumnId! }, pos, +1, { inclusive: true, excludeId: ticket.id });
 
         await tRepo.update(ticket.id, { column_id: destColumnId!, position: pos });
       });
@@ -272,11 +264,7 @@ export function registerTicketTools(server: McpServer, ctx: ToolContext): void {
 
       await ticketRepo.remove(ticket);
 
-      await ticketRepo.createQueryBuilder()
-        .update()
-        .set({ position: () => 'position - 1' })
-        .where('column_id = :colId AND position > :pos', { colId: columnId, pos: position })
-        .execute();
+      await shiftTicketPositions(ticketRepo, { column_id: columnId }, position, -1);
 
       await activityService.logActivity({
         entity_type: 'ticket', entity_id: ticket.id, action: 'deleted',
@@ -408,11 +396,7 @@ export function registerTicketTools(server: McpServer, ctx: ToolContext): void {
       await ticketRepo.delete(ticket.id);
 
       if (parentId) {
-        await ticketRepo.createQueryBuilder()
-          .update()
-          .set({ position: () => 'position - 1' })
-          .where('parent_id = :parentId AND position > :pos', { parentId, pos: deletedPosition })
-          .execute();
+        await shiftTicketPositions(ticketRepo, { parent_id: parentId }, deletedPosition, -1);
       }
 
       await activityService.logActivity({

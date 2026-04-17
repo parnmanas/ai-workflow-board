@@ -11,7 +11,7 @@ import { WorkspaceGuard } from '../../common/guards/workspace.guard';
 import { ActivityService } from '../../services/activity.service';
 import { MAX_IMAGE_SIZE, MAX_IMAGES_PER_MESSAGE, ALLOWED_IMAGE_MIMETYPES } from '../../common/constants/upload';
 import { loadTicketFull } from '../mcp/shared/ticket-parsing';
-import { maxTicketPosition, maxChildPosition, resolveAgentId } from '../mcp/shared/ticket-helpers';
+import { maxTicketPosition, maxChildPosition, resolveAgentId, shiftTicketPositions } from '../mcp/shared/ticket-helpers';
 
 @Controller('api')
 @UseGuards(AuthGuard, WorkspaceGuard)
@@ -210,11 +210,7 @@ export class TicketsController {
       const tRepo = manager.getRepository(Ticket);
       const sourceColumnId = ticket.column_id;
 
-      await tRepo.createQueryBuilder()
-        .update()
-        .set({ position: () => 'position - 1' })
-        .where('column_id = :colId AND position > :pos AND parent_id IS NULL', { colId: sourceColumnId, pos: ticket.position })
-        .execute();
+      await shiftTicketPositions(tRepo, { column_id: sourceColumnId }, ticket.position, -1);
 
       const destColumnId = targetColumnId || sourceColumnId;
       const destCount = await tRepo.createQueryBuilder('t')
@@ -222,11 +218,7 @@ export class TicketsController {
         .getCount();
       const pos = Math.min(targetPosition ?? destCount, destCount);
 
-      await tRepo.createQueryBuilder()
-        .update()
-        .set({ position: () => 'position + 1' })
-        .where('column_id = :colId AND position >= :pos AND id != :id AND parent_id IS NULL', { colId: destColumnId, pos, id: ticket.id })
-        .execute();
+      await shiftTicketPositions(tRepo, { column_id: destColumnId }, pos, +1, { inclusive: true, excludeId: ticket.id });
 
       await tRepo.update(ticket.id, { column_id: destColumnId, position: pos });
     });
@@ -261,17 +253,9 @@ export class TicketsController {
     await this.ticketRepo.remove(ticket);
 
     if (parentId) {
-      await this.ticketRepo.createQueryBuilder()
-        .update()
-        .set({ position: () => 'position - 1' })
-        .where('parent_id = :parentId AND position > :pos', { parentId, pos: position })
-        .execute();
+      await shiftTicketPositions(this.ticketRepo, { parent_id: parentId }, position, -1);
     } else if (columnId) {
-      await this.ticketRepo.createQueryBuilder()
-        .update()
-        .set({ position: () => 'position - 1' })
-        .where('column_id = :colId AND position > :pos AND parent_id IS NULL', { colId: columnId, pos: position })
-        .execute();
+      await shiftTicketPositions(this.ticketRepo, { column_id: columnId }, position, -1);
     }
 
     return res.json({ success: true });

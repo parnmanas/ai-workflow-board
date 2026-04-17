@@ -9,9 +9,11 @@
  *   - tickets.controller.ts (Phase 4 will consolidate here)
  */
 
-import type { DataSource } from 'typeorm';
+import type { DataSource, EntityManager } from 'typeorm';
 import { Ticket } from '../../../entities/Ticket';
 import { safeJsonParse } from './helpers';
+
+type RepoScope = DataSource | EntityManager;
 
 /**
  * Shallow parse: decode JSON string columns on a single ticket row without
@@ -49,8 +51,8 @@ export function parseComments<T extends { created_at: Date | string }>(comments:
  * Tree depth cap is the schema's 2-level nesting (root → child → grandchild).
  * Grandchildren have `children: []` forced, matching historic API behavior.
  */
-export async function loadTicketFull(dataSource: DataSource, id: string) {
-  const ticketRepo = dataSource.getRepository(Ticket);
+export async function loadTicketFull(scope: RepoScope, id: string) {
+  const ticketRepo = scope.getRepository(Ticket);
   const ticket = await ticketRepo.findOne({
     where: { id },
     relations: ['children', 'children.children', 'children.children.comments', 'children.comments', 'comments'],

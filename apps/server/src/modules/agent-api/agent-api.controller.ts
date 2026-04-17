@@ -13,22 +13,12 @@ import { User } from '../../entities/User';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { ChatRoomsService } from '../chat-rooms/chat-rooms.service';
 import { activityEvents } from '../../services/activity.service';
-
-async function findColumn(dataSource: DataSource, boardId: string, columnName: string) {
-  return dataSource.getRepository(BoardColumn)
-    .createQueryBuilder('col')
-    .where('col.board_id = :boardId AND LOWER(col.name) = LOWER(:name)', { boardId, name: columnName })
-    .getOne();
-}
-
-async function maxTicketPosition(ticketRepo: Repository<Ticket>, columnId: string): Promise<number> {
-  const result = await ticketRepo
-    .createQueryBuilder('t')
-    .select('COALESCE(MAX(t.position), -1)', 'max')
-    .where('t.column_id = :columnId', { columnId })
-    .getRawOne();
-  return (result?.max ?? -1) + 1;
-}
+import {
+  findColumnByName,
+  maxTicketPosition,
+  maxChildPosition,
+  shiftTicketPositions,
+} from '../mcp/shared/ticket-helpers';
 
 @Controller('api/agent')
 @UseGuards(AgentAuthGuard)
@@ -83,13 +73,13 @@ export class AgentApiController {
     const { boardId, column, title, description = '', priority = 'medium', assignee = '', subtasks = [] } = body;
     if (!column || !title) return res.status(400).json({ error: 'column and title are required' });
 
-    const col = await findColumn(this.dataSource, boardId, column);
+    const col = await findColumnByName(this.dataSource, boardId, column);
     if (!col) return res.status(404).json({ error: `Column "${column}" not found` });
 
     const ticket = await this.dataSource.transaction(async (manager) => {
       const tRepo = manager.getRepository(Ticket);
 
-      const position = await maxTicketPosition(tRepo, col.id);
+      const position = await maxTicketPosition(manager, col.id);
       const t = await tRepo.save(tRepo.create({
         column_id: col.id, title, description, priority, assignee, labels: '[]', position,
       }));
@@ -120,25 +110,19 @@ export class AgentApiController {
     const ticket = await this.ticketRepo.findOne({ where: { id: ticketId } });
     if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
 
-    const col = await findColumn(this.dataSource, boardId, toColumn);
+    const col = await findColumnByName(this.dataSource, boardId, toColumn);
     if (!col) return res.status(404).json({ error: `Column "${toColumn}" not found` });
 
     await this.dataSource.transaction(async (manager) => {
       const tRepo = manager.getRepository(Ticket);
 
-      await tRepo.createQueryBuilder().update()
-        .set({ position: () => 'position - 1' })
-        .where('column_id = :colId AND position > :pos', { colId: ticket.column_id, pos: ticket.position })
-        .execute();
+      await shiftTicketPositions(tRepo, { column_id: ticket.column_id }, ticket.position, -1);
 
       const destCount = await tRepo.createQueryBuilder('t')
-        .where('t.column_id = :colId AND t.id != :id', { colId: col.id, id: ticket.id }).getCount();
+        .where('t.column_id = :colId AND t.id != :id AND t.parent_id IS NULL', { colId: col.id, id: ticket.id }).getCount();
       const pos = position ?? destCount;
 
-      await tRepo.createQueryBuilder().update()
-        .set({ position: () => 'position + 1' })
-        .where('column_id = :colId AND position >= :pos AND id != :id', { colId: col.id, pos, id: ticket.id })
-        .execute();
+      await shiftTicketPositions(tRepo, { column_id: col.id }, pos, +1, { inclusive: true, excludeId: ticket.id });
 
       await tRepo.update(ticket.id, { column_id: col.id, position: pos });
     });
@@ -161,9 +145,9 @@ export class AgentApiController {
         try {
           switch (op.action) {
             case 'create-ticket': {
-              const col = await findColumn(this.dataSource, String(op.boardId), op.column);
+              const col = await findColumnByName(manager, String(op.boardId), op.column);
               if (!col) { results.push({ error: `Column "${op.column}" not found` }); continue; }
-              const pos = await maxTicketPosition(tRepo, col.id);
+              const pos = await maxTicketPosition(manager, col.id);
               const r = await tRepo.save(tRepo.create({
                 column_id: col.id, title: op.title, description: op.description || '',
                 priority: op.priority || 'medium', assignee: op.assignee || '', labels: '[]', position: pos,
@@ -172,22 +156,18 @@ export class AgentApiController {
               break;
             }
             case 'move-ticket': {
-              const col = await findColumn(this.dataSource, String(op.boardId), op.toColumn);
+              const col = await findColumnByName(manager, String(op.boardId), op.toColumn);
               if (!col) { results.push({ error: `Column "${op.toColumn}" not found` }); continue; }
               const t = await tRepo.findOne({ where: { id: String(op.ticketId) } });
               if (!t) { results.push({ error: 'Ticket not found' }); continue; }
 
-              await tRepo.createQueryBuilder().update()
-                .set({ position: () => 'position - 1' })
-                .where('column_id = :colId AND position > :pos', { colId: t.column_id, pos: t.position }).execute();
+              await shiftTicketPositions(tRepo, { column_id: t.column_id }, t.position, -1);
 
               const cnt = await tRepo.createQueryBuilder('t')
-                .where('t.column_id = :colId AND t.id != :id', { colId: col.id, id: t.id }).getCount();
+                .where('t.column_id = :colId AND t.id != :id AND t.parent_id IS NULL', { colId: col.id, id: t.id }).getCount();
               const pos = op.position ?? cnt;
 
-              await tRepo.createQueryBuilder().update()
-                .set({ position: () => 'position + 1' })
-                .where('column_id = :colId AND position >= :pos AND id != :id', { colId: col.id, pos, id: t.id }).execute();
+              await shiftTicketPositions(tRepo, { column_id: col.id }, pos, +1, { inclusive: true, excludeId: t.id });
 
               await tRepo.update(t.id, { column_id: col.id, position: pos });
               results.push({ success: true, ticketId: op.ticketId, movedTo: op.toColumn });
@@ -195,12 +175,10 @@ export class AgentApiController {
             }
             case 'add-child':
             case 'add-subtask': {
-              const maxP = await tRepo.createQueryBuilder('t')
-                .select('COALESCE(MAX(t.position), -1)', 'max')
-                .where('t.parent_id = :parentId', { parentId: String(op.ticketId) }).getRawOne();
+              const position = await maxChildPosition(manager, String(op.ticketId));
               const r = await tRepo.save(tRepo.create({
                 parent_id: String(op.ticketId), depth: 1, column_id: null as any,
-                title: op.title, position: (maxP?.max ?? -1) + 1, status: 'todo',
+                title: op.title, position, status: 'todo',
               }));
               results.push({ success: true, ticketId: r.id });
               break;
