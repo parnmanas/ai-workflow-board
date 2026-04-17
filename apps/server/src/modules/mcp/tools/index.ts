@@ -1,19 +1,25 @@
 /**
  * `registerAllTools` orchestrator — called by both the NestJS integrated
  * controller (mcp.controller.ts) and the standalone entry point
- * (mcp-server.ts). Each domain file below contributes a slice of the full
- * tool surface.
+ * (mcp-server.ts).
  *
- * Phase 3 C1 started this split. Subsequent commits (C2..C15) peel tool
- * blocks out of mcp-tools.ts into tools/<domain>-tools.ts and wire each
- * slice's `register*Tools(server, ctx)` into the list below. Whatever
- * hasn't been moved yet is still registered by the monolithic pass at the
- * end — that path shrinks with each commit and disappears after C15.
+ * Phase 3 split the 68 MCP tools across 14 domain files below. Each
+ * `register<Domain>Tools(server, ctx)` contributes a slice; the total is
+ * the complete AWB MCP surface.
+ *
+ * Tool count (68):
+ *   - workspace (5), board (5), column (3), ticket (11), comment (1),
+ *     activity (2), user (6, incl. whoami), agent (9, incl. ping and
+ *     prompt templates), chat (3, incl. set_typing), api-key (6),
+ *     trigger (3, incl. subscribe_events), resource (6), github (3),
+ *     misc (5, channels + batch_operations)
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { setEmbeddingDataSource } from '../../../services/embedding.service';
+import { setGitHubDataSource } from '../../../services/github-connector.service';
 import type { ToolContext } from './context';
-import { registerAllTools as registerMonolithTools } from '../mcp-tools';
+
 import { registerWorkspaceTools } from './workspace-tools';
 import { registerBoardTools } from './board-tools';
 import { registerColumnTools } from './column-tools';
@@ -33,6 +39,12 @@ export type { ToolContext } from './context';
 export { createStandaloneContext } from './context';
 
 export function registerAllTools(server: McpServer, ctx: ToolContext): void {
+  // Hydrate the DataSource-aware services that are still accessed via
+  // module setters (embedding / github). Safe to call on every server
+  // creation — both setters are idempotent.
+  setEmbeddingDataSource(ctx.dataSource);
+  setGitHubDataSource(ctx.dataSource);
+
   registerWorkspaceTools(server, ctx);
   registerBoardTools(server, ctx);
   registerColumnTools(server, ctx);
@@ -47,7 +59,4 @@ export function registerAllTools(server: McpServer, ctx: ToolContext): void {
   registerResourceTools(server, ctx);
   registerGitHubTools(server, ctx);
   registerMiscTools(server, ctx);
-  // Monolithic fallback — remaining tools not yet moved to domain files.
-  // Shrinks with every Phase 3 commit; removed once C15 lands.
-  registerMonolithTools(server, ctx);
 }
