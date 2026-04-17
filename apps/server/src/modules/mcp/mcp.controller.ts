@@ -5,8 +5,9 @@ import { Request, Response } from 'express';
 import { randomUUID } from 'crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
-import { registerAllTools, setDataSource, setLogService as setMcpToolsLogService, setSessionAuth, removeSessionAuth } from './mcp-tools';
+import { registerAllTools, setDataSource, setLogService as setMcpToolsLogService } from './mcp-tools';
 import { expressToWebRequest, sendWebResponse } from './internal/express-bridge';
+import { sessionStore } from './internal/session-store';
 import { ApiKeyService } from '../../services/api-key.service';
 import { LogService } from '../../services/log.service';
 import { AgentConnectionService } from '../agents/agent-connection.service';
@@ -63,19 +64,11 @@ function mcpLogError(message: string, meta?: Record<string, any>) {
   }
 }
 
-const SESSION_TTL_MS = 10 * 60 * 1000; // 10 minutes idle timeout
-
 // Bridge logger options that route through the controller's logService-aware mcpLog.
 const bridgeLogOpts = { log: mcpLog, logError: mcpLogError };
 
 @Controller()
 export class McpController implements OnModuleInit, OnModuleDestroy {
-  private mcpSessions = new Map<string, {
-    transport: WebStandardStreamableHTTPServerTransport;
-    server: McpServer;
-    lastActivity: number;
-  }>();
-
   // agentId → McpServer mapping for push notifications
   private agentServers = new Map<string, McpServer>();
   private triggerListener: ((event: any) => void) | null = null;
@@ -119,22 +112,23 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     };
     activityEvents.on('agent_trigger', this.triggerListener);
 
-    // Cleanup idle sessions every 2 minutes
-    setInterval(() => {
-      const now = Date.now();
-      let cleaned = 0;
-      for (const [sid, session] of this.mcpSessions) {
-        if (now - session.lastActivity > SESSION_TTL_MS) {
-          session.transport.close().catch(() => {});
-          this.mcpSessions.delete(sid);
-          removeSessionAuth(sid);
-          cleaned++;
-        }
+    // Register eviction hook to mark agents offline when their session idles out.
+    // (Normal close handles this via transport.onclose — this covers abnormal
+    // disconnects that never fire onclose.)
+    sessionStore.onEviction((_sid, entry) => {
+      const agentId = entry.auth?.agentId;
+      if (agentId) {
+        this.agentServers.delete(agentId);
+        this.agentConnectionService.markOffline(agentId).catch((e) => {
+          mcpLogError(`Failed to mark agent offline on idle eviction: ${e}`);
+        });
       }
-      if (cleaned > 0) {
-        mcpLog(`Session cleanup: removed ${cleaned} idle sessions (active: ${this.mcpSessions.size})`);
-      }
-    }, 2 * 60 * 1000);
+    });
+
+    // Start the unified idle-cleanup sweep (idempotent; no-op if already running).
+    sessionStore.ensureCleanupStarted((removed, remaining) => {
+      mcpLog(`Session cleanup: removed ${removed} idle sessions (active: ${remaining})`);
+    });
   }
 
   onModuleDestroy() {
@@ -266,11 +260,10 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
 
       // DELETE: terminate session
       if (req.method === 'DELETE') {
-        if (sessionId && this.mcpSessions.has(sessionId)) {
-          const session = this.mcpSessions.get(sessionId)!;
+        if (sessionId && sessionStore.has(sessionId)) {
+          const session = sessionStore.get(sessionId)!;
           await session.transport.close();
-          this.mcpSessions.delete(sessionId);
-          removeSessionAuth(sessionId);
+          sessionStore.remove(sessionId);
           res.status(200).end();
         } else {
           res.status(404).json({ error: 'Session not found' });
@@ -281,9 +274,9 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       const webReq = expressToWebRequest(req);
 
       // Existing session
-      if (sessionId && this.mcpSessions.has(sessionId)) {
-        const session = this.mcpSessions.get(sessionId)!;
-        session.lastActivity = Date.now();
+      if (sessionId && sessionStore.has(sessionId)) {
+        const session = sessionStore.get(sessionId)!;
+        sessionStore.touch(sessionId);
         const webRes = await session.transport.handleRequest(webReq, { parsedBody: req.body });
         await sendWebResponse(webRes, res, bridgeLogOpts);
         return;
@@ -306,9 +299,8 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
           sessionIdGenerator: () => randomUUID(),
           enableJsonResponse: true,
           onsessioninitialized: (id) => {
-            this.mcpSessions.set(id, { transport, server: mcpServer, lastActivity: Date.now() });
-            // Inject agent auth context for tool handlers
-            setSessionAuth(id, {
+            // Register transport + auth context atomically in the unified store.
+            sessionStore.register(id, transport, mcpServer, {
               agentId: mcpAuthInfo.agentId,
               agentName: mcpAuthInfo.agentName,
               scope: mcpAuthInfo.scope,
@@ -319,7 +311,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
               this.agentServers.set(mcpAuthInfo.agentId, mcpServer);
             }
             const who = mcpAuthInfo?.agentName || mcpAuthInfo?.keyHint || 'anonymous';
-            mcpLog(`New session: ${id} by [${who}]  (active: ${this.mcpSessions.size})`);
+            mcpLog(`New session: ${id} by [${who}]  (active: ${sessionStore.size})`);
           },
         });
 
@@ -334,9 +326,8 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
         transport.onclose = () => {
           const sid = transport.sessionId;
           if (sid) {
-            this.mcpSessions.delete(sid);
-            removeSessionAuth(sid);
-            mcpLog(`Session closed: ${sid}  (active: ${this.mcpSessions.size})`);
+            sessionStore.remove(sid);
+            mcpLog(`Session closed: ${sid}  (active: ${sessionStore.size})`);
           }
           // Clean up agent → server mapping and mark offline
           if (mcpAuthInfo?.agentId) {

@@ -21,26 +21,27 @@ export function setDataSource(dataSource: DataSource) {
 }
 
 // ─── Agent Auth Context (per-session) ──────────────────────
-export interface McpAgentContext {
-  agentId?: string;
-  agentName?: string;
-  scope?: string;
-  source: 'db' | 'env' | 'dev-mode';
-}
+// Session auth context is stored centrally in internal/session-store.ts
+// (merged with the transport-session map so both share a single TTL).
+// These exports remain to preserve the existing public API — they delegate
+// to sessionStore. Note: setSessionAuth is a no-op if the session has not
+// been registered with a transport first (preferred flow is to pass `auth`
+// to sessionStore.register() atomically — the controller does this).
+import { sessionStore, type McpAgentContext } from './internal/session-store';
 
-const sessionAuthMap = new Map<string, McpAgentContext>();
+export type { McpAgentContext };
 
 export function setSessionAuth(sessionId: string, ctx: McpAgentContext) {
-  sessionAuthMap.set(sessionId, ctx);
+  sessionStore.setAuth(sessionId, ctx);
 }
 
 export function removeSessionAuth(sessionId: string) {
-  sessionAuthMap.delete(sessionId);
+  sessionStore.removeAuth(sessionId);
 }
 
 function getCallerAgent(extra: { sessionId?: string }): McpAgentContext | undefined {
   if (!extra.sessionId) return undefined;
-  return sessionAuthMap.get(extra.sessionId);
+  return sessionStore.getAuth(extra.sessionId);
 }
 
 // Optional LogService: when running inside NestJS, logs go through the

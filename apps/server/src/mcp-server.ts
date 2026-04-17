@@ -30,6 +30,7 @@ import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/
 import { initDb, AppDataSource } from './db';
 import { registerAllTools } from './modules/mcp/mcp-tools';
 import { expressToWebRequest, sendWebResponse } from './modules/mcp/internal/express-bridge';
+import { sessionStore } from './modules/mcp/internal/session-store';
 import { setEmbeddingDataSource } from './services/embedding.service';
 import { setGitHubDataSource } from './services/github-connector.service';
 
@@ -73,29 +74,10 @@ async function startHttp() {
     credentials: true,
   }));
 
-  // ── Session management ──────────────────────────────────
-  const SESSION_TTL_MS = 10 * 60 * 1000; // 10 minutes idle timeout
-  const sessions = new Map<string, {
-    transport: WebStandardStreamableHTTPServerTransport;
-    server: McpServer;
-    lastActivity: number;
-  }>();
-
-  // Cleanup idle sessions every 2 minutes
-  setInterval(() => {
-    const now = Date.now();
-    let cleaned = 0;
-    for (const [sid, session] of sessions) {
-      if (now - session.lastActivity > SESSION_TTL_MS) {
-        session.transport.close().catch(() => {});
-        sessions.delete(sid);
-        cleaned++;
-      }
-    }
-    if (cleaned > 0) {
-      mcpLog(`Session cleanup: removed ${cleaned} idle sessions (active: ${sessions.size})`);
-    }
-  }, 2 * 60 * 1000);
+  // ── Session management (unified store with TTL cleanup) ─
+  sessionStore.ensureCleanupStarted((removed, remaining) => {
+    mcpLog(`Session cleanup: removed ${removed} idle sessions (active: ${remaining})`);
+  });
 
   // ── Bridge logger (routes shared bridge diagnostics through mcpLog) ──
   const bridgeLog = (msg: string, meta?: Record<string, any>) => mcpLog(msg, meta || '');
@@ -116,10 +98,10 @@ async function startHttp() {
 
       // ─ DELETE ─────────────────────────────────────────
       if (req.method === 'DELETE') {
-        if (sessionId && sessions.has(sessionId)) {
-          const session = sessions.get(sessionId)!;
+        if (sessionId && sessionStore.has(sessionId)) {
+          const session = sessionStore.get(sessionId)!;
           await session.transport.close();
-          sessions.delete(sessionId);
+          sessionStore.remove(sessionId);
           res.status(200).end();
         } else {
           res.status(404).json({ error: 'Session not found' });
@@ -130,9 +112,9 @@ async function startHttp() {
       const webReq = expressToWebRequest(req);
 
       // ─ Existing session ───────────────────────────────
-      if (sessionId && sessions.has(sessionId)) {
-        const session = sessions.get(sessionId)!;
-        session.lastActivity = Date.now();
+      if (sessionId && sessionStore.has(sessionId)) {
+        const session = sessionStore.get(sessionId)!;
+        sessionStore.touch(sessionId);
         const webRes = await session.transport.handleRequest(webReq, {
           parsedBody: req.body,
         });
@@ -157,8 +139,8 @@ async function startHttp() {
           sessionIdGenerator: () => randomUUID(),
           enableJsonResponse: true,
           onsessioninitialized: (id) => {
-            sessions.set(id, { transport, server: mcpServer, lastActivity: Date.now() });
-            mcpLog(`New session: ${id}  (active: ${sessions.size})`);
+            sessionStore.register(id, transport, mcpServer);
+            mcpLog(`New session: ${id}  (active: ${sessionStore.size})`);
           },
         });
 
@@ -169,8 +151,8 @@ async function startHttp() {
         transport.onclose = () => {
           const sid = transport.sessionId;
           if (sid) {
-            sessions.delete(sid);
-            mcpLog(`Session closed: ${sid}  (active: ${sessions.size})`);
+            sessionStore.remove(sid);
+            mcpLog(`Session closed: ${sid}  (active: ${sessionStore.size})`);
           }
         };
 
@@ -207,7 +189,7 @@ async function startHttp() {
     res.json({
       status: 'ok',
       transport: 'streamable-http',
-      sessions: sessions.size,
+      sessions: sessionStore.size,
       timestamp: new Date().toISOString(),
     });
   });
