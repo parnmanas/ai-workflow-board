@@ -5,13 +5,15 @@ import { Request, Response } from 'express';
 import { randomUUID } from 'crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
-import { registerAllTools, setDataSource, setLogService as setMcpToolsLogService } from './mcp-tools';
+import { registerAllTools, type ToolContext } from './tools';
 import { expressToWebRequest, sendWebResponse } from './internal/express-bridge';
 import { sessionStore } from './internal/session-store';
 import { ApiKeyService } from '../../services/api-key.service';
 import { LogService } from '../../services/log.service';
 import { AgentConnectionService } from '../agents/agent-connection.service';
-import { activityEvents } from '../../services/activity.service';
+import { ActivityService, activityEvents } from '../../services/activity.service';
+import { setEmbeddingDataSource } from '../../services/embedding.service';
+import { setGitHubDataSource } from '../../services/github-connector.service';
 
 interface McpAuthInfo {
   keyHint: string;
@@ -78,12 +80,16 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly _logService: LogService,
     private readonly agentConnectionService: AgentConnectionService,
+    private readonly activityService: ActivityService,
   ) {}
 
   onModuleInit() {
-    setDataSource(this.dataSource);
     logService = this._logService;
-    setMcpToolsLogService(this._logService);
+    // Services that depend on the DataSource still use module-level setters
+    // (historical — they pre-date the ToolContext pattern). Hydrate them
+    // once here so both module-scope code and ToolContext consumers agree.
+    setEmbeddingDataSource(this.dataSource);
+    setGitHubDataSource(this.dataSource);
 
     // Listen for agent_trigger events and push MCP notifications to connected agents
     this.triggerListener = (event: any) => {
@@ -137,12 +143,21 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private buildToolContext(): ToolContext {
+    return {
+      dataSource: this.dataSource,
+      activityService: this.activityService,
+      apiKeyService: this.apiKeyService,
+      logger: this._logService,
+    };
+  }
+
   private createMcpServer(): McpServer {
     const server = new McpServer(
       { name: 'ai-workflow-board', version: '1.0.0' },
       { capabilities: { experimental: { 'awb/schemaVersion': { version: 2 } } } },
     );
-    registerAllTools(server);
+    registerAllTools(server, this.buildToolContext());
     return server;
   }
 

@@ -8,17 +8,16 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { DataSource } from 'typeorm';
-import { AppDataSource as defaultDataSource, DEFAULT_COLUMNS } from '../../db';
+import { DEFAULT_COLUMNS } from '../../db';
+import type { ToolContext } from './tools/context';
 
-// Mutable DataSource: defaults to standalone AppDataSource,
-// but can be overridden with the NestJS-managed DataSource.
-let AppDataSource: DataSource = defaultDataSource;
-
-export function setDataSource(dataSource: DataSource) {
-  AppDataSource = dataSource;
-  setEmbeddingDataSource(dataSource);
-  setGitHubDataSource(dataSource);
-}
+// Module-scope DataSource reference. Historically this was a mutable global
+// overridden via `setDataSource`. During Phase 3 we pivoted to passing a
+// ToolContext into `registerAllTools`, but the monolithic tool bodies below
+// still close over `AppDataSource`. We hydrate it from `ctx.dataSource` at
+// the top of `registerAllTools` so every tool call sees the NestJS-managed
+// DataSource (or the standalone one in standalone mode).
+let AppDataSource: DataSource = null as unknown as DataSource;
 
 // ─── Agent Auth Context (per-session) ──────────────────────
 // Session auth context is stored centrally in internal/session-store.ts
@@ -44,21 +43,19 @@ function getCallerAgent(extra: { sessionId?: string }): McpAgentContext | undefi
   return sessionStore.getAuth(extra.sessionId);
 }
 
-// Optional LogService: when running inside NestJS, logs go through the
-// centralized LogService. Falls back to console in standalone mode.
-import { LogService } from '../../services/log.service';
-let _logService: LogService | null = null;
-
-export function setLogService(ls: LogService) {
-  _logService = ls;
-}
+// Logger pulled from the ToolContext — set inside `registerAllTools`.
+// `mcpToolsLog` preserves the original call sites while routing through
+// the context's logger (NestJS LogService in integrated mode, console
+// shim in standalone mode).
+import type { McpLogger } from './tools/context';
+let _logger: McpLogger = {
+  info: (c, m, meta) => console.log(`[${c}]`, m, meta || ''),
+  warn: (c, m, meta) => console.warn(`[${c}]`, m, meta || ''),
+  error: (c, m, meta) => console.error(`[${c}]`, m, meta || ''),
+};
 
 function mcpToolsLog(message: string, meta?: Record<string, any>) {
-  if (_logService) {
-    _logService.info('MCP', message, meta);
-  } else {
-    console.log('[MCP]', message, meta || '');
-  }
+  _logger.info('MCP', message, meta);
 }
 import { Workspace } from '../../entities/Workspace';
 import { Board } from '../../entities/Board';
@@ -91,15 +88,10 @@ import {
 
 import { randomBytes } from 'crypto';
 
-// ─── Helpers ────────────────────────────────────────────────
-
-function ok(data: unknown) {
-  return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
-}
-
-function err(message: string) {
-  return { content: [{ type: 'text' as const, text: JSON.stringify({ error: message }) }], isError: true };
-}
+// Shared helpers extracted during Phase 3 C1. These replace the previous
+// in-file definitions of `ok`, `err`, `safeJsonParse`, and `loadTicketFull`.
+import { ok, err, safeJsonParse } from './shared/helpers';
+import { loadTicketFull as sharedLoadTicketFull } from './shared/ticket-parsing';
 
 async function findColumnByName(boardId: string, columnName: string) {
   return AppDataSource.getRepository(BoardColumn)
@@ -126,39 +118,12 @@ async function maxChildPosition(parentId: string): Promise<number> {
   return (result?.max ?? -1) + 1;
 }
 
-function safeJsonParse(val: string | null | undefined, fallback: any = []): any {
-  try { return JSON.parse(val || JSON.stringify(fallback)); }
-  catch { return fallback; }
-}
-
+// `loadTicketFull` is a thin wrapper over the shared implementation — it
+// binds the module-scope AppDataSource so the rest of this file can call it
+// without an explicit DataSource argument. Tool files moved into tools/
+// will call `sharedLoadTicketFull(ctx.dataSource, id)` directly.
 async function loadTicketFull(id: string) {
-  const ticketRepo = AppDataSource.getRepository(Ticket);
-  const ticket = await ticketRepo.findOne({
-    where: { id },
-    relations: ['children', 'children.children', 'children.children.comments', 'children.comments', 'comments'],
-  });
-  if (!ticket) return null;
-  return {
-    ...ticket,
-    labels: safeJsonParse(ticket.labels),
-    channel_ids: safeJsonParse(ticket.channel_ids),
-    children: (ticket.children || []).sort((a, b) => a.position - b.position).map(child => ({
-      ...child,
-      labels: safeJsonParse(child.labels),
-      channel_ids: safeJsonParse(child.channel_ids),
-      children: (child.children || []).sort((a, b) => a.position - b.position).map(gc => ({
-        ...gc,
-        labels: safeJsonParse(gc.labels),
-        channel_ids: safeJsonParse(gc.channel_ids),
-        children: [],
-        comments: (gc.comments || []).sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()),
-      })),
-      comments: (child.comments || []).sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()),
-    })),
-    comments: (ticket.comments || []).sort((a, b) =>
-      new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-    ),
-  };
+  return sharedLoadTicketFull(AppDataSource, id);
 }
 
 // Resolve agent ID from name if ID is missing
@@ -286,7 +251,14 @@ async function updateApiKey(id: string, updates: {
 
 // ─── Tool Registration ──────────────────────────────────────
 
-export function registerAllTools(server: McpServer): void {
+export function registerAllTools(server: McpServer, ctx: ToolContext): void {
+  // Hydrate module-scope references from the context. Phase 3 is moving the
+  // tool bodies into tools/<domain>-tools.ts — for now they still close over
+  // these locals, so we sync them here on every registration.
+  AppDataSource = ctx.dataSource;
+  _logger = ctx.logger;
+  setEmbeddingDataSource(ctx.dataSource);
+  setGitHubDataSource(ctx.dataSource);
 
   // ═══════════════════════════════════════════════════════════
   //  WORKSPACE TOOLS
