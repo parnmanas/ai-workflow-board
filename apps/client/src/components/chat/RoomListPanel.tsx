@@ -394,7 +394,11 @@ function RoomListRow({ room, isActive, onClick }: RoomListRowProps) {
     .slice(0, 2)
     .toUpperCase();
 
-  const unreadCount = room.unread_count || 0;
+  // B5: active room is always "read" from the UI's perspective. The server may
+  // briefly report unread_count > 0 due to SSE-vs-markRead ordering, but there's
+  // no user value in surfacing that to the room the user is literally viewing.
+  const rawUnread = room.unread_count || 0;
+  const unreadCount = isActive ? 0 : rawUnread;
   const showBadge = unreadCount > 0;
   const badgeLabel = unreadCount >= 100 ? '99+' : String(unreadCount);
 
