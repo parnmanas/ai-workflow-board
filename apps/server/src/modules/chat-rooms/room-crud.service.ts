@@ -285,7 +285,6 @@ export class RoomCrudService {
         room_id: room.id,
         participant_type: p.participant_type,
         participant_id: p.participant_id,
-        last_read_message_id: null,
         last_read_at: joinedAt,
         left_at: null,
       }),

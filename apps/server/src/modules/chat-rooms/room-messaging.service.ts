@@ -253,7 +253,6 @@ export class RoomMessagingService {
 
     if (shouldUpdate) {
       await this.participantRepo.update(participant.id, {
-        last_read_message_id: latestMsg.id,
         last_read_at: latestMsg.created_at,
       });
     }
@@ -262,7 +261,6 @@ export class RoomMessagingService {
     // Multi-tab sync (B3) needs this so a client can match against its local
     // unread_count even when another tab's markRead beat us to it.
     const effectiveReadAt = shouldUpdate ? latestMsg.created_at : participant.last_read_at!;
-    const effectiveReadMsgId = shouldUpdate ? latestMsg.id : participant.last_read_message_id;
 
     const memberIds = await this.membership.getRoomMemberIds(roomId);
     const agentMemberIds = await this.membership.getRoomAgentMemberIds(roomId);
@@ -272,7 +270,6 @@ export class RoomMessagingService {
       participant_id: participantId,
       participant_type: participantType,
       last_read_at: effectiveReadAt.toISOString(),
-      last_read_message_id: effectiveReadMsgId,
       member_ids: memberIds,
       agent_member_ids: agentMemberIds,
     });

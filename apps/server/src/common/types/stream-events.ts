@@ -125,7 +125,6 @@ export interface ChatRoomUpdatePayload {
   // user vs agent when the same UUID collides across domains.
   participant_type?: 'user' | 'agent';
   last_read_at?: string; // ISO-8601
-  last_read_message_id?: string | null;
 }
 
 export interface ChatRoomTypingPayload {

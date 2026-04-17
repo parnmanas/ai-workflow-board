@@ -91,7 +91,6 @@ export class RoomMembershipService {
           room_id: roomId,
           participant_type: p.participant_type,
           participant_id: p.participant_id,
-          last_read_message_id: null,
           last_read_at: joinedAt,
           left_at: null,
         }),

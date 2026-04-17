@@ -22,10 +22,6 @@ export class ChatRoomParticipant {
   @Column({ type: 'varchar' })
   participant_id: string;
 
-  // Client display: last message UUID seen by this participant
-  @Column({ type: 'varchar', nullable: true, default: null })
-  last_read_message_id: string | null;
-
   // Server-side unread count: use m.created_at > p.last_read_at (CHAT-12, CHAT-13)
   // NOTE: Do NOT use UUID comparison for unread detection — UUIDs are not monotonic
   @Column({ type: 'timestamp', nullable: true, default: null })
