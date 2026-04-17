@@ -4,22 +4,24 @@
  * (mcp-server.ts). Each domain file below contributes a slice of the full
  * tool surface.
  *
- * Current state (Phase 3 C1): domain files have not yet been created.
- * `registerAllTools` delegates to the monolithic implementation still
- * living in mcp-tools.ts. Subsequent commits (C2..C15) peel tool blocks
- * out of that file into tools/<domain>-tools.ts and wire each slice's
- * `register*Tools(server, ctx)` into the array below.
+ * Phase 3 C1 started this split. Subsequent commits (C2..C15) peel tool
+ * blocks out of mcp-tools.ts into tools/<domain>-tools.ts and wire each
+ * slice's `register*Tools(server, ctx)` into the list below. Whatever
+ * hasn't been moved yet is still registered by the monolithic pass at the
+ * end — that path shrinks with each commit and disappears after C15.
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ToolContext } from './context';
 import { registerAllTools as registerMonolithTools } from '../mcp-tools';
+import { registerWorkspaceTools } from './workspace-tools';
 
 export type { ToolContext } from './context';
 export { createStandaloneContext } from './context';
 
 export function registerAllTools(server: McpServer, ctx: ToolContext): void {
-  // Phase 3 C1: still a single monolithic pass. C2..C15 will replace this
-  // with an explicit list of domain-specific registration calls.
+  registerWorkspaceTools(server, ctx);
+  // Monolithic fallback — remaining tools not yet moved to domain files.
+  // Shrinks with every Phase 3 commit; removed once C15 lands.
   registerMonolithTools(server, ctx);
 }
