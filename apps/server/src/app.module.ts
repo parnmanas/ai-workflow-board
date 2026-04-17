@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ServeStaticModule } from '@nestjs/serve-static';
-import { join } from 'path';
+import { join, sep } from 'path';
 import { DatabaseModule } from './database/database.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { WorkspacesModule } from './modules/workspaces/workspaces.module';
@@ -33,6 +33,26 @@ import { MentionsModule } from './modules/mentions/mentions.module';
     ServeStaticModule.forRoot({
       rootPath: join(__dirname, '..', '..', 'client', 'dist'),
       exclude: ['/api{*path}', '/mcp{*path}'],
+      serveStaticOptions: {
+        // Vite emits hashed filenames inside /assets/ (index-<hash>.js etc.) so
+        // those are safe to cache forever. index.html and anything at the root
+        // must NOT be cached — otherwise a redeploy ships new hashed bundles
+        // but browsers keep loading the old index.html which points at the
+        // *previous* hash and never picks up the new code. This has been the
+        // source of "my fix isn't live" reports for a while.
+        setHeaders: (res, path) => {
+          if (path.endsWith('.html')) {
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+            res.setHeader('Pragma', 'no-cache');
+            res.setHeader('Expires', '0');
+          } else if (path.includes(`${sep}assets${sep}`)) {
+            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+          } else {
+            // Other root-level files (favicon, robots) — modest cache.
+            res.setHeader('Cache-Control', 'public, max-age=3600');
+          }
+        },
+      },
     }),
     AuthModule,
     WorkspacesModule,
