@@ -124,14 +124,23 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     // Register eviction hook to mark agents offline when their session idles out.
     // (Normal close handles this via transport.onclose — this covers abnormal
     // disconnects that never fire onclose.)
+    //
+    // Guard against false offlines on reconnect: if another live session for
+    // the same agent exists (typical when a client reconnects before the old
+    // session's 10-min TTL expires), leave it alone. The AgentStatusService's
+    // 90s heartbeat-gap sweep is the authoritative offline detector anyway;
+    // this hook is just a fast-path for the common clean case.
     sessionStore.onEviction((_sid, entry) => {
       const agentId = entry.auth?.agentId;
-      if (agentId) {
-        this.agentServers.delete(agentId);
-        this.agentConnectionService.markOffline(agentId).catch((e) => {
-          mcpLogError(`Failed to mark agent offline on idle eviction: ${e}`);
-        });
+      if (!agentId) return;
+      if (sessionStore.hasAgentSession(agentId)) {
+        // Still connected on another session — do nothing.
+        return;
       }
+      this.agentServers.delete(agentId);
+      this.agentConnectionService.markOffline(agentId).catch((e) => {
+        mcpLogError(`Failed to mark agent offline on idle eviction: ${e}`);
+      });
     });
 
     // Start the unified idle-cleanup sweep (idempotent; no-op if already running).
@@ -347,8 +356,10 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
             sessionStore.remove(sid);
             mcpLog(`Session closed: ${sid}  (active: ${sessionStore.size})`);
           }
-          // Clean up agent → server mapping and mark offline
-          if (mcpAuthInfo?.agentId) {
+          // Clean up agent → server mapping and mark offline, BUT only if no
+          // other live session for this agent remains (reconnect guard — see
+          // the eviction-hook comment above).
+          if (mcpAuthInfo?.agentId && !sessionStore.hasAgentSession(mcpAuthInfo.agentId)) {
             this.agentServers.delete(mcpAuthInfo.agentId);
             this.agentConnectionService.markOffline(mcpAuthInfo.agentId).catch((e) => {
               mcpLogError(`Failed to mark agent offline: ${e}`);

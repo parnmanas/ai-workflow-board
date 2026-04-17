@@ -115,6 +115,19 @@ class SessionStore {
     return this.sessions.delete(sessionId);
   }
 
+  /**
+   * True iff any currently-registered session carries the given agentId in its
+   * auth context. Used by the eviction hook to avoid marking an agent offline
+   * when a stale session idles out but other live sessions for the same agent
+   * (e.g. from a reconnect) are still active.
+   */
+  hasAgentSession(agentId: string): boolean {
+    for (const entry of this.sessions.values()) {
+      if (entry.auth?.agentId === agentId) return true;
+    }
+    return false;
+  }
+
   /** Register a hook to run after each idle-cleanup eviction. */
   onEviction(hook: SessionEvictionHook): void {
     this.evictionHooks.push(hook);
