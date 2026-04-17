@@ -1,7 +1,7 @@
 import { Controller, Get, Post, Patch, Delete, Body, Param, Req, Res, UseGuards } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
-import { Repository, DataSource, IsNull } from 'typeorm';
+import { Repository, DataSource } from 'typeorm';
 import { Ticket } from '../../entities/Ticket';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { Comment } from '../../entities/Comment';
@@ -10,48 +10,8 @@ import { AuthGuard } from '../../common/guards/auth.guard';
 import { WorkspaceGuard } from '../../common/guards/workspace.guard';
 import { ActivityService } from '../../services/activity.service';
 import { MAX_IMAGE_SIZE, MAX_IMAGES_PER_MESSAGE, ALLOWED_IMAGE_MIMETYPES } from '../../common/constants/upload';
-
-function parseComments(comments: any[]) {
-  return (comments || [])
-    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-    .map(c => ({ ...c, images: JSON.parse(c.images || '[]') }));
-}
-
-function parseTicket(ticket: Ticket) {
-  return {
-    ...ticket,
-    labels: JSON.parse(ticket.labels || '[]'),
-    channel_ids: JSON.parse(ticket.channel_ids || '[]'),
-    children: (ticket.children || [])
-      .sort((a, b) => a.position - b.position)
-      .map(child => ({
-        ...child,
-        labels: JSON.parse(child.labels || '[]'),
-        channel_ids: JSON.parse(child.channel_ids || '[]'),
-        children: (child.children || []).sort((a, b) => a.position - b.position).map(gc => ({
-          ...gc,
-          labels: JSON.parse(gc.labels || '[]'),
-          channel_ids: JSON.parse(gc.channel_ids || '[]'),
-          children: [],
-          comments: parseComments(gc.comments),
-        })),
-        comments: parseComments(child.comments),
-      })),
-    comments: parseComments(ticket.comments),
-  };
-}
-
-async function loadTicketFull(ticketRepo: Repository<Ticket>, id: string) {
-  const ticket = await ticketRepo.findOne({
-    where: { id },
-    relations: [
-      'children', 'children.children', 'children.children.comments',
-      'children.comments', 'comments',
-    ],
-  });
-  if (!ticket) return null;
-  return parseTicket(ticket);
-}
+import { loadTicketFull } from '../mcp/shared/ticket-parsing';
+import { maxTicketPosition, maxChildPosition, resolveAgentId } from '../mcp/shared/ticket-helpers';
 
 @Controller('api')
 @UseGuards(AuthGuard, WorkspaceGuard)
@@ -64,13 +24,6 @@ export class TicketsController {
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly activityService: ActivityService,
   ) {}
-
-  private async resolveAgentId(id: string, name: string): Promise<string> {
-    if (id) return id;
-    if (!name) return '';
-    const agent = await this.agentRepo.findOne({ where: { name } }).catch(() => null);
-    return agent?.id || '';
-  }
 
   private resolveCreator(req: any, body: any): { created_by: string; created_by_type: string; created_by_id: string } {
     // If explicitly provided in body (e.g., from MCP/agent API)
@@ -101,17 +54,11 @@ export class TicketsController {
     const col = await this.colRepo.findOne({ where: { id: columnId } });
     if (!col) return res.status(404).json({ error: 'Column not found' });
 
-    const resolvedAssigneeId = await this.resolveAgentId(assignee_id, assignee);
-    const resolvedReporterId = await this.resolveAgentId(reporter_id, reporter);
+    const resolvedAssigneeId = await resolveAgentId(this.dataSource, assignee_id, assignee);
+    const resolvedReporterId = await resolveAgentId(this.dataSource, reporter_id, reporter);
     const creator = this.resolveCreator(req, body);
 
-    const maxResult = await this.ticketRepo
-      .createQueryBuilder('t')
-      .select('COALESCE(MAX(t.position), -1)', 'max')
-      .where('t.column_id = :columnId AND t.parent_id IS NULL', { columnId })
-      .getRawOne();
-
-    const position = (maxResult?.max ?? -1) + 1;
+    const position = await maxTicketPosition(this.dataSource, columnId);
     const ticket = await this.ticketRepo.save(this.ticketRepo.create({
       column_id: columnId, title, description, priority, assignee, reporter,
       assignee_id: resolvedAssigneeId, reporter_id: resolvedReporterId,
@@ -139,17 +86,11 @@ export class TicketsController {
     const { title, description = '', priority = 'medium', status = 'todo', assignee = '', reporter = '', assignee_id = '', reporter_id = '', labels = [], channel_ids = [] } = body;
     if (!title) return res.status(400).json({ error: 'title is required' });
 
-    const resolvedAssigneeId = await this.resolveAgentId(assignee_id, assignee);
-    const resolvedReporterId = await this.resolveAgentId(reporter_id, reporter);
+    const resolvedAssigneeId = await resolveAgentId(this.dataSource, assignee_id, assignee);
+    const resolvedReporterId = await resolveAgentId(this.dataSource, reporter_id, reporter);
     const creator = this.resolveCreator(req, body);
 
-    const maxResult = await this.ticketRepo
-      .createQueryBuilder('t')
-      .select('COALESCE(MAX(t.position), -1)', 'max')
-      .where('t.parent_id = :parentId', { parentId })
-      .getRawOne();
-
-    const position = (maxResult?.max ?? -1) + 1;
+    const position = await maxChildPosition(this.dataSource, parentId);
     const child = await this.ticketRepo.save(this.ticketRepo.create({
       parent_id: parentId, depth: childDepth, column_id: null as any,
       title, description, priority, status, assignee, reporter,
@@ -170,7 +111,7 @@ export class TicketsController {
 
   @Get('tickets/:id')
   async get(@Param('id') id: string, @Res() res: Response) {
-    const ticket = await loadTicketFull(this.ticketRepo, id);
+    const ticket = await loadTicketFull(this.dataSource, id);
     if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
     return res.json(ticket);
   }
@@ -192,13 +133,13 @@ export class TicketsController {
     if (status !== undefined) ticket.status = status;
     if (assignee !== undefined) {
       ticket.assignee = assignee;
-      ticket.assignee_id = await this.resolveAgentId(assignee_id || '', assignee);
+      ticket.assignee_id = await resolveAgentId(this.dataSource, assignee_id || '', assignee);
     } else if (assignee_id !== undefined) {
       ticket.assignee_id = assignee_id;
     }
     if (reporter !== undefined) {
       ticket.reporter = reporter;
-      ticket.reporter_id = await this.resolveAgentId(reporter_id || '', reporter);
+      ticket.reporter_id = await resolveAgentId(this.dataSource, reporter_id || '', reporter);
     } else if (reporter_id !== undefined) {
       ticket.reporter_id = reporter_id;
     }
@@ -253,7 +194,7 @@ export class TicketsController {
       });
     }
 
-    const updated = await loadTicketFull(this.ticketRepo, ticket.id);
+    const updated = await loadTicketFull(this.dataSource, ticket.id);
     return res.json(updated);
   }
 
@@ -290,7 +231,7 @@ export class TicketsController {
       await tRepo.update(ticket.id, { column_id: destColumnId, position: pos });
     });
 
-    const updated = await loadTicketFull(this.ticketRepo, ticket.id);
+    const updated = await loadTicketFull(this.dataSource, ticket.id);
 
     const oldCol = await this.colRepo.findOne({ where: { id: ticket.column_id } });
     const newColId = targetColumnId || ticket.column_id;

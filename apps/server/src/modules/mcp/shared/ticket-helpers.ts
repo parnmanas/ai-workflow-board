@@ -18,12 +18,12 @@ export async function findColumnByName(dataSource: DataSource, boardId: string, 
     .getOne();
 }
 
-/** Next free `position` value at the end of a column. */
+/** Next free `position` value at the end of a column (root tickets only). */
 export async function maxTicketPosition(dataSource: DataSource, columnId: string): Promise<number> {
   const result = await dataSource.getRepository(Ticket)
     .createQueryBuilder('t')
     .select('COALESCE(MAX(t.position), -1)', 'max')
-    .where('t.column_id = :columnId', { columnId })
+    .where('t.column_id = :columnId AND t.parent_id IS NULL', { columnId })
     .getRawOne();
   return (result?.max ?? -1) + 1;
 }
