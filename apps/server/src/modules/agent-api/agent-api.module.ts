@@ -12,10 +12,11 @@ import { Agent } from '../../entities/Agent';
 import { AgentApiController } from './agent-api.controller';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { ChatRoomsService } from '../chat-rooms/chat-rooms.service';
+import { RoomMembershipService } from '../chat-rooms/room-membership.service';
 
 @Module({
   imports: [TypeOrmModule.forFeature([Board, BoardColumn, Ticket, Comment, ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, Agent])],
   controllers: [AgentApiController],
-  providers: [AgentAuthGuard, ChatRoomsService],
+  providers: [AgentAuthGuard, ChatRoomsService, RoomMembershipService],
 })
 export class AgentApiModule {}

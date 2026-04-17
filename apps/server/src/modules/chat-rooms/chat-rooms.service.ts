@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
-import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, Repository } from 'typeorm';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
@@ -9,6 +9,7 @@ import { Agent } from '../../entities/Agent';
 import { Ticket } from '../../entities/Ticket';
 import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
+import { RoomMembershipService } from './room-membership.service';
 
 const CONTENT_MAX = 10000;
 const PARTICIPANT_CAP = 50;
@@ -19,6 +20,14 @@ function makeError(status: number, message: string): Error & { status: number } 
   return err;
 }
 
+/**
+ * Facade for chat-room operations.
+ *
+ * Kept as the single entry point used by ChatRoomsController, AgentApiController, and
+ * the rest of the app. Membership bookkeeping lives in RoomMembershipService; this class
+ * delegates there (and will delegate to sibling Messaging/CRUD services in later commits)
+ * while preserving the historical public API so callers don't need updating.
+ */
 @Injectable()
 export class ChatRoomsService {
   constructor(
@@ -40,14 +49,14 @@ export class ChatRoomsService {
     @InjectRepository(Ticket)
     private readonly ticketRepo: Repository<Ticket>,
 
-    @InjectDataSource() private readonly dataSource: DataSource,
-
     private readonly logService: LogService,
+
+    private readonly membership: RoomMembershipService,
   ) {}
 
   /** Wraps a column reference with ::text on postgres to avoid varchar/uuid mismatch */
   private toText(col: string): string {
-    return this.dataSource.options.type === 'postgres' ? `${col}::text` : col;
+    return this.membership.toText(col);
   }
 
   /**
@@ -532,82 +541,14 @@ export class ChatRoomsService {
     userId: string,
     newParticipants: { participant_type: string; participant_id: string }[],
   ): Promise<void> {
-    const room = await this.roomRepo.findOne({ where: { id: roomId } });
-    if (!room) {
-      throw makeError(404, 'Room not found');
-    }
-    if (room.type === 'dm') {
-      throw makeError(400, 'Cannot add participants to a direct message');
-    }
-
-    await this._requireActiveParticipant(roomId, userId);
-
-    // Wrap cap-check and insert in a transaction to prevent concurrent requests from
-    // exceeding the participant cap (read-check-then-write race condition).
-    await this.participantRepo.manager.transaction(async (em) => {
-      const currentCount = await em
-        .createQueryBuilder(ChatRoomParticipant, 'p')
-        .where('p.room_id = :roomId', { roomId })
-        .andWhere('p.left_at IS NULL')
-        .getCount();
-
-      if (currentCount + newParticipants.length > PARTICIPANT_CAP) {
-        throw makeError(400, 'This room is full (50 participant limit).');
-      }
-
-      // Add each new participant (always create new row, even for re-joins)
-      const rows = newParticipants.map(p =>
-        em.create(ChatRoomParticipant, {
-          room_id: roomId,
-          participant_type: p.participant_type,
-          participant_id: p.participant_id,
-          last_read_message_id: null,
-          last_read_at: null,
-          left_at: null,
-        }),
-      );
-      await em.save(rows);
-    });
-
-    const memberIds = await this.getRoomMemberIds(roomId);
-    const agentMemberIds = await this.getRoomAgentMemberIds(roomId);
-    activityEvents.emit('chat_room_update', {
-      room_id: roomId,
-      update_type: 'participant_added',
-      participant_ids: newParticipants.map(p => p.participant_id),
-      member_ids: memberIds,
-      agent_member_ids: agentMemberIds,
-    });
+    return this.membership.addParticipants(roomId, userId, newParticipants);
   }
 
   /**
    * Leave a room by soft-deleting the participant row (sets left_at).
    */
   async leaveRoom(roomId: string, userId: string): Promise<void> {
-    const participant = await this.participantRepo.findOne({
-      where: {
-        room_id: roomId,
-        participant_id: userId,
-        participant_type: 'user',
-      },
-    });
-
-    if (!participant || participant.left_at !== null) {
-      throw makeError(400, 'Not an active participant in this room');
-    }
-
-    await this.participantRepo.update(participant.id, { left_at: new Date() });
-
-    // Get updated member IDs after the leave
-    const memberIds = await this.getRoomMemberIds(roomId);
-    const agentMemberIds = await this.getRoomAgentMemberIds(roomId);
-    activityEvents.emit('chat_room_update', {
-      room_id: roomId,
-      update_type: 'participant_left',
-      participant_id: userId,
-      member_ids: memberIds,
-      agent_member_ids: agentMemberIds,
-    });
+    return this.membership.leaveRoom(roomId, userId);
   }
 
   /**
@@ -615,15 +556,7 @@ export class ChatRoomsService {
    * Used to populate member_ids in SSE events for synchronous filtering.
    */
   async getRoomMemberIds(roomId: string): Promise<Set<string>> {
-    const participants = await this.participantRepo
-      .createQueryBuilder('p')
-      .select('p.participant_id')
-      .where('p.room_id = :roomId', { roomId })
-      .andWhere("p.participant_type = 'user'")
-      .andWhere('p.left_at IS NULL')
-      .getMany();
-
-    return new Set(participants.map(p => p.participant_id));
+    return this.membership.getRoomMemberIds(roomId);
   }
 
   /**
@@ -631,15 +564,7 @@ export class ChatRoomsService {
    * Used to allow agent proxies to receive chat_room_message via SSE.
    */
   async getRoomAgentMemberIds(roomId: string): Promise<Set<string>> {
-    const participants = await this.participantRepo
-      .createQueryBuilder('p')
-      .select('p.participant_id')
-      .where('p.room_id = :roomId', { roomId })
-      .andWhere("p.participant_type = 'agent'")
-      .andWhere('p.left_at IS NULL')
-      .getMany();
-
-    return new Set(participants.map(p => p.participant_id));
+    return this.membership.getRoomAgentMemberIds(roomId);
   }
 
   /**
@@ -743,14 +668,7 @@ export class ChatRoomsService {
   // --- Private helpers ---
 
   private async _resolveParticipantName(participantType: string, participantId: string): Promise<string> {
-    if (participantType === 'user') {
-      const user = await this.userRepo.findOne({ where: { id: participantId } });
-      return user ? (user.name || user.email) : 'Unknown User';
-    } else if (participantType === 'agent') {
-      const agent = await this.agentRepo.findOne({ where: { id: participantId } });
-      return agent ? agent.name : 'Unknown Agent';
-    }
-    return 'Unknown';
+    return this.membership.resolveParticipantName(participantType, participantId);
   }
 
   private async _requireActiveParticipant(
@@ -758,17 +676,7 @@ export class ChatRoomsService {
     participantId: string,
     participantType: string = 'user',
   ): Promise<void> {
-    const participant = await this.participantRepo
-      .createQueryBuilder('p')
-      .where('p.room_id = :roomId', { roomId })
-      .andWhere('p.participant_id = :participantId', { participantId })
-      .andWhere('p.participant_type = :participantType', { participantType })
-      .andWhere('p.left_at IS NULL')
-      .getOne();
-
-    if (!participant) {
-      throw makeError(403, 'Not an active participant in this room');
-    }
+    return this.membership.requireActiveParticipant(roomId, participantId, participantType);
   }
 
   /**
