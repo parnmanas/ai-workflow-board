@@ -23,58 +23,7 @@ import {
   ChatRoomUpdatePayload,
   ChatRoomTypingPayload,
 } from '../../common/types/stream-events';
-
-/**
- * Subscriber identity resolved by the SSE stream handler. Mirrors what
- * EventsController.stream() builds from the auth token or API key.
- */
-export interface SubscriberIdentity {
-  type: 'user' | 'agent';
-  name: string;
-  agentId?: string;
-  userId?: string;
-  /** boardId query param, scoping board_update delivery. */
-  boardId?: string;
-}
-
-/**
- * Context passed into the async map() callback for events that need to resolve
- * additional data (e.g., board_update needs to resolve a ticket → board_id).
- */
-export interface EventMapContext {
-  resolveBoardId(ticketId: string, entityId: string): Promise<string | null>;
-}
-
-export interface MappedEnvelope<P = any> {
-  payload: P;
-  scope: StreamEvent<P>['scope'];
-  timestamp?: string;
-}
-
-export interface EventDefinition<SourceEvent = any, P = any> {
-  /** StreamEvent.event_type emitted on the wire. */
-  eventType: StreamEvent['event_type'];
-  /** Name of the event on the activityEvents EventEmitter. */
-  emitterEvent: string;
-  /**
-   * Convert an emitter payload into the envelope fields (payload/scope/timestamp).
-   * Return null/undefined to skip emission (e.g., activity without a resolvable board_id).
-   * May be synchronous or asynchronous.
-   */
-  map(
-    event: SourceEvent,
-    ctx: EventMapContext,
-  ): MappedEnvelope<P> | null | undefined | Promise<MappedEnvelope<P> | null | undefined>;
-  /**
-   * Return true if the envelope should reach this subscriber. Default: deliver to all.
-   */
-  filter?(envelope: StreamEvent<P>, identity: SubscriberIdentity): boolean;
-  /**
-   * Transform the envelope into the wire `data` object. Default: envelope as-is.
-   * Some legacy types flatten payload fields up to the top level for proxy.mjs compat.
-   */
-  flatten?(envelope: StreamEvent<P>): any;
-}
+import { EventDefinition, SubscriberIdentity } from './types';
 
 // ── Helpers used by multiple filter functions ─────────────────────────────
 

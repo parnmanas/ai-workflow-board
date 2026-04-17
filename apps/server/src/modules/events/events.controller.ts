@@ -10,12 +10,8 @@ import { AuthService } from '../../services/auth.service';
 import { ApiKeyService } from '../../services/api-key.service';
 import { LogService } from '../../services/log.service';
 import { StreamEvent } from '../../common/types/stream-events';
-import {
-  EVENT_TYPES,
-  EventDefinition,
-  EventMapContext,
-  SubscriberIdentity,
-} from './event-registry';
+import { EVENT_TYPES } from './event-registry';
+import { EventDefinition, EventMapContext, SubscriberIdentity } from './types';
 
 interface RegisteredListener {
   def: EventDefinition;
