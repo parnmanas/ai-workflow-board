@@ -92,6 +92,15 @@ import { randomBytes } from 'crypto';
 // in-file definitions of `ok`, `err`, `safeJsonParse`, and `loadTicketFull`.
 import { ok, err, safeJsonParse } from './shared/helpers';
 import { loadTicketFull as sharedLoadTicketFull } from './shared/ticket-parsing';
+// Resource helpers (C13) — still needed by sync_github_resource in the
+// remaining monolith until GitHub tools migrate in C14.
+import { resourceToJson, embedResource as sharedEmbedResource } from './shared/resource-helpers';
+
+// Bridge wrappers so pre-existing call sites keep working until their
+// domain migration. Removed at the C16 shim-reduction step.
+async function embedResource(resource: Resource) {
+  return sharedEmbedResource(AppDataSource, _logger, resource);
+}
 
 async function findColumnByName(boardId: string, columnName: string) {
   return AppDataSource.getRepository(BoardColumn)
