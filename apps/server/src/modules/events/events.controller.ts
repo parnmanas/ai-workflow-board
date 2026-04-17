@@ -1,6 +1,6 @@
 import { Controller, Sse, Req, Header, UnauthorizedException, OnModuleDestroy } from '@nestjs/common';
 import { Request } from 'express';
-import { Observable, Subject, filter, map, finalize, of, merge } from 'rxjs';
+import { Observable, Subject, filter, map, finalize, of, merge, interval } from 'rxjs';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Ticket } from '../../entities/Ticket';
@@ -165,8 +165,19 @@ export class EventsController implements OnModuleDestroy {
       type: 'server_meta',
     } as MessageEvent);
 
+    // Keepalive — push a named `ping` event every 15s so reverse proxies
+    // (nginx/ALB/Cloudflare) don't hit their idle-connection timeout and
+    // kill the stream with 502/terminated after 1-5 min of silence. The
+    // EventSource client ignores unknown event types, so this is a no-op on
+    // the consumer side beyond keeping the TCP connection warm.
+    const KEEPALIVE_MS = 15_000;
+    const keepalive = interval(KEEPALIVE_MS).pipe(
+      map(() => ({ data: JSON.stringify({ ts: Date.now() }), type: 'ping' } as MessageEvent)),
+    );
+
     return merge(
       versionEvent,
+      keepalive,
       this.eventSubject.pipe(
         filter((event: StreamEvent) => {
           const def = registry.get(event.event_type);
