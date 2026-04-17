@@ -745,7 +745,7 @@ export default function TicketDetail({
                       padding: '6px 10px', fontSize: '14px', cursor: 'pointer',
                     }}>📎</button>
                     <MentionTextarea
-                      asInput
+                      rows={1}
                       value={commentContent}
                       onChange={setCommentContent}
                       candidates={mentionCandidates}
@@ -753,8 +753,9 @@ export default function TicketDetail({
                       placeholder={user ? `${user.name}(으)로 댓글 작성... (@로 태그)` : 'Write a comment... (@ to tag)'}
                       ariaLabel="Comment"
                       style={{
-                        flex: 1, background: tokens.colors.surface, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
-                        padding: '6px 10px', color: tokens.colors.textStrong, fontSize: '12px', outline: 'none', width: '100%',
+                        width: '100%', background: tokens.colors.surface, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
+                        padding: '6px 10px', color: tokens.colors.textStrong, fontSize: '12px', outline: 'none',
+                        resize: 'none', fontFamily: 'inherit', lineHeight: 1.5, boxSizing: 'border-box',
                       }}
                     />
                     <button onClick={handleSubmitComment} disabled={!commentContent.trim()} style={{

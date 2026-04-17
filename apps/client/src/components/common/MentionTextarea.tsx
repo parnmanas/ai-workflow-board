@@ -20,8 +20,6 @@ interface MentionTextareaProps {
   disabled?: boolean;
   ariaLabel?: string;
   style?: React.CSSProperties;
-  /** Render as a single-line <input> instead of multi-line <textarea>. */
-  asInput?: boolean;
 }
 
 const TOKEN_INSERT = (c: MentionCandidate) => `@[${c.type}:${c.id}|${c.name}] `;
@@ -45,9 +43,8 @@ export function MentionTextarea({
   disabled = false,
   ariaLabel,
   style,
-  asInput = false,
 }: MentionTextareaProps) {
-  const inputRef = useRef<HTMLTextAreaElement | HTMLInputElement | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [triggerIdx, setTriggerIdx] = useState<number | null>(null);
@@ -119,14 +116,14 @@ export function MentionTextarea({
     setQuery('');
   }, []);
 
-  const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement | HTMLInputElement>) => {
+  const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const next = e.target.value;
     onChange(next);
     const caret = e.target.selectionStart ?? next.length;
     updateTriggerFromCaret(next, caret);
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement | HTMLInputElement>) => {
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (open && filtered.length > 0) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
@@ -182,20 +179,6 @@ export function MentionTextarea({
     insertSelection(c);
   };
 
-  const commonProps = {
-    ref: inputRef as any,
-    value,
-    onChange: handleChange,
-    onKeyDown: handleKeyDown,
-    onBlur: () => {
-      // Delay close so clicks on the dropdown register.
-      setTimeout(() => setOpen(false), 150);
-    },
-    'aria-label': ariaLabel,
-    placeholder,
-    disabled,
-    style,
-  };
 
   // Keep the portal alive while open so the user always gets feedback that
   // `@` was detected — even if the candidate list is still loading or empty.
@@ -214,9 +197,18 @@ export function MentionTextarea({
 
   return (
     <div style={{ position: 'relative', flex: 1, minWidth: 0 }}>
-      {asInput
-        ? <input type="text" {...commonProps} />
-        : <textarea rows={rows} {...commonProps} />}
+      <textarea
+        ref={inputRef}
+        rows={rows}
+        value={value}
+        onChange={handleChange}
+        onKeyDown={handleKeyDown}
+        onBlur={() => setTimeout(() => setOpen(false), 150)}
+        aria-label={ariaLabel}
+        placeholder={placeholder}
+        disabled={disabled}
+        style={style}
+      />
 
       {shouldRenderDropdown && createPortal(
         <div
