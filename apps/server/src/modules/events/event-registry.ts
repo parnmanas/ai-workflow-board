@@ -143,9 +143,15 @@ export const EVENT_TYPES: EventDefinition[] = [
         timestamp: event.timestamp,
       };
     },
-    // Phase 1 keeps broadcast behavior (proxy.mjs filters client-side).
-    // D-07 recipient-scoping is skeleton for future tightening.
-    filter: () => true,
+    // Recipient-scoped delivery: only the target agent's SSE stream receives
+    // the trigger. Without this, every connected agent's proxy would process
+    // the event (the "proxy.mjs filters client-side" comment was aspirational
+    // — the proxy had no such filter). Cross-agent leaks caused unrelated
+    // agents to pick up triggers meant for others; see incident notes.
+    filter: (env, identity) => {
+      if (identity.type !== 'agent') return false;
+      return env.scope.agent_id === identity.agentId;
+    },
     flatten: (env) => {
       const p = env.payload as AgentTriggerPayload;
       return {
