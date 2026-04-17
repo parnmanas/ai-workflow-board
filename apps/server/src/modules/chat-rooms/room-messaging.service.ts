@@ -6,8 +6,10 @@ import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
 import { Agent } from '../../entities/Agent';
 import { Ticket } from '../../entities/Ticket';
+import { UserMention } from '../../entities/UserMention';
 import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
+import { MentionService, ResolvedMention } from '../../services/mention.service';
 import { RoomMembershipService } from './room-membership.service';
 
 const CONTENT_MAX = 10000;
@@ -49,9 +51,14 @@ export class RoomMessagingService {
     @InjectRepository(Ticket)
     private readonly ticketRepo: Repository<Ticket>,
 
+    @InjectRepository(UserMention)
+    private readonly userMentionRepo: Repository<UserMention>,
+
     private readonly logService: LogService,
 
     private readonly membership: RoomMembershipService,
+
+    private readonly mentionService: MentionService,
   ) {}
 
   /**
@@ -160,7 +167,7 @@ export class RoomMessagingService {
 
     // CHAT-18: only parse mentions from user messages — prevents agent-to-agent loops
     if (senderType === 'user') {
-      const dispatched = await this._processMentions(roomId, workspaceId, senderId, trimmed, savedMsg);
+      const dispatched = await this._processMentions(roomId, workspaceId, senderId, senderName, trimmed, savedMsg);
       await this._handleDmAgentRequest(roomId, workspaceId, senderId, trimmed, savedMsg, dispatched);
     }
 
@@ -345,38 +352,95 @@ export class RoomMessagingService {
   // --- Private helpers (mention dispatch) ---
 
   /**
-   * Parse @mention tokens from a user message and emit chat_request for each resolved agent.
-   * CHAT-17: Supports direct agent name matches and role shortcuts (@reviewer/@assignee/@reporter).
+   * Parse structured @[type:id|name] tokens from a user message, dispatch
+   * agent mentions as chat_request events, and persist user mentions for the
+   * sidebar unread badge.
+   *
    * CHAT-18: Only called for sender_type === 'user' to prevent agent-to-agent loops.
-   * Returns the set of agent IDs dispatched (used by _handleDmAgentRequest to avoid duplicate dispatch).
+   * Returns the set of agent IDs dispatched so _handleDmAgentRequest can avoid
+   * duplicate dispatch in DM rooms.
    */
   private async _processMentions(
     roomId: string,
     workspaceId: string,
     senderId: string,
+    senderName: string,
     content: string,
     savedMessage: ChatRoomMessage,
   ): Promise<Set<string>> {
     const dispatched = new Set<string>();
-    const tokens = content.match(/@([\w-]+)/g) ?? [];
-    for (const token of tokens) {
-      const name = token.slice(1); // strip leading @
-      const agent = await this._resolveAgentByMention(name, roomId, workspaceId);
-      if (!agent) continue;
+    const refs = this.mentionService.parseMentions(content);
+    if (refs.length === 0) return dispatched;
 
-      activityEvents.emit('chat_request', {
-        agent_id: agent.id,
-        user_id: senderId,
-        ticket_id: null, // will be resolved by event handler from room context if needed
-        role_prompt: agent.role_prompt || '',
-        new_message: content,
-        history: [],
-        timestamp: savedMessage.created_at.toISOString(),
-        mention_depth: 1,
-      });
+    // Role shortcuts resolve against the ticket linked to this room (if any).
+    let ticket: Ticket | null = null;
+    if (refs.some(r => r.type === 'role')) {
+      const room = await this.roomRepo.findOne({ where: { id: roomId } });
+      if (room?.ticket_id) {
+        ticket = await this.ticketRepo.findOne({ where: { id: room.ticket_id } });
+      }
+    }
 
-      dispatched.add(agent.id);
-      this.logService.info('ChatRooms', `@mention routed to agent ${agent.name} (${agent.id}) in room ${roomId}`);
+    const resolved: ResolvedMention[] = this.mentionService.resolveMentions(refs, ticket);
+    if (resolved.length === 0) return dispatched;
+
+    const preview = (content || '').slice(0, 500);
+    const ts = savedMessage.created_at.toISOString();
+
+    for (const m of resolved) {
+      if (m.type === 'agent') {
+        const agent = await this.agentRepo.findOne({ where: { id: m.id } });
+        if (!agent) continue;
+        // Workspace-scope safety: never cross-post a mention into the wrong workspace.
+        if (agent.workspace_id && agent.workspace_id !== workspaceId) continue;
+
+        activityEvents.emit('chat_request', {
+          agent_id: agent.id,
+          user_id: senderId,
+          ticket_id: ticket?.id ?? null,
+          role_prompt: agent.role_prompt || '',
+          new_message: content,
+          history: [],
+          timestamp: ts,
+          mention_depth: 1,
+        });
+
+        dispatched.add(agent.id);
+        this.logService.info(
+          'ChatRooms',
+          `@mention routed to agent ${agent.name} (${agent.id}) in room ${roomId}`,
+        );
+      } else {
+        // User mention — persist + emit user_mention for sidebar badge sync.
+        const row = await this.userMentionRepo.save(this.userMentionRepo.create({
+          user_id: m.id,
+          workspace_id: workspaceId,
+          source_type: 'chat_message',
+          source_id: savedMessage.id,
+          ticket_id: ticket?.id ?? null,
+          room_id: roomId,
+          actor_id: senderId,
+          actor_type: 'user',
+          actor_name: senderName,
+          preview,
+        }));
+
+        activityEvents.emit('user_mention', {
+          mention_id: row.id,
+          user_id: row.user_id,
+          workspace_id: row.workspace_id,
+          source_type: 'chat_message',
+          source_id: savedMessage.id,
+          ticket_id: ticket?.id ?? null,
+          room_id: roomId,
+          actor_id: senderId,
+          actor_type: 'user',
+          actor_name: senderName,
+          preview,
+          created_at: (row.created_at instanceof Date ? row.created_at : new Date()).toISOString(),
+        });
+        this.logService.info('ChatRooms', `User @-mention recorded: user ${row.user_id} in room ${roomId}`);
+      }
     }
     return dispatched;
   }
@@ -430,53 +494,4 @@ export class RoomMessagingService {
     this.logService.info('ChatRooms', `DM auto-routed to agent ${agent.name} (${agent.id}) in room ${roomId}`);
   }
 
-  /**
-   * Resolve an @mention name to an Agent entity.
-   * Handles role shortcuts (@reviewer/@assignee/@reporter) via the linked ticket if present.
-   */
-  private async _resolveAgentByMention(
-    name: string,
-    roomId: string,
-    workspaceId: string,
-  ): Promise<Agent | null> {
-    const ROLE_SHORTCUTS = ['reviewer', 'assignee', 'reporter'];
-    const lower = name.toLowerCase();
-
-    if (ROLE_SHORTCUTS.includes(lower)) {
-      const agentId = await this._resolveRoleShortcut(lower, roomId);
-      if (!agentId) return null;
-      return this.agentRepo.findOne({ where: { id: agentId } });
-    }
-
-    // Case-insensitive name match scoped to workspace (compatible with SQLite and PostgreSQL)
-    return this.agentRepo
-      .createQueryBuilder('a')
-      .where('LOWER(a.name) = LOWER(:name)', { name })
-      .andWhere('a.workspace_id = :wsId', { wsId: workspaceId })
-      .getOne();
-  }
-
-  /**
-   * Resolve a role shortcut (@reviewer/@assignee/@reporter) to an agent ID
-   * via the ticket linked to this room. Returns null if no ticket context.
-   */
-  private async _resolveRoleShortcut(shortcut: string, roomId: string): Promise<string | null> {
-    const room = await this.roomRepo.findOne({ where: { id: roomId } });
-    if (!room?.ticket_id) return null;
-
-    const ticket = await this.ticketRepo.findOne({ where: { id: room.ticket_id } });
-    if (!ticket) return null;
-
-    const fieldMap: Record<string, keyof Ticket> = {
-      reviewer: 'reviewer_id',
-      assignee: 'assignee_id',
-      reporter: 'reporter_id',
-    };
-
-    const field = fieldMap[shortcut];
-    if (!field) return null;
-
-    const agentId = ticket[field] as string;
-    return agentId || null;
-  }
 }

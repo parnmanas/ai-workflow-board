@@ -6,6 +6,7 @@ import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
 import { User } from '../../entities/User';
 import { Agent } from '../../entities/Agent';
 import { Ticket } from '../../entities/Ticket';
+import { UserMention } from '../../entities/UserMention';
 import { ChatRoomsController } from './chat-rooms.controller';
 import { ChatRoomsService } from './chat-rooms.service';
 import { RoomCrudService } from './room-crud.service';
@@ -17,7 +18,7 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, Agent, Ticket]),
+    TypeOrmModule.forFeature([ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, Agent, Ticket, UserMention]),
     SharedServicesModule,
   ],
   controllers: [ChatRoomsController],

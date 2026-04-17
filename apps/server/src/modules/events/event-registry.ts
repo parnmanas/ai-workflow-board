@@ -22,6 +22,8 @@ import {
   ChatRoomMessagePayload,
   ChatRoomUpdatePayload,
   ChatRoomTypingPayload,
+  CommentMentionPayload,
+  UserMentionPayload,
 } from '../../common/types/stream-events';
 import { EventDefinition, SubscriberIdentity } from './types';
 
@@ -337,5 +339,96 @@ export const EVENT_TYPES: EventDefinition[] = [
     },
     filter: roomMemberFilter,
     flatten: (env) => env.payload,
+  },
+
+  // ───────── comment_mention ─────────
+  // Fired when an @-mention in a ticket comment targets an agent. Only the
+  // mentioned agent's proxy receives this — other agents stay idle so the
+  // subagent spawn budget isn't spent on bystanders.
+  //
+  // proxy.mjs reads fields at the top level (like agent_trigger), so flatten
+  // is provided explicitly.
+  {
+    eventType: 'comment_mention',
+    emitterEvent: 'comment_mention',
+    map(event: any) {
+      const payload: CommentMentionPayload = {
+        ticket_id: event.ticket_id,
+        comment_id: event.comment_id,
+        workspace_id: event.workspace_id,
+        agent_id: event.agent_id,
+        actor_id: event.actor_id || '',
+        actor_type: event.actor_type || 'user',
+        actor_name: event.actor_name || '',
+        content: event.content || '',
+        role_prompt: event.role_prompt || '',
+        mention_source: event.mention_source === 'role' ? 'role' : 'direct',
+        role_shortcut: event.role_shortcut,
+      };
+      return {
+        payload,
+        scope: { agent_id: event.agent_id, workspace_id: event.workspace_id },
+        timestamp: event.timestamp,
+      };
+    },
+    filter: (env, identity) => {
+      if (identity.type !== 'agent') return false;
+      return env.scope.agent_id === identity.agentId;
+    },
+    flatten: (env) => {
+      const p = env.payload as CommentMentionPayload;
+      return {
+        board_id: '__mention__',
+        event_type: 'comment_mention',
+        ticket_id: p.ticket_id,
+        entity_type: 'comment',
+        action: 'mention',
+        field_changed: p.comment_id,
+        actor_name: p.actor_name,
+        // Flat fields proxy.mjs reads:
+        comment_id: p.comment_id,
+        agent_id: p.agent_id,
+        actor_id: p.actor_id,
+        actor_type: p.actor_type,
+        content: p.content,
+        role_prompt: p.role_prompt,
+        mention_source: p.mention_source,
+        role_shortcut: p.role_shortcut || '',
+        timestamp: env.timestamp,
+      };
+    },
+  },
+
+  // ───────── user_mention ─────────
+  // Fired when a user is @-mentioned. Only delivered to the mentioned user's
+  // own web sessions so the sidebar unread badge increments without polling.
+  {
+    eventType: 'user_mention',
+    emitterEvent: 'user_mention',
+    map(event: any) {
+      const payload: UserMentionPayload = {
+        mention_id: event.mention_id,
+        user_id: event.user_id,
+        workspace_id: event.workspace_id,
+        source_type: event.source_type,
+        source_id: event.source_id,
+        ticket_id: event.ticket_id ?? null,
+        room_id: event.room_id ?? null,
+        actor_id: event.actor_id || '',
+        actor_type: event.actor_type || 'user',
+        actor_name: event.actor_name || '',
+        preview: event.preview || '',
+        created_at: event.created_at,
+      };
+      return {
+        payload,
+        scope: { user_id: event.user_id, workspace_id: event.workspace_id },
+        timestamp: event.created_at,
+      };
+    },
+    filter: (env, identity) => {
+      if (identity.type !== 'user') return false;
+      return env.scope.user_id === identity.userId;
+    },
   },
 ];

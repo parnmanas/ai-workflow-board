@@ -6,6 +6,7 @@ import type { ChatRoomListItem, ChatRoomMessageItem } from '../../types';
 import MessageList from './MessageList';
 import NewChatModal from './ParticipantPicker';
 import { type MentionParticipant } from './utils/markdown';
+import { MentionTextarea, MentionCandidate } from '../common/MentionTextarea';
 
 // ─── Style constants (mirror ChatPage.tsx COLORS) ────────────────────────────
 
@@ -47,6 +48,28 @@ function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessageInputProps) {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [mentionCandidates, setMentionCandidates] = useState<MentionCandidate[]>([]);
+
+  // Pull workspace-wide mention candidates once. Role shortcuts require a
+  // ticket context we don't have in a free-form chat room, so they're
+  // intentionally omitted here.
+  useEffect(() => {
+    const workspaceId = typeof window !== 'undefined'
+      ? localStorage.getItem('currentWorkspaceId') || ''
+      : '';
+    if (!workspaceId) {
+      setMentionCandidates([]);
+      return;
+    }
+    api.getMentionCandidates(workspaceId)
+      .then(data => {
+        setMentionCandidates([
+          ...data.users.map(u => ({ type: 'user' as const, id: u.id, name: u.name })),
+          ...data.agents.map(a => ({ type: 'agent' as const, id: a.id, name: a.name })),
+        ]);
+      })
+      .catch(() => setMentionCandidates([]));
+  }, []);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -258,16 +281,15 @@ function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessageInputProps) {
           >
             +
           </button>
-          <textarea
-            ref={textareaRef}
-            aria-label="Message"
-            aria-required="true"
-            placeholder="Type a message…"
+          <MentionTextarea
             value={text}
-            onChange={(e) => setText(e.target.value)}
-            onKeyDown={handleKeyDown}
-            disabled={sending}
+            onChange={setText}
+            candidates={mentionCandidates}
+            onSubmit={handleSend}
             rows={1}
+            disabled={sending}
+            ariaLabel="Message"
+            placeholder="Type a message… (@ to tag)"
             style={{
               flex: 1,
               background: COLORS.dominant,
@@ -283,9 +305,8 @@ function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessageInputProps) {
               fontFamily: 'inherit',
               lineHeight: 1.5,
               boxSizing: 'border-box',
+              width: '100%',
             }}
-            onFocus={(e) => (e.target.style.borderColor = COLORS.accent)}
-            onBlur={(e) => (e.target.style.borderColor = COLORS.border)}
           />
           <button
             onClick={handleSend}

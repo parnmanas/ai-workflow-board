@@ -2,6 +2,7 @@ import React from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { tokens } from '../tokens';
+import { MentionInboxBadge } from './common/MentionInboxBadge';
 
 interface SidebarProps {
   isMobile: boolean;
@@ -176,10 +177,11 @@ export default function Sidebar({ isMobile, isOpen, onClose, wsId, boards }: Sid
           >
             W
           </div>
-          <div style={{ minWidth: 0 }}>
+          <div style={{ minWidth: 0, flex: 1 }}>
             <div style={{ fontSize: '15px', fontWeight: 700, color: tokens.colors.textPrimary, lineHeight: 1.2 }}>AWB</div>
             <div style={{ fontSize: '11px', color: tokens.colors.textMuted, lineHeight: 1.4 }}>Workflow Board</div>
           </div>
+          <MentionInboxBadge workspaceId={wsId} />
         </div>
       </div>
 

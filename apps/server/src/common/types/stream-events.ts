@@ -12,7 +12,9 @@ export type StreamEventType =
   | 'chat_request'         // Phase 4 D-71/D-72 — proxy.mjs consumes this to spawn chat subagents
   | 'chat_room_message'    // Phase 7: new message in a chat room
   | 'chat_room_update'     // Phase 7: room renamed / participant added / user left
-  | 'chat_room_typing';    // Phase 7+: agent typing indicator in a chat room
+  | 'chat_room_typing'     // Phase 7+: agent typing indicator in a chat room
+  | 'comment_mention'      // Mention feature: agent @-mentioned in a ticket comment
+  | 'user_mention';        // Mention feature: user @-mentioned (web UI unread badge)
 
 export interface StreamEventScope {
   board_id?: string;
@@ -133,4 +135,39 @@ export interface ChatRoomTypingPayload {
   agent_name: string;
   is_typing: boolean;
   status?: string | null;
+}
+
+// Mention feature — comment-sourced @-mention delivered to a specific agent.
+// Proxy.mjs consumes this natively (flattened to top level) and synthesizes a
+// "this comment is addressed to YOU" subagent prompt so the agent doesn't
+// confuse ambient comment-activity noise with a direct request.
+export interface CommentMentionPayload {
+  ticket_id: string;
+  comment_id: string;
+  workspace_id: string;
+  agent_id: string;
+  actor_id: string;
+  actor_type: 'user' | 'agent';
+  actor_name: string;
+  content: string;
+  role_prompt: string;
+  mention_source: 'direct' | 'role'; // direct @-mention vs. @assignee-style role shortcut
+  role_shortcut?: string; // 'assignee' | 'reporter' | 'reviewer' when mention_source === 'role'
+}
+
+// Mention feature — user @-mentioned. Fires only for the mentioned user's
+// connected sessions so the sidebar badge reconciles without a round-trip.
+export interface UserMentionPayload {
+  mention_id: string;           // UserMention.id
+  user_id: string;              // mentioned user
+  workspace_id: string;
+  source_type: 'comment' | 'chat_message';
+  source_id: string;
+  ticket_id: string | null;
+  room_id: string | null;
+  actor_id: string;
+  actor_type: 'user' | 'agent';
+  actor_name: string;
+  preview: string;
+  created_at: string; // ISO-8601
 }

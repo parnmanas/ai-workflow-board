@@ -6,9 +6,14 @@ import { Ticket } from '../../entities/Ticket';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { Comment } from '../../entities/Comment';
 import { Agent } from '../../entities/Agent';
+import { UserMention } from '../../entities/UserMention';
+import { User } from '../../entities/User';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { WorkspaceGuard } from '../../common/guards/workspace.guard';
 import { ActivityService } from '../../services/activity.service';
+import { activityEvents } from '../../services/activity.service';
+import { LogService } from '../../services/log.service';
+import { MentionService } from '../../services/mention.service';
 import { MAX_IMAGE_SIZE, MAX_IMAGES_PER_MESSAGE, ALLOWED_IMAGE_MIMETYPES } from '../../common/constants/upload';
 import { loadTicketFull } from '../mcp/shared/ticket-parsing';
 import { maxTicketPosition, maxChildPosition, resolveAgentId, shiftTicketPositions } from '../mcp/shared/ticket-helpers';
@@ -21,8 +26,11 @@ export class TicketsController {
     @InjectRepository(BoardColumn) private readonly colRepo: Repository<BoardColumn>,
     @InjectRepository(Comment) private readonly commentRepo: Repository<Comment>,
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
+    @InjectRepository(UserMention) private readonly mentionRepo: Repository<UserMention>,
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly activityService: ActivityService,
+    private readonly logService: LogService,
+    private readonly mentionService: MentionService,
   ) {}
 
   private resolveCreator(req: any, body: any): { created_by: string; created_by_type: string; created_by_id: string } {
@@ -290,6 +298,7 @@ export class TicketsController {
 
     const comment = await this.commentRepo.save(this.commentRepo.create({
       ticket_id: id,
+      workspace_id: ticket.workspace_id,
       author_type: 'user',
       author_id: currentUser.id,
       author: currentUser.name,
@@ -307,6 +316,90 @@ export class TicketsController {
       new_value: content,
     });
 
+    // Mention dispatch — only for user-authored comments so agent->agent
+    // comment chains can't trigger runaway notifications.
+    try {
+      await this._dispatchCommentMentions(comment, ticket, currentUser);
+    } catch (err: any) {
+      this.logService.warn('Mentions', `Comment mention dispatch failed for comment ${comment.id}: ${err?.message || err}`);
+    }
+
     return res.status(201).json({ ...comment, images: JSON.parse(comment.images || '[]') });
+  }
+
+  /**
+   * Parse @-mention tokens from the saved comment and fire notification events.
+   *
+   *  - Agent mentions → `comment_mention` SSE event, routed only to the target
+   *    agent's proxy. The proxy synthesizes a "this comment is addressed to
+   *    YOU" subagent prompt so the agent never mistakes the mention for
+   *    ambient board activity.
+   *  - User mentions → `user_mentions` row + `user_mention` SSE event, consumed
+   *    by the web UI sidebar badge.
+   */
+  private async _dispatchCommentMentions(comment: Comment, ticket: Ticket, actor: { id: string; name: string }): Promise<void> {
+    const refs = this.mentionService.parseMentions(comment.content);
+    if (refs.length === 0) return;
+
+    const resolved = this.mentionService.resolveMentions(refs, ticket);
+    if (resolved.length === 0) return;
+
+    const preview = (comment.content || '').slice(0, 500);
+    const ts = (comment.created_at instanceof Date ? comment.created_at : new Date()).toISOString();
+
+    for (const m of resolved) {
+      if (m.type === 'agent') {
+        const agent = await this.agentRepo.findOne({ where: { id: m.id } });
+        if (!agent) continue;
+        // Scope safety: an agent in a different workspace should never receive this mention.
+        if (agent.workspace_id && ticket.workspace_id && agent.workspace_id !== ticket.workspace_id) continue;
+
+        activityEvents.emit('comment_mention', {
+          ticket_id: ticket.id,
+          comment_id: comment.id,
+          workspace_id: ticket.workspace_id,
+          agent_id: agent.id,
+          actor_id: actor.id,
+          actor_type: 'user',
+          actor_name: actor.name,
+          content: comment.content,
+          role_prompt: agent.role_prompt || '',
+          mention_source: m.roleShortcut ? 'role' : 'direct',
+          role_shortcut: m.roleShortcut,
+          timestamp: ts,
+        });
+        this.logService.info('Mentions', `Agent @-mention routed: ${agent.name} (${agent.id}) on ticket ${ticket.id}`);
+      } else {
+        // User mention — persist + emit for badge sync
+        const row = await this.mentionRepo.save(this.mentionRepo.create({
+          user_id: m.id,
+          workspace_id: ticket.workspace_id,
+          source_type: 'comment',
+          source_id: comment.id,
+          ticket_id: ticket.id,
+          room_id: null,
+          actor_id: actor.id,
+          actor_type: 'user',
+          actor_name: actor.name,
+          preview,
+        }));
+
+        activityEvents.emit('user_mention', {
+          mention_id: row.id,
+          user_id: row.user_id,
+          workspace_id: row.workspace_id,
+          source_type: 'comment',
+          source_id: comment.id,
+          ticket_id: ticket.id,
+          room_id: null,
+          actor_id: actor.id,
+          actor_type: 'user',
+          actor_name: actor.name,
+          preview,
+          created_at: (row.created_at instanceof Date ? row.created_at : new Date()).toISOString(),
+        });
+        this.logService.info('Mentions', `User @-mention recorded: user ${row.user_id} on ticket ${ticket.id}`);
+      }
+    }
   }
 }

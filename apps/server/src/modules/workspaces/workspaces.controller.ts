@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Patch, Delete, Body, Param, Res, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Delete, Body, Param, Query, Res, UseGuards } from '@nestjs/common';
 import { Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
@@ -7,6 +7,7 @@ import { Board } from '../../entities/Board';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { Ticket } from '../../entities/Ticket';
 import { User } from '../../entities/User';
+import { Agent } from '../../entities/Agent';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { DEFAULT_COLUMNS } from '../../database/database.module';
 import { ReBACService } from '../../services/rebac.service';
@@ -20,6 +21,7 @@ export class WorkspacesController {
     @InjectRepository(BoardColumn) private readonly colRepo: Repository<BoardColumn>,
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
     @InjectRepository(User) private readonly userRepo: Repository<User>,
+    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     private readonly rebacService: ReBACService,
   ) {}
 
@@ -178,5 +180,61 @@ export class WorkspacesController {
     await this.rebacService.revoke({ type: 'user', id: userId }, 'member', { type: 'workspace', id });
     await this.rebacService.revoke({ type: 'user', id: userId }, 'owner', { type: 'workspace', id });
     return res.json({ success: true });
+  }
+
+  // ─── Mention autocomplete candidates ───────────────────────
+  //
+  // Returns the user + agent set the composer's @-dropdown should show for
+  // this workspace. When `ticket_id` is supplied, role shortcuts are included
+  // only for roles that the ticket has filled — otherwise `@assignee` etc.
+  // would resolve to nothing and confuse the user.
+
+  @Get(':id/mention-candidates')
+  async mentionCandidates(
+    @Param('id') id: string,
+    @Query('ticket_id') ticketId: string | undefined,
+    @Res() res: Response,
+  ) {
+    const ws = await this.wsRepo.findOne({ where: { id } });
+    if (!ws) return res.status(404).json({ error: 'Workspace not found' });
+
+    const [members, owners, agents] = await Promise.all([
+      this.rebacService.listSubjects({ type: 'workspace', id }, 'member'),
+      this.rebacService.listSubjects({ type: 'workspace', id }, 'owner'),
+      this.agentRepo.find({ where: { workspace_id: id, is_active: 1 }, order: { name: 'ASC' } }),
+    ]);
+
+    const allUserIds = [...new Set([
+      ...members.filter(s => s.type === 'user').map(s => s.id),
+      ...owners.filter(s => s.type === 'user').map(s => s.id),
+    ])];
+    const users = allUserIds.length
+      ? (await this.userRepo.find({ where: { id: In(allUserIds) } }))
+          .map(u => ({ id: u.id, name: u.name, avatar_url: u.avatar_url }))
+          .sort((a, b) => a.name.localeCompare(b.name))
+      : [];
+
+    const roleShortcuts: Array<{ key: string; label: string; resolved_type: 'agent'; resolved_id: string }> = [];
+    if (ticketId) {
+      const ticket = await this.ticketRepo.findOne({ where: { id: ticketId } });
+      if (ticket) {
+        const agentById = new Map(agents.map(a => [a.id, a]));
+        const addShortcut = (key: 'assignee' | 'reporter' | 'reviewer', agentId: string) => {
+          if (!agentId) return;
+          const agent = agentById.get(agentId);
+          const label = agent ? `${key} (${agent.name})` : key;
+          roleShortcuts.push({ key, label, resolved_type: 'agent', resolved_id: agentId });
+        };
+        addShortcut('assignee', ticket.assignee_id);
+        addShortcut('reporter', ticket.reporter_id);
+        addShortcut('reviewer', ticket.reviewer_id);
+      }
+    }
+
+    return res.json({
+      users,
+      agents: agents.map(a => ({ id: a.id, name: a.name, avatar_url: a.avatar_url })),
+      role_shortcuts: roleShortcuts,
+    });
   }
 }

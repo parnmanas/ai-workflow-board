@@ -477,4 +477,55 @@ export const api = {
 
   searchChatMessages: (workspaceId: string, query: string): Promise<any[]> =>
     request<any[]>(`/chat-rooms/search?q=${encodeURIComponent(query)}&workspace_id=${encodeURIComponent(workspaceId)}`),
+
+  // ─── @-Mentions ─────────────────────────────────────────
+  getMentionCandidates: (
+    workspaceId: string,
+    ticketId?: string,
+  ): Promise<MentionCandidatesResponse> => {
+    const qs = ticketId ? `?ticket_id=${encodeURIComponent(ticketId)}` : '';
+    return request<MentionCandidatesResponse>(
+      `/workspaces/${encodeURIComponent(workspaceId)}/mention-candidates${qs}`,
+    );
+  },
+
+  getUnreadMentions: (workspaceId: string): Promise<UnreadMentionsResponse> =>
+    request<UnreadMentionsResponse>(`/workspaces/${encodeURIComponent(workspaceId)}/mentions/unread`),
+
+  markMentionRead: (mentionId: string): Promise<UserMentionItem> =>
+    request<UserMentionItem>(`/mentions/${encodeURIComponent(mentionId)}/read`, { method: 'POST' }),
+
+  markAllMentionsRead: (workspaceId: string): Promise<{ updated: number }> =>
+    request<{ updated: number }>(
+      `/workspaces/${encodeURIComponent(workspaceId)}/mentions/read-all`,
+      { method: 'POST' },
+    ),
 };
+
+// ─── Mention types ───────────────────────────────────────
+export interface MentionCandidatesResponse {
+  users: Array<{ id: string; name: string; avatar_url: string }>;
+  agents: Array<{ id: string; name: string; avatar_url: string }>;
+  role_shortcuts: Array<{ key: string; label: string; resolved_type: 'agent'; resolved_id: string }>;
+}
+
+export interface UserMentionItem {
+  id: string;
+  user_id: string;
+  workspace_id: string;
+  source_type: 'comment' | 'chat_message';
+  source_id: string;
+  ticket_id: string | null;
+  room_id: string | null;
+  actor_id: string;
+  actor_type: 'user' | 'agent';
+  actor_name: string;
+  preview: string;
+  created_at: string;
+  read_at: string | null;
+}
+
+export interface UnreadMentionsResponse {
+  count: number;
+  items: UserMentionItem[];
+}

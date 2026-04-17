@@ -18,6 +18,7 @@ import { LogService } from './log.service';
 import { NotificationService } from './notification.service';
 import { SystemCommentService } from './system-comment.service';
 import { ReBACService } from './rebac.service';
+import { MentionService } from './mention.service';
 
 @Global()
 @Module({
@@ -33,6 +34,7 @@ import { ReBACService } from './rebac.service';
     NotificationService,
     SystemCommentService,
     ReBACService,
+    MentionService,
   ],
   exports: [
     ActivityService,
@@ -43,6 +45,7 @@ import { ReBACService } from './rebac.service';
     NotificationService,
     SystemCommentService,
     ReBACService,
+    MentionService,
   ],
 })
 export class SharedServicesModule {}

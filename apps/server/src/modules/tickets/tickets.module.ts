@@ -4,11 +4,12 @@ import { Ticket } from '../../entities/Ticket';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { Comment } from '../../entities/Comment';
 import { Agent } from '../../entities/Agent';
+import { UserMention } from '../../entities/UserMention';
 import { TicketsController } from './tickets.controller';
 import { AuthGuard } from '../../common/guards/auth.guard';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Ticket, BoardColumn, Comment, Agent])],
+  imports: [TypeOrmModule.forFeature([Ticket, BoardColumn, Comment, Agent, UserMention])],
   controllers: [TicketsController],
   providers: [AuthGuard],
 })

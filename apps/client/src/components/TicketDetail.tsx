@@ -5,6 +5,7 @@ import { api } from '../api';
 import { useAuth } from '../contexts/AuthContext';
 import ChildTicketList from './SubtaskList';
 import { tokens } from '../tokens';
+import { MentionTextarea, MentionCandidate } from './common/MentionTextarea';
 
 interface TicketDetailProps {
   ticket: Ticket;
@@ -42,6 +43,7 @@ export default function TicketDetail({
   const [description, setDescription] = useState(currentTicket.description);
   const [priority, setPriority] = useState(currentTicket.priority);
   const [status, setStatus] = useState(currentTicket.status || 'todo');
+  const [mentionCandidates, setMentionCandidates] = useState<MentionCandidate[]>([]);
   const resolveAgentName = (id: string | undefined, name: string) => {
     if (id) {
       const agent = agents.find(a => a.id === id);
@@ -114,6 +116,29 @@ export default function TicketDetail({
       api.getTicketActivity(currentTicket.id).then(setActivities).catch(() => {});
     }
   }, [activeTab, currentTicket.id]);
+
+  // Load @-mention candidates whenever the focused ticket changes so
+  // role shortcuts (@assignee/@reporter/@reviewer) resolve against THIS
+  // ticket's role_id fields.
+  useEffect(() => {
+    const workspaceId = typeof window !== 'undefined'
+      ? localStorage.getItem('currentWorkspaceId') || ''
+      : '';
+    if (!workspaceId) {
+      setMentionCandidates([]);
+      return;
+    }
+    api.getMentionCandidates(workspaceId, currentTicket.id)
+      .then(data => {
+        const items: MentionCandidate[] = [
+          ...data.role_shortcuts.map(r => ({ type: 'role' as const, id: r.key, name: r.key, sublabel: r.label.replace(`${r.key} `, '') })),
+          ...data.users.map(u => ({ type: 'user' as const, id: u.id, name: u.name })),
+          ...data.agents.map(a => ({ type: 'agent' as const, id: a.id, name: a.name })),
+        ];
+        setMentionCandidates(items);
+      })
+      .catch(() => setMentionCandidates([]));
+  }, [currentTicket.id]);
 
   const navigateToChild = useCallback((child: Ticket) => {
     setNavStack(prev => [...prev, child]);
@@ -694,14 +719,17 @@ export default function TicketDetail({
                       background: tokens.colors.border, color: tokens.colors.textSecondary, border: 'none', borderRadius: tokens.radii.md,
                       padding: '6px 10px', fontSize: '14px', cursor: 'pointer',
                     }}>📎</button>
-                    <input
+                    <MentionTextarea
+                      asInput
                       value={commentContent}
-                      onChange={e => setCommentContent(e.target.value)}
-                      onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSubmitComment(); } }}
-                      placeholder={user ? `${user.name}(으)로 댓글 작성...` : 'Write a comment...'}
+                      onChange={setCommentContent}
+                      candidates={mentionCandidates}
+                      onSubmit={handleSubmitComment}
+                      placeholder={user ? `${user.name}(으)로 댓글 작성... (@로 태그)` : 'Write a comment... (@ to tag)'}
+                      ariaLabel="Comment"
                       style={{
                         flex: 1, background: tokens.colors.surface, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
-                        padding: '6px 10px', color: tokens.colors.textStrong, fontSize: '12px', outline: 'none',
+                        padding: '6px 10px', color: tokens.colors.textStrong, fontSize: '12px', outline: 'none', width: '100%',
                       }}
                     />
                     <button onClick={handleSubmitComment} disabled={!commentContent.trim()} style={{

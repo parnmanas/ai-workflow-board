@@ -35,7 +35,8 @@ type StreamNamedEventType =
   | 'board_update' | 'agent_typing' | 'agent_trigger'
   | 'chat_message' | 'agent_status'
   | 'chat_room_message' | 'chat_room_update' | 'chat_room_typing'  // Phase 7
-  | 'server_meta';  // Phase 8 — protocol version handshake (CHAT-20)
+  | 'server_meta'   // Phase 8 — protocol version handshake (CHAT-20)
+  | 'user_mention'; // Mention feature — sidebar unread badge sync
 
 interface BoardStreamContextValue {
   /** Subscribe to a named SSE event (board_update/agent_typing/agent_trigger). */
@@ -177,6 +178,10 @@ export function BoardStreamProvider({ children }: ProviderProps) {
       // Phase 8 CHAT-20: protocol version handshake — dispatch to subscribers
       eventSource.addEventListener('server_meta', (event: MessageEvent) => {
         dispatch('server_meta', event.data);
+      });
+
+      eventSource.addEventListener('user_mention', (event: MessageEvent) => {
+        dispatch('user_mention', event.data);
       });
 
       eventSource.onerror = () => {

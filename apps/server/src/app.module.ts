@@ -24,6 +24,7 @@ import { ChatRoomsModule } from './modules/chat-rooms/chat-rooms.module';
 import { ResourcesModule } from './modules/resources/resources.module';
 import { CredentialsModule } from './modules/credentials/credentials.module';
 import { AgentLogsModule } from './modules/agent-logs/agent-logs.module';
+import { MentionsModule } from './modules/mentions/mentions.module';
 
 @Module({
   imports: [
@@ -54,6 +55,7 @@ import { AgentLogsModule } from './modules/agent-logs/agent-logs.module';
     ResourcesModule,
     CredentialsModule,
     AgentLogsModule,
+    MentionsModule,
   ],
 })
 export class AppModule {}

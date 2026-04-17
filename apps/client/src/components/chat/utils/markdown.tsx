@@ -4,14 +4,42 @@ import { tokens } from '../../../tokens';
 // ─── renderMarkdown — XSS-safe inline markdown ───────────────────────────────
 // T-07-12: No dangerouslySetInnerHTML. React JSX element construction only.
 // URL scheme validation: only http:// and https:// are allowed in <a> href.
-// Phase 8: @mention tokens rendered as accent-colored pills (CHAT-17).
+// Mentions: structured tokens `@[user|agent|role:id|display]` render as pills
+// (authoritative — id is attached). Bare `@name` tokens render as plain text;
+// they are no longer a dispatch surface server-side.
 
 const ROLE_SHORTCUTS = new Set(['reviewer', 'assignee', 'reporter']);
+const STRUCTURED_MENTION_RE = /@\[(user|agent|role):([\w-]+)(?:\|([^\]]*))?\]/g;
 
 export interface MentionParticipant {
   id: string;
   name: string;
   type: string;
+}
+
+function renderMentionPill(
+  display: string,
+  variant: 'agent' | 'user' | 'role',
+  key: number,
+): React.ReactNode {
+  // agent = stronger tint; user/role = softer
+  const bgColor = variant === 'agent' ? 'rgba(99,102,241,0.15)' : 'rgba(99,102,241,0.12)';
+  const textColor = variant === 'agent' ? tokens.colors.accentSubtle : tokens.colors.accentPale;
+  return (
+    <span
+      key={key}
+      aria-label={`Mention: ${display}`}
+      style={{
+        background: bgColor,
+        color: textColor,
+        borderRadius: tokens.radii.sm,
+        padding: '0 4px',
+        display: 'inline',
+      }}
+    >
+      {display}
+    </span>
+  );
 }
 
 export function renderMarkdown(text: string, participants?: MentionParticipant[]): React.ReactNode[] {
@@ -41,8 +69,37 @@ export function renderMarkdown(text: string, participants?: MentionParticipant[]
         </code>,
       );
     } else {
-      // Step 1b: Split on @mention tokens before applying other formatting
-      const mentionParts = part.split(/(@[a-zA-Z0-9_-]+)/g);
+      // Step 1a: First, split out structured mention tokens. These are
+      // authoritative (they ship an ID), so they render as pills regardless
+      // of whether the name collides with another entity.
+      const structuredParts: Array<{ token: string; pill?: { variant: 'agent' | 'user' | 'role'; display: string } }> = [];
+      let cursor = 0;
+      STRUCTURED_MENTION_RE.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = STRUCTURED_MENTION_RE.exec(part)) !== null) {
+        if (m.index > cursor) {
+          structuredParts.push({ token: part.slice(cursor, m.index) });
+        }
+        const variant = m[1] as 'user' | 'agent' | 'role';
+        const name = m[3] || m[2];
+        structuredParts.push({ token: m[0], pill: { variant, display: `@${name}` } });
+        cursor = m.index + m[0].length;
+      }
+      if (cursor < part.length) {
+        structuredParts.push({ token: part.slice(cursor) });
+      }
+      if (structuredParts.length === 0) structuredParts.push({ token: part });
+
+      for (const sp of structuredParts) {
+        if (sp.pill) {
+          nodes.push(renderMentionPill(sp.pill.display, sp.pill.variant, keyIdx++));
+          continue;
+        }
+
+      // Step 1b: Split on bare @mention tokens. After the structured-token
+      // migration these are legacy or unresolvable — render as muted text
+      // unless a participant/role shortcut matches (kept for backward compat).
+      const mentionParts = sp.token.split(/(@[a-zA-Z0-9_-]+)/g);
       for (const mp of mentionParts) {
         if (mp.startsWith('@') && mp.length > 1) {
           const name = mp.slice(1);
@@ -55,24 +112,7 @@ export function renderMarkdown(text: string, participants?: MentionParticipant[]
           const isResolved = isRoleShortcut || !!matchedParticipant;
 
           if (isResolved) {
-            // Render as pill: agent = accentSubtle bg, user/role = accentPale bg
-            const bgColor = isAgent ? 'rgba(99,102,241,0.15)' : 'rgba(99,102,241,0.12)';
-            const textColor = isAgent ? tokens.colors.accentSubtle : tokens.colors.accentPale;
-            nodes.push(
-              <span
-                key={keyIdx++}
-                aria-label={`Mention: ${mp}`}
-                style={{
-                  background: bgColor,
-                  color: textColor,
-                  borderRadius: tokens.radii.sm,
-                  padding: '0 4px',
-                  display: 'inline',
-                }}
-              >
-                {mp}
-              </span>,
-            );
+            nodes.push(renderMentionPill(mp, isAgent ? 'agent' : 'user', keyIdx++));
           } else {
             // Unresolved mention: plain muted text
             nodes.push(
@@ -103,6 +143,7 @@ export function renderMarkdown(text: string, participants?: MentionParticipant[]
             nodes.push(<React.Fragment key={keyIdx++}>{seg}</React.Fragment>);
           }
         }
+      }
       }
     }
   }
