@@ -82,14 +82,17 @@ export class RoomMembershipService {
         throw makeError(400, 'This room is full (50 participant limit).');
       }
 
-      // Add each new participant (always create new row, even for re-joins)
+      // B2 fix: initialize last_read_at to NOW() so existing room history isn't
+      // flagged as unread to the newly added participant. They see the backlog
+      // when they scroll, but the room doesn't shout at them with a large badge.
+      const joinedAt = new Date();
       const rows = newParticipants.map(p =>
         em.create(ChatRoomParticipant, {
           room_id: roomId,
           participant_type: p.participant_type,
           participant_id: p.participant_id,
           last_read_message_id: null,
-          last_read_at: null,
+          last_read_at: joinedAt,
           left_at: null,
         }),
       );

@@ -275,14 +275,18 @@ export class RoomCrudService {
       }),
     );
 
-    // Bulk-save participants
+    // B2 fix: initialize last_read_at to NOW(). A new room has no backlog
+    // relevant to a joiner — starting them at zero unread avoids a confusing
+    // badge on first entry. Any message sent between this insert and the
+    // first page load is caught via SSE/REST refresh.
+    const joinedAt = new Date();
     const participantRows = uniqueParticipants.map(p =>
       this.participantRepo.create({
         room_id: room.id,
         participant_type: p.participant_type,
         participant_id: p.participant_id,
         last_read_message_id: null,
-        last_read_at: null,
+        last_read_at: joinedAt,
         left_at: null,
       }),
     );
