@@ -15,7 +15,15 @@ export default function CommentList({ comments, onImagePreview }: CommentListPro
   const virtualizer = useVirtualizer({
     count: comments.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 60,
+    // Rough initial estimate — real heights come from measureElement. Short
+    // one-liner comments are ~50px; agent comments with code blocks easily
+    // hit 400+. A mid-range estimate minimizes the post-measure correction.
+    estimateSize: () => 120,
+    // CRITICAL: track measurements by comment id rather than positional index.
+    // Without this, prepending a new comment shifts every index by one and
+    // the virtualizer reuses the OLD item's measured height for the NEW item,
+    // leaving large blank gaps between cards.
+    getItemKey: (index) => comments[index].id,
     overscan: 5,
   });
 
