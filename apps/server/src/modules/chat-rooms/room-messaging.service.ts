@@ -182,6 +182,22 @@ export class RoomMessagingService {
       agent_member_ids: agentMemberIds,
     });
 
+    // B1 fix: auto-advance the sender's read marker so their own message never
+    // counts toward their unread. Fired AFTER chat_room_message to guarantee
+    // correct client state ordering — any client that increments unread on
+    // chat_room_message then resets it via chat_room_update 'read'.
+    //
+    // Silently tolerate failures: the message is already saved + broadcast;
+    // an unadvanced read marker is recoverable on the next explicit markRead.
+    try {
+      await this.markRead(roomId, senderId, senderType);
+    } catch (err: any) {
+      this.logService.warn(
+        'ChatRooms',
+        `Auto-markRead failed for sender ${senderType}:${senderId} in room ${roomId}: ${err?.message || err}`,
+      );
+    }
+
     return {
       id: savedMsg.id,
       room_id: savedMsg.room_id,
@@ -199,13 +215,17 @@ export class RoomMessagingService {
   /**
    * Mark room as read up to the latest message (monotonic advance only).
    * Only advances last_read_at if the latest message is newer than current last_read_at.
+   *
+   * `participantType` defaults to 'user' for backward compat with the REST
+   * endpoint; the message-send path passes 'agent' when the sender is an agent
+   * so an agent's own messages don't count toward its unread (B1).
    */
-  async markRead(roomId: string, userId: string): Promise<void> {
+  async markRead(roomId: string, participantId: string, participantType: string = 'user'): Promise<void> {
     const participant = await this.participantRepo.findOne({
       where: {
         room_id: roomId,
-        participant_id: userId,
-        participant_type: 'user',
+        participant_id: participantId,
+        participant_type: participantType,
       },
     });
 
@@ -243,7 +263,7 @@ export class RoomMessagingService {
     activityEvents.emit('chat_room_update', {
       room_id: roomId,
       update_type: 'read',
-      participant_id: userId,
+      participant_id: participantId,
       member_ids: memberIds,
       agent_member_ids: agentMemberIds,
     });
