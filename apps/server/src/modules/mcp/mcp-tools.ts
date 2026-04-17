@@ -270,34 +270,7 @@ export function registerAllTools(server: McpServer, ctx: ToolContext): void {
 
   // Comment tools moved to tools/comment-tools.ts (Phase 3 C6).
 
-  // ═══════════════════════════════════════════════════════════
-  //  ACTIVITY TOOLS
-  // ═══════════════════════════════════════════════════════════
-
-  server.tool(
-    'get_ticket_activity',
-    'Get activity log for a specific ticket',
-    {
-      ticket_id: z.string().describe('Ticket ID'),
-      limit: z.number().optional().default(50).describe('Max number of entries'),
-    },
-    async ({ ticket_id, limit }) => {
-      const logs = await getTicketActivity(ticket_id, limit);
-      return ok(logs);
-    }
-  );
-
-  server.tool(
-    'get_recent_activity',
-    'Get the global recent activity feed across all tickets',
-    {
-      limit: z.number().optional().default(100).describe('Max number of entries'),
-    },
-    async ({ limit }) => {
-      const logs = await getRecentActivity(limit);
-      return ok(logs);
-    }
-  );
+  // Activity tools moved to tools/activity-tools.ts (Phase 3 C7).
 
   // ═══════════════════════════════════════════════════════════
   //  USER TOOLS

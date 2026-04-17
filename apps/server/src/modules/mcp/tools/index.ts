@@ -19,6 +19,7 @@ import { registerBoardTools } from './board-tools';
 import { registerColumnTools } from './column-tools';
 import { registerTicketTools } from './ticket-tools';
 import { registerCommentTools } from './comment-tools';
+import { registerActivityTools } from './activity-tools';
 
 export type { ToolContext } from './context';
 export { createStandaloneContext } from './context';
@@ -29,6 +30,7 @@ export function registerAllTools(server: McpServer, ctx: ToolContext): void {
   registerColumnTools(server, ctx);
   registerTicketTools(server, ctx);
   registerCommentTools(server, ctx);
+  registerActivityTools(server, ctx);
   // Monolithic fallback — remaining tools not yet moved to domain files.
   // Shrinks with every Phase 3 commit; removed once C15 lands.
   registerMonolithTools(server, ctx);
