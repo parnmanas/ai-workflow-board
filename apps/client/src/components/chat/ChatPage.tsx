@@ -308,8 +308,21 @@ export default function ChatPage() {
     ) {
       // Refresh room list
       api.listChatRooms().then(setRooms).catch(() => {});
+    } else if (
+      payload.update_type === 'read' &&
+      payload.room_id &&
+      payload.participant_type === 'user' &&
+      payload.participant_id === user?.id
+    ) {
+      // B3: same user read in another tab/device → sync local unread to 0.
+      // Filter by participant_type === 'user' so an agent in the same room
+      // that happens to share a UUID with our user_id (won't in practice, but
+      // defensive) doesn't clobber our badge.
+      setRooms((prev) =>
+        prev.map((r) => (r.id === payload.room_id ? { ...r, unread_count: 0 } : r)),
+      );
     }
-  }, []));
+  }, [user?.id]));
 
   function selectRoom(roomId: string) {
     setActiveRoomId(roomId);
