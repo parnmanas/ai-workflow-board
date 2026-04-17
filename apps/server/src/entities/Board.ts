@@ -20,6 +20,11 @@ export class Board {
   routing_config: string;  // JSON: { [columnName: string]: string[] }  e.g. { "review": ["assignee","reviewer"] }
                            // Keyed by lowercase column name. Each value is an array of roles to notify.
 
+  @Column({ type: 'text', nullable: true, default: null })
+  column_prompts: string | null;  // JSON: { [columnId: string]: promptTemplateId: string }
+                                  // Keyed by BoardColumn.id. Template content is attached to agent_trigger SSE events
+                                  // when a ticket moves into the mapped column.
+
   @CreateDateColumn()
   created_at: Date;
 

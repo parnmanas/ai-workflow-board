@@ -86,10 +86,21 @@ export class BoardsController {
     const board = await this.boardRepo.findOne({ where: { id } });
     if (!board) return res.status(404).json({ error: 'Board not found' });
 
-    const { name, description, routing_config } = body;
+    const { name, description, routing_config, column_prompts } = body;
     if (name !== undefined) board.name = name;
     if (description !== undefined) board.description = description;
     if (routing_config !== undefined) board.routing_config = JSON.stringify(routing_config);
+    if (column_prompts !== undefined) {
+      if (column_prompts === null) {
+        board.column_prompts = null;
+      } else if (typeof column_prompts === 'object') {
+        const cleaned: Record<string, string> = {};
+        for (const [colId, tplId] of Object.entries(column_prompts)) {
+          if (typeof tplId === 'string' && tplId.length > 0) cleaned[colId] = tplId;
+        }
+        board.column_prompts = Object.keys(cleaned).length === 0 ? null : JSON.stringify(cleaned);
+      }
+    }
 
     await this.boardRepo.save(board);
     return res.json(board);

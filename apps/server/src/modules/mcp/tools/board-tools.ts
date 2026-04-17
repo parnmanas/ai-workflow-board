@@ -165,19 +165,33 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'update_board',
-    'Update a board name or description',
+    'Update a board name, description, or column→prompt-template mapping',
     {
       board_id: z.string().describe('Board ID'),
       name: z.string().optional().describe('New name'),
       description: z.string().optional().describe('New description'),
+      column_prompts: z.record(z.string(), z.string().nullable()).nullable().optional()
+        .describe('Column→PromptTemplate mapping: { [column_id]: prompt_template_id }. Pass null or {} to clear all.'),
     },
-    async ({ board_id, name, description }) => {
+    async ({ board_id, name, description, column_prompts }) => {
       const boardRepo = dataSource.getRepository(Board);
       const board = await boardRepo.findOne({ where: { id: board_id } });
       if (!board) return err('Board not found');
 
       if (name !== undefined) board.name = name;
       if (description !== undefined) board.description = description;
+      if (column_prompts !== undefined) {
+        if (column_prompts === null) {
+          board.column_prompts = null;
+        } else {
+          // Drop null mappings so stored shape stays { [col]: templateId } without nullables
+          const cleaned: Record<string, string> = {};
+          for (const [colId, tplId] of Object.entries(column_prompts)) {
+            if (tplId) cleaned[colId] = tplId;
+          }
+          board.column_prompts = Object.keys(cleaned).length === 0 ? null : JSON.stringify(cleaned);
+        }
+      }
 
       await boardRepo.save(board);
       return ok(board);

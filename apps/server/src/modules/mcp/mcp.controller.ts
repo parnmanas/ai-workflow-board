@@ -109,6 +109,9 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
           agent_id: agentId,
           role: event.role,
           trigger_source: event.trigger_source,
+          role_prompt: event.role_prompt,
+          ticket_prompt: event.ticket_prompt,
+          column_prompt: event.column_prompt,
           timestamp: event.timestamp,
         },
       }).catch((e: unknown) => {

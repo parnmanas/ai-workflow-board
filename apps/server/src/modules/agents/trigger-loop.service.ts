@@ -6,7 +6,9 @@ import { AgentTrigger } from '../../entities/AgentTrigger';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { Ticket } from '../../entities/Ticket';
 import { BoardColumn } from '../../entities/BoardColumn';
+import { Board } from '../../entities/Board';
 import { Agent } from '../../entities/Agent';
+import { PromptTemplate } from '../../entities/PromptTemplate';
 import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
 
@@ -197,6 +199,30 @@ export class TriggerLoopService implements OnModuleInit {
     const freshTicket = await this.dataSource.getRepository(Ticket).findOne({ where: { id: ticket.id } });
     const ticketPrompt = freshTicket?.prompt_text || '';
 
+    // Column workflow prompt: look up Board.column_prompts[ticket.column_id] → PromptTemplate.
+    // Fails open (null column_prompt) on any miss — never blocks a trigger.
+    let columnPrompt: { template_id: string; name: string; content: string } | null = null;
+    try {
+      const col = await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } });
+      if (col) {
+        const board = await this.dataSource.getRepository(Board).findOne({ where: { id: col.board_id } });
+        const raw = board?.column_prompts;
+        if (raw) {
+          const map = safeJsonParse(raw, {});
+          const tplId: string | undefined = map?.[ticket.column_id];
+          if (tplId) {
+            const tpl = await this.dataSource.getRepository(PromptTemplate).findOne({ where: { id: tplId } });
+            // Cross-workspace safety: PromptTemplate.workspace_id must match Board.workspace_id.
+            if (tpl && tpl.workspace_id === board!.workspace_id) {
+              columnPrompt = { template_id: tpl.id, name: tpl.name, content: tpl.content };
+            }
+          }
+        }
+      }
+    } catch (e) {
+      this.logService.warn('MCP', 'column_prompt lookup failed (continuing without)', { err: String(e), ticket_id: ticket.id });
+    }
+
     // SSE push
     activityEvents.emit('agent_trigger', {
       trigger_id: trigger.id,
@@ -204,8 +230,9 @@ export class TriggerLoopService implements OnModuleInit {
       agent_id: agentId,
       role,
       trigger_source: triggerSource,
-      role_prompt: rolePrompt,      // D-20
-      ticket_prompt: ticketPrompt,  // D-20
+      role_prompt: rolePrompt,        // D-20
+      ticket_prompt: ticketPrompt,    // D-20
+      column_prompt: columnPrompt,    // phase12: board column → prompt-template content
       timestamp: now.toISOString(),
     });
 
