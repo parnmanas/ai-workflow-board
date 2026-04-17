@@ -135,6 +135,7 @@ export const EVENT_TYPES: EventDefinition[] = [
         role_prompt: event.role_prompt || '',
         ticket_prompt: event.ticket_prompt || '',
         trigger_source: event.trigger_source || '',
+        column_prompt: event.column_prompt ?? null,
       };
       return {
         payload,
@@ -159,6 +160,11 @@ export const EVENT_TYPES: EventDefinition[] = [
         role_prompt: p.role_prompt,
         ticket_prompt: p.ticket_prompt,
         trigger_source: p.trigger_source,
+        // phase12: forward column_prompt (PromptTemplate wired to the ticket's
+        // column) so proxy.mjs can include it in composeTriggerPrompt. Without
+        // this, ev.column_prompt stays undefined on the proxy side and the
+        // column workflow guide never reaches the agent.
+        column_prompt: p.column_prompt,
         timestamp: env.timestamp,
       };
     },
