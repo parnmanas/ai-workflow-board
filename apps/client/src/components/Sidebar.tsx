@@ -108,6 +108,7 @@ export default function Sidebar({ isMobile, isOpen, onClose, wsId, boards }: Sid
     { key: 'admin-users',    path: '/admin/users',    label: 'Users',       icon: 'U' },
     { key: 'admin-qa',      path: '/admin/qa',      label: 'QA Tests',    icon: 'Q' },
     { key: 'admin-logs',    path: '/admin/logs',    label: 'Server Logs', icon: 'L' },
+    { key: 'admin-agent-logs', path: '/admin/agent-logs', label: 'Agent Logs',  icon: 'G' },
     { key: 'admin-settings', path: '/admin/settings', label: 'Settings',    icon: 'S' },
   ];
 

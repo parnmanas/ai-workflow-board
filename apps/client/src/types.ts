@@ -327,6 +327,30 @@ export interface ChatRoomMessageItem {
   created_at: string;
 }
 
+// ─── Agent Error Logs (Phase C) ──────────────────────────────
+// Error logs uploaded by each agent's MCP plugin (proxy.log tail).
+// Server source of truth: apps/server/src/modules/agent-logs/*.
+export interface AgentErrorLog {
+  id: string;
+  agent_id: string;
+  agent_name?: string;  // joined from Agent table (server may populate)
+  workspace_id: string | null;
+  occurred_at: string;   // ISO
+  level: 'error' | 'warn' | 'fatal';
+  category: string;      // 'crash' | 'sse' | 'presence' | 'subagent' | 'ipc' | 'misc'
+  message: string;
+  raw_line: string | null;
+  pid: string | null;
+  plugin_version: string | null;
+  created_at: string;
+}
+
+export interface AgentErrorLogAgentSummary {
+  agent_id: string;
+  agent_name: string;
+  error_count: number;
+}
+
 // SSE envelope wrapping AgentStatusPayload (Plan 03-01 wire shape).
 export interface AgentStatusEnvelope {
   event_type: 'agent_status';

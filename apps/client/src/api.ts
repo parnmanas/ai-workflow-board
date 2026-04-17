@@ -11,6 +11,8 @@ import type {
   ChatRoomDetail,
   ChatRoomMessageItem,
   ChatRoomParticipantInfo,
+  AgentErrorLog,
+  AgentErrorLogAgentSummary,
 } from './types';
 
 const BASE = '/api';
@@ -409,6 +411,21 @@ export const api = {
   },
   getLogStats: () => request<any>('/admin/logs/stats'),
   getLogCategories: () => request<string[]>('/admin/logs/categories'),
+
+  // ─── Admin Agent Logs (Phase C) ────────────────────────
+  listAgentLogs: (params: { agent_id?: string; level?: string; category?: string; since?: string; until?: string; limit?: number } = {}) => {
+    const q = new URLSearchParams();
+    if (params.agent_id) q.set('agent_id', params.agent_id);
+    if (params.level) q.set('level', params.level);
+    if (params.category) q.set('category', params.category);
+    if (params.since) q.set('since', params.since);
+    if (params.until) q.set('until', params.until);
+    if (params.limit) q.set('limit', String(params.limit));
+    const qs = q.toString();
+    return request<AgentErrorLog[]>(`/admin/agent-logs${qs ? '?' + qs : ''}`);
+  },
+  listAgentLogAgents: () =>
+    request<AgentErrorLogAgentSummary[]>('/admin/agent-logs/agents'),
 
   // ─── Admin Settings ────────────────────────────────────
   getSettings: () =>
