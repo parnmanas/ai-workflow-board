@@ -6,6 +6,7 @@ import ChildTicketList from './SubtaskList';
 import CommentList from './CommentList';
 import { TypingIndicator } from './TypingIndicator';
 import { tokens } from '../tokens';
+import { MentionTextarea, MentionCandidate } from './common/MentionTextarea';
 
 interface TicketPanelProps {
   ticket: Ticket;
@@ -106,6 +107,7 @@ export default function TicketPanel({
   const [activeTab, setActiveTab] = useState<'detail' | 'comments' | 'activity'>('detail');
   const [activities, setActivities] = useState<ActivityLog[]>([]);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [mentionCandidates, setMentionCandidates] = useState<MentionCandidate[]>([]);
 
   useEffect(() => {
     setTitle(activeTicket.title);
@@ -125,6 +127,44 @@ export default function TicketPanel({
       api.getTicketActivity(activeTicket.id).then(setActivities).catch(() => {});
     }
   }, [activeTab, activeTicket.id]);
+
+  // Seed @-mention candidates from props + ticket role_ids immediately so the
+  // dropdown works before the workspace-user API call returns.
+  useEffect(() => {
+    const agentById = new Map(agents.map(a => [a.id, a]));
+    const roleItems: MentionCandidate[] = [];
+    const pushRole = (key: 'assignee' | 'reporter' | 'reviewer', id: string | undefined) => {
+      if (!id) return;
+      const a = agentById.get(id);
+      roleItems.push({ type: 'role', id: key, name: key, sublabel: a ? a.name : id });
+    };
+    pushRole('assignee', activeTicket.assignee_id);
+    pushRole('reporter', activeTicket.reporter_id);
+    pushRole('reviewer', activeTicket.reviewer_id);
+    const agentItems: MentionCandidate[] = agents.map(a => ({ type: 'agent', id: a.id, name: a.name }));
+    setMentionCandidates([...roleItems, ...agentItems]);
+
+    const workspaceId = typeof window !== 'undefined'
+      ? localStorage.getItem('currentWorkspaceId') || ''
+      : '';
+    if (!workspaceId) return;
+    api.getMentionCandidates(workspaceId, activeTicket.id)
+      .then(data => {
+        const next: MentionCandidate[] = [
+          ...data.role_shortcuts.map(r => ({ type: 'role' as const, id: r.key, name: r.key, sublabel: r.label.replace(`${r.key} `, '') })),
+          ...data.users.map(u => ({ type: 'user' as const, id: u.id, name: u.name })),
+          ...data.agents.map(a => ({ type: 'agent' as const, id: a.id, name: a.name })),
+        ];
+        const seen = new Set<string>();
+        setMentionCandidates(next.filter(c => {
+          const k = `${c.type}:${c.id}`;
+          if (seen.has(k)) return false;
+          seen.add(k);
+          return true;
+        }));
+      })
+      .catch(() => { /* keep fallback */ });
+  }, [activeTicket.id, activeTicket.assignee_id, activeTicket.reporter_id, activeTicket.reviewer_id, agents]);
 
   const saveField = (field: string, value: any) => {
     onUpdate(activeTicket.id, { [field]: value });
@@ -186,14 +226,18 @@ export default function TicketPanel({
           background: tokens.colors.border, color: tokens.colors.textMuted, border: 'none', borderRadius: tokens.radii.md,
           padding: '5px 9px', fontSize: '13px', cursor: 'pointer',
         }}>&#128206;</button>
-        <input
+        <MentionTextarea
+          rows={1}
           value={commentContent}
-          onChange={e => setCommentContent(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSubmitComment(); } }}
-          placeholder={user ? `${user.name}(으)로 댓글 작성...` : 'Write a comment...'}
+          onChange={setCommentContent}
+          candidates={mentionCandidates}
+          onSubmit={handleSubmitComment}
+          placeholder={user ? `${user.name}(으)로 댓글 작성... (@로 태그)` : 'Write a comment... (@ to tag)'}
+          ariaLabel="Comment"
           style={{
-            flex: 1, background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
+            width: '100%', background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
             padding: '5px 10px', color: tokens.colors.textStrong, fontSize: '12px', outline: 'none',
+            resize: 'none', fontFamily: 'inherit', lineHeight: 1.5, boxSizing: 'border-box',
           }}
         />
         <button onClick={handleSubmitComment} disabled={!commentContent.trim()} style={{
