@@ -26,6 +26,7 @@ import { registerChatTools } from './chat-tools';
 import { registerApiKeyTools } from './api-key-tools';
 import { registerTriggerTools } from './trigger-tools';
 import { registerResourceTools } from './resource-tools';
+import { registerGitHubTools } from './github-tools';
 
 export type { ToolContext } from './context';
 export { createStandaloneContext } from './context';
@@ -43,6 +44,7 @@ export function registerAllTools(server: McpServer, ctx: ToolContext): void {
   registerApiKeyTools(server, ctx);
   registerTriggerTools(server, ctx);
   registerResourceTools(server, ctx);
+  registerGitHubTools(server, ctx);
   // Monolithic fallback — remaining tools not yet moved to domain files.
   // Shrinks with every Phase 3 commit; removed once C15 lands.
   registerMonolithTools(server, ctx);
