@@ -251,21 +251,40 @@ export class RoomMessagingService {
       return;
     }
 
-    // Monotonic advance: only update if latest message is newer than current last_read_at
-    const shouldUpdate =
-      participant.last_read_at === null ||
-      latestMsg.created_at > participant.last_read_at;
+    // CRITICAL: copy the message's DB-stored created_at via a SQL subquery so
+    // we preserve full precision. PostgreSQL TIMESTAMP is microsecond-precise;
+    // JavaScript Date is millisecond-only. If we serialize the fetched JS
+    // Date (from latestMsg.created_at) back through TypeORM as the new
+    // last_read_at value, the driver truncates sub-millisecond precision.
+    // The stored last_read_at then ends up strictly less than the source
+    // message's actual DB value, and the unread subquery
+    //   COUNT(*) WHERE m.created_at > p.last_read_at
+    // keeps counting that same message forever — regardless of how many
+    // times markRead runs. This was the long-standing "badge stuck at 1" bug.
+    //
+    // The WHERE guard keeps the update monotonic: only advance if the new
+    // message's stored value is strictly greater than the current marker.
+    const result = await this.participantRepo
+      .createQueryBuilder()
+      .update()
+      .set({
+        last_read_at: () => '(SELECT created_at FROM chat_room_messages WHERE id = :msgId)',
+      })
+      .where('id = :pid', { pid: participant.id })
+      .andWhere(
+        '(last_read_at IS NULL OR last_read_at < (SELECT created_at FROM chat_room_messages WHERE id = :msgId))',
+      )
+      .setParameter('msgId', latestMsg.id)
+      .execute();
 
-    if (shouldUpdate) {
-      await this.participantRepo.update(participant.id, {
-        last_read_at: latestMsg.created_at,
-      });
-    }
+    const didAdvance = (result.affected ?? 0) > 0;
 
     // The effective read marker after this call, whether we advanced or not.
     // Multi-tab sync (B3) needs this so a client can match against its local
-    // unread_count even when another tab's markRead beat us to it.
-    const effectiveReadAt = shouldUpdate ? latestMsg.created_at : participant.last_read_at!;
+    // unread_count even when another tab's markRead beat us to it. The ISO
+    // string we emit only has millisecond resolution; that's fine for the
+    // client's unread=0 reconciliation, which doesn't re-run the DB query.
+    const effectiveReadAt = didAdvance ? latestMsg.created_at : participant.last_read_at!;
 
     const memberIds = await this.membership.getRoomMemberIds(roomId);
     const agentMemberIds = await this.membership.getRoomAgentMemberIds(roomId);
