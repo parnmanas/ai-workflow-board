@@ -33,6 +33,9 @@ export class Agent {
   @Column({ type: 'timestamp', nullable: true, default: null })
   last_seen_at: Date | null;
 
+  @Column({ type: 'timestamp', nullable: true, default: null })
+  last_error_upload_at: Date | null;
+
   @Column({ type: 'varchar', default: '' })
   webhook_url: string;
 

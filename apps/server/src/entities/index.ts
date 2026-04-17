@@ -19,3 +19,4 @@ export { Resource } from './Resource';
 export { ResourceEmbedding } from './ResourceEmbedding';
 export { SystemSetting } from './SystemSetting';
 export { Credential } from './Credential';
+export { AgentErrorLog } from './AgentErrorLog';

@@ -23,6 +23,7 @@ import { SharedServicesModule } from './services/shared-services.module';
 import { ChatRoomsModule } from './modules/chat-rooms/chat-rooms.module';
 import { ResourcesModule } from './modules/resources/resources.module';
 import { CredentialsModule } from './modules/credentials/credentials.module';
+import { AgentLogsModule } from './modules/agent-logs/agent-logs.module';
 
 @Module({
   imports: [
@@ -52,6 +53,7 @@ import { CredentialsModule } from './modules/credentials/credentials.module';
     ChatRoomsModule,
     ResourcesModule,
     CredentialsModule,
+    AgentLogsModule,
   ],
 })
 export class AppModule {}
