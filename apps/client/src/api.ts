@@ -120,7 +120,15 @@ export const api = {
     request<any[]>(workspaceId ? `/boards?workspace_id=${workspaceId}` : '/boards'),
   createBoard: (data: { name: string; description?: string; workspace_id: string }) =>
     request<any>('/boards', { method: 'POST', body: JSON.stringify(data) }),
-  updateBoard: (id: string, data: { name?: string; description?: string; routing_config?: Record<string, string[]> }) =>
+  updateBoard: (
+    id: string,
+    data: {
+      name?: string;
+      description?: string;
+      routing_config?: Record<string, string[]>;
+      column_prompts?: Record<string, string> | null;
+    },
+  ) =>
     request<any>(`/boards/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteBoard: (id: string) =>
     request<any>(`/boards/${id}`, { method: 'DELETE' }),

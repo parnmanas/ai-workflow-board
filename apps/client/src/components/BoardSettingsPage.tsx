@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { api } from '../api';
+import { PromptTemplate } from '../types';
 import { useBoard } from '../hooks/useBoard';
 import { useToast } from '../contexts/ToastContext';
 import { useLoading } from '../contexts/LoadingContext';
@@ -25,6 +26,21 @@ export default function BoardSettingsPage() {
     board, refresh,
     createColumn, updateColumn, deleteColumn,
   } = useBoard(boardId ?? '');
+
+  // Prompt templates for the column→template selector. Loaded once per
+  // workspace; ColumnManager renders a "(None)" option plus these.
+  // Permission-gated on the server (MANAGE_PROMPT_TEMPLATES) — fall back
+  // silently to an empty list so non-privileged users can still view
+  // settings without a crash.
+  const [promptTemplates, setPromptTemplates] = useState<PromptTemplate[]>([]);
+  useEffect(() => {
+    if (!wsId) return;
+    let cancelled = false;
+    api.listPromptTemplates(wsId)
+      .then((list) => { if (!cancelled) setPromptTemplates(list); })
+      .catch(() => { if (!cancelled) setPromptTemplates([]); });
+    return () => { cancelled = true; };
+  }, [wsId]);
 
   const wrap = async (fn: () => Promise<any>, okMsg?: string) => {
     try {
@@ -70,6 +86,10 @@ export default function BoardSettingsPage() {
     try { return JSON.parse(board.routing_config || '{}'); } catch { return {}; }
   })();
 
+  const columnPrompts: Record<string, string> = (() => {
+    try { return JSON.parse(board.column_prompts || '{}'); } catch { return {}; }
+  })();
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <PageHeader
@@ -89,11 +109,19 @@ export default function BoardSettingsPage() {
             columns={board.columns}
             boardId={board.id}
             routingConfig={routingConfig}
+            columnPrompts={columnPrompts}
+            promptTemplates={promptTemplates}
             onCreateColumn={(bid, name, color) => wrap(() => createColumn(bid, name, color), 'Column created')}
             onUpdateColumn={(columnId, data) => wrap(() => updateColumn(columnId, data), 'Column updated')}
             onDeleteColumn={(columnId) => wrap(() => deleteColumn(columnId), 'Column deleted')}
             onUpdateRoutingConfig={async (config) => {
               await api.updateBoard(board.id, { routing_config: config });
+              refresh();
+            }}
+            onUpdateColumnPrompts={async (next) => {
+              // null clears all; empty object is equivalent per server contract.
+              const payload = Object.keys(next).length === 0 ? null : next;
+              await api.updateBoard(board.id, { column_prompts: payload });
               refresh();
             }}
           />

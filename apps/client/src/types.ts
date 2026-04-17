@@ -193,6 +193,7 @@ export interface Board {
   name: string;
   description: string;
   routing_config: string; // JSON: { [columnName]: 'assignee' | 'reporter' | 'reviewer' }
+  column_prompts?: string | null; // JSON: { [columnId: string]: promptTemplateId: string }
   columns: Column[];
   created_at: string;
   updated_at: string;

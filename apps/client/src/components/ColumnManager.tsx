@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
-import { Column } from '../types';
+import { Column, PromptTemplate } from '../types';
 import { tokens } from '../tokens';
 import { Button, Input } from './common';
 
@@ -10,10 +10,13 @@ interface ColumnManagerProps {
   columns: Column[];
   boardId: string;
   routingConfig: Record<string, string[]>;
+  columnPrompts: Record<string, string>; // columnId → promptTemplateId
+  promptTemplates: PromptTemplate[];
   onCreateColumn: (boardId: string, name: string, color?: string) => Promise<void>;
   onUpdateColumn: (columnId: string, data: { name?: string; color?: string; position?: number; description?: string }) => Promise<void>;
   onDeleteColumn: (columnId: string) => Promise<void>;
   onUpdateRoutingConfig: (config: Record<string, string[]>) => Promise<void>;
+  onUpdateColumnPrompts: (config: Record<string, string>) => Promise<void>;
 }
 
 // tag/label palette — decorative column color swatches, not tokenized
@@ -24,8 +27,8 @@ const PRESET_COLORS = [
 ];
 
 export default function ColumnManager({
-  columns, boardId, routingConfig,
-  onCreateColumn, onUpdateColumn, onDeleteColumn, onUpdateRoutingConfig,
+  columns, boardId, routingConfig, columnPrompts, promptTemplates,
+  onCreateColumn, onUpdateColumn, onDeleteColumn, onUpdateRoutingConfig, onUpdateColumnPrompts,
 }: ColumnManagerProps) {
   const [newColName, setNewColName] = useState('');
   const [newColColor, setNewColColor] = useState('#60a5fa'); // tag/label palette default — not tokenized
@@ -87,6 +90,13 @@ export default function ColumnManager({
   };
 
   const getColRoles = (colName: string): string[] => routingConfig[colName.toLowerCase()] || [];
+
+  const setColumnPrompt = (colId: string, tplId: string | '') => {
+    const next = { ...columnPrompts };
+    if (tplId) next[colId] = tplId;
+    else delete next[colId];
+    onUpdateColumnPrompts(next);
+  };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -199,6 +209,39 @@ export default function ColumnManager({
                                     );
                                   })}
                                 </div>
+                              </div>
+
+                              {/* Prompt template selector — attached to agent_trigger when a ticket enters this column */}
+                              <div style={{ paddingLeft: 28, display: 'flex', alignItems: 'center', gap: 8 }}>
+                                <span style={{ fontSize: '10px', color: tokens.colors.borderStrong, fontWeight: 600, textTransform: 'uppercase', flexShrink: 0 }}>
+                                  Prompt
+                                </span>
+                                <select
+                                  value={columnPrompts[col.id] || ''}
+                                  onChange={(e) => setColumnPrompt(col.id, e.target.value)}
+                                  style={{
+                                    padding: '3px 8px', borderRadius: tokens.radii.sm, fontSize: '12px',
+                                    border: `1px solid ${tokens.colors.border}`,
+                                    background: tokens.colors.surfaceCard, color: tokens.colors.textStrong,
+                                    cursor: 'pointer', minWidth: 180,
+                                  }}
+                                >
+                                  <option value="">(None)</option>
+                                  {promptTemplates.map((tpl) => (
+                                    <option key={tpl.id} value={tpl.id}>
+                                      {tpl.name}
+                                      {tpl.category ? `  ·  ${tpl.category}` : ''}
+                                    </option>
+                                  ))}
+                                </select>
+                                {columnPrompts[col.id] && !promptTemplates.some((t) => t.id === columnPrompts[col.id]) && (
+                                  <span
+                                    title="The currently-linked template is missing from this workspace (deleted or inaccessible). Select a new one or clear."
+                                    style={{ fontSize: '11px', color: tokens.colors.danger ?? '#f87171' }}
+                                  >
+                                    unresolved
+                                  </span>
+                                )}
                               </div>
                             </div>
                           )}
