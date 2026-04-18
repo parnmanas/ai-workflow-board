@@ -77,7 +77,9 @@ export class TicketsController {
 
     await this.activityService.logActivity({
       entity_type: 'ticket', entity_id: ticket.id, action: 'created',
-      ticket_id: ticket.id, actor_name: creator.created_by || reporter || assignee,
+      ticket_id: ticket.id,
+      actor_id: creator.created_by_id || undefined,
+      actor_name: creator.created_by || reporter || assignee,
     });
 
     return res.status(201).json({ ...ticket, labels, channel_ids, children: [], comments: [] });
@@ -109,6 +111,7 @@ export class TicketsController {
     await this.activityService.logActivity({
       entity_type: 'ticket', entity_id: child.id, action: 'created',
       ticket_id: parent.depth === 0 ? parentId : parent.parent_id || parentId,
+      actor_id: creator.created_by_id || undefined,
       actor_name: creator.created_by || reporter || assignee,
       new_value: title,
     });
@@ -124,8 +127,12 @@ export class TicketsController {
   }
 
   @Patch('tickets/:id')
-  async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
+  async update(@Param('id') id: string, @Body() body: any, @Req() req: any, @Res() res: Response) {
     const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
+
+    const currentUser = req.currentUser;
+    const actorId = currentUser?.id || undefined;
+    const actorName = currentUser?.name || currentUser?.email || undefined;
 
     const { title, description, priority, assignee, reporter, reviewer_id, assignee_id, reporter_id, labels, channel_ids, status, prompt_text } = body;
     const oldAssignee = ticket.assignee;
@@ -162,6 +169,7 @@ export class TicketsController {
         entity_type: 'ticket', entity_id: ticket.id, action: 'status_changed',
         field_changed: 'status', old_value: oldStatus || '', new_value: status,
         ticket_id: ticket.parent_id || ticket.id,
+        actor_id: actorId, actor_name: actorName,
       });
     }
     if (assignee !== undefined && assignee !== oldAssignee) {
@@ -169,6 +177,7 @@ export class TicketsController {
         entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
         field_changed: 'assignee', old_value: oldAssignee || '', new_value: assignee || '',
         ticket_id: ticket.parent_id || ticket.id,
+        actor_id: actorId, actor_name: actorName,
       });
     }
     if (reporter !== undefined && reporter !== oldReporter) {
@@ -176,6 +185,7 @@ export class TicketsController {
         entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
         field_changed: 'reporter', old_value: oldReporter || '', new_value: reporter || '',
         ticket_id: ticket.parent_id || ticket.id,
+        actor_id: actorId, actor_name: actorName,
       });
     }
     if (reviewer_id !== undefined && reviewer_id !== oldReviewerId) {
@@ -184,6 +194,7 @@ export class TicketsController {
         entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
         field_changed: 'reviewer', old_value: oldReviewerId || '', new_value: reviewerAgent?.name || reviewer_id || '',
         ticket_id: ticket.parent_id || ticket.id,
+        actor_id: actorId, actor_name: actorName,
       });
     }
 
@@ -197,6 +208,7 @@ export class TicketsController {
         entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
         field_changed: otherChanges.join(', '),
         ticket_id: ticket.parent_id || ticket.id,
+        actor_id: actorId, actor_name: actorName,
       });
     }
 
@@ -205,7 +217,7 @@ export class TicketsController {
   }
 
   @Patch('tickets/:id/move')
-  async move(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
+  async move(@Param('id') id: string, @Body() body: any, @Req() req: any, @Res() res: Response) {
     const { targetColumnId, targetPosition } = body;
     const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
 
@@ -234,10 +246,13 @@ export class TicketsController {
     const newColId = targetColumnId || ticket.column_id;
     const newCol = await this.colRepo.findOne({ where: { id: newColId } });
 
+    const currentUser = req.currentUser;
     await this.activityService.logActivity({
       entity_type: 'ticket', entity_id: ticket.id, action: 'moved',
       field_changed: 'column', old_value: oldCol?.name || String(ticket.column_id),
       new_value: newCol?.name || String(newColId), ticket_id: ticket.id,
+      actor_id: currentUser?.id,
+      actor_name: currentUser?.name || currentUser?.email,
     });
 
     return res.json(updated);

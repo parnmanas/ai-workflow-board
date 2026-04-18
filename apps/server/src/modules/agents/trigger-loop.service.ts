@@ -28,6 +28,45 @@ const TRIGGER_ACTIONS = new Set(['moved', 'created', 'updated']);
 const COMMENT_ACTION = 'created';
 const COMMENT_ENTITY = 'comment';
 
+// Conventional column-name → role defaults. Applied ONLY when the board's
+// routing_config doesn't mention the column at all. An explicit entry in
+// routing_config — including an empty array — overrides the default (empty
+// array = opt-out). Keys are lowercased before lookup, matching columnName
+// normalization in _handleActivity. Covers the English defaults seeded by
+// db.ts DEFAULT_COLUMNS plus common Korean aliases users rename them to.
+const DEFAULT_COLUMN_ROLES: Record<string, string[]> = {
+  // English (matches default board seed + common variations)
+  'backlog':     ['assignee'],
+  'todo':        ['assignee'],
+  'to do':       ['assignee'],
+  'in progress': ['assignee'],
+  'doing':       ['assignee'],
+  'wip':         ['assignee'],
+  'review':      ['reviewer'],
+  'in review':   ['reviewer'],
+  'qa':          ['reviewer'],
+  'testing':     ['reviewer'],
+  'done':        ['reporter'],
+  'completed':   ['reporter'],
+  'closed':      ['reporter'],
+  // Korean (common column names after localization)
+  '백로그':     ['assignee'],
+  '할 일':      ['assignee'],
+  '할일':       ['assignee'],
+  '진행':       ['assignee'],
+  '진행중':     ['assignee'],
+  '진행 중':    ['assignee'],
+  '작업':       ['assignee'],
+  '작업중':     ['assignee'],
+  '리뷰':       ['reviewer'],
+  '검토':       ['reviewer'],
+  '리뷰중':     ['reviewer'],
+  '리뷰 중':    ['reviewer'],
+  '검토중':     ['reviewer'],
+  '검토 중':    ['reviewer'],
+  '완료':       ['reporter'],
+};
+
 @Injectable()
 export class TriggerLoopService implements OnModuleInit {
   constructor(
@@ -96,7 +135,12 @@ export class TriggerLoopService implements OnModuleInit {
       return;
     }
 
-    // Resolve routing_config from the board
+    // Resolve routing_config from the board. SQLite doesn't understand the
+    // board-scoped subquery cleanly in all cases, so we split: (1) look up the
+    // column that matches the lowercased name in the ticket's own board, and
+    // (2) fall back to any board that has a column by that name if the ticket
+    // has no current column (rare — happens on orphan subtasks). Either way
+    // we end up with the routing_config JSON string (or null).
     const colRepo = this.dataSource.getRepository(BoardColumn);
     const colRow = await colRepo
       .createQueryBuilder('col')
@@ -106,8 +150,7 @@ export class TriggerLoopService implements OnModuleInit {
       .andWhere('col.board_id IN (SELECT bc.board_id FROM columns bc WHERE bc.id = :colId)', { colId: ticket.column_id || '' })
       .getRawOne();
 
-    // Fallback: for moved events, match by column name broadly
-    let routingConfigStr: string | null = colRow?.routing_config;
+    let routingConfigStr: string | null = colRow?.routing_config ?? null;
     if (!routingConfigStr && log.action === 'moved') {
       const fallback = await colRepo
         .createQueryBuilder('col')
@@ -115,17 +158,36 @@ export class TriggerLoopService implements OnModuleInit {
         .addSelect('b.routing_config', 'routing_config')
         .where('LOWER(col.name) = LOWER(:name)', { name: columnName })
         .getRawOne();
-      routingConfigStr = fallback?.routing_config;
+      routingConfigStr = fallback?.routing_config ?? null;
     }
 
-    if (!routingConfigStr) return;
-
+    // routing_config JSON is keyed by lowercase column name. If the key is
+    // PRESENT in the config (even as an empty array) we respect that as the
+    // board's explicit intent — including opt-out via []. If it's ABSENT we
+    // fall back to DEFAULT_COLUMN_ROLES so conventionally-named columns work
+    // out of the box without the user having to configure BoardSettings.
     const routingConfig = safeJsonParse(routingConfigStr, {}) as Record<string, string | string[]>;
-    const rolesRaw = routingConfig[columnName];
-    if (!rolesRaw) return;
+    let rolesRaw: string | string[] | undefined;
+    let fromDefault = false;
+    if (routingConfig && Object.prototype.hasOwnProperty.call(routingConfig, columnName)) {
+      rolesRaw = routingConfig[columnName];
+    } else {
+      rolesRaw = DEFAULT_COLUMN_ROLES[columnName];
+      fromDefault = rolesRaw !== undefined;
+    }
+    if (rolesRaw === undefined) return;
 
     // Normalize to array (backward compat: old format was single string)
     const roles: string[] = Array.isArray(rolesRaw) ? rolesRaw : [rolesRaw];
+    // Explicit empty array = opt-out. Default map never produces empty arrays,
+    // but board config can; either way nothing to do.
+    if (roles.length === 0) return;
+
+    if (fromDefault) {
+      this.logService.info('MCP', 'Routing fallback to DEFAULT_COLUMN_ROLES', {
+        column: columnName, roles, ticket_id: ticket.id,
+      });
+    }
 
     // Create triggers for each role
     for (const role of roles) {
