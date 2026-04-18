@@ -11,7 +11,8 @@ import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
 import { Agent } from '../../entities/Agent';
 import { User } from '../../entities/User';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
-import { ChatRoomsService } from '../chat-rooms/chat-rooms.service';
+import { RoomMembershipService } from '../chat-rooms/room-membership.service';
+import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { activityEvents } from '../../services/activity.service';
 import {
   findColumnByName,
@@ -30,7 +31,8 @@ export class AgentApiController {
     @InjectRepository(Comment) private readonly commentRepo: Repository<Comment>,
     @InjectRepository(ChatRoomMessage) private readonly messageRepo: Repository<ChatRoomMessage>,
     @InjectDataSource() private readonly dataSource: DataSource,
-    private readonly chatRoomsService: ChatRoomsService,
+    private readonly membership: RoomMembershipService,
+    private readonly messaging: RoomMessagingService,
   ) {}
 
   @Get('board-summary')
@@ -221,8 +223,8 @@ export class AgentApiController {
   async setChatRoomTyping(@Body() body: any, @Param('roomId') roomId: string, @Res() res: Response) {
     const { agent_id, agent_name, is_typing, status } = body;
     if (!agent_id) return res.status(400).json({ error: 'agent_id is required' });
-    const memberIds = await this.chatRoomsService.getRoomMemberIds(roomId);
-    const agentMemberIds = await this.chatRoomsService.getRoomAgentMemberIds(roomId);
+    const memberIds = await this.membership.getRoomMemberIds(roomId);
+    const agentMemberIds = await this.membership.getRoomAgentMemberIds(roomId);
     activityEvents.emit('chat_room_typing', {
       room_id: roomId,
       agent_id,
@@ -247,7 +249,7 @@ export class AgentApiController {
     const agent = await this.dataSource.getRepository(Agent).findOne({ where: { id: agent_id } });
     const agentName = agent?.name || 'Agent';
 
-    const msg = await this.chatRoomsService.sendMessage(
+    const msg = await this.messaging.sendMessage(
       roomId, room.workspace_id, 'agent', agent_id, agentName, content,
     );
     return res.status(201).json(msg);

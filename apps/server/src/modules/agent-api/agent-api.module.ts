@@ -12,14 +12,18 @@ import { Agent } from '../../entities/Agent';
 import { UserMention } from '../../entities/UserMention';
 import { AgentApiController } from './agent-api.controller';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
-import { ChatRoomsService } from '../chat-rooms/chat-rooms.service';
-import { RoomCrudService } from '../chat-rooms/room-crud.service';
-import { RoomMembershipService } from '../chat-rooms/room-membership.service';
-import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
+import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Board, BoardColumn, Ticket, Comment, ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, Agent, UserMention])],
+  // Chat-room services are imported via ChatRoomsModule so AgentApiController
+  // and ChatRoomsController share the same singleton instances (previously
+  // each module re-provided the services, which risked state divergence for
+  // any per-instance caches).
+  imports: [
+    TypeOrmModule.forFeature([Board, BoardColumn, Ticket, Comment, ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, Agent, UserMention]),
+    ChatRoomsModule,
+  ],
   controllers: [AgentApiController],
-  providers: [AgentAuthGuard, ChatRoomsService, RoomCrudService, RoomMembershipService, RoomMessagingService],
+  providers: [AgentAuthGuard],
 })
 export class AgentApiModule {}

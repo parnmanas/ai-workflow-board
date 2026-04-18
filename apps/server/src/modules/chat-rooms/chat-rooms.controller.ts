@@ -16,13 +16,19 @@ import { AuthGuard } from '../../common/guards/auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { PERMISSIONS } from '../../common/types/permissions';
-import { ChatRoomsService } from './chat-rooms.service';
+import { RoomCrudService } from './room-crud.service';
+import { RoomMembershipService } from './room-membership.service';
+import { RoomMessagingService } from './room-messaging.service';
 import { MAX_IMAGE_SIZE, MAX_IMAGES_PER_MESSAGE, ALLOWED_IMAGE_MIMETYPES } from '../../common/constants/upload';
 
 @Controller('api/chat-rooms')
 @UseGuards(AuthGuard, PermissionGuard)
 export class ChatRoomsController {
-  constructor(private readonly chatRoomsService: ChatRoomsService) {}
+  constructor(
+    private readonly crud: RoomCrudService,
+    private readonly membership: RoomMembershipService,
+    private readonly messaging: RoomMessagingService,
+  ) {}
 
   @Get()
   @RequirePermission(PERMISSIONS.CHAT_VIEW)
@@ -30,7 +36,7 @@ export class ChatRoomsController {
     const user = (req as any).currentUser;
     const wsId = req.headers['x-workspace-id'] as string;
     if (!wsId) return res.status(400).json({ error: 'Workspace ID required' });
-    const rooms = await this.chatRoomsService.listRooms(wsId, user.id);
+    const rooms = await this.crud.listRooms(wsId, user.id);
     return res.json(rooms);
   }
 
@@ -45,7 +51,7 @@ export class ChatRoomsController {
       return res.status(400).json({ error: 'participants array required' });
     }
     try {
-      const result = await this.chatRoomsService.createRoom(wsId, user.id, participants, name);
+      const result = await this.crud.createRoom(wsId, user.id, participants, name);
       return res.status(201).json(result);
     } catch (err: any) {
       return res.status(err.status || 400).json({ error: err.message });
@@ -70,7 +76,7 @@ export class ChatRoomsController {
     }
     try {
       const user = (req as any).currentUser;
-      const results = await this.chatRoomsService.searchMessages(wsId, user.id, q);
+      const results = await this.messaging.searchMessages(wsId, user.id, q);
       return res.json(results);
     } catch (err: any) {
       return res.status(err.status || 500).json({ error: err.message });
@@ -82,7 +88,7 @@ export class ChatRoomsController {
   async getRoom(@Req() req: Request, @Res() res: Response, @Param('roomId') roomId: string) {
     const user = (req as any).currentUser;
     try {
-      const detail = await this.chatRoomsService.getRoomDetail(roomId, user.id);
+      const detail = await this.crud.getRoomDetail(roomId, user.id);
       return res.json(detail);
     } catch (err: any) {
       return res.status(err.status || 404).json({ error: err.message });
@@ -96,7 +102,7 @@ export class ChatRoomsController {
     const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
     const before = req.query.before as string | undefined;
     try {
-      const messages = await this.chatRoomsService.getMessages(roomId, user.id, limit, before);
+      const messages = await this.messaging.getMessages(roomId, user.id, limit, before);
       return res.json(messages);
     } catch (err: any) {
       return res.status(err.status || 403).json({ error: err.message });
@@ -133,7 +139,7 @@ export class ChatRoomsController {
     }
 
     try {
-      const msg = await this.chatRoomsService.sendMessage(
+      const msg = await this.messaging.sendMessage(
         roomId,
         wsId,
         'user',
@@ -153,7 +159,7 @@ export class ChatRoomsController {
   async markRead(@Req() req: Request, @Res() res: Response, @Param('roomId') roomId: string) {
     const user = (req as any).currentUser;
     try {
-      await this.chatRoomsService.markRead(roomId, user.id);
+      await this.messaging.markRead(roomId, user.id);
       return res.json({ ok: true });
     } catch (err: any) {
       return res.status(err.status || 403).json({ error: err.message });
@@ -169,7 +175,7 @@ export class ChatRoomsController {
       return res.status(400).json({ error: 'name required' });
     }
     try {
-      await this.chatRoomsService.renameRoom(roomId, user.id, name);
+      await this.crud.renameRoom(roomId, user.id, name);
       return res.json({ ok: true });
     } catch (err: any) {
       return res.status(err.status || 400).json({ error: err.message });
@@ -185,7 +191,7 @@ export class ChatRoomsController {
       return res.status(400).json({ error: 'participants array required' });
     }
     try {
-      await this.chatRoomsService.addParticipants(roomId, user.id, participants);
+      await this.membership.addParticipants(roomId, user.id, participants);
       return res.json({ ok: true });
     } catch (err: any) {
       return res.status(err.status || 400).json({ error: err.message });
@@ -197,7 +203,7 @@ export class ChatRoomsController {
   async leaveRoom(@Req() req: Request, @Res() res: Response, @Param('roomId') roomId: string) {
     const user = (req as any).currentUser;
     try {
-      await this.chatRoomsService.leaveRoom(roomId, user.id);
+      await this.membership.leaveRoom(roomId, user.id);
       return res.json({ ok: true });
     } catch (err: any) {
       return res.status(err.status || 400).json({ error: err.message });
