@@ -131,13 +131,26 @@ export class AgentsController {
         )
       : false;
 
+    // Enrich with live current_task from AgentStatusService (in-memory), same
+    // source the /dashboard list uses. Without this, the detail view always
+    // rendered "Idle" even when the agent was actively working on a ticket —
+    // a straight inconsistency with what the list view showed.
+    const liveStatus = this.agentStatusService.getOne(agent.id);
+    const currentTask = liveStatus?.current_task
+      ? {
+          ticket_id: liveStatus.current_task.ticket_id,
+          ticket_title: liveStatus.current_task.ticket_title,
+          claimed_at: liveStatus.current_task.claimed_at.toISOString(),
+        }
+      : undefined;
+
     if (isAdmin) {
-      return res.json({ ...agent, redacted: false });
+      return res.json({ ...agent, current_task: currentTask, redacted: false });
     }
 
     // Non-admin: strip role_prompt + role_prompt_meta before returning
     const { role_prompt, role_prompt_meta, ...safe } = agent as any;
-    return res.json({ ...safe, role_prompt: '', role_prompt_meta: null, redacted: true });
+    return res.json({ ...safe, role_prompt: '', role_prompt_meta: null, current_task: currentTask, redacted: true });
   }
 
   @Post()
