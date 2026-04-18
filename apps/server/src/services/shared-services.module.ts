@@ -24,11 +24,9 @@ import { MentionService } from './mention.service';
  * Global cross-cutting services.
  *
  * Only truly ubiquitous services live here (Log, Auth, ApiKey, Activity,
- * ReBAC, Mention). Everything else is scoped to its feature module:
+ * ReBAC, Mention, Discord). Everything else is scoped to its feature module:
  *
  *   - EmbeddingService / GitHubConnectorService → `modules/mcp/mcp-services.module.ts`
- *   - DiscordService → provider only (consumed by NotificationService in-scope;
- *     no other module injects it)
  *   - NotificationService / SystemCommentService → provider only (they run as
  *     event-listener singletons via OnModuleInit; nothing injects them)
  *
@@ -56,6 +54,7 @@ import { MentionService } from './mention.service';
     ActivityService,
     AuthService,
     ApiKeyService,
+    DiscordService,
     LogService,
     ReBACService,
     MentionService,
