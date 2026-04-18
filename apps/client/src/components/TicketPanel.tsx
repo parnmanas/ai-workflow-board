@@ -41,31 +41,93 @@ const priorityColors: Record<string, string> = {
   critical: '#ef4444',
 };
 
-function RetriggerButton({ disabled, busy, onClick, title }: {
-  disabled: boolean; busy: boolean; onClick: () => void; title: string;
+function TriggerMenu({
+  open, onClose, roleTargets, busy, onPick,
+}: {
+  open: boolean;
+  onClose: () => void;
+  roleTargets: { role: 'assignee' | 'reporter' | 'reviewer'; name: string; hasAgent: boolean }[];
+  busy: Record<string, boolean>;
+  onPick: (role: 'assignee' | 'reporter' | 'reviewer', name: string) => void;
 }) {
+  if (!open) return null;
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      title={title}
-      aria-label={title}
-      style={{
-        padding: '5px 8px',
-        background: disabled ? tokens.colors.surfaceSubtle : tokens.colors.surfaceCard,
-        border: `1px solid ${tokens.colors.border}`,
-        borderRadius: tokens.radii.md,
-        color: disabled ? tokens.colors.textMuted : tokens.colors.accentMid,
-        fontSize: '12px',
-        lineHeight: 1,
-        cursor: disabled ? 'not-allowed' : 'pointer',
-        opacity: busy ? 0.6 : 1,
-        flexShrink: 0,
-      }}
-    >
-      {busy ? '…' : '⚡'}
-    </button>
+    <>
+      <div
+        onClick={onClose}
+        style={{ position: 'fixed', inset: 0, zIndex: 10 }}
+      />
+      <div
+        style={{
+          position: 'absolute',
+          top: '100%',
+          right: 0,
+          marginTop: 4,
+          minWidth: 200,
+          background: tokens.colors.surfaceCard,
+          border: `1px solid ${tokens.colors.border}`,
+          borderRadius: tokens.radii.md,
+          boxShadow: '0 4px 16px rgba(0,0,0,0.35)',
+          zIndex: 11,
+          overflow: 'hidden',
+        }}
+      >
+        <div
+          style={{
+            padding: '6px 10px',
+            fontSize: '10px',
+            fontWeight: 700,
+            textTransform: 'uppercase',
+            letterSpacing: '0.05em',
+            color: tokens.colors.textMuted,
+            borderBottom: `1px solid ${tokens.colors.border}`,
+            background: tokens.colors.surfaceSubtle,
+          }}
+        >
+          Trigger
+        </div>
+        {roleTargets.map(({ role, name, hasAgent }) => {
+          const isBusy = !!busy[role];
+          const disabled = !hasAgent || isBusy;
+          return (
+            <button
+              key={role}
+              type="button"
+              disabled={disabled}
+              onClick={() => {
+                if (disabled) return;
+                onPick(role, name);
+                onClose();
+              }}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 8,
+                width: '100%',
+                padding: '8px 12px',
+                background: 'transparent',
+                border: 'none',
+                borderTop: role === 'assignee' ? 'none' : `1px solid ${tokens.colors.border}`,
+                color: disabled ? tokens.colors.textMuted : tokens.colors.textStrong,
+                fontSize: '12px',
+                cursor: disabled ? 'not-allowed' : 'pointer',
+                textAlign: 'left',
+              }}
+              onMouseEnter={e => { if (!disabled) e.currentTarget.style.background = tokens.colors.surfaceSubtle; }}
+              onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+            >
+              <span style={{ textTransform: 'capitalize', fontWeight: 600 }}>
+                {role}
+              </span>
+              <span style={{ fontSize: '11px', color: tokens.colors.textMuted }}>
+                {isBusy ? 'sending…' : hasAgent ? name : 'unassigned'}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </>
   );
 }
 
@@ -91,6 +153,7 @@ export default function TicketPanel({
   // Per-role in-flight state for the Re-trigger buttons — prevents
   // double-fires while the network round trip is pending.
   const [retriggering, setRetriggering] = useState<Record<string, boolean>>({});
+  const [triggerMenuOpen, setTriggerMenuOpen] = useState(false);
 
   // Navigation stack: array of ticket IDs navigated within this panel
   const [navStack, setNavStack] = useState<string[]>([ticket.id]);
@@ -323,7 +386,37 @@ export default function TicketPanel({
             background: tokens.colors.surfaceCard, color: tokens.colors.textMuted,
           }}>{columnName}</span>
         </div>
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div style={{ display: 'flex', gap: 8, position: 'relative' }}>
+          <button
+            onClick={() => setTriggerMenuOpen(v => !v)}
+            title="Manually wake an agent on this ticket (bypasses cooldown)"
+            style={{
+              background: tokens.colors.surfaceCard,
+              color: tokens.colors.accentMid,
+              border: `1px solid ${tokens.colors.border}`,
+              borderRadius: tokens.radii.md,
+              padding: '4px 12px',
+              fontSize: '12px',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 4,
+            }}
+          >
+            <span>⚡</span>
+            <span>Trigger</span>
+          </button>
+          <TriggerMenu
+            open={triggerMenuOpen}
+            onClose={() => setTriggerMenuOpen(false)}
+            roleTargets={[
+              { role: 'assignee', name: assignee || 'unassigned', hasAgent: !!activeTicket.assignee_id },
+              { role: 'reporter', name: reporter || 'none',       hasAgent: !!activeTicket.reporter_id },
+              { role: 'reviewer', name: (agents.find(a => a.id === reviewerId)?.name) || 'none', hasAgent: !!activeTicket.reviewer_id },
+            ]}
+            busy={retriggering}
+            onPick={(role, name) => handleRetrigger(role, name)}
+          />
           <button onClick={() => { onDelete(activeTicket.id); onClose(); }} style={{
             background: tokens.colors.dangerBg, color: tokens.colors.dangerLight, border: 'none', borderRadius: tokens.radii.md,
             padding: '4px 12px', fontSize: '12px', cursor: 'pointer',
@@ -393,88 +486,61 @@ export default function TicketPanel({
 
               <div>
                 <label style={labelStyle}>Assignee</label>
-                <div style={{ display: 'flex', gap: 4 }}>
-                  <select
-                    value={assignee}
-                    onChange={e => {
-                      const name = e.target.value;
-                      const agent = agents.find(a => a.name === name);
-                      setAssignee(name);
-                      onUpdate(activeTicket.id, { assignee: name, assignee_id: agent?.id || '' });
-                    }}
-                    style={{
-                      background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
-                      padding: '5px 8px', color: tokens.colors.textStrong, fontSize: '12px', flex: 1, minWidth: 0,
-                    }}
-                  >
-                    <option value="">Unassigned</option>
-                    {agents.filter(a => a.is_active).map(a => <option key={a.id} value={a.name}>{a.name}</option>)}
-                  </select>
-                  <RetriggerButton
-                    disabled={!activeTicket.assignee_id || !!retriggering.assignee}
-                    busy={!!retriggering.assignee}
-                    onClick={() => handleRetrigger('assignee', assignee)}
-                    title={activeTicket.assignee_id ? `Re-trigger assignee (${assignee})` : 'No assignee to trigger'}
-                  />
-                </div>
+                <select
+                  value={assignee}
+                  onChange={e => {
+                    const name = e.target.value;
+                    const agent = agents.find(a => a.name === name);
+                    setAssignee(name);
+                    onUpdate(activeTicket.id, { assignee: name, assignee_id: agent?.id || '' });
+                  }}
+                  style={{
+                    background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
+                    padding: '5px 8px', color: tokens.colors.textStrong, fontSize: '12px', width: '100%',
+                  }}
+                >
+                  <option value="">Unassigned</option>
+                  {agents.filter(a => a.is_active).map(a => <option key={a.id} value={a.name}>{a.name}</option>)}
+                </select>
               </div>
 
               <div>
                 <label style={labelStyle}>Reporter</label>
-                <div style={{ display: 'flex', gap: 4 }}>
-                  <select
-                    value={reporter}
-                    onChange={e => {
-                      const name = e.target.value;
-                      const agent = agents.find(a => a.name === name);
-                      setReporter(name);
-                      onUpdate(activeTicket.id, { reporter: name, reporter_id: agent?.id || '' });
-                    }}
-                    style={{
-                      background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
-                      padding: '5px 8px', color: tokens.colors.textStrong, fontSize: '12px', flex: 1, minWidth: 0,
-                    }}
-                  >
-                    <option value="">None</option>
-                    {agents.filter(a => a.is_active).map(a => <option key={a.id} value={a.name}>{a.name}</option>)}
-                  </select>
-                  <RetriggerButton
-                    disabled={!activeTicket.reporter_id || !!retriggering.reporter}
-                    busy={!!retriggering.reporter}
-                    onClick={() => handleRetrigger('reporter', reporter)}
-                    title={activeTicket.reporter_id ? `Re-trigger reporter (${reporter})` : 'No reporter to trigger'}
-                  />
-                </div>
+                <select
+                  value={reporter}
+                  onChange={e => {
+                    const name = e.target.value;
+                    const agent = agents.find(a => a.name === name);
+                    setReporter(name);
+                    onUpdate(activeTicket.id, { reporter: name, reporter_id: agent?.id || '' });
+                  }}
+                  style={{
+                    background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
+                    padding: '5px 8px', color: tokens.colors.textStrong, fontSize: '12px', width: '100%',
+                  }}
+                >
+                  <option value="">None</option>
+                  {agents.filter(a => a.is_active).map(a => <option key={a.id} value={a.name}>{a.name}</option>)}
+                </select>
               </div>
 
               <div>
                 <label style={labelStyle}>Reviewer</label>
-                <div style={{ display: 'flex', gap: 4 }}>
-                  <select
-                    value={reviewerId}
-                    onChange={e => {
-                      const id = e.target.value;
-                      setReviewerId(id);
-                      onUpdate(activeTicket.id, { reviewer_id: id });
-                    }}
-                    style={{
-                      background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
-                      padding: '5px 8px', color: tokens.colors.textStrong, fontSize: '12px', flex: 1, minWidth: 0,
-                    }}
-                  >
-                    <option value="">None</option>
-                    {agents.filter(a => a.is_active).map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
-                  </select>
-                  <RetriggerButton
-                    disabled={!activeTicket.reviewer_id || !!retriggering.reviewer}
-                    busy={!!retriggering.reviewer}
-                    onClick={() => {
-                      const reviewerAgent = agents.find(a => a.id === reviewerId);
-                      return handleRetrigger('reviewer', reviewerAgent?.name);
-                    }}
-                    title={activeTicket.reviewer_id ? 'Re-trigger reviewer' : 'No reviewer to trigger'}
-                  />
-                </div>
+                <select
+                  value={reviewerId}
+                  onChange={e => {
+                    const id = e.target.value;
+                    setReviewerId(id);
+                    onUpdate(activeTicket.id, { reviewer_id: id });
+                  }}
+                  style={{
+                    background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
+                    padding: '5px 8px', color: tokens.colors.textStrong, fontSize: '12px', width: '100%',
+                  }}
+                >
+                  <option value="">None</option>
+                  {agents.filter(a => a.is_active).map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                </select>
               </div>
             </div>
 
