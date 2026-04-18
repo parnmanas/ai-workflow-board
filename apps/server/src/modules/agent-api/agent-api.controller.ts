@@ -20,6 +20,7 @@ import {
   maxChildPosition,
   shiftTicketPositions,
 } from '../mcp/shared/ticket-helpers';
+import { loadTicketFull } from '../mcp/shared/ticket-parsing';
 import { findOrFail } from '../../common/find-or-fail';
 
 @Controller('api/agent')
@@ -35,6 +36,13 @@ export class AgentApiController {
     private readonly membership: RoomMembershipService,
     private readonly messaging: RoomMessagingService,
   ) {}
+
+  @Get('tickets/:id')
+  async getTicket(@Param('id') id: string, @Res() res: Response) {
+    const ticket = await loadTicketFull(this.dataSource, id);
+    if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+    return res.json(ticket);
+  }
 
   @Get('board-summary')
   async boardSummaryDefault(@Res() res: Response) {
