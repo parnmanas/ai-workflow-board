@@ -19,9 +19,23 @@ import { NotificationService } from './notification.service';
 import { SystemCommentService } from './system-comment.service';
 import { ReBACService } from './rebac.service';
 import { MentionService } from './mention.service';
-import { EmbeddingService } from './embedding.service';
-import { GitHubConnectorService } from './github-connector.service';
 
+/**
+ * Global cross-cutting services.
+ *
+ * Only truly ubiquitous services live here (Log, Auth, ApiKey, Activity,
+ * ReBAC, Mention). Everything else is scoped to its feature module:
+ *
+ *   - EmbeddingService / GitHubConnectorService → `modules/mcp/mcp-services.module.ts`
+ *   - DiscordService → provider only (consumed by NotificationService in-scope;
+ *     no other module injects it)
+ *   - NotificationService / SystemCommentService → provider only (they run as
+ *     event-listener singletons via OnModuleInit; nothing injects them)
+ *
+ * Keeping `@Global()` here is still justified: LogService has 15+ consumers,
+ * ApiKeyService 7+, ActivityService 6+ — propagating those through every
+ * module's `imports` array would be pure noise.
+ */
 @Global()
 @Module({
   imports: [
@@ -37,21 +51,14 @@ import { GitHubConnectorService } from './github-connector.service';
     SystemCommentService,
     ReBACService,
     MentionService,
-    EmbeddingService,
-    GitHubConnectorService,
   ],
   exports: [
     ActivityService,
     AuthService,
     ApiKeyService,
-    DiscordService,
     LogService,
-    NotificationService,
-    SystemCommentService,
     ReBACService,
     MentionService,
-    EmbeddingService,
-    GitHubConnectorService,
   ],
 })
 export class SharedServicesModule {}
