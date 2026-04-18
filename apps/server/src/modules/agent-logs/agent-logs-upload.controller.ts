@@ -1,4 +1,4 @@
-import { Body, Controller, Post, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Post, Query, Res, UseGuards } from '@nestjs/common';
 import { Response } from 'express';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { AgentLogsService } from './agent-logs.service';
@@ -22,5 +22,31 @@ export class AgentLogsUploadController {
     } catch (err: any) {
       return res.status(err.status || 500).json({ error: err.message });
     }
+  }
+
+  // Read-side companion to the upload path. Agents can ask the server what
+  // errors another agent (or themselves) has reported — useful when one agent
+  // is diagnosing a peer's crash loop and doesn't have shell access to the
+  // peer's proxy.log. Guarded by the same AgentAuthGuard as the POST, so any
+  // valid API key can query; we don't expose this to anonymous callers.
+  @Get()
+  async query(
+    @Query('agent_id') agentId: string | undefined,
+    @Query('level') level: string | undefined,
+    @Query('category') category: string | undefined,
+    @Query('since') since: string | undefined,
+    @Query('until') until: string | undefined,
+    @Query('limit') limit: string | undefined,
+    @Res() res: Response,
+  ) {
+    const rows = await this.service.list({
+      agent_id: agentId,
+      level,
+      category,
+      since: since ? new Date(since) : undefined,
+      until: until ? new Date(until) : undefined,
+      limit: limit ? Math.min(parseInt(limit, 10) || 100, 500) : 100,
+    });
+    return res.json(rows);
   }
 }
