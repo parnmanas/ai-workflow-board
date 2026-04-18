@@ -32,8 +32,6 @@ import { createStandaloneContext } from './modules/mcp/tools';
 import { createMcpServerForContext } from './modules/mcp/internal/create-mcp-server';
 import { expressToWebRequest, sendWebResponse } from './modules/mcp/internal/express-bridge';
 import { sessionStore } from './modules/mcp/internal/session-store';
-import { setEmbeddingDataSource } from './services/embedding.service';
-import { setGitHubDataSource } from './services/github-connector.service';
 
 // ─── Helpers ───────────────────────────────────────────────
 
@@ -200,8 +198,6 @@ async function startHttp() {
 
 async function main() {
   await initDb();
-  setEmbeddingDataSource(AppDataSource);
-  setGitHubDataSource(AppDataSource);
 
   const transport = (process.env.MCP_TRANSPORT || 'stdio').toLowerCase();
 

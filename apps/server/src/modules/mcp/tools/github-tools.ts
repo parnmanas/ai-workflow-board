@@ -7,16 +7,13 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { Resource } from '../../../entities/Resource';
-import {
-  isGitHubEnabled, parseGitHubUrl, fetchRepoInfo, buildSyncContent,
-  searchGitHubRepos, searchGitHubCode, searchGitHubIssues,
-} from '../../../services/github-connector.service';
+import { parseGitHubUrl, buildSyncContent } from '../../../services/github-connector.service';
 import { ok, err } from '../shared/helpers';
 import { resourceToJson, embedResource } from '../shared/resource-helpers';
 import type { ToolContext } from './context';
 
 export function registerGitHubTools(server: McpServer, ctx: ToolContext): void {
-  const { dataSource, logger } = ctx;
+  const { dataSource, logger, embeddingService, githubService } = ctx;
 
   server.tool(
     'fetch_github_info',
@@ -29,7 +26,7 @@ export function registerGitHubTools(server: McpServer, ctx: ToolContext): void {
       credential_id: z.string().optional().describe('Credential ID from workspace credentials (overrides global token)'),
     },
     async ({ url, owner, repo, credential_id }) => {
-      if (!(await isGitHubEnabled(credential_id))) {
+      if (!(await githubService.isEnabled(credential_id))) {
         return err('GitHub token not configured. Add a credential or set global token in Admin Settings.');
       }
       let o = owner;
@@ -43,7 +40,7 @@ export function registerGitHubTools(server: McpServer, ctx: ToolContext): void {
       if (!o || !r) return err('Provide either url or both owner and repo');
 
       try {
-        const info = await fetchRepoInfo(o, r, credential_id);
+        const info = await githubService.fetchRepoInfo(o, r, credential_id);
         return ok(info);
       } catch (e: any) {
         return err(`GitHub API error: ${e.message}`);
@@ -65,7 +62,7 @@ export function registerGitHubTools(server: McpServer, ctx: ToolContext): void {
       credential_id: z.string().optional().describe('Credential ID for GitHub auth (overrides global token)'),
     },
     async ({ workspace_id, url, resource_id, board_id, credential_id }) => {
-      if (!(await isGitHubEnabled(credential_id))) {
+      if (!(await githubService.isEnabled(credential_id))) {
         return err('GitHub token not configured. Add a credential or set global token in Admin Settings.');
       }
       const parsed = parseGitHubUrl(url);
@@ -73,7 +70,7 @@ export function registerGitHubTools(server: McpServer, ctx: ToolContext): void {
 
       let info;
       try {
-        info = await fetchRepoInfo(parsed.owner, parsed.repo, credential_id);
+        info = await githubService.fetchRepoInfo(parsed.owner, parsed.repo, credential_id);
       } catch (e: any) {
         return err(`GitHub API error: ${e.message}`);
       }
@@ -96,7 +93,7 @@ export function registerGitHubTools(server: McpServer, ctx: ToolContext): void {
         existing.tags = JSON.stringify(tags);
         if (credential_id) existing.credential_id = credential_id;
         const saved = await resourceRepo.save(existing);
-        embedResource(dataSource, logger, saved).catch(() => {});
+        embedResource(dataSource, logger, embeddingService, saved).catch(() => {});
         logger.info('MCP', `Synced GitHub repo ${info.full_name} → resource ${saved.id}`);
         return ok(resourceToJson(saved));
       }
@@ -116,7 +113,7 @@ export function registerGitHubTools(server: McpServer, ctx: ToolContext): void {
         tags: JSON.stringify(tags),
       });
       const saved = await resourceRepo.save(created);
-      embedResource(dataSource, logger, saved).catch(() => {});
+      embedResource(dataSource, logger, embeddingService, saved).catch(() => {});
       logger.info('MCP', `Created GitHub resource ${info.full_name} → ${saved.id}`);
       return ok(resourceToJson(saved));
     }
@@ -135,20 +132,20 @@ export function registerGitHubTools(server: McpServer, ctx: ToolContext): void {
       credential_id: z.string().optional().describe('Credential ID for GitHub auth (overrides global token)'),
     },
     async ({ query, scope, per_page, sort, credential_id }) => {
-      if (!(await isGitHubEnabled(credential_id))) {
+      if (!(await githubService.isEnabled(credential_id))) {
         return err('GitHub token not configured. Add a credential or set global token in Admin Settings.');
       }
       const limit = Math.min(per_page ?? 10, 30);
       try {
         if (scope === 'code') {
-          const results = await searchGitHubCode(query, { per_page: limit, credential_id });
+          const results = await githubService.searchCode(query, { per_page: limit, credential_id });
           return ok({ scope: 'code', total_count: results.total_count, items: results.items });
         }
         if (scope === 'issues') {
-          const results = await searchGitHubIssues(query, { per_page: limit, sort, credential_id });
+          const results = await githubService.searchIssues(query, { per_page: limit, sort, credential_id });
           return ok({ scope: 'issues', total_count: results.total_count, items: results.items });
         }
-        const results = await searchGitHubRepos(query, { per_page: limit, sort, credential_id });
+        const results = await githubService.searchRepos(query, { per_page: limit, sort, credential_id });
         return ok({ scope: 'repositories', total_count: results.total_count, items: results.items });
       } catch (e: any) {
         return err(`GitHub search error: ${e.message}`);

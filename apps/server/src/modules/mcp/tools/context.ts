@@ -25,6 +25,8 @@ import { ApiKey } from '../../../entities/ApiKey';
 import { ActivityService } from '../../../services/activity.service';
 import { ApiKeyService } from '../../../services/api-key.service';
 import { LogService } from '../../../services/log.service';
+import { EmbeddingService } from '../../../services/embedding.service';
+import { GitHubConnectorService } from '../../../services/github-connector.service';
 
 /**
  * Minimal surface that MCP tools need from the logging subsystem.
@@ -48,6 +50,8 @@ export interface ToolContext {
   dataSource: DataSource;
   activityService: ActivityService;
   apiKeyService: ApiKeyService;
+  embeddingService: EmbeddingService;
+  githubService: GitHubConnectorService;
   logger: McpLogger;
 }
 
@@ -75,6 +79,8 @@ export function createStandaloneContext(dataSource: DataSource): ToolContext {
     logService,
   );
   const apiKeyService = new ApiKeyService(dataSource.getRepository(ApiKey));
+  const embeddingService = new EmbeddingService(dataSource);
+  const githubService = new GitHubConnectorService(dataSource);
 
-  return { dataSource, activityService, apiKeyService, logger };
+  return { dataSource, activityService, apiKeyService, embeddingService, githubService, logger };
 }

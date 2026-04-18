@@ -13,8 +13,8 @@ import { ApiKeyService } from '../../services/api-key.service';
 import { LogService } from '../../services/log.service';
 import { AgentConnectionService } from '../agents/agent-connection.service';
 import { ActivityService, activityEvents } from '../../services/activity.service';
-import { setEmbeddingDataSource } from '../../services/embedding.service';
-import { setGitHubDataSource } from '../../services/github-connector.service';
+import { EmbeddingService } from '../../services/embedding.service';
+import { GitHubConnectorService } from '../../services/github-connector.service';
 
 interface McpAuthInfo {
   keyHint: string;
@@ -82,15 +82,12 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     private readonly _logService: LogService,
     private readonly agentConnectionService: AgentConnectionService,
     private readonly activityService: ActivityService,
+    private readonly embeddingService: EmbeddingService,
+    private readonly githubService: GitHubConnectorService,
   ) {}
 
   onModuleInit() {
     logService = this._logService;
-    // Services that depend on the DataSource still use module-level setters
-    // (historical — they pre-date the ToolContext pattern). Hydrate them
-    // once here so both module-scope code and ToolContext consumers agree.
-    setEmbeddingDataSource(this.dataSource);
-    setGitHubDataSource(this.dataSource);
 
     // Listen for agent_trigger events and push MCP notifications to connected agents
     this.triggerListener = (event: any) => {
@@ -161,6 +158,8 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       dataSource: this.dataSource,
       activityService: this.activityService,
       apiKeyService: this.apiKeyService,
+      embeddingService: this.embeddingService,
+      githubService: this.githubService,
       logger: this._logService,
     };
   }

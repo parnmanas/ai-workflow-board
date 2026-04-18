@@ -18,8 +18,6 @@
 import { readdirSync } from 'fs';
 import { join } from 'path';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { setEmbeddingDataSource } from '../../../services/embedding.service';
-import { setGitHubDataSource } from '../../../services/github-connector.service';
 import type { ToolContext } from './context';
 
 export type { ToolContext } from './context';
@@ -76,12 +74,6 @@ function findRegisterFn(mod: Record<string, unknown>, base: string): RegisterFn 
 }
 
 export function registerAllTools(server: McpServer, ctx: ToolContext): void {
-  // Hydrate the DataSource-aware services that are still accessed via
-  // module setters (embedding / github). Safe to call on every server
-  // creation — both setters are idempotent.
-  setEmbeddingDataSource(ctx.dataSource);
-  setGitHubDataSource(ctx.dataSource);
-
   for (const mod of discoverToolModules()) {
     mod.register(server, ctx);
   }

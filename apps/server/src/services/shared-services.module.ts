@@ -19,6 +19,8 @@ import { NotificationService } from './notification.service';
 import { SystemCommentService } from './system-comment.service';
 import { ReBACService } from './rebac.service';
 import { MentionService } from './mention.service';
+import { EmbeddingService } from './embedding.service';
+import { GitHubConnectorService } from './github-connector.service';
 
 @Global()
 @Module({
@@ -35,6 +37,8 @@ import { MentionService } from './mention.service';
     SystemCommentService,
     ReBACService,
     MentionService,
+    EmbeddingService,
+    GitHubConnectorService,
   ],
   exports: [
     ActivityService,
@@ -46,6 +50,8 @@ import { MentionService } from './mention.service';
     SystemCommentService,
     ReBACService,
     MentionService,
+    EmbeddingService,
+    GitHubConnectorService,
   ],
 })
 export class SharedServicesModule {}

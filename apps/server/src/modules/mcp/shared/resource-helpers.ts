@@ -8,9 +8,7 @@
 import type { DataSource } from 'typeorm';
 import { Resource } from '../../../entities/Resource';
 import { ResourceEmbedding } from '../../../entities/ResourceEmbedding';
-import {
-  generateEmbedding, buildResourceText, textHash, isEmbeddingEnabled,
-} from '../../../services/embedding.service';
+import { EmbeddingService, buildResourceText, textHash } from '../../../services/embedding.service';
 import type { McpLogger } from '../tools/context';
 
 export function parseResourceTags(r: Resource): string[] {
@@ -46,8 +44,13 @@ export function resourceToJson(r: Resource) {
  * text's hash has changed. No-op otherwise. Safe to `.catch(() => {})` from
  * the caller.
  */
-export async function embedResource(dataSource: DataSource, logger: McpLogger, resource: Resource): Promise<void> {
-  if (!(await isEmbeddingEnabled())) return;
+export async function embedResource(
+  dataSource: DataSource,
+  logger: McpLogger,
+  embeddingService: EmbeddingService,
+  resource: Resource,
+): Promise<void> {
+  if (!(await embeddingService.isEnabled())) return;
   const text = buildResourceText({
     name: resource.name,
     description: resource.description,
@@ -61,7 +64,7 @@ export async function embedResource(dataSource: DataSource, logger: McpLogger, r
   const existing = await embRepo.findOne({ where: { resource_id: resource.id } });
   if (existing && existing.text_hash === hash) return;
 
-  const result = await generateEmbedding(text);
+  const result = await embeddingService.generateEmbedding(text);
   if (!result) return;
 
   if (existing) {

@@ -9,15 +9,13 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { Resource } from '../../../entities/Resource';
 import { ResourceEmbedding } from '../../../entities/ResourceEmbedding';
-import {
-  generateEmbedding, cosineSimilarity, isEmbeddingEnabled,
-} from '../../../services/embedding.service';
+import { cosineSimilarity } from '../../../services/embedding.service';
 import { ok, err } from '../shared/helpers';
 import { parseResourceTags, resourceToJson, embedResource } from '../shared/resource-helpers';
 import type { ToolContext } from './context';
 
 export function registerResourceTools(server: McpServer, ctx: ToolContext): void {
-  const { dataSource, logger } = ctx;
+  const { dataSource, logger, embeddingService } = ctx;
 
   server.tool(
     'list_resources',
@@ -92,7 +90,7 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
         if (board_id !== undefined) existing.board_id = board_id || null;
         if (tags !== undefined) existing.tags = JSON.stringify(tags);
         const saved = await repo.save(existing);
-        embedResource(dataSource, logger, saved).catch(() => {});
+        embedResource(dataSource, logger, embeddingService, saved).catch(() => {});
         return ok(resourceToJson(saved));
       }
 
@@ -110,7 +108,7 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
         tags: JSON.stringify(tags ?? []),
       });
       const saved = await repo.save(created);
-      embedResource(dataSource, logger, saved).catch(() => {});
+      embedResource(dataSource, logger, embeddingService, saved).catch(() => {});
       return ok(resourceToJson(saved));
     }
   );
@@ -154,8 +152,8 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
       if (resources.length === 0) return ok({ results: [], search_mode: 'none', total: 0 });
 
       // Try vector search first
-      if (await isEmbeddingEnabled()) {
-        const queryEmbedding = await generateEmbedding(query);
+      if (await embeddingService.isEnabled()) {
+        const queryEmbedding = await embeddingService.generateEmbedding(query);
         if (queryEmbedding) {
           const embRepo = dataSource.getRepository(ResourceEmbedding);
           const resourceIds = resources.map(r => r.id);
@@ -226,7 +224,7 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
       workspace_id: z.string().describe('Workspace ID'),
     },
     async ({ workspace_id }) => {
-      if (!(await isEmbeddingEnabled())) {
+      if (!(await embeddingService.isEnabled())) {
         return err('Embedding not configured. Set EMBEDDING_PROVIDER=openai and OPENAI_API_KEY env vars.');
       }
       const repo = dataSource.getRepository(Resource);
@@ -234,7 +232,7 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
       let embedded = 0;
       for (const resource of resources) {
         try {
-          await embedResource(dataSource, logger, resource);
+          await embedResource(dataSource, logger, embeddingService, resource);
           embedded++;
         } catch (e: any) {
           logger.info('MCP', `Failed to embed resource ${resource.id}: ${e.message}`);
