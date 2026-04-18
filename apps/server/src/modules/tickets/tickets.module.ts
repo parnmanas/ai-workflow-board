@@ -7,9 +7,14 @@ import { Agent } from '../../entities/Agent';
 import { UserMention } from '../../entities/UserMention';
 import { TicketsController } from './tickets.controller';
 import { AuthGuard } from '../../common/guards/auth.guard';
+import { AgentsModule } from '../agents/agents.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Ticket, BoardColumn, Comment, Agent, UserMention])],
+  imports: [
+    TypeOrmModule.forFeature([Ticket, BoardColumn, Comment, Agent, UserMention]),
+    // Exports TriggerLoopService so /api/tickets/:id/trigger can re-engage agents.
+    AgentsModule,
+  ],
   controllers: [TicketsController],
   providers: [AuthGuard],
 })

@@ -162,6 +162,12 @@ export const api = {
   moveTicket: (id: string, targetColumnId: string, targetPosition: number) =>
     request<any>(`/tickets/${id}/move`, { method: 'PATCH', body: JSON.stringify({ targetColumnId, targetPosition }) }),
 
+  triggerAgent: (id: string, role: 'assignee' | 'reporter' | 'reviewer', agent_id?: string) =>
+    request<{ trigger_id: string; ticket_id: string; agent_id: string; role: string; trigger_source: 'manual'; pushed_at: string }>(
+      `/tickets/${id}/trigger`,
+      { method: 'POST', body: JSON.stringify(agent_id ? { role, agent_id } : { role }) },
+    ),
+
   deleteTicket: (id: string) =>
     request<any>(`/tickets/${id}`, { method: 'DELETE' }),
 

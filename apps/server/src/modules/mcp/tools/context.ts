@@ -27,6 +27,7 @@ import { ApiKeyService } from '../../../services/api-key.service';
 import { LogService } from '../../../services/log.service';
 import { EmbeddingService } from '../../../services/embedding.service';
 import { GitHubConnectorService } from '../../../services/github-connector.service';
+import type { TriggerLoopService } from '../../agents/trigger-loop.service';
 
 /**
  * Minimal surface that MCP tools need from the logging subsystem.
@@ -53,6 +54,10 @@ export interface ToolContext {
   embeddingService: EmbeddingService;
   githubService: GitHubConnectorService;
   logger: McpLogger;
+  // Optional — present in NestJS integrated mode; undefined when invoked from
+  // the standalone mcp-server entry point (no DI). Tools that depend on it
+  // must degrade gracefully.
+  triggerService?: TriggerLoopService;
 }
 
 /**

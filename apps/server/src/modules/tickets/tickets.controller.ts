@@ -14,6 +14,7 @@ import { ActivityService } from '../../services/activity.service';
 import { activityEvents } from '../../services/activity.service';
 import { LogService } from '../../services/log.service';
 import { MentionService } from '../../services/mention.service';
+import { TriggerLoopService } from '../agents/trigger-loop.service';
 import { MAX_IMAGE_SIZE, MAX_IMAGES_PER_MESSAGE, ALLOWED_IMAGE_MIMETYPES } from '../../common/constants/upload';
 import { loadTicketFull } from '../mcp/shared/ticket-parsing';
 import { maxTicketPosition, maxChildPosition, resolveAgentId, shiftTicketPositions } from '../mcp/shared/ticket-helpers';
@@ -32,6 +33,7 @@ export class TicketsController {
     private readonly activityService: ActivityService,
     private readonly logService: LogService,
     private readonly mentionService: MentionService,
+    private readonly triggerLoop: TriggerLoopService,
   ) {}
 
   private resolveCreator(req: any, body: any): { created_by: string; created_by_type: string; created_by_id: string } {
@@ -256,6 +258,55 @@ export class TicketsController {
     });
 
     return res.json(updated);
+  }
+
+  /**
+   * Manually re-trigger an agent on this ticket. Used when the auto trigger
+   * fired but the agent never responded (dead subagent, missed SSE, etc.) and
+   * the human wants to punt it awake. Bypasses the 60s cooldown that the auto
+   * path honors. Body `{role, agent_id?}` — role picks which ticket slot
+   * (assignee/reporter/reviewer) to wake; an explicit agent_id overrides the
+   * role-resolved target (admin override, useful when the role isn't filled
+   * but someone specific should take it).
+   */
+  @Post('tickets/:id/trigger')
+  async triggerAgent(@Param('id') id: string, @Body() body: any, @Req() req: any, @Res() res: Response) {
+    const role = String(body?.role || '').toLowerCase();
+    if (!['assignee', 'reporter', 'reviewer'].includes(role)) {
+      return res.status(400).json({ error: 'role must be one of assignee|reporter|reviewer' });
+    }
+    const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
+    const explicitAgentId = body?.agent_id ? String(body.agent_id) : '';
+    const roleField = role === 'assignee' ? 'assignee_id'
+      : role === 'reporter' ? 'reporter_id'
+      : 'reviewer_id';
+    const targetAgentId = explicitAgentId || (ticket as any)[roleField] || '';
+    if (!targetAgentId) {
+      return res.status(400).json({
+        error: `No ${role} assigned on this ticket. Set ticket.${roleField} first, or pass agent_id in the body.`,
+      });
+    }
+    const currentUser = req.currentUser;
+    try {
+      const trigger = await this.triggerLoop.createManualTrigger(
+        id, targetAgentId, role,
+        {
+          id: currentUser?.id || '',
+          name: currentUser?.name || currentUser?.email || 'web-user',
+        },
+      );
+      return res.json({
+        trigger_id: trigger.id,
+        ticket_id: trigger.ticket_id,
+        agent_id: trigger.agent_id,
+        role: trigger.role,
+        trigger_source: 'manual',
+        pushed_at: new Date().toISOString(),
+      });
+    } catch (e: any) {
+      const status = typeof e?.status === 'number' ? e.status : 500;
+      return res.status(status).json({ error: e?.message || 'Manual trigger failed' });
+    }
   }
 
   @Delete('tickets/:id')

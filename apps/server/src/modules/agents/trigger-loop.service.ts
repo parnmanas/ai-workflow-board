@@ -204,30 +204,106 @@ export class TriggerLoopService implements OnModuleInit {
     }
   }
 
+  /**
+   * Manually (re-)trigger an agent on a ticket. Bypasses cooldown — the whole
+   * point of the feature is letting a human punt the reviewer when the auto
+   * trigger fired but the agent didn't respond, or to re-engage an agent on a
+   * stale ticket. Still writes a fresh cooldown_until for spam protection on
+   * future auto-triggers, and records trigger_source='manual' + the actor on
+   * the ActivityLog so audit trails show who kicked it.
+   */
+  async createManualTrigger(
+    ticketId: string,
+    targetAgentId: string,
+    role: string,
+    actor: { id: string; name: string },
+  ): Promise<AgentTrigger> {
+    if (!ROLE_TO_FIELD[role]) {
+      throw Object.assign(new Error(`Invalid role: ${role}`), { status: 400 });
+    }
+    if (!targetAgentId) {
+      throw Object.assign(new Error('No target agent (set ticket role agent or pass agent_id)'), { status: 400 });
+    }
+
+    const ticket = await this.dataSource.getRepository(Ticket).findOne({ where: { id: ticketId } });
+    if (!ticket) {
+      throw Object.assign(new Error('Ticket not found'), { status: 404 });
+    }
+
+    const agentRepo = this.dataSource.getRepository(Agent);
+    const agent = await agentRepo.findOne({ where: { id: targetAgentId } });
+    if (!agent) {
+      throw Object.assign(new Error(`Target agent ${targetAgentId} not found`), { status: 404 });
+    }
+
+    return this._createTriggerCore({
+      ticket,
+      agentId: targetAgentId,
+      role,
+      triggerSource: 'manual',
+      triggeredBy: actor.id,
+      actorName: `manual by ${actor.name}`,
+      skipCooldown: true,
+    });
+  }
+
   private async _createTrigger(
     ticket: Ticket, agentId: string, role: string,
     triggerSource: string, log: ActivityLog,
   ): Promise<void> {
-    // Cooldown check
-    const existing = await this.triggerRepo.findOne({
-      where: { ticket_id: ticket.id, agent_id: agentId },
-      order: { created_at: 'DESC' },
+    await this._createTriggerCore({
+      ticket,
+      agentId,
+      role,
+      triggerSource,
+      triggeredBy: log.actor_id || '',
+      actorName: 'TriggerLoop',
+      skipCooldown: false,
     });
+  }
+
+  /**
+   * Internal core shared by both auto (_createTrigger) and manual
+   * (createManualTrigger) paths. Handles cooldown, DB insert, activity log,
+   * prompt resolution (role_prompt, ticket_prompt, column_prompt), and SSE
+   * emission. Returns the persisted trigger, or null when cooldown suppressed.
+   */
+  private async _createTriggerCore(opts: {
+    ticket: Ticket;
+    agentId: string;
+    role: string;
+    triggerSource: string;
+    triggeredBy: string;
+    actorName: string;
+    skipCooldown: boolean;
+  }): Promise<AgentTrigger> {
+    const { ticket, agentId, role, triggerSource, triggeredBy, actorName, skipCooldown } = opts;
+
+    // Cooldown check — skipped for manual triggers (explicit user intent).
+    if (!skipCooldown) {
+      const existing = await this.triggerRepo.findOne({
+        where: { ticket_id: ticket.id, agent_id: agentId },
+        order: { created_at: 'DESC' },
+      });
+      const existingNow = new Date();
+      if (existing?.cooldown_until && existing.cooldown_until > existingNow) {
+        this.logService.info('MCP', 'Trigger suppressed (cooldown)', {
+          ticket_id: ticket.id, agent_id: agentId, role,
+        });
+        // Return the existing trigger so callers have a handle; downstream
+        // tolerates the "not pushed" case by checking id equality if needed.
+        return existing;
+      }
+    }
 
     const now = new Date();
-    if (existing?.cooldown_until && existing.cooldown_until > now) {
-      this.logService.info('MCP', 'Trigger suppressed (cooldown)', {
-        ticket_id: ticket.id, agent_id: agentId, role,
-      });
-      return;
-    }
 
     const trigger = await this.triggerRepo.save(
       this.triggerRepo.create({
         ticket_id: ticket.id,
         role,
         agent_id: agentId,
-        triggered_by: log.actor_id || '',
+        triggered_by: triggeredBy,
         expires_at: new Date(now.getTime() + TRIGGER_TTL_MS),
         acknowledged_at: null,
         cooldown_until: new Date(now.getTime() + COOLDOWN_MS),
@@ -241,7 +317,7 @@ export class TriggerLoopService implements OnModuleInit {
       entity_id: ticket.id,
       ticket_id: ticket.id,
       actor_id: 'system',
-      actor_name: 'TriggerLoop',
+      actor_name: actorName,
       action: 'trigger_dispatched',
       new_value: role,
       role,
@@ -301,6 +377,8 @@ export class TriggerLoopService implements OnModuleInit {
     this.logService.info('MCP', 'AgentTrigger created + pushed', {
       ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource,
     });
+
+    return trigger;
   }
 
   private async _sweepExpiredTriggers(): Promise<number> {

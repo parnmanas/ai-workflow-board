@@ -12,6 +12,7 @@ import { sessionStore } from './internal/session-store';
 import { ApiKeyService } from '../../services/api-key.service';
 import { LogService } from '../../services/log.service';
 import { AgentConnectionService } from '../agents/agent-connection.service';
+import { TriggerLoopService } from '../agents/trigger-loop.service';
 import { ActivityService, activityEvents } from '../../services/activity.service';
 import { EmbeddingService } from '../../services/embedding.service';
 import { GitHubConnectorService } from '../../services/github-connector.service';
@@ -84,6 +85,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     private readonly activityService: ActivityService,
     private readonly embeddingService: EmbeddingService,
     private readonly githubService: GitHubConnectorService,
+    private readonly triggerLoopService: TriggerLoopService,
   ) {}
 
   onModuleInit() {
@@ -161,6 +163,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       embeddingService: this.embeddingService,
       githubService: this.githubService,
       logger: this._logService,
+      triggerService: this.triggerLoopService,
     };
   }
 

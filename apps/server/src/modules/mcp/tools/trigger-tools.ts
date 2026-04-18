@@ -19,7 +19,59 @@ import { getCallerAgent } from '../shared/session-auth';
 import type { ToolContext } from './context';
 
 export function registerTriggerTools(server: McpServer, ctx: ToolContext): void {
-  const { dataSource, activityService } = ctx;
+  const { dataSource, activityService, triggerService } = ctx;
+
+  server.tool(
+    'manual_trigger',
+    'Manually (re-)trigger an agent on a ticket. Use when the automatic trigger ' +
+    'fired but the agent never reacted, or to wake an agent on a stale ticket. ' +
+    'Bypasses the 60s cooldown (still sets a fresh one for future auto-triggers). ' +
+    'Either specify a role — the ticket\'s assignee_id/reporter_id/reviewer_id ' +
+    'is resolved accordingly — or pass agent_id explicitly to override.',
+    {
+      ticket_id: z.string().describe('Ticket ID to trigger on'),
+      role: z.enum(['assignee', 'reporter', 'reviewer']).describe('Which role slot to wake'),
+      agent_id: z.string().optional().describe('Explicit target agent (overrides the role slot lookup)'),
+    },
+    async ({ ticket_id, role, agent_id }, extra: { sessionId?: string }) => {
+      if (!triggerService) {
+        return err('manual_trigger is unavailable in standalone MCP server mode — use the NestJS-integrated server.');
+      }
+      const ticket = await dataSource.getRepository(Ticket).findOne({ where: { id: ticket_id } });
+      if (!ticket) return err('Ticket not found');
+
+      const roleField = role === 'assignee' ? 'assignee_id'
+        : role === 'reporter' ? 'reporter_id'
+        : 'reviewer_id';
+      const targetAgentId = agent_id || ((ticket as any)[roleField] || '');
+      if (!targetAgentId) {
+        return err(`No ${role} assigned on ticket ${ticket_id}. Set ticket.${roleField} first, or pass agent_id.`);
+      }
+
+      const caller = getCallerAgent(extra);
+      try {
+        const trigger = await triggerService.createManualTrigger(
+          ticket_id,
+          targetAgentId,
+          role,
+          {
+            id: caller?.agentId || '',
+            name: caller?.agentName || 'mcp-caller',
+          },
+        );
+        return ok({
+          trigger_id: trigger.id,
+          ticket_id: trigger.ticket_id,
+          agent_id: trigger.agent_id,
+          role: trigger.role,
+          trigger_source: 'manual',
+          pushed_at: new Date().toISOString(),
+        });
+      } catch (e: any) {
+        return err(e?.message || 'Manual trigger failed');
+      }
+    }
+  );
 
   server.tool(
     'get_pending_triggers',
