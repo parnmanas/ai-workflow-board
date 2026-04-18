@@ -5,6 +5,7 @@ import { Repository } from 'typeorm';
 import { SystemSetting } from '../../entities/SystemSetting';
 import { AdminGuard } from '../../common/guards/admin.guard';
 import { encrypt, decrypt } from '../../services/encryption.service';
+import { maskSecret } from '../../common/mask';
 
 const SETTING_DEFINITIONS: Record<string, { description: string; is_secret: boolean; default_value: string }> = {
   'embedding.provider': { description: 'Embedding provider (openai or none)', is_secret: false, default_value: 'none' },
@@ -79,12 +80,6 @@ export class SettingsController {
 
     return res.json({ success: true, updated: results });
   }
-}
-
-function maskSecret(value: string): string {
-  if (!value) return '';
-  if (value.length <= 8) return '••••••••';
-  return value.slice(0, 4) + '••••' + value.slice(-4);
 }
 
 function isMasked(value: string): boolean {

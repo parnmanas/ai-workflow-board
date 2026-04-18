@@ -7,6 +7,7 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { PERMISSIONS } from '../../common/types/permissions';
 import { encrypt, decrypt } from '../../services/encryption.service';
+import { maskSecret } from '../../common/mask';
 
 const PROVIDER_FIELDS: Record<string, { label: string; fields: string[] }> = {
   github: { label: 'GitHub', fields: ['token'] },
@@ -20,9 +21,7 @@ function maskCredentialData(decryptedJson: string): Record<string, string> {
     const data = JSON.parse(decryptedJson);
     const masked: Record<string, string> = {};
     for (const [key, value] of Object.entries(data)) {
-      const v = String(value);
-      if (!v) { masked[key] = ''; continue; }
-      masked[key] = v.length <= 8 ? '••••••••' : v.slice(0, 4) + '••••' + v.slice(-4);
+      masked[key] = maskSecret(String(value));
     }
     return masked;
   } catch {
