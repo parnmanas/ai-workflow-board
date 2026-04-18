@@ -21,6 +21,7 @@ function renderMentionPill(
   display: string,
   variant: 'agent' | 'user' | 'role',
   key: number,
+  raw?: string,
 ): React.ReactNode {
   // agent = stronger tint; user/role = softer
   const bgColor = variant === 'agent' ? 'rgba(99,102,241,0.15)' : 'rgba(99,102,241,0.12)';
@@ -29,6 +30,10 @@ function renderMentionPill(
     <span
       key={key}
       aria-label={`Mention: ${display}`}
+      // data-mention-raw lets handleMentionAwareCopy swap the visible "@Name"
+      // back to the structured `@[type:id|Name]` token on copy, so pasted
+      // text is round-trippable through MentionTextarea.
+      data-mention-raw={raw}
       style={{
         background: bgColor,
         color: textColor,
@@ -40,6 +45,34 @@ function renderMentionPill(
       {display}
     </span>
   );
+}
+
+/**
+ * Clipboard handler for any container that renders mention pills via
+ * `renderMarkdown`. Rewrites selected pill spans to their structured
+ * `@[type:id|Name]` form so users pasting a copied comment/message
+ * preserve dispatchable mention tokens instead of losing them to plain
+ * `@Name` text.
+ *
+ * No-op when the selection contains no pill spans — we only preventDefault
+ * and rewrite when a swap is actually needed, so plain-text copy stays
+ * plain.
+ */
+export function handleMentionAwareCopy(e: React.ClipboardEvent<HTMLElement>): void {
+  const selection = typeof window !== 'undefined' ? window.getSelection() : null;
+  if (!selection || selection.rangeCount === 0) return;
+  const range = selection.getRangeAt(0);
+  const fragment = range.cloneContents();
+  const host = document.createElement('div');
+  host.appendChild(fragment);
+  const pills = host.querySelectorAll('[data-mention-raw]');
+  if (pills.length === 0) return;
+  pills.forEach((el) => {
+    const raw = el.getAttribute('data-mention-raw');
+    if (raw) el.textContent = raw;
+  });
+  e.clipboardData.setData('text/plain', host.innerText);
+  e.preventDefault();
 }
 
 export function renderMarkdown(text: string, participants?: MentionParticipant[]): React.ReactNode[] {
@@ -92,7 +125,7 @@ export function renderMarkdown(text: string, participants?: MentionParticipant[]
 
       for (const sp of structuredParts) {
         if (sp.pill) {
-          nodes.push(renderMentionPill(sp.pill.display, sp.pill.variant, keyIdx++));
+          nodes.push(renderMentionPill(sp.pill.display, sp.pill.variant, keyIdx++, sp.token));
           continue;
         }
 

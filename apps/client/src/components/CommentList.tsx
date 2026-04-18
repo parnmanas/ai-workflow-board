@@ -2,7 +2,7 @@ import React, { useRef } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Comment } from '../types';
 import { tokens } from '../tokens';
-import { renderMarkdown } from './chat/utils/markdown';
+import { renderMarkdown, handleMentionAwareCopy } from './chat/utils/markdown';
 
 interface CommentListProps {
   comments: Comment[];
@@ -80,11 +80,14 @@ export default function CommentList({ comments, onImagePreview }: CommentListPro
               </div>
               {/* Comment content — renderMarkdown keeps XSS-safe JSX construction (T-05-02-01)
                  and pills @-mentions (both structured @[type:id|name] tokens and legacy @name). */}
-              <p style={{
-                fontSize: isSystem ? '12px' : '13px',
-                color: isSystem ? tokens.colors.badgeSystemText : tokens.colors.textDisabled,
-                lineHeight: 1.5, whiteSpace: 'pre-wrap', margin: 0,
-              }}>{renderMarkdown(c.content)}</p>
+              <p
+                onCopy={handleMentionAwareCopy}
+                style={{
+                  fontSize: isSystem ? '12px' : '13px',
+                  color: isSystem ? tokens.colors.badgeSystemText : tokens.colors.textDisabled,
+                  lineHeight: 1.5, whiteSpace: 'pre-wrap', margin: 0,
+                }}
+              >{renderMarkdown(c.content)}</p>
               {images.length > 0 && (
                 <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
                   {images.map((img, idx) => (

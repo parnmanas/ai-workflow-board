@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { tokens } from '../../tokens';
 import type { ChatRoomMessageItem } from '../../types';
 import { formatClockTime, daySeparatorLabel, sameDay } from './utils/time';
-import { renderMarkdown, type MentionParticipant } from './utils/markdown';
+import { renderMarkdown, handleMentionAwareCopy, type MentionParticipant } from './utils/markdown';
 
 // ─── Style constants (mirror ChatPage.tsx COLORS) ────────────────────────────
 
@@ -167,6 +167,7 @@ export default function MessageList({ messages, participantCount, participants =
                   ? '12px 12px 2px 12px'
                   : '12px 12px 12px 2px',
             }}
+            onCopy={handleMentionAwareCopy}
           >
             {renderMarkdown(msg.content, participants)}
             {/* Inline image thumbnails */}
