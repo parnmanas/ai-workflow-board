@@ -4,6 +4,7 @@ import type { Credential } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 import { Button, Input, Modal, Badge, Card } from '../common';
+import { relativeTime } from '../../utils/time';
 
 const PROVIDERS = [
   { value: 'github', label: 'GitHub', icon: 'G' },
@@ -18,21 +19,6 @@ const PROVIDER_FIELD_LABELS: Record<string, Record<string, { label: string; plac
   openai: { api_key: { label: 'API Key', placeholder: 'sk-...' } },
   custom: { token: { label: 'Token / Secret', placeholder: 'Enter secret value' } },
 };
-
-function relativeTime(iso: string): string {
-  if (!iso) return '';
-  const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return '';
-  const diff = Math.max(0, Date.now() - then);
-  const sec = Math.floor(diff / 1000);
-  if (sec < 45) return 'just now';
-  const min = Math.floor(sec / 60);
-  if (min < 60) return `${min}m ago`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr}h ago`;
-  const day = Math.floor(hr / 24);
-  return `${day}d ago`;
-}
 
 export default function CredentialManager({ workspaceId }: { workspaceId?: string }) {
   const { showToast } = useToast();

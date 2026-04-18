@@ -30,3 +30,6 @@ dist/
 # OS
 .DS_Store
 Thumbs.db
+
+# graphify output (run from repo root, sometimes spills here)
+graphify-out/
