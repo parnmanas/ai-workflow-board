@@ -28,7 +28,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { initDb, AppDataSource } from './db';
-import { registerAllTools, createStandaloneContext } from './modules/mcp/tools';
+import { createStandaloneContext } from './modules/mcp/tools';
+import { createMcpServerForContext } from './modules/mcp/internal/create-mcp-server';
 import { expressToWebRequest, sendWebResponse } from './modules/mcp/internal/express-bridge';
 import { sessionStore } from './modules/mcp/internal/session-store';
 import { setEmbeddingDataSource } from './services/embedding.service';
@@ -43,12 +44,7 @@ function mcpLog(...args: unknown[]) {
 // ─── Create & configure MCP server ─────────────────────────
 
 function createMcpServer(): McpServer {
-  const server = new McpServer(
-    { name: 'ai-workflow-board', version: '1.0.0' },
-    { capabilities: { experimental: { 'awb/schemaVersion': { version: 2 } } } },
-  );
-  registerAllTools(server, createStandaloneContext(AppDataSource));
-  return server;
+  return createMcpServerForContext(createStandaloneContext(AppDataSource));
 }
 
 // ─── STDIO mode ─────────────────────────────────────────────

@@ -75,18 +75,18 @@ export function MentionTextarea({
       setAnchorRect(null);
       return;
     }
-    const update = () => {
+    const syncAnchorRect = () => {
       const el = inputRef.current;
       if (!el) return;
       const r = el.getBoundingClientRect();
       setAnchorRect({ top: r.top, left: r.left, width: r.width });
     };
-    update();
-    window.addEventListener('scroll', update, true); // capture scroll from ancestors too
-    window.addEventListener('resize', update);
+    syncAnchorRect();
+    window.addEventListener('scroll', syncAnchorRect, true); // capture scroll from ancestors too
+    window.addEventListener('resize', syncAnchorRect);
     return () => {
-      window.removeEventListener('scroll', update, true);
-      window.removeEventListener('resize', update);
+      window.removeEventListener('scroll', syncAnchorRect, true);
+      window.removeEventListener('resize', syncAnchorRect);
     };
   }, [open]);
 

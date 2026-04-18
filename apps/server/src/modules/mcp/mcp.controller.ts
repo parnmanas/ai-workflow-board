@@ -5,7 +5,8 @@ import { Request, Response } from 'express';
 import { randomUUID } from 'crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
-import { registerAllTools, type ToolContext } from './tools';
+import { type ToolContext } from './tools';
+import { createMcpServerForContext } from './internal/create-mcp-server';
 import { expressToWebRequest, sendWebResponse } from './internal/express-bridge';
 import { sessionStore } from './internal/session-store';
 import { ApiKeyService } from '../../services/api-key.service';
@@ -165,12 +166,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
   }
 
   private createMcpServer(): McpServer {
-    const server = new McpServer(
-      { name: 'ai-workflow-board', version: '1.0.0' },
-      { capabilities: { experimental: { 'awb/schemaVersion': { version: 2 } } } },
-    );
-    registerAllTools(server, this.buildToolContext());
-    return server;
+    return createMcpServerForContext(this.buildToolContext());
   }
 
   private async authenticate(req: Request, res: Response): Promise<McpAuthInfo | null> {
