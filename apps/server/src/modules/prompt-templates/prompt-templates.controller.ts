@@ -6,6 +6,7 @@ import { PromptTemplate } from '../../entities/PromptTemplate';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { PERMISSIONS } from '../../common/types/permissions';
+import { findOrFail } from '../../common/find-or-fail';
 
 @Controller('api/prompt-templates')
 @UseGuards(PermissionGuard)
@@ -44,8 +45,7 @@ export class PromptTemplatesController {
     if (!workspaceId) {
       return res.status(400).json({ error: 'workspace_id query parameter is required' });
     }
-    const tpl = await this.templateRepo.findOne({ where: { id, workspace_id: workspaceId } });
-    if (!tpl) return res.status(404).json({ error: 'Template not found in workspace' });
+    const tpl = await findOrFail(this.templateRepo, { where: { id, workspace_id: workspaceId } }, 'Template not found in workspace');
     return res.json(tpl);
   }
 
@@ -66,8 +66,7 @@ export class PromptTemplatesController {
   async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     const { workspace_id } = body;
     if (!workspace_id) return res.status(400).json({ error: 'workspace_id is required in body' });
-    const tpl = await this.templateRepo.findOne({ where: { id, workspace_id } });
-    if (!tpl) return res.status(404).json({ error: 'Template not found in workspace' });
+    const tpl = await findOrFail(this.templateRepo, { where: { id, workspace_id } }, 'Template not found in workspace');
 
     if (body.name !== undefined) {
       if (!body.name || !body.name.trim()) return res.status(400).json({ error: 'name cannot be empty' });
@@ -91,8 +90,7 @@ export class PromptTemplatesController {
     @Res() res: Response,
   ) {
     if (!workspaceId) return res.status(400).json({ error: 'workspace_id query parameter is required' });
-    const tpl = await this.templateRepo.findOne({ where: { id, workspace_id: workspaceId } });
-    if (!tpl) return res.status(404).json({ error: 'Template not found in workspace' });
+    await findOrFail(this.templateRepo, { where: { id, workspace_id: workspaceId } }, 'Template not found in workspace');
     await this.templateRepo.delete({ id, workspace_id: workspaceId });
     return res.json({ success: true, id });
   }

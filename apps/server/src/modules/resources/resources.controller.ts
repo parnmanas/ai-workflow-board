@@ -6,6 +6,7 @@ import { Resource } from '../../entities/Resource';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { PERMISSIONS } from '../../common/types/permissions';
+import { findOrFail } from '../../common/find-or-fail';
 
 @Controller('api/resources')
 @UseGuards(PermissionGuard)
@@ -41,8 +42,7 @@ export class ResourcesController {
     @Param('id') id: string,
     @Res() res: Response,
   ) {
-    const resource = await this.resourceRepo.findOne({ where: { id } });
-    if (!resource) return res.status(404).json({ error: 'Resource not found' });
+    const resource = await findOrFail(this.resourceRepo, { where: { id } }, 'Resource not found');
     const parsed = {
       ...resource,
       tags: (() => { try { return JSON.parse(resource.tags || '[]'); } catch { return []; } })(),
@@ -86,8 +86,7 @@ export class ResourcesController {
   async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     const { workspace_id } = body;
     if (!workspace_id) return res.status(400).json({ error: 'workspace_id is required in body' });
-    const resource = await this.resourceRepo.findOne({ where: { id, workspace_id } });
-    if (!resource) return res.status(404).json({ error: 'Resource not found in workspace' });
+    const resource = await findOrFail(this.resourceRepo, { where: { id, workspace_id } }, 'Resource not found in workspace');
 
     if (body.name !== undefined) {
       if (!body.name || !body.name.trim()) return res.status(400).json({ error: 'name cannot be empty' });
@@ -118,8 +117,7 @@ export class ResourcesController {
     @Res() res: Response,
   ) {
     if (!workspaceId) return res.status(400).json({ error: 'workspace_id query parameter is required' });
-    const resource = await this.resourceRepo.findOne({ where: { id, workspace_id: workspaceId } });
-    if (!resource) return res.status(404).json({ error: 'Resource not found in workspace' });
+    await findOrFail(this.resourceRepo, { where: { id, workspace_id: workspaceId } }, 'Resource not found in workspace');
     await this.resourceRepo.delete({ id, workspace_id: workspaceId });
     return res.json({ success: true, id });
   }

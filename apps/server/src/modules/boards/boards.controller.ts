@@ -7,6 +7,7 @@ import { BoardColumn } from '../../entities/BoardColumn';
 import { Ticket } from '../../entities/Ticket';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { DEFAULT_COLUMNS } from '../../database/database.module';
+import { findOrFail } from '../../common/find-or-fail';
 
 @Controller('api/boards')
 @UseGuards(AuthGuard)
@@ -47,8 +48,7 @@ export class BoardsController {
 
   @Get(':id')
   async get(@Param('id') id: string, @Res() res: Response) {
-    const board = await this.boardRepo.findOne({ where: { id } });
-    if (!board) return res.status(404).json({ error: 'Board not found' });
+    const board = await findOrFail(this.boardRepo, { where: { id } }, 'Board not found');
 
     const columns = await this.colRepo.find({ where: { board_id: board.id }, order: { position: 'ASC' } });
     const columnsWithTickets = await Promise.all(
@@ -83,8 +83,7 @@ export class BoardsController {
 
   @Patch(':id')
   async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
-    const board = await this.boardRepo.findOne({ where: { id } });
-    if (!board) return res.status(404).json({ error: 'Board not found' });
+    const board = await findOrFail(this.boardRepo, { where: { id } }, 'Board not found');
 
     const { name, description, routing_config, column_prompts } = body;
     if (name !== undefined) board.name = name;
@@ -108,8 +107,7 @@ export class BoardsController {
 
   @Post(':id/archive')
   async archive(@Param('id') id: string, @Res() res: Response) {
-    const board = await this.boardRepo.findOne({ where: { id } });
-    if (!board) return res.status(404).json({ error: 'Board not found' });
+    const board = await findOrFail(this.boardRepo, { where: { id } }, 'Board not found');
     board.archived_at = new Date();
     await this.boardRepo.save(board);
     return res.json(board);
@@ -117,8 +115,7 @@ export class BoardsController {
 
   @Post(':id/restore')
   async restore(@Param('id') id: string, @Res() res: Response) {
-    const board = await this.boardRepo.findOne({ where: { id } });
-    if (!board) return res.status(404).json({ error: 'Board not found' });
+    const board = await findOrFail(this.boardRepo, { where: { id } }, 'Board not found');
     board.archived_at = null;
     await this.boardRepo.save(board);
     return res.json(board);

@@ -8,6 +8,7 @@ import { AuthGuard } from '../../common/guards/auth.guard';
 import { AdminGuard } from '../../common/guards/admin.guard';
 import { ReBACService } from '../../services/rebac.service';
 import { ActivityService } from '../../services/activity.service';
+import { findOrFail } from '../../common/find-or-fail';
 
 @Controller('api/admin/pending-users')
 @UseGuards(AuthGuard, AdminGuard)
@@ -45,8 +46,7 @@ export class PendingUsersController {
 
   @Post(':id/approve')
   async approve(@Param('id') id: string, @Res() res: Response) {
-    const user = await this.userRepo.findOne({ where: { id } });
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    const user = await findOrFail(this.userRepo, { where: { id } }, 'User not found');
 
     if ((user as any).status !== 'pending') {
       return res.status(400).json({ error: 'User is not in pending status' });
@@ -60,8 +60,7 @@ export class PendingUsersController {
 
   @Post(':id/reject')
   async reject(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
-    const user = await this.userRepo.findOne({ where: { id } });
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    const user = await findOrFail(this.userRepo, { where: { id } }, 'User not found');
 
     (user as any).status = 'rejected';
     await this.userRepo.save(user);
@@ -74,11 +73,8 @@ export class PendingUsersController {
     const { workspace_id, relation = 'member' } = body;
     if (!workspace_id) return res.status(400).json({ error: 'workspace_id is required' });
 
-    const user = await this.userRepo.findOne({ where: { id } });
-    if (!user) return res.status(404).json({ error: 'User not found' });
-
-    const workspace = await this.workspaceRepo.findOne({ where: { id: workspace_id } });
-    if (!workspace) return res.status(404).json({ error: 'Workspace not found' });
+    await findOrFail(this.userRepo, { where: { id } }, 'User not found');
+    await findOrFail(this.workspaceRepo, { where: { id: workspace_id } }, 'Workspace not found');
 
     await this.rebacService.grant(
       { type: 'user', id },

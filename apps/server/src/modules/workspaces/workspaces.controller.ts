@@ -11,6 +11,7 @@ import { Agent } from '../../entities/Agent';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { DEFAULT_COLUMNS } from '../../database/database.module';
 import { ReBACService } from '../../services/rebac.service';
+import { findOrFail } from '../../common/find-or-fail';
 
 @Controller('api/workspaces')
 @UseGuards(AuthGuard)
@@ -53,8 +54,7 @@ export class WorkspacesController {
 
   @Get(':id')
   async get(@Param('id') id: string, @Res() res: Response) {
-    const ws = await this.wsRepo.findOne({ where: { id } });
-    if (!ws) return res.status(404).json({ error: 'Workspace not found' });
+    const ws = await findOrFail(this.wsRepo, { where: { id } }, 'Workspace not found');
 
     const boards = await this.boardRepo.find({ where: { workspace_id: id }, order: { created_at: 'ASC' } });
     const boardsFull = await Promise.all(boards.map(async board => {
@@ -86,8 +86,7 @@ export class WorkspacesController {
 
   @Patch(':id')
   async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
-    const ws = await this.wsRepo.findOne({ where: { id } });
-    if (!ws) return res.status(404).json({ error: 'Workspace not found' });
+    const ws = await findOrFail(this.wsRepo, { where: { id } }, 'Workspace not found');
 
     const { name, description } = body;
     if (name !== undefined) ws.name = name;
@@ -99,8 +98,7 @@ export class WorkspacesController {
 
   @Delete(':id')
   async delete(@Param('id') id: string, @Res() res: Response) {
-    const ws = await this.wsRepo.findOne({ where: { id } });
-    if (!ws) return res.status(404).json({ error: 'Workspace not found' });
+    const ws = await findOrFail(this.wsRepo, { where: { id } }, 'Workspace not found');
 
     const count = await this.wsRepo.count();
     if (count <= 1) return res.status(400).json({ error: 'Cannot delete the last workspace' });
@@ -113,8 +111,7 @@ export class WorkspacesController {
 
   @Get(':id/members')
   async listMembers(@Param('id') id: string, @Res() res: Response) {
-    const ws = await this.wsRepo.findOne({ where: { id } });
-    if (!ws) return res.status(404).json({ error: 'Workspace not found' });
+    await findOrFail(this.wsRepo, { where: { id } }, 'Workspace not found');
 
     const [members, owners] = await Promise.all([
       this.rebacService.listSubjects({ type: 'workspace', id }, 'member'),
@@ -150,10 +147,8 @@ export class WorkspacesController {
       return res.status(400).json({ error: 'relation must be member or owner' });
     }
 
-    const ws = await this.wsRepo.findOne({ where: { id } });
-    if (!ws) return res.status(404).json({ error: 'Workspace not found' });
-    const user = await this.userRepo.findOne({ where: { id: user_id } });
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    await findOrFail(this.wsRepo, { where: { id } }, 'Workspace not found');
+    await findOrFail(this.userRepo, { where: { id: user_id } }, 'User not found');
 
     await this.rebacService.grant({ type: 'user', id: user_id }, relation, { type: 'workspace', id });
     return res.status(201).json({ success: true, user_id, relation, workspace_id: id });
@@ -195,8 +190,7 @@ export class WorkspacesController {
     @Query('ticket_id') ticketId: string | undefined,
     @Res() res: Response,
   ) {
-    const ws = await this.wsRepo.findOne({ where: { id } });
-    if (!ws) return res.status(404).json({ error: 'Workspace not found' });
+    await findOrFail(this.wsRepo, { where: { id } }, 'Workspace not found');
 
     const [members, owners, agents] = await Promise.all([
       this.rebacService.listSubjects({ type: 'workspace', id }, 'member'),

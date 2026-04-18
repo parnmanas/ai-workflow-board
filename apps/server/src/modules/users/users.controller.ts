@@ -9,6 +9,7 @@ import { PERMISSIONS } from '../../common/types/permissions';
 import { resolvePermissions } from '../../common/types/permissions';
 import { AuthService } from '../../services/auth.service';
 import { ReBACService } from '../../services/rebac.service';
+import { findOrFail } from '../../common/find-or-fail';
 
 @Controller('api/users')
 @UseGuards(PermissionGuard)
@@ -50,8 +51,7 @@ export class UsersController {
 
   @Get(':id')
   async get(@Param('id') id: string, @Res() res: Response) {
-    const user = await this.userRepo.findOne({ where: { id } });
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    const user = await findOrFail(this.userRepo, { where: { id } }, 'User not found');
     const customPerms = user.permissions ? JSON.parse(user.permissions || '[]') : [];
     return res.json({ ...user, resolved_permissions: resolvePermissions(user.role, customPerms) });
   }
@@ -78,8 +78,7 @@ export class UsersController {
 
   @Patch(':id')
   async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
-    const user = await this.userRepo.findOne({ where: { id } });
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    const user = await findOrFail(this.userRepo, { where: { id } }, 'User not found');
 
     const { name, email, avatar_url, role, status, discord_user_id, password, permissions } = body;
     if (name !== undefined) user.name = name;
@@ -103,8 +102,7 @@ export class UsersController {
 
   @Delete(':id')
   async delete(@Param('id') id: string, @Res() res: Response) {
-    const user = await this.userRepo.findOne({ where: { id } });
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    const user = await findOrFail(this.userRepo, { where: { id } }, 'User not found');
     await this.userRepo.delete(user.id);
     return res.json({ success: true });
   }

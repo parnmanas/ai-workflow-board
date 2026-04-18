@@ -20,6 +20,7 @@ import {
   maxChildPosition,
   shiftTicketPositions,
 } from '../mcp/shared/ticket-helpers';
+import { findOrFail } from '../../common/find-or-fail';
 
 @Controller('api/agent')
 @UseGuards(AgentAuthGuard)
@@ -43,8 +44,7 @@ export class AgentApiController {
   @Get('board-summary/:boardId')
   async boardSummary(@Param('boardId') boardId: string, @Res() res: Response) {
     const id = boardId || '1';
-    const board = await this.boardRepo.findOne({ where: { id } });
-    if (!board) return res.status(404).json({ error: 'Board not found' });
+    const board = await findOrFail(this.boardRepo, { where: { id } }, 'Board not found');
 
     const columns = await this.colRepo.find({ where: { board_id: board.id }, order: { position: 'ASC' } });
     const summary = {
@@ -109,8 +109,7 @@ export class AgentApiController {
     const { boardId, ticketId, toColumn, position } = body;
     if (!ticketId || !toColumn) return res.status(400).json({ error: 'ticketId and toColumn are required' });
 
-    const ticket = await this.ticketRepo.findOne({ where: { id: ticketId } });
-    if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+    const ticket = await findOrFail(this.ticketRepo, { where: { id: ticketId } }, 'Ticket not found');
 
     const col = await findColumnByName(this.dataSource, boardId, toColumn);
     if (!col) return res.status(404).json({ error: `Column "${toColumn}" not found` });

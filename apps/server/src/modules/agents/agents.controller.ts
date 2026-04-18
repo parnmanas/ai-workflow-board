@@ -13,6 +13,7 @@ import { RequirePermission } from '../../common/decorators/require-permission.de
 import { CurrentWorkspaceId } from '../../common/decorators/current-workspace.decorator';
 import { PERMISSIONS, hasPermission } from '../../common/types/permissions';
 import { AgentStatusService } from './agent-status.service';
+import { findOrFail } from '../../common/find-or-fail';
 
 @Controller('api/agents')
 @UseGuards(PermissionGuard, WorkspaceGuard)
@@ -98,10 +99,9 @@ export class AgentsController {
     @Res() res: Response,
   ) {
     // Verify agent belongs to requesting workspace before returning activity
-    const agent = await this.agentRepo.findOne({
+    await findOrFail(this.agentRepo, {
       where: { id, ...(workspaceId ? { workspace_id: workspaceId } : {}) },
-    });
-    if (!agent) return res.status(404).json({ error: 'Agent not found' });
+    }, 'Agent not found');
 
     const limit = Math.min(Math.max(parseInt(limitRaw) || 50, 1), 200);
     const logs = await this.dataSource.getRepository(ActivityLog).find({
@@ -115,11 +115,10 @@ export class AgentsController {
   @Get(':id')
   @RequirePermission(PERMISSIONS.VIEW_ACTIVITY)
   async get(@Param('id') id: string, @Req() req: Request, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
-    const agent = await this.agentRepo.findOne({
+    const agent = await findOrFail(this.agentRepo, {
       where: { id, ...(workspaceId ? { workspace_id: workspaceId } : {}) },
       relations: ['channel_identities'],
-    });
-    if (!agent) return res.status(404).json({ error: 'Agent not found' });
+    }, 'Agent not found');
 
     // Phase 3 D-44 — role_prompt is admin-gated. Non-admin viewers receive a redacted payload.
     // req.currentUser is populated by AuthGuard (runs before PermissionGuard) and cannot be spoofed from headers.
@@ -166,10 +165,9 @@ export class AgentsController {
 
   @Patch(':id')
   async update(@Param('id') id: string, @Body() body: any, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
-    const agent = await this.agentRepo.findOne({
+    const agent = await findOrFail(this.agentRepo, {
       where: { id, ...(workspaceId ? { workspace_id: workspaceId } : {}) },
-    });
-    if (!agent) return res.status(404).json({ error: 'Agent not found' });
+    }, 'Agent not found');
 
     const { name, description, type, avatar_url, is_active, role_prompt, role_prompt_meta } = body;
     // Phase 1 role prompt fields (D-14 / ROLE-02)
@@ -183,18 +181,16 @@ export class AgentsController {
 
   @Delete(':id')
   async delete(@Param('id') id: string, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
-    const agent = await this.agentRepo.findOne({
+    const agent = await findOrFail(this.agentRepo, {
       where: { id, ...(workspaceId ? { workspace_id: workspaceId } : {}) },
-    });
-    if (!agent) return res.status(404).json({ error: 'Agent not found' });
+    }, 'Agent not found');
     await this.agentRepo.delete(agent.id);
     return res.json({ success: true });
   }
 
   @Post(':id/identities')
   async addIdentity(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
-    const agent = await this.agentRepo.findOne({ where: { id } });
-    if (!agent) return res.status(404).json({ error: 'Agent not found' });
+    await findOrFail(this.agentRepo, { where: { id } }, 'Agent not found');
 
     const { channel_type, channel_external_id, display_name = '' } = body;
     if (!channel_type || !channel_external_id) {
@@ -209,8 +205,7 @@ export class AgentsController {
 
   @Patch('identities/:identityId')
   async updateIdentity(@Param('identityId') identityId: string, @Body() body: any, @Res() res: Response) {
-    const identity = await this.identityRepo.findOne({ where: { id: identityId } });
-    if (!identity) return res.status(404).json({ error: 'Identity not found' });
+    const identity = await findOrFail(this.identityRepo, { where: { id: identityId } }, 'Identity not found');
 
     const { channel_type, channel_external_id, display_name } = body;
     if (channel_type !== undefined) identity.channel_type = channel_type;
@@ -223,8 +218,7 @@ export class AgentsController {
 
   @Delete('identities/:identityId')
   async deleteIdentity(@Param('identityId') identityId: string, @Res() res: Response) {
-    const identity = await this.identityRepo.findOne({ where: { id: identityId } });
-    if (!identity) return res.status(404).json({ error: 'Identity not found' });
+    const identity = await findOrFail(this.identityRepo, { where: { id: identityId } }, 'Identity not found');
     await this.identityRepo.delete(identity.id);
     return res.json({ success: true });
   }

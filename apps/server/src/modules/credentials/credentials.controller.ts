@@ -8,6 +8,7 @@ import { RequirePermission } from '../../common/decorators/require-permission.de
 import { PERMISSIONS } from '../../common/types/permissions';
 import { encrypt, decrypt } from '../../services/encryption.service';
 import { maskSecret } from '../../common/mask';
+import { findOrFail } from '../../common/find-or-fail';
 
 const PROVIDER_FIELDS: Record<string, { label: string; fields: string[] }> = {
   github: { label: 'GitHub', fields: ['token'] },
@@ -76,8 +77,7 @@ export class CredentialsController {
     @Res() res: Response,
   ) {
     if (!workspaceId) return res.status(400).json({ error: 'workspace_id is required' });
-    const cred = await this.credRepo.findOne({ where: { id, workspace_id: workspaceId } });
-    if (!cred) return res.status(404).json({ error: 'Credential not found' });
+    const cred = await findOrFail(this.credRepo, { where: { id, workspace_id: workspaceId } }, 'Credential not found');
     return res.json({
       id: cred.id,
       workspace_id: cred.workspace_id,
@@ -123,8 +123,7 @@ export class CredentialsController {
   async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     const { workspace_id } = body;
     if (!workspace_id) return res.status(400).json({ error: 'workspace_id is required' });
-    const cred = await this.credRepo.findOne({ where: { id, workspace_id } });
-    if (!cred) return res.status(404).json({ error: 'Credential not found' });
+    const cred = await findOrFail(this.credRepo, { where: { id, workspace_id } }, 'Credential not found');
 
     if (body.name !== undefined) {
       if (!body.name?.trim()) return res.status(400).json({ error: 'name cannot be empty' });
@@ -162,8 +161,7 @@ export class CredentialsController {
     @Res() res: Response,
   ) {
     if (!workspaceId) return res.status(400).json({ error: 'workspace_id is required' });
-    const cred = await this.credRepo.findOne({ where: { id, workspace_id: workspaceId } });
-    if (!cred) return res.status(404).json({ error: 'Credential not found' });
+    await findOrFail(this.credRepo, { where: { id, workspace_id: workspaceId } }, 'Credential not found');
     await this.credRepo.delete({ id, workspace_id: workspaceId });
     return res.json({ success: true, id });
   }

@@ -17,6 +17,7 @@ import { MentionService } from '../../services/mention.service';
 import { MAX_IMAGE_SIZE, MAX_IMAGES_PER_MESSAGE, ALLOWED_IMAGE_MIMETYPES } from '../../common/constants/upload';
 import { loadTicketFull } from '../mcp/shared/ticket-parsing';
 import { maxTicketPosition, maxChildPosition, resolveAgentId, shiftTicketPositions } from '../mcp/shared/ticket-helpers';
+import { findOrFail } from '../../common/find-or-fail';
 
 @Controller('api')
 @UseGuards(AuthGuard, WorkspaceGuard)
@@ -59,8 +60,7 @@ export class TicketsController {
     const { title, description = '', priority = 'medium', assignee = '', reporter = '', assignee_id = '', reporter_id = '', labels = [], channel_ids = [] } = body;
     if (!title) return res.status(400).json({ error: 'title is required' });
 
-    const col = await this.colRepo.findOne({ where: { id: columnId } });
-    if (!col) return res.status(404).json({ error: 'Column not found' });
+    await findOrFail(this.colRepo, { where: { id: columnId } }, 'Column not found');
 
     const resolvedAssigneeId = await resolveAgentId(this.dataSource, assignee_id, assignee);
     const resolvedReporterId = await resolveAgentId(this.dataSource, reporter_id, reporter);
@@ -85,8 +85,7 @@ export class TicketsController {
 
   @Post('tickets/:parentId/children')
   async createChild(@Param('parentId') parentId: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
-    const parent = await this.ticketRepo.findOne({ where: { id: parentId } });
-    if (!parent) return res.status(404).json({ error: 'Parent ticket not found' });
+    const parent = await findOrFail(this.ticketRepo, { where: { id: parentId } }, 'Parent ticket not found');
 
     const childDepth = parent.depth + 1;
     if (childDepth > 2) return res.status(400).json({ error: 'Maximum depth of 2 exceeded' });
@@ -126,8 +125,7 @@ export class TicketsController {
 
   @Patch('tickets/:id')
   async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
-    const ticket = await this.ticketRepo.findOne({ where: { id } });
-    if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+    const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
 
     const { title, description, priority, assignee, reporter, reviewer_id, assignee_id, reporter_id, labels, channel_ids, status, prompt_text } = body;
     const oldAssignee = ticket.assignee;
@@ -209,8 +207,7 @@ export class TicketsController {
   @Patch('tickets/:id/move')
   async move(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     const { targetColumnId, targetPosition } = body;
-    const ticket = await this.ticketRepo.findOne({ where: { id } });
-    if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+    const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
 
     if (ticket.depth > 0) return res.status(400).json({ error: 'Only root tickets can be moved on the board' });
 
@@ -248,11 +245,10 @@ export class TicketsController {
 
   @Delete('tickets/:id')
   async delete(@Param('id') id: string, @Res() res: Response) {
-    const ticket = await this.ticketRepo.findOne({
+    const ticket = await findOrFail(this.ticketRepo, {
       where: { id },
       relations: ['children', 'comments'],
-    });
-    if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+    }, 'Ticket not found');
 
     const columnId = ticket.column_id;
     const position = ticket.position;
@@ -277,8 +273,7 @@ export class TicketsController {
     const currentUser = (req as any).currentUser;
     if (!currentUser) return res.status(401).json({ error: 'Authentication required' });
 
-    const ticket = await this.ticketRepo.findOne({ where: { id } });
-    if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+    const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
 
     if (images.length > MAX_IMAGES_PER_MESSAGE) {
       return res.status(400).json({ error: `Maximum ${MAX_IMAGES_PER_MESSAGE} images per comment` });

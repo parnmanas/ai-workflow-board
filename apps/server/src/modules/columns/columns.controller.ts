@@ -4,6 +4,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { AuthGuard } from '../../common/guards/auth.guard';
+import { findOrFail } from '../../common/find-or-fail';
 
 @Controller('api')
 @UseGuards(AuthGuard)
@@ -31,8 +32,7 @@ export class ColumnsController {
   @Patch('columns/:id')
   async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     const { name, color, position, description } = body;
-    const col = await this.repo.findOne({ where: { id } });
-    if (!col) return res.status(404).json({ error: 'Column not found' });
+    const col = await findOrFail(this.repo, { where: { id } }, 'Column not found');
 
     if (name !== undefined) col.name = name;
     if (color !== undefined) col.color = color;

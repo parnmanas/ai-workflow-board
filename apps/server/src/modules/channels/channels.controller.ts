@@ -9,6 +9,7 @@ import { RequirePermission } from '../../common/decorators/require-permission.de
 import { CurrentWorkspaceId } from '../../common/decorators/current-workspace.decorator';
 import { PERMISSIONS } from '../../common/types/permissions';
 import { DiscordService } from '../../services/discord.service';
+import { findOrFail } from '../../common/find-or-fail';
 
 @Controller('api/channels')
 @UseGuards(PermissionGuard, WorkspaceGuard)
@@ -31,10 +32,9 @@ export class ChannelsController {
 
   @Get(':id')
   async get(@Param('id') id: string, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
-    const channel = await this.channelRepo.findOne({
+    const channel = await findOrFail(this.channelRepo, {
       where: { id, ...(workspaceId ? { workspace_id: workspaceId } : {}) },
-    });
-    if (!channel) return res.status(404).json({ error: 'Channel not found' });
+    }, 'Channel not found');
     return res.json({ ...channel, bot_token: channel.bot_token ? '***' + channel.bot_token.slice(-4) : '' });
   }
 
@@ -51,10 +51,9 @@ export class ChannelsController {
 
   @Patch(':id')
   async update(@Param('id') id: string, @Body() body: any, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
-    const channel = await this.channelRepo.findOne({
+    const channel = await findOrFail(this.channelRepo, {
       where: { id, ...(workspaceId ? { workspace_id: workspaceId } : {}) },
-    });
-    if (!channel) return res.status(404).json({ error: 'Channel not found' });
+    }, 'Channel not found');
 
     const { name, type, bot_token, channel_id, is_active, notify_on_status_change, notify_on_update, notify_on_comment } = body;
     if (name !== undefined) channel.name = name;
@@ -72,20 +71,18 @@ export class ChannelsController {
 
   @Delete(':id')
   async delete(@Param('id') id: string, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
-    const channel = await this.channelRepo.findOne({
+    const channel = await findOrFail(this.channelRepo, {
       where: { id, ...(workspaceId ? { workspace_id: workspaceId } : {}) },
-    });
-    if (!channel) return res.status(404).json({ error: 'Channel not found' });
+    }, 'Channel not found');
     await this.channelRepo.delete(channel.id);
     return res.json({ success: true });
   }
 
   @Post(':id/test')
   async test(@Param('id') id: string, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
-    const channel = await this.channelRepo.findOne({
+    const channel = await findOrFail(this.channelRepo, {
       where: { id, ...(workspaceId ? { workspace_id: workspaceId } : {}) },
-    });
-    if (!channel) return res.status(404).json({ error: 'Channel not found' });
+    }, 'Channel not found');
     const result = await this.discordService.testDiscordConnection(channel);
     return res.json(result);
   }
