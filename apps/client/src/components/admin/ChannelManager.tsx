@@ -1,25 +1,18 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { api } from '../../api';
 import { Channel } from '../../types';
 import { tokens } from '../../tokens';
 import { Button, Input, Select, Badge, Modal, Card } from '../common';
+import { useCrudList } from '../../hooks/useCrudList';
 
 export default function ChannelManager({ workspaceId }: { workspaceId?: string } = {}) {
-  const [channels, setChannels] = useState<Channel[]>([]);
-  const [showForm, setShowForm] = useState(false);
-  const [editingId, setEditingId] = useState<string | null>(null);
+  const { items: channels, showForm, setShowForm, editingId, setEditingId, refresh: load } =
+    useCrudList<Channel>(() => api.getChannels());
   const [testResult, setTestResult] = useState<Record<string, { success: boolean; error?: string }>>({});
   const [form, setForm] = useState({
     name: '', type: 'discord', bot_token: '', channel_id: '',
     notify_on_status_change: 1, notify_on_update: 1, notify_on_comment: 1,
   });
-
-  const load = async () => {
-    const data = await api.getChannels();
-    setChannels(data);
-  };
-
-  useEffect(() => { load(); }, []);
 
   const resetForm = () => {
     setForm({

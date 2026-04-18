@@ -1,23 +1,16 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { api } from '../../api';
 import { Agent } from '../../types';
 import { tokens } from '../../tokens';
 import { Button, Input, Select, Badge, Modal, Card } from '../common';
+import { useCrudList } from '../../hooks/useCrudList';
 
 export default function AgentManager() {
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [showForm, setShowForm] = useState(false);
-  const [editingId, setEditingId] = useState<string | null>(null);
+  const { items: agents, showForm, setShowForm, editingId, setEditingId, refresh: load } =
+    useCrudList<Agent>(() => api.getAgentsAll());
   const [form, setForm] = useState({ name: '', description: '', type: 'custom', role_prompt: '' });
   const [identityForm, setIdentityForm] = useState({ channel_type: 'discord', channel_external_id: '', display_name: '' });
   const [showIdentityFor, setShowIdentityFor] = useState<string | null>(null);
-
-  const load = async () => {
-    const data = await api.getAgentsAll();
-    setAgents(data);
-  };
-
-  useEffect(() => { load(); }, []);
 
   const resetForm = () => {
     setForm({ name: '', description: '', type: 'custom', role_prompt: '' });
