@@ -1,8 +1,9 @@
-import { Controller, Get, Post, Patch, Delete, Body, Param, Req, Res, UseGuards } from '@nestjs/common';
-import { Request, Response } from 'express';
+import { Controller, Get, Post, Patch, Delete, Body, Param, Res, UseGuards } from '@nestjs/common';
+import { Response } from 'express';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { WorkspaceGuard } from '../../common/guards/workspace.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
+import { CurrentWorkspaceId } from '../../common/decorators/current-workspace.decorator';
 import { PERMISSIONS } from '../../common/types/permissions';
 import { ApiKeyService } from '../../services/api-key.service';
 
@@ -13,16 +14,14 @@ export class ApiKeysController {
   constructor(private readonly apiKeyService: ApiKeyService) {}
 
   @Get()
-  async list(@Req() req: Request, @Res() res: Response) {
-    const workspaceId = (req as any).currentWorkspaceId;
+  async list(@CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
     if (!workspaceId) return res.json([]);
     const keys = await this.apiKeyService.listApiKeys(workspaceId);
     return res.json(keys);
   }
 
   @Get(':id')
-  async get(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
-    const workspaceId = (req as any).currentWorkspaceId;
+  async get(@Param('id') id: string, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
     const key = await this.apiKeyService.getApiKey(id);
     if (!key) return res.status(404).json({ error: 'API key not found' });
     if (workspaceId && key.workspace_id !== workspaceId) return res.status(404).json({ error: 'API key not found' });
@@ -30,7 +29,7 @@ export class ApiKeysController {
   }
 
   @Post()
-  async create(@Body() body: any, @Req() req: Request, @Res() res: Response) {
+  async create(@Body() body: any, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
     const { name, agent_id, scope, expires_in_days } = body;
     if (!name) return res.status(400).json({ error: 'name is required' });
 
@@ -40,9 +39,8 @@ export class ApiKeysController {
       expires_at.setDate(expires_at.getDate() + expires_in_days);
     }
 
-    const workspaceId = (req as any).currentWorkspaceId || '';
     const result = await this.apiKeyService.createApiKey({
-      name, agent_id: agent_id || null, scope: scope || 'full', expires_at, workspace_id: workspaceId,
+      name, agent_id: agent_id || null, scope: scope || 'full', expires_at, workspace_id: workspaceId || '',
     });
 
     return res.status(201).json({
@@ -52,7 +50,7 @@ export class ApiKeysController {
   }
 
   @Patch(':id')
-  async update(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
+  async update(@Param('id') id: string, @Body() body: any, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
     const { name, scope, is_active, agent_id, expires_in_days } = body;
     const updates: any = {};
     if (name !== undefined) updates.name = name;
@@ -69,7 +67,6 @@ export class ApiKeysController {
       }
     }
 
-    const workspaceId = (req as any).currentWorkspaceId;
     const existing = await this.apiKeyService.getApiKey(id);
     if (!existing) return res.status(404).json({ error: 'API key not found' });
     if (workspaceId && existing.workspace_id !== workspaceId) return res.status(404).json({ error: 'API key not found' });
@@ -80,8 +77,7 @@ export class ApiKeysController {
   }
 
   @Post(':id/revoke')
-  async revoke(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
-    const workspaceId = (req as any).currentWorkspaceId;
+  async revoke(@Param('id') id: string, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
     const existing = await this.apiKeyService.getApiKey(id);
     if (!existing) return res.status(404).json({ error: 'API key not found' });
     if (workspaceId && existing.workspace_id !== workspaceId) return res.status(404).json({ error: 'API key not found' });
@@ -92,8 +88,7 @@ export class ApiKeysController {
   }
 
   @Delete(':id')
-  async delete(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
-    const workspaceId = (req as any).currentWorkspaceId;
+  async delete(@Param('id') id: string, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
     const existing = await this.apiKeyService.getApiKey(id);
     if (!existing) return res.status(404).json({ error: 'API key not found' });
     if (workspaceId && existing.workspace_id !== workspaceId) return res.status(404).json({ error: 'API key not found' });

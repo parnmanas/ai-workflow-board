@@ -1,11 +1,12 @@
-import { Controller, Get, Post, Patch, Delete, Body, Param, Req, Res, UseGuards } from '@nestjs/common';
-import { Request, Response } from 'express';
+import { Controller, Get, Post, Patch, Delete, Body, Param, Res, UseGuards } from '@nestjs/common';
+import { Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Channel } from '../../entities/Channel';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { WorkspaceGuard } from '../../common/guards/workspace.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
+import { CurrentWorkspaceId } from '../../common/decorators/current-workspace.decorator';
 import { PERMISSIONS } from '../../common/types/permissions';
 import { DiscordService } from '../../services/discord.service';
 
@@ -19,8 +20,7 @@ export class ChannelsController {
   ) {}
 
   @Get()
-  async list(@Req() req: Request, @Res() res: Response) {
-    const workspaceId = (req as any).currentWorkspaceId;
+  async list(@CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
     if (!workspaceId) return res.json([]);
     const channels = await this.channelRepo.find({ where: { workspace_id: workspaceId }, order: { name: 'ASC' } });
     const masked = channels.map(ch => ({
@@ -30,8 +30,7 @@ export class ChannelsController {
   }
 
   @Get(':id')
-  async get(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
-    const workspaceId = (req as any).currentWorkspaceId;
+  async get(@Param('id') id: string, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
     const channel = await this.channelRepo.findOne({
       where: { id, ...(workspaceId ? { workspace_id: workspaceId } : {}) },
     });
@@ -40,20 +39,18 @@ export class ChannelsController {
   }
 
   @Post()
-  async create(@Body() body: any, @Req() req: Request, @Res() res: Response) {
+  async create(@Body() body: any, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
     const { name, type = 'discord', bot_token = '', channel_id = '', is_active = 1, notify_on_status_change = 1, notify_on_update = 1, notify_on_comment = 1 } = body;
     if (!name) return res.status(400).json({ error: 'name is required' });
 
-    const workspaceId = (req as any).currentWorkspaceId || '';
     const channel = await this.channelRepo.save(this.channelRepo.create({
-      name, type, bot_token, channel_id, is_active, notify_on_status_change, notify_on_update, notify_on_comment, workspace_id: workspaceId,
+      name, type, bot_token, channel_id, is_active, notify_on_status_change, notify_on_update, notify_on_comment, workspace_id: workspaceId || '',
     }));
     return res.status(201).json({ ...channel, bot_token: channel.bot_token ? '***' + channel.bot_token.slice(-4) : '' });
   }
 
   @Patch(':id')
-  async update(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
-    const workspaceId = (req as any).currentWorkspaceId;
+  async update(@Param('id') id: string, @Body() body: any, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
     const channel = await this.channelRepo.findOne({
       where: { id, ...(workspaceId ? { workspace_id: workspaceId } : {}) },
     });
@@ -74,8 +71,7 @@ export class ChannelsController {
   }
 
   @Delete(':id')
-  async delete(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
-    const workspaceId = (req as any).currentWorkspaceId;
+  async delete(@Param('id') id: string, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
     const channel = await this.channelRepo.findOne({
       where: { id, ...(workspaceId ? { workspace_id: workspaceId } : {}) },
     });
@@ -85,8 +81,7 @@ export class ChannelsController {
   }
 
   @Post(':id/test')
-  async test(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
-    const workspaceId = (req as any).currentWorkspaceId;
+  async test(@Param('id') id: string, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
     const channel = await this.channelRepo.findOne({
       where: { id, ...(workspaceId ? { workspace_id: workspaceId } : {}) },
     });

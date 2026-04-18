@@ -10,6 +10,7 @@ import { Workspace } from '../../entities/Workspace';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { WorkspaceGuard } from '../../common/guards/workspace.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
+import { CurrentWorkspaceId } from '../../common/decorators/current-workspace.decorator';
 import { PERMISSIONS, hasPermission } from '../../common/types/permissions';
 import { AgentStatusService } from './agent-status.service';
 
@@ -26,14 +27,13 @@ export class AgentsController {
   ) {}
 
   @Get()
-  async list(@Req() req: Request, @Query('scope') scope: string, @Res() res: Response) {
+  async list(@Req() req: Request, @CurrentWorkspaceId() workspaceId: string | null, @Query('scope') scope: string, @Res() res: Response) {
     // Admin can request all agents across workspaces with ?scope=all
     const isAdmin = (req as any).currentUser?.role === 'admin';
     if (scope === 'all' && isAdmin) {
       const agents = await this.agentRepo.find({ relations: ['channel_identities'], order: { name: 'ASC' } });
       return res.json(agents);
     }
-    const workspaceId = (req as any).currentWorkspaceId; // populated by WorkspaceGuard
     if (!workspaceId) return res.json([]);
     const agents = await this.agentRepo.find({
       where: { workspace_id: workspaceId },
@@ -94,10 +94,9 @@ export class AgentsController {
   async getAgentActivity(
     @Param('id') id: string,
     @Query('limit') limitRaw: string,
-    @Req() req: Request,
+    @CurrentWorkspaceId() workspaceId: string | null,
     @Res() res: Response,
   ) {
-    const workspaceId = (req as any).currentWorkspaceId;
     // Verify agent belongs to requesting workspace before returning activity
     const agent = await this.agentRepo.findOne({
       where: { id, ...(workspaceId ? { workspace_id: workspaceId } : {}) },
@@ -115,8 +114,7 @@ export class AgentsController {
 
   @Get(':id')
   @RequirePermission(PERMISSIONS.VIEW_ACTIVITY)
-  async get(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
-    const workspaceId = (req as any).currentWorkspaceId;
+  async get(@Param('id') id: string, @Req() req: Request, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
     const agent = await this.agentRepo.findOne({
       where: { id, ...(workspaceId ? { workspace_id: workspaceId } : {}) },
       relations: ['channel_identities'],
@@ -144,7 +142,7 @@ export class AgentsController {
   }
 
   @Post()
-  async create(@Body() body: any, @Req() req: Request, @Res() res: Response) {
+  async create(@Body() body: any, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
     const { name, description = '', type = 'custom', avatar_url = '', is_active = 1 } = body;
     if (!name) return res.status(400).json({ error: 'name is required' });
 
@@ -152,7 +150,7 @@ export class AgentsController {
     // prevent cross-workspace agent creation by users in other workspaces.
     // Fall back to oldest workspace for backward-compat when guard sets no workspace
     // (e.g. dev mode with no X-Workspace-Id header).
-    let effectiveWorkspaceId: string = (req as any).currentWorkspaceId || '';
+    let effectiveWorkspaceId: string = workspaceId || '';
     if (!effectiveWorkspaceId) {
       const defaultWs = await this.dataSource
         .getRepository(Workspace)
@@ -167,8 +165,7 @@ export class AgentsController {
   }
 
   @Patch(':id')
-  async update(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
-    const workspaceId = (req as any).currentWorkspaceId;
+  async update(@Param('id') id: string, @Body() body: any, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
     const agent = await this.agentRepo.findOne({
       where: { id, ...(workspaceId ? { workspace_id: workspaceId } : {}) },
     });
@@ -185,8 +182,7 @@ export class AgentsController {
   }
 
   @Delete(':id')
-  async delete(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
-    const workspaceId = (req as any).currentWorkspaceId;
+  async delete(@Param('id') id: string, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
     const agent = await this.agentRepo.findOne({
       where: { id, ...(workspaceId ? { workspace_id: workspaceId } : {}) },
     });
