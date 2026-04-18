@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import 'reflect-metadata';
+import { json, urlencoded } from 'express';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { AllExceptionsFilter } from './common/filters/http-exception.filter';
@@ -9,6 +10,17 @@ import { LogService } from './services/log.service';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+
+  // Raise Express body-parser limit from its 100KB default. Agent plugins
+  // ship proxy.log error + event batches (up to 500 entries, each can carry
+  // ~200 bytes of raw_line) — a routine batch crosses 100KB, which made the
+  // default limit silently bounce uploads as 404 "Cannot POST" via Express's
+  // catch-all route. Raised to 10MB; ingestEntries already caps entries at
+  // 500 per upload so this is the natural ceiling, not a wildly permissive
+  // attack surface.
+  app.use(json({ limit: '10mb' }));
+  app.use(urlencoded({ limit: '10mb', extended: true }));
+
   app.enableCors({
     origin: process.env.CORS_ORIGIN || true, // true = reflect request origin (dev); set CORS_ORIGIN in production
     credentials: true,
