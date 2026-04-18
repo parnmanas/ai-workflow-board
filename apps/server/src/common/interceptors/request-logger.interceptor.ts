@@ -5,6 +5,60 @@ import { Request, Response } from 'express';
 import { LogService } from '../../services/log.service';
 import { throwError } from 'rxjs';
 
+const REDACTED_HEADERS = new Set([
+  'authorization',
+  'cookie',
+  'set-cookie',
+  'x-api-key',
+  'x-agent-key',
+  'x-auth-token',
+  'proxy-authorization',
+]);
+
+const REDACTED_BODY_KEYS = new Set([
+  'password',
+  'current_password',
+  'new_password',
+  'old_password',
+  'token',
+  'api_key',
+  'apikey',
+  'secret',
+]);
+
+const MAX_PAYLOAD_BYTES = 10_000;
+
+function sanitizeHeaders(headers: Record<string, any> | undefined): Record<string, any> {
+  if (!headers) return {};
+  const out: Record<string, any> = {};
+  for (const [k, v] of Object.entries(headers)) {
+    out[k] = REDACTED_HEADERS.has(k.toLowerCase()) ? '***' : v;
+  }
+  return out;
+}
+
+function sanitizeBody(body: any): any {
+  if (body == null || typeof body !== 'object') return body;
+  if (Array.isArray(body)) return body;
+  const out: Record<string, any> = {};
+  for (const [k, v] of Object.entries(body)) {
+    out[k] = REDACTED_BODY_KEYS.has(k.toLowerCase()) ? '***' : v;
+  }
+  return out;
+}
+
+function capPayload(value: any): string | undefined {
+  if (value == null) return undefined;
+  let serialized: string;
+  try {
+    serialized = typeof value === 'string' ? value : JSON.stringify(value);
+  } catch {
+    serialized = String(value);
+  }
+  if (serialized.length <= MAX_PAYLOAD_BYTES) return serialized;
+  return serialized.slice(0, MAX_PAYLOAD_BYTES) + `...[truncated: ${serialized.length - MAX_PAYLOAD_BYTES} bytes]`;
+}
+
 @Injectable()
 export class RequestLoggerInterceptor implements NestInterceptor {
   constructor(private readonly logService: LogService) {}
@@ -25,31 +79,42 @@ export class RequestLoggerInterceptor implements NestInterceptor {
     const wsId = req.headers['x-workspace-id'] || '-';
     const start = Date.now();
 
-    // Log request
-    const bodySnippet = req.body && Object.keys(req.body).length > 0
-      ? JSON.stringify(req.body).slice(0, 200)
-      : '';
+    const reqHeaders = sanitizeHeaders(req.headers as any);
+    const reqBody = capPayload(sanitizeBody(req.body));
 
     return next.handle().pipe(
-      tap(() => {
+      tap((responseBody) => {
         const duration = Date.now() - start;
         const status = res.statusCode;
+        const resHeaders = sanitizeHeaders(res.getHeaders() as any);
+        const resBody = capPayload(responseBody);
         this.logService.info('HTTP', `${method} ${url} → ${status} (${duration}ms)`, {
           user: userName,
           userId,
           wsId,
-          body: bodySnippet || undefined,
+          status,
+          duration,
+          reqHeaders,
+          reqBody,
+          resHeaders,
+          resBody,
         });
       }),
       catchError((err) => {
         const duration = Date.now() - start;
         const status = err.status || err.getStatus?.() || 500;
         const message = err.message || 'Unknown error';
+        const resHeaders = sanitizeHeaders(res.getHeaders() as any);
         this.logService.error('HTTP', `${method} ${url} → ${status} (${duration}ms) — ${message}`, {
           user: userName,
           userId,
           wsId,
-          body: bodySnippet || undefined,
+          status,
+          duration,
+          reqHeaders,
+          reqBody,
+          resHeaders,
+          error: message,
         });
         return throwError(() => err);
       }),

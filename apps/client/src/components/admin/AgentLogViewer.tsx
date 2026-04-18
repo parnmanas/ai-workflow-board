@@ -7,10 +7,23 @@ const LEVEL_COLORS: Record<string, string> = {
   fatal: tokens.colors.danger,
   error: tokens.colors.warning,
   warn: tokens.colors.warningLight,
+  info: tokens.colors.successLight,
 };
 
-const CATEGORIES = ['crash', 'sse', 'presence', 'subagent', 'ipc', 'misc'] as const;
-const LEVELS = ['fatal', 'error', 'warn'] as const;
+const CATEGORIES = [
+  'crash',
+  'sse',
+  'presence',
+  'subagent',
+  'ipc',
+  'misc',
+  'agent_trigger',
+  'board_update',
+  'chat_request',
+  'chat_room_message',
+  'comment_mention',
+] as const;
+const LEVELS = ['fatal', 'error', 'warn', 'info'] as const;
 
 const POLL_INTERVAL = 15000;
 const DEFAULT_SINCE_HOURS = 24;
@@ -277,10 +290,10 @@ export default function AgentLogViewer() {
                 marginBottom: 8,
               }}
             >
-              No errors recorded
+              No logs recorded
             </div>
             <div style={{ fontSize: 13, color: tokens.colors.textSecondary }}>
-              Agent plugins will upload proxy.log errors here when they occur.
+              Agent plugins upload proxy.log errors and received SSE events here.
             </div>
           </div>
         ) : (
