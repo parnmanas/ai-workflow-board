@@ -9,6 +9,51 @@ export interface MentionCandidate {
   sublabel?: string; // secondary line (e.g. "Assignee (Alice)")
 }
 
+// Parse any raw `@[type:id|name]` tokens out of the stored value into an
+// ordered log of the mentions that appear in the text, and return the
+// display-form string (the raw tokens replaced by a human-readable `@name`).
+// Order matters for the reverse mapping — each mention is found by its
+// first unconsumed `@name` occurrence after the previous one in the string.
+const RAW_TOKEN_RE = /@\[(user|agent|role):([\w-]+)(?:\|([^\]]*))?\]/g;
+function parseRawToDisplay(raw: string): { display: string; log: MentionCandidate[] } {
+  const log: MentionCandidate[] = [];
+  if (!raw) return { display: '', log };
+  const display = raw.replace(RAW_TOKEN_RE, (_match, type, id, name) => {
+    const displayName = name || id;
+    log.push({ type: type as MentionCandidate['type'], id, name: displayName });
+    return `@${displayName}`;
+  });
+  return { display, log };
+}
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Given the current textarea text (display form) and the ordered log of
+// mentions we believe are in it, rebuild the raw value by replacing the
+// first `@name` occurrence (word-boundary-terminated) for each log entry
+// with its full `@[type:id|name]` token. Log entries whose name no longer
+// appears are skipped — corresponds to the user having deleted that
+// mention.
+function displayToRaw(display: string, log: MentionCandidate[]): string {
+  if (log.length === 0) return display;
+  let out = '';
+  let cursor = 0;
+  for (const entry of log) {
+    const re = new RegExp('@' + escapeRegex(entry.name) + '(?![\\w-])');
+    const slice = display.slice(cursor);
+    const m = re.exec(slice);
+    if (!m) continue; // mention deleted by user
+    const absIdx = cursor + m.index;
+    out += display.slice(cursor, absIdx);
+    out += `@[${entry.type}:${entry.id}|${entry.name}]`;
+    cursor = absIdx + m[0].length;
+  }
+  out += display.slice(cursor);
+  return out;
+}
+
 interface MentionTextareaProps {
   value: string;
   onChange: (text: string) => void;
@@ -21,8 +66,6 @@ interface MentionTextareaProps {
   ariaLabel?: string;
   style?: React.CSSProperties;
 }
-
-const TOKEN_INSERT = (c: MentionCandidate) => `@[${c.type}:${c.id}|${c.name}] `;
 
 /**
  * Textarea (or single-line input) with an @-mention autocomplete dropdown.
@@ -53,6 +96,19 @@ export function MentionTextarea({
   // overflow containers (ticket detail comment scroll area, right panel) can't
   // clip it. Coordinates are recomputed on open, scroll, and resize.
   const [anchorRect, setAnchorRect] = useState<{ top: number; left: number; width: number } | null>(null);
+
+  // Parse the raw `value` coming in from the parent into (a) the display
+  // string the textarea actually shows, and (b) the ordered mention log
+  // we'll use to reverse-map edits back to raw. The log is refreshed on
+  // every value change so it stays authoritative against whatever the
+  // parent most recently stored. We keep a ref copy because event handlers
+  // fired between renders need the latest log synchronously.
+  const { display: displayValue, log: derivedLog } = useMemo(
+    () => parseRawToDisplay(value || ''),
+    [value],
+  );
+  const mentionLogRef = useRef<MentionCandidate[]>(derivedLog);
+  mentionLogRef.current = derivedLog;
 
   const filtered = useMemo(() => {
     if (!open) return [];
@@ -117,10 +173,13 @@ export function MentionTextarea({
   }, []);
 
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    const next = e.target.value;
-    onChange(next);
-    const caret = e.target.selectionStart ?? next.length;
-    updateTriggerFromCaret(next, caret);
+    // textarea holds display form (`@name`); convert back to raw tokens using
+    // the log so the parent keeps dispatchable `@[type:id|name]` in its state.
+    const nextDisplay = e.target.value;
+    const rawValue = displayToRaw(nextDisplay, mentionLogRef.current);
+    onChange(rawValue);
+    const caret = e.target.selectionStart ?? nextDisplay.length;
+    updateTriggerFromCaret(nextDisplay, caret);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -157,23 +216,44 @@ export function MentionTextarea({
   const insertSelection = useCallback((c: MentionCandidate) => {
     if (triggerIdx == null) return;
     const el = inputRef.current;
-    const caret = el?.selectionStart ?? value.length;
-    const before = value.slice(0, triggerIdx);
-    const after = value.slice(caret);
-    const token = TOKEN_INSERT(c);
-    const next = before + token + after;
-    onChange(next);
+    const caret = el?.selectionStart ?? displayValue.length;
+    // Operate in display coordinates so triggerIdx/caret line up with what
+    // the user actually sees in the textarea.
+    const before = displayValue.slice(0, triggerIdx);
+    const after = displayValue.slice(caret);
+    const displayInsert = `@${c.name} `;
+    const nextDisplay = before + displayInsert + after;
+
+    // Figure out where in the existing log the new mention lands, so
+    // displayToRaw can find it at the right position. Scan existing log
+    // entries against the CURRENT display, stopping at the first one whose
+    // `@name` occurrence is at or past triggerIdx.
+    const oldLog = mentionLogRef.current;
+    let insertLogIdx = oldLog.length;
+    let scanCursor = 0;
+    for (let i = 0; i < oldLog.length; i++) {
+      const re = new RegExp('@' + escapeRegex(oldLog[i].name) + '(?![\\w-])');
+      const slice = displayValue.slice(scanCursor);
+      const m = re.exec(slice);
+      if (!m) continue;
+      const abs = scanCursor + m.index;
+      if (abs >= triggerIdx) { insertLogIdx = i; break; }
+      scanCursor = abs + m[0].length;
+    }
+    const newLog = [...oldLog.slice(0, insertLogIdx), c, ...oldLog.slice(insertLogIdx)];
+    const rawValue = displayToRaw(nextDisplay, newLog);
+    onChange(rawValue);
+
     setOpen(false);
     setTriggerIdx(null);
     setQuery('');
-    // Restore caret to the end of the inserted token. Needs a frame so the
-    // textarea applies the new value before we set selection.
+    // Restore caret to end of inserted display text (not raw length).
     requestAnimationFrame(() => {
-      const newCaret = (before + token).length;
+      const newCaret = (before + displayInsert).length;
       el?.focus();
       el?.setSelectionRange(newCaret, newCaret);
     });
-  }, [triggerIdx, value, onChange]);
+  }, [triggerIdx, displayValue, onChange]);
 
   const handleClickCandidate = (c: MentionCandidate) => {
     insertSelection(c);
@@ -200,7 +280,7 @@ export function MentionTextarea({
       <textarea
         ref={inputRef}
         rows={rows}
-        value={value}
+        value={displayValue}
         onChange={handleChange}
         onKeyDown={handleKeyDown}
         onBlur={() => setTimeout(() => setOpen(false), 150)}
