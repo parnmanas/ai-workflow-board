@@ -2,6 +2,7 @@ import 'dotenv/config';
 import 'reflect-metadata';
 import { json, urlencoded } from 'express';
 import { NestFactory } from '@nestjs/core';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
 import { AllExceptionsFilter } from './common/filters/http-exception.filter';
 import { RequestLoggerInterceptor } from './common/interceptors/request-logger.interceptor';
@@ -33,6 +34,26 @@ async function bootstrap() {
   app.useGlobalFilters(exceptionFilter);
   app.useGlobalInterceptors(new RequestLoggerInterceptor(logService));
 
+  // Swagger (OpenAPI) docs at /api-docs. Covers the REST API only — MCP tools
+  // live under /mcp and use JSON-RPC, which OpenAPI can't describe.
+  // Session-token auth (Bearer) and agent API key (X-Agent-Key) are declared
+  // as security schemes so "Authorize" works from the Swagger UI.
+  const swaggerConfig = new DocumentBuilder()
+    .setTitle('AI Workflow Board — REST API')
+    .setDescription(
+      'Kanban + agent-operations REST endpoints. For MCP (JSON-RPC) tools see /mcp. ' +
+      'Allocation polling (v0.25.0): GET /api/agents/:id/allocated-tickets is the ' +
+      'REST counterpart of the MCP tool `get_allocated_tickets`.'
+    )
+    .setVersion('0.25.0')
+    .addBearerAuth({ type: 'http', scheme: 'bearer', bearerFormat: 'session-token' }, 'user-session')
+    .addApiKey({ type: 'apiKey', name: 'X-Agent-Key', in: 'header' }, 'agent-api-key')
+    .build();
+  const swaggerDoc = SwaggerModule.createDocument(app, swaggerConfig);
+  SwaggerModule.setup('api-docs', app, swaggerDoc, {
+    swaggerOptions: { persistAuthorization: true },
+  });
+
   const PORT = process.env.PORT || 7701;
   await app.listen(PORT, '0.0.0.0');
 
@@ -60,6 +81,7 @@ async function bootstrap() {
 
   logService.info('System', `AI Workflow Board server running on http://0.0.0.0:${PORT}`);
   logService.info('System', `MCP endpoint available at http://0.0.0.0:${PORT}/mcp`);
+  logService.info('System', `Swagger (OpenAPI) docs at http://0.0.0.0:${PORT}/api-docs`);
   logService.info('System', `MCP auth: ${authStatus}`);
   logService.info('System', `API key management: http://localhost:${PORT}/api/keys`);
 }

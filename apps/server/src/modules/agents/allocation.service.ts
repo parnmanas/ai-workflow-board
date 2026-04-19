@@ -1,0 +1,165 @@
+import { Injectable } from '@nestjs/common';
+import { InjectDataSource } from '@nestjs/typeorm';
+import { DataSource } from 'typeorm';
+import { ActivityLog } from '../../entities/ActivityLog';
+import { Agent } from '../../entities/Agent';
+import { Board } from '../../entities/Board';
+import { BoardColumn } from '../../entities/BoardColumn';
+import { Comment } from '../../entities/Comment';
+import { Ticket } from '../../entities/Ticket';
+
+export interface AllocatedTicketRow {
+  ticket_id: string;
+  role: 'assignee' | 'reporter' | 'reviewer';
+  column_id: string;
+  column_position: number;
+  priority: string;
+  priority_index: number;
+  title: string;
+  my_last_update_at: string | null;
+}
+
+const ROLE_TO_TICKET_FIELD: Record<string, 'assignee_id' | 'reporter_id' | 'reviewer_id'> = {
+  assignee: 'assignee_id',
+  reporter: 'reporter_id',
+  reviewer: 'reviewer_id',
+};
+
+// Keep in sync with plugin-side ordering. Index 0 = highest priority.
+const PRIORITY_ORDER = ['critical', 'high', 'medium', 'low'] as const;
+
+function priorityIndex(p: string | null | undefined): number {
+  const i = PRIORITY_ORDER.indexOf(((p || 'medium').toLowerCase() as typeof PRIORITY_ORDER[number]));
+  return i >= 0 ? i : PRIORITY_ORDER.length;
+}
+
+function safeJsonParse<T>(s: string | null | undefined, fallback: T): T {
+  if (!s) return fallback;
+  try { return JSON.parse(s) as T; } catch { return fallback; }
+}
+
+/**
+ * Computes the "what tickets should this agent be working on right now" set.
+ *
+ * Shared between the MCP `get_allocated_tickets` tool and the REST
+ * `GET /api/agents/:id/allocated-tickets` endpoint so both return identical
+ * rows. See trigger-tools.ts for the MCP wrapper.
+ */
+@Injectable()
+export class AllocationService {
+  constructor(
+    @InjectDataSource() private readonly dataSource: DataSource,
+  ) {}
+
+  async getAllocatedTickets(agentId: string, workspaceId: string): Promise<{ error: string } | AllocatedTicketRow[]> {
+    const agent = await this.dataSource.getRepository(Agent).findOne({ where: { id: agentId } });
+    if (!agent) return { error: 'Agent not found' };
+    if (agent.workspace_id && agent.workspace_id !== workspaceId) {
+      return { error: 'Agent does not belong to the requested workspace' };
+    }
+
+    const ticketRepo = this.dataSource.getRepository(Ticket);
+    const tickets = await ticketRepo.createQueryBuilder('t')
+      .innerJoin('columns', 'col', 'col.id = t.column_id')
+      .innerJoin('boards', 'b', 'b.id = col.board_id')
+      .where('b.workspace_id = :workspaceId', { workspaceId })
+      .andWhere('(t.assignee_id = :agentId OR t.reporter_id = :agentId OR t.reviewer_id = :agentId)', { agentId })
+      .getMany();
+
+    if (tickets.length === 0) return [];
+
+    const colIds = Array.from(new Set(tickets.map(t => t.column_id).filter(Boolean) as string[]));
+    if (colIds.length === 0) return [];
+
+    const columns = await this.dataSource.getRepository(BoardColumn)
+      .createQueryBuilder('col')
+      .where('col.id IN (:...ids)', { ids: colIds })
+      .getMany();
+    const boardIds = Array.from(new Set(columns.map(c => c.board_id)));
+    const boards = boardIds.length === 0 ? []
+      : await this.dataSource.getRepository(Board)
+        .createQueryBuilder('b')
+        .where('b.id IN (:...ids)', { ids: boardIds })
+        .getMany();
+    const colById = new Map(columns.map(c => [c.id, c]));
+    const boardById = new Map(boards.map(b => [b.id, b]));
+
+    const rows: AllocatedTicketRow[] = [];
+    const rowTicketIds = new Set<string>();
+
+    for (const ticket of tickets) {
+      if (!ticket.column_id) continue;
+      const col = colById.get(ticket.column_id);
+      if (!col) continue;
+      if ((col as any).is_terminal === true) continue;
+      const board = boardById.get(col.board_id);
+      if (!board) continue;
+
+      const routing = safeJsonParse<Record<string, string | string[]>>(board.routing_config, {});
+      const columnKey = (col.name || '').toLowerCase();
+      const rawRoles = Object.prototype.hasOwnProperty.call(routing, columnKey)
+        ? routing[columnKey]
+        : undefined;
+      if (rawRoles === undefined) continue;
+      const roles = Array.isArray(rawRoles) ? rawRoles : [rawRoles];
+      if (roles.length === 0) continue;
+
+      for (const role of roles) {
+        const field = ROLE_TO_TICKET_FIELD[role];
+        if (!field) continue;
+        if ((ticket as any)[field] !== agentId) continue;
+        rows.push({
+          ticket_id: ticket.id,
+          role: role as AllocatedTicketRow['role'],
+          column_id: ticket.column_id,
+          column_position: col.position,
+          priority: ticket.priority || 'medium',
+          priority_index: priorityIndex(ticket.priority),
+          title: ticket.title,
+          my_last_update_at: null,
+        });
+        rowTicketIds.add(ticket.id);
+      }
+    }
+
+    if (rows.length === 0) return [];
+
+    const ticketIdsArr = Array.from(rowTicketIds);
+
+    const latestComments = await this.dataSource.getRepository(Comment)
+      .createQueryBuilder('c')
+      .select('c.ticket_id', 'ticket_id')
+      .addSelect('MAX(c.created_at)', 'latest')
+      .where('c.ticket_id IN (:...ids)', { ids: ticketIdsArr })
+      .andWhere(`c.author_type = 'agent' AND c.author_id = :agentId`, { agentId })
+      .groupBy('c.ticket_id')
+      .getRawMany<{ ticket_id: string; latest: string | Date | null }>();
+
+    const latestActivity = await this.dataSource.getRepository(ActivityLog)
+      .createQueryBuilder('a')
+      .select('a.ticket_id', 'ticket_id')
+      .addSelect('MAX(a.created_at)', 'latest')
+      .where('a.ticket_id IN (:...ids)', { ids: ticketIdsArr })
+      .andWhere('a.actor_id = :agentId', { agentId })
+      .groupBy('a.ticket_id')
+      .getRawMany<{ ticket_id: string; latest: string | Date | null }>();
+
+    const maxByTicket = new Map<string, number>();
+    const fold = (row: { ticket_id: string; latest: string | Date | null }) => {
+      if (!row.latest) return;
+      const ts = row.latest instanceof Date ? row.latest.getTime() : new Date(row.latest).getTime();
+      if (!Number.isFinite(ts)) return;
+      const prev = maxByTicket.get(row.ticket_id) ?? 0;
+      if (ts > prev) maxByTicket.set(row.ticket_id, ts);
+    };
+    latestComments.forEach(fold);
+    latestActivity.forEach(fold);
+
+    for (const r of rows) {
+      const ts = maxByTicket.get(r.ticket_id);
+      r.my_last_update_at = ts ? new Date(ts).toISOString() : null;
+    }
+
+    return rows;
+  }
+}

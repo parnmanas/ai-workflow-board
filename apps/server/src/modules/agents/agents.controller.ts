@@ -12,8 +12,11 @@ import { RequirePermission } from '../../common/decorators/require-permission.de
 import { CurrentWorkspaceId } from '../../common/decorators/current-workspace.decorator';
 import { PERMISSIONS, hasPermission } from '../../common/types/permissions';
 import { AgentStatusService } from './agent-status.service';
+import { AllocationService } from './allocation.service';
+import { ApiOperation, ApiParam, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { findOrFail } from '../../common/find-or-fail';
 
+@ApiTags('agents')
 @Controller('api/agents')
 @UseGuards(PermissionGuard, WorkspaceGuard)
 @RequirePermission(PERMISSIONS.MANAGE_AGENTS)
@@ -23,7 +26,32 @@ export class AgentsController {
     @InjectRepository(AgentChannelIdentity) private readonly identityRepo: Repository<AgentChannelIdentity>,
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly agentStatusService: AgentStatusService,
+    private readonly allocationService: AllocationService,
   ) {}
+
+  @Get(':id/allocated-tickets')
+  @RequirePermission(PERMISSIONS.VIEW_ACTIVITY)
+  @ApiOperation({
+    summary: 'List tickets currently allocated to this agent',
+    description:
+      'Returns rows [{ ticket_id, role, column_id, column_position, priority, priority_index, title, my_last_update_at }]. ' +
+      'Excludes terminal columns. my_last_update_at = MAX(latest comment by this agent, latest activity log entry with actor_id=this agent). ' +
+      'REST counterpart of the MCP tool `get_allocated_tickets` — used by the plugin-side 5-minute allocation poll (v0.25.0).',
+  })
+  @ApiParam({ name: 'id', description: 'Agent ID (UUID)' })
+  @ApiQuery({ name: 'workspace_id', description: 'Workspace to scope results', required: true })
+  async allocatedTickets(
+    @Param('id') id: string,
+    @Query('workspace_id') workspaceId: string,
+    @CurrentWorkspaceId() currentWorkspaceId: string | null,
+    @Res() res: Response,
+  ) {
+    const effectiveWs = workspaceId || currentWorkspaceId || '';
+    if (!effectiveWs) return res.status(400).json({ error: 'workspace_id is required' });
+    const result = await this.allocationService.getAllocatedTickets(id, effectiveWs);
+    if ('error' in result) return res.status(400).json(result);
+    return res.json(result);
+  }
 
   @Get()
   async list(@Req() req: Request, @CurrentWorkspaceId() workspaceId: string | null, @Query('scope') scope: string, @Res() res: Response) {

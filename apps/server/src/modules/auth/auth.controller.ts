@@ -1,3 +1,4 @@
+import { ApiTags } from '@nestjs/swagger';
 import { Controller, Post, Get, Body, Headers, Res, HttpStatus } from '@nestjs/common';
 import { Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -8,6 +9,7 @@ import { AuthService } from '../../services/auth.service';
 import { ReBACService } from '../../services/rebac.service';
 import { PERMISSION_LABELS, ROLE_PERMISSIONS, resolvePermissions } from '../../common/types/permissions';
 
+@ApiTags('auth')
 @Controller('api/auth')
 export class AuthController {
   constructor(

@@ -1,7 +1,9 @@
+import { ApiTags } from '@nestjs/swagger';
 import { Controller, Get } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 
+@ApiTags('health')
 @Controller('api')
 export class HealthController {
   constructor(@InjectDataSource() private readonly dataSource: DataSource) {}

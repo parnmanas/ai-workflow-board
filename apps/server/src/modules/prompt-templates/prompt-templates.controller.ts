@@ -1,3 +1,4 @@
+import { ApiTags } from '@nestjs/swagger';
 import { Controller, Get, Post, Patch, Delete, Body, Param, Query, Res, UseGuards } from '@nestjs/common';
 import { Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -8,6 +9,7 @@ import { RequirePermission } from '../../common/decorators/require-permission.de
 import { PERMISSIONS } from '../../common/types/permissions';
 import { findOrFail } from '../../common/find-or-fail';
 
+@ApiTags('prompt-templates')
 @Controller('api/prompt-templates')
 @UseGuards(PermissionGuard)
 @RequirePermission(PERMISSIONS.MANAGE_PROMPT_TEMPLATES)

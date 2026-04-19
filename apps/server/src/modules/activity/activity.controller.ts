@@ -1,3 +1,4 @@
+import { ApiTags } from '@nestjs/swagger';
 import { Controller, Get, Param, Query, Res, UseGuards } from '@nestjs/common';
 import { Response } from 'express';
 import { PermissionGuard } from '../../common/guards/permission.guard';
@@ -8,6 +9,7 @@ import { ActivityService } from '../../services/activity.service';
 // Phase 3 D-46 — workspace-wide recent activity feed for the dashboard.
 // Single-workspace assumption per REQUIREMENTS.md §Out of Scope — no per-workspace
 // scoping on getRecentActivity. Multi-tenant scoping is deferred.
+@ApiTags('activity')
 @Controller('api')
 @UseGuards(PermissionGuard)
 @RequirePermission(PERMISSIONS.VIEW_ACTIVITY)

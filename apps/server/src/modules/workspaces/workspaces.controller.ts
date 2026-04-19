@@ -1,3 +1,4 @@
+import { ApiTags } from '@nestjs/swagger';
 import { Controller, Get, Post, Patch, Delete, Body, Param, Query, Res, UseGuards } from '@nestjs/common';
 import { Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -13,6 +14,7 @@ import { DEFAULT_COLUMNS } from '../../database/database.module';
 import { ReBACService } from '../../services/rebac.service';
 import { findOrFail } from '../../common/find-or-fail';
 
+@ApiTags('workspaces')
 @Controller('api/workspaces')
 @UseGuards(AuthGuard)
 export class WorkspacesController {
