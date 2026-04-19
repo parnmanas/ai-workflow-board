@@ -302,6 +302,24 @@ export default function AgentDetailModal({ agentId, onClose }: AgentDetailModalP
               </span>
               <span>{subtitleTail}</span>
             </div>
+            {detail?.id && (
+              <div
+                title="Click to copy agent ID"
+                onClick={() => { navigator.clipboard?.writeText(detail.id).catch(() => {}); }}
+                style={{
+                  fontSize: 11,
+                  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                  color: tokens.colors.textMuted,
+                  marginTop: 4,
+                  cursor: 'pointer',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {detail.id}
+              </div>
+            )}
           </div>
           {/* Close button */}
           <button
