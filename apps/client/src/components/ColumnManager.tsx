@@ -13,7 +13,7 @@ interface ColumnManagerProps {
   columnPrompts: Record<string, string>; // columnId → promptTemplateId
   promptTemplates: PromptTemplate[];
   onCreateColumn: (boardId: string, name: string, color?: string) => Promise<void>;
-  onUpdateColumn: (columnId: string, data: { name?: string; color?: string; position?: number; description?: string }) => Promise<void>;
+  onUpdateColumn: (columnId: string, data: { name?: string; color?: string; position?: number; description?: string; is_terminal?: boolean }) => Promise<void>;
   onDeleteColumn: (columnId: string) => Promise<void>;
   onUpdateRoutingConfig: (config: Record<string, string[]>) => Promise<void>;
   onUpdateColumnPrompts: (config: Record<string, string>) => Promise<void>;
@@ -209,6 +209,24 @@ export default function ColumnManager({
                                     );
                                   })}
                                 </div>
+                                {/* Terminal flag — v0.25.0: excludes tickets in this column
+                                   from get_allocated_tickets so agents don't wake up on Done. */}
+                                <label
+                                  title="Terminal columns (Done / Archived / Cancelled) never wake an agent via the allocation poll — tickets here are considered complete."
+                                  style={{
+                                    marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4,
+                                    fontSize: '11px', color: col.is_terminal ? tokens.colors.accentLight : tokens.colors.textMuted,
+                                    cursor: 'pointer', userSelect: 'none',
+                                  }}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={!!col.is_terminal}
+                                    onChange={(e) => onUpdateColumn(col.id, { is_terminal: e.target.checked })}
+                                    style={{ cursor: 'pointer' }}
+                                  />
+                                  Terminal (Done)
+                                </label>
                               </div>
 
                               {/* Prompt template selector — attached to agent_trigger when a ticket enters this column */}
