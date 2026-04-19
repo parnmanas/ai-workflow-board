@@ -135,5 +135,29 @@ jobs:
               --env-file "$APP_ENV_FILE" \
               ghcr.io/${{ github.repository_owner }}/ai-workflow-board:latest
 
+            # ── Health check ──
+            # 새 컨테이너가 크래시 루프·DB 연결 실패·마이그레이션 오류 등으로
+            # 죽어도 docker run 자체는 성공이라 workflow 가 ✅ 로 끝나는 문제.
+            # /api/health 에 30초간 2초 간격 재시도; 끝까지 실패하면 컨테이너
+            # 로그 덤프 후 exit 1 로 workflow 를 빨갛게 만듦.
+            echo "Waiting for /api/health to return ok..."
+            HEALTH_OK=0
+            for i in $(seq 1 15); do
+              status=$(docker exec ai-workflow-board wget -qO- http://127.0.0.1:7701/api/health 2>/dev/null | grep -o '"status":"[^"]*"' || true)
+              if [ "$status" = '"status":"ok"' ]; then
+                HEALTH_OK=1
+                echo "Health check OK after ${i} attempt(s)"
+                break
+              fi
+              sleep 2
+            done
+            if [ "$HEALTH_OK" != "1" ]; then
+              echo "=== HEALTH CHECK FAILED after 30s — dumping container logs ==="
+              docker logs --tail 100 ai-workflow-board || true
+              echo "=== container state ==="
+              docker inspect --format '{{.State.Status}} exit={{.State.ExitCode}} err={{.State.Error}}' ai-workflow-board || true
+              exit 1
+            fi
+
             # 사용하지 않는 이미지 정리
             docker image prune -f
