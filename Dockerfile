@@ -55,7 +55,19 @@ COPY --from=builder /app/apps/client/dist ./apps/client/dist
 # Install production dependencies only
 RUN npm install --omit=dev --workspace=server
 
+# Drop to the `node` user baked into node:22-alpine. The server never
+# writes to /app at runtime (logs are in-memory, DB is external Postgres,
+# SQLite code path is dev-only), so world-readable files from the
+# root-owned install stages are fine for execution.
+USER node
+
 EXPOSE 7701
+
+# Container-level health probe. Independent of deploy-side curl checks —
+# lets Docker / Swarm / Kubernetes mark the container unhealthy when the
+# DB connection dies or the process wedges without crashing.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:7701/api/health | grep -q '"status":"ok"' || exit 1
 
 # Start the NestJS server (serves both API + static client)
 CMD ["node", "apps/server/dist/main.js"]
