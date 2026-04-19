@@ -46,6 +46,12 @@ jobs:
         with:
           host: ${{ secrets.NAS_HOST }}
           username: ${{ secrets.NAS_USER }}
+          # key 가 설정돼 있으면 key 인증 사용, 비어있으면 password 로 fallback.
+          # 전환 전략: (1) NAS 에 public key 등록 + NAS_SSH_KEY secret 추가
+          #            (2) 배포 1회 → key 인증 성공 확인
+          #            (3) NAS_PASSWORD secret 제거 + NAS sshd 에서
+          #                PasswordAuthentication no 로 완전 차단
+          key: ${{ secrets.NAS_SSH_KEY }}
           password: ${{ secrets.NAS_PASSWORD }}
           port: ${{ secrets.NAS_PORT }}
           script: |
