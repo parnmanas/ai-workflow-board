@@ -55,6 +55,38 @@ jobs:
             # ── Docker 네트워크 (앱 ↔ DB 통신용) ──
             docker network create awb-net 2>/dev/null || true
 
+            # ── Env 파일 준비 ──
+            # credential 을 docker run 명령줄에 직접 붙이지 않고 파일로 주입.
+            # 목적: NAS shell history / ps -ef / SSH 명령줄 로그에 평문 credential
+            # 이 찍히는 걸 차단. (docker inspect 의 Env 필드에는 여전히 평문으로
+            # 남으므로, 완전 은폐를 원하면 Docker secrets 또는 앱 코드에서
+            # file-based credential 로드를 도입해야 함.)
+            ENV_DIR=/volume1/docker/awb
+            mkdir -p "$ENV_DIR"
+            umask 077
+
+            APP_ENV_FILE="$ENV_DIR/app.env"
+            cat > "$APP_ENV_FILE" <<EOF
+            NODE_ENV=production
+            DB_TYPE=postgres
+            DB_HOST=awb-postgres
+            DB_PORT=5432
+            DB_NAME=${{ secrets.DB_NAME }}
+            DB_USER=${{ secrets.DB_USER }}
+            DB_PASS=${{ secrets.DB_PASS }}
+            MCP_API_KEYS=${{ secrets.MCP_API_KEYS }}
+            AGENT_API_KEY=${{ secrets.AGENT_API_KEY }}
+            EOF
+            chmod 600 "$APP_ENV_FILE"
+
+            PG_ENV_FILE="$ENV_DIR/postgres.env"
+            cat > "$PG_ENV_FILE" <<EOF
+            POSTGRES_DB=${{ secrets.DB_NAME }}
+            POSTGRES_USER=${{ secrets.DB_USER }}
+            POSTGRES_PASSWORD=${{ secrets.DB_PASS }}
+            EOF
+            chmod 600 "$PG_ENV_FILE"
+
             # ── PostgreSQL 컨테이너 (최초 1회만 생성, 이후 유지) ──
             if ! docker ps --format '{{.Names}}' | grep -q '^awb-postgres$'; then
               echo "Starting PostgreSQL container..."
@@ -63,15 +95,13 @@ jobs:
                 --network awb-net \
                 --restart unless-stopped \
                 -v awb-pgdata:/var/lib/postgresql/data \
-                -e POSTGRES_DB=${{ secrets.DB_NAME }} \
-                -e POSTGRES_USER=${{ secrets.DB_USER }} \
-                -e POSTGRES_PASSWORD=${{ secrets.DB_PASS }} \
+                --env-file "$PG_ENV_FILE" \
                 postgres:16-alpine
 
               # DB 준비 대기
               echo "Waiting for PostgreSQL to be ready..."
               for i in $(seq 1 30); do
-                docker exec awb-postgres pg_isready -U ${{ secrets.DB_USER }} 2>/dev/null && break
+                docker exec awb-postgres pg_isready -U "${{ secrets.DB_USER }}" 2>/dev/null && break
                 sleep 1
               done
             else
@@ -96,15 +126,7 @@ jobs:
               --network awb-net \
               --restart unless-stopped \
               -p 7701:7701 \
-              -e NODE_ENV=production \
-              -e DB_TYPE=postgres \
-              -e DB_HOST=awb-postgres \
-              -e DB_PORT=5432 \
-              -e DB_NAME=${{ secrets.DB_NAME }} \
-              -e DB_USER=${{ secrets.DB_USER }} \
-              -e DB_PASS=${{ secrets.DB_PASS }} \
-              -e MCP_API_KEYS=${{ secrets.MCP_API_KEYS }} \
-              -e AGENT_API_KEY=${{ secrets.AGENT_API_KEY }} \
+              --env-file "$APP_ENV_FILE" \
               ghcr.io/${{ github.repository_owner }}/ai-workflow-board:latest
 
             # 사용하지 않는 이미지 정리
