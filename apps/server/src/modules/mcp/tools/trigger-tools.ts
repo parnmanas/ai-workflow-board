@@ -17,38 +17,14 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { ActivityLog } from '../../../entities/ActivityLog';
-import { Agent } from '../../../entities/Agent';
-import { Board } from '../../../entities/Board';
 import { BoardColumn } from '../../../entities/BoardColumn';
-import { Comment } from '../../../entities/Comment';
 import { Ticket } from '../../../entities/Ticket';
 import { ok, err } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
 import type { ToolContext } from './context';
 
-function safeJsonParse<T>(s: string | null | undefined, fallback: T): T {
-  if (!s) return fallback;
-  try { return JSON.parse(s) as T; } catch { return fallback; }
-}
-
-// Role → ticket field. The three system-defined role slots on a Ticket.
-// routing_config maps user-chosen column names to these three roles.
-const ROLE_TO_TICKET_FIELD: Record<string, 'assignee_id' | 'reporter_id' | 'reviewer_id'> = {
-  assignee: 'assignee_id',
-  reporter: 'reporter_id',
-  reviewer: 'reviewer_id',
-};
-
-// Plugin-side priority ordering uses index in this list (lower = higher priority).
-// Values not in the list sort last.
-const PRIORITY_ORDER = ['critical', 'high', 'medium', 'low'] as const;
-function priorityIndex(p: string | null | undefined): number {
-  const i = PRIORITY_ORDER.indexOf(((p || 'medium').toLowerCase() as typeof PRIORITY_ORDER[number]));
-  return i >= 0 ? i : PRIORITY_ORDER.length;
-}
-
 export function registerTriggerTools(server: McpServer, ctx: ToolContext): void {
-  const { dataSource } = ctx;
+  const { dataSource, allocationService } = ctx;
 
   server.tool(
     'get_allocated_tickets',
@@ -63,133 +39,12 @@ export function registerTriggerTools(server: McpServer, ctx: ToolContext): void 
       workspace_id: z.string().describe('Workspace to scope results'),
     },
     async ({ agent_id, workspace_id }) => {
-      const agentRepo = dataSource.getRepository(Agent);
-      const agent = await agentRepo.findOne({ where: { id: agent_id } });
-      if (!agent) return err('Agent not found');
-      if (agent.workspace_id && agent.workspace_id !== workspace_id) {
-        return err('Agent does not belong to the requested workspace');
+      if (!allocationService) {
+        return err('get_allocated_tickets is unavailable in standalone MCP server mode — use the NestJS-integrated server.');
       }
-
-      // Every ticket in the workspace where this agent holds a role slot.
-      const ticketRepo = dataSource.getRepository(Ticket);
-      const tickets = await ticketRepo.createQueryBuilder('t')
-        .innerJoin('columns', 'col', 'col.id = t.column_id')
-        .innerJoin('boards', 'b', 'b.id = col.board_id')
-        .where('b.workspace_id = :workspaceId', { workspaceId: workspace_id })
-        .andWhere('(t.assignee_id = :agentId OR t.reporter_id = :agentId OR t.reviewer_id = :agentId)', { agentId: agent_id })
-        .getMany();
-
-      if (tickets.length === 0) return ok([]);
-
-      const colIds = Array.from(new Set(tickets.map(t => t.column_id).filter(Boolean) as string[]));
-      if (colIds.length === 0) return ok([]);
-      const columns = await dataSource.getRepository(BoardColumn)
-        .createQueryBuilder('col')
-        .where('col.id IN (:...ids)', { ids: colIds })
-        .getMany();
-      const boardIds = Array.from(new Set(columns.map(c => c.board_id)));
-      const boards = boardIds.length === 0 ? []
-        : await dataSource.getRepository(Board)
-          .createQueryBuilder('b')
-          .where('b.id IN (:...ids)', { ids: boardIds })
-          .getMany();
-      const colById = new Map(columns.map(c => [c.id, c]));
-      const boardById = new Map(boards.map(b => [b.id, b]));
-
-      // Walk the tickets and build the (ticket, role) pairs that the agent
-      // actually holds + the column routes to that role. Collect them first,
-      // then batch-query my_last_update_at for the set of ticket ids in one
-      // pass each over comments + activity_logs.
-      type Row = {
-        ticket_id: string;
-        role: string;
-        column_id: string;
-        column_position: number;
-        priority: string;
-        priority_index: number;
-        title: string;
-        my_last_update_at: string | null;
-      };
-      const rows: Row[] = [];
-      const rowTicketIds = new Set<string>();
-
-      for (const ticket of tickets) {
-        if (!ticket.column_id) continue;
-        const col = colById.get(ticket.column_id);
-        if (!col) continue;
-        // v0.25.0: exclude terminal columns — those are "done" and never need agent action.
-        if ((col as any).is_terminal === true) continue;
-        const board = boardById.get(col.board_id);
-        if (!board) continue;
-
-        const routing = safeJsonParse<Record<string, string | string[]>>(board.routing_config, {});
-        const columnKey = (col.name || '').toLowerCase();
-        const rawRoles = Object.prototype.hasOwnProperty.call(routing, columnKey)
-          ? routing[columnKey]
-          : undefined;
-        if (rawRoles === undefined) continue;
-        const roles = Array.isArray(rawRoles) ? rawRoles : [rawRoles];
-        if (roles.length === 0) continue;
-
-        for (const role of roles) {
-          const field = ROLE_TO_TICKET_FIELD[role];
-          if (!field) continue;
-          if ((ticket as any)[field] !== agent_id) continue;
-          rows.push({
-            ticket_id: ticket.id,
-            role,
-            column_id: ticket.column_id,
-            column_position: col.position,
-            priority: ticket.priority || 'medium',
-            priority_index: priorityIndex(ticket.priority),
-            title: ticket.title,
-            my_last_update_at: null, // filled in below
-          });
-          rowTicketIds.add(ticket.id);
-        }
-      }
-
-      if (rows.length === 0) return ok([]);
-
-      // my_last_update_at: MAX of (latest comment by this agent, latest
-      // activity log entry with actor_id = this agent) per ticket.
-      const ticketIdsArr = Array.from(rowTicketIds);
-
-      const latestComments = await dataSource.getRepository(Comment)
-        .createQueryBuilder('c')
-        .select('c.ticket_id', 'ticket_id')
-        .addSelect('MAX(c.created_at)', 'latest')
-        .where('c.ticket_id IN (:...ids)', { ids: ticketIdsArr })
-        .andWhere(`c.author_type = 'agent' AND c.author_id = :agentId`, { agentId: agent_id })
-        .groupBy('c.ticket_id')
-        .getRawMany<{ ticket_id: string; latest: string | Date | null }>();
-
-      const latestActivity = await dataSource.getRepository(ActivityLog)
-        .createQueryBuilder('a')
-        .select('a.ticket_id', 'ticket_id')
-        .addSelect('MAX(a.created_at)', 'latest')
-        .where('a.ticket_id IN (:...ids)', { ids: ticketIdsArr })
-        .andWhere('a.actor_id = :agentId', { agentId: agent_id })
-        .groupBy('a.ticket_id')
-        .getRawMany<{ ticket_id: string; latest: string | Date | null }>();
-
-      const maxByTicket = new Map<string, number>();
-      const fold = (row: { ticket_id: string; latest: string | Date | null }) => {
-        if (!row.latest) return;
-        const ts = row.latest instanceof Date ? row.latest.getTime() : new Date(row.latest).getTime();
-        if (!Number.isFinite(ts)) return;
-        const prev = maxByTicket.get(row.ticket_id) ?? 0;
-        if (ts > prev) maxByTicket.set(row.ticket_id, ts);
-      };
-      latestComments.forEach(fold);
-      latestActivity.forEach(fold);
-
-      for (const r of rows) {
-        const ts = maxByTicket.get(r.ticket_id);
-        r.my_last_update_at = ts ? new Date(ts).toISOString() : null;
-      }
-
-      return ok(rows);
+      const result = await allocationService.getAllocatedTickets(agent_id, workspace_id);
+      if ('error' in result) return err(result.error);
+      return ok(result);
     }
   );
 

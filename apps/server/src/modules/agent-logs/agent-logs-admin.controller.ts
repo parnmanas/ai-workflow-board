@@ -1,8 +1,10 @@
+import { ApiTags } from '@nestjs/swagger';
 import { Controller, Get, Query, Res, UseGuards } from '@nestjs/common';
 import { Response } from 'express';
 import { AdminGuard } from '../../common/guards/admin.guard';
 import { AgentLogsService } from './agent-logs.service';
 
+@ApiTags('agent-logs-admin')
 @Controller('api/admin/agent-logs')
 @UseGuards(AdminGuard)
 export class AgentLogsAdminController {

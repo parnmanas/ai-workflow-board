@@ -1,3 +1,4 @@
+import { ApiTags } from '@nestjs/swagger';
 import { Controller, Get, Post, Body, Param, Query, Res, UseGuards } from '@nestjs/common';
 import { Response } from 'express';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
@@ -23,6 +24,7 @@ import {
 import { loadTicketFull } from '../mcp/shared/ticket-parsing';
 import { findOrFail } from '../../common/find-or-fail';
 
+@ApiTags('agent-api')
 @Controller('api/agent')
 @UseGuards(AgentAuthGuard)
 export class AgentApiController {

@@ -1,3 +1,4 @@
+import { ApiTags } from '@nestjs/swagger';
 import { Controller, Get, Query, UseGuards } from '@nestjs/common';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
@@ -5,6 +6,7 @@ import { RequirePermission } from '../../common/decorators/require-permission.de
 import { PERMISSIONS } from '../../common/types/permissions';
 import { LogService } from '../../services/log.service';
 
+@ApiTags('logs')
 @Controller('api/admin')
 @UseGuards(PermissionGuard)
 @RequirePermission(PERMISSIONS.ADMIN_ACCESS)

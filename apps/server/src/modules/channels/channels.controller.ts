@@ -1,3 +1,4 @@
+import { ApiTags } from '@nestjs/swagger';
 import { Controller, Get, Post, Patch, Delete, Body, Param, Res, UseGuards } from '@nestjs/common';
 import { Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -11,6 +12,7 @@ import { PERMISSIONS } from '../../common/types/permissions';
 import { DiscordService } from '../../services/discord.service';
 import { findOrFail } from '../../common/find-or-fail';
 
+@ApiTags('channels')
 @Controller('api/channels')
 @UseGuards(PermissionGuard, WorkspaceGuard)
 @RequirePermission(PERMISSIONS.MANAGE_CHANNELS)

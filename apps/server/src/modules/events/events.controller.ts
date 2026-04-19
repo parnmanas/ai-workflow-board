@@ -1,3 +1,4 @@
+import { ApiTags } from '@nestjs/swagger';
 import { Controller, Sse, Req, Header, UnauthorizedException, OnModuleDestroy } from '@nestjs/common';
 import { Request } from 'express';
 import { Observable, Subject, filter, map, finalize, of, merge, interval } from 'rxjs';
@@ -18,6 +19,7 @@ interface RegisteredListener {
   handler: (rawEvent: any) => void;
 }
 
+@ApiTags('events')
 @Controller('api/events')
 export class EventsController implements OnModuleDestroy {
   private readonly eventSubject = new Subject<StreamEvent>();

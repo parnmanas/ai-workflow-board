@@ -1,3 +1,4 @@
+import { ApiTags } from '@nestjs/swagger';
 import {
   Controller,
   Get,
@@ -21,6 +22,7 @@ import { RoomMembershipService } from './room-membership.service';
 import { RoomMessagingService } from './room-messaging.service';
 import { MAX_IMAGE_SIZE, MAX_IMAGES_PER_MESSAGE, ALLOWED_IMAGE_MIMETYPES } from '../../common/constants/upload';
 
+@ApiTags('chat-rooms')
 @Controller('api/chat-rooms')
 @UseGuards(AuthGuard, PermissionGuard)
 export class ChatRoomsController {

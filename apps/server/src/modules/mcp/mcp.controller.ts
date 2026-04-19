@@ -1,3 +1,4 @@
+import { ApiTags } from '@nestjs/swagger';
 import { Controller, All, Req, Res, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
@@ -14,6 +15,7 @@ import { LogService } from '../../services/log.service';
 import { AgentConnectionService } from '../agents/agent-connection.service';
 import { TriggerLoopService } from '../agents/trigger-loop.service';
 import { AgentStatusService } from '../agents/agent-status.service';
+import { AllocationService } from '../agents/allocation.service';
 import { MentionService } from '../../services/mention.service';
 import { ActivityService, activityEvents } from '../../services/activity.service';
 import { EmbeddingService } from '../../services/embedding.service';
@@ -73,6 +75,7 @@ function mcpLogError(message: string, meta?: Record<string, any>) {
 // Bridge logger options that route through the controller's logService-aware mcpLog.
 const bridgeLogOpts = { log: mcpLog, logError: mcpLogError };
 
+@ApiTags('mcp')
 @Controller()
 export class McpController implements OnModuleInit, OnModuleDestroy {
   // agentId → McpServer mapping for push notifications
@@ -90,6 +93,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     private readonly triggerLoopService: TriggerLoopService,
     private readonly mentionService: MentionService,
     private readonly agentStatusService: AgentStatusService,
+    private readonly allocationService: AllocationService,
   ) {}
 
   onModuleInit() {
@@ -169,6 +173,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       logger: this._logService,
       mentionService: this.mentionService,
       agentStatusService: this.agentStatusService,
+      allocationService: this.allocationService,
     };
   }
 

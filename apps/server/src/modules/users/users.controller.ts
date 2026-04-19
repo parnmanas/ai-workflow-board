@@ -1,3 +1,4 @@
+import { ApiTags } from '@nestjs/swagger';
 import { Controller, Get, Post, Patch, Delete, Body, Param, Query, Res, UseGuards } from '@nestjs/common';
 import { Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -11,6 +12,7 @@ import { AuthService } from '../../services/auth.service';
 import { ReBACService } from '../../services/rebac.service';
 import { findOrFail } from '../../common/find-or-fail';
 
+@ApiTags('users')
 @Controller('api/users')
 @UseGuards(PermissionGuard)
 @RequirePermission(PERMISSIONS.MANAGE_USERS)

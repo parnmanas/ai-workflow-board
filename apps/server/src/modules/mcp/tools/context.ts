@@ -29,6 +29,7 @@ import { EmbeddingService } from '../../../services/embedding.service';
 import { GitHubConnectorService } from '../../../services/github-connector.service';
 import { MentionService } from '../../../services/mention.service';
 import type { AgentStatusService } from '../../agents/agent-status.service';
+import type { AllocationService } from '../../agents/allocation.service';
 
 /**
  * Minimal surface that MCP tools need from the logging subsystem.
@@ -60,6 +61,7 @@ export interface ToolContext {
   // the standalone mcp-server entry point (no DI). Tools that depend on it
   // must degrade gracefully.
   agentStatusService?: AgentStatusService;
+  allocationService?: AllocationService;
 }
 
 /**

@@ -1,3 +1,4 @@
+import { ApiTags } from '@nestjs/swagger';
 import { Controller, Post, Patch, Delete, Body, Param, Res, UseGuards } from '@nestjs/common';
 import { Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -6,6 +7,7 @@ import { BoardColumn } from '../../entities/BoardColumn';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { findOrFail } from '../../common/find-or-fail';
 
+@ApiTags('columns')
 @Controller('api')
 @UseGuards(AuthGuard)
 export class ColumnsController {

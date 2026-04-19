@@ -1,3 +1,4 @@
+import { ApiTags } from '@nestjs/swagger';
 import { Controller, Get, Post, Param, Body, Res, UseGuards } from '@nestjs/common';
 import { Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -10,6 +11,7 @@ import { ReBACService } from '../../services/rebac.service';
 import { ActivityService } from '../../services/activity.service';
 import { findOrFail } from '../../common/find-or-fail';
 
+@ApiTags('pending-users')
 @Controller('api/admin/pending-users')
 @UseGuards(AuthGuard, AdminGuard)
 export class PendingUsersController {
