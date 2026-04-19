@@ -1,4 +1,4 @@
-import { ApiTags } from '@nestjs/swagger';
+import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { Controller, Get, Post, Patch, Delete, Body, Param, Query, Res, UseGuards } from '@nestjs/common';
 import { Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -35,6 +35,7 @@ function isMaskedValue(value: string): boolean {
   return value.includes('••••');
 }
 
+@ApiBearerAuth('user-session')
 @ApiTags('credentials')
 @Controller('api/credentials')
 @UseGuards(PermissionGuard)
