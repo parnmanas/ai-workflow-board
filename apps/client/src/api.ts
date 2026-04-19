@@ -144,7 +144,7 @@ export const api = {
   // ─── Columns ──────────────────────────────────────────
   createColumn: (boardId: string, data: { name: string; color?: string; description?: string }) =>
     request<any>(`/boards/${boardId}/columns`, { method: 'POST', body: JSON.stringify(data) }),
-  updateColumn: (id: string, data: { name?: string; color?: string; position?: number; description?: string }) =>
+  updateColumn: (id: string, data: { name?: string; color?: string; position?: number; description?: string; is_terminal?: boolean }) =>
     request<any>(`/columns/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteColumn: (id: string) =>
     request<any>(`/columns/${id}`, { method: 'DELETE' }),

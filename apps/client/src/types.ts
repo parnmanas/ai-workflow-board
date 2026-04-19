@@ -183,6 +183,7 @@ export interface Column {
   position: number;
   color: string;
   description: string;
+  is_terminal: boolean;
   tickets: Ticket[];
   created_at: string;
 }

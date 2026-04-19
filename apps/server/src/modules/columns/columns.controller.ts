@@ -31,12 +31,13 @@ export class ColumnsController {
 
   @Patch('columns/:id')
   async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
-    const { name, color, position, description } = body;
+    const { name, color, position, description, is_terminal } = body;
     const col = await findOrFail(this.repo, { where: { id } }, 'Column not found');
 
     if (name !== undefined) col.name = name;
     if (color !== undefined) col.color = color;
     if (description !== undefined) col.description = description;
+    if (is_terminal !== undefined) col.is_terminal = !!is_terminal;
     await this.repo.save(col);
 
     if (position !== undefined) {
