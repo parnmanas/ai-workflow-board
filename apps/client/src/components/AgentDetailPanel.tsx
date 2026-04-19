@@ -243,6 +243,28 @@ export default function AgentDetailPanel({
             >
               {isOnline ? 'ONLINE' : 'OFFLINE'}
             </div>
+            {(detail?.id || agent?.id) && (
+              <div
+                title="Click to copy agent ID"
+                onClick={() => {
+                  const id = detail?.id || agent?.id || '';
+                  navigator.clipboard?.writeText(id).catch(() => {});
+                }}
+                style={{
+                  fontSize: 10,
+                  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                  color: tokens.colors.textMuted,
+                  marginTop: 2,
+                  cursor: 'pointer',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  maxWidth: 260,
+                }}
+              >
+                {detail?.id || agent?.id}
+              </div>
+            )}
           </div>
         </div>
         {/* Close button */}
