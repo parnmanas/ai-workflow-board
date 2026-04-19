@@ -125,6 +125,7 @@ export function registerUserTools(server: McpServer, ctx: ToolContext): void {
             type: found.type,
             description: found.description,
             is_active: found.is_active,
+            workspace_id: found.workspace_id || '',
             channel_identities: found.channel_identities,
           };
         }
@@ -134,6 +135,10 @@ export function registerUserTools(server: McpServer, ctx: ToolContext): void {
         authenticated: true,
         agent_id: caller.agentId || null,
         agent_name: caller.agentName || null,
+        // Surfaced at top level too so plugin pollers don't have to dig into
+        // the nested agent object — they need this to call workspace-scoped
+        // tools like get_pending_triggers without an extra round trip.
+        workspace_id: agentInfo?.workspace_id || '',
         scope: caller.scope || 'full',
         source: caller.source,
         agent: agentInfo,

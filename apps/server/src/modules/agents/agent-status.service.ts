@@ -15,7 +15,6 @@ import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import { Agent } from '../../entities/Agent';
-import { ActivityLog } from '../../entities/ActivityLog';
 import { Ticket } from '../../entities/Ticket';
 import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
@@ -36,43 +35,23 @@ interface AgentStatus {
 
 const SWEEP_INTERVAL_MS = 30_000;
 const OFFLINE_THRESHOLD_MS = 90_000;
-
-// D-39: "done" column detection uses a case-insensitive whitelist of common
-// terminal column names. ActivityLog records every column move with
-// action='moved' and the destination name in new_value (see
-// trigger-loop.service.ts:87), so we match against new_value, not a sentinel action.
-const DONE_COLUMN_NAMES = new Set(['done', 'complete', 'completed', 'closed']);
-
-function isDoneColumn(name: string | null | undefined): boolean {
-  if (!name) return false;
-  return DONE_COLUMN_NAMES.has(name.toLowerCase().trim());
-}
+// current_task is plugin-signal driven. If a plugin crashes between
+// setCurrentTask and clearCurrentTask the task would otherwise stay stuck;
+// the sweep auto-clears any task older than this so the dashboard recovers
+// without manual intervention. Tuned long enough that legitimate long-running
+// reviews don't flap, short enough that crashes self-heal within ~one sweep.
+const CURRENT_TASK_STALE_MS = 15 * 60_000;
 
 @Injectable()
 export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
   private readonly state = new Map<string, AgentStatus>();
   private sweepHandle: NodeJS.Timeout | null = null;
-  private readonly triggerListener: (event: any) => void;
-  private readonly activityListener: (log: ActivityLog) => void;
 
   constructor(
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly logService: LogService,
-  ) {
-    // Arrow wrappers catch promise rejections so a single bad event cannot
-    // crash the Node process or tear down the EventEmitter listener chain.
-    this.triggerListener = (event) => {
-      this._onAgentTrigger(event).catch((e: unknown) => {
-        this.logService.error('AgentStatus', 'triggerListener failed', { err: e });
-      });
-    };
-    this.activityListener = (log) => {
-      this._onActivity(log).catch((e: unknown) => {
-        this.logService.error('AgentStatus', 'activityListener failed', { err: e });
-      });
-    };
-  }
+  ) {}
 
   async onModuleInit(): Promise<void> {
     // Seed the in-memory map from the current DB snapshot so that the first
@@ -86,8 +65,13 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
       });
     }
 
-    activityEvents.on('agent_trigger', this.triggerListener);
-    activityEvents.on('activity', this.activityListener);
+    // Note: previously a `agent_trigger` listener auto-set current_task on
+    // every trigger emit. That made "processing" indistinguishable from
+    // "trigger queued" — agents that never picked the trigger up (proxy
+    // disconnected, subagent silent-exit, spawn failure) appeared busy
+    // forever. current_task is now strictly plugin-signal driven via
+    // setCurrentTask / clearCurrentTask, so the dashboard reflects what's
+    // actually executing rather than what was dispatched.
 
     // D-53: 30s sweep handle stored in field (cleared in onModuleDestroy per §Pitfall 8).
     this.sweepHandle = setInterval(() => {
@@ -102,8 +86,6 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
   }
 
   onModuleDestroy(): void {
-    activityEvents.removeListener('agent_trigger', this.triggerListener);
-    activityEvents.removeListener('activity', this.activityListener);
     if (this.sweepHandle) {
       clearInterval(this.sweepHandle);
       this.sweepHandle = null;
@@ -130,13 +112,12 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * D-39: When an agent is triggered on a ticket, record it as their current_task
-   * with a fresh title lookup. Also stamps is_online=true and last_seen_at=now
-   * because the agent demonstrably has an active identity at this moment.
+   * Plugin signal: an agent has just spawned a ticket-session subagent and
+   * actually started working on the ticket. Stamps current_task + is_online +
+   * last_seen_at so the dashboard reflects "in progress" the instant the
+   * subagent process is alive — not when the trigger was queued.
    */
-  private async _onAgentTrigger(event: any): Promise<void> {
-    const agent_id = event?.agent_id;
-    const ticket_id = event?.ticket_id;
+  async setCurrentTask(agent_id: string, ticket_id: string): Promise<void> {
     if (!agent_id || !ticket_id) return;
 
     const ticket = await this.dataSource
@@ -163,19 +144,22 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * D-39: When any activity log is emitted, check if it's a ticket move into a
-   * "done" column for an agent whose current_task is that ticket. If so, clear.
+   * Plugin signal: subagent for the ticket has exited (idle TTL, normal
+   * completion, or crash). Clears current_task so the dashboard releases the
+   * "processing" badge.
+   *
+   * `expectedTicketId` lets the caller assert intent — if a newer task
+   * already overwrote current_task we must not clobber it. Pass undefined to
+   * force-clear unconditionally (e.g. agent shutdown).
    */
-  private async _onActivity(log: ActivityLog): Promise<void> {
-    if (!log) return;
-    if (log.action !== 'moved' || !log.actor_id || !log.ticket_id) return;
-    if (!isDoneColumn(log.new_value)) return;
-
-    const status = this.state.get(log.actor_id);
-    if (!status?.current_task || status.current_task.ticket_id !== log.ticket_id) return;
+  clearCurrentTask(agent_id: string, expectedTicketId?: string): void {
+    if (!agent_id) return;
+    const status = this.state.get(agent_id);
+    if (!status?.current_task) return;
+    if (expectedTicketId && status.current_task.ticket_id !== expectedTicketId) return;
 
     const updated: AgentStatus = { ...status, current_task: undefined };
-    this.state.set(log.actor_id, updated);
+    this.state.set(agent_id, updated);
     this._emit(updated);
   }
 
@@ -187,23 +171,31 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
    */
   private async _sweep(): Promise<void> {
     const threshold = new Date(Date.now() - OFFLINE_THRESHOLD_MS);
+    const staleTaskCutoff = new Date(Date.now() - CURRENT_TASK_STALE_MS);
     const agents = await this.agentRepo.find();
     for (const a of agents) {
       const prev = this.state.get(a.id);
       const is_online = !!(a.last_seen_at && a.last_seen_at > threshold);
 
+      // Stale current_task auto-clear: covers plugin crashes that skipped
+      // clearCurrentTask. Never blocks legitimate long work — sweep just
+      // forgets the badge after CURRENT_TASK_STALE_MS, the next setCurrentTask
+      // re-establishes it.
+      const taskIsStale = !!prev?.current_task && prev.current_task.claimed_at < staleTaskCutoff;
+      const next_current_task = !is_online || taskIsStale ? undefined : prev?.current_task;
+
       const prevLastSeenMs = prev?.last_seen_at?.getTime();
       const nextLastSeenMs = a.last_seen_at?.getTime();
+      const taskChanged = !!prev?.current_task && next_current_task === undefined;
       const stateChanged =
-        !prev || prev.is_online !== is_online || prevLastSeenMs !== nextLastSeenMs;
+        !prev || prev.is_online !== is_online || prevLastSeenMs !== nextLastSeenMs || taskChanged;
       if (!stateChanged) continue;
 
       const updated: AgentStatus = {
         agent_id: a.id,
         is_online,
         last_seen_at: a.last_seen_at,
-        // Clear current_task on offline transition; preserve across same-online sweeps.
-        current_task: is_online ? prev?.current_task : undefined,
+        current_task: next_current_task,
       };
       this.state.set(a.id, updated);
       this._emit(updated);

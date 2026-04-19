@@ -13,6 +13,7 @@ import { ApiKeyService } from '../../services/api-key.service';
 import { LogService } from '../../services/log.service';
 import { AgentConnectionService } from '../agents/agent-connection.service';
 import { TriggerLoopService } from '../agents/trigger-loop.service';
+import { AgentStatusService } from '../agents/agent-status.service';
 import { MentionService } from '../../services/mention.service';
 import { ActivityService, activityEvents } from '../../services/activity.service';
 import { EmbeddingService } from '../../services/embedding.service';
@@ -88,6 +89,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     private readonly githubService: GitHubConnectorService,
     private readonly triggerLoopService: TriggerLoopService,
     private readonly mentionService: MentionService,
+    private readonly agentStatusService: AgentStatusService,
   ) {}
 
   onModuleInit() {
@@ -167,6 +169,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       logger: this._logService,
       mentionService: this.mentionService,
       triggerService: this.triggerLoopService,
+      agentStatusService: this.agentStatusService,
     };
   }
 

@@ -129,6 +129,14 @@ export function registerTriggerTools(server: McpServer, ctx: ToolContext): void 
       trigger.acknowledged_at = new Date();
       await repo.save(trigger);
 
+      // NOTE: do NOT touch current_task here. Trigger ack ("I received this,
+      // don't re-deliver") and current_task ("I'm actively processing now")
+      // are separate signals. Plugin acks immediately on dispatch but the
+      // subagent runs for a long time afterward — clearing current_task at
+      // ack time would race-clear the dashboard while work is still going.
+      // current_task is owned exclusively by set_current_task /
+      // clear_current_task + the 15-min stale sweep.
+
       await activityService.logActivity({
         entity_type: 'ticket',
         entity_id: trigger.ticket_id,
