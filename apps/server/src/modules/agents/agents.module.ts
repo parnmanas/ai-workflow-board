@@ -2,7 +2,6 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Agent } from '../../entities/Agent';
 import { AgentChannelIdentity } from '../../entities/AgentChannelIdentity';
-import { AgentTrigger } from '../../entities/AgentTrigger';
 import { Ticket } from '../../entities/Ticket';
 import { AgentsController } from './agents.controller';
 import { AgentConnectionService } from './agent-connection.service';
@@ -12,7 +11,7 @@ import { AuthGuard } from '../../common/guards/auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Agent, AgentChannelIdentity, AgentTrigger, Ticket])],
+  imports: [TypeOrmModule.forFeature([Agent, AgentChannelIdentity, Ticket])],
   controllers: [AgentsController],
   providers: [AuthGuard, PermissionGuard, AgentConnectionService, TriggerLoopService, AgentStatusService],
   exports: [AgentConnectionService, TriggerLoopService, AgentStatusService],

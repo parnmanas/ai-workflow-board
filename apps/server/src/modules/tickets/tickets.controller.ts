@@ -288,7 +288,7 @@ export class TicketsController {
     }
     const currentUser = req.currentUser;
     try {
-      const trigger = await this.triggerLoop.createManualTrigger(
+      const trigger = await this.triggerLoop.emitManualTrigger(
         id, targetAgentId, role,
         {
           id: currentUser?.id || '',
@@ -296,7 +296,7 @@ export class TicketsController {
         },
       );
       return res.json({
-        trigger_id: trigger.id,
+        trigger_id: trigger.trigger_id,
         ticket_id: trigger.ticket_id,
         agent_id: trigger.agent_id,
         role: trigger.role,

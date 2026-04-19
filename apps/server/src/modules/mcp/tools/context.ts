@@ -28,7 +28,6 @@ import { LogService } from '../../../services/log.service';
 import { EmbeddingService } from '../../../services/embedding.service';
 import { GitHubConnectorService } from '../../../services/github-connector.service';
 import { MentionService } from '../../../services/mention.service';
-import type { TriggerLoopService } from '../../agents/trigger-loop.service';
 import type { AgentStatusService } from '../../agents/agent-status.service';
 
 /**
@@ -60,7 +59,6 @@ export interface ToolContext {
   // Optional — present in NestJS integrated mode; undefined when invoked from
   // the standalone mcp-server entry point (no DI). Tools that depend on it
   // must degrade gracefully.
-  triggerService?: TriggerLoopService;
   agentStatusService?: AgentStatusService;
 }
 

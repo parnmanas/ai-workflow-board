@@ -168,7 +168,6 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       githubService: this.githubService,
       logger: this._logService,
       mentionService: this.mentionService,
-      triggerService: this.triggerLoopService,
       agentStatusService: this.agentStatusService,
     };
   }
