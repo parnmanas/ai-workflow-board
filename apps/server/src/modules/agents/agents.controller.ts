@@ -13,9 +13,10 @@ import { CurrentWorkspaceId } from '../../common/decorators/current-workspace.de
 import { PERMISSIONS, hasPermission } from '../../common/types/permissions';
 import { AgentStatusService } from './agent-status.service';
 import { AllocationService } from './allocation.service';
-import { ApiOperation, ApiParam, ApiQuery, ApiTags } from '@nestjs/swagger';
+import { ApiOperation, ApiParam, ApiQuery, ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { findOrFail } from '../../common/find-or-fail';
 
+@ApiBearerAuth('user-session')
 @ApiTags('agents')
 @Controller('api/agents')
 @UseGuards(PermissionGuard, WorkspaceGuard)

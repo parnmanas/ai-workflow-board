@@ -1,4 +1,5 @@
-import { ApiTags } from '@nestjs/swagger';
+import { ApiBody, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { LoginDto, RegisterDto, SetupDto } from './auth.dto';
 import { Controller, Post, Get, Body, Headers, Res, HttpStatus } from '@nestjs/common';
 import { Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -54,6 +55,8 @@ export class AuthController {
   }
 
   @Post('login')
+  @ApiOperation({ summary: 'Log in with email + password. Returns { token, user, workspaces }. Put the token in the "user-session" Authorize slot at the top of this page.' })
+  @ApiBody({ type: LoginDto })
   async login(@Body() body: any, @Res() res: Response) {
     const { email, password } = body;
     if (!email || !password) {
@@ -122,6 +125,8 @@ export class AuthController {
   }
 
   @Post('setup')
+  @ApiOperation({ summary: 'One-time initial-admin setup. Rejected after the first user exists.' })
+  @ApiBody({ type: SetupDto })
   async setup(@Body() body: any, @Res() res: Response) {
     const needs = await this.authService.needsSetup();
     if (!needs) {
@@ -165,6 +170,8 @@ export class AuthController {
   }
 
   @Post('register')
+  @ApiOperation({ summary: 'Register a new user. First user becomes admin automatically.' })
+  @ApiBody({ type: RegisterDto })
   async register(@Body() body: any, @Res() res: Response) {
     const { name, email, password, requested_workspace_id } = body;
     if (!name || !email || !password) {

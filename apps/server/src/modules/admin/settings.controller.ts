@@ -1,4 +1,4 @@
-import { ApiTags } from '@nestjs/swagger';
+import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { Controller, Get, Patch, Body, Res, UseGuards } from '@nestjs/common';
 import { Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -14,6 +14,7 @@ const SETTING_DEFINITIONS: Record<string, { description: string; is_secret: bool
   'embedding.model': { description: 'Embedding model name', is_secret: false, default_value: 'text-embedding-3-small' },
 };
 
+@ApiBearerAuth('user-session')
 @ApiTags('settings')
 @Controller('api/admin/settings')
 @UseGuards(AdminGuard)

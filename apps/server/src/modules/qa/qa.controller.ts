@@ -1,4 +1,4 @@
-import { ApiTags } from '@nestjs/swagger';
+import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { Controller, Post, Res, UseGuards } from '@nestjs/common';
 import { Response } from 'express';
 import { InjectDataSource } from '@nestjs/typeorm';
@@ -53,6 +53,7 @@ interface QAReport {
   cleanup: { workspace_deleted: boolean; error?: string };
 }
 
+@ApiBearerAuth('user-session')
 @ApiTags('qa')
 @Controller('api/admin/qa')
 @UseGuards(AdminGuard)

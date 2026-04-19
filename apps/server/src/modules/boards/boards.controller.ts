@@ -1,4 +1,4 @@
-import { ApiTags } from '@nestjs/swagger';
+import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { Controller, Get, Post, Patch, Delete, Body, Param, Query, Res, UseGuards } from '@nestjs/common';
 import { Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -10,6 +10,7 @@ import { AuthGuard } from '../../common/guards/auth.guard';
 import { DEFAULT_COLUMNS } from '../../database/database.module';
 import { findOrFail } from '../../common/find-or-fail';
 
+@ApiBearerAuth('user-session')
 @ApiTags('boards')
 @Controller('api/boards')
 @UseGuards(AuthGuard)

@@ -1,9 +1,10 @@
-import { ApiTags } from '@nestjs/swagger';
+import { ApiTags, ApiSecurity } from '@nestjs/swagger';
 import { Body, Controller, Get, Post, Query, Res, UseGuards } from '@nestjs/common';
 import { Response } from 'express';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { AgentLogsService } from './agent-logs.service';
 
+@ApiSecurity('agent-api-key')
 @ApiTags('agent-logs-upload')
 @Controller('api/agent/error-logs')
 @UseGuards(AgentAuthGuard)

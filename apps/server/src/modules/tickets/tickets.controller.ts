@@ -1,4 +1,4 @@
-import { ApiTags } from '@nestjs/swagger';
+import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { Controller, Get, Post, Patch, Delete, Body, Param, Req, Res, UseGuards } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
@@ -21,6 +21,7 @@ import { loadTicketFull } from '../mcp/shared/ticket-parsing';
 import { maxTicketPosition, maxChildPosition, resolveAgentId, shiftTicketPositions } from '../mcp/shared/ticket-helpers';
 import { findOrFail } from '../../common/find-or-fail';
 
+@ApiBearerAuth('user-session')
 @ApiTags('tickets')
 @Controller('api')
 @UseGuards(AuthGuard, WorkspaceGuard)

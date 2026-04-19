@@ -1,4 +1,4 @@
-import { ApiTags } from '@nestjs/swagger';
+import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { Controller, Get, Post, Patch, Delete, Body, Param, Res, UseGuards } from '@nestjs/common';
 import { Response } from 'express';
 import { PermissionGuard } from '../../common/guards/permission.guard';
@@ -8,6 +8,7 @@ import { CurrentWorkspaceId } from '../../common/decorators/current-workspace.de
 import { PERMISSIONS } from '../../common/types/permissions';
 import { ApiKeyService } from '../../services/api-key.service';
 
+@ApiBearerAuth('user-session')
 @ApiTags('api-keys')
 @Controller('api/keys')
 @UseGuards(PermissionGuard, WorkspaceGuard)

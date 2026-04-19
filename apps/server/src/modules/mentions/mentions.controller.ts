@@ -1,4 +1,4 @@
-import { ApiTags } from '@nestjs/swagger';
+import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { Controller, Get, Post, Param, Req, Res, UseGuards } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { AuthGuard } from '../../common/guards/auth.guard';
@@ -10,6 +10,7 @@ import { MentionsService } from './mentions.service';
  * to, they only see their own unread rows, and every row's user_id is set
  * at dispatch time (tickets.controller / room-messaging.service).
  */
+@ApiBearerAuth('user-session')
 @ApiTags('mentions')
 @Controller('api')
 @UseGuards(AuthGuard)
