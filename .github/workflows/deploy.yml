@@ -3,7 +3,7 @@ name: Deploy AI Workflow Board
 on:
   push:
     branches:
-      - production
+      - production.private
   workflow_dispatch:
 
 env:
