@@ -22,13 +22,13 @@ import * as entitiesBarrel from './entities';
 
 const entities = Object.values(entitiesBarrel);
 
-export const DEFAULT_COLUMNS = [
-  { name: 'Backlog', position: 0, color: '#94a3b8' },
-  { name: 'To Do', position: 1, color: '#60a5fa' },
-  { name: 'In Progress', position: 2, color: '#fbbf24' },
-  { name: 'Review', position: 3, color: '#a78bfa' },
-  { name: 'Done', position: 4, color: '#34d399' },
-];
+// New boards start with no columns. Hardcoded English defaults silently
+// imposed a workflow shape ("Backlog/To Do/In Progress/Review/Done") that
+// only matched the boards whose owners were happy to mirror it; everyone
+// else had to delete and recreate. Workflow shape is now an explicit board
+// setup step (UI / API), and trigger routing only fires for columns whose
+// names are mapped in Board.routing_config.
+export const DEFAULT_COLUMNS: Array<{ name: string; position: number; color: string }> = [];
 
 export function buildDataSourceOptions(): DataSourceOptions {
   const dbType = (process.env.DB_TYPE || 'sqlite') as 'sqlite' | 'mysql' | 'postgres';

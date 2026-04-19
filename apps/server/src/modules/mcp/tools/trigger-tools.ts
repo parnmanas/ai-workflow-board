@@ -3,6 +3,11 @@
  *
  * Tools:
  *   - get_pending_triggers: unacknowledged AgentTriggers for the calling agent
+ *   - get_my_actionable_tickets: tickets whose current column's routing_config
+ *     assigns a role the calling agent holds (idle-path reconciliation so that
+ *     agents entering backlog/staging columns get noticed even when no
+ *     AgentTrigger was ever created — e.g. ticket existed before the agent
+ *     was set as reporter, or the original trigger was already acked)
  *   - acknowledge_trigger: mark a trigger as processed
  *   - subscribe_events: pull activity log slice (time-cursor paginated)
  */
@@ -12,11 +17,26 @@ import { z } from 'zod';
 import { ActivityLog } from '../../../entities/ActivityLog';
 import { Agent } from '../../../entities/Agent';
 import { AgentTrigger } from '../../../entities/AgentTrigger';
+import { Board } from '../../../entities/Board';
 import { BoardColumn } from '../../../entities/BoardColumn';
 import { Ticket } from '../../../entities/Ticket';
 import { ok, err } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
 import type { ToolContext } from './context';
+
+function safeJsonParse<T>(s: string | null | undefined, fallback: T): T {
+  if (!s) return fallback;
+  try { return JSON.parse(s) as T; } catch { return fallback; }
+}
+
+// Role → ticket field. Intentional: these are the three system-defined role
+// slots on a Ticket (not column names). routing_config is the mapping layer
+// between user-chosen column names and these three roles.
+const ROLE_TO_TICKET_FIELD: Record<string, 'assignee_id' | 'reporter_id' | 'reviewer_id'> = {
+  assignee: 'assignee_id',
+  reporter: 'reporter_id',
+  reviewer: 'reviewer_id',
+};
 
 export function registerTriggerTools(server: McpServer, ctx: ToolContext): void {
   const { dataSource, activityService, triggerService } = ctx;
@@ -101,6 +121,102 @@ export function registerTriggerTools(server: McpServer, ctx: ToolContext): void 
         .getMany();
 
       return ok(triggers);
+    }
+  );
+
+  server.tool(
+    'get_my_actionable_tickets',
+    'Return tickets whose current column\'s routing_config assigns a role held by the calling agent, ' +
+    'excluding tickets that already have a pending (unacknowledged) AgentTrigger. Purely ' +
+    'routing_config-driven — no column-name conventions, no status assumptions, no role-list baked in.',
+    {
+      agent_id: z.string().describe('Calling agent ID'),
+      workspace_id: z.string().describe('Workspace to scope results'),
+    },
+    async ({ agent_id, workspace_id }) => {
+      const agentRepo = dataSource.getRepository(Agent);
+      const agent = await agentRepo.findOne({ where: { id: agent_id } });
+      if (!agent) return err('Agent not found');
+      if (agent.workspace_id && agent.workspace_id !== workspace_id) {
+        return err('Agent does not belong to the requested workspace');
+      }
+
+      // Every ticket where this agent holds at least one role slot within
+      // the requested workspace. We walk these tickets, resolve each one's
+      // column → board.routing_config, and emit the (ticket, role) pairs
+      // where routing matches a role the agent actually holds.
+      const ticketRepo = dataSource.getRepository(Ticket);
+      const tickets = await ticketRepo.createQueryBuilder('t')
+        .innerJoin('columns', 'col', 'col.id = t.column_id')
+        .innerJoin('boards', 'b', 'b.id = col.board_id')
+        .where('b.workspace_id = :workspaceId', { workspaceId: workspace_id })
+        .andWhere('(t.assignee_id = :agentId OR t.reporter_id = :agentId OR t.reviewer_id = :agentId)', { agentId: agent_id })
+        .getMany();
+
+      if (tickets.length === 0) return ok([]);
+
+      // Resolve routing_config for every column we'll touch, in one pass.
+      // column_id is cached; we batch by board to minimize queries.
+      const colIds = Array.from(new Set(tickets.map(t => t.column_id).filter(Boolean) as string[]));
+      if (colIds.length === 0) return ok([]);
+      const columns = await dataSource.getRepository(BoardColumn)
+        .createQueryBuilder('col')
+        .where('col.id IN (:...ids)', { ids: colIds })
+        .getMany();
+      const boardIds = Array.from(new Set(columns.map(c => c.board_id)));
+      const boards = boardIds.length === 0 ? []
+        : await dataSource.getRepository(Board)
+          .createQueryBuilder('b')
+          .where('b.id IN (:...ids)', { ids: boardIds })
+          .getMany();
+      const colById = new Map(columns.map(c => [c.id, c]));
+      const boardById = new Map(boards.map(b => [b.id, b]));
+
+      // Tickets with an unacknowledged AgentTrigger are already en route via
+      // the push / get_pending_triggers path — don't double-report them.
+      const now = new Date();
+      const pendingRows = await dataSource.getRepository(AgentTrigger)
+        .createQueryBuilder('t')
+        .select('t.ticket_id', 'ticket_id').addSelect('t.role', 'role')
+        .where('t.acknowledged_at IS NULL')
+        .andWhere('(t.expires_at IS NULL OR t.expires_at > :now)', { now })
+        .andWhere('t.agent_id = :agentId', { agentId: agent_id })
+        .getRawMany<{ ticket_id: string; role: string }>();
+      const pendingPairs = new Set(pendingRows.map(r => `${r.ticket_id}::${r.role}`));
+
+      const actionable: Array<{ ticket_id: string; role: string; column_id: string; title: string }> = [];
+
+      for (const ticket of tickets) {
+        if (!ticket.column_id) continue;
+        const col = colById.get(ticket.column_id);
+        if (!col) continue;
+        const board = boardById.get(col.board_id);
+        if (!board) continue;
+
+        const routing = safeJsonParse<Record<string, string | string[]>>(board.routing_config, {});
+        const columnKey = (col.name || '').toLowerCase();
+        const rawRoles = Object.prototype.hasOwnProperty.call(routing, columnKey)
+          ? routing[columnKey]
+          : undefined;
+        if (rawRoles === undefined) continue;
+        const roles = Array.isArray(rawRoles) ? rawRoles : [rawRoles];
+        if (roles.length === 0) continue;
+
+        for (const role of roles) {
+          const field = ROLE_TO_TICKET_FIELD[role];
+          if (!field) continue;
+          if ((ticket as any)[field] !== agent_id) continue; // agent doesn't hold this role
+          if (pendingPairs.has(`${ticket.id}::${role}`)) continue; // already en route
+          actionable.push({
+            ticket_id: ticket.id,
+            role,
+            column_id: ticket.column_id,
+            title: ticket.title,
+          });
+        }
+      }
+
+      return ok(actionable);
     }
   );
 
