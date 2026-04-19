@@ -25,6 +25,9 @@ export class BoardColumn {
   @Column({ type: 'varchar', default: '' })
   description: string;
 
+  @Column({ type: 'boolean', default: false })
+  is_terminal: boolean;
+
   @CreateDateColumn()
   created_at: Date;
 

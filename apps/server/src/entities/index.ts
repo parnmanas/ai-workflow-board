@@ -9,7 +9,6 @@ export { AgentChannelIdentity } from './AgentChannelIdentity';
 export { Channel } from './Channel';
 export { ActivityLog } from './ActivityLog';
 export { ApiKey } from './ApiKey';
-export { AgentTrigger } from './AgentTrigger';
 export { PromptTemplate } from './PromptTemplate';
 export { RelationTuple } from './RelationTuple';
 export { ChatRoom } from './ChatRoom';

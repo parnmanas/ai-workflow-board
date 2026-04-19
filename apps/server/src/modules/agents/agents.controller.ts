@@ -4,7 +4,6 @@ import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { Agent } from '../../entities/Agent';
 import { AgentChannelIdentity } from '../../entities/AgentChannelIdentity';
-import { AgentTrigger } from '../../entities/AgentTrigger';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { Workspace } from '../../entities/Workspace';
 import { PermissionGuard } from '../../common/guards/permission.guard';
@@ -22,7 +21,6 @@ export class AgentsController {
   constructor(
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     @InjectRepository(AgentChannelIdentity) private readonly identityRepo: Repository<AgentChannelIdentity>,
-    @InjectRepository(AgentTrigger) private readonly triggerRepo: Repository<AgentTrigger>,
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly agentStatusService: AgentStatusService,
   ) {}
@@ -55,37 +53,30 @@ export class AgentsController {
       order: { name: 'ASC' },
     });
 
-    const rows = await Promise.all(
-      agents.map(async (agent) => {
-        const pendingCount = await this.triggerRepo
-          .createQueryBuilder('t')
-          .where('t.agent_id = :agentId', { agentId: agent.id })
-          .andWhere('t.acknowledged_at IS NULL')
-          .getCount();
+    const rows = agents.map((agent) => {
+      // Phase 3 D-42 — pull live current_task from AgentStatusService (in-memory)
+      const liveStatus = this.agentStatusService.getOne(agent.id);
+      const currentTask = liveStatus?.current_task
+        ? {
+            ticket_id: liveStatus.current_task.ticket_id,
+            ticket_title: liveStatus.current_task.ticket_title,
+            claimed_at: liveStatus.current_task.claimed_at.toISOString(),
+          }
+        : undefined;
 
-        // Phase 3 D-42 — pull live current_task from AgentStatusService (in-memory)
-        const liveStatus = this.agentStatusService.getOne(agent.id);
-        const currentTask = liveStatus?.current_task
-          ? {
-              ticket_id: liveStatus.current_task.ticket_id,
-              ticket_title: liveStatus.current_task.ticket_title,
-              claimed_at: liveStatus.current_task.claimed_at.toISOString(),
-            }
-          : undefined;
-
-        return {
-          id: agent.id,
-          name: agent.name,
-          avatar_url: agent.avatar_url,
-          is_online: !!agent.is_online,
-          last_seen_at: agent.last_seen_at ? agent.last_seen_at.toISOString() : null,
-          connected_at: agent.connected_at ? agent.connected_at.toISOString() : null,
-          workspace_id: agent.workspace_id,
-          pending_trigger_count: pendingCount,
-          current_task: currentTask,
-        };
-      }),
-    );
+      return {
+        id: agent.id,
+        name: agent.name,
+        avatar_url: agent.avatar_url,
+        is_online: !!agent.is_online,
+        last_seen_at: agent.last_seen_at ? agent.last_seen_at.toISOString() : null,
+        connected_at: agent.connected_at ? agent.connected_at.toISOString() : null,
+        workspace_id: agent.workspace_id,
+        // v0.25.0: AgentTrigger table removed; field kept for UI compat but always 0.
+        pending_trigger_count: 0,
+        current_task: currentTask,
+      };
+    });
 
     return res.json(rows);
   }
