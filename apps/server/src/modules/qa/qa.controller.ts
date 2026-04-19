@@ -17,8 +17,16 @@ import { ActivityLog } from '../../entities/ActivityLog';
 import { ActivityService } from '../../services/activity.service';
 import { ApiKeyService } from '../../services/api-key.service';
 import { AuthService } from '../../services/auth.service';
-import { DEFAULT_COLUMNS } from '../../database/database.module';
 import { maxTicketPosition, maxChildPosition } from '../mcp/shared/ticket-helpers';
+
+// QA harness owns its own scratch columns. Intentionally NOT shared with
+// db.ts seeds — the harness is a self-contained test scenario, so it
+// defines exactly the column shape its tests need rather than depending on
+// any global "default" board template.
+const QA_COLUMNS = [
+  { name: 'QA-In', position: 0, color: '#888' },
+  { name: 'QA-Out', position: 1, color: '#888' },
+];
 
 interface TestResult {
   name: string;
@@ -97,7 +105,7 @@ export class QaController {
       qaWsId = ws.id;
       const board = await boardRepo.save(boardRepo.create({ workspace_id: ws.id, name: 'QA Board', description: '' }));
       qaBoardId = board.id;
-      const cols = DEFAULT_COLUMNS.map(c => ({ ...c, board_id: board.id }));
+      const cols = QA_COLUMNS.map(c => ({ ...c, board_id: board.id }));
       const saved = await colRepo.save(cols.map(c => colRepo.create(c)));
       qaColumnIds = saved.map(c => c.id);
       return `Workspace ${ws.id}, Board ${board.id}, ${saved.length} columns`;
