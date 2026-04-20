@@ -842,7 +842,13 @@ export default function TicketPanel({
             {/* Type filter chips. Only render types that have at least one comment
                OR are currently active (so toggling-off still shows the chip). */}
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 8 }}>
-              {ALL_COMMENT_TYPES.filter(t => typeCounts[t] > 0 || activeTypes.has(t)).map(t => {
+              {/* Render a chip for every type that has at least one comment.
+                 Previously also kept chips for OFF types the user had toggled
+                 off, but that branch hid chips for types with count=0 the
+                 instant the user clicked to toggle them off — leaving no way
+                 to toggle back on. count>0 alone is the right invariant: the
+                 chip exists iff there is something to filter. */}
+              {ALL_COMMENT_TYPES.filter(t => typeCounts[t] > 0).map(t => {
                 const tstyle = COMMENT_TYPE_STYLES[t];
                 const active = activeTypes.has(t);
                 return (

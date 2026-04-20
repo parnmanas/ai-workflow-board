@@ -32,8 +32,15 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
   });
 
   if (comments.length === 0) {
+    // Same flex: 1 footprint as the populated state so the parent column
+    // doesn't collapse and yank the compose input up to the top of the panel.
+    // Without this, an empty Comments tab looks visually broken (input glued
+    // under the filter chips instead of pinned to the bottom).
     return (
-      <div style={{ padding: '12px 0', color: tokens.colors.borderStrong, fontSize: '12px', textAlign: 'center' }}>
+      <div style={{
+        flex: 1, minHeight: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+        color: tokens.colors.borderStrong, fontSize: '12px', textAlign: 'center',
+      }}>
         No comments yet.
       </div>
     );
