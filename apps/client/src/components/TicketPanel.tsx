@@ -528,7 +528,7 @@ export default function TicketPanel({
             fontSize: '10px', fontWeight: 700, padding: '1px 6px', borderRadius: tokens.radii.sm,
             background: 'transparent', color: tokens.colors.infoLight,
             border: `1px solid ${tokens.colors.info}`, textTransform: 'uppercase', letterSpacing: 0.4,
-          }}>\u2192 Answering</span>
+          }}>{'\u2192'} Answering</span>
           <div style={{ flex: 1, minWidth: 0, fontSize: '11px', color: tokens.colors.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             <span style={{ color: tokens.colors.textDisabled, fontWeight: 600 }}>{replyingTo.author}:</span>{' '}
             {replyingTo.preview}
@@ -541,7 +541,7 @@ export default function TicketPanel({
               background: 'transparent', border: 'none', color: tokens.colors.textMuted,
               cursor: 'pointer', fontSize: '14px', padding: '0 4px',
             }}
-          >\u2715</button>
+          >{'\u2715'}</button>
         </div>
       )}
       {/* Compose type selector — hidden in reply mode since the type is locked

@@ -121,7 +121,7 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
                         background: 'transparent', color: tokens.colors.infoLight,
                         border: `1px solid ${tokens.colors.info}`, cursor: 'pointer', textTransform: 'uppercase', letterSpacing: 0.4,
                       }}
-                    >\u2192 Answer</button>
+                    >{'\u2192'} Answer</button>
                   )}
                   {ctype === 'question' && status && (
                     onSetCommentStatus ? (
