@@ -9,8 +9,6 @@ export default function AgentManager() {
   const { items: agents, showForm, setShowForm, editingId, setEditingId, refresh: load } =
     useCrudList<Agent>(() => api.getAgentsAll());
   const [form, setForm] = useState({ name: '', description: '', type: 'custom', role_prompt: '' });
-  const [identityForm, setIdentityForm] = useState({ channel_type: 'discord', channel_external_id: '', display_name: '' });
-  const [showIdentityFor, setShowIdentityFor] = useState<string | null>(null);
 
   const resetForm = () => {
     setForm({ name: '', description: '', type: 'custom', role_prompt: '' });
@@ -43,19 +41,6 @@ export default function AgentManager() {
   const handleDelete = async (id: string) => {
     if (!confirm('Delete this agent?')) return;
     await api.deleteAgent(id);
-    await load();
-  };
-
-  const handleAddIdentity = async (agentId: string) => {
-    if (!identityForm.channel_external_id.trim()) return;
-    await api.addAgentIdentity(agentId, identityForm);
-    setIdentityForm({ channel_type: 'discord', channel_external_id: '', display_name: '' });
-    setShowIdentityFor(null);
-    await load();
-  };
-
-  const handleDeleteIdentity = async (identityId: string) => {
-    await api.deleteAgentIdentity(identityId);
     await load();
   };
 
@@ -99,65 +84,9 @@ export default function AgentManager() {
                 <div style={{ fontSize: '11px', color: tokens.colors.textMuted }}>{agent.description || 'No description'}</div>
               </div>
               <Badge variant={agentTypeBadgeVariant(agent.type)}>{agent.type}</Badge>
-              <Button variant="secondary" size="sm" onClick={() => setShowIdentityFor(showIdentityFor === agent.id ? null : agent.id)}>IDs</Button>
               <Button variant="secondary" size="sm" onClick={() => handleEdit(agent)}>Edit</Button>
               <Button variant="danger" size="sm" onClick={() => handleDelete(agent.id)}>Delete</Button>
             </div>
-
-            {/* Channel Identities */}
-            {(agent.channel_identities?.length > 0 || showIdentityFor === agent.id) && (
-              <div style={{ padding: '0 12px 10px', borderTop: `1px solid ${tokens.colors.surfaceCard}` }}>
-                <div style={{ fontSize: '11px', color: tokens.colors.textMuted, fontWeight: 600, margin: '8px 0 6px', textTransform: 'uppercase' }}>
-                  Channel Identities
-                </div>
-                {(agent.channel_identities || []).map(identity => (
-                  <div key={identity.id} style={{
-                    display: 'flex', alignItems: 'center', gap: 8, padding: '4px 8px',
-                    background: tokens.colors.surfaceCard, borderRadius: tokens.radii.sm, marginBottom: 4, fontSize: '12px',
-                  }}>
-                    <span style={{ color: tokens.colors.accentLight, fontWeight: 600 }}>{identity.channel_type}</span>
-                    <span style={{ color: tokens.colors.textStrong }}>{identity.channel_external_id}</span>
-                    {identity.display_name && <span style={{ color: tokens.colors.textMuted }}>({identity.display_name})</span>}
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => handleDeleteIdentity(identity.id)}
-                      style={{ marginLeft: 'auto' }}
-                    >x</Button>
-                  </div>
-                ))}
-
-                {showIdentityFor === agent.id && (
-                  <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
-                    <div style={{ width: 120, flexShrink: 0 }}>
-                      <Select
-                        value={identityForm.channel_type}
-                        onChange={e => setIdentityForm({ ...identityForm, channel_type: (e.target as HTMLSelectElement).value })}
-                        options={[
-                          { value: 'discord', label: 'Discord' },
-                          { value: 'slack', label: 'Slack' },
-                        ]}
-                      />
-                    </div>
-                    <div style={{ flex: 1 }}>
-                      <Input
-                        value={identityForm.channel_external_id}
-                        onChange={e => setIdentityForm({ ...identityForm, channel_external_id: e.target.value })}
-                        placeholder="External ID"
-                      />
-                    </div>
-                    <div style={{ flex: 1 }}>
-                      <Input
-                        value={identityForm.display_name}
-                        onChange={e => setIdentityForm({ ...identityForm, display_name: e.target.value })}
-                        placeholder="Display name"
-                      />
-                    </div>
-                    <Button variant="primary" size="sm" onClick={() => handleAddIdentity(agent.id)}>Add</Button>
-                  </div>
-                )}
-              </div>
-            )}
           </Card>
         ))}
         {agents.length === 0 && (

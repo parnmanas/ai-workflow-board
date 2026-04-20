@@ -260,10 +260,6 @@ export const api = {
     request<any>(`/agents/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteAgent: (id: string) =>
     request<any>(`/agents/${id}`, { method: 'DELETE' }),
-  addAgentIdentity: (agentId: string, data: { channel_type: string; channel_external_id: string; display_name?: string }) =>
-    request<any>(`/agents/${agentId}/identities`, { method: 'POST', body: JSON.stringify(data) }),
-  deleteAgentIdentity: (identityId: string) =>
-    request<any>(`/agents/identities/${identityId}`, { method: 'DELETE' }),
 
   // ─── Channels ──────────────────────────────────────────
   getChannels: () => request<any[]>('/channels'),

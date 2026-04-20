@@ -7,8 +7,6 @@ import { LogService } from './log.service';
 import { Ticket } from '../entities/Ticket';
 import { Comment } from '../entities/Comment';
 import { User } from '../entities/User';
-import { Agent } from '../entities/Agent';
-import { AgentChannelIdentity } from '../entities/AgentChannelIdentity';
 import { BoardColumn } from '../entities/BoardColumn';
 import { ActivityLog } from '../entities/ActivityLog';
 
@@ -28,8 +26,6 @@ export class NotificationService implements OnModuleInit, OnModuleDestroy {
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
     @InjectRepository(Comment) private readonly commentRepo: Repository<Comment>,
     @InjectRepository(User) private readonly userRepo: Repository<User>,
-    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
-    @InjectRepository(AgentChannelIdentity) private readonly identityRepo: Repository<AgentChannelIdentity>,
     @InjectRepository(BoardColumn) private readonly colRepo: Repository<BoardColumn>,
     private readonly discordService: DiscordService,
     private readonly logService: LogService,
@@ -295,26 +291,15 @@ export class NotificationService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async resolveDiscordId(id: string, name: string): Promise<string> {
-    // 1. By user ID
+    // Agent-to-Discord mapping was removed with AgentChannelIdentity — only
+    // user.discord_user_id remains. Agents don't get @-mentioned in Discord
+    // anymore; their activity is reported through the channel but without
+    // a per-agent mention target.
     if (id) {
       const user = await this.userRepo.findOne({ where: { id } }).catch(() => null);
       if (user?.discord_user_id) return user.discord_user_id;
-      // By agent ID → channel identity
-      const identity = await this.identityRepo.findOne({
-        where: { agent_id: id, channel_type: 'discord' },
-      }).catch(() => null);
-      if (identity?.channel_external_id) return identity.channel_external_id;
     }
-    // 2. By name → agent name → channel identity
     if (name) {
-      const agent = await this.agentRepo.findOne({ where: { name } }).catch(() => null);
-      if (agent) {
-        const identity = await this.identityRepo.findOne({
-          where: { agent_id: agent.id, channel_type: 'discord' },
-        }).catch(() => null);
-        if (identity?.channel_external_id) return identity.channel_external_id;
-      }
-      // By name → user name
       const user = await this.userRepo.findOne({ where: { name } }).catch(() => null);
       if (user?.discord_user_id) return user.discord_user_id;
     }

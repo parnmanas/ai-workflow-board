@@ -1,5 +1,4 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, OneToMany } from 'typeorm';
-import { AgentChannelIdentity } from './AgentChannelIdentity';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
 
 @Entity('agents')
 export class Agent {
@@ -56,7 +55,4 @@ export class Agent {
 
   @UpdateDateColumn()
   updated_at: Date;
-
-  @OneToMany(() => AgentChannelIdentity, identity => identity.agent, { cascade: true })
-  channel_identities: AgentChannelIdentity[];
 }

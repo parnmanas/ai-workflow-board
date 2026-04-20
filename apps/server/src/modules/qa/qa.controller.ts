@@ -11,7 +11,6 @@ import { Ticket } from '../../entities/Ticket';
 import { Comment } from '../../entities/Comment';
 import { User } from '../../entities/User';
 import { Agent } from '../../entities/Agent';
-import { AgentChannelIdentity } from '../../entities/AgentChannelIdentity';
 import { Channel } from '../../entities/Channel';
 import { ApiKey } from '../../entities/ApiKey';
 import { ActivityLog } from '../../entities/ActivityLog';
@@ -87,7 +86,6 @@ export class QaController {
     const commentRepo = this.dataSource.getRepository(Comment);
     const userRepo = this.dataSource.getRepository(User);
     const agentRepo = this.dataSource.getRepository(Agent);
-    const identityRepo = this.dataSource.getRepository(AgentChannelIdentity);
     const channelRepo = this.dataSource.getRepository(Channel);
 
     let qaWsId = '';
@@ -98,7 +96,6 @@ export class QaController {
     let qaCommentId = '';
     let qaUserId = '';
     let qaAgentId = '';
-    let qaIdentityId = '';
     let qaChannelId = '';
     let qaApiKeyId = '';
 
@@ -193,14 +190,6 @@ export class QaController {
       const a = await agentRepo.save(agentRepo.create({ name: 'QA Agent', type: 'custom', description: 'QA test agent' }));
       qaAgentId = a.id;
       return `Agent ${a.id}`;
-    });
-
-    await runTest('Add Channel Identity', 'Agent', async () => {
-      const i = await identityRepo.save(identityRepo.create({
-        agent_id: qaAgentId, channel_type: 'discord', channel_external_id: '123456', display_name: 'QA Bot',
-      }));
-      qaIdentityId = i.id;
-      return `Identity ${i.id}`;
     });
 
     // === CHANNEL TESTS ===

@@ -4,7 +4,6 @@ import { User } from '../../entities/User';
 import { RelationTuple } from '../../entities/RelationTuple';
 import { ApiKey } from '../../entities/ApiKey';
 import { Channel } from '../../entities/Channel';
-import { AgentChannelIdentity } from '../../entities/AgentChannelIdentity';
 import { PromptTemplate } from '../../entities/PromptTemplate';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { Agent } from '../../entities/Agent';
@@ -109,7 +108,6 @@ export class WorkspaceV2Backfill1760000000002 implements MigrationInterface {
 
     await backfillWorkspaceId(manager.getRepository(ApiKey));
     await backfillWorkspaceId(manager.getRepository(Channel));
-    await backfillWorkspaceId(manager.getRepository(AgentChannelIdentity));
     await backfillWorkspaceId(manager.getRepository(PromptTemplate));
     await backfillWorkspaceId(manager.getRepository(ActivityLog));
     await backfillWorkspaceId(manager.getRepository(Agent));

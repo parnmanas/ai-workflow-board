@@ -3,7 +3,6 @@ import { Request, Response } from 'express';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { Agent } from '../../entities/Agent';
-import { AgentChannelIdentity } from '../../entities/AgentChannelIdentity';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { Workspace } from '../../entities/Workspace';
 import { PermissionGuard } from '../../common/guards/permission.guard';
@@ -24,7 +23,6 @@ import { findOrFail } from '../../common/find-or-fail';
 export class AgentsController {
   constructor(
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
-    @InjectRepository(AgentChannelIdentity) private readonly identityRepo: Repository<AgentChannelIdentity>,
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly agentStatusService: AgentStatusService,
     private readonly allocationService: AllocationService,
@@ -59,13 +57,12 @@ export class AgentsController {
     // Admin can request all agents across workspaces with ?scope=all
     const isAdmin = (req as any).currentUser?.role === 'admin';
     if (scope === 'all' && isAdmin) {
-      const agents = await this.agentRepo.find({ relations: ['channel_identities'], order: { name: 'ASC' } });
+      const agents = await this.agentRepo.find({ order: { name: 'ASC' } });
       return res.json(agents);
     }
     if (!workspaceId) return res.json([]);
     const agents = await this.agentRepo.find({
       where: { workspace_id: workspaceId },
-      relations: ['channel_identities'],
       order: { name: 'ASC' },
     });
     return res.json(agents);
@@ -137,7 +134,6 @@ export class AgentsController {
   async get(@Param('id') id: string, @Req() req: Request, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
     const agent = await findOrFail(this.agentRepo, {
       where: { id, ...(workspaceId ? { workspace_id: workspaceId } : {}) },
-      relations: ['channel_identities'],
     }, 'Agent not found');
 
     // Phase 3 D-44 — role_prompt is admin-gated. Non-admin viewers receive a redacted payload.
@@ -193,7 +189,7 @@ export class AgentsController {
     const agent = await this.agentRepo.save(
       this.agentRepo.create({ name, description, type, avatar_url, is_active, workspace_id: effectiveWorkspaceId }),
     );
-    return res.status(201).json({ ...agent, channel_identities: [] });
+    return res.status(201).json(agent);
   }
 
   @Patch(':id')
@@ -207,8 +203,7 @@ export class AgentsController {
     if (role_prompt !== undefined) agent.role_prompt = role_prompt;
     if (role_prompt_meta !== undefined) agent.role_prompt_meta = role_prompt_meta;
 
-    await this.agentRepo.save(agent);
-    const updated = await this.agentRepo.findOne({ where: { id: agent.id }, relations: ['channel_identities'] });
+    const updated = await this.agentRepo.save(agent);
     return res.json(updated);
   }
 
@@ -218,41 +213,6 @@ export class AgentsController {
       where: { id, ...(workspaceId ? { workspace_id: workspaceId } : {}) },
     }, 'Agent not found');
     await this.agentRepo.delete(agent.id);
-    return res.json({ success: true });
-  }
-
-  @Post(':id/identities')
-  async addIdentity(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
-    await findOrFail(this.agentRepo, { where: { id } }, 'Agent not found');
-
-    const { channel_type, channel_external_id, display_name = '' } = body;
-    if (!channel_type || !channel_external_id) {
-      return res.status(400).json({ error: 'channel_type and channel_external_id are required' });
-    }
-
-    const identity = await this.identityRepo.save(this.identityRepo.create({
-      agent_id: id, channel_type, channel_external_id, display_name,
-    }));
-    return res.status(201).json(identity);
-  }
-
-  @Patch('identities/:identityId')
-  async updateIdentity(@Param('identityId') identityId: string, @Body() body: any, @Res() res: Response) {
-    const identity = await findOrFail(this.identityRepo, { where: { id: identityId } }, 'Identity not found');
-
-    const { channel_type, channel_external_id, display_name } = body;
-    if (channel_type !== undefined) identity.channel_type = channel_type;
-    if (channel_external_id !== undefined) identity.channel_external_id = channel_external_id;
-    if (display_name !== undefined) identity.display_name = display_name;
-
-    const updated = await this.identityRepo.save(identity);
-    return res.json(updated);
-  }
-
-  @Delete('identities/:identityId')
-  async deleteIdentity(@Param('identityId') identityId: string, @Res() res: Response) {
-    const identity = await findOrFail(this.identityRepo, { where: { id: identityId } }, 'Identity not found');
-    await this.identityRepo.delete(identity.id);
     return res.json({ success: true });
   }
 }

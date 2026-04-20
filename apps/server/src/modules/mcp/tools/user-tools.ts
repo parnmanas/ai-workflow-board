@@ -116,7 +116,6 @@ export function registerUserTools(server: McpServer, ctx: ToolContext): void {
       if (caller.agentId) {
         const found = await dataSource.getRepository(Agent).findOne({
           where: { id: caller.agentId },
-          relations: ['channel_identities'],
         });
         if (found) {
           agentInfo = {
@@ -126,7 +125,6 @@ export function registerUserTools(server: McpServer, ctx: ToolContext): void {
             description: found.description,
             is_active: found.is_active,
             workspace_id: found.workspace_id || '',
-            channel_identities: found.channel_identities,
           };
         }
       }

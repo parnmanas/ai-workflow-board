@@ -26,7 +26,6 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
     {},
     async () => {
       const agents = await dataSource.getRepository(Agent).find({
-        relations: ['channel_identities'],
         order: { name: 'ASC' },
       });
       return ok(agents);
@@ -40,7 +39,6 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
     async ({ agent_id }) => {
       const agent = await dataSource.getRepository(Agent).findOne({
         where: { id: agent_id },
-        relations: ['channel_identities'],
       });
       if (!agent) return err('Agent not found');
       return ok(agent);
@@ -60,7 +58,7 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
     async ({ name, description, type, avatar_url, is_active }) => {
       const agentRepo = dataSource.getRepository(Agent);
       const agent = await agentRepo.save(agentRepo.create({ name, description, type, avatar_url, is_active }));
-      return ok({ ...agent, channel_identities: [] });
+      return ok(agent);
     }
   );
 
@@ -92,8 +90,7 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
       if (role_prompt !== undefined) agent.role_prompt = role_prompt;              // D-18
       if (role_prompt_meta !== undefined) agent.role_prompt_meta = role_prompt_meta as Record<string, any>; // D-18
 
-      await agentRepo.save(agent);
-      const updated = await agentRepo.findOne({ where: { id: agent.id }, relations: ['channel_identities'] });
+      const updated = await agentRepo.save(agent);
       return ok(updated);
     }
   );

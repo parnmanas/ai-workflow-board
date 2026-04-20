@@ -7,7 +7,6 @@ import { Comment } from '../entities/Comment';
 import { Ticket } from '../entities/Ticket';
 import { User } from '../entities/User';
 import { Agent } from '../entities/Agent';
-import { AgentChannelIdentity } from '../entities/AgentChannelIdentity';
 import { BoardColumn } from '../entities/BoardColumn';
 import { RelationTuple } from '../entities/RelationTuple';
 import { ActivityService } from './activity.service';
@@ -38,7 +37,7 @@ import { PresenceService } from './presence.service';
 @Global()
 @Module({
   imports: [
-    TypeOrmModule.forFeature([ActivityLog, ApiKey, Agent, AgentChannelIdentity, Channel, Comment, Ticket, User, BoardColumn, RelationTuple]),
+    TypeOrmModule.forFeature([ActivityLog, ApiKey, Agent, Channel, Comment, Ticket, User, BoardColumn, RelationTuple]),
   ],
   providers: [
     ActivityService,

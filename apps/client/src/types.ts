@@ -36,15 +36,6 @@ export interface PermissionMeta {
   group: string;
 }
 
-export interface AgentChannelIdentity {
-  id: string; // GUID
-  agent_id: string; // GUID — references Agent.id
-  channel_type: string;
-  channel_external_id: string;
-  display_name: string;
-  created_at: string;
-}
-
 export interface Agent {
   id: string; // GUID
   name: string;
@@ -55,7 +46,6 @@ export interface Agent {
   is_online: number;           // 0 = offline, 1 = online (Phase 2)
   connected_at: string | null; // ISO timestamp or null (Phase 2)
   last_seen_at: string | null; // ISO timestamp or null (Phase 2)
-  channel_identities: AgentChannelIdentity[];
   // Phase 1 role prompt fields (D-14 / ROLE-02)
   role_prompt?: string;
   role_prompt_meta?: Record<string, any> | null;
@@ -274,7 +264,6 @@ export interface AgentDetail extends DashboardAgent {
   role_prompt: string;                                // '' when redacted per D-44
   role_prompt_meta: { updated_at: string; updated_by: string } | null;
   redacted: boolean;                                  // true for non-admin viewer per D-44
-  channel_identities?: any[];
 }
 
 // ActivityRow mirrors the ActivityLog entity shape emitted by GET /api/activity

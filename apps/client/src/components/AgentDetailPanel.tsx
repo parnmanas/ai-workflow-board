@@ -68,7 +68,7 @@ export default function AgentDetailPanel({
 }: AgentDetailPanelProps) {
   const navigate = useNavigate();
 
-  // Full agent detail (includes role_prompt, channel_identities, redacted flag)
+  // Full agent detail (includes role_prompt, redacted flag)
   const [detail, setDetail] = useState<AgentDetail | null>(null);
   const [activity, setActivity] = useState<ActivityRow[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -78,14 +78,6 @@ export default function AgentDetailPanel({
   const [rolePrompt, setRolePrompt] = useState('');
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-
-  // Channel identity add form (admin only)
-  const [identityForm, setIdentityForm] = useState({
-    channel_type: 'discord',
-    channel_external_id: '',
-    display_name: '',
-  });
-  const [showAddIdentity, setShowAddIdentity] = useState(false);
 
   const loadDetail = useCallback(async () => {
     if (!agent?.id) return;
@@ -126,19 +118,6 @@ export default function AgentDetailPanel({
     } finally {
       setSaving(false);
     }
-  };
-
-  const handleAddIdentity = async () => {
-    if (!detail || !identityForm.channel_external_id.trim()) return;
-    await api.addAgentIdentity(detail.id, identityForm);
-    setIdentityForm({ channel_type: 'discord', channel_external_id: '', display_name: '' });
-    setShowAddIdentity(false);
-    await loadDetail();
-  };
-
-  const handleDeleteIdentity = async (identityId: string) => {
-    await api.deleteAgentIdentity(identityId);
-    await loadDetail();
   };
 
   const handleTaskClick = (ticketId: string) => {
@@ -364,134 +343,6 @@ export default function AgentDetailPanel({
               : detail?.redacted
               ? '(role prompt hidden)'
               : detail?.role_prompt || 'No role prompt set.'}
-          </div>
-        )}
-      </section>
-
-      {/* ── Channel Identities ──────────────────────────── */}
-      <section>
-        <div style={{ ...sectionLabelStyle, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <span>Channel Identities</span>
-          {isAdmin && (
-            <button
-              type="button"
-              onClick={() => setShowAddIdentity((v) => !v)}
-              style={{
-                background: showAddIdentity ? tokens.colors.border : 'transparent',
-                color: tokens.colors.textSecondary,
-                border: `1px solid ${tokens.colors.border}`,
-                borderRadius: tokens.radii.sm,
-                padding: '2px 8px',
-                fontSize: 11,
-                cursor: 'pointer',
-                textTransform: 'none',
-                fontWeight: 600,
-                letterSpacing: 0,
-              }}
-            >
-              {showAddIdentity ? 'Cancel' : '+ Add'}
-            </button>
-          )}
-        </div>
-
-        {/* Existing identities */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          {(detail?.channel_identities || agent?.channel_identities || []).length === 0 && (
-            <div style={{ fontSize: 12, color: tokens.colors.borderStrong, fontStyle: 'italic' }}>
-              No channel identities configured.
-            </div>
-          )}
-          {(detail?.channel_identities || agent?.channel_identities || []).map((identity: any) => (
-            <div
-              key={identity.id}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                padding: '6px 10px',
-                background: tokens.colors.surface,
-                border: `1px solid ${tokens.colors.border}`,
-                borderRadius: tokens.radii.md,
-                fontSize: 12,
-              }}
-            >
-              <span style={{ color: tokens.colors.accentLight, fontWeight: 600, flexShrink: 0 }}>
-                {identity.channel_type}
-              </span>
-              <span style={{ color: tokens.colors.textStrong, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {identity.channel_external_id}
-              </span>
-              {identity.display_name && (
-                <span style={{ color: tokens.colors.textMuted, flexShrink: 0 }}>({identity.display_name})</span>
-              )}
-              {isAdmin && (
-                <button
-                  type="button"
-                  onClick={() => handleDeleteIdentity(identity.id)}
-                  style={{
-                    marginLeft: 'auto',
-                    background: 'none',
-                    border: 'none',
-                    color: tokens.colors.borderStrong,
-                    cursor: 'pointer',
-                    fontSize: 13,
-                    padding: '0 2px',
-                    flexShrink: 0,
-                  }}
-                  aria-label="Remove identity"
-                >
-                  x
-                </button>
-              )}
-            </div>
-          ))}
-        </div>
-
-        {/* Add identity form (admin only) */}
-        {isAdmin && showAddIdentity && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
-            <div style={{ display: 'flex', gap: 6 }}>
-              <select
-                value={identityForm.channel_type}
-                onChange={(e) => setIdentityForm({ ...identityForm, channel_type: e.target.value })}
-                style={{ ...inputStyle, width: 100, flex: 'none' }}
-              >
-                <option value="discord">Discord</option>
-                <option value="slack">Slack</option>
-              </select>
-              <input
-                value={identityForm.channel_external_id}
-                onChange={(e) => setIdentityForm({ ...identityForm, channel_external_id: e.target.value })}
-                placeholder="External ID"
-                style={{ ...inputStyle, flex: 1 }}
-              />
-            </div>
-            <div style={{ display: 'flex', gap: 6 }}>
-              <input
-                value={identityForm.display_name}
-                onChange={(e) => setIdentityForm({ ...identityForm, display_name: e.target.value })}
-                placeholder="Display name (optional)"
-                style={{ ...inputStyle, flex: 1 }}
-              />
-              <button
-                type="button"
-                onClick={handleAddIdentity}
-                style={{
-                  background: tokens.colors.accent,
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: tokens.radii.md,
-                  padding: '8px 14px',
-                  fontSize: 12,
-                  fontWeight: 600,
-                  cursor: 'pointer',
-                  whiteSpace: 'nowrap',
-                  flexShrink: 0,
-                }}
-              >
-                Add
-              </button>
-            </div>
           </div>
         )}
       </section>

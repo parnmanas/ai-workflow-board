@@ -5,7 +5,6 @@ export { Ticket } from './Ticket';
 export { Comment } from './Comment';
 export { User } from './User';
 export { Agent } from './Agent';
-export { AgentChannelIdentity } from './AgentChannelIdentity';
 export { Channel } from './Channel';
 export { ActivityLog } from './ActivityLog';
 export { ApiKey } from './ApiKey';
