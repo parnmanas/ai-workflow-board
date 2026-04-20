@@ -11,9 +11,15 @@ interface CommentListProps {
   // Phase 2B: lets the question OPEN/RESOLVED pill double as a toggle.
   // Optional so embeddings without question support can omit it.
   onSetCommentStatus?: (commentId: string, status: 'open' | 'resolved') => void;
+  // Phase 2C: "Answer" button on open questions. Parent owns the reply state
+  // (which question is being answered) so compose-area UX can show a banner.
+  onReply?: (commentId: string) => void;
+  // Highlight the row currently being replied to so the reply banner doesn't
+  // feel disconnected from the question card.
+  replyingToCommentId?: string | null;
 }
 
-export default function CommentList({ comments, onImagePreview, onSetCommentStatus }: CommentListProps) {
+export default function CommentList({ comments, onImagePreview, onSetCommentStatus, onReply, replyingToCommentId }: CommentListProps) {
   const parentRef = useRef<HTMLDivElement>(null);
 
   const virtualizer = useVirtualizer({
@@ -67,6 +73,7 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
           const status = c.status;
           const images = c.images || [];
 
+          const isReplyTarget = replyingToCommentId === c.id;
           return (
             <div
               key={`comment-${c.id}`}
@@ -75,11 +82,14 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
               style={{
                 position: 'absolute', top: virtualItem.start, left: 0, right: 0,
                 background: tstyle.bg,
-                border: `1px solid ${tokens.colors.border}`,
+                border: `1px solid ${isReplyTarget ? tstyle.border : tokens.colors.border}`,
                 borderLeft: `3px solid ${tstyle.border}`,
                 borderRadius: tokens.radii.lg,
                 padding: isCompact ? '8px 12px' : 10,
                 marginBottom: 6,
+                // Subtle outer ring while a reply is being composed for this
+                // question, so the user keeps the link in view as they type.
+                boxShadow: isReplyTarget ? `0 0 0 2px ${tstyle.border}` : undefined,
               }}
             >
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: isCompact ? 2 : 5 }}>
@@ -100,6 +110,18 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
                       <span aria-hidden="true">{tstyle.icon}</span>
                       <span>{tstyle.label}</span>
                     </span>
+                  )}
+                  {ctype === 'question' && status === 'open' && onReply && (
+                    <button
+                      type="button"
+                      onClick={() => onReply(c.id)}
+                      title="Write an answer to this question"
+                      style={{
+                        fontSize: '10px', fontWeight: 700, padding: '1px 6px', borderRadius: tokens.radii.sm,
+                        background: 'transparent', color: tokens.colors.infoLight,
+                        border: `1px solid ${tokens.colors.info}`, cursor: 'pointer', textTransform: 'uppercase', letterSpacing: 0.4,
+                      }}
+                    >\u2192 Answer</button>
                   )}
                   {ctype === 'question' && status && (
                     onSetCommentStatus ? (

@@ -230,6 +230,9 @@ export default function TicketPanel({
   // (e.g., user + reviewer agent) don't shadow each other. Auto-cleared after
   // TYPING_TTL_MS so a tab close doesn't leave a stale "X is typing".
   const [commentTypists, setCommentTypists] = useState<Record<string, { name: string; until: number }>>({});
+  // Phase 2C: which question (if any) the user is currently composing an answer to.
+  // Set via the Answer button on a question card; cleared on submit/cancel/ticket switch.
+  const [replyingTo, setReplyingTo] = useState<{ id: string; preview: string; author: string } | null>(null);
   const [activeTab, setActiveTab] = useState<'detail' | 'comments' | 'activity'>('detail');
   const [activities, setActivities] = useState<ActivityLog[]>([]);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
@@ -408,33 +411,56 @@ export default function TicketPanel({
 
   const handleSubmitComment = () => {
     if (commentContent.trim()) {
+      // When replying to a question, force type='answer' and link via parent_id.
+      // The server auto-resolves the parent question on receipt (see
+      // tickets.controller.addComment) so the OPEN pill flips to Resolved
+      // without a follow-up call.
+      const isReply = !!replyingTo;
+      const submittedType: CommentType = isReply ? 'answer' : composeType;
+      const options = isReply
+        ? { type: 'answer' as const, parent_id: replyingTo!.id }
+        : (composeType !== 'note' ? { type: composeType } : undefined);
+
       onAddComment(
         activeTicket.id,
         commentContent.trim(),
         commentImages.length > 0 ? commentImages : undefined,
-        // Only forward the type when it differs from the default. Keeps the
-        // request body backward-identical for the most common case ('note')
-        // and avoids server-side noise from explicit "type=note" hints.
-        composeType !== 'note' ? { type: composeType } : undefined,
+        options,
       );
       setCommentContent('');
       setCommentImages([]);
       // Reset to the default type after each send so a one-off Question doesn't
       // sticky-set the compose mode.
       setComposeType('note');
+      // Drop reply context so the next comment isn't accidentally an answer too.
+      setReplyingTo(null);
       // Clear typing indicator immediately on submit (otherwise the just-sent
       // comment would land alongside a "still typing" footer).
       stopTypingEmit(activeTicket.id);
       // Auto-enable the chip for the type we just submitted, otherwise the new
       // row would land in the timeline but be hidden by the active filter.
       setActiveTypes(prev => {
-        if (prev.has(composeType)) return prev;
+        if (prev.has(submittedType)) return prev;
         const next = new Set(prev);
-        next.add(composeType);
+        next.add(submittedType);
         return next;
       });
     }
   };
+
+  const handleStartReply = useCallback((commentId: string) => {
+    const target = (activeTicket.comments || []).find(c => c.id === commentId);
+    if (!target) return;
+    setReplyingTo({
+      id: target.id,
+      preview: (target.content || '').slice(0, 120),
+      author: target.author || 'Someone',
+    });
+  }, [activeTicket.comments]);
+
+  // Drop reply context when the user navigates to a different ticket so the
+  // banner can't outlive the question it points at.
+  useEffect(() => { setReplyingTo(null); }, [activeTicket.id]);
 
   // Type-filter state — Set so toggling is O(1). Defaults exclude 'system' so
   // the previous behavior (no audit-log noise in the timeline) is preserved.
@@ -487,8 +513,40 @@ export default function TicketPanel({
 
   const renderCommentInput = () => (
     <div>
-      {/* Compose type selector — segmented control of composable types.
-         Hidden if only one composable type exists (defensive, current set is 4). */}
+      {/* Reply banner — visible only while answering a question. Forces
+         type='answer' on submit (see handleSubmitComment) so the user can't
+         accidentally choose a different type while in reply mode. */}
+      {replyingTo && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6,
+          padding: '6px 10px', borderRadius: tokens.radii.md,
+          background: tokens.colors.surfaceSubtle,
+          border: `1px solid ${tokens.colors.info}`,
+          borderLeft: `3px solid ${tokens.colors.info}`,
+        }}>
+          <span style={{
+            fontSize: '10px', fontWeight: 700, padding: '1px 6px', borderRadius: tokens.radii.sm,
+            background: 'transparent', color: tokens.colors.infoLight,
+            border: `1px solid ${tokens.colors.info}`, textTransform: 'uppercase', letterSpacing: 0.4,
+          }}>\u2192 Answering</span>
+          <div style={{ flex: 1, minWidth: 0, fontSize: '11px', color: tokens.colors.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            <span style={{ color: tokens.colors.textDisabled, fontWeight: 600 }}>{replyingTo.author}:</span>{' '}
+            {replyingTo.preview}
+          </div>
+          <button
+            type="button"
+            onClick={() => setReplyingTo(null)}
+            title="Cancel reply"
+            style={{
+              background: 'transparent', border: 'none', color: tokens.colors.textMuted,
+              cursor: 'pointer', fontSize: '14px', padding: '0 4px',
+            }}
+          >\u2715</button>
+        </div>
+      )}
+      {/* Compose type selector — hidden in reply mode since the type is locked
+         to 'answer'. Otherwise: segmented control of composable types. */}
+      {!replyingTo && (
       <div style={{ display: 'flex', gap: 4, marginBottom: 6, flexWrap: 'wrap' }}>
         {ALL_COMMENT_TYPES.filter(t => COMMENT_TYPE_STYLES[t].composable).map(t => {
           const tstyle = COMMENT_TYPE_STYLES[t];
@@ -516,6 +574,7 @@ export default function TicketPanel({
           );
         })}
       </div>
+      )}
       {commentImages.length > 0 && (
         <div style={{ display: 'flex', gap: 4, marginBottom: 6, flexWrap: 'wrap' }}>
           {commentImages.map((img, idx) => (
@@ -887,6 +946,8 @@ export default function TicketPanel({
               onSetCommentStatus={onSetCommentStatus
                 ? (commentId, status) => onSetCommentStatus(activeTicket.id, commentId, status)
                 : undefined}
+              onReply={handleStartReply}
+              replyingToCommentId={replyingTo?.id || null}
             />
 
             <TypingIndicator agentName={typingIndicators[navStack[navStack.length - 1]] ?? null} />
