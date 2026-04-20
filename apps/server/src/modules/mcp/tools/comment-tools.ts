@@ -14,7 +14,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { Agent } from '../../../entities/Agent';
-import { Comment, CommentType } from '../../../entities/Comment';
+import { Comment, CommentType, COMMENT_TYPES } from '../../../entities/Comment';
 import { Ticket } from '../../../entities/Ticket';
 import { User } from '../../../entities/User';
 import { UserMention } from '../../../entities/UserMention';
@@ -28,17 +28,50 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
 
   server.tool(
     'add_comment',
-    'Add a comment to a ticket. When authenticated as an agent, author fields are auto-filled if omitted.',
+    'Add a comment to a ticket. When authenticated as an agent, author fields are auto-filled if omitted. ' +
+      'Optional `type`/`parent_id`/`metadata` mirror the REST endpoint so an agent can post note/chat/handoff/etc. ' +
+      'directly without falling back to the more opinionated ask_question/answer_question/record_decision tools. ' +
+      'type=\'system\' is reserved for SystemCommentService and rejected here.',
     {
       ticket_id: z.string().describe('Ticket ID'),
       author_type: z.enum(['user', 'agent']).optional().describe('Comment author type (auto-detected from auth)'),
       author_id: z.string().optional().describe('Author ID (auto-filled from auth if omitted)'),
       author: z.string().optional().describe('Display name (auto-resolved from auth/ID if omitted)'),
       content: z.string().describe('Comment content'),
+      type: z.enum(['note', 'question', 'answer', 'decision', 'chat', 'handoff']).optional()
+        .describe("Comment type discriminator (default 'note'). type='answer' requires parent_id and auto-resolves the parent question."),
+      parent_id: z.string().optional()
+        .describe("Parent comment id for threading. Must belong to the same ticket. Required for type='answer'."),
+      metadata: z.record(z.string(), z.unknown()).optional()
+        .describe('Type-specific extension bag (e.g. handoff target_agent_id, decision references[]). Stored as JSON on the row.'),
     },
-    async ({ ticket_id, author_type, author_id, author, content }, extra: { sessionId?: string }) => {
+    async ({ ticket_id, author_type, author_id, author, content, type, parent_id, metadata }, extra: { sessionId?: string }) => {
       const ticket = await dataSource.getRepository(Ticket).findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Ticket not found');
+
+      // Validate type — REST endpoint shape parity. Zod already restricts to the
+      // allowed enum, but we also reject 'system' explicitly so an agent can't
+      // forge audit-log entries by claiming type=system.
+      if (type !== undefined && !COMMENT_TYPES.includes(type as CommentType)) {
+        return err(`Unsupported comment type: ${type}`);
+      }
+      const resolvedType: CommentType = (type as CommentType | undefined) || 'note';
+      if (resolvedType === 'system') {
+        return err("type='system' is reserved for SystemCommentService");
+      }
+
+      // Validate parent_id (when given): must exist and belong to the same ticket.
+      const commentRepo = dataSource.getRepository(Comment);
+      let resolvedParentId: string | null = null;
+      if (parent_id) {
+        const parent = await commentRepo.findOne({ where: { id: parent_id } });
+        if (!parent) return err('parent_id references a non-existent comment');
+        if (parent.ticket_id !== ticket_id) return err('parent comment belongs to a different ticket');
+        resolvedParentId = parent.id;
+      }
+      if (resolvedType === 'answer' && !resolvedParentId) {
+        return err("type='answer' requires parent_id pointing to the question being answered");
+      }
 
       // Auto-fill from authenticated agent if fields are missing
       const caller = getCallerAgent(extra);
@@ -63,15 +96,29 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         }
       }
 
-      const commentRepo = dataSource.getRepository(Comment);
       const comment = await commentRepo.save(commentRepo.create({
-        ticket_id, author_type: resolvedAuthorType, author_id: resolvedAuthorId, author: authorName, content,
+        ticket_id,
+        author_type: resolvedAuthorType,
+        author_id: resolvedAuthorId,
+        author: authorName,
+        content,
+        type: resolvedType,
+        status: resolvedType === 'question' ? 'open' : null,
+        parent_id: resolvedParentId,
+        metadata: JSON.stringify(metadata && typeof metadata === 'object' ? metadata : {}),
       }));
+
+      // Auto-resolve parent question on answer — same idempotent flip the REST
+      // endpoint and answer_question tool perform, so all three surfaces agree.
+      if (resolvedType === 'answer' && resolvedParentId) {
+        await commentRepo.update({ id: resolvedParentId }, { status: 'resolved' });
+      }
 
       await activityService.logActivity({
         entity_type: 'comment', entity_id: comment.id, action: 'created',
         ticket_id, actor_id: resolvedAuthorId, actor_name: authorName,
         new_value: content,
+        field_changed: resolvedType,
       });
 
       // Dispatch @-mentions just like the REST path
