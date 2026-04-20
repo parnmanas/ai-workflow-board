@@ -1,4 +1,4 @@
-import React, { useRef, useMemo } from 'react';
+import React, { useRef, useMemo, useCallback } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Comment } from '../types';
 import { tokens } from '../tokens';
@@ -85,6 +85,17 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
     getItemKey: (index) => flatRows[index].comment.id,
     overscan: 5,
   });
+
+  // Internal jump-to-comment for decision reference chips. Lives on the
+  // virtualizer so we don't have to plumb scroll state out to TicketPanel —
+  // the reference is always inside the same CommentList instance, so a
+  // self-contained scrollToIndex is enough. Falls back to no-op if the
+  // referenced id isn't currently in the visible (filtered) list.
+  const handleJumpToComment = useCallback((commentId: string) => {
+    const index = flatRows.findIndex(r => r.comment.id === commentId);
+    if (index < 0) return;
+    virtualizer.scrollToIndex(index, { align: 'center', behavior: 'smooth' });
+  }, [flatRows, virtualizer]);
 
   if (comments.length === 0) {
     // Same flex: 1 footprint as the populated state so the parent column
@@ -233,6 +244,50 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
                       }}
                     />
                   ))}
+                </div>
+              )}
+              {/* Tier-1 A: decision references footer.
+                 record_decision MCP tool stashes referenced comment ids in
+                 metadata.references; render them as click-through chips so
+                 the curated decision links back to the discussion it draws
+                 from. Falls back to a non-clickable "ref:abcd1234" pill when
+                 the parent doesn't pass onJumpToComment. */}
+              {ctype === 'decision' && Array.isArray((c.metadata as any)?.references) && (c.metadata as any).references.length > 0 && (
+                <div style={{
+                  marginTop: 8, paddingTop: 6, borderTop: `1px dashed ${tokens.colors.border}`,
+                  display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap',
+                }}>
+                  <span style={{ fontSize: '10px', fontWeight: 700, color: tokens.colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.4 }}>
+                    References:
+                  </span>
+                  {((c.metadata as any).references as unknown[]).map((rawId, idx) => {
+                    if (typeof rawId !== 'string') return null;
+                    const refId = rawId;
+                    // Show a short suffix so chips stay readable. Full id is
+                    // accessible via title/hover for debugging.
+                    const label = `ref:${refId.slice(-6)}`;
+                    // Disable click when the referenced comment isn't in the
+                    // current visible list (filtered out, deleted, or never
+                    // existed). Visual cue: muted opacity + default cursor.
+                    const inList = flatRows.some(r => r.comment.id === refId);
+                    return (
+                      <button
+                        key={`ref-${refId}-${idx}`}
+                        type="button"
+                        title={inList ? `Jump to ${refId}` : `${refId} (not in current view)`}
+                        disabled={!inList}
+                        onClick={inList ? () => handleJumpToComment(refId) : undefined}
+                        style={{
+                          fontSize: '10px', fontWeight: 600, padding: '1px 6px', borderRadius: tokens.radii.sm,
+                          background: 'transparent', color: tokens.colors.textDisabled,
+                          border: `1px solid ${tokens.colors.border}`,
+                          cursor: inList ? 'pointer' : 'default',
+                          opacity: inList ? 1 : 0.5,
+                          fontFamily: 'monospace',
+                        }}
+                      >{label}</button>
+                    );
+                  })}
                 </div>
               )}
             </div>
