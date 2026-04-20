@@ -470,10 +470,28 @@ export default function TicketPanel({
   //   • author_type === 'system' → routed through the 'system' chip even if
   //     the row is legacy and has type='note' (older system rows pre-Phase 1).
   //   • everything else → routed through its CommentType.
+  // Plus: if a row's parent is hidden by the current filter, the row drops
+  // out too. Collapsing the whole thread when the question chip turns off
+  // matches user intent ("hide the conversation, not just one half of it").
+  // Replies whose parent is missing from the dataset entirely (true orphans,
+  // e.g. parent deleted) still pass — CommentList renders them at top level.
   const filteredComments = useMemo(() => {
-    return (activeTicket.comments || []).filter(c => {
+    const all = activeTicket.comments || [];
+    const byId = new Map<string, typeof all[number]>();
+    for (const c of all) byId.set(c.id, c);
+    const visibleByOwnType = (c: typeof all[number]): boolean => {
       if (c.author_type === 'system') return activeTypes.has('system');
       return activeTypes.has(resolveCommentType(c.type as string | null | undefined));
+    };
+    return all.filter(c => {
+      if (!visibleByOwnType(c)) return false;
+      if (c.parent_id) {
+        const parent = byId.get(c.parent_id);
+        // Parent exists but is filtered out → hide this row too. Parent
+        // missing from the dataset → keep this row (true orphan).
+        if (parent && !visibleByOwnType(parent)) return false;
+      }
+      return true;
     });
   }, [activeTicket.comments, activeTypes]);
 
