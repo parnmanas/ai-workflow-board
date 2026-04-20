@@ -50,6 +50,6 @@ export class UserMention {
   @CreateDateColumn()
   created_at: Date;
 
-  @Column({ type: 'timestamp', nullable: true, default: null })
+  @Column({ type: Date, nullable: true, default: null })
   read_at: Date | null;
 }

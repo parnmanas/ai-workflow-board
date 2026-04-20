@@ -49,7 +49,7 @@ export class Ticket {
   @Column({ type: 'varchar', nullable: true, default: null })
   locked_by_agent_id: string | null;
 
-  @Column({ type: 'timestamp', nullable: true, default: null })
+  @Column({ type: Date, nullable: true, default: null })
   locked_at: Date | null;
 
   @VersionColumn({ default: 1 })

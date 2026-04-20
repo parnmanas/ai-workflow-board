@@ -18,7 +18,7 @@ export class ChatRoom {
   name: string;
 
   // Denormalized for efficient room list sort (CHAT-06); updated on every sendMessage
-  @Column({ type: 'timestamp', nullable: true, default: null })
+  @Column({ type: Date, nullable: true, default: null })
   last_message_at: Date | null;
 
   // Optional link to a Ticket — enables @mention role shortcuts (@reviewer/@assignee/@reporter)

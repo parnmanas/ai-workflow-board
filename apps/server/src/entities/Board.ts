@@ -31,7 +31,7 @@ export class Board {
   @UpdateDateColumn()
   updated_at: Date;
 
-  @Column({ type: 'timestamp', nullable: true, default: null })
+  @Column({ type: Date, nullable: true, default: null })
   archived_at: Date | null;
 
   @ManyToOne(() => Workspace, ws => ws.boards, { onDelete: 'CASCADE' })

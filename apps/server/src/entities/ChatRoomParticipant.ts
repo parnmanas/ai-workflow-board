@@ -24,11 +24,11 @@ export class ChatRoomParticipant {
 
   // Server-side unread count: use m.created_at > p.last_read_at (CHAT-12, CHAT-13)
   // NOTE: Do NOT use UUID comparison for unread detection — UUIDs are not monotonic
-  @Column({ type: 'timestamp', nullable: true, default: null })
+  @Column({ type: Date, nullable: true, default: null })
   last_read_at: Date | null;
 
   // Soft-delete for leave (CHAT-16); null = active participant
-  @Column({ type: 'timestamp', nullable: true, default: null })
+  @Column({ type: Date, nullable: true, default: null })
   left_at: Date | null;
 
   @CreateDateColumn()

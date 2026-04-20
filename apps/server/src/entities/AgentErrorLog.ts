@@ -13,7 +13,7 @@ export class AgentErrorLog {
   @Column({ type: 'varchar', nullable: true, default: null })
   workspace_id: string | null;
 
-  @Column({ type: 'timestamp' })
+  @Column({ type: Date })
   occurred_at: Date;
 
   @Column({ type: 'varchar' })

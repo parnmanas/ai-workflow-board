@@ -27,13 +27,13 @@ export class Agent {
   @Column({ type: 'varchar', default: '[]' })
   roles: string;  // JSON-serialised string array e.g. '["assignee","reviewer"]'
 
-  @Column({ type: 'timestamp', nullable: true, default: null })
+  @Column({ type: Date, nullable: true, default: null })
   connected_at: Date | null;
 
-  @Column({ type: 'timestamp', nullable: true, default: null })
+  @Column({ type: Date, nullable: true, default: null })
   last_seen_at: Date | null;
 
-  @Column({ type: 'timestamp', nullable: true, default: null })
+  @Column({ type: Date, nullable: true, default: null })
   last_error_upload_at: Date | null;
 
   @Column({ type: 'varchar', default: '' })

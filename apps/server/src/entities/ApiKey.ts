@@ -28,10 +28,10 @@ export class ApiKey {
   @Column({ type: 'int', default: 1 })
   is_active: number;
 
-  @Column({ type: 'timestamp', nullable: true, default: null })
+  @Column({ type: Date, nullable: true, default: null })
   expires_at: Date | null;
 
-  @Column({ type: 'timestamp', nullable: true, default: null })
+  @Column({ type: Date, nullable: true, default: null })
   last_used_at: Date | null;
 
   @Column({ type: 'int', default: 0 })
