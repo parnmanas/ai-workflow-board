@@ -42,7 +42,11 @@ export default function UserManager({ workspaceId }: { workspaceId?: string } = 
     ]);
     setUsers(usersData);
     setPermInfo(permData);
-    setPendingUsers(pendingData);
+    // PendingUsersController returns { users: [...] }, not a bare array.
+    // Without this unwrap pendingUsers.length is undefined → falsy → the
+    // "Pending Approval" section never renders even when accounts await
+    // approval. api.getPendingUsers is typed as `any` so TS doesn't catch it.
+    setPendingUsers(Array.isArray(pendingData) ? pendingData : (pendingData?.users ?? []));
     setWorkspaces(workspacesData);
   };
 
