@@ -393,4 +393,120 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       return ok(comment);
     }
   );
+
+  // ─── handoff_to_agent ────────────────────────────────────────────
+  // Tier-1 D. Reassign a ticket to another agent and leave a typed
+  // handoff comment in one tool call. Without this, agents had to call
+  // update_ticket (assignee change) and add_comment separately and
+  // hope the receiver could thread them together. The handoff comment
+  // type renders distinctively in the timeline and the comment_mention
+  // event lets the receiving agent's proxy spawn a subagent immediately
+  // with the handoff context — the assignee-change trigger that fires
+  // soon after carries no human-readable explanation, so the mention
+  // fills the "why am I picking this up?" gap.
+  server.tool(
+    'handoff_to_agent',
+    'Hand a ticket off to another agent. Reassigns the ticket (assignee role only — reporter/reviewer remain unchanged) AND posts a type=handoff comment so the receiver sees both the ticket and the human-readable rationale. The receiving agent gets a comment_mention event so their proxy can react immediately; the standard assignee-change trigger still fires so existing routing logic continues to work.',
+    {
+      ticket_id: z.string().describe('Ticket ID being handed off'),
+      target_agent_id: z.string().describe("ID of the Agent the ticket is being assigned to"),
+      content: z.string().describe('Handoff rationale. Why is the receiver picking this up? What context do they need? Plain text or markdown.'),
+      author_type: z.enum(['user', 'agent']).optional(),
+      author_id: z.string().optional(),
+      author: z.string().optional(),
+    },
+    async ({ ticket_id, target_agent_id, content, author_type, author_id, author }, extra: { sessionId?: string }) => {
+      const ticketRepo = dataSource.getRepository(Ticket);
+      const ticket = await ticketRepo.findOne({ where: { id: ticket_id } });
+      if (!ticket) return err('Ticket not found');
+
+      const agentRepo = dataSource.getRepository(Agent);
+      const targetAgent = await agentRepo.findOne({ where: { id: target_agent_id } });
+      if (!targetAgent) return err('target_agent_id refers to an unknown agent');
+      // Cross-workspace handoff would silently leak ticket context to an
+      // agent whose API key lives in a different workspace boundary; refuse.
+      if (targetAgent.workspace_id && ticket.workspace_id && targetAgent.workspace_id !== ticket.workspace_id) {
+        return err('Target agent is in a different workspace than the ticket');
+      }
+
+      const resolved = await resolveAuthor(author_type, author_id, author, extra);
+      if ('error' in resolved) return err(resolved.error);
+
+      // Snapshot the previous assignee BEFORE the swap so the handoff
+      // metadata records who passed the baton (useful for audit trails
+      // and for the receiver to acknowledge the prior owner).
+      const previousAssigneeId = ticket.assignee_id || '';
+      const previousAssigneeName = ticket.assignee || '';
+
+      // Self-handoff is a no-op assignment but a valid comment surface
+      // (e.g., "I'm picking this back up after the deploy completed");
+      // we don't refuse but we also don't churn the assignee row.
+      const isSameAssignee = previousAssigneeId === target_agent_id;
+
+      // 1. Save handoff comment first so the activity dispatch + mention
+      //    event reference an existing comment row.
+      const commentRepo = dataSource.getRepository(Comment);
+      const comment = await commentRepo.save(commentRepo.create({
+        ticket_id,
+        author_type: resolved.authorType,
+        author_id: resolved.authorId,
+        author: resolved.authorName,
+        content,
+        type: 'handoff' as CommentType,
+        metadata: JSON.stringify({
+          target_agent_id,
+          target_agent_name: targetAgent.name,
+          previous_assignee_id: previousAssigneeId || null,
+          previous_assignee_name: previousAssigneeName || null,
+          role: 'assignee',
+        }),
+      }));
+
+      // 2. Reassign ticket. Skip the write if it would be a no-op so we
+      //    don't fire a spurious assignee_changed activity.
+      if (!isSameAssignee) {
+        ticket.assignee_id = target_agent_id;
+        ticket.assignee = targetAgent.name;
+        await ticketRepo.save(ticket);
+
+        await activityService.logActivity({
+          entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
+          field_changed: 'assignee',
+          old_value: previousAssigneeName || '',
+          new_value: targetAgent.name,
+          ticket_id: ticket.parent_id || ticket.id,
+          actor_id: resolved.authorId, actor_name: resolved.authorName,
+        });
+      }
+
+      // 3. Activity for the comment itself — same shape as record_decision /
+      //    ask_question so the inbox feed treats it consistently.
+      await activityService.logActivity({
+        entity_type: 'comment', entity_id: comment.id, action: 'created',
+        ticket_id, actor_id: resolved.authorId, actor_name: resolved.authorName,
+        new_value: content, field_changed: 'handoff',
+      });
+
+      // 4. comment_mention to the target agent so the proxy spawns a
+      //    subagent NOW with the handoff content rather than waiting for
+      //    the next assignee-trigger cycle.
+      const ts = (comment.created_at instanceof Date ? comment.created_at : new Date()).toISOString();
+      activityEvents.emit('comment_mention', {
+        ticket_id: ticket.id,
+        comment_id: comment.id,
+        workspace_id: ticket.workspace_id,
+        agent_id: targetAgent.id,
+        actor_id: resolved.authorId,
+        actor_type: resolved.authorType,
+        actor_name: resolved.authorName,
+        content,
+        role_prompt: targetAgent.role_prompt || '',
+        mention_source: 'direct',
+        timestamp: ts,
+      });
+      logger.info('Handoff', `Ticket ${ticket.id} handed to agent ${targetAgent.name} (${targetAgent.id}) by ${resolved.authorName}`);
+
+      return ok({ comment, ticket: { id: ticket.id, assignee_id: ticket.assignee_id, assignee: ticket.assignee } });
+    }
+  );
 }
