@@ -219,6 +219,14 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ is_active: false }),
     }),
+  // Tier-1 F: per-ticket read marker.
+  getTicketReadState: (ticketId: string) =>
+    request<{ ticket_id: string; last_read_at: string | null }>(`/tickets/${ticketId}/read-state`),
+  markTicketRead: (ticketId: string, upTo?: string) =>
+    request<{ ticket_id: string; last_read_at: string }>(`/tickets/${ticketId}/read`, {
+      method: 'POST',
+      body: JSON.stringify(upTo ? { up_to: upTo } : {}),
+    }),
 
   // ─── Users ─────────────────────────────────────────────
   getUsers: (workspaceId?: string) =>

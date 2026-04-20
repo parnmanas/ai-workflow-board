@@ -17,9 +17,14 @@ interface CommentListProps {
   // Highlight the row currently being replied to so the reply banner doesn't
   // feel disconnected from the question card.
   replyingToCommentId?: string | null;
+  // Tier-1 F: comments with created_at > lastReadAt render with an unread
+  // cue (small dot + slight tint). Snapshotted by the parent on mount so
+  // the cutoff stays stable while the user reads.
+  lastReadAt?: string | null;
 }
 
-export default function CommentList({ comments, onImagePreview, onSetCommentStatus, onReply, replyingToCommentId }: CommentListProps) {
+export default function CommentList({ comments, onImagePreview, onSetCommentStatus, onReply, replyingToCommentId, lastReadAt }: CommentListProps) {
+  const lastReadMs = lastReadAt ? new Date(lastReadAt).getTime() : null;
   const parentRef = useRef<HTMLDivElement>(null);
 
   // Phase 2D — visual threading. Comments arrive newest-first from the server.
@@ -140,6 +145,10 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
           const images = c.images || [];
 
           const isReplyTarget = replyingToCommentId === c.id;
+          // Tier-1 F: row is unread if created after the user's last read
+          // marker. NULL marker means "never read" → everything is unread.
+          const createdMs = new Date(c.created_at).getTime();
+          const isUnread = lastReadMs === null ? true : createdMs > lastReadMs;
           return (
             <div
               key={`comment-${c.id}`}
@@ -215,8 +224,22 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
                     <span style={{ fontSize: '12px', fontWeight: 600, color: authorBadge.color }}>{c.author}</span>
                   )}
                 </div>
-                <span style={{ fontSize: '10px', color: tokens.colors.textMuted }}>
-                  {new Date(c.created_at).toLocaleString()}
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                  {/* Tier-1 F unread cue — small accent dot beside the timestamp.
+                     Conservative: shown for every unread row, but only when a
+                     read marker exists at all (a brand-new ticket with NULL
+                     marker would otherwise paint every row as "new", which is
+                     just noise on first load). */}
+                  {isUnread && lastReadMs !== null && (
+                    <span title="Unread" style={{
+                      width: 6, height: 6, borderRadius: '50%',
+                      background: tokens.colors.accentMid,
+                      display: 'inline-block',
+                    }} />
+                  )}
+                  <span style={{ fontSize: '10px', color: tokens.colors.textMuted }}>
+                    {new Date(c.created_at).toLocaleString()}
+                  </span>
                 </span>
               </div>
               {/* Comment content — renderMarkdown keeps XSS-safe JSX construction (T-05-02-01)

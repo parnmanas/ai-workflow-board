@@ -8,6 +8,7 @@ import { BoardColumn } from '../../entities/BoardColumn';
 import { Comment, COMMENT_TYPES, CommentType } from '../../entities/Comment';
 import { Agent } from '../../entities/Agent';
 import { UserMention } from '../../entities/UserMention';
+import { TicketReadState } from '../../entities/TicketReadState';
 import { User } from '../../entities/User';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { WorkspaceGuard } from '../../common/guards/workspace.guard';
@@ -33,6 +34,7 @@ export class TicketsController {
     @InjectRepository(Comment) private readonly commentRepo: Repository<Comment>,
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     @InjectRepository(UserMention) private readonly mentionRepo: Repository<UserMention>,
+    @InjectRepository(TicketReadState) private readonly readStateRepo: Repository<TicketReadState>,
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly activityService: ActivityService,
     private readonly logService: LogService,
@@ -428,6 +430,49 @@ export class TicketsController {
       images: JSON.parse(comment.images || '[]'),
       metadata: JSON.parse(comment.metadata || '{}'),
     });
+  }
+
+  @Get('tickets/:id/read-state')
+  async getReadState(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
+    const currentUser = (req as any).currentUser;
+    if (!currentUser) return res.status(401).json({ error: 'Authentication required' });
+    const row = await this.readStateRepo.findOne({ where: { user_id: currentUser.id, ticket_id: id } });
+    return res.json({ ticket_id: id, last_read_at: row?.last_read_at ?? null });
+  }
+
+  @Post('tickets/:id/read')
+  async markRead(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
+    const currentUser = (req as any).currentUser;
+    if (!currentUser) return res.status(401).json({ error: 'Authentication required' });
+    const ticket = await this.ticketRepo.findOne({ where: { id } });
+    if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+
+    // Optional explicit cutoff (ISO timestamp); defaults to NOW so the
+    // common "I just opened the panel" case marks everything currently
+    // visible as read.
+    const cutoff = body?.up_to ? new Date(body.up_to) : new Date();
+    if (Number.isNaN(cutoff.getTime())) {
+      return res.status(400).json({ error: 'up_to must be an ISO timestamp' });
+    }
+
+    let row = await this.readStateRepo.findOne({ where: { user_id: currentUser.id, ticket_id: id } });
+    if (!row) {
+      row = this.readStateRepo.create({
+        user_id: currentUser.id,
+        ticket_id: id,
+        workspace_id: ticket.workspace_id || '',
+        last_read_at: cutoff,
+      });
+    } else {
+      // Monotonic — never roll the marker backwards. If a newer cutoff is
+      // already stored (e.g., another tab marked further), keep that and
+      // return the larger value so the client converges.
+      if (!row.last_read_at || cutoff.getTime() > row.last_read_at.getTime()) {
+        row.last_read_at = cutoff;
+      }
+    }
+    const saved = await this.readStateRepo.save(row);
+    return res.json({ ticket_id: id, last_read_at: saved.last_read_at });
   }
 
   @Post('tickets/:id/presence')

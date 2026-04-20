@@ -20,3 +20,4 @@ export { SystemSetting } from './SystemSetting';
 export { Credential } from './Credential';
 export { AgentErrorLog } from './AgentErrorLog';
 export { UserMention } from './UserMention';
+export { TicketReadState } from './TicketReadState';

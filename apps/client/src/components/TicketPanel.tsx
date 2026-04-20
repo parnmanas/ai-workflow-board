@@ -237,6 +237,11 @@ export default function TicketPanel({
   // Server emits ticket_presence on viewer-set transitions; we keep the latest
   // viewer list keyed by composite type:id so user/agent collisions can't shadow.
   const [presenceViewers, setPresenceViewers] = useState<Array<{ type: 'user' | 'agent'; id: string; name: string }>>([]);
+  // Tier-1 F: last_read_at for the current user on this ticket. Comments
+  // with created_at > lastReadAt render with an "unread" cue. Snapshotted
+  // on panel mount so the moment-of-arrival cutoff stays stable while the
+  // user reads — re-marking only happens on unmount / ticket switch.
+  const [lastReadAt, setLastReadAt] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'detail' | 'comments' | 'activity'>('detail');
   const [activities, setActivities] = useState<ActivityLog[]>([]);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
@@ -470,6 +475,25 @@ export default function TicketPanel({
       // Best-effort explicit leave so the other viewers' badge clears
       // without waiting for TTL expiry. Fire-and-forget; we don't await.
       api.leaveTicketPresence(ticketId).catch(() => { /* ignore */ });
+    };
+  }, [activeTicket.id]);
+
+  // ─── Tier-1 F: ticket read marker ────────────────────────────────────
+  // Fetch last_read_at on mount/ticket-switch and snapshot it so the
+  // unread cue in CommentList stays stable while the user reads. On
+  // unmount/ticket-switch we POST a NOW marker so the next visit treats
+  // anything posted while we were away as unread.
+  useEffect(() => {
+    const ticketId = activeTicket.id;
+    let cancelled = false;
+    api.getTicketReadState(ticketId)
+      .then(state => { if (!cancelled) setLastReadAt(state.last_read_at); })
+      .catch(() => { if (!cancelled) setLastReadAt(null); });
+    return () => {
+      cancelled = true;
+      // Mark the ticket read up to NOW. Server is monotonic so a
+      // concurrent tab having marked further forward is preserved.
+      api.markTicketRead(ticketId).catch(() => { /* ignore */ });
     };
   }, [activeTicket.id]);
 
@@ -1087,6 +1111,7 @@ export default function TicketPanel({
                 : undefined}
               onReply={handleStartReply}
               replyingToCommentId={replyingTo?.id || null}
+              lastReadAt={lastReadAt}
             />
 
             <TypingIndicator agentName={typingIndicators[navStack[navStack.length - 1]] ?? null} />
