@@ -201,6 +201,11 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify({ status }),
     }),
+  setCommentTyping: (ticketId: string, isTyping: boolean, commentType?: string) =>
+    request<any>(`/tickets/${ticketId}/comment-typing`, {
+      method: 'POST',
+      body: JSON.stringify({ is_typing: isTyping, ...(commentType ? { comment_type: commentType } : {}) }),
+    }),
 
   // ─── Users ─────────────────────────────────────────────
   getUsers: (workspaceId?: string) =>

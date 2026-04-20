@@ -428,6 +428,33 @@ export class TicketsController {
     });
   }
 
+  @Post('tickets/:id/comment-typing')
+  async setCommentTyping(
+    @Param('id') id: string,
+    @Body() body: any,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const currentUser = (req as any).currentUser;
+    if (!currentUser) return res.status(401).json({ error: 'Authentication required' });
+
+    const ticket = await this.ticketRepo.findOne({ where: { id } });
+    if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+
+    activityEvents.emit('comment_typing', {
+      ticket_id: id,
+      workspace_id: ticket.workspace_id,
+      actor_type: 'user',
+      actor_id: currentUser.id,
+      actor_name: currentUser.name || '',
+      is_typing: !!body?.is_typing,
+      comment_type: typeof body?.comment_type === 'string' ? body.comment_type : undefined,
+      timestamp: new Date().toISOString(),
+    });
+
+    return res.json({ ok: true });
+  }
+
   @Patch('tickets/:ticketId/comments/:commentId/status')
   async setCommentStatus(
     @Param('ticketId') ticketId: string,

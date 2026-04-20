@@ -23,6 +23,7 @@ import {
   ChatRoomUpdatePayload,
   ChatRoomTypingPayload,
   CommentMentionPayload,
+  CommentTypingPayload,
   UserMentionPayload,
 } from '../../common/types/stream-events';
 import { EventDefinition, SubscriberIdentity } from './types';
@@ -442,5 +443,41 @@ export const EVENT_TYPES: EventDefinition[] = [
       if (identity.type !== 'user') return false;
       return env.scope.user_id === identity.userId;
     },
+  },
+
+  // ───────── comment_typing ─────────
+  // Phase-9: someone is composing a comment on a ticket. Broadcast to everyone
+  // EXCEPT the actor — the actor doesn't need their own keystrokes echoed back.
+  // No board scope: the client filters by ticket_id since multiple ticket panels
+  // can be open across tabs.
+  {
+    eventType: 'comment_typing',
+    emitterEvent: 'comment_typing',
+    map(event: any) {
+      const payload: CommentTypingPayload = {
+        ticket_id: event.ticket_id,
+        workspace_id: event.workspace_id,
+        actor_type: event.actor_type === 'agent' ? 'agent' : 'user',
+        actor_id: event.actor_id,
+        actor_name: event.actor_name || '',
+        is_typing: !!event.is_typing,
+        comment_type: event.comment_type,
+      };
+      return {
+        payload,
+        scope: { ticket_id: event.ticket_id, workspace_id: event.workspace_id },
+        timestamp: event.timestamp,
+      };
+    },
+    // Skip the actor (suppresses self-echo). Everything else passes through —
+    // ticket-level audience scoping is the client's job because we don't track
+    // "who has the ticket panel open" on the server.
+    filter: (env, identity) => {
+      const p = env.payload as CommentTypingPayload;
+      if (identity.type === 'agent' && p.actor_type === 'agent') return p.actor_id !== identity.agentId;
+      if (identity.type === 'user'  && p.actor_type === 'user')  return p.actor_id !== identity.userId;
+      return true;
+    },
+    flatten: (env) => env.payload,
   },
 ];

@@ -14,7 +14,8 @@ export type StreamEventType =
   | 'chat_room_update'     // Phase 7: room renamed / participant added / user left
   | 'chat_room_typing'     // Phase 7+: agent typing indicator in a chat room
   | 'comment_mention'      // Mention feature: agent @-mentioned in a ticket comment
-  | 'user_mention';        // Mention feature: user @-mentioned (web UI unread badge)
+  | 'user_mention'         // Mention feature: user @-mentioned (web UI unread badge)
+  | 'comment_typing';      // Phase-9 typed comments: someone is composing a comment on a ticket
 
 export interface StreamEventScope {
   board_id?: string;
@@ -155,6 +156,23 @@ export interface CommentMentionPayload {
   role_prompt: string;
   mention_source: 'direct' | 'role'; // direct @-mention vs. @assignee-style role shortcut
   role_shortcut?: string; // 'assignee' | 'reporter' | 'reviewer' when mention_source === 'role'
+}
+
+// Phase-9 typed comments — fires when a user/agent starts composing a comment
+// on a ticket. Scoped per ticket so other viewers of the same ticket can render
+// "X is typing..." without polluting the workspace-wide stream. The actor is
+// excluded from delivery (filter in event-registry) so they don't see their own
+// typing echoed back.
+export interface CommentTypingPayload {
+  ticket_id: string;
+  workspace_id: string;
+  actor_type: 'user' | 'agent';
+  actor_id: string;
+  actor_name: string;
+  is_typing: boolean;
+  // Optional discriminator hint — reserves room for "Alice is asking a question"
+  // vs. "Alice is writing a chat" UX in a later phase.
+  comment_type?: string;
 }
 
 // Mention feature — user @-mentioned. Fires only for the mentioned user's

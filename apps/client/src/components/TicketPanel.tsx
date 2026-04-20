@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Ticket, Agent, Channel, ActivityLog, CommentType } from '../types';
 import { api } from '../api';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
+import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
 import ChildTicketList from './SubtaskList';
 import CommentList from './CommentList';
 import { TypingIndicator } from './TypingIndicator';
@@ -225,6 +226,10 @@ export default function TicketPanel({
   // Compose type selector — restricted to types where COMMENT_TYPE_STYLES.composable=true.
   // 'note' is the default so the previous flow (just type and Send) is unchanged.
   const [composeType, setComposeType] = useState<CommentType>('note');
+  // Phase 3: live typing indicator. Map keyed by actor_id so multiple typists
+  // (e.g., user + reviewer agent) don't shadow each other. Auto-cleared after
+  // TYPING_TTL_MS so a tab close doesn't leave a stale "X is typing".
+  const [commentTypists, setCommentTypists] = useState<Record<string, { name: string; until: number }>>({});
   const [activeTab, setActiveTab] = useState<'detail' | 'comments' | 'activity'>('detail');
   const [activities, setActivities] = useState<ActivityLog[]>([]);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
@@ -311,6 +316,96 @@ export default function TicketPanel({
     input.click();
   };
 
+  // ─── Phase 3: typing emit (debounced) ─────────────────────────────────
+  // Send is_typing=true on first keystroke; idle for TYPING_IDLE_MS triggers
+  // is_typing=false. The throttle prevents flooding the SSE bus while still
+  // refreshing the indicator before its TTL expires.
+  const TYPING_IDLE_MS = 1500;
+  const TYPING_REFRESH_MS = 4000; // resend "still typing" so other clients keep the badge alive
+  const TYPING_TTL_MS = 6000;     // local sweep horizon (server emits no explicit clear if tab dies)
+  const typingIdleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const typingRefreshTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const typingActiveRef = useRef(false);
+  const lastTypingTicketIdRef = useRef<string | null>(null);
+
+  const stopTypingEmit = useCallback((ticketId: string | null) => {
+    if (typingIdleTimer.current) { clearTimeout(typingIdleTimer.current); typingIdleTimer.current = null; }
+    if (typingRefreshTimer.current) { clearInterval(typingRefreshTimer.current); typingRefreshTimer.current = null; }
+    if (typingActiveRef.current && ticketId) {
+      typingActiveRef.current = false;
+      api.setCommentTyping(ticketId, false, composeType !== 'note' ? composeType : undefined).catch(() => { /* fire-and-forget */ });
+    }
+  }, [composeType]);
+
+  const handleComposeChange = useCallback((value: string) => {
+    setCommentContent(value);
+    const ticketId = activeTicket.id;
+    lastTypingTicketIdRef.current = ticketId;
+    if (!value.trim()) {
+      // Empty buffer → user cleared / sent. Drop the indicator immediately.
+      stopTypingEmit(ticketId);
+      return;
+    }
+    if (!typingActiveRef.current) {
+      typingActiveRef.current = true;
+      api.setCommentTyping(ticketId, true, composeType !== 'note' ? composeType : undefined).catch(() => { /* fire-and-forget */ });
+      // Start refresh heartbeat while the typing flag stays on
+      typingRefreshTimer.current = setInterval(() => {
+        if (typingActiveRef.current) {
+          api.setCommentTyping(ticketId, true, composeType !== 'note' ? composeType : undefined).catch(() => {});
+        }
+      }, TYPING_REFRESH_MS);
+    }
+    if (typingIdleTimer.current) clearTimeout(typingIdleTimer.current);
+    typingIdleTimer.current = setTimeout(() => stopTypingEmit(ticketId), TYPING_IDLE_MS);
+  }, [activeTicket.id, composeType, stopTypingEmit]);
+
+  // On unmount or ticket switch, send a clean "stopped typing" so the other
+  // viewers don't keep waiting on a TTL.
+  useEffect(() => {
+    return () => stopTypingEmit(lastTypingTicketIdRef.current);
+  }, [stopTypingEmit]);
+  useEffect(() => {
+    if (lastTypingTicketIdRef.current && lastTypingTicketIdRef.current !== activeTicket.id) {
+      stopTypingEmit(lastTypingTicketIdRef.current);
+    }
+  }, [activeTicket.id, stopTypingEmit]);
+
+  // Subscribe to comment_typing events for the active ticket. Server already
+  // suppresses self-echo, so anything we receive came from someone else.
+  useBoardStreamEvent('comment_typing', useCallback((data: any) => {
+    if (!data || data.ticket_id !== activeTicket.id) return;
+    if (data.is_typing) {
+      setCommentTypists(prev => ({
+        ...prev,
+        [data.actor_id]: { name: data.actor_name || 'Someone', until: Date.now() + TYPING_TTL_MS },
+      }));
+    } else {
+      setCommentTypists(prev => {
+        if (!prev[data.actor_id]) return prev;
+        const next = { ...prev };
+        delete next[data.actor_id];
+        return next;
+      });
+    }
+  }, [activeTicket.id]));
+
+  // Periodic sweep so a typist whose tab died eventually disappears.
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = Date.now();
+      setCommentTypists(prev => {
+        let changed = false;
+        const next: typeof prev = {};
+        for (const [k, v] of Object.entries(prev)) {
+          if (v.until > now) next[k] = v; else changed = true;
+        }
+        return changed ? next : prev;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
   const handleSubmitComment = () => {
     if (commentContent.trim()) {
       onAddComment(
@@ -327,6 +422,9 @@ export default function TicketPanel({
       // Reset to the default type after each send so a one-off Question doesn't
       // sticky-set the compose mode.
       setComposeType('note');
+      // Clear typing indicator immediately on submit (otherwise the just-sent
+      // comment would land alongside a "still typing" footer).
+      stopTypingEmit(activeTicket.id);
       // Auto-enable the chip for the type we just submitted, otherwise the new
       // row would land in the timeline but be hidden by the active filter.
       setActiveTypes(prev => {
@@ -438,7 +536,7 @@ export default function TicketPanel({
         <MentionTextarea
           rows={1}
           value={commentContent}
-          onChange={setCommentContent}
+          onChange={handleComposeChange}
           candidates={mentionCandidates}
           onSubmit={handleSubmitComment}
           placeholder={user ? `${user.name}(으)로 댓글 작성... (@로 태그)` : 'Write a comment... (@ to tag)'}
@@ -786,6 +884,19 @@ export default function TicketPanel({
             />
 
             <TypingIndicator agentName={typingIndicators[navStack[navStack.length - 1]] ?? null} />
+
+            {/* Phase 3 — comment-typing live indicator. Names are joined with
+               commas if multiple typists overlap. Stays a separate row from the
+               agent-trigger TypingIndicator above so the two signals don't
+               overwrite each other. */}
+            {Object.keys(commentTypists).length > 0 && (
+              <div style={{
+                fontSize: '11px', color: tokens.colors.textMuted,
+                padding: '2px 8px', fontStyle: 'italic',
+              }}>
+                {Object.values(commentTypists).map(t => t.name).join(', ')} {Object.keys(commentTypists).length === 1 ? 'is' : 'are'} typing...
+              </div>
+            )}
 
             {renderCommentInput()}
           </div>

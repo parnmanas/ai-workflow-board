@@ -36,7 +36,8 @@ type StreamNamedEventType =
   | 'chat_message' | 'agent_status'
   | 'chat_room_message' | 'chat_room_update' | 'chat_room_typing'  // Phase 7
   | 'server_meta'   // Phase 8 — protocol version handshake (CHAT-20)
-  | 'user_mention'; // Mention feature — sidebar unread badge sync
+  | 'user_mention'  // Mention feature — sidebar unread badge sync
+  | 'comment_typing'; // Phase-9 typed comments — "user is composing" indicator
 
 interface BoardStreamContextValue {
   /** Subscribe to a named SSE event (board_update/agent_typing/agent_trigger). */
@@ -182,6 +183,10 @@ export function BoardStreamProvider({ children }: ProviderProps) {
 
       eventSource.addEventListener('user_mention', (event: MessageEvent) => {
         dispatch('user_mention', event.data);
+      });
+
+      eventSource.addEventListener('comment_typing', (event: MessageEvent) => {
+        dispatch('comment_typing', event.data);
       });
 
       eventSource.onerror = () => {
