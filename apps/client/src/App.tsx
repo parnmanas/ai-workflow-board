@@ -34,7 +34,7 @@ function WorkspaceDefaultRedirect() {
 }
 
 function AppContent() {
-  const { isAuthenticated, isLoading } = useAuth();
+  const { isAuthenticated, isLoading, serverUnavailable } = useAuth();
   const { showToast } = useToast();
   const wasAuthenticated = useRef(false);
 
@@ -69,6 +69,57 @@ function AppContent() {
             fontSize: '24px', fontWeight: 700, color: 'white',
           }}>W</div>
           <div style={{ color: tokens.colors.textMuted, fontSize: '13px' }}>Loading...</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (serverUnavailable) {
+    return (
+      <div style={{
+        minHeight: '100vh',
+        background: tokens.colors.surface,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}>
+        <div style={{
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          gap: 16,
+          maxWidth: 400,
+          textAlign: 'center',
+        }}>
+          <div style={{
+            width: 48, height: 48, borderRadius: 12,
+            background: tokens.colors.border,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: '24px', fontWeight: 700, color: tokens.colors.textMuted,
+          }}>W</div>
+          <div style={{ fontSize: '16px', fontWeight: 700, color: tokens.colors.textPrimary }}>
+            Server Unavailable
+          </div>
+          <div style={{ fontSize: '13px', color: tokens.colors.textSecondary, lineHeight: 1.5 }}>
+            Unable to connect to the AWB server. Make sure the server is running and try again.
+          </div>
+          <button
+            onClick={() => window.location.reload()}
+            style={{
+              marginTop: 8,
+              padding: '8px 20px',
+              background: tokens.colors.accent,
+              color: 'white',
+              border: 'none',
+              borderRadius: 6,
+              fontSize: '13px',
+              fontWeight: 600,
+              cursor: 'pointer',
+              fontFamily: 'inherit',
+            }}
+          >
+            Retry
+          </button>
         </div>
       </div>
     );

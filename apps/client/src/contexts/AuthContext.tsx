@@ -15,6 +15,7 @@ interface AuthState {
   isAuthenticated: boolean;
   isLoading: boolean;
   needsSetup: boolean;
+  serverUnavailable: boolean;
   currentWorkspaceId: string | null;
   availableWorkspaces: WorkspaceEntry[];
   userStatus: 'active' | 'pending' | 'rejected' | null;
@@ -75,6 +76,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     isAuthenticated: false,
     isLoading: true,
     needsSetup: false,
+    serverUnavailable: false,
     currentWorkspaceId: localStorage.getItem('currentWorkspaceId'),
     availableWorkspaces: [],
     userStatus: null,
@@ -88,9 +90,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       // 토큰 없으면 setup 필요 여부 확인
       try {
         const { needs_setup } = await api.getSetupStatus();
-        setState(s => ({ ...s, isLoading: false, needsSetup: needs_setup }));
+        setState(s => ({ ...s, isLoading: false, needsSetup: needs_setup, serverUnavailable: false }));
       } catch {
-        setState(s => ({ ...s, isLoading: false, needsSetup: false }));
+        setState(s => ({ ...s, isLoading: false, needsSetup: false, serverUnavailable: true }));
       }
       return;
     }
@@ -107,6 +109,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         isAuthenticated: wsState.isAuthenticated,
         isLoading: false,
         needsSetup: false,
+        serverUnavailable: false,
         currentWorkspaceId: wsState.currentWorkspaceId,
         availableWorkspaces: wsState.availableWorkspaces,
         userStatus,
@@ -118,12 +121,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const { needs_setup } = await api.getSetupStatus();
         setState({
           user: null, token: null, isAuthenticated: false, isLoading: false,
-          needsSetup: needs_setup, currentWorkspaceId: null, availableWorkspaces: [], userStatus: null,
+          needsSetup: needs_setup, serverUnavailable: false, currentWorkspaceId: null, availableWorkspaces: [], userStatus: null,
         });
       } catch {
         setState({
           user: null, token: null, isAuthenticated: false, isLoading: false,
-          needsSetup: false, currentWorkspaceId: null, availableWorkspaces: [], userStatus: null,
+          needsSetup: false, serverUnavailable: true, currentWorkspaceId: null, availableWorkspaces: [], userStatus: null,
         });
       }
     }
@@ -175,6 +178,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       isAuthenticated: wsState.isAuthenticated,
       isLoading: false,
       needsSetup: false,
+      serverUnavailable: false,
       currentWorkspaceId: wsState.currentWorkspaceId,
       availableWorkspaces: wsState.availableWorkspaces,
       userStatus,
@@ -187,7 +191,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     localStorage.removeItem('currentWorkspaceId');
     setState({
       user: null, token: null, isAuthenticated: false, isLoading: false, needsSetup: false,
-      currentWorkspaceId: null, availableWorkspaces: [], userStatus: null,
+      serverUnavailable: false, currentWorkspaceId: null, availableWorkspaces: [], userStatus: null,
     });
   };
 
@@ -200,6 +204,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       isAuthenticated: true,
       isLoading: false,
       needsSetup: false,
+      serverUnavailable: false,
       currentWorkspaceId: null,
       availableWorkspaces: [],
       userStatus: 'active',
