@@ -383,10 +383,51 @@ export default function TicketPanel({
     }
   }, [activeTicket.id, stopTypingEmit]);
 
+  // Tier-1 H: per-type notification mute. Hoisted above the comment_typing
+  // handler because that handler reads mutedTypes — keeping the declaration
+  // colocated with the chip filter (which would be a more natural home for
+  // a future "filter chip + mute toggle" combo) would cause a TDZ error.
+  // (chip = "show in the list", mute = "suppress signals like unread dots
+  // and typing indicators"). A type can be visible-but-muted ("I'll read
+  // chats when I scroll, just don't ping me about them") or hidden-but-
+  // notified (rare, but the model supports it).
+  const COMMENT_MUTE_LS_KEY = 'awb.commentTypeMuted';
+  const [mutedTypes, setMutedTypes] = useState<Set<CommentType>>(() => {
+    try {
+      const raw = typeof window !== 'undefined' ? localStorage.getItem(COMMENT_MUTE_LS_KEY) : null;
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          const validKeys = new Set(Object.keys(COMMENT_TYPE_STYLES));
+          return new Set(parsed.filter((t): t is CommentType => typeof t === 'string' && validKeys.has(t)));
+        }
+      }
+    } catch { /* fall through */ }
+    return new Set<CommentType>();
+  });
+  useEffect(() => {
+    try {
+      if (typeof window === 'undefined') return;
+      localStorage.setItem(COMMENT_MUTE_LS_KEY, JSON.stringify(Array.from(mutedTypes)));
+    } catch { /* ignore */ }
+  }, [mutedTypes]);
+  const toggleMute = useCallback((t: CommentType) => {
+    setMutedTypes(prev => {
+      const next = new Set(prev);
+      if (next.has(t)) next.delete(t); else next.add(t);
+      return next;
+    });
+  }, []);
+  const [notifMenuOpen, setNotifMenuOpen] = useState(false);
+
   // Subscribe to comment_typing events for the active ticket. Server already
   // suppresses self-echo, so anything we receive came from someone else.
+  // Tier-1 H: drop the typist signal entirely when the typed comment_type
+  // is muted — the user has opted out of being interrupted by chat-typing,
+  // question-typing, etc.
   useBoardStreamEvent('comment_typing', useCallback((data: any) => {
     if (!data || data.ticket_id !== activeTicket.id) return;
+    if (data.comment_type && mutedTypes.has(data.comment_type as CommentType)) return;
     if (data.is_typing) {
       setCommentTypists(prev => ({
         ...prev,
@@ -400,7 +441,7 @@ export default function TicketPanel({
         return next;
       });
     }
-  }, [activeTicket.id]));
+  }, [activeTicket.id, mutedTypes]));
 
   // Periodic sweep so a typist whose tab died eventually disappears.
   useEffect(() => {
@@ -1077,15 +1118,77 @@ export default function TicketPanel({
         ) : activeTab === 'comments' ? (
           /* Comments Tab */
           <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 200 }}>
-            {/* Type filter chips. Only render types that have at least one comment
-               OR are currently active (so toggling-off still shows the chip). */}
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 8 }}>
+            {/* Type filter chips + Tier-1 H notification menu. Notify mute is
+               independent of the filter (chip = list visibility, mute =
+               signal suppression like unread dots and typing indicators). */}
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 8, alignItems: 'center', position: 'relative' }}>
               {/* Render a chip for every type that has at least one comment.
                  Previously also kept chips for OFF types the user had toggled
                  off, but that branch hid chips for types with count=0 the
                  instant the user clicked to toggle them off — leaving no way
                  to toggle back on. count>0 alone is the right invariant: the
                  chip exists iff there is something to filter. */}
+              {/* Notify menu — bell icon + count badge if anything is muted */}
+              <button
+                type="button"
+                onClick={() => setNotifMenuOpen(v => !v)}
+                title="Notification preferences (mute signals per comment type)"
+                aria-pressed={notifMenuOpen}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 4,
+                  padding: '2px 8px', borderRadius: tokens.radii.full as any,
+                  fontSize: '11px', fontWeight: 600,
+                  background: notifMenuOpen ? tokens.colors.surfaceSubtle : 'transparent',
+                  color: mutedTypes.size > 0 ? tokens.colors.warningLight : tokens.colors.textMuted,
+                  border: `1px solid ${tokens.colors.border}`,
+                  cursor: 'pointer',
+                }}
+              >
+                <span aria-hidden="true">{mutedTypes.size > 0 ? '\uD83D\uDD15' : '\uD83D\uDD14'}</span>
+                {mutedTypes.size > 0 && <span style={{ fontSize: '10px' }}>{mutedTypes.size}</span>}
+              </button>
+              {notifMenuOpen && (
+                <div
+                  // Click-outside via overlay isn't worth a global listener for
+                  // this small menu; clicking elsewhere on the chip row or the
+                  // bell again closes it (toggle).
+                  style={{
+                    position: 'absolute', top: '100%', left: 0, marginTop: 4, zIndex: 10,
+                    minWidth: 220, padding: 8,
+                    background: tokens.colors.surfaceCard,
+                    border: `1px solid ${tokens.colors.border}`,
+                    borderRadius: tokens.radii.md,
+                    boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
+                  }}
+                >
+                  <div style={{ fontSize: '10px', color: tokens.colors.textMuted, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.4 }}>
+                    Mute signals per type
+                  </div>
+                  {ALL_COMMENT_TYPES.filter(t => COMMENT_TYPE_STYLES[t].composable || t === 'handoff' || t === 'answer').map(t => {
+                    const tstyle = COMMENT_TYPE_STYLES[t];
+                    const muted = mutedTypes.has(t);
+                    return (
+                      <label key={`mute-${t}`} style={{
+                        display: 'flex', alignItems: 'center', gap: 8, padding: '4px 2px', cursor: 'pointer',
+                      }}>
+                        <input
+                          type="checkbox"
+                          checked={muted}
+                          onChange={() => toggleMute(t)}
+                          style={{ accentColor: tokens.colors.warning }}
+                        />
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: '12px', color: tokens.colors.textStrong }}>
+                          <span aria-hidden="true" style={{ color: tstyle.text }}>{tstyle.icon}</span>
+                          <span>{tstyle.label}</span>
+                        </span>
+                      </label>
+                    );
+                  })}
+                  <div style={{ fontSize: '10px', color: tokens.colors.textMuted, marginTop: 6, fontStyle: 'italic' }}>
+                    Muted types stay visible in the list — but their unread dot and "is typing" hints are hidden.
+                  </div>
+                </div>
+              )}
               {ALL_COMMENT_TYPES.filter(t => typeCounts[t] > 0).map(t => {
                 const tstyle = COMMENT_TYPE_STYLES[t];
                 const active = activeTypes.has(t);
@@ -1128,6 +1231,7 @@ export default function TicketPanel({
               onReply={handleStartReply}
               replyingToCommentId={replyingTo?.id || null}
               lastReadAt={lastReadAt}
+              mutedTypes={mutedTypes}
             />
 
             <TypingIndicator agentName={typingIndicators[navStack[navStack.length - 1]] ?? null} />

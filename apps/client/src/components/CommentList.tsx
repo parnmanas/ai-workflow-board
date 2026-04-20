@@ -1,6 +1,6 @@
 import React, { useRef, useMemo, useCallback } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { Comment } from '../types';
+import { Comment, CommentType } from '../types';
 import { tokens } from '../tokens';
 import { renderMarkdown, handleMentionAwareCopy } from './chat/utils/markdown';
 import { COMMENT_TYPE_STYLES, resolveCommentType } from './comment-types';
@@ -21,9 +21,13 @@ interface CommentListProps {
   // cue (small dot + slight tint). Snapshotted by the parent on mount so
   // the cutoff stays stable while the user reads.
   lastReadAt?: string | null;
+  // Tier-1 H: per-type notification mute. Comments whose type is in this
+  // set keep showing in the list (filter chip controls visibility) but
+  // their unread dot is suppressed — "I see this exists, just don't ping me".
+  mutedTypes?: Set<CommentType>;
 }
 
-export default function CommentList({ comments, onImagePreview, onSetCommentStatus, onReply, replyingToCommentId, lastReadAt }: CommentListProps) {
+export default function CommentList({ comments, onImagePreview, onSetCommentStatus, onReply, replyingToCommentId, lastReadAt, mutedTypes }: CommentListProps) {
   const lastReadMs = lastReadAt ? new Date(lastReadAt).getTime() : null;
   const parentRef = useRef<HTMLDivElement>(null);
 
@@ -147,8 +151,11 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
           const isReplyTarget = replyingToCommentId === c.id;
           // Tier-1 F: row is unread if created after the user's last read
           // marker. NULL marker means "never read" → everything is unread.
+          // Tier-1 H: muted types suppress the unread dot — the user
+          // explicitly opted out of being signaled about this type.
           const createdMs = new Date(c.created_at).getTime();
-          const isUnread = lastReadMs === null ? true : createdMs > lastReadMs;
+          const isUnreadByTime = lastReadMs === null ? true : createdMs > lastReadMs;
+          const isUnread = isUnreadByTime && !(mutedTypes && mutedTypes.has(ctype));
           return (
             <div
               key={`comment-${c.id}`}
