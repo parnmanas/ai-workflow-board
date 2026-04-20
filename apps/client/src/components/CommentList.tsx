@@ -1,4 +1,4 @@
-import React, { useRef } from 'react';
+import React, { useRef, useMemo } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Comment } from '../types';
 import { tokens } from '../tokens';
@@ -22,8 +22,57 @@ interface CommentListProps {
 export default function CommentList({ comments, onImagePreview, onSetCommentStatus, onReply, replyingToCommentId }: CommentListProps) {
   const parentRef = useRef<HTMLDivElement>(null);
 
+  // Phase 2D — visual threading. Comments arrive newest-first from the server.
+  // We split them into top-level (no parent_id) and replies (parent_id set),
+  // then re-flatten so each top-level row is immediately followed by its
+  // replies in chronological (oldest-first) order. This reads naturally:
+  //
+  //   Q (newest top-level)
+  //     ↳ A1 (oldest reply to Q)
+  //     ↳ A2 (newer reply to Q)
+  //   Q (older top-level)
+  //     ↳ A3 …
+  //
+  // Replies whose parent isn't in the visible set (e.g., the question's type
+  // chip is filtered off) fall through as orphan top-level rows so they're
+  // never silently dropped.
+  const flatRows = useMemo(() => {
+    const repliesByParent = new Map<string, Comment[]>();
+    const topLevel: Comment[] = [];
+    for (const c of comments) {
+      if (c.parent_id) {
+        const arr = repliesByParent.get(c.parent_id) || [];
+        arr.push(c);
+        repliesByParent.set(c.parent_id, arr);
+      } else {
+        topLevel.push(c);
+      }
+    }
+    const out: Array<{ comment: Comment; indent: 0 | 1; orphan?: boolean }> = [];
+    const consumed = new Set<string>();
+    for (const c of topLevel) {
+      out.push({ comment: c, indent: 0 });
+      consumed.add(c.id);
+      const replies = repliesByParent.get(c.id);
+      if (replies) {
+        replies
+          .slice()
+          .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+          .forEach(r => {
+            out.push({ comment: r, indent: 1 });
+            consumed.add(r.id);
+          });
+      }
+    }
+    // Pick up orphans: a reply whose parent is hidden by the current filter.
+    for (const c of comments) {
+      if (!consumed.has(c.id)) out.push({ comment: c, indent: 0, orphan: true });
+    }
+    return out;
+  }, [comments]);
+
   const virtualizer = useVirtualizer({
-    count: comments.length,
+    count: flatRows.length,
     getScrollElement: () => parentRef.current,
     // Rough initial estimate — real heights come from measureElement. Short
     // one-liner comments are ~50px; agent comments with code blocks easily
@@ -33,7 +82,7 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
     // Without this, prepending a new comment shifts every index by one and
     // the virtualizer reuses the OLD item's measured height for the NEW item,
     // leaving large blank gaps between cards.
-    getItemKey: (index) => comments[index].id,
+    getItemKey: (index) => flatRows[index].comment.id,
     overscan: 5,
   });
 
@@ -56,7 +105,13 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
     <div ref={parentRef} style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
       <div style={{ height: `${virtualizer.getTotalSize()}px`, position: 'relative' }}>
         {virtualizer.getVirtualItems().map(virtualItem => {
-          const c = comments[virtualItem.index];
+          const row = flatRows[virtualItem.index];
+          const c = row.comment;
+          const isIndented = row.indent === 1;
+          // Indent reply rows under their parent question. left:0/right:0
+          // positioning is preserved so the virtualizer's vertical math stays
+          // intact; the visual offset comes from paddingLeft on the row wrapper.
+          const indentPx = isIndented ? 24 : 0;
           const isAgent = c.author_type === 'agent';
           // Author badge stays driven by author_type so the user/agent/system
           // axis remains visible. Type styling is layered on top (left border,
@@ -80,7 +135,7 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
               ref={virtualizer.measureElement}
               data-index={virtualItem.index}
               style={{
-                position: 'absolute', top: virtualItem.start, left: 0, right: 0,
+                position: 'absolute', top: virtualItem.start, left: indentPx, right: 0,
                 background: tstyle.bg,
                 border: `1px solid ${isReplyTarget ? tstyle.border : tokens.colors.border}`,
                 borderLeft: `3px solid ${tstyle.border}`,
