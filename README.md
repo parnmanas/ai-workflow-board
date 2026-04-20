@@ -100,10 +100,7 @@ This starts both the client and server:
 # 1. Create environment file
 cp docker-compose.env.example .env
 
-# 2. Edit .env with your settings
-#    - Set DB_PASS to a secure password
-#    - Set MCP_API_KEYS for agent authentication
-#    - Set AGENT_API_KEY for agent API access
+# 2. Edit .env — set DB_PASS to a secure password
 
 # 3. Start services
 docker compose up -d
@@ -124,11 +121,11 @@ The server runs on port **7701** with PostgreSQL. Both the web UI and MCP endpoi
 | `PORT` | `7701` | Server port |
 | `NODE_ENV` | `development` | Environment mode |
 | `CORS_ORIGIN` | `true` | CORS origin (true = reflect request origin) |
-| `MCP_API_KEYS` | — | Comma-separated API keys (format: `agentName:key,key2`) |
-| `MCP_DEV_MODE` | `false` | Set `true` to skip API key validation |
-| `AGENT_API_KEY` | — | Static key for agent REST API (X-Agent-Key header) |
-| `AGENT_DEV_MODE` | `false` | Set `true` to allow unauthenticated agent access |
 | `ENCRYPTION_KEY` | (auto-generated) | Key for encrypting stored credentials (AES-256-GCM) |
+| `MCP_DEV_MODE` | `false` | Set `true` to skip MCP API key validation in dev |
+| `AGENT_DEV_MODE` | `false` | Set `true` to skip agent auth in dev |
+
+> **API Keys**: Create and manage API keys in the web UI (**Workspace > API Keys**). Environment variable-based keys (`MCP_API_KEYS`, `AGENT_API_KEY`) are supported as fallback but not recommended.
 
 ### Optional: Embedding & Vector Search
 

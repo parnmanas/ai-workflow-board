@@ -35,8 +35,6 @@ services:
       DB_NAME: ${DB_NAME:-ai_workflow}
       DB_USER: ${DB_USER:-postgres}
       DB_PASS: ${DB_PASS}
-      MCP_API_KEYS: ${MCP_API_KEYS:-}
-      AGENT_API_KEY: ${AGENT_API_KEY:-}
 
 volumes:
   pgdata:
