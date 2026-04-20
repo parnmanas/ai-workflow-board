@@ -48,7 +48,7 @@ export default function Board() {
   const {
     board, users, agents, channels, loading: boardLoading, error, refresh,
     createTicket, updateTicket, moveTicket, deleteTicket,
-    createChildTicket, addComment,
+    createChildTicket, addComment, setCommentStatus,
     createColumn, updateColumn, deleteColumn,
     typingIndicators,
   } = useBoard(boardId ?? '');
@@ -103,9 +103,18 @@ export default function Board() {
     await wrapAction(() => deleteTicket(childId), 'Subtask deleted');
   }, [wrapAction, deleteTicket]);
 
-  const handleAddComment = useCallback(async (ticketId: string, content: string, images?: { filename: string; mimetype: string; data: string }[]) => {
-    await wrapAction(() => addComment(ticketId, content, images || []), 'Comment added');
+  const handleAddComment = useCallback(async (
+    ticketId: string,
+    content: string,
+    images?: { filename: string; mimetype: string; data: string }[],
+    options?: { type?: string; parent_id?: string | null; metadata?: Record<string, unknown> },
+  ) => {
+    await wrapAction(() => addComment(ticketId, content, images || [], options), 'Comment added');
   }, [wrapAction, addComment]);
+
+  const handleSetCommentStatus = useCallback(async (ticketId: string, commentId: string, status: 'open' | 'resolved') => {
+    await wrapAction(() => setCommentStatus(ticketId, commentId, status), status === 'resolved' ? 'Question resolved' : 'Question reopened');
+  }, [wrapAction, setCommentStatus]);
 
   const handleCreateColumn = useCallback(async (boardId: string, name: string, color?: string) => {
     await wrapAction(() => createColumn(boardId, name, color), 'Column created');
@@ -214,6 +223,7 @@ export default function Board() {
                   onCreateChild={handleCreateChild}
                   onDeleteChild={handleDeleteChild}
                   onAddComment={handleAddComment}
+                  onSetCommentStatus={handleSetCommentStatus}
                   onSelectTicket={setActivePanelTicketId}
                 />
               </Panel>

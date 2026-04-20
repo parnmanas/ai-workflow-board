@@ -428,6 +428,66 @@ export class TicketsController {
     });
   }
 
+  @Patch('tickets/:ticketId/comments/:commentId/status')
+  async setCommentStatus(
+    @Param('ticketId') ticketId: string,
+    @Param('commentId') commentId: string,
+    @Body() body: any,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const currentUser = (req as any).currentUser;
+    if (!currentUser) return res.status(401).json({ error: 'Authentication required' });
+
+    const desired = body?.status;
+    // Only the question lifecycle uses status today. Restrict the surface
+    // explicitly so we can extend later (e.g., decision 'archived') without
+    // accidentally accepting arbitrary strings now.
+    if (desired !== 'open' && desired !== 'resolved') {
+      return res.status(400).json({ error: "status must be 'open' or 'resolved'" });
+    }
+
+    const comment = await this.commentRepo.findOne({ where: { id: commentId } });
+    if (!comment) return res.status(404).json({ error: 'Comment not found' });
+    if (comment.ticket_id !== ticketId) {
+      return res.status(400).json({ error: 'Comment does not belong to that ticket' });
+    }
+    if (comment.type !== 'question') {
+      return res.status(400).json({ error: 'Only question comments carry a resolvable status' });
+    }
+    if (comment.status === desired) {
+      // No-op write; return the row so the client can reconcile state without
+      // a follow-up GET.
+      return res.json({
+        ...comment,
+        images: JSON.parse(comment.images || '[]'),
+        metadata: JSON.parse(comment.metadata || '{}'),
+      });
+    }
+
+    await this.commentRepo.update({ id: commentId }, { status: desired });
+
+    await this.activityService.logActivity({
+      entity_type: 'comment',
+      entity_id: commentId,
+      action: 'updated',
+      ticket_id: ticketId,
+      actor_id: currentUser.id,
+      actor_name: currentUser.name,
+      field_changed: 'status',
+      old_value: comment.status || '',
+      new_value: desired,
+    });
+
+    const updated = await this.commentRepo.findOne({ where: { id: commentId } });
+    return res.json({
+      ...(updated || comment),
+      status: desired,
+      images: JSON.parse((updated || comment).images || '[]'),
+      metadata: JSON.parse((updated || comment).metadata || '{}'),
+    });
+  }
+
   /**
    * Parse @-mention tokens from the saved comment and fire notification events.
    *

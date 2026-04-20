@@ -180,8 +180,27 @@ export const api = {
     request<any>(`/tickets/${parentId}/children`, { method: 'POST', body: JSON.stringify(data) }),
 
   // ─── Comments ──────────────────────────────────────────
-  addComment: (ticketId: string, content: string, images: { filename: string; mimetype: string; data: string }[] = []) =>
-    request<any>(`/tickets/${ticketId}/comments`, { method: 'POST', body: JSON.stringify({ content, images }) }),
+  addComment: (
+    ticketId: string,
+    content: string,
+    images: { filename: string; mimetype: string; data: string }[] = [],
+    options?: { type?: string; parent_id?: string | null; metadata?: Record<string, unknown> },
+  ) =>
+    request<any>(`/tickets/${ticketId}/comments`, {
+      method: 'POST',
+      body: JSON.stringify({
+        content,
+        images,
+        ...(options?.type ? { type: options.type } : {}),
+        ...(options?.parent_id !== undefined ? { parent_id: options.parent_id } : {}),
+        ...(options?.metadata ? { metadata: options.metadata } : {}),
+      }),
+    }),
+  setCommentStatus: (ticketId: string, commentId: string, status: 'open' | 'resolved') =>
+    request<any>(`/tickets/${ticketId}/comments/${commentId}/status`, {
+      method: 'PATCH',
+      body: JSON.stringify({ status }),
+    }),
 
   // ─── Users ─────────────────────────────────────────────
   getUsers: (workspaceId?: string) =>

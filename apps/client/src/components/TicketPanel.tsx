@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { Ticket, Agent, Channel, ActivityLog } from '../types';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { Ticket, Agent, Channel, ActivityLog, CommentType } from '../types';
 import { api } from '../api';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
@@ -8,6 +8,7 @@ import CommentList from './CommentList';
 import { TypingIndicator } from './TypingIndicator';
 import { tokens } from '../tokens';
 import { MentionTextarea, MentionCandidate } from './common/MentionTextarea';
+import { ALL_COMMENT_TYPES, COMMENT_TYPE_STYLES, defaultVisibleTypes, resolveCommentType } from './comment-types';
 
 interface TicketPanelProps {
   ticket: Ticket;
@@ -20,7 +21,13 @@ interface TicketPanelProps {
   onDelete: (id: string) => void;
   onCreateChild: (parentId: string, data: { title: string; description?: string; priority?: string; assignee?: string; reporter?: string }) => void;
   onDeleteChild: (childId: string) => void;
-  onAddComment: (ticketId: string, content: string, images?: { filename: string; mimetype: string; data: string }[]) => void;
+  onAddComment: (
+    ticketId: string,
+    content: string,
+    images?: { filename: string; mimetype: string; data: string }[],
+    options?: { type?: string; parent_id?: string | null; metadata?: Record<string, unknown> },
+  ) => void;
+  onSetCommentStatus?: (ticketId: string, commentId: string, status: 'open' | 'resolved') => void;
   onSelectTicket?: (id: string) => void;
 }
 
@@ -145,7 +152,7 @@ function fileToBase64(file: File): Promise<string> {
 
 export default function TicketPanel({
   ticket, columnName, agents, channels, typingIndicators,
-  onClose, onUpdate, onDelete, onCreateChild, onDeleteChild, onAddComment, onSelectTicket,
+  onClose, onUpdate, onDelete, onCreateChild, onDeleteChild, onAddComment, onSetCommentStatus, onSelectTicket,
 }: TicketPanelProps) {
   const { user } = useAuth();
   const { showToast } = useToast();
@@ -215,6 +222,9 @@ export default function TicketPanel({
   const [selectedChannelIds, setSelectedChannelIds] = useState<string[]>(activeTicket.channel_ids || []);
   const [commentContent, setCommentContent] = useState('');
   const [commentImages, setCommentImages] = useState<{ filename: string; mimetype: string; data: string }[]>([]);
+  // Compose type selector — restricted to types where COMMENT_TYPE_STYLES.composable=true.
+  // 'note' is the default so the previous flow (just type and Send) is unchanged.
+  const [composeType, setComposeType] = useState<CommentType>('note');
   const [activeTab, setActiveTab] = useState<'detail' | 'comments' | 'activity'>('detail');
   const [activities, setActivities] = useState<ActivityLog[]>([]);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
@@ -303,15 +313,74 @@ export default function TicketPanel({
 
   const handleSubmitComment = () => {
     if (commentContent.trim()) {
-      onAddComment(activeTicket.id, commentContent.trim(), commentImages.length > 0 ? commentImages : undefined);
+      onAddComment(
+        activeTicket.id,
+        commentContent.trim(),
+        commentImages.length > 0 ? commentImages : undefined,
+        // Only forward the type when it differs from the default. Keeps the
+        // request body backward-identical for the most common case ('note')
+        // and avoids server-side noise from explicit "type=note" hints.
+        composeType !== 'note' ? { type: composeType } : undefined,
+      );
       setCommentContent('');
       setCommentImages([]);
+      // Reset to the default type after each send so a one-off Question doesn't
+      // sticky-set the compose mode.
+      setComposeType('note');
+      // Auto-enable the chip for the type we just submitted, otherwise the new
+      // row would land in the timeline but be hidden by the active filter.
+      setActiveTypes(prev => {
+        if (prev.has(composeType)) return prev;
+        const next = new Set(prev);
+        next.add(composeType);
+        return next;
+      });
     }
   };
 
-  // Filter comments: exclude system comments from user-facing lists
-  const userComments = (activeTicket.comments || []).filter(c => c.author_type !== 'system');
-  const userCommentCount = userComments.length;
+  // Type-filter state — Set so toggling is O(1). Defaults exclude 'system' so
+  // the previous behavior (no audit-log noise in the timeline) is preserved.
+  const [activeTypes, setActiveTypes] = useState<Set<CommentType>>(() => defaultVisibleTypes());
+
+  // Filter comments by current chip selection. Two axes:
+  //   • author_type === 'system' → routed through the 'system' chip even if
+  //     the row is legacy and has type='note' (older system rows pre-Phase 1).
+  //   • everything else → routed through its CommentType.
+  const filteredComments = useMemo(() => {
+    return (activeTicket.comments || []).filter(c => {
+      if (c.author_type === 'system') return activeTypes.has('system');
+      return activeTypes.has(resolveCommentType(c.type as string | null | undefined));
+    });
+  }, [activeTicket.comments, activeTypes]);
+
+  // Counts per type — drives chip badge ("3" beside Question, etc.) so the
+  // user can see at a glance which buckets have content.
+  const typeCounts = useMemo(() => {
+    const counts: Record<CommentType, number> = {
+      note: 0, question: 0, answer: 0, decision: 0, chat: 0, system: 0, handoff: 0,
+    };
+    for (const c of activeTicket.comments || []) {
+      if (c.author_type === 'system') {
+        counts.system += 1;
+      } else {
+        counts[resolveCommentType(c.type as string | null | undefined)] += 1;
+      }
+    }
+    return counts;
+  }, [activeTicket.comments]);
+
+  // Tab badge stays filter-independent — toggling chips shouldn't change "how
+  // many comments this ticket has". System rows still excluded so the badge
+  // reflects user-relevant volume.
+  const userCommentCount = (activeTicket.comments || []).filter(c => c.author_type !== 'system').length;
+
+  const toggleType = useCallback((t: CommentType) => {
+    setActiveTypes(prev => {
+      const next = new Set(prev);
+      if (next.has(t)) next.delete(t); else next.add(t);
+      return next;
+    });
+  }, []);
 
   const labelStyle = {
     fontSize: '11px', color: tokens.colors.textMuted, fontWeight: 600,
@@ -320,6 +389,35 @@ export default function TicketPanel({
 
   const renderCommentInput = () => (
     <div>
+      {/* Compose type selector — segmented control of composable types.
+         Hidden if only one composable type exists (defensive, current set is 4). */}
+      <div style={{ display: 'flex', gap: 4, marginBottom: 6, flexWrap: 'wrap' }}>
+        {ALL_COMMENT_TYPES.filter(t => COMMENT_TYPE_STYLES[t].composable).map(t => {
+          const tstyle = COMMENT_TYPE_STYLES[t];
+          const active = composeType === t;
+          return (
+            <button
+              key={`compose-${t}`}
+              type="button"
+              onClick={() => setComposeType(t)}
+              title={`Post as ${tstyle.label}`}
+              aria-pressed={active}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 4,
+                padding: '2px 8px', borderRadius: tokens.radii.sm,
+                fontSize: '11px', fontWeight: 600,
+                background: active ? tstyle.bg : 'transparent',
+                color: active ? tstyle.text : tokens.colors.textMuted,
+                border: `1px solid ${active ? tstyle.border : tokens.colors.border}`,
+                cursor: 'pointer', textTransform: 'uppercase', letterSpacing: 0.4,
+              }}
+            >
+              <span aria-hidden="true">{tstyle.icon}</span>
+              <span>{tstyle.label}</span>
+            </button>
+          );
+        })}
+      </div>
       {commentImages.length > 0 && (
         <div style={{ display: 'flex', gap: 4, marginBottom: 6, flexWrap: 'wrap' }}>
           {commentImages.map((img, idx) => (
@@ -643,9 +741,48 @@ export default function TicketPanel({
         ) : activeTab === 'comments' ? (
           /* Comments Tab */
           <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 200 }}>
+            {/* Type filter chips. Only render types that have at least one comment
+               OR are currently active (so toggling-off still shows the chip). */}
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 8 }}>
+              {ALL_COMMENT_TYPES.filter(t => typeCounts[t] > 0 || activeTypes.has(t)).map(t => {
+                const tstyle = COMMENT_TYPE_STYLES[t];
+                const active = activeTypes.has(t);
+                return (
+                  <button
+                    key={`chip-${t}`}
+                    onClick={() => toggleType(t)}
+                    title={`Toggle ${tstyle.label} comments`}
+                    aria-pressed={active}
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 4,
+                      padding: '2px 8px', borderRadius: tokens.radii.full as any,
+                      fontSize: '11px', fontWeight: 600,
+                      background: active ? tstyle.bg : 'transparent',
+                      color: active ? tstyle.text : tokens.colors.textMuted,
+                      border: `1px solid ${active ? tstyle.border : tokens.colors.border}`,
+                      cursor: 'pointer',
+                      textTransform: 'uppercase', letterSpacing: 0.4,
+                      opacity: typeCounts[t] === 0 ? 0.5 : 1,
+                    }}
+                  >
+                    <span aria-hidden="true">{tstyle.icon}</span>
+                    <span>{tstyle.label}</span>
+                    {typeCounts[t] > 0 && (
+                      <span style={{
+                        fontSize: '10px', padding: '0 5px', borderRadius: tokens.radii.full as any,
+                        background: tokens.colors.surface, color: tokens.colors.textMuted, marginLeft: 2,
+                      }}>{typeCounts[t]}</span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
             <CommentList
-              comments={userComments}
+              comments={filteredComments}
               onImagePreview={(src) => setImagePreview(src)}
+              onSetCommentStatus={onSetCommentStatus
+                ? (commentId, status) => onSetCommentStatus(activeTicket.id, commentId, status)
+                : undefined}
             />
 
             <TypingIndicator agentName={typingIndicators[navStack[navStack.length - 1]] ?? null} />

@@ -147,8 +147,17 @@ export function useBoard(boardId: string = '') {
     await withLocalAction(() => api.createChildTicket(parentId, data));
   };
 
-  const addComment = async (ticketId: string, content: string, images: { filename: string; mimetype: string; data: string }[] = []) => {
-    await withLocalAction(() => api.addComment(ticketId, content, images));
+  const addComment = async (
+    ticketId: string,
+    content: string,
+    images: { filename: string; mimetype: string; data: string }[] = [],
+    options?: { type?: string; parent_id?: string | null; metadata?: Record<string, unknown> },
+  ) => {
+    await withLocalAction(() => api.addComment(ticketId, content, images, options));
+  };
+
+  const setCommentStatus = async (ticketId: string, commentId: string, status: 'open' | 'resolved') => {
+    await withLocalAction(() => api.setCommentStatus(ticketId, commentId, status));
   };
 
   const createColumn = async (boardId: string, name: string, color?: string) => {
@@ -178,6 +187,7 @@ export function useBoard(boardId: string = '') {
     deleteTicket,
     createChildTicket,
     addComment,
+    setCommentStatus,
     createColumn,
     updateColumn,
     deleteColumn,
