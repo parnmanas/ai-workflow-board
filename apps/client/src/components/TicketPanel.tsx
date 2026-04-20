@@ -464,7 +464,34 @@ export default function TicketPanel({
 
   // Type-filter state — Set so toggling is O(1). Defaults exclude 'system' so
   // the previous behavior (no audit-log noise in the timeline) is preserved.
-  const [activeTypes, setActiveTypes] = useState<Set<CommentType>>(() => defaultVisibleTypes());
+  // Persisted to localStorage under a stable key so the user's last selection
+  // survives ticket switches and reloads. Bad/missing payloads fall back to
+  // defaults; type narrowing happens against COMMENT_TYPE_STYLES to avoid a
+  // future enum addition silently surfacing rogue values.
+  const COMMENT_FILTER_LS_KEY = 'awb.commentTypeFilter';
+  const [activeTypes, setActiveTypes] = useState<Set<CommentType>>(() => {
+    try {
+      const raw = typeof window !== 'undefined' ? localStorage.getItem(COMMENT_FILTER_LS_KEY) : null;
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          const validKeys = new Set(Object.keys(COMMENT_TYPE_STYLES));
+          const safe = parsed.filter((t): t is CommentType => typeof t === 'string' && validKeys.has(t));
+          if (safe.length > 0) return new Set(safe);
+        }
+      }
+    } catch { /* localStorage disabled / quota / corrupt JSON — fall through */ }
+    return defaultVisibleTypes();
+  });
+  // Persist on every change. Cheap (small array) and we want the next ticket
+  // panel mount on the same browser to see the latest selection without a
+  // round-trip.
+  useEffect(() => {
+    try {
+      if (typeof window === 'undefined') return;
+      localStorage.setItem(COMMENT_FILTER_LS_KEY, JSON.stringify(Array.from(activeTypes)));
+    } catch { /* ignore — non-critical */ }
+  }, [activeTypes]);
 
   // Filter comments by current chip selection. Two axes:
   //   • author_type === 'system' → routed through the 'system' chip even if
