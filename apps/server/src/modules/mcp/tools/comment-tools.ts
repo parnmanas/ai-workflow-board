@@ -1,13 +1,20 @@
 /**
  * Comment MCP tools.
  *
- * Tools: add_comment
+ * Tools: add_comment, ask_question, answer_question, record_decision
+ *
+ * The three typed-intent tools (ask_question / answer_question / record_decision)
+ * are thin wrappers around the same Comment.save() that add_comment uses, but
+ * they pin the `type` discriminator at the tool boundary so the agent's intent
+ * is encoded in the call itself. This makes prompt design clearer than
+ * "use add_comment with type='question'" and avoids agents drifting back to
+ * type='note' by forgetting to pass the field.
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { Agent } from '../../../entities/Agent';
-import { Comment } from '../../../entities/Comment';
+import { Comment, CommentType } from '../../../entities/Comment';
 import { Ticket } from '../../../entities/Ticket';
 import { User } from '../../../entities/User';
 import { UserMention } from '../../../entities/UserMention';
@@ -136,6 +143,205 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         // Never fail the comment save because mention dispatch blew up.
         logger.warn('Mentions', `MCP add_comment mention dispatch failed: ${e instanceof Error ? e.message : String(e)}`);
       }
+
+      return ok(comment);
+    }
+  );
+
+  // ─── Helper: resolve caller identity (auth + author resolution) ────
+  // Centralizes the auto-fill logic that all 4 tools share. Returns the
+  // resolved {authorType, authorId, authorName} or an error tuple.
+  async function resolveAuthor(
+    requestedType: 'user' | 'agent' | undefined,
+    requestedId: string | undefined,
+    requestedName: string | undefined,
+    extra: { sessionId?: string },
+  ): Promise<{ authorType: 'user' | 'agent'; authorId: string; authorName: string } | { error: string }> {
+    const caller = getCallerAgent(extra);
+    const authorType = requestedType || (caller?.agentId ? 'agent' : 'user');
+    const authorId = requestedId || caller?.agentId || '';
+    if (!authorId) return { error: 'author_id is required (or authenticate with an agent API key)' };
+
+    let authorName = requestedName || '';
+    if (!authorName) {
+      if (authorType === 'agent') {
+        if (caller?.agentName && caller?.agentId === authorId) {
+          authorName = caller.agentName;
+        } else {
+          const agent = await dataSource.getRepository(Agent).findOne({ where: { id: authorId } });
+          authorName = agent?.name || `Agent #${authorId}`;
+        }
+      } else {
+        const user = await dataSource.getRepository(User).findOne({ where: { id: authorId } });
+        authorName = user?.name || `User #${authorId}`;
+      }
+    }
+    return { authorType, authorId, authorName };
+  }
+
+  // ─── ask_question ────────────────────────────────────────────────
+  server.tool(
+    'ask_question',
+    'Ask a question on a ticket — creates a comment with type=question, status=open. The ticket assignee/reporter (or @mentioned user) is notified. Use this when you are blocked and need a human answer before continuing; the ticket detail UI surfaces the open question prominently.',
+    {
+      ticket_id: z.string().describe('Ticket ID the question is about'),
+      content: z.string().describe('Question body. Plain text or markdown. Embed @[user:id|Name] tokens to direct the question at a specific user.'),
+      author_type: z.enum(['user', 'agent']).optional().describe('Author type (auto-detected from auth)'),
+      author_id: z.string().optional().describe('Author ID (auto-filled from auth if omitted)'),
+      author: z.string().optional().describe('Display name (auto-resolved if omitted)'),
+    },
+    async ({ ticket_id, content, author_type, author_id, author }, extra: { sessionId?: string }) => {
+      const ticket = await dataSource.getRepository(Ticket).findOne({ where: { id: ticket_id } });
+      if (!ticket) return err('Ticket not found');
+
+      const resolved = await resolveAuthor(author_type, author_id, author, extra);
+      if ('error' in resolved) return err(resolved.error);
+
+      const commentRepo = dataSource.getRepository(Comment);
+      const comment = await commentRepo.save(commentRepo.create({
+        ticket_id,
+        author_type: resolved.authorType,
+        author_id: resolved.authorId,
+        author: resolved.authorName,
+        content,
+        type: 'question' as CommentType,
+        status: 'open',
+      }));
+
+      await activityService.logActivity({
+        entity_type: 'comment', entity_id: comment.id, action: 'created',
+        ticket_id, actor_id: resolved.authorId, actor_name: resolved.authorName,
+        new_value: content, field_changed: 'question',
+      });
+
+      // Mention dispatch — same logic as the REST + add_comment paths so an
+      // ask_question with @[user:...|Name] reaches the inbox + sidebar badge.
+      try {
+        const refs = mentionService.parseMentions(content);
+        if (refs.length > 0) {
+          const resolvedRefs = mentionService.resolveMentions(refs, ticket);
+          const preview = (content || '').slice(0, 500);
+          const ts = (comment.created_at instanceof Date ? comment.created_at : new Date()).toISOString();
+          const userMentionRepo = dataSource.getRepository(UserMention);
+          for (const m of resolvedRefs) {
+            if (m.type === 'agent') {
+              const agent = await dataSource.getRepository(Agent).findOne({ where: { id: m.id } });
+              if (!agent) continue;
+              if (agent.workspace_id && ticket.workspace_id && agent.workspace_id !== ticket.workspace_id) continue;
+              activityEvents.emit('comment_mention', {
+                ticket_id: ticket.id, comment_id: comment.id, workspace_id: ticket.workspace_id,
+                agent_id: agent.id,
+                actor_id: resolved.authorId, actor_type: resolved.authorType, actor_name: resolved.authorName,
+                content, role_prompt: agent.role_prompt || '',
+                mention_source: m.roleShortcut ? 'role' : 'direct', role_shortcut: m.roleShortcut,
+                timestamp: ts,
+              });
+            } else {
+              const row = await userMentionRepo.save(userMentionRepo.create({
+                user_id: m.id, workspace_id: ticket.workspace_id,
+                source_type: 'comment', source_id: comment.id,
+                ticket_id: ticket.id, room_id: null,
+                actor_id: resolved.authorId, actor_type: resolved.authorType, actor_name: resolved.authorName,
+                preview,
+              }));
+              activityEvents.emit('user_mention', {
+                mention_id: row.id, user_id: row.user_id, workspace_id: row.workspace_id,
+                source_type: 'comment', source_id: comment.id,
+                ticket_id: ticket.id, room_id: null,
+                actor_id: resolved.authorId, actor_type: resolved.authorType, actor_name: resolved.authorName,
+                preview,
+                created_at: (row.created_at instanceof Date ? row.created_at : new Date()).toISOString(),
+              });
+            }
+          }
+        }
+      } catch (e) {
+        logger.warn('Mentions', `ask_question mention dispatch failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+
+      return ok(comment);
+    }
+  );
+
+  // ─── answer_question ─────────────────────────────────────────────
+  server.tool(
+    'answer_question',
+    'Answer a previously-asked question. Creates a comment with type=answer and parent_id pointing at the question; the parent question auto-resolves so the ticket no longer shows it as open. The original question must exist on the same ticket and have type=question.',
+    {
+      question_comment_id: z.string().describe("ID of the question comment being answered (Comment.id where type='question')"),
+      content: z.string().describe('Answer body. Plain text or markdown.'),
+      author_type: z.enum(['user', 'agent']).optional(),
+      author_id: z.string().optional(),
+      author: z.string().optional(),
+    },
+    async ({ question_comment_id, content, author_type, author_id, author }, extra: { sessionId?: string }) => {
+      const commentRepo = dataSource.getRepository(Comment);
+      const question = await commentRepo.findOne({ where: { id: question_comment_id } });
+      if (!question) return err('Question comment not found');
+      if (question.type !== 'question') return err('Parent comment is not a question');
+
+      const resolved = await resolveAuthor(author_type, author_id, author, extra);
+      if ('error' in resolved) return err(resolved.error);
+
+      const answer = await commentRepo.save(commentRepo.create({
+        ticket_id: question.ticket_id,
+        author_type: resolved.authorType,
+        author_id: resolved.authorId,
+        author: resolved.authorName,
+        content,
+        type: 'answer' as CommentType,
+        parent_id: question.id,
+      }));
+
+      // Idempotent flip — even if a prior answer already resolved it, this
+      // matches the REST endpoint's behavior so the two paths agree.
+      await commentRepo.update({ id: question.id }, { status: 'resolved' });
+
+      await activityService.logActivity({
+        entity_type: 'comment', entity_id: answer.id, action: 'created',
+        ticket_id: question.ticket_id, actor_id: resolved.authorId, actor_name: resolved.authorName,
+        new_value: content, field_changed: 'answer',
+      });
+
+      return ok(answer);
+    }
+  );
+
+  // ─── record_decision ─────────────────────────────────────────────
+  server.tool(
+    'record_decision',
+    'Record a decision on a ticket — creates a comment with type=decision. Use this for resolved trade-offs, scope choices, or anything future readers should be able to find without scrolling the full discussion. Decisions render with a distinctive style and survive comment-filter toggles by default.',
+    {
+      ticket_id: z.string().describe('Ticket ID'),
+      content: z.string().describe('Decision text. Phrase as a statement: "We will use X because Y".'),
+      references: z.array(z.string()).optional().describe('Optional comment ids the decision draws from (stored in metadata.references for later traceability).'),
+      author_type: z.enum(['user', 'agent']).optional(),
+      author_id: z.string().optional(),
+      author: z.string().optional(),
+    },
+    async ({ ticket_id, content, references, author_type, author_id, author }, extra: { sessionId?: string }) => {
+      const ticket = await dataSource.getRepository(Ticket).findOne({ where: { id: ticket_id } });
+      if (!ticket) return err('Ticket not found');
+
+      const resolved = await resolveAuthor(author_type, author_id, author, extra);
+      if ('error' in resolved) return err(resolved.error);
+
+      const commentRepo = dataSource.getRepository(Comment);
+      const comment = await commentRepo.save(commentRepo.create({
+        ticket_id,
+        author_type: resolved.authorType,
+        author_id: resolved.authorId,
+        author: resolved.authorName,
+        content,
+        type: 'decision' as CommentType,
+        metadata: JSON.stringify(references && references.length > 0 ? { references } : {}),
+      }));
+
+      await activityService.logActivity({
+        entity_type: 'comment', entity_id: comment.id, action: 'created',
+        ticket_id, actor_id: resolved.authorId, actor_name: resolved.authorName,
+        new_value: content, field_changed: 'decision',
+      });
 
       return ok(comment);
     }
