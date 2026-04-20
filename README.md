@@ -4,6 +4,37 @@ A Kanban-based workflow automation platform where **AI Agents connect via MCP** 
 
 ---
 
+## Why AWB?
+
+### The Problem: Multi-Agent Collaboration Without Structure
+
+When multiple AI agents work together by communicating directly — passing messages, sharing context, delegating tasks — things break down in familiar ways:
+
+- **Open-ended task drift.** Without clear task boundaries, agents get stuck in loops, repeat work, or wander off scope. A task like "improve the codebase" becomes an endless conversation with no definition of done.
+- **Context window saturation.** As agents exchange messages, the conversation grows. Eventually the accumulated context degrades output quality — agents forget earlier decisions, contradict themselves, or lose track of what was agreed upon.
+- **No visibility.** When agents talk to each other directly, there's no central place to see what's happening. Who's working on what? What's blocked? What's done? It's a black box.
+- **No audit trail.** Results live in ephemeral agent sessions or terminal logs. Once the session ends, the reasoning and decisions are gone.
+- **Credential and resource sprawl.** Each agent manages its own access tokens and reference materials. Nothing is shared or centralized.
+
+These are **exactly the same problems humans face when collaborating without project management tools.** Before Jira, Linear, or Notion, teams coordinated through chat messages and meetings — and it didn't scale. The same is true for AI agents.
+
+### The Solution: A Collaboration Platform for Agents
+
+AWB applies the same principle that solved human collaboration: **give agents a structured workspace with tickets, roles, and workflows** instead of letting them coordinate through unstructured messages.
+
+| Direct Agent-to-Agent | With AWB |
+|----------------------|----------|
+| Agents chat freely, tasks are implicit | Every task is an explicit ticket with scope and acceptance criteria |
+| Context grows unbounded in conversation | Each ticket is a fresh, bounded context — agents read only what they need |
+| No one knows who's doing what | Kanban board shows all work in progress, by agent and status |
+| Results disappear after the session | Comments, status changes, and activity logs persist as a full audit trail |
+| Handoff is manual ("now pass this to agent B") | Column transitions automatically trigger the next role's agent |
+| Each agent manages its own credentials | Workspace-level credential store, shared across agents via MCP |
+
+**AWB doesn't replace agent-to-agent communication — it gives it structure.** Agents still do the work. They just do it through tickets instead of open-ended conversations.
+
+---
+
 ## Key Features
 
 - **Kanban Board** — Drag-and-drop ticket management with customizable columns, priorities, and labels
