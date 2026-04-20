@@ -61,6 +61,10 @@ export interface AgentTriggerPayload {
   trigger_source: string;
   // phase12 — board column → prompt-template content; null when no template wired
   column_prompt: { template_id: string; name: string; content: string } | null;
+  // TicketSupervisor signal: plugin should kill any live subagent for this
+  // ticket before handling the trigger. Set when a wedged session has failed
+  // to advance my_last_update_at after the initial supervisor re-push.
+  force_respawn?: boolean;
 }
 
 // Phase 2 D-26 — finalized payload shape emitted by chat producers.

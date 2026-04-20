@@ -11,10 +11,11 @@ import { PromptTemplate } from '../../entities/PromptTemplate';
 import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
 
-// v0.25.0: pure SSE emitter. The AgentTrigger DB table has been removed —
-// delivery is fire-and-forget; the plugin's 5-minute allocated-ticket poll
-// reconciles any missed events. No cooldown (the plugin dedupes in-session
-// by trigger_id), no TTL sweep (no persistence), no manual trigger path.
+// Pure SSE emitter. The AgentTrigger DB table was removed in v0.25.0 —
+// delivery is fire-and-forget. Backstop for dropped SSE is now
+// TicketSupervisorService (server-side), which re-pushes stale allocations.
+// No cooldown here (the plugin dedupes in-session by trigger_id), no TTL
+// sweep (no persistence).
 //
 // Activities we convert to agent_trigger events:
 //   - 'moved': ticket moved to a new column
@@ -179,12 +180,32 @@ export class TriggerLoopService implements OnModuleInit {
   }
 
   /**
+   * Public emitter for server-side schedulers (e.g. TicketSupervisorService).
+   * Delegates to the private _emitTrigger with the same payload composition
+   * (role_prompt / ticket_prompt / column_prompt loaded fresh). Pass
+   * `opts.forceRespawn: true` to tell the plugin to kill any live subagent for
+   * this ticket before handling — used when a wedged session hasn't advanced
+   * my_last_update_at after an initial re-push.
+   */
+  async emitAgentTrigger(
+    ticket: Ticket,
+    agentId: string,
+    role: string,
+    triggerSource: string,
+    triggeredBy: string,
+    opts?: { forceRespawn?: boolean },
+  ): Promise<string> {
+    return this._emitTrigger(ticket, agentId, role, triggerSource, triggeredBy, opts);
+  }
+
+  /**
    * Compose the trigger payload (role_prompt / ticket_prompt / column_prompt
    * loaded fresh at dispatch time) and emit via activityEvents so the
    * EventsController SSE listener forwards it to connected agents.
    *
-   * Fire-and-forget: no DB row, no ack, no retry. The plugin's 5-minute
-   * allocated-ticket poll is the backstop for dropped SSE deliveries.
+   * Fire-and-forget: no DB row, no ack, no retry. TicketSupervisorService
+   * re-pushes stale allocations (my_last_update_at older than 30 min) and
+   * escalates to force_respawn after the cooldown if silence persists.
    */
   private async _emitTrigger(
     ticket: Ticket,
@@ -192,6 +213,7 @@ export class TriggerLoopService implements OnModuleInit {
     role: string,
     triggerSource: string,
     triggeredBy: string,
+    opts?: { forceRespawn?: boolean },
   ): Promise<string> {
     const now = new Date();
 
@@ -228,6 +250,8 @@ export class TriggerLoopService implements OnModuleInit {
     // Ephemeral trigger_id — plugin-side dedup key, no server persistence.
     const triggerId = randomUUID();
 
+    const forceRespawn = opts?.forceRespawn === true;
+
     activityEvents.emit('agent_trigger', {
       trigger_id: triggerId,
       ticket_id: ticket.id,
@@ -239,10 +263,11 @@ export class TriggerLoopService implements OnModuleInit {
       column_prompt: columnPrompt,
       triggered_by: triggeredBy,
       timestamp: now.toISOString(),
+      force_respawn: forceRespawn,
     });
 
     this.logService.info('MCP', 'agent_trigger emitted (fire-and-forget)', {
-      ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource,
+      ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource, force_respawn: forceRespawn,
     });
 
     return triggerId;

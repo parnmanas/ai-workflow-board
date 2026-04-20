@@ -8,13 +8,14 @@ import { AgentConnectionService } from './agent-connection.service';
 import { TriggerLoopService } from './trigger-loop.service';
 import { AgentStatusService } from './agent-status.service';
 import { AllocationService } from './allocation.service';
+import { TicketSupervisorService } from './ticket-supervisor.service';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 
 @Module({
   imports: [TypeOrmModule.forFeature([Agent, AgentChannelIdentity, Ticket])],
   controllers: [AgentsController],
-  providers: [AuthGuard, PermissionGuard, AgentConnectionService, TriggerLoopService, AgentStatusService, AllocationService],
+  providers: [AuthGuard, PermissionGuard, AgentConnectionService, TriggerLoopService, AgentStatusService, AllocationService, TicketSupervisorService],
   exports: [AgentConnectionService, TriggerLoopService, AgentStatusService, AllocationService],
 })
 export class AgentsModule {}
