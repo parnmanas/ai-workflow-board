@@ -9,7 +9,7 @@ import CommentList from './CommentList';
 import { TypingIndicator } from './TypingIndicator';
 import { tokens } from '../tokens';
 import { MentionTextarea, MentionCandidate } from './common/MentionTextarea';
-import { ALL_COMMENT_TYPES, COMMENT_TYPE_STYLES, defaultVisibleTypes, resolveCommentType } from './comment-types';
+import { ALL_COMMENT_TYPES, COMMENT_TYPE_STYLES, defaultVisibleTypes, resolveCommentType, hasStaleOpenQuestion } from './comment-types';
 
 interface TicketPanelProps {
   ticket: Ticket;
@@ -773,6 +773,22 @@ export default function TicketPanel({
             fontSize: '11px', padding: '3px 8px', borderRadius: 4,
             background: tokens.colors.surfaceCard, color: tokens.colors.textMuted,
           }}>{columnName}</span>
+          {/* Tier-1 G stale-question badge in the panel header. Same threshold
+             as the board card so a ticket marked stale on the board stays
+             marked once you open it — no surprise mismatch. */}
+          {hasStaleOpenQuestion(activeTicket.comments) && (
+            <span
+              title="An open question on this ticket has been waiting >24h"
+              style={{
+                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                width: 20, height: 20, borderRadius: '50%',
+                background: tokens.colors.warningBg, color: tokens.colors.warningLight,
+                fontSize: '12px', fontWeight: 700,
+                border: `1px solid ${tokens.colors.warning}`,
+              }}
+              aria-label="Stale open question"
+            >?</span>
+          )}
           {/* Tier-1 E presence — show other viewers (exclude self) as small
              avatar pills. Capped at 3 visible + "+N" overflow so a noisy
              ticket doesn't blow out the header row. Title attribute lists

@@ -96,3 +96,29 @@ export function resolveCommentType(raw: string | null | undefined): CommentType 
   if (raw && (raw in COMMENT_TYPE_STYLES)) return raw as CommentType;
   return 'note';
 }
+
+// Tier-1 G — stale-question alert threshold. A ticket is considered "blocked
+// on a question" when an open question comment exists whose created_at is
+// older than this window. 24h is the lightest possible default that still
+// catches "asked yesterday, never answered" without flagging a question
+// posted an hour ago. Tunable per deployment by reaching into here; future
+// extension could pull this from per-workspace settings.
+export const STALE_QUESTION_THRESHOLD_MS = 24 * 60 * 60 * 1000;
+
+// Pure derived check — no network. The board endpoint already eagerly
+// fetches `ticket.comments`, so callers can ask this question on every
+// ticket card without an extra round-trip.
+export function hasStaleOpenQuestion(
+  comments: Array<{ type?: string | null; status?: string | null; created_at: string | Date }> | undefined,
+  now: number = Date.now(),
+  thresholdMs: number = STALE_QUESTION_THRESHOLD_MS,
+): boolean {
+  if (!comments || comments.length === 0) return false;
+  for (const c of comments) {
+    if (c.type !== 'question') continue;
+    if (c.status !== 'open') continue;
+    const createdMs = new Date(c.created_at).getTime();
+    if (Number.isFinite(createdMs) && now - createdMs >= thresholdMs) return true;
+  }
+  return false;
+}

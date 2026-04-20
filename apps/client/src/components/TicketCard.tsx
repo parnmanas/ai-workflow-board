@@ -3,6 +3,7 @@ import { Draggable } from '@hello-pangea/dnd';
 import { Ticket } from '../types';
 import { tokens } from '../tokens';
 import { Badge } from './common';
+import { hasStaleOpenQuestion } from './comment-types';
 
 interface TicketCardProps {
   ticket: Ticket;
@@ -50,9 +51,29 @@ export default function TicketCard({ ticket, index, onClick }: TicketCardProps) 
         >
           {/* Priority + ID */}
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-            <Badge variant={priorityVariants[ticket.priority] ?? 'neutral'}>
-              {priorityLabels[ticket.priority]}
-            </Badge>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <Badge variant={priorityVariants[ticket.priority] ?? 'neutral'}>
+                {priorityLabels[ticket.priority]}
+              </Badge>
+              {/* Tier-1 G stale-question badge — surfaces tickets blocked
+                 on an answer for >24h so they don't quietly rot. Pure
+                 derived from the ticket's already-loaded comments; no
+                 extra round-trip. Tooltip explains the threshold so the
+                 badge isn't a mystery. */}
+              {hasStaleOpenQuestion(ticket.comments) && (
+                <span
+                  title="An open question on this ticket has been waiting >24h"
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                    width: 18, height: 18, borderRadius: '50%',
+                    background: tokens.colors.warningBg, color: tokens.colors.warningLight,
+                    fontSize: '11px', fontWeight: 700,
+                    border: `1px solid ${tokens.colors.warning}`,
+                  }}
+                  aria-label="Stale open question"
+                >?</span>
+              )}
+            </div>
             <span style={{ fontSize: '10px', color: tokens.colors.textMuted }}>#{ticket.id}</span>
           </div>
 
