@@ -22,12 +22,12 @@ export class DropLastReadMessageIdColumn1760000000004 implements MigrationInterf
   name = 'DropLastReadMessageIdColumn1760000000004';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    // SQLite gained ALTER TABLE ... DROP COLUMN in 3.35 (March 2021); sql.js
-    // ships a recent enough build. Postgres supports it natively. Both accept
-    // the IF EXISTS clause.
-    await queryRunner.query(
-      'ALTER TABLE chat_room_participants DROP COLUMN IF EXISTS last_read_message_id',
-    );
+    const table = await queryRunner.getTable('chat_room_participants');
+    if (table && table.findColumnByName('last_read_message_id')) {
+      await queryRunner.query(
+        'ALTER TABLE chat_room_participants DROP COLUMN last_read_message_id',
+      );
+    }
   }
 
   public async down(_queryRunner: QueryRunner): Promise<void> {
