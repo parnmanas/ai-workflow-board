@@ -19,6 +19,7 @@ import { NotificationService } from './notification.service';
 import { SystemCommentService } from './system-comment.service';
 import { ReBACService } from './rebac.service';
 import { MentionService } from './mention.service';
+import { PresenceService } from './presence.service';
 
 /**
  * Global cross-cutting services.
@@ -49,6 +50,7 @@ import { MentionService } from './mention.service';
     SystemCommentService,
     ReBACService,
     MentionService,
+    PresenceService,
   ],
   exports: [
     ActivityService,
@@ -58,6 +60,7 @@ import { MentionService } from './mention.service';
     LogService,
     ReBACService,
     MentionService,
+    PresenceService,
   ],
 })
 export class SharedServicesModule {}

@@ -15,7 +15,8 @@ export type StreamEventType =
   | 'chat_room_typing'     // Phase 7+: agent typing indicator in a chat room
   | 'comment_mention'      // Mention feature: agent @-mentioned in a ticket comment
   | 'user_mention'         // Mention feature: user @-mentioned (web UI unread badge)
-  | 'comment_typing';      // Phase-9 typed comments: someone is composing a comment on a ticket
+  | 'comment_typing'       // Phase-9 typed comments: someone is composing a comment on a ticket
+  | 'ticket_presence';     // Tier-1 E: viewer set for a ticket (who has the panel open)
 
 export interface StreamEventScope {
   board_id?: string;
@@ -173,6 +174,18 @@ export interface CommentTypingPayload {
   // Optional discriminator hint — reserves room for "Alice is asking a question"
   // vs. "Alice is writing a chat" UX in a later phase.
   comment_type?: string;
+}
+
+// Tier-1 E — ticket-presence transition. Emitted when the viewer set for a
+// ticket changes (someone opened the panel / their heartbeat expired / they
+// left explicitly). Steady-state heartbeats DON'T fire this event; only
+// transitions do, so traffic is bounded by the join/leave rate not the ping
+// rate. Workspace-scoped so the client can ignore presence for tickets they
+// can't see.
+export interface TicketPresencePayload {
+  ticket_id: string;
+  workspace_id?: string;
+  viewers: Array<{ type: 'user' | 'agent'; id: string; name: string }>;
 }
 
 // Mention feature — user @-mentioned. Fires only for the mentioned user's

@@ -233,6 +233,10 @@ export default function TicketPanel({
   // Phase 2C: which question (if any) the user is currently composing an answer to.
   // Set via the Answer button on a question card; cleared on submit/cancel/ticket switch.
   const [replyingTo, setReplyingTo] = useState<{ id: string; preview: string; author: string } | null>(null);
+  // Tier-1 E: live ticket presence — who else has this panel open right now.
+  // Server emits ticket_presence on viewer-set transitions; we keep the latest
+  // viewer list keyed by composite type:id so user/agent collisions can't shadow.
+  const [presenceViewers, setPresenceViewers] = useState<Array<{ type: 'user' | 'agent'; id: string; name: string }>>([]);
   const [activeTab, setActiveTab] = useState<'detail' | 'comments' | 'activity'>('detail');
   const [activities, setActivities] = useState<ActivityLog[]>([]);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
@@ -447,6 +451,66 @@ export default function TicketPanel({
       });
     }
   };
+
+  // ─── Tier-1 E: ticket-presence heartbeat + subscription ──────────────
+  // Ping every 15s while this panel is mounted so the server's 30s TTL
+  // stays refreshed. Seed-fire immediately so the badge paints on first
+  // render without a 15s wait.
+  useEffect(() => {
+    const ticketId = activeTicket.id;
+    let cancelled = false;
+    const ping = () => {
+      api.pingTicketPresence(ticketId).catch(() => { /* best-effort */ });
+    };
+    ping();
+    const interval = setInterval(() => { if (!cancelled) ping(); }, 15000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+      // Best-effort explicit leave so the other viewers' badge clears
+      // without waiting for TTL expiry. Fire-and-forget; we don't await.
+      api.leaveTicketPresence(ticketId).catch(() => { /* ignore */ });
+    };
+  }, [activeTicket.id]);
+
+  // Subscribe to ticket_presence events scoped to the currently active ticket.
+  // Server emits only on transitions, so this is low-traffic.
+  useBoardStreamEvent('ticket_presence', useCallback((data: any) => {
+    if (!data || data.ticket_id !== activeTicket.id) return;
+    const list = Array.isArray(data.viewers) ? data.viewers : [];
+    setPresenceViewers(list);
+  }, [activeTicket.id]));
+
+  // Drop stale viewer list when switching tickets (don't show last ticket's
+  // viewers while the first ticket_presence event for the new ticket arrives).
+  useEffect(() => { setPresenceViewers([]); }, [activeTicket.id]);
+
+  // Best-effort leave on page unload. Uses a POST body with is_active:false
+  // — sendBeacon is the only fetch variant guaranteed to deliver from an
+  // unload handler, but fetch keepalive works in modern browsers too.
+  useEffect(() => {
+    const onUnload = () => {
+      try {
+        const token = localStorage.getItem('auth_token');
+        const wsId = localStorage.getItem('currentWorkspaceId');
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (token) headers.Authorization = `Bearer ${token}`;
+        if (wsId) headers['X-Workspace-Id'] = wsId;
+        const baseUrl = window.location.hostname === 'localhost'
+          ? `${window.location.protocol}//${window.location.hostname}:7701`
+          : '';
+        // Beacon can't set headers reliably, so prefer fetch keepalive.
+        fetch(`${baseUrl}/api/tickets/${activeTicket.id}/presence`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ is_active: false }),
+          keepalive: true,
+        }).catch(() => { /* ignore */ });
+      } catch { /* ignore */ }
+    };
+    window.addEventListener('beforeunload', onUnload);
+    return () => window.removeEventListener('beforeunload', onUnload);
+  }, [activeTicket.id]);
 
   const handleStartReply = useCallback((commentId: string) => {
     const target = (activeTicket.comments || []).find(c => c.id === commentId);
@@ -685,6 +749,36 @@ export default function TicketPanel({
             fontSize: '11px', padding: '3px 8px', borderRadius: 4,
             background: tokens.colors.surfaceCard, color: tokens.colors.textMuted,
           }}>{columnName}</span>
+          {/* Tier-1 E presence — show other viewers (exclude self) as small
+             avatar pills. Capped at 3 visible + "+N" overflow so a noisy
+             ticket doesn't blow out the header row. Title attribute lists
+             everyone for hover-disclosure. */}
+          {(() => {
+            const others = presenceViewers.filter(v => !(v.type === 'user' && user && v.id === user.id));
+            if (others.length === 0) return null;
+            const visible = others.slice(0, 3);
+            const overflow = others.length - visible.length;
+            const title = `Currently viewing: ${others.map(v => v.name || v.id).join(', ')}`;
+            return (
+              <span title={title} style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
+                {visible.map(v => (
+                  <span key={`pres-${v.type}-${v.id}`} style={{
+                    width: 18, height: 18, borderRadius: '50%',
+                    background: v.type === 'agent' ? tokens.colors.accent : tokens.colors.info,
+                    color: 'white', fontSize: '9px', fontWeight: 700,
+                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                    border: `1px solid ${tokens.colors.surface}`,
+                    marginLeft: -4,
+                  }}>{(v.name || '?').charAt(0).toUpperCase()}</span>
+                ))}
+                {overflow > 0 && (
+                  <span style={{
+                    fontSize: '10px', color: tokens.colors.textMuted, marginLeft: 4,
+                  }}>+{overflow}</span>
+                )}
+              </span>
+            );
+          })()}
         </div>
         <div style={{ display: 'flex', gap: 8, position: 'relative' }}>
           <button

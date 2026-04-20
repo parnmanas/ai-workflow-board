@@ -15,6 +15,7 @@ import { ActivityService } from '../../services/activity.service';
 import { activityEvents } from '../../services/activity.service';
 import { LogService } from '../../services/log.service';
 import { MentionService } from '../../services/mention.service';
+import { PresenceService } from '../../services/presence.service';
 import { TriggerLoopService } from '../agents/trigger-loop.service';
 import { MAX_IMAGE_SIZE, MAX_IMAGES_PER_MESSAGE, ALLOWED_IMAGE_MIMETYPES } from '../../common/constants/upload';
 import { loadTicketFull } from '../mcp/shared/ticket-parsing';
@@ -37,6 +38,7 @@ export class TicketsController {
     private readonly logService: LogService,
     private readonly mentionService: MentionService,
     private readonly triggerLoop: TriggerLoopService,
+    private readonly presence: PresenceService,
   ) {}
 
   private resolveCreator(req: any, body: any): { created_by: string; created_by_type: string; created_by_id: string } {
@@ -426,6 +428,36 @@ export class TicketsController {
       images: JSON.parse(comment.images || '[]'),
       metadata: JSON.parse(comment.metadata || '{}'),
     });
+  }
+
+  @Post('tickets/:id/presence')
+  async setPresence(
+    @Param('id') id: string,
+    @Body() body: any,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const currentUser = (req as any).currentUser;
+    if (!currentUser) return res.status(401).json({ error: 'Authentication required' });
+
+    const ticket = await this.ticketRepo.findOne({ where: { id } });
+    if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+
+    // Default action is "ping" — explicit { is_active: false } leaves the
+    // ticket. Beacons on tab close use the leave variant so the badge clears
+    // before the 30s sweep would.
+    const isLeaving = body?.is_active === false;
+    if (isLeaving) {
+      this.presence.leave(id, { type: 'user', id: currentUser.id });
+    } else {
+      this.presence.ping(id, {
+        type: 'user',
+        id: currentUser.id,
+        name: currentUser.name || '',
+        workspaceId: ticket.workspace_id,
+      });
+    }
+    return res.json({ ok: true, viewers: this.presence.list(id).map(v => ({ type: v.type, id: v.id, name: v.name })) });
   }
 
   @Post('tickets/:id/comment-typing')

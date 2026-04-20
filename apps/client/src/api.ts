@@ -206,6 +206,19 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ is_typing: isTyping, ...(commentType ? { comment_type: commentType } : {}) }),
     }),
+  // Tier-1 E ticket presence — heartbeat (default) or explicit leave.
+  // Returns the current viewer list so the caller can paint without a
+  // SSE round-trip on first ping.
+  pingTicketPresence: (ticketId: string) =>
+    request<any>(`/tickets/${ticketId}/presence`, {
+      method: 'POST',
+      body: JSON.stringify({ is_active: true }),
+    }),
+  leaveTicketPresence: (ticketId: string) =>
+    request<any>(`/tickets/${ticketId}/presence`, {
+      method: 'POST',
+      body: JSON.stringify({ is_active: false }),
+    }),
 
   // ─── Users ─────────────────────────────────────────────
   getUsers: (workspaceId?: string) =>

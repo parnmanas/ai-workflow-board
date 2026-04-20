@@ -24,6 +24,7 @@ import {
   ChatRoomTypingPayload,
   CommentMentionPayload,
   CommentTypingPayload,
+  TicketPresencePayload,
   UserMentionPayload,
 } from '../../common/types/stream-events';
 import { EventDefinition, SubscriberIdentity } from './types';
@@ -443,6 +444,31 @@ export const EVENT_TYPES: EventDefinition[] = [
       if (identity.type !== 'user') return false;
       return env.scope.user_id === identity.userId;
     },
+  },
+
+  // ───────── ticket_presence ─────────
+  // Tier-1 E. Fires only on viewer-set transitions. Ticket-scoped — the
+  // client filters by ticket_id locally because we don't track "who has
+  // panel X open" on the server (presence IS the answer to that question).
+  {
+    eventType: 'ticket_presence',
+    emitterEvent: 'ticket_presence',
+    map(event: any) {
+      const payload: TicketPresencePayload = {
+        ticket_id: event.ticket_id,
+        workspace_id: event.workspace_id,
+        viewers: Array.isArray(event.viewers) ? event.viewers : [],
+      };
+      return {
+        payload,
+        scope: { ticket_id: event.ticket_id, workspace_id: event.workspace_id },
+        timestamp: event.timestamp,
+      };
+    },
+    // Pass everything through; the client decides which presence updates
+    // are relevant to the panel currently open in the foreground.
+    filter: () => true,
+    flatten: (env) => env.payload,
   },
 
   // ───────── comment_typing ─────────
