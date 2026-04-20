@@ -137,6 +137,9 @@ export interface CommentImage {
   data: string; // base64
 }
 
+export type CommentType = 'note' | 'question' | 'answer' | 'decision' | 'chat' | 'system' | 'handoff';
+export type CommentStatus = 'open' | 'resolved' | null;
+
 export interface Comment {
   id: string; // GUID
   ticket_id: string; // GUID — references Ticket.id
@@ -146,6 +149,18 @@ export interface Comment {
   content: string;
   images: CommentImage[];
   created_at: string;
+  // Discriminator: routes UI rendering and filter chips. Defaults to 'note' for
+  // legacy rows and any caller that omits the field. 'system' is reserved for
+  // SystemCommentService output (REST endpoint rejects it explicitly).
+  type: CommentType;
+  // Only populated for type='question'. Server flips it to 'resolved' when an
+  // 'answer' child arrives.
+  status: CommentStatus;
+  // Threading link: 'answer' -> 'question' or generic reply chain. Same-ticket
+  // only (server validated).
+  parent_id: string | null;
+  // Type-specific extension bag (e.g., handoff target_agent_id, decision refs).
+  metadata: Record<string, unknown>;
 }
 
 export interface Ticket {

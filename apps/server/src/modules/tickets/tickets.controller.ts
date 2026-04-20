@@ -5,7 +5,7 @@ import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import { Ticket } from '../../entities/Ticket';
 import { BoardColumn } from '../../entities/BoardColumn';
-import { Comment } from '../../entities/Comment';
+import { Comment, COMMENT_TYPES, CommentType } from '../../entities/Comment';
 import { Agent } from '../../entities/Agent';
 import { UserMention } from '../../entities/UserMention';
 import { User } from '../../entities/User';
@@ -336,7 +336,7 @@ export class TicketsController {
 
   @Post('tickets/:id/comments')
   async addComment(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
-    const { content, images = [] } = body;
+    const { content, images = [], type, parent_id = null, metadata = {} } = body;
     if (!content) return res.status(400).json({ error: 'content is required' });
 
     const currentUser = (req as any).currentUser;
@@ -360,6 +360,27 @@ export class TicketsController {
       }
     }
 
+    if (type !== undefined && !COMMENT_TYPES.includes(type)) {
+      return res.status(400).json({ error: `Unsupported comment type: ${type}` });
+    }
+    const resolvedType: CommentType = (type as CommentType) || 'note';
+    if (resolvedType === 'system') {
+      // type=system is reserved for SystemCommentService so audit-log entries
+      // can never be forged through the user-facing endpoint.
+      return res.status(400).json({ error: 'type=system is reserved for SystemCommentService' });
+    }
+
+    let resolvedParentId: string | null = null;
+    if (parent_id) {
+      const parent = await this.commentRepo.findOne({ where: { id: parent_id } });
+      if (!parent) return res.status(400).json({ error: 'parent_id references a non-existent comment' });
+      if (parent.ticket_id !== id) return res.status(400).json({ error: 'parent comment belongs to a different ticket' });
+      resolvedParentId = parent.id;
+    }
+    if (resolvedType === 'answer' && !resolvedParentId) {
+      return res.status(400).json({ error: 'type=answer requires parent_id pointing to the question being answered' });
+    }
+
     const comment = await this.commentRepo.save(this.commentRepo.create({
       ticket_id: id,
       workspace_id: ticket.workspace_id,
@@ -368,7 +389,18 @@ export class TicketsController {
       author: currentUser.name,
       content,
       images: JSON.stringify(images),
+      type: resolvedType,
+      status: resolvedType === 'question' ? 'open' : null,
+      parent_id: resolvedParentId,
+      metadata: JSON.stringify(metadata && typeof metadata === 'object' ? metadata : {}),
     }));
+
+    // Auto-resolve the parent question when an answer arrives. Cheap idempotent
+    // update, so re-answers that change the resolution state still flip status
+    // back to 'resolved' even if it was already resolved by a prior answer.
+    if (resolvedType === 'answer' && resolvedParentId) {
+      await this.commentRepo.update({ id: resolvedParentId }, { status: 'resolved' });
+    }
 
     await this.activityService.logActivity({
       entity_type: 'comment',
@@ -378,6 +410,7 @@ export class TicketsController {
       actor_id: currentUser.id,
       actor_name: currentUser.name,
       new_value: content,
+      field_changed: resolvedType,
     });
 
     // Mention dispatch — only for user-authored comments so agent->agent
@@ -388,7 +421,11 @@ export class TicketsController {
       this.logService.warn('Mentions', `Comment mention dispatch failed for comment ${comment.id}: ${err?.message || err}`);
     }
 
-    return res.status(201).json({ ...comment, images: JSON.parse(comment.images || '[]') });
+    return res.status(201).json({
+      ...comment,
+      images: JSON.parse(comment.images || '[]'),
+      metadata: JSON.parse(comment.metadata || '{}'),
+    });
   }
 
   /**

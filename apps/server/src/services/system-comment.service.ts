@@ -96,6 +96,7 @@ export class SystemCommentService implements OnModuleInit, OnModuleDestroy {
         author_id: '',
         author: 'System',
         content,
+        type: 'system',
       }));
     } catch (err) {
       this.logService.error('SystemComment', 'Failed to create system comment', { error: String(err) });

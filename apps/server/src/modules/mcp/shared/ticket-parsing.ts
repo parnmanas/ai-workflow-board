@@ -28,19 +28,25 @@ export function parseTicket(ticket: Ticket) {
 }
 
 /**
- * Sort comments by newest-first and decode the `images` column (if stored as a
- * JSON string). Idempotent: comments that already have `images` as a parsed
- * array or `undefined` pass through unchanged.
+ * Sort comments by newest-first and decode JSON-string columns (`images` array,
+ * `metadata` object). Idempotent: rows whose columns are already decoded (or
+ * missing) pass through unchanged.
  */
 export function parseComments<T extends { created_at: Date | string }>(comments: T[] | undefined): T[] {
   return (comments || []).slice()
     .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
     .map((c) => {
-      const raw = (c as any).images;
-      if (typeof raw === 'string') {
-        return { ...(c as any), images: safeJsonParse(raw) } as T;
+      const out: any = { ...(c as any) };
+      const rawImages = out.images;
+      if (typeof rawImages === 'string') {
+        out.images = safeJsonParse(rawImages);
       }
-      return c;
+      const rawMetadata = out.metadata;
+      if (typeof rawMetadata === 'string') {
+        const parsed = safeJsonParse(rawMetadata);
+        out.metadata = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+      }
+      return out as T;
     });
 }
 
