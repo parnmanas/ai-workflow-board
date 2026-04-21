@@ -95,8 +95,13 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
 
   const openResourceFile = (r: Resource) => {
     const mime = r.file_mimetype || '';
-    if (r.file_data && mime.startsWith('image/')) {
-      setLightboxImage({ src: `data:${mime};base64,${r.file_data}`, alt: r.name });
+    // Treat as image when the mime says so, or when the user classified the
+    // resource as 'image' — some older uploads landed with an empty mimetype
+    // and would otherwise fall through to the octet-stream download branch.
+    const isImage = mime.startsWith('image/') || (r.type === 'image' && !!r.file_data);
+    if (r.file_data && isImage) {
+      const effectiveMime = mime.startsWith('image/') ? mime : 'image/png';
+      setLightboxImage({ src: `data:${effectiveMime};base64,${r.file_data}`, alt: r.name });
       return;
     }
     if (r.file_data) {

@@ -11,7 +11,7 @@ import { Resource } from '../../../entities/Resource';
 import { ResourceEmbedding } from '../../../entities/ResourceEmbedding';
 import { cosineSimilarity } from '../../../services/embedding.service';
 import { ok, err } from '../shared/helpers';
-import { parseResourceTags, resourceToJson, embedResource } from '../shared/resource-helpers';
+import { parseResourceTags, resourceToJson, embedResource, inferResourceMimetype } from '../shared/resource-helpers';
 import type { ToolContext } from './context';
 
 export function registerResourceTools(server: McpServer, ctx: ToolContext): void {
@@ -87,6 +87,12 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
         if (file_data !== undefined) existing.file_data = file_data;
         if (file_name !== undefined) existing.file_name = file_name;
         if (file_mimetype !== undefined) existing.file_mimetype = file_mimetype;
+        // Backfill mimetype when the caller left it empty but we have bytes
+        // to sniff or a filename to parse — prevents the client viewer from
+        // falling through to the octet-stream download branch.
+        if (existing.file_data && !existing.file_mimetype) {
+          existing.file_mimetype = inferResourceMimetype(existing.file_data, existing.file_name || existing.name);
+        }
         if (board_id !== undefined) existing.board_id = board_id || null;
         if (tags !== undefined) existing.tags = JSON.stringify(tags);
         const saved = await repo.save(existing);
@@ -94,6 +100,11 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
         return ok(resourceToJson(saved));
       }
 
+      const effectiveFileData = file_data ?? '';
+      const effectiveFileName = file_name ?? '';
+      const effectiveMimetype = file_mimetype && file_mimetype.length > 0
+        ? file_mimetype
+        : (effectiveFileData ? inferResourceMimetype(effectiveFileData, effectiveFileName || name) : '');
       const created = repo.create({
         workspace_id,
         board_id: board_id || null,
@@ -102,9 +113,9 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
         type: type ?? 'link',
         url: url ?? '',
         content: content ?? '',
-        file_data: file_data ?? '',
-        file_name: file_name ?? '',
-        file_mimetype: file_mimetype ?? '',
+        file_data: effectiveFileData,
+        file_name: effectiveFileName,
+        file_mimetype: effectiveMimetype,
         tags: JSON.stringify(tags ?? []),
       });
       const saved = await repo.save(created);

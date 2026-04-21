@@ -16,6 +16,45 @@ export function parseResourceTags(r: Resource): string[] {
 }
 
 /**
+ * Guess the MIME type of a resource payload when the uploader did not
+ * provide one. First try magic-byte prefixes on the base64 stream, then
+ * fall back to the filename extension. Returns an empty string when
+ * neither signal is available — callers decide whether to store the
+ * empty or reject the save.
+ */
+export function inferResourceMimetype(fileData: string | null | undefined, fileName: string | null | undefined): string {
+  if (fileData) {
+    const sample = fileData.slice(0, 16);
+    if (sample.startsWith('iVBORw0KGgo')) return 'image/png';
+    if (sample.startsWith('/9j/')) return 'image/jpeg';
+    if (sample.startsWith('R0lGOD')) return 'image/gif';
+    if (sample.startsWith('UklGR')) return 'image/webp';
+    if (sample.startsWith('PHN2Zy')) return 'image/svg+xml';
+    if (sample.startsWith('JVBERi')) return 'application/pdf';
+    if (sample.startsWith('UEsDB')) return 'application/zip';
+  }
+  const ext = (fileName || '').toLowerCase().split('.').pop() || '';
+  switch (ext) {
+    case 'png': return 'image/png';
+    case 'jpg':
+    case 'jpeg': return 'image/jpeg';
+    case 'gif': return 'image/gif';
+    case 'webp': return 'image/webp';
+    case 'svg': return 'image/svg+xml';
+    case 'pdf': return 'application/pdf';
+    case 'txt':
+    case 'md':
+    case 'csv':
+    case 'log': return 'text/plain';
+    case 'json': return 'application/json';
+    case 'html':
+    case 'htm': return 'text/html';
+    case 'zip': return 'application/zip';
+    default: return '';
+  }
+}
+
+/**
  * Compact JSON view of a resource for list/search responses. Truncates
  * content at 500 chars with ellipsis so agents don't accidentally stream
  * huge blobs through the tool response channel.
