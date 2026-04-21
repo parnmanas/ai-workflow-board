@@ -8,6 +8,7 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { PERMISSIONS } from '../../common/types/permissions';
 import { findOrFail } from '../../common/find-or-fail';
+import { inferResourceMimetype } from '../mcp/shared/resource-helpers';
 
 @ApiBearerAuth('user-session')
 @ApiTags('resources')
@@ -63,6 +64,9 @@ export class ResourcesController {
     if (!workspace_id) return res.status(400).json({ error: 'workspace_id is required' });
     if (!name || !name.trim()) return res.status(400).json({ error: 'name is required' });
 
+    const effectiveMimetype = file_mimetype && file_mimetype.length > 0
+      ? file_mimetype
+      : (file_data ? inferResourceMimetype(file_data, file_name || name) : '');
     const resource = await this.resourceRepo.save(
       this.resourceRepo.create({
         workspace_id,
@@ -75,7 +79,7 @@ export class ResourcesController {
         content,
         file_data,
         file_name,
-        file_mimetype,
+        file_mimetype: effectiveMimetype,
         tags: JSON.stringify(Array.isArray(tags) ? tags : []),
       }),
     );
@@ -102,6 +106,9 @@ export class ResourcesController {
     if (body.file_data !== undefined) resource.file_data = body.file_data;
     if (body.file_name !== undefined) resource.file_name = body.file_name;
     if (body.file_mimetype !== undefined) resource.file_mimetype = body.file_mimetype;
+    if (resource.file_data && !resource.file_mimetype) {
+      resource.file_mimetype = inferResourceMimetype(resource.file_data, resource.file_name || resource.name);
+    }
     if (body.board_id !== undefined) resource.board_id = body.board_id || null;
     if (body.credential_id !== undefined) resource.credential_id = body.credential_id || null;
     if (body.tags !== undefined) resource.tags = JSON.stringify(Array.isArray(body.tags) ? body.tags : []);
