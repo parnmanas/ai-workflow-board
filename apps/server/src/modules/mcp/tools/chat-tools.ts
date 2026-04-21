@@ -14,7 +14,7 @@ import { ChatRoom } from '../../../entities/ChatRoom';
 import { ChatRoomMessage } from '../../../entities/ChatRoomMessage';
 import { ChatRoomParticipant } from '../../../entities/ChatRoomParticipant';
 import { activityEvents } from '../../../services/activity.service';
-import { ok, err } from '../shared/helpers';
+import { ok, err, MENTION_SYNTAX_DOC } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
 import type { ToolContext } from './context';
 
@@ -51,7 +51,10 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
   server.tool(
     'send_chat_room_message',
     'Send a message to a chat room. The agent must be an active participant in the room. ' +
-    'Messages are persisted and delivered to all room participants via SSE.',
+    'Messages are persisted and delivered to all room participants via SSE.\n\n' +
+    MENTION_SYNTAX_DOC +
+    '\n\nNote: chat rooms are not ticket-scoped, so `@[role:...]` role shortcuts have no target context and are dropped on delivery. ' +
+    'Stick to `@[user:<uuid>|Name]` and `@[agent:<uuid>|Name]` in chat messages.',
     {
       room_id: z.string().describe('Chat room ID to send the message to'),
       content: z.string().min(1).max(10000).describe('Message content (supports markdown: bold, italic, code span, links)'),
