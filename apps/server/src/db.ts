@@ -85,9 +85,18 @@ export function buildDataSourceOptions(): DataSourceOptions {
   // Default: SQLite (sql.js — pure WASM, no native build required)
   const dbDir = path.join(__dirname, '..', '..', '..', 'database');
   if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
+  // Allow QA flow-test subprocess to target an isolated db file via env.
+  // Two processes writing sqljs to the same file clobber each other on
+  // autoSave, so the admin "Run Flow Tests" endpoint sets this to e.g.
+  // database/qa-flows.db before spawning node --test.
+  const sqliteLocation = process.env.SQLJS_DB_PATH
+    ? (path.isAbsolute(process.env.SQLJS_DB_PATH)
+        ? process.env.SQLJS_DB_PATH
+        : path.join(dbDir, process.env.SQLJS_DB_PATH))
+    : path.join(dbDir, 'data.db');
   return {
     type: 'sqljs',
-    location: path.join(dbDir, 'data.db'),
+    location: sqliteLocation,
     autoSave: true,
     entities,
     migrations: migrationsGlob,
