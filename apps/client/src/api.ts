@@ -444,6 +444,11 @@ export const api = {
   // ─── QA (Quality Assurance) ────────────────────────────
   getQaStatus: () => request<{ available: boolean; description: string; usage: string }>('/admin/qa/status'),
   runQa: () => request<any>('/admin/qa/run', { method: 'POST' }),
+  // Flow tests — spawns `node --test test/qa-flows/*.test.mjs` on the server.
+  // Takes ~30-60s; intended for admins to trigger the full end-to-end suite
+  // (ticket lifecycle, MCP round-trips, multi-agent scoping, large data,
+  // etc.) from the admin UI without dropping to a shell.
+  runQaFlows: () => request<any>('/admin/qa/run-flows', { method: 'POST' }),
 
   // ─── Admin Logs ────────────────────────────────────────
   getLogs: (params?: { level?: string; category?: string; since?: string; limit?: number; search?: string }) => {
