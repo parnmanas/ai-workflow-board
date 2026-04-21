@@ -25,7 +25,7 @@ interface TicketPanelProps {
   onAddComment: (
     ticketId: string,
     content: string,
-    images?: { filename: string; mimetype: string; data: string }[],
+    attachments?: { file_name: string; file_mimetype: string; file_data: string }[],
     options?: { type?: string; parent_id?: string | null; metadata?: Record<string, unknown> },
   ) => void;
   onSetCommentStatus?: (ticketId: string, commentId: string, status: 'open' | 'resolved') => void;
@@ -222,7 +222,10 @@ export default function TicketPanel({
   const [reviewerId, setReviewerId] = useState(activeTicket.reviewer_id || '');
   const [selectedChannelIds, setSelectedChannelIds] = useState<string[]>(activeTicket.channel_ids || []);
   const [commentContent, setCommentContent] = useState('');
-  const [commentImages, setCommentImages] = useState<{ filename: string; mimetype: string; data: string }[]>([]);
+  // Staged attachments — kept in memory until the user hits Send; server
+  // turns each into a Resource (type='comment_attachment') and attaches the
+  // resulting ids to the comment in one transactional POST.
+  const [commentAttachments, setCommentAttachments] = useState<{ file_name: string; file_mimetype: string; file_data: string }[]>([]);
   // Compose type selector — restricted to types where COMMENT_TYPE_STYLES.composable=true.
   // 'note' is the default so the previous flow (just type and Send) is unchanged.
   const [composeType, setComposeType] = useState<CommentType>('note');
@@ -256,7 +259,7 @@ export default function TicketPanel({
     setReviewerId(activeTicket.reviewer_id || '');
     setSelectedChannelIds(activeTicket.channel_ids || []);
     setCommentContent('');
-    setCommentImages([]);
+    setCommentAttachments([]);
     setActiveTab('detail');
   }, [activeTicket.id, activeTicket.updated_at]);
 
@@ -308,22 +311,24 @@ export default function TicketPanel({
     onUpdate(activeTicket.id, { [field]: value });
   };
 
-  const handleImageAttach = () => {
+  const handleAttach = () => {
     const input = document.createElement('input');
     input.type = 'file';
-    input.accept = 'image/*';
+    // No mimetype restriction — comment attachments go through the Resource
+    // table the same as any other workspace/board asset, so the picker accepts
+    // PDFs, zips, videos, etc. Matches server cap in MAX_COMMENT_ATTACHMENT_SIZE.
     input.multiple = true;
     input.onchange = async (e) => {
       const files = (e.target as HTMLInputElement).files;
       if (!files) return;
-      const newImages: typeof commentImages = [];
-      for (let i = 0; i < files.length && commentImages.length + newImages.length < 5; i++) {
+      const newAttachments: typeof commentAttachments = [];
+      for (let i = 0; i < files.length && commentAttachments.length + newAttachments.length < 5; i++) {
         const file = files[i];
-        if (file.size > 5 * 1024 * 1024) continue;
+        if (file.size > 10 * 1024 * 1024) continue;
         const data = await fileToBase64(file);
-        newImages.push({ filename: file.name, mimetype: file.type, data });
+        newAttachments.push({ file_name: file.name, file_mimetype: file.type || 'application/octet-stream', file_data: data });
       }
-      setCommentImages(prev => [...prev, ...newImages].slice(0, 5));
+      setCommentAttachments(prev => [...prev, ...newAttachments].slice(0, 5));
     };
     input.click();
   };
@@ -474,11 +479,11 @@ export default function TicketPanel({
       onAddComment(
         activeTicket.id,
         commentContent.trim(),
-        commentImages.length > 0 ? commentImages : undefined,
+        commentAttachments.length > 0 ? commentAttachments : undefined,
         options,
       );
       setCommentContent('');
-      setCommentImages([]);
+      setCommentAttachments([]);
       // Reset to the default type after each send so a one-off Question doesn't
       // sticky-set the compose mode.
       setComposeType('note');
@@ -749,20 +754,42 @@ export default function TicketPanel({
         })}
       </div>
       )}
-      {commentImages.length > 0 && (
+      {commentAttachments.length > 0 && (
         <div style={{ display: 'flex', gap: 4, marginBottom: 6, flexWrap: 'wrap' }}>
-          {commentImages.map((img, idx) => (
-            <div key={idx} style={{ position: 'relative' }}>
-              <img src={`data:${img.mimetype};base64,${img.data}`} alt={img.filename}
-                style={{ width: 44, height: 44, objectFit: 'cover', borderRadius: tokens.radii.sm, border: `1px solid ${tokens.colors.border}` }} />
-              <button onClick={() => setCommentImages(prev => prev.filter((_, i) => i !== idx))}
-                style={{ position: 'absolute', top: -4, right: -4, background: tokens.colors.danger, color: 'white', border: 'none', borderRadius: tokens.radii.full, width: 16, height: 16, fontSize: '10px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>x</button>
-            </div>
-          ))}
+          {commentAttachments.map((att, idx) => {
+            const isImage = att.file_mimetype.startsWith('image/');
+            return (
+              <div key={idx} style={{ position: 'relative' }}>
+                {isImage ? (
+                  <img
+                    src={`data:${att.file_mimetype};base64,${att.file_data}`}
+                    alt={att.file_name}
+                    style={{ width: 44, height: 44, objectFit: 'cover', borderRadius: tokens.radii.sm, border: `1px solid ${tokens.colors.border}` }}
+                  />
+                ) : (
+                  <div
+                    title={att.file_name}
+                    style={{
+                      width: 120, maxWidth: 180, height: 44, padding: '4px 6px',
+                      borderRadius: tokens.radii.sm, border: `1px solid ${tokens.colors.border}`,
+                      background: tokens.colors.surfaceCard, color: tokens.colors.textSecondary,
+                      display: 'flex', alignItems: 'center', gap: 6, fontSize: '11px',
+                      overflow: 'hidden',
+                    }}
+                  >
+                    <span style={{ fontSize: '14px' }}>📎</span>
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{att.file_name}</span>
+                  </div>
+                )}
+                <button onClick={() => setCommentAttachments(prev => prev.filter((_, i) => i !== idx))}
+                  style={{ position: 'absolute', top: -4, right: -4, background: tokens.colors.danger, color: 'white', border: 'none', borderRadius: tokens.radii.full, width: 16, height: 16, fontSize: '10px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>x</button>
+              </div>
+            );
+          })}
         </div>
       )}
       <div style={{ display: 'flex', gap: 5 }}>
-        <button onClick={handleImageAttach} title="Attach image" style={{
+        <button onClick={handleAttach} title="Attach file" style={{
           background: tokens.colors.border, color: tokens.colors.textMuted, border: 'none', borderRadius: tokens.radii.md,
           padding: '5px 9px', fontSize: '13px', cursor: 'pointer',
         }}>&#128206;</button>

@@ -106,10 +106,10 @@ export default function Board() {
   const handleAddComment = useCallback(async (
     ticketId: string,
     content: string,
-    images?: { filename: string; mimetype: string; data: string }[],
+    attachments?: { file_name: string; file_mimetype: string; file_data: string }[],
     options?: { type?: string; parent_id?: string | null; metadata?: Record<string, unknown> },
   ) => {
-    await wrapAction(() => addComment(ticketId, content, images || [], options), 'Comment added');
+    await wrapAction(() => addComment(ticketId, content, attachments || [], options), 'Comment added');
   }, [wrapAction, addComment]);
 
   const handleSetCommentStatus = useCallback(async (ticketId: string, commentId: string, status: 'open' | 'resolved') => {

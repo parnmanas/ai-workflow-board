@@ -30,10 +30,24 @@ export class ResourcesController {
     if (!workspaceId) {
       return res.status(400).json({ error: 'workspace_id query parameter is required' });
     }
-    const where: any = { workspace_id: workspaceId };
-    if (boardId !== undefined) where.board_id = boardId || null;
-    if (type) where.type = type;
-    const resources = await this.resourceRepo.find({ where, order: { name: 'ASC' } });
+    const qb = this.resourceRepo.createQueryBuilder('r')
+      .where('r.workspace_id = :ws', { ws: workspaceId });
+    if (boardId !== undefined) {
+      // boardId === '' means "workspace-scope only" (board_id IS NULL);
+      // a concrete uuid filters to that board. The prior `boardId || null`
+      // shortcut silently returned every resource when the client omitted
+      // the param, which bled board-scoped files into the workspace view.
+      if (boardId) qb.andWhere('r.board_id = :bid', { bid: boardId });
+      else qb.andWhere('r.board_id IS NULL');
+    }
+    if (type) {
+      qb.andWhere('r.type = :t', { t: type });
+    } else {
+      // comment_attachment is server-managed and would clutter the default
+      // listing; callers must opt in by passing type=comment_attachment.
+      qb.andWhere('r.type != :hidden', { hidden: 'comment_attachment' });
+    }
+    const resources = await qb.orderBy('r.name', 'ASC').getMany();
     const parsed = resources.map((r) => ({
       ...r,
       tags: (() => { try { return JSON.parse(r.tags || '[]'); } catch { return []; } })(),

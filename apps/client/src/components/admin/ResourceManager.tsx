@@ -11,7 +11,12 @@ const RESOURCE_TYPES = [
   { value: 'document', label: 'Document', icon: 'D' },
   { value: 'image', label: 'Image', icon: 'I' },
   { value: 'link', label: 'Link', icon: 'L' },
+  { value: 'comment_attachment', label: 'Comment Attachment', icon: 'A' },
 ] as const;
+
+// Types that the resource UI treats as "system-managed" — excluded from the
+// default list and only shown when the user picks them via the type filter.
+const HIDDEN_TYPES = new Set(['comment_attachment']);
 
 function typeIcon(type: string): string {
   const found = RESOURCE_TYPES.find((t) => t.value === type);

@@ -16,7 +16,7 @@ import { BoardColumn } from '../../../entities/BoardColumn';
 import { Ticket } from '../../../entities/Ticket';
 import { ok, err, safeJsonParse } from '../shared/helpers';
 import { loadTicketFull } from '../shared/ticket-parsing';
-import { findColumnByName, maxTicketPosition, resolveAgentId, shiftTicketPositions } from '../shared/ticket-helpers';
+import { findColumnByName, maxTicketPosition, resolveAgentId, shiftTicketPositions, deleteCommentAttachmentsForTicket } from '../shared/ticket-helpers';
 import { getCallerAgent } from '../shared/session-auth';
 import type { ToolContext } from './context';
 
@@ -205,6 +205,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       const columnId = ticket.column_id;
       const position = ticket.position;
 
+      await deleteCommentAttachmentsForTicket(dataSource, ticket.id);
       await ticketRepo.remove(ticket);
 
       await shiftTicketPositions(ticketRepo, { column_id: columnId }, position, -1);

@@ -2,7 +2,7 @@ import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { Controller, Get, Post, Patch, Delete, Body, Param, Req, Res, UseGuards } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
+import { Repository, DataSource, In } from 'typeorm';
 import { Ticket } from '../../entities/Ticket';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { Comment, COMMENT_TYPES, CommentType } from '../../entities/Comment';
@@ -18,9 +18,10 @@ import { LogService } from '../../services/log.service';
 import { MentionService } from '../../services/mention.service';
 import { PresenceService } from '../../services/presence.service';
 import { TriggerLoopService } from '../agents/trigger-loop.service';
-import { MAX_IMAGE_SIZE, MAX_IMAGES_PER_MESSAGE, ALLOWED_IMAGE_MIMETYPES } from '../../common/constants/upload';
-import { loadTicketFull } from '../mcp/shared/ticket-parsing';
-import { maxTicketPosition, maxChildPosition, resolveAgentId, shiftTicketPositions } from '../mcp/shared/ticket-helpers';
+import { MAX_COMMENT_ATTACHMENT_SIZE, MAX_COMMENT_ATTACHMENTS } from '../../common/constants/upload';
+import { Resource } from '../../entities/Resource';
+import { loadTicketFull, parseComments, expandCommentAttachments } from '../mcp/shared/ticket-parsing';
+import { maxTicketPosition, maxChildPosition, resolveAgentId, shiftTicketPositions, deleteCommentAttachmentsForTicket } from '../mcp/shared/ticket-helpers';
 import { findOrFail } from '../../common/find-or-fail';
 
 @ApiBearerAuth('user-session')
@@ -327,6 +328,10 @@ export class TicketsController {
     const position = ticket.position;
     const parentId = ticket.parent_id;
 
+    // Strip comment_attachment Resources before the ticket cascade removes
+    // the comment rows they were tied to — Resource has no FK back to Ticket.
+    await deleteCommentAttachmentsForTicket(this.dataSource, ticket.id);
+
     await this.ticketRepo.remove(ticket);
 
     if (parentId) {
@@ -340,7 +345,17 @@ export class TicketsController {
 
   @Post('tickets/:id/comments')
   async addComment(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
-    const { content, images = [], type, parent_id = null, metadata = {} } = body;
+    const {
+      content,
+      type,
+      parent_id = null,
+      metadata = {},
+      // Pre-created Resource ids (agent/MCP path — Resources already exist).
+      attachment_resource_ids: rawAttachmentIds = [],
+      // Inline file uploads (user/UI path — server creates Resources in the
+      // same transaction as the comment so a failure rolls both back).
+      attachments: rawInlineAttachments = [],
+    } = body;
     if (!content) return res.status(400).json({ error: 'content is required' });
 
     const currentUser = (req as any).currentUser;
@@ -348,19 +363,22 @@ export class TicketsController {
 
     const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
 
-    if (images.length > MAX_IMAGES_PER_MESSAGE) {
-      return res.status(400).json({ error: `Maximum ${MAX_IMAGES_PER_MESSAGE} images per comment` });
+    const preIds: string[] = Array.isArray(rawAttachmentIds)
+      ? rawAttachmentIds.filter((v: any) => typeof v === 'string' && v)
+      : [];
+    const inlineFiles: { file_data: string; file_name: string; file_mimetype: string }[] =
+      Array.isArray(rawInlineAttachments) ? rawInlineAttachments : [];
+
+    if (preIds.length + inlineFiles.length > MAX_COMMENT_ATTACHMENTS) {
+      return res.status(400).json({ error: `Maximum ${MAX_COMMENT_ATTACHMENTS} attachments per comment` });
     }
-    for (const img of images) {
-      if (!img.data || !img.filename || !img.mimetype) {
-        return res.status(400).json({ error: 'Each image must have data, filename, and mimetype' });
+    for (const f of inlineFiles) {
+      if (!f || typeof f !== 'object' || !f.file_data || !f.file_name) {
+        return res.status(400).json({ error: 'Each inline attachment must have file_data and file_name' });
       }
-      if (!ALLOWED_IMAGE_MIMETYPES.has(img.mimetype)) {
-        return res.status(400).json({ error: `Unsupported image type: ${img.mimetype}` });
-      }
-      const approxSize = (img.data.length * 3) / 4;
-      if (approxSize > MAX_IMAGE_SIZE) {
-        return res.status(400).json({ error: `Image ${img.filename} exceeds ${MAX_IMAGE_SIZE / 1024 / 1024}MB limit` });
+      const approxSize = (f.file_data.length * 3) / 4;
+      if (approxSize > MAX_COMMENT_ATTACHMENT_SIZE) {
+        return res.status(400).json({ error: `Attachment ${f.file_name} exceeds ${MAX_COMMENT_ATTACHMENT_SIZE / 1024 / 1024}MB limit` });
       }
     }
 
@@ -385,19 +403,87 @@ export class TicketsController {
       return res.status(400).json({ error: 'type=answer requires parent_id pointing to the question being answered' });
     }
 
-    const comment = await this.commentRepo.save(this.commentRepo.create({
-      ticket_id: id,
-      workspace_id: ticket.workspace_id,
-      author_type: 'user',
-      author_id: currentUser.id,
-      author: currentUser.name,
-      content,
-      images: JSON.stringify(images),
-      type: resolvedType,
-      status: resolvedType === 'question' ? 'open' : null,
-      parent_id: resolvedParentId,
-      metadata: JSON.stringify(metadata && typeof metadata === 'object' ? metadata : {}),
-    }));
+    // Verify any pre-created Resource ids belong to this ticket's workspace
+    // and are typed correctly before we commit. Cross-workspace references
+    // would let a caller attach another team's Resource to a comment.
+    if (preIds.length > 0) {
+      const resourceRepo = this.dataSource.getRepository(Resource);
+      const rows = await resourceRepo.findBy({ id: In(preIds) } as any);
+      const found = new Map(rows.map(r => [r.id, r]));
+      for (const rid of preIds) {
+        const r = found.get(rid);
+        if (!r) return res.status(400).json({ error: `attachment_resource_ids contains unknown id: ${rid}` });
+        if (r.workspace_id !== ticket.workspace_id) {
+          return res.status(400).json({ error: `attachment resource ${rid} belongs to a different workspace` });
+        }
+        if (r.type !== 'comment_attachment') {
+          return res.status(400).json({ error: `attachment resource ${rid} is type=${r.type}; expected comment_attachment` });
+        }
+      }
+    }
+
+    const inferResourceMimetypeLocal = (dataBase64: string, fileName: string, explicit?: string): string => {
+      if (explicit && explicit.length > 0) return explicit;
+      const ext = (fileName.split('.').pop() || '').toLowerCase();
+      const extMap: Record<string, string> = {
+        png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp',
+        pdf: 'application/pdf', txt: 'text/plain', md: 'text/markdown', json: 'application/json',
+        zip: 'application/zip', csv: 'text/csv', mp4: 'video/mp4', mov: 'video/quicktime',
+      };
+      return extMap[ext] || 'application/octet-stream';
+    };
+
+    // Resolve the ticket's board so attachments land in that board's Resources
+    // (not the workspace scope). Tickets store column_id, not board_id, and
+    // child tickets have a null column — walk to the ancestor that has one.
+    const resolveBoardId = async (startTicket: Ticket): Promise<string | null> => {
+      let cursor: Ticket | null = startTicket;
+      while (cursor && !cursor.column_id && cursor.parent_id) {
+        cursor = await this.ticketRepo.findOne({ where: { id: cursor.parent_id } });
+      }
+      if (!cursor?.column_id) return null;
+      const col = await this.colRepo.findOne({ where: { id: cursor.column_id } });
+      return col?.board_id || null;
+    };
+    const ticketBoardId = inlineFiles.length > 0 ? await resolveBoardId(ticket) : null;
+
+    const comment = await this.dataSource.transaction(async (manager) => {
+      const createdIds: string[] = [];
+      for (const f of inlineFiles) {
+        const mimetype = inferResourceMimetypeLocal(f.file_data, f.file_name, f.file_mimetype);
+        const r = await manager.getRepository(Resource).save(
+          manager.getRepository(Resource).create({
+            workspace_id: ticket.workspace_id,
+            board_id: ticketBoardId,
+            credential_id: null,
+            name: f.file_name,
+            description: '',
+            type: 'comment_attachment',
+            url: '',
+            content: '',
+            file_data: f.file_data,
+            file_name: f.file_name,
+            file_mimetype: mimetype,
+            tags: '[]',
+          }),
+        );
+        createdIds.push(r.id);
+      }
+      const allIds = [...preIds, ...createdIds];
+      return manager.getRepository(Comment).save(manager.getRepository(Comment).create({
+        ticket_id: id,
+        workspace_id: ticket.workspace_id,
+        author_type: 'user',
+        author_id: currentUser.id,
+        author: currentUser.name,
+        content,
+        attachment_resource_ids: JSON.stringify(allIds),
+        type: resolvedType,
+        status: resolvedType === 'question' ? 'open' : null,
+        parent_id: resolvedParentId,
+        metadata: JSON.stringify(metadata && typeof metadata === 'object' ? metadata : {}),
+      }));
+    });
 
     // Auto-resolve the parent question when an answer arrives. Cheap idempotent
     // update, so re-answers that change the resolution state still flip status
@@ -425,11 +511,9 @@ export class TicketsController {
       this.logService.warn('Mentions', `Comment mention dispatch failed for comment ${comment.id}: ${err?.message || err}`);
     }
 
-    return res.status(201).json({
-      ...comment,
-      images: JSON.parse(comment.images || '[]'),
-      metadata: JSON.parse(comment.metadata || '{}'),
-    });
+    const [parsed] = parseComments([comment]);
+    await expandCommentAttachments(this.dataSource, [parsed]);
+    return res.status(201).json(parsed);
   }
 
   @Get('tickets/:id/read-state')
@@ -562,11 +646,9 @@ export class TicketsController {
     if (comment.status === desired) {
       // No-op write; return the row so the client can reconcile state without
       // a follow-up GET.
-      return res.json({
-        ...comment,
-        images: JSON.parse(comment.images || '[]'),
-        metadata: JSON.parse(comment.metadata || '{}'),
-      });
+      const [parsed] = parseComments([comment]);
+      await expandCommentAttachments(this.dataSource, [parsed]);
+      return res.json(parsed);
     }
 
     await this.commentRepo.update({ id: commentId }, { status: desired });
@@ -584,12 +666,11 @@ export class TicketsController {
     });
 
     const updated = await this.commentRepo.findOne({ where: { id: commentId } });
-    return res.json({
-      ...(updated || comment),
-      status: desired,
-      images: JSON.parse((updated || comment).images || '[]'),
-      metadata: JSON.parse((updated || comment).metadata || '{}'),
-    });
+    const source = updated || comment;
+    source.status = desired;
+    const [parsed] = parseComments([source]);
+    await expandCommentAttachments(this.dataSource, [parsed]);
+    return res.json(parsed);
   }
 
   /**

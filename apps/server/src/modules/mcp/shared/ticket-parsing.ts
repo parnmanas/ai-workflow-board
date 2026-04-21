@@ -10,10 +10,19 @@
  */
 
 import type { DataSource, EntityManager } from 'typeorm';
+import { In } from 'typeorm';
 import { Ticket } from '../../../entities/Ticket';
+import { Resource } from '../../../entities/Resource';
 import { safeJsonParse } from './helpers';
 
 type RepoScope = DataSource | EntityManager;
+
+export type CommentAttachment = {
+  id: string;
+  file_name: string;
+  file_mimetype: string;
+  file_data: string;
+};
 
 /**
  * Shallow parse: decode JSON string columns on a single ticket row without
@@ -28,19 +37,25 @@ export function parseTicket(ticket: Ticket) {
 }
 
 /**
- * Sort comments by newest-first and decode JSON-string columns (`images` array,
- * `metadata` object). Idempotent: rows whose columns are already decoded (or
- * missing) pass through unchanged.
+ * Sort comments by newest-first and decode JSON-string columns
+ * (`attachment_resource_ids` array, `metadata` object). Leaves `attachments`
+ * as an empty array — call `expandCommentAttachments` afterwards to hydrate
+ * file metadata + bytes from the Resource table. Idempotent: rows whose
+ * columns are already decoded pass through unchanged.
  */
 export function parseComments<T extends { created_at: Date | string }>(comments: T[] | undefined): T[] {
   return (comments || []).slice()
     .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
     .map((c) => {
       const out: any = { ...(c as any) };
-      const rawImages = out.images;
-      if (typeof rawImages === 'string') {
-        out.images = safeJsonParse(rawImages);
+      const rawIds = out.attachment_resource_ids;
+      if (typeof rawIds === 'string') {
+        const parsed = safeJsonParse(rawIds);
+        out.attachment_resource_ids = Array.isArray(parsed) ? parsed : [];
+      } else if (!Array.isArray(out.attachment_resource_ids)) {
+        out.attachment_resource_ids = [];
       }
+      if (!Array.isArray(out.attachments)) out.attachments = [];
       const rawMetadata = out.metadata;
       if (typeof rawMetadata === 'string') {
         const parsed = safeJsonParse(rawMetadata);
@@ -48,6 +63,47 @@ export function parseComments<T extends { created_at: Date | string }>(comments:
       }
       return out as T;
     });
+}
+
+/**
+ * Hydrate the `attachments` field on a flat array of comments by issuing one
+ * `IN (...)` query against the Resource table. Safe to call on an empty list
+ * (returns immediately) and on comments that have no attachment_resource_ids
+ * (leaves `attachments: []`).
+ *
+ * Expects each comment to already have `attachment_resource_ids` decoded
+ * (i.e., `parseComments` ran first).
+ */
+export async function expandCommentAttachments(
+  scope: RepoScope,
+  comments: any[] | undefined,
+): Promise<void> {
+  if (!comments || comments.length === 0) return;
+  const allIds = new Set<string>();
+  for (const c of comments) {
+    const ids = c?.attachment_resource_ids;
+    if (Array.isArray(ids)) for (const id of ids) if (typeof id === 'string' && id) allIds.add(id);
+  }
+  if (allIds.size === 0) {
+    for (const c of comments) if (Array.isArray(c?.attachment_resource_ids)) c.attachments = [];
+    return;
+  }
+  const rows = await scope.getRepository(Resource).find({ where: { id: In([...allIds]) } });
+  const map = new Map<string, CommentAttachment>();
+  for (const r of rows) {
+    map.set(r.id, {
+      id: r.id,
+      file_name: r.file_name,
+      file_mimetype: r.file_mimetype,
+      file_data: r.file_data,
+    });
+  }
+  for (const c of comments) {
+    const ids: string[] = Array.isArray(c.attachment_resource_ids) ? c.attachment_resource_ids : [];
+    // Drop ids that no longer resolve (deleted resource) so the client never
+    // has to defend against missing attachments in render code.
+    c.attachments = ids.map((id) => map.get(id)).filter((a): a is CommentAttachment => !!a);
+  }
 }
 
 /**
@@ -64,7 +120,7 @@ export async function loadTicketFull(scope: RepoScope, id: string) {
     relations: ['children', 'children.children', 'children.children.comments', 'children.comments', 'comments'],
   });
   if (!ticket) return null;
-  return {
+  const out = {
     ...ticket,
     labels: safeJsonParse(ticket.labels),
     channel_ids: safeJsonParse(ticket.channel_ids),
@@ -83,4 +139,12 @@ export async function loadTicketFull(scope: RepoScope, id: string) {
     })),
     comments: parseComments(ticket.comments),
   };
+  // One batched lookup for every attachment across the whole tree so we don't
+  // fan out per-comment Resource queries.
+  const allComments: any[] = [
+    ...out.comments,
+    ...out.children.flatMap((c: any) => [...c.comments, ...c.children.flatMap((gc: any) => gc.comments)]),
+  ];
+  await expandCommentAttachments(scope, allComments);
+  return out;
 }

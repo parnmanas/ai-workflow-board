@@ -1,14 +1,15 @@
 import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { Controller, Get, Post, Patch, Delete, Body, Param, Query, Res, UseGuards } from '@nestjs/common';
 import { Response } from 'express';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, IsNull } from 'typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { Repository, IsNull, DataSource } from 'typeorm';
 import { Board } from '../../entities/Board';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { Ticket } from '../../entities/Ticket';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { DEFAULT_COLUMNS } from '../../database/database.module';
 import { findOrFail } from '../../common/find-or-fail';
+import { parseComments, expandCommentAttachments } from '../mcp/shared/ticket-parsing';
 
 @ApiBearerAuth('user-session')
 @ApiTags('boards')
@@ -19,6 +20,7 @@ export class BoardsController {
     @InjectRepository(Board) private readonly boardRepo: Repository<Board>,
     @InjectRepository(BoardColumn) private readonly colRepo: Repository<BoardColumn>,
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
+    @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
 
   @Get()
@@ -73,13 +75,15 @@ export class BoardsController {
               channel_ids: JSON.parse(child.channel_ids || '[]'),
               children: (child.children || []).sort((a, b) => a.position - b.position),
             })),
-            comments: (t.comments || []).sort((a, b) =>
-              new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-            ).map(c => ({ ...c, images: JSON.parse(c.images || '[]') })),
+            comments: parseComments(t.comments),
           })),
         };
       })
     );
+
+    const allComments: any[] = [];
+    for (const col of columnsWithTickets) for (const t of col.tickets) allComments.push(...t.comments);
+    await expandCommentAttachments(this.dataSource, allComments);
 
     return res.json({ ...board, columns: columnsWithTickets });
   }

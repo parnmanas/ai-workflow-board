@@ -19,19 +19,24 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
 
   server.tool(
     'list_resources',
-    'List resources in a workspace. Optionally filter by board_id or type (repository/document/image/link). ' +
-    'Resources with board_id=null are workspace-level; those with a board_id are board-scoped.',
+    'List resources in a workspace. Scope rule: omit board_id → returns ALL (workspace+board); ' +
+    'pass board_id="" → workspace-scope only (board_id IS NULL); pass board_id=<uuid> → that board only. ' +
+    'Types: repository, document, image, link, comment_attachment (auto-managed, hidden from default UI).',
     {
       workspace_id: z.string().describe('Workspace ID (required)'),
-      board_id: z.string().optional().describe('Board ID to filter board-scoped resources. Omit for workspace-level resources.'),
-      type: z.string().optional().describe('Filter by resource type: repository, document, image, link'),
+      board_id: z.string().optional().describe('"" → workspace-scope, <uuid> → board-scope, omit → all'),
+      type: z.string().optional().describe('Filter by resource type: repository, document, image, link, comment_attachment'),
     },
     async ({ workspace_id, board_id, type }) => {
       const repo = dataSource.getRepository(Resource);
-      const where: any = { workspace_id };
-      if (board_id !== undefined) where.board_id = board_id || null;
-      if (type) where.type = type;
-      const resources = await repo.find({ where, order: { name: 'ASC' } });
+      const qb = repo.createQueryBuilder('r').where('r.workspace_id = :ws', { ws: workspace_id });
+      if (board_id !== undefined) {
+        if (board_id) qb.andWhere('r.board_id = :bid', { bid: board_id });
+        else qb.andWhere('r.board_id IS NULL');
+      }
+      if (type) qb.andWhere('r.type = :t', { t: type });
+      else qb.andWhere('r.type != :hidden', { hidden: 'comment_attachment' });
+      const resources = await qb.orderBy('r.name', 'ASC').getMany();
       return ok(resources.map(resourceToJson));
     }
   );
@@ -64,7 +69,7 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
       board_id: z.string().optional().describe('Board ID for board-scoped resources. Omit or null for workspace-level.'),
       name: z.string().describe('Resource name'),
       description: z.string().optional().describe('Short description'),
-      type: z.enum(['repository', 'document', 'image', 'link']).optional().default('link').describe('Resource type'),
+      type: z.enum(['repository', 'document', 'image', 'link', 'comment_attachment']).optional().default('link').describe('Resource type. Do NOT set comment_attachment manually — reserved for inline comment uploads managed by the server.'),
       url: z.string().optional().describe('External URL (for repository/link/image types)'),
       content: z.string().optional().describe('Text content (for document type or notes)'),
       file_data: z.string().optional().describe('Base64-encoded file data (for image type)'),

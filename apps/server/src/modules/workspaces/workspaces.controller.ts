@@ -13,6 +13,9 @@ import { AuthGuard } from '../../common/guards/auth.guard';
 import { DEFAULT_COLUMNS } from '../../database/database.module';
 import { ReBACService } from '../../services/rebac.service';
 import { findOrFail } from '../../common/find-or-fail';
+import { parseComments, expandCommentAttachments } from '../mcp/shared/ticket-parsing';
+import { InjectDataSource } from '@nestjs/typeorm';
+import { DataSource } from 'typeorm';
 
 @ApiBearerAuth('user-session')
 @ApiTags('workspaces')
@@ -27,6 +30,7 @@ export class WorkspacesController {
     @InjectRepository(User) private readonly userRepo: Repository<User>,
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     private readonly rebacService: ReBACService,
+    @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
 
   @Get()
@@ -75,14 +79,17 @@ export class WorkspacesController {
             labels: JSON.parse(t.labels || '[]'),
             channel_ids: JSON.parse(t.channel_ids || '[]'),
             children: (t.children || []).sort((a, b) => a.position - b.position),
-            comments: (t.comments || []).sort((a, b) =>
-              new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-            ).map(c => ({ ...c, images: JSON.parse(c.images || '[]') })),
+            comments: parseComments(t.comments),
           })),
         };
       }));
       return { ...board, columns: colsFull };
     }));
+
+    // Hydrate comment attachments across every ticket in one batched query.
+    const allComments: any[] = [];
+    for (const b of boardsFull) for (const col of b.columns) for (const t of col.tickets) allComments.push(...t.comments);
+    await expandCommentAttachments(this.dataSource, allComments);
 
     return res.json({ ...ws, boards: boardsFull });
   }

@@ -30,8 +30,12 @@ export class Comment {
   @Column({ type: 'varchar' })
   content: string;
 
+  // JSON array of Resource ids (type='comment_attachment') for files uploaded
+  // alongside the comment. Inline base64 is never stored on the comment row —
+  // binary lives in the Resource table so the existing resource viewer,
+  // download pipeline, and filtering UI can reuse their logic unchanged.
   @Column({ type: 'text', default: '[]' })
-  images: string;
+  attachment_resource_ids: string;
 
   // Discriminator that turns the single comments timeline into typed facets:
   // note (default), question/answer (Q&A threading via parent_id),

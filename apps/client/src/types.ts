@@ -121,10 +121,15 @@ export interface ActivityLog {
   created_at: string;
 }
 
-export interface CommentImage {
-  filename: string;
-  mimetype: string;
-  data: string; // base64
+// Hydrated Resource metadata returned with a comment. file_data is the
+// raw base64 payload — the server ships it inline so the UI can render
+// image thumbnails (<img src="data:...">) and kick off downloads without
+// a second round-trip per attachment.
+export interface CommentAttachment {
+  id: string; // Resource.id (type='comment_attachment')
+  file_name: string;
+  file_mimetype: string;
+  file_data: string;
 }
 
 export type CommentType = 'note' | 'question' | 'answer' | 'decision' | 'chat' | 'system' | 'handoff';
@@ -137,7 +142,8 @@ export interface Comment {
   author_id: string; // GUID — references User.id or Agent.id
   author: string;
   content: string;
-  images: CommentImage[];
+  attachment_resource_ids: string[]; // Resource ids (type='comment_attachment')
+  attachments: CommentAttachment[]; // server-hydrated from Resource table
   created_at: string;
   // Discriminator: routes UI rendering and filter chips. Defaults to 'note' for
   // legacy rows and any caller that omits the field. 'system' is reserved for

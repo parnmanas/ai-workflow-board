@@ -180,17 +180,26 @@ export const api = {
     request<any>(`/tickets/${parentId}/children`, { method: 'POST', body: JSON.stringify(data) }),
 
   // ─── Comments ──────────────────────────────────────────
+  // attachments are uploaded in the SAME request as the comment so the user
+  // doesn't have to wait for two round-trips; server wraps both the Resource
+  // insert and the Comment insert in a single transaction.
   addComment: (
     ticketId: string,
     content: string,
-    images: { filename: string; mimetype: string; data: string }[] = [],
-    options?: { type?: string; parent_id?: string | null; metadata?: Record<string, unknown> },
+    attachments: { file_name: string; file_mimetype: string; file_data: string }[] = [],
+    options?: {
+      type?: string;
+      parent_id?: string | null;
+      metadata?: Record<string, unknown>;
+      attachment_resource_ids?: string[];
+    },
   ) =>
     request<any>(`/tickets/${ticketId}/comments`, {
       method: 'POST',
       body: JSON.stringify({
         content,
-        images,
+        ...(attachments.length > 0 ? { attachments } : {}),
+        ...(options?.attachment_resource_ids ? { attachment_resource_ids: options.attachment_resource_ids } : {}),
         ...(options?.type ? { type: options.type } : {}),
         ...(options?.parent_id !== undefined ? { parent_id: options.parent_id } : {}),
         ...(options?.metadata ? { metadata: options.metadata } : {}),

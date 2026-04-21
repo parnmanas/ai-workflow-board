@@ -9,7 +9,7 @@ export default function WorkspaceResourcesPage() {
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <PageHeader title="Resources" />
       <div style={{ flex: 1, overflow: 'auto', minHeight: 0, padding: '24px' }}>
-        <ResourceManager workspaceId={wsId} />
+        <ResourceManager workspaceId={wsId} boardId={null} />
       </div>
     </div>
   );

@@ -150,10 +150,10 @@ export function useBoard(boardId: string = '') {
   const addComment = async (
     ticketId: string,
     content: string,
-    images: { filename: string; mimetype: string; data: string }[] = [],
+    attachments: { file_name: string; file_mimetype: string; file_data: string }[] = [],
     options?: { type?: string; parent_id?: string | null; metadata?: Record<string, unknown> },
   ) => {
-    await withLocalAction(() => api.addComment(ticketId, content, images, options));
+    await withLocalAction(() => api.addComment(ticketId, content, attachments, options));
   };
 
   const setCommentStatus = async (ticketId: string, commentId: string, status: 'open' | 'resolved') => {

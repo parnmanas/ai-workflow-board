@@ -146,7 +146,7 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
           const tstyle = COMMENT_TYPE_STYLES[ctype];
           const isCompact = ctype === 'system';
           const status = c.status;
-          const images = c.images || [];
+          const attachments = c.attachments || [];
 
           const isReplyTarget = replyingToCommentId === c.id;
           // Tier-1 F: row is unread if created after the user's last read
@@ -259,21 +259,48 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
                   lineHeight: 1.5, whiteSpace: 'pre-wrap', margin: 0,
                 }}
               >{renderMarkdown(c.content)}</p>
-              {images.length > 0 && (
+              {attachments.length > 0 && (
                 <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
-                  {images.map((img, idx) => (
-                    <img
-                      key={idx}
-                      src={`data:${img.mimetype};base64,${img.data}`}
-                      alt={img.filename}
-                      onClick={() => onImagePreview?.(`data:${img.mimetype};base64,${img.data}`)}
-                      style={{
-                        width: 70, height: 70, objectFit: 'cover', borderRadius: tokens.radii.sm,
-                        cursor: onImagePreview ? 'pointer' : 'default',
-                        border: `1px solid ${tokens.colors.border}`,
-                      }}
-                    />
-                  ))}
+                  {attachments.map((att) => {
+                    const isImage = (att.file_mimetype || '').startsWith('image/');
+                    const src = `data:${att.file_mimetype || 'application/octet-stream'};base64,${att.file_data}`;
+                    if (isImage) {
+                      return (
+                        <img
+                          key={att.id}
+                          src={src}
+                          alt={att.file_name}
+                          onClick={() => onImagePreview?.(src)}
+                          title={att.file_name}
+                          style={{
+                            width: 70, height: 70, objectFit: 'cover', borderRadius: tokens.radii.sm,
+                            cursor: onImagePreview ? 'pointer' : 'default',
+                            border: `1px solid ${tokens.colors.border}`,
+                          }}
+                        />
+                      );
+                    }
+                    return (
+                      <a
+                        key={att.id}
+                        href={src}
+                        download={att.file_name}
+                        title={att.file_name}
+                        style={{
+                          display: 'inline-flex', alignItems: 'center', gap: 6,
+                          maxWidth: 240, padding: '6px 10px',
+                          borderRadius: tokens.radii.sm,
+                          background: tokens.colors.surfaceCard,
+                          border: `1px solid ${tokens.colors.border}`,
+                          color: tokens.colors.textSecondary,
+                          fontSize: '12px', textDecoration: 'none',
+                        }}
+                      >
+                        <span aria-hidden="true">📎</span>
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{att.file_name}</span>
+                      </a>
+                    );
+                  })}
                 </div>
               )}
               {/* Tier-1 A: decision references footer.

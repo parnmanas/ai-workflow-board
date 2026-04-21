@@ -13,11 +13,13 @@
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { In } from 'typeorm';
 import { Agent } from '../../../entities/Agent';
 import { Comment, CommentType, COMMENT_TYPES } from '../../../entities/Comment';
 import { Ticket } from '../../../entities/Ticket';
 import { User } from '../../../entities/User';
 import { UserMention } from '../../../entities/UserMention';
+import { Resource } from '../../../entities/Resource';
 import { activityEvents } from '../../../services/activity.service';
 import { ok, err } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
@@ -44,8 +46,10 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         .describe("Parent comment id for threading. Must belong to the same ticket. Required for type='answer'."),
       metadata: z.record(z.string(), z.unknown()).optional()
         .describe('Type-specific extension bag (e.g. handoff target_agent_id, decision references[]). Stored as JSON on the row.'),
+      attachment_resource_ids: z.array(z.string()).optional()
+        .describe("Resource ids to attach. Each must already exist with type='comment_attachment' in the ticket's workspace — create them first via save_resource. MCP does not accept inline base64 here (cap payload size, keep upload/transaction logic in one place)."),
     },
-    async ({ ticket_id, author_type, author_id, author, content, type, parent_id, metadata }, extra: { sessionId?: string }) => {
+    async ({ ticket_id, author_type, author_id, author, content, type, parent_id, metadata, attachment_resource_ids }, extra: { sessionId?: string }) => {
       const ticket = await dataSource.getRepository(Ticket).findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Ticket not found');
 
@@ -96,12 +100,29 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         }
       }
 
+      // Validate any attachment_resource_ids so agents can't cross-workspace
+      // or mistakenly wire a generic resource into a comment.
+      const resolvedAttachmentIds: string[] = Array.isArray(attachment_resource_ids)
+        ? attachment_resource_ids.filter((v): v is string => typeof v === 'string' && !!v)
+        : [];
+      if (resolvedAttachmentIds.length > 0) {
+        const rows = await dataSource.getRepository(Resource).findBy({ id: In(resolvedAttachmentIds) } as any);
+        const found = new Map(rows.map(r => [r.id, r]));
+        for (const rid of resolvedAttachmentIds) {
+          const r = found.get(rid);
+          if (!r) return err(`attachment_resource_ids contains unknown id: ${rid}`);
+          if (r.workspace_id !== ticket.workspace_id) return err(`attachment resource ${rid} belongs to a different workspace`);
+          if (r.type !== 'comment_attachment') return err(`attachment resource ${rid} is type=${r.type}; expected comment_attachment`);
+        }
+      }
+
       const comment = await commentRepo.save(commentRepo.create({
         ticket_id,
         author_type: resolvedAuthorType,
         author_id: resolvedAuthorId,
         author: authorName,
         content,
+        attachment_resource_ids: JSON.stringify(resolvedAttachmentIds),
         type: resolvedType,
         status: resolvedType === 'question' ? 'open' : null,
         parent_id: resolvedParentId,
