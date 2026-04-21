@@ -36,20 +36,25 @@ export function registerColumnTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'update_column',
-    'Update a column name, color, or position',
+    'Update a column name, color, description, position, or terminal flag',
     {
       column_id: z.string().describe('Column ID'),
       name: z.string().optional().describe('New column name'),
       color: z.string().optional().describe('New column color (hex)'),
+      description: z.string().optional().describe('New column description'),
       position: z.number().optional().describe('New position index'),
+      is_terminal: z.boolean().optional()
+        .describe('Whether tickets in this column are considered workflow end-state (excluded from agent allocation polling). Typically true for Done-style columns.'),
     },
-    async ({ column_id, name, color, position }) => {
+    async ({ column_id, name, color, description, position, is_terminal }) => {
       const repo = dataSource.getRepository(BoardColumn);
       const col = await repo.findOne({ where: { id: column_id } });
       if (!col) return err('Column not found');
 
       if (name !== undefined) col.name = name;
       if (color !== undefined) col.color = color;
+      if (description !== undefined) col.description = description;
+      if (is_terminal !== undefined) col.is_terminal = !!is_terminal;
       await repo.save(col);
 
       if (position !== undefined) {
