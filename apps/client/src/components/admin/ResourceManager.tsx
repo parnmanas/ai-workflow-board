@@ -50,6 +50,7 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
   const [formCredentialId, setFormCredentialId] = useState<string>('');
   const [formErrors, setFormErrors] = useState<{ name?: string }>({});
   const [credentials, setCredentials] = useState<Credential[]>([]);
+  const [lightboxImage, setLightboxImage] = useState<{ src: string; alt: string } | null>(null);
 
   const effectiveWorkspaceId = workspaceId ||
     (typeof window !== 'undefined' ? localStorage.getItem('currentWorkspaceId') || '' : '');
@@ -82,6 +83,46 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
   useEffect(() => {
     loadResources();
   }, [loadResources]);
+
+  useEffect(() => {
+    if (!lightboxImage) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setLightboxImage(null);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [lightboxImage]);
+
+  const openResourceFile = (r: Resource) => {
+    const mime = r.file_mimetype || '';
+    if (r.file_data && mime.startsWith('image/')) {
+      setLightboxImage({ src: `data:${mime};base64,${r.file_data}`, alt: r.name });
+      return;
+    }
+    if (r.file_data) {
+      try {
+        const bytes = Uint8Array.from(atob(r.file_data), (c) => c.charCodeAt(0));
+        const blob = new Blob([bytes], { type: mime || 'application/octet-stream' });
+        const url = URL.createObjectURL(blob);
+        const win = window.open(url, '_blank');
+        setTimeout(() => URL.revokeObjectURL(url), 60_000);
+        if (!win) {
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = r.file_name || r.name;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+        }
+      } catch (err: any) {
+        showToast(err?.message || 'Failed to open file', 'error');
+      }
+      return;
+    }
+    if (r.url) {
+      window.open(r.url, '_blank', 'noopener,noreferrer');
+    }
+  };
 
   const startCreate = () => {
     setFormName('');
@@ -313,13 +354,21 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
                   <img
                     src={`data:${r.file_mimetype || 'image/png'};base64,${r.file_data}`}
                     alt={r.name}
-                    style={{ maxWidth: '100%', maxHeight: 120, borderRadius: tokens.radii.sm, objectFit: 'contain' }}
+                    onClick={() => openResourceFile(r)}
+                    title="Click to view full size"
+                    style={{ maxWidth: '100%', maxHeight: 120, borderRadius: tokens.radii.sm, objectFit: 'contain', cursor: 'zoom-in', display: 'block' }}
                   />
                 </div>
               )}
 
               {r.file_name && r.type !== 'image' && (
-                <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginBottom: 4 }}>
+                <div
+                  onClick={() => openResourceFile(r)}
+                  title="Click to open"
+                  style={{ fontSize: '11px', color: tokens.colors.accent, marginBottom: 4, cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                  onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.textDecoration = 'underline'; }}
+                  onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.textDecoration = 'none'; }}
+                >
                   File: {r.file_name}
                 </div>
               )}
@@ -345,6 +394,7 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
                   {relativeTime(r.updated_at || r.created_at)}
                 </div>
                 <div style={{ display: 'flex', gap: 6 }}>
+                  {r.file_data && <Button variant="secondary" size="sm" onClick={() => openResourceFile(r)}>View</Button>}
                   <Button variant="secondary" size="sm" onClick={() => startEdit(r)}>Edit</Button>
                   <Button variant="danger" size="sm" onClick={() => setDeleteTarget(r)}>Delete</Button>
                 </div>
@@ -562,6 +612,71 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
           {deleteTarget?.name} will be permanently removed.
         </div>
       </Modal>
+
+      {lightboxImage && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label={lightboxImage.alt}
+          onClick={() => setLightboxImage(null)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0, 0, 0, 0.92)',
+            zIndex: 10000,
+            overflow: 'auto',
+            cursor: 'zoom-out',
+          }}
+        >
+          <div style={{ minHeight: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 40 }}>
+            <img
+              src={lightboxImage.src}
+              alt={lightboxImage.alt}
+              onClick={(e) => e.stopPropagation()}
+              style={{ cursor: 'default', background: '#fff', borderRadius: tokens.radii.sm, boxShadow: '0 10px 40px rgba(0,0,0,0.5)' }}
+            />
+          </div>
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); setLightboxImage(null); }}
+            style={{
+              position: 'fixed',
+              top: 12,
+              right: 16,
+              background: 'rgba(255, 255, 255, 0.18)',
+              color: '#fff',
+              border: 'none',
+              borderRadius: tokens.radii.sm,
+              padding: '8px 14px',
+              cursor: 'pointer',
+              fontSize: 13,
+              fontWeight: 600,
+            }}
+          >
+            Close (Esc)
+          </button>
+          <div
+            style={{
+              position: 'fixed',
+              bottom: 16,
+              left: '50%',
+              transform: 'translateX(-50%)',
+              background: 'rgba(0, 0, 0, 0.6)',
+              color: '#fff',
+              padding: '6px 12px',
+              borderRadius: tokens.radii.sm,
+              fontSize: 12,
+              maxWidth: '80vw',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              pointerEvents: 'none',
+            }}
+          >
+            {lightboxImage.alt}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
