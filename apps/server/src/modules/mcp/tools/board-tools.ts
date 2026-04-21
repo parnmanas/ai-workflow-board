@@ -141,7 +141,7 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'create_board',
-    'Create a new board with default columns (Backlog, To Do, In Progress, Review, Done) inside a workspace',
+    'Create a new board with default columns (Backlog, To Do, In Progress, Review, Merging, Done) inside a workspace',
     {
       workspace_id: z.string().describe('Workspace ID'),
       name: z.string().describe('Board name'),
@@ -165,21 +165,30 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'update_board',
-    'Update a board name, description, or column→prompt-template mapping',
+    'Update a board name, description, routing_config, or column→prompt-template mapping',
     {
       board_id: z.string().describe('Board ID'),
       name: z.string().optional().describe('New name'),
       description: z.string().optional().describe('New description'),
+      routing_config: z.record(z.string(), z.array(z.string())).nullable().optional()
+        .describe('Column→role routing: { [lowercased column name]: ["assignee"|"reviewer"|"reporter", ...] }. Pass null or {} to clear all.'),
       column_prompts: z.record(z.string(), z.string().nullable()).nullable().optional()
         .describe('Column→PromptTemplate mapping: { [column_id]: prompt_template_id }. Pass null or {} to clear all.'),
     },
-    async ({ board_id, name, description, column_prompts }) => {
+    async ({ board_id, name, description, routing_config, column_prompts }) => {
       const boardRepo = dataSource.getRepository(Board);
       const board = await boardRepo.findOne({ where: { id: board_id } });
       if (!board) return err('Board not found');
 
       if (name !== undefined) board.name = name;
       if (description !== undefined) board.description = description;
+      if (routing_config !== undefined) {
+        if (routing_config === null) {
+          board.routing_config = '{}';
+        } else {
+          board.routing_config = JSON.stringify(routing_config);
+        }
+      }
       if (column_prompts !== undefined) {
         if (column_prompts === null) {
           board.column_prompts = null;
