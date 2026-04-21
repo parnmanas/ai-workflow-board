@@ -21,7 +21,7 @@ import { User } from '../../../entities/User';
 import { UserMention } from '../../../entities/UserMention';
 import { Resource } from '../../../entities/Resource';
 import { activityEvents } from '../../../services/activity.service';
-import { ok, err } from '../shared/helpers';
+import { ok, err, MENTION_SYNTAX_DOC } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
 import type { ToolContext } from './context';
 
@@ -33,7 +33,8 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
     'Add a comment to a ticket. When authenticated as an agent, author fields are auto-filled if omitted. ' +
       'Optional `type`/`parent_id`/`metadata` mirror the REST endpoint so an agent can post note/chat/handoff/etc. ' +
       'directly without falling back to the more opinionated ask_question/answer_question/record_decision tools. ' +
-      'type=\'system\' is reserved for SystemCommentService and rejected here.',
+      'type=\'system\' is reserved for SystemCommentService and rejected here.\n\n' +
+      MENTION_SYNTAX_DOC,
     {
       ticket_id: z.string().describe('Ticket ID'),
       author_type: z.enum(['user', 'agent']).optional().describe('Comment author type (auto-detected from auth)'),
@@ -250,7 +251,8 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
   // ─── ask_question ────────────────────────────────────────────────
   server.tool(
     'ask_question',
-    'Ask a question on a ticket — creates a comment with type=question, status=open. The ticket assignee/reporter (or @mentioned user) is notified. Use this when you are blocked and need a human answer before continuing; the ticket detail UI surfaces the open question prominently.',
+    'Ask a question on a ticket — creates a comment with type=question, status=open. The ticket assignee/reporter (or @mentioned user) is notified. Use this when you are blocked and need a human answer before continuing; the ticket detail UI surfaces the open question prominently.\n\n' +
+    MENTION_SYNTAX_DOC,
     {
       ticket_id: z.string().describe('Ticket ID the question is about'),
       content: z.string().describe('Question body. Plain text or markdown. Embed @[user:id|Name] tokens to direct the question at a specific user.'),
@@ -334,7 +336,8 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
   // ─── answer_question ─────────────────────────────────────────────
   server.tool(
     'answer_question',
-    'Answer a previously-asked question. Creates a comment with type=answer and parent_id pointing at the question; the parent question auto-resolves so the ticket no longer shows it as open. The original question must exist on the same ticket and have type=question.',
+    'Answer a previously-asked question. Creates a comment with type=answer and parent_id pointing at the question; the parent question auto-resolves so the ticket no longer shows it as open. The original question must exist on the same ticket and have type=question.\n\n' +
+    MENTION_SYNTAX_DOC,
     {
       question_comment_id: z.string().describe("ID of the question comment being answered (Comment.id where type='question')"),
       content: z.string().describe('Answer body. Plain text or markdown.'),
@@ -378,7 +381,8 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
   // ─── record_decision ─────────────────────────────────────────────
   server.tool(
     'record_decision',
-    'Record a decision on a ticket — creates a comment with type=decision. Use this for resolved trade-offs, scope choices, or anything future readers should be able to find without scrolling the full discussion. Decisions render with a distinctive style and survive comment-filter toggles by default.',
+    'Record a decision on a ticket — creates a comment with type=decision. Use this for resolved trade-offs, scope choices, or anything future readers should be able to find without scrolling the full discussion. Decisions render with a distinctive style and survive comment-filter toggles by default.\n\n' +
+    MENTION_SYNTAX_DOC,
     {
       ticket_id: z.string().describe('Ticket ID'),
       content: z.string().describe('Decision text. Phrase as a statement: "We will use X because Y".'),
@@ -427,7 +431,8 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
   // fills the "why am I picking this up?" gap.
   server.tool(
     'handoff_to_agent',
-    'Hand a ticket off to another agent. Reassigns the ticket (assignee role only — reporter/reviewer remain unchanged) AND posts a type=handoff comment so the receiver sees both the ticket and the human-readable rationale. The receiving agent gets a comment_mention event so their proxy can react immediately; the standard assignee-change trigger still fires so existing routing logic continues to work.',
+    'Hand a ticket off to another agent. Reassigns the ticket (assignee role only — reporter/reviewer remain unchanged) AND posts a type=handoff comment so the receiver sees both the ticket and the human-readable rationale. The receiving agent gets a comment_mention event so their proxy can react immediately; the standard assignee-change trigger still fires so existing routing logic continues to work.\n\n' +
+    MENTION_SYNTAX_DOC,
     {
       ticket_id: z.string().describe('Ticket ID being handed off'),
       target_agent_id: z.string().describe("ID of the Agent the ticket is being assigned to"),
