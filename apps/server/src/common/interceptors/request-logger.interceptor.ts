@@ -71,6 +71,14 @@ export class RequestLoggerInterceptor implements NestInterceptor {
     // Skip SSE/streaming endpoints (headers already sent — interceptor tap causes crash)
     if (req.path.startsWith('/api/events')) return next.handle();
     if (req.path.startsWith('/mcp')) return next.handle();
+    // Skip log-query endpoints. Logging the query itself stuffs the returned
+    // log array into `resBody`, which on the NEXT poll gets stuffed into
+    // *that* request's log, and so on — the buffer grows quadratically until
+    // it fills up the 2000-entry ring and every entry is a nested snapshot
+    // of earlier entries. Polling the Server Logs page was enough to make
+    // the symptom obvious. The admin UI doesn't lose anything: request
+    // counts are still visible as the other rows in the viewer.
+    if (req.path === '/api/admin/logs' || req.path.startsWith('/api/admin/logs/')) return next.handle();
 
     const method = req.method;
     const url = req.originalUrl || req.url;

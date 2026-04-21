@@ -33,7 +33,14 @@ export class AllExceptionsFilter implements ExceptionFilter {
     const userId = request?.currentUser?.id || '-';
     const userName = request?.currentUser?.name || request?.currentUser?.email || '-';
 
-    if (this.logService) {
+    // Skip persisting failures of the log-query endpoints themselves — every
+    // stored Error row would otherwise balloon on the next poll that pulls
+    // the full log list, same recursion problem as RequestLoggerInterceptor.
+    // We still flush to console so docker/pm2 collectors see it.
+    const reqPath: string = request?.path || (typeof url === 'string' ? url.split('?')[0] : '');
+    const isLogEndpoint = reqPath === '/api/admin/logs' || reqPath.startsWith('/api/admin/logs/');
+
+    if (this.logService && !isLogEndpoint) {
       this.logService.error('Error', `${method} ${url} → ${status} — ${message}`, {
         user: userName,
         userId,
