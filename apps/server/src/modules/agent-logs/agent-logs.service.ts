@@ -144,6 +144,18 @@ export class AgentLogsService {
     }));
   }
 
+  // Count error-level entries since the given cutoff. NULL cutoff counts
+  // all-time errors, which only makes sense on a user's first visit before
+  // the client has stored a last-seen timestamp; subsequent polls always
+  // pass one. Matches the UI filter default ("errors only" badge, not warn).
+  async countSince(since: Date | null): Promise<number> {
+    const qb = this.repo.createQueryBuilder('l').where("l.level IN ('error', 'fatal')");
+    if (since && !Number.isNaN(since.getTime())) {
+      qb.andWhere('l.occurred_at > :since', { since });
+    }
+    return qb.getCount();
+  }
+
   async listAgentsWithRecentErrors(days = 7): Promise<{ agent_id: string; agent_name: string | null; error_count: number }[]> {
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
     const raw = await this.repo

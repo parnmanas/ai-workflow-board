@@ -62,7 +62,29 @@ export class ChatRoomsController {
   }
 
   // IMPORTANT: This route must be before @Get(':roomId') so Express does not treat
-  // the literal string "search" as a roomId value.
+  // the literal string "unread-counts" / "search" as a roomId value.
+  @Get('unread-counts')
+  @RequirePermission(PERMISSIONS.CHAT_VIEW)
+  async unreadCounts(@Req() req: Request, @Res() res: Response) {
+    const user = (req as any).currentUser;
+    const wsId = req.headers['x-workspace-id'] as string;
+    if (!wsId) return res.status(400).json({ error: 'Workspace ID required' });
+    // Reuse listRooms — it already computes per-room unread counts via the
+    // same datetime-comparison query the chat page uses. Sidebar badge
+    // doesn't need room metadata (name, last message, dm partner), so we
+    // project just { total, perRoom } here. Sum is trivial client-side too
+    // but returning it explicitly avoids a client-side reduce loop.
+    const rooms = await this.crud.listRooms(wsId, user.id);
+    const perRoom: Record<string, number> = {};
+    let total = 0;
+    for (const r of rooms) {
+      const n = Number(r.unread_count || 0);
+      if (n > 0) perRoom[r.id] = n;
+      total += n;
+    }
+    return res.json({ total, perRoom });
+  }
+
   @Get('search')
   @RequirePermission(PERMISSIONS.CHAT_VIEW)
   async searchMessages(

@@ -129,6 +129,112 @@ export class TicketsController {
     return res.status(201).json({ ...child, labels: JSON.parse(child.labels || '[]'), channel_ids: JSON.parse(child.channel_ids || '[]'), children: [], comments: [] });
   }
 
+  // IMPORTANT: keep `tickets/unread-counts` above `tickets/:id` — Express
+  // picks the first matching pattern, and `:id` would eat the literal
+  // "unread-counts" segment (producing a 404 "Ticket not found").
+  // Sidebar badge + per-ticket badge source. Returns unread comment counts
+  // scoped to tickets the current user is involved in within one workspace:
+  //   - their role fields match (assignee_id / reporter_id / reviewer_id),
+  //   - OR they've already read at least once (TicketReadState row exists).
+  // Scoping to "involved" tickets keeps the number manageable on big boards
+  // — we don't want every new comment on every ticket in the workspace
+  // lighting up the badge, just ones the user cares about.
+  //
+  // `unread` = comments with created_at > TicketReadState.last_read_at
+  // (or > user's role-grant date if the user has never marked it read).
+  // For simplicity NULL last_read_at counts every ticket-comment as unread,
+  // which matches the ticket detail panel's own rendering.
+  @Get('tickets/unread-counts')
+  async unreadCounts(@Req() req: Request, @Res() res: Response) {
+    const currentUser = (req as any).currentUser;
+    if (!currentUser) return res.status(401).json({ error: 'Authentication required' });
+    const wsId = (req.headers['x-workspace-id'] as string) || '';
+    if (!wsId) return res.status(400).json({ error: 'Workspace ID required' });
+
+    // Involved ticket IDs in this workspace: role holder OR has read-state row.
+    const roleTickets = await this.ticketRepo
+      .createQueryBuilder('t')
+      .select('t.id', 'id')
+      .where('t.workspace_id = :wsId', { wsId })
+      .andWhere(
+        '(t.assignee_id = :uid OR t.reporter_id = :uid OR t.reviewer_id = :uid)',
+        { uid: currentUser.id },
+      )
+      .getRawMany();
+    const readRows = await this.readStateRepo
+      .createQueryBuilder('r')
+      .select('r.ticket_id', 'id')
+      .addSelect('r.last_read_at', 'last_read_at')
+      .where('r.user_id = :uid AND r.workspace_id = :wsId', { uid: currentUser.id, wsId })
+      .getRawMany();
+
+    const involvedIds = new Set<string>([
+      ...roleTickets.map((r) => r.id),
+      ...readRows.map((r) => r.id),
+    ]);
+    if (involvedIds.size === 0) return res.json({ total: 0, perTicket: {}, perBoard: {} });
+
+    const readBy: Record<string, Date | null> = {};
+    for (const r of readRows) readBy[r.id] = r.last_read_at ? new Date(r.last_read_at) : null;
+
+    const perTicket: Record<string, number> = {};
+    let total = 0;
+    const comments = await this.commentRepo
+      .createQueryBuilder('c')
+      .select(['c.ticket_id AS ticket_id', 'c.created_at AS created_at', 'c.author_id AS author_id'])
+      .where('c.ticket_id IN (:...ids)', { ids: Array.from(involvedIds) })
+      .getRawMany();
+    for (const c of comments) {
+      if (c.author_id === currentUser.id) continue;
+      const cutoff = readBy[c.ticket_id];
+      if (cutoff && new Date(c.created_at) <= cutoff) continue;
+      perTicket[c.ticket_id] = (perTicket[c.ticket_id] || 0) + 1;
+      total++;
+    }
+
+    // Roll up perTicket → perBoard (sidebar per-board badges).
+    const perBoard: Record<string, number> = {};
+    const ticketIdsWithUnread = Object.keys(perTicket);
+    if (ticketIdsWithUnread.length > 0) {
+      const allTickets = await this.ticketRepo
+        .createQueryBuilder('t')
+        .select(['t.id AS id', 't.column_id AS column_id', 't.parent_id AS parent_id'])
+        .where('t.workspace_id = :wsId', { wsId })
+        .getRawMany();
+      const byId = new Map<string, { column_id: string | null; parent_id: string | null }>();
+      for (const t of allTickets) byId.set(t.id, { column_id: t.column_id, parent_id: t.parent_id });
+      const columnIds = new Set<string>();
+      const resolveBoardColumn = (startId: string): string | null => {
+        let cursor: { column_id: string | null; parent_id: string | null } | undefined = byId.get(startId);
+        for (let i = 0; cursor && !cursor.column_id && cursor.parent_id && i < 5; i++) {
+          cursor = byId.get(cursor.parent_id);
+        }
+        return cursor?.column_id ?? null;
+      };
+      for (const id of ticketIdsWithUnread) {
+        const colId = resolveBoardColumn(id);
+        if (colId) columnIds.add(colId);
+      }
+      if (columnIds.size > 0) {
+        const cols = await this.ticketRepo.manager
+          .getRepository('BoardColumn')
+          .createQueryBuilder('c')
+          .select(['c.id AS id', 'c.board_id AS board_id'])
+          .where('c.id IN (:...ids)', { ids: Array.from(columnIds) })
+          .getRawMany();
+        const boardByColumn = new Map<string, string>();
+        for (const c of cols) boardByColumn.set(c.id, c.board_id);
+        for (const id of ticketIdsWithUnread) {
+          const colId = resolveBoardColumn(id);
+          const boardId = colId ? boardByColumn.get(colId) : undefined;
+          if (boardId) perBoard[boardId] = (perBoard[boardId] || 0) + perTicket[id];
+        }
+      }
+    }
+
+    return res.json({ total, perTicket, perBoard });
+  }
+
   @Get('tickets/:id')
   async get(@Param('id') id: string, @Res() res: Response) {
     const ticket = await loadTicketFull(this.dataSource, id);

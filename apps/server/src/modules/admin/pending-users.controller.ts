@@ -23,6 +23,15 @@ export class PendingUsersController {
     private readonly activityService: ActivityService,
   ) {}
 
+  // Lightweight count for the admin sidebar badge. Separate from GET / so
+  // the admin nav can poll/listen without materializing the full user list
+  // (which joins to workspaces) every time.
+  @Get('count')
+  async count(@Res() res: Response) {
+    const count = await this.userRepo.count({ where: { status: 'pending' } as any });
+    return res.json({ count });
+  }
+
   @Get()
   async list(@Res() res: Response) {
     const users = await this.userRepo.find({ where: { status: 'pending' } as any });

@@ -36,4 +36,15 @@ export class AgentLogsAdminController {
   async agents(@Res() res: Response) {
     return res.json(await this.service.listAgentsWithRecentErrors(7));
   }
+
+  // Admin sidebar badge: how many error-level entries have landed since
+  // the caller last checked. `since` is tracked client-side in localStorage
+  // and sent on every poll — the server does no per-user state tracking
+  // here because error logs are global (not per-user). Capped to error/fatal
+  // level so warn-level noise doesn't flood the badge.
+  @Get('unseen-count')
+  async unseenCount(@Query('since') since: string | undefined, @Res() res: Response) {
+    const count = await this.service.countSince(since ? new Date(since) : null);
+    return res.json({ count });
+  }
 }
