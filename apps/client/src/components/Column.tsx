@@ -8,7 +8,7 @@ import { tokens } from '../tokens';
 interface ColumnProps {
   column: ColumnType;
   onTicketClick: (ticket: Ticket) => void;
-  onCreateTicket: (columnId: string, title: string, priority: string) => void;
+  onCreateTicket: (columnId: string, title: string, description: string, priority: string) => void;
 }
 
 export default function Column({ column, onTicketClick, onCreateTicket }: ColumnProps) {
@@ -88,15 +88,6 @@ export default function Column({ column, onTicketClick, onCreateTicket }: Column
               minHeight: 60,
             }}
           >
-            {showForm && (
-              <CreateTicketForm
-                onSubmit={(title, priority) => {
-                  onCreateTicket(column.id, title, priority);
-                  setShowForm(false);
-                }}
-                onCancel={() => setShowForm(false)}
-              />
-            )}
             {column.tickets.map((ticket, index) => (
               <TicketCard
                 key={ticket.id}
@@ -109,6 +100,15 @@ export default function Column({ column, onTicketClick, onCreateTicket }: Column
           </div>
         )}
       </Droppable>
+
+      <CreateTicketForm
+        isOpen={showForm}
+        onSubmit={(title, description, priority) => {
+          onCreateTicket(column.id, title, description, priority);
+          setShowForm(false);
+        }}
+        onCancel={() => setShowForm(false)}
+      />
     </div>
   );
 }

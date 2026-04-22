@@ -102,8 +102,16 @@ export function useBoard(boardId: string = '') {
     }
   };
 
-  const createTicket = async (columnId: string, title: string, priority = 'medium') => {
-    await withLocalAction(() => api.createTicket(columnId, { title, priority }));
+  const createTicket = async (
+    columnId: string,
+    title: string,
+    description: string,
+    priority = 'medium',
+  ) => {
+    // Description is now required at create time (atomic modal flow). Keeping
+    // it as a third positional param instead of an options bag because only
+    // one caller exists; add a trailing options object here if that changes.
+    await withLocalAction(() => api.createTicket(columnId, { title, description, priority }));
   };
 
   const updateTicket = async (ticketId: string, data: Record<string, any>) => {
