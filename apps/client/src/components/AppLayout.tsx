@@ -6,6 +6,7 @@ import { useMediaQuery } from '../hooks/useMediaQuery';
 import { useWorkspaces } from '../hooks/useBoard';
 import { api } from '../api';
 import { BoardStreamProvider } from '../contexts/BoardStreamContext';
+import { NotificationProvider } from '../contexts/NotificationContext';
 import WorkspaceBanner from './WorkspaceBanner';
 import { useAuth } from '../contexts/AuthContext';
 import { tokens } from '../tokens';
@@ -164,6 +165,7 @@ export default function AppLayout() {
     // badge. The provider itself is a singleton — moving it up does NOT add an
     // extra EventSource connection.
     <BoardStreamProvider>
+    <NotificationProvider>
     <div className="awb-shell">
       <Sidebar
         isMobile={isMobile}
@@ -246,6 +248,7 @@ export default function AppLayout() {
         </main>
       </div>
     </div>
+    </NotificationProvider>
     </BoardStreamProvider>
   );
 }

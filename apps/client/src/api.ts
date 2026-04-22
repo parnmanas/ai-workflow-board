@@ -561,6 +561,23 @@ export const api = {
       `/workspaces/${encodeURIComponent(workspaceId)}/mentions/read-all`,
       { method: 'POST' },
     ),
+
+  // ─── Badge count endpoints ───────────────────────────────
+  // Lightweight counts used by the sidebar NotificationContext. Workspace
+  // scope is resolved server-side from the X-Workspace-Id header, which
+  // getAuthHeaders() pulls from localStorage — no explicit workspaceId
+  // parameter is needed here. Each endpoint returns `{ count }` or
+  // `{ total, perX }` so the client bookkeeping stays uniform.
+  getChatUnreadCounts: (): Promise<{ total: number; perRoom: Record<string, number> }> =>
+    request<{ total: number; perRoom: Record<string, number> }>('/chat-rooms/unread-counts'),
+  getTicketUnreadCounts: (): Promise<{ total: number; perTicket: Record<string, number>; perBoard: Record<string, number> }> =>
+    request<{ total: number; perTicket: Record<string, number>; perBoard: Record<string, number> }>('/tickets/unread-counts'),
+  getPendingUsersCount: (): Promise<{ count: number }> =>
+    request<{ count: number }>('/admin/pending-users/count'),
+  getAgentErrorsUnseenCount: (since?: string | null): Promise<{ count: number }> => {
+    const qs = since ? `?since=${encodeURIComponent(since)}` : '';
+    return request<{ count: number }>(`/admin/agent-logs/unseen-count${qs}`);
+  },
 };
 
 // ─── Mention types ───────────────────────────────────────
