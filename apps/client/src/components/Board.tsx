@@ -83,8 +83,13 @@ export default function Board() {
     }
   };
 
-  const handleCreateTicket = useCallback(async (columnId: string, title: string, priority: string) => {
-    await wrapAction(() => createTicket(columnId, title, priority), 'Ticket created');
+  const handleCreateTicket = useCallback(async (
+    columnId: string,
+    title: string,
+    description: string,
+    priority: string,
+  ) => {
+    await wrapAction(() => createTicket(columnId, title, description, priority), 'Ticket created');
   }, [wrapAction, createTicket]);
 
   const handleUpdateTicket = useCallback(async (ticketId: string, data: Record<string, any>) => {
