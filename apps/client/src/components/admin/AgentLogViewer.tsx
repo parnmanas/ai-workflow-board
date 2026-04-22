@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
 import type { AgentErrorLog, AgentErrorLogAgentSummary } from '../../types';
+import { useNotifications } from '../../contexts/NotificationContext';
 
 const LEVEL_COLORS: Record<string, string> = {
   fatal: tokens.colors.danger,
@@ -65,6 +66,15 @@ export default function AgentLogViewer() {
   // Auto-refresh
   const [autoRefresh, setAutoRefresh] = useState(true);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Opening this page stamps "last seen" for the agent-errors badge so
+  // the sidebar dot clears until the next new error arrives. The server
+  // does no per-user tracking here — the stamp is pure localStorage,
+  // persisted across reloads via the NotificationContext helper.
+  const { markAgentErrorsSeen } = useNotifications();
+  useEffect(() => {
+    markAgentErrorsSeen();
+  }, [markAgentErrorsSeen]);
 
   // Expanded raw_line rows
   const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());

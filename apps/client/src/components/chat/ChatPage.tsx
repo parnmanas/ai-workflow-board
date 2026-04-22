@@ -10,6 +10,7 @@ import { api } from '../../api';
 import { useAuth } from '../../contexts/AuthContext';
 import { useBoardStreamEvent } from '../../contexts/BoardStreamContext';
 import { useToast } from '../../contexts/ToastContext';
+import { useNotifications } from '../../contexts/NotificationContext';
 import { useMediaQuery } from '../../hooks/useMediaQuery';
 import { tokens } from '../../tokens';
 import type { ChatRoomListItem, ChatRoomDetail, ChatRoomMessageItem } from '../../types';
@@ -81,6 +82,10 @@ function ProtocolUpgradeBanner() {
 export default function ChatPage() {
   const { user } = useAuth();
   const { showToast, playNotifySound } = useToast();
+  // Keep sidebar chat badge in lockstep: whenever we POST mark-read we
+  // also tell the NotificationContext so the badge clears without
+  // waiting for the 60 s refresh. Room-scoped (per-room unread zeros).
+  const { markRead: markBadgeRead } = useNotifications();
   const isMobile = useMediaQuery('(max-width: 767px)');
 
   const [rooms, setRooms] = useState<ChatRoomListItem[]>([]);
@@ -149,6 +154,7 @@ export default function ChatPage() {
 
     // Mark room as read
     api.markChatRoomRead(activeRoomId).catch(() => {});
+    markBadgeRead('chat', activeRoomId);
     setRooms((prev) =>
       prev.map((r) => (r.id === activeRoomId ? { ...r, unread_count: 0 } : r)),
     );
@@ -230,6 +236,7 @@ export default function ChatPage() {
         return [...prev, msg];
       });
       api.markChatRoomRead(msg.room_id).catch(() => {});
+      markBadgeRead('chat', msg.room_id);
     } else {
       setRooms((prev) =>
         prev.map((r) =>

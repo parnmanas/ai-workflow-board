@@ -3,6 +3,9 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { tokens } from '../tokens';
 import { MentionInboxBadge } from './common/MentionInboxBadge';
+import { NavBadge } from './common/NavBadge';
+import { NotificationSettingsPanel } from './common/NotificationSettingsPanel';
+import { useNotifications } from '../contexts/NotificationContext';
 
 interface SidebarProps {
   isMobile: boolean;
@@ -31,6 +34,10 @@ export default function Sidebar({ isMobile, isOpen, onClose, wsId, boards }: Sid
   const navigate = useNavigate();
   const location = useLocation();
   const [boardsExpanded, setBoardsExpanded] = React.useState(true);
+  // Badge counts come from NotificationContext (mounted in AppLayout). This
+  // is a read-only consumer — we do not import any stream client here, per
+  // the component header's SSE Reconnect Contract note.
+  const { counts } = useNotifications();
 
   const isBoardActive = (boardId: string): boolean =>
     location.pathname.includes('/boards/' + boardId);
@@ -94,8 +101,12 @@ export default function Sidebar({ isMobile, isOpen, onClose, wsId, boards }: Sid
     fontFamily: 'inherit',
   });
 
-  const workspaceNavItems = [
-    { key: 'chat',             path: `/ws/${wsId}/chat`,             label: 'Chat',             icon: 'C' },
+  // Nav items annotated with a `badge` count pulled from NotificationContext.
+  // undefined (or 0) renders nothing in <NavBadge>, so items without a source
+  // just get no decoration. Keeping the mapping in the item definition makes
+  // it easy to add a new badge source later — one line in one place.
+  const workspaceNavItems: { key: string; path: string; label: string; icon: string; badge?: number }[] = [
+    { key: 'chat',             path: `/ws/${wsId}/chat`,             label: 'Chat',             icon: 'C', badge: counts.chat.total },
     { key: 'users',            path: `/ws/${wsId}/users`,            label: 'Users',            icon: 'U' },
     { key: 'agents',           path: `/ws/${wsId}/agents`,           label: 'AI Agents',        icon: 'A' },
     { key: 'prompt-templates', path: `/ws/${wsId}/prompt-templates`, label: 'Prompt Templates', icon: 'P' },
@@ -105,15 +116,18 @@ export default function Sidebar({ isMobile, isOpen, onClose, wsId, boards }: Sid
     { key: 'api-keys',         path: `/ws/${wsId}/api-keys`,         label: 'API Keys',         icon: 'K' },
   ];
 
-  const adminNavItems = [
-    { key: 'admin-users',    path: '/admin/users',    label: 'Users',       icon: 'U' },
+  const adminNavItems: { key: string; path: string; label: string; icon: string; badge?: number }[] = [
+    { key: 'admin-users',    path: '/admin/users',    label: 'Users',       icon: 'U', badge: counts.pendingUsers },
     { key: 'admin-qa',      path: '/admin/qa',      label: 'QA Tests',    icon: 'Q' },
     { key: 'admin-logs',    path: '/admin/logs',    label: 'Server Logs', icon: 'L' },
-    { key: 'admin-agent-logs', path: '/admin/agent-logs', label: 'Agent Logs',  icon: 'G' },
+    { key: 'admin-agent-logs', path: '/admin/agent-logs', label: 'Agent Logs',  icon: 'G', badge: counts.agentErrors },
     { key: 'admin-settings', path: '/admin/settings', label: 'Settings',    icon: 'S' },
   ];
 
-  const renderNavButton = (item: { key: string; path: string; label: string; icon: string }, active: boolean) => (
+  const renderNavButton = (
+    item: { key: string; path: string; label: string; icon: string; badge?: number },
+    active: boolean,
+  ) => (
     <button
       key={item.key}
       onClick={() => handleNavClick(item.path)}
@@ -151,7 +165,10 @@ export default function Sidebar({ isMobile, isOpen, onClose, wsId, boards }: Sid
       >
         {item.icon}
       </div>
-      <span>{item.label}</span>
+      <span style={{ flex: 1 }}>{item.label}</span>
+      {typeof item.badge === 'number' && item.badge > 0 && (
+        <NavBadge count={item.badge} />
+      )}
     </button>
   );
 
@@ -182,6 +199,7 @@ export default function Sidebar({ isMobile, isOpen, onClose, wsId, boards }: Sid
             <div style={{ fontSize: '11px', color: tokens.colors.textMuted, lineHeight: 1.4 }}>Workflow Board</div>
           </div>
           <MentionInboxBadge workspaceId={wsId} />
+          <NotificationSettingsPanel />
         </div>
       </div>
 
@@ -202,9 +220,10 @@ export default function Sidebar({ isMobile, isOpen, onClose, wsId, boards }: Sid
             tabIndex={0}
             onClick={() => { navigate(`/ws/${wsId}/boards`); if (isMobile) onClose(); }}
             onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { navigate(`/ws/${wsId}/boards`); if (isMobile) onClose(); } }}
-            style={{ cursor: 'pointer' }}
+            style={{ cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 6 }}
           >
             BOARDS
+            {counts.tickets.total > 0 && <NavBadge count={counts.tickets.total} />}
           </span>
           <span
             role="button"
@@ -277,9 +296,12 @@ export default function Sidebar({ isMobile, isOpen, onClose, wsId, boards }: Sid
                       >
                         B
                       </div>
-                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
                         {b.name}
                       </span>
+                      {counts.tickets.perBoard[b.id] > 0 && (
+                        <NavBadge count={counts.tickets.perBoard[b.id]} />
+                      )}
                     </button>
                     {/* Board Settings sub-entry when board is active */}
                     {active && (

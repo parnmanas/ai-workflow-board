@@ -4,6 +4,7 @@ import { api } from '../api';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
+import { useNotifications } from '../contexts/NotificationContext';
 import ChildTicketList from './SubtaskList';
 import CommentList from './CommentList';
 import { TypingIndicator } from './TypingIndicator';
@@ -529,19 +530,24 @@ export default function TicketPanel({
   // unread cue in CommentList stays stable while the user reads. On
   // unmount/ticket-switch we POST a NOW marker so the next visit treats
   // anything posted while we were away as unread.
+  const { markRead: markBadgeRead } = useNotifications();
   useEffect(() => {
     const ticketId = activeTicket.id;
     let cancelled = false;
     api.getTicketReadState(ticketId)
       .then(state => { if (!cancelled) setLastReadAt(state.last_read_at); })
       .catch(() => { if (!cancelled) setLastReadAt(null); });
+    // Opening the panel already counts as "read up to here" for the badge
+    // system. The server marker is still written on unmount below, but
+    // clearing the sidebar badge immediately makes the UI feel right.
+    markBadgeRead('tickets', ticketId);
     return () => {
       cancelled = true;
       // Mark the ticket read up to NOW. Server is monotonic so a
       // concurrent tab having marked further forward is preserved.
       api.markTicketRead(ticketId).catch(() => { /* ignore */ });
     };
-  }, [activeTicket.id]);
+  }, [activeTicket.id, markBadgeRead]);
 
   // Subscribe to ticket_presence events scoped to the currently active ticket.
   // Server emits only on transitions, so this is low-traffic.

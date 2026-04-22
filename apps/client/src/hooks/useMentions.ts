@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, UserMentionItem } from '../api';
 import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
+import { useNotifications } from '../contexts/NotificationContext';
 
 interface UseMentionsResult {
   unreadCount: number;
@@ -19,6 +20,10 @@ interface UseMentionsResult {
 export function useMentions(workspaceId: string | null): UseMentionsResult {
   const [unreadItems, setUnreadItems] = useState<UserMentionItem[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
+  // Mirror single-mention and all-read actions into the sidebar
+  // NotificationContext so the nav mentions badge clears in lockstep
+  // with this inbox drop-down (and across tabs via BroadcastChannel).
+  const notifications = useNotifications();
 
   const refresh = useCallback(async () => {
     if (!workspaceId) {
@@ -72,11 +77,15 @@ export function useMentions(workspaceId: string | null): UseMentionsResult {
     setUnreadCount(c => Math.max(0, c - 1));
     try {
       await api.markMentionRead(mentionId);
+      // Refresh the authoritative sidebar count — we don't know locally
+      // whether this was the last unread so best to re-fetch rather than
+      // double-decrement.
+      notifications.refresh();
     } catch {
       // Roll back on failure — refetch will correct if the user keeps the panel open.
       refresh();
     }
-  }, [refresh]);
+  }, [refresh, notifications]);
 
   const markAllRead = useCallback(async () => {
     if (!workspaceId) return;
@@ -86,11 +95,12 @@ export function useMentions(workspaceId: string | null): UseMentionsResult {
     setUnreadCount(0);
     try {
       await api.markAllMentionsRead(workspaceId);
+      notifications.markRead('mentions');
     } catch {
       setUnreadItems(prevItems);
       setUnreadCount(prevCount);
     }
-  }, [workspaceId, unreadItems, unreadCount]);
+  }, [workspaceId, unreadItems, unreadCount, notifications]);
 
   return { unreadCount, unreadItems, refresh, markRead, markAllRead };
 }
