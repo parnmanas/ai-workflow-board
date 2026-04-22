@@ -125,6 +125,8 @@ This starts both the client and server:
 
 ## Production Deployment
 
+> **Note on branches.** `main` holds the source code; deploy automation lives only on `production.private`. That branch equals `main` plus one extra commit adding `.github/workflows/deploy.yml` (trigger: `push` to `production.private`). To ship a release, rebase `production.private` onto the new `main` and push — `scripts/deploy-sync.sh` (or `scripts/deploy-sync.ps1` on Windows) does the whole dance in one command. Don't merge `main` into `production.private`; use rebase to avoid 3-way-merging the "deploy.yml doesn't exist on main" delta into a file deletion.
+
 ### Docker Compose (Recommended)
 
 ```bash
