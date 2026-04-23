@@ -263,16 +263,22 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       (req as any).currentWorkspaceId = mcpAuthInfo.workspaceId ?? null;
 
       // schemaVersion:2 validation — per D-12..D-14
-      // Skip for internal clients (presence heartbeat) that only call ping tool
+      // Skip for internal clients (presence heartbeat) that only call ping tool.
+      // Skip for subagents spawned directly via Claude CLI (no proxy.mjs in path):
+      // the gate's purpose is to detect outdated proxy.mjs versions, which is
+      // meaningless when the client isn't a proxy at all. Subagent-manager marks
+      // these sessions with X-AWB-Client-Type: subagent.
       if (req.method === 'POST' && req.body?.method === 'initialize') {
         const clientName = req.body?.params?.clientInfo?.name;
+        const clientTypeHeader = String(req.headers['x-awb-client-type'] || '').toLowerCase();
         const schemaVerRaw = req.body?.params?.capabilities?.experimental?.['awb/schemaVersion'];
         // Accept both { version: 2 } (MCP-compliant object) and bare 2 (legacy)
         const schemaVer = typeof schemaVerRaw === 'object' && schemaVerRaw !== null
           ? schemaVerRaw.version
           : schemaVerRaw;
         const isInternalClient = clientName === 'awb-presence-heartbeat';
-        if (schemaVer !== 2 && !isInternalClient) {
+        const isSubagent = clientTypeHeader === 'subagent';
+        if (schemaVer !== 2 && !isInternalClient && !isSubagent) {
           return res.status(200).json({
             jsonrpc: '2.0',
             id: req.body.id ?? null,
