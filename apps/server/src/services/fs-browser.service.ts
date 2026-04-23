@@ -24,7 +24,13 @@ import { LogService } from './log.service';
  *   real filesystem layout); server is a pure forwarder.
  */
 
-export type FsOp = 'list' | 'stat' | 'read';
+export type FsOp = 'list' | 'stat' | 'read' | 'roots';
+
+export interface FsRootsResult {
+  cwd: string;
+  roots: string[];
+  enabled: boolean;
+}
 
 export interface FsListEntry {
   name: string;
@@ -62,7 +68,7 @@ export interface FsReadResult {
 
 export interface FsPluginResponse {
   ok: boolean;
-  data?: FsListResult | FsStatResult | FsReadResult;
+  data?: FsListResult | FsStatResult | FsReadResult | FsRootsResult;
   error?: string;
   code?: string;
 }
@@ -70,7 +76,7 @@ export interface FsPluginResponse {
 interface PendingRequest {
   agent_id: string;
   op: FsOp;
-  path: string;
+  path?: string;
   created_at: number;
   resolve: (v: FsPluginResponse) => void;
   timer: NodeJS.Timeout;
@@ -97,7 +103,7 @@ export class FsBrowserService {
   async request(
     agentId: string,
     op: FsOp,
-    args: { path: string; offset?: number; limit?: number },
+    args: { path?: string; offset?: number; limit?: number },
   ): Promise<FsPluginResponse> {
     const agent = await this.agentRepo.findOne({ where: { id: agentId } });
     if (!agent) throw new Error('Agent not found');

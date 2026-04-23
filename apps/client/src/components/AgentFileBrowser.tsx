@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../api';
-import type { FsListEntry, FsListResult, FsReadResult } from '../types';
+import type { FsListEntry, FsListResult, FsReadResult, FsRootsResult } from '../types';
 import { tokens } from '../tokens';
 
 interface AgentFileBrowserProps {
@@ -59,6 +59,7 @@ export default function AgentFileBrowser({ agentId, isOnline }: AgentFileBrowser
   const [selectedFile, setSelectedFile] = useState<FsReadResult | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [rootsInfo, setRootsInfo] = useState<FsRootsResult | null>(null);
 
   const crumbs = useMemo(() => (path ? splitCrumbs(path) : []), [path]);
 
@@ -95,15 +96,40 @@ export default function AgentFileBrowser({ agentId, isOnline }: AgentFileBrowser
   }, [agentId]);
 
   useEffect(() => {
-    // Switching agents blanks the view until the user types a starting path —
-    // we intentionally don't auto-list anything because the set of valid
-    // roots is agent-specific and lives only in the plugin config.
+    // Reset view, then auto-discover the starting directory: ask the plugin
+    // for its cwd + configured roots and list whichever makes sense. Without
+    // this step the user would have to guess an absolute path to begin with,
+    // which defeats the "file explorer" affordance.
     setPath('');
     setInputPath('');
     setListing(null);
     setSelectedFile(null);
     setError(null);
-  }, [agentId]);
+    setRootsInfo(null);
+
+    if (!isOnline) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const info = await api.getAgentFsRoots(agentId);
+        if (cancelled) return;
+        setRootsInfo(info);
+        if (!info.enabled) {
+          setError('File browsing is disabled on this agent. Add fs_browser.{enabled,roots} to the plugin config.');
+          return;
+        }
+        // Prefer cwd when it's already inside a configured root — the human
+        // usually wants to start where the agent is actually working. Fall
+        // back to the first root when cwd is outside scope.
+        const cwdInScope = info.roots.some(r => info.cwd === r || info.cwd.startsWith(r + '/') || info.cwd.startsWith(r + '\\'));
+        const starting = cwdInScope ? info.cwd : (info.roots[0] || '');
+        if (starting) loadPath(starting);
+      } catch (err: any) {
+        if (!cancelled) setError(err?.message || 'Failed to fetch agent scope roots');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [agentId, isOnline, loadPath]);
 
   if (!isOnline) {
     return (
@@ -115,6 +141,57 @@ export default function AgentFileBrowser({ agentId, isOnline }: AgentFileBrowser
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      {rootsInfo && rootsInfo.roots.length > 0 && (
+        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', alignItems: 'center' }}>
+          <span style={{ fontSize: 10, color: tokens.colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.4, marginRight: 2 }}>
+            Roots
+          </span>
+          {rootsInfo.roots.map((root) => {
+            const isActive = path === root || path.startsWith(root + '/') || path.startsWith(root + '\\');
+            return (
+              <button
+                key={root}
+                type="button"
+                onClick={() => loadPath(root)}
+                title={root}
+                style={{
+                  background: isActive ? tokens.colors.accent : tokens.colors.surfaceCard,
+                  color: isActive ? 'white' : tokens.colors.textSecondary,
+                  border: `1px solid ${isActive ? tokens.colors.accent : tokens.colors.border}`,
+                  borderRadius: tokens.radii.full,
+                  padding: '2px 10px',
+                  fontSize: 11,
+                  fontFamily: 'monospace',
+                  cursor: 'pointer',
+                  maxWidth: 220,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {root.split(/[\\/]/).filter(Boolean).slice(-2).join('/') || root}
+              </button>
+            );
+          })}
+          {rootsInfo.cwd && !rootsInfo.roots.includes(rootsInfo.cwd) && (
+            <button
+              type="button"
+              onClick={() => loadPath(rootsInfo.cwd)}
+              title={`cwd: ${rootsInfo.cwd}`}
+              style={{
+                background: 'transparent',
+                color: tokens.colors.textMuted,
+                border: `1px dashed ${tokens.colors.border}`,
+                borderRadius: tokens.radii.full,
+                padding: '2px 10px',
+                fontSize: 11,
+                fontFamily: 'monospace',
+                cursor: 'pointer',
+              }}
+            >cwd</button>
+          )}
+        </div>
+      )}
       <form
         onSubmit={(e) => { e.preventDefault(); loadPath(inputPath.trim()); }}
         style={{ display: 'flex', gap: 6 }}

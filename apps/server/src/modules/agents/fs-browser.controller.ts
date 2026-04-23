@@ -37,7 +37,22 @@ export class FsBrowserController {
     private readonly logService: LogService,
   ) {}
 
-  // ─── User-facing: list / stat / read ──────────────────────────────
+  // ─── User-facing: roots / list / stat / read ──────────────────────
+
+  @Get('api/agents/:id/fs/roots')
+  @UseGuards(PermissionGuard)
+  @RequirePermission(PERMISSIONS.BROWSE_AGENT_FS)
+  @ApiOperation({
+    summary: 'Report the agent\'s configured scope roots and current working directory',
+    description: 'UI calls this on open to decide the initial directory without the user having to type a path. Also tells the UI whether fs browsing is enabled on the plugin side.',
+  })
+  async roots(
+    @Param('id') id: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    return this.forward(id, 'roots', {}, req, res);
+  }
 
   @Get('api/agents/:id/fs/list')
   @UseGuards(PermissionGuard)
@@ -137,11 +152,13 @@ export class FsBrowserController {
   private async forward(
     agentId: string,
     op: FsOp,
-    args: { path: string; offset?: number; limit?: number },
+    args: { path?: string; offset?: number; limit?: number },
     req: Request,
     res: Response,
   ) {
-    if (!args.path || typeof args.path !== 'string') {
+    // `roots` is a self-describing discovery call — no path input makes sense.
+    // Every other op needs a concrete absolute path from the caller.
+    if (op !== 'roots' && (!args.path || typeof args.path !== 'string')) {
       return res.status(400).json({ error: 'path query parameter is required' });
     }
 
@@ -154,7 +171,7 @@ export class FsBrowserController {
       return res.status(503).json({ error: 'Agent is offline', code: 'AGENT_OFFLINE' });
     }
 
-    this.logService.info('FsBrowser', `${userLabel} ${op} ${args.path} on agent ${agent.name} (${agent.id})`);
+    this.logService.info('FsBrowser', `${userLabel} ${op} ${args.path ?? ''} on agent ${agent.name} (${agent.id})`);
 
     try {
       const result = await this.fsBrowser.request(agentId, op, args);
