@@ -115,7 +115,7 @@ export default function AgentFileBrowser({ agentId, isOnline }: AgentFileBrowser
         if (cancelled) return;
         setRootsInfo(info);
         if (!info.enabled) {
-          setError('File browsing is disabled on this agent. Add fs_browser.{enabled,roots} to the plugin config.');
+          setError('File browsing is disabled on this agent. Add a fs_browser.roots list to the plugin config.');
           return;
         }
         // Prefer cwd when it's already inside a configured root — the human
