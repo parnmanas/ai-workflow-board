@@ -263,8 +263,22 @@ export const api = {
       `/agents/${encodeURIComponent(agentId)}/activity?limit=${limit}`,
     );
   },
-  createAgent: (data: { name: string; description?: string; type?: string }) =>
-    request<any>('/agents', { method: 'POST', body: JSON.stringify(data) }),
+  // The server reads X-Workspace-Id from the header set by getAuthHeaders(),
+  // which pulls `currentWorkspaceId` from localStorage. When the user is on
+  // `/ws/:wsId/agents` but localStorage still points at a different workspace
+  // (refresh / bookmark / stale value), the POST would silently save the
+  // agent into the WRONG workspace, and the list refresh — which uses the
+  // URL wsId — would then show nothing new, appearing as "New Agent did
+  // nothing." The caller passes the URL wsId explicitly here so the request
+  // is unambiguously scoped to the workspace the user is looking at.
+  createAgent: (data: { name: string; description?: string; type?: string; workspaceId?: string }) => {
+    const { workspaceId, ...body } = data;
+    const init: RequestInit = { method: 'POST', body: JSON.stringify(body) };
+    if (workspaceId) {
+      init.headers = { ...getAuthHeaders(), 'X-Workspace-Id': workspaceId };
+    }
+    return request<any>('/agents', init);
+  },
   updateAgent: (id: string, data: Record<string, any>) =>
     request<any>(`/agents/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteAgent: (id: string) =>

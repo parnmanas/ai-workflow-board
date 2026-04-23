@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom';
 import { api } from '../api';
 import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
 import { useAuth } from '../contexts/AuthContext';
+import { useToast } from '../contexts/ToastContext';
 import PageHeader from './PageHeader';
 import AgentCard from './AgentCard';
 import AgentDetailModal from './AgentDetailModal';
@@ -49,6 +50,7 @@ function mergeAgentStatus(
 export default function AgentsPage() {
   const { wsId } = useParams<{ wsId: string }>();
   const { user } = useAuth();
+  const { showToast } = useToast();
 
   const [agents, setAgents] = useState<DashboardAgent[] | null>(null);
   const [loading, setLoading] = useState(true);
@@ -112,17 +114,35 @@ export default function AgentsPage() {
   });
 
   // ─── Handlers ─────────────────────────────────────────────────
+  // Track in-flight state so double-clicks on Create don't spawn parallel
+  // POSTs, and so the button can disable + show "Creating..." feedback.
+  const [creating, setCreating] = useState(false);
   const handleCreateAgent = useCallback(async () => {
-    if (!createForm.name.trim()) return;
-    await api.createAgent({
-      name: createForm.name.trim(),
-      description: createForm.description.trim() || undefined,
-      type: createForm.type,
-    });
-    setCreateForm({ name: '', description: '', type: 'custom' });
-    setShowCreateModal(false);
-    await loadSnapshot();
-  }, [createForm, loadSnapshot]);
+    if (!createForm.name.trim() || creating) return;
+    setCreating(true);
+    try {
+      // Pass the URL wsId explicitly so the request always lands in the
+      // workspace the user is looking at, regardless of whether
+      // localStorage.currentWorkspaceId has drifted.
+      await api.createAgent({
+        name: createForm.name.trim(),
+        description: createForm.description.trim() || undefined,
+        type: createForm.type,
+        workspaceId: wsId,
+      });
+      setCreateForm({ name: '', description: '', type: 'custom' });
+      setShowCreateModal(false);
+      await loadSnapshot();
+      showToast('Agent created', 'success');
+    } catch (err: any) {
+      // Surface the failure — prior silent-catch made "New Agent" appear to
+      // do nothing when the POST was rejected (403 from WorkspaceGuard,
+      // auth expiry, etc.). Keep the modal open so the user can retry.
+      showToast(err?.message || 'Failed to create agent', 'error');
+    } finally {
+      setCreating(false);
+    }
+  }, [createForm, creating, loadSnapshot, wsId, showToast]);
 
   // ─── Render ───────────────────────────────────────────────────
   const agentsList = agents || [];
@@ -329,13 +349,13 @@ export default function AgentsPage() {
               }}>Cancel</button>
               <button
                 onClick={handleCreateAgent}
-                disabled={!createForm.name.trim()}
+                disabled={!createForm.name.trim() || creating}
                 style={{
-                  background: createForm.name.trim() ? tokens.colors.accent : tokens.colors.border, color: 'white',
+                  background: createForm.name.trim() && !creating ? tokens.colors.accent : tokens.colors.border, color: 'white',
                   border: 'none', borderRadius: tokens.radii.md, padding: '6px 14px', fontSize: '12px',
-                  fontWeight: 600, cursor: createForm.name.trim() ? 'pointer' : 'not-allowed',
+                  fontWeight: 600, cursor: createForm.name.trim() && !creating ? 'pointer' : 'not-allowed',
                 }}
-              >Create</button>
+              >{creating ? 'Creating...' : 'Create'}</button>
             </div>
           </div>
         </div>
