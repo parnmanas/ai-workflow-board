@@ -16,7 +16,8 @@ export type StreamEventType =
   | 'comment_mention'      // Mention feature: agent @-mentioned in a ticket comment
   | 'user_mention'         // Mention feature: user @-mentioned (web UI unread badge)
   | 'comment_typing'       // Phase-9 typed comments: someone is composing a comment on a ticket
-  | 'ticket_presence';     // Tier-1 E: viewer set for a ticket (who has the panel open)
+  | 'ticket_presence'      // Tier-1 E: viewer set for a ticket (who has the panel open)
+  | 'fs_request';          // File browser: server → plugin reverse RPC to read agent-machine files
 
 export interface StreamEventScope {
   board_id?: string;
@@ -207,4 +208,18 @@ export interface UserMentionPayload {
   actor_name: string;
   preview: string;
   created_at: string; // ISO-8601
+}
+
+// File browser — server emits this toward a specific agent's SSE stream to ask
+// the plugin to perform a filesystem op on the agent's machine. Plugin answers
+// via HTTP POST to /api/fs/responses/:request_id (out-of-band — not SSE) so
+// response bodies aren't constrained by event-stream framing. Scope root
+// enforcement lives in the plugin, not here — server is a pure forwarder.
+export interface FsRequestPayload {
+  request_id: string;                        // server-generated uuid; plugin echoes it on the response POST
+  agent_id: string;                          // target agent (matches identity for filter)
+  op: 'list' | 'stat' | 'read';
+  path: string;                              // absolute path on the agent machine
+  offset?: number;                           // read: byte offset (default 0)
+  limit?: number;                            // read: max bytes (server caps at 5MB)
 }

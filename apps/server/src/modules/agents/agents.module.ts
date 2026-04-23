@@ -3,18 +3,21 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { Agent } from '../../entities/Agent';
 import { Ticket } from '../../entities/Ticket';
 import { AgentsController } from './agents.controller';
+import { FsBrowserController } from './fs-browser.controller';
 import { AgentConnectionService } from './agent-connection.service';
 import { TriggerLoopService } from './trigger-loop.service';
 import { AgentStatusService } from './agent-status.service';
 import { AllocationService } from './allocation.service';
 import { TicketSupervisorService } from './ticket-supervisor.service';
+import { FsBrowserService } from '../../services/fs-browser.service';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
+import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 
 @Module({
   imports: [TypeOrmModule.forFeature([Agent, Ticket])],
-  controllers: [AgentsController],
-  providers: [AuthGuard, PermissionGuard, AgentConnectionService, TriggerLoopService, AgentStatusService, AllocationService, TicketSupervisorService],
-  exports: [AgentConnectionService, TriggerLoopService, AgentStatusService, AllocationService],
+  controllers: [AgentsController, FsBrowserController],
+  providers: [AuthGuard, PermissionGuard, AgentAuthGuard, AgentConnectionService, TriggerLoopService, AgentStatusService, AllocationService, TicketSupervisorService, FsBrowserService],
+  exports: [AgentConnectionService, TriggerLoopService, AgentStatusService, AllocationService, FsBrowserService],
 })
 export class AgentsModule {}

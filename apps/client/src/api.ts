@@ -13,6 +13,9 @@ import type {
   ChatRoomParticipantInfo,
   AgentErrorLog,
   AgentErrorLogAgentSummary,
+  FsListResult,
+  FsStatResult,
+  FsReadResult,
 } from './types';
 
 const BASE = '/api';
@@ -262,6 +265,23 @@ export const api = {
     return request<ActivityRow[]>(
       `/agents/${encodeURIComponent(agentId)}/activity?limit=${limit}`,
     );
+  },
+  // ─── Agent file browser (v0.31.0) ─────────────────────────
+  // Each call forwards through to the agent's plugin over SSE and awaits the
+  // reverse-HTTP response. Agent offline → 503. Path outside scope → 403.
+  listAgentFs: (agentId: string, path: string): Promise<FsListResult> => {
+    const params = new URLSearchParams({ path });
+    return request<FsListResult>(`/agents/${encodeURIComponent(agentId)}/fs/list?${params.toString()}`);
+  },
+  statAgentFs: (agentId: string, path: string): Promise<FsStatResult> => {
+    const params = new URLSearchParams({ path });
+    return request<FsStatResult>(`/agents/${encodeURIComponent(agentId)}/fs/stat?${params.toString()}`);
+  },
+  readAgentFs: (agentId: string, path: string, opts?: { offset?: number; limit?: number }): Promise<FsReadResult> => {
+    const params = new URLSearchParams({ path });
+    if (opts?.offset !== undefined) params.set('offset', String(opts.offset));
+    if (opts?.limit !== undefined) params.set('limit', String(opts.limit));
+    return request<FsReadResult>(`/agents/${encodeURIComponent(agentId)}/fs/read?${params.toString()}`);
   },
   // The server reads X-Workspace-Id from the header set by getAuthHeaders(),
   // which pulls `currentWorkspaceId` from localStorage. When the user is on

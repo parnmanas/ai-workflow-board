@@ -374,3 +374,41 @@ export interface AgentStatusEnvelope {
   };
   timestamp: string;
 }
+
+// ─── Agent File Browser (v0.31.0) ───────────────────────────
+// Responses returned by the plugin (via /api/agents/:id/fs/*) when browsing
+// files on an agent's machine. Path enforcement happens on the plugin side
+// against configured scope roots; server is a pure forwarder.
+export interface FsListEntry {
+  name: string;
+  type: 'file' | 'directory' | 'symlink' | 'other';
+  size: number;
+  mtime: string;
+  mode: number;
+}
+
+export interface FsListResult {
+  path: string;
+  entries: FsListEntry[];
+  truncated: boolean;
+}
+
+export interface FsStatResult {
+  path: string;
+  real_path?: string;
+  type: 'file' | 'directory' | 'symlink' | 'other';
+  size: number;
+  mtime: string;
+  mode: number;
+}
+
+export interface FsReadResult {
+  path: string;
+  content: string;           // utf8 text, or base64 bytes — see encoding
+  encoding: 'utf8' | 'base64';
+  size: number;              // full file size at stat time
+  read_bytes: number;        // bytes this response actually contains
+  offset: number;
+  truncated: boolean;        // true when size > offset + read_bytes
+  mtime: string;
+}
