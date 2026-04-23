@@ -14,6 +14,7 @@ export const PERMISSIONS = {
   VIEW_ACTIVITY: 'activity.view',
   CHAT_SEND: 'chat.send',
   CHAT_VIEW: 'chat.view',
+  BROWSE_AGENT_FS: 'agents.fs_browse',
 } as const;
 
 export type Permission = typeof PERMISSIONS[keyof typeof PERMISSIONS];
@@ -58,4 +59,5 @@ export const PERMISSION_LABELS: Record<string, { label: string; description: str
   [PERMISSIONS.VIEW_ACTIVITY]: { label: 'View Activity', description: 'View activity logs', group: 'General' },
   [PERMISSIONS.CHAT_SEND]: { label: 'Send Chat Messages', description: 'Send chat messages to agents', group: 'Chat' },
   [PERMISSIONS.CHAT_VIEW]: { label: 'View Chat Messages', description: 'View chat threads and history', group: 'Chat' },
+  [PERMISSIONS.BROWSE_AGENT_FS]: { label: 'Browse Agent Filesystem', description: 'Browse files on an agent machine within scoped roots configured on the plugin side', group: 'Admin' },
 };

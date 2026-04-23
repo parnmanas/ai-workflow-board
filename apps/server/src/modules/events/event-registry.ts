@@ -26,6 +26,7 @@ import {
   CommentTypingPayload,
   TicketPresencePayload,
   UserMentionPayload,
+  FsRequestPayload,
 } from '../../common/types/stream-events';
 import { EventDefinition, SubscriberIdentity } from './types';
 
@@ -505,5 +506,56 @@ export const EVENT_TYPES: EventDefinition[] = [
       return true;
     },
     flatten: (env) => env.payload,
+  },
+
+  // ───────── fs_request ─────────
+  // Reverse RPC: server (acting on behalf of a web-UI user) asks a specific
+  // agent's plugin proxy to perform a filesystem op on the agent machine.
+  // Only the target agent's SSE stream receives the event — same filter shape
+  // as agent_trigger. Plugin answers via HTTP POST to
+  // `/api/fs/responses/:request_id` (out-of-band) so response bodies aren't
+  // constrained by event-stream framing.
+  {
+    eventType: 'fs_request',
+    emitterEvent: 'fs_request',
+    map(event: any) {
+      const payload: FsRequestPayload = {
+        request_id: event.request_id,
+        agent_id: event.agent_id,
+        op: event.op,
+        path: event.path,
+        offset: event.offset,
+        limit: event.limit,
+      };
+      return {
+        payload,
+        scope: { agent_id: event.agent_id },
+        timestamp: event.timestamp,
+      };
+    },
+    filter: (env, identity) => {
+      if (identity.type !== 'agent') return false;
+      return env.scope.agent_id === identity.agentId;
+    },
+    flatten: (env) => {
+      const p = env.payload as FsRequestPayload;
+      return {
+        board_id: '__fs__',
+        event_type: 'fs_request',
+        ticket_id: '',
+        entity_type: 'fs',
+        action: p.op,
+        field_changed: p.request_id,
+        actor_name: p.agent_id,
+        // Plugin reads these top-level fields when dispatching.
+        request_id: p.request_id,
+        agent_id: p.agent_id,
+        op: p.op,
+        path: p.path,
+        offset: p.offset,
+        limit: p.limit,
+        timestamp: env.timestamp,
+      };
+    },
   },
 ];

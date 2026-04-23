@@ -25,6 +25,11 @@ export class AgentAuthGuard implements CanActivate {
       if (dbResult.valid && dbResult.apiKey) {
         // Inject workspace_id from the API key record for workspace-scoped queries
         request.currentWorkspaceId = dbResult.apiKey.workspace_id || null;
+        // Also expose the resolved ApiKey row + agent id so downstream
+        // controllers (e.g. fs-browser response receiver) can identify
+        // WHICH agent is calling without a second lookup.
+        request.apiKey = dbResult.apiKey;
+        request.currentAgentId = dbResult.apiKey.agent_id || null;
         return true;
       }
     } catch {

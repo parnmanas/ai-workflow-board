@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import type { AgentDetail, ActivityRow } from '../types';
 import { tokens } from '../tokens';
+import AgentFileBrowser from './AgentFileBrowser';
 
 /**
  * AgentDetailPanel — Phase 6 Plan 06-05.
@@ -453,6 +454,14 @@ export default function AgentDetailPanel({
             })}
           </div>
         )}
+      </section>
+
+      {/* ── File browser (v0.31.0) ───────────────────────── */}
+      <section style={{ marginTop: 16, marginBottom: 16 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, color: tokens.colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 8 }}>
+          Files
+        </div>
+        <AgentFileBrowser agentId={agent.id} isOnline={!!agent.is_online} />
       </section>
 
       {/* ── Save changes (admin only) ────────────────────── */}
