@@ -134,6 +134,7 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
   const [recentActivity, setRecentActivity] = useState<ActivityRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<'info' | 'files'>('info');
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
 
   const loadDetail = async () => {
@@ -478,6 +479,54 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
             </div>
           )}
 
+          {/* Tab bar — two tabs: Info (existing info/activity sections) and
+             Files (fs-browser). Rendered above the content so the scroll
+             body keeps its current spacing without an extra wrapper. Sticky
+             positioning keeps the tabs visible even when the file browser's
+             text preview grows past one viewport. */}
+          <div
+            role="tablist"
+            style={{
+              position: 'sticky',
+              top: -24,
+              background: tokens.colors.surface,
+              display: 'flex',
+              gap: 4,
+              borderBottom: `1px solid ${tokens.colors.border}`,
+              marginTop: -8,
+              marginBottom: -8,
+              zIndex: 1,
+            }}
+          >
+            {(['info', 'files'] as const).map((tab) => {
+              const isActive = activeTab === tab;
+              return (
+                <button
+                  key={tab}
+                  role="tab"
+                  aria-selected={isActive}
+                  onClick={() => setActiveTab(tab)}
+                  style={{
+                    background: 'transparent',
+                    color: isActive ? tokens.colors.textPrimary : tokens.colors.textMuted,
+                    border: 'none',
+                    borderBottom: `2px solid ${isActive ? tokens.colors.accent : 'transparent'}`,
+                    padding: '8px 14px',
+                    fontSize: 12,
+                    fontWeight: isActive ? 600 : 500,
+                    textTransform: 'uppercase',
+                    letterSpacing: 0.6,
+                    cursor: 'pointer',
+                  }}
+                >
+                  {tab === 'info' ? 'Info' : 'Files'}
+                </button>
+              );
+            })}
+          </div>
+
+          {activeTab === 'info' && (
+          <>
           {/* CURRENT TASK section */}
           <section>
             <div style={sectionLabelStyle}>CURRENT TASK</div>
@@ -725,23 +774,14 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
               </div>
             )}
           </section>
+          </>
+          )}
 
-          {/* FILES section — v0.31.0 fs-browser. Renders only when the agent
-             detail is loaded so we have id + is_online to gate on. */}
-          {detail && (
-            <section>
-              <div style={{
-                fontSize: tokens.typography.fontSizeXs,
-                fontWeight: tokens.typography.fontWeightSemibold,
-                color: tokens.colors.textMuted,
-                textTransform: 'uppercase',
-                letterSpacing: 0.6,
-                marginBottom: tokens.spacing.sm,
-              }}>
-                Files
-              </div>
-              <AgentFileBrowser agentId={detail.id} isOnline={isOnline} />
-            </section>
+          {/* FILES tab — the tab bar above gates visibility. The component
+             is mounted only while the tab is active so it skips the initial
+             /fs/roots fetch until the user asks for it. */}
+          {activeTab === 'files' && detail && (
+            <AgentFileBrowser agentId={detail.id} isOnline={isOnline} />
           )}
         </div>
       </div>
