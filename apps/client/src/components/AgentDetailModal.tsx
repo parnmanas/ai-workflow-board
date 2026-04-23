@@ -6,6 +6,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 import type { AgentDetail, ActivityRow } from '../types';
 import { tokens } from '../tokens';
+import AgentFileBrowser from './AgentFileBrowser';
 
 /**
  * AgentDetailModal — Phase 3 Plan 03-03 §Component Inventory #4.
@@ -724,6 +725,24 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
               </div>
             )}
           </section>
+
+          {/* FILES section — v0.31.0 fs-browser. Renders only when the agent
+             detail is loaded so we have id + is_online to gate on. */}
+          {detail && (
+            <section>
+              <div style={{
+                fontSize: tokens.typography.fontSizeXs,
+                fontWeight: tokens.typography.fontWeightSemibold,
+                color: tokens.colors.textMuted,
+                textTransform: 'uppercase',
+                letterSpacing: 0.6,
+                marginBottom: tokens.spacing.sm,
+              }}>
+                Files
+              </div>
+              <AgentFileBrowser agentId={detail.id} isOnline={isOnline} />
+            </section>
+          )}
         </div>
       </div>
     </>
