@@ -16,6 +16,7 @@ import type {
   FsListResult,
   FsStatResult,
   FsReadResult,
+  FsRootsResult,
 } from './types';
 
 const BASE = '/api';
@@ -269,6 +270,8 @@ export const api = {
   // ─── Agent file browser (v0.31.0) ─────────────────────────
   // Each call forwards through to the agent's plugin over SSE and awaits the
   // reverse-HTTP response. Agent offline → 503. Path outside scope → 403.
+  getAgentFsRoots: (agentId: string): Promise<FsRootsResult> =>
+    request<FsRootsResult>(`/agents/${encodeURIComponent(agentId)}/fs/roots`),
   listAgentFs: (agentId: string, path: string): Promise<FsListResult> => {
     const params = new URLSearchParams({ path });
     return request<FsListResult>(`/agents/${encodeURIComponent(agentId)}/fs/list?${params.toString()}`);

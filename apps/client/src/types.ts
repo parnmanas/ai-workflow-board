@@ -412,3 +412,9 @@ export interface FsReadResult {
   truncated: boolean;        // true when size > offset + read_bytes
   mtime: string;
 }
+
+export interface FsRootsResult {
+  cwd: string;               // plugin process cwd (may or may not be in scope)
+  roots: string[];           // configured scope roots (realpath'd)
+  enabled: boolean;          // false when plugin has fs_browser off or no valid roots
+}
