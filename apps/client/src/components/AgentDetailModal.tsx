@@ -2,6 +2,8 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
+import { useAuth } from '../contexts/AuthContext';
+import { useToast } from '../contexts/ToastContext';
 import type { AgentDetail, ActivityRow } from '../types';
 import { tokens } from '../tokens';
 
@@ -30,6 +32,10 @@ import { tokens } from '../tokens';
 interface AgentDetailModalProps {
   agentId: string;
   onClose: () => void;
+  // Called after a successful delete so the parent page can refresh its
+  // snapshot. Optional so callers that don't care about deletions don't
+  // have to pass a no-op.
+  onDeleted?: (agentId: string) => void;
 }
 
 const ACTION_VERB: Record<string, string> = {
@@ -102,7 +108,26 @@ function formatActivityTimestamp(iso: string): string {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
-export default function AgentDetailModal({ agentId, onClose }: AgentDetailModalProps) {
+export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentDetailModalProps) {
+  const { user } = useAuth();
+  const { showToast } = useToast();
+  const [deleting, setDeleting] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const handleDeleteAgent = async () => {
+    if (deleting) return;
+    setDeleting(true);
+    try {
+      await api.deleteAgent(agentId);
+      showToast('Agent deleted', 'success');
+      onDeleted?.(agentId);
+      onClose();
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to delete agent', 'error');
+      setConfirmingDelete(false);
+    } finally {
+      setDeleting(false);
+    }
+  };
   const navigate = useNavigate();
   const [detail, setDetail] = useState<AgentDetail | null>(null);
   const [recentActivity, setRecentActivity] = useState<ActivityRow[]>([]);
@@ -321,25 +346,86 @@ export default function AgentDetailModal({ agentId, onClose }: AgentDetailModalP
               </div>
             )}
           </div>
-          {/* Close button */}
-          <button
-            ref={closeButtonRef}
-            type="button"
-            onClick={onClose}
-            style={{
-              background: tokens.colors.border,
-              color: tokens.colors.textStrong,
-              border: 'none',
-              borderRadius: tokens.radii.md,
-              padding: '4px 12px',
-              fontSize: 16,
-              cursor: 'pointer',
-              flexShrink: 0,
-            }}
-            aria-label="Close agent detail"
-          >
-            x
-          </button>
+          {/* Delete + close — delete is admin-only, and uses a two-click
+              confirmation inline instead of a separate modal so we don't
+              stack overlays. First click arms "Confirm delete", second
+              click commits. Clicking away cancels via onBlur. */}
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
+            {user?.role === 'admin' && (
+              confirmingDelete ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={handleDeleteAgent}
+                    disabled={deleting}
+                    style={{
+                      background: tokens.colors.dangerMid,
+                      color: '#fff',
+                      border: 'none',
+                      borderRadius: tokens.radii.md,
+                      padding: '4px 12px',
+                      fontSize: 12,
+                      fontWeight: 600,
+                      cursor: deleting ? 'not-allowed' : 'pointer',
+                    }}
+                  >
+                    {deleting ? 'Deleting...' : 'Confirm delete'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmingDelete(false)}
+                    disabled={deleting}
+                    style={{
+                      background: 'transparent',
+                      color: tokens.colors.textSecondary,
+                      border: `1px solid ${tokens.colors.border}`,
+                      borderRadius: tokens.radii.md,
+                      padding: '4px 10px',
+                      fontSize: 12,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setConfirmingDelete(true)}
+                  title="Delete this agent"
+                  style={{
+                    background: 'transparent',
+                    color: tokens.colors.dangerLight,
+                    border: `1px solid ${tokens.colors.dangerBg}`,
+                    borderRadius: tokens.radii.md,
+                    padding: '4px 10px',
+                    fontSize: 12,
+                    fontWeight: 500,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Delete
+                </button>
+              )
+            )}
+            <button
+              ref={closeButtonRef}
+              type="button"
+              onClick={onClose}
+              style={{
+                background: tokens.colors.border,
+                color: tokens.colors.textStrong,
+                border: 'none',
+                borderRadius: tokens.radii.md,
+                padding: '4px 12px',
+                fontSize: 16,
+                cursor: 'pointer',
+              }}
+              aria-label="Close agent detail"
+            >
+              x
+            </button>
+          </div>
         </div>
 
         {/* Scroll body */}

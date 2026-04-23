@@ -283,6 +283,13 @@ export default function AgentsPage() {
         <AgentDetailModal
           agentId={detailAgentId}
           onClose={() => setDetailAgentId(null)}
+          onDeleted={(deletedId) => {
+            // Optimistic removal so the card disappears instantly; the
+            // subsequent loadSnapshot() is the authoritative truth.
+            setAgents((prev) => (prev ? prev.filter((a) => a.id !== deletedId) : prev));
+            setDetailAgentId(null);
+            loadSnapshot();
+          }}
         />
       )}
 

@@ -60,14 +60,40 @@ export default function AppLayout() {
   // Derive current workspace object for WorkspaceBanner
   const currentWorkspace = workspaces.find(w => w.id === currentWorkspaceId) ?? null;
 
-  // Auto-select first workspace if none saved
+  // ── Single-source-of-truth sync: URL → state → localStorage ──────────
+  //
+  // currentWorkspaceId used to live in 3 places (localStorage header
+  // source, AppLayout state, AuthContext state) that drifted apart on
+  // URL-initiated changes (bookmark load, browser back, sidebar click
+  // while on a non-ws route, etc). Symptom: WorkspaceSelector dropdown
+  // showed workspace A while the page showed B, and writes (create
+  // agent, etc.) landed in whichever workspace localStorage happened
+  // to hold.
+  //
+  // Fix: whenever the URL carries a wsId, force localStorage + local
+  // state to agree with it. Runs on every URL change, synchronously
+  // before any child component re-renders, so `getAuthHeaders()` (which
+  // still reads localStorage) always matches the page the user is
+  // actually looking at.
   useEffect(() => {
+    if (params.wsId && params.wsId !== currentWorkspaceId) {
+      setCurrentWorkspaceId(params.wsId);
+      try { localStorage.setItem('currentWorkspaceId', params.wsId); } catch {}
+    }
+  }, [params.wsId, currentWorkspaceId]);
+
+  // Auto-select first workspace if none saved AND the URL doesn't already
+  // dictate one. Without the URL check this effect would fight the
+  // sync-from-URL effect above on admin routes where params.wsId is
+  // undefined but a saved workspace should persist.
+  useEffect(() => {
+    if (params.wsId) return;
     if (workspaces.length > 0 && !currentWorkspaceId) {
       const first = workspaces[0].id;
       setCurrentWorkspaceId(first);
       try { localStorage.setItem('currentWorkspaceId', first); } catch {}
     }
-  }, [workspaces, currentWorkspaceId]);
+  }, [workspaces, currentWorkspaceId, params.wsId]);
 
   // Track boards for sidebar + WorkspaceSelector edit UX
   const fetchBoards = useCallback((wsId: string) => {
