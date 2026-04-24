@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState } from 'react';
 import { Droppable } from '@hello-pangea/dnd';
 import { Column as ColumnType, Ticket } from '../types';
 import TicketCard from './TicketCard';
@@ -14,8 +14,7 @@ interface ColumnProps {
 
 export default function Column({ column, onTicketClick, onCreateTicket }: ColumnProps) {
   const [showForm, setShowForm] = useState(false);
-  const columnScrollRef = useRef<HTMLDivElement | null>(null);
-  useDragToScroll(columnScrollRef, { axis: 'y' });
+  const columnScrollRef = useDragToScroll<HTMLDivElement>({ axis: 'y' });
 
   return (
     <div style={{
@@ -77,7 +76,7 @@ export default function Column({ column, onTicketClick, onCreateTicket }: Column
         {(provided, snapshot) => (
           <div
             ref={(node) => {
-              columnScrollRef.current = node;
+              columnScrollRef(node);
               provided.innerRef(node);
             }}
             {...provided.droppableProps}

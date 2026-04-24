@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { DragDropContext, DropResult } from '@hello-pangea/dnd';
 import { Group, Panel, Separator } from 'react-resizable-panels';
@@ -36,10 +36,8 @@ export default function Board() {
 
   const [activePanelTicketId, setActivePanelTicketId] = useState<string | null>(null);
 
-  const panelBoardScrollRef = useRef<HTMLDivElement | null>(null);
-  const fullBoardScrollRef = useRef<HTMLDivElement | null>(null);
-  useDragToScroll(panelBoardScrollRef, { axis: 'x' });
-  useDragToScroll(fullBoardScrollRef, { axis: 'x' });
+  const panelBoardScrollRef = useDragToScroll<HTMLDivElement>({ axis: 'x' });
+  const fullBoardScrollRef = useDragToScroll<HTMLDivElement>({ axis: 'x' });
 
   // Helper: wrap any async action with loading bar + error toast
   const wrapAction = useCallback(async (action: () => Promise<any>, successMsg?: string) => {

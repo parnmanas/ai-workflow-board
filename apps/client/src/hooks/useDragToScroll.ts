@@ -1,4 +1,4 @@
-import { useEffect, RefObject } from 'react';
+import { useEffect, useState } from 'react';
 
 type Axis = 'x' | 'y' | 'both';
 
@@ -7,14 +7,20 @@ export interface UseDragToScrollOptions {
   threshold?: number;
 }
 
+/**
+ * Click-and-drag pan on a scroll container. Returns a callback ref — attach
+ * it to the element you want pannable. The hook re-attaches listeners when
+ * the element changes, so it survives conditional renders that swap the
+ * underlying DOM node (e.g. toggling a side panel that renders a different
+ * scroll container subtree).
+ */
 export function useDragToScroll<T extends HTMLElement>(
-  ref: RefObject<T | null>,
   options: UseDragToScrollOptions = {},
-): void {
+): (node: T | null) => void {
   const { axis = 'both', threshold = 3 } = options;
+  const [el, setEl] = useState<T | null>(null);
 
   useEffect(() => {
-    const el = ref.current;
     if (!el) return;
 
     let active = false;
@@ -69,7 +75,7 @@ export function useDragToScroll<T extends HTMLElement>(
       // Let interactive controls handle their own mousedowns
       if (target.closest('button, a, input, textarea, select, label, [contenteditable="true"]')) return;
       if (!el.contains(target)) return;
-      // If a nested useDragToScroll container already handled this event, skip
+      // Inner container wins over outer when nested
       e.stopPropagation();
       active = true;
       passedThreshold = false;
@@ -92,5 +98,7 @@ export function useDragToScroll<T extends HTMLElement>(
         document.body.style.userSelect = prevBodyUserSelect;
       }
     };
-  }, [ref, axis, threshold]);
+  }, [el, axis, threshold]);
+
+  return setEl;
 }
