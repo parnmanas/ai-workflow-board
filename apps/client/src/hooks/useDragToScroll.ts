@@ -62,7 +62,15 @@ export function useDragToScroll<T extends HTMLElement>(
 
     const onMouseDown = (e: MouseEvent) => {
       if (e.button !== 0) return;
-      if (e.target !== el) return;
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      // @hello-pangea/dnd owns mousedown on draggable cards
+      if (target.closest('[data-rfd-draggable-id]')) return;
+      // Let interactive controls handle their own mousedowns
+      if (target.closest('button, a, input, textarea, select, label, [contenteditable="true"]')) return;
+      if (!el.contains(target)) return;
+      // If a nested useDragToScroll container already handled this event, skip
+      e.stopPropagation();
       active = true;
       passedThreshold = false;
       startX = e.clientX;
