@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { DragDropContext, DropResult } from '@hello-pangea/dnd';
 import { Group, Panel, Separator } from 'react-resizable-panels';
 import { Ticket } from '../types';
 import { useBoard } from '../hooks/useBoard';
+import { useDragToScroll } from '../hooks/useDragToScroll';
 import { useToast } from '../contexts/ToastContext';
 import { useLoading } from '../contexts/LoadingContext';
 import PageHeader from './PageHeader';
@@ -34,6 +35,11 @@ export default function Board() {
   const { wsId, boardId } = useParams<{ wsId: string; boardId: string }>();
 
   const [activePanelTicketId, setActivePanelTicketId] = useState<string | null>(null);
+
+  const panelBoardScrollRef = useRef<HTMLDivElement | null>(null);
+  const fullBoardScrollRef = useRef<HTMLDivElement | null>(null);
+  useDragToScroll(panelBoardScrollRef, { axis: 'x' });
+  useDragToScroll(fullBoardScrollRef, { axis: 'x' });
 
   // Helper: wrap any async action with loading bar + error toast
   const wrapAction = useCallback(async (action: () => Promise<any>, successMsg?: string) => {
@@ -205,9 +211,20 @@ export default function Board() {
         <>
           {activePanelTicket ? (
             <Group orientation="horizontal" style={{ flex: 1, overflow: 'hidden' }}>
-              <Panel minSize="40" style={{ overflowX: 'auto' }}>
+              <Panel minSize="40">
                 <DragDropContext onDragEnd={handleDragEnd}>
-                  <div style={{ display: 'flex', gap: 12, padding: 16, minHeight: '100%', alignItems: 'flex-start' }}>
+                  <div
+                    ref={panelBoardScrollRef}
+                    style={{
+                      display: 'flex',
+                      gap: 12,
+                      padding: 16,
+                      height: '100%',
+                      overflowX: 'auto',
+                      alignItems: 'flex-start',
+                      cursor: 'grab',
+                    }}
+                  >
                     {board.columns.map(col => (
                       <Column key={col.id} column={col} onTicketClick={handleTicketClick} onCreateTicket={handleCreateTicket} />
                     ))}
@@ -235,7 +252,18 @@ export default function Board() {
             </Group>
           ) : (
             <DragDropContext onDragEnd={handleDragEnd}>
-              <div style={{ flex: 1, display: 'flex', gap: 12, padding: 16, overflowX: 'auto', alignItems: 'flex-start' }}>
+              <div
+                ref={fullBoardScrollRef}
+                style={{
+                  flex: 1,
+                  display: 'flex',
+                  gap: 12,
+                  padding: 16,
+                  overflowX: 'auto',
+                  alignItems: 'flex-start',
+                  cursor: 'grab',
+                }}
+              >
                 {board.columns.map(col => (
                   <Column key={col.id} column={col} onTicketClick={handleTicketClick} onCreateTicket={handleCreateTicket} />
                 ))}
