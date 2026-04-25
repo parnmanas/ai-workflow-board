@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
+import { BUILTIN_ROLES } from '../../db';
 
 function makeError(status: number, message: string): Error & { status: number } {
   const err = new Error(message) as Error & { status: number };
@@ -41,6 +42,40 @@ export class WorkspaceRolesService {
     @InjectRepository(TicketRoleAssignment)
     private readonly assignRepo: Repository<TicketRoleAssignment>,
   ) {}
+
+  /**
+   * Seed the BUILTIN_ROLES preset into a workspace. Idempotent: existing
+   * slugs are left alone so this can run on every workspace create AND on
+   * old workspaces brought in by the v0.34 migration without producing
+   * duplicates. Returns the count of rows actually inserted.
+   *
+   * Called from:
+   *   - DatabaseModule first-run default-workspace seed
+   *   - REST POST /api/workspaces
+   *   - MCP create_workspace tool
+   *   - Migration 1760000000008-SeedWorkspaceRoles (data backfill)
+   */
+  async seedBuiltinRoles(workspaceId: string): Promise<number> {
+    if (!workspaceId) return 0;
+    let inserted = 0;
+    for (const def of BUILTIN_ROLES) {
+      const existing = await this.roleRepo.findOne({
+        where: { workspace_id: workspaceId, slug: def.slug },
+      });
+      if (existing) continue;
+      await this.roleRepo.save(this.roleRepo.create({
+        workspace_id: workspaceId,
+        slug: def.slug,
+        name: def.name,
+        role_prompt: '',
+        description: def.description,
+        position: def.position,
+        is_builtin: true,
+      }));
+      inserted++;
+    }
+    return inserted;
+  }
 
   async list(workspaceId: string): Promise<WorkspaceRole[]> {
     if (!workspaceId) return [];

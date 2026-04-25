@@ -1,11 +1,12 @@
 import { Module, OnModuleInit, Inject, Optional } from '@nestjs/common';
 import { TypeOrmModule, InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
-import { buildDataSourceOptions, DEFAULT_COLUMNS } from '../db';
+import { buildDataSourceOptions, DEFAULT_COLUMNS, BUILTIN_ROLES } from '../db';
 import * as entitiesBarrel from '../entities';
 import { Workspace } from '../entities/Workspace';
 import { Board } from '../entities/Board';
 import { BoardColumn } from '../entities/BoardColumn';
+import { WorkspaceRole } from '../entities/WorkspaceRole';
 import { LogService } from '../services/log.service';
 
 const entityList = Object.values(entitiesBarrel);
@@ -62,6 +63,7 @@ export class DatabaseModule implements OnModuleInit {
     const wsRepo = this.dataSource.getRepository(Workspace);
     const boardRepo = this.dataSource.getRepository(Board);
     const colRepo = this.dataSource.getRepository(BoardColumn);
+    const roleRepo = this.dataSource.getRepository(WorkspaceRole);
 
     // Seed default workspace if empty (seeding, NOT migration — stays here)
     const wsCount = await wsRepo.count();
@@ -82,7 +84,22 @@ export class DatabaseModule implements OnModuleInit {
         board_id: board.id,
       }));
       await colRepo.save(defaultCols.map(c => colRepo.create(c)));
-      this.dbLog('Seeded default workspace with board and 5 columns');
+
+      // v0.34 — seed the same role preset every newly-created workspace
+      // gets so the default workspace doesn't end up role-less if the
+      // 1760000000008 migration runs before this block (or never runs at
+      // all on a fresh DB).
+      await roleRepo.save(BUILTIN_ROLES.map(def => roleRepo.create({
+        workspace_id: ws.id,
+        slug: def.slug,
+        name: def.name,
+        role_prompt: '',
+        description: def.description,
+        position: def.position,
+        is_builtin: true,
+      })));
+
+      this.dbLog(`Seeded default workspace with board, ${defaultCols.length} columns, and ${BUILTIN_ROLES.length} roles`);
     }
   }
 }

@@ -8,9 +8,13 @@ import { User } from '../../entities/User';
 import { Agent } from '../../entities/Agent';
 import { WorkspacesController } from './workspaces.controller';
 import { AuthGuard } from '../../common/guards/auth.guard';
+import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Workspace, Board, BoardColumn, Ticket, User, Agent])],
+  imports: [
+    TypeOrmModule.forFeature([Workspace, Board, BoardColumn, Ticket, User, Agent]),
+    WorkspaceRolesModule,
+  ],
   controllers: [WorkspacesController],
   providers: [AuthGuard],
 })

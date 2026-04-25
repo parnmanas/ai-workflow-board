@@ -13,6 +13,7 @@ import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { DEFAULT_COLUMNS } from '../../database/database.module';
+import { WorkspaceRolesService } from '../workspace-roles/workspace-roles.service';
 import { ReBACService } from '../../services/rebac.service';
 import { findOrFail } from '../../common/find-or-fail';
 import { parseComments, expandCommentAttachments } from '../mcp/shared/ticket-parsing';
@@ -33,6 +34,7 @@ export class WorkspacesController {
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     private readonly rebacService: ReBACService,
     @InjectDataSource() private readonly dataSource: DataSource,
+    private readonly workspaceRolesService: WorkspaceRolesService,
   ) {}
 
   @Get()
@@ -56,6 +58,12 @@ export class WorkspacesController {
     }));
     const defaultCols = DEFAULT_COLUMNS.map(c => ({ ...c, board_id: board.id }));
     await this.colRepo.save(defaultCols.map(c => this.colRepo.create(c)));
+
+    // v0.34: every new workspace gets the same builtin role preset that
+    // existing workspaces received from the migration. Mention syntax,
+    // routing_config, and trigger dispatch all rely on these slugs being
+    // present, so seeding here keeps fresh workspaces immediately usable.
+    await this.workspaceRolesService.seedBuiltinRoles(ws.id);
 
     const result = await this.wsRepo.findOne({ where: { id: ws.id } });
     return res.status(201).json(result);

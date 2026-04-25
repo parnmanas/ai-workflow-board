@@ -46,6 +46,44 @@ export const DEFAULT_COLUMNS: Array<{ name: string; position: number; color: str
   { name: 'Done',        position: 5, color: '#34d399', is_terminal: true },
 ];
 
+/**
+ * v0.34 — built-in workspace role preset, seeded into every newly created
+ * workspace and into existing workspaces by the
+ * `1760000000008-SeedWorkspaceRoles` migration.
+ *
+ * Same starter-pack semantics as DEFAULT_COLUMNS: rows show up so the
+ * first-run UX has working `assignee/reporter/reviewer` slugs that match
+ * the `routing_config` keys boards historically use; they're then fully
+ * editable (slug, name, prompt) and deletable per-workspace once admins
+ * adjust them. Plain rows in the same `workspace_roles` table — `is_builtin`
+ * is purely a UI badge, not a special-case in any code path.
+ */
+export const BUILTIN_ROLES: Array<{
+  slug: string;
+  name: string;
+  position: number;
+  description: string;
+}> = [
+  {
+    slug: 'assignee',
+    name: 'Assignee',
+    position: 0,
+    description: 'Owns the work — implements / drives the ticket forward.',
+  },
+  {
+    slug: 'reporter',
+    name: 'Reporter',
+    position: 1,
+    description: 'Filed the ticket — clarifies intent and acceptance criteria.',
+  },
+  {
+    slug: 'reviewer',
+    name: 'Reviewer',
+    position: 2,
+    description: "Reviews the assignee's work before it advances.",
+  },
+];
+
 export function buildDataSourceOptions(): DataSourceOptions {
   const dbType = (process.env.DB_TYPE || 'sqlite') as 'sqlite' | 'mysql' | 'postgres';
   // Migrations glob — matches both src/.ts (tsx dev mode) and dist/.js (compiled)

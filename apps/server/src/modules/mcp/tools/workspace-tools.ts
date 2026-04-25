@@ -11,7 +11,8 @@ import { Workspace } from '../../../entities/Workspace';
 import { Board } from '../../../entities/Board';
 import { BoardColumn } from '../../../entities/BoardColumn';
 import { Ticket } from '../../../entities/Ticket';
-import { DEFAULT_COLUMNS } from '../../../db';
+import { WorkspaceRole } from '../../../entities/WorkspaceRole';
+import { DEFAULT_COLUMNS, BUILTIN_ROLES } from '../../../db';
 import { ok, err } from '../shared/helpers';
 import type { ToolContext } from './context';
 
@@ -82,6 +83,18 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
 
       const defaultCols = DEFAULT_COLUMNS.map(c => ({ ...c, board_id: board.id }));
       await colRepo.save(defaultCols.map(c => colRepo.create(c)));
+
+      // v0.34: seed built-in role preset (assignee/reporter/reviewer).
+      const roleRepo = dataSource.getRepository(WorkspaceRole);
+      await roleRepo.save(BUILTIN_ROLES.map(def => roleRepo.create({
+        workspace_id: ws.id,
+        slug: def.slug,
+        name: def.name,
+        role_prompt: '',
+        description: def.description,
+        position: def.position,
+        is_builtin: true,
+      })));
 
       const result = await wsRepo.findOne({ where: { id: ws.id } });
       return ok(result);
