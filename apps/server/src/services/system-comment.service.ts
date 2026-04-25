@@ -6,6 +6,7 @@ import { LogService } from './log.service';
 import { Comment } from '../entities/Comment';
 import { Ticket } from '../entities/Ticket';
 import { ActivityLog } from '../entities/ActivityLog';
+import { WorkspaceRole } from '../entities/WorkspaceRole';
 
 @Injectable()
 export class SystemCommentService implements OnModuleInit, OnModuleDestroy {
@@ -14,6 +15,7 @@ export class SystemCommentService implements OnModuleInit, OnModuleDestroy {
   constructor(
     @InjectRepository(Comment) private readonly commentRepo: Repository<Comment>,
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
+    @InjectRepository(WorkspaceRole) private readonly roleRepo: Repository<WorkspaceRole>,
     private readonly logService: LogService,
   ) {}
 
@@ -67,11 +69,23 @@ export class SystemCommentService implements OnModuleInit, OnModuleDestroy {
         return `📋 Ticket moved from **${log.old_value || 'Unknown'}** to **${log.new_value || 'Unknown'}**${actor}`;
       }
       if (log.action === 'updated' && log.field_changed) {
-        if (log.field_changed === 'assignee') {
-          return `👤 Assignee changed from **${log.old_value || 'Unassigned'}** to **${log.new_value || 'Unassigned'}**${actor}`;
-        }
-        if (log.field_changed === 'reporter') {
-          return `📝 Reporter changed from **${log.old_value || 'None'}** to **${log.new_value || 'None'}**${actor}`;
+        // Role-assignment field_changed values are workspace role slugs.
+        // Look the role up so the comment shows the human-readable name and
+        // not the raw slug ("QA Reviewer changed from …" not "qa-reviewer
+        // changed from …"). Built-in slugs (assignee/reporter/reviewer)
+        // resolve via the same path now that they live in workspace_roles.
+        const ticket = await this.ticketRepo.findOne({ where: { id: log.ticket_id! } });
+        if (ticket?.workspace_id) {
+          const role = await this.roleRepo.findOne({
+            where: { workspace_id: ticket.workspace_id, slug: log.field_changed },
+          });
+          if (role) {
+            const icon = role.slug === 'assignee' ? '👤'
+              : role.slug === 'reporter' ? '📝'
+              : role.slug === 'reviewer' ? '🔍'
+              : '🎭';
+            return `${icon} ${role.name} changed from **${log.old_value || 'Unassigned'}** to **${log.new_value || 'Unassigned'}**${actor}`;
+          }
         }
       }
     }

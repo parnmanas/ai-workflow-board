@@ -5,6 +5,7 @@ import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, DataSource, In } from 'typeorm';
 import { Ticket } from '../../entities/Ticket';
 import { BoardColumn } from '../../entities/BoardColumn';
+import { Board } from '../../entities/Board';
 import { Comment, COMMENT_TYPES, CommentType } from '../../entities/Comment';
 import { Agent } from '../../entities/Agent';
 import { UserMention } from '../../entities/UserMention';
@@ -18,6 +19,7 @@ import { LogService } from '../../services/log.service';
 import { MentionService } from '../../services/mention.service';
 import { PresenceService } from '../../services/presence.service';
 import { TriggerLoopService } from '../agents/trigger-loop.service';
+import { TicketRoleAssignmentService } from '../workspace-roles/ticket-role-assignment.service';
 import { MAX_COMMENT_ATTACHMENT_SIZE, MAX_COMMENT_ATTACHMENTS } from '../../common/constants/upload';
 import { Resource } from '../../entities/Resource';
 import { loadTicketFull, parseComments, expandCommentAttachments } from '../mcp/shared/ticket-parsing';
@@ -42,6 +44,7 @@ export class TicketsController {
     private readonly mentionService: MentionService,
     private readonly triggerLoop: TriggerLoopService,
     private readonly presence: PresenceService,
+    private readonly ticketRoleAssignments: TicketRoleAssignmentService,
   ) {}
 
   private resolveCreator(req: any, body: any): { created_by: string; created_by_type: string; created_by_id: string } {
@@ -85,6 +88,16 @@ export class TicketsController {
       created_by: creator.created_by, created_by_type: creator.created_by_type, created_by_id: creator.created_by_id,
     }));
 
+    // Mirror onto TicketRoleAssignment so trigger loop / allocation /
+    // mention resolution see the new ticket via the v0.34 path.
+    await this._refreshWorkspaceId(ticket);
+    if (ticket.workspace_id) {
+      await this.ticketRoleAssignments.syncBuiltinTrio(ticket.id, ticket.workspace_id, {
+        assignee_id: resolvedAssigneeId,
+        reporter_id: resolvedReporterId,
+      });
+    }
+
     await this.activityService.logActivity({
       entity_type: 'ticket', entity_id: ticket.id, action: 'created',
       ticket_id: ticket.id,
@@ -93,6 +106,24 @@ export class TicketsController {
     });
 
     return res.status(201).json({ ...ticket, labels, channel_ids, children: [], comments: [] });
+  }
+
+  /**
+   * Tickets currently inherit workspace_id from their column → board.
+   * Pull it once after creation so the assignment-table sync below has
+   * the value to scope WorkspaceRole lookups against.
+   */
+  private async _refreshWorkspaceId(ticket: Ticket): Promise<void> {
+    if (ticket.workspace_id) return;
+    const col = ticket.column_id
+      ? await this.colRepo.findOne({ where: { id: ticket.column_id } })
+      : null;
+    if (!col) return;
+    const board = await this.dataSource.getRepository(Board).findOne({ where: { id: col.board_id } });
+    if (board?.workspace_id) {
+      ticket.workspace_id = board.workspace_id;
+      await this.ticketRepo.update(ticket.id, { workspace_id: ticket.workspace_id });
+    }
   }
 
   @Post('tickets/:parentId/children')
@@ -115,8 +146,18 @@ export class TicketsController {
       title, description, priority, status, assignee, reporter,
       assignee_id: resolvedAssigneeId, reporter_id: resolvedReporterId,
       labels: JSON.stringify(labels), channel_ids: JSON.stringify(channel_ids), position,
+      // Inherit workspace_id from parent so role lookups resolve immediately
+      // (children otherwise have NULL workspace_id and miss the sync below).
+      workspace_id: parent.workspace_id || '',
       created_by: creator.created_by, created_by_type: creator.created_by_type, created_by_id: creator.created_by_id,
     }));
+
+    if (child.workspace_id) {
+      await this.ticketRoleAssignments.syncBuiltinTrio(child.id, child.workspace_id, {
+        assignee_id: resolvedAssigneeId,
+        reporter_id: resolvedReporterId,
+      });
+    }
 
     await this.activityService.logActivity({
       entity_type: 'ticket', entity_id: child.id, action: 'created',
@@ -279,6 +320,21 @@ export class TicketsController {
     if (prompt_text !== undefined) ticket.prompt_text = prompt_text;
 
     await this.ticketRepo.save(ticket);
+
+    // v0.34: mirror builtin role changes onto TicketRoleAssignment so the
+    // trigger loop / mention resolution stay in sync. Each slot is only
+    // synced when the caller actually included the field — passing
+    // undefined leaves the assignment untouched (matches REST semantics
+    // where unspecified fields preserve their value).
+    if (ticket.workspace_id) {
+      const trio: { assignee_id?: string; reporter_id?: string; reviewer_id?: string } = {};
+      if (assignee !== undefined || assignee_id !== undefined) trio.assignee_id = ticket.assignee_id || '';
+      if (reporter !== undefined || reporter_id !== undefined) trio.reporter_id = ticket.reporter_id || '';
+      if (reviewer_id !== undefined) trio.reviewer_id = ticket.reviewer_id || '';
+      if (Object.keys(trio).length > 0) {
+        await this.ticketRoleAssignments.syncBuiltinTrio(ticket.id, ticket.workspace_id, trio);
+      }
+    }
 
     if (status !== undefined && status !== oldStatus) {
       await this.activityService.logActivity({
@@ -793,7 +849,7 @@ export class TicketsController {
     const refs = this.mentionService.parseMentions(comment.content);
     if (refs.length === 0) return;
 
-    const resolved = this.mentionService.resolveMentions(refs, ticket);
+    const resolved = await this.mentionService.resolveMentions(refs, ticket);
     if (resolved.length === 0) return;
 
     const preview = (comment.content || '').slice(0, 500);

@@ -152,7 +152,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       try {
         const refs = mentionService.parseMentions(content);
         if (refs.length > 0) {
-          const resolved = mentionService.resolveMentions(refs, ticket);
+          const resolved = await mentionService.resolveMentions(refs, ticket);
           const preview = (content || '').slice(0, 500);
           const ts = (comment.created_at instanceof Date ? comment.created_at : new Date()).toISOString();
           const userMentionRepo = dataSource.getRepository(UserMention);
@@ -289,7 +289,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       try {
         const refs = mentionService.parseMentions(content);
         if (refs.length > 0) {
-          const resolvedRefs = mentionService.resolveMentions(refs, ticket);
+          const resolvedRefs = await mentionService.resolveMentions(refs, ticket);
           const preview = (content || '').slice(0, 500);
           const ts = (comment.created_at instanceof Date ? comment.created_at : new Date()).toISOString();
           const userMentionRepo = dataSource.getRepository(UserMention);
@@ -494,6 +494,14 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         ticket.assignee_id = target_agent_id;
         ticket.assignee = targetAgent.name;
         await ticketRepo.save(ticket);
+
+        // v0.34: mirror the new assignee onto the assignment table so the
+        // trigger loop sees it on the next activity event.
+        if (ctx.ticketRoleAssignmentService && ticket.workspace_id) {
+          await ctx.ticketRoleAssignmentService.syncBuiltinTrio(ticket.id, ticket.workspace_id, {
+            assignee_id: target_agent_id,
+          });
+        }
 
         await activityService.logActivity({
           entity_type: 'ticket', entity_id: ticket.id, action: 'updated',

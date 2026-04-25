@@ -1,16 +1,19 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { DataSource, In } from 'typeorm';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { Agent } from '../../entities/Agent';
 import { Board } from '../../entities/Board';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { Comment } from '../../entities/Comment';
 import { Ticket } from '../../entities/Ticket';
+import { WorkspaceRole } from '../../entities/WorkspaceRole';
+import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 
 export interface AllocatedTicketRow {
   ticket_id: string;
-  role: 'assignee' | 'reporter' | 'reviewer';
+  /** Role slug — workspace-scoped (was hardcoded enum pre-v0.34). */
+  role: string;
   column_id: string;
   column_position: number;
   priority: string;
@@ -18,12 +21,6 @@ export interface AllocatedTicketRow {
   title: string;
   my_last_update_at: string | null;
 }
-
-const ROLE_TO_TICKET_FIELD: Record<string, 'assignee_id' | 'reporter_id' | 'reviewer_id'> = {
-  assignee: 'assignee_id',
-  reporter: 'reporter_id',
-  reviewer: 'reviewer_id',
-};
 
 // Keep in sync with plugin-side ordering. Index 0 = highest priority.
 const PRIORITY_ORDER = ['critical', 'high', 'medium', 'low'] as const;
@@ -58,15 +55,39 @@ export class AllocationService {
       return { error: 'Agent does not belong to the requested workspace' };
     }
 
+    // v0.34: tickets-where-this-agent-holds-a-role lookup goes through
+    // TicketRoleAssignment instead of the legacy assignee_id/reporter_id/
+    // reviewer_id columns. Build the candidate ticket set from assignment
+    // rows first so custom workspace roles are picked up automatically.
+    const assignRepo = this.dataSource.getRepository(TicketRoleAssignment);
+    const myAssignments = await assignRepo.find({ where: { agent_id: agentId } });
+    if (myAssignments.length === 0) return [];
+
+    const assignedTicketIds = Array.from(new Set(myAssignments.map(a => a.ticket_id)));
     const ticketRepo = this.dataSource.getRepository(Ticket);
     const tickets = await ticketRepo.createQueryBuilder('t')
       .innerJoin('columns', 'col', 'col.id = t.column_id')
       .innerJoin('boards', 'b', 'b.id = col.board_id')
       .where('b.workspace_id = :workspaceId', { workspaceId })
-      .andWhere('(t.assignee_id = :agentId OR t.reporter_id = :agentId OR t.reviewer_id = :agentId)', { agentId })
+      .andWhere('t.id IN (:...ticketIds)', { ticketIds: assignedTicketIds })
       .getMany();
 
     if (tickets.length === 0) return [];
+
+    // Index assignments by ticket → set of role IDs for which this agent is
+    // the holder. Used inside the per-ticket loop to decide which roles
+    // contribute rows.
+    const myRoleIdsByTicket = new Map<string, Set<string>>();
+    for (const a of myAssignments) {
+      const set = myRoleIdsByTicket.get(a.ticket_id) ?? new Set<string>();
+      set.add(a.role_id);
+      myRoleIdsByTicket.set(a.ticket_id, set);
+    }
+
+    // Resolve role slugs once for the workspace — keys for routing_config.
+    const roleRepo = this.dataSource.getRepository(WorkspaceRole);
+    const roles = await roleRepo.find({ where: { workspace_id: workspaceId } });
+    const roleBySlug = new Map(roles.map(r => [r.slug, r]));
 
     const colIds = Array.from(new Set(tickets.map(t => t.column_id).filter(Boolean) as string[]));
     if (colIds.length === 0) return [];
@@ -101,16 +122,17 @@ export class AllocationService {
         ? routing[columnKey]
         : undefined;
       if (rawRoles === undefined) continue;
-      const roles = Array.isArray(rawRoles) ? rawRoles : [rawRoles];
-      if (roles.length === 0) continue;
+      const slugList = Array.isArray(rawRoles) ? rawRoles : [rawRoles];
+      if (slugList.length === 0) continue;
 
-      for (const role of roles) {
-        const field = ROLE_TO_TICKET_FIELD[role];
-        if (!field) continue;
-        if ((ticket as any)[field] !== agentId) continue;
+      const myRoleIds = myRoleIdsByTicket.get(ticket.id) ?? new Set<string>();
+      for (const slug of slugList) {
+        const role = roleBySlug.get(slug);
+        if (!role) continue;
+        if (!myRoleIds.has(role.id)) continue;
         rows.push({
           ticket_id: ticket.id,
-          role: role as AllocatedTicketRow['role'],
+          role: slug,
           column_id: ticket.column_id,
           column_position: col.position,
           priority: ticket.priority || 'medium',

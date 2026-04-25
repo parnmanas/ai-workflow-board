@@ -17,6 +17,7 @@ import WorkspaceApiKeysPage from './components/WorkspaceApiKeysPage';
 import WorkspacePromptTemplatesPage from './components/WorkspacePromptTemplatesPage';
 import WorkspaceResourcesPage from './components/WorkspaceResourcesPage';
 import WorkspaceCredentialsPage from './components/WorkspaceCredentialsPage';
+import WorkspaceRolesPage from './components/WorkspaceRolesPage';
 import AgentDetailPage from './components/AgentDetailPage';
 import { tokens } from './tokens';
 
@@ -158,6 +159,7 @@ function AppContent() {
           <Route path="prompt-templates" element={<WorkspacePromptTemplatesPage />} />
           <Route path="resources" element={<WorkspaceResourcesPage />} />
           <Route path="credentials" element={<WorkspaceCredentialsPage />} />
+          <Route path="roles" element={<WorkspaceRolesPage />} />
         </Route>
       </Route>
     </Routes>
