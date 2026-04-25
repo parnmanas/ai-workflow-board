@@ -17,6 +17,7 @@ import WorkspaceApiKeysPage from './components/WorkspaceApiKeysPage';
 import WorkspacePromptTemplatesPage from './components/WorkspacePromptTemplatesPage';
 import WorkspaceResourcesPage from './components/WorkspaceResourcesPage';
 import WorkspaceCredentialsPage from './components/WorkspaceCredentialsPage';
+import AgentDetailPage from './components/AgentDetailPage';
 import { tokens } from './tokens';
 
 // Redirects the user to /ws/:currentWorkspaceId/:to, waiting for auth to resolve.
@@ -151,6 +152,7 @@ function AppContent() {
           <Route path="chat" element={<ChatPage />} />
           <Route path="users" element={<WorkspaceUsersPage />} />
           <Route path="agents" element={<AgentsPage />} />
+          <Route path="agents/:agentId" element={<AgentDetailPage />} />
           <Route path="channels" element={<WorkspaceChannelsPage />} />
           <Route path="api-keys" element={<WorkspaceApiKeysPage />} />
           <Route path="prompt-templates" element={<WorkspacePromptTemplatesPage />} />

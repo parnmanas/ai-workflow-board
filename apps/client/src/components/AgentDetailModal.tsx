@@ -25,9 +25,10 @@ import { useParams } from 'react-router-dom';
  *
  * Live header subtitle: subscribes to agent_status envelopes via the
  * shared envelope bus and merges the payload when scope.agent_id
- * matches. The RECENT ACTIVITY list is intentionally NOT live-updated
- * (per UI-SPEC §Lifecycle: snapshot at open time; close+reopen to
- * refresh).
+ * matches. RECENT ACTIVITY is seeded from a fetch on mount and kept live
+ * via board_update SSE so users sitting on the page see new entries
+ * appear without refreshing (route move in v0.32.x — used to be a
+ * close+reopen-to-refresh modal).
  *
  * The reconnect contract grep must return 0 against this file.
  */
@@ -186,6 +187,35 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
     );
   });
 
+  // Live activity feed: prepend board_update events authored by this agent.
+  // Page mode (route, not modal) means the user can sit on this view across
+  // many ticket transitions, so a static snapshot quickly stales. Cap the
+  // list at 50 entries to match the original page-load fetch limit.
+  useBoardStreamEvent('board_update', (data: any) => {
+    if (!data || !agentId) return;
+    // board_update payload is flattened on the wire — actor identity lives
+    // at the top level. Match by actor_id when present (most reliable);
+    // fall back to actor_name when actor_id is missing on the wire.
+    const matchesActor =
+      (data.actor_id && data.actor_id === agentId) ||
+      (data.actor_name && detail?.name && data.actor_name === detail.name);
+    if (!matchesActor) return;
+    const row: ActivityRow = {
+      id: `live-${data.timestamp || Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      entity_type: data.entity_type,
+      action: data.action,
+      field_changed: data.field_changed || undefined,
+      actor_id: data.actor_id || agentId,
+      actor_name: data.actor_name || detail?.name || '',
+      ticket_id: data.ticket_id || undefined,
+      created_at: data.timestamp || new Date().toISOString(),
+    };
+    setRecentActivity((prev) => {
+      const next = [row, ...prev];
+      return next.length > 50 ? next.slice(0, 50) : next;
+    });
+  });
+
   // Escape key + body scroll lock.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -241,36 +271,21 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
 
   return (
     <>
-      {/* Backdrop — identical idiom to TicketDetail.tsx */}
+      {/* Page mode (since v0.32.x): the agent detail used to render as a modal
+         over the agents grid, but Refresh would close the panel and there
+         wasn't enough horizontal room for the Subagents transcript. The
+         component now sits inside AppLayout's content area as a full route
+         (`/ws/:wsId/agents/:agentId`), so the wrapper is a flex column that
+         fills its parent — no backdrop, no fixed positioning. */}
       <div
-        onClick={onClose}
-        style={{
-          position: 'fixed',
-          inset: 0,
-          background: 'rgba(0,0,0,0.4)',
-          zIndex: 1000,
-        }}
-      />
-
-      {/* Right panel */}
-      <div
-        role="dialog"
-        aria-modal="true"
+        role="region"
         aria-labelledby="agent-detail-title"
         style={{
-          position: 'fixed',
-          top: 0,
-          right: 0,
-          bottom: 0,
-          width: 1100,
-          maxWidth: '100vw',
+          flex: 1,
+          minHeight: 0,
           background: tokens.colors.surfaceCard,
-          borderLeft: `1px solid ${tokens.colors.border}`,
-          zIndex: 1001,
           display: 'flex',
           flexDirection: 'column',
-          boxShadow: tokens.shadows.panel,
-          animation: 'slideInRight 0.2s ease-out',
         }}
       >
         {/* Header */}
