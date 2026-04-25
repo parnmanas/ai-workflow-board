@@ -550,13 +550,17 @@ export const api = {
       body: JSON.stringify({ participants, name }),
     }),
 
-  getChatRoom: (roomId: string) =>
-    request<ChatRoomDetail>(`/chat-rooms/${roomId}`),
+  getChatRoom: (roomId: string, observer = false) =>
+    request<ChatRoomDetail>(`/chat-rooms/${roomId}${observer ? '?observer=true' : ''}`),
 
-  getChatRoomMessages: (roomId: string, limit = 50, before?: string) =>
-    request<ChatRoomMessageItem[]>(
-      `/chat-rooms/${roomId}/messages?limit=${limit}${before ? `&before=${before}` : ''}`
-    ),
+  getChatRoomMessages: (roomId: string, limit = 50, before?: string, observer = false) => {
+    const parts = [`limit=${limit}`];
+    if (before) parts.push(`before=${before}`);
+    if (observer) parts.push('observer=true');
+    return request<ChatRoomMessageItem[]>(
+      `/chat-rooms/${roomId}/messages?${parts.join('&')}`,
+    );
+  },
 
   sendChatRoomMessage: (roomId: string, content: string, images?: Array<{ data: string; filename: string; mimetype: string }>) =>
     request<ChatRoomMessageItem>(`/chat-rooms/${roomId}/messages`, {

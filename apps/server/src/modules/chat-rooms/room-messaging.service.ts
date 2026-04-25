@@ -70,8 +70,15 @@ export class RoomMessagingService {
     userId: string,
     limit: number,
     before?: string,
+    options?: { observer?: boolean },
   ): Promise<any[]> {
-    await this.membership.requireActiveParticipant(roomId, userId);
+    // v0.32: observer mode skips the active-participant gate so admins can
+    // read agent-to-agent rooms they're not a member of (workspace-wide chat
+    // monitoring). Caller (controller) must enforce its own permission check
+    // before passing observer=true; this service trusts that flag.
+    if (!options?.observer) {
+      await this.membership.requireActiveParticipant(roomId, userId);
+    }
 
     const cappedLimit = Math.min(limit, 200);
 

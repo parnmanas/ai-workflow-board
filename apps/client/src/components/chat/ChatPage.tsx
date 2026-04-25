@@ -101,13 +101,21 @@ export default function ChatPage() {
   const [chatProtocolVersion, setChatProtocolVersion] = useState<number | null>(null);
   const [scrollToMessageId, setScrollToMessageId] = useState<string | null>(null);
   const [typingAgents, setTypingAgents] = useState<Record<string, { name: string; status?: string }>>({}); // agent_id -> { name, status }
+  // Observer mode: viewer is *not* a participant of the active room (only
+  // possible when showAllRooms is on). Used to skip mark-read calls that
+  // would 403 server-side for non-members.
+  const [isObserver, setIsObserver] = useState<boolean>(false);
   const originalTitleRef = useRef(document.title);
   const activeRoomIdRef = useRef<string | null>(null);
+  const isObserverRef = useRef<boolean>(false);
 
-  // Keep ref in sync with state for use in SSE callbacks
+  // Keep refs in sync with state for use in SSE callbacks
   useEffect(() => {
     activeRoomIdRef.current = activeRoomId;
   }, [activeRoomId]);
+  useEffect(() => {
+    isObserverRef.current = isObserver;
+  }, [isObserver]);
 
   // Workspace-wide observer toggle (v0.32+) — when on, the room list
   // includes every active room in the workspace, including agent-to-agent
@@ -141,16 +149,22 @@ export default function ChatPage() {
     if (!activeRoomId) {
       setMessages([]);
       setRoomParticipants([]);
+      setIsObserver(false);
       return;
     }
+    // When showAllRooms is on, assume non-member until detail confirms
+    // membership — the observer flag bypasses the active-participant gate
+    // server-side, so we send it on the *initial* fetch to avoid a 403.
+    const initialObserver = showAllRooms;
+    setIsObserver(initialObserver);
     setLoadingMessages(true);
-    api.getChatRoomMessages(activeRoomId)
+    api.getChatRoomMessages(activeRoomId, 50, undefined, initialObserver)
       .then((msgs) => setMessages(msgs))
       .catch(() => setMessages([]))
       .finally(() => setLoadingMessages(false));
 
     // Fetch room detail to populate participants for @mention pill rendering
-    api.getChatRoom(activeRoomId)
+    api.getChatRoom(activeRoomId, initialObserver)
       .then((detail: any) => {
         if (detail?.participants) {
           const mentionPs: MentionParticipant[] = detail.participants.map((p: any) => ({
@@ -160,22 +174,29 @@ export default function ChatPage() {
           }));
           setRoomParticipants(mentionPs);
           setParticipantCount(mentionPs.filter((p) => p.type === 'user').length);
+          const isMember = detail.participants.some(
+            (p: any) => p.participant_id === user?.id && p.participant_type === 'user',
+          );
+          // Re-derive: only an observer if scope is workspace AND viewer
+          // truly isn't a participant. Members in workspace mode get
+          // normal read-receipt behaviour.
+          setIsObserver(showAllRooms && !isMember);
+          if (isMember) {
+            api.markChatRoomRead(activeRoomId).catch(() => {});
+            markBadgeRead('chat', activeRoomId);
+            setRooms((prev) =>
+              prev.map((r) => (r.id === activeRoomId ? { ...r, unread_count: 0 } : r)),
+            );
+          }
         }
       })
       .catch(() => {});
 
-    // Mark room as read
-    api.markChatRoomRead(activeRoomId).catch(() => {});
-    markBadgeRead('chat', activeRoomId);
-    setRooms((prev) =>
-      prev.map((r) => (r.id === activeRoomId ? { ...r, unread_count: 0 } : r)),
-    );
-
-  }, [activeRoomId]);
+  }, [activeRoomId, showAllRooms, user?.id, markBadgeRead]);
 
   // Mark read on visibility change (tab regains focus)
   useEffect(() => {
-    if (!activeRoomId) return;
+    if (!activeRoomId || isObserver) return;
     function handleVisibility() {
       if (document.visibilityState === 'visible' && activeRoomId) {
         api.markChatRoomRead(activeRoomId).catch(() => {});
@@ -186,7 +207,7 @@ export default function ChatPage() {
     }
     document.addEventListener('visibilitychange', handleVisibility);
     return () => document.removeEventListener('visibilitychange', handleVisibility);
-  }, [activeRoomId]);
+  }, [activeRoomId, isObserver]);
 
   // SSE: server_meta — protocol version handshake (CHAT-20)
   useBoardStreamEvent('server_meta', useCallback((data: any) => {
@@ -247,8 +268,11 @@ export default function ChatPage() {
         if (prev.some((m) => m.id === msg.id)) return prev;
         return [...prev, msg];
       });
-      api.markChatRoomRead(msg.room_id).catch(() => {});
-      markBadgeRead('chat', msg.room_id);
+      // Skip read-receipts when watching as a non-member observer.
+      if (!isObserverRef.current) {
+        api.markChatRoomRead(msg.room_id).catch(() => {});
+        markBadgeRead('chat', msg.room_id);
+      }
     } else {
       setRooms((prev) =>
         prev.map((r) =>
