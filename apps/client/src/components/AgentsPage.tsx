@@ -1,12 +1,11 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 import PageHeader from './PageHeader';
 import AgentCard from './AgentCard';
-import AgentDetailModal from './AgentDetailModal';
 import { tokens } from '../tokens';
 import { Button } from './common';
 import type {
@@ -55,7 +54,10 @@ export default function AgentsPage() {
   const [agents, setAgents] = useState<DashboardAgent[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [snapshotError, setSnapshotError] = useState<string | null>(null);
-  const [detailAgentId, setDetailAgentId] = useState<string | null>(null);
+  const navigate = useNavigate();
+  const openDetail = useCallback((id: string) => {
+    if (wsId) navigate(`/ws/${wsId}/agents/${id}`);
+  }, [navigate, wsId]);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [createForm, setCreateForm] = useState({ name: '', description: '', type: 'custom' });
 
@@ -262,7 +264,7 @@ export default function AgentsPage() {
             {agentsList.map((agent) => (
               <div
                 key={agent.id}
-                onClick={() => setDetailAgentId(agent.id)}
+                onClick={() => openDetail(agent.id)}
                 style={{
                   cursor: 'pointer',
                   borderRadius: tokens.radii.lg,
@@ -270,7 +272,7 @@ export default function AgentsPage() {
               >
                 <AgentCard
                   agent={agent}
-                  onOpenDetail={() => setDetailAgentId(agent.id)}
+                  onOpenDetail={() => openDetail(agent.id)}
                 />
               </div>
             ))}
@@ -278,20 +280,8 @@ export default function AgentsPage() {
         )}
       </div>
 
-      {/* Agent detail modal */}
-      {detailAgentId && (
-        <AgentDetailModal
-          agentId={detailAgentId}
-          onClose={() => setDetailAgentId(null)}
-          onDeleted={(deletedId) => {
-            // Optimistic removal so the card disappears instantly; the
-            // subsequent loadSnapshot() is the authoritative truth.
-            setAgents((prev) => (prev ? prev.filter((a) => a.id !== deletedId) : prev));
-            setDetailAgentId(null);
-            loadSnapshot();
-          }}
-        />
-      )}
+      {/* Agent detail surface moved to a real route in v0.32.x —
+         see AgentDetailPage. AgentsPage just navigates on click. */}
 
       {/* Create Agent modal */}
       {showCreateModal && (
