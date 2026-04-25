@@ -119,7 +119,12 @@ export class ChatRoomsController {
   async getRoom(@Req() req: Request, @Res() res: Response, @Param('roomId') roomId: string) {
     const user = (req as any).currentUser;
     try {
-      const detail = await this.crud.getRoomDetail(roomId, user.id);
+      // getRoomDetail already tolerates a non-member viewer (it just won't
+      // compute unread/last-read for them). Pass empty string when the
+      // caller is an observer — same treatment as agent callers in
+      // create_chat_room.
+      const observe = req.query.observer === 'true';
+      const detail = await this.crud.getRoomDetail(roomId, observe ? '' : user.id);
       return res.json(detail);
     } catch (err: any) {
       return res.status(err.status || 404).json({ error: err.message });
@@ -132,8 +137,9 @@ export class ChatRoomsController {
     const user = (req as any).currentUser;
     const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
     const before = req.query.before as string | undefined;
+    const observer = req.query.observer === 'true';
     try {
-      const messages = await this.messaging.getMessages(roomId, user.id, limit, before);
+      const messages = await this.messaging.getMessages(roomId, user.id, limit, before, { observer });
       return res.json(messages);
     } catch (err: any) {
       return res.status(err.status || 403).json({ error: err.message });
