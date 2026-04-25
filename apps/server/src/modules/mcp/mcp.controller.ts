@@ -16,6 +16,8 @@ import { AgentConnectionService } from '../agents/agent-connection.service';
 import { TriggerLoopService } from '../agents/trigger-loop.service';
 import { AgentStatusService } from '../agents/agent-status.service';
 import { AllocationService } from '../agents/allocation.service';
+import { RoomCrudService } from '../chat-rooms/room-crud.service';
+import { RoomMembershipService } from '../chat-rooms/room-membership.service';
 import { MentionService } from '../../services/mention.service';
 import { ActivityService, activityEvents } from '../../services/activity.service';
 import { EmbeddingService } from '../../services/embedding.service';
@@ -94,6 +96,8 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     private readonly mentionService: MentionService,
     private readonly agentStatusService: AgentStatusService,
     private readonly allocationService: AllocationService,
+    private readonly roomCrudService: RoomCrudService,
+    private readonly roomMembershipService: RoomMembershipService,
   ) {}
 
   onModuleInit() {
@@ -174,6 +178,8 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       mentionService: this.mentionService,
       agentStatusService: this.agentStatusService,
       allocationService: this.allocationService,
+      roomCrudService: this.roomCrudService,
+      roomMembershipService: this.roomMembershipService,
     };
   }
 

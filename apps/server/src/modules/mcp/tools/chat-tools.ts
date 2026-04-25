@@ -19,7 +19,7 @@ import { getCallerAgent } from '../shared/session-auth';
 import type { ToolContext } from './context';
 
 export function registerChatTools(server: McpServer, ctx: ToolContext): void {
-  const { dataSource } = ctx;
+  const { dataSource, roomCrudService, roomMembershipService } = ctx;
 
   server.tool(
     'set_typing',
@@ -141,6 +141,73 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
         type: p.room?.type || 'group',
         last_message_at: p.room?.last_message_at || null,
       })));
+    }
+  );
+
+  // v0.32: room creation from MCP. Lets an agent open a DM with a user or
+  // another agent (or a group room) without going through the web UI. The
+  // creator is auto-included; pass at least one OTHER participant.
+  server.tool(
+    'create_chat_room',
+    'Create a chat room (DM or group) with the given participants. Caller is auto-included so you only list the OTHER members. Two participants total → DM; three+ → group. If a DM already exists between the same two members, returns the existing room (existing=true).',
+    {
+      participants: z.array(z.object({
+        type: z.enum(['user', 'agent']).describe("Participant kind"),
+        id: z.string().describe("User ID or Agent ID"),
+      })).min(1).describe('Other participants to include. Caller (this agent) is added automatically.'),
+      name: z.string().optional().describe('Group room name (ignored for DMs).'),
+    },
+    async ({ participants, name }, extra: { sessionId?: string }) => {
+      if (!roomCrudService) return err('Chat room creation is unavailable in this MCP context');
+      const caller = getCallerAgent(extra);
+      if (!caller?.agentId) return err('Unauthorized: agent identity required');
+      const agent = await dataSource.getRepository(Agent).findOne({ where: { id: caller.agentId } });
+      if (!agent?.workspace_id) return err('Could not resolve workspace from caller agent');
+      try {
+        const result = await roomCrudService.createRoom(
+          agent.workspace_id,
+          { type: 'agent', id: caller.agentId },
+          participants.map(p => ({ participant_type: p.type, participant_id: p.id })),
+          name,
+        );
+        return ok({
+          room_id: result.room.id,
+          existing: result.existing,
+          type: result.room.type,
+          name: result.room.name,
+          participants: result.room.participants || [],
+        });
+      } catch (e: any) {
+        return err(e?.message || 'Failed to create room');
+      }
+    }
+  );
+
+  // Group rooms only — DMs are immutable. Caller must already be a member.
+  server.tool(
+    'add_chat_participants',
+    'Add participants to an existing group chat room. Fails on DMs, on rooms the caller is not in, and on cap (50). Re-adding a previously-left member creates a fresh participant row.',
+    {
+      room_id: z.string().describe('Target room ID'),
+      participants: z.array(z.object({
+        type: z.enum(['user', 'agent']),
+        id: z.string(),
+      })).min(1).describe('Participants to add'),
+    },
+    async ({ room_id, participants }, extra: { sessionId?: string }) => {
+      if (!roomMembershipService) return err('Chat membership is unavailable in this MCP context');
+      const caller = getCallerAgent(extra);
+      if (!caller?.agentId) return err('Unauthorized: agent identity required');
+      try {
+        await roomMembershipService.addParticipants(
+          room_id,
+          { type: 'agent', id: caller.agentId },
+          participants.map(p => ({ participant_type: p.type, participant_id: p.id })),
+        );
+        return ok({ ok: true, room_id });
+      } catch (e: any) {
+        return err(e?.message || 'Failed to add participants');
+      }
     }
   );
 }

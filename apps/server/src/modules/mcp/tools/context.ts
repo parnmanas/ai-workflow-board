@@ -30,6 +30,8 @@ import { GitHubConnectorService } from '../../../services/github-connector.servi
 import { MentionService } from '../../../services/mention.service';
 import type { AgentStatusService } from '../../agents/agent-status.service';
 import type { AllocationService } from '../../agents/allocation.service';
+import type { RoomCrudService } from '../../chat-rooms/room-crud.service';
+import type { RoomMembershipService } from '../../chat-rooms/room-membership.service';
 
 /**
  * Minimal surface that MCP tools need from the logging subsystem.
@@ -62,6 +64,8 @@ export interface ToolContext {
   // must degrade gracefully.
   agentStatusService?: AgentStatusService;
   allocationService?: AllocationService;
+  roomCrudService?: RoomCrudService;
+  roomMembershipService?: RoomMembershipService;
 }
 
 /**

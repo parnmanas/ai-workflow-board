@@ -35,10 +35,16 @@ export class ChatRoomsController {
 
   @Get()
   @RequirePermission(PERMISSIONS.CHAT_VIEW)
-  async listRooms(@Req() req: Request, @Res() res: Response) {
-    const user = (req as any).currentUser;
+  async listRooms(@Req() req: Request, @Res() res: Response, @Query('scope') scope?: string) {
     const wsId = req.headers['x-workspace-id'] as string;
     if (!wsId) return res.status(400).json({ error: 'Workspace ID required' });
+    if (scope === 'workspace') {
+      // Observer view: every active room in this workspace, including ones
+      // the caller is not a participant in (e.g., agent-to-agent DMs).
+      const rooms = await this.crud.listAllWorkspaceRooms(wsId);
+      return res.json(rooms);
+    }
+    const user = (req as any).currentUser;
     const rooms = await this.crud.listRooms(wsId, user.id);
     return res.json(rooms);
   }
@@ -54,7 +60,7 @@ export class ChatRoomsController {
       return res.status(400).json({ error: 'participants array required' });
     }
     try {
-      const result = await this.crud.createRoom(wsId, user.id, participants, name);
+      const result = await this.crud.createRoom(wsId, { type: 'user', id: user.id }, participants, name);
       return res.status(201).json(result);
     } catch (err: any) {
       return res.status(err.status || 400).json({ error: err.message });

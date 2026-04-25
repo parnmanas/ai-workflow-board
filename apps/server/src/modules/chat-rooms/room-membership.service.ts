@@ -56,9 +56,12 @@ export class RoomMembershipService {
    */
   async addParticipants(
     roomId: string,
-    userId: string,
+    caller: { type: 'user' | 'agent'; id: string } | string,
     newParticipants: { participant_type: string; participant_id: string }[],
   ): Promise<void> {
+    // Back-compat: existing controller call site passes a bare userId string;
+    // the new MCP path passes a typed caller. Normalize here so both work.
+    const c = typeof caller === 'string' ? { type: 'user' as const, id: caller } : caller;
     const room = await this.roomRepo.findOne({ where: { id: roomId } });
     if (!room) {
       throw makeError(404, 'Room not found');
@@ -67,7 +70,7 @@ export class RoomMembershipService {
       throw makeError(400, 'Cannot add participants to a direct message');
     }
 
-    await this.requireActiveParticipant(roomId, userId);
+    await this.requireActiveParticipant(roomId, c.id, c.type);
 
     // Wrap cap-check and insert in a transaction to prevent concurrent requests from
     // exceeding the participant cap (read-check-then-write race condition).

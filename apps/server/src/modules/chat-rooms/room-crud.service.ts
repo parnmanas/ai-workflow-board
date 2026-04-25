@@ -187,16 +187,17 @@ export class RoomCrudService {
    */
   async createRoom(
     workspaceId: string,
-    creatorUserId: string,
+    creator: { type: 'user' | 'agent'; id: string },
     participantIds: { participant_type: string; participant_id: string }[],
     name?: string,
   ): Promise<{ room: any; existing: boolean }> {
-    // Ensure creator is always included (deduplicate)
+    // Ensure creator is always included (deduplicate). v0.32: creator can be
+    // an agent (MCP create_chat_room path) — previously we hardcoded 'user'.
     const alreadyIncluded = participantIds.some(
-      p => p.participant_type === 'user' && p.participant_id === creatorUserId,
+      p => p.participant_type === creator.type && p.participant_id === creator.id,
     );
     if (!alreadyIncluded) {
-      participantIds = [{ participant_type: 'user', participant_id: creatorUserId }, ...participantIds];
+      participantIds = [{ participant_type: creator.type, participant_id: creator.id }, ...participantIds];
     }
 
     // Deduplicate participants list
@@ -240,7 +241,11 @@ export class RoomCrudService {
         .getOne();
 
       if (existing) {
-        const detail = await this.getRoomDetail(existing.id, creatorUserId);
+        // getRoomDetail wants a user id for unread-count / last-read math —
+        // when the creator is an agent we pass empty so the detail returns
+        // without per-user badges. UI ignores those for agent callers.
+        const detailViewerUserId = creator.type === 'user' ? creator.id : '';
+        const detail = await this.getRoomDetail(existing.id, detailViewerUserId);
         return { room: detail, existing: true };
       }
     }
@@ -293,7 +298,8 @@ export class RoomCrudService {
 
     this.logService.info('ChatRooms', `Created ${roomType} room ${room.id} in workspace ${workspaceId}`);
 
-    const detail = await this.getRoomDetail(room.id, creatorUserId);
+    const viewerUserId = creator.type === 'user' ? creator.id : '';
+    const detail = await this.getRoomDetail(room.id, viewerUserId);
     return { room: detail, existing: false };
   }
 
@@ -381,6 +387,73 @@ export class RoomCrudService {
       new_name: trimmedName,
       member_ids: memberIds,
       agent_member_ids: agentMemberIds,
+    });
+  }
+
+  /**
+   * Workspace-wide observer view: every active room regardless of caller's
+   * membership. Used by the chat page's "All workspace rooms" toggle so a
+   * human can monitor agent-to-agent conversations they aren't a participant
+   * in. Does not compute per-user unread counts (caller may not be a member).
+   */
+  async listAllWorkspaceRooms(workspaceId: string): Promise<any[]> {
+    const rooms = await this.roomRepo.find({
+      where: { workspace_id: workspaceId },
+      order: { last_message_at: 'DESC' },
+    });
+    if (rooms.length === 0) return [];
+    const roomIds = rooms.map(r => r.id);
+    const participantRows = await this.participantRepo
+      .createQueryBuilder('p')
+      .where('p.room_id IN (:...roomIds)', { roomIds })
+      .andWhere('p.left_at IS NULL')
+      .getMany();
+    const lastMsgRows = await this.messageRepo
+      .createQueryBuilder('m')
+      .where('m.room_id IN (:...roomIds)', { roomIds })
+      .orderBy('m.created_at', 'DESC')
+      .getMany();
+    const lastByRoom = new Map<string, ChatRoomMessage>();
+    for (const m of lastMsgRows) if (!lastByRoom.has(m.room_id)) lastByRoom.set(m.room_id, m);
+    const partsByRoom = new Map<string, ChatRoomParticipant[]>();
+    for (const p of participantRows) {
+      const arr = partsByRoom.get(p.room_id) || [];
+      arr.push(p);
+      partsByRoom.set(p.room_id, arr);
+    }
+    // Bulk-resolve participant names
+    const userIds = [...new Set(participantRows.filter(p => p.participant_type === 'user').map(p => p.participant_id))];
+    const agentIds = [...new Set(participantRows.filter(p => p.participant_type === 'agent').map(p => p.participant_id))];
+    const [usersById, agentsById] = await Promise.all([
+      userIds.length > 0 ? this.userRepo.findByIds(userIds).then(list => new Map(list.map(u => [u.id, u.name || u.email]))) : Promise.resolve(new Map<string, string>()),
+      agentIds.length > 0 ? this.agentRepo.findByIds(agentIds).then(list => new Map(list.map(a => [a.id, a.name]))) : Promise.resolve(new Map<string, string>()),
+    ]);
+    const nameOf = (type: string, id: string): string => {
+      if (type === 'user') return usersById.get(id) || 'Unknown User';
+      if (type === 'agent') return agentsById.get(id) || 'Unknown Agent';
+      return 'Unknown';
+    };
+    return rooms.map((r) => {
+      const parts = (partsByRoom.get(r.id) || []).map(p => ({
+        type: p.participant_type,
+        id: p.participant_id,
+        name: nameOf(p.participant_type, p.participant_id),
+      }));
+      const last = lastByRoom.get(r.id);
+      return {
+        id: r.id,
+        type: r.type,
+        name: r.name || (parts.map(p => p.name).join(', ') || '(unnamed)'),
+        last_message_at: r.last_message_at,
+        participants: parts,
+        last_message: last
+          ? {
+              content: last.content,
+              sender_name: nameOf(last.sender_type, last.sender_id),
+              created_at: last.created_at,
+            }
+          : null,
+      };
     });
   }
 }
