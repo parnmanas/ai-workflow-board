@@ -7,6 +7,8 @@ import { useToast } from '../contexts/ToastContext';
 import type { AgentDetail, ActivityRow } from '../types';
 import { tokens } from '../tokens';
 import AgentFileBrowser from './AgentFileBrowser';
+import AgentSubagentsPanel from './AgentSubagentsPanel';
+import { useParams } from 'react-router-dom';
 
 /**
  * AgentDetailModal — Phase 3 Plan 03-03 §Component Inventory #4.
@@ -134,7 +136,8 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
   const [recentActivity, setRecentActivity] = useState<ActivityRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'info' | 'files'>('info');
+  const [activeTab, setActiveTab] = useState<'info' | 'files' | 'subagents'>('info');
+  const { wsId } = useParams<{ wsId: string }>();
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
 
   const loadDetail = async () => {
@@ -259,7 +262,7 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
           top: 0,
           right: 0,
           bottom: 0,
-          width: 640,
+          width: 1100,
           maxWidth: '100vw',
           background: tokens.colors.surfaceCard,
           borderLeft: `1px solid ${tokens.colors.border}`,
@@ -498,7 +501,7 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
               zIndex: 1,
             }}
           >
-            {(['info', 'files'] as const).map((tab) => {
+            {(['info', 'files', 'subagents'] as const).map((tab) => {
               const isActive = activeTab === tab;
               return (
                 <button
@@ -519,7 +522,7 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
                     cursor: 'pointer',
                   }}
                 >
-                  {tab === 'info' ? 'Info' : 'Files'}
+                  {tab === 'info' ? 'Info' : tab === 'files' ? 'Files' : 'Subagents'}
                 </button>
               );
             })}
@@ -782,6 +785,15 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
              /fs/roots fetch until the user asks for it. */}
           {activeTab === 'files' && detail && (
             <AgentFileBrowser agentId={detail.id} isOnline={isOnline} />
+          )}
+
+          {/* SUBAGENTS tab — live transcript of every subagent this agent's
+             plugin has spawned. Filtered by detail.id so users see only the
+             selected agent's traffic. */}
+          {activeTab === 'subagents' && detail && (
+            <div style={{ flex: 1, minHeight: 0, height: 480, display: 'flex' }}>
+              <AgentSubagentsPanel wsId={wsId} agentId={detail.id} />
+            </div>
           )}
         </div>
       </div>

@@ -17,7 +17,6 @@ import WorkspaceApiKeysPage from './components/WorkspaceApiKeysPage';
 import WorkspacePromptTemplatesPage from './components/WorkspacePromptTemplatesPage';
 import WorkspaceResourcesPage from './components/WorkspaceResourcesPage';
 import WorkspaceCredentialsPage from './components/WorkspaceCredentialsPage';
-import SubagentMonitorPage from './components/SubagentMonitorPage';
 import { tokens } from './tokens';
 
 // Redirects the user to /ws/:currentWorkspaceId/:to, waiting for auth to resolve.
@@ -157,7 +156,6 @@ function AppContent() {
           <Route path="prompt-templates" element={<WorkspacePromptTemplatesPage />} />
           <Route path="resources" element={<WorkspaceResourcesPage />} />
           <Route path="credentials" element={<WorkspaceCredentialsPage />} />
-          <Route path="subagents" element={<SubagentMonitorPage />} />
         </Route>
       </Route>
     </Routes>
