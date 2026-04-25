@@ -25,6 +25,7 @@ import { ResourcesModule } from './modules/resources/resources.module';
 import { CredentialsModule } from './modules/credentials/credentials.module';
 import { AgentLogsModule } from './modules/agent-logs/agent-logs.module';
 import { MentionsModule } from './modules/mentions/mentions.module';
+import { WorkspaceRolesModule } from './modules/workspace-roles/workspace-roles.module';
 
 @Module({
   imports: [
@@ -76,6 +77,7 @@ import { MentionsModule } from './modules/mentions/mentions.module';
     CredentialsModule,
     AgentLogsModule,
     MentionsModule,
+    WorkspaceRolesModule,
   ],
 })
 export class AppModule {}

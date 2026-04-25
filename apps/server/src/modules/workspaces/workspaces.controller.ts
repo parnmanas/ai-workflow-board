@@ -9,6 +9,8 @@ import { BoardColumn } from '../../entities/BoardColumn';
 import { Ticket } from '../../entities/Ticket';
 import { User } from '../../entities/User';
 import { Agent } from '../../entities/Agent';
+import { WorkspaceRole } from '../../entities/WorkspaceRole';
+import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { DEFAULT_COLUMNS } from '../../database/database.module';
 import { ReBACService } from '../../services/rebac.service';
@@ -218,20 +220,52 @@ export class WorkspacesController {
           .sort((a, b) => a.name.localeCompare(b.name))
       : [];
 
-    const roleShortcuts: Array<{ key: string; label: string; resolved_type: 'agent'; resolved_id: string }> = [];
+    // v0.34: role shortcuts come from the workspace_roles table (any slug
+    // the workspace has defined), not the hardcoded triple. Each shortcut
+    // resolves against the ticket_role_assignments row for that role on
+    // the supplied ticket; roles with no assignment are omitted (so
+    // `@assignee` only appears in the autocompleter when an assignee is set).
+    const roleShortcuts: Array<{
+      key: string;
+      label: string;
+      resolved_type: 'agent' | 'user';
+      resolved_id: string;
+    }> = [];
     if (ticketId) {
       const ticket = await this.ticketRepo.findOne({ where: { id: ticketId } });
       if (ticket) {
+        const wsRoles = await this.dataSource
+          .getRepository(WorkspaceRole)
+          .find({ where: { workspace_id: id }, order: { position: 'ASC' } });
+        const assignments = await this.dataSource
+          .getRepository(TicketRoleAssignment)
+          .find({ where: { ticket_id: ticket.id } });
+        const byRoleId = new Map(assignments.map(a => [a.role_id, a]));
         const agentById = new Map(agents.map(a => [a.id, a]));
-        const addShortcut = (key: 'assignee' | 'reporter' | 'reviewer', agentId: string) => {
-          if (!agentId) return;
-          const agent = agentById.get(agentId);
-          const label = agent ? `${key} (${agent.name})` : key;
-          roleShortcuts.push({ key, label, resolved_type: 'agent', resolved_id: agentId });
-        };
-        addShortcut('assignee', ticket.assignee_id);
-        addShortcut('reporter', ticket.reporter_id);
-        addShortcut('reviewer', ticket.reviewer_id);
+        const userById = new Map(users.map(u => [u.id, u]));
+        for (const role of wsRoles) {
+          const a = byRoleId.get(role.id);
+          if (!a) continue;
+          if (a.agent_id) {
+            const agent = agentById.get(a.agent_id);
+            const label = agent ? `${role.slug} (${agent.name})` : role.slug;
+            roleShortcuts.push({
+              key: role.slug,
+              label,
+              resolved_type: 'agent',
+              resolved_id: a.agent_id,
+            });
+          } else if (a.user_id) {
+            const u = userById.get(a.user_id);
+            const label = u ? `${role.slug} (${u.name})` : role.slug;
+            roleShortcuts.push({
+              key: role.slug,
+              label,
+              resolved_type: 'user',
+              resolved_id: a.user_id,
+            });
+          }
+        }
       }
     }
 

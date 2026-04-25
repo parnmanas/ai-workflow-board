@@ -33,6 +33,7 @@ import type { AllocationService } from '../../agents/allocation.service';
 import type { RoomCrudService } from '../../chat-rooms/room-crud.service';
 import type { RoomMembershipService } from '../../chat-rooms/room-membership.service';
 import type { RoomMessagingService } from '../../chat-rooms/room-messaging.service';
+import type { TicketRoleAssignmentService } from '../../workspace-roles/ticket-role-assignment.service';
 
 /**
  * Minimal surface that MCP tools need from the logging subsystem.
@@ -73,6 +74,10 @@ export interface ToolContext {
   // agent_chain_depth) as the REST endpoints. Standalone context omits it —
   // the tool degrades to an explicit error in that mode.
   roomMessagingService?: RoomMessagingService;
+  // v0.34: ticket role-assignment helper. Required for ticket CRUD MCP tools
+  // to keep the assignment table in sync with legacy column writes.
+  // Standalone context omits it; tools degrade by skipping the sync.
+  ticketRoleAssignmentService?: TicketRoleAssignmentService;
 }
 
 /**

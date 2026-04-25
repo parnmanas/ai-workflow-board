@@ -17,7 +17,7 @@ import { maxChildPosition, resolveAgentId, shiftTicketPositions } from '../share
 import type { ToolContext } from './context';
 
 export function registerTicketChildTools(server: McpServer, ctx: ToolContext): void {
-  const { dataSource, activityService } = ctx;
+  const { dataSource, activityService, ticketRoleAssignmentService } = ctx;
 
   server.tool(
     'create_child_ticket',
@@ -55,8 +55,18 @@ export function registerTicketChildTools(server: McpServer, ctx: ToolContext): v
         parent_id, depth: newDepth, column_id: null as any, title, description, priority, status,
         assignee, reporter, assignee_id, reporter_id,
         labels: JSON.stringify(labels), position,
+        // Inherit workspace_id from parent so role lookups work immediately.
+        workspace_id: parent.workspace_id || '',
         created_by: creatorName, created_by_type: creatorType, created_by_id: creatorId,
       }));
+
+      // v0.34: assignment-table sync.
+      if (ticketRoleAssignmentService && child.workspace_id) {
+        await ticketRoleAssignmentService.syncBuiltinTrio(child.id, child.workspace_id, {
+          assignee_id: child.assignee_id || '',
+          reporter_id: child.reporter_id || '',
+        });
+      }
 
       await activityService.logActivity({
         entity_type: 'ticket', entity_id: child.id, action: 'created',
@@ -101,6 +111,16 @@ export function registerTicketChildTools(server: McpServer, ctx: ToolContext): v
       if (labels !== undefined) ticket.labels = JSON.stringify(labels);
 
       const updated = await ticketRepo.save(ticket);
+
+      // v0.34: assignment-table sync (only fields the caller included).
+      if (ticketRoleAssignmentService && ticket.workspace_id) {
+        const trio: { assignee_id?: string; reporter_id?: string } = {};
+        if (assignee !== undefined || assignee_id !== undefined) trio.assignee_id = ticket.assignee_id || '';
+        if (reporter !== undefined || reporter_id !== undefined) trio.reporter_id = ticket.reporter_id || '';
+        if (Object.keys(trio).length > 0) {
+          await ticketRoleAssignmentService.syncBuiltinTrio(ticket.id, ticket.workspace_id, trio);
+        }
+      }
 
       if (oldStatus !== ticket.status) {
         await activityService.logActivity({

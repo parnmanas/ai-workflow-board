@@ -7,8 +7,11 @@ import { LogService } from './log.service';
 import { Ticket } from '../entities/Ticket';
 import { Comment } from '../entities/Comment';
 import { User } from '../entities/User';
+import { Agent } from '../entities/Agent';
 import { BoardColumn } from '../entities/BoardColumn';
 import { ActivityLog } from '../entities/ActivityLog';
+import { WorkspaceRole } from '../entities/WorkspaceRole';
+import { TicketRoleAssignment } from '../entities/TicketRoleAssignment';
 
 const ACTION_COLORS: Record<string, number> = {
   created: 0x34d399,
@@ -26,10 +29,80 @@ export class NotificationService implements OnModuleInit, OnModuleDestroy {
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
     @InjectRepository(Comment) private readonly commentRepo: Repository<Comment>,
     @InjectRepository(User) private readonly userRepo: Repository<User>,
+    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     @InjectRepository(BoardColumn) private readonly colRepo: Repository<BoardColumn>,
+    @InjectRepository(WorkspaceRole) private readonly roleRepo: Repository<WorkspaceRole>,
+    @InjectRepository(TicketRoleAssignment) private readonly assignRepo: Repository<TicketRoleAssignment>,
     private readonly discordService: DiscordService,
     private readonly logService: LogService,
   ) {}
+
+  /**
+   * Resolve the assignee + reporter holders for a ticket via
+   * TicketRoleAssignment, falling back to the legacy
+   * `assignee` / `reporter` display columns when an assignment row hasn't
+   * been created yet (mid-migration drift). Discord notifications only
+   * mention these two slugs — custom roles aren't surfaced there yet.
+   */
+  private async _resolveLegacyHolders(ticket: Ticket): Promise<{
+    assignee_id: string;
+    assignee_name: string;
+    reporter_id: string;
+    reporter_name: string;
+  }> {
+    let assignee_id = '';
+    let assignee_name = ticket.assignee || '';
+    let reporter_id = '';
+    let reporter_name = ticket.reporter || '';
+
+    if (ticket.workspace_id) {
+      const roles = await this.roleRepo.find({
+        where: { workspace_id: ticket.workspace_id },
+      });
+      const bySlug = new Map(roles.map(r => [r.slug, r]));
+      const ar = bySlug.get('assignee');
+      const rr = bySlug.get('reporter');
+      const wantedRoleIds = [ar?.id, rr?.id].filter((x): x is string => !!x);
+      if (wantedRoleIds.length > 0) {
+        const assignments = await this.assignRepo
+          .createQueryBuilder('a')
+          .where('a.ticket_id = :tid', { tid: ticket.id })
+          .andWhere('a.role_id IN (:...rids)', { rids: wantedRoleIds })
+          .getMany();
+        for (const a of assignments) {
+          const role = roles.find(r => r.id === a.role_id);
+          if (!role) continue;
+          if (a.agent_id) {
+            const agent = await this.agentRepo.findOne({ where: { id: a.agent_id } });
+            if (role.slug === 'assignee') {
+              assignee_id = a.agent_id;
+              assignee_name = agent?.name || assignee_name;
+            } else if (role.slug === 'reporter') {
+              reporter_id = a.agent_id;
+              reporter_name = agent?.name || reporter_name;
+            }
+          } else if (a.user_id) {
+            const user = await this.userRepo.findOne({ where: { id: a.user_id } });
+            if (role.slug === 'assignee') {
+              assignee_id = a.user_id;
+              assignee_name = user?.name || user?.email || assignee_name;
+            } else if (role.slug === 'reporter') {
+              reporter_id = a.user_id;
+              reporter_name = user?.name || user?.email || reporter_name;
+            }
+          }
+        }
+      }
+    }
+
+    // Legacy column fallback — populated by the v0.34 migration backfill or
+    // any pre-migration write-through. Keeps Discord working until Deploy 2
+    // strips these columns.
+    if (!assignee_id && (ticket as any).assignee_id) assignee_id = (ticket as any).assignee_id;
+    if (!reporter_id && (ticket as any).reporter_id) reporter_id = (ticket as any).reporter_id;
+
+    return { assignee_id, assignee_name, reporter_id, reporter_name };
+  }
 
   /** Walk from a ticket up to the root, returning the hierarchy path (top-down). */
   private async getTicketHierarchy(ticketId: string): Promise<Ticket[]> {
@@ -160,10 +233,11 @@ export class NotificationService implements OnModuleInit, OnModuleDestroy {
       const ticket = await this.ticketRepo.findOne({ where: { id: log.ticket_id } });
       if (ticket) {
         ticketTitle = ticket.title;
-        reporterId = ticket.reporter_id;
-        reporterName = ticket.reporter;
-        assigneeId = ticket.assignee_id;
-        assigneeName = ticket.assignee;
+        const holders = await this._resolveLegacyHolders(ticket);
+        reporterId = holders.reporter_id;
+        reporterName = holders.reporter_name;
+        assigneeId = holders.assignee_id;
+        assigneeName = holders.assignee_name;
         isChildTicket = ticket.depth > 0;
       }
 
@@ -213,10 +287,11 @@ export class NotificationService implements OnModuleInit, OnModuleDestroy {
       const ticket = await this.ticketRepo.findOne({ where: { id: log.entity_id } });
       if (ticket) {
         ticketTitle = ticket.title;
-        reporterId = ticket.reporter_id;
-        reporterName = ticket.reporter;
-        assigneeId = ticket.assignee_id;
-        assigneeName = ticket.assignee;
+        const holders = await this._resolveLegacyHolders(ticket);
+        reporterId = holders.reporter_id;
+        reporterName = holders.reporter_name;
+        assigneeId = holders.assignee_id;
+        assigneeName = holders.assignee_name;
         isChildTicket = ticket.depth > 0;
       }
     } else if (log.entity_type === 'subtask') {
@@ -226,10 +301,11 @@ export class NotificationService implements OnModuleInit, OnModuleDestroy {
       });
       if (childTicket) {
         ticketTitle = childTicket.title;
-        reporterId = childTicket.reporter_id;
-        reporterName = childTicket.reporter;
-        assigneeId = childTicket.assignee_id;
-        assigneeName = childTicket.assignee;
+        const holders = await this._resolveLegacyHolders(childTicket);
+        reporterId = holders.reporter_id;
+        reporterName = holders.reporter_name;
+        assigneeId = holders.assignee_id;
+        assigneeName = holders.assignee_name;
         isChildTicket = true;
       }
     }
@@ -238,10 +314,11 @@ export class NotificationService implements OnModuleInit, OnModuleDestroy {
       const ticket = await this.ticketRepo.findOne({ where: { id: log.ticket_id } });
       if (ticket) {
         ticketTitle = ticket.title;
-        if (!reporterId) reporterId = ticket.reporter_id;
-        if (!reporterName) reporterName = ticket.reporter;
-        if (!assigneeId) assigneeId = ticket.assignee_id;
-        if (!assigneeName) assigneeName = ticket.assignee;
+        const holders = await this._resolveLegacyHolders(ticket);
+        if (!reporterId) reporterId = holders.reporter_id;
+        if (!reporterName) reporterName = holders.reporter_name;
+        if (!assigneeId) assigneeId = holders.assignee_id;
+        if (!assigneeName) assigneeName = holders.assignee_name;
       }
     }
 

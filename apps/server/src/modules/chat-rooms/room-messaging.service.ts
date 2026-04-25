@@ -442,7 +442,7 @@ export class RoomMessagingService {
       }
     }
 
-    const resolved: ResolvedMention[] = this.mentionService.resolveMentions(refs, ticket);
+    const resolved: ResolvedMention[] = await this.mentionService.resolveMentions(refs, ticket);
     if (resolved.length === 0) return dispatched;
 
     const preview = (content || '').slice(0, 500);

@@ -8,6 +8,8 @@ import { BoardColumn } from '../../entities/BoardColumn';
 import { Board } from '../../entities/Board';
 import { Agent } from '../../entities/Agent';
 import { PromptTemplate } from '../../entities/PromptTemplate';
+import { WorkspaceRole } from '../../entities/WorkspaceRole';
+import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
 
@@ -27,12 +29,6 @@ import { activityEvents } from '../../services/activity.service';
 
 const COMMENT_ACTION = 'created';
 const COMMENT_ENTITY = 'comment';
-
-const ROLE_TO_FIELD: Record<string, keyof Pick<Ticket, 'assignee_id' | 'reporter_id' | 'reviewer_id'>> = {
-  assignee: 'assignee_id',
-  reporter: 'reporter_id',
-  reviewer: 'reviewer_id',
-};
 
 @Injectable()
 export class TriggerLoopService implements OnModuleInit {
@@ -120,15 +116,27 @@ export class TriggerLoopService implements OnModuleInit {
     const roles: string[] = Array.isArray(rolesRaw) ? rolesRaw : [rolesRaw];
     if (roles.length === 0) return;
 
-    for (const role of roles) {
-      const roleField = ROLE_TO_FIELD[role];
-      if (!roleField) continue;
-      const targetAgentId = ticket[roleField];
+    // Resolve role slugs against the ticket's workspace roles + assignments.
+    // Pre-v0.34 this loop indexed `ROLE_TO_FIELD[role]` and read the agent ID
+    // off `ticket.assignee_id` / `reporter_id` / `reviewer_id`. Now slugs are
+    // workspace-scoped so we look up the WorkspaceRole row, then the
+    // TicketRoleAssignment that pins a holder onto this ticket.
+    const roleRepo = this.dataSource.getRepository(WorkspaceRole);
+    const assignRepo = this.dataSource.getRepository(TicketRoleAssignment);
+    for (const slug of roles) {
+      const role = await roleRepo.findOne({
+        where: { workspace_id: ticket.workspace_id, slug },
+      });
+      if (!role) continue;
+      const assignment = await assignRepo.findOne({
+        where: { ticket_id: ticket.id, role_id: role.id },
+      });
+      const targetAgentId = assignment?.agent_id || null;
       if (!targetAgentId) continue;
       // Don't trigger the actor on their own actions
       if (targetAgentId === log.actor_id) continue;
 
-      await this._emitTrigger(ticket, targetAgentId, role, triggerSource, log.actor_id || '');
+      await this._emitTrigger(ticket, targetAgentId, slug, triggerSource, log.actor_id || '');
     }
   }
 
@@ -143,9 +151,6 @@ export class TriggerLoopService implements OnModuleInit {
     role: string,
     actor: { id: string; name: string },
   ): Promise<{ trigger_id: string; ticket_id: string; agent_id: string; role: string }> {
-    if (!ROLE_TO_FIELD[role]) {
-      throw Object.assign(new Error(`Invalid role: ${role}`), { status: 400 });
-    }
     if (!targetAgentId) {
       throw Object.assign(new Error('No target agent (set ticket role agent or pass agent_id)'), { status: 400 });
     }
@@ -153,6 +158,15 @@ export class TriggerLoopService implements OnModuleInit {
     const ticket = await this.dataSource.getRepository(Ticket).findOne({ where: { id: ticketId } });
     if (!ticket) {
       throw Object.assign(new Error('Ticket not found'), { status: 404 });
+    }
+
+    // Validate the slug against the ticket's workspace roles. Custom slugs
+    // are allowed as long as a row exists; an unknown slug is a 400.
+    const roleRow = await this.dataSource.getRepository(WorkspaceRole).findOne({
+      where: { workspace_id: ticket.workspace_id, slug: role },
+    });
+    if (!roleRow) {
+      throw Object.assign(new Error(`Invalid role: ${role}`), { status: 400 });
     }
 
     const agent = await this.dataSource.getRepository(Agent).findOne({ where: { id: targetAgentId } });
@@ -217,9 +231,19 @@ export class TriggerLoopService implements OnModuleInit {
   ): Promise<string> {
     const now = new Date();
 
-    // Load role_prompt fresh (agent.role_prompt may have been edited since last dispatch)
+    // Compose role_prompt = workspace role's prompt + agent's own prompt.
+    // Both layers loaded fresh here so any edits since last dispatch propagate
+    // (Agent.role_prompt or WorkspaceRole.role_prompt). Empty layers are
+    // skipped — neither side is a hard requirement. Plugin sees the joined
+    // text in the same `role_prompt` field on the wire, so no plugin change
+    // is needed for v0.34's prepend semantics.
     const agent = await this.dataSource.getRepository(Agent).findOne({ where: { id: agentId } });
-    const rolePrompt = agent?.role_prompt || '';
+    const workspaceRole = await this.dataSource.getRepository(WorkspaceRole).findOne({
+      where: { workspace_id: ticket.workspace_id, slug: role },
+    });
+    const rolePrompt = [workspaceRole?.role_prompt, agent?.role_prompt]
+      .filter((s): s is string => !!s && s.trim().length > 0)
+      .join('\n\n');
 
     // Re-fetch ticket for fresh prompt_text — the one from _handleActivity may be stale
     const freshTicket = await this.dataSource.getRepository(Ticket).findOne({ where: { id: ticket.id } });

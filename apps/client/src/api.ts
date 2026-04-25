@@ -122,6 +122,24 @@ export const api = {
   removeWorkspaceMember: (wsId: string, userId: string) =>
     request<any>(`/workspaces/${wsId}/members/${userId}`, { method: 'DELETE' }),
 
+  // ─── Workspace Roles (v0.34) ───────────────────────────
+  // Workspace-scoped workflow role catalog. The three legacy slugs
+  // (`assignee`/`reporter`/`reviewer`) are seeded with `is_builtin: true` per
+  // workspace; admins can rename / re-prompt them or add custom slugs. A
+  // role can't be deleted while any ticket assignment still references it.
+  listWorkspaceRoles: (wsId: string) =>
+    request<any[]>(`/workspaces/${wsId}/roles`),
+  createWorkspaceRole: (wsId: string, data: { slug: string; name: string; role_prompt?: string; description?: string; position?: number }) =>
+    request<any>(`/workspaces/${wsId}/roles`, { method: 'POST', body: JSON.stringify(data) }),
+  updateWorkspaceRole: (
+    wsId: string,
+    roleId: string,
+    data: { slug?: string; name?: string; role_prompt?: string; description?: string; position?: number },
+  ) =>
+    request<any>(`/workspaces/${wsId}/roles/${roleId}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteWorkspaceRole: (wsId: string, roleId: string) =>
+    request<any>(`/workspaces/${wsId}/roles/${roleId}`, { method: 'DELETE' }),
+
   // ─── Boards ────────────────────────────────────────────
   getBoard: (id: string) => request<any>(`/boards/${id}`),
   getBoards: (workspaceId?: string) =>
@@ -634,7 +652,8 @@ export const api = {
 export interface MentionCandidatesResponse {
   users: Array<{ id: string; name: string; avatar_url: string }>;
   agents: Array<{ id: string; name: string; avatar_url: string }>;
-  role_shortcuts: Array<{ key: string; label: string; resolved_type: 'agent'; resolved_id: string }>;
+  // v0.34: workspace roles can resolve to agents *or* users now.
+  role_shortcuts: Array<{ key: string; label: string; resolved_type: 'agent' | 'user'; resolved_id: string }>;
 }
 
 export interface UserMentionItem {

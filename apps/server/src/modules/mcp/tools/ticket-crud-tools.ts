@@ -21,7 +21,7 @@ import { getCallerAgent } from '../shared/session-auth';
 import type { ToolContext } from './context';
 
 export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): void {
-  const { dataSource, activityService } = ctx;
+  const { dataSource, activityService, ticketRoleAssignmentService } = ctx;
 
   server.tool(
     'get_ticket',
@@ -101,6 +101,16 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
         return t;
       });
 
+      // v0.34: mirror builtin trio onto TicketRoleAssignment so the trigger
+      // loop / mention resolution / allocation see the new ticket.
+      if (ticketRoleAssignmentService && ticket.workspace_id) {
+        await ticketRoleAssignmentService.syncBuiltinTrio(ticket.id, ticket.workspace_id, {
+          assignee_id: ticket.assignee_id || '',
+          reporter_id: ticket.reporter_id || '',
+          reviewer_id: ticket.reviewer_id || '',
+        });
+      }
+
       await activityService.logActivity({
         entity_type: 'ticket', entity_id: ticket.id, action: 'created',
         ticket_id: ticket.id, actor_name: creatorName || reporter || assignee,
@@ -157,6 +167,18 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       if (channel_ids !== undefined) { ticket.channel_ids = JSON.stringify(channel_ids); changes.push('channel_ids'); }
 
       await ticketRepo.save(ticket);
+
+      // v0.34: assignment-table sync. Only synced fields the caller actually
+      // included; undefined slots preserve their existing assignment.
+      if (ticketRoleAssignmentService && ticket.workspace_id) {
+        const trio: { assignee_id?: string; reporter_id?: string; reviewer_id?: string } = {};
+        if (assignee !== undefined || assignee_id !== undefined) trio.assignee_id = ticket.assignee_id || '';
+        if (reporter !== undefined || reporter_id !== undefined) trio.reporter_id = ticket.reporter_id || '';
+        if (reviewer_id !== undefined) trio.reviewer_id = ticket.reviewer_id || '';
+        if (Object.keys(trio).length > 0) {
+          await ticketRoleAssignmentService.syncBuiltinTrio(ticket.id, ticket.workspace_id, trio);
+        }
+      }
 
       // Log assignee/reporter changes separately for system comment generation
       if (assignee !== undefined && assignee !== oldAssignee) {

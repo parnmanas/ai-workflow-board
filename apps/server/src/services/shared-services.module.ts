@@ -9,6 +9,8 @@ import { User } from '../entities/User';
 import { Agent } from '../entities/Agent';
 import { BoardColumn } from '../entities/BoardColumn';
 import { RelationTuple } from '../entities/RelationTuple';
+import { WorkspaceRole } from '../entities/WorkspaceRole';
+import { TicketRoleAssignment } from '../entities/TicketRoleAssignment';
 import { ActivityService } from './activity.service';
 import { AuthService } from './auth.service';
 import { ApiKeyService } from './api-key.service';
@@ -37,7 +39,10 @@ import { PresenceService } from './presence.service';
 @Global()
 @Module({
   imports: [
-    TypeOrmModule.forFeature([ActivityLog, ApiKey, Agent, Channel, Comment, Ticket, User, BoardColumn, RelationTuple]),
+    TypeOrmModule.forFeature([
+      ActivityLog, ApiKey, Agent, Channel, Comment, Ticket, User, BoardColumn, RelationTuple,
+      WorkspaceRole, TicketRoleAssignment,
+    ]),
   ],
   providers: [
     ActivityService,
