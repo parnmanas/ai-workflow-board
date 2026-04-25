@@ -289,6 +289,10 @@ export const EVENT_TYPES: EventDefinition[] = [
         sender_name: event.sender_name,
         content: event.content,
         created_at: event.created_at,
+        // v0.33: trailing agent-chain depth — plugin uses to break loops.
+        agent_chain_depth: typeof event.agent_chain_depth === 'number'
+          ? event.agent_chain_depth
+          : undefined,
       };
       return {
         payload,

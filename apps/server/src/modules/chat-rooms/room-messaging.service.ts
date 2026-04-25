@@ -14,6 +14,11 @@ import { RoomMembershipService } from './room-membership.service';
 
 const CONTENT_MAX = 10000;
 
+// Look-back window for agent-chain depth derivation. Bounded so the query
+// stays cheap even on very busy rooms; large enough to expose any realistic
+// loop because the plugin caps long before this many turns.
+const AGENT_CHAIN_LOOKBACK = 8;
+
 function makeError(status: number, message: string): Error & { status: number } {
   const err = new Error(message) as Error & { status: number };
   err.status = status;
@@ -182,6 +187,12 @@ export class RoomMessagingService {
     const memberIds = await this.membership.getRoomMemberIds(roomId);
     const agentMemberIds = await this.membership.getRoomAgentMemberIds(roomId);
 
+    // Trailing consecutive agent-sender count in this room INCLUDING the
+    // just-saved message. Plugin uses it to short-circuit dispatch once
+    // agents have been talking to each other for too many turns. Always
+    // computed (cheap query) so the field is consistent on every emit.
+    const agentChainDepth = await this._computeAgentChainDepth(roomId);
+
     activityEvents.emit('chat_room_message', {
       room_id: roomId,
       workspace_id: workspaceId,
@@ -192,6 +203,7 @@ export class RoomMessagingService {
       content: trimmed,
       images: savedMsg.images,
       created_at: savedMsg.created_at.toISOString(),
+      agent_chain_depth: agentChainDepth,
       member_ids: memberIds,
       agent_member_ids: agentMemberIds,
     });
@@ -354,6 +366,36 @@ export class RoomMessagingService {
       content: m.content,
       created_at: m.created_at,
     }));
+  }
+
+  /**
+   * Count trailing consecutive agent-sender messages in the room (most-recent
+   * first), capped at AGENT_CHAIN_LOOKBACK. Returns 0 when the latest message
+   * is from a user or the room is empty. Called AFTER save so the just-saved
+   * message participates in the count.
+   *
+   * Used by sendMessage() to populate `agent_chain_depth` on the
+   * chat_room_message SSE payload, which the plugin proxy then consults to
+   * decide whether to keep delegating agent-to-agent replies (cap = 3 in the
+   * plugin). The lookback window stays small because the plugin breaks the
+   * chain long before this many consecutive agent turns are possible.
+   */
+  private async _computeAgentChainDepth(roomId: string): Promise<number> {
+    const recent = await this.messageRepo
+      .createQueryBuilder('m')
+      .select(['m.sender_type'])
+      .where('m.room_id = :roomId', { roomId })
+      .orderBy('m.created_at', 'DESC')
+      .addOrderBy('m.id', 'DESC')
+      .limit(AGENT_CHAIN_LOOKBACK)
+      .getMany();
+
+    let depth = 0;
+    for (const m of recent) {
+      if (m.sender_type !== 'agent') break;
+      depth++;
+    }
+    return depth;
   }
 
   // --- Private helpers (mention dispatch) ---

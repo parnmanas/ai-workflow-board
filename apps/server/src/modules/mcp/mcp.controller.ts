@@ -18,6 +18,7 @@ import { AgentStatusService } from '../agents/agent-status.service';
 import { AllocationService } from '../agents/allocation.service';
 import { RoomCrudService } from '../chat-rooms/room-crud.service';
 import { RoomMembershipService } from '../chat-rooms/room-membership.service';
+import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { MentionService } from '../../services/mention.service';
 import { ActivityService, activityEvents } from '../../services/activity.service';
 import { EmbeddingService } from '../../services/embedding.service';
@@ -98,6 +99,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     private readonly allocationService: AllocationService,
     private readonly roomCrudService: RoomCrudService,
     private readonly roomMembershipService: RoomMembershipService,
+    private readonly roomMessagingService: RoomMessagingService,
   ) {}
 
   onModuleInit() {
@@ -180,6 +182,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       allocationService: this.allocationService,
       roomCrudService: this.roomCrudService,
       roomMembershipService: this.roomMembershipService,
+      roomMessagingService: this.roomMessagingService,
     };
   }
 

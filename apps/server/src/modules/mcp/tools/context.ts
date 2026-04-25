@@ -32,6 +32,7 @@ import type { AgentStatusService } from '../../agents/agent-status.service';
 import type { AllocationService } from '../../agents/allocation.service';
 import type { RoomCrudService } from '../../chat-rooms/room-crud.service';
 import type { RoomMembershipService } from '../../chat-rooms/room-membership.service';
+import type { RoomMessagingService } from '../../chat-rooms/room-messaging.service';
 
 /**
  * Minimal surface that MCP tools need from the logging subsystem.
@@ -66,6 +67,12 @@ export interface ToolContext {
   allocationService?: AllocationService;
   roomCrudService?: RoomCrudService;
   roomMembershipService?: RoomMembershipService;
+  // v0.33: shared message-send entry point. Required for the MCP
+  // send_chat_room_message tool so it goes through the same dispatch path
+  // (mention parsing, DM auto-route, chat_room_message emit with
+  // agent_chain_depth) as the REST endpoints. Standalone context omits it —
+  // the tool degrades to an explicit error in that mode.
+  roomMessagingService?: RoomMessagingService;
 }
 
 /**
