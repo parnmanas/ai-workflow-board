@@ -17,12 +17,16 @@ export type StreamEventType =
   | 'user_mention'         // Mention feature: user @-mentioned (web UI unread badge)
   | 'comment_typing'       // Phase-9 typed comments: someone is composing a comment on a ticket
   | 'ticket_presence'      // Tier-1 E: viewer set for a ticket (who has the panel open)
-  | 'fs_request';          // File browser: server → plugin reverse RPC to read agent-machine files
+  | 'fs_request'           // File browser: server → plugin reverse RPC to read agent-machine files
+  | 'subagent_registered'  // Subagent monitor: plugin spawned a subagent
+  | 'subagent_log'         // Subagent monitor: stream-json line in/out
+  | 'subagent_ended';      // Subagent monitor: subagent process exited
 
 export interface StreamEventScope {
   board_id?: string;
   agent_id?: string;
   user_id?: string;
+  workspace_id?: string;    // v0.32: workspace-scoped events (subagent monitor)
   ticket_id?: string; // Phase 2 D-26 — chat thread scoping (global vs ticket-scoped)
   room_id?: string;         // Phase 7: chat room targeting
   member_ids?: Set<string>; // Phase 7: pre-resolved participant user IDs for sync filter
@@ -222,4 +226,45 @@ export interface FsRequestPayload {
   path: string;                              // absolute path on the agent machine
   offset?: number;                           // read: byte offset (default 0)
   limit?: number;                            // read: max bytes (server caps at 5MB)
+}
+
+// Subagent monitor — plugin reports subagent lifecycle + stream-json traffic
+// to the AWB server so the web UI can render a live transcript across every
+// agent machine. Storage is in-memory only (live debug, not audit log) and a
+// subagent's record is dropped when its process exits or when the plugin
+// disconnects, so the dataset stays bounded without explicit pruning.
+export interface SubagentRegisteredPayload {
+  subagent_id: string;        // plugin-generated uuid; identifies one transcript
+  agent_id: string;           // parent registered agent
+  workspace_id: string;
+  kind: 'chat' | 'ticket' | 'oneshot';
+  session_key: string;        // 'ticket:<id>:<role>' | 'room:<id>' | 'oneshot:<trigger_id>'
+  pid: number;
+  started_at: string;
+  // Optional human-readable label the UI shows in the list (e.g., ticket title
+  // or room name). Plugin best-effort fills this; server doesn't validate.
+  label?: string;
+}
+
+export interface SubagentLogPayload {
+  subagent_id: string;
+  agent_id: string;
+  workspace_id: string;
+  // direction is from the subagent's POV: 'in' = parent → subagent stdin
+  // (i.e. our composed turn prompts), 'out' = subagent stdout (the model's
+  // responses, tool_use frames, thinking blocks, etc.).
+  direction: 'in' | 'out';
+  // Raw stream-json line. UI parses; server is a pure forwarder.
+  line: string;
+  ts: string;
+}
+
+export interface SubagentEndedPayload {
+  subagent_id: string;
+  agent_id: string;
+  workspace_id: string;
+  exit_code: number | null;
+  signal: string | null;
+  duration_ms: number;
+  ended_at: string;
 }

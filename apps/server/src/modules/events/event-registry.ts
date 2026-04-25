@@ -27,6 +27,9 @@ import {
   TicketPresencePayload,
   UserMentionPayload,
   FsRequestPayload,
+  SubagentRegisteredPayload,
+  SubagentLogPayload,
+  SubagentEndedPayload,
 } from '../../common/types/stream-events';
 import { EventDefinition, SubscriberIdentity } from './types';
 
@@ -557,5 +560,71 @@ export const EVENT_TYPES: EventDefinition[] = [
         timestamp: env.timestamp,
       };
     },
+  },
+
+  // ───────── subagent_registered / subagent_log / subagent_ended ─────────
+  // Workspace-scoped fan-out: every user with an SSE stream subscribed to the
+  // workspace sees every subagent on every agent machine in that workspace.
+  // No agent-side filter — the events are observability traffic the agents
+  // don't need to consume themselves. UI does the rendering.
+  {
+    eventType: 'subagent_registered',
+    emitterEvent: 'subagent_registered',
+    map(event: any) {
+      const payload: SubagentRegisteredPayload = {
+        subagent_id: event.subagent_id,
+        agent_id: event.agent_id,
+        workspace_id: event.workspace_id,
+        kind: event.kind,
+        session_key: event.session_key || '',
+        pid: event.pid || 0,
+        started_at: event.started_at || new Date().toISOString(),
+        label: event.label,
+      };
+      return { payload, scope: { workspace_id: event.workspace_id }, timestamp: payload.started_at };
+    },
+    // Workspace scoping happens at the page (REST) level; SSE filter only
+    // restricts to user subscribers (agents don't need this traffic).
+    filter: (env, identity) => identity.type === 'user',
+    flatten: (env) => ({ event_type: 'subagent_registered', ...(env.payload as object), timestamp: env.timestamp }),
+  },
+  {
+    eventType: 'subagent_log',
+    emitterEvent: 'subagent_log',
+    map(event: any) {
+      const payload: SubagentLogPayload = {
+        subagent_id: event.subagent_id,
+        agent_id: event.agent_id,
+        workspace_id: event.workspace_id,
+        direction: event.direction,
+        line: event.line,
+        ts: event.ts || new Date().toISOString(),
+      };
+      return { payload, scope: { workspace_id: event.workspace_id }, timestamp: payload.ts };
+    },
+    // Workspace scoping happens at the page (REST) level; SSE filter only
+    // restricts to user subscribers (agents don't need this traffic).
+    filter: (env, identity) => identity.type === 'user',
+    flatten: (env) => ({ event_type: 'subagent_log', ...(env.payload as object), timestamp: env.timestamp }),
+  },
+  {
+    eventType: 'subagent_ended',
+    emitterEvent: 'subagent_ended',
+    map(event: any) {
+      const payload: SubagentEndedPayload = {
+        subagent_id: event.subagent_id,
+        agent_id: event.agent_id,
+        workspace_id: event.workspace_id,
+        exit_code: event.exit_code ?? null,
+        signal: event.signal ?? null,
+        duration_ms: event.duration_ms || 0,
+        ended_at: event.ended_at || new Date().toISOString(),
+      };
+      return { payload, scope: { workspace_id: event.workspace_id }, timestamp: payload.ended_at };
+    },
+    // Workspace scoping happens at the page (REST) level; SSE filter only
+    // restricts to user subscribers (agents don't need this traffic).
+    filter: (env, identity) => identity.type === 'user',
+    flatten: (env) => ({ event_type: 'subagent_ended', ...(env.payload as object), timestamp: env.timestamp }),
   },
 ];

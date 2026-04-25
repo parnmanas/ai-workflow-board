@@ -17,6 +17,8 @@ import type {
   FsStatResult,
   FsReadResult,
   FsRootsResult,
+  SubagentSummary,
+  SubagentTranscript,
 } from './types';
 
 const BASE = '/api';
@@ -285,6 +287,13 @@ export const api = {
     if (opts?.offset !== undefined) params.set('offset', String(opts.offset));
     if (opts?.limit !== undefined) params.set('limit', String(opts.limit));
     return request<FsReadResult>(`/agents/${encodeURIComponent(agentId)}/fs/read?${params.toString()}`);
+  },
+  // ─── Subagent monitor (v0.32) ─────────────────────────────
+  listSubagents: (workspaceId: string): Promise<SubagentSummary[]> =>
+    request<SubagentSummary[]>(`/subagent-monitor/workspaces/${encodeURIComponent(workspaceId)}`),
+  getSubagentTranscript: (subagentId: string, workspaceId: string): Promise<SubagentTranscript> => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    return request<SubagentTranscript>(`/subagent-monitor/${encodeURIComponent(subagentId)}?${params.toString()}`);
   },
   // The server reads X-Workspace-Id from the header set by getAuthHeaders(),
   // which pulls `currentWorkspaceId` from localStorage. When the user is on

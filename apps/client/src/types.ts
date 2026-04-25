@@ -418,3 +418,33 @@ export interface FsRootsResult {
   roots: string[];           // configured scope roots (realpath'd)
   enabled: boolean;          // false when plugin has fs_browser off or no valid roots
 }
+
+// ─── Subagent monitor (v0.32) ───────────────────────────────
+export type SubagentKind = 'chat' | 'ticket' | 'oneshot';
+
+export interface SubagentSummary {
+  subagent_id: string;
+  agent_id: string;
+  workspace_id: string;
+  kind: SubagentKind;
+  session_key: string;
+  pid: number;
+  started_at: string;
+  label?: string;
+  ended_at?: string;
+  exit_code?: number | null;
+  signal?: string | null;
+  duration_ms?: number;
+  line_count: number;
+}
+
+export interface SubagentLogLine {
+  direction: 'in' | 'out';
+  line: string;
+  ts: string;
+}
+
+export interface SubagentTranscript {
+  summary: SubagentSummary;
+  lines: SubagentLogLine[];
+}
