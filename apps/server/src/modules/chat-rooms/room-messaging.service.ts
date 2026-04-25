@@ -369,21 +369,28 @@ export class RoomMessagingService {
   }
 
   /**
-   * Count trailing consecutive agent-sender messages in the room (most-recent
-   * first), capped at AGENT_CHAIN_LOOKBACK. Returns 0 when the latest message
-   * is from a user or the room is empty. Called AFTER save so the just-saved
-   * message participates in the count.
+   * Length of the strictly-alternating agent-sender chain ending at the
+   * latest message. Each consecutive same-sender repeat is consolidated into
+   * one chain "step", so a single agent talking to itself never inflates the
+   * counter — only genuine back-and-forth between *different* agents does.
    *
-   * Used by sendMessage() to populate `agent_chain_depth` on the
-   * chat_room_message SSE payload, which the plugin proxy then consults to
-   * decide whether to keep delegating agent-to-agent replies (cap = 3 in the
-   * plugin). The lookback window stays small because the plugin breaks the
-   * chain long before this many consecutive agent turns are possible.
+   * Examples (latest first):
+   *   user                             → 0     (chain broken by user)
+   *   agentA                           → 1     (first agent turn)
+   *   agentA, agentA, agentA           → 1     (same agent retrying — not a loop)
+   *   agentA, agentB                   → 2     (one round-trip)
+   *   agentA, agentB, agentA           → 3     (B replied to A, then A replied)
+   *   agentA, agentA, agentB, agentA   → 3     (initial duplicates collapse)
+   *
+   * Plugin proxy reads this field on chat_room_message and skips delegation
+   * once depth ≥ AGENT_CHAIN_DEPTH_CAP (3) so an A↔B reply chain auto-terminates.
+   * Lookback stays small because the plugin breaks the chain long before this
+   * many alternations can stack up.
    */
   private async _computeAgentChainDepth(roomId: string): Promise<number> {
     const recent = await this.messageRepo
       .createQueryBuilder('m')
-      .select(['m.sender_type'])
+      .select(['m.sender_type', 'm.sender_id'])
       .where('m.room_id = :roomId', { roomId })
       .orderBy('m.created_at', 'DESC')
       .addOrderBy('m.id', 'DESC')
@@ -391,9 +398,14 @@ export class RoomMessagingService {
       .getMany();
 
     let depth = 0;
+    let prevSenderId: string | null = null;
     for (const m of recent) {
       if (m.sender_type !== 'agent') break;
-      depth++;
+      // Same agent in a row: still part of the same chain step.
+      if (m.sender_id !== prevSenderId) {
+        depth++;
+        prevSenderId = m.sender_id;
+      }
     }
     return depth;
   }
