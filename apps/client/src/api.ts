@@ -186,6 +186,19 @@ export const api = {
   moveTicket: (id: string, targetColumnId: string, targetPosition: number) =>
     request<any>(`/tickets/${id}/move`, { method: 'PATCH', body: JSON.stringify({ targetColumnId, targetPosition }) }),
 
+  // Re-parent a ticket. parent_id=null promotes back to root (must include
+  // column_id); parent_id=string makes it a subtask. targetPosition is
+  // optional — server clamps and defaults to end-of-list.
+  reparentTicket: (id: string, parent_id: string | null, opts?: { column_id?: string; targetPosition?: number }) =>
+    request<any>(`/tickets/${id}/parent`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        parent_id,
+        ...(opts?.column_id ? { column_id: opts.column_id } : {}),
+        ...(typeof opts?.targetPosition === 'number' ? { targetPosition: opts.targetPosition } : {}),
+      }),
+    }),
+
   triggerAgent: (id: string, role: 'assignee' | 'reporter' | 'reviewer', agent_id?: string) =>
     request<{ trigger_id: string; ticket_id: string; agent_id: string; role: string; trigger_source: 'manual'; pushed_at: string }>(
       `/tickets/${id}/trigger`,

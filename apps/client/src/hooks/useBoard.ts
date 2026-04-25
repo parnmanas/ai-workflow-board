@@ -151,6 +151,14 @@ export function useBoard(boardId: string = '') {
     await withLocalAction(() => api.deleteTicket(ticketId));
   };
 
+  const reparentTicket = async (
+    ticketId: string,
+    parentId: string | null,
+    opts?: { column_id?: string; targetPosition?: number },
+  ) => {
+    await withLocalAction(() => api.reparentTicket(ticketId, parentId, opts));
+  };
+
   const createChildTicket = async (parentId: string, data: { title: string; description?: string; priority?: string; assignee?: string; reporter?: string }) => {
     await withLocalAction(() => api.createChildTicket(parentId, data));
   };
@@ -192,6 +200,7 @@ export function useBoard(boardId: string = '') {
     createTicket,
     updateTicket,
     moveTicket,
+    reparentTicket,
     deleteTicket,
     createChildTicket,
     addComment,

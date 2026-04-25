@@ -17,12 +17,18 @@ interface TicketPanelProps {
   columnName: string;
   agents: Agent[];
   channels: Channel[];
+  // Flat list of all root tickets on the board, used by the SubtaskList
+  // "Link existing" picker. Optional so legacy callers don't break.
+  boardTickets?: Ticket[];
   typingIndicators: Record<string, string | null>;
   onClose: () => void;
   onUpdate: (id: string, data: Record<string, any>) => void;
   onDelete: (id: string) => void;
   onCreateChild: (parentId: string, data: { title: string; description?: string; priority?: string; assignee?: string; reporter?: string }) => void;
   onDeleteChild: (childId: string) => void;
+  // Adopt an existing ticket as a subtask of `parentId`. Distinct from
+  // onCreateChild (which makes a new ticket).
+  onReparentChild?: (parentId: string, childId: string) => void;
   onAddComment: (
     ticketId: string,
     content: string,
@@ -153,8 +159,8 @@ function fileToBase64(file: File): Promise<string> {
 }
 
 export default function TicketPanel({
-  ticket, columnName, agents, channels, typingIndicators,
-  onClose, onUpdate, onDelete, onCreateChild, onDeleteChild, onAddComment, onSetCommentStatus, onSelectTicket,
+  ticket, columnName, agents, channels, boardTickets, typingIndicators,
+  onClose, onUpdate, onDelete, onCreateChild, onDeleteChild, onReparentChild, onAddComment, onSetCommentStatus, onSelectTicket,
 }: TicketPanelProps) {
   const { user } = useAuth();
   const { showToast } = useToast();
@@ -1142,9 +1148,11 @@ export default function TicketPanel({
               parentTicket={activeTicket}
               agents={agents}
               maxDepth={2}
+              boardTickets={boardTickets}
               onCreateChild={onCreateChild}
               onUpdateChild={(id, data) => onUpdate(id, data)}
               onDeleteChild={onDeleteChild}
+              onReparentChild={onReparentChild}
               onSelectChild={handleSelectChild}
             />
           </>
