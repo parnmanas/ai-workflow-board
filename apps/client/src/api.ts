@@ -541,8 +541,8 @@ export const api = {
     request<any>('/admin/settings', { method: 'PATCH', body: JSON.stringify({ settings }) }),
 
   // ── Phase 7: Chat Rooms ─────────────────────────
-  listChatRooms: () =>
-    request<ChatRoomListItem[]>('/chat-rooms'),
+  listChatRooms: (scope?: 'workspace') =>
+    request<ChatRoomListItem[]>(scope === 'workspace' ? '/chat-rooms?scope=workspace' : '/chat-rooms'),
 
   createChatRoom: (participants: { participant_type: string; participant_id: string }[], name?: string) =>
     request<ChatRoomDetail>('/chat-rooms', {

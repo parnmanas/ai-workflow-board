@@ -29,6 +29,11 @@ export interface ChatRoomListPanelProps {
   onNewChat: () => void;
   workspaceId: string;
   onNavigateToMessage: (roomId: string, messageId: string) => void;
+  // v0.32: workspace-wide observer toggle. When true, the list shows every
+  // active room in the workspace including agent-to-agent rooms the user
+  // isn't a participant in. Optional so legacy callers compile unchanged.
+  showAllRooms?: boolean;
+  onToggleShowAllRooms?: (next: boolean) => void;
 }
 
 export default function ChatRoomListPanel({
@@ -40,6 +45,8 @@ export default function ChatRoomListPanel({
   onNewChat,
   workspaceId,
   onNavigateToMessage,
+  showAllRooms,
+  onToggleShowAllRooms,
 }: ChatRoomListPanelProps) {
   const [isSearching, setIsSearching] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -143,6 +150,25 @@ export default function ChatRoomListPanel({
               >
                 &#128269;
               </button>
+              {onToggleShowAllRooms && (
+                <button
+                  onClick={() => onToggleShowAllRooms(!showAllRooms)}
+                  title={showAllRooms ? 'Showing every workspace room (incl. agent-to-agent). Click for "my rooms" only.' : 'Click to also show rooms you are not a participant in.'}
+                  style={{
+                    background: showAllRooms ? COLORS.accent : 'transparent',
+                    color: showAllRooms ? 'white' : COLORS.textSecondary,
+                    border: `1px solid ${showAllRooms ? COLORS.accent : COLORS.border}`,
+                    borderRadius: tokens.radii.md,
+                    padding: '6px 10px',
+                    fontSize: 11,
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {showAllRooms ? 'All rooms' : 'My rooms'}
+                </button>
+              )}
               <button
                 onClick={onNewChat}
                 style={{

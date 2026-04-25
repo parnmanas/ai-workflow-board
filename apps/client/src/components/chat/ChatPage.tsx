@@ -109,10 +109,22 @@ export default function ChatPage() {
     activeRoomIdRef.current = activeRoomId;
   }, [activeRoomId]);
 
-  // Load rooms on mount
+  // Workspace-wide observer toggle (v0.32+) — when on, the room list
+  // includes every active room in the workspace, including agent-to-agent
+  // DMs the current user isn't a participant in. Off by default; persisted
+  // to localStorage so the choice survives reloads.
+  const [showAllRooms, setShowAllRoomsState] = useState<boolean>(() => {
+    try { return localStorage.getItem('chat:showAllRooms') === 'true'; } catch { return false; }
+  });
+  const setShowAllRooms = useCallback((v: boolean) => {
+    setShowAllRoomsState(v);
+    try { localStorage.setItem('chat:showAllRooms', String(v)); } catch { /* noop */ }
+  }, []);
+
+  // Load rooms on mount + when scope toggles
   useEffect(() => {
     setLoading(true);
-    api.listChatRooms()
+    api.listChatRooms(showAllRooms ? 'workspace' : undefined)
       .then((list) => {
         setRooms(list);
         setRoomsError(null);
@@ -121,7 +133,7 @@ export default function ChatPage() {
         setRoomsError('Could not load chats.');
       })
       .finally(() => setLoading(false));
-  }, []);
+  }, [showAllRooms]);
 
   // Load messages + mark read on room change
   useEffect(() => {
@@ -418,6 +430,8 @@ export default function ChatPage() {
             onNewChat={() => setShowNewChat(true)}
             workspaceId={workspaceId}
             onNavigateToMessage={handleNavigateToMessage}
+            showAllRooms={showAllRooms}
+            onToggleShowAllRooms={setShowAllRooms}
           />
         ) : (
           <ChatRoomView
@@ -463,6 +477,8 @@ export default function ChatPage() {
             onNewChat={() => setShowNewChat(true)}
             workspaceId={workspaceId}
             onNavigateToMessage={handleNavigateToMessage}
+            showAllRooms={showAllRooms}
+            onToggleShowAllRooms={setShowAllRooms}
           />
         </Panel>
         <Separator style={{ background: COLORS.border, width: 1, cursor: 'col-resize' }} />
