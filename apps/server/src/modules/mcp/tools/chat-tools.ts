@@ -10,8 +10,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { Agent } from '../../../entities/Agent';
-import { ChatRoom } from '../../../entities/ChatRoom';
-import { ChatRoomMessage } from '../../../entities/ChatRoomMessage';
 import { ChatRoomParticipant } from '../../../entities/ChatRoomParticipant';
 import { activityEvents } from '../../../services/activity.service';
 import { ok, err, MENTION_SYNTAX_DOC } from '../shared/helpers';
@@ -19,7 +17,7 @@ import { getCallerAgent } from '../shared/session-auth';
 import type { ToolContext } from './context';
 
 export function registerChatTools(server: McpServer, ctx: ToolContext): void {
-  const { dataSource, roomCrudService, roomMembershipService } = ctx;
+  const { dataSource, roomCrudService, roomMembershipService, roomMessagingService } = ctx;
 
   server.tool(
     'set_typing',
@@ -60,6 +58,15 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
       content: z.string().min(1).max(10000).describe('Message content (supports markdown: bold, italic, code span, links)'),
     },
     async ({ room_id, content }, extra: { sessionId?: string }) => {
+      // v0.33: route through RoomMessagingService so the MCP tool, the user
+      // REST endpoint (chat-rooms.controller) and the agent ack endpoint
+      // (agent-api.controller) all share one save → emit path. That's also
+      // what stamps `agent_chain_depth` on the SSE so the plugin can break
+      // agent-to-agent loops. Standalone MCP context has no DI, so the
+      // service is undefined there and the tool returns a clear error.
+      if (!roomMessagingService) {
+        return err('send_chat_room_message is unavailable in this MCP context (no RoomMessagingService)');
+      }
       const caller = getCallerAgent(extra);
       if (!caller) return err('Unauthorized: no agent identity for this session');
 
@@ -68,48 +75,24 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
         : null;
       if (!agent) return err('Agent identity not found for this session');
 
-      // Verify agent is an active participant
-      const participant = await dataSource.getRepository(ChatRoomParticipant).findOne({
-        where: { room_id, participant_id: agent.id, participant_type: 'agent', left_at: undefined },
-      });
-      if (!participant) return err(`Agent is not an active participant in room ${room_id}`);
-
-      // Save message
-      const msg = await dataSource.getRepository(ChatRoomMessage).save(
-        dataSource.getRepository(ChatRoomMessage).create({
+      try {
+        const msg = await roomMessagingService.sendMessage(
           room_id,
-          sender_type: 'agent',
-          sender_id: agent.id,
+          agent.workspace_id,
+          'agent',
+          agent.id,
+          agent.name,
           content,
-          workspace_id: agent.workspace_id,
-        }),
-      );
-
-      // Update room last_message_at
-      await dataSource.getRepository(ChatRoom).update(room_id, { last_message_at: msg.created_at });
-
-      // Resolve member_ids for SSE participant filter
-      const members = await dataSource.getRepository(ChatRoomParticipant).find({
-        where: { room_id, left_at: undefined },
-      });
-      const memberIds = new Set(members.filter(m => m.participant_type === 'user').map(m => m.participant_id));
-      const agentMemberIds = new Set(members.filter(m => m.participant_type === 'agent').map(m => m.participant_id));
-
-      activityEvents.emit('chat_room_message', {
-        room_id,
-        workspace_id: agent.workspace_id,
-        message_id: msg.id,
-        sender_type: 'agent',
-        sender_id: agent.id,
-        sender_name: agent.name,
-        content,
-        images: [],
-        created_at: msg.created_at instanceof Date ? msg.created_at.toISOString() : msg.created_at,
-        member_ids: memberIds,
-        agent_member_ids: agentMemberIds,
-      });
-
-      return ok({ message_id: msg.id, room_id, content, created_at: msg.created_at });
+        );
+        return ok({
+          message_id: msg.id,
+          room_id: msg.room_id,
+          content: msg.content,
+          created_at: msg.created_at,
+        });
+      } catch (e: any) {
+        return err(e?.message || 'Failed to send chat room message');
+      }
     }
   );
 

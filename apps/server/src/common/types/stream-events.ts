@@ -125,6 +125,11 @@ export interface ChatRoomMessagePayload {
   sender_name: string;
   content: string;
   created_at: string; // ISO-8601
+  // v0.33: trailing consecutive agent-sender count in the room, including this
+  // message. user-sent → 0; agent reply to a user → 1; agent reply to that → 2…
+  // Plugin uses it to break agent-to-agent ping-pong loops by skipping
+  // delegation once a configurable cap is hit.
+  agent_chain_depth?: number;
 }
 
 export interface ChatRoomUpdatePayload {
