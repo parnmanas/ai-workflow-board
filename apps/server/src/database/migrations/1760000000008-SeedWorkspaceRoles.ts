@@ -5,6 +5,7 @@ import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { Agent } from '../../entities/Agent';
 import { User } from '../../entities/User';
+import { BUILTIN_ROLES } from '../../db';
 
 /**
  * v0.34 — workspace-configurable roles bootstrap.
@@ -46,17 +47,11 @@ export class SeedWorkspaceRoles1760000000008 implements MigrationInterface {
     const agentRepo = manager.getRepository(Agent);
     const userRepo = manager.getRepository(User);
 
-    // ── Pass 1: seed built-in roles ──────────────────────────────────────
-    const BUILTIN: Array<{ slug: string; name: string; position: number; description: string }> = [
-      { slug: 'assignee', name: 'Assignee', position: 0, description: 'Owns the work — implements / drives the ticket forward.' },
-      { slug: 'reporter', name: 'Reporter', position: 1, description: 'Filed the ticket — clarifies intent and acceptance criteria.' },
-      { slug: 'reviewer', name: 'Reviewer', position: 2, description: 'Reviews the assignee\'s work before it advances.' },
-    ];
-
+    // ── Pass 1: seed built-in roles (preset shared with new-workspace path) ──
     const workspaces = await wsRepo.find();
     let createdRoles = 0;
     for (const ws of workspaces) {
-      for (const def of BUILTIN) {
+      for (const def of BUILTIN_ROLES) {
         const existing = await roleRepo.findOne({
           where: { workspace_id: ws.id, slug: def.slug },
         });
