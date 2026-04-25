@@ -109,7 +109,6 @@ export default function Sidebar({ isMobile, isOpen, onClose, wsId, boards }: Sid
     { key: 'chat',             path: `/ws/${wsId}/chat`,             label: 'Chat',             icon: 'C', badge: counts.chat.total },
     { key: 'users',            path: `/ws/${wsId}/users`,            label: 'Users',            icon: 'U' },
     { key: 'agents',           path: `/ws/${wsId}/agents`,           label: 'AI Agents',        icon: 'A' },
-    { key: 'subagents',        path: `/ws/${wsId}/subagents`,        label: 'Subagents',        icon: 'S' },
     { key: 'prompt-templates', path: `/ws/${wsId}/prompt-templates`, label: 'Prompt Templates', icon: 'P' },
     { key: 'resources',        path: `/ws/${wsId}/resources`,        label: 'Resources',        icon: 'R' },
     { key: 'credentials',      path: `/ws/${wsId}/credentials`,      label: 'Credentials',      icon: 'X' },
