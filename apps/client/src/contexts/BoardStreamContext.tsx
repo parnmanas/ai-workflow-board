@@ -38,7 +38,8 @@ type StreamNamedEventType =
   | 'server_meta'   // Phase 8 — protocol version handshake (CHAT-20)
   | 'user_mention'  // Mention feature — sidebar unread badge sync
   | 'comment_typing'   // Phase-9 typed comments — "user is composing" indicator
-  | 'ticket_presence'; // Tier-1 E — viewer set for a ticket (panel-open indicator)
+  | 'ticket_presence'  // Tier-1 E — viewer set for a ticket (panel-open indicator)
+  | 'subagent_registered' | 'subagent_log' | 'subagent_ended';  // v0.32 subagent monitor
 
 interface BoardStreamContextValue {
   /** Subscribe to a named SSE event (board_update/agent_typing/agent_trigger). */
