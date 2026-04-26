@@ -9,6 +9,7 @@ import { Ticket } from '../../entities/Ticket';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { DEFAULT_COLUMNS } from '../../database/database.module';
 import { DEFAULT_BOARD_ROUTING } from '../../db';
+import { PromptTemplatesService } from '../prompt-templates/prompt-templates.service';
 import { findOrFail } from '../../common/find-or-fail';
 import { parseComments, expandCommentAttachments } from '../mcp/shared/ticket-parsing';
 
@@ -22,6 +23,7 @@ export class BoardsController {
     @InjectRepository(BoardColumn) private readonly colRepo: Repository<BoardColumn>,
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
     @InjectDataSource() private readonly dataSource: DataSource,
+    private readonly promptTemplatesService: PromptTemplatesService,
   ) {}
 
   @Get()
@@ -49,7 +51,20 @@ export class BoardsController {
       routing_config: JSON.stringify(DEFAULT_BOARD_ROUTING),
     }));
     const defaultCols = DEFAULT_COLUMNS.map(c => ({ ...c, board_id: board.id }));
-    await this.colRepo.save(defaultCols.map(c => this.colRepo.create(c)));
+    const savedCols = await this.colRepo.save(defaultCols.map(c => this.colRepo.create(c)));
+
+    // Auto-link each new column to its matching default workflow template.
+    // seedDefaults is idempotent — existing workspaces (where the templates
+    // were minted at workspace-create time or via the backfill migration)
+    // get a no-op insert and the existing rows back.
+    await this.promptTemplatesService.seedDefaults(workspace_id);
+    const colPrompts = await this.promptTemplatesService.computeDefaultColumnPrompts(
+      workspace_id,
+      savedCols.map(c => ({ id: c.id, name: c.name })),
+    );
+    if (Object.keys(colPrompts).length > 0) {
+      await this.boardRepo.update({ id: board.id }, { column_prompts: JSON.stringify(colPrompts) });
+    }
 
     const result = await this.boardRepo.findOne({ where: { id: board.id } });
     return res.status(201).json(result);

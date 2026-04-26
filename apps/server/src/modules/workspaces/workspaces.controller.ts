@@ -15,6 +15,7 @@ import { AuthGuard } from '../../common/guards/auth.guard';
 import { DEFAULT_COLUMNS } from '../../database/database.module';
 import { DEFAULT_BOARD_ROUTING } from '../../db';
 import { WorkspaceRolesService } from '../workspace-roles/workspace-roles.service';
+import { PromptTemplatesService } from '../prompt-templates/prompt-templates.service';
 import { ReBACService } from '../../services/rebac.service';
 import { findOrFail } from '../../common/find-or-fail';
 import { parseComments, expandCommentAttachments } from '../mcp/shared/ticket-parsing';
@@ -36,6 +37,7 @@ export class WorkspacesController {
     private readonly rebacService: ReBACService,
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly workspaceRolesService: WorkspaceRolesService,
+    private readonly promptTemplatesService: PromptTemplatesService,
   ) {}
 
   @Get()
@@ -61,13 +63,26 @@ export class WorkspacesController {
       routing_config: JSON.stringify(DEFAULT_BOARD_ROUTING),
     }));
     const defaultCols = DEFAULT_COLUMNS.map(c => ({ ...c, board_id: board.id }));
-    await this.colRepo.save(defaultCols.map(c => this.colRepo.create(c)));
+    const savedCols = await this.colRepo.save(defaultCols.map(c => this.colRepo.create(c)));
 
     // v0.34: every new workspace gets the same builtin role preset that
     // existing workspaces received from the migration. Mention syntax,
     // routing_config, and trigger dispatch all rely on these slugs being
     // present, so seeding here keeps fresh workspaces immediately usable.
     await this.workspaceRolesService.seedBuiltinRoles(ws.id);
+
+    // Default workflow prompt templates + auto-link each column to the
+    // matching template so the board ships with a working column→prompt
+    // map (not just empty routing). seedDefaults must precede the column
+    // map computation; otherwise the templates aren't yet visible.
+    await this.promptTemplatesService.seedDefaults(ws.id);
+    const colPrompts = await this.promptTemplatesService.computeDefaultColumnPrompts(
+      ws.id,
+      savedCols.map(c => ({ id: c.id, name: c.name })),
+    );
+    if (Object.keys(colPrompts).length > 0) {
+      await this.boardRepo.update({ id: board.id }, { column_prompts: JSON.stringify(colPrompts) });
+    }
 
     const result = await this.wsRepo.findOne({ where: { id: ws.id } });
     return res.status(201).json(result);

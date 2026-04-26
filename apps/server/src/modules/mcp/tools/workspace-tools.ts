@@ -13,6 +13,8 @@ import { BoardColumn } from '../../../entities/BoardColumn';
 import { Ticket } from '../../../entities/Ticket';
 import { WorkspaceRole } from '../../../entities/WorkspaceRole';
 import { DEFAULT_COLUMNS, BUILTIN_ROLES, DEFAULT_BOARD_ROUTING } from '../../../db';
+import { DEFAULT_PROMPT_TEMPLATES } from '../../../database/default-prompt-templates';
+import { PromptTemplate } from '../../../entities/PromptTemplate';
 import { ok, err } from '../shared/helpers';
 import type { ToolContext } from './context';
 
@@ -83,7 +85,7 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
       }));
 
       const defaultCols = DEFAULT_COLUMNS.map(c => ({ ...c, board_id: board.id }));
-      await colRepo.save(defaultCols.map(c => colRepo.create(c)));
+      const savedCols = await colRepo.save(defaultCols.map(c => colRepo.create(c)));
 
       // v0.34: seed built-in role preset (planner/assignee/reporter/reviewer).
       const roleRepo = dataSource.getRepository(WorkspaceRole);
@@ -96,6 +98,30 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
         position: def.position,
         is_builtin: true,
       })));
+
+      // Default workflow prompt templates + auto-link to columns by name.
+      // Same registry feeds the REST + first-run + MCP paths so all three
+      // produce identical output for a fresh workspace.
+      const tplRepo = dataSource.getRepository(PromptTemplate);
+      const seededTemplates = await tplRepo.save(DEFAULT_PROMPT_TEMPLATES.map(def =>
+        tplRepo.create({
+          workspace_id: ws.id,
+          name: def.name,
+          description: def.description,
+          content: def.content,
+          category: def.category,
+        })));
+      const tplIdByName = new Map(seededTemplates.map(t => [t.name, t.id]));
+      const colPrompts: Record<string, string> = {};
+      for (const col of savedCols) {
+        const def = DEFAULT_PROMPT_TEMPLATES.find(d => d.column_match === col.name.toLowerCase());
+        if (!def) continue;
+        const tplId = tplIdByName.get(def.name);
+        if (tplId) colPrompts[col.id] = tplId;
+      }
+      if (Object.keys(colPrompts).length > 0) {
+        await boardRepo.update({ id: board.id }, { column_prompts: JSON.stringify(colPrompts) });
+      }
 
       const result = await wsRepo.findOne({ where: { id: ws.id } });
       return ok(result);

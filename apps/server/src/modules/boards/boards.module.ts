@@ -5,9 +5,10 @@ import { BoardColumn } from '../../entities/BoardColumn';
 import { Ticket } from '../../entities/Ticket';
 import { BoardsController } from './boards.controller';
 import { AuthGuard } from '../../common/guards/auth.guard';
+import { PromptTemplatesModule } from '../prompt-templates/prompt-templates.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Board, BoardColumn, Ticket])],
+  imports: [TypeOrmModule.forFeature([Board, BoardColumn, Ticket]), PromptTemplatesModule],
   controllers: [BoardsController],
   providers: [AuthGuard],
 })
