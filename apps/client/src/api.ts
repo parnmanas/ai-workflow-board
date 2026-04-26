@@ -139,6 +139,14 @@ export const api = {
     request<any>(`/workspaces/${wsId}/roles/${roleId}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteWorkspaceRole: (wsId: string, roleId: string) =>
     request<any>(`/workspaces/${wsId}/roles/${roleId}`, { method: 'DELETE' }),
+  // Bulk reorder — server rewrites position to 0..N-1 in the given order.
+  // Order propagates to TicketPanel / ColumnManager / TriggerMenu via the
+  // same `position` field they already sort on.
+  reorderWorkspaceRoles: (wsId: string, orderedRoleIds: string[]) =>
+    request<any[]>(`/workspaces/${wsId}/roles/reorder`, {
+      method: 'PATCH',
+      body: JSON.stringify({ ordered_role_ids: orderedRoleIds }),
+    }),
 
   // ─── Ticket Role Assignments (v0.34) ───────────────────
   // Per-ticket holder for each WorkspaceRole. The legacy

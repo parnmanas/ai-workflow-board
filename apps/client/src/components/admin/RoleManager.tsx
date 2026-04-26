@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
+import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
 import { Button, Input, Modal, Card } from '../common';
@@ -106,6 +107,27 @@ export default function RoleManager({ workspaceId }: { workspaceId: string }) {
     }
   };
 
+  // Drag-to-reorder. Optimistic — render the new order immediately, then
+  // persist; on server failure we reload from the source of truth so the
+  // UI converges. Position field on each row is rewritten to 0..N-1 by
+  // the server, but we don't bother updating the local copy because
+  // `roles` is replaced on success.
+  const handleDragEnd = async (result: DropResult) => {
+    if (!result.destination) return;
+    if (result.source.index === result.destination.index) return;
+    const next = roles.slice();
+    const [moved] = next.splice(result.source.index, 1);
+    next.splice(result.destination.index, 0, moved);
+    setRoles(next);
+    try {
+      const updated = await api.reorderWorkspaceRoles(workspaceId, next.map(r => r.id));
+      setRoles(updated as WorkspaceRoleRow[]);
+    } catch (e: any) {
+      setActionError(e?.message || 'Reorder failed');
+      await load();
+    }
+  };
+
   const handleDelete = async (r: WorkspaceRoleRow) => {
     if (!confirm(`Delete role "${r.name}" (slug: ${r.slug})?\n\nThis can't be undone, and only succeeds when no ticket assignments still reference it.`)) {
       return;
@@ -131,7 +153,8 @@ export default function RoleManager({ workspaceId }: { workspaceId: string }) {
         <p style={{ margin: 0, color: tokens.colors.textMuted, fontSize: 13 }}>
           Roles control who gets triggered when a ticket moves through a column. Slugs (e.g. <code>assignee</code>)
           are used in <code>@[role:slug|Name]</code> mentions and <code>routing_config</code>. Each role's prompt is prepended to
-          the agent's own <code>role_prompt</code> at trigger time.
+          the agent's own <code>role_prompt</code> at trigger time. Drag the <code>⠿</code> handle to reorder —
+          the order here drives how roles appear on every ticket.
         </p>
         <Button onClick={() => { resetForm(); setShowForm(true); }}>+ New role</Button>
       </div>
@@ -149,54 +172,93 @@ export default function RoleManager({ workspaceId }: { workspaceId: string }) {
         </div>
       )}
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        {roles.map(r => (
-          <Card key={r.id}>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: 12 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <strong style={{ fontSize: 15 }}>{r.name}</strong>
-                <code style={{
-                  fontSize: 12,
-                  padding: '2px 6px',
-                  background: tokens.colors.surfaceSubtle,
-                  borderRadius: tokens.radii.sm,
-                }}>{r.slug}</code>
-                {r.is_builtin && (
-                  <span style={{
-                    fontSize: 11,
-                    padding: '2px 6px',
-                    background: `${tokens.colors.accent}1A`,
-                    color: tokens.colors.accent,
-                    borderRadius: tokens.radii.sm,
-                  }}>built-in</span>
-                )}
-              </div>
-              {r.description && (
-                <div style={{ fontSize: 13, color: tokens.colors.textMuted }}>{r.description}</div>
-              )}
-              {r.role_prompt && (
-                <details>
-                  <summary style={{ cursor: 'pointer', fontSize: 12, color: tokens.colors.textMuted }}>
-                    Role prompt ({r.role_prompt.length} chars)
-                  </summary>
-                  <pre style={{
-                    fontSize: 12,
-                    padding: 8,
-                    background: tokens.colors.surfaceSubtle,
-                    borderRadius: tokens.radii.sm,
-                    whiteSpace: 'pre-wrap',
-                    margin: '4px 0 0',
-                  }}>{r.role_prompt}</pre>
-                </details>
-              )}
-              <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
-                <Button onClick={() => startEdit(r)}>Edit</Button>
-                <Button onClick={() => handleDelete(r)} variant="danger">Delete</Button>
-              </div>
+      <DragDropContext onDragEnd={handleDragEnd}>
+        <Droppable droppableId="workspace-roles-list">
+          {(provided) => (
+            <div
+              ref={provided.innerRef}
+              {...provided.droppableProps}
+              style={{ display: 'flex', flexDirection: 'column', gap: 8 }}
+            >
+              {roles.map((r, idx) => (
+                <Draggable key={r.id} draggableId={r.id} index={idx}>
+                  {(dragProvided, snapshot) => (
+                    <div
+                      ref={dragProvided.innerRef}
+                      {...dragProvided.draggableProps}
+                      style={{
+                        ...dragProvided.draggableProps.style,
+                        // Subtle lift while dragging so the visual order
+                        // matches the data order during the gesture.
+                        boxShadow: snapshot.isDragging ? tokens.shadows.modal : undefined,
+                        opacity: snapshot.isDragging ? 0.95 : 1,
+                      }}
+                    >
+                      <Card>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: 12 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <span
+                              {...dragProvided.dragHandleProps}
+                              title="Drag to reorder"
+                              style={{
+                                cursor: 'grab',
+                                color: tokens.colors.borderStrong,
+                                userSelect: 'none',
+                                fontSize: 14,
+                                padding: '0 4px',
+                                lineHeight: 1,
+                              }}
+                            >⠿</span>
+                            <strong style={{ fontSize: 15 }}>{r.name}</strong>
+                            <code style={{
+                              fontSize: 12,
+                              padding: '2px 6px',
+                              background: tokens.colors.surfaceSubtle,
+                              borderRadius: tokens.radii.sm,
+                            }}>{r.slug}</code>
+                            {r.is_builtin && (
+                              <span style={{
+                                fontSize: 11,
+                                padding: '2px 6px',
+                                background: `${tokens.colors.accent}1A`,
+                                color: tokens.colors.accent,
+                                borderRadius: tokens.radii.sm,
+                              }}>built-in</span>
+                            )}
+                          </div>
+                          {r.description && (
+                            <div style={{ fontSize: 13, color: tokens.colors.textMuted }}>{r.description}</div>
+                          )}
+                          {r.role_prompt && (
+                            <details>
+                              <summary style={{ cursor: 'pointer', fontSize: 12, color: tokens.colors.textMuted }}>
+                                Role prompt ({r.role_prompt.length} chars)
+                              </summary>
+                              <pre style={{
+                                fontSize: 12,
+                                padding: 8,
+                                background: tokens.colors.surfaceSubtle,
+                                borderRadius: tokens.radii.sm,
+                                whiteSpace: 'pre-wrap',
+                                margin: '4px 0 0',
+                              }}>{r.role_prompt}</pre>
+                            </details>
+                          )}
+                          <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+                            <Button onClick={() => startEdit(r)}>Edit</Button>
+                            <Button onClick={() => handleDelete(r)} variant="danger">Delete</Button>
+                          </div>
+                        </div>
+                      </Card>
+                    </div>
+                  )}
+                </Draggable>
+              ))}
+              {provided.placeholder}
             </div>
-          </Card>
-        ))}
-      </div>
+          )}
+        </Droppable>
+      </DragDropContext>
 
       {showForm && (
         <Modal isOpen={showForm} onClose={resetForm} title={editingId ? 'Edit role' : 'New role'} maxWidth={720}>

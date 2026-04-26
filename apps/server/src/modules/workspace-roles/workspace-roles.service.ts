@@ -85,6 +85,50 @@ export class WorkspaceRolesService {
     });
   }
 
+  /**
+   * Atomically rewrite the `position` field of every role in a workspace
+   * based on the provided id order. Used by the Roles drag-to-reorder UI.
+   *
+   * The given id list must match the workspace's current role set exactly
+   * — no missing rows, no foreign rows. This is intentional: the UI should
+   * always reorder the full list, not partially overwrite. Catching a
+   * mismatch here also prevents accidental bulk delete-via-reorder.
+   *
+   * Positions are rewritten as a contiguous 0..N-1 sequence so future
+   * inserts (which use `maxPosition + 1`) and reorders behave predictably.
+   */
+  async reorder(workspaceId: string, orderedRoleIds: string[]): Promise<WorkspaceRole[]> {
+    if (!workspaceId) throw makeError(400, 'workspaceId is required');
+    if (!Array.isArray(orderedRoleIds) || orderedRoleIds.length === 0) {
+      throw makeError(400, 'ordered_role_ids must be a non-empty array');
+    }
+    const seen = new Set<string>();
+    for (const id of orderedRoleIds) {
+      if (typeof id !== 'string' || !id) throw makeError(400, 'ordered_role_ids contains an invalid id');
+      if (seen.has(id)) throw makeError(400, `ordered_role_ids contains duplicate id: ${id}`);
+      seen.add(id);
+    }
+
+    const current = await this.roleRepo.find({ where: { workspace_id: workspaceId } });
+    const currentIds = new Set(current.map(r => r.id));
+    if (current.length !== orderedRoleIds.length) {
+      throw makeError(400, `ordered_role_ids length (${orderedRoleIds.length}) must match workspace role count (${current.length})`);
+    }
+    for (const id of orderedRoleIds) {
+      if (!currentIds.has(id)) throw makeError(400, `role ${id} does not belong to this workspace`);
+    }
+
+    // Single transaction — never leave the table half-renumbered.
+    await this.roleRepo.manager.transaction(async (m) => {
+      const repo = m.getRepository(WorkspaceRole);
+      for (let i = 0; i < orderedRoleIds.length; i++) {
+        await repo.update({ id: orderedRoleIds[i] }, { position: i });
+      }
+    });
+
+    return this.list(workspaceId);
+  }
+
   async get(roleId: string): Promise<WorkspaceRole | null> {
     return this.roleRepo.findOne({ where: { id: roleId } });
   }
