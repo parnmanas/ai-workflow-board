@@ -1066,9 +1066,7 @@ export default function TicketPanel({
                   const saving = savingRoleId === role.id;
                   return (
                     <div key={role.id}>
-                      <label style={labelStyle}>
-                        {role.name}{role.is_builtin ? '' : ' ✦'}
-                      </label>
+                      <label style={labelStyle}>{role.name}</label>
                       <select
                         value={value}
                         disabled={!onSetRoleAssignment || saving}
