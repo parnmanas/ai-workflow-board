@@ -8,6 +8,12 @@ export function useBoard(boardId: string = '') {
   const [users, setUsers] = useState<User[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [channels, setChannels] = useState<Channel[]>([]);
+  // Workspace roles catalog. Drives the dynamic role rows on TicketPanel
+  // and the trigger menu — one row per role, ordered by `position`.
+  const [workspaceRoles, setWorkspaceRoles] = useState<Array<{
+    id: string; slug: string; name: string; description?: string;
+    position: number; is_builtin: boolean; role_prompt?: string;
+  }>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   // typing indicator: map of ticketId -> agentId (or null when cleared)
@@ -27,14 +33,20 @@ export function useBoard(boardId: string = '') {
       setBoard(boardData);
       setError(null);
 
-      const [usersData, agentsData, channelsData] = await Promise.all([
+      // Workspace roles list is workspace-scoped, not board-scoped — pull
+      // the workspace id from the board payload so a single fetch refreshes
+      // alongside the board state.
+      const wsId = (boardData as any)?.workspace_id || '';
+      const [usersData, agentsData, channelsData, rolesData] = await Promise.all([
         api.getUsers().catch(() => []),
         api.getAgents().catch(() => []),
         api.getChannels().catch(() => []),
+        wsId ? api.listWorkspaceRoles(wsId).catch(() => []) : Promise.resolve([] as any[]),
       ]);
       setUsers(usersData);
       setAgents(agentsData);
       setChannels(channelsData);
+      setWorkspaceRoles((rolesData as any[]).slice().sort((a, b) => (a.position ?? 0) - (b.position ?? 0)));
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -159,6 +171,14 @@ export function useBoard(boardId: string = '') {
     await withLocalAction(() => api.reparentTicket(ticketId, parentId, opts));
   };
 
+  const setTicketRoleAssignment = async (
+    ticketId: string,
+    roleId: string,
+    holder: { agent_id?: string | null; user_id?: string | null },
+  ) => {
+    await withLocalAction(() => api.setTicketRoleAssignment(ticketId, roleId, holder));
+  };
+
   const createChildTicket = async (parentId: string, data: { title: string; description?: string; priority?: string; assignee?: string; reporter?: string }) => {
     await withLocalAction(() => api.createChildTicket(parentId, data));
   };
@@ -193,6 +213,7 @@ export function useBoard(boardId: string = '') {
     users,
     agents,
     channels,
+    workspaceRoles,
     loading,
     error,
     refresh,
@@ -203,6 +224,7 @@ export function useBoard(boardId: string = '') {
     reparentTicket,
     deleteTicket,
     createChildTicket,
+    setTicketRoleAssignment,
     addComment,
     setCommentStatus,
     createColumn,

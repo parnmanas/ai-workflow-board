@@ -1,5 +1,5 @@
 import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
-import { Controller, Get, Post, Patch, Delete, Body, Param, Req, Res, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Put, Patch, Delete, Body, Param, Req, Res, UseGuards } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, DataSource, In } from 'typeorm';
@@ -11,6 +11,7 @@ import { Agent } from '../../entities/Agent';
 import { UserMention } from '../../entities/UserMention';
 import { TicketReadState } from '../../entities/TicketReadState';
 import { User } from '../../entities/User';
+import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { WorkspaceGuard } from '../../common/guards/workspace.guard';
 import { ActivityService } from '../../services/activity.service';
@@ -600,6 +601,123 @@ export class TicketsController {
   }
 
   /**
+   * List the resolved role assignments for a ticket — one row per
+   * WorkspaceRole that has an assignment (rows with no assignment are
+   * omitted; the client merges this with the workspace's full role list to
+   * render an empty slot for unfilled roles).
+   *
+   * Each entry: { role: {id, slug, name, position, is_builtin}, holder: {type, id, name} | null }
+   */
+  @Get('tickets/:id/role-assignments')
+  async listRoleAssignments(@Param('id') id: string, @Res() res: Response) {
+    await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
+    const resolved = await this.ticketRoleAssignments.resolveForTicket(id);
+    return res.json(resolved.map(r => ({
+      role: {
+        id: r.role.id, slug: r.role.slug, name: r.role.name,
+        position: r.role.position, is_builtin: r.role.is_builtin,
+      },
+      holder: r.holder,
+    })));
+  }
+
+  /**
+   * Set (or clear) the holder of a single role on a ticket. Body:
+   *   { agent_id?: string|null, user_id?: string|null }
+   * Mutually exclusive — passing both rejects with 400. Both null/empty
+   * clears the slot (deletes the assignment row).
+   *
+   * Builtin slugs (`assignee`/`reporter`/`reviewer`) are mirrored back to the
+   * legacy ticket columns so older code paths (TicketCard, activity log,
+   * agent allocation fallbacks) keep seeing the same value. Custom slugs
+   * have no mirror — they live only in TicketRoleAssignment.
+   */
+  @Put('tickets/:id/role-assignments/:roleId')
+  async setRoleAssignment(
+    @Param('id') id: string,
+    @Param('roleId') roleId: string,
+    @Body() body: any,
+    @Req() req: any,
+    @Res() res: Response,
+  ) {
+    const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
+    const agent_id: string | null = body?.agent_id || null;
+    const user_id: string | null = body?.user_id || null;
+    if (agent_id && user_id) {
+      return res.status(400).json({ error: 'cannot set both agent_id and user_id' });
+    }
+
+    const roleRepo = this.dataSource.getRepository(WorkspaceRole);
+    const role = await roleRepo.findOne({ where: { id: roleId } });
+    if (!role) return res.status(404).json({ error: 'Role not found' });
+    if (ticket.workspace_id && role.workspace_id !== ticket.workspace_id) {
+      return res.status(400).json({ error: 'Role belongs to a different workspace' });
+    }
+
+    // Validate the holder exists. Skipping this would let a typo silently
+    // pin a dead id onto the ticket.
+    let agentName = '';
+    let userName = '';
+    if (agent_id) {
+      const a = await this.agentRepo.findOne({ where: { id: agent_id } });
+      if (!a) return res.status(404).json({ error: 'Agent not found' });
+      agentName = a.name;
+    }
+    if (user_id) {
+      const u = await this.dataSource.getRepository(User).findOne({ where: { id: user_id } });
+      if (!u) return res.status(404).json({ error: 'User not found' });
+      userName = u.name || u.email;
+    }
+
+    try {
+      await this.ticketRoleAssignments.setHolder(id, roleId, { agent_id, user_id });
+    } catch (e: any) {
+      return res.status(e?.status || 400).json({ error: e?.message || 'Failed to update role' });
+    }
+
+    // Mirror builtin slugs onto the legacy ticket columns. Display-name
+    // columns (`assignee`, `reporter`) get the holder's name when an agent
+    // or user fills the slot, blank when cleared. There's no historical
+    // `reviewer` name column, only `reviewer_id`.
+    const legacyMap: Record<string, { id: 'assignee_id' | 'reporter_id' | 'reviewer_id'; name?: 'assignee' | 'reporter' }> = {
+      assignee: { id: 'assignee_id', name: 'assignee' },
+      reporter: { id: 'reporter_id', name: 'reporter' },
+      reviewer: { id: 'reviewer_id' },
+    };
+    const mirror = legacyMap[role.slug];
+    let beforeId = '';
+    if (mirror) {
+      beforeId = (ticket as any)[mirror.id] || '';
+      const newId = agent_id || user_id || '';
+      const update: any = { [mirror.id]: newId };
+      if (mirror.name) update[mirror.name] = agentName || userName || '';
+      await this.ticketRepo.update(id, update);
+    }
+
+    const currentUser = req.currentUser;
+    await this.activityService.logActivity({
+      entity_type: 'ticket', entity_id: id, action: 'updated',
+      field_changed: mirror ? role.slug : `role:${role.slug}`,
+      old_value: beforeId,
+      new_value: agentName || userName || '',
+      ticket_id: ticket.parent_id || ticket.id,
+      actor_id: currentUser?.id,
+      actor_name: currentUser?.name || currentUser?.email,
+    });
+
+    const resolved = await this.ticketRoleAssignments.resolveForTicket(id);
+    return res.json({
+      assignments: resolved.map(r => ({
+        role: {
+          id: r.role.id, slug: r.role.slug, name: r.role.name,
+          position: r.role.position, is_builtin: r.role.is_builtin,
+        },
+        holder: r.holder,
+      })),
+    });
+  }
+
+  /**
    * Manually re-trigger an agent on this ticket. Used when the auto trigger
    * fired but the agent never responded (dead subagent, missed SSE, etc.) and
    * the human wants to punt it awake. Bypasses the 60s cooldown that the auto
@@ -611,18 +729,31 @@ export class TicketsController {
   @Post('tickets/:id/trigger')
   async triggerAgent(@Param('id') id: string, @Body() body: any, @Req() req: any, @Res() res: Response) {
     const role = String(body?.role || '').toLowerCase();
-    if (!['assignee', 'reporter', 'reviewer'].includes(role)) {
-      return res.status(400).json({ error: 'role must be one of assignee|reporter|reviewer' });
+    if (!role) {
+      return res.status(400).json({ error: 'role is required (workspace role slug)' });
     }
     const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
     const explicitAgentId = body?.agent_id ? String(body.agent_id) : '';
-    const roleField = role === 'assignee' ? 'assignee_id'
-      : role === 'reporter' ? 'reporter_id'
-      : 'reviewer_id';
-    const targetAgentId = explicitAgentId || (ticket as any)[roleField] || '';
+
+    // Resolve the role holder against the workspace role catalog. Legacy
+    // ticket columns (assignee_id / reporter_id / reviewer_id) are still
+    // checked as a fallback so v1 callers that haven't migrated keep working
+    // for the builtin three slugs.
+    let targetAgentId = explicitAgentId;
+    if (!targetAgentId) {
+      const holder = await this.ticketRoleAssignments.getHolderBySlug(id, ticket.workspace_id, role);
+      if (holder) targetAgentId = holder.agent_id || '';
+      if (!targetAgentId) {
+        const legacyField = role === 'assignee' ? 'assignee_id'
+          : role === 'reporter' ? 'reporter_id'
+          : role === 'reviewer' ? 'reviewer_id'
+          : null;
+        if (legacyField) targetAgentId = (ticket as any)[legacyField] || '';
+      }
+    }
     if (!targetAgentId) {
       return res.status(400).json({
-        error: `No ${role} assigned on this ticket. Set ticket.${roleField} first, or pass agent_id in the body.`,
+        error: `No agent holds role '${role}' on this ticket. Set the holder first, or pass agent_id in the body.`,
       });
     }
     const currentUser = req.currentUser;

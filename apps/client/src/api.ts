@@ -140,6 +140,22 @@ export const api = {
   deleteWorkspaceRole: (wsId: string, roleId: string) =>
     request<any>(`/workspaces/${wsId}/roles/${roleId}`, { method: 'DELETE' }),
 
+  // ─── Ticket Role Assignments (v0.34) ───────────────────
+  // Per-ticket holder for each WorkspaceRole. The legacy
+  // assignee/reporter/reviewer triple is mirrored from the builtin slugs;
+  // custom slugs are *only* visible through this endpoint.
+  listTicketRoleAssignments: (ticketId: string) =>
+    request<TicketRoleAssignmentRow[]>(`/tickets/${ticketId}/role-assignments`),
+  setTicketRoleAssignment: (
+    ticketId: string,
+    roleId: string,
+    holder: { agent_id?: string | null; user_id?: string | null },
+  ) =>
+    request<{ assignments: TicketRoleAssignmentRow[] }>(
+      `/tickets/${ticketId}/role-assignments/${roleId}`,
+      { method: 'PUT', body: JSON.stringify(holder) },
+    ),
+
   // ─── Boards ────────────────────────────────────────────
   getBoard: (id: string) => request<any>(`/boards/${id}`),
   getBoards: (workspaceId?: string) =>
@@ -660,6 +676,12 @@ export const api = {
     return request<{ count: number }>(`/admin/agent-logs/unseen-count${qs}`);
   },
 };
+
+// ─── Ticket role assignment types ─────────────────────────
+export interface TicketRoleAssignmentRow {
+  role: { id: string; slug: string; name: string; position: number; is_builtin: boolean };
+  holder: { type: 'agent' | 'user'; id: string; name: string } | null;
+}
 
 // ─── Mention types ───────────────────────────────────────
 export interface MentionCandidatesResponse {

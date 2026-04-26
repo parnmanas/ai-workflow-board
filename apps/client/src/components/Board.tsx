@@ -50,9 +50,10 @@ export default function Board() {
   }, [showToast, withLoading]);
 
   const {
-    board, users, agents, channels, loading: boardLoading, error, refresh,
+    board, users, agents, channels, workspaceRoles,
+    loading: boardLoading, error, refresh,
     createTicket, updateTicket, moveTicket, reparentTicket, deleteTicket,
-    createChildTicket, addComment, setCommentStatus,
+    createChildTicket, setTicketRoleAssignment, addComment, setCommentStatus,
     createColumn, updateColumn, deleteColumn,
     typingIndicators,
   } = useBoard(boardId ?? '');
@@ -132,6 +133,14 @@ export default function Board() {
   const handleReparentChild = useCallback(async (parentId: string, childId: string) => {
     await wrapAction(() => reparentTicket(childId, parentId), 'Subtask linked');
   }, [wrapAction, reparentTicket]);
+
+  const handleSetRoleAssignment = useCallback(async (
+    ticketId: string,
+    roleId: string,
+    holder: { agent_id?: string | null; user_id?: string | null },
+  ) => {
+    await wrapAction(() => setTicketRoleAssignment(ticketId, roleId, holder));
+  }, [wrapAction, setTicketRoleAssignment]);
 
   const handleAddComment = useCallback(async (
     ticketId: string,
@@ -255,7 +264,9 @@ export default function Board() {
                     ticket={activePanelTicket}
                     columnName={board.columns.find(c => c.tickets.some(t => t.id === activePanelTicket.id))?.name || ''}
                     agents={agents}
+                    users={users}
                     channels={channels}
+                    workspaceRoles={workspaceRoles}
                     boardTickets={board.columns.flatMap(c => c.tickets)}
                     typingIndicators={typingIndicators}
                     onClose={handleCloseDetail}
@@ -264,6 +275,7 @@ export default function Board() {
                     onCreateChild={handleCreateChild}
                     onDeleteChild={handleDeleteChild}
                     onReparentChild={handleReparentChild}
+                    onSetRoleAssignment={handleSetRoleAssignment}
                     onAddComment={handleAddComment}
                     onSetCommentStatus={handleSetCommentStatus}
                     onSelectTicket={setActivePanelTicketId}
