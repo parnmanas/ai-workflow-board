@@ -199,8 +199,8 @@ export default function RoleManager({ workspaceId }: { workspaceId: string }) {
       </div>
 
       {showForm && (
-        <Modal isOpen={showForm} onClose={resetForm} title={editingId ? 'Edit role' : 'New role'}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: 16, minWidth: 480 }}>
+        <Modal isOpen={showForm} onClose={resetForm} title={editingId ? 'Edit role' : 'New role'} maxWidth={720}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12, padding: 4 }}>
             <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
               <span style={{ fontSize: 12, color: tokens.colors.textMuted }}>
                 Slug — used in <code>@[role:slug|...]</code> mentions and routing_config. Lowercase letters/digits/hyphens.
@@ -235,7 +235,7 @@ export default function RoleManager({ workspaceId }: { workspaceId: string }) {
                 value={form.role_prompt}
                 onChange={(e) => setForm({ ...form, role_prompt: e.target.value })}
                 placeholder="You are reviewing for production-readiness. Focus on edge cases and security holes."
-                rows={6}
+                rows={10}
                 style={{
                   fontFamily: 'monospace',
                   fontSize: 13,
