@@ -8,6 +8,7 @@ import { BoardColumn } from '../../entities/BoardColumn';
 import { Ticket } from '../../entities/Ticket';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { DEFAULT_COLUMNS } from '../../database/database.module';
+import { DEFAULT_BOARD_ROUTING } from '../../db';
 import { findOrFail } from '../../common/find-or-fail';
 import { parseComments, expandCommentAttachments } from '../mcp/shared/ticket-parsing';
 
@@ -43,7 +44,10 @@ export class BoardsController {
     if (!name) return res.status(400).json({ error: 'name is required' });
     if (!workspace_id) return res.status(400).json({ error: 'workspace_id is required' });
 
-    const board = await this.boardRepo.save(this.boardRepo.create({ name, description, workspace_id }));
+    const board = await this.boardRepo.save(this.boardRepo.create({
+      name, description, workspace_id,
+      routing_config: JSON.stringify(DEFAULT_BOARD_ROUTING),
+    }));
     const defaultCols = DEFAULT_COLUMNS.map(c => ({ ...c, board_id: board.id }));
     await this.colRepo.save(defaultCols.map(c => this.colRepo.create(c)));
 

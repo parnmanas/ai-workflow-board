@@ -67,7 +67,7 @@ export class WorkspaceRolesService {
         workspace_id: workspaceId,
         slug: def.slug,
         name: def.name,
-        role_prompt: '',
+        role_prompt: def.role_prompt,
         description: def.description,
         position: def.position,
         is_builtin: true,

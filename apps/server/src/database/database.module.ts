@@ -1,7 +1,7 @@
 import { Module, OnModuleInit, Inject, Optional } from '@nestjs/common';
 import { TypeOrmModule, InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
-import { buildDataSourceOptions, DEFAULT_COLUMNS, BUILTIN_ROLES } from '../db';
+import { buildDataSourceOptions, DEFAULT_COLUMNS, BUILTIN_ROLES, DEFAULT_BOARD_ROUTING } from '../db';
 import * as entitiesBarrel from '../entities';
 import { Workspace } from '../entities/Workspace';
 import { Board } from '../entities/Board';
@@ -77,6 +77,10 @@ export class DatabaseModule implements OnModuleInit {
         workspace_id: ws.id,
         name: 'AI Workflow Board',
         description: 'Main board for AI agent collaboration',
+        // Seed the default plan→implement→review routing so the workflow
+        // is functional out of the box. Admins can override via Board
+        // Settings → Routing.
+        routing_config: JSON.stringify(DEFAULT_BOARD_ROUTING),
       }));
 
       const defaultCols = DEFAULT_COLUMNS.map(c => ({
@@ -93,7 +97,7 @@ export class DatabaseModule implements OnModuleInit {
         workspace_id: ws.id,
         slug: def.slug,
         name: def.name,
-        role_prompt: '',
+        role_prompt: def.role_prompt,
         description: def.description,
         position: def.position,
         is_builtin: true,

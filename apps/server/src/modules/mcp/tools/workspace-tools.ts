@@ -12,7 +12,7 @@ import { Board } from '../../../entities/Board';
 import { BoardColumn } from '../../../entities/BoardColumn';
 import { Ticket } from '../../../entities/Ticket';
 import { WorkspaceRole } from '../../../entities/WorkspaceRole';
-import { DEFAULT_COLUMNS, BUILTIN_ROLES } from '../../../db';
+import { DEFAULT_COLUMNS, BUILTIN_ROLES, DEFAULT_BOARD_ROUTING } from '../../../db';
 import { ok, err } from '../shared/helpers';
 import type { ToolContext } from './context';
 
@@ -64,7 +64,7 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
 
   server.tool(
     'create_workspace',
-    'Create a new workspace with a default board and columns (Backlog, To Do, In Progress, Review, Done)',
+    'Create a new workspace with a default board, columns (Backlog, To Do, Plan, In Progress, Review, Merging, Done) and the planner→assignee→reviewer routing preset',
     {
       name: z.string().describe('Workspace name'),
       description: z.string().optional().default('').describe('Workspace description'),
@@ -79,18 +79,19 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
         workspace_id: ws.id,
         name: `${name} Board`,
         description: '',
+        routing_config: JSON.stringify(DEFAULT_BOARD_ROUTING),
       }));
 
       const defaultCols = DEFAULT_COLUMNS.map(c => ({ ...c, board_id: board.id }));
       await colRepo.save(defaultCols.map(c => colRepo.create(c)));
 
-      // v0.34: seed built-in role preset (assignee/reporter/reviewer).
+      // v0.34: seed built-in role preset (planner/assignee/reporter/reviewer).
       const roleRepo = dataSource.getRepository(WorkspaceRole);
       await roleRepo.save(BUILTIN_ROLES.map(def => roleRepo.create({
         workspace_id: ws.id,
         slug: def.slug,
         name: def.name,
-        role_prompt: '',
+        role_prompt: def.role_prompt,
         description: def.description,
         position: def.position,
         is_builtin: true,

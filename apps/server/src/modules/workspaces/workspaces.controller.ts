@@ -13,6 +13,7 @@ import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { DEFAULT_COLUMNS } from '../../database/database.module';
+import { DEFAULT_BOARD_ROUTING } from '../../db';
 import { WorkspaceRolesService } from '../workspace-roles/workspace-roles.service';
 import { ReBACService } from '../../services/rebac.service';
 import { findOrFail } from '../../common/find-or-fail';
@@ -55,6 +56,9 @@ export class WorkspacesController {
     const ws = await this.wsRepo.save(this.wsRepo.create({ name, description }));
     const board = await this.boardRepo.save(this.boardRepo.create({
       workspace_id: ws.id, name: board_name?.trim() || `${name} Board`, description: '',
+      // Default routing pairs each workflow column with its driving role.
+      // Admins can edit via Board Settings → Routing.
+      routing_config: JSON.stringify(DEFAULT_BOARD_ROUTING),
     }));
     const defaultCols = DEFAULT_COLUMNS.map(c => ({ ...c, board_id: board.id }));
     await this.colRepo.save(defaultCols.map(c => this.colRepo.create(c)));
