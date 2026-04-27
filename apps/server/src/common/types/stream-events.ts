@@ -93,6 +93,7 @@ export interface AgentStatusPayload {
     ticket_id: string;
     ticket_title: string;
     claimed_at: string;  // ISO-8601
+    role?: string;       // role slug the subagent was spawned for; undefined for older plugins
   };
 }
 
@@ -249,6 +250,12 @@ export interface SubagentRegisteredPayload {
   // Optional human-readable label the UI shows in the list (e.g., ticket title
   // or room name). Plugin best-effort fills this; server doesn't validate.
   label?: string;
+  // v0.34: ticket + role context for ticket-kind subagents. Lets the UI show
+  // "Ticket title · reviewer" instead of just an opaque session key. Both
+  // optional — older plugins and chat/oneshot subagents leave them undefined.
+  ticket_id?: string;
+  ticket_title?: string;
+  role?: string;
 }
 
 export interface SubagentLogPayload {

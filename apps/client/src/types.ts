@@ -274,6 +274,9 @@ export interface AgentCurrentTask {
   ticket_id: string;
   ticket_title: string;
   claimed_at: string; // ISO-8601
+  // Role slug the subagent was spawned for (assignee/reporter/reviewer or
+  // workspace-custom). Optional — older plugins don't pin a role.
+  role?: string;
 }
 
 export interface DashboardAgent {
@@ -464,6 +467,11 @@ export interface SubagentSummary {
   // Set once `ended_at` is set; ISO-8601 instant the server will purge the
   // record (default 48h after end). undefined while live.
   expires_at?: string;
+  // v0.34: ticket + role context for ticket-kind subagents. Lets the UI show
+  // "Ticket title · reviewer" instead of the raw session_key.
+  ticket_id?: string;
+  ticket_title?: string;
+  role?: string;
 }
 
 export interface SubagentLogLine {

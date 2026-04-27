@@ -26,7 +26,67 @@ import { getCallerAgent } from '../shared/session-auth';
 import type { ToolContext } from './context';
 
 export function registerCommentTools(server: McpServer, ctx: ToolContext): void {
-  const { dataSource, activityService, mentionService, logger } = ctx;
+  const { dataSource, activityService, mentionService, logger, ticketRoleAssignmentService } = ctx;
+
+  /**
+   * Snapshot which role(s) an agent comment was authored as, on the ticket
+   * the comment lives on. Stored under `metadata.author_role` (string when
+   * the role is unambiguous, array when the same agent legitimately holds
+   * multiple roles on the ticket and didn't pin one explicitly).
+   *
+   * Resolution order:
+   *   1. caller-supplied `author_role` (override — the agent knows what it
+   *      is doing right now).
+   *   2. session-pinned role from X-AWB-Subagent-Role headers (the plugin
+   *      ticket-session-manager spawns one subagent per (ticket, role) and
+   *      pins the role on that child's MCP config — this is the common path
+   *      for agent-authored comments).
+   *   3. TicketRoleAssignmentService lookup of every role this agent holds
+   *      on the ticket (best-effort fallback when neither override nor
+   *      session header is present — e.g. an older plugin or a top-level
+   *      proxy session).
+   *
+   * Returns `null` when nothing resolves, so callers can omit the field
+   * entirely rather than write a misleading empty string.
+   */
+  async function resolveAuthorRole(
+    ticketId: string,
+    requestedRole: string | undefined,
+    authorType: 'user' | 'agent',
+    authorId: string,
+    sessionRole: string | undefined,
+    sessionTicketId: string | undefined,
+  ): Promise<string | string[] | null> {
+    const explicit = (requestedRole || '').trim().toLowerCase();
+    if (explicit) return explicit;
+    if (authorType !== 'agent') return null;
+
+    const sessionMatchesTicket = sessionTicketId && sessionTicketId === ticketId;
+    if (sessionMatchesTicket && sessionRole) return sessionRole;
+
+    if (!ticketRoleAssignmentService) return null;
+    try {
+      const resolved = await ticketRoleAssignmentService.resolveForTicket(ticketId);
+      const slugs = resolved
+        .filter(r => r.holder?.type === 'agent' && r.holder.id === authorId)
+        .map(r => r.role.slug);
+      if (slugs.length === 0) return null;
+      if (slugs.length === 1) return slugs[0];
+      return slugs;
+    } catch {
+      return null;
+    }
+  }
+
+  function mergeAuthorRoleIntoMetadata(
+    metadata: Record<string, unknown> | undefined,
+    authorRole: string | string[] | null,
+  ): Record<string, unknown> {
+    const base = metadata && typeof metadata === 'object' ? { ...metadata } : {};
+    if (authorRole === null) return base;
+    if (base.author_role === undefined) base.author_role = authorRole;
+    return base;
+  }
 
   server.tool(
     'add_comment',
@@ -47,10 +107,12 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         .describe("Parent comment id for threading. Must belong to the same ticket. Required for type='answer'."),
       metadata: z.record(z.string(), z.unknown()).optional()
         .describe('Type-specific extension bag (e.g. handoff target_agent_id, decision references[]). Stored as JSON on the row.'),
+      author_role: z.string().optional()
+        .describe("Role the comment is authored as (e.g. 'assignee', 'reviewer'). Auto-filled from the subagent session pin or from TicketRoleAssignment when omitted. Stored on metadata.author_role so the UI can render which role spoke."),
       attachment_resource_ids: z.array(z.string()).optional()
         .describe("Resource ids to attach. Each must already exist with type='comment_attachment' in the ticket's workspace — create them first via save_resource. MCP does not accept inline base64 here (cap payload size, keep upload/transaction logic in one place)."),
     },
-    async ({ ticket_id, author_type, author_id, author, content, type, parent_id, metadata, attachment_resource_ids }, extra: { sessionId?: string }) => {
+    async ({ ticket_id, author_type, author_id, author, content, type, parent_id, metadata, author_role, attachment_resource_ids }, extra: { sessionId?: string }) => {
       const ticket = await dataSource.getRepository(Ticket).findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Ticket not found');
 
@@ -117,6 +179,16 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         }
       }
 
+      const resolvedAuthorRole = await resolveAuthorRole(
+        ticket_id,
+        author_role,
+        resolvedAuthorType,
+        resolvedAuthorId,
+        caller?.subagentRole,
+        caller?.subagentTicketId,
+      );
+      const finalMetadata = mergeAuthorRoleIntoMetadata(metadata, resolvedAuthorRole);
+
       const comment = await commentRepo.save(commentRepo.create({
         ticket_id,
         author_type: resolvedAuthorType,
@@ -127,7 +199,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         type: resolvedType,
         status: resolvedType === 'question' ? 'open' : null,
         parent_id: resolvedParentId,
-        metadata: JSON.stringify(metadata && typeof metadata === 'object' ? metadata : {}),
+        metadata: JSON.stringify(finalMetadata),
       }));
 
       // Auto-resolve parent question on answer — same idempotent flip the REST
@@ -259,8 +331,10 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       author_type: z.enum(['user', 'agent']).optional().describe('Author type (auto-detected from auth)'),
       author_id: z.string().optional().describe('Author ID (auto-filled from auth if omitted)'),
       author: z.string().optional().describe('Display name (auto-resolved if omitted)'),
+      author_role: z.string().optional()
+        .describe("Role the question is authored as. Auto-filled from subagent session pin or TicketRoleAssignment when omitted; stored on metadata.author_role."),
     },
-    async ({ ticket_id, content, author_type, author_id, author }, extra: { sessionId?: string }) => {
+    async ({ ticket_id, content, author_type, author_id, author, author_role }, extra: { sessionId?: string }) => {
       const ticket = await dataSource.getRepository(Ticket).findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Ticket not found');
 
@@ -268,6 +342,12 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       if ('error' in resolved) return err(resolved.error);
 
       const commentRepo = dataSource.getRepository(Comment);
+      const callerCtx = getCallerAgent(extra);
+      const resolvedAuthorRole = await resolveAuthorRole(
+        ticket_id, author_role, resolved.authorType, resolved.authorId,
+        callerCtx?.subagentRole, callerCtx?.subagentTicketId,
+      );
+      const askMetadata = mergeAuthorRoleIntoMetadata(undefined, resolvedAuthorRole);
       const comment = await commentRepo.save(commentRepo.create({
         ticket_id,
         author_type: resolved.authorType,
@@ -276,6 +356,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         content,
         type: 'question' as CommentType,
         status: 'open',
+        metadata: JSON.stringify(askMetadata),
       }));
 
       await activityService.logActivity({
@@ -344,8 +425,10 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       author_type: z.enum(['user', 'agent']).optional(),
       author_id: z.string().optional(),
       author: z.string().optional(),
+      author_role: z.string().optional()
+        .describe("Role the answer is authored as. Auto-filled from subagent session pin or TicketRoleAssignment when omitted; stored on metadata.author_role."),
     },
-    async ({ question_comment_id, content, author_type, author_id, author }, extra: { sessionId?: string }) => {
+    async ({ question_comment_id, content, author_type, author_id, author, author_role }, extra: { sessionId?: string }) => {
       const commentRepo = dataSource.getRepository(Comment);
       const question = await commentRepo.findOne({ where: { id: question_comment_id } });
       if (!question) return err('Question comment not found');
@@ -354,6 +437,12 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       const resolved = await resolveAuthor(author_type, author_id, author, extra);
       if ('error' in resolved) return err(resolved.error);
 
+      const callerCtx = getCallerAgent(extra);
+      const resolvedAuthorRole = await resolveAuthorRole(
+        question.ticket_id, author_role, resolved.authorType, resolved.authorId,
+        callerCtx?.subagentRole, callerCtx?.subagentTicketId,
+      );
+      const answerMetadata = mergeAuthorRoleIntoMetadata(undefined, resolvedAuthorRole);
       const answer = await commentRepo.save(commentRepo.create({
         ticket_id: question.ticket_id,
         author_type: resolved.authorType,
@@ -362,6 +451,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         content,
         type: 'answer' as CommentType,
         parent_id: question.id,
+        metadata: JSON.stringify(answerMetadata),
       }));
 
       // Idempotent flip — even if a prior answer already resolved it, this
@@ -390,8 +480,10 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       author_type: z.enum(['user', 'agent']).optional(),
       author_id: z.string().optional(),
       author: z.string().optional(),
+      author_role: z.string().optional()
+        .describe("Role the decision is recorded as. Auto-filled from subagent session pin or TicketRoleAssignment when omitted; stored on metadata.author_role."),
     },
-    async ({ ticket_id, content, references, author_type, author_id, author }, extra: { sessionId?: string }) => {
+    async ({ ticket_id, content, references, author_type, author_id, author, author_role }, extra: { sessionId?: string }) => {
       const ticket = await dataSource.getRepository(Ticket).findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Ticket not found');
 
@@ -399,6 +491,15 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       if ('error' in resolved) return err(resolved.error);
 
       const commentRepo = dataSource.getRepository(Comment);
+      const callerCtx = getCallerAgent(extra);
+      const resolvedAuthorRole = await resolveAuthorRole(
+        ticket_id, author_role, resolved.authorType, resolved.authorId,
+        callerCtx?.subagentRole, callerCtx?.subagentTicketId,
+      );
+      const decisionMetadata = mergeAuthorRoleIntoMetadata(
+        references && references.length > 0 ? { references } : undefined,
+        resolvedAuthorRole,
+      );
       const comment = await commentRepo.save(commentRepo.create({
         ticket_id,
         author_type: resolved.authorType,
@@ -406,7 +507,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         author: resolved.authorName,
         content,
         type: 'decision' as CommentType,
-        metadata: JSON.stringify(references && references.length > 0 ? { references } : {}),
+        metadata: JSON.stringify(decisionMetadata),
       }));
 
       await activityService.logActivity({
@@ -440,8 +541,10 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       author_type: z.enum(['user', 'agent']).optional(),
       author_id: z.string().optional(),
       author: z.string().optional(),
+      author_role: z.string().optional()
+        .describe("Role the handing-off agent is acting as. Auto-filled from subagent session pin or TicketRoleAssignment when omitted; stored on metadata.author_role. (Distinct from metadata.role which records the target's incoming role.)"),
     },
-    async ({ ticket_id, target_agent_id, content, author_type, author_id, author }, extra: { sessionId?: string }) => {
+    async ({ ticket_id, target_agent_id, content, author_type, author_id, author, author_role }, extra: { sessionId?: string }) => {
       const ticketRepo = dataSource.getRepository(Ticket);
       const ticket = await ticketRepo.findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Ticket not found');
@@ -472,6 +575,18 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       // 1. Save handoff comment first so the activity dispatch + mention
       //    event reference an existing comment row.
       const commentRepo = dataSource.getRepository(Comment);
+      const callerCtx = getCallerAgent(extra);
+      const resolvedAuthorRole = await resolveAuthorRole(
+        ticket_id, author_role, resolved.authorType, resolved.authorId,
+        callerCtx?.subagentRole, callerCtx?.subagentTicketId,
+      );
+      const handoffMetadata = mergeAuthorRoleIntoMetadata({
+        target_agent_id,
+        target_agent_name: targetAgent.name,
+        previous_assignee_id: previousAssigneeId || null,
+        previous_assignee_name: previousAssigneeName || null,
+        role: 'assignee',
+      }, resolvedAuthorRole);
       const comment = await commentRepo.save(commentRepo.create({
         ticket_id,
         author_type: resolved.authorType,
@@ -479,13 +594,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         author: resolved.authorName,
         content,
         type: 'handoff' as CommentType,
-        metadata: JSON.stringify({
-          target_agent_id,
-          target_agent_name: targetAgent.name,
-          previous_assignee_id: previousAssigneeId || null,
-          previous_assignee_name: previousAssigneeName || null,
-          role: 'assignee',
-        }),
+        metadata: JSON.stringify(handoffMetadata),
       }));
 
       // 2. Reassign ticket. Skip the write if it would be a no-op so we

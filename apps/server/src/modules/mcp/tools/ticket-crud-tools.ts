@@ -245,7 +245,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
 
   server.tool(
     'get_my_tickets',
-    'Get tickets where this agent is assignee, reporter, or reviewer within the workspace.',
+    'Get tickets where this agent is assignee, reporter, or reviewer within the workspace. Each row includes `my_roles` — the role slug(s) the agent holds on that ticket — so an agent juggling multiple roles can see at a glance which hat to wear per ticket.',
     {
       agent_id: z.string().describe('Calling agent ID'),
       workspace_id: z.string().describe('Workspace to scope results'),
@@ -272,11 +272,41 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       }
 
       const tickets = await qb.orderBy('t.created_at', 'DESC').getMany();
-      return ok(tickets.map(t => ({
-        ...t,
-        labels: safeJsonParse(t.labels, []),
-        channel_ids: safeJsonParse(t.channel_ids, []),
-      })));
+
+      // Resolve role slugs the agent holds per ticket. Prefer
+      // TicketRoleAssignment (handles workspace-custom roles); fall back to
+      // the legacy assignee_id / reporter_id / reviewer_id columns when the
+      // assignment service is unavailable (standalone MCP server mode) or
+      // returns nothing for a row.
+      const rolesByTicket = new Map<string, string[]>();
+      if (ticketRoleAssignmentService) {
+        for (const t of tickets) {
+          try {
+            const resolved = await ticketRoleAssignmentService.resolveForTicket(t.id);
+            const slugs = resolved
+              .filter(r => r.holder?.type === 'agent' && r.holder.id === agent_id)
+              .map(r => r.role.slug);
+            if (slugs.length > 0) rolesByTicket.set(t.id, slugs);
+          } catch { /* fall through to legacy lookup */ }
+        }
+      }
+
+      return ok(tickets.map(t => {
+        let myRoles = rolesByTicket.get(t.id);
+        if (!myRoles || myRoles.length === 0) {
+          const legacy: string[] = [];
+          if (t.assignee_id === agent_id) legacy.push('assignee');
+          if (t.reporter_id === agent_id) legacy.push('reporter');
+          if (t.reviewer_id === agent_id) legacy.push('reviewer');
+          myRoles = legacy;
+        }
+        return {
+          ...t,
+          labels: safeJsonParse(t.labels, []),
+          channel_ids: safeJsonParse(t.channel_ids, []),
+          my_roles: myRoles,
+        };
+      }));
     }
   );
 

@@ -239,6 +239,7 @@ export const EVENT_TYPES: EventDefinition[] = [
                 event.current_task.claimed_at instanceof Date
                   ? event.current_task.claimed_at.toISOString()
                   : String(event.current_task.claimed_at),
+              role: event.current_task.role || undefined,
             }
           : undefined,
       };
@@ -584,6 +585,9 @@ export const EVENT_TYPES: EventDefinition[] = [
         pid: event.pid || 0,
         started_at: event.started_at || new Date().toISOString(),
         label: event.label,
+        ticket_id: event.ticket_id || undefined,
+        ticket_title: event.ticket_title || undefined,
+        role: event.role || undefined,
       };
       return { payload, scope: { workspace_id: event.workspace_id }, timestamp: payload.started_at };
     },

@@ -30,6 +30,10 @@ interface AgentStatus {
     ticket_id: string;
     ticket_title: string;
     claimed_at: Date;
+    // Role slug the subagent was spawned for (assignee/reporter/reviewer
+    // or a workspace-custom slug). Optional because pre-v0.34 plugins do
+    // not pin a role; the dashboard renders without it when undefined.
+    role?: string;
   };
 }
 
@@ -117,7 +121,7 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
    * last_seen_at so the dashboard reflects "in progress" the instant the
    * subagent process is alive — not when the trigger was queued.
    */
-  async setCurrentTask(agent_id: string, ticket_id: string): Promise<void> {
+  async setCurrentTask(agent_id: string, ticket_id: string, role?: string): Promise<void> {
     if (!agent_id || !ticket_id) return;
 
     const ticket = await this.dataSource
@@ -137,6 +141,7 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
         ticket_id,
         ticket_title: ticket?.title ?? '(unknown ticket)',
         claimed_at: new Date(),
+        role: role || undefined,
       },
     };
     this.state.set(agent_id, updated);

@@ -346,6 +346,15 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
         return;
       }
 
+      // Role + ticket context pinned per-spawn by the plugin subagent-manager.
+      // Plugin writes one MCP config file per (ticket, role) subagent and
+      // injects these headers there, so every tool call from that child
+      // process carries them. Stashing on the session lets add_comment and
+      // friends attribute work to the correct role without each tool needing
+      // a role argument. Top-level proxy and chat sessions omit the headers.
+      const subagentRoleHeader = String(req.headers['x-awb-subagent-role'] || '').toLowerCase().trim() || undefined;
+      const subagentTicketIdHeader = String(req.headers['x-awb-subagent-ticket-id'] || '').trim() || undefined;
+
       // New session (initialization request — no session ID)
       if (req.method === 'POST') {
         const transport = new WebStandardStreamableHTTPServerTransport({
@@ -358,6 +367,8 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
               agentName: mcpAuthInfo.agentName,
               scope: mcpAuthInfo.scope,
               source: mcpAuthInfo.source,
+              subagentRole: subagentRoleHeader,
+              subagentTicketId: subagentTicketIdHeader,
             });
             // Register agentId → server mapping for push notifications
             if (mcpAuthInfo.agentId) {
