@@ -23,3 +23,5 @@ export { TicketReadState } from './TicketReadState';
 export { WorkspaceRole } from './WorkspaceRole';
 export { TicketRoleAssignment } from './TicketRoleAssignment';
 export { TicketAttachment } from './TicketAttachment';
+export { Subagent } from './Subagent';
+export { SubagentLogLine } from './SubagentLogLine';

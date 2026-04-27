@@ -2,6 +2,8 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Agent } from '../../entities/Agent';
 import { Ticket } from '../../entities/Ticket';
+import { Subagent } from '../../entities/Subagent';
+import { SubagentLogLine } from '../../entities/SubagentLogLine';
 import { AgentsController } from './agents.controller';
 import { FsBrowserController } from './fs-browser.controller';
 import { SubagentMonitorController } from './subagent-monitor.controller';
@@ -17,7 +19,7 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Agent, Ticket])],
+  imports: [TypeOrmModule.forFeature([Agent, Ticket, Subagent, SubagentLogLine])],
   controllers: [AgentsController, FsBrowserController, SubagentMonitorController],
   providers: [AuthGuard, PermissionGuard, AgentAuthGuard, AgentConnectionService, TriggerLoopService, AgentStatusService, AllocationService, TicketSupervisorService, FsBrowserService, SubagentMonitorService],
   exports: [AgentConnectionService, TriggerLoopService, AgentStatusService, AllocationService, FsBrowserService, SubagentMonitorService],
