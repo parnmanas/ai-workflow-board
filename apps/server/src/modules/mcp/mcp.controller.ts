@@ -10,6 +10,7 @@ import { type ToolContext } from './tools';
 import { createMcpServerForContext } from './internal/create-mcp-server';
 import { expressToWebRequest, sendWebResponse } from './internal/express-bridge';
 import { sessionStore } from './internal/session-store';
+import { SystemSetting } from '../../entities/SystemSetting';
 import { ApiKeyService } from '../../services/api-key.service';
 import { LogService } from '../../services/log.service';
 import { AgentConnectionService } from '../agents/agent-connection.service';
@@ -163,6 +164,25 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     sessionStore.ensureCleanupStarted((removed, remaining) => {
       mcpLog(`Session cleanup: removed ${removed} idle sessions (active: ${remaining})`);
     });
+
+    // Pull the configured `mcp.max_sessions` cap from system_settings so the
+    // LRU evict ceiling matches the admin UI without a restart. Failures are
+    // non-fatal — the store keeps DEFAULT_MAX_SESSIONS until the next PATCH
+    // pushes a new value via SettingsController.
+    this.loadMcpMaxSessions().catch((err) => {
+      mcpLog(`Failed to load mcp.max_sessions from DB: ${err.message}`);
+    });
+  }
+
+  private async loadMcpMaxSessions(): Promise<void> {
+    const repo = this.dataSource.getRepository(SystemSetting);
+    const row = await repo.findOne({ where: { key: 'mcp.max_sessions' } });
+    if (!row || !row.value) return;
+    const n = parseInt(row.value, 10);
+    if (Number.isFinite(n) && n > 0) {
+      sessionStore.setMaxSessions(n);
+      mcpLog(`MCP session cap loaded from settings: ${n}`);
+    }
   }
 
   onModuleDestroy() {

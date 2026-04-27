@@ -7,12 +7,31 @@ import { SystemSetting } from '../../entities/SystemSetting';
 import { AdminGuard } from '../../common/guards/admin.guard';
 import { encrypt, decrypt } from '../../services/encryption.service';
 import { maskSecret } from '../../common/mask';
+import { sessionStore, DEFAULT_MAX_SESSIONS } from '../../modules/mcp/internal/session-store';
 
 const SETTING_DEFINITIONS: Record<string, { description: string; is_secret: boolean; default_value: string }> = {
   'embedding.provider': { description: 'Embedding provider (openai or none)', is_secret: false, default_value: 'none' },
   'embedding.api_key': { description: 'API key for the embedding provider', is_secret: true, default_value: '' },
   'embedding.model': { description: 'Embedding model name', is_secret: false, default_value: 'text-embedding-3-small' },
+  'mcp.max_sessions': {
+    description: 'Hard cap on concurrent MCP sessions. When exceeded, the oldest-idle session is evicted (LRU). Idle sessions still expire after 10 minutes regardless.',
+    is_secret: false,
+    default_value: String(DEFAULT_MAX_SESSIONS),
+  },
 };
+
+/**
+ * Pushes the value freshly-saved-to-DB into the running process. Settings
+ * with side effects beyond the DB row (i.e., they configure live state
+ * somewhere in the app) opt in here. Called from update() after the row
+ * is persisted; new keys with no side effect can omit the entry.
+ */
+function applyLiveSettingChange(key: string, rawValue: string): void {
+  if (key === 'mcp.max_sessions') {
+    const n = parseInt(rawValue, 10);
+    if (Number.isFinite(n) && n > 0) sessionStore.setMaxSessions(n);
+  }
+}
 
 @ApiBearerAuth('user-session')
 @ApiTags('settings')
@@ -73,6 +92,12 @@ export class SettingsController {
           description: def.description,
           is_secret: def.is_secret ? 1 : 0,
         }));
+      }
+      // Push the saved value into any live in-process consumer. Non-secret
+      // values are stored as-is; secrets aren't piped through this path
+      // (no current setting needs live propagation of an encrypted value).
+      if (!def.is_secret) {
+        applyLiveSettingChange(key, storeValue);
       }
       results.push({
         key,

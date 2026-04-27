@@ -189,6 +189,30 @@ export default function SettingsManager() {
         />
       </Card>
 
+      {/* ─── MCP Configuration ─── */}
+      <Card padding="20px">
+        <div style={{ fontSize: '15px', fontWeight: 700, color: tokens.colors.textStrong, marginBottom: 4 }}>
+          MCP Configuration
+        </div>
+        <div style={{ fontSize: '12px', color: tokens.colors.textSecondary, marginBottom: 20, lineHeight: 1.5 }}>
+          Limits the active MCP session count. Once the cap is reached the oldest-idle session is
+          evicted (LRU) so subagent fanout can't grow the in-memory store without bound. Idle
+          sessions still expire after 10 minutes regardless of this setting.
+        </div>
+
+        <div>
+          <label style={labelStyle}>Max concurrent sessions</label>
+          <div style={hintStyle}>{settings.find((s) => s.key === 'mcp.max_sessions')?.description || ''}</div>
+          <Input
+            type="number"
+            min={1}
+            value={formValues['mcp.max_sessions'] || ''}
+            onChange={(e) => handleChange('mcp.max_sessions', e.target.value)}
+            placeholder="200"
+          />
+        </div>
+      </Card>
+
       {/* ─── Save ─── */}
       <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
         <Button
