@@ -207,7 +207,9 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
       agent.is_online = 1;
       await agentRepo.save(agent);
 
-      logger.info('MCP', `ping: agent ${agent_id} (${agent.name}) is online`);
+      // No info-level log: every healthy proxy fires this every 30s and the
+      // line drowned everything else in the MCP timeline. last_seen_at is
+      // authoritative; the dashboard reads from there.
       return ok({ status: 'ok', agent_id, last_seen_at: now.toISOString() });
     }
   );
