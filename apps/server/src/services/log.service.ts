@@ -45,7 +45,8 @@ export class LogService {
   query(params: {
     level?: string;
     category?: string;
-    since?: string; // ISO timestamp
+    since?: string;  // ISO timestamp — exclusive lower bound (>)
+    until?: string;  // ISO timestamp — inclusive upper bound (<=)
     limit?: number;
     search?: string;
   }): LogEntry[] {
@@ -55,6 +56,10 @@ export class LogService {
     if (params.since) {
       const sinceDate = new Date(params.since).getTime();
       result = result.filter(e => new Date(e.timestamp).getTime() > sinceDate);
+    }
+    if (params.until) {
+      const untilDate = new Date(params.until).getTime();
+      result = result.filter(e => new Date(e.timestamp).getTime() <= untilDate);
     }
     if (params.search) {
       const s = params.search.toLowerCase();

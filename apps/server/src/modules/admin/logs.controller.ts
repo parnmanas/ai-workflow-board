@@ -19,6 +19,7 @@ export class LogsController {
     @Query('level') level?: string,
     @Query('category') category?: string,
     @Query('since') since?: string,
+    @Query('until') until?: string,
     @Query('limit') limit?: string,
     @Query('search') search?: string,
   ) {
@@ -26,6 +27,7 @@ export class LogsController {
       level,
       category,
       since,
+      until,
       limit: limit ? parseInt(limit) : 200,
       search,
     });

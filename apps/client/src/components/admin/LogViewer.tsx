@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
+import { useToast } from '../../contexts/ToastContext';
 
 interface LogEntry {
   id?: string;
@@ -29,6 +30,7 @@ const LEVEL_COLORS: Record<string, string> = {
 const POLL_INTERVAL = 3000;
 
 export default function LogViewer() {
+  const { showToast } = useToast();
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
   const [stats, setStats] = useState<LogStats>({});
@@ -38,6 +40,11 @@ export default function LogViewer() {
   const [levelFilter, setLevelFilter] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('');
   const [searchFilter, setSearchFilter] = useState('');
+  // Time-range filters. `datetime-local` value format is "YYYY-MM-DDTHH:MM"
+  // (no timezone), interpreted in the browser's local zone — we convert to
+  // ISO/UTC right before posting to the server.
+  const [startTime, setStartTime] = useState('');
+  const [endTime, setEndTime] = useState('');
 
   // Auto-refresh
   const [autoRefresh, setAutoRefresh] = useState(true);
@@ -59,34 +66,46 @@ export default function LogViewer() {
     });
   };
 
-  const fetchLogs = useCallback(async (since?: string) => {
+  const fetchLogs = useCallback(async (tailSince?: string) => {
     try {
       const params: any = { limit: 200 };
       if (levelFilter) params.level = levelFilter;
       if (categoryFilter) params.category = categoryFilter;
       if (searchFilter) params.search = searchFilter;
-      if (since) params.since = since;
+
+      // Manual range overrides the polling tail. When either bound is set we
+      // refetch the full filtered range every tick instead of appending — the
+      // user has fixed a window and expects the list to reflect exactly that.
+      const startIso = startTime ? new Date(startTime).toISOString() : null;
+      const endIso = endTime ? new Date(endTime).toISOString() : null;
+      const useTail = !startIso && !endIso && !!tailSince;
+
+      if (startIso) params.since = startIso;
+      else if (useTail) params.since = tailSince!;
+      if (endIso) params.until = endIso;
 
       const data = await api.getLogs(params);
 
-      if (since && data.length > 0) {
-        // Append new logs, avoid duplicates
+      if (useTail && data.length > 0) {
+        // Append new tail logs, avoid duplicates
         setLogs(prev => {
           const existingTimestamps = new Set(prev.map(l => l.timestamp + l.message));
           const newLogs = data.filter(l => !existingTimestamps.has(l.timestamp + l.message));
           return [...newLogs, ...prev];
         });
-      } else if (!since) {
+      } else if (!useTail) {
         setLogs(data);
       }
 
-      if (data.length > 0) {
+      // Only track the tail cursor in tail-mode. With a manual range, polling
+      // refetches the full range so a cursor would just freeze the view.
+      if (!startIso && !endIso && data.length > 0) {
         lastTimestampRef.current = data[0]?.timestamp || null;
       }
     } catch (err) {
       console.error('Failed to fetch logs:', err);
     }
-  }, [levelFilter, categoryFilter, searchFilter]);
+  }, [levelFilter, categoryFilter, searchFilter, startTime, endTime]);
 
   const fetchMeta = useCallback(async () => {
     try {
@@ -101,11 +120,13 @@ export default function LogViewer() {
     }
   }, []);
 
-  // Initial load
+  // Initial load — also re-runs when the time-range filter changes so the
+  // list snaps to the new bounds without waiting for the next poll.
   useEffect(() => {
     setLoading(true);
+    lastTimestampRef.current = null;
     Promise.all([fetchLogs(), fetchMeta()]).finally(() => setLoading(false));
-  }, [levelFilter, categoryFilter, searchFilter]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [levelFilter, categoryFilter, searchFilter, startTime, endTime]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Auto-refresh polling
   useEffect(() => {
@@ -116,7 +137,10 @@ export default function LogViewer() {
 
     if (autoRefresh) {
       intervalRef.current = setInterval(() => {
-        if (lastTimestampRef.current) {
+        // Manual time range refetches the full window each tick (no tailing).
+        if (startTime || endTime) {
+          fetchLogs();
+        } else if (lastTimestampRef.current) {
           fetchLogs(lastTimestampRef.current);
         } else {
           fetchLogs();
@@ -130,13 +154,41 @@ export default function LogViewer() {
         clearInterval(intervalRef.current);
       }
     };
-  }, [autoRefresh, fetchLogs, fetchMeta]);
+  }, [autoRefresh, fetchLogs, fetchMeta, startTime, endTime]);
 
   const handleRefresh = () => {
     setLoading(true);
     lastTimestampRef.current = null;
     Promise.all([fetchLogs(), fetchMeta()]).finally(() => setLoading(false));
   };
+
+  const handleClearRange = () => {
+    setStartTime('');
+    setEndTime('');
+  };
+
+  const handleCopy = useCallback(async () => {
+    if (logs.length === 0) {
+      showToast('No logs to copy', 'info');
+      return;
+    }
+    const lines = logs.map(log => {
+      const head = `[${log.timestamp}] ${log.level.toUpperCase().padEnd(5)} ${log.category} — ${log.message}`;
+      if (log.meta && Object.keys(log.meta).length > 0) {
+        const metaJson = JSON.stringify(log.meta, null, 2)
+          .split('\n').map(l => '  ' + l).join('\n');
+        return `${head}\n${metaJson}`;
+      }
+      return head;
+    });
+    const text = lines.join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast(`Copied ${logs.length} log${logs.length === 1 ? '' : 's'} to clipboard`, 'success');
+    } catch (err: any) {
+      showToast(err?.message || 'Copy failed — clipboard permission denied?', 'error');
+    }
+  }, [logs, showToast]);
 
   const formatTime = (ts: string) => {
     try {
@@ -174,6 +226,20 @@ export default function LogViewer() {
             />
             Auto-refresh
           </label>
+          <button
+            onClick={handleCopy}
+            disabled={logs.length === 0}
+            title="Copy all currently shown logs (with details) to clipboard"
+            style={{
+              padding: '6px 14px', borderRadius: tokens.radii.md,
+              background: tokens.colors.border, border: 'none',
+              color: tokens.colors.textStrong, fontSize: '12px', fontWeight: 500,
+              cursor: logs.length === 0 ? 'default' : 'pointer',
+              opacity: logs.length === 0 ? 0.5 : 1,
+            }}
+          >
+            Copy ({logs.length})
+          </button>
           <button
             onClick={handleRefresh}
             disabled={loading}
@@ -239,6 +305,56 @@ export default function LogViewer() {
             flex: 1, minWidth: 180,
           }}
         />
+      </div>
+
+      {/* Time range filter */}
+      <div style={{
+        display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center',
+      }}>
+        <span style={{ fontSize: '11px', color: tokens.colors.textSecondary, minWidth: 56 }}>From</span>
+        <input
+          type="datetime-local"
+          value={startTime}
+          onChange={e => setStartTime(e.target.value)}
+          step={1}
+          style={{
+            padding: '6px 10px', borderRadius: tokens.radii.md,
+            background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`,
+            color: tokens.colors.textStrong, fontSize: '12px',
+            colorScheme: 'dark',
+          }}
+        />
+        <span style={{ fontSize: '11px', color: tokens.colors.textSecondary }}>To</span>
+        <input
+          type="datetime-local"
+          value={endTime}
+          onChange={e => setEndTime(e.target.value)}
+          step={1}
+          style={{
+            padding: '6px 10px', borderRadius: tokens.radii.md,
+            background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`,
+            color: tokens.colors.textStrong, fontSize: '12px',
+            colorScheme: 'dark',
+          }}
+        />
+        {(startTime || endTime) && (
+          <button
+            onClick={handleClearRange}
+            style={{
+              padding: '6px 10px', borderRadius: tokens.radii.md,
+              background: 'transparent', border: `1px solid ${tokens.colors.border}`,
+              color: tokens.colors.textSecondary, fontSize: '11px',
+              cursor: 'pointer',
+            }}
+          >
+            Clear range
+          </button>
+        )}
+        {(startTime || endTime) && (
+          <span style={{ fontSize: '11px', color: tokens.colors.textMuted }}>
+            (auto-refresh refetches the full window)
+          </span>
+        )}
       </div>
 
       {/* Stats Bar */}
