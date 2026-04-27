@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Ticket, Agent, Channel, ActivityLog, CommentType, User } from '../types';
+import { Ticket, Agent, Channel, ActivityLog, CommentType, User, TicketAttachmentMeta } from '../types';
 import { api, TicketRoleAssignmentRow } from '../api';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
@@ -279,6 +279,14 @@ export default function TicketPanel({
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [mentionCandidates, setMentionCandidates] = useState<MentionCandidate[]>([]);
 
+  // Ticket-level attachments — file_data is fetched on demand (download/preview)
+  // so the metadata list can stay cheap. Seeded from the ticket payload, then
+  // refreshed via api.listTicketAttachments after each mutation so concurrent
+  // edits across tabs converge.
+  const [ticketAttachments, setTicketAttachments] = useState<TicketAttachmentMeta[]>(activeTicket.attachments || []);
+  const [attachmentBusy, setAttachmentBusy] = useState(false);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+
   useEffect(() => {
     setTitle(activeTicket.title);
     setDescription(activeTicket.description);
@@ -289,8 +297,30 @@ export default function TicketPanel({
     setSelectedChannelIds(activeTicket.channel_ids || []);
     setCommentContent('');
     setCommentAttachments([]);
+    // Seed from the ticket payload (only loadTicketFull populates this; the
+    // board listing doesn't), then fetch fresh metadata so the list is
+    // always authoritative regardless of which load path supplied the prop.
+    setTicketAttachments(activeTicket.attachments || []);
+    setAttachmentError(null);
     setActiveTab('detail');
+    let cancelled = false;
+    api.listTicketAttachments(activeTicket.id)
+      .then(rows => { if (!cancelled) setTicketAttachments(rows || []); })
+      .catch(() => { /* keep seeded list — non-blocking */ });
+    return () => { cancelled = true; };
   }, [activeTicket.id, activeTicket.updated_at]);
+
+  // Cross-tab sync — board_update fires on every activity event, so refresh
+  // the attachments list when our ticket is the target. Filtering by
+  // field_changed='attachment' avoids refetching on unrelated updates
+  // (assignee change, comment add, etc.).
+  useBoardStreamEvent('board_update', useCallback((data: any) => {
+    if (!data || data.ticket_id !== activeTicket.id) return;
+    if (data.field_changed !== 'attachment') return;
+    api.listTicketAttachments(activeTicket.id)
+      .then(rows => setTicketAttachments(rows || []))
+      .catch(() => { /* non-blocking */ });
+  }, [activeTicket.id]));
 
   useEffect(() => {
     if (activeTab === 'activity') {
@@ -372,6 +402,111 @@ export default function TicketPanel({
     };
     input.click();
   };
+
+  // ─── Ticket-level attachments ────────────────────────────────
+  const TICKET_ATTACHMENT_MAX = 20;
+  const TICKET_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
+
+  const handleAddTicketAttachments = useCallback(() => {
+    setAttachmentError(null);
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.multiple = true;
+    input.onchange = async (e) => {
+      const files = (e.target as HTMLInputElement).files;
+      if (!files || files.length === 0) return;
+      const remaining = TICKET_ATTACHMENT_MAX - ticketAttachments.length;
+      if (remaining <= 0) {
+        setAttachmentError(`Maximum ${TICKET_ATTACHMENT_MAX} attachments per ticket`);
+        return;
+      }
+      const payload: { file_name: string; file_mimetype: string; file_data: string }[] = [];
+      const oversized: string[] = [];
+      for (let i = 0; i < files.length && payload.length < remaining; i++) {
+        const file = files[i];
+        if (file.size > TICKET_ATTACHMENT_SIZE_BYTES) {
+          oversized.push(file.name);
+          continue;
+        }
+        const data = await fileToBase64(file);
+        payload.push({
+          file_name: file.name,
+          file_mimetype: file.type || 'application/octet-stream',
+          file_data: data,
+        });
+      }
+      if (payload.length === 0) {
+        if (oversized.length > 0) {
+          setAttachmentError(`Skipped — exceeds 10MB: ${oversized.join(', ')}`);
+        }
+        return;
+      }
+      setAttachmentBusy(true);
+      try {
+        const saved = await api.addTicketAttachments(activeTicket.id, payload);
+        setTicketAttachments(prev => [...saved, ...prev]);
+        if (oversized.length > 0) {
+          setAttachmentError(`Skipped — exceeds 10MB: ${oversized.join(', ')}`);
+        }
+      } catch (err: any) {
+        setAttachmentError(err?.message || 'Upload failed');
+      } finally {
+        setAttachmentBusy(false);
+      }
+    };
+    input.click();
+  }, [activeTicket.id, ticketAttachments.length]);
+
+  const handleDeleteTicketAttachment = useCallback(async (attachmentId: string, fileName: string) => {
+    if (!window.confirm(`Delete attachment "${fileName}"?`)) return;
+    setAttachmentBusy(true);
+    setAttachmentError(null);
+    const prev = ticketAttachments;
+    setTicketAttachments(prev.filter(a => a.id !== attachmentId));
+    try {
+      await api.deleteTicketAttachment(activeTicket.id, attachmentId);
+    } catch (err: any) {
+      setTicketAttachments(prev);
+      setAttachmentError(err?.message || 'Delete failed');
+    } finally {
+      setAttachmentBusy(false);
+    }
+  }, [activeTicket.id, ticketAttachments]);
+
+  const handleDownloadTicketAttachment = useCallback(async (attachment: TicketAttachmentMeta) => {
+    setAttachmentError(null);
+    try {
+      const full = await api.getTicketAttachment(activeTicket.id, attachment.id);
+      if (!full?.file_data) {
+        setAttachmentError('Attachment has no data');
+        return;
+      }
+      const link = document.createElement('a');
+      link.href = `data:${full.file_mimetype || 'application/octet-stream'};base64,${full.file_data}`;
+      link.download = full.file_name;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } catch (err: any) {
+      setAttachmentError(err?.message || 'Download failed');
+    }
+  }, [activeTicket.id]);
+
+  const handlePreviewTicketAttachment = useCallback(async (attachment: TicketAttachmentMeta) => {
+    if (!attachment.file_mimetype?.startsWith('image/')) {
+      handleDownloadTicketAttachment(attachment);
+      return;
+    }
+    setAttachmentError(null);
+    try {
+      const full = await api.getTicketAttachment(activeTicket.id, attachment.id);
+      if (full?.file_data) {
+        setImagePreview(`data:${full.file_mimetype};base64,${full.file_data}`);
+      }
+    } catch (err: any) {
+      setAttachmentError(err?.message || 'Preview failed');
+    }
+  }, [activeTicket.id, handleDownloadTicketAttachment]);
 
   // ─── Phase 3: typing emit (debounced) ─────────────────────────────────
   // Send is_typing=true on first keystroke; idle for TYPING_IDLE_MS triggers
@@ -1149,6 +1284,114 @@ export default function TicketPanel({
                   resize: 'vertical', outline: 'none', lineHeight: 1.6, boxSizing: 'border-box',
                 }}
               />
+            </div>
+
+            {/* Ticket-level attachments. Distinct from comment attachments —
+               files added here live on the ticket itself and cascade-delete
+               with it; they do NOT pass through the Resource indirection
+               that the comment composer uses. */}
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                <label style={{ ...labelStyle, marginBottom: 0 }}>
+                  Attachments
+                  {ticketAttachments.length > 0 && (
+                    <span style={{ marginLeft: 6, color: tokens.colors.textDisabled, fontWeight: 500 }}>
+                      ({ticketAttachments.length}/{TICKET_ATTACHMENT_MAX})
+                    </span>
+                  )}
+                </label>
+                <button
+                  type="button"
+                  onClick={handleAddTicketAttachments}
+                  disabled={attachmentBusy || ticketAttachments.length >= TICKET_ATTACHMENT_MAX}
+                  style={{
+                    background: 'transparent',
+                    border: `1px solid ${tokens.colors.border}`,
+                    borderRadius: tokens.radii.md,
+                    color: tokens.colors.textStrong,
+                    fontSize: '11px',
+                    padding: '4px 10px',
+                    cursor: (attachmentBusy || ticketAttachments.length >= TICKET_ATTACHMENT_MAX) ? 'not-allowed' : 'pointer',
+                    opacity: (attachmentBusy || ticketAttachments.length >= TICKET_ATTACHMENT_MAX) ? 0.5 : 1,
+                  }}
+                  title="Attach files (10MB each, max 20 per ticket)"
+                >
+                  + Attach files
+                </button>
+              </div>
+              {attachmentError && (
+                <div style={{
+                  fontSize: '11px', color: tokens.colors.dangerLight, padding: '4px 6px',
+                  background: tokens.colors.dangerBg, borderRadius: tokens.radii.sm, marginBottom: 4,
+                }}>
+                  {attachmentError}
+                </div>
+              )}
+              {ticketAttachments.length === 0 ? (
+                <div style={{
+                  fontSize: '11px', color: tokens.colors.textMuted, fontStyle: 'italic',
+                  padding: '6px 10px', background: tokens.colors.surfaceCard,
+                  border: `1px dashed ${tokens.colors.border}`, borderRadius: tokens.radii.lg,
+                }}>
+                  No files attached.
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  {ticketAttachments.map(att => {
+                    const isImage = att.file_mimetype?.startsWith('image/');
+                    const sizeKb = att.file_size > 0 ? Math.max(1, Math.round(att.file_size / 1024)) : null;
+                    return (
+                      <div
+                        key={att.id}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: 8,
+                          padding: '6px 10px',
+                          background: tokens.colors.surfaceCard,
+                          border: `1px solid ${tokens.colors.border}`,
+                          borderRadius: tokens.radii.md,
+                        }}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => handlePreviewTicketAttachment(att)}
+                          style={{
+                            background: 'transparent', border: 'none', padding: 0, cursor: 'pointer',
+                            color: tokens.colors.textStrong, fontSize: '12px', fontWeight: 500,
+                            textAlign: 'left', flex: 1, minWidth: 0,
+                            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                          }}
+                          title={isImage ? 'Click to preview' : 'Click to download'}
+                        >
+                          {isImage ? '🖼️' : '📎'} {att.file_name}
+                        </button>
+                        <span style={{ fontSize: '10px', color: tokens.colors.textMuted, fontVariantNumeric: 'tabular-nums' }}>
+                          {sizeKb !== null ? `${sizeKb} KB` : ''}
+                          {att.uploaded_by ? ` · ${att.uploaded_by}` : ''}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleDownloadTicketAttachment(att)}
+                          title="Download"
+                          style={{
+                            background: 'transparent', border: 'none', cursor: 'pointer',
+                            color: tokens.colors.textSecondary, fontSize: '12px', padding: '0 4px',
+                          }}
+                        >⬇</button>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteTicketAttachment(att.id, att.file_name)}
+                          disabled={attachmentBusy}
+                          title="Delete"
+                          style={{
+                            background: 'transparent', border: 'none', cursor: attachmentBusy ? 'not-allowed' : 'pointer',
+                            color: tokens.colors.dangerLight, fontSize: '12px', padding: '0 4px',
+                          }}
+                        >✕</button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
             {/* Notification Channels */}
