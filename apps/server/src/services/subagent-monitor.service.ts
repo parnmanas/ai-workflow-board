@@ -29,6 +29,9 @@ export interface SubagentSummary {
   signal?: string | null;
   duration_ms?: number;
   line_count: number;
+  // ISO-8601 timestamp at which the ended record will be purged from the
+  // in-memory registry. Only set once `ended_at` is set; undefined while live.
+  expires_at?: string;
 }
 
 export interface SubagentLogLine {
@@ -42,17 +45,26 @@ interface SubagentRecord extends SubagentSummary {
 }
 
 const RING_PER_SUBAGENT = 500;
-// After a subagent ends we keep its record around for a short grace window so a
-// late-opening transcript drawer still has the tail. Plugin reconnect or the
-// next register call from the same plugin clears anything older.
-const ENDED_GRACE_MS = 5 * 60_000;
+// Ended subagents stick around for 48h by default so users can still pull up
+// the transcript long after the process exits. Override via
+// SUBAGENT_ENDED_RETENTION_HOURS (float ok, e.g. 0.5 for 30 minutes).
+const DEFAULT_ENDED_RETENTION_HOURS = 48;
+function endedRetentionMs(): number {
+  const raw = process.env.SUBAGENT_ENDED_RETENTION_HOURS;
+  const hours = raw ? Number(raw) : DEFAULT_ENDED_RETENTION_HOURS;
+  if (!Number.isFinite(hours) || hours < 0) return DEFAULT_ENDED_RETENTION_HOURS * 3_600_000;
+  return hours * 3_600_000;
+}
 
 @Injectable()
 export class SubagentMonitorService {
   private readonly registry = new Map<string, SubagentRecord>();
+  private readonly retentionMs = endedRetentionMs();
 
   constructor(private readonly logService: LogService) {
-    setInterval(() => this._sweepEnded(), 60_000).unref?.();
+    // Sweep every 5 min; ended records can sit for up to 48h so a 60s tick is
+    // wasted work.
+    setInterval(() => this._sweepEnded(), 5 * 60_000).unref?.();
   }
 
   register(input: {
@@ -128,6 +140,7 @@ export class SubagentMonitorService {
     rec.exit_code = input.exit_code ?? null;
     rec.signal = input.signal ?? null;
     rec.duration_ms = Date.now() - new Date(rec.started_at).getTime();
+    rec.expires_at = new Date(Date.now() + this.retentionMs).toISOString();
     activityEvents.emit('subagent_ended', {
       subagent_id: rec.subagent_id,
       agent_id: rec.agent_id,
@@ -136,6 +149,7 @@ export class SubagentMonitorService {
       signal: rec.signal,
       duration_ms: rec.duration_ms,
       ended_at,
+      expires_at: rec.expires_at,
     });
     return { ok: true };
   }
@@ -163,7 +177,13 @@ export class SubagentMonitorService {
     const now = Date.now();
     for (const [id, rec] of this.registry) {
       if (!rec.ended_at) continue;
-      if (now - new Date(rec.ended_at).getTime() > ENDED_GRACE_MS) {
+      // Prefer the explicit expires_at (set when the subagent ended) so a
+      // mid-flight retention bump still respects records frozen by the older
+      // setting. Fall back to ended_at + current retentionMs for old records.
+      const expiresAt = rec.expires_at
+        ? new Date(rec.expires_at).getTime()
+        : new Date(rec.ended_at).getTime() + this.retentionMs;
+      if (now > expiresAt) {
         this.registry.delete(id);
       }
     }

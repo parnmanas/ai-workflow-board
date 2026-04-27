@@ -60,7 +60,14 @@ export default function AgentSubagentsPanel({ wsId, agentId }: AgentSubagentsPan
     if (!wsId || data.workspace_id !== wsId) return;
     setSubagents((prev) => prev.map((s) =>
       s.subagent_id === data.subagent_id
-        ? { ...s, ended_at: data.ended_at, exit_code: data.exit_code, signal: data.signal, duration_ms: data.duration_ms }
+        ? {
+            ...s,
+            ended_at: data.ended_at,
+            exit_code: data.exit_code,
+            signal: data.signal,
+            duration_ms: data.duration_ms,
+            expires_at: data.expires_at,
+          }
         : s,
     ));
   });
@@ -152,6 +159,7 @@ export default function AgentSubagentsPanel({ wsId, agentId }: AgentSubagentsPan
               <div style={{ fontSize: 10, color: tokens.colors.textMuted, marginTop: 2 }}>
                 started {new Date(s.started_at).toLocaleTimeString()}
                 {isEnded && ` · ended (exit ${s.exit_code ?? '-'}${s.signal ? `/${s.signal}` : ''})`}
+                {isEnded && s.expires_at && ` · ${formatExpiresIn(s.expires_at)}`}
               </div>
             </button>
           );
@@ -168,6 +176,25 @@ export default function AgentSubagentsPanel({ wsId, agentId }: AgentSubagentsPan
       </div>
     </div>
   );
+}
+
+function formatExpiresIn(iso: string): string {
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return '';
+  const ms = t - Date.now();
+  if (ms <= 0) return 'expiring';
+  const hours = Math.floor(ms / 3_600_000);
+  if (hours >= 24) {
+    const days = Math.floor(hours / 24);
+    const rem = hours - days * 24;
+    return `expires in ${days}d${rem ? ` ${rem}h` : ''}`;
+  }
+  if (hours >= 1) {
+    const mins = Math.floor((ms - hours * 3_600_000) / 60_000);
+    return `expires in ${hours}h${mins ? ` ${mins}m` : ''}`;
+  }
+  const mins = Math.max(1, Math.floor(ms / 60_000));
+  return `expires in ${mins}m`;
 }
 
 function SubagentTranscript({ summary, lines }: { summary: SubagentSummary; lines: SubagentLogLine[] }) {

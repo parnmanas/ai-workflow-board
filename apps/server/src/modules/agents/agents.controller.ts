@@ -199,6 +199,15 @@ export class AgentsController {
     }, 'Agent not found');
 
     const { name, description, type, avatar_url, is_active, role_prompt, role_prompt_meta } = body;
+    if (name !== undefined) {
+      const trimmed = typeof name === 'string' ? name.trim() : '';
+      if (!trimmed) return res.status(400).json({ error: 'name cannot be empty' });
+      agent.name = trimmed;
+    }
+    if (description !== undefined) agent.description = description;
+    if (type !== undefined) agent.type = type;
+    if (avatar_url !== undefined) agent.avatar_url = avatar_url;
+    if (is_active !== undefined) agent.is_active = Number(is_active) ? 1 : 0;
     // Phase 1 role prompt fields (D-14 / ROLE-02)
     if (role_prompt !== undefined) agent.role_prompt = role_prompt;
     if (role_prompt_meta !== undefined) agent.role_prompt_meta = role_prompt_meta;
