@@ -617,11 +617,12 @@ export const api = {
   runQaFlows: () => request<any>('/admin/qa/run-flows', { method: 'POST' }),
 
   // ─── Admin Logs ────────────────────────────────────────
-  getLogs: (params?: { level?: string; category?: string; since?: string; limit?: number; search?: string }) => {
+  getLogs: (params?: { level?: string; category?: string; since?: string; until?: string; limit?: number; search?: string }) => {
     const qs = new URLSearchParams();
     if (params?.level) qs.set('level', params.level);
     if (params?.category) qs.set('category', params.category);
     if (params?.since) qs.set('since', params.since);
+    if (params?.until) qs.set('until', params.until);
     if (params?.limit) qs.set('limit', String(params.limit));
     if (params?.search) qs.set('search', params.search);
     const q = qs.toString();
