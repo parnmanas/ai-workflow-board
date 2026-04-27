@@ -4,7 +4,7 @@ import Sidebar from './Sidebar';
 import WorkspaceSelector from './WorkspaceSelector';
 import { useMediaQuery } from '../hooks/useMediaQuery';
 import { useWorkspaces } from '../hooks/useBoard';
-import { api } from '../api';
+import { api, setActiveWorkspaceId } from '../api';
 import { BoardStreamProvider } from '../contexts/BoardStreamContext';
 import { NotificationProvider } from '../contexts/NotificationContext';
 import WorkspaceBanner from './WorkspaceBanner';
@@ -61,7 +61,7 @@ export default function AppLayout() {
   // Derive current workspace object for WorkspaceBanner
   const currentWorkspace = workspaces.find(w => w.id === currentWorkspaceId) ?? null;
 
-  // ── Single-source-of-truth sync: URL → state → localStorage ──────────
+  // ── Single-source-of-truth sync: URL → state → per-tab active workspace ──
   //
   // currentWorkspaceId used to live in 3 places (localStorage header
   // source, AppLayout state, AuthContext state) that drifted apart on
@@ -71,17 +71,26 @@ export default function AppLayout() {
   // agent, etc.) landed in whichever workspace localStorage happened
   // to hold.
   //
-  // Fix: whenever the URL carries a wsId, force localStorage + local
-  // state to agree with it. Runs on every URL change, synchronously
-  // before any child component re-renders, so `getAuthHeaders()` (which
-  // still reads localStorage) always matches the page the user is
-  // actually looking at.
+  // Fix: whenever the URL carries a wsId, force local state + per-tab
+  // active workspace to agree with it. localStorage is also written so
+  // a fresh tab opened later can recover the last workspace as a default,
+  // but localStorage is no longer consulted at request time — each tab
+  // owns its own X-Workspace-Id (see api.ts setActiveWorkspaceId).
   useEffect(() => {
     if (params.wsId && params.wsId !== currentWorkspaceId) {
       setCurrentWorkspaceId(params.wsId);
       try { localStorage.setItem('currentWorkspaceId', params.wsId); } catch {}
     }
   }, [params.wsId, currentWorkspaceId]);
+
+  // Keep the api module's per-tab active workspace in lockstep with our
+  // state so every API call (and any code that reads getActiveWorkspaceId)
+  // sees the workspace the tab is actually rendering. Runs on mount too,
+  // so the bootstrap value (URL → sessionStorage → localStorage) is
+  // promoted to state-driven authority once React is in control.
+  useEffect(() => {
+    setActiveWorkspaceId(currentWorkspaceId);
+  }, [currentWorkspaceId]);
 
   // Auto-select first workspace if none saved AND the URL doesn't already
   // dictate one. Without the URL check this effect would fight the

@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { api } from '../api';
+import { api, setActiveWorkspaceId } from '../api';
 import { User } from '../types';
 
 interface WorkspaceEntry {
@@ -139,6 +139,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const handler = () => {
       localStorage.removeItem('auth_token');
       localStorage.removeItem('currentWorkspaceId');
+      setActiveWorkspaceId(null);
       setState(prev => {
         if (!prev.isAuthenticated && !prev.user) return prev; // Already logged out
         return {
@@ -189,6 +190,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try { await api.logout(); } catch { /* ignore */ }
     localStorage.removeItem('auth_token');
     localStorage.removeItem('currentWorkspaceId');
+    setActiveWorkspaceId(null);
     setState({
       user: null, token: null, isAuthenticated: false, isLoading: false, needsSetup: false,
       serverUnavailable: false, currentWorkspaceId: null, availableWorkspaces: [], userStatus: null,
@@ -213,6 +215,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const setCurrentWorkspace = (wsId: string) => {
     localStorage.setItem('currentWorkspaceId', wsId);
+    setActiveWorkspaceId(wsId);
     setState(s => ({ ...s, currentWorkspaceId: wsId, isAuthenticated: true }));
   };
 

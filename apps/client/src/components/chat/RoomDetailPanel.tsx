@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { api } from '../../api';
+import { api, getActiveWorkspaceId } from '../../api';
 import { tokens } from '../../tokens';
 import PageHeader from '../PageHeader';
 import type { ChatRoomListItem, ChatRoomMessageItem } from '../../types';
@@ -54,9 +54,7 @@ function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessageInputProps) {
   // ticket context we don't have in a free-form chat room, so they're
   // intentionally omitted here.
   useEffect(() => {
-    const workspaceId = typeof window !== 'undefined'
-      ? localStorage.getItem('currentWorkspaceId') || ''
-      : '';
+    const workspaceId = getActiveWorkspaceId() || '';
     if (!workspaceId) {
       setMentionCandidates([]);
       return;

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { api } from '../../api';
+import { api, getActiveWorkspaceId } from '../../api';
 import type { Credential } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
@@ -35,8 +35,7 @@ export default function CredentialManager({ workspaceId }: { workspaceId?: strin
   const [formFields, setFormFields] = useState<Record<string, string>>({});
   const [formErrors, setFormErrors] = useState<{ name?: string }>({});
 
-  const effectiveWsId = workspaceId ||
-    (typeof window !== 'undefined' ? localStorage.getItem('currentWorkspaceId') || '' : '');
+  const effectiveWsId = workspaceId || (getActiveWorkspaceId() || '');
 
   const loadCredentials = useCallback(async () => {
     if (!effectiveWsId) { setCredentials([]); setLoading(false); return; }

@@ -24,15 +24,56 @@ import type {
 
 const BASE = '/api';
 
+// ─── Active workspace (per-tab) ────────────────────────────────
+// `localStorage.currentWorkspaceId` is shared across browser tabs, which
+// caused cross-workspace data leaks: switching workspace in Tab A would
+// silently change the X-Workspace-Id header that Tab B sent on its next
+// request, so Tab B (still showing workspace A on screen) would receive
+// agents/tickets/etc. from workspace B. Symptom: "agent role list shows
+// agents from another workspace, content of other workspaces leaks in".
+//
+// Fix: hold the active workspace in a per-tab module variable, persisted
+// to sessionStorage (per-tab) and bootstrapped from the URL when present.
+// localStorage is still written by AppLayout for new-tab default, but it
+// is NEVER consulted at request time — each tab is self-contained.
+const SESSION_WS_KEY = 'awb.activeWorkspaceId';
+
+function bootstrapActiveWorkspaceId(): string | null {
+  if (typeof window === 'undefined') return null;
+  // 1) URL — most accurate, per-tab, survives initial render before AppLayout mounts.
+  const m = window.location.pathname.match(/^\/ws\/([^/]+)/);
+  if (m && m[1]) return m[1];
+  // 2) sessionStorage — per-tab, survives reload of the same tab.
+  try {
+    const ss = sessionStorage.getItem(SESSION_WS_KEY);
+    if (ss) return ss;
+  } catch { /* ignore */ }
+  // 3) localStorage — last-resort default for a new tab with no URL hint.
+  try { return localStorage.getItem('currentWorkspaceId'); } catch { return null; }
+}
+
+let _activeWorkspaceId: string | null = bootstrapActiveWorkspaceId();
+
+export function setActiveWorkspaceId(id: string | null): void {
+  _activeWorkspaceId = id;
+  try {
+    if (id) sessionStorage.setItem(SESSION_WS_KEY, id);
+    else sessionStorage.removeItem(SESSION_WS_KEY);
+  } catch { /* ignore */ }
+}
+
+export function getActiveWorkspaceId(): string | null {
+  return _activeWorkspaceId;
+}
+
 function getAuthHeaders(): Record<string, string> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   const token = localStorage.getItem('auth_token');
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
   }
-  const wsId = localStorage.getItem('currentWorkspaceId');
-  if (wsId) {
-    headers['X-Workspace-Id'] = wsId;
+  if (_activeWorkspaceId) {
+    headers['X-Workspace-Id'] = _activeWorkspaceId;
   }
   return headers;
 }
@@ -373,13 +414,9 @@ export const api = {
     return request<SubagentTranscript>(`/subagent-monitor/${encodeURIComponent(subagentId)}?${params.toString()}`);
   },
   // The server reads X-Workspace-Id from the header set by getAuthHeaders(),
-  // which pulls `currentWorkspaceId` from localStorage. When the user is on
-  // `/ws/:wsId/agents` but localStorage still points at a different workspace
-  // (refresh / bookmark / stale value), the POST would silently save the
-  // agent into the WRONG workspace, and the list refresh — which uses the
-  // URL wsId — would then show nothing new, appearing as "New Agent did
-  // nothing." The caller passes the URL wsId explicitly here so the request
-  // is unambiguously scoped to the workspace the user is looking at.
+  // which now pulls from the per-tab active workspace. The caller can still
+  // pass `workspaceId` explicitly to override (e.g., admin tools acting on a
+  // workspace other than the one the tab is currently viewing).
   createAgent: (data: { name: string; description?: string; type?: string; workspaceId?: string }) => {
     const { workspaceId, ...body } = data;
     const init: RequestInit = { method: 'POST', body: JSON.stringify(body) };
@@ -534,25 +571,22 @@ export const api = {
   },
 
   // ─── Chat (Phase 2) ────────────────────────────────────
-  // Workspace context is read inline from localStorage per the established
-  // client convention (matches Board.tsx and PromptTemplateManager.tsx).
+  // Workspace context is read from the per-tab active workspace (see
+  // getActiveWorkspaceId) so multi-tab use never leaks across workspaces.
   listChatThreads: () => {
-    const workspace_id =
-      typeof window !== 'undefined' ? localStorage.getItem('currentWorkspaceId') || '' : '';
+    const workspace_id = getActiveWorkspaceId() || '';
     const params = new URLSearchParams({ workspace_id });
     return request<ChatThread[]>(`/chat/threads?${params.toString()}`);
   },
   listChatMessages: (params: { agent_id: string; ticket_id?: string | null; limit?: number }) => {
-    const workspace_id =
-      typeof window !== 'undefined' ? localStorage.getItem('currentWorkspaceId') || '' : '';
+    const workspace_id = getActiveWorkspaceId() || '';
     const qs = new URLSearchParams({ workspace_id, agent_id: params.agent_id });
     if (params.ticket_id) qs.set('ticket_id', params.ticket_id);
     if (params.limit) qs.set('limit', String(params.limit));
     return request<ChatMessage[]>(`/chat/messages?${qs.toString()}`);
   },
   sendChatMessage: (params: { agent_id: string; content: string; ticket_id?: string | null }) => {
-    const workspace_id =
-      typeof window !== 'undefined' ? localStorage.getItem('currentWorkspaceId') || '' : '';
+    const workspace_id = getActiveWorkspaceId() || '';
     return request<ChatMessage>('/chat/messages', {
       method: 'POST',
       body: JSON.stringify({
