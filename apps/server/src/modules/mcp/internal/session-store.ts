@@ -56,12 +56,29 @@ export type SessionEvictionHook = (sessionId: string, entry: SessionEntry) => vo
 
 export const SESSION_TTL_MS = 10 * 60 * 1000; // 10 minutes idle timeout
 const CLEANUP_INTERVAL_MS = 2 * 60 * 1000;    // sweep every 2 minutes
+export const DEFAULT_MAX_SESSIONS = 200;
 
 class SessionStore {
   private sessions = new Map<string, SessionEntry>();
   private evictionHooks: SessionEvictionHook[] = [];
   private cleanupTimer: NodeJS.Timeout | null = null;
   private cleanupReporter: ((removed: number, remaining: number) => void) | null = null;
+  // Hard ceiling on concurrent sessions. When `register()` would exceed it,
+  // the oldest-idle session is evicted (LRU) so unbounded subagent fanout
+  // can't grow the in-memory store without bound. Configurable via
+  // `mcp.max_sessions` admin setting; SettingsController + McpController
+  // call setMaxSessions() at startup and on every PATCH so the live cap
+  // tracks the DB without restart.
+  private maxSessions = DEFAULT_MAX_SESSIONS;
+
+  setMaxSessions(n: number): void {
+    if (!Number.isFinite(n) || n <= 0) return;
+    this.maxSessions = Math.floor(n);
+  }
+
+  getMaxSessions(): number {
+    return this.maxSessions;
+  }
 
   /** Register a new session's transport + server. Auth may be attached now or later. */
   register(
@@ -70,12 +87,46 @@ class SessionStore {
     server: McpServer,
     auth?: McpAgentContext,
   ): void {
+    // Cap enforcement runs BEFORE the new session is added, so a user
+    // bursting past the limit immediately frees a slot instead of leaving
+    // the store transiently above the cap.
+    if (this.sessions.size >= this.maxSessions) {
+      this.evictOldestIdle();
+    }
     this.sessions.set(sessionId, {
       transport,
       server,
       auth,
       lastActivity: Date.now(),
     });
+  }
+
+  /**
+   * Pop the least-recently-active session. Used by the LRU cap; idle TTL
+   * cleanup uses runCleanup() which evicts every session past TTL in one pass.
+   * Eviction hooks fire so downstream concerns (agent offline marking,
+   * subagent monitor cleanup) stay consistent with TTL-driven eviction.
+   */
+  private evictOldestIdle(): void {
+    let oldestSid: string | null = null;
+    let oldestActivity = Infinity;
+    for (const [sid, entry] of this.sessions) {
+      if (entry.lastActivity < oldestActivity) {
+        oldestActivity = entry.lastActivity;
+        oldestSid = sid;
+      }
+    }
+    if (!oldestSid) return;
+    const entry = this.sessions.get(oldestSid);
+    if (!entry) return;
+    this.sessions.delete(oldestSid);
+    entry.transport.close().catch(() => {});
+    for (const hook of this.evictionHooks) {
+      try { hook(oldestSid, entry); } catch { /* hook errors swallowed to protect other sessions */ }
+    }
+    if (this.cleanupReporter) {
+      this.cleanupReporter(1, this.sessions.size);
+    }
   }
 
   /** Attach or replace auth context for an existing session. */
