@@ -32,6 +32,14 @@ export interface SubagentSummary {
   // ISO-8601 timestamp at which the ended record will be purged from the
   // in-memory registry. Only set once `ended_at` is set; undefined while live.
   expires_at?: string;
+  // v0.34: ticket + role context for ticket-kind subagents. The plugin
+  // ticket-session-manager spawns one subagent per (ticket, role) and reports
+  // both fields here so the UI can show "Ticket title · reviewer" instead of
+  // an opaque session key. Optional because older plugins and chat/oneshot
+  // subagents leave them undefined.
+  ticket_id?: string;
+  ticket_title?: string;
+  role?: string;
 }
 
 export interface SubagentLogLine {
@@ -76,6 +84,9 @@ export class SubagentMonitorService {
     pid: number;
     started_at?: string;
     label?: string;
+    ticket_id?: string;
+    ticket_title?: string;
+    role?: string;
   }): SubagentRecord {
     const started_at = input.started_at || new Date().toISOString();
     const rec: SubagentRecord = {
@@ -87,6 +98,9 @@ export class SubagentMonitorService {
       pid: input.pid,
       started_at,
       label: input.label,
+      ticket_id: input.ticket_id,
+      ticket_title: input.ticket_title,
+      role: input.role,
       line_count: 0,
       lines: [],
     };

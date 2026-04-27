@@ -148,13 +148,24 @@ export default function AgentSubagentsPanel({ wsId, agentId }: AgentSubagentsPan
                   background: isEnded ? tokens.colors.textMuted : tokens.colors.successLight,
                 }} />
                 <span style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', color: tokens.colors.textMuted }}>{s.kind}</span>
+                {s.role && (
+                  <span title={`role · ${s.role}`} style={{
+                    fontSize: 10, fontWeight: 700, padding: '0 5px', borderRadius: tokens.radii.sm,
+                    border: `1px solid ${tokens.colors.border}`, color: tokens.colors.accentLight,
+                    textTransform: 'uppercase', letterSpacing: 0.4,
+                  }}>{s.role}</span>
+                )}
                 <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>· pid {s.pid}</span>
                 <span style={{ marginLeft: 'auto', fontSize: 10, color: tokens.colors.textMuted }}>
                   {s.line_count} lines
                 </span>
               </div>
               <div style={{ fontSize: 12, fontFamily: 'monospace', color: tokens.colors.textPrimary, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {s.label || s.session_key || '(no label)'}
+                {/* Prefer the explicit ticket title — agent operators
+                   recognise tickets by title, not by session_key uuids.
+                   Falls back through label → session_key for chat/oneshot
+                   subagents that don't carry ticket context. */}
+                {s.ticket_title || s.label || s.session_key || '(no label)'}
               </div>
               <div style={{ fontSize: 10, color: tokens.colors.textMuted, marginTop: 2 }}>
                 started {new Date(s.started_at).toLocaleTimeString()}
@@ -202,7 +213,7 @@ function SubagentTranscript({ summary, lines }: { summary: SubagentSummary; line
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <div style={{ padding: '10px 12px', borderBottom: `1px solid ${tokens.colors.border}`, fontFamily: 'monospace', fontSize: 12 }}>
         <div style={{ color: tokens.colors.textPrimary }}>
-          {summary.label || summary.session_key} <span style={{ color: tokens.colors.textMuted }}>· {summary.kind} · pid {summary.pid}</span>
+          {summary.ticket_title || summary.label || summary.session_key} <span style={{ color: tokens.colors.textMuted }}>· {summary.kind}{summary.role ? ` · ${summary.role}` : ''} · pid {summary.pid}</span>
         </div>
         <div style={{ color: tokens.colors.textMuted, fontSize: 11, marginTop: 2 }}>
           {summary.subagent_id}

@@ -775,7 +775,7 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
             <div style={cardStyle}>
               {hasTask && detail?.current_task ? (
                 <>
-                  <div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                     <a
                       onClick={() =>
                         handleTaskClick(detail.current_task!.ticket_id)
@@ -784,6 +784,16 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
                     >
                       {detail.current_task.ticket_title}
                     </a>
+                    {detail.current_task.role && (
+                      <span
+                        title={`Working as ${detail.current_task.role}`}
+                        style={{
+                          fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: tokens.radii.sm,
+                          border: `1px solid ${tokens.colors.border}`, color: tokens.colors.accentLight,
+                          textTransform: 'uppercase', letterSpacing: 0.4,
+                        }}
+                      >as {detail.current_task.role}</span>
+                    )}
                   </div>
                   <div
                     style={{

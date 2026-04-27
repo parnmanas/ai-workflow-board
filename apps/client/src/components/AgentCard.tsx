@@ -252,6 +252,9 @@ export default function AgentCard({ agent, onOpenDetail }: AgentCardProps) {
           <div>
             <div style={taskTitleStyle}>{agent.current_task.ticket_title}</div>
             <div style={taskMetaStyle}>
+              {agent.current_task.role ? (
+                <span style={{ textTransform: 'uppercase', letterSpacing: 0.4, marginRight: 6 }}>as {agent.current_task.role} ·</span>
+              ) : null}
               since {formatClaimedTime(agent.current_task.claimed_at)} ·{' '}
               {formatElapsed(agent.current_task.claimed_at)}
             </div>

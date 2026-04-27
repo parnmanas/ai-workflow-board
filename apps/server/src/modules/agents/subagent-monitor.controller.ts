@@ -53,7 +53,7 @@ export class SubagentMonitorController {
     const agentId = this._agentId(req);
     if (!agentId) return res.status(401).json({ error: 'Could not resolve agent from API key' });
 
-    const { subagent_id, kind, session_key, pid, started_at, label } = body || {};
+    const { subagent_id, kind, session_key, pid, started_at, label, ticket_id, ticket_title, role } = body || {};
     // workspace_id falls back to the API key's bound workspace when the
     // plugin doesn't pass it explicitly (the plugin doesn't always know it).
     const workspaceId = body?.workspace_id || (req as any).currentWorkspaceId;
@@ -69,6 +69,9 @@ export class SubagentMonitorController {
       pid: pid || 0,
       started_at,
       label,
+      ticket_id: typeof ticket_id === 'string' && ticket_id ? ticket_id : undefined,
+      ticket_title: typeof ticket_title === 'string' && ticket_title ? ticket_title : undefined,
+      role: typeof role === 'string' && role ? role : undefined,
     });
     return res.status(201).json({ subagent_id: rec.subagent_id });
   }

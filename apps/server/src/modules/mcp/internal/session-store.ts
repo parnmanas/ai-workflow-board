@@ -30,6 +30,13 @@ export interface McpAgentContext {
   agentName?: string;
   scope?: string;
   source: 'db' | 'env' | 'dev-mode';
+  // Role + ticket context the plugin's subagent-manager pins per spawn via
+  // X-AWB-Subagent-Role / X-AWB-Subagent-Ticket-Id headers. Lets server-side
+  // tools (add_comment, etc.) attribute work to the role the subagent is
+  // acting as without making every tool call carry the role explicitly.
+  // Empty when the caller is a top-level agent (proxy.mjs) or a chat session.
+  subagentRole?: string;
+  subagentTicketId?: string;
 }
 
 interface SessionEntry {

@@ -24,20 +24,21 @@ export function registerAgentStatusTools(server: McpServer, ctx: ToolContext): v
     'set_current_task',
     'Mark this agent as actively processing the given ticket. Call from the plugin ' +
     'when a ticket-session subagent is successfully spawned. Idempotent — repeating ' +
-    'with the same ticket just refreshes the claimed_at timestamp.',
+    'with the same ticket (and role) just refreshes the claimed_at timestamp.',
     {
       agent_id: z.string().describe('Calling agent ID'),
       ticket_id: z.string().describe('Ticket the agent is now working on'),
+      role: z.string().optional().describe('Role slug the subagent was spawned for (assignee/reporter/reviewer or a workspace-custom slug). Surfaced on the dashboard so a multi-role agent shows which hat it is wearing right now.'),
     },
-    async ({ agent_id, ticket_id }) => {
+    async ({ agent_id, ticket_id, role }) => {
       if (!agentStatusService) {
         return err('set_current_task is unavailable in standalone MCP server mode — use the NestJS-integrated server.');
       }
       const agent = await dataSource.getRepository(Agent).findOne({ where: { id: agent_id } });
       if (!agent) return err('Agent not found');
 
-      await agentStatusService.setCurrentTask(agent_id, ticket_id);
-      return ok({ agent_id, ticket_id, set_at: new Date().toISOString() });
+      await agentStatusService.setCurrentTask(agent_id, ticket_id, role);
+      return ok({ agent_id, ticket_id, role: role || null, set_at: new Date().toISOString() });
     }
   );
 

@@ -87,6 +87,7 @@ export class AgentsController {
             ticket_id: liveStatus.current_task.ticket_id,
             ticket_title: liveStatus.current_task.ticket_title,
             claimed_at: liveStatus.current_task.claimed_at.toISOString(),
+            role: liveStatus.current_task.role || undefined,
           }
         : undefined;
 
@@ -157,6 +158,7 @@ export class AgentsController {
           ticket_id: liveStatus.current_task.ticket_id,
           ticket_title: liveStatus.current_task.ticket_title,
           claimed_at: liveStatus.current_task.claimed_at.toISOString(),
+          role: liveStatus.current_task.role || undefined,
         }
       : undefined;
 

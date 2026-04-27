@@ -230,6 +230,32 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
                   {!isCompact && (
                     <span style={{ fontSize: '12px', fontWeight: 600, color: authorBadge.color }}>{c.author}</span>
                   )}
+                  {/* Role badge — surfaces which role an agent commented as
+                     when the same agent holds multiple roles on the ticket
+                     (e.g. assignee + reviewer). Server stores
+                     metadata.author_role on save (see comment-tools.ts
+                     resolveAuthorRole); accepts a string slug or an array
+                     when the role was ambiguous at write time. */}
+                  {!isCompact && isAgent && (() => {
+                    const raw = (c.metadata as any)?.author_role;
+                    const roles: string[] = Array.isArray(raw)
+                      ? raw.filter((s): s is string => typeof s === 'string' && !!s)
+                      : typeof raw === 'string' && raw
+                        ? [raw]
+                        : [];
+                    if (roles.length === 0) return null;
+                    return roles.map((slug) => (
+                      <span
+                        key={slug}
+                        title={`as ${slug}`}
+                        style={{
+                          fontSize: '10px', fontWeight: 700, padding: '1px 6px', borderRadius: tokens.radii.sm,
+                          background: 'transparent', color: tokens.colors.textPrimary,
+                          border: `1px solid ${tokens.colors.border}`, textTransform: 'uppercase', letterSpacing: 0.4,
+                        }}
+                      >as {slug}</span>
+                    ));
+                  })()}
                 </div>
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
                   {/* Tier-1 F unread cue — small accent dot beside the timestamp.
