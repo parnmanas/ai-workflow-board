@@ -12,6 +12,7 @@ import { BoardColumn } from '../../../entities/BoardColumn';
 import { Ticket } from '../../../entities/Ticket';
 import { Comment } from '../../../entities/Comment';
 import { Resource } from '../../../entities/Resource';
+import { TicketAttachment } from '../../../entities/TicketAttachment';
 
 /**
  * Anything that provides `getRepository(Entity)` — both `DataSource` and a
@@ -158,4 +159,58 @@ export async function deleteCommentAttachmentsForTicket(
     .where('id IN (:...ids) AND type = :t', { ids, t: 'comment_attachment' })
     .execute();
   return result.affected || 0;
+}
+
+/**
+ * Cheap mimetype inference for ticket-level uploads. Mirrors the same map
+ * used inline by the comment add path so the two attachment surfaces agree
+ * on what an extensionless or unknown file resolves to.
+ */
+export function inferTicketAttachmentMimetype(fileName: string, explicit?: string): string {
+  if (explicit && explicit.length > 0) return explicit;
+  const ext = (fileName.split('.').pop() || '').toLowerCase();
+  const extMap: Record<string, string> = {
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp',
+    svg: 'image/svg+xml',
+    pdf: 'application/pdf', txt: 'text/plain', md: 'text/markdown', json: 'application/json',
+    zip: 'application/zip', csv: 'text/csv', mp4: 'video/mp4', mov: 'video/quicktime',
+    log: 'text/plain', xml: 'application/xml', html: 'text/html',
+  };
+  return extMap[ext] || 'application/octet-stream';
+}
+
+/**
+ * Project a TicketAttachment row into the wire-shape the API surfaces use
+ * (REST list + ticket detail). `includeData=false` strips `file_data` so list
+ * responses don't pay the base64 cost; the single-attachment GET passes
+ * `true` to ship the binary alongside metadata for download/preview.
+ */
+export function projectTicketAttachment(
+  row: TicketAttachment,
+  options: { includeData?: boolean } = {},
+) {
+  const { includeData = false } = options;
+  const out: any = {
+    id: row.id,
+    workspace_id: row.workspace_id,
+    ticket_id: row.ticket_id,
+    file_name: row.file_name,
+    file_mimetype: row.file_mimetype,
+    file_size: row.file_size,
+    uploaded_by_type: row.uploaded_by_type,
+    uploaded_by_id: row.uploaded_by_id,
+    uploaded_by: row.uploaded_by,
+    created_at: row.created_at,
+  };
+  if (includeData) out.file_data = row.file_data;
+  return out;
+}
+
+/**
+ * Approximate decoded byte count for a base64 string. Mirrors the formula
+ * the comment-attachment path uses (length * 3 / 4); padding overcounts by
+ * 1–2 bytes which is tolerable for size-cap enforcement.
+ */
+export function approxBase64Size(base64: string): number {
+  return Math.floor(((base64?.length || 0) * 3) / 4);
 }

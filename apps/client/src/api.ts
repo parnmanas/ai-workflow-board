@@ -19,6 +19,7 @@ import type {
   FsRootsResult,
   SubagentSummary,
   SubagentTranscript,
+  TicketAttachmentMeta,
 } from './types';
 
 const BASE = '/api';
@@ -296,6 +297,27 @@ export const api = {
     request<{ ticket_id: string; last_read_at: string }>(`/tickets/${ticketId}/read`, {
       method: 'POST',
       body: JSON.stringify(upTo ? { up_to: upTo } : {}),
+    }),
+
+  // ─── Ticket Attachments ────────────────────────────────
+  // Files attached directly to a ticket (NOT through Resources). Distinct
+  // from comment attachments — these cascade-delete with the ticket and
+  // store the binary on the dedicated `ticket_attachments` table.
+  listTicketAttachments: (ticketId: string) =>
+    request<TicketAttachmentMeta[]>(`/tickets/${ticketId}/attachments`),
+  getTicketAttachment: (ticketId: string, attachmentId: string) =>
+    request<TicketAttachmentMeta>(`/tickets/${ticketId}/attachments/${attachmentId}`),
+  addTicketAttachments: (
+    ticketId: string,
+    attachments: { file_name: string; file_mimetype: string; file_data: string }[],
+  ) =>
+    request<TicketAttachmentMeta[]>(`/tickets/${ticketId}/attachments`, {
+      method: 'POST',
+      body: JSON.stringify({ attachments }),
+    }),
+  deleteTicketAttachment: (ticketId: string, attachmentId: string) =>
+    request<{ success: boolean; id: string }>(`/tickets/${ticketId}/attachments/${attachmentId}`, {
+      method: 'DELETE',
     }),
 
   // ─── Users ─────────────────────────────────────────────

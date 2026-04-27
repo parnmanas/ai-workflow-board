@@ -13,7 +13,9 @@ import type { DataSource, EntityManager } from 'typeorm';
 import { In } from 'typeorm';
 import { Ticket } from '../../../entities/Ticket';
 import { Resource } from '../../../entities/Resource';
+import { TicketAttachment } from '../../../entities/TicketAttachment';
 import { safeJsonParse } from './helpers';
+import { projectTicketAttachment } from './ticket-helpers';
 
 type RepoScope = DataSource | EntityManager;
 
@@ -112,6 +114,11 @@ export async function expandCommentAttachments(
  *
  * Tree depth cap is the schema's 2-level nesting (root → child → grandchild).
  * Grandchildren have `children: []` forced, matching historic API behavior.
+ *
+ * Ticket-level file attachments (the `attachments` field on root + every
+ * descendant) are hydrated as metadata only — `file_data` is omitted so the
+ * payload stays small. Callers that need the bytes hit the dedicated
+ * `GET /api/tickets/:id/attachments/:attachmentId` endpoint.
  */
 export async function loadTicketFull(scope: RepoScope, id: string) {
   const ticketRepo = scope.getRepository(Ticket);
@@ -120,7 +127,7 @@ export async function loadTicketFull(scope: RepoScope, id: string) {
     relations: ['children', 'children.children', 'children.children.comments', 'children.comments', 'comments'],
   });
   if (!ticket) return null;
-  const out = {
+  const out: any = {
     ...ticket,
     labels: safeJsonParse(ticket.labels),
     channel_ids: safeJsonParse(ticket.channel_ids),
@@ -134,10 +141,13 @@ export async function loadTicketFull(scope: RepoScope, id: string) {
         channel_ids: safeJsonParse(gc.channel_ids),
         children: [],
         comments: parseComments(gc.comments),
+        attachments: [] as any[],
       })),
       comments: parseComments(child.comments),
+      attachments: [] as any[],
     })),
     comments: parseComments(ticket.comments),
+    attachments: [] as any[],
   };
   // One batched lookup for every attachment across the whole tree so we don't
   // fan out per-comment Resource queries.
@@ -146,5 +156,30 @@ export async function loadTicketFull(scope: RepoScope, id: string) {
     ...out.children.flatMap((c: any) => [...c.comments, ...c.children.flatMap((gc: any) => gc.comments)]),
   ];
   await expandCommentAttachments(scope, allComments);
+
+  // Ticket-level attachments — collected for root + every descendant in a
+  // single IN(...) query, then partitioned back onto each ticket node.
+  const allTicketIds: string[] = [
+    out.id,
+    ...out.children.map((c: any) => c.id),
+    ...out.children.flatMap((c: any) => (c.children || []).map((gc: any) => gc.id)),
+  ];
+  const attachmentRows = await scope.getRepository(TicketAttachment)
+    .find({ where: { ticket_id: In(allTicketIds) } as any });
+  const attachmentsByTicket = new Map<string, any[]>();
+  for (const row of attachmentRows) {
+    const list = attachmentsByTicket.get(row.ticket_id) || [];
+    list.push(projectTicketAttachment(row, { includeData: false }));
+    attachmentsByTicket.set(row.ticket_id, list);
+  }
+  const sortAttachments = (list: any[]) =>
+    list.slice().sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+  out.attachments = sortAttachments(attachmentsByTicket.get(out.id) || []);
+  for (const child of out.children) {
+    child.attachments = sortAttachments(attachmentsByTicket.get(child.id) || []);
+    for (const gc of child.children) {
+      gc.attachments = sortAttachments(attachmentsByTicket.get(gc.id) || []);
+    }
+  }
   return out;
 }

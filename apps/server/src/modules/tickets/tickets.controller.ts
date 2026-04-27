@@ -21,10 +21,25 @@ import { MentionService } from '../../services/mention.service';
 import { PresenceService } from '../../services/presence.service';
 import { TriggerLoopService } from '../agents/trigger-loop.service';
 import { TicketRoleAssignmentService } from '../workspace-roles/ticket-role-assignment.service';
-import { MAX_COMMENT_ATTACHMENT_SIZE, MAX_COMMENT_ATTACHMENTS } from '../../common/constants/upload';
+import {
+  MAX_COMMENT_ATTACHMENT_SIZE,
+  MAX_COMMENT_ATTACHMENTS,
+  MAX_TICKET_ATTACHMENT_SIZE,
+  MAX_TICKET_ATTACHMENTS,
+} from '../../common/constants/upload';
 import { Resource } from '../../entities/Resource';
+import { TicketAttachment } from '../../entities/TicketAttachment';
 import { loadTicketFull, parseComments, expandCommentAttachments } from '../mcp/shared/ticket-parsing';
-import { maxTicketPosition, maxChildPosition, resolveAgentId, shiftTicketPositions, deleteCommentAttachmentsForTicket } from '../mcp/shared/ticket-helpers';
+import {
+  maxTicketPosition,
+  maxChildPosition,
+  resolveAgentId,
+  shiftTicketPositions,
+  deleteCommentAttachmentsForTicket,
+  inferTicketAttachmentMimetype,
+  projectTicketAttachment,
+  approxBase64Size,
+} from '../mcp/shared/ticket-helpers';
 import { findOrFail } from '../../common/find-or-fail';
 
 @ApiBearerAuth('user-session')
@@ -39,6 +54,7 @@ export class TicketsController {
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     @InjectRepository(UserMention) private readonly mentionRepo: Repository<UserMention>,
     @InjectRepository(TicketReadState) private readonly readStateRepo: Repository<TicketReadState>,
+    @InjectRepository(TicketAttachment) private readonly attachmentRepo: Repository<TicketAttachment>,
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly activityService: ActivityService,
     private readonly logService: LogService,
@@ -803,6 +819,140 @@ export class TicketsController {
     }
 
     return res.json({ success: true });
+  }
+
+  // ─── Ticket-level attachments ───────────────────────────
+  // Files attached directly to the ticket — distinct from comment attachments
+  // (which live as Resource rows). Stored inline on the ticket_attachments
+  // table so binary lifecycle stays bound to the ticket and cascades on
+  // ticket delete without a Resource indirection.
+
+  @Get('tickets/:id/attachments')
+  async listAttachments(@Param('id') id: string, @Res() res: Response) {
+    await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
+    const rows = await this.attachmentRepo.find({
+      where: { ticket_id: id },
+      order: { created_at: 'DESC' },
+    });
+    return res.json(rows.map(r => projectTicketAttachment(r, { includeData: false })));
+  }
+
+  @Get('tickets/:id/attachments/:attachmentId')
+  async getAttachment(
+    @Param('id') id: string,
+    @Param('attachmentId') attachmentId: string,
+    @Res() res: Response,
+  ) {
+    const row = await this.attachmentRepo.findOne({ where: { id: attachmentId, ticket_id: id } });
+    if (!row) return res.status(404).json({ error: 'Attachment not found' });
+    return res.json(projectTicketAttachment(row, { includeData: true }));
+  }
+
+  @Post('tickets/:id/attachments')
+  async addAttachments(
+    @Param('id') id: string,
+    @Body() body: any,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const currentUser = (req as any).currentUser;
+    if (!currentUser) return res.status(401).json({ error: 'Authentication required' });
+
+    const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
+
+    // Accept either a single `{file_name, file_data, file_mimetype}` object
+    // OR an array of them under `attachments`. Mirrors the comment endpoint's
+    // pattern of letting clients batch related uploads in one call.
+    const incoming: any[] = Array.isArray(body?.attachments)
+      ? body.attachments
+      : (body?.file_data ? [body] : []);
+    if (incoming.length === 0) {
+      return res.status(400).json({ error: 'attachments[] (or a single file_data + file_name) is required' });
+    }
+
+    const existingCount = await this.attachmentRepo.count({ where: { ticket_id: id } });
+    if (existingCount + incoming.length > MAX_TICKET_ATTACHMENTS) {
+      return res.status(400).json({
+        error: `Maximum ${MAX_TICKET_ATTACHMENTS} attachments per ticket (have ${existingCount}, adding ${incoming.length})`,
+      });
+    }
+
+    for (const f of incoming) {
+      if (!f || typeof f !== 'object' || !f.file_data || !f.file_name) {
+        return res.status(400).json({ error: 'Each attachment must include file_data and file_name' });
+      }
+      if (approxBase64Size(f.file_data) > MAX_TICKET_ATTACHMENT_SIZE) {
+        return res.status(400).json({
+          error: `Attachment ${f.file_name} exceeds ${MAX_TICKET_ATTACHMENT_SIZE / 1024 / 1024}MB limit`,
+        });
+      }
+    }
+
+    const saved = await this.dataSource.transaction(async (manager) => {
+      const repo = manager.getRepository(TicketAttachment);
+      const created: TicketAttachment[] = [];
+      for (const f of incoming) {
+        const mimetype = inferTicketAttachmentMimetype(f.file_name, f.file_mimetype);
+        const row = await repo.save(repo.create({
+          ticket_id: id,
+          workspace_id: ticket.workspace_id || '',
+          file_name: f.file_name,
+          file_mimetype: mimetype,
+          file_data: f.file_data,
+          file_size: approxBase64Size(f.file_data),
+          uploaded_by_type: 'user',
+          uploaded_by_id: currentUser.id,
+          uploaded_by: currentUser.name || currentUser.email || '',
+        }));
+        created.push(row);
+      }
+      return created;
+    });
+
+    for (const row of saved) {
+      await this.activityService.logActivity({
+        entity_type: 'ticket',
+        entity_id: ticket.id,
+        action: 'updated',
+        ticket_id: ticket.parent_id || ticket.id,
+        actor_id: currentUser.id,
+        actor_name: currentUser.name || currentUser.email,
+        field_changed: 'attachment',
+        new_value: row.file_name,
+      });
+    }
+
+    return res.status(201).json(saved.map(r => projectTicketAttachment(r, { includeData: false })));
+  }
+
+  @Delete('tickets/:id/attachments/:attachmentId')
+  async deleteAttachment(
+    @Param('id') id: string,
+    @Param('attachmentId') attachmentId: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const currentUser = (req as any).currentUser;
+    if (!currentUser) return res.status(401).json({ error: 'Authentication required' });
+
+    const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
+    const row = await this.attachmentRepo.findOne({ where: { id: attachmentId, ticket_id: id } });
+    if (!row) return res.status(404).json({ error: 'Attachment not found' });
+
+    await this.attachmentRepo.delete({ id: attachmentId });
+
+    await this.activityService.logActivity({
+      entity_type: 'ticket',
+      entity_id: ticket.id,
+      action: 'updated',
+      ticket_id: ticket.parent_id || ticket.id,
+      actor_id: currentUser.id,
+      actor_name: currentUser.name || currentUser.email,
+      field_changed: 'attachment',
+      old_value: row.file_name,
+    });
+
+    return res.json({ success: true, id: attachmentId });
   }
 
   @Post('tickets/:id/comments')

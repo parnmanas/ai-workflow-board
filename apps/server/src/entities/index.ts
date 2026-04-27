@@ -22,3 +22,4 @@ export { UserMention } from './UserMention';
 export { TicketReadState } from './TicketReadState';
 export { WorkspaceRole } from './WorkspaceRole';
 export { TicketRoleAssignment } from './TicketRoleAssignment';
+export { TicketAttachment } from './TicketAttachment';

@@ -132,6 +132,24 @@ export interface CommentAttachment {
   file_data: string;
 }
 
+// Ticket-level attachment. Distinct from CommentAttachment — the binary lives
+// on the dedicated `ticket_attachments` table (NOT through Resources), which
+// is why this row carries no Resource indirection. List responses omit
+// `file_data` to keep payloads small; the dedicated GET endpoint returns it.
+export interface TicketAttachmentMeta {
+  id: string;
+  workspace_id: string;
+  ticket_id: string;
+  file_name: string;
+  file_mimetype: string;
+  file_size: number;
+  uploaded_by_type: 'user' | 'agent' | string;
+  uploaded_by_id: string;
+  uploaded_by: string;
+  created_at: string;
+  file_data?: string; // present only when fetched via getTicketAttachment
+}
+
 export type CommentType = 'note' | 'question' | 'answer' | 'decision' | 'chat' | 'system' | 'handoff';
 export type CommentStatus = 'open' | 'resolved' | null;
 
@@ -183,6 +201,10 @@ export interface Ticket {
   position: number;
   children: Ticket[];
   comments: Comment[];
+  // File attachments stored directly on the ticket (NOT via Resources).
+  // Populated as metadata only by `loadTicketFull` — `file_data` is fetched
+  // on demand via getTicketAttachment.
+  attachments?: TicketAttachmentMeta[];
   created_at: string;
   updated_at: string;
 }
