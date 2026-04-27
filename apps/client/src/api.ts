@@ -139,6 +139,30 @@ export const api = {
     request<any>(`/workspaces/${wsId}/roles/${roleId}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteWorkspaceRole: (wsId: string, roleId: string) =>
     request<any>(`/workspaces/${wsId}/roles/${roleId}`, { method: 'DELETE' }),
+  // Bulk reorder — server rewrites position to 0..N-1 in the given order.
+  // Order propagates to TicketPanel / ColumnManager / TriggerMenu via the
+  // same `position` field they already sort on.
+  reorderWorkspaceRoles: (wsId: string, orderedRoleIds: string[]) =>
+    request<any[]>(`/workspaces/${wsId}/roles/reorder`, {
+      method: 'PATCH',
+      body: JSON.stringify({ ordered_role_ids: orderedRoleIds }),
+    }),
+
+  // ─── Ticket Role Assignments (v0.34) ───────────────────
+  // Per-ticket holder for each WorkspaceRole. The legacy
+  // assignee/reporter/reviewer triple is mirrored from the builtin slugs;
+  // custom slugs are *only* visible through this endpoint.
+  listTicketRoleAssignments: (ticketId: string) =>
+    request<TicketRoleAssignmentRow[]>(`/tickets/${ticketId}/role-assignments`),
+  setTicketRoleAssignment: (
+    ticketId: string,
+    roleId: string,
+    holder: { agent_id?: string | null; user_id?: string | null },
+  ) =>
+    request<{ assignments: TicketRoleAssignmentRow[] }>(
+      `/tickets/${ticketId}/role-assignments/${roleId}`,
+      { method: 'PUT', body: JSON.stringify(holder) },
+    ),
 
   // ─── Boards ────────────────────────────────────────────
   getBoard: (id: string) => request<any>(`/boards/${id}`),
@@ -185,6 +209,19 @@ export const api = {
 
   moveTicket: (id: string, targetColumnId: string, targetPosition: number) =>
     request<any>(`/tickets/${id}/move`, { method: 'PATCH', body: JSON.stringify({ targetColumnId, targetPosition }) }),
+
+  // Re-parent a ticket. parent_id=null promotes back to root (must include
+  // column_id); parent_id=string makes it a subtask. targetPosition is
+  // optional — server clamps and defaults to end-of-list.
+  reparentTicket: (id: string, parent_id: string | null, opts?: { column_id?: string; targetPosition?: number }) =>
+    request<any>(`/tickets/${id}/parent`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        parent_id,
+        ...(opts?.column_id ? { column_id: opts.column_id } : {}),
+        ...(typeof opts?.targetPosition === 'number' ? { targetPosition: opts.targetPosition } : {}),
+      }),
+    }),
 
   triggerAgent: (id: string, role: 'assignee' | 'reporter' | 'reviewer', agent_id?: string) =>
     request<{ trigger_id: string; ticket_id: string; agent_id: string; role: string; trigger_source: 'manual'; pushed_at: string }>(
@@ -647,6 +684,12 @@ export const api = {
     return request<{ count: number }>(`/admin/agent-logs/unseen-count${qs}`);
   },
 };
+
+// ─── Ticket role assignment types ─────────────────────────
+export interface TicketRoleAssignmentRow {
+  role: { id: string; slug: string; name: string; position: number; is_builtin: boolean };
+  holder: { type: 'agent' | 'user'; id: string; name: string } | null;
+}
 
 // ─── Mention types ───────────────────────────────────────
 export interface MentionCandidatesResponse {

@@ -1,5 +1,5 @@
 import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
-import { Controller, Get, Post, Patch, Delete, Body, Param, Req, Res, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Put, Patch, Delete, Body, Param, Req, Res, UseGuards } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, DataSource, In } from 'typeorm';
@@ -11,6 +11,7 @@ import { Agent } from '../../entities/Agent';
 import { UserMention } from '../../entities/UserMention';
 import { TicketReadState } from '../../entities/TicketReadState';
 import { User } from '../../entities/User';
+import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { WorkspaceGuard } from '../../common/guards/workspace.guard';
 import { ActivityService } from '../../services/activity.service';
@@ -431,6 +432,292 @@ export class TicketsController {
   }
 
   /**
+   * Re-parent a ticket. Two modes:
+   *   - `parent_id` set     → make the ticket a subtask of that parent.
+   *                            Sibling positions shift; column_id is cleared
+   *                            because non-root tickets don't live on a column.
+   *   - `parent_id` is null → promote the ticket back to root. Caller must
+   *                            supply `column_id` (which board column to land
+   *                            in); position defaults to end of column.
+   *
+   * Validates:
+   *   - cycle: target parent must not be the ticket itself or a descendant
+   *   - depth: subtree's deepest leaf must still fit under the 2-level cap
+   *   - workspace: parent must share the ticket's workspace
+   * Descendant depths are recomputed in the same transaction.
+   */
+  @Patch('tickets/:id/parent')
+  async reparent(@Param('id') id: string, @Body() body: any, @Req() req: any, @Res() res: Response) {
+    const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
+
+    const rawParent = body?.parent_id;
+    const newParentId: string | null = rawParent === null || rawParent === '' || rawParent === undefined
+      ? null
+      : String(rawParent);
+    const targetColumnId: string | undefined = body?.column_id ? String(body.column_id) : undefined;
+    const targetPosition: number | undefined = typeof body?.targetPosition === 'number'
+      ? body.targetPosition
+      : undefined;
+
+    if (newParentId === ticket.id) {
+      return res.status(400).json({ error: 'A ticket cannot be its own parent' });
+    }
+
+    // Pull the moving ticket's full subtree once so we can: (a) detect a cycle
+    // when the requested parent is itself a descendant, (b) compute the
+    // subtree's max depth offset for the cap check, and (c) re-stamp depths.
+    const subtree = await this._collectSubtree(ticket.id);
+    const subtreeIds = new Set(subtree.map(t => t.id));
+    const subtreeMaxDepth = subtree.reduce((max, t) => Math.max(max, t.depth), ticket.depth) - ticket.depth;
+
+    let newDepth = 0;
+    let parent: Ticket | null = null;
+    if (newParentId) {
+      if (subtreeIds.has(newParentId)) {
+        return res.status(400).json({ error: 'Cannot re-parent under self or a descendant' });
+      }
+      parent = await this.ticketRepo.findOne({ where: { id: newParentId } });
+      if (!parent) return res.status(400).json({ error: 'Parent ticket not found' });
+      if (ticket.workspace_id && parent.workspace_id && parent.workspace_id !== ticket.workspace_id) {
+        return res.status(400).json({ error: 'Parent ticket belongs to a different workspace' });
+      }
+      newDepth = parent.depth + 1;
+    } else {
+      // Promotion to root requires a target column.
+      if (!targetColumnId) {
+        return res.status(400).json({ error: 'column_id is required when parent_id is null' });
+      }
+      const col = await this.colRepo.findOne({ where: { id: targetColumnId } });
+      if (!col) return res.status(400).json({ error: 'Target column not found' });
+      newDepth = 0;
+    }
+
+    if (newDepth + subtreeMaxDepth > 2) {
+      return res.status(400).json({ error: 'Reparent would exceed maximum depth of 2' });
+    }
+
+    // No-op early-out: same parent and (for root tickets) same column with no
+    // position change. Lets the UI fire reparent on every drop without us
+    // having to bookkeep "did anything actually change" upstream.
+    const oldParentId = ticket.parent_id;
+    const oldColumnId = ticket.column_id;
+    if (newParentId === oldParentId
+        && (newParentId !== null || (targetColumnId && targetColumnId === oldColumnId))
+        && targetPosition === undefined) {
+      const unchanged = await loadTicketFull(this.dataSource, ticket.id);
+      return res.json(unchanged);
+    }
+
+    await this.dataSource.transaction(async (manager) => {
+      const tRepo = manager.getRepository(Ticket);
+
+      // 1) Close the gap left in the source scope.
+      if (oldParentId) {
+        await shiftTicketPositions(tRepo, { parent_id: oldParentId }, ticket.position, -1);
+      } else if (oldColumnId) {
+        await shiftTicketPositions(tRepo, { column_id: oldColumnId }, ticket.position, -1);
+      }
+
+      // 2) Compute the destination position.
+      let pos: number;
+      if (newParentId) {
+        const destCount = await tRepo
+          .createQueryBuilder('t')
+          .where('t.parent_id = :pid AND t.id != :id', { pid: newParentId, id: ticket.id })
+          .getCount();
+        pos = Math.min(targetPosition ?? destCount, destCount);
+        await shiftTicketPositions(tRepo, { parent_id: newParentId }, pos, +1, { inclusive: true, excludeId: ticket.id });
+      } else {
+        const destCol = targetColumnId!;
+        const destCount = await tRepo
+          .createQueryBuilder('t')
+          .where('t.column_id = :cid AND t.id != :id AND t.parent_id IS NULL', { cid: destCol, id: ticket.id })
+          .getCount();
+        pos = Math.min(targetPosition ?? destCount, destCount);
+        await shiftTicketPositions(tRepo, { column_id: destCol }, pos, +1, { inclusive: true, excludeId: ticket.id });
+      }
+
+      // 3) Update the moving ticket. column_id is nulled when the ticket is
+      // parented (children don't live on a column); set to target column when
+      // promoted to root.
+      await tRepo.update(ticket.id, {
+        parent_id: newParentId,
+        depth: newDepth,
+        column_id: newParentId ? (null as any) : targetColumnId!,
+        position: pos,
+      });
+
+      // 4) Re-stamp depths of descendants. Each was previously at
+      // (ticket.depth + offset); set to (newDepth + offset).
+      const depthDelta = newDepth - ticket.depth;
+      if (depthDelta !== 0) {
+        for (const desc of subtree) {
+          if (desc.id === ticket.id) continue;
+          await tRepo.update(desc.id, { depth: desc.depth + depthDelta });
+        }
+      }
+    });
+
+    const updated = await loadTicketFull(this.dataSource, ticket.id);
+
+    const currentUser = req.currentUser;
+    const oldParentTitle = oldParentId
+      ? (await this.ticketRepo.findOne({ where: { id: oldParentId } }))?.title || oldParentId
+      : (oldColumnId ? (await this.colRepo.findOne({ where: { id: oldColumnId } }))?.name || oldColumnId : '');
+    const newParentTitle = newParentId
+      ? parent?.title || newParentId
+      : (targetColumnId ? (await this.colRepo.findOne({ where: { id: targetColumnId } }))?.name || targetColumnId : '');
+    await this.activityService.logActivity({
+      entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
+      field_changed: 'parent', old_value: oldParentTitle, new_value: newParentTitle,
+      ticket_id: newParentId
+        ? (parent?.parent_id || newParentId)
+        : ticket.id,
+      actor_id: currentUser?.id,
+      actor_name: currentUser?.name || currentUser?.email,
+    });
+
+    return res.json(updated);
+  }
+
+  /**
+   * BFS from `rootId` collecting the ticket plus every descendant. Used by
+   * reparent for cycle detection and depth re-stamping. Stays bounded by the
+   * 2-level depth cap, so worst case is one root → N children → M grandchildren.
+   */
+  private async _collectSubtree(rootId: string): Promise<Ticket[]> {
+    const out: Ticket[] = [];
+    const queue: string[] = [rootId];
+    while (queue.length > 0) {
+      const ids = queue.splice(0, queue.length);
+      const rows = await this.ticketRepo.find({ where: { id: In(ids) } as any });
+      for (const r of rows) out.push(r);
+      const children = await this.ticketRepo.find({ where: { parent_id: In(ids) } as any });
+      for (const c of children) queue.push(c.id);
+    }
+    // Dedupe just in case the caller hits an unexpected cycle.
+    const seen = new Set<string>();
+    return out.filter(t => seen.has(t.id) ? false : (seen.add(t.id), true));
+  }
+
+  /**
+   * List the resolved role assignments for a ticket — one row per
+   * WorkspaceRole that has an assignment (rows with no assignment are
+   * omitted; the client merges this with the workspace's full role list to
+   * render an empty slot for unfilled roles).
+   *
+   * Each entry: { role: {id, slug, name, position, is_builtin}, holder: {type, id, name} | null }
+   */
+  @Get('tickets/:id/role-assignments')
+  async listRoleAssignments(@Param('id') id: string, @Res() res: Response) {
+    await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
+    const resolved = await this.ticketRoleAssignments.resolveForTicket(id);
+    return res.json(resolved.map(r => ({
+      role: {
+        id: r.role.id, slug: r.role.slug, name: r.role.name,
+        position: r.role.position, is_builtin: r.role.is_builtin,
+      },
+      holder: r.holder,
+    })));
+  }
+
+  /**
+   * Set (or clear) the holder of a single role on a ticket. Body:
+   *   { agent_id?: string|null, user_id?: string|null }
+   * Mutually exclusive — passing both rejects with 400. Both null/empty
+   * clears the slot (deletes the assignment row).
+   *
+   * Builtin slugs (`assignee`/`reporter`/`reviewer`) are mirrored back to the
+   * legacy ticket columns so older code paths (TicketCard, activity log,
+   * agent allocation fallbacks) keep seeing the same value. Custom slugs
+   * have no mirror — they live only in TicketRoleAssignment.
+   */
+  @Put('tickets/:id/role-assignments/:roleId')
+  async setRoleAssignment(
+    @Param('id') id: string,
+    @Param('roleId') roleId: string,
+    @Body() body: any,
+    @Req() req: any,
+    @Res() res: Response,
+  ) {
+    const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
+    const agent_id: string | null = body?.agent_id || null;
+    const user_id: string | null = body?.user_id || null;
+    if (agent_id && user_id) {
+      return res.status(400).json({ error: 'cannot set both agent_id and user_id' });
+    }
+
+    const roleRepo = this.dataSource.getRepository(WorkspaceRole);
+    const role = await roleRepo.findOne({ where: { id: roleId } });
+    if (!role) return res.status(404).json({ error: 'Role not found' });
+    if (ticket.workspace_id && role.workspace_id !== ticket.workspace_id) {
+      return res.status(400).json({ error: 'Role belongs to a different workspace' });
+    }
+
+    // Validate the holder exists. Skipping this would let a typo silently
+    // pin a dead id onto the ticket.
+    let agentName = '';
+    let userName = '';
+    if (agent_id) {
+      const a = await this.agentRepo.findOne({ where: { id: agent_id } });
+      if (!a) return res.status(404).json({ error: 'Agent not found' });
+      agentName = a.name;
+    }
+    if (user_id) {
+      const u = await this.dataSource.getRepository(User).findOne({ where: { id: user_id } });
+      if (!u) return res.status(404).json({ error: 'User not found' });
+      userName = u.name || u.email;
+    }
+
+    try {
+      await this.ticketRoleAssignments.setHolder(id, roleId, { agent_id, user_id });
+    } catch (e: any) {
+      return res.status(e?.status || 400).json({ error: e?.message || 'Failed to update role' });
+    }
+
+    // Mirror builtin slugs onto the legacy ticket columns. Display-name
+    // columns (`assignee`, `reporter`) get the holder's name when an agent
+    // or user fills the slot, blank when cleared. There's no historical
+    // `reviewer` name column, only `reviewer_id`.
+    const legacyMap: Record<string, { id: 'assignee_id' | 'reporter_id' | 'reviewer_id'; name?: 'assignee' | 'reporter' }> = {
+      assignee: { id: 'assignee_id', name: 'assignee' },
+      reporter: { id: 'reporter_id', name: 'reporter' },
+      reviewer: { id: 'reviewer_id' },
+    };
+    const mirror = legacyMap[role.slug];
+    let beforeId = '';
+    if (mirror) {
+      beforeId = (ticket as any)[mirror.id] || '';
+      const newId = agent_id || user_id || '';
+      const update: any = { [mirror.id]: newId };
+      if (mirror.name) update[mirror.name] = agentName || userName || '';
+      await this.ticketRepo.update(id, update);
+    }
+
+    const currentUser = req.currentUser;
+    await this.activityService.logActivity({
+      entity_type: 'ticket', entity_id: id, action: 'updated',
+      field_changed: mirror ? role.slug : `role:${role.slug}`,
+      old_value: beforeId,
+      new_value: agentName || userName || '',
+      ticket_id: ticket.parent_id || ticket.id,
+      actor_id: currentUser?.id,
+      actor_name: currentUser?.name || currentUser?.email,
+    });
+
+    const resolved = await this.ticketRoleAssignments.resolveForTicket(id);
+    return res.json({
+      assignments: resolved.map(r => ({
+        role: {
+          id: r.role.id, slug: r.role.slug, name: r.role.name,
+          position: r.role.position, is_builtin: r.role.is_builtin,
+        },
+        holder: r.holder,
+      })),
+    });
+  }
+
+  /**
    * Manually re-trigger an agent on this ticket. Used when the auto trigger
    * fired but the agent never responded (dead subagent, missed SSE, etc.) and
    * the human wants to punt it awake. Bypasses the 60s cooldown that the auto
@@ -442,18 +729,31 @@ export class TicketsController {
   @Post('tickets/:id/trigger')
   async triggerAgent(@Param('id') id: string, @Body() body: any, @Req() req: any, @Res() res: Response) {
     const role = String(body?.role || '').toLowerCase();
-    if (!['assignee', 'reporter', 'reviewer'].includes(role)) {
-      return res.status(400).json({ error: 'role must be one of assignee|reporter|reviewer' });
+    if (!role) {
+      return res.status(400).json({ error: 'role is required (workspace role slug)' });
     }
     const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
     const explicitAgentId = body?.agent_id ? String(body.agent_id) : '';
-    const roleField = role === 'assignee' ? 'assignee_id'
-      : role === 'reporter' ? 'reporter_id'
-      : 'reviewer_id';
-    const targetAgentId = explicitAgentId || (ticket as any)[roleField] || '';
+
+    // Resolve the role holder against the workspace role catalog. Legacy
+    // ticket columns (assignee_id / reporter_id / reviewer_id) are still
+    // checked as a fallback so v1 callers that haven't migrated keep working
+    // for the builtin three slugs.
+    let targetAgentId = explicitAgentId;
+    if (!targetAgentId) {
+      const holder = await this.ticketRoleAssignments.getHolderBySlug(id, ticket.workspace_id, role);
+      if (holder) targetAgentId = holder.agent_id || '';
+      if (!targetAgentId) {
+        const legacyField = role === 'assignee' ? 'assignee_id'
+          : role === 'reporter' ? 'reporter_id'
+          : role === 'reviewer' ? 'reviewer_id'
+          : null;
+        if (legacyField) targetAgentId = (ticket as any)[legacyField] || '';
+      }
+    }
     if (!targetAgentId) {
       return res.status(400).json({
-        error: `No ${role} assigned on this ticket. Set ticket.${roleField} first, or pass agent_id in the body.`,
+        error: `No agent holds role '${role}' on this ticket. Set the holder first, or pass agent_id in the body.`,
       });
     }
     const currentUser = req.currentUser;

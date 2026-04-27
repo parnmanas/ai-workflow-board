@@ -272,4 +272,7 @@ export interface SubagentEndedPayload {
   signal: string | null;
   duration_ms: number;
   ended_at: string;
+  // ISO-8601 instant at which the server will purge this record from the
+  // in-memory registry. Drives the "expires in 47h 32m" hint in the UI.
+  expires_at?: string;
 }

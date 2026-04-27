@@ -1,12 +1,14 @@
 import { Module, OnModuleInit, Inject, Optional } from '@nestjs/common';
 import { TypeOrmModule, InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
-import { buildDataSourceOptions, DEFAULT_COLUMNS, BUILTIN_ROLES } from '../db';
+import { buildDataSourceOptions, DEFAULT_COLUMNS, BUILTIN_ROLES, DEFAULT_BOARD_ROUTING } from '../db';
+import { DEFAULT_PROMPT_TEMPLATES } from './default-prompt-templates';
 import * as entitiesBarrel from '../entities';
 import { Workspace } from '../entities/Workspace';
 import { Board } from '../entities/Board';
 import { BoardColumn } from '../entities/BoardColumn';
 import { WorkspaceRole } from '../entities/WorkspaceRole';
+import { PromptTemplate } from '../entities/PromptTemplate';
 import { LogService } from '../services/log.service';
 
 const entityList = Object.values(entitiesBarrel);
@@ -64,6 +66,7 @@ export class DatabaseModule implements OnModuleInit {
     const boardRepo = this.dataSource.getRepository(Board);
     const colRepo = this.dataSource.getRepository(BoardColumn);
     const roleRepo = this.dataSource.getRepository(WorkspaceRole);
+    const tplRepo = this.dataSource.getRepository(PromptTemplate);
 
     // Seed default workspace if empty (seeding, NOT migration — stays here)
     const wsCount = await wsRepo.count();
@@ -77,13 +80,17 @@ export class DatabaseModule implements OnModuleInit {
         workspace_id: ws.id,
         name: 'AI Workflow Board',
         description: 'Main board for AI agent collaboration',
+        // Seed the default plan→implement→review routing so the workflow
+        // is functional out of the box. Admins can override via Board
+        // Settings → Routing.
+        routing_config: JSON.stringify(DEFAULT_BOARD_ROUTING),
       }));
 
       const defaultCols = DEFAULT_COLUMNS.map(c => ({
         ...c,
         board_id: board.id,
       }));
-      await colRepo.save(defaultCols.map(c => colRepo.create(c)));
+      const savedCols = await colRepo.save(defaultCols.map(c => colRepo.create(c)));
 
       // v0.34 — seed the same role preset every newly-created workspace
       // gets so the default workspace doesn't end up role-less if the
@@ -93,13 +100,36 @@ export class DatabaseModule implements OnModuleInit {
         workspace_id: ws.id,
         slug: def.slug,
         name: def.name,
-        role_prompt: '',
+        role_prompt: def.role_prompt,
         description: def.description,
         position: def.position,
         is_builtin: true,
       })));
 
-      this.dbLog(`Seeded default workspace with board, ${defaultCols.length} columns, and ${BUILTIN_ROLES.length} roles`);
+      // Default workflow prompt templates + auto-link to columns by name.
+      // Inlined here (rather than calling PromptTemplatesService) because
+      // DatabaseModule has no DI access to feature-module services.
+      const seededTemplates = await tplRepo.save(DEFAULT_PROMPT_TEMPLATES.map(def =>
+        tplRepo.create({
+          workspace_id: ws.id,
+          name: def.name,
+          description: def.description,
+          content: def.content,
+          category: def.category,
+        })));
+      const tplIdByName = new Map(seededTemplates.map(t => [t.name, t.id]));
+      const colPrompts: Record<string, string> = {};
+      for (const col of savedCols) {
+        const def = DEFAULT_PROMPT_TEMPLATES.find(d => d.column_match === col.name.toLowerCase());
+        if (!def) continue;
+        const tplId = tplIdByName.get(def.name);
+        if (tplId) colPrompts[col.id] = tplId;
+      }
+      if (Object.keys(colPrompts).length > 0) {
+        await boardRepo.update({ id: board.id }, { column_prompts: JSON.stringify(colPrompts) });
+      }
+
+      this.dbLog(`Seeded default workspace with board, ${defaultCols.length} columns, ${BUILTIN_ROLES.length} roles, and ${seededTemplates.length} prompt templates`);
     }
   }
 }

@@ -10,7 +10,9 @@ import { Workspace } from '../../../entities/Workspace';
 import { Board } from '../../../entities/Board';
 import { BoardColumn } from '../../../entities/BoardColumn';
 import { Ticket } from '../../../entities/Ticket';
-import { DEFAULT_COLUMNS } from '../../../db';
+import { DEFAULT_COLUMNS, DEFAULT_BOARD_ROUTING } from '../../../db';
+import { DEFAULT_PROMPT_TEMPLATES } from '../../../database/default-prompt-templates';
+import { PromptTemplate } from '../../../entities/PromptTemplate';
 import { ok, err, safeJsonParse } from '../shared/helpers';
 import type { ToolContext } from './context';
 
@@ -141,7 +143,7 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'create_board',
-    'Create a new board with default columns (Backlog, To Do, In Progress, Review, Merging, Done) inside a workspace',
+    'Create a new board with default columns (Backlog, To Do, Plan, In Progress, Review, Merging, Done) and the planner→assignee→reviewer routing preset, inside a workspace',
     {
       workspace_id: z.string().describe('Workspace ID'),
       name: z.string().describe('Board name'),
@@ -154,9 +156,44 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
       const boardRepo = dataSource.getRepository(Board);
       const colRepo = dataSource.getRepository(BoardColumn);
 
-      const board = await boardRepo.save(boardRepo.create({ name, description, workspace_id }));
+      const board = await boardRepo.save(boardRepo.create({
+        name, description, workspace_id,
+        routing_config: JSON.stringify(DEFAULT_BOARD_ROUTING),
+      }));
       const defaultCols = DEFAULT_COLUMNS.map(c => ({ ...c, board_id: board.id }));
-      await colRepo.save(defaultCols.map(c => colRepo.create(c)));
+      const savedCols = await colRepo.save(defaultCols.map(c => colRepo.create(c)));
+
+      // Idempotently seed default workflow templates into the workspace
+      // (existing rows by name are left alone) and auto-link each new
+      // column to its matching template via Board.column_prompts.
+      const tplRepo = dataSource.getRepository(PromptTemplate);
+      const existing = await tplRepo.find({ where: { workspace_id } });
+      const existingByName = new Map(existing.map(t => [t.name, t]));
+      const inserted: PromptTemplate[] = [];
+      for (const def of DEFAULT_PROMPT_TEMPLATES) {
+        if (existingByName.has(def.name)) continue;
+        inserted.push(await tplRepo.save(tplRepo.create({
+          workspace_id,
+          name: def.name,
+          description: def.description,
+          content: def.content,
+          category: def.category,
+        })));
+      }
+      const tplIdByName = new Map([
+        ...existing.map(t => [t.name, t.id] as const),
+        ...inserted.map(t => [t.name, t.id] as const),
+      ]);
+      const colPrompts: Record<string, string> = {};
+      for (const col of savedCols) {
+        const def = DEFAULT_PROMPT_TEMPLATES.find(d => d.column_match === col.name.toLowerCase());
+        if (!def) continue;
+        const tplId = tplIdByName.get(def.name);
+        if (tplId) colPrompts[col.id] = tplId;
+      }
+      if (Object.keys(colPrompts).length > 0) {
+        await boardRepo.update({ id: board.id }, { column_prompts: JSON.stringify(colPrompts) });
+      }
 
       const result = await boardRepo.findOne({ where: { id: board.id } });
       return ok(result);

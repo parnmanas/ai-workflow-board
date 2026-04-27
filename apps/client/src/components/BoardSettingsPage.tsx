@@ -23,7 +23,7 @@ export default function BoardSettingsPage() {
   const { wsId, boardId } = useParams<{ wsId: string; boardId: string }>();
 
   const {
-    board, refresh,
+    board, workspaceRoles, refresh,
     createColumn, updateColumn, deleteColumn,
   } = useBoard(boardId ?? '');
 
@@ -111,6 +111,7 @@ export default function BoardSettingsPage() {
             routingConfig={routingConfig}
             columnPrompts={columnPrompts}
             promptTemplates={promptTemplates}
+            workspaceRoles={workspaceRoles}
             onCreateColumn={(bid, name, color) => wrap(() => createColumn(bid, name, color), 'Column created')}
             onUpdateColumn={(columnId, data) => wrap(() => updateColumn(columnId, data), 'Column updated')}
             onDeleteColumn={(columnId) => wrap(() => deleteColumn(columnId), 'Column deleted')}

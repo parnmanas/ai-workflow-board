@@ -58,6 +58,26 @@ export class WorkspaceRolesController {
     }
   }
 
+  /**
+   * Bulk-reorder. Body: { ordered_role_ids: string[] }. Mounted at
+   * `reorder` literally so the path doesn't collide with `:roleId` (Express
+   * picks first match). The full id list for the workspace must be
+   * supplied — see WorkspaceRolesService.reorder for the rationale.
+   */
+  @Patch('reorder')
+  async reorder(
+    @Param('workspaceId') workspaceId: string,
+    @Body() body: any,
+    @Res() res: Response,
+  ) {
+    try {
+      const roles = await this.service.reorder(workspaceId, body?.ordered_role_ids || []);
+      return res.json(roles);
+    } catch (err: any) {
+      return res.status(err.status || 400).json({ error: err.message });
+    }
+  }
+
   @Patch(':roleId')
   async update(
     @Param('roleId') roleId: string,

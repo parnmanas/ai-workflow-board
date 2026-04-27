@@ -623,6 +623,7 @@ export const EVENT_TYPES: EventDefinition[] = [
         signal: event.signal ?? null,
         duration_ms: event.duration_ms || 0,
         ended_at: event.ended_at || new Date().toISOString(),
+        expires_at: event.expires_at,
       };
       return { payload, scope: { workspace_id: event.workspace_id }, timestamp: payload.ended_at };
     },

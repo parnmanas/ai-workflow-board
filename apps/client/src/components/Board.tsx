@@ -50,9 +50,10 @@ export default function Board() {
   }, [showToast, withLoading]);
 
   const {
-    board, users, agents, channels, loading: boardLoading, error, refresh,
-    createTicket, updateTicket, moveTicket, deleteTicket,
-    createChildTicket, addComment, setCommentStatus,
+    board, users, agents, channels, workspaceRoles,
+    loading: boardLoading, error, refresh,
+    createTicket, updateTicket, moveTicket, reparentTicket, deleteTicket,
+    createChildTicket, setTicketRoleAssignment, addComment, setCommentStatus,
     createColumn, updateColumn, deleteColumn,
     typingIndicators,
   } = useBoard(boardId ?? '');
@@ -77,6 +78,21 @@ export default function Board() {
     if (source.droppableId === destination.droppableId && source.index === destination.index) return;
 
     const ticketId = draggableId.replace('ticket-', '');
+
+    // Subtask drop zone in the right-hand TicketPanel: droppableId is
+    // `subtasks-<parentId>`. Re-parent the dragged ticket under the parent
+    // instead of moving it across columns.
+    if (destination.droppableId.startsWith('subtasks-')) {
+      const parentId = destination.droppableId.replace('subtasks-', '');
+      if (ticketId === parentId) return; // can't parent a ticket to itself
+      try {
+        await reparentTicket(ticketId, parentId, { targetPosition: destination.index });
+      } catch (err: any) {
+        showToast(err.message || 'Failed to add as subtask', 'error');
+      }
+      return;
+    }
+
     const targetColumnId = destination.droppableId.replace('column-', '');
 
     // moveTicket already does optimistic update + revert on error
@@ -111,6 +127,20 @@ export default function Board() {
   const handleDeleteChild = useCallback(async (childId: string) => {
     await wrapAction(() => deleteTicket(childId), 'Subtask deleted');
   }, [wrapAction, deleteTicket]);
+
+  // Used by the "Link existing" picker in SubtaskList — drag-and-drop already
+  // routes through handleDragEnd so this only fires for explicit picker clicks.
+  const handleReparentChild = useCallback(async (parentId: string, childId: string) => {
+    await wrapAction(() => reparentTicket(childId, parentId), 'Subtask linked');
+  }, [wrapAction, reparentTicket]);
+
+  const handleSetRoleAssignment = useCallback(async (
+    ticketId: string,
+    roleId: string,
+    holder: { agent_id?: string | null; user_id?: string | null },
+  ) => {
+    await wrapAction(() => setTicketRoleAssignment(ticketId, roleId, holder));
+  }, [wrapAction, setTicketRoleAssignment]);
 
   const handleAddComment = useCallback(async (
     ticketId: string,
@@ -208,9 +238,9 @@ export default function Board() {
       {board ? (
         <>
           {activePanelTicket ? (
-            <Group orientation="horizontal" style={{ flex: 1, overflow: 'hidden' }}>
-              <Panel minSize="40">
-                <DragDropContext onDragEnd={handleDragEnd}>
+            <DragDropContext onDragEnd={handleDragEnd}>
+              <Group orientation="horizontal" style={{ flex: 1, overflow: 'hidden' }}>
+                <Panel minSize="40">
                   <div
                     ref={panelBoardScrollRef}
                     style={{
@@ -227,27 +257,32 @@ export default function Board() {
                       <Column key={col.id} column={col} onTicketClick={handleTicketClick} onCreateTicket={handleCreateTicket} />
                     ))}
                   </div>
-                </DragDropContext>
-              </Panel>
-              <Separator style={{ width: 4, background: tokens.colors.border, cursor: 'col-resize', flexShrink: 0 }} />
-              <Panel defaultSize="40" minSize="25" maxSize="70" style={{ overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-                <TicketPanel
-                  ticket={activePanelTicket}
-                  columnName={board.columns.find(c => c.tickets.some(t => t.id === activePanelTicket.id))?.name || ''}
-                  agents={agents}
-                  channels={channels}
-                  typingIndicators={typingIndicators}
-                  onClose={handleCloseDetail}
-                  onUpdate={handleUpdateTicket}
-                  onDelete={(id) => { handleDeleteTicket(id); handleCloseDetail(); }}
-                  onCreateChild={handleCreateChild}
-                  onDeleteChild={handleDeleteChild}
-                  onAddComment={handleAddComment}
-                  onSetCommentStatus={handleSetCommentStatus}
-                  onSelectTicket={setActivePanelTicketId}
-                />
-              </Panel>
-            </Group>
+                </Panel>
+                <Separator style={{ width: 4, background: tokens.colors.border, cursor: 'col-resize', flexShrink: 0 }} />
+                <Panel defaultSize="40" minSize="25" maxSize="70" style={{ overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+                  <TicketPanel
+                    ticket={activePanelTicket}
+                    columnName={board.columns.find(c => c.tickets.some(t => t.id === activePanelTicket.id))?.name || ''}
+                    agents={agents}
+                    users={users}
+                    channels={channels}
+                    workspaceRoles={workspaceRoles}
+                    boardTickets={board.columns.flatMap(c => c.tickets)}
+                    typingIndicators={typingIndicators}
+                    onClose={handleCloseDetail}
+                    onUpdate={handleUpdateTicket}
+                    onDelete={(id) => { handleDeleteTicket(id); handleCloseDetail(); }}
+                    onCreateChild={handleCreateChild}
+                    onDeleteChild={handleDeleteChild}
+                    onReparentChild={handleReparentChild}
+                    onSetRoleAssignment={handleSetRoleAssignment}
+                    onAddComment={handleAddComment}
+                    onSetCommentStatus={handleSetCommentStatus}
+                    onSelectTicket={setActivePanelTicketId}
+                  />
+                </Panel>
+              </Group>
+            </DragDropContext>
           ) : (
             <DragDropContext onDragEnd={handleDragEnd}>
               <div

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Outlet, useNavigate, useParams } from 'react-router-dom';
+import { Outlet, useNavigate, useParams, useLocation } from 'react-router-dom';
 import Sidebar from './Sidebar';
 import WorkspaceSelector from './WorkspaceSelector';
 import { useMediaQuery } from '../hooks/useMediaQuery';
@@ -32,6 +32,7 @@ export default function AppLayout() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const navigate = useNavigate();
   const params = useParams<{ wsId?: string }>();
+  const location = useLocation();
   const { user } = useAuth();
 
   // Workspace state — AppLayout is the single writer to localStorage.currentWorkspaceId.
@@ -135,8 +136,14 @@ export default function AppLayout() {
   const handleSelectWorkspace = useCallback((wsId: string) => {
     setCurrentWorkspaceId(wsId);
     try { localStorage.setItem('currentWorkspaceId', wsId); } catch {}
-    navigate(`/ws/${wsId}/boards`);
-  }, [navigate]);
+    // Preserve the current top-level menu (boards / chat / agents / users / ...)
+    // when switching workspaces. Deeper segments (e.g. boards/:boardId,
+    // agents/:agentId) are scoped to the old workspace and won't resolve in
+    // the new one, so we keep only the first segment after /ws/:wsId/.
+    const m = location.pathname.match(/^\/ws\/[^/]+\/([^/]+)/);
+    const section = m?.[1] ?? 'boards';
+    navigate(`/ws/${wsId}/${section}`);
+  }, [navigate, location.pathname]);
 
   const handleCreateWorkspace = useCallback(async (name: string, description?: string, boardName?: string) => {
     const ws = await createWorkspace(name, description, boardName);

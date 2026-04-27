@@ -267,6 +267,9 @@ export interface DashboardAgent {
 }
 
 export interface AgentDetail extends DashboardAgent {
+  description?: string;
+  type?: string;
+  is_active?: number;
   role_prompt: string;                                // '' when redacted per D-44
   role_prompt_meta: { updated_at: string; updated_by: string } | null;
   redacted: boolean;                                  // true for non-admin viewer per D-44
@@ -436,6 +439,9 @@ export interface SubagentSummary {
   signal?: string | null;
   duration_ms?: number;
   line_count: number;
+  // Set once `ended_at` is set; ISO-8601 instant the server will purge the
+  // record (default 48h after end). undefined while live.
+  expires_at?: string;
 }
 
 export interface SubagentLogLine {

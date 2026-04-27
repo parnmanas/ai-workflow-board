@@ -4,7 +4,10 @@ import { Column, PromptTemplate } from '../types';
 import { tokens } from '../tokens';
 import { Button, Input } from './common';
 
-const ROLES = ['assignee', 'reviewer', 'reporter'] as const;
+// Routing toggles used to be hardcoded to the legacy assignee/reviewer/reporter
+// trio — replaced in v0.34 with the workspace's actual role catalog so the
+// Planner role (and any custom workspace roles) show up here automatically.
+interface RoleOption { slug: string; name: string; position: number }
 
 interface ColumnManagerProps {
   columns: Column[];
@@ -12,6 +15,7 @@ interface ColumnManagerProps {
   routingConfig: Record<string, string[]>;
   columnPrompts: Record<string, string>; // columnId → promptTemplateId
   promptTemplates: PromptTemplate[];
+  workspaceRoles?: RoleOption[];
   onCreateColumn: (boardId: string, name: string, color?: string) => Promise<void>;
   onUpdateColumn: (columnId: string, data: { name?: string; color?: string; position?: number; description?: string; is_terminal?: boolean }) => Promise<void>;
   onDeleteColumn: (columnId: string) => Promise<void>;
@@ -27,9 +31,11 @@ const PRESET_COLORS = [
 ];
 
 export default function ColumnManager({
-  columns, boardId, routingConfig, columnPrompts, promptTemplates,
+  columns, boardId, routingConfig, columnPrompts, promptTemplates, workspaceRoles,
   onCreateColumn, onUpdateColumn, onDeleteColumn, onUpdateRoutingConfig, onUpdateColumnPrompts,
 }: ColumnManagerProps) {
+  const sortedRoles: RoleOption[] = (workspaceRoles || []).slice()
+    .sort((a, b) => a.position - b.position);
   const [newColName, setNewColName] = useState('');
   const [newColColor, setNewColColor] = useState('#60a5fa'); // tag/label palette default — not tokenized
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -189,22 +195,27 @@ export default function ColumnManager({
                                 <span style={{ fontSize: '10px', color: tokens.colors.borderStrong, fontWeight: 600, textTransform: 'uppercase', flexShrink: 0 }}>
                                   Routing
                                 </span>
-                                <div style={{ display: 'flex', gap: 4 }}>
-                                  {ROLES.map(role => {
-                                    const active = colRoles.includes(role);
+                                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                                  {sortedRoles.length === 0 ? (
+                                    <span style={{ fontSize: '11px', color: tokens.colors.textMuted, fontStyle: 'italic' }}>
+                                      No workspace roles configured
+                                    </span>
+                                  ) : sortedRoles.map(role => {
+                                    const active = colRoles.includes(role.slug);
                                     return (
                                       <button
-                                        key={role}
-                                        onClick={() => toggleRole(col.name, role)}
+                                        key={role.slug}
+                                        onClick={() => toggleRole(col.name, role.slug)}
+                                        title={`Toggle ${role.name} for this column`}
                                         style={{
                                           padding: '3px 10px', borderRadius: tokens.radii.sm, fontSize: '11px', fontWeight: 600,
                                           border: active ? `1px solid ${tokens.colors.accent}` : `1px solid ${tokens.colors.border}`,
                                           background: active ? `${tokens.colors.accent}20` : 'transparent',
                                           color: active ? tokens.colors.accentLight : tokens.colors.borderStrong,
-                                          cursor: 'pointer', textTransform: 'capitalize',
+                                          cursor: 'pointer',
                                         }}
                                       >
-                                        {role}
+                                        {role.name}
                                       </button>
                                     );
                                   })}

@@ -141,6 +141,64 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
   const { wsId } = useParams<{ wsId: string }>();
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
 
+  // Inline edit state for the basic agent fields exposed in the header /
+  // INFO tab. Server-side `redacted: false` already implies the viewer has
+  // MANAGE_AGENTS permission (see agents.controller.ts), so we let any non-
+  // redacted viewer edit. The Save button issues a single PATCH and merges
+  // the response back into `detail` so the header refreshes without a
+  // round-trip GET.
+  const canEdit = !!detail && !detail.redacted;
+  const [editing, setEditing] = useState(false);
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [editName, setEditName] = useState('');
+  const [editDescription, setEditDescription] = useState('');
+  const [editAvatarUrl, setEditAvatarUrl] = useState('');
+
+  const beginEdit = () => {
+    if (!detail) return;
+    setEditName(detail.name || '');
+    setEditDescription(detail.description || '');
+    setEditAvatarUrl(detail.avatar_url || '');
+    setEditing(true);
+  };
+
+  const cancelEdit = () => {
+    setEditing(false);
+  };
+
+  const saveEdit = async () => {
+    if (!detail || savingEdit) return;
+    const trimmedName = editName.trim();
+    if (!trimmedName) {
+      showToast('Name cannot be empty', 'error');
+      return;
+    }
+    setSavingEdit(true);
+    try {
+      const updated = await api.updateAgent(detail.id, {
+        name: trimmedName,
+        description: editDescription,
+        avatar_url: editAvatarUrl,
+      });
+      setDetail((prev) =>
+        prev
+          ? {
+              ...prev,
+              name: updated.name ?? trimmedName,
+              description: updated.description ?? editDescription,
+              avatar_url: updated.avatar_url ?? editAvatarUrl,
+            }
+          : prev,
+      );
+      setEditing(false);
+      showToast('Agent updated', 'success');
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to update agent', 'error');
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
   const loadDetail = async () => {
     setLoading(true);
     setError(null);
@@ -319,20 +377,47 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
           </div>
           {/* Title column */}
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div
-              id="agent-detail-title"
-              style={{
-                fontSize: 20,
-                fontWeight: 700,
-                color: tokens.colors.textPrimary,
-                lineHeight: 1.2,
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              {detail?.name || (loading ? 'Loading...' : 'Agent')}
-            </div>
+            {editing ? (
+              <input
+                aria-label="Agent name"
+                id="agent-detail-title"
+                value={editName}
+                disabled={savingEdit}
+                onChange={(e) => setEditName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') { e.preventDefault(); saveEdit(); }
+                  if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); }
+                }}
+                style={{
+                  fontSize: 20,
+                  fontWeight: 700,
+                  lineHeight: 1.2,
+                  width: '100%',
+                  background: tokens.colors.surface,
+                  color: tokens.colors.textPrimary,
+                  border: `1px solid ${tokens.colors.border}`,
+                  borderRadius: tokens.radii.md,
+                  padding: '4px 8px',
+                  boxSizing: 'border-box',
+                  fontFamily: 'inherit',
+                }}
+              />
+            ) : (
+              <div
+                id="agent-detail-title"
+                style={{
+                  fontSize: 20,
+                  fontWeight: 700,
+                  color: tokens.colors.textPrimary,
+                  lineHeight: 1.2,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {detail?.name || (loading ? 'Loading...' : 'Agent')}
+              </div>
+            )}
             <div
               style={{
                 fontSize: 13,
@@ -371,6 +456,62 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
               stack overlays. First click arms "Confirm delete", second
               click commits. Clicking away cancels via onBlur. */}
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
+            {canEdit && !editing && !confirmingDelete && (
+              <button
+                type="button"
+                onClick={beginEdit}
+                title="Edit agent details"
+                style={{
+                  background: 'transparent',
+                  color: tokens.colors.textPrimary,
+                  border: `1px solid ${tokens.colors.border}`,
+                  borderRadius: tokens.radii.md,
+                  padding: '4px 10px',
+                  fontSize: 12,
+                  fontWeight: 500,
+                  cursor: 'pointer',
+                }}
+              >
+                Edit
+              </button>
+            )}
+            {editing && (
+              <>
+                <button
+                  type="button"
+                  onClick={saveEdit}
+                  disabled={savingEdit}
+                  style={{
+                    background: tokens.colors.accent,
+                    color: '#fff',
+                    border: 'none',
+                    borderRadius: tokens.radii.md,
+                    padding: '4px 12px',
+                    fontSize: 12,
+                    fontWeight: 600,
+                    cursor: savingEdit ? 'not-allowed' : 'pointer',
+                  }}
+                >
+                  {savingEdit ? 'Saving...' : 'Save'}
+                </button>
+                <button
+                  type="button"
+                  onClick={cancelEdit}
+                  disabled={savingEdit}
+                  style={{
+                    background: 'transparent',
+                    color: tokens.colors.textSecondary,
+                    border: `1px solid ${tokens.colors.border}`,
+                    borderRadius: tokens.radii.md,
+                    padding: '4px 10px',
+                    fontSize: 12,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Cancel
+                </button>
+              </>
+            )}
             {user?.role === 'admin' && (
               confirmingDelete ? (
                 <>
@@ -545,6 +686,89 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
 
           {activeTab === 'info' && (
           <>
+          {/* DETAILS section — description + avatar URL. Editable inline by
+             admins (gated server-side by the `redacted` flag). When not in
+             edit mode the section is skipped if both fields are empty so the
+             panel stays compact for users who haven't filled them in. */}
+          {(editing || (detail && (detail.description || detail.avatar_url))) && (
+            <section>
+              <div style={sectionLabelStyle}>DETAILS</div>
+              <div style={cardStyle}>
+                {editing ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                    <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      <span style={{ fontSize: 11, fontWeight: 600, color: tokens.colors.textSecondary, letterSpacing: 0.4, textTransform: 'uppercase' }}>
+                        Description
+                      </span>
+                      <textarea
+                        value={editDescription}
+                        disabled={savingEdit}
+                        onChange={(e) => setEditDescription(e.target.value)}
+                        rows={3}
+                        style={{
+                          background: tokens.colors.surfaceCard,
+                          color: tokens.colors.textStrong,
+                          border: `1px solid ${tokens.colors.border}`,
+                          borderRadius: tokens.radii.md,
+                          padding: '6px 10px',
+                          fontSize: 13,
+                          lineHeight: 1.5,
+                          resize: 'vertical',
+                          fontFamily: 'inherit',
+                        }}
+                      />
+                    </label>
+                    <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      <span style={{ fontSize: 11, fontWeight: 600, color: tokens.colors.textSecondary, letterSpacing: 0.4, textTransform: 'uppercase' }}>
+                        Avatar URL
+                      </span>
+                      <input
+                        type="text"
+                        value={editAvatarUrl}
+                        disabled={savingEdit}
+                        onChange={(e) => setEditAvatarUrl(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') { e.preventDefault(); saveEdit(); }
+                          if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); }
+                        }}
+                        placeholder="https://..."
+                        style={{
+                          background: tokens.colors.surfaceCard,
+                          color: tokens.colors.textStrong,
+                          border: `1px solid ${tokens.colors.border}`,
+                          borderRadius: tokens.radii.md,
+                          padding: '6px 10px',
+                          fontSize: 13,
+                          fontFamily: 'inherit',
+                        }}
+                      />
+                    </label>
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {detail?.description && (
+                      <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                        {detail.description}
+                      </div>
+                    )}
+                    {detail?.avatar_url && (
+                      <div
+                        style={{
+                          fontSize: 11,
+                          color: tokens.colors.textMuted,
+                          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                          wordBreak: 'break-all',
+                        }}
+                      >
+                        {detail.avatar_url}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </section>
+          )}
+
           {/* CURRENT TASK section */}
           <section>
             <div style={sectionLabelStyle}>CURRENT TASK</div>

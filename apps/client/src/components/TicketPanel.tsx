@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Ticket, Agent, Channel, ActivityLog, CommentType } from '../types';
-import { api } from '../api';
+import { Ticket, Agent, Channel, ActivityLog, CommentType, User } from '../types';
+import { api, TicketRoleAssignmentRow } from '../api';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
@@ -12,17 +12,38 @@ import { tokens } from '../tokens';
 import { MentionTextarea, MentionCandidate } from './common/MentionTextarea';
 import { ALL_COMMENT_TYPES, COMMENT_TYPE_STYLES, defaultVisibleTypes, resolveCommentType, hasStaleOpenQuestion } from './comment-types';
 
+export interface WorkspaceRoleSummary {
+  id: string; slug: string; name: string;
+  description?: string; position: number; is_builtin: boolean;
+  role_prompt?: string;
+}
+
 interface TicketPanelProps {
   ticket: Ticket;
   columnName: string;
   agents: Agent[];
+  users?: User[];
   channels: Channel[];
+  // The full workspace role catalog. Drives one row per role on the panel,
+  // sorted by position. Empty array → fallback to the legacy hardcoded
+  // assignee/reporter/reviewer trio so the panel stays usable in workspaces
+  // without the v0.34 role catalog yet.
+  workspaceRoles?: WorkspaceRoleSummary[];
+  // Flat list of all root tickets on the board, used by the SubtaskList
+  // "Link existing" picker. Optional so legacy callers don't break.
+  boardTickets?: Ticket[];
   typingIndicators: Record<string, string | null>;
   onClose: () => void;
   onUpdate: (id: string, data: Record<string, any>) => void;
   onDelete: (id: string) => void;
   onCreateChild: (parentId: string, data: { title: string; description?: string; priority?: string; assignee?: string; reporter?: string }) => void;
   onDeleteChild: (childId: string) => void;
+  // Adopt an existing ticket as a subtask of `parentId`. Distinct from
+  // onCreateChild (which makes a new ticket).
+  onReparentChild?: (parentId: string, childId: string) => void;
+  // Set (or clear) the holder of a workspace role on this ticket. Mutually
+  // exclusive agent_id / user_id; pass both null/'' to clear.
+  onSetRoleAssignment?: (ticketId: string, roleId: string, holder: { agent_id?: string | null; user_id?: string | null }) => void;
   onAddComment: (
     ticketId: string,
     content: string,
@@ -50,14 +71,16 @@ const priorityColors: Record<string, string> = {
   critical: '#ef4444',
 };
 
+interface TriggerRoleTarget { slug: string; label: string; holderName: string; hasAgent: boolean }
+
 function TriggerMenu({
   open, onClose, roleTargets, busy, onPick,
 }: {
   open: boolean;
   onClose: () => void;
-  roleTargets: { role: 'assignee' | 'reporter' | 'reviewer'; name: string; hasAgent: boolean }[];
+  roleTargets: TriggerRoleTarget[];
   busy: Record<string, boolean>;
-  onPick: (role: 'assignee' | 'reporter' | 'reviewer', name: string) => void;
+  onPick: (slug: string, label: string, holderName: string) => void;
 }) {
   if (!open) return null;
   return (
@@ -95,17 +118,17 @@ function TriggerMenu({
         >
           Trigger
         </div>
-        {roleTargets.map(({ role, name, hasAgent }) => {
-          const isBusy = !!busy[role];
+        {roleTargets.map(({ slug, label, holderName, hasAgent }, idx) => {
+          const isBusy = !!busy[slug];
           const disabled = !hasAgent || isBusy;
           return (
             <button
-              key={role}
+              key={slug}
               type="button"
               disabled={disabled}
               onClick={() => {
                 if (disabled) return;
-                onPick(role, name);
+                onPick(slug, label, holderName);
                 onClose();
               }}
               style={{
@@ -117,7 +140,7 @@ function TriggerMenu({
                 padding: '8px 12px',
                 background: 'transparent',
                 border: 'none',
-                borderTop: role === 'assignee' ? 'none' : `1px solid ${tokens.colors.border}`,
+                borderTop: idx === 0 ? 'none' : `1px solid ${tokens.colors.border}`,
                 color: disabled ? tokens.colors.textMuted : tokens.colors.textStrong,
                 fontSize: '12px',
                 cursor: disabled ? 'not-allowed' : 'pointer',
@@ -126,11 +149,9 @@ function TriggerMenu({
               onMouseEnter={e => { if (!disabled) e.currentTarget.style.background = tokens.colors.surfaceSubtle; }}
               onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
             >
-              <span style={{ textTransform: 'capitalize', fontWeight: 600 }}>
-                {role}
-              </span>
+              <span style={{ fontWeight: 600 }}>{label}</span>
               <span style={{ fontSize: '11px', color: tokens.colors.textMuted }}>
-                {isBusy ? 'sending…' : hasAgent ? name : 'unassigned'}
+                {isBusy ? 'sending…' : hasAgent ? holderName : 'unassigned'}
               </span>
             </button>
           );
@@ -153,9 +174,16 @@ function fileToBase64(file: File): Promise<string> {
 }
 
 export default function TicketPanel({
-  ticket, columnName, agents, channels, typingIndicators,
-  onClose, onUpdate, onDelete, onCreateChild, onDeleteChild, onAddComment, onSetCommentStatus, onSelectTicket,
+  ticket, columnName, agents, users, channels, workspaceRoles, boardTickets, typingIndicators,
+  onClose, onUpdate, onDelete, onCreateChild, onDeleteChild, onReparentChild, onSetRoleAssignment, onAddComment, onSetCommentStatus, onSelectTicket,
 }: TicketPanelProps) {
+  // ─── Ticket role assignments ────────────────────────────
+  // Per-ticket fetch — the board endpoint doesn't include assignments yet,
+  // and we want fresh data on panel open. Refetch when the ticket id or
+  // updated_at changes so a write through onSetRoleAssignment converges.
+  const [roleAssignments, setRoleAssignments] = useState<TicketRoleAssignmentRow[]>([]);
+  // Pending writes — UI shows "saving…" on the relevant role row.
+  const [savingRoleId, setSavingRoleId] = useState<string | null>(null);
   const { user } = useAuth();
   const { showToast } = useToast();
 
@@ -185,17 +213,17 @@ export default function TicketPanel({
     setNavStack(prev => prev.length > 1 ? prev.slice(0, -1) : prev);
   }, []);
 
-  const handleRetrigger = useCallback(async (role: 'assignee' | 'reporter' | 'reviewer', targetAgentName?: string) => {
-    if (retriggering[role]) return;
-    setRetriggering(prev => ({ ...prev, [role]: true }));
+  const handleRetrigger = useCallback(async (slug: string, label: string, holderName?: string) => {
+    if (retriggering[slug]) return;
+    setRetriggering(prev => ({ ...prev, [slug]: true }));
     try {
-      const result = await api.triggerAgent(activeTicket.id, role);
-      showToast(`Triggered ${role}${targetAgentName ? ` (${targetAgentName})` : ''}`, 'success');
+      const result = await api.triggerAgent(activeTicket.id, slug as any);
+      showToast(`Triggered ${label}${holderName ? ` (${holderName})` : ''}`, 'success');
       return result;
     } catch (e: any) {
       showToast(`Trigger failed: ${e?.message || 'unknown error'}`, 'error');
     } finally {
-      setRetriggering(prev => ({ ...prev, [role]: false }));
+      setRetriggering(prev => ({ ...prev, [slug]: false }));
     }
   }, [activeTicket.id, retriggering, showToast]);
 
@@ -269,6 +297,17 @@ export default function TicketPanel({
       api.getTicketActivity(activeTicket.id).then(setActivities).catch(() => {});
     }
   }, [activeTab, activeTicket.id]);
+
+  // Fetch role assignments for the active ticket. Refetched on
+  // activeTicket.updated_at so writes through onSetRoleAssignment (which
+  // triggers a board refresh and bumps updated_at) converge.
+  useEffect(() => {
+    let cancelled = false;
+    api.listTicketRoleAssignments(activeTicket.id)
+      .then(rows => { if (!cancelled) setRoleAssignments(rows || []); })
+      .catch(() => { if (!cancelled) setRoleAssignments([]); });
+    return () => { cancelled = true; };
+  }, [activeTicket.id, activeTicket.updated_at]);
 
   // Seed @-mention candidates from props + ticket role_ids immediately so the
   // dropdown works before the workspace-user API call returns.
@@ -917,13 +956,22 @@ export default function TicketPanel({
           <TriggerMenu
             open={triggerMenuOpen}
             onClose={() => setTriggerMenuOpen(false)}
-            roleTargets={[
-              { role: 'assignee', name: assignee || 'unassigned', hasAgent: !!activeTicket.assignee_id },
-              { role: 'reporter', name: reporter || 'none',       hasAgent: !!activeTicket.reporter_id },
-              { role: 'reviewer', name: (agents.find(a => a.id === reviewerId)?.name) || 'none', hasAgent: !!activeTicket.reviewer_id },
-            ]}
+            roleTargets={(workspaceRoles || []).slice().sort((a, b) => a.position - b.position).map(r => {
+              const row = roleAssignments.find(x => x.role.id === r.id);
+              const holder = row?.holder || null;
+              // Trigger only fires for agent holders — user holders aren't
+              // wakeable (no agent endpoint to call). Mark hasAgent
+              // accordingly so the menu disables them with the same "unassigned"
+              // visual cue.
+              return {
+                slug: r.slug,
+                label: r.name,
+                holderName: holder?.name || (holder ? holder.id : 'unassigned'),
+                hasAgent: holder?.type === 'agent',
+              };
+            })}
             busy={retriggering}
-            onPick={(role, name) => handleRetrigger(role, name)}
+            onPick={(slug, label, holderName) => handleRetrigger(slug, label, holderName)}
           />
           <button onClick={() => { onDelete(activeTicket.id); onClose(); }} style={{
             background: tokens.colors.dangerBg, color: tokens.colors.dangerLight, border: 'none', borderRadius: tokens.radii.md,
@@ -992,64 +1040,80 @@ export default function TicketPanel({
                 </select>
               </div>
 
-              <div>
-                <label style={labelStyle}>Assignee</label>
-                <select
-                  value={assignee}
-                  onChange={e => {
-                    const name = e.target.value;
-                    const agent = agents.find(a => a.name === name);
-                    setAssignee(name);
-                    onUpdate(activeTicket.id, { assignee: name, assignee_id: agent?.id || '' });
-                  }}
-                  style={{
-                    background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
-                    padding: '5px 8px', color: tokens.colors.textStrong, fontSize: '12px', width: '100%',
-                  }}
-                >
-                  <option value="">Unassigned</option>
-                  {agents.filter(a => a.is_active).map(a => <option key={a.id} value={a.name}>{a.name}</option>)}
-                </select>
-              </div>
-
-              <div>
-                <label style={labelStyle}>Reporter</label>
-                <select
-                  value={reporter}
-                  onChange={e => {
-                    const name = e.target.value;
-                    const agent = agents.find(a => a.name === name);
-                    setReporter(name);
-                    onUpdate(activeTicket.id, { reporter: name, reporter_id: agent?.id || '' });
-                  }}
-                  style={{
-                    background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
-                    padding: '5px 8px', color: tokens.colors.textStrong, fontSize: '12px', width: '100%',
-                  }}
-                >
-                  <option value="">None</option>
-                  {agents.filter(a => a.is_active).map(a => <option key={a.id} value={a.name}>{a.name}</option>)}
-                </select>
-              </div>
-
-              <div>
-                <label style={labelStyle}>Reviewer</label>
-                <select
-                  value={reviewerId}
-                  onChange={e => {
-                    const id = e.target.value;
-                    setReviewerId(id);
-                    onUpdate(activeTicket.id, { reviewer_id: id });
-                  }}
-                  style={{
-                    background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
-                    padding: '5px 8px', color: tokens.colors.textStrong, fontSize: '12px', width: '100%',
-                  }}
-                >
-                  <option value="">None</option>
-                  {agents.filter(a => a.is_active).map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
-                </select>
-              </div>
+              {(() => {
+                // One cell per workspace role, sorted by position. Encoding
+                // the holder as a prefixed select value (`agent:<id>` /
+                // `user:<id>`) keeps the picker a single dropdown that spans
+                // both holder kinds without duplicating the row.
+                const sortedRoles = (workspaceRoles || []).slice()
+                  .sort((a, b) => a.position - b.position);
+                if (sortedRoles.length === 0) {
+                  return (
+                    <div style={{ gridColumn: '1 / span 2', fontSize: '11px', color: tokens.colors.textMuted, fontStyle: 'italic' }}>
+                      No workspace roles yet — configure roles in workspace settings.
+                    </div>
+                  );
+                }
+                const assignmentByRoleId = new Map(roleAssignments.map(r => [r.role.id, r]));
+                const activeAgents = (agents || []).filter(a => a.is_active);
+                const activeUsers = users || [];
+                return sortedRoles.map(role => {
+                  const row = assignmentByRoleId.get(role.id);
+                  const holder = row?.holder || null;
+                  const value = holder
+                    ? `${holder.type}:${holder.id}`
+                    : '';
+                  const saving = savingRoleId === role.id;
+                  return (
+                    <div key={role.id}>
+                      <label style={labelStyle}>{role.name}</label>
+                      <select
+                        value={value}
+                        disabled={!onSetRoleAssignment || saving}
+                        onChange={async e => {
+                          if (!onSetRoleAssignment) return;
+                          const raw = e.target.value;
+                          const next = !raw
+                            ? { agent_id: null, user_id: null }
+                            : raw.startsWith('agent:')
+                              ? { agent_id: raw.slice(6), user_id: null }
+                              : raw.startsWith('user:')
+                                ? { agent_id: null, user_id: raw.slice(5) }
+                                : { agent_id: null, user_id: null };
+                          setSavingRoleId(role.id);
+                          try {
+                            await onSetRoleAssignment(activeTicket.id, role.id, next);
+                          } finally {
+                            setSavingRoleId(null);
+                          }
+                        }}
+                        title={role.description || ''}
+                        style={{
+                          background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
+                          padding: '5px 8px', color: tokens.colors.textStrong, fontSize: '12px', width: '100%',
+                          cursor: !onSetRoleAssignment ? 'not-allowed' : 'pointer',
+                        }}
+                      >
+                        <option value="">Unassigned{saving ? ' · saving…' : ''}</option>
+                        {activeAgents.length > 0 && (
+                          <optgroup label="Agents">
+                            {activeAgents.map(a => (
+                              <option key={`a-${a.id}`} value={`agent:${a.id}`}>{a.name}</option>
+                            ))}
+                          </optgroup>
+                        )}
+                        {activeUsers.length > 0 && (
+                          <optgroup label="Users">
+                            {activeUsers.map(u => (
+                              <option key={`u-${u.id}`} value={`user:${u.id}`}>{u.name || u.email}</option>
+                            ))}
+                          </optgroup>
+                        )}
+                      </select>
+                    </div>
+                  );
+                });
+              })()}
             </div>
 
             {/* Created By */}
@@ -1142,9 +1206,11 @@ export default function TicketPanel({
               parentTicket={activeTicket}
               agents={agents}
               maxDepth={2}
+              boardTickets={boardTickets}
               onCreateChild={onCreateChild}
               onUpdateChild={(id, data) => onUpdate(id, data)}
               onDeleteChild={onDeleteChild}
+              onReparentChild={onReparentChild}
               onSelectChild={handleSelectChild}
             />
           </>
