@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { api } from '../api';
 import { tokens } from '../tokens';
@@ -7,6 +8,14 @@ type Mode = 'login' | 'setup' | 'register';
 
 export default function LoginPage() {
   const { login, setup, needsSetup, userStatus, availableWorkspaces, currentWorkspaceId, setCurrentWorkspace } = useAuth();
+  const navigate = useNavigate();
+  // Picking a workspace must drive the URL too. Without an explicit navigate,
+  // a stale `/ws/<old>/...` URL (e.g. left over from an expired session)
+  // wins the next AppLayout sync and silently swaps in the wrong workspace.
+  const pickWorkspace = (wsId: string) => {
+    setCurrentWorkspace(wsId);
+    navigate(`/ws/${wsId}/boards`, { replace: true });
+  };
   const [mode, setMode] = useState<Mode>(needsSetup ? 'setup' : 'login');
   const [form, setForm] = useState({ name: '', email: '', password: '' });
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState('');
@@ -132,7 +141,7 @@ export default function LoginPage() {
             {availableWorkspaces.map(ws => (
               <button
                 key={ws.id}
-                onClick={() => setCurrentWorkspace(ws.id)}
+                onClick={() => pickWorkspace(ws.id)}
                 style={{
                   padding: '14px 18px', background: tokens.colors.surface, border: `1px solid ${tokens.colors.border}`,
                   borderRadius: 10, color: tokens.colors.textStrong, cursor: 'pointer', textAlign: 'left',
