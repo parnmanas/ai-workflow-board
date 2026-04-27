@@ -229,6 +229,32 @@ export class AgentApiController {
     return res.json({ results });
   }
 
+  /**
+   * Lightweight presence heartbeat. Mirrors the MCP `ping` tool but skips the
+   * 4-step initialize / notifications/initialized / tools/call / DELETE dance
+   * that an MCP session requires — a single POST is enough to stamp
+   * last_seen_at, and the previous flow was the dominant source of MCP
+   * session churn (one new + one closed session per heartbeat per proxy,
+   * multiplied across every running agent instance).
+   *
+   * Intentionally silent at info-level: every healthy proxy posts one every
+   * HEARTBEAT_INTERVAL_MS (30s by default), so logging would drown the rest
+   * of the MCP/HTTP timeline. last_seen_at is the source of truth.
+   */
+  @Post('ping')
+  async ping(@Body() body: any, @Res() res: Response) {
+    const { agent_id } = body || {};
+    if (!agent_id) return res.status(400).json({ error: 'agent_id is required' });
+    const agentRepo = this.dataSource.getRepository(Agent);
+    const agent = await agentRepo.findOne({ where: { id: agent_id } });
+    if (!agent) return res.status(404).json({ error: 'Agent not found' });
+    const now = new Date();
+    const patch: Partial<Agent> = { last_seen_at: now, is_online: 1 };
+    if (!agent.connected_at) patch.connected_at = now;
+    await agentRepo.update({ id: agent_id }, patch);
+    return res.json({ status: 'ok', agent_id, last_seen_at: now.toISOString() });
+  }
+
   @Post('chat-rooms/:roomId/typing')
   async setChatRoomTyping(@Body() body: any, @Param('roomId') roomId: string, @Res() res: Response) {
     const { agent_id, agent_name, is_typing, status } = body;
