@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { api } from '../../api';
+import { api, getActiveWorkspaceId } from '../../api';
 import type { PromptTemplate } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
@@ -22,8 +22,7 @@ export default function PromptTemplateManager({ workspaceId }: { workspaceId?: s
   const [formContent, setFormContent] = useState('');
   const [formErrors, setFormErrors] = useState<{ name?: string; content?: string }>({});
 
-  const effectiveWorkspaceId = workspaceId ||
-    (typeof window !== 'undefined' ? localStorage.getItem('currentWorkspaceId') || '' : '');
+  const effectiveWorkspaceId = workspaceId || (getActiveWorkspaceId() || '');
 
   const loadTemplates = useCallback(async () => {
     if (!effectiveWorkspaceId) {

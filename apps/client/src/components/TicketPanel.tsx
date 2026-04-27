@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Ticket, Agent, Channel, ActivityLog, CommentType, User, TicketAttachmentMeta } from '../types';
-import { api, TicketRoleAssignmentRow } from '../api';
+import { api, TicketRoleAssignmentRow, getActiveWorkspaceId } from '../api';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
@@ -355,9 +355,7 @@ export default function TicketPanel({
     const agentItems: MentionCandidate[] = agents.map(a => ({ type: 'agent', id: a.id, name: a.name }));
     setMentionCandidates([...roleItems, ...agentItems]);
 
-    const workspaceId = typeof window !== 'undefined'
-      ? localStorage.getItem('currentWorkspaceId') || ''
-      : '';
+    const workspaceId = getActiveWorkspaceId() || '';
     if (!workspaceId) return;
     api.getMentionCandidates(workspaceId, activeTicket.id)
       .then(data => {
@@ -742,7 +740,7 @@ export default function TicketPanel({
     const onUnload = () => {
       try {
         const token = localStorage.getItem('auth_token');
-        const wsId = localStorage.getItem('currentWorkspaceId');
+        const wsId = getActiveWorkspaceId();
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
         if (token) headers.Authorization = `Bearer ${token}`;
         if (wsId) headers['X-Workspace-Id'] = wsId;
