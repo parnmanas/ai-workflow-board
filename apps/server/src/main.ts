@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import 'reflect-metadata';
 import { json, urlencoded } from 'express';
+import compression from 'compression';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
@@ -21,6 +22,13 @@ async function bootstrap() {
   // attack surface.
   app.use(json({ limit: '10mb' }));
   app.use(urlencoded({ limit: '10mb', extended: true }));
+
+  // Gzip everything over 1KB. The MCP tools/list response alone is ~59KB
+  // uncompressed; compression cuts it ~10x and stacks on top of the
+  // tools/list cache (cache avoids re-serialization, gzip avoids
+  // re-transmission). Threshold ignores tiny responses where the
+  // compression overhead would outweigh the savings.
+  app.use(compression({ threshold: 1024 }));
 
   app.enableCors({
     origin: process.env.CORS_ORIGIN || true, // true = reflect request origin (dev); set CORS_ORIGIN in production

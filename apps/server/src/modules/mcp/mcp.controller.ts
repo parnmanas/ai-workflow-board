@@ -80,6 +80,46 @@ function mcpLogError(message: string, meta?: Record<string, any>) {
 // Bridge logger options that route through the controller's logService-aware mcpLog.
 const bridgeLogOpts = { log: mcpLog, logError: mcpLogError };
 
+/**
+ * tools/list response cache. Tool registration is static (registerAllTools
+ * runs once per session via createMcpServerForContext, but every session
+ * registers the same set), so the JSON-RPC result body is identical across
+ * sessions and across time — only the request `id` varies. We cache the
+ * body produced by the first call with a placeholder where the id sits and
+ * substitute the real id for every subsequent call. Skips the SDK's tool
+ * registry walk + zod-to-JSON-schema serialization on every cached hit;
+ * for a 79-tool registry that's a ~59KB body otherwise rebuilt per session.
+ */
+const TOOLS_LIST_ID_PLACEHOLDER = '__AWB_TOOLS_LIST_ID__';
+let cachedToolsListBody: string | null = null;
+
+function buildCachedToolsListResponse(reqId: unknown): string | null {
+  if (!cachedToolsListBody) return null;
+  return cachedToolsListBody.replace(
+    `"${TOOLS_LIST_ID_PLACEHOLDER}"`,
+    JSON.stringify(reqId ?? null),
+  );
+}
+
+function captureToolsListBodyIfFirst(bodyStr: string): void {
+  if (cachedToolsListBody) return;
+  // Body shape: {"jsonrpc":"2.0","id":<X>,"result":{"tools":[...]}}
+  // Replace the id field with our placeholder string. Only replace the
+  // first id occurrence to avoid clobbering an id nested in a tool's
+  // schema (paranoid, but safe). normalizeJsonRpcBody puts id second
+  // in the JSON output — the regex anchors to that location.
+  const placeheld = bodyStr.replace(
+    /"id":\s*(?:-?\d+|"[^"]*"|null)/,
+    `"id":"${TOOLS_LIST_ID_PLACEHOLDER}"`,
+  );
+  // Sanity check: the placeholder must have landed and the body must look
+  // like a tools/list result. If anything is off, skip caching — better
+  // to re-run SDK than to serve a malformed response forever.
+  if (!placeheld.includes(TOOLS_LIST_ID_PLACEHOLDER)) return;
+  if (!placeheld.includes('"tools":')) return;
+  cachedToolsListBody = placeheld;
+}
+
 @ApiTags('mcp')
 @Controller()
 export class McpController implements OnModuleInit, OnModuleDestroy {
@@ -350,8 +390,28 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       if (sessionId && sessionStore.has(sessionId)) {
         const session = sessionStore.get(sessionId)!;
         sessionStore.touch(sessionId);
+
+        // Cache hit: skip the SDK pipeline entirely for tools/list. The
+        // result body is invariant across sessions, so substituting the
+        // request id into the cached body yields a byte-equivalent
+        // response without serializing 79 tool schemas again.
+        if (req.method === 'POST' && req.body?.method === 'tools/list') {
+          const cachedBody = buildCachedToolsListResponse(req.body.id);
+          if (cachedBody) {
+            res.setHeader('content-type', 'application/json; charset=utf-8');
+            res.setHeader('content-length', Buffer.byteLength(cachedBody));
+            res.status(200).end(cachedBody);
+            return;
+          }
+        }
+
+        const isFirstToolsList =
+          req.method === 'POST' && req.body?.method === 'tools/list' && !cachedToolsListBody;
         const webRes = await session.transport.handleRequest(webReq, { parsedBody: req.body });
-        await sendWebResponse(webRes, res, bridgeLogOpts);
+        await sendWebResponse(webRes, res, {
+          ...bridgeLogOpts,
+          onJsonBody: isFirstToolsList ? captureToolsListBodyIfFirst : undefined,
+        });
         return;
       }
 

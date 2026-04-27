@@ -62,6 +62,13 @@ export interface SendWebResponseOptions {
   log?: BridgeLogger;
   /** Called when the SSE stream loop throws. */
   logError?: BridgeErrorLogger;
+  /**
+   * Optional hook invoked after a JSON response body is fully read but
+   * before it's flushed to the client. Used by McpController to populate
+   * the tools/list response cache without re-running the SDK pipeline on
+   * later calls. Not invoked for SSE responses or empty bodies.
+   */
+  onJsonBody?: (bodyStr: string, contentType: string) => void;
 }
 
 export async function sendWebResponse(
@@ -115,6 +122,10 @@ export async function sendWebResponse(
     if (contentType.includes('application/json')) {
       bodyStr = normalizeJsonRpcBody(bodyStr);
       res.setHeader('content-type', 'application/json; charset=utf-8');
+    }
+
+    if (opts.onJsonBody && contentType.includes('application/json')) {
+      try { opts.onJsonBody(bodyStr, contentType); } catch { /* hook errors don't block the response */ }
     }
 
     const bodyBuf = Buffer.from(bodyStr, 'utf8');
