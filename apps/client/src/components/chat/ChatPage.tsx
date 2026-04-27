@@ -6,7 +6,7 @@ import {
   useMemo,
 } from 'react';
 import { Group, Panel, Separator } from 'react-resizable-panels';
-import { api } from '../../api';
+import { api, getActiveWorkspaceId } from '../../api';
 import { useAuth } from '../../contexts/AuthContext';
 import { useBoardStreamEvent } from '../../contexts/BoardStreamContext';
 import { useToast } from '../../contexts/ToastContext';
@@ -436,7 +436,7 @@ export default function ChatPage() {
     [rooms, activeRoomId],
   );
 
-  const workspaceId = typeof window !== 'undefined' ? (localStorage.getItem('currentWorkspaceId') || '') : '';
+  const workspaceId = getActiveWorkspaceId() || '';
   const showUpgradeBanner = chatProtocolVersion !== null && chatProtocolVersion < 2;
 
   // Mobile layout: single panel

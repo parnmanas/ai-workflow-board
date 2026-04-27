@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { api } from '../../api';
+import { api, getActiveWorkspaceId } from '../../api';
 import type { Resource, Credential } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
@@ -57,8 +57,7 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [lightboxImage, setLightboxImage] = useState<{ src: string; alt: string } | null>(null);
 
-  const effectiveWorkspaceId = workspaceId ||
-    (typeof window !== 'undefined' ? localStorage.getItem('currentWorkspaceId') || '' : '');
+  const effectiveWorkspaceId = workspaceId || (getActiveWorkspaceId() || '');
 
   const loadResources = useCallback(async () => {
     if (!effectiveWorkspaceId) {
