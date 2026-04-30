@@ -1,5 +1,6 @@
 import { ApiTags } from '@nestjs/swagger';
-import { Controller, Sse, Req, Header, UnauthorizedException, OnModuleDestroy } from '@nestjs/common';
+import { Controller, Sse, Req, Header, UnauthorizedException, OnModuleDestroy, Get, UseGuards } from '@nestjs/common';
+import { AuthGuard } from '../../common/guards/auth.guard';
 import { Request } from 'express';
 import { Observable, Subject, filter, map, finalize, of, merge, interval } from 'rxjs';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -24,6 +25,13 @@ interface RegisteredListener {
 export class EventsController implements OnModuleDestroy {
   private readonly eventSubject = new Subject<StreamEvent>();
   private clientCount = 0;
+  // Tracks live SSE connections per agent_id. Each proxy.mjs holds one
+  // event-stream open; multiple proxies running for the same agent
+  // (e.g., user opens several Claude Code sessions) all increment here, so
+  // the agent dashboard can warn the user when their work is being raced
+  // by sibling proxies — the orphan-cleanup symptom we hit on stuck merging
+  // tickets where Proxy B startup SIGTERM'd Proxy A's still-alive subagent.
+  private readonly agentSseCounts = new Map<string, number>();
   private readonly listeners: RegisteredListener[] = [];
 
   constructor(
@@ -149,11 +157,15 @@ export class EventsController implements OnModuleDestroy {
     };
 
     this.clientCount++;
+    if (identity.agentId) {
+      const next = (this.agentSseCounts.get(identity.agentId) || 0) + 1;
+      this.agentSseCounts.set(identity.agentId, next);
+    }
     this.logService.info(
       'SSE',
       `Client connected (${identity.type}: ${identity.name}, board: ${
         identity.boardId || 'all'
-      }, total: ${this.clientCount})`,
+      }, total: ${this.clientCount}${identity.agentId ? `, agent_proxies=${this.agentSseCounts.get(identity.agentId)}` : ''})`,
     );
 
     // Quick lookup: event_type → EventDefinition.
@@ -198,9 +210,30 @@ export class EventsController implements OnModuleDestroy {
         }),
         finalize(() => {
           this.clientCount--;
-          this.logService.info('SSE', `Client disconnected (total: ${this.clientCount})`);
+          if (identity.agentId) {
+            const cur = this.agentSseCounts.get(identity.agentId) || 0;
+            const next = cur - 1;
+            if (next <= 0) this.agentSseCounts.delete(identity.agentId);
+            else this.agentSseCounts.set(identity.agentId, next);
+          }
+          this.logService.info('SSE', `Client disconnected (total: ${this.clientCount}${identity.agentId ? `, agent_proxies=${this.agentSseCounts.get(identity.agentId) || 0}` : ''})`);
         }),
       ),
     );
+  }
+
+  /**
+   * Snapshot of live SSE-connection counts per agent_id. The dashboard's
+   * Agent Details modal calls this to warn when more than one proxy is
+   * running for the same agent — that's the failure mode where each
+   * proxy's startup orphan-cleanup SIGTERMs the sibling proxy's still-alive
+   * subagent, so tickets routed to that agent silently die mid-turn.
+   */
+  @Get('active-agent-sessions')
+  @UseGuards(AuthGuard)
+  getActiveAgentSessions(): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const [agentId, count] of this.agentSseCounts) out[agentId] = count;
+    return out;
   }
 }

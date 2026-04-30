@@ -199,17 +199,21 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
     }
   };
 
+  const [proxyCount, setProxyCount] = useState<number>(0);
+
   const loadDetail = async () => {
     setLoading(true);
     setError(null);
     setDetail(null);
     setRecentActivity([]);
-    const [a, b] = await Promise.allSettled([
+    const [a, b, c] = await Promise.allSettled([
       api.getAgent(agentId),
       api.getAgentActivity(agentId, { limit: 50 }),
+      api.getActiveAgentSessions(),
     ]);
     if (a.status === 'fulfilled') setDetail(a.value);
     if (b.status === 'fulfilled') setRecentActivity(b.value || []);
+    if (c.status === 'fulfilled') setProxyCount(c.value?.[agentId] ?? 0);
     if (a.status === 'rejected' || b.status === 'rejected') {
       setError('Could not load agent details. Retry.');
     }
@@ -296,6 +300,12 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
   const subtitleTail = detail?.last_seen_at
     ? ` · last seen ${formatRelative(detail.last_seen_at)}`
     : ' · never connected';
+  // Surface live-proxy count so the user sees when more than one Claude
+  // Code session is connected for the same agent — that's the orphan-
+  // cleanup race scenario that silently kills subagents mid-turn.
+  const proxyTail = proxyCount > 0
+    ? ` · ${proxyCount} proxy session${proxyCount === 1 ? '' : 's'}${proxyCount > 1 ? ' ⚠ multiple' : ''}`
+    : '';
 
   const sectionLabelStyle: React.CSSProperties = {
     fontSize: 11,
@@ -431,6 +441,11 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
                 {subtitleStatusLabel}
               </span>
               <span>{subtitleTail}</span>
+              {proxyTail && (
+                <span style={{ color: proxyCount > 1 ? tokens.colors.warning : tokens.colors.textMuted, fontWeight: proxyCount > 1 ? 600 : 400 }}>
+                  {proxyTail}
+                </span>
+              )}
             </div>
             {detail?.id && (
               <div
