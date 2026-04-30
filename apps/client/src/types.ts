@@ -484,3 +484,16 @@ export interface SubagentTranscript {
   summary: SubagentSummary;
   lines: SubagentLogLine[];
 }
+
+// One live SSE connection (proxy.mjs ↔ AWB) for an agent. The Agent
+// Details modal renders a list so the user can spot multi-proxy
+// situations. `session_id` is server-generated and stable for the
+// lifetime of the connection. Fields mirror SseSessionDetail in
+// EventsController on the server side.
+export interface AgentProxySession {
+  session_id: string;
+  connected_at: string;
+  ip: string;
+  user_agent: string;
+  board_id: string | null;
+}

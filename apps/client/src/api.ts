@@ -19,6 +19,7 @@ import type {
   FsRootsResult,
   SubagentSummary,
   SubagentTranscript,
+  AgentProxySession,
   TicketAttachmentMeta,
 } from './types';
 
@@ -631,12 +632,16 @@ export const api = {
   getLogStats: () => request<any>('/admin/logs/stats'),
   getLogCategories: () => request<string[]>('/admin/logs/categories'),
 
-  // ─── Live SSE-connection counts per agent_id ────────────
-  // Used by AgentDetailModal to flag agents with multiple proxies running
-  // (each Claude Code session opens its own SSE — when more than one is
-  // live for the same agent, sibling proxies' orphan-cleanup races kill
-  // each other's subagents mid-turn).
-  getActiveAgentSessions: () => request<Record<string, number>>('/events/active-agent-sessions'),
+  // ─── Live SSE connection detail per agent_id ───────────
+  // Returns the array of live proxy SSE sessions per agent, each entry
+  // carrying connect timestamp + peer IP + user-agent + boardId scope.
+  // The Agent Details modal renders the list so the user can spot
+  // multi-proxy situations directly — e.g., distinguish "two terminals
+  // on this host" from "one Claude CLI internally opening two streams"
+  // by looking at the IPs and connect times. Empty / missing entry = 0
+  // proxies for that agent (modal treats it as offline).
+  getActiveAgentSessions: () =>
+    request<Record<string, AgentProxySession[]>>('/events/active-agent-sessions'),
 
   // ─── Admin Agent Logs (Phase C) ────────────────────────
   listAgentLogs: (params: { agent_id?: string; level?: string; category?: string; since?: string; until?: string; limit?: number } = {}) => {

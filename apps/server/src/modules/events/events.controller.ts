@@ -3,10 +3,12 @@ import { Controller, Sse, Req, Header, UnauthorizedException, OnModuleDestroy, G
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { Request } from 'express';
 import { Observable, Subject, filter, map, finalize, of, merge, interval } from 'rxjs';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { Repository, DataSource } from 'typeorm';
+import { randomUUID } from 'crypto';
 import { Ticket } from '../../entities/Ticket';
 import { BoardColumn } from '../../entities/BoardColumn';
+import { ActivityLog } from '../../entities/ActivityLog';
 import { activityEvents } from '../../services/activity.service';
 import { AuthService } from '../../services/auth.service';
 import { ApiKeyService } from '../../services/api-key.service';
@@ -20,23 +22,33 @@ interface RegisteredListener {
   handler: (rawEvent: any) => void;
 }
 
+interface SseSessionDetail {
+  session_id: string;       // server-generated UUID for this SSE connection
+  connected_at: string;     // ISO timestamp
+  ip: string;               // peer IP (x-real-ip / x-forwarded-for / req.ip)
+  user_agent: string;       // request user-agent header
+  board_id: string | null;  // boardId scope from query string (proxies pass 'all')
+}
+
 @ApiTags('events')
 @Controller('api/events')
 export class EventsController implements OnModuleDestroy {
   private readonly eventSubject = new Subject<StreamEvent>();
   private clientCount = 0;
-  // Tracks live SSE connections per agent_id. Each proxy.mjs holds one
-  // event-stream open; multiple proxies running for the same agent
-  // (e.g., user opens several Claude Code sessions) all increment here, so
-  // the agent dashboard can warn the user when their work is being raced
-  // by sibling proxies — the orphan-cleanup symptom we hit on stuck merging
-  // tickets where Proxy B startup SIGTERM'd Proxy A's still-alive subagent.
-  private readonly agentSseCounts = new Map<string, number>();
+  // Tracks live SSE connections per agent_id with full per-connection
+  // detail (connect timestamp, peer IP, user-agent, board scope). The
+  // Agent Details modal renders the list so the user can see whether
+  // multiple proxies are actually concurrent — including the case where
+  // a SINGLE Claude Code session opens more than one SSE stream (each
+  // claude CLI MCP-client lifecycle phase can create its own connection),
+  // which a bare count would obscure.
+  private readonly agentSseSessions = new Map<string, Map<string, SseSessionDetail>>();
   private readonly listeners: RegisteredListener[] = [];
 
   constructor(
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
     @InjectRepository(BoardColumn) private readonly colRepo: Repository<BoardColumn>,
+    @InjectDataSource() private readonly dataSource: DataSource,
     private readonly authService: AuthService,
     private readonly apiKeyService: ApiKeyService,
     private readonly logService: LogService,
@@ -157,15 +169,29 @@ export class EventsController implements OnModuleDestroy {
     };
 
     this.clientCount++;
+    const sseSessionId = randomUUID();
+    let proxyCountNow = 0;
     if (identity.agentId) {
-      const next = (this.agentSseCounts.get(identity.agentId) || 0) + 1;
-      this.agentSseCounts.set(identity.agentId, next);
+      const detail: SseSessionDetail = {
+        session_id: sseSessionId,
+        connected_at: new Date().toISOString(),
+        ip: this._extractIp(req),
+        user_agent: String(req.headers['user-agent'] || '').slice(0, 200),
+        board_id: identity.boardId || null,
+      };
+      let bucket = this.agentSseSessions.get(identity.agentId);
+      if (!bucket) { bucket = new Map(); this.agentSseSessions.set(identity.agentId, bucket); }
+      bucket.set(sseSessionId, detail);
+      proxyCountNow = bucket.size;
+      // ActivityLog entry so this connect lands in the agent's Recent
+      // Activity feed alongside ticket events.
+      this._recordProxyActivity(identity.agentId, identity.name, 'proxy_connected', detail);
     }
     this.logService.info(
       'SSE',
       `Client connected (${identity.type}: ${identity.name}, board: ${
         identity.boardId || 'all'
-      }, total: ${this.clientCount}${identity.agentId ? `, agent_proxies=${this.agentSseCounts.get(identity.agentId)}` : ''})`,
+      }, total: ${this.clientCount}${identity.agentId ? `, agent_proxies=${proxyCountNow}` : ''})`,
     );
 
     // Quick lookup: event_type → EventDefinition.
@@ -210,30 +236,83 @@ export class EventsController implements OnModuleDestroy {
         }),
         finalize(() => {
           this.clientCount--;
+          let endedDetail: SseSessionDetail | undefined;
+          let bucketSize = 0;
           if (identity.agentId) {
-            const cur = this.agentSseCounts.get(identity.agentId) || 0;
-            const next = cur - 1;
-            if (next <= 0) this.agentSseCounts.delete(identity.agentId);
-            else this.agentSseCounts.set(identity.agentId, next);
+            const bucket = this.agentSseSessions.get(identity.agentId);
+            if (bucket) {
+              endedDetail = bucket.get(sseSessionId);
+              bucket.delete(sseSessionId);
+              bucketSize = bucket.size;
+              if (bucketSize === 0) this.agentSseSessions.delete(identity.agentId);
+            }
+            if (endedDetail) {
+              this._recordProxyActivity(identity.agentId, identity.name, 'proxy_disconnected', endedDetail);
+            }
           }
-          this.logService.info('SSE', `Client disconnected (total: ${this.clientCount}${identity.agentId ? `, agent_proxies=${this.agentSseCounts.get(identity.agentId) || 0}` : ''})`);
+          this.logService.info('SSE', `Client disconnected (total: ${this.clientCount}${identity.agentId ? `, agent_proxies=${bucketSize}` : ''})`);
         }),
       ),
     );
   }
 
   /**
-   * Snapshot of live SSE-connection counts per agent_id. The dashboard's
-   * Agent Details modal calls this to warn when more than one proxy is
-   * running for the same agent — that's the failure mode where each
-   * proxy's startup orphan-cleanup SIGTERMs the sibling proxy's still-alive
-   * subagent, so tickets routed to that agent silently die mid-turn.
+   * Snapshot of live SSE connections per agent_id with full per-session
+   * detail. The dashboard's Agent Details modal renders the list so the
+   * user can spot multi-proxy situations directly: connect timestamp +
+   * peer IP + user-agent let them tell apart "two terminals on this host"
+   * vs "Claude CLI internally opens two streams for one session" vs
+   * "remote workstation also connected".
    */
   @Get('active-agent-sessions')
   @UseGuards(AuthGuard)
-  getActiveAgentSessions(): Record<string, number> {
-    const out: Record<string, number> = {};
-    for (const [agentId, count] of this.agentSseCounts) out[agentId] = count;
+  getActiveAgentSessions(): Record<string, SseSessionDetail[]> {
+    const out: Record<string, SseSessionDetail[]> = {};
+    for (const [agentId, bucket] of this.agentSseSessions) {
+      out[agentId] = Array.from(bucket.values()).sort((a, b) =>
+        a.connected_at.localeCompare(b.connected_at),
+      );
+    }
     return out;
+  }
+
+  private _extractIp(req: Request): string {
+    const xri = req.headers['x-real-ip'];
+    if (typeof xri === 'string' && xri) return xri;
+    const xff = req.headers['x-forwarded-for'];
+    if (typeof xff === 'string' && xff) return xff.split(',')[0].trim();
+    return req.ip || '';
+  }
+
+  /**
+   * Stash the proxy connect/disconnect event on the agent's ActivityLog
+   * timeline. actor_id = agent_id so it surfaces in `getAgentActivity` and
+   * the existing dashboard "Recent Activity" feed without any wiring on
+   * the consumer side. Best-effort: a write failure shouldn't break the
+   * SSE pipeline, so errors are swallowed with a log warning.
+   */
+  private _recordProxyActivity(
+    agentId: string,
+    agentName: string,
+    action: 'proxy_connected' | 'proxy_disconnected',
+    detail: SseSessionDetail,
+  ): void {
+    const repo = this.dataSource.getRepository(ActivityLog);
+    repo
+      .save(
+        repo.create({
+          entity_type: 'agent',
+          entity_id: agentId,
+          actor_id: agentId,
+          actor_name: agentName,
+          action,
+          field_changed: 'proxy_session',
+          old_value: '',
+          new_value: JSON.stringify(detail),
+        }),
+      )
+      .catch((e: unknown) => {
+        this.logService.warn('SSE', 'proxy activity log save failed', { err: e });
+      });
   }
 }
