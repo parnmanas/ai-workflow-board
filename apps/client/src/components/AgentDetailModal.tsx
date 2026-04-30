@@ -369,8 +369,12 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
         role="region"
         aria-labelledby="agent-detail-title"
         style={{
-          flex: 1,
-          minHeight: 0,
+          // height:100% snaps to .awb-content's flex-allocated height. flex:1
+          // doesn't work here because .awb-content is display:block, not a
+          // flex container — the wrapper grew to natural content size and
+          // .awb-content's overflow-y:auto produced an outer scrollbar that
+          // duplicated the inner RECENT ACTIVITY scroll.
+          height: '100%',
           background: tokens.colors.surfaceCard,
           display: 'flex',
           flexDirection: 'column',
