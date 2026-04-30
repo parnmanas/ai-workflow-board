@@ -633,7 +633,12 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
         <div
           style={{
             flex: 1,
-            overflowY: activeTab === 'subagents' ? 'hidden' : 'auto',
+            // INFO uses outer scroll because its sections (DETAILS, ROLE
+            // PROMPT, etc.) stack and may collectively exceed viewport.
+            // SUBAGENTS and FILES manage their own height + scroll and need
+            // the body to be a non-scrolling flex container so inner panes
+            // can clip independently.
+            overflowY: activeTab === 'info' ? 'auto' : 'hidden',
             padding: 24,
             display: 'flex',
             flexDirection: 'column',
@@ -1057,12 +1062,14 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
                   background: tokens.colors.surface,
                   border: `1px solid ${tokens.colors.border}`,
                   borderRadius: tokens.radii.md,
-                  // Cap the inline Recent Activity feed so a busy agent
-                  // (proxy connect/disconnect storm, many comments) doesn't
-                  // shove every other section off the screen — the modal
-                  // already pages, but a self-contained scroll keeps the
-                  // PROXY SESSIONS / DETAILS / CURRENT TASK headers in view.
-                  maxHeight: 360,
+                  // Recent Activity grows with the viewport. The previous
+                  // 360px cap left a lot of empty modal space on tall
+                  // screens. minHeight uses calc so a tall window pushes
+                  // the feed down to the bottom; on short windows the
+                  // outer modal-body scroll picks up the slack. Self-
+                  // contained overflow keeps the rest of INFO's sections
+                  // in view at the top.
+                  minHeight: 'calc(100vh - 360px)',
                   overflowY: 'auto',
                 }}
               >
@@ -1163,9 +1170,14 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
 
           {/* FILES tab — the tab bar above gates visibility. The component
              is mounted only while the tab is active so it skips the initial
-             /fs/roots fetch until the user asks for it. */}
+             /fs/roots fetch until the user asks for it. flex:1 + minHeight:0
+             so the file list claims the full modal body height instead of
+             collapsing to its intrinsic content size — pairs with the body's
+             overflowY:hidden on this tab. */}
           {activeTab === 'files' && detail && (
-            <AgentFileBrowser agentId={detail.id} isOnline={isOnline} />
+            <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+              <AgentFileBrowser agentId={detail.id} isOnline={isOnline} />
+            </div>
           )}
 
           {/* SUBAGENTS tab — live transcript of every subagent this agent's
