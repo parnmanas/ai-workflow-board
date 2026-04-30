@@ -140,7 +140,12 @@ export default function AgentFileBrowser({ agentId, isOnline }: AgentFileBrowser
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+    // height:100% + minHeight:0 + flex column so the panel fills the agent-detail
+    // body. Listing + file viewer below claim flex:1 to share remaining space and
+    // scroll inside themselves — without this the natural sum of header + listing
+    // (maxHeight 320) + viewer (maxHeight 400) overflows the body and the outer
+    // wrapper's overflow:hidden clips the bottom of the viewer.
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, height: '100%', minHeight: 0 }}>
       {rootsInfo && rootsInfo.roots.length > 0 && (
         <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', alignItems: 'center' }}>
           <span style={{ fontSize: 10, color: tokens.colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.4, marginRight: 2 }}>
@@ -263,7 +268,8 @@ export default function AgentFileBrowser({ agentId, isOnline }: AgentFileBrowser
         <div style={{
           border: `1px solid ${tokens.colors.border}`,
           borderRadius: tokens.radii.sm,
-          maxHeight: 320,
+          flex: '1 1 0',
+          minHeight: 120,
           overflowY: 'auto',
         }}>
           {listing.entries.length === 0 ? (
@@ -320,8 +326,11 @@ export default function AgentFileBrowser({ agentId, isOnline }: AgentFileBrowser
           display: 'flex',
           flexDirection: 'column',
           gap: 6,
+          flex: '1 1 0',
+          minHeight: 120,
+          overflow: 'hidden',
         }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 11, color: tokens.colors.textMuted, fontFamily: 'monospace' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 11, color: tokens.colors.textMuted, fontFamily: 'monospace', flexShrink: 0 }}>
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{selectedFile.path}</span>
             <span>
               {selectedFile.encoding} · {formatSize(selectedFile.read_bytes)}
@@ -331,7 +340,8 @@ export default function AgentFileBrowser({ agentId, isOnline }: AgentFileBrowser
           {selectedFile.encoding === 'utf8' ? (
             <pre style={{
               margin: 0,
-              maxHeight: 400,
+              flex: 1,
+              minHeight: 0,
               overflow: 'auto',
               fontSize: 12,
               fontFamily: 'monospace',
