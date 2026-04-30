@@ -624,15 +624,21 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
           </div>
         </div>
 
-        {/* Scroll body */}
+        {/* Scroll body — INFO tab uses outer scroll (cards stack); SUBAGENTS
+            tab needs the body to NOT scroll so the inner two-pane layout
+            (list / transcript) can clip its own overflows independently.
+            FILES tab is similar to subagents in that it manages its own
+            scroll, but the existing overflowY:auto here is harmless for
+            it because the file tree component already constrains height. */}
         <div
           style={{
             flex: 1,
-            overflowY: 'auto',
+            overflowY: activeTab === 'subagents' ? 'hidden' : 'auto',
             padding: 24,
             display: 'flex',
             flexDirection: 'column',
             gap: 24,
+            minHeight: 0,
           }}
         >
           {/* Error banner */}
@@ -1051,7 +1057,13 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
                   background: tokens.colors.surface,
                   border: `1px solid ${tokens.colors.border}`,
                   borderRadius: tokens.radii.md,
-                  overflow: 'hidden',
+                  // Cap the inline Recent Activity feed so a busy agent
+                  // (proxy connect/disconnect storm, many comments) doesn't
+                  // shove every other section off the screen — the modal
+                  // already pages, but a self-contained scroll keeps the
+                  // PROXY SESSIONS / DETAILS / CURRENT TASK headers in view.
+                  maxHeight: 360,
+                  overflowY: 'auto',
                 }}
               >
                 {recentActivity.map((row, idx) => {
@@ -1160,7 +1172,15 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
              plugin has spawned. Filtered by detail.id so users see only the
              selected agent's traffic. */}
           {activeTab === 'subagents' && detail && (
-            <div style={{ flex: 1, minHeight: 0, height: 480, display: 'flex' }}>
+            // flex: 1 (no fixed height) so the panel claims all remaining
+            // modal body height, then AgentSubagentsPanel's own internal
+            // flex layout sets independent overflows on the list (left)
+            // and transcript (right). minHeight:0 is required for the
+            // inner overflow:auto's to actually clip — without it the
+            // flex item grows to its content size and clipping never
+            // triggers, which is what made the list and transcript scroll
+            // in lockstep with the outer modal.
+            <div style={{ flex: 1, minHeight: 480, display: 'flex', minWidth: 0 }}>
               <AgentSubagentsPanel wsId={wsId} agentId={detail.id} />
             </div>
           )}
