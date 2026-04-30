@@ -199,6 +199,36 @@ export class EventsController implements OnModuleDestroy {
       }, total: ${this.clientCount}${identity.agentId ? `, agent_proxies=${proxyCountNow}` : ''})`,
     );
 
+    // Idempotent cleanup invoked from EITHER req.on('close') (fires the
+    // moment the TCP socket drops, even when a reverse proxy is in the
+    // middle) OR the rxjs `finalize` (fallback for cases where the close
+    // event doesn't propagate). Without the close hook, a flaky network
+    // / server restart leaves stale entries in agentSseSessions until
+    // the upstream-pool idle timeout, which is exactly the failure mode
+    // the user hit (one live proxy, modal shows two).
+    let cleanedUp = false;
+    const cleanup = (source: 'finalize' | 'req-close') => {
+      if (cleanedUp) return;
+      cleanedUp = true;
+      this.clientCount--;
+      let endedDetail: SseSessionDetail | undefined;
+      let bucketSize = 0;
+      if (identity.agentId) {
+        const bucket = this.agentSseSessions.get(identity.agentId);
+        if (bucket) {
+          endedDetail = bucket.get(sseSessionId);
+          bucket.delete(sseSessionId);
+          bucketSize = bucket.size;
+          if (bucketSize === 0) this.agentSseSessions.delete(identity.agentId);
+        }
+        if (endedDetail) {
+          this._recordProxyActivity(identity.agentId, identity.name, 'proxy_disconnected', endedDetail);
+        }
+      }
+      this.logService.info('SSE', `Client disconnected via ${source} (total: ${this.clientCount}${identity.agentId ? `, agent_proxies=${bucketSize}` : ''})`);
+    };
+    req.on('close', () => cleanup('req-close'));
+
     // Quick lookup: event_type → EventDefinition.
     const registry = new Map<string, EventDefinition>(
       EVENT_TYPES.map((def) => [def.eventType, def]),
@@ -239,24 +269,7 @@ export class EventsController implements OnModuleDestroy {
             type: event.event_type,
           } as MessageEvent;
         }),
-        finalize(() => {
-          this.clientCount--;
-          let endedDetail: SseSessionDetail | undefined;
-          let bucketSize = 0;
-          if (identity.agentId) {
-            const bucket = this.agentSseSessions.get(identity.agentId);
-            if (bucket) {
-              endedDetail = bucket.get(sseSessionId);
-              bucket.delete(sseSessionId);
-              bucketSize = bucket.size;
-              if (bucketSize === 0) this.agentSseSessions.delete(identity.agentId);
-            }
-            if (endedDetail) {
-              this._recordProxyActivity(identity.agentId, identity.name, 'proxy_disconnected', endedDetail);
-            }
-          }
-          this.logService.info('SSE', `Client disconnected (total: ${this.clientCount}${identity.agentId ? `, agent_proxies=${bucketSize}` : ''})`);
-        }),
+        finalize(() => cleanup('finalize')),
       ),
     );
   }
