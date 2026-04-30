@@ -1062,14 +1062,13 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
                   background: tokens.colors.surface,
                   border: `1px solid ${tokens.colors.border}`,
                   borderRadius: tokens.radii.md,
-                  // Recent Activity grows with the viewport. The previous
-                  // 360px cap left a lot of empty modal space on tall
-                  // screens. minHeight uses calc so a tall window pushes
-                  // the feed down to the bottom; on short windows the
-                  // outer modal-body scroll picks up the slack. Self-
-                  // contained overflow keeps the rest of INFO's sections
-                  // in view at the top.
-                  minHeight: 'calc(100vh - 360px)',
+                  // Cap grows with the viewport (the prior fixed 360 was
+                  // too small on tall windows; minHeight was wrong because
+                  // it forced the OUTER modal to scroll). maxHeight pegs
+                  // the feed to "the size of the window minus the headers
+                  // and other INFO sections above it" and overflowY keeps
+                  // the scroll INSIDE the feed — no double-scroll.
+                  maxHeight: 'calc(100vh - 360px)',
                   overflowY: 'auto',
                 }}
               >
