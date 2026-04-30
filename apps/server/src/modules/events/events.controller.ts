@@ -25,7 +25,11 @@ interface RegisteredListener {
 interface SseSessionDetail {
   session_id: string;       // server-generated UUID for this SSE connection
   connected_at: string;     // ISO timestamp
-  ip: string;               // peer IP (x-real-ip / x-forwarded-for / req.ip)
+  ip: string;               // X-Plugin-Ip header from plugin (preferred);
+                            // falls back to x-real-ip / x-forwarded-for /
+                            // req.ip; 'unknown' if neither resolves
+  plugin_version: string;   // X-Plugin-Version header; 'unknown' for
+                            // pre-v0.35.5 plugins that don't ship it
   user_agent: string;       // request user-agent header
   board_id: string | null;  // boardId scope from query string (proxies pass 'all')
 }
@@ -176,6 +180,7 @@ export class EventsController implements OnModuleDestroy {
         session_id: sseSessionId,
         connected_at: new Date().toISOString(),
         ip: this._extractIp(req),
+        plugin_version: this._extractPluginVersion(req),
         user_agent: String(req.headers['user-agent'] || '').slice(0, 200),
         board_id: identity.boardId || null,
       };
@@ -277,11 +282,24 @@ export class EventsController implements OnModuleDestroy {
   }
 
   private _extractIp(req: Request): string {
+    // Plugin-supplied IP wins — the plugin knows what NIC it actually
+    // bound to, which the upstream reverse proxy can mangle. Older
+    // plugins (pre-v0.35.5) don't ship this header; fall back to the
+    // standard reverse-proxy chain inference, then req.ip, then mark
+    // 'unknown' so the dashboard doesn't render an empty cell.
+    const plugin = req.headers['x-plugin-ip'];
+    if (typeof plugin === 'string' && plugin.trim()) return plugin.trim();
     const xri = req.headers['x-real-ip'];
     if (typeof xri === 'string' && xri) return xri;
     const xff = req.headers['x-forwarded-for'];
     if (typeof xff === 'string' && xff) return xff.split(',')[0].trim();
-    return req.ip || '';
+    return req.ip || 'unknown';
+  }
+
+  private _extractPluginVersion(req: Request): string {
+    const v = req.headers['x-plugin-version'];
+    if (typeof v === 'string' && v.trim()) return v.trim().slice(0, 32);
+    return 'unknown';
   }
 
   /**
