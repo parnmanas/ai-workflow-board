@@ -50,10 +50,29 @@ const ACTION_VERB: Record<string, string> = {
   agent_trigger: 'claimed',
   trigger_claimed: 'claimed',
   agent_trigger_resolved: 'resolved',
+  proxy_connected: 'proxy connected',
+  proxy_disconnected: 'proxy disconnected',
 };
 
 function actionVerb(action: string): string {
   return ACTION_VERB[action] || 'updated';
+}
+
+/**
+ * For proxy_connected / proxy_disconnected ActivityLog rows the server
+ * stamps `new_value` with the SseSessionDetail JSON. Pull the session_id
+ * out so the Recent Activity row can show which connection the event
+ * corresponds to. Returns null on any non-matching row or parse failure.
+ */
+function extractProxySessionId(row: { action?: string; new_value?: string | null }): string | null {
+  if (row.action !== 'proxy_connected' && row.action !== 'proxy_disconnected') return null;
+  if (!row.new_value) return null;
+  try {
+    const parsed = JSON.parse(row.new_value);
+    return typeof parsed?.session_id === 'string' ? parsed.session_id : null;
+  } catch {
+    return null;
+  }
 }
 
 function formatClaimedTime(claimedAt: string): string {
@@ -1044,6 +1063,7 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
                     '';
                   const newColumn =
                     row.action === 'ticket_moved' ? row.new_value || '' : '';
+                  const proxySessionId = extractProxySessionId(row);
                   const isLast = idx === recentActivity.length - 1;
                   return (
                     <div
@@ -1109,6 +1129,14 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
                                 {newColumn}
                               </span>
                             ) : null}
+                          </>
+                        ) : null}
+                        {proxySessionId ? (
+                          <>
+                            {' '}
+                            <span style={{ color: tokens.colors.textMuted, fontFamily: 'monospace', fontSize: 11 }}>
+                              {proxySessionId}
+                            </span>
                           </>
                         ) : null}
                       </div>
