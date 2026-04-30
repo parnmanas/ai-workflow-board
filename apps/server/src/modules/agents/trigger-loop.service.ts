@@ -133,8 +133,20 @@ export class TriggerLoopService implements OnModuleInit {
       });
       const targetAgentId = assignment?.agent_id || null;
       if (!targetAgentId) continue;
-      // Don't trigger the actor on their own actions
-      if (targetAgentId === log.actor_id) continue;
+      // Self-trigger guard, action-type aware (v0.34 onward):
+      //   - comment / ticket_update: same agent_id implies the actor's own
+      //     role context — re-firing on the same (ticket, role) would just
+      //     wake the same persistent subagent that just produced the event,
+      //     which is a deadlock-shaped feedback loop. Skip.
+      //   - column_move: the destination column inherently shifts role
+      //     responsibility (e.g. Review → Merging changes owner from
+      //     reviewer to assignee). With v0.34's per-(ticket, role) plugin
+      //     subagents, the same agent_id holding both source and destination
+      //     roles still spawns a *separate* subagent for the new role —
+      //     there's no LLM-level self-loop to prevent. Pre-v0.34 the guard
+      //     was correct because everything ran in one session; now it
+      //     silently deadlocks any same-agent-multi-role workflow.
+      if (triggerSource !== 'column_move' && targetAgentId === log.actor_id) continue;
 
       await this._emitTrigger(ticket, targetAgentId, slug, triggerSource, log.actor_id || '');
     }
