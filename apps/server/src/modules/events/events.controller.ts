@@ -186,25 +186,6 @@ export class EventsController implements OnModuleDestroy {
       };
       let bucket = this.agentSseSessions.get(identity.agentId);
       if (!bucket) { bucket = new Map(); this.agentSseSessions.set(identity.agentId, bucket); }
-      // Reconnect dedup: a new SSE connection that fingerprints
-      // identically (same IP, plugin_version, user_agent) to an existing
-      // entry is the same plugin instance reconnecting — usually after
-      // the server restarted or the reverse proxy reset the upstream
-      // pool. The old entry's req.on('close')/finalize hasn't fired yet
-      // because the upstream-pool TCP socket can linger minutes past
-      // the actual client disconnect, so without this sweep the modal
-      // shows two rows for one plugin. Drop matching predecessors and
-      // log an implicit disconnect for each.
-      for (const [oldId, oldDetail] of Array.from(bucket.entries())) {
-        if (
-          oldDetail.ip === detail.ip
-          && oldDetail.plugin_version === detail.plugin_version
-          && oldDetail.user_agent === detail.user_agent
-        ) {
-          bucket.delete(oldId);
-          this._recordProxyActivity(identity.agentId, identity.name, 'proxy_disconnected', oldDetail);
-        }
-      }
       bucket.set(sseSessionId, detail);
       proxyCountNow = bucket.size;
       // ActivityLog entry so this connect lands in the agent's Recent
@@ -226,7 +207,7 @@ export class EventsController implements OnModuleDestroy {
     // the upstream-pool idle timeout, which is exactly the failure mode
     // the user hit (one live proxy, modal shows two).
     let cleanedUp = false;
-    const cleanup = (source: 'finalize' | 'req-close') => {
+    const cleanup = (source: 'finalize' | 'req-close' | 'req-error' | 'socket-error' | 'socket-close') => {
       if (cleanedUp) return;
       cleanedUp = true;
       this.clientCount--;
@@ -246,7 +227,27 @@ export class EventsController implements OnModuleDestroy {
       }
       this.logService.info('SSE', `Client disconnected via ${source} (total: ${this.clientCount}${identity.agentId ? `, agent_proxies=${bucketSize}` : ''})`);
     };
+    // Multiple disconnect signals — whichever fires first wins, the rest
+    // are no-ops. Express + NestJS @Sse don't surface SSE write failures
+    // through any single hook; chasing each underlying signal cuts the
+    // window where a stale entry can sit in agentSseSessions:
+    //   - req.on('close')   socket-level close, fires fastest in the
+    //                       common case (client disconnected, no proxy
+    //                       buffer)
+    //   - req.on('error')   request-side error (network hiccup, the
+    //                       client side TCP RST)
+    //   - socket events     when the upstream-pool socket between
+    //                       reverse proxy and AWB resets, those events
+    //                       fire on req.socket directly
+    //   - finalize          rxjs unsubscribe — fallback that always
+    //                       eventually fires when the Observable
+    //                       completes
     req.on('close', () => cleanup('req-close'));
+    req.on('error', () => cleanup('req-error'));
+    if (req.socket) {
+      req.socket.on('error', () => cleanup('socket-error'));
+      req.socket.on('close', () => cleanup('socket-close'));
+    }
 
     // Quick lookup: event_type → EventDefinition.
     const registry = new Map<string, EventDefinition>(
