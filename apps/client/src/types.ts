@@ -499,4 +499,12 @@ export interface AgentProxySession {
                           // pre-v0.35.5 plugins that don't ship it
   user_agent: string;
   board_id: string | null;
+  // Routing flags filled by the server. `is_main` = this session currently
+  // receives the agent's recipient-scoped events (triggers, mentions, chat,
+  // fs_request) when 2+ proxies are connected. `main_pinned` = the user
+  // explicitly picked it; when false but `is_main` is true the server
+  // auto-selected (oldest-connected). Both fields are stable for as long as
+  // the bucket of connected sessions doesn't change.
+  is_main: boolean;
+  main_pinned: boolean;
 }

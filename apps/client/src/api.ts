@@ -643,6 +643,21 @@ export const api = {
   getActiveAgentSessions: () =>
     request<Record<string, AgentProxySession[]>>('/events/active-agent-sessions'),
 
+  // Pin a specific SSE session as the routing target for an agent. Used by
+  // the Agent Details panel when the user has 2+ proxies connected and wants
+  // to direct ticket triggers + chat events to a specific terminal.
+  setAgentMainSession: (agentId: string, sessionId: string) =>
+    request<{ ok: boolean; agent_id?: string; session_id?: string; error?: string }>(
+      `/events/active-agent-sessions/${encodeURIComponent(agentId)}/main`,
+      { method: 'POST', body: JSON.stringify({ session_id: sessionId }) },
+    ),
+  // Clear the user-pinned main; routing falls back to oldest-connected.
+  clearAgentMainSession: (agentId: string) =>
+    request<{ ok: boolean; agent_id?: string }>(
+      `/events/active-agent-sessions/${encodeURIComponent(agentId)}/main`,
+      { method: 'DELETE' },
+    ),
+
   // ─── Admin Agent Logs (Phase C) ────────────────────────
   listAgentLogs: (params: { agent_id?: string; level?: string; category?: string; since?: string; until?: string; limit?: number } = {}) => {
     const q = new URLSearchParams();

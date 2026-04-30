@@ -220,6 +220,54 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
 
   const [proxySessions, setProxySessions] = useState<AgentProxySession[]>([]);
   const proxyCount = proxySessions.length;
+  // Disable buttons during a pin/clear round-trip so a fast double-click
+  // can't flip the pinning between two sessions before the first POST settles.
+  const [pinningSessionId, setPinningSessionId] = useState<string | null>(null);
+
+  const refreshProxySessions = async () => {
+    try {
+      const map = await api.getActiveAgentSessions();
+      setProxySessions(map?.[agentId] ?? []);
+    } catch {
+      /* swallow — modal stays usable, surface label keeps last value */
+    }
+  };
+
+  const handlePinMain = async (sessionId: string) => {
+    if (pinningSessionId) return;
+    setPinningSessionId(sessionId);
+    try {
+      const r = await api.setAgentMainSession(agentId, sessionId);
+      if (r?.ok) {
+        showToast('Main session updated', 'success');
+        await refreshProxySessions();
+      } else {
+        showToast(r?.error || 'Failed to pin main session', 'error');
+      }
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to pin main session', 'error');
+    } finally {
+      setPinningSessionId(null);
+    }
+  };
+
+  const handleClearMain = async () => {
+    if (pinningSessionId) return;
+    setPinningSessionId('__clear__');
+    try {
+      const r = await api.clearAgentMainSession(agentId);
+      if (r?.ok) {
+        showToast('Main session cleared (auto)', 'success');
+        await refreshProxySessions();
+      } else {
+        showToast('Failed to clear main session', 'error');
+      }
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to clear main session', 'error');
+    } finally {
+      setPinningSessionId(null);
+    }
+  };
 
   const loadDetail = async () => {
     setLoading(true);
@@ -823,73 +871,155 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
               proxy.mjs instances. More than one row means multiple proxies
               are concurrently connected (multi-terminal, or a single Claude
               CLI internally opening more than one stream). The orphan-cleanup
-              race that silently kills subagents shows up here. */}
+              race that silently kills subagents shows up here.
+              When proxyCount > 1, the user picks one as "MAIN" and the
+              server routes ticket triggers + chat events only to that
+              session (see events.controller.ts AGENT_ROUTED_EVENTS). */}
           <section>
-            <div style={sectionLabelStyle}>
-              PROXY SESSIONS
-              {proxyCount > 0 && (
-                <span style={{
-                  marginLeft: 8,
-                  color: proxyCount > 1 ? tokens.colors.warning : tokens.colors.textMuted,
-                  fontWeight: proxyCount > 1 ? 700 : 500,
-                }}>
-                  ({proxyCount}){proxyCount > 1 ? ' ⚠ multiple' : ''}
-                </span>
+            <div style={{ ...sectionLabelStyle, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div>
+                PROXY SESSIONS
+                {proxyCount > 0 && (
+                  <span style={{
+                    marginLeft: 8,
+                    color: proxyCount > 1 ? tokens.colors.warning : tokens.colors.textMuted,
+                    fontWeight: proxyCount > 1 ? 700 : 500,
+                  }}>
+                    ({proxyCount}){proxyCount > 1 ? ' ⚠ multiple' : ''}
+                  </span>
+                )}
+              </div>
+              {proxyCount > 1 && proxySessions.some((s) => s.main_pinned) && (
+                <button
+                  type="button"
+                  onClick={handleClearMain}
+                  disabled={!!pinningSessionId}
+                  title="Clear pinned main; fall back to oldest-connected"
+                  style={{
+                    background: 'transparent',
+                    color: tokens.colors.textSecondary,
+                    border: `1px solid ${tokens.colors.border}`,
+                    borderRadius: tokens.radii.sm,
+                    padding: '2px 8px',
+                    fontSize: 10,
+                    fontWeight: 500,
+                    letterSpacing: 0.4,
+                    textTransform: 'none',
+                    cursor: pinningSessionId ? 'not-allowed' : 'pointer',
+                  }}
+                >
+                  Clear pin (auto)
+                </button>
               )}
             </div>
-            <div style={{ ...cardStyle, maxHeight: 200, overflowY: 'auto' }}>
+            <div style={{ ...cardStyle, maxHeight: 240, overflowY: 'auto' }}>
               {proxyCount === 0 ? (
                 <div style={{ color: tokens.colors.textMuted, fontSize: 12 }}>
                   No live proxy connection.
                 </div>
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  {proxySessions.map((s) => (
-                    <div
-                      key={s.session_id}
-                      style={{
-                        padding: '8px 10px',
-                        borderRadius: 6,
-                        background: tokens.colors.surfaceSubtle,
-                        border: `1px solid ${tokens.colors.border}`,
-                        fontSize: 12,
-                        lineHeight: 1.5,
-                      }}
-                    >
-                      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-                        <span>
-                          <span style={{ color: tokens.colors.textMuted }}>connected: </span>
-                          {formatRelative(s.connected_at)}
-                        </span>
-                        <span>
-                          <span style={{ color: tokens.colors.textMuted }}>ip: </span>
-                          <span style={{ fontFamily: 'monospace', color: s.ip === 'unknown' ? tokens.colors.warning : undefined }}>
-                            {s.ip || 'unknown'}
-                          </span>
-                        </span>
-                        <span>
-                          <span style={{ color: tokens.colors.textMuted }}>plugin: </span>
-                          <span style={{ fontFamily: 'monospace', color: s.plugin_version === 'unknown' ? tokens.colors.warning : undefined }}>
-                            {s.plugin_version || 'unknown'}
-                          </span>
-                        </span>
-                        {s.board_id && (
-                          <span>
-                            <span style={{ color: tokens.colors.textMuted }}>board: </span>
-                            <span style={{ fontFamily: 'monospace' }}>{s.board_id.slice(0, 8)}</span>
-                          </span>
-                        )}
-                      </div>
-                      {s.user_agent && (
-                        <div style={{ marginTop: 4, color: tokens.colors.textMuted, fontFamily: 'monospace', wordBreak: 'break-all' }}>
-                          {s.user_agent}
-                        </div>
-                      )}
-                      <div style={{ marginTop: 4, color: tokens.colors.textDisabled, fontFamily: 'monospace', fontSize: 11 }}>
-                        session: {s.session_id}
-                      </div>
+                  {proxyCount > 1 && (
+                    <div style={{ fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.5 }}>
+                      Pick the session that should receive ticket triggers and chat messages. Other
+                      sessions stay connected for observability but won't spawn subagents.
                     </div>
-                  ))}
+                  )}
+                  {proxySessions.map((s) => {
+                    const showSelector = proxyCount > 1;
+                    const isPinned = s.main_pinned;
+                    const isAutoMain = s.is_main && !s.main_pinned;
+                    const rowBusy = pinningSessionId === s.session_id;
+                    return (
+                      <div
+                        key={s.session_id}
+                        style={{
+                          padding: '8px 10px',
+                          borderRadius: 6,
+                          background: s.is_main ? tokens.colors.surface : tokens.colors.surfaceSubtle,
+                          border: `1px solid ${s.is_main ? tokens.colors.accent : tokens.colors.border}`,
+                          fontSize: 12,
+                          lineHeight: 1.5,
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                          {showSelector && (
+                            <label
+                              style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: 6,
+                                cursor: pinningSessionId ? 'not-allowed' : 'pointer',
+                                userSelect: 'none',
+                              }}
+                              title={isPinned ? 'Pinned as main' : 'Set as main'}
+                            >
+                              <input
+                                type="radio"
+                                name={`proxy-main-${agentId}`}
+                                checked={isPinned}
+                                disabled={!!pinningSessionId}
+                                onChange={() => { handlePinMain(s.session_id); }}
+                              />
+                              <span style={{ fontSize: 11, fontWeight: 600, color: tokens.colors.textSecondary, letterSpacing: 0.3 }}>
+                                {rowBusy ? 'Pinning...' : 'Set as main'}
+                              </span>
+                            </label>
+                          )}
+                          {s.is_main && (
+                            <span
+                              style={{
+                                fontSize: 10,
+                                fontWeight: 700,
+                                padding: '1px 6px',
+                                borderRadius: tokens.radii.sm,
+                                background: isPinned ? tokens.colors.accent : 'transparent',
+                                color: isPinned ? '#fff' : tokens.colors.accent,
+                                border: `1px solid ${tokens.colors.accent}`,
+                                textTransform: 'uppercase',
+                                letterSpacing: 0.6,
+                              }}
+                              title={isPinned ? 'User-pinned main session' : 'Auto-selected main (oldest connected)'}
+                            >
+                              {isAutoMain ? 'Main · auto' : 'Main'}
+                            </span>
+                          )}
+                        </div>
+                        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: showSelector || s.is_main ? 4 : 0 }}>
+                          <span>
+                            <span style={{ color: tokens.colors.textMuted }}>connected: </span>
+                            {formatRelative(s.connected_at)}
+                          </span>
+                          <span>
+                            <span style={{ color: tokens.colors.textMuted }}>ip: </span>
+                            <span style={{ fontFamily: 'monospace', color: s.ip === 'unknown' ? tokens.colors.warning : undefined }}>
+                              {s.ip || 'unknown'}
+                            </span>
+                          </span>
+                          <span>
+                            <span style={{ color: tokens.colors.textMuted }}>plugin: </span>
+                            <span style={{ fontFamily: 'monospace', color: s.plugin_version === 'unknown' ? tokens.colors.warning : undefined }}>
+                              {s.plugin_version || 'unknown'}
+                            </span>
+                          </span>
+                          {s.board_id && (
+                            <span>
+                              <span style={{ color: tokens.colors.textMuted }}>board: </span>
+                              <span style={{ fontFamily: 'monospace' }}>{s.board_id.slice(0, 8)}</span>
+                            </span>
+                          )}
+                        </div>
+                        {s.user_agent && (
+                          <div style={{ marginTop: 4, color: tokens.colors.textMuted, fontFamily: 'monospace', wordBreak: 'break-all' }}>
+                            {s.user_agent}
+                          </div>
+                        )}
+                        <div style={{ marginTop: 4, color: tokens.colors.textDisabled, fontFamily: 'monospace', fontSize: 11 }}>
+                          session: {s.session_id}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>

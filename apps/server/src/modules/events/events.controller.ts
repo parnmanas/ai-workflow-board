@@ -1,5 +1,5 @@
 import { ApiTags } from '@nestjs/swagger';
-import { Controller, Sse, Req, Header, UnauthorizedException, OnModuleDestroy, Get, UseGuards } from '@nestjs/common';
+import { Controller, Sse, Req, Header, UnauthorizedException, OnModuleDestroy, Get, Post, Delete, Param, Body, UseGuards } from '@nestjs/common';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { Request } from 'express';
 import { Observable, Subject, filter, map, finalize, of, merge, interval } from 'rxjs';
@@ -47,7 +47,39 @@ export class EventsController implements OnModuleDestroy {
   // claude CLI MCP-client lifecycle phase can create its own connection),
   // which a bare count would obscure.
   private readonly agentSseSessions = new Map<string, Map<string, SseSessionDetail>>();
+  /**
+   * agent_id → session_id of the user-pinned "main" SSE session for that
+   * agent. Populated only when 2+ proxies are concurrently connected for the
+   * same agent and the user explicitly picks one via the Agent Details panel
+   * (POST /events/active-agent-sessions/:agentId/main).
+   *
+   * When this map has no entry for an agent, agent-targeted events default
+   * to the oldest-connected session (auto-main) so the duplicate-subagent
+   * race is avoided even before the user picks. Cleared on disconnect of
+   * the pinned session (cleanup() below) and on explicit DELETE.
+   */
+  private readonly agentMainSession = new Map<string, string>();
   private readonly listeners: RegisteredListener[] = [];
+
+  /**
+   * Event types whose delivery to an agent's SSE stream causes the proxy to
+   * spawn a subagent or otherwise act on a single-recipient request. With
+   * multiple concurrent proxy sessions for the same agent, delivering these
+   * to every session would fan out into duplicate subagents racing each
+   * other. We pin them to the agent's "main" session (user-picked, or
+   * oldest-connected as auto-fallback). Broadcast/observability events
+   * (board_update, agent_status, subagent_*, ticket_presence, comment_typing)
+   * still flow to every session unchanged.
+   */
+  private static readonly AGENT_ROUTED_EVENTS = new Set<string>([
+    'agent_trigger',
+    'comment_mention',
+    'chat_request',
+    'chat_room_message',
+    'chat_room_typing',
+    'fs_request',
+    'agent_typing',
+  ]);
 
   constructor(
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
@@ -167,13 +199,13 @@ export class EventsController implements OnModuleDestroy {
       throw new UnauthorizedException('Invalid or expired session/API key');
     }
 
+    this.clientCount++;
+    const sseSessionId = randomUUID();
     const identity: SubscriberIdentity = {
       ...authIdentity,
       boardId: (req.query.boardId as string) || undefined,
+      sseSessionId,
     };
-
-    this.clientCount++;
-    const sseSessionId = randomUUID();
     let proxyCountNow = 0;
     if (identity.agentId) {
       const detail: SseSessionDetail = {
@@ -220,6 +252,12 @@ export class EventsController implements OnModuleDestroy {
           bucket.delete(sseSessionId);
           bucketSize = bucket.size;
           if (bucketSize === 0) this.agentSseSessions.delete(identity.agentId);
+        }
+        // Clear pinned main if this disconnecting session was it. Without
+        // this, agentMainSession would point at a dead session_id and the
+        // routing fallback ("oldest connected") would never re-engage.
+        if (this.agentMainSession.get(identity.agentId) === sseSessionId) {
+          this.agentMainSession.delete(identity.agentId);
         }
         if (endedDetail) {
           this._recordProxyActivity(identity.agentId, identity.name, 'proxy_disconnected', endedDetail);
@@ -277,7 +315,22 @@ export class EventsController implements OnModuleDestroy {
         filter((event: StreamEvent) => {
           const def = registry.get(event.event_type);
           if (!def) return false;
-          return def.filter ? def.filter(event, identity) : true;
+          if (def.filter && !def.filter(event, identity)) return false;
+          // Per-agent routing: when this agent has 2+ concurrent proxy
+          // sessions, agent-recipient events (triggers, mentions, chat,
+          // fs_request, agent_typing) flow only to the pinned "main"
+          // session — or to the oldest-connected session as auto-fallback
+          // when the user hasn't pinned one. Single-session and user
+          // identities are unaffected.
+          if (
+            identity.type === 'agent' &&
+            identity.agentId &&
+            EventsController.AGENT_ROUTED_EVENTS.has(event.event_type)
+          ) {
+            const target = this._resolveRoutingTargetSession(identity.agentId);
+            if (target && target !== sseSessionId) return false;
+          }
+          return true;
         }),
         map((event: StreamEvent) => {
           const def = registry.get(event.event_type);
@@ -304,14 +357,106 @@ export class EventsController implements OnModuleDestroy {
    */
   @Get('active-agent-sessions')
   @UseGuards(AuthGuard)
-  getActiveAgentSessions(): Record<string, SseSessionDetail[]> {
-    const out: Record<string, SseSessionDetail[]> = {};
+  getActiveAgentSessions(): Record<string, (SseSessionDetail & { is_main: boolean; main_pinned: boolean })[]> {
+    const out: Record<string, (SseSessionDetail & { is_main: boolean; main_pinned: boolean })[]> = {};
     for (const [agentId, bucket] of this.agentSseSessions) {
-      out[agentId] = Array.from(bucket.values()).sort((a, b) =>
-        a.connected_at.localeCompare(b.connected_at),
-      );
+      const target = this._resolveRoutingTargetSession(agentId);
+      const pinned = this.agentMainSession.get(agentId);
+      out[agentId] = Array.from(bucket.values())
+        .map((s) => ({
+          ...s,
+          // is_main = the session that currently receives agent-routed
+          // events (either user-pinned or auto-elected oldest).
+          is_main: s.session_id === target,
+          // main_pinned = user explicitly picked it (vs. auto-fallback).
+          // The UI uses this to distinguish "MAIN" (pinned) from "MAIN (auto)".
+          main_pinned: !!pinned && s.session_id === pinned,
+        }))
+        .sort((a, b) => a.connected_at.localeCompare(b.connected_at));
     }
     return out;
+  }
+
+  /**
+   * Pin a specific SSE session as the routing target for an agent. Used by
+   * the Agent Details panel when the user has 2+ proxies connected and wants
+   * to direct ticket triggers + chat events to a specific terminal.
+   *
+   * The pinned session must currently be in `agentSseSessions` for this
+   * agent — we don't accept pre-pinning a session that hasn't connected yet
+   * because the session_id is server-generated per-connection and clients
+   * never see one until the SSE stream is open.
+   */
+  @Post('active-agent-sessions/:agentId/main')
+  @UseGuards(AuthGuard)
+  setAgentMainSession(
+    @Param('agentId') agentId: string,
+    @Body() body: { session_id?: string },
+  ) {
+    const sessionId = (body?.session_id || '').trim();
+    if (!sessionId) {
+      return { ok: false, error: 'session_id required' };
+    }
+    const bucket = this.agentSseSessions.get(agentId);
+    if (!bucket || !bucket.has(sessionId)) {
+      return { ok: false, error: 'session not connected for this agent' };
+    }
+    this.agentMainSession.set(agentId, sessionId);
+    this.logService.info(
+      'SSE',
+      `Agent main session pinned (agent=${agentId}, session=${sessionId})`,
+    );
+    return { ok: true, agent_id: agentId, session_id: sessionId };
+  }
+
+  /**
+   * Clear the user-pinned main for an agent. Routing falls back to the
+   * oldest-connected session (auto-main) until the user pins another.
+   */
+  @Delete('active-agent-sessions/:agentId/main')
+  @UseGuards(AuthGuard)
+  clearAgentMainSession(@Param('agentId') agentId: string) {
+    this.agentMainSession.delete(agentId);
+    this.logService.info('SSE', `Agent main session cleared (agent=${agentId})`);
+    return { ok: true, agent_id: agentId };
+  }
+
+  /**
+   * Decide which of an agent's SSE sessions should receive agent-recipient
+   * events (triggers, mentions, chat). Returns null when the agent has no
+   * live sessions — caller skips delivery in that case (the event was a
+   * miss anyway).
+   *
+   * Resolution order:
+   *   1. User-pinned main, if still connected.
+   *   2. Sole live session, when there's only one.
+   *   3. Oldest-connected session (auto-main) — picked deterministically so
+   *      a server restart while two proxies are connected doesn't bounce
+   *      routing between them.
+   *
+   * The single-session case is intentionally a separate branch from the
+   * multi-session fallback so a cold connection (no pinned main yet) still
+   * delivers events from the moment the first SSE stream opens.
+   */
+  private _resolveRoutingTargetSession(agentId: string): string | null {
+    const bucket = this.agentSseSessions.get(agentId);
+    if (!bucket || bucket.size === 0) return null;
+    const pinned = this.agentMainSession.get(agentId);
+    if (pinned && bucket.has(pinned)) return pinned;
+    if (bucket.size === 1) {
+      const [only] = bucket.keys();
+      return only;
+    }
+    let oldestId: string | null = null;
+    let oldestAt = Infinity;
+    for (const [sid, det] of bucket) {
+      const ts = new Date(det.connected_at).getTime();
+      if (Number.isFinite(ts) && ts < oldestAt) {
+        oldestAt = ts;
+        oldestId = sid;
+      }
+    }
+    return oldestId;
   }
 
   private _extractIp(req: Request): string {
