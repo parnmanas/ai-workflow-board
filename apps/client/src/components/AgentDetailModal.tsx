@@ -633,12 +633,13 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
         <div
           style={{
             flex: 1,
-            // INFO uses outer scroll because its sections (DETAILS, ROLE
-            // PROMPT, etc.) stack and may collectively exceed viewport.
-            // SUBAGENTS and FILES manage their own height + scroll and need
-            // the body to be a non-scrolling flex container so inner panes
-            // can clip independently.
-            overflowY: activeTab === 'info' ? 'auto' : 'hidden',
+            // No outer scroll on any tab. INFO's last-section (Recent
+            // Activity) is a flex:1 child with its own overflow:auto, so
+            // it absorbs all remaining height and only IT scrolls when
+            // there's overflow. SUBAGENTS and FILES already manage their
+            // own internal scroll. Outer scroll caused a double-scroll
+            // confusion the user explicitly does not want.
+            overflowY: 'hidden',
             padding: 24,
             display: 'flex',
             flexDirection: 'column',
@@ -996,14 +997,18 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
             )}
           </section>
 
-          {/* RECENT ACTIVITY section */}
-          <section>
+          {/* RECENT ACTIVITY section — flex:1 + minHeight:0 so this
+              section absorbs all remaining modal-body height. Inner list
+              has overflow:auto, so the feed scrolls inside itself with no
+              outer modal scroll bar. */}
+          <section style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
             <div
               style={{
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'space-between',
                 marginBottom: 8,
+                flexShrink: 0,
               }}
             >
               <div
@@ -1062,13 +1067,12 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
                   background: tokens.colors.surface,
                   border: `1px solid ${tokens.colors.border}`,
                   borderRadius: tokens.radii.md,
-                  // Cap grows with the viewport (the prior fixed 360 was
-                  // too small on tall windows; minHeight was wrong because
-                  // it forced the OUTER modal to scroll). maxHeight pegs
-                  // the feed to "the size of the window minus the headers
-                  // and other INFO sections above it" and overflowY keeps
-                  // the scroll INSIDE the feed — no double-scroll.
-                  maxHeight: 'calc(100vh - 360px)',
+                  // flex:1 + minHeight:0 lets this absorb all remaining
+                  // modal body height (parent <section> is also flex:1).
+                  // Inner overflowY:auto means the list scrolls itself
+                  // — no outer modal scroll, no viewport-math.
+                  flex: 1,
+                  minHeight: 0,
                   overflowY: 'auto',
                 }}
               >
