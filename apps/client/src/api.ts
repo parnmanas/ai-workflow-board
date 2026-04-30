@@ -631,6 +631,13 @@ export const api = {
   getLogStats: () => request<any>('/admin/logs/stats'),
   getLogCategories: () => request<string[]>('/admin/logs/categories'),
 
+  // ─── Live SSE-connection counts per agent_id ────────────
+  // Used by AgentDetailModal to flag agents with multiple proxies running
+  // (each Claude Code session opens its own SSE — when more than one is
+  // live for the same agent, sibling proxies' orphan-cleanup races kill
+  // each other's subagents mid-turn).
+  getActiveAgentSessions: () => request<Record<string, number>>('/events/active-agent-sessions'),
+
   // ─── Admin Agent Logs (Phase C) ────────────────────────
   listAgentLogs: (params: { agent_id?: string; level?: string; category?: string; since?: string; until?: string; limit?: number } = {}) => {
     const q = new URLSearchParams();
