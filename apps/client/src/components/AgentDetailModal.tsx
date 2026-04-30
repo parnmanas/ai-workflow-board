@@ -4,7 +4,7 @@ import { api } from '../api';
 import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
-import type { AgentDetail, ActivityRow } from '../types';
+import type { AgentDetail, ActivityRow, AgentProxySession } from '../types';
 import { tokens } from '../tokens';
 import AgentFileBrowser from './AgentFileBrowser';
 import AgentSubagentsPanel from './AgentSubagentsPanel';
@@ -199,7 +199,8 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
     }
   };
 
-  const [proxyCount, setProxyCount] = useState<number>(0);
+  const [proxySessions, setProxySessions] = useState<AgentProxySession[]>([]);
+  const proxyCount = proxySessions.length;
 
   const loadDetail = async () => {
     setLoading(true);
@@ -213,7 +214,7 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
     ]);
     if (a.status === 'fulfilled') setDetail(a.value);
     if (b.status === 'fulfilled') setRecentActivity(b.value || []);
-    if (c.status === 'fulfilled') setProxyCount(c.value?.[agentId] ?? 0);
+    if (c.status === 'fulfilled') setProxySessions(c.value?.[agentId] ?? []);
     if (a.status === 'rejected' || b.status === 'rejected') {
       setError('Could not load agent details. Retry.');
     }
@@ -783,6 +784,74 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
               </div>
             </section>
           )}
+
+          {/* PROXY SESSIONS section — live SSE connections from this agent's
+              proxy.mjs instances. More than one row means multiple proxies
+              are concurrently connected (multi-terminal, or a single Claude
+              CLI internally opening more than one stream). The orphan-cleanup
+              race that silently kills subagents shows up here. */}
+          <section>
+            <div style={sectionLabelStyle}>
+              PROXY SESSIONS
+              {proxyCount > 0 && (
+                <span style={{
+                  marginLeft: 8,
+                  color: proxyCount > 1 ? tokens.colors.warning : tokens.colors.textMuted,
+                  fontWeight: proxyCount > 1 ? 700 : 500,
+                }}>
+                  ({proxyCount}){proxyCount > 1 ? ' ⚠ multiple' : ''}
+                </span>
+              )}
+            </div>
+            <div style={cardStyle}>
+              {proxyCount === 0 ? (
+                <div style={{ color: tokens.colors.textMuted, fontSize: 12 }}>
+                  No live proxy connection.
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {proxySessions.map((s) => (
+                    <div
+                      key={s.session_id}
+                      style={{
+                        padding: '8px 10px',
+                        borderRadius: 6,
+                        background: tokens.colors.surfaceSubtle,
+                        border: `1px solid ${tokens.colors.border}`,
+                        fontSize: 12,
+                        lineHeight: 1.5,
+                      }}
+                    >
+                      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                        <span>
+                          <span style={{ color: tokens.colors.textMuted }}>connected: </span>
+                          {formatRelative(s.connected_at)}
+                        </span>
+                        <span>
+                          <span style={{ color: tokens.colors.textMuted }}>ip: </span>
+                          <span style={{ fontFamily: 'monospace' }}>{s.ip || '?'}</span>
+                        </span>
+                        {s.board_id && (
+                          <span>
+                            <span style={{ color: tokens.colors.textMuted }}>board: </span>
+                            <span style={{ fontFamily: 'monospace' }}>{s.board_id.slice(0, 8)}</span>
+                          </span>
+                        )}
+                      </div>
+                      {s.user_agent && (
+                        <div style={{ marginTop: 4, color: tokens.colors.textMuted, fontFamily: 'monospace', wordBreak: 'break-all' }}>
+                          {s.user_agent}
+                        </div>
+                      )}
+                      <div style={{ marginTop: 4, color: tokens.colors.textDisabled, fontFamily: 'monospace', fontSize: 11 }}>
+                        session: {s.session_id}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </section>
 
           {/* CURRENT TASK section */}
           <section>
