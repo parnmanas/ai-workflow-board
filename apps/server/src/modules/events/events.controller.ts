@@ -186,6 +186,25 @@ export class EventsController implements OnModuleDestroy {
       };
       let bucket = this.agentSseSessions.get(identity.agentId);
       if (!bucket) { bucket = new Map(); this.agentSseSessions.set(identity.agentId, bucket); }
+      // Reconnect dedup: a new SSE connection that fingerprints
+      // identically (same IP, plugin_version, user_agent) to an existing
+      // entry is the same plugin instance reconnecting — usually after
+      // the server restarted or the reverse proxy reset the upstream
+      // pool. The old entry's req.on('close')/finalize hasn't fired yet
+      // because the upstream-pool TCP socket can linger minutes past
+      // the actual client disconnect, so without this sweep the modal
+      // shows two rows for one plugin. Drop matching predecessors and
+      // log an implicit disconnect for each.
+      for (const [oldId, oldDetail] of Array.from(bucket.entries())) {
+        if (
+          oldDetail.ip === detail.ip
+          && oldDetail.plugin_version === detail.plugin_version
+          && oldDetail.user_agent === detail.user_agent
+        ) {
+          bucket.delete(oldId);
+          this._recordProxyActivity(identity.agentId, identity.name, 'proxy_disconnected', oldDetail);
+        }
+      }
       bucket.set(sseSessionId, detail);
       proxyCountNow = bucket.size;
       // ActivityLog entry so this connect lands in the agent's Recent
