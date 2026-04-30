@@ -7,8 +7,6 @@ import { useWorkspaces } from '../hooks/useBoard';
 import { api, setActiveWorkspaceId } from '../api';
 import { BoardStreamProvider } from '../contexts/BoardStreamContext';
 import { NotificationProvider } from '../contexts/NotificationContext';
-import WorkspaceBanner from './WorkspaceBanner';
-import { useAuth } from '../contexts/AuthContext';
 import { tokens } from '../tokens';
 
 /**
@@ -33,7 +31,6 @@ export default function AppLayout() {
   const navigate = useNavigate();
   const params = useParams<{ wsId?: string }>();
   const location = useLocation();
-  const { user } = useAuth();
 
   // Workspace state — AppLayout is the single writer to localStorage.currentWorkspaceId.
   // Workspace changes navigate to /ws/:wsId/boards via React Router instead of
@@ -57,9 +54,6 @@ export default function AppLayout() {
 
   // URL wsId takes precedence for sidebar context
   const urlWsId = params.wsId || currentWorkspaceId;
-
-  // Derive current workspace object for WorkspaceBanner
-  const currentWorkspace = workspaces.find(w => w.id === currentWorkspaceId) ?? null;
 
   // ── Single-source-of-truth sync: URL → state → per-tab active workspace ──
   //
@@ -254,8 +248,10 @@ export default function AppLayout() {
         {/* Desktop-only global top strip — owns WorkspaceSelector (writer).
             Lives OUTSIDE BoardStreamProvider so workspace switching does not
             tear down the SSE stream (the provider manages its own per-board
-            subscription logic). */}
-        {!isMobile && (
+            subscription logic). Hidden on /admin/* routes since those pages
+            are not workspace-scoped — switching workspaces from the admin
+            UI was misleading (no ws context to switch from). */}
+        {!isMobile && !location.pathname.startsWith('/admin') && (
           <div
             style={{
               display: 'flex',
@@ -278,11 +274,6 @@ export default function AppLayout() {
               onUpdateBoard={handleUpdateBoard}
             />
           </div>
-        )}
-
-        {/* Admin workspace context banner — shown when an admin is operating in a specific workspace */}
-        {user?.role === 'admin' && currentWorkspaceId && currentWorkspace && (
-          <WorkspaceBanner workspaceName={currentWorkspace.name} />
         )}
 
         <main className="awb-content">
