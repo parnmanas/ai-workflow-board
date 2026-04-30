@@ -829,7 +829,15 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
                         </span>
                         <span>
                           <span style={{ color: tokens.colors.textMuted }}>ip: </span>
-                          <span style={{ fontFamily: 'monospace' }}>{s.ip || '?'}</span>
+                          <span style={{ fontFamily: 'monospace', color: s.ip === 'unknown' ? tokens.colors.warning : undefined }}>
+                            {s.ip || 'unknown'}
+                          </span>
+                        </span>
+                        <span>
+                          <span style={{ color: tokens.colors.textMuted }}>plugin: </span>
+                          <span style={{ fontFamily: 'monospace', color: s.plugin_version === 'unknown' ? tokens.colors.warning : undefined }}>
+                            {s.plugin_version || 'unknown'}
+                          </span>
                         </span>
                         {s.board_id && (
                           <span>

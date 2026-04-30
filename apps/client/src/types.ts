@@ -493,7 +493,10 @@ export interface SubagentTranscript {
 export interface AgentProxySession {
   session_id: string;
   connected_at: string;
-  ip: string;
+  ip: string;            // X-Plugin-Ip from plugin (preferred), else
+                          // reverse-proxy chain, else 'unknown'
+  plugin_version: string; // X-Plugin-Version from plugin; 'unknown' for
+                          // pre-v0.35.5 plugins that don't ship it
   user_agent: string;
   board_id: string | null;
 }
