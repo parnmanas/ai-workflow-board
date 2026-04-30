@@ -633,13 +633,13 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
         <div
           style={{
             flex: 1,
-            // No outer scroll on any tab. INFO's last-section (Recent
-            // Activity) is a flex:1 child with its own overflow:auto, so
-            // it absorbs all remaining height and only IT scrolls when
-            // there's overflow. SUBAGENTS and FILES already manage their
-            // own internal scroll. Outer scroll caused a double-scroll
-            // confusion the user explicitly does not want.
-            overflowY: 'hidden',
+            // SUBAGENTS / FILES manage their own scroll, INFO uses outer
+            // scroll only as a last-resort fallback (when DETAILS / ROLE
+            // PROMPT / PROXY SESSIONS together exceed viewport). The
+            // Recent Activity feed itself has a viewport-based maxHeight
+            // + own overflow, so the common case still has the scroll
+            // INSIDE Recent Activity and the outer modal does NOT scroll.
+            overflowY: activeTab === 'info' ? 'auto' : 'hidden',
             padding: 24,
             display: 'flex',
             flexDirection: 'column',
@@ -997,18 +997,14 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
             )}
           </section>
 
-          {/* RECENT ACTIVITY section — flex:1 + minHeight:0 so this
-              section absorbs all remaining modal-body height. Inner list
-              has overflow:auto, so the feed scrolls inside itself with no
-              outer modal scroll bar. */}
-          <section style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+          {/* RECENT ACTIVITY section */}
+          <section>
             <div
               style={{
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'space-between',
                 marginBottom: 8,
-                flexShrink: 0,
               }}
             >
               <div
@@ -1067,12 +1063,14 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
                   background: tokens.colors.surface,
                   border: `1px solid ${tokens.colors.border}`,
                   borderRadius: tokens.radii.md,
-                  // flex:1 + minHeight:0 lets this absorb all remaining
-                  // modal body height (parent <section> is also flex:1).
-                  // Inner overflowY:auto means the list scrolls itself
-                  // — no outer modal scroll, no viewport-math.
-                  flex: 1,
-                  minHeight: 0,
+                  // Cap to roughly the available viewport (modal header
+                  // ~80px + tab bar ~50px + DETAILS card ~140px + ROLE
+                  // PROMPT ~80px + PROXY SESSIONS ~120px + paddings/gaps
+                  // ~50px → ~520px). Sized to grow with the window so the
+                  // feed fills tall screens, while keeping its own scroll
+                  // INSIDE — no outer modal scroll until the upper
+                  // sections themselves overflow.
+                  maxHeight: 'calc(100vh - 280px)',
                   overflowY: 'auto',
                 }}
               >
