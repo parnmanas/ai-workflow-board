@@ -266,6 +266,20 @@ export const api = {
       }),
     }),
 
+  // Move a root ticket to a different board (same workspace). Subtasks travel
+  // with the parent automatically. target_column_id/target_position are
+  // optional — omitting both lands in the destination board's first column at
+  // end-of-list.
+  moveTicketToBoard: (id: string, target_board_id: string, opts?: { target_column_id?: string; target_position?: number }) =>
+    request<any>(`/tickets/${id}/move-to-board`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        target_board_id,
+        ...(opts?.target_column_id ? { target_column_id: opts.target_column_id } : {}),
+        ...(typeof opts?.target_position === 'number' ? { target_position: opts.target_position } : {}),
+      }),
+    }),
+
   triggerAgent: (id: string, role: 'assignee' | 'reporter' | 'reviewer', agent_id?: string) =>
     request<{ trigger_id: string; ticket_id: string; agent_id: string; role: string; trigger_source: 'manual'; pushed_at: string }>(
       `/tickets/${id}/trigger`,

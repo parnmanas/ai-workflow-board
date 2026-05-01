@@ -171,6 +171,38 @@ export function useBoard(boardId: string = '') {
     await withLocalAction(() => api.reparentTicket(ticketId, parentId, opts));
   };
 
+  // Cross-board move. Optimistically removes the ticket from the current
+  // board view (it now lives on a different board). On error we revert by
+  // restoring the prior board snapshot, same pattern as moveTicket.
+  const moveTicketToBoard = async (
+    ticketId: string,
+    targetBoardId: string,
+    opts?: { target_column_id?: string; target_position?: number },
+  ) => {
+    const prevBoard = board;
+    if (board) {
+      setBoard(prev => {
+        if (!prev) return prev;
+        const cols = prev.columns.map(c => ({
+          ...c,
+          tickets: c.tickets.filter(t => t.id !== ticketId),
+        }));
+        return { ...prev, columns: cols };
+      });
+    }
+
+    localActionCount.current++;
+    try {
+      await api.moveTicketToBoard(ticketId, targetBoardId, opts);
+      await refresh();
+    } catch (err) {
+      setBoard(prevBoard);
+      throw err;
+    } finally {
+      setTimeout(() => { localActionCount.current = Math.max(0, localActionCount.current - 1); }, 500);
+    }
+  };
+
   const setTicketRoleAssignment = async (
     ticketId: string,
     roleId: string,
@@ -222,6 +254,7 @@ export function useBoard(boardId: string = '') {
     updateTicket,
     moveTicket,
     reparentTicket,
+    moveTicketToBoard,
     deleteTicket,
     createChildTicket,
     setTicketRoleAssignment,

@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { DragDropContext, DropResult } from '@hello-pangea/dnd';
+import { DragDropContext, Droppable, DragStart, DropResult } from '@hello-pangea/dnd';
 import { Group, Panel, Separator } from 'react-resizable-panels';
 import { Ticket } from '../types';
+import { api } from '../api';
 import { useBoard } from '../hooks/useBoard';
 import { useDragToScroll } from '../hooks/useDragToScroll';
 import { useToast } from '../contexts/ToastContext';
@@ -52,11 +53,42 @@ export default function Board() {
   const {
     board, users, agents, channels, workspaceRoles,
     loading: boardLoading, error, refresh,
-    createTicket, updateTicket, moveTicket, reparentTicket, deleteTicket,
+    createTicket, updateTicket, moveTicket, reparentTicket, moveTicketToBoard, deleteTicket,
     createChildTicket, setTicketRoleAssignment, addComment, setCommentStatus,
     createColumn, updateColumn, deleteColumn,
     typingIndicators,
   } = useBoard(boardId ?? '');
+
+  // Workspace's other boards — drives the drag-and-drop "move to board" strip
+  // and is also passed (via TicketPanel) to the explicit board picker. Fetched
+  // here rather than in TicketPanel so dragging a card without ever opening
+  // the panel still has a populated drop strip.
+  const [workspaceBoards, setWorkspaceBoards] = useState<{ id: string; name: string }[]>([]);
+  useEffect(() => {
+    if (!wsId) { setWorkspaceBoards([]); return; }
+    let cancelled = false;
+    api.getBoards(wsId).then((rows) => {
+      if (cancelled) return;
+      setWorkspaceBoards(
+        (rows || [])
+          .filter((b: any) => !b.archived_at)
+          .map((b: any) => ({ id: b.id, name: b.name })),
+      );
+    }).catch(() => { /* silent — drop strip just won't appear */ });
+    return () => { cancelled = true; };
+  }, [wsId, boardId]);
+
+  const otherBoards = useMemo(
+    () => workspaceBoards.filter(b => b.id !== boardId),
+    [workspaceBoards, boardId],
+  );
+
+  // Drag tracking for the "move to other board" strip. We only show the
+  // strip when a root ticket is being dragged — child tickets carry no
+  // column_id and the cross-board endpoint rejects them anyway. The
+  // dragged ticket id is tracked so we can resolve depth in onBeforeDragStart
+  // without traversing the column tree on every drag-over.
+  const [draggingRootTicket, setDraggingRootTicket] = useState(false);
 
   // Derive activePanelTicket from board data (searches children + grandchildren)
   const activePanelTicket = activePanelTicketId && board
@@ -71,7 +103,17 @@ export default function Board() {
 
   // --- Wrapped action handlers ---
 
+  const handleDragStart = (start: DragStart) => {
+    // Only show the cross-board drop strip when dragging a root ticket;
+    // children can't be moved across boards (no column_id).
+    if (!board) return;
+    const ticketId = start.draggableId.replace('ticket-', '');
+    const found = findTicketById(board, ticketId);
+    setDraggingRootTicket(!!found && (found.depth ?? 0) === 0 && !found.parent_id);
+  };
+
   const handleDragEnd = async (result: DropResult) => {
+    setDraggingRootTicket(false);
     if (!result.destination || !board) return;
 
     const { source, destination, draggableId } = result;
@@ -93,6 +135,28 @@ export default function Board() {
       return;
     }
 
+    // Cross-board drop strip: droppableId is `move-to-board-<boardId>`.
+    // Drops on a strip entry move the ticket to that board's first column.
+    // Column-precision moves still go through the explicit picker in the
+    // ticket panel (drag&drop with only one drop target per board keeps the
+    // strip readable when the workspace has many boards).
+    if (destination.droppableId.startsWith('move-to-board-')) {
+      const targetBoardId = destination.droppableId.replace('move-to-board-', '');
+      if (targetBoardId === boardId) return;
+      try {
+        await moveTicketToBoard(ticketId, targetBoardId);
+        const dest = workspaceBoards.find(b => b.id === targetBoardId);
+        showToast(`Moved to ${dest?.name || 'board'}`, 'success');
+        // Clear the panel if it was open on the moved ticket — it now lives
+        // on a different board and findTicketById would return null next
+        // render anyway.
+        if (activePanelTicketId === ticketId) setActivePanelTicketId(null);
+      } catch (err: any) {
+        showToast(err.message || 'Failed to move to board', 'error');
+      }
+      return;
+    }
+
     const targetColumnId = destination.droppableId.replace('column-', '');
 
     // moveTicket already does optimistic update + revert on error
@@ -102,6 +166,14 @@ export default function Board() {
       showToast(err.message || 'Failed to move ticket', 'error');
     }
   };
+
+  const handleMoveTicketToBoard = useCallback(async (
+    ticketId: string,
+    targetBoardId: string,
+    opts?: { target_column_id?: string },
+  ) => {
+    await wrapAction(() => moveTicketToBoard(ticketId, targetBoardId, opts));
+  }, [wrapAction, moveTicketToBoard]);
 
   const handleCreateTicket = useCallback(async (
     columnId: string,
@@ -211,6 +283,70 @@ export default function Board() {
   // Board settings link uses workspace-scoped URL
   const settingsLink = wsId && boardId ? `/ws/${wsId}/boards/${boardId}/settings` : '#';
 
+  // Cross-board drop strip — only visible mid-drag when the dragged item is a
+  // root ticket and the workspace has at least one other board. Each entry is
+  // a Droppable; handleDragEnd routes `move-to-board-<id>` to the cross-board
+  // endpoint. Hidden when no other boards exist (the strip would only show
+  // dead space).
+  const moveBoardStrip = draggingRootTicket && otherBoards.length > 0 ? (
+    <div
+      style={{
+        display: 'flex',
+        gap: 8,
+        padding: '8px 16px',
+        borderBottom: `1px solid ${tokens.colors.border}`,
+        background: `${tokens.colors.accent}10`,
+        flexShrink: 0,
+        overflowX: 'auto',
+        alignItems: 'center',
+      }}
+    >
+      <span style={{
+        fontSize: '11px',
+        fontWeight: 700,
+        color: tokens.colors.textMuted,
+        textTransform: 'uppercase',
+        letterSpacing: '0.05em',
+        flexShrink: 0,
+        marginRight: 4,
+      }}>
+        Move to →
+      </span>
+      {otherBoards.map(b => (
+        <Droppable
+          droppableId={`move-to-board-${b.id}`}
+          key={b.id}
+          // Single-target drop, no item rendering needed inside.
+          isCombineEnabled={false}
+        >
+          {(provided, snapshot) => (
+            <div
+              ref={provided.innerRef}
+              {...provided.droppableProps}
+              style={{
+                padding: '6px 14px',
+                borderRadius: tokens.radii.md,
+                border: `1px dashed ${snapshot.isDraggingOver ? tokens.colors.accent : tokens.colors.borderStrong}`,
+                background: snapshot.isDraggingOver
+                  ? `${tokens.colors.accent}30`
+                  : tokens.colors.surfaceCard,
+                fontSize: '12px',
+                fontWeight: 600,
+                color: snapshot.isDraggingOver ? tokens.colors.textStrong : tokens.colors.textSecondary,
+                whiteSpace: 'nowrap',
+                transition: 'background 0.15s, border-color 0.15s, color 0.15s',
+                flexShrink: 0,
+              }}
+            >
+              {b.name}
+              <span style={{ display: 'none' }}>{provided.placeholder}</span>
+            </div>
+          )}
+        </Droppable>
+      ))}
+    </div>
+  ) : null;
+
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
       <PageHeader
@@ -238,7 +374,8 @@ export default function Board() {
       {board ? (
         <>
           {activePanelTicket ? (
-            <DragDropContext onDragEnd={handleDragEnd}>
+            <DragDropContext onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
+              {moveBoardStrip}
               <Group orientation="horizontal" style={{ flex: 1, overflow: 'hidden' }}>
                 <Panel minSize="40">
                   <div
@@ -279,12 +416,16 @@ export default function Board() {
                     onAddComment={handleAddComment}
                     onSetCommentStatus={handleSetCommentStatus}
                     onSelectTicket={setActivePanelTicketId}
+                    currentBoardId={boardId}
+                    workspaceId={wsId}
+                    onMoveToBoard={handleMoveTicketToBoard}
                   />
                 </Panel>
               </Group>
             </DragDropContext>
           ) : (
-            <DragDropContext onDragEnd={handleDragEnd}>
+            <DragDropContext onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
+              {moveBoardStrip}
               <div
                 ref={fullBoardScrollRef}
                 style={{

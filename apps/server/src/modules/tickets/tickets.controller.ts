@@ -597,6 +597,110 @@ export class TicketsController {
   }
 
   /**
+   * Move a root ticket (with its entire subtree) to a different board.
+   * Body: { target_board_id, target_column_id?, target_position? }
+   *
+   * Subtasks travel automatically — they're attached via parent_id and
+   * carry column_id=null, so changing the root's column_id doesn't require
+   * touching descendants. Same-workspace constraint mirrors reparent;
+   * cross-workspace moves would invalidate channel/role/agent references.
+   *
+   * If target_column_id is omitted, lands in the target board's first
+   * column (lowest position).
+   */
+  @Patch('tickets/:id/move-to-board')
+  async moveToBoard(@Param('id') id: string, @Body() body: any, @Req() req: any, @Res() res: Response) {
+    const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
+
+    if (ticket.parent_id || ticket.depth > 0) {
+      return res.status(400).json({ error: 'Only root tickets can be moved across boards' });
+    }
+
+    const targetBoardId: string | undefined = body?.target_board_id ? String(body.target_board_id) : undefined;
+    if (!targetBoardId) return res.status(400).json({ error: 'target_board_id is required' });
+
+    const targetColumnIdRaw: string | undefined = body?.target_column_id ? String(body.target_column_id) : undefined;
+    const targetPosition: number | undefined = typeof body?.target_position === 'number'
+      ? body.target_position
+      : undefined;
+
+    const boardRepo = this.dataSource.getRepository(Board);
+    const targetBoard = await boardRepo.findOne({ where: { id: targetBoardId } });
+    if (!targetBoard) return res.status(400).json({ error: 'Target board not found' });
+
+    if (ticket.workspace_id && targetBoard.workspace_id && targetBoard.workspace_id !== ticket.workspace_id) {
+      return res.status(400).json({ error: 'Target board belongs to a different workspace' });
+    }
+
+    // Resolve target column: explicit if given (must belong to target board),
+    // otherwise the first column on that board by position.
+    let targetCol: BoardColumn | null;
+    if (targetColumnIdRaw) {
+      targetCol = await this.colRepo.findOne({ where: { id: targetColumnIdRaw } });
+      if (!targetCol) return res.status(400).json({ error: 'Target column not found' });
+      if (targetCol.board_id !== targetBoardId) {
+        return res.status(400).json({ error: 'Target column does not belong to target board' });
+      }
+    } else {
+      const cols = await this.colRepo.find({ where: { board_id: targetBoardId } as any, order: { position: 'ASC' as any } });
+      if (cols.length === 0) return res.status(400).json({ error: 'Target board has no columns' });
+      targetCol = cols[0];
+    }
+
+    // Resolve source board (current column → board) for the no-op check and
+    // activity log. column_id should always be set on a root ticket; the
+    // null guard is just defensive.
+    const sourceCol = ticket.column_id
+      ? await this.colRepo.findOne({ where: { id: ticket.column_id } })
+      : null;
+    const sourceBoardId = sourceCol?.board_id ?? null;
+
+    if (sourceBoardId === targetBoardId && targetCol.id === ticket.column_id && targetPosition === undefined) {
+      const unchanged = await loadTicketFull(this.dataSource, ticket.id);
+      return res.json(unchanged);
+    }
+
+    await this.dataSource.transaction(async (manager) => {
+      const tRepo = manager.getRepository(Ticket);
+
+      // 1) Close the gap in the source column.
+      if (ticket.column_id) {
+        await shiftTicketPositions(tRepo, { column_id: ticket.column_id }, ticket.position, -1);
+      }
+
+      // 2) Compute destination position in the target column and open a slot.
+      const destCount = await tRepo.createQueryBuilder('t')
+        .where('t.column_id = :colId AND t.id != :id AND t.parent_id IS NULL', { colId: targetCol!.id, id: ticket.id })
+        .getCount();
+      const pos = Math.min(targetPosition ?? destCount, destCount);
+      await shiftTicketPositions(tRepo, { column_id: targetCol!.id }, pos, +1, { inclusive: true, excludeId: ticket.id });
+
+      // 3) Update the ticket. workspace_id is preserved (same-workspace
+      // constraint guaranteed above) so subtasks remain consistent.
+      await tRepo.update(ticket.id, { column_id: targetCol!.id, position: pos });
+    });
+
+    const updated = await loadTicketFull(this.dataSource, ticket.id);
+
+    const sourceBoard = sourceBoardId
+      ? await boardRepo.findOne({ where: { id: sourceBoardId } })
+      : null;
+
+    const currentUser = req.currentUser;
+    await this.activityService.logActivity({
+      entity_type: 'ticket', entity_id: ticket.id, action: 'moved',
+      field_changed: 'board',
+      old_value: sourceBoard?.name || sourceBoardId || '',
+      new_value: targetBoard.name || targetBoardId,
+      ticket_id: ticket.id,
+      actor_id: currentUser?.id,
+      actor_name: currentUser?.name || currentUser?.email,
+    });
+
+    return res.json(updated);
+  }
+
+  /**
    * BFS from `rootId` collecting the ticket plus every descendant. Used by
    * reparent for cycle detection and depth re-stamping. Stays bounded by the
    * 2-level depth cap, so worst case is one root → N children → M grandchildren.

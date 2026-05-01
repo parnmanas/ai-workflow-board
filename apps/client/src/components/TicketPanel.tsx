@@ -52,6 +52,17 @@ interface TicketPanelProps {
   ) => void;
   onSetCommentStatus?: (ticketId: string, commentId: string, status: 'open' | 'resolved') => void;
   onSelectTicket?: (id: string) => void;
+  // The board this panel is rendered on. Used to filter the destination
+  // picker (you don't move a ticket to its own board) and to detect a
+  // post-move panel close (the ticket is no longer on this board).
+  currentBoardId?: string;
+  // Workspace the current board lives in. Drives the board picker fetch —
+  // we list boards in the same workspace only (the server rejects
+  // cross-workspace moves anyway).
+  workspaceId?: string;
+  // Move a root ticket to another board. Optional column id picks a specific
+  // column on the target board; omit for the destination's first column.
+  onMoveToBoard?: (ticketId: string, targetBoardId: string, opts?: { target_column_id?: string }) => void;
 }
 
 function findInTree(root: Ticket, id: string): Ticket | null {
@@ -72,6 +83,172 @@ const priorityColors: Record<string, string> = {
 };
 
 interface TriggerRoleTarget { slug: string; label: string; holderName: string; hasAgent: boolean }
+
+interface MoveToBoardOption {
+  id: string;
+  name: string;
+  columns: { id: string; name: string }[];
+}
+
+function MoveToBoardMenu({
+  open, onClose, boards, busy, onPick, loading,
+}: {
+  open: boolean;
+  onClose: () => void;
+  boards: MoveToBoardOption[];
+  busy: boolean;
+  loading: boolean;
+  onPick: (boardId: string, columnId?: string) => void;
+}) {
+  // Track which board row is expanded to show its column picker. Null means
+  // every row is collapsed (default state on open). Click a board's chevron
+  // to expand; click the row body or the "Move →" hint to move to its first
+  // column without picking.
+  const [expanded, setExpanded] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) setExpanded(null);
+  }, [open]);
+
+  if (!open) return null;
+  return (
+    <>
+      <div
+        onClick={onClose}
+        style={{ position: 'fixed', inset: 0, zIndex: 10 }}
+      />
+      <div
+        style={{
+          position: 'absolute',
+          top: '100%',
+          right: 0,
+          marginTop: 4,
+          minWidth: 260,
+          maxWidth: 320,
+          maxHeight: 360,
+          background: tokens.colors.surfaceCard,
+          border: `1px solid ${tokens.colors.border}`,
+          borderRadius: tokens.radii.md,
+          boxShadow: '0 4px 16px rgba(0,0,0,0.35)',
+          zIndex: 11,
+          overflow: 'hidden',
+          display: 'flex',
+          flexDirection: 'column',
+        }}
+      >
+        <div
+          style={{
+            padding: '6px 10px',
+            fontSize: '10px',
+            fontWeight: 700,
+            textTransform: 'uppercase',
+            letterSpacing: '0.05em',
+            color: tokens.colors.textMuted,
+            borderBottom: `1px solid ${tokens.colors.border}`,
+            background: tokens.colors.surfaceSubtle,
+            flexShrink: 0,
+          }}
+        >
+          Move to board
+        </div>
+        <div style={{ flex: 1, overflowY: 'auto' }}>
+          {loading ? (
+            <div style={{ padding: '12px', fontSize: '11px', color: tokens.colors.textMuted, fontStyle: 'italic' }}>
+              Loading boards…
+            </div>
+          ) : boards.length === 0 ? (
+            <div style={{ padding: '12px', fontSize: '11px', color: tokens.colors.textMuted, fontStyle: 'italic' }}>
+              No other boards in this workspace
+            </div>
+          ) : boards.map((b, idx) => {
+            const isExpanded = expanded === b.id;
+            return (
+              <div key={b.id} style={{
+                borderTop: idx === 0 ? 'none' : `1px solid ${tokens.colors.border}`,
+              }}>
+                <div
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 6,
+                    padding: '8px 10px',
+                    background: 'transparent',
+                  }}
+                >
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => { if (!busy) { onPick(b.id); onClose(); } }}
+                    style={{
+                      flex: 1,
+                      display: 'flex', alignItems: 'center', gap: 8,
+                      background: 'transparent', border: 'none',
+                      padding: 0,
+                      color: tokens.colors.textStrong,
+                      fontSize: '12px', fontWeight: 600,
+                      cursor: busy ? 'not-allowed' : 'pointer',
+                      textAlign: 'left',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                    title="Move to this board's first column"
+                  >
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{b.name}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setExpanded(isExpanded ? null : b.id)}
+                    style={{
+                      background: 'transparent', border: `1px solid ${tokens.colors.border}`,
+                      borderRadius: tokens.radii.sm, padding: '2px 6px',
+                      color: tokens.colors.textMuted, fontSize: '10px',
+                      cursor: 'pointer',
+                    }}
+                    title="Pick a specific column"
+                  >
+                    {isExpanded ? '▾' : '▸'} column
+                  </button>
+                </div>
+                {isExpanded && (
+                  <div style={{
+                    padding: '4px 10px 8px 18px',
+                    display: 'flex', flexDirection: 'column', gap: 2,
+                    background: tokens.colors.surface,
+                  }}>
+                    {b.columns.length === 0 ? (
+                      <div style={{ fontSize: '11px', color: tokens.colors.textMuted, fontStyle: 'italic', padding: '4px 0' }}>
+                        No columns
+                      </div>
+                    ) : b.columns.map(c => (
+                      <button
+                        key={c.id}
+                        type="button"
+                        disabled={busy}
+                        onClick={() => { if (!busy) { onPick(b.id, c.id); onClose(); } }}
+                        style={{
+                          background: 'transparent', border: 'none',
+                          padding: '4px 6px',
+                          color: tokens.colors.textSecondary,
+                          fontSize: '11px',
+                          cursor: busy ? 'not-allowed' : 'pointer',
+                          textAlign: 'left',
+                          borderRadius: tokens.radii.sm,
+                        }}
+                        onMouseEnter={e => { if (!busy) e.currentTarget.style.background = tokens.colors.surfaceSubtle; }}
+                        onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+                      >
+                        → {c.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </>
+  );
+}
 
 function TriggerMenu({
   open, onClose, roleTargets, busy, onPick,
@@ -176,6 +353,7 @@ function fileToBase64(file: File): Promise<string> {
 export default function TicketPanel({
   ticket, columnName, agents, users, channels, workspaceRoles, boardTickets, typingIndicators,
   onClose, onUpdate, onDelete, onCreateChild, onDeleteChild, onReparentChild, onSetRoleAssignment, onAddComment, onSetCommentStatus, onSelectTicket,
+  currentBoardId, workspaceId, onMoveToBoard,
 }: TicketPanelProps) {
   // ─── Ticket role assignments ────────────────────────────
   // Per-ticket fetch — the board endpoint doesn't include assignments yet,
@@ -191,6 +369,17 @@ export default function TicketPanel({
   // double-fires while the network round trip is pending.
   const [retriggering, setRetriggering] = useState<Record<string, boolean>>({});
   const [triggerMenuOpen, setTriggerMenuOpen] = useState(false);
+
+  // "Move to board" picker state. Boards in the workspace are loaded lazily
+  // on first menu open and cached for the panel's lifetime so re-opening the
+  // menu is instant. The cache is keyed by workspace_id; if the active
+  // ticket's workspace ever changes (it shouldn't on a single panel mount),
+  // a refetch happens automatically.
+  const [moveBoardMenuOpen, setMoveBoardMenuOpen] = useState(false);
+  const [moveBoardOptions, setMoveBoardOptions] = useState<MoveToBoardOption[]>([]);
+  const [moveBoardLoading, setMoveBoardLoading] = useState(false);
+  const [moveBoardWorkspaceLoaded, setMoveBoardWorkspaceLoaded] = useState<string | null>(null);
+  const [movingToBoard, setMovingToBoard] = useState(false);
 
   // Navigation stack: array of ticket IDs navigated within this panel
   const [navStack, setNavStack] = useState<string[]>([ticket.id]);
@@ -212,6 +401,68 @@ export default function TicketPanel({
   const handleBack = useCallback(() => {
     setNavStack(prev => prev.length > 1 ? prev.slice(0, -1) : prev);
   }, []);
+
+  // Lazy-load workspace boards when the move menu first opens. Excludes the
+  // current board. Each entry carries a flat list of {id, name} columns so
+  // the picker can let the user pick a specific column without a second
+  // round trip per board (api.getBoards alone doesn't include columns).
+  const loadMoveBoardOptions = useCallback(async () => {
+    const wsId = workspaceId || '';
+    if (!wsId) {
+      setMoveBoardOptions([]);
+      return;
+    }
+    if (moveBoardWorkspaceLoaded === wsId) return;
+    setMoveBoardLoading(true);
+    try {
+      const all = await api.getBoards(wsId);
+      const candidates = (all || []).filter((b: any) => !b.archived_at && b.id !== currentBoardId);
+      const detailed = await Promise.all(
+        candidates.map(async (b: any) => {
+          try {
+            const full = await api.getBoard(b.id);
+            const cols = ((full?.columns || []) as any[])
+              .slice()
+              .sort((a, b) => (a.position ?? 0) - (b.position ?? 0))
+              .map(c => ({ id: c.id, name: c.name }));
+            return { id: b.id, name: b.name, columns: cols } as MoveToBoardOption;
+          } catch {
+            return { id: b.id, name: b.name, columns: [] } as MoveToBoardOption;
+          }
+        }),
+      );
+      setMoveBoardOptions(detailed);
+      setMoveBoardWorkspaceLoaded(wsId);
+    } finally {
+      setMoveBoardLoading(false);
+    }
+  }, [workspaceId, currentBoardId, moveBoardWorkspaceLoaded]);
+
+  const handleOpenMoveBoardMenu = useCallback(() => {
+    setMoveBoardMenuOpen(true);
+    loadMoveBoardOptions().catch(() => { /* loading flag already cleared */ });
+  }, [loadMoveBoardOptions]);
+
+  const handleMoveToBoard = useCallback(async (targetBoardId: string, columnId?: string) => {
+    if (!onMoveToBoard) return;
+    setMovingToBoard(true);
+    try {
+      await onMoveToBoard(activeTicket.id, targetBoardId, columnId ? { target_column_id: columnId } : undefined);
+      const dest = moveBoardOptions.find(b => b.id === targetBoardId);
+      const colName = columnId ? dest?.columns.find(c => c.id === columnId)?.name : undefined;
+      showToast(
+        `Moved to ${dest?.name || 'board'}${colName ? ` → ${colName}` : ''}`,
+        'success',
+      );
+      // Ticket is no longer on this board — close the panel so the user
+      // isn't left staring at stale state.
+      onClose();
+    } catch (e: any) {
+      showToast(`Move failed: ${e?.message || 'unknown error'}`, 'error');
+    } finally {
+      setMovingToBoard(false);
+    }
+  }, [onMoveToBoard, activeTicket.id, moveBoardOptions, showToast, onClose]);
 
   const handleRetrigger = useCallback(async (slug: string, label: string, holderName?: string) => {
     if (retriggering[slug]) return;
@@ -1106,6 +1357,41 @@ export default function TicketPanel({
             busy={retriggering}
             onPick={(slug, label, holderName) => handleRetrigger(slug, label, holderName)}
           />
+          {/* Move-to-board action — only meaningful for root tickets, since
+             children carry no column_id and inherit the board through their
+             parent. Hidden when no handler is wired (legacy callers). */}
+          {onMoveToBoard && activeTicket.depth === 0 && !activeTicket.parent_id && (
+            <div style={{ position: 'relative' }}>
+              <button
+                onClick={handleOpenMoveBoardMenu}
+                disabled={movingToBoard}
+                title="Move this ticket (and its subtasks) to a different board"
+                style={{
+                  background: tokens.colors.surfaceCard,
+                  color: tokens.colors.textSecondary,
+                  border: `1px solid ${tokens.colors.border}`,
+                  borderRadius: tokens.radii.md,
+                  padding: '4px 12px',
+                  fontSize: '12px',
+                  cursor: movingToBoard ? 'not-allowed' : 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 4,
+                }}
+              >
+                <span>📋</span>
+                <span>{movingToBoard ? 'Moving…' : 'Move to…'}</span>
+              </button>
+              <MoveToBoardMenu
+                open={moveBoardMenuOpen}
+                onClose={() => setMoveBoardMenuOpen(false)}
+                boards={moveBoardOptions}
+                loading={moveBoardLoading}
+                busy={movingToBoard}
+                onPick={(boardId, columnId) => handleMoveToBoard(boardId, columnId)}
+              />
+            </div>
+          )}
           <button onClick={() => { onDelete(activeTicket.id); onClose(); }} style={{
             background: tokens.colors.dangerBg, color: tokens.colors.dangerLight, border: 'none', borderRadius: tokens.radii.md,
             padding: '4px 12px', fontSize: '12px', cursor: 'pointer',
