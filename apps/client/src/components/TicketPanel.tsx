@@ -276,7 +276,10 @@ export default function TicketPanel({
   const [lastReadAt, setLastReadAt] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'detail' | 'comments' | 'activity'>('detail');
   const [activities, setActivities] = useState<ActivityLog[]>([]);
-  const [imagePreview, setImagePreview] = useState<string | null>(null);
+  // Modal preview can be an image OR a video — discriminate by mimetype so
+  // the modal picks the right element. `null` mimetype falls back to <img>
+  // for backwards compatibility with legacy callers that pass src only.
+  const [imagePreview, setImagePreview] = useState<{ src: string; mimetype?: string } | null>(null);
   const [mentionCandidates, setMentionCandidates] = useState<MentionCandidate[]>([]);
 
   // Ticket-level attachments — file_data is fetched on demand (download/preview)
@@ -491,7 +494,10 @@ export default function TicketPanel({
   }, [activeTicket.id]);
 
   const handlePreviewTicketAttachment = useCallback(async (attachment: TicketAttachmentMeta) => {
-    if (!attachment.file_mimetype?.startsWith('image/')) {
+    const mt = attachment.file_mimetype || '';
+    const isImage = mt.startsWith('image/');
+    const isVideo = mt.startsWith('video/');
+    if (!isImage && !isVideo) {
       handleDownloadTicketAttachment(attachment);
       return;
     }
@@ -499,7 +505,10 @@ export default function TicketPanel({
     try {
       const full = await api.getTicketAttachment(activeTicket.id, attachment.id);
       if (full?.file_data) {
-        setImagePreview(`data:${full.file_mimetype};base64,${full.file_data}`);
+        setImagePreview({
+          src: `data:${full.file_mimetype};base64,${full.file_data}`,
+          mimetype: full.file_mimetype,
+        });
       }
     } catch (err: any) {
       setAttachmentError(err?.message || 'Preview failed');
@@ -935,15 +944,44 @@ export default function TicketPanel({
       {commentAttachments.length > 0 && (
         <div style={{ display: 'flex', gap: 4, marginBottom: 6, flexWrap: 'wrap' }}>
           {commentAttachments.map((att, idx) => {
-            const isImage = att.file_mimetype.startsWith('image/');
+            const mt = att.file_mimetype || '';
+            const isImage = mt.startsWith('image/');
+            const isVideo = mt.startsWith('video/');
+            const src = `data:${mt};base64,${att.file_data}`;
             return (
               <div key={idx} style={{ position: 'relative' }}>
                 {isImage ? (
                   <img
-                    src={`data:${att.file_mimetype};base64,${att.file_data}`}
+                    src={src}
                     alt={att.file_name}
                     style={{ width: 44, height: 44, objectFit: 'cover', borderRadius: tokens.radii.sm, border: `1px solid ${tokens.colors.border}` }}
                   />
+                ) : isVideo ? (
+                  <div
+                    title={att.file_name}
+                    style={{
+                      width: 60, height: 44, borderRadius: tokens.radii.sm,
+                      border: `1px solid ${tokens.colors.border}`, overflow: 'hidden',
+                      position: 'relative', background: '#000',
+                    }}
+                  >
+                    <video
+                      src={src}
+                      muted
+                      playsInline
+                      preload="metadata"
+                      style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+                    />
+                    <span
+                      aria-hidden="true"
+                      style={{
+                        position: 'absolute', inset: 0, display: 'flex',
+                        alignItems: 'center', justifyContent: 'center',
+                        color: 'rgba(255,255,255,0.85)', fontSize: '14px',
+                        textShadow: '0 0 4px rgba(0,0,0,0.7)', pointerEvents: 'none',
+                      }}
+                    >▶</span>
+                  </div>
                 ) : (
                   <div
                     title={att.file_name}
@@ -1336,7 +1374,9 @@ export default function TicketPanel({
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                   {ticketAttachments.map(att => {
-                    const isImage = att.file_mimetype?.startsWith('image/');
+                    const mt = att.file_mimetype || '';
+                    const isImage = mt.startsWith('image/');
+                    const isVideo = mt.startsWith('video/');
                     const sizeKb = att.file_size > 0 ? Math.max(1, Math.round(att.file_size / 1024)) : null;
                     return (
                       <div
@@ -1358,9 +1398,9 @@ export default function TicketPanel({
                             textAlign: 'left', flex: 1, minWidth: 0,
                             overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                           }}
-                          title={isImage ? 'Click to preview' : 'Click to download'}
+                          title={isImage || isVideo ? 'Click to preview' : 'Click to download'}
                         >
-                          {isImage ? '🖼️' : '📎'} {att.file_name}
+                          {isImage ? '🖼️' : isVideo ? '🎬' : '📎'} {att.file_name}
                         </button>
                         <span style={{ fontSize: '10px', color: tokens.colors.textMuted, fontVariantNumeric: 'tabular-nums' }}>
                           {sizeKb !== null ? `${sizeKb} KB` : ''}
@@ -1564,7 +1604,7 @@ export default function TicketPanel({
             </div>
             <CommentList
               comments={filteredComments}
-              onImagePreview={(src) => setImagePreview(src)}
+              onImagePreview={(src, mimetype) => setImagePreview({ src, mimetype })}
               onSetCommentStatus={onSetCommentStatus
                 ? (commentId, status) => onSetCommentStatus(activeTicket.id, commentId, status)
                 : undefined}
@@ -1634,13 +1674,25 @@ export default function TicketPanel({
         )}
       </div>
 
-      {/* Image preview modal */}
+      {/* Image / video preview modal */}
       {imagePreview && (
         <div onClick={() => setImagePreview(null)} style={{
           position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)',
           display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2000, cursor: 'pointer',
         }}>
-          <img src={imagePreview} alt="Preview" style={{ maxWidth: '90vw', maxHeight: '90vh', borderRadius: 8 }} />
+          {imagePreview.mimetype?.startsWith('video/') ? (
+            // Stop bubbling so clicking the controls doesn't close the modal —
+            // backdrop click still does.
+            <video
+              src={imagePreview.src}
+              controls
+              autoPlay
+              onClick={(e) => e.stopPropagation()}
+              style={{ maxWidth: '90vw', maxHeight: '90vh', borderRadius: 8, background: '#000' }}
+            />
+          ) : (
+            <img src={imagePreview.src} alt="Preview" style={{ maxWidth: '90vw', maxHeight: '90vh', borderRadius: 8 }} />
+          )}
         </div>
       )}
     </div>

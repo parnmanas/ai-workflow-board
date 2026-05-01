@@ -7,7 +7,9 @@ import { COMMENT_TYPE_STYLES, resolveCommentType } from './comment-types';
 
 interface CommentListProps {
   comments: Comment[];
-  onImagePreview?: (src: string) => void;
+  // src + mimetype so the modal can pick <img> vs <video>. mimetype is
+  // optional so legacy callers (image-only flows) still type-check.
+  onImagePreview?: (src: string, mimetype?: string) => void;
   // Phase 2B: lets the question OPEN/RESOLVED pill double as a toggle.
   // Optional so embeddings without question support can omit it.
   onSetCommentStatus?: (commentId: string, status: 'open' | 'resolved') => void;
@@ -288,15 +290,17 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
               {attachments.length > 0 && (
                 <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
                   {attachments.map((att) => {
-                    const isImage = (att.file_mimetype || '').startsWith('image/');
-                    const src = `data:${att.file_mimetype || 'application/octet-stream'};base64,${att.file_data}`;
+                    const mt = att.file_mimetype || '';
+                    const isImage = mt.startsWith('image/');
+                    const isVideo = mt.startsWith('video/');
+                    const src = `data:${mt || 'application/octet-stream'};base64,${att.file_data}`;
                     if (isImage) {
                       return (
                         <img
                           key={att.id}
                           src={src}
                           alt={att.file_name}
-                          onClick={() => onImagePreview?.(src)}
+                          onClick={() => onImagePreview?.(src, mt)}
                           title={att.file_name}
                           style={{
                             width: 70, height: 70, objectFit: 'cover', borderRadius: tokens.radii.sm,
@@ -304,6 +308,43 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
                             border: `1px solid ${tokens.colors.border}`,
                           }}
                         />
+                      );
+                    }
+                    if (isVideo) {
+                      // Inline <video> preview — agents and users get the same
+                      // first-class playback affordance as images, no download
+                      // round-trip. Click-through opens the modal viewer for
+                      // a larger surface.
+                      return (
+                        <div
+                          key={att.id}
+                          onClick={() => onImagePreview?.(src, mt)}
+                          title={att.file_name}
+                          style={{
+                            width: 120, height: 70, borderRadius: tokens.radii.sm,
+                            cursor: onImagePreview ? 'pointer' : 'default',
+                            border: `1px solid ${tokens.colors.border}`,
+                            overflow: 'hidden', position: 'relative',
+                            background: '#000',
+                          }}
+                        >
+                          <video
+                            src={src}
+                            muted
+                            playsInline
+                            preload="metadata"
+                            style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+                          />
+                          <span
+                            aria-hidden="true"
+                            style={{
+                              position: 'absolute', inset: 0, display: 'flex',
+                              alignItems: 'center', justifyContent: 'center',
+                              color: 'rgba(255,255,255,0.85)', fontSize: '24px',
+                              textShadow: '0 0 4px rgba(0,0,0,0.7)', pointerEvents: 'none',
+                            }}
+                          >▶</span>
+                        </div>
                       );
                     }
                     return (
