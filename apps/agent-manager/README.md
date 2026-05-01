@@ -1,0 +1,183 @@
+# awb-agent-manager
+
+Standalone subagent runner for [AI Workflow Board](../../README.md). Connects to
+an AWB server over SSE + REST, spawns CLI-driven agents (Claude, Codex, Gemini,
+or any custom binary that speaks MCP), and reports liveness back to the AWB
+admin dashboard.
+
+This package replaces the daemon that used to live inside the
+`@parnmanas/awb` Claude plugin. The plugin (in
+[`submodules/claude-plugins/ai-workflow-board/`](../../../claude-plugins/ai-workflow-board/))
+is now a pure stdio↔HTTP MCP forwarder. agent-manager owns everything else:
+SSE event delivery, persistent ticket/chat sessions, subagent supervision, fs
+browser, instance heartbeats, and CLI lifecycle management.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  AWB server (NestJS)                                            │
+│   ├── /api/agent-manager/*    pairing, agent identity RPC       │
+│   ├── /api/admin/agent-manager/*    instance dashboard, command │
+│   └── SSE event stream  ─────────────┐                          │
+└─────────────────────────────────────┬─┘                          │
+                                      │ HTTP (Bearer key)          │
+                                      ▼                            │
+┌─────────────────────────────────────────────────────────────────┐│
+│  awb-agent-manager  (this package)                              ││
+│   ├── EventStream       SSE consumer + reconnect                ││
+│   ├── EventDispatcher   route → ticket / chat / fs / command    ││
+│   ├── ManagedAgents     spawn / stop / restart CLI children     ││
+│   └── InstanceHeartbeat per-process registry ping ──────────────┘
+└─────────────────────────────────────────────────────────────────┘
+       │ stdio
+       ▼
+   claude / codex / gemini / custom CLI
+```
+
+## Install
+
+### npm (recommended)
+
+```bash
+npm i -g @awb/agent-manager
+awb-agent-manager --version
+```
+
+> The package is not yet published to the public npm registry. Until it ships,
+> install from a local checkout (see "Development").
+
+### Docker
+
+```bash
+docker run --rm -it \
+  -v "$HOME/.config/awb-agent-manager:/data" \
+  -e AWB_AGENT_MANAGER_HOME=/data \
+  ghcr.io/parnmanas/awb-agent-manager:latest
+```
+
+The image bundles `node:22-alpine` plus the manager binary. Mount a host
+directory for `AWB_AGENT_MANAGER_HOME` so config + lockfile survive container
+restarts. Bind-mount each agent's working directory the same way (e.g.
+`-v $HOME/repos:/repos`) and configure those paths inside AWB.
+
+## First run — pairing with an AWB server
+
+The manager bootstraps from a one-time pairing token minted by an AWB admin.
+After redeeming, the manager stores its API key and agent identity in
+`$AWB_AGENT_MANAGER_HOME/config.json` (default
+`~/.config/awb-agent-manager/config.json`).
+
+1. **Mint** — In the AWB admin UI: _Admin → Agent Manager → Pair manager…_.
+   The dialog returns a raw token (long-form) and a 6-char display code; copy
+   either. Both are shown only once.
+2. **Redeem** — On the host that will run the manager:
+
+   ```bash
+   curl -X POST "$AWB_URL/api/agent-manager/pair/redeem" \
+     -H 'content-type: application/json' \
+     -d '{"token":"<raw-token-or-6-char-code>","instance_id":"'"$(hostname)-1"'"}'
+   ```
+
+   The response includes `api_key`, `agent_id`, and `workspace_id`. Save them
+   into `~/.config/awb-agent-manager/config.json`:
+
+   ```json
+   {
+     "url": "https://awb.example.com",
+     "apiKey": "<api_key from redeem response>",
+     "workspace_id": "<workspace_id>",
+     "agent_id": "<agent_id>",
+     "cli": "claude"
+   }
+   ```
+
+   _(A `pair` subcommand that does this in one step is on the roadmap. Until
+   then, the redeem call above is the manual path.)_
+3. **Start** — `awb-agent-manager`. The process registers with the AWB
+   instance dashboard and starts listening for `agent_manager_command` SSE
+   events.
+4. **Add managed agents** — Back in AWB, _Agent Manager → Managed Agents →
+   Create_. Pick the CLI (`claude` / `codex` / `gemini` / `custom`), point at a
+   working directory, and click _Spawn_. The manager runs the configured CLI
+   on the chosen folder.
+
+## Migration from the claude-plugin daemon (≤ v0.39)
+
+The plugin daemon is gone as of plugin v0.40.0. Everything it owned moved
+here. Migration is opt-in but easy:
+
+- agent-manager auto-imports `~/.claude/channels/awb/{config,agent}.json` on
+  first run if `~/.config/awb-agent-manager/config.json` is missing. A
+  `MIGRATED-TO-AGENT-MANAGER.txt` marker is dropped next to the legacy files;
+  subsequent starts skip the import. Legacy files are never deleted — the
+  plugin's stdio MCP proxy still reads them.
+- The first run will refuse to start while the legacy daemon's
+  `~/.claude/channels/awb/agent.lock` is owned by a live PID. Stop the old
+  Claude session (or `kill` the daemon) first, then start
+  `awb-agent-manager`. Pass `--force` to take over a stale lock owned by a
+  dead PID.
+
+## Configuration
+
+| Source                                           | Precedence       |
+|--------------------------------------------------|------------------|
+| `--config <path>` flag                           | 1 (highest)      |
+| `$AWB_AGENT_MANAGER_HOME/config.json`            | 2                |
+| `$XDG_CONFIG_HOME/awb-agent-manager/config.json` | 3 (Linux)        |
+| `%APPDATA%\awb-agent-manager\config.json`        | 3 (Windows)      |
+| `~/.config/awb-agent-manager/config.json`        | 4 (fallback)     |
+
+Schema (`config.json`):
+
+```json
+{
+  "url": "https://awb.example.com",
+  "apiKey": "<bearer key from pairing>",
+  "workspace_id": "<workspace uuid>",
+  "agent_id": "<manager agent uuid>",
+  "cli": "claude",
+  "delegation": {
+    "enabled": true,
+    "max_concurrent_subagents": 4
+  }
+}
+```
+
+CLI flags (`awb-agent-manager --help`):
+
+| Flag                    | Meaning                                                 |
+|-------------------------|---------------------------------------------------------|
+| `-c, --config <path>`   | Override config.json path                               |
+| `-w, --workspace <id>`  | Override `workspace_id` from config                     |
+| `-f, --force`           | Take over a lockfile owned by a stale or live owner     |
+| `--dry-run`             | Load config, log what would happen, exit                |
+| `-h, --help`            | Show full usage                                         |
+| `-v, --version`         | Print version                                           |
+
+Signals:
+
+| Signal       | Behavior                                                  |
+|--------------|-----------------------------------------------------------|
+| `SIGTERM`/`SIGINT` | Graceful drain (stop subagents, release lock)       |
+| `SIGHUP`     | Re-read `config.json` (delegation tunables hot-reload)    |
+| `SIGUSR1`    | Self-update hook (currently a stub — upgrade via npm)     |
+
+## Development
+
+```bash
+# from this directory
+npm install            # workspace install at the repo root also works
+npm run build          # tsc → dist/
+npm run dev            # tsx watch src/main.ts
+node dist/main.js -h
+```
+
+The full AWB workspace builds via turbo from the repo root:
+
+```bash
+cd ../..               # submodules/ai-workflow-board
+npm install
+npm run build          # builds agent-manager + client + server
+```
+
+For deep reference (config schema, SSE event types, security model, internals)
+see [`docs/agent-manager.md`](../../docs/agent-manager.md).
