@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import {
@@ -10,7 +10,12 @@ import {
 } from './lib/constants.js';
 import { loadConfig, resolveAgentId } from './lib/config.js';
 import { installCrashHandlers, log } from './lib/logging.js';
-import { acquireAgentLock, type LockHandle } from './lib/agent-lockfile.js';
+import {
+  acquireAgentLock,
+  inspectLegacyAgentLock,
+  type LockHandle,
+} from './lib/agent-lockfile.js';
+import { importLegacyConfig } from './lib/legacy-import.js';
 import { runSelfUpdate } from './lib/self-update.js';
 import { PresenceHeartbeat } from './lib/presence-heartbeat.js';
 import { InstanceHeartbeat } from './lib/instance-heartbeat.js';
@@ -97,7 +102,13 @@ Config search order:
   2. $AWB_AGENT_MANAGER_HOME/config.json
   3. $XDG_CONFIG_HOME/awb-agent-manager/config.json (or %APPDATA% on Windows)
   4. ~/.config/awb-agent-manager/config.json
-  5. Legacy claude-plugin path (auto-import lands in ST-3): ${LEGACY_CONFIG_PATH}
+
+Legacy import:
+  On first run, ${LEGACY_CONFIG_PATH} is copied into the new
+  config home if no config.json is present yet. A marker file is placed in
+  the legacy directory; subsequent runs skip the import. Existing legacy
+  files are NEVER deleted — the claude-plugin stdio MCP proxy may still use
+  them.
 
 Signals:
   SIGTERM/SIGINT  graceful drain + exit
@@ -125,13 +136,32 @@ async function main(): Promise<void> {
   process.stdout.write(`awb-agent-manager v${version}\n`);
   process.stdout.write(`  home:        ${AGENT_MANAGER_HOME}\n`);
 
+  // Auto-import claude-plugin daemon config on first run. Idempotent — skipped
+  // if the new config is already present or if a previous run left a marker.
+  // Only runs when no explicit --config flag was passed.
+  if (!flags.config) {
+    const importResult = importLegacyConfig();
+    if (importResult.imported) {
+      process.stdout.write(
+        `  imported:    ${importResult.source.config} -> ${importResult.target.config}\n`,
+      );
+    }
+  }
+
   const configPath = flags.config ?? CONFIG_PATH;
   let config = loadConfig(configPath);
   if (!config) {
     process.stdout.write(`  config:      not found at ${configPath}\n`);
-    process.stdout.write(
-      `  hint:        config auto-import from ${LEGACY_CONFIG_PATH} lands in ST-3\n`,
-    );
+    if (existsSync(LEGACY_CONFIG_PATH)) {
+      process.stdout.write(
+        `  hint:        legacy plugin config exists at ${LEGACY_CONFIG_PATH} ` +
+          `but a previous import already ran. Copy it to ${configPath} manually if you want to re-import.\n`,
+      );
+    } else {
+      process.stdout.write(
+        `  hint:        no legacy plugin config at ${LEGACY_CONFIG_PATH} either — run pairing.\n`,
+      );
+    }
     if (flags.dryRun) {
       log('--dry-run: exiting after config load (config=missing)');
       return;
@@ -164,6 +194,29 @@ async function runRuntime(
   argv: string[],
 ): Promise<void> {
   void argv; // reserved for future re-exec hook
+
+  // Refuse to run alongside a still-alive claude-plugin daemon. They would
+  // both subscribe to the same SSE stream and double-process events.
+  const legacyLock = inspectLegacyAgentLock();
+  if (legacyLock.alive && legacyLock.pid) {
+    if (flags.force) {
+      log(
+        `[legacy-lock] --force: ignoring live plugin daemon at pid=${legacyLock.pid} ` +
+          `(role=${legacyLock.role || '?'}, version=${legacyLock.version || '?'}). ` +
+          `Stop it manually if you see double-processed events.`,
+      );
+    } else {
+      log(
+        `[legacy-lock] claude-plugin daemon is still running ` +
+          `(pid=${legacyLock.pid}, role=${legacyLock.role || '?'}, ` +
+          `version=${legacyLock.version || '?'}, started_at=${legacyLock.started_at || '?'}). ` +
+          `Stop it before launching agent-manager, or pass --force to start anyway.`,
+      );
+      process.exit(3);
+    }
+  } else if (legacyLock.present) {
+    log(`[legacy-lock] found stale lockfile at ${legacyLock.path} — ignoring.`);
+  }
 
   let lock: LockHandle;
   try {

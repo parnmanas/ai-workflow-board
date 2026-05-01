@@ -19,10 +19,11 @@ import {
   readFileSync,
   unlinkSync,
   mkdirSync,
+  existsSync,
 } from 'node:fs';
 import { dirname } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { AGENT_MANAGER_HOME } from './constants.js';
+import { AGENT_MANAGER_HOME, LEGACY_LOCK_PATH } from './constants.js';
 import { join } from 'node:path';
 import { log } from './logging.js';
 
@@ -244,4 +245,48 @@ function safeUnlinkOwn(myPid: number): void {
 /** Pure inspector — does not touch the lockfile. */
 export function inspectAgentLock(): ParsedLock | null {
   return readLock();
+}
+
+export interface LegacyLockState {
+  present: boolean;
+  alive: boolean;
+  pid: number | null;
+  role?: string;
+  version?: string;
+  started_at?: string;
+  path: string;
+}
+
+/**
+ * Inspect the legacy claude-plugin lockfile (~/.claude/channels/awb/agent.lock).
+ *
+ * Used at startup so the standalone manager refuses to run alongside a still-
+ * alive plugin daemon. Returns `present:false` when the legacy file is absent
+ * (the common case once users migrate). Stale lockfiles are reported as
+ * `present:true, alive:false` so the caller can log a benign warning instead
+ * of aborting.
+ */
+export function inspectLegacyAgentLock(): LegacyLockState {
+  if (!existsSync(LEGACY_LOCK_PATH)) {
+    return { present: false, alive: false, pid: null, path: LEGACY_LOCK_PATH };
+  }
+  try {
+    const raw = readFileSync(LEGACY_LOCK_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+    const pid = Number.isFinite(parsed?.pid) ? parsed.pid : 0;
+    if (pid <= 0) {
+      return { present: true, alive: false, pid: null, path: LEGACY_LOCK_PATH };
+    }
+    return {
+      present: true,
+      alive: isPidAlive(pid),
+      pid,
+      role: parsed.role,
+      version: parsed.version,
+      started_at: parsed.started_at,
+      path: LEGACY_LOCK_PATH,
+    };
+  } catch {
+    return { present: true, alive: false, pid: null, path: LEGACY_LOCK_PATH };
+  }
 }

@@ -28,6 +28,8 @@ export const LEGACY_PLUGIN_HOME = join(
 );
 export const LEGACY_CONFIG_PATH = join(LEGACY_PLUGIN_HOME, 'config.json');
 export const LEGACY_AGENT_PATH = join(LEGACY_PLUGIN_HOME, 'agent.json');
+export const LEGACY_LOCK_PATH = join(LEGACY_PLUGIN_HOME, 'agent.lock');
+export const LEGACY_MIGRATION_MARKER = join(LEGACY_PLUGIN_HOME, 'MIGRATED-TO-AGENT-MANAGER.txt');
 
 export const RECONNECT_INITIAL_MS = 2000;
 export const RECONNECT_MAX_MS = 30000;
