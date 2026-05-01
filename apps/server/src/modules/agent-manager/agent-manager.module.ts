@@ -10,6 +10,7 @@ import { WorkspaceGuard } from '../../common/guards/workspace.guard';
 import { AgentManagerController } from './agent-manager.controller';
 import { InstanceRegistryService } from './instance-registry.service';
 import { PairingService } from './pairing.service';
+import { CommandLedgerService } from './command-ledger.service';
 
 @Module({
   // AgentsModule re-exports SubagentMonitorService so the same singleton that
@@ -25,6 +26,7 @@ import { PairingService } from './pairing.service';
   providers: [
     InstanceRegistryService,
     PairingService,
+    CommandLedgerService,
     AgentAuthGuard,
     AuthGuard,
     PermissionGuard,

@@ -18,6 +18,7 @@ import { SubagentMonitorService } from '../../services/subagent-monitor.service'
 import { activityEvents } from '../../services/activity.service';
 import { InstanceRegistryService } from './instance-registry.service';
 import { PairingService } from './pairing.service';
+import { CommandLedgerService } from './command-ledger.service';
 import type { AgentManagerCommand, AgentManagerCommandPayload } from '../../common/types/stream-events';
 
 const ALLOWED_CLI_TYPES = new Set(['claude', 'codex', 'gemini', 'custom']);
@@ -53,6 +54,7 @@ export class AgentManagerController {
     private readonly apiKeyService: ApiKeyService,
     private readonly subagentMonitor: SubagentMonitorService,
     private readonly logService: LogService,
+    private readonly commandLedger: CommandLedgerService,
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
   ) {}
 
@@ -206,11 +208,35 @@ export class AgentManagerController {
     if (!command_id || !status) {
       return res.status(400).json({ error: 'command_id and status (ok|error) are required' });
     }
+
+    // Ledger lookup verifies (a) the command was actually dispatched and
+    // hasn't been acked yet, and (b) the API key acking it belongs to the
+    // same manager Agent identity that the dispatch was scoped to.
+    const record = this.commandLedger.consume(command_id);
+    if (!record) {
+      this.logService.warn(
+        'AgentManager',
+        `Command ack rejected — no pending dispatch (id=${command_id}, caller=${callerAgentId})`,
+        { command_id, caller_agent_id: callerAgentId, status },
+      );
+      return res.status(410).json({ error: 'command_id is unknown or its ack window has expired' });
+    }
+    if (callerAgentId && callerAgentId !== record.agent_id) {
+      // Re-record so the legitimate manager can still ack within the TTL.
+      this.commandLedger.record(record);
+      this.logService.warn(
+        'AgentManager',
+        `Command ack rejected — caller mismatch (id=${command_id}, caller=${callerAgentId}, expected=${record.agent_id})`,
+        { command_id, caller_agent_id: callerAgentId, expected_agent_id: record.agent_id, status },
+      );
+      return res.status(403).json({ error: 'caller does not own this command_id' });
+    }
+
     const detail = typeof body?.detail === 'string' ? body.detail.slice(0, 2000) : '';
     this.logService.info(
       'AgentManager',
-      `Command ack id=${command_id} status=${status} agent=${callerAgentId}`,
-      { command_id, status, detail, agent_id: callerAgentId },
+      `Command ack id=${command_id} status=${status} command=${record.command} agent=${callerAgentId}`,
+      { command_id, status, detail, command: record.command, agent_id: callerAgentId },
     );
     return res.json({ ok: true });
   }
@@ -382,6 +408,16 @@ export class AgentManagerController {
       issued_by: user.id,
       issued_at,
     };
+    // Ledger first, then emit. The order matters: a manager that processes
+    // the SSE event very quickly could ack before our local write commits,
+    // and the ack handler would then 410 Gone a legitimate response.
+    this.commandLedger.record({
+      command_id,
+      instance_id: inst.instance_id,
+      agent_id: inst.agent_id,
+      command,
+      issued_at,
+    });
     activityEvents.emit('agent_manager_command', { ...payload, timestamp: issued_at });
     this.logService.info(
       'AgentManager',
