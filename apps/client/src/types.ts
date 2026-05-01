@@ -49,6 +49,9 @@ export interface Agent {
   // Phase 1 role prompt fields (D-14 / ROLE-02)
   role_prompt?: string;
   role_prompt_meta?: Record<string, any> | null;
+  // ST-4 — agent-manager-managed agents. Empty/null on legacy rows.
+  working_dir?: string;
+  manager_agent_id?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -524,4 +527,47 @@ export interface AgentManagerInstance {
   agent_ids?: string[];
   working_dirs?: string[];
   paired_at?: string;
+}
+
+// ST-5 — pairing tokens. PairingTokenMint is the response of
+// POST /admin/agent-manager/pair (raw token shown ONCE); PairingTokenSafe is
+// the masked listing form (no `token` field). Both share the rest of the
+// shape so list rows can render the same metadata.
+export interface PairingTokenSafe {
+  id: string;
+  code: string;
+  workspace_id: string;
+  created_by_user_id: string;
+  agent_name?: string;
+  created_at: string;
+  expires_at: string;
+  redeemed_at: string | null;
+  redeemed_instance_id: string | null;
+}
+
+export interface PairingTokenMint extends PairingTokenSafe {
+  token: string; // raw bearer — show once, never persist client-side beyond the modal session
+}
+
+// ST-4 control commands surfaced to the manager-mode instance over SSE. The
+// UI maps each to a button on the instance detail panel.
+export type AgentManagerCommandKind =
+  | 'spawn_agent'
+  | 'stop_agent'
+  | 'restart_agent'
+  | 'set_working_dir'
+  | 'reload_config';
+
+export interface AgentManagerCommandResult {
+  ok: boolean;
+  command_id: string;
+  issued_at: string;
+}
+
+export interface ManagedAgentCreateBody {
+  name: string;
+  cli: 'claude' | 'codex' | 'gemini' | 'custom';
+  working_dir?: string;
+  manager_agent_id?: string | null;
+  description?: string;
 }

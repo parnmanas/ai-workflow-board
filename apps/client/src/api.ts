@@ -21,6 +21,12 @@ import type {
   SubagentTranscript,
   AgentProxySession,
   AgentManagerInstance,
+  PairingTokenMint,
+  PairingTokenSafe,
+  AgentManagerCommandKind,
+  AgentManagerCommandResult,
+  ManagedAgentCreateBody,
+  Agent,
   TicketAttachmentMeta,
 } from './types';
 
@@ -635,6 +641,37 @@ export const api = {
     request<any[]>(`/admin/agent-manager/instances/${encodeURIComponent(instanceId)}/logs?limit=${limit}`),
   restartAgentManagerInstance: (instanceId: string) =>
     request<any>(`/admin/agent-manager/instances/${encodeURIComponent(instanceId)}/restart`, { method: 'POST' }),
+
+  // ─── ST-4/5 Agent-manager pairing & control ───────────
+  // Pairing token lifecycle. mintAgentManagerPairing returns the raw token
+  // ONCE — the UI must show it, copy it, and discard it. listAgentManagerPairings
+  // returns the masked rows (no token, just the display code) for the table.
+  mintAgentManagerPairing: (body: { agent_name?: string }) =>
+    request<PairingTokenMint>('/admin/agent-manager/pair', { method: 'POST', body: JSON.stringify(body || {}) }),
+  listAgentManagerPairings: () =>
+    request<PairingTokenSafe[]>('/admin/agent-manager/pair'),
+  revokeAgentManagerPairing: (id: string) =>
+    request<{ ok: true }>(`/admin/agent-manager/pair/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  // Control command — admin → manager instance over SSE. The 202 response
+  // is the dispatch ack only; the manager later calls /command/ack with the
+  // execution outcome (currently consumed only by server logs, surfacing it
+  // in the UI is a future enhancement).
+  sendAgentManagerCommand: (
+    instanceId: string,
+    body: { command: AgentManagerCommandKind; args?: Record<string, any> },
+  ) =>
+    request<AgentManagerCommandResult>(
+      `/admin/agent-manager/instances/${encodeURIComponent(instanceId)}/command`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+
+  // Create an agent identity that the manager will spawn. Differs from the
+  // generic POST /agents in two ways: (1) cli is validated against the
+  // claude/codex/gemini/custom whitelist, (2) manager_agent_id is sanity-
+  // checked against the same workspace before save.
+  createManagedAgent: (body: ManagedAgentCreateBody) =>
+    request<Agent>('/admin/agent-manager/agents', { method: 'POST', body: JSON.stringify(body) }),
 
   // ─── Admin Logs ────────────────────────────────────────
   getLogs: (params?: { level?: string; category?: string; since?: string; until?: string; limit?: number; search?: string }) => {
