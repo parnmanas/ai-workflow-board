@@ -1,0 +1,29 @@
+{
+  "name": "agent-manager",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Standalone subagent runner for AWB — drives Claude / Codex / Gemini CLIs without a host editor",
+  "type": "module",
+  "main": "dist/main.js",
+  "bin": {
+    "awb-agent-manager": "dist/main.js"
+  },
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "rimraf": "^6.0.1",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
