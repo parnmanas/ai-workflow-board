@@ -4,7 +4,8 @@
 //   {
 //     command_id:   string,
 //     instance_id:  string,            // target manager instance
-//     agent_id:     string,            // target managed agent (empty for reload_config)
+//     agent_id:     string,            // server fills with the MANAGER'S identity
+//                                      // (NOT the target managed agent — see below)
 //     command:      'spawn_agent' | 'stop_agent' | 'restart_agent'
 //                 | 'set_working_dir' | 'reload_config',
 //     args:         Record<string, any>,   // command-specific (e.g. { working_dir })
@@ -12,6 +13,13 @@
 //     issued_at:    string,
 //     timestamp:    string,
 //   }
+//
+// agent_id semantics (load-bearing): the server-emitted top-level `agent_id`
+// is the *manager* instance's identity (used for SSE fan-out scoping).
+// The actual *target managed agent* always travels in `args.agent_id`.
+// Earlier revisions used `args.agent_id ?? agent_id` which silently picked
+// the manager itself as the target when args was malformed; that fallback
+// is now removed and the per-command extractor below requires args.agent_id.
 //
 // Filtering: every manager subscribed to the SSE stream sees every command
 // payload (the server fans out per-agent). We drop events whose
@@ -128,9 +136,20 @@ export class AgentManagerCommandHandler {
     }
   }
 
+  /**
+   * Pull the target managed-agent id from `args.agent_id`. The top-level
+   * `payload.agent_id` is the manager's own identity (server fan-out
+   * scoping) and is intentionally NOT used as a fallback — falling back to
+   * it would let a malformed dispatch act on the manager itself.
+   */
+  #targetAgentId(payload: AgentManagerCommandPayload, command: string): string {
+    const id = typeof payload.args?.agent_id === 'string' ? payload.args.agent_id.trim() : '';
+    if (!id) throw new Error(`${command}: args.agent_id is required`);
+    return id;
+  }
+
   async #spawnAgent(payload: AgentManagerCommandPayload): Promise<string> {
-    const agentId = payload.args?.agent_id ?? payload.agent_id;
-    if (!agentId) throw new Error('spawn_agent: agent_id missing');
+    const agentId = this.#targetAgentId(payload, 'spawn_agent');
 
     // Pull the canonical record from AWB so we know the cli / working_dir
     // the admin configured. Falls back to in-payload args when present.
@@ -155,8 +174,7 @@ export class AgentManagerCommandHandler {
   }
 
   async #stopAgent(payload: AgentManagerCommandPayload): Promise<string> {
-    const agentId = payload.args?.agent_id ?? payload.agent_id;
-    if (!agentId) throw new Error('stop_agent: agent_id missing');
+    const agentId = this.#targetAgentId(payload, 'stop_agent');
     const rec = this.#deps.registry.markStopped(agentId, 'stop_agent command');
     if (!rec) {
       // Unknown to this manager — likely never spawned here. Treat as a
@@ -167,17 +185,16 @@ export class AgentManagerCommandHandler {
   }
 
   async #restartAgent(payload: AgentManagerCommandPayload): Promise<string> {
-    const agentId = payload.args?.agent_id ?? payload.agent_id;
-    if (!agentId) throw new Error('restart_agent: agent_id missing');
+    // Asserts args.agent_id once up front — both inner calls reuse it via payload.
+    this.#targetAgentId(payload, 'restart_agent');
     await this.#stopAgent(payload).catch(() => undefined);
     const detail = await this.#spawnAgent(payload);
     return `restart_agent → ${detail}`;
   }
 
   async #setWorkingDir(payload: AgentManagerCommandPayload): Promise<string> {
-    const agentId = payload.args?.agent_id ?? payload.agent_id;
+    const agentId = this.#targetAgentId(payload, 'set_working_dir');
     const workingDir = String(payload.args?.working_dir ?? '').trim();
-    if (!agentId) throw new Error('set_working_dir: agent_id missing');
     if (!workingDir) throw new Error('set_working_dir: working_dir is empty');
 
     // If we don't yet know about the agent, hydrate from AWB so we capture
