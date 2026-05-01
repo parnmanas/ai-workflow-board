@@ -30,6 +30,7 @@ import {
   SubagentRegisteredPayload,
   SubagentLogPayload,
   SubagentEndedPayload,
+  AgentInstanceUpdatePayload,
 } from '../../common/types/stream-events';
 import { EventDefinition, SubscriberIdentity } from './types';
 
@@ -635,5 +636,43 @@ export const EVENT_TYPES: EventDefinition[] = [
     // restricts to user subscribers (agents don't need this traffic).
     filter: (env, identity) => identity.type === 'user',
     flatten: (env) => ({ event_type: 'subagent_ended', ...(env.payload as object), timestamp: env.timestamp }),
+  },
+
+  // ───────── agent_instance_update ─────────
+  // Phase 3 Agent Manager — daemon/proxy presence registry change. Workspace-
+  // scoped so the admin UI for one workspace doesn't see every other tenant's
+  // instance traffic; agent subscribers don't need this (it's pure UI fuel for
+  // the human-side dashboard).
+  {
+    eventType: 'agent_instance_update',
+    emitterEvent: 'agent_instance_update',
+    map(event: any) {
+      const inst = event?.instance || {};
+      const payload: AgentInstanceUpdatePayload = {
+        action: event?.action === 'registered' || event?.action === 'removed' ? event.action : 'updated',
+        instance: {
+          instance_id: String(inst.instance_id || ''),
+          agent_id: String(inst.agent_id || ''),
+          workspace_id: typeof inst.workspace_id === 'string' ? inst.workspace_id : null,
+          mode: inst.mode === 'daemon' ? 'daemon' : 'proxy',
+          hostname: String(inst.hostname || 'unknown'),
+          plugin_version: String(inst.plugin_version || 'unknown'),
+          cli: String(inst.cli || 'claude'),
+          cli_adapters: Array.isArray(inst.cli_adapters) ? inst.cli_adapters.map(String) : [],
+          pid: Number.isFinite(inst.pid) ? Number(inst.pid) : 0,
+          started_at: String(inst.started_at || ''),
+          last_seen_at: String(inst.last_seen_at || ''),
+        },
+      };
+      return {
+        payload,
+        scope: { workspace_id: payload.instance.workspace_id || undefined },
+        timestamp: event?.timestamp || payload.instance.last_seen_at,
+      };
+    },
+    // UI fuel only — admins watching the dashboard. Agents have no use for
+    // their sibling instances' presence (they already know about their own).
+    filter: (env, identity) => identity.type === 'user',
+    flatten: (env) => ({ event_type: 'agent_instance_update', ...(env.payload as object), timestamp: env.timestamp }),
   },
 ];

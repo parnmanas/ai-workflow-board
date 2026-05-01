@@ -26,6 +26,7 @@ import { CredentialsModule } from './modules/credentials/credentials.module';
 import { AgentLogsModule } from './modules/agent-logs/agent-logs.module';
 import { MentionsModule } from './modules/mentions/mentions.module';
 import { WorkspaceRolesModule } from './modules/workspace-roles/workspace-roles.module';
+import { AgentManagerModule } from './modules/agent-manager/agent-manager.module';
 
 @Module({
   imports: [
@@ -78,6 +79,7 @@ import { WorkspaceRolesModule } from './modules/workspace-roles/workspace-roles.
     AgentLogsModule,
     MentionsModule,
     WorkspaceRolesModule,
+    AgentManagerModule,
   ],
 })
 export class AppModule {}
