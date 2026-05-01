@@ -71,6 +71,11 @@ export interface ChatSessionManager {
   recordRoomMessage(payload: any): void;
 }
 
+export interface ColumnPrompt {
+  name?: string;
+  content?: string;
+}
+
 export interface TicketTriggerArgs {
   ticketId: string;
   role: string;
@@ -78,7 +83,7 @@ export interface TicketTriggerArgs {
   agentId: string;
   rolePrompt: string;
   ticketPrompt: string;
-  columnPrompt: string | null;
+  columnPrompt: ColumnPrompt | null;
   ticket: any;
   forceRespawn: boolean;
 }
@@ -118,7 +123,7 @@ export interface PromptComposer {
     rolePrompt: string,
     ticketPrompt: string,
     ticketId: string,
-    columnPrompt: string | null,
+    columnPrompt: ColumnPrompt | null,
   ): string;
   composeChatPrompt(rolePrompt: string, history: any[], newMessage: string): string;
   composeChatRoomPrompt(
