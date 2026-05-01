@@ -133,8 +133,12 @@ interface AgentManagerCommand {
   command_id: string;      // ack key
   command: 'spawn_agent' | 'stop_agent' | 'restart_agent'
          | 'set_working_dir' | 'reload_config';
-  agent_id?: string;       // required for *_agent / set_working_dir
+  agent_id: string;        // server fans out scoped to the manager identity;
+                           // this is the MANAGER's id, not the target managed
+                           // agent. The target travels in args.agent_id.
   args?: {
+    agent_id?: string;     // REQUIRED for *_agent / set_working_dir;
+                           // identifies the managed-agent target on this manager
     working_dir?: string;
     cli?: 'claude' | 'codex' | 'gemini' | 'custom';
   };
@@ -143,8 +147,18 @@ interface AgentManagerCommand {
 
 Each handler returns an ack via
 `POST /api/agent-manager/command/ack` with shape
-`{ command_id, result: 'ok' | 'error', detail: string }`. The ack travels
+`{ command_id, status: 'ok' | 'error', detail: string }`. The ack travels
 over REST (not SSE) so it is not affected by the SSE reconnect loop.
+
+The server-side ack endpoint enforces:
+
+- `command_id` must match a pending dispatch (in-memory ledger, 10-minute TTL).
+  Unknown / expired ids → `410 Gone`.
+- The API key making the ack request must belong to the same manager Agent
+  identity the dispatch was scoped to. Mismatch → `403 Forbidden` and the
+  ledger record is restored so the legitimate manager can still ack.
+- Each `command_id` is one-shot: a successful ack consumes the ledger
+  entry. Replays land on `410 Gone`.
 
 | Command           | Status                          |
 |-------------------|---------------------------------|
@@ -198,6 +212,34 @@ to refuse running concurrently with the old plugin daemon.
   escapes are rejected at `realpath` time before any IO.
 - **Lockfile** — prevents two managers writing the same `subagents.json`. A
   hostile take-over still requires PID forge; honest installations are safe.
+
+## Testing
+
+> **No automated tests yet — all behavior is verified manually.** The plugin
+> daemon's prior unit tests (`subagent-manager`, `chat-session-manager`,
+> `agent-lockfile`, `self-update`, `subagent-delegation`) were dropped when
+> the daemon moved here and have not been ported to TS yet. The same logic
+> still runs (re-typed line-for-line during ST-2), so short-term regression
+> risk is low — but new contributors should treat the public contracts here
+> (SSE event shapes, config schema, ack semantics) as the source of truth
+> rather than inferring from code.
+
+Minimum manual smoke pass before each version bump:
+
+- `npm run build` (workspace root, via turbo) — agent-manager + server +
+  client all compile clean.
+- Pairing dry-run — mint via admin UI → redeem via curl → manager starts and
+  the instance shows up on the dashboard.
+- `agent_manager_command` round-trip — `set_working_dir` and
+  `reload_config` ack `ok`; `spawn_agent` / `stop_agent` / `restart_agent`
+  ack with the expected `STUB:` detail (CLI lifecycle is intentionally not
+  forking yet — see _SSE event contract_ table).
+
+When the CLI lifecycle stubs are filled in, port at minimum the
+`subagent-delegation` test (it covers the load-bearing path: trigger event →
+working_dir scoped subagent → ack) and add a `command-ledger.service.spec`
+smoke test for the ack ownership check. Until then, regressions surface
+through the manual pass above.
 
 ## Versioning + sync rules
 

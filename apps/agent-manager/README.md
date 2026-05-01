@@ -97,8 +97,17 @@ After redeeming, the manager stores its API key and agent identity in
    events.
 4. **Add managed agents** — Back in AWB, _Agent Manager → Managed Agents →
    Create_. Pick the CLI (`claude` / `codex` / `gemini` / `custom`), point at a
-   working directory, and click _Spawn_. The manager runs the configured CLI
-   on the chosen folder.
+   working directory, and click _Spawn_.
+
+   > ⚠ **CLI lifecycle is currently stubbed.** `Spawn` / `Stop` / `Restart`
+   > only update the manager's in-memory `ManagedAgentRegistry` and report a
+   > stubbed ack — no child process is forked yet. The real `child_process`
+   > launcher (per-agent log file, `working_dir` validation, ready-signal
+   > gating, restart/log-rotation policy) lands in a follow-up ticket. Until
+   > then, run the chosen CLI on the host yourself; AWB heartbeats and SSE
+   > events still flow through this manager. See `docs/agent-manager.md`
+   > _SSE event contract → `agent_manager_command` payload_ for the per-command
+   > status table.
 
 ## Migration from the claude-plugin daemon (≤ v0.39)
 

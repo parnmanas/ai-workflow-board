@@ -639,11 +639,44 @@ interface ManagedAgentsSectionProps {
   inst: AgentManagerInstance;
 }
 
-const COMMAND_BUTTONS: { kind: AgentManagerCommandKind; label: string; variant: 'primary' | 'danger' | 'secondary' }[] = [
-  { kind: 'spawn_agent', label: 'Spawn', variant: 'primary' },
-  { kind: 'stop_agent', label: 'Stop', variant: 'danger' },
-  { kind: 'restart_agent', label: 'Restart', variant: 'secondary' },
+// CLI lifecycle is currently stubbed in the manager (registry-only, no
+// child_process fork). The "(stub)" suffix surfaces that to the operator so
+// a green "dispatched" toast doesn't read as "process is now running".
+// Tracked for follow-up — drop the suffix once the real spawner lands.
+const STUB_SUFFIX = ' (stub)';
+const COMMAND_BUTTONS: {
+  kind: AgentManagerCommandKind;
+  label: string;
+  variant: 'primary' | 'danger' | 'secondary';
+  title: string;
+}[] = [
+  {
+    kind: 'spawn_agent',
+    label: `Spawn${STUB_SUFFIX}`,
+    variant: 'primary',
+    title: 'Dispatch spawn_agent. Lifecycle is stubbed — manager updates registry only, no CLI fork yet.',
+  },
+  {
+    kind: 'stop_agent',
+    label: `Stop${STUB_SUFFIX}`,
+    variant: 'danger',
+    title: 'Dispatch stop_agent. Lifecycle is stubbed — manager updates registry only.',
+  },
+  {
+    kind: 'restart_agent',
+    label: `Restart${STUB_SUFFIX}`,
+    variant: 'secondary',
+    title: 'Dispatch restart_agent. Lifecycle is stubbed — manager updates registry only.',
+  },
 ];
+
+// Lifecycle commands whose ack from the manager is currently a stub.
+// Used to phrase the dispatch toast honestly.
+const STUBBED_LIFECYCLE: ReadonlySet<AgentManagerCommandKind> = new Set([
+  'spawn_agent',
+  'stop_agent',
+  'restart_agent',
+]);
 
 function ManagedAgentsSection({ inst }: ManagedAgentsSectionProps) {
   const { showToast } = useToast();
@@ -681,7 +714,12 @@ function ManagedAgentsSection({ inst }: ManagedAgentsSectionProps) {
           command: kind,
           args: { agent_id: agentId, ...(extraArgs || {}) },
         });
-        showToast(`${kind} dispatched (id=${resp.command_id.slice(0, 8)})`, 'success');
+        // Dispatch ack only — the manager's execution ack lands on the server
+        // log via POST /command/ack a moment later. For stubbed lifecycle
+        // commands we surface that explicitly so the operator doesn't mistake
+        // the green toast for "the CLI is now running".
+        const stubNote = STUBBED_LIFECYCLE.has(kind) ? ' — lifecycle stubbed, see manager logs for ack' : '';
+        showToast(`${kind} dispatched (id=${resp.command_id.slice(0, 8)})${stubNote}`, 'success');
       } catch (err: any) {
         showToast(`Command failed: ${err?.message || err}`, 'error');
       } finally {
@@ -806,6 +844,7 @@ function ManagedAgentsSection({ inst }: ManagedAgentsSectionProps) {
                         variant={btn.variant}
                         disabled={pendingCmd === `${btn.kind}:${a.id}`}
                         onClick={() => sendCommand(btn.kind, a.id)}
+                        title={btn.title}
                       >
                         {btn.label}
                       </Button>
