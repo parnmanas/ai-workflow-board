@@ -28,6 +28,15 @@ export interface InstanceMeta {
   version: string;
   cli: string;
   cliAdapters: string[];
+  // ST-5b — managed-agent presence reporter. Optional so legacy callers
+  // that don't track managed agents still construct a valid heartbeat.
+  managedAgents?: ManagedAgentSnapshot | null;
+}
+
+/** Tiny duck-typed read-only snapshot of ManagedAgentRegistry. */
+export interface ManagedAgentSnapshot {
+  liveAgentIds(): string[];
+  workingDirs(): string[];
 }
 
 export interface InstanceHeartbeatPayload {
@@ -41,6 +50,10 @@ export interface InstanceHeartbeatPayload {
   cli_adapters: string[];
   pid: number;
   started_at: string;
+  // ST-4 — populated when InstanceMeta carries a managedAgents snapshot.
+  agent_ids?: string[];
+  working_dirs?: string[];
+  paired_at?: string;
 }
 
 export class InstanceHeartbeat {
@@ -60,18 +73,27 @@ export class InstanceHeartbeat {
     const cliAdapters = Array.isArray(meta?.cliAdapters)
       ? meta.cliAdapters.map((s) => String(s)).filter(Boolean)
       : [];
-    this.#payloadFactory = () => ({
-      instance_id: this.#instanceId,
-      agent_id: this.#agentId,
-      workspace_id: (config?.workspace_id as string) || null,
-      mode: meta?.mode === 'manager' ? 'manager' : 'manager',
-      hostname: hostname() || 'unknown',
-      plugin_version: String(meta?.version || 'unknown'),
-      cli: String(meta?.cli || 'claude'),
-      cli_adapters: cliAdapters,
-      pid: process.pid,
-      started_at: this.#startedAt,
-    });
+    const managedSnapshot = meta?.managedAgents ?? null;
+    this.#payloadFactory = () => {
+      const agentIds = managedSnapshot ? managedSnapshot.liveAgentIds() : [];
+      const workingDirs = managedSnapshot ? managedSnapshot.workingDirs() : [];
+      return {
+        instance_id: this.#instanceId,
+        agent_id: this.#agentId,
+        workspace_id: (config?.workspace_id as string) || null,
+        mode: meta?.mode === 'manager' ? 'manager' : 'manager',
+        hostname: hostname() || 'unknown',
+        plugin_version: String(meta?.version || 'unknown'),
+        cli: String(meta?.cli || 'claude'),
+        cli_adapters: cliAdapters,
+        pid: process.pid,
+        started_at: this.#startedAt,
+        // Only include the managed-agent fields when the snapshot is wired
+        // and non-empty; legacy AWB servers (pre-ST-4) don't expect them.
+        ...(agentIds.length ? { agent_ids: agentIds } : {}),
+        ...(workingDirs.length ? { working_dirs: workingDirs } : {}),
+      };
+    };
   }
 
   start(): void {

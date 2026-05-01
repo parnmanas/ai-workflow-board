@@ -100,3 +100,67 @@ export async function postFsResponse(
     log(`fs response POST error: ${err?.message ?? err} (request=${requestId})`);
   }
 }
+
+/**
+ * ST-5b — manager → server ack for an agent_manager_command. Fire-and-log
+ * because the server's audit trail is best-effort (the command itself
+ * already landed via SSE). Caller passes 'ok' or 'error' + a short detail
+ * the operator can read from server logs.
+ */
+export async function postCommandAck(
+  config: AwbConfig,
+  command_id: string,
+  status: 'ok' | 'error',
+  detail?: string,
+): Promise<void> {
+  if (!command_id) return;
+  try {
+    const url = `${trimSlash(config.url)}/api/agent-manager/command/ack`;
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'X-Agent-Key': config.apiKey,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({ command_id, status, detail: detail ?? '' }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!resp.ok) {
+      log(`command ack POST failed: ${resp.status} ${resp.statusText} (command=${command_id})`);
+    }
+  } catch (err: any) {
+    log(`command ack POST error: ${err?.message ?? err} (command=${command_id})`);
+  }
+}
+
+/**
+ * ST-5b — pull a managed agent's record from AWB. Used when the manager
+ * receives a spawn_agent / set_working_dir command and needs to know the
+ * canonical working_dir / cli for that agent identity. Returns null on any
+ * failure; caller decides whether to surface error or fall through.
+ */
+export async function fetchAgentRecord(
+  config: AwbConfig,
+  agentId: string,
+): Promise<{ id: string; name: string; type: string; working_dir: string; manager_agent_id: string | null } | null> {
+  if (!agentId) return null;
+  try {
+    const url = `${trimSlash(config.url)}/api/agents/${encodeURIComponent(agentId)}`;
+    const resp = await fetch(url, {
+      headers: {
+        'X-Agent-Key': config.apiKey,
+        Accept: 'application/json',
+      },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!resp.ok) {
+      log(`agent fetch failed: ${resp.status} ${resp.statusText} (agent=${agentId})`);
+      return null;
+    }
+    return (await resp.json()) as any;
+  } catch (err: any) {
+    log(`agent fetch error: ${err?.message ?? err} (agent=${agentId})`);
+    return null;
+  }
+}

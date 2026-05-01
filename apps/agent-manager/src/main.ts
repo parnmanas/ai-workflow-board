@@ -34,6 +34,8 @@ import {
   createAdapter,
 } from './lib/cli-adapters/index.js';
 import { promptComposer } from './lib/prompts.js';
+import { ManagedAgentRegistry } from './lib/managed-agents.js';
+import { AgentManagerCommandHandler } from './lib/agent-manager-commands.js';
 import type { SessionAwareConfig } from './lib/base-session-manager.js';
 import type { SubagentAwareConfig } from './lib/subagent-manager.js';
 
@@ -265,6 +267,25 @@ async function runRuntime(
     log(`SubagentManager init failed: ${err?.message ?? err}`),
   );
 
+  // ST-5b — managed-agent registry hydrated by agent_manager_command SSE
+  // events. Reported back to AWB on every InstanceHeartbeat ping so the
+  // admin UI's manager detail panel can render `agent_ids` / `working_dirs`.
+  const managedAgents = new ManagedAgentRegistry();
+  const commandHandler = new AgentManagerCommandHandler(config, {
+    registry: managedAgents,
+    getInstanceId: () => instanceHeartbeat._real?.instanceId ?? null,
+    reloadConfig: async () => {
+      const next = loadConfig();
+      if (!next?.url || !next?.apiKey) return 'reload skipped: config missing';
+      const disruptive =
+        next.url !== config.url ||
+        next.apiKey !== config.apiKey ||
+        String(next.cli || '') !== String(config.cli || '');
+      Object.assign(config, next);
+      return disruptive ? 'reloaded (disruptive — server/apiKey/cli need restart)' : 'reloaded';
+    },
+  });
+
   const chatSessionManager = new ChatSessionManager(config, adapter);
   const ticketSessionManager = new TicketSessionManager(config, adapter);
   const fsBrowser = new FsBrowser(config, (config as any).fs_browser || {});
@@ -295,6 +316,7 @@ async function runRuntime(
       ticketSessionManager,
       fsBrowser,
       prompts: promptComposer,
+      agentManagerCommandHandler: commandHandler,
     },
     pluginVersion: version,
     onConnect: kickPresencePing,
@@ -313,6 +335,9 @@ async function runRuntime(
       version,
       cli: adapter.cliType,
       cliAdapters: KNOWN_ADAPTER_CLI_TYPES.slice() as string[],
+      // ST-5b — pass the registry as a snapshot source so each heartbeat
+      // reports the currently-supervised agent_ids and their working dirs.
+      managedAgents,
     });
     instanceHeartbeat._real.start();
     const fireUpload = (): void => {

@@ -139,12 +139,20 @@ export interface PromptComposer {
   ): string;
 }
 
+export interface AgentManagerCommandSink {
+  handle(raw: string): Promise<void>;
+}
+
 export interface EventDispatcherDeps {
   subagentManager?: SubagentManager | null;
   chatSessionManager?: ChatSessionManager | null;
   ticketSessionManager?: TicketSessionManager | null;
   fsBrowser?: FsBrowser | null;
   prompts?: PromptComposer | null;
+  // ST-5b — handler for agent_manager_command SSE events. Optional so the
+  // dispatcher stays usable in pre-ST-5b harnesses (and tests that don't
+  // care about manager control commands).
+  agentManagerCommandHandler?: AgentManagerCommandSink | null;
 }
 
 export class EventDispatcher {
@@ -154,6 +162,7 @@ export class EventDispatcher {
   #ticketSessionManager: TicketSessionManager | null;
   #fsBrowser: FsBrowser | null;
   #prompts: PromptComposer | null;
+  #agentManagerCommandHandler: AgentManagerCommandSink | null;
 
   constructor(config: AwbConfig, deps: EventDispatcherDeps = {}) {
     this.#config = config;
@@ -162,6 +171,7 @@ export class EventDispatcher {
     this.#ticketSessionManager = deps.ticketSessionManager ?? null;
     this.#fsBrowser = deps.fsBrowser ?? null;
     this.#prompts = deps.prompts ?? null;
+    this.#agentManagerCommandHandler = deps.agentManagerCommandHandler ?? null;
   }
 
   /** Route a raw SSE event payload to the right handler. */
@@ -174,6 +184,7 @@ export class EventDispatcher {
       case 'chat_room_message':
       case 'comment_mention':
       case 'fs_request':
+      case 'agent_manager_command':
         recordEvent(eventType, raw);
         break;
       default:
@@ -192,6 +203,10 @@ export class EventDispatcher {
         return this.handleCommentMention(raw);
       case 'fs_request':
         return this.handleFsRequest(raw);
+      case 'agent_manager_command':
+        return this.#agentManagerCommandHandler
+          ? this.#agentManagerCommandHandler.handle(raw)
+          : undefined;
     }
   }
 
