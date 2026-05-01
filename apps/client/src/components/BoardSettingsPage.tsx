@@ -6,18 +6,13 @@ import { useBoard } from '../hooks/useBoard';
 import { useToast } from '../contexts/ToastContext';
 import { useLoading } from '../contexts/LoadingContext';
 import PageHeader from './PageHeader';
-import PageTabs from './PageTabs';
 import ColumnManager from './ColumnManager';
 import { tokens } from '../tokens';
 import { Button } from './common';
-import ResourceManager from './admin/ResourceManager';
-
-type TabKey = 'columns' | 'resources';
 
 export default function BoardSettingsPage() {
   const { showToast } = useToast();
   const { withLoading } = useLoading();
-  const [activeTab, setActiveTab] = useState<TabKey>('columns');
 
   // Board and workspace identity come from the URL.
   const { wsId, boardId } = useParams<{ wsId: string; boardId: string }>();
@@ -96,40 +91,28 @@ export default function BoardSettingsPage() {
         title="Board Settings"
         description={board.name}
       />
-      <PageTabs
-        tabs={[
-          { id: 'columns', label: 'Columns', onClick: () => setActiveTab('columns') },
-          { id: 'resources', label: 'Resources', onClick: () => setActiveTab('resources') },
-        ]}
-        activeId={activeTab}
-      />
       <div style={{ ...pageStyle, flex: 1, overflow: 'auto', minHeight: 0 }}>
-        {activeTab === 'columns' && (
-          <ColumnManager
-            columns={board.columns}
-            boardId={board.id}
-            routingConfig={routingConfig}
-            columnPrompts={columnPrompts}
-            promptTemplates={promptTemplates}
-            workspaceRoles={workspaceRoles}
-            onCreateColumn={(bid, name, color) => wrap(() => createColumn(bid, name, color), 'Column created')}
-            onUpdateColumn={(columnId, data) => wrap(() => updateColumn(columnId, data), 'Column updated')}
-            onDeleteColumn={(columnId) => wrap(() => deleteColumn(columnId), 'Column deleted')}
-            onUpdateRoutingConfig={async (config) => {
-              await api.updateBoard(board.id, { routing_config: config });
-              refresh();
-            }}
-            onUpdateColumnPrompts={async (next) => {
-              // null clears all; empty object is equivalent per server contract.
-              const payload = Object.keys(next).length === 0 ? null : next;
-              await api.updateBoard(board.id, { column_prompts: payload });
-              refresh();
-            }}
-          />
-        )}
-        {activeTab === 'resources' && (
-          <ResourceManager workspaceId={wsId} boardId={boardId} />
-        )}
+        <ColumnManager
+          columns={board.columns}
+          boardId={board.id}
+          routingConfig={routingConfig}
+          columnPrompts={columnPrompts}
+          promptTemplates={promptTemplates}
+          workspaceRoles={workspaceRoles}
+          onCreateColumn={(bid, name, color) => wrap(() => createColumn(bid, name, color), 'Column created')}
+          onUpdateColumn={(columnId, data) => wrap(() => updateColumn(columnId, data), 'Column updated')}
+          onDeleteColumn={(columnId) => wrap(() => deleteColumn(columnId), 'Column deleted')}
+          onUpdateRoutingConfig={async (config) => {
+            await api.updateBoard(board.id, { routing_config: config });
+            refresh();
+          }}
+          onUpdateColumnPrompts={async (next) => {
+            // null clears all; empty object is equivalent per server contract.
+            const payload = Object.keys(next).length === 0 ? null : next;
+            await api.updateBoard(board.id, { column_prompts: payload });
+            refresh();
+          }}
+        />
       </div>
     </div>
   );
