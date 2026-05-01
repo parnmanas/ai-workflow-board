@@ -61,7 +61,8 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
   server.tool(
     'save_resource',
     'Create or update a resource. If `id` is provided → update; otherwise → create. ' +
-    'Supports four types: repository (GitHub repos etc.), document (text content), image (base64 file or URL), link (general URLs). ' +
+    'Supports five types: repository (GitHub repos etc.), document (text content), image (base64 file or URL), link (general URLs), comment_attachment (file payload to be tagged into a comment). ' +
+    'To attach a file to a comment from MCP: (1) call save_resource with type="comment_attachment" + file_data (base64) + file_name + file_mimetype, scoped to the same workspace as the target ticket; (2) pass the returned id in add_comment.attachment_resource_ids. Images render inline; videos render with an inline player; everything else renders as a download chip. ' +
     'Resources are automatically embedded for vector search when an embedding API is configured.',
     {
       workspace_id: z.string().describe('Workspace ID (required)'),
@@ -69,7 +70,7 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
       board_id: z.string().optional().describe('Board ID for board-scoped resources. Omit or null for workspace-level.'),
       name: z.string().describe('Resource name'),
       description: z.string().optional().describe('Short description'),
-      type: z.enum(['repository', 'document', 'image', 'link', 'comment_attachment']).optional().default('link').describe('Resource type. Do NOT set comment_attachment manually — reserved for inline comment uploads managed by the server.'),
+      type: z.enum(['repository', 'document', 'image', 'link', 'comment_attachment']).optional().default('link').describe('Resource type. Use comment_attachment for files you intend to attach to a comment via add_comment.attachment_resource_ids — they are hidden from the default Resources UI but linked from the comment that owns them.'),
       url: z.string().optional().describe('External URL (for repository/link/image types)'),
       content: z.string().optional().describe('Text content (for document type or notes)'),
       file_data: z.string().optional().describe('Base64-encoded file data (for image type)'),
