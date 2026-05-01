@@ -3,6 +3,13 @@ import { parseArgs } from 'node:util';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
+import {
+  AGENT_MANAGER_HOME,
+  CONFIG_PATH,
+  LEGACY_CONFIG_PATH,
+} from './lib/constants.js';
+import { loadConfig } from './lib/config.js';
+import { installCrashHandlers, log } from './lib/logging.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -47,44 +54,71 @@ function parseFlags(argv: string[]): CliFlags {
   };
 }
 
-function printHelp() {
+function printHelp(): void {
   process.stdout.write(`awb-agent-manager — standalone AWB subagent runner
 
 Usage:
   awb-agent-manager [options]
 
 Options:
-  -c, --config <path>     Path to config.json (default: platform XDG config dir)
+  -c, --config <path>     Path to config.json (default: ${CONFIG_PATH})
   -w, --workspace <id>    Override workspace_id from config
       --dry-run           Load config and exit without starting runtime
   -h, --help              Show this help text
   -v, --version           Print version
 
+Config search order:
+  1. --config flag
+  2. $AWB_AGENT_MANAGER_HOME/config.json
+  3. $XDG_CONFIG_HOME/awb-agent-manager/config.json (or %APPDATA% on Windows)
+  4. ~/.config/awb-agent-manager/config.json
+  5. Legacy claude-plugin path (auto-import in ST-3): ${LEGACY_CONFIG_PATH}
+
 Notes:
-  - This is a scaffold (ST-1). Runtime modules will be migrated from the
-    claude-plugins daemon in ST-2 and wired up here.
+  - This is a scaffold (ST-1 + ST-2 phase A). Runtime modules (event-stream,
+    session managers, subagent runner, cli adapters) are migrated incrementally.
 `);
 }
 
-async function main() {
+async function main(): Promise<void> {
   const flags = parseFlags(process.argv.slice(2));
 
   if (flags.help) {
     printHelp();
     return;
   }
-
   if (flags.version) {
     process.stdout.write(`${readPkgVersion()}\n`);
     return;
   }
 
+  installCrashHandlers();
+
   process.stdout.write(
     `awb-agent-manager v${readPkgVersion()} (scaffold — runtime not yet implemented)\n`,
   );
-  if (flags.config) process.stdout.write(`  --config:    ${flags.config}\n`);
-  if (flags.workspace) process.stdout.write(`  --workspace: ${flags.workspace}\n`);
-  if (flags.dryRun) process.stdout.write(`  --dry-run:   true\n`);
+  process.stdout.write(`  home:        ${AGENT_MANAGER_HOME}\n`);
+
+  const configPath = flags.config ?? CONFIG_PATH;
+  const config = loadConfig(configPath);
+  if (config) {
+    process.stdout.write(`  config:      ${configPath}\n`);
+    process.stdout.write(`  url:         ${config.url}\n`);
+    process.stdout.write(`  workspace:   ${flags.workspace ?? config.workspace_id ?? '(none)'}\n`);
+    process.stdout.write(`  cli:         ${config.cli ?? 'claude'}\n`);
+  } else {
+    process.stdout.write(`  config:      not found at ${configPath}\n`);
+    process.stdout.write(
+      `  hint:        config auto-import from ${LEGACY_CONFIG_PATH} lands in ST-3\n`,
+    );
+  }
+
+  if (flags.dryRun) {
+    log(`--dry-run: exiting after config load (config=${config ? 'loaded' : 'missing'})`);
+    return;
+  }
+
+  log('runtime not yet implemented — exiting cleanly');
 }
 
 main().catch((err) => {
