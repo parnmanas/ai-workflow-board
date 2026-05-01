@@ -500,3 +500,22 @@ export interface AgentProxySession {
   user_agent: string;
   board_id: string | null;
 }
+
+// Phase 3 — single daemon/proxy instance heartbeating against AWB. Mirrors
+// InstanceRecord in apps/server/src/modules/agent-manager/instance-registry.service.ts.
+// One Agent row can have multiple instances (proxy + daemon, or several
+// machines for the same agent identity); the registry preserves the per-
+// process detail the admin dashboard renders.
+export interface AgentManagerInstance {
+  instance_id: string;
+  agent_id: string;
+  workspace_id: string | null;
+  mode: 'daemon' | 'proxy';
+  hostname: string;
+  plugin_version: string;
+  cli: string;
+  cli_adapters: string[];
+  pid: number;
+  started_at: string;
+  last_seen_at: string;
+}

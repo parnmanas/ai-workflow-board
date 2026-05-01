@@ -5,6 +5,7 @@ import UserManager from './UserManager';
 import QaRunner from './QaRunner';
 import LogViewer from './LogViewer';
 import AgentLogViewer from './AgentLogViewer';
+import AgentManagerPage from './AgentManagerPage';
 import SettingsManager from './SettingsManager';
 import { tokens } from '../../tokens';
 
@@ -13,6 +14,7 @@ const pageTitles: Record<string, { title: string; description?: string }> = {
   qa: { title: 'QA Tests', description: 'Run quality assurance tests' },
   logs: { title: 'Server Logs', description: 'View server logs' },
   'agent-logs': { title: 'Agent Logs', description: 'Per-agent plugin error reports' },
+  'agent-manager': { title: 'Agent Manager', description: 'Live daemon/proxy instances heartbeating against this server' },
   settings: { title: 'Settings', description: 'System configuration' },
 };
 
@@ -36,6 +38,7 @@ export default function AdminPage() {
       <Route path="qa" element={<AdminRoute page="qa"><QaRunner /></AdminRoute>} />
       <Route path="logs" element={<AdminRoute page="logs"><LogViewer /></AdminRoute>} />
       <Route path="agent-logs" element={<AdminRoute page="agent-logs"><AgentLogViewer /></AdminRoute>} />
+      <Route path="agent-manager" element={<AdminRoute page="agent-manager"><AgentManagerPage /></AdminRoute>} />
       <Route path="settings" element={<AdminRoute page="settings"><SettingsManager /></AdminRoute>} />
       <Route path="*" element={<Navigate to="/admin/users" replace />} />
     </Routes>

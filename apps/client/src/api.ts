@@ -20,6 +20,7 @@ import type {
   SubagentSummary,
   SubagentTranscript,
   AgentProxySession,
+  AgentManagerInstance,
   TicketAttachmentMeta,
 } from './types';
 
@@ -616,6 +617,24 @@ export const api = {
   // (ticket lifecycle, MCP round-trips, multi-agent scoping, large data,
   // etc.) from the admin UI without dropping to a shell.
   runQaFlows: () => request<any>('/admin/qa/run-flows', { method: 'POST' }),
+
+  // ─── Admin Agent Manager (Phase 3) ─────────────────────
+  // Live registry of daemon/proxy plugin instances heartbeating against the
+  // server. One Agent row may have multiple instances (a developer running
+  // proxy.mjs on one host and daemon.mjs on another shares one agent id);
+  // this surface preserves the per-process detail.
+  listAgentManagerInstances: (workspaceId?: string) => {
+    const qs = new URLSearchParams();
+    if (workspaceId) qs.set('workspace_id', workspaceId);
+    const q = qs.toString();
+    return request<AgentManagerInstance[]>(`/admin/agent-manager/instances${q ? '?' + q : ''}`);
+  },
+  getAgentManagerInstanceSubagents: (instanceId: string) =>
+    request<SubagentSummary[]>(`/admin/agent-manager/instances/${encodeURIComponent(instanceId)}/subagents`),
+  getAgentManagerInstanceLogs: (instanceId: string, limit = 200) =>
+    request<any[]>(`/admin/agent-manager/instances/${encodeURIComponent(instanceId)}/logs?limit=${limit}`),
+  restartAgentManagerInstance: (instanceId: string) =>
+    request<any>(`/admin/agent-manager/instances/${encodeURIComponent(instanceId)}/restart`, { method: 'POST' }),
 
   // ─── Admin Logs ────────────────────────────────────────
   getLogs: (params?: { level?: string; category?: string; since?: string; until?: string; limit?: number; search?: string }) => {
