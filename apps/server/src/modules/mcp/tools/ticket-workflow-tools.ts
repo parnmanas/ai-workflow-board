@@ -23,13 +23,18 @@ export function registerTicketWorkflowTools(server: McpServer, ctx: ToolContext)
 
   server.tool(
     'move_ticket',
-    'Move a ticket to a different column. Specify target by column_id or column_name.\n\n' +
-    'WORKFLOW RULE — subtask completion:\n' +
+    'Move a root ticket to a different column. Specify target by column_id or column_name.\n\n' +
+    'SCOPE — root tickets only:\n' +
+    'move_ticket only applies to root tickets (depth = 0, parent_id = null). Child / subtask tickets have ' +
+    'column_id = null and live attached to their parent — there is no column to move them to. To finish a ' +
+    'subtask, call update_child_ticket(status="done") instead; do NOT try to move it.\n\n' +
+    'WORKFLOW RULE — parent moves forward only when children are done:\n' +
     'Before moving a parent ticket forward (e.g., In Progress → Review, or any column → a review/done column), ' +
     'verify that every child ticket is complete. A child counts as complete when its status is "done" OR when its ' +
     'column is marked is_terminal=true. Inspect children via get_ticket first; if any child is still open, either ' +
-    'finish it or leave the parent where it is. This rule is a convention (not enforced by the server), but agents ' +
-    'must respect it — moving a parent past unfinished children invalidates reviewer context.',
+    'finish it (assignee should call update_child_ticket(status="done") on the subtask once their work is in) or ' +
+    'leave the parent where it is. This rule is a convention (not enforced by the server), but agents must respect ' +
+    'it — moving a parent past unfinished children invalidates reviewer context.',
     {
       ticket_id: z.string().describe('Ticket ID'),
       target_column_id: z.string().optional().describe('Target column ID (use this OR target_column_name)'),
