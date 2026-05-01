@@ -79,7 +79,17 @@ export function registerTicketChildTools(server: McpServer, ctx: ToolContext): v
 
   server.tool(
     'update_child_ticket',
-    'Update a child ticket (title, description, status, priority, assignee, etc.)',
+    'Update a child (subtask) ticket\'s fields — title, description, status, priority, assignee, etc.\n\n' +
+    'WORKFLOW RULE — finishing a subtask:\n' +
+    'Subtasks (depth > 0, parent_id != null) do NOT live on a column, so move_ticket does not apply to them — ' +
+    'their column_id is null by design. When you finish work on a subtask, mark completion by calling ' +
+    'update_child_ticket with status="done". Without this, the parent ticket\'s "Subtasks (X/Y done)" progress ' +
+    'never advances and the parent\'s reviewer cannot tell whether the work is finished. The standard ' +
+    'subtask-end sequence is:\n' +
+    '  1) add_comment(ticket_id, "<results / notes>")\n' +
+    '  2) update_child_ticket(ticket_id, status="done")\n' +
+    'No move_ticket call — the parent will be moved later by whoever owns the root ticket once every sibling ' +
+    'subtask is also "done".',
     {
       ticket_id: z.string().describe('Child ticket ID'),
       title: z.string().optional().describe('New title'),

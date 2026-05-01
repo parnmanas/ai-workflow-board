@@ -123,7 +123,11 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
 
   server.tool(
     'update_ticket',
-    'Update a ticket\'s fields (title, description, priority, assignee, reporter, reviewer_id, labels, channel_ids)',
+    'Update a root ticket\'s fields (title, description, priority, assignee, reporter, reviewer_id, labels, channel_ids).\n\n' +
+    'NOTE: this tool does NOT change `status` and is intended for ROOT tickets. ' +
+    'Status on a root ticket is driven by which column it sits in — use move_ticket to advance it. ' +
+    'For SUBTASKS (depth > 0), use update_child_ticket — that\'s also where you mark a finished subtask ' +
+    'with status="done".',
     {
       ticket_id: z.string().describe('Ticket ID'),
       title: z.string().optional().describe('New title'),
