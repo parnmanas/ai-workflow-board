@@ -283,67 +283,83 @@ export default function Board() {
   // Board settings link uses workspace-scoped URL
   const settingsLink = wsId && boardId ? `/ws/${wsId}/boards/${boardId}/settings` : '#';
 
-  // Cross-board drop strip — only visible mid-drag when the dragged item is a
-  // root ticket and the workspace has at least one other board. Each entry is
-  // a Droppable; handleDragEnd routes `move-to-board-<id>` to the cross-board
-  // endpoint. Hidden when no other boards exist (the strip would only show
-  // dead space).
-  const moveBoardStrip = draggingRootTicket && otherBoards.length > 0 ? (
+  // Cross-board drop strip. Each board entry is a Droppable; handleDragEnd
+  // routes `move-to-board-<id>` to the cross-board endpoint.
+  //
+  // CRITICAL: The Droppables are mounted whenever `otherBoards` has entries,
+  // not just while a drag is in progress. hello-pangea/dnd does NOT support
+  // mounting/unmounting Droppables mid-drag — doing so triggers Invariant
+  // failures from internal `dragStopped`/`release` cleanup. The
+  // `draggingRootTicket` flag only toggles visibility (max-height + opacity),
+  // so the dnd registry sees a stable Droppable set across the whole drag
+  // lifecycle.
+  const stripVisible = draggingRootTicket && otherBoards.length > 0;
+  const moveBoardStrip = otherBoards.length > 0 ? (
     <div
+      aria-hidden={!stripVisible}
       style={{
-        display: 'flex',
-        gap: 8,
-        padding: '8px 16px',
-        borderBottom: `1px solid ${tokens.colors.border}`,
-        background: `${tokens.colors.accent}10`,
         flexShrink: 0,
-        overflowX: 'auto',
-        alignItems: 'center',
+        maxHeight: stripVisible ? 80 : 0,
+        opacity: stripVisible ? 1 : 0,
+        overflow: 'hidden',
+        borderBottom: stripVisible ? `1px solid ${tokens.colors.border}` : 'none',
+        background: `${tokens.colors.accent}10`,
+        transition: 'max-height 0.18s ease, opacity 0.15s ease',
       }}
     >
-      <span style={{
-        fontSize: '11px',
-        fontWeight: 700,
-        color: tokens.colors.textMuted,
-        textTransform: 'uppercase',
-        letterSpacing: '0.05em',
-        flexShrink: 0,
-        marginRight: 4,
-      }}>
-        Move to →
-      </span>
-      {otherBoards.map(b => (
-        <Droppable
-          droppableId={`move-to-board-${b.id}`}
-          key={b.id}
-          // Single-target drop, no item rendering needed inside.
-          isCombineEnabled={false}
-        >
-          {(provided, snapshot) => (
-            <div
-              ref={provided.innerRef}
-              {...provided.droppableProps}
-              style={{
-                padding: '6px 14px',
-                borderRadius: tokens.radii.md,
-                border: `1px dashed ${snapshot.isDraggingOver ? tokens.colors.accent : tokens.colors.borderStrong}`,
-                background: snapshot.isDraggingOver
-                  ? `${tokens.colors.accent}30`
-                  : tokens.colors.surfaceCard,
-                fontSize: '12px',
-                fontWeight: 600,
-                color: snapshot.isDraggingOver ? tokens.colors.textStrong : tokens.colors.textSecondary,
-                whiteSpace: 'nowrap',
-                transition: 'background 0.15s, border-color 0.15s, color 0.15s',
-                flexShrink: 0,
-              }}
-            >
-              {b.name}
-              <span style={{ display: 'none' }}>{provided.placeholder}</span>
-            </div>
-          )}
-        </Droppable>
-      ))}
+      <div
+        style={{
+          display: 'flex',
+          gap: 8,
+          padding: '8px 16px',
+          overflowX: 'auto',
+          alignItems: 'center',
+        }}
+      >
+        <span style={{
+          fontSize: '11px',
+          fontWeight: 700,
+          color: tokens.colors.textMuted,
+          textTransform: 'uppercase',
+          letterSpacing: '0.05em',
+          flexShrink: 0,
+          marginRight: 4,
+        }}>
+          Move to →
+        </span>
+        {otherBoards.map(b => (
+          <Droppable droppableId={`move-to-board-${b.id}`} key={b.id}>
+            {(provided, snapshot) => (
+              <div
+                ref={provided.innerRef}
+                {...provided.droppableProps}
+                style={{
+                  padding: '6px 14px',
+                  borderRadius: tokens.radii.md,
+                  border: `1px dashed ${snapshot.isDraggingOver ? tokens.colors.accent : tokens.colors.borderStrong}`,
+                  background: snapshot.isDraggingOver
+                    ? `${tokens.colors.accent}30`
+                    : tokens.colors.surfaceCard,
+                  fontSize: '12px',
+                  fontWeight: 600,
+                  color: snapshot.isDraggingOver ? tokens.colors.textStrong : tokens.colors.textSecondary,
+                  whiteSpace: 'nowrap',
+                  transition: 'background 0.15s, border-color 0.15s, color 0.15s',
+                  flexShrink: 0,
+                  position: 'relative',
+                }}
+              >
+                {b.name}
+                {/* Library expects the placeholder to be rendered as a
+                   sibling so it can measure dimensions. Drop-only zones
+                   don't actually need any visible space, but skipping
+                   the placeholder is unsupported — render it normally. */}
+                {provided.placeholder}
+              </div>
+            )}
+          </Droppable>
+        ))}
+      </div>
     </div>
   ) : null;
 
