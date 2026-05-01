@@ -31,6 +31,7 @@ import {
   SubagentLogPayload,
   SubagentEndedPayload,
   AgentInstanceUpdatePayload,
+  AgentManagerCommandPayload,
 } from '../../common/types/stream-events';
 import { EventDefinition, SubscriberIdentity } from './types';
 
@@ -648,13 +649,15 @@ export const EVENT_TYPES: EventDefinition[] = [
     emitterEvent: 'agent_instance_update',
     map(event: any) {
       const inst = event?.instance || {};
+      const mode: 'daemon' | 'proxy' | 'manager' =
+        inst.mode === 'daemon' ? 'daemon' : inst.mode === 'manager' ? 'manager' : 'proxy';
       const payload: AgentInstanceUpdatePayload = {
         action: event?.action === 'registered' || event?.action === 'removed' ? event.action : 'updated',
         instance: {
           instance_id: String(inst.instance_id || ''),
           agent_id: String(inst.agent_id || ''),
           workspace_id: typeof inst.workspace_id === 'string' ? inst.workspace_id : null,
-          mode: inst.mode === 'daemon' ? 'daemon' : 'proxy',
+          mode,
           hostname: String(inst.hostname || 'unknown'),
           plugin_version: String(inst.plugin_version || 'unknown'),
           cli: String(inst.cli || 'claude'),
@@ -662,6 +665,9 @@ export const EVENT_TYPES: EventDefinition[] = [
           pid: Number.isFinite(inst.pid) ? Number(inst.pid) : 0,
           started_at: String(inst.started_at || ''),
           last_seen_at: String(inst.last_seen_at || ''),
+          agent_ids: Array.isArray(inst.agent_ids) ? inst.agent_ids.map(String) : undefined,
+          working_dirs: Array.isArray(inst.working_dirs) ? inst.working_dirs.map(String) : undefined,
+          paired_at: typeof inst.paired_at === 'string' ? inst.paired_at : undefined,
         },
       };
       return {
@@ -674,5 +680,44 @@ export const EVENT_TYPES: EventDefinition[] = [
     // their sibling instances' presence (they already know about their own).
     filter: (env, identity) => identity.type === 'user',
     flatten: (env) => ({ event_type: 'agent_instance_update', ...(env.payload as object), timestamp: env.timestamp }),
+  },
+
+  // ───────── agent_manager_command ─────────
+  // ST-4 — AWB → awb-agent-manager control message. Per-agent delivery: only
+  // the manager whose Agent identity matches scope.agent_id receives this.
+  // Multiple manager processes can share one Agent identity (e.g., laptop + VM
+  // running with the same pairing code) — instance_id discrimination happens
+  // on the manager side after delivery.
+  {
+    eventType: 'agent_manager_command',
+    emitterEvent: 'agent_manager_command',
+    map(event: any) {
+      const payload: AgentManagerCommandPayload = {
+        command_id: String(event.command_id || ''),
+        instance_id: String(event.instance_id || ''),
+        agent_id: String(event.agent_id || ''),
+        command: event.command,
+        args: typeof event.args === 'object' && event.args ? event.args : {},
+        issued_by: String(event.issued_by || ''),
+        issued_at: String(event.issued_at || new Date().toISOString()),
+      };
+      return {
+        payload,
+        scope: { agent_id: payload.agent_id },
+        timestamp: payload.issued_at,
+      };
+    },
+    // Only the target manager-agent identity receives the command. agent-only
+    // delivery — admins watching the dashboard see the SSE round-trip via the
+    // ack-driven activity log entry, not the command event itself.
+    filter: (env, identity) => {
+      if (identity.type !== 'agent') return false;
+      return env.scope.agent_id === identity.agentId;
+    },
+    flatten: (env) => ({
+      event_type: 'agent_manager_command',
+      ...(env.payload as object),
+      timestamp: env.timestamp,
+    }),
   },
 ];

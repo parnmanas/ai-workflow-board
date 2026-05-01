@@ -501,16 +501,18 @@ export interface AgentProxySession {
   board_id: string | null;
 }
 
-// Phase 3 — single daemon/proxy instance heartbeating against AWB. Mirrors
-// InstanceRecord in apps/server/src/modules/agent-manager/instance-registry.service.ts.
+// Phase 3 — single daemon/proxy/manager instance heartbeating against AWB.
+// Mirrors InstanceRecord in
+// apps/server/src/modules/agent-manager/instance-registry.service.ts.
 // One Agent row can have multiple instances (proxy + daemon, or several
 // machines for the same agent identity); the registry preserves the per-
-// process detail the admin dashboard renders.
+// process detail the admin dashboard renders. ST-4 adds the 'manager' mode
+// for the standalone awb-agent-manager process (claude/codex/gemini parent).
 export interface AgentManagerInstance {
   instance_id: string;
   agent_id: string;
   workspace_id: string | null;
-  mode: 'daemon' | 'proxy';
+  mode: 'daemon' | 'proxy' | 'manager';
   hostname: string;
   plugin_version: string;
   cli: string;
@@ -518,4 +520,8 @@ export interface AgentManagerInstance {
   pid: number;
   started_at: string;
   last_seen_at: string;
+  // ST-4 manager-mode fields. Daemons/proxies leave these undefined.
+  agent_ids?: string[];
+  working_dirs?: string[];
+  paired_at?: string;
 }

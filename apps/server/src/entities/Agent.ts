@@ -50,6 +50,22 @@ export class Agent {
   @Column({ type: 'simple-json', nullable: true, default: null })
   role_prompt_meta: Record<string, any> | null;
 
+  // ST-4: agent-manager-managed working directory on the host running the
+  // agent CLI (claude/codex/gemini). Empty string = unset (manager will
+  // refuse to spawn until the admin sets one). Plain text rather than JSON
+  // because there is exactly one path per agent identity — multi-root
+  // agents would need a different abstraction.
+  @Column({ type: 'text', default: '' })
+  working_dir: string;
+
+  // ST-4: id of the agent-manager Agent row that supervises this agent.
+  // null for legacy / standalone agents (e.g. Claude CLI running with the
+  // bare plugin proxy). Set when an admin creates an agent identity through
+  // the agent-manager UI so the manager can route spawn/stop SSE commands
+  // to the right host.
+  @Column({ type: 'varchar', nullable: true, default: null })
+  manager_agent_id: string | null;
+
   @CreateDateColumn()
   created_at: Date;
 

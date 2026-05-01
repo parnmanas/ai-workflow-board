@@ -56,8 +56,12 @@ function formatDuration(startIso: string): string {
   }
 }
 
-function modeBadgeColor(mode: 'daemon' | 'proxy'): string {
-  return mode === 'daemon' ? tokens.colors.accentLight : tokens.colors.successLight;
+function modeBadgeColor(mode: 'daemon' | 'proxy' | 'manager'): string {
+  // manager → accent (admin-controllable), daemon → accentLight (legacy daemon),
+  // proxy → success (passive Claude CLI bridge).
+  if (mode === 'manager') return tokens.colors.accent;
+  if (mode === 'daemon') return tokens.colors.accentLight;
+  return tokens.colors.successLight;
 }
 
 interface InstanceRowProps {

@@ -25,7 +25,10 @@ export interface InstanceRecord {
   instance_id: string;
   agent_id: string;
   workspace_id: string | null;
-  mode: 'daemon' | 'proxy';
+  // ST-4: 'manager' is the standalone awb-agent-manager process — it is
+  // the AWB-side replacement for the plugin's daemon.mjs and supervises
+  // multiple agent identities (claude/codex/gemini).
+  mode: 'daemon' | 'proxy' | 'manager';
   hostname: string;
   plugin_version: string;
   cli: string;
@@ -33,6 +36,10 @@ export interface InstanceRecord {
   pid: number;
   started_at: string;
   last_seen_at: string;
+  // ST-4 manager-mode fields. Empty for daemon/proxy.
+  agent_ids?: string[];        // identities the manager currently supervises
+  working_dirs?: string[];     // distinct working-dir roots known to the manager
+  paired_at?: string;          // ISO timestamp when the manager redeemed its pairing token
 }
 
 const INSTANCE_TTL_MS = 90_000;     // 3x default plugin heartbeat interval

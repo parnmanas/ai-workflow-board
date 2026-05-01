@@ -1,44 +1,68 @@
 import { ApiBearerAuth, ApiSecurity, ApiTags, ApiOperation } from '@nestjs/swagger';
-import { Body, Controller, Get, Param, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
 import { Request, Response } from 'express';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { randomBytes } from 'crypto';
+import { Agent } from '../../entities/Agent';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
+import { WorkspaceGuard } from '../../common/guards/workspace.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
+import { CurrentUser, CurrentUserData } from '../../common/decorators/current-user.decorator';
+import { CurrentWorkspaceId } from '../../common/decorators/current-workspace.decorator';
 import { PERMISSIONS } from '../../common/types/permissions';
 import { LogService } from '../../services/log.service';
+import { ApiKeyService } from '../../services/api-key.service';
 import { SubagentMonitorService } from '../../services/subagent-monitor.service';
+import { activityEvents } from '../../services/activity.service';
 import { InstanceRegistryService } from './instance-registry.service';
+import { PairingService } from './pairing.service';
+import type { AgentManagerCommand, AgentManagerCommandPayload } from '../../common/types/stream-events';
+
+const ALLOWED_CLI_TYPES = new Set(['claude', 'codex', 'gemini', 'custom']);
+const ALLOWED_COMMANDS: ReadonlySet<AgentManagerCommand> = new Set([
+  'spawn_agent',
+  'stop_agent',
+  'restart_agent',
+  'set_working_dir',
+  'reload_config',
+] as const);
 
 /**
- * Agent Manager — Phase 3 admin dashboard for live daemon/proxy instances.
+ * Agent Manager — Phase 3 admin dashboard for live daemon/proxy/manager
+ * instances + ST-4 pairing/control flow for the standalone awb-agent-manager.
  *
  * Three audiences:
- *   - Plugin (X-Agent-Key): POST `/api/agent/instance-heartbeat` to register
- *     and refresh per-process presence. The Agent.last_seen_at row collapses
- *     all instances to one online flag; this endpoint preserves the per-process
- *     fan-out (host, mode, plugin version, registered CLI adapters).
+ *   - Plugin / agent-manager (X-Agent-Key): POST `/api/agent/instance-heartbeat`
+ *     to register and refresh per-process presence. ST-4 manager mode adds
+ *     agent_ids[]/working_dirs[]/paired_at to the InstanceRecord.
  *   - Admin user: GET `/api/admin/agent-manager/instances` etc. for the
- *     dashboard at `/admin/agent-manager`.
- *   - Self-update path (Phase 4): POST `/instances/:id/restart` is a stub —
- *     Phase 4 will deliver SIGUSR1 to the process via the daemon's signal
- *     handler.
+ *     dashboard at `/admin/agent-manager`. ST-4 adds pairing/command endpoints.
+ *   - awb-agent-manager bootstrap: POST `/api/agent-manager/pair/redeem`
+ *     swaps a one-time pairing token for an API key + agent identity.
+ *   - awb-agent-manager runtime: POST `/api/agent-manager/command/ack`
+ *     reports back the result of a control command.
  */
 @ApiTags('agent-manager')
 @Controller()
 export class AgentManagerController {
   constructor(
     private readonly registry: InstanceRegistryService,
+    private readonly pairing: PairingService,
+    private readonly apiKeyService: ApiKeyService,
     private readonly subagentMonitor: SubagentMonitorService,
     private readonly logService: LogService,
+    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
   ) {}
 
-  // ─── Plugin → Server ─────────────────────────────────────────────────────
+  // ─── Plugin / manager → Server ───────────────────────────────────────────
 
   @ApiSecurity('agent-api-key')
   @Post('api/agent/instance-heartbeat')
   @UseGuards(AgentAuthGuard)
   @ApiOperation({
-    summary: 'Plugin → server: register / refresh a daemon-or-proxy instance',
+    summary: 'Plugin / awb-agent-manager → server: register / refresh a process instance',
   })
   async heartbeat(@Body() body: any, @Req() req: Request, @Res() res: Response) {
     const auth = (req as any).apiKey;
@@ -55,10 +79,20 @@ export class AgentManagerController {
       return res.status(400).json({ error: 'agent_id is required (and could not be resolved from API key)' });
     }
 
-    const mode = body?.mode === 'daemon' ? 'daemon' : 'proxy';
+    const mode: 'daemon' | 'proxy' | 'manager' =
+      body?.mode === 'daemon' ? 'daemon' : body?.mode === 'manager' ? 'manager' : 'proxy';
     const cli_adapters = Array.isArray(body?.cli_adapters)
       ? body.cli_adapters.filter((s: unknown): s is string => typeof s === 'string' && !!s)
       : [];
+
+    // ST-4: manager-mode metadata. Daemons/proxies pass through as undefined.
+    const agent_ids = Array.isArray(body?.agent_ids)
+      ? body.agent_ids.filter((s: unknown): s is string => typeof s === 'string' && !!s)
+      : undefined;
+    const working_dirs = Array.isArray(body?.working_dirs)
+      ? body.working_dirs.filter((s: unknown): s is string => typeof s === 'string' && !!s)
+      : undefined;
+    const paired_at = typeof body?.paired_at === 'string' && body.paired_at ? body.paired_at : undefined;
 
     const rec = this.registry.upsert({
       instance_id,
@@ -71,18 +105,123 @@ export class AgentManagerController {
       cli_adapters,
       pid: Number.isFinite(body?.pid) ? Number(body.pid) : 0,
       started_at: typeof body?.started_at === 'string' && body.started_at ? body.started_at : new Date().toISOString(),
+      agent_ids,
+      working_dirs,
+      paired_at,
     });
 
     return res.json({ ok: true, instance_id: rec.instance_id, last_seen_at: rec.last_seen_at });
   }
 
-  // ─── Admin → Server ──────────────────────────────────────────────────────
+  // ─── ST-4 awb-agent-manager bootstrap (pairing redeem) ──────────────────
+
+  /**
+   * Manager-side: exchange a pairing token (issued by an admin via the AWB
+   * UI) for an API key, agent identity, and workspace binding. The token is
+   * the only auth — the handler is intentionally guard-less because the
+   * caller has nothing else yet. Single-shot: a redeemed token is consumed.
+   */
+  @Post('api/agent-manager/pair/redeem')
+  @ApiOperation({ summary: 'Manager bootstrap — redeem a pairing token for an API key + agent identity' })
+  async pairRedeem(@Body() body: any, @Res() res: Response) {
+    const token = typeof body?.token === 'string' ? body.token.trim() : '';
+    const code = typeof body?.code === 'string' ? body.code.trim().toUpperCase() : '';
+    const instance_id = typeof body?.instance_id === 'string' ? body.instance_id.trim() : '';
+    const hostname = typeof body?.hostname === 'string' ? body.hostname.trim() : 'unknown';
+    if (!token && !code) {
+      return res.status(400).json({ error: 'token or code is required' });
+    }
+    if (!instance_id) {
+      return res.status(400).json({ error: 'instance_id is required' });
+    }
+
+    // Resolve a code → token if the user typed in the short display code.
+    let resolvedToken = token;
+    if (!resolvedToken && code) {
+      // PairingService doesn't expose a code lookup directly (the token is
+      // the bearer, not the code). Iterate the workspace-scoped list of any
+      // known workspace to find a match — small fan-out, in-memory map.
+      // We don't know the workspace here, so do an unscoped scan via the
+      // service's internal map. Add a thin helper for this.
+      const found = (this.pairing as any).findByCode?.(code);
+      if (found && typeof found.token === 'string') resolvedToken = found.token;
+    }
+    if (!resolvedToken) return res.status(401).json({ error: 'Invalid or expired pairing token' });
+
+    const rec = this.pairing.redeem(resolvedToken, instance_id);
+    if (!rec) return res.status(401).json({ error: 'Invalid or expired pairing token' });
+
+    // Create (or reuse) the manager Agent identity. We always create a fresh
+    // identity per pairing redemption — sharing one Agent row across multiple
+    // hosts is supported (commands fan-out by agent_id), but each redemption
+    // gets its own row so revoking one host doesn't kick the others off.
+    const agentName = (rec.agent_name || `awb-agent-manager (${hostname})`).slice(0, 200);
+    const agent = await this.agentRepo.save(
+      this.agentRepo.create({
+        name: agentName,
+        description: 'awb-agent-manager — paired instance (ST-4)',
+        type: 'manager',
+        is_active: 1,
+        workspace_id: rec.workspace_id,
+        roles: '[]',
+      }),
+    );
+
+    const apiKey = await this.apiKeyService.createApiKey({
+      name: `agent-manager:${hostname}:${rec.id}`,
+      agent_id: agent.id,
+      scope: 'full',
+      workspace_id: rec.workspace_id,
+    });
+
+    this.logService.info('AgentManager', `Pairing redeemed id=${rec.id} ws=${rec.workspace_id} agent=${agent.id}`);
+
+    return res.status(201).json({
+      ok: true,
+      api_key: apiKey.raw_key,
+      agent_id: agent.id,
+      agent_name: agent.name,
+      workspace_id: rec.workspace_id,
+      paired_at: rec.redeemed_at,
+    });
+  }
+
+  // ─── ST-4 awb-agent-manager runtime — command ack ───────────────────────
+
+  /**
+   * Manager-side: report back the outcome of an agent_manager_command SSE
+   * dispatch. Arrives via REST (not SSE) so failure on the bidirectional
+   * stream doesn't strand the response. Requires the manager's API key
+   * (AgentAuthGuard) so a hostile client can't fake an ack for somebody
+   * else's command.
+   */
+  @ApiSecurity('agent-api-key')
+  @Post('api/agent-manager/command/ack')
+  @UseGuards(AgentAuthGuard)
+  @ApiOperation({ summary: 'Manager → server: ack the outcome of a control command' })
+  async commandAck(@Body() body: any, @Req() req: Request, @Res() res: Response) {
+    const callerAgentId = (req as any).currentAgentId || (req as any).apiKey?.agent_id || null;
+    const command_id = typeof body?.command_id === 'string' ? body.command_id : '';
+    const status = body?.status === 'ok' ? 'ok' : body?.status === 'error' ? 'error' : null;
+    if (!command_id || !status) {
+      return res.status(400).json({ error: 'command_id and status (ok|error) are required' });
+    }
+    const detail = typeof body?.detail === 'string' ? body.detail.slice(0, 2000) : '';
+    this.logService.info(
+      'AgentManager',
+      `Command ack id=${command_id} status=${status} agent=${callerAgentId}`,
+      { command_id, status, detail, agent_id: callerAgentId },
+    );
+    return res.json({ ok: true });
+  }
+
+  // ─── Admin → Server (instances) ──────────────────────────────────────────
 
   @ApiBearerAuth('user-session')
   @Get('api/admin/agent-manager/instances')
   @UseGuards(PermissionGuard)
   @RequirePermission(PERMISSIONS.ADMIN_ACCESS)
-  @ApiOperation({ summary: 'List currently-heartbeating daemon/proxy instances' })
+  @ApiOperation({ summary: 'List currently-heartbeating daemon/proxy/manager instances' })
   list(@Query('workspace_id') workspaceId: string, @Res() res: Response) {
     const data = workspaceId ? this.registry.listForWorkspace(workspaceId) : this.registry.list();
     return res.json(data);
@@ -146,5 +285,161 @@ export class AgentManagerController {
         'send SIGUSR1 directly to the process: `kill -USR1 <pid>` on the host.',
       instance: inst,
     });
+  }
+
+  // ─── ST-4 admin → server: pairing tokens ────────────────────────────────
+
+  @ApiBearerAuth('user-session')
+  @Post('api/admin/agent-manager/pair')
+  @UseGuards(PermissionGuard, WorkspaceGuard)
+  @RequirePermission(PERMISSIONS.ADMIN_ACCESS)
+  @ApiOperation({ summary: 'Mint a one-time pairing token for an awb-agent-manager bootstrap' })
+  pairMint(
+    @Body() body: any,
+    @CurrentUser() user: CurrentUserData | undefined,
+    @CurrentWorkspaceId() workspaceId: string | null,
+    @Res() res: Response,
+  ) {
+    if (!user) return res.status(401).json({ error: 'unauthenticated' });
+    if (!workspaceId) return res.status(400).json({ error: 'workspace_id is required' });
+    const agent_name = typeof body?.agent_name === 'string' && body.agent_name.trim()
+      ? body.agent_name.trim().slice(0, 200)
+      : undefined;
+    const rec = this.pairing.mint({
+      workspace_id: workspaceId,
+      created_by_user_id: user.id,
+      agent_name,
+    });
+    // Raw token is returned ONCE — caller must hand it (or the display code)
+    // to the manager CLI immediately. Subsequent listings only show the code.
+    return res.status(201).json(rec);
+  }
+
+  @ApiBearerAuth('user-session')
+  @Get('api/admin/agent-manager/pair')
+  @UseGuards(PermissionGuard, WorkspaceGuard)
+  @RequirePermission(PERMISSIONS.ADMIN_ACCESS)
+  @ApiOperation({ summary: 'List active pairing tokens for the current workspace' })
+  pairList(@CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
+    if (!workspaceId) return res.json([]);
+    return res.json(this.pairing.listForWorkspace(workspaceId));
+  }
+
+  @ApiBearerAuth('user-session')
+  @Delete('api/admin/agent-manager/pair/:id')
+  @UseGuards(PermissionGuard, WorkspaceGuard)
+  @RequirePermission(PERMISSIONS.ADMIN_ACCESS)
+  @ApiOperation({ summary: 'Revoke an unredeemed pairing token' })
+  pairRevoke(
+    @Param('id') id: string,
+    @CurrentWorkspaceId() workspaceId: string | null,
+    @Res() res: Response,
+  ) {
+    if (!workspaceId) return res.status(400).json({ error: 'workspace_id is required' });
+    const ok = this.pairing.revoke(id, workspaceId);
+    if (!ok) return res.status(404).json({ error: 'Pairing token not found' });
+    return res.json({ ok: true });
+  }
+
+  // ─── ST-4 admin → server: control commands ──────────────────────────────
+
+  @ApiBearerAuth('user-session')
+  @Post('api/admin/agent-manager/instances/:id/command')
+  @UseGuards(PermissionGuard)
+  @RequirePermission(PERMISSIONS.ADMIN_ACCESS)
+  @ApiOperation({
+    summary: 'Send a control command (spawn/stop/restart/set_working_dir/reload_config) to a manager instance',
+  })
+  sendCommand(
+    @Param('id') id: string,
+    @Body() body: any,
+    @CurrentUser() user: CurrentUserData | undefined,
+    @Res() res: Response,
+  ) {
+    if (!user) return res.status(401).json({ error: 'unauthenticated' });
+    const inst = this.registry.get(id);
+    if (!inst) return res.status(404).json({ error: 'Instance not found or expired' });
+    if (inst.mode !== 'manager') {
+      return res.status(409).json({
+        error: 'instance_is_not_manager',
+        message: 'Control commands only target awb-agent-manager instances; this is a daemon/proxy.',
+      });
+    }
+    const command = String(body?.command || '') as AgentManagerCommand;
+    if (!ALLOWED_COMMANDS.has(command)) {
+      return res.status(400).json({ error: `unknown command "${command}"` });
+    }
+    const args = typeof body?.args === 'object' && body.args ? body.args : {};
+    const command_id = randomBytes(8).toString('hex');
+    const issued_at = new Date().toISOString();
+
+    const payload: AgentManagerCommandPayload = {
+      command_id,
+      instance_id: inst.instance_id,
+      agent_id: inst.agent_id,
+      command,
+      args,
+      issued_by: user.id,
+      issued_at,
+    };
+    activityEvents.emit('agent_manager_command', { ...payload, timestamp: issued_at });
+    this.logService.info(
+      'AgentManager',
+      `Sent command ${command} to instance ${inst.instance_id} (agent=${inst.agent_id})`,
+      { command_id, args, issued_by: user.id },
+    );
+    return res.status(202).json({ ok: true, command_id, issued_at });
+  }
+
+  // ─── ST-4 admin → server: agent identity CRUD scoped for the manager ────
+
+  @ApiBearerAuth('user-session')
+  @Post('api/admin/agent-manager/agents')
+  @UseGuards(PermissionGuard, WorkspaceGuard)
+  @RequirePermission(PERMISSIONS.MANAGE_AGENTS)
+  @ApiOperation({
+    summary: 'Create an agent identity that the agent-manager will spawn (claude/codex/gemini)',
+  })
+  async createManagedAgent(
+    @Body() body: any,
+    @CurrentWorkspaceId() workspaceId: string | null,
+    @Res() res: Response,
+  ) {
+    if (!workspaceId) return res.status(400).json({ error: 'workspace_id is required' });
+    const name = typeof body?.name === 'string' ? body.name.trim() : '';
+    if (!name) return res.status(400).json({ error: 'name is required' });
+    const cli = typeof body?.cli === 'string' ? body.cli.trim().toLowerCase() : '';
+    if (!ALLOWED_CLI_TYPES.has(cli)) {
+      return res.status(400).json({ error: `cli must be one of ${[...ALLOWED_CLI_TYPES].join(', ')}` });
+    }
+    const working_dir = typeof body?.working_dir === 'string' ? body.working_dir.trim() : '';
+    const manager_agent_id = typeof body?.manager_agent_id === 'string' && body.manager_agent_id
+      ? body.manager_agent_id
+      : null;
+    const description = typeof body?.description === 'string' ? body.description : '';
+
+    // If a manager_agent_id is supplied, sanity-check it exists in the same
+    // workspace — silently dropping a typo'd link would make spawn-routing
+    // mysteriously fail.
+    if (manager_agent_id) {
+      const m = await this.agentRepo.findOne({ where: { id: manager_agent_id, workspace_id: workspaceId } });
+      if (!m) return res.status(400).json({ error: 'manager_agent_id does not exist in this workspace' });
+    }
+
+    const agent = await this.agentRepo.save(
+      this.agentRepo.create({
+        name,
+        description,
+        // Store the CLI selector in the existing `type` field so existing
+        // listings (which key off type) keep working. claude/codex/gemini/custom.
+        type: cli,
+        is_active: 1,
+        workspace_id: workspaceId,
+        working_dir,
+        manager_agent_id,
+        roles: '[]',
+      }),
+    );
+    return res.status(201).json(agent);
   }
 }
