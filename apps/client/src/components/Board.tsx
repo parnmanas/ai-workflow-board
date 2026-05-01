@@ -208,8 +208,20 @@ export default function Board() {
     );
   }
 
-  // Board settings link uses workspace-scoped URL
+  // Board-scoped action links (workspace-scoped URLs)
+  const resourcesLink = wsId && boardId ? `/ws/${wsId}/boards/${boardId}/resources` : '#';
   const settingsLink = wsId && boardId ? `/ws/${wsId}/boards/${boardId}/settings` : '#';
+
+  const headerActionStyle: React.CSSProperties = {
+    padding: '6px 14px',
+    borderRadius: 8,
+    background: tokens.colors.surfaceCard,
+    border: `1px solid ${tokens.colors.border}`,
+    fontSize: '13px',
+    color: tokens.colors.textSecondary,
+    textDecoration: 'none',
+    fontWeight: 500,
+  };
 
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
@@ -217,21 +229,14 @@ export default function Board() {
         title={board?.name || 'Board'}
         description={board?.description}
         actions={
-          <Link
-            to={settingsLink}
-            style={{
-              padding: '6px 14px',
-              borderRadius: 8,
-              background: tokens.colors.surfaceCard,
-              border: `1px solid ${tokens.colors.border}`,
-              fontSize: '13px',
-              color: tokens.colors.textSecondary,
-              textDecoration: 'none',
-              fontWeight: 500,
-            }}
-          >
-            ⚙ Board Settings
-          </Link>
+          <>
+            <Link to={resourcesLink} style={headerActionStyle}>
+              📁 Resources
+            </Link>
+            <Link to={settingsLink} style={headerActionStyle}>
+              ⚙ Settings
+            </Link>
+          </>
         }
       />
 
