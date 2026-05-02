@@ -150,6 +150,13 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
   const [subagents, setSubagents] = useState<SubagentSummary[] | null>(null);
   const [logs, setLogs] = useState<any[] | null>(null);
   const [restartPending, setRestartPending] = useState(false);
+  // Manager Agent.name + description live in the agents table, separate
+  // from inst.hostname (OS hostname). The header shows hostname; this
+  // load surfaces the Agent.name (used as the children's display prefix)
+  // so the operator can see and edit it. Only loaded for manager-mode
+  // instances since daemon/proxy don't have an editable identity.
+  const [managerInfo, setManagerInfo] = useState<{ name: string; description: string } | null>(null);
+  const [editIdentityOpen, setEditIdentityOpen] = useState(false);
 
   const loadSubagents = useCallback(async () => {
     try {
@@ -171,12 +178,28 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
     }
   }, [inst.instance_id, showToast]);
 
+  const loadManagerInfo = useCallback(async () => {
+    if (inst.mode !== 'manager') {
+      setManagerInfo(null);
+      return;
+    }
+    try {
+      const a = await api.getAgent(inst.agent_id);
+      setManagerInfo({ name: a.name || '', description: a.description || '' });
+    } catch (err: any) {
+      // Non-fatal: header degrades gracefully to hostname-only.
+      setManagerInfo(null);
+    }
+  }, [inst.mode, inst.agent_id]);
+
   useEffect(() => {
     setSubagents(null);
     setLogs(null);
+    setManagerInfo(null);
     loadSubagents();
     loadLogs();
-  }, [inst.instance_id, loadSubagents, loadLogs]);
+    loadManagerInfo();
+  }, [inst.instance_id, loadSubagents, loadLogs, loadManagerInfo]);
 
   const handleRestart = async () => {
     if (restartPending) return;
@@ -222,8 +245,16 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
             {inst.mode}
           </span>
           <h2 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: tokens.colors.textPrimary }}>
-            {inst.hostname}
+            {managerInfo?.name || inst.hostname}
           </h2>
+          {managerInfo?.name && managerInfo.name !== inst.hostname && (
+            <span
+              style={{ fontSize: 12, color: tokens.colors.textMuted }}
+              title="OS hostname reported by the manager process — distinct from the editable Agent identity name above."
+            >
+              host: {inst.hostname}
+            </span>
+          )}
           <span style={{ fontSize: 12, color: tokens.colors.textMuted, fontFamily: 'monospace' }}>
             {inst.instance_id}
           </span>
@@ -329,6 +360,27 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
         </dl>
 
         <div style={{ marginTop: 16, display: 'flex', gap: 8 }}>
+          {inst.mode === 'manager' && (
+            <button
+              onClick={() => setEditIdentityOpen(true)}
+              disabled={!managerInfo}
+              style={{
+                padding: '6px 14px',
+                fontSize: 12,
+                fontWeight: 600,
+                background: 'transparent',
+                color: tokens.colors.textStrong,
+                border: `1px solid ${tokens.colors.border}`,
+                borderRadius: tokens.radii.md,
+                cursor: managerInfo ? 'pointer' : 'wait',
+                fontFamily: 'inherit',
+                opacity: managerInfo ? 1 : 0.5,
+              }}
+              title="Rename the manager Agent identity. The new name becomes the prefix for every child agent in the UI."
+            >
+              Edit identity
+            </button>
+          )}
           <button
             onClick={handleRestart}
             disabled={restartPending}
@@ -348,7 +400,7 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
             Restart instance
           </button>
           <button
-            onClick={() => { loadSubagents(); loadLogs(); }}
+            onClick={() => { loadSubagents(); loadLogs(); loadManagerInfo(); }}
             style={{
               padding: '6px 14px',
               fontSize: 12,
@@ -365,6 +417,19 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
           </button>
         </div>
       </div>
+      {inst.mode === 'manager' && managerInfo && (
+        <EditAgentManagerDialog
+          isOpen={editIdentityOpen}
+          onClose={() => setEditIdentityOpen(false)}
+          managerAgentId={inst.agent_id}
+          initialName={managerInfo.name}
+          initialDescription={managerInfo.description}
+          onSubmitted={() => {
+            setEditIdentityOpen(false);
+            loadManagerInfo();
+          }}
+        />
+      )}
 
       {inst.mode === 'manager' && <ManagedAgentsSection inst={inst} />}
 
@@ -1163,6 +1228,112 @@ function MintedTokenPanel({ rec, onDismiss }: MintedTokenPanelProps) {
         </Button>
       </div>
     </div>
+  );
+}
+
+// ─── Manager-agent identity dialog (rename / describe) ───────────────
+//
+// The manager Agent's `name` field is what server-side `manager_name`
+// enrichment uses to prefix children as `<manager>/<agent>` in the UI.
+// Header in InstanceDetail shows `inst.hostname` (OS hostname from the
+// manager process), which can diverge from the Agent.name set at
+// pair-mint — that mismatch is the entire reason this dialog exists.
+// type/cli stay fixed as 'manager'.
+
+interface EditAgentManagerDialogProps {
+  isOpen: boolean;
+  onClose(): void;
+  managerAgentId: string;
+  initialName: string;
+  initialDescription: string;
+  onSubmitted(): void;
+}
+
+function EditAgentManagerDialog({
+  isOpen,
+  onClose,
+  managerAgentId,
+  initialName,
+  initialDescription,
+  onSubmitted,
+}: EditAgentManagerDialogProps) {
+  const { showToast } = useToast();
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    setName(initialName);
+    setDescription(initialDescription);
+    setBusy(false);
+  }, [isOpen, initialName, initialDescription]);
+
+  const submit = async () => {
+    const trimmedName = name.trim();
+    if (!trimmedName) {
+      showToast('Name is required', 'error');
+      return;
+    }
+    setBusy(true);
+    try {
+      await api.updateAgent(managerAgentId, {
+        name: trimmedName,
+        description,
+      });
+      showToast(`Manager identity updated`, 'success');
+      onSubmitted();
+    } catch (err: any) {
+      showToast(`Update failed: ${err?.message || err}`, 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      isOpen={isOpen}
+      onClose={onClose}
+      title="Edit manager identity"
+      maxWidth={460}
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose} disabled={busy}>
+            Cancel
+          </Button>
+          <Button variant="primary" onClick={submit} disabled={busy}>
+            Save
+          </Button>
+        </>
+      }
+    >
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div>
+          <label style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 4 }}>
+            Name
+          </label>
+          <Input
+            type="text"
+            value={name}
+            placeholder="e.g. Rolf"
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setName(e.target.value)}
+          />
+          <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2 }}>
+            Used as the <code>&lt;manager&gt;/&lt;agent&gt;</code> prefix for every child agent of this manager.
+          </div>
+        </div>
+        <div>
+          <label style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 4 }}>
+            Description (optional)
+          </label>
+          <Input
+            type="text"
+            value={description}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setDescription(e.target.value)}
+          />
+        </div>
+      </div>
+    </Modal>
   );
 }
 
