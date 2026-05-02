@@ -43,6 +43,38 @@ export class TicketSessionManager
       return { dispatched: false, reason: 'duplicate_trigger' };
     }
 
+    // Defensive per-agent cap. The server's TriggerLoopService already
+    // enforces this against AgentStatusService.active_tasks, but
+    // set_current_task lags the trigger by the spawn round-trip — two
+    // back-to-back triggers can both pass the server gate before either
+    // has stamped current_task. Mirror the cap here using the manager's
+    // own session map (which flips synchronously on spawn).
+    //
+    // Allowed: same agent already has a session for THIS ticket (a new
+    //   trigger on a live ticket session is a follow-up turn, not a new
+    //   ticket). The early-exit at line ~76 handles that case.
+    // Dropped: same agentId has active sessions on N OTHER tickets where
+    //   N >= maxConcurrentTicketsPerAgent.
+    const maxConcurrent = Math.max(
+      1,
+      Math.floor(spec.maxConcurrentTicketsPerAgent ?? 1),
+    );
+    if (spec.agentId && !this._getSession(sessionKey)) {
+      const otherTickets = new Set<string>();
+      for (const sess of this._sessions.values()) {
+        if (sess.agentId === spec.agentId && sess.ticketId && sess.ticketId !== spec.ticketId) {
+          otherTickets.add(sess.ticketId);
+        }
+      }
+      if (otherTickets.size >= maxConcurrent) {
+        log(
+          `[ticket-session] dispatch dropped (per-agent cap reached): agent=${spec.agentId.slice(0, 8)} ticket=${spec.ticketId.slice(0, 8)} max=${maxConcurrent} active=${otherTickets.size}`,
+        );
+        if (dedupKey) this._forgetDedup(dedupKey);
+        return { dispatched: false, reason: 'agent_cap_busy' };
+      }
+    }
+
     if (spec.forceRespawn === true) {
       const prev = this._getSession(sessionKey);
       if (prev) {
