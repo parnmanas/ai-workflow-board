@@ -680,6 +680,10 @@ function ManagedAgentsSection({ inst }: ManagedAgentsSectionProps) {
   const { showToast } = useToast();
   const [agents, setAgents] = useState<Agent[] | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  // null = closed, Agent = editing that row. Single dialog for create + edit
+  // since they share the same form (mode flag inside the dialog handles the
+  // CLI lock + autoSpawn checkbox visibility).
+  const [editAgent, setEditAgent] = useState<Agent | null>(null);
   const [pendingCmd, setPendingCmd] = useState<string | null>(null); // `${cmd}:${agentId}`
 
   // The manager Agent identity is `inst.agent_id` (created by pair/redeem).
@@ -835,6 +839,14 @@ function ManagedAgentsSection({ inst }: ManagedAgentsSectionProps) {
                     </span>
                   </div>
                   <div style={{ display: 'flex', gap: 4 }}>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setEditAgent(a)}
+                      title="Edit name / working_dir / description. CLI is fixed."
+                    >
+                      Edit
+                    </Button>
                     {COMMAND_BUTTONS.map((btn) => (
                       <Button
                         key={btn.kind}
@@ -867,14 +879,28 @@ function ManagedAgentsSection({ inst }: ManagedAgentsSectionProps) {
         </ul>
       )}
 
-      <CreateManagedAgentDialog
+      <ManagedAgentDialog
         isOpen={createOpen}
         onClose={() => setCreateOpen(false)}
         managerAgentId={inst.agent_id}
         managerInstanceId={inst.instance_id}
         defaultCli={inst.cli}
-        onCreated={() => {
+        mode="create"
+        onSubmitted={() => {
           setCreateOpen(false);
+          refresh();
+        }}
+      />
+      <ManagedAgentDialog
+        isOpen={editAgent !== null}
+        onClose={() => setEditAgent(null)}
+        managerAgentId={inst.agent_id}
+        managerInstanceId={inst.instance_id}
+        defaultCli={inst.cli}
+        mode="edit"
+        agent={editAgent}
+        onSubmitted={() => {
+          setEditAgent(null);
           refresh();
         }}
       />
@@ -1140,30 +1166,45 @@ function MintedTokenPanel({ rec, onDismiss }: MintedTokenPanelProps) {
   );
 }
 
-// ─── Create managed-agent dialog ──────────────────────────────────────
+// ─── Managed-agent dialog (create / edit) ─────────────────────────────
 
-interface CreateManagedAgentDialogProps {
+type CliKind = 'claude' | 'codex' | 'gemini' | 'custom';
+
+interface ManagedAgentDialogProps {
   isOpen: boolean;
   onClose(): void;
   managerAgentId: string;
   /** Manager instance id — used to dispatch a follow-up spawn_agent SSE
-   *  command after Create succeeds, so the operator gets one-click setup. */
+   *  command (create mode) or set_working_dir (edit mode, when working_dir
+   *  changed) so the running manager picks up the change live. */
   managerInstanceId: string;
   defaultCli: string;
-  onCreated(): void;
+  /** Create vs edit. In edit mode `agent` must be provided and CLI is locked. */
+  mode: 'create' | 'edit';
+  agent?: Agent | null;
+  onSubmitted(): void;
 }
 
-const CLI_OPTIONS: { value: 'claude' | 'codex' | 'gemini' | 'custom'; label: string }[] = [
+const CLI_OPTIONS: { value: CliKind; label: string }[] = [
   { value: 'claude', label: 'Claude Code' },
   { value: 'codex', label: 'Codex' },
   { value: 'gemini', label: 'Gemini' },
   { value: 'custom', label: 'Custom' },
 ];
 
-function CreateManagedAgentDialog({ isOpen, onClose, managerAgentId, managerInstanceId, defaultCli, onCreated }: CreateManagedAgentDialogProps) {
+function ManagedAgentDialog({
+  isOpen,
+  onClose,
+  managerAgentId,
+  managerInstanceId,
+  defaultCli,
+  mode,
+  agent,
+  onSubmitted,
+}: ManagedAgentDialogProps) {
   const { showToast } = useToast();
   const [name, setName] = useState('');
-  const [cli, setCli] = useState<'claude' | 'codex' | 'gemini' | 'custom'>('claude');
+  const [cli, setCli] = useState<CliKind>('claude');
   const [workingDir, setWorkingDir] = useState('');
   const [description, setDescription] = useState('');
   const [autoSpawn, setAutoSpawn] = useState(true);
@@ -1175,16 +1216,25 @@ function CreateManagedAgentDialog({ isOpen, onClose, managerAgentId, managerInst
 
   useEffect(() => {
     if (!isOpen) return;
-    setName('');
-    setWorkingDir('');
-    setDescription('');
-    setAutoSpawn(true);
     setPickerOpen(false);
-    // Default CLI tracks the manager's primary CLI, but the operator can
-    // override it (e.g., spawn a Gemini agent under a Claude-default manager).
-    const defaulted = CLI_OPTIONS.find((o) => o.value === defaultCli)?.value || 'claude';
-    setCli(defaulted);
-  }, [isOpen, defaultCli]);
+    setBusy(false);
+    if (mode === 'edit' && agent) {
+      setName(agent.name);
+      setCli((CLI_OPTIONS.find((o) => o.value === agent.type)?.value as CliKind) || 'custom');
+      setWorkingDir(agent.working_dir || '');
+      setDescription(agent.description || '');
+      setAutoSpawn(false);
+    } else {
+      setName('');
+      setWorkingDir('');
+      setDescription('');
+      setAutoSpawn(true);
+      // Default CLI tracks the manager's primary CLI, but the operator can
+      // override it (e.g., spawn a Gemini agent under a Claude-default manager).
+      const defaulted = CLI_OPTIONS.find((o) => o.value === defaultCli)?.value || 'claude';
+      setCli(defaulted);
+    }
+  }, [isOpen, mode, agent, defaultCli]);
 
   const submit = async () => {
     const trimmedName = name.trim();
@@ -1193,52 +1243,91 @@ function CreateManagedAgentDialog({ isOpen, onClose, managerAgentId, managerInst
       return;
     }
     const trimmedWorkingDir = workingDir.trim();
-    if (autoSpawn && !trimmedWorkingDir) {
+    if (mode === 'create' && autoSpawn && !trimmedWorkingDir) {
       showToast('Working directory is required when "Spawn after create" is on', 'error');
       return;
     }
     setBusy(true);
     try {
-      // Step 1: create the AWB Agent identity. Returns the new Agent row.
-      const created = await api.createManagedAgent({
-        name: trimmedName,
-        cli,
-        working_dir: trimmedWorkingDir || undefined,
-        manager_agent_id: managerAgentId,
-        description: description.trim() || undefined,
-      });
-      showToast(`Agent "${trimmedName}" created`, 'success');
+      if (mode === 'edit') {
+        if (!agent) throw new Error('edit mode without agent');
+        // Only send fields the user can actually change here. CLI (`type`)
+        // is intentionally locked — changing the underlying binary on a
+        // live agent identity would invalidate its on-disk per-agent CLI
+        // home dir and confuse routing, so it stays a create-time decision.
+        await api.updateAgent(agent.id, {
+          name: trimmedName,
+          description,
+          working_dir: trimmedWorkingDir,
+        });
+        showToast(`Agent "${trimmedName}" updated`, 'success');
 
-      // Step 2 (optional): one-click spawn — dispatch spawn_agent on the
-      // owning manager so it provisions the apiKey, writes per-agent
-      // mcp-config, and starts routing matching SSE events to the new
-      // agent's identity. Without this the operator has to click Spawn
-      // separately on the row that just appeared.
-      if (autoSpawn && created?.id) {
-        try {
-          const resp = await api.sendAgentManagerCommand(managerInstanceId, {
-            command: 'spawn_agent',
-            args: { agent_id: created.id },
-          });
-          showToast(`spawn_agent dispatched (id=${resp.command_id.slice(0, 8)})`, 'success');
-        } catch (err: any) {
-          showToast(`Auto-spawn failed: ${err?.message || err} (you can retry from the row)`, 'error');
+        // Working_dir change on a running agent: ping the manager so its
+        // in-memory registry reflects the new cwd immediately. Without this
+        // the manager keeps using the old cwd until the next spawn cycle.
+        const wdChanged = (agent.working_dir || '') !== trimmedWorkingDir;
+        if (wdChanged && trimmedWorkingDir) {
+          try {
+            const resp = await api.sendAgentManagerCommand(managerInstanceId, {
+              command: 'set_working_dir',
+              args: { agent_id: agent.id, working_dir: trimmedWorkingDir },
+            });
+            showToast(
+              `set_working_dir dispatched (id=${resp.command_id.slice(0, 8)}) — restart agent to pick up new cwd`,
+              'success',
+            );
+          } catch (err: any) {
+            showToast(
+              `Saved, but failed to notify manager: ${err?.message || err}`,
+              'error',
+            );
+          }
+        }
+      } else {
+        // Create flow.
+        const created = await api.createManagedAgent({
+          name: trimmedName,
+          cli,
+          working_dir: trimmedWorkingDir || undefined,
+          manager_agent_id: managerAgentId,
+          description: description.trim() || undefined,
+        });
+        showToast(`Agent "${trimmedName}" created`, 'success');
+
+        // One-click spawn — dispatch spawn_agent on the owning manager so it
+        // provisions the apiKey, writes per-agent mcp-config, and starts
+        // routing matching SSE events to the new agent's identity.
+        if (autoSpawn && created?.id) {
+          try {
+            const resp = await api.sendAgentManagerCommand(managerInstanceId, {
+              command: 'spawn_agent',
+              args: { agent_id: created.id },
+            });
+            showToast(`spawn_agent dispatched (id=${resp.command_id.slice(0, 8)})`, 'success');
+          } catch (err: any) {
+            showToast(`Auto-spawn failed: ${err?.message || err} (you can retry from the row)`, 'error');
+          }
         }
       }
 
-      onCreated();
+      onSubmitted();
     } catch (err: any) {
-      showToast(`Create failed: ${err?.message || err}`, 'error');
+      showToast(
+        `${mode === 'edit' ? 'Update' : 'Create'} failed: ${err?.message || err}`,
+        'error',
+      );
     } finally {
       setBusy(false);
     }
   };
 
+  const isEdit = mode === 'edit';
+
   return (
     <Modal
       isOpen={isOpen}
       onClose={onClose}
-      title="Create managed agent"
+      title={isEdit ? 'Edit managed agent' : 'Create managed agent'}
       maxWidth={520}
       footer={
         <>
@@ -1246,7 +1335,7 @@ function CreateManagedAgentDialog({ isOpen, onClose, managerAgentId, managerInst
             Cancel
           </Button>
           <Button variant="primary" onClick={submit} disabled={busy}>
-            Create
+            {isEdit ? 'Save' : 'Create'}
           </Button>
         </>
       }
@@ -1271,7 +1360,13 @@ function CreateManagedAgentDialog({ isOpen, onClose, managerAgentId, managerInst
             value={cli}
             options={CLI_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
             onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setCli(e.target.value as any)}
+            disabled={isEdit}
           />
+          {isEdit && (
+            <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2 }}>
+              CLI is fixed once the agent identity is created — make a new agent if you need a different CLI.
+            </div>
+          )}
         </div>
         <div>
           <label style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 4 }}>
@@ -1295,7 +1390,9 @@ function CreateManagedAgentDialog({ isOpen, onClose, managerAgentId, managerInst
             </Button>
           </div>
           <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2 }}>
-            Leave blank to set later via the agent row's <em>set_working_dir</em> action.
+            {isEdit
+              ? 'Changing this dispatches set_working_dir to the manager — restart the agent to pick up the new cwd.'
+              : 'Leave blank to set later via the agent row\'s set_working_dir action.'}
           </div>
         </div>
         <DirectoryPicker
@@ -1317,21 +1414,23 @@ function CreateManagedAgentDialog({ isOpen, onClose, managerAgentId, managerInst
             onChange={(e: React.ChangeEvent<HTMLInputElement>) => setDescription(e.target.value)}
           />
         </div>
-        <div>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: tokens.colors.textPrimary }}>
-            <input
-              type="checkbox"
-              checked={autoSpawn}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setAutoSpawn(e.target.checked)}
-            />
-            <span>Spawn on this manager after create</span>
-          </label>
-          <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2 }}>
-            One-click setup: the manager provisions an apiKey for this agent,
-            writes its config + mcp-config files, and starts handling matching
-            ticket / chat / mention events. Requires Working directory above.
+        {!isEdit && (
+          <div>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: tokens.colors.textPrimary }}>
+              <input
+                type="checkbox"
+                checked={autoSpawn}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setAutoSpawn(e.target.checked)}
+              />
+              <span>Spawn on this manager after create</span>
+            </label>
+            <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2 }}>
+              One-click setup: the manager provisions an apiKey for this agent,
+              writes its config + mcp-config files, and starts handling matching
+              ticket / chat / mention events. Requires Working directory above.
+            </div>
           </div>
-        </div>
+        )}
       </div>
     </Modal>
   );
