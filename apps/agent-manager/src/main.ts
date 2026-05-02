@@ -30,7 +30,7 @@ import { onFlushThreshold } from './lib/event-log-recorder.js';
 import { cleanupOrphanSubagents } from './lib/orphan-cleanup.js';
 import { FsBrowser } from './lib/fs-browser.js';
 import { SubagentMonitor } from './lib/subagent-monitor.js';
-import { KNOWN_ADAPTER_CLI_TYPES } from './lib/cli-adapters/index.js';
+import { KNOWN_ADAPTER_CLI_TYPES, createAdapter } from './lib/cli-adapters/index.js';
 import { promptComposer } from './lib/prompts.js';
 import { ManagedAgentRegistry } from './lib/managed-agents.js';
 import { ManagedAgentContextRegistry } from './lib/managed-agent-context.js';
@@ -449,6 +449,17 @@ async function runRuntime(
       // a rehydrated agent's first event-spawn can immediately point its
       // CLI's CLAUDE_CONFIG_DIR / GEMINI_HOME / CODEX_HOME at the dir.
       await ensureCliHomeDir(id);
+      // Also re-run the adapter's cli-home prep on every rehydrate. The
+      // typical case is claude's credentials symlink: it can go stale when
+      // the operator re-auths on the host, and rehydrate is the only
+      // post-spawn point we know we'll hit before the next subagent
+      // fork. Failures here are logged but non-fatal — the CLI itself
+      // will surface a clearer auth error if the symlink is broken.
+      try {
+        await createAdapter(cfg.cli).prepareCliHome(cliHomeDirFor(id));
+      } catch (err: any) {
+        log(`rehydrate: cli-home prep failed for agent=${id.slice(0, 8)} cli=${cfg.cli}: ${err?.message ?? err}`);
+      }
       managedAgentContexts.upsert({
         agent_id: id,
         name: cfg.name,
