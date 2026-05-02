@@ -69,19 +69,26 @@ function readPkgVersion(): string {
 }
 
 function parseFlags(argv: string[]): CliFlags {
-  const { values } = parseArgs({
-    args: argv,
-    options: {
-      config: { type: 'string', short: 'c' },
-      workspace: { type: 'string', short: 'w' },
-      'dry-run': { type: 'boolean' },
-      help: { type: 'boolean', short: 'h' },
-      version: { type: 'boolean', short: 'v' },
-      force: { type: 'boolean', short: 'f' },
-    },
-    allowPositionals: true,
-    strict: false,
-  });
+  let values: Record<string, unknown>;
+  try {
+    ({ values } = parseArgs({
+      args: argv,
+      options: {
+        config: { type: 'string', short: 'c' },
+        workspace: { type: 'string', short: 'w' },
+        'dry-run': { type: 'boolean' },
+        help: { type: 'boolean', short: 'h' },
+        version: { type: 'boolean', short: 'v' },
+        force: { type: 'boolean', short: 'f' },
+      },
+      allowPositionals: false,
+      strict: true,
+    }));
+  } catch (err: any) {
+    process.stderr.write(`\n  ✗ ${err?.message ?? err}\n\n`);
+    process.stderr.write(`  Run \`awb-agent-manager --help\` for usage.\n\n`);
+    process.exit(2);
+  }
 
   return {
     config: values.config as string | undefined,
@@ -118,9 +125,6 @@ Setup options (\`awb-agent-manager setup ...\`):
       --non-interactive      Fail fast on missing fields instead of prompting
       --force                Overwrite an existing config.json
 
-      Note: CLI is per-managed-agent now (set in AWB Admin → Agent
-      Manager → Managed Agents → Create), not a manager-wide value.
-
 Service options (\`awb-agent-manager service install ...\`):
       --system               Install at /etc/systemd/system/ (sudo, runs at boot pre-login)
                              Default: ~/.config/systemd/user/ (no sudo, needs \`loginctl enable-linger\`)
@@ -153,19 +157,26 @@ Signals:
  * flag set stays narrow (no setup-only flags polluting -h output).
  */
 function parseSetupArgs(argv: string[]): SetupOptions {
-  const { values } = parseArgs({
-    args: argv,
-    options: {
-      config: { type: 'string', short: 'c' },
-      url: { type: 'string' },
-      token: { type: 'string' },
-      'instance-id': { type: 'string' },
-      'non-interactive': { type: 'boolean' },
-      force: { type: 'boolean', short: 'f' },
-    },
-    allowPositionals: true,
-    strict: false,
-  });
+  let values: Record<string, unknown>;
+  try {
+    ({ values } = parseArgs({
+      args: argv,
+      options: {
+        config: { type: 'string', short: 'c' },
+        url: { type: 'string' },
+        token: { type: 'string' },
+        'instance-id': { type: 'string' },
+        'non-interactive': { type: 'boolean' },
+        force: { type: 'boolean', short: 'f' },
+      },
+      allowPositionals: false,
+      strict: true,
+    }));
+  } catch (err: any) {
+    process.stderr.write(`\n  ✗ setup: ${err?.message ?? err}\n\n`);
+    process.stderr.write(`  Run \`awb-agent-manager --help\` for setup options.\n\n`);
+    process.exit(2);
+  }
   return {
     configPath: (values.config as string | undefined) || undefined,
     url: (values.url as string | undefined) || undefined,
@@ -200,25 +211,41 @@ async function main(): Promise<void> {
   // (no sudo). System mode requires sudo. See lib/service-install.ts.
   if (argv[0] === 'service') {
     const sub = argv[1] || '';
-    const subArgs = argv.slice(2);
-    const isSystem = subArgs.includes('--system');
-    const dryRun = subArgs.includes('--dry-run');
-    const unitOnly = subArgs.includes('--unit-only');
-    const execIdx = subArgs.indexOf('--exec-path');
-    const execPath = execIdx >= 0 ? subArgs[execIdx + 1] : undefined;
+    if (sub !== 'install' && sub !== 'uninstall') {
+      process.stderr.write(
+        `\n  ✗ service: unknown subcommand '${sub}' (expected: install | uninstall)\n\n` +
+          `  Usage: awb-agent-manager service <install|uninstall> [--system] [--exec-path <p>] [--dry-run] [--unit-only]\n\n`,
+      );
+      process.exit(2);
+    }
+    let serviceValues: Record<string, unknown>;
+    try {
+      ({ values: serviceValues } = parseArgs({
+        args: argv.slice(2),
+        options: {
+          system: { type: 'boolean' },
+          'dry-run': { type: 'boolean' },
+          'unit-only': { type: 'boolean' },
+          'exec-path': { type: 'string' },
+        },
+        allowPositionals: false,
+        strict: true,
+      }));
+    } catch (err: any) {
+      process.stderr.write(`\n  ✗ service ${sub}: ${err?.message ?? err}\n\n`);
+      process.exit(2);
+    }
+    const isSystem = Boolean(serviceValues.system);
+    const dryRun = Boolean(serviceValues['dry-run']);
+    const unitOnly = Boolean(serviceValues['unit-only']);
+    const execPath = serviceValues['exec-path'] as string | undefined;
     try {
       if (sub === 'install') {
         await installService({ system: isSystem, execPath, dryRun, unitOnly });
-        process.exit(0);
-      }
-      if (sub === 'uninstall') {
+      } else {
         await uninstallService({ system: isSystem });
-        process.exit(0);
       }
-      process.stderr.write(
-        `\n  Usage: awb-agent-manager service <install|uninstall> [--system] [--exec-path <p>] [--dry-run] [--unit-only]\n\n`,
-      );
-      process.exit(2);
+      process.exit(0);
     } catch (err: any) {
       process.stderr.write(`\n  ✗ service ${sub} failed: ${err?.message ?? err}\n\n`);
       process.exit(1);
@@ -268,7 +295,7 @@ async function main(): Promise<void> {
         `\n  No config yet. Run the pairing wizard to set one up:\n\n` +
           `      awb-agent-manager setup\n\n` +
           `  Or non-interactively (CI / Ansible):\n\n` +
-          `      awb-agent-manager setup --url <awb-url> --token <pairing-token> [--cli claude]\n\n` +
+          `      awb-agent-manager setup --url <awb-url> --token <pairing-token>\n\n` +
           `  The token comes from AWB Admin → Agent Manager → "Pair manager…".\n`,
       );
     }
@@ -343,7 +370,7 @@ async function runRuntime(
   }
 
   log(
-    `agent-manager starting (server=${config.url} version=${version} per-agent cli)`,
+    `agent-manager starting (server=${config.url} version=${version})`,
   );
   log(
     `Delegation: maxConcurrent=${config.delegation.maxConcurrent} ttl=${config.delegation.ttlMinutes}min idle=${config.delegation.idleMinutes}min cliBin=${config.delegation.claudeBin}`,
@@ -580,13 +607,12 @@ async function runRuntime(
     }
     const disruptive =
       next.url !== config.url ||
-      next.apiKey !== config.apiKey ||
-      String(next.cli || '') !== String(config.cli || '');
+      next.apiKey !== config.apiKey;
     Object.assign(config, next);
     log(
       `SIGHUP: config reloaded (delegation.maxConcurrent=${config.delegation.maxConcurrent} ` +
         `ttl=${config.delegation.ttlMinutes}min idle=${config.delegation.idleMinutes}min)` +
-        (disruptive ? ' — server/apiKey/cli changes need a manager restart to take effect' : ''),
+        (disruptive ? ' — server/apiKey changes need a manager restart to take effect' : ''),
     );
   });
 
