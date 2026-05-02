@@ -18,6 +18,7 @@ import {
 import { importLegacyConfig } from './lib/legacy-import.js';
 import { runSelfUpdate } from './lib/self-update.js';
 import { runSetup, type SetupOptions } from './lib/setup.js';
+import { installService, uninstallService } from './lib/service-install.js';
 import { PresenceHeartbeat } from './lib/presence-heartbeat.js';
 import { InstanceHeartbeat } from './lib/instance-heartbeat.js';
 import { EventStream } from './lib/event-stream.js';
@@ -94,9 +95,11 @@ function printHelp(): void {
   process.stdout.write(`awb-agent-manager — standalone AWB subagent runner
 
 Usage:
-  awb-agent-manager                   start the manager (uses saved config)
-  awb-agent-manager setup [opts]      first-run pairing wizard
-  awb-agent-manager [options]         start with overrides
+  awb-agent-manager                       start the manager (uses saved config)
+  awb-agent-manager setup [opts]          first-run pairing wizard
+  awb-agent-manager service install [..]  register as a systemd service
+  awb-agent-manager service uninstall     remove the systemd service
+  awb-agent-manager [options]             start with overrides
 
 Options:
   -c, --config <path>     Path to config.json (default: ${CONFIG_PATH})
@@ -115,6 +118,13 @@ Setup options (\`awb-agent-manager setup ...\`):
 
       Note: CLI is per-managed-agent now (set in AWB Admin → Agent
       Manager → Managed Agents → Create), not a manager-wide value.
+
+Service options (\`awb-agent-manager service install ...\`):
+      --system               Install at /etc/systemd/system/ (sudo, runs at boot pre-login)
+                             Default: ~/.config/systemd/user/ (no sudo, needs \`loginctl enable-linger\`)
+      --exec-path <path>     Override path to dist/main.js (default: this binary's location)
+      --dry-run              Print the unit file without writing or running systemctl
+      --unit-only            Write the unit file but skip daemon-reload + enable + restart
 
 Config search order:
   1. --config flag
@@ -178,6 +188,37 @@ async function main(): Promise<void> {
       process.exit(0);
     } catch (err: any) {
       process.stderr.write(`\n  ✗ setup failed: ${err?.message ?? err}\n\n`);
+      process.exit(1);
+    }
+  }
+
+  // ─ service install / uninstall ─────────────────────────────────────
+  // `awb-agent-manager service install [--system] [--exec-path <p>] [--dry-run]`
+  // Generates a systemd unit + enables + starts. User mode by default
+  // (no sudo). System mode requires sudo. See lib/service-install.ts.
+  if (argv[0] === 'service') {
+    const sub = argv[1] || '';
+    const subArgs = argv.slice(2);
+    const isSystem = subArgs.includes('--system');
+    const dryRun = subArgs.includes('--dry-run');
+    const unitOnly = subArgs.includes('--unit-only');
+    const execIdx = subArgs.indexOf('--exec-path');
+    const execPath = execIdx >= 0 ? subArgs[execIdx + 1] : undefined;
+    try {
+      if (sub === 'install') {
+        await installService({ system: isSystem, execPath, dryRun, unitOnly });
+        process.exit(0);
+      }
+      if (sub === 'uninstall') {
+        await uninstallService({ system: isSystem });
+        process.exit(0);
+      }
+      process.stderr.write(
+        `\n  Usage: awb-agent-manager service <install|uninstall> [--system] [--exec-path <p>] [--dry-run] [--unit-only]\n\n`,
+      );
+      process.exit(2);
+    } catch (err: any) {
+      process.stderr.write(`\n  ✗ service ${sub} failed: ${err?.message ?? err}\n\n`);
       process.exit(1);
     }
   }
