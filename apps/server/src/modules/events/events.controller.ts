@@ -4,7 +4,7 @@ import { AuthGuard } from '../../common/guards/auth.guard';
 import { Request } from 'express';
 import { Observable, Subject, filter, map, finalize, of, merge, interval } from 'rxjs';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
+import { Repository, DataSource, In } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { Ticket } from '../../entities/Ticket';
 import { BoardColumn } from '../../entities/BoardColumn';
@@ -17,6 +17,7 @@ import { LogService } from '../../services/log.service';
 import { StreamEvent } from '../../common/types/stream-events';
 import { EVENT_TYPES } from './event-registry';
 import { EventDefinition, EventMapContext, SubscriberIdentity } from './types';
+import { InstanceRegistryService } from '../agent-manager/instance-registry.service';
 
 interface RegisteredListener {
   def: EventDefinition;
@@ -24,7 +25,15 @@ interface RegisteredListener {
 }
 
 interface SseSessionDetail {
+  // Discriminator for unified SESSIONS panel rendering. 'proxy' rows are real
+  // SSE buckets owned by a proxy.mjs process; 'manager' rows are synthesized
+  // from InstanceRegistry at read time so the UI can show managed agents
+  // (which never open their own SSE — the manager mediates) under the same
+  // panel without losing routing semantics. Only 'proxy' rows participate
+  // in main-pin selection (AGENT_ROUTED_EVENTS resolution).
+  source: 'proxy' | 'manager';
   session_id: string;       // server-generated UUID for this SSE connection
+                            // (proxy); for 'manager' rows, `mgr:<instance_id>`
   connected_at: string;     // ISO timestamp
   ip: string;               // X-Plugin-Ip header from plugin (preferred);
                             // falls back to x-real-ip / x-forwarded-for /
@@ -33,6 +42,18 @@ interface SseSessionDetail {
                             // pre-v0.35.5 plugins that don't ship it
   user_agent: string;       // request user-agent header
   board_id: string | null;  // boardId scope from query string (proxies pass 'all')
+
+  // ── Manager-source only (undefined for proxy rows) ───────────────────
+  instance_id?: string;        // InstanceRecord.instance_id of the manager
+  manager_agent_id?: string;   // Agent.id of the supervising manager
+  manager_name?: string;       // Display name of the manager (for row label)
+  cli?: string;                // 'claude' | 'codex' | 'gemini' | custom
+  cli_adapters?: string[];     // additional adapter identifiers known to the manager
+  hostname?: string;           // host running the manager
+  pid?: number;                // pid of the manager process
+  started_at?: string;         // ISO when the manager process started
+  paired_at?: string;          // ISO when the manager redeemed its pairing token
+  working_dir?: string;        // managed agent's working_dir on the manager host
 }
 
 @ApiTags('events')
@@ -90,6 +111,7 @@ export class EventsController implements OnModuleDestroy {
     private readonly authService: AuthService,
     private readonly apiKeyService: ApiKeyService,
     private readonly logService: LogService,
+    private readonly instanceRegistry: InstanceRegistryService,
   ) {
     // Table-driven listener registration: EVENT_TYPES drives everything.
     // One loop replaces the 9 hand-written listener blocks that previously lived here.
@@ -235,6 +257,7 @@ export class EventsController implements OnModuleDestroy {
     let proxyCountNow = 0;
     if (identity.agentId) {
       const detail: SseSessionDetail = {
+        source: 'proxy',
         session_id: sseSessionId,
         connected_at: new Date().toISOString(),
         ip: this._extractIp(req),
@@ -407,7 +430,7 @@ export class EventsController implements OnModuleDestroy {
    */
   @Get('active-agent-sessions')
   @UseGuards(AuthGuard)
-  getActiveAgentSessions(): Record<string, (SseSessionDetail & { is_main: boolean; main_pinned: boolean })[]> {
+  async getActiveAgentSessions(): Promise<Record<string, (SseSessionDetail & { is_main: boolean; main_pinned: boolean })[]>> {
     const out: Record<string, (SseSessionDetail & { is_main: boolean; main_pinned: boolean })[]> = {};
     for (const [agentId, bucket] of this.agentSseSessions) {
       const target = this._resolveRoutingTargetSession(agentId);
@@ -424,6 +447,80 @@ export class EventsController implements OnModuleDestroy {
         }))
         .sort((a, b) => a.connected_at.localeCompare(b.connected_at));
     }
+
+    // Synthesize manager-source rows from InstanceRegistry. A managed agent
+    // never opens its own SSE — the manager mediates everything via its own
+    // proxy/SSE connection plus per-call MCP HTTP — so without this merge
+    // the SESSIONS panel would always be empty for managed agents even
+    // while the manager is actively heartbeating. Each manager InstanceRecord
+    // contributes one row per agent_id it supervises into that agent's
+    // bucket. is_main / main_pinned are forced to false because manager
+    // rows don't participate in AGENT_ROUTED_EVENTS routing (proxy rows do).
+    const managers = this.instanceRegistry.list().filter(
+      (r) => r.mode === 'manager' && Array.isArray(r.agent_ids) && r.agent_ids.length > 0,
+    );
+    if (managers.length > 0) {
+      // Batch-resolve names + per-agent working_dir so the row can show
+      // "via {manager}" + the actual cwd of the managed agent (which can
+      // differ from the manager's working_dirs[] aggregate).
+      const managerIds = Array.from(new Set(managers.map((m) => m.agent_id)));
+      const managedAgentIds = Array.from(
+        new Set(managers.flatMap((m) => m.agent_ids ?? [])),
+      );
+      const lookupIds = Array.from(new Set([...managerIds, ...managedAgentIds]));
+
+      let nameById = new Map<string, string>();
+      let cwdById = new Map<string, string>();
+      try {
+        const rows = lookupIds.length > 0
+          ? await this.agentRepo.find({
+              where: { id: In(lookupIds) },
+              select: ['id', 'name', 'working_dir'],
+            })
+          : [];
+        for (const r of rows) {
+          nameById.set(r.id, r.name);
+          if (r.working_dir) cwdById.set(r.id, r.working_dir);
+        }
+      } catch (err) {
+        this.logService.warn('SSE', `Manager-row name/cwd lookup failed: ${err}`);
+      }
+
+      for (const m of managers) {
+        for (const managedId of m.agent_ids ?? []) {
+          if (!out[managedId]) out[managedId] = [];
+          const row: SseSessionDetail & { is_main: boolean; main_pinned: boolean } = {
+            source: 'manager',
+            // Stable, collision-proof key for React + de-dupe.
+            session_id: `mgr:${m.instance_id}`,
+            connected_at: m.started_at,
+            ip: 'via manager',
+            plugin_version: m.plugin_version,
+            user_agent: '',
+            board_id: null,
+            instance_id: m.instance_id,
+            manager_agent_id: m.agent_id,
+            manager_name: nameById.get(m.agent_id),
+            cli: m.cli,
+            cli_adapters: m.cli_adapters,
+            hostname: m.hostname,
+            pid: m.pid,
+            started_at: m.started_at,
+            paired_at: m.paired_at,
+            working_dir: cwdById.get(managedId),
+            is_main: false,
+            main_pinned: false,
+          };
+          out[managedId].push(row);
+        }
+      }
+      // Re-sort each touched bucket so manager rows interleave with proxy
+      // rows by connect-time rather than appearing as a trailing block.
+      for (const agentId of Object.keys(out)) {
+        out[agentId].sort((a, b) => a.connected_at.localeCompare(b.connected_at));
+      }
+    }
+
     return out;
   }
 
