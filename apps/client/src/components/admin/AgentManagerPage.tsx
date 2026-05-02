@@ -13,6 +13,7 @@ import { useBoardStreamEvent } from '../../contexts/BoardStreamContext';
 import { useToast } from '../../contexts/ToastContext';
 import { Button, Input, Modal, Select } from '../common';
 import { formatAgentDisplayName } from '../../utils/agentName';
+import DirectoryPicker from './DirectoryPicker';
 
 /**
  * Phase 3 — admin dashboard for live daemon/proxy plugin instances.
@@ -1167,6 +1168,10 @@ function CreateManagedAgentDialog({ isOpen, onClose, managerAgentId, managerInst
   const [description, setDescription] = useState('');
   const [autoSpawn, setAutoSpawn] = useState(true);
   const [busy, setBusy] = useState(false);
+  // ST-7 directory picker — opens a modal that browses the manager's host
+  // filesystem via the existing fs reverse-RPC. Lets the user click a
+  // directory instead of typing an absolute path.
+  const [pickerOpen, setPickerOpen] = useState(false);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -1174,6 +1179,7 @@ function CreateManagedAgentDialog({ isOpen, onClose, managerAgentId, managerInst
     setWorkingDir('');
     setDescription('');
     setAutoSpawn(true);
+    setPickerOpen(false);
     // Default CLI tracks the manager's primary CLI, but the operator can
     // override it (e.g., spawn a Gemini agent under a Claude-default manager).
     const defaulted = CLI_OPTIONS.find((o) => o.value === defaultCli)?.value || 'claude';
@@ -1271,16 +1277,36 @@ function CreateManagedAgentDialog({ isOpen, onClose, managerAgentId, managerInst
           <label style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 4 }}>
             Working directory
           </label>
-          <Input
-            type="text"
-            value={workingDir}
-            placeholder="/abs/path/on/manager/host (can be set later)"
-            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setWorkingDir(e.target.value)}
-          />
+          <div style={{ display: 'flex', gap: 6, alignItems: 'stretch' }}>
+            <div style={{ flex: 1 }}>
+              <Input
+                type="text"
+                value={workingDir}
+                placeholder="/abs/path/on/manager/host (or click Browse)"
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setWorkingDir(e.target.value)}
+              />
+            </div>
+            <Button
+              variant="ghost"
+              onClick={() => setPickerOpen(true)}
+              title="Browse the manager host's filesystem via SSE reverse-RPC"
+            >
+              📁 Browse…
+            </Button>
+          </div>
           <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2 }}>
             Leave blank to set later via the agent row's <em>set_working_dir</em> action.
           </div>
         </div>
+        <DirectoryPicker
+          isOpen={pickerOpen}
+          onClose={() => setPickerOpen(false)}
+          managerAgentId={managerAgentId}
+          initialPath={workingDir.trim() || undefined}
+          onPick={(picked) => {
+            setWorkingDir(picked);
+          }}
+        />
         <div>
           <label style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 4 }}>
             Description (optional)
