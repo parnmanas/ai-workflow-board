@@ -54,6 +54,21 @@ export class FsBrowserController {
     return this.forward(id, 'roots', {}, req, res);
   }
 
+  @Get('api/agents/:id/fs/drives')
+  @UseGuards(PermissionGuard)
+  @RequirePermission(PERMISSIONS.BROWSE_AGENT_FS)
+  @ApiOperation({
+    summary: 'Enumerate filesystem volume roots on the agent machine',
+    description: 'Drive-letter list on Windows (C:\\, D:\\…); single "/" on UNIX. Used by the directory picker when the user navigates "up" from a drive root to switch volumes.',
+  })
+  async drives(
+    @Param('id') id: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    return this.forward(id, 'drives', {}, req, res);
+  }
+
   @Get('api/agents/:id/fs/list')
   @UseGuards(PermissionGuard)
   @RequirePermission(PERMISSIONS.BROWSE_AGENT_FS)
@@ -156,9 +171,10 @@ export class FsBrowserController {
     req: Request,
     res: Response,
   ) {
-    // `roots` is a self-describing discovery call — no path input makes sense.
-    // Every other op needs a concrete absolute path from the caller.
-    if (op !== 'roots' && (!args.path || typeof args.path !== 'string')) {
+    // `roots` and `drives` are self-describing discovery calls — no path
+    // input makes sense. Every other op needs a concrete absolute path
+    // from the caller.
+    if (op !== 'roots' && op !== 'drives' && (!args.path || typeof args.path !== 'string')) {
       return res.status(400).json({ error: 'path query parameter is required' });
     }
 

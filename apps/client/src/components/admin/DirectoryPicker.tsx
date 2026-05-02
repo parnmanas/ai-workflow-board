@@ -18,9 +18,19 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../../api';
-import type { FsListResult, FsRootsResult } from '../../types';
+import type { FsDriveEntry, FsListResult, FsRootsResult } from '../../types';
 import { tokens } from '../../tokens';
 import { Button, Modal } from '../common';
+
+// Sentinel value parentOf returns for a drive root on Windows. The picker
+// reads this and flips into drive-list mode (renders the volume list as
+// pseudo-directories) instead of trying to traverse off the file system.
+const DRIVES_SENTINEL = '__drives__';
+
+function isWindowsDriveRoot(path: string): boolean {
+  // Strict drive root: `C:\`, `D:/`, ... — exactly drive letter + sep + nothing.
+  return /^[A-Za-z]:[\\/]?$/.test(path);
+}
 
 interface DirectoryPickerProps {
   isOpen: boolean;
@@ -62,11 +72,15 @@ function splitCrumbs(path: string): Crumb[] {
 
 function parentOf(path: string): string | null {
   if (!path) return null;
+  // At a Windows drive root, "up" surfaces the drive list rather than
+  // looping back onto the same path. Caller switches into drive-list mode
+  // when it sees the sentinel.
+  if (isWindowsDriveRoot(path)) return DRIVES_SENTINEL;
   const isWindows = /^[A-Za-z]:[\\/]/.test(path);
   const sep = isWindows ? '\\' : '/';
   const trimmed = path.replace(/[\\/]+$/, '');
   const idx = trimmed.lastIndexOf(sep);
-  if (idx <= 0) return isWindows ? trimmed.slice(0, 3) : '/';
+  if (idx <= 0) return isWindows ? `${trimmed.slice(0, 2)}${sep}` : '/';
   return trimmed.slice(0, idx);
 }
 
@@ -80,24 +94,51 @@ export default function DirectoryPicker({
   const [path, setPath] = useState('');
   const [listing, setListing] = useState<FsListResult | null>(null);
   const [roots, setRoots] = useState<FsRootsResult | null>(null);
+  // 'browse' renders directory entries from `listing`; 'drives' renders
+  // the volume-root list (Windows multi-drive only — UNIX collapses to a
+  // single `/` so we never enter this mode there).
+  const [mode, setMode] = useState<'browse' | 'drives'>('browse');
+  const [drives, setDrives] = useState<FsDriveEntry[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const isWindowsManager = roots?.platform === 'win32' || (path && /^[A-Za-z]:[\\/]/.test(path));
   const crumbs = useMemo(() => (path ? splitCrumbs(path) : []), [path]);
   const directories = useMemo(
     () => (listing?.entries || []).filter((e) => e.type === 'directory'),
     [listing],
   );
 
+  const loadDrives = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await api.getAgentFsDrives(managerAgentId);
+      setDrives(result.drives || []);
+      setMode('drives');
+    } catch (err: any) {
+      setError(err?.message || 'Failed to enumerate drives');
+    } finally {
+      setLoading(false);
+    }
+  }, [managerAgentId]);
+
   const loadPath = useCallback(
     async (target: string) => {
       if (!target) return;
+      // Caller routes the sentinel through here so a single click handler
+      // works for crumbs / parent / root buttons.
+      if (target === DRIVES_SENTINEL) {
+        await loadDrives();
+        return;
+      }
       setLoading(true);
       setError(null);
       try {
         const result = await api.listAgentFs(managerAgentId, target);
         setListing(result);
         setPath(result.path);
+        setMode('browse');
       } catch (err: any) {
         setListing(null);
         setError(err?.message || 'Failed to list directory');
@@ -105,7 +146,7 @@ export default function DirectoryPicker({
         setLoading(false);
       }
     },
-    [managerAgentId],
+    [managerAgentId, loadDrives],
   );
 
   // Initial discovery on open: fetch roots + cwd, choose a sensible start.
@@ -115,6 +156,8 @@ export default function DirectoryPicker({
     setListing(null);
     setError(null);
     setRoots(null);
+    setMode('browse');
+    setDrives(null);
     let cancelled = false;
     (async () => {
       try {
@@ -175,7 +218,7 @@ export default function DirectoryPicker({
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
-          <Button variant="primary" onClick={handleUseHere} disabled={!path}>
+          <Button variant="primary" onClick={handleUseHere} disabled={!path || mode === 'drives'}>
             Use this directory
           </Button>
         </>
@@ -212,28 +255,51 @@ export default function DirectoryPicker({
         )}
 
         {/* Breadcrumbs + parent button */}
-        {path && (
+        {(path || mode === 'drives') && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
             <button
               type="button"
               onClick={() => parent && loadPath(parent)}
-              disabled={!parent || loading}
+              disabled={mode === 'drives' || !parent || loading}
               style={{
                 padding: '2px 8px',
                 border: `1px solid ${tokens.colors.border}`,
                 background: 'transparent',
                 borderRadius: tokens.radii.sm,
                 fontSize: 11,
-                cursor: parent ? 'pointer' : 'not-allowed',
+                cursor: mode === 'drives' || !parent ? 'not-allowed' : 'pointer',
                 color: tokens.colors.textSecondary,
               }}
-              title="Up one level"
+              title={mode === 'drives' ? 'Already at the volume list' : 'Up one level'}
             >
               ↑
             </button>
-            {crumbs.map((c, i) => (
+            {/* Windows-only: a virtual "💻 Drives" crumb so the user can
+                jump back to the volume list from any depth without
+                clicking ↑ repeatedly. Hidden on UNIX where there is only
+                one root. */}
+            {isWindowsManager && (
+              <button
+                type="button"
+                onClick={loadDrives}
+                disabled={loading || mode === 'drives'}
+                style={{
+                  padding: '2px 6px',
+                  background: 'transparent',
+                  border: 'none',
+                  color: mode === 'drives' ? tokens.colors.textStrong : tokens.colors.accent,
+                  fontFamily: 'monospace',
+                  fontSize: 12,
+                  cursor: 'pointer',
+                }}
+                title="Show drive list"
+              >
+                💻 Drives
+              </button>
+            )}
+            {mode === 'browse' && crumbs.map((c, i) => (
               <React.Fragment key={c.path}>
-                {i > 0 && <span style={{ color: tokens.colors.textMuted }}>/</span>}
+                {(i > 0 || isWindowsManager) && <span style={{ color: tokens.colors.textMuted }}>/</span>}
                 <button
                   type="button"
                   onClick={() => loadPath(c.path)}
@@ -255,7 +321,7 @@ export default function DirectoryPicker({
           </div>
         )}
 
-        {/* Listing — directories only */}
+        {/* Listing — directories only (browse mode) or volume roots (drives mode) */}
         <div
           style={{
             border: `1px solid ${tokens.colors.border}`,
@@ -272,13 +338,46 @@ export default function DirectoryPicker({
               {error}
             </div>
           )}
-          {!loading && !error && directories.length === 0 && listing && (
+          {!loading && !error && mode === 'drives' && drives && drives.length === 0 && (
+            <div style={{ padding: 12, fontSize: 12, color: tokens.colors.textMuted, fontStyle: 'italic' }}>
+              Manager reported no accessible volume roots.
+            </div>
+          )}
+          {!loading && !error && mode === 'drives' && drives && drives.map((d) => (
+            <button
+              key={d.path}
+              type="button"
+              onClick={() => loadPath(d.path)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                width: '100%',
+                padding: '6px 12px',
+                background: 'transparent',
+                border: 'none',
+                borderBottom: `1px solid ${tokens.colors.border}`,
+                cursor: 'pointer',
+                fontFamily: 'monospace',
+                fontSize: 12,
+                color: tokens.colors.textPrimary,
+                textAlign: 'left',
+              }}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = tokens.colors.surfaceSubtle; }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
+            >
+              <span>💽</span>
+              <span>{d.name}</span>
+              <span style={{ marginLeft: 'auto', color: tokens.colors.textMuted }}>{d.path}</span>
+            </button>
+          ))}
+          {!loading && !error && mode === 'browse' && directories.length === 0 && listing && (
             <div style={{ padding: 12, fontSize: 12, color: tokens.colors.textMuted, fontStyle: 'italic' }}>
               No subdirectories here. Use the "Use this directory" button below to pick the
               current path, or navigate up.
             </div>
           )}
-          {!loading && !error && directories.map((d) => {
+          {!loading && !error && mode === 'browse' && directories.map((d) => {
             const sep = /^[A-Za-z]:[\\/]/.test(path) ? '\\' : '/';
             const childPath = path.endsWith(sep) ? `${path}${d.name}` : `${path}${sep}${d.name}`;
             return (
@@ -312,7 +411,7 @@ export default function DirectoryPicker({
         </div>
 
         {/* Selected path summary */}
-        {path && (
+        {mode === 'browse' && path && (
           <div style={{ fontSize: 11, color: tokens.colors.textSecondary }}>
             <strong style={{ color: tokens.colors.textPrimary }}>Selected:</strong>{' '}
             <code style={{ fontFamily: 'monospace', fontSize: 11 }}>{path}</code>
@@ -321,6 +420,11 @@ export default function DirectoryPicker({
                 (outside the manager's configured fs_browser.roots — pick anyway if intentional)
               </span>
             )}
+          </div>
+        )}
+        {mode === 'drives' && (
+          <div style={{ fontSize: 11, color: tokens.colors.textSecondary }}>
+            Pick a volume to browse. Use the breadcrumbs above to drill in once a drive is open.
           </div>
         )}
       </div>

@@ -70,6 +70,32 @@ export class FsBrowser implements FsBrowserContract {
   }
 
   /**
+   * Enumerate filesystem roots usable as starting points. Windows: probe
+   * each letter A-Z for an accessible drive root and report the live ones
+   * (`C:\`, `D:\`, …). UNIX: a single `/` since there is only one root
+   * volume. Result is shaped for the picker's drive-list mode (the user
+   * "goes up" from `C:\` and lands here to switch drives).
+   */
+  private async listDrives(): Promise<Array<{ name: string; path: string }>> {
+    if (process.platform !== 'win32') {
+      return [{ name: '/', path: '/' }];
+    }
+    const probes: Promise<{ name: string; path: string } | null>[] = [];
+    for (let code = 65; code <= 90; code++) {
+      const letter = String.fromCharCode(code);
+      const root = `${letter}:\\`;
+      probes.push(
+        fsp.access(root).then(
+          () => ({ name: `${letter}:`, path: root }),
+          () => null,
+        ),
+      );
+    }
+    const results = await Promise.all(probes);
+    return results.filter((r): r is { name: string; path: string } => r !== null);
+  }
+
+  /**
    * Suggested starting points for the picker when no explicit roots are
    * set. Order matters — picker uses the first hit that contains cwd.
    */
@@ -104,8 +130,20 @@ export class FsBrowser implements FsBrowserContract {
           cwd: process.cwd(),
           roots: advertisedRoots,
           enabled: true,
+          platform: process.platform,
         },
       };
+    }
+
+    if (op === 'drives') {
+      // Cross-drive navigation on Windows. The picker calls this when the
+      // user goes "up" from a drive root (`C:\`) — UNIX-style filesystems
+      // collapse to a single `/` so the call still resolves to a sensible
+      // shape there. Drives outside the configured roots scope are still
+      // listed (operator hasn't typically pinned C:/D:/E: explicitly); the
+      // subsequent `list` call gates by the same scope check as everything
+      // else, so a drive returned here may still 403 on traversal.
+      return { ok: true, data: { drives: await this.listDrives() } };
     }
 
     const rawPath = req.path;

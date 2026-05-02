@@ -17,6 +17,7 @@ import type {
   FsStatResult,
   FsReadResult,
   FsRootsResult,
+  FsDrivesResult,
   SubagentSummary,
   SubagentTranscript,
   AgentProxySession,
@@ -415,6 +416,8 @@ export const api = {
   // reverse-HTTP response. Agent offline → 503. Path outside scope → 403.
   getAgentFsRoots: (agentId: string): Promise<FsRootsResult> =>
     request<FsRootsResult>(`/agents/${encodeURIComponent(agentId)}/fs/roots`),
+  getAgentFsDrives: (agentId: string): Promise<FsDrivesResult> =>
+    request<FsDrivesResult>(`/agents/${encodeURIComponent(agentId)}/fs/drives`),
   listAgentFs: (agentId: string, path: string): Promise<FsListResult> => {
     const params = new URLSearchParams({ path });
     return request<FsListResult>(`/agents/${encodeURIComponent(agentId)}/fs/list?${params.toString()}`);

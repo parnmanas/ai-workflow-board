@@ -116,8 +116,11 @@ function InstanceRow({ inst, selected, onSelect }: InstanceRowProps) {
           >
             {inst.mode}
           </span>
-          <span style={{ fontWeight: 600, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {inst.hostname}
+          <span
+            style={{ fontWeight: 600, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+            title={inst.agent_name && inst.agent_name !== inst.hostname ? `host: ${inst.hostname}` : inst.hostname}
+          >
+            {inst.agent_name || inst.hostname}
           </span>
         </div>
         <span
