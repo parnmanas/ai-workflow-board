@@ -36,6 +36,12 @@ export interface SubagentRegisterArgs {
   ticketId?: string;
   ticketTitle?: string;
   role?: string;
+  /** Per-call apiKey override. When set, the registration POST and all
+   *  follow-up lines/end/reconcile calls for this subagent authenticate as
+   *  this agent (typically the managed agent the subagent is running for),
+   *  so the server attributes the subagent to it instead of the manager.
+   *  Defaults to the manager's own apiKey. */
+  apiKey?: string;
 }
 
 export interface SubagentTapHandle {
@@ -52,7 +58,16 @@ export class SubagentMonitor {
   #config: SubagentMonitorConfig;
   #workspaceId: string | null;
   #enabled: boolean;
-  #liveIds = new Set<string>();
+  // Live subagent_ids partitioned by the apiKey they were registered under.
+  // Each partition reconciles independently against the server because the
+  // /reconcile endpoint scopes to whatever agent the apiKey resolves to —
+  // a manager-key reconcile would only ever see manager-attributed
+  // subagents, never the managed-agent ones.
+  #liveIdsByKey = new Map<string, Set<string>>();
+  // Per-subagent apiKey lookup so SubagentTap.flush/end and stream-of-record
+  // reconcile use the same identity the register call used. Set on register,
+  // dropped on end/dead.
+  #apiKeyForSubagent = new Map<string, string>();
   #reconcileTimer: NodeJS.Timeout | null = null;
   #reconcileInitialTimer: NodeJS.Timeout | null = null;
 
@@ -76,7 +91,14 @@ export class SubagentMonitor {
     if (!this.#enabled) return makeNoopTap();
     const subagentId = randomUUID();
     const startedAt = new Date().toISOString();
-    this.#liveIds.add(subagentId);
+    const apiKey = args.apiKey || this.#config.apiKey;
+    let bucket = this.#liveIdsByKey.get(apiKey);
+    if (!bucket) {
+      bucket = new Set<string>();
+      this.#liveIdsByKey.set(apiKey, bucket);
+    }
+    bucket.add(subagentId);
+    this.#apiKeyForSubagent.set(subagentId, apiKey);
 
     const body: Record<string, unknown> = {
       subagent_id: subagentId,
@@ -90,7 +112,7 @@ export class SubagentMonitor {
     if (args.ticketId) body.ticket_id = args.ticketId;
     if (args.ticketTitle) body.ticket_title = args.ticketTitle;
     if (args.role) body.role = args.role;
-    this.#post('/api/agent-subagents', body).catch(() => {});
+    this.#post('/api/agent-subagents', body, apiKey).catch(() => {});
 
     return new SubagentTap(this, subagentId, startedAt);
   }
@@ -100,7 +122,12 @@ export class SubagentMonitor {
     lines: Array<{ direction: 'in' | 'out'; line: string; ts: string }>,
   ): Promise<PostResult> {
     if (!this.#enabled || !lines.length) return 'ok';
-    return this.#post(`/api/agent-subagents/${encodeURIComponent(subagentId)}/lines`, { lines });
+    const apiKey = this.#apiKeyForSubagent.get(subagentId) || this.#config.apiKey;
+    return this.#post(
+      `/api/agent-subagents/${encodeURIComponent(subagentId)}/lines`,
+      { lines },
+      apiKey,
+    );
   }
 
   async _end(
@@ -108,8 +135,18 @@ export class SubagentMonitor {
     info: { exit_code?: number | null; signal?: NodeJS.Signals | null } | null | undefined,
   ): Promise<PostResult> {
     if (!this.#enabled) return 'ok';
-    this.#liveIds.delete(subagentId);
-    return this.#post(`/api/agent-subagents/${encodeURIComponent(subagentId)}/end`, info || {});
+    const apiKey = this.#apiKeyForSubagent.get(subagentId) || this.#config.apiKey;
+    const bucket = this.#liveIdsByKey.get(apiKey);
+    if (bucket) {
+      bucket.delete(subagentId);
+      if (bucket.size === 0) this.#liveIdsByKey.delete(apiKey);
+    }
+    this.#apiKeyForSubagent.delete(subagentId);
+    return this.#post(
+      `/api/agent-subagents/${encodeURIComponent(subagentId)}/end`,
+      info || {},
+      apiKey,
+    );
   }
 
   stop(): void {
@@ -139,17 +176,35 @@ export class SubagentMonitor {
   }
 
   async #reportLiveList(): Promise<void> {
-    const ids = Array.from(this.#liveIds);
-    await this.#post('/api/agent-subagents/reconcile', { live_subagent_ids: ids });
+    // Reconcile per apiKey — server scopes /reconcile to whatever agent the
+    // caller's apiKey resolves to, so we can't dump every subagent_id under
+    // the manager's identity (the server would mark managed-agent
+    // attributed ones as ended). Always include the manager's own bucket
+    // even when empty so the server can still mark stale manager-side
+    // entries as disappeared after a manager crash.
+    const buckets = new Map<string, string[]>();
+    if (!this.#liveIdsByKey.has(this.#config.apiKey)) {
+      buckets.set(this.#config.apiKey, []);
+    }
+    for (const [apiKey, ids] of this.#liveIdsByKey) {
+      buckets.set(apiKey, Array.from(ids));
+    }
+    for (const [apiKey, ids] of buckets) {
+      await this.#post(
+        '/api/agent-subagents/reconcile',
+        { live_subagent_ids: ids },
+        apiKey,
+      );
+    }
   }
 
-  async #post(path: string, body: unknown): Promise<PostResult> {
+  async #post(path: string, body: unknown, apiKey?: string): Promise<PostResult> {
     try {
       const url = `${this.#config.url.replace(/\/$/, '')}${path}`;
       const resp = await fetch(url, {
         method: 'POST',
         headers: {
-          'X-Agent-Key': this.#config.apiKey,
+          'X-Agent-Key': apiKey || this.#config.apiKey,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(body),
