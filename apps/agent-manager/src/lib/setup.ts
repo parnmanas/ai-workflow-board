@@ -17,11 +17,13 @@ import { existsSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { hostname } from 'node:os';
 import { createInterface, type Interface as ReadlineInterface } from 'node:readline';
-import { CONFIG_PATH } from './constants.js';
+import { AGENT_PATH, CONFIG_PATH } from './constants.js';
 
 export interface SetupOptions {
   /** Override config.json target path. Default: $AWB_AGENT_MANAGER_HOME/config.json */
   configPath?: string;
+  /** Override agent.json target path. Default: $AWB_AGENT_MANAGER_HOME/agent.json */
+  agentPath?: string;
   /** AWB server base URL (no trailing slash). Prompted if absent. */
   url?: string;
   /** Pairing token (raw or 6-char display code). Prompted if absent. */
@@ -125,6 +127,25 @@ function writeConfigJson(path: string, body: unknown): void {
 }
 
 /**
+ * Write agent.json with the redeemed identity. The runtime reads this file
+ * (not config.json) for the local agent_id used by SSE filters, presence
+ * heartbeat, and instance heartbeat — so re-pair without rewriting agent.json
+ * leaves the manager talking under the OLD identity even though config.json
+ * carries the new apiKey. Mirrored chmod-after-write so umask doesn't leave
+ * the secret-adjacent file world-readable.
+ */
+function writeAgentJson(path: string, body: unknown): void {
+  const dir = dirname(path);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path, JSON.stringify(body, null, 2) + '\n');
+  try {
+    chmodSync(path, 0o600);
+  } catch {
+    /* Windows / FAT */
+  }
+}
+
+/**
  * Run the setup flow. Caller is expected to have parsed argv into
  * SetupOptions and passed `nonInteractive=true` if no TTY is available
  * (CI, Ansible, etc.). Returns SetupResult on success; throws on failure
@@ -185,11 +206,28 @@ export async function runSetup(options: SetupOptions): Promise<SetupResult> {
   };
   writeConfigJson(targetPath, configBody);
 
+  // Also refresh agent.json so the runtime's loadAgentInfo() picks up the new
+  // identity. Without this, a re-pair (--force) leaves the manager talking
+  // under the OLD agent_id (SSE filter, presence heartbeat, instance
+  // heartbeat all read from agent.json) — observed live as
+  // `Agent identity: <stale-uuid>` followed by 401s on the new apiKey.
+  const agentPath = options.agentPath ?? AGENT_PATH;
+  const agentBody = {
+    agent_id: issued.agent_id,
+    agent_name: 'manager',
+    agent_type: 'manager',
+    key_hint: maskKey(issued.api_key),
+    scope: 'full',
+    connected_at: new Date().toISOString(),
+  };
+  writeAgentJson(agentPath, agentBody);
+
   process.stderr.write(`  ✓ paired\n`);
   process.stderr.write(`    agent_id     ${issued.agent_id}\n`);
   process.stderr.write(`    workspace_id ${issued.workspace_id}\n`);
   process.stderr.write(`    apiKey       ${maskKey(issued.api_key)}\n`);
-  process.stderr.write(`  ✓ wrote ${targetPath} (mode 0600)\n\n`);
+  process.stderr.write(`  ✓ wrote ${targetPath} (mode 0600)\n`);
+  process.stderr.write(`  ✓ wrote ${agentPath} (mode 0600)\n\n`);
   process.stderr.write(`  Next: run \`awb-agent-manager\` to start the manager.\n`);
 
   return {
