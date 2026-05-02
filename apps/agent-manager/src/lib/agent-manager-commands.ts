@@ -51,6 +51,7 @@ import {
   eraseSecrets,
   maskKey,
 } from './managed-agent-store.js';
+import { createAdapter } from './cli-adapters/index.js';
 
 type CommandKind =
   | 'spawn_agent'
@@ -240,6 +241,20 @@ export class AgentManagerCommandHandler {
     // shared host.
     await ensureCliHomeDir(agentId);
     const cliHomeDir = cliHomeDirFor(agentId);
+
+    // Adapter-specific cli-home bootstrap — typically credential
+    // propagation so the spawned CLI doesn't immediately fail with an
+    // auth error on a fresh per-agent home (claude reads
+    // .credentials.json from CLAUDE_CONFIG_DIR; without this hook the
+    // first turn exited with is_error=true in well under a second).
+    // Best-effort: a propagation failure is logged but doesn't block
+    // spawn — the CLI's own auth error is more actionable than a
+    // missing-file abort here.
+    try {
+      await createAdapter(cli).prepareCliHome(cliHomeDir);
+    } catch (err: any) {
+      log(`spawn_agent: cli-home prep failed for agent=${agentId.slice(0, 8)} cli=${cli}: ${err?.message ?? err}`);
+    }
 
     // 5. context registry — EventDispatcher reads this on every event
     if (this.#deps.contextRegistry) {

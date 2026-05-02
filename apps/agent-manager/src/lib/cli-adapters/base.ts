@@ -100,4 +100,21 @@ export abstract class CliAdapter {
   configDirEnv(): string | null {
     return null;
   }
+
+  /**
+   * Optional hook called once per spawn_agent after `ensureCliHomeDir`
+   * creates the per-agent dir. Override to copy / symlink any
+   * credentials or shared state the CLI needs before it can run — most
+   * commonly the operator's auth token, which the CLI looks for inside
+   * its config home and which a fresh per-agent home would miss.
+   *
+   * Throws on real I/O failures so the caller can surface them; the
+   * caller is expected to wrap in try/catch since prep failure is
+   * usually non-fatal (the CLI will surface its own "not authed"
+   * error on next run, which is more actionable than a manager log
+   * line about a missing file).
+   */
+  async prepareCliHome(_cliHomeDir: string): Promise<void> {
+    /* default: no preparation needed */
+  }
 }
