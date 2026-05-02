@@ -2,8 +2,20 @@ import React, { useState } from 'react';
 import { api } from '../../api';
 import { Channel } from '../../types';
 import { tokens } from '../../tokens';
-import { Button, Input, Select, Badge, Modal, Card } from '../common';
+import { Button, Input, Select, Badge, Modal } from '../common';
 import { useCrudList } from '../../hooks/useCrudList';
+
+const listHeadStyle = (align: 'left' | 'right'): React.CSSProperties => ({
+  textAlign: align,
+  padding: '8px 12px',
+  fontWeight: 600,
+});
+
+const listCellStyle = (align: 'left' | 'right'): React.CSSProperties => ({
+  textAlign: align,
+  padding: '10px 12px',
+  verticalAlign: 'middle',
+});
 
 export default function ChannelManager({ workspaceId }: { workspaceId?: string } = {}) {
   const { items: channels, showForm, setShowForm, editingId, setEditingId, refresh: load } =
@@ -73,48 +85,117 @@ export default function ChannelManager({ workspaceId }: { workspaceId?: string }
         <Button variant="primary" onClick={() => { resetForm(); setShowForm(true); }}>+ Add Channel</Button>
       </div>
 
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))',
-        gap: tokens.spacing.md,
-      }}>
-        {channels.map(ch => (
-          <Card key={ch.id} padding="10px 12px">
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              <div style={{
-                width: 32, height: 32, borderRadius: tokens.radii.lg,
-                background: ch.is_active ? `${tokens.colors.successLight}20` : `${tokens.colors.border}40`,
-                border: `1px solid ${ch.is_active ? tokens.colors.successLight : tokens.colors.borderStrong}`,
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                fontSize: '12px', fontWeight: 700, color: ch.is_active ? tokens.colors.successLight : tokens.colors.textMuted,
-                flexShrink: 0,
-              }}>D</div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: '13px', fontWeight: 600, color: tokens.colors.textStrong }}>{ch.name}</div>
-                <div style={{ fontSize: '11px', color: tokens.colors.textMuted }}>
-                  Token: {ch.bot_token || 'Not set'} | Channel: {ch.channel_id || 'Not set'}
-                </div>
-              </div>
-              {testResult[ch.id] && (
-                testResult[ch.id].success
-                  ? <Badge variant="success">Connected</Badge>
-                  : <Badge variant="danger">Failed</Badge>
-              )}
-              <Button variant="secondary" size="sm" onClick={() => handleTest(ch.id)}>Test</Button>
-              <Button variant={ch.is_active ? 'primary' : 'secondary'} size="sm" onClick={() => handleToggleActive(ch)}>
-                {ch.is_active ? 'Active' : 'Inactive'}
-              </Button>
-              <Button variant="secondary" size="sm" onClick={() => handleEdit(ch)}>Edit</Button>
-              <Button variant="danger" size="sm" onClick={() => handleDelete(ch.id)}>Delete</Button>
-            </div>
-          </Card>
-        ))}
-        {channels.length === 0 && (
-          <div style={{ textAlign: 'center', padding: '48px 24px', gridColumn: '1 / -1' }}>
-            <div style={{ fontSize: 18, fontWeight: 700, color: tokens.colors.textPrimary, marginBottom: 8 }}>No channels yet</div>
-            <div style={{ fontSize: 13, color: tokens.colors.textSecondary }}>Add a Discord channel to receive notifications.</div>
-          </div>
-        )}
+      <div
+        style={{
+          background: tokens.colors.surfaceCard,
+          border: `1px solid ${tokens.colors.border}`,
+          borderRadius: tokens.radii.md,
+          overflowX: 'auto',
+        }}
+      >
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+          <thead>
+            <tr
+              style={{
+                background: tokens.colors.surface,
+                color: tokens.colors.textMuted,
+                fontSize: 11,
+                textTransform: 'uppercase',
+                letterSpacing: '0.05em',
+              }}
+            >
+              <th style={listHeadStyle('left')}>Name</th>
+              <th style={listHeadStyle('left')}>Type</th>
+              <th style={listHeadStyle('left')}>Channel ID</th>
+              <th style={listHeadStyle('left')}>Notifications</th>
+              <th style={listHeadStyle('left')}>Test</th>
+              <th style={listHeadStyle('right')}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {channels.map((ch) => {
+              const notifyParts: string[] = [];
+              if (ch.notify_on_status_change) notifyParts.push('status');
+              if (ch.notify_on_update) notifyParts.push('updates');
+              if (ch.notify_on_comment) notifyParts.push('comments');
+              return (
+                <tr key={ch.id} style={{ borderTop: `1px solid ${tokens.colors.border}` }}>
+                  <td
+                    style={{
+                      ...listCellStyle('left'),
+                      maxWidth: 240,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                      color: tokens.colors.textStrong,
+                      fontWeight: 600,
+                    }}
+                    title={ch.name}
+                  >
+                    {ch.name}
+                  </td>
+                  <td style={listCellStyle('left')}>
+                    <Badge variant="neutral">{ch.type}</Badge>
+                  </td>
+                  <td
+                    style={{
+                      ...listCellStyle('left'),
+                      fontFamily: 'monospace',
+                      color: tokens.colors.textMuted,
+                      maxWidth: 200,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                    title={ch.channel_id || ''}
+                  >
+                    {ch.channel_id || <span style={{ color: tokens.colors.textMuted }}>not set</span>}
+                  </td>
+                  <td style={{ ...listCellStyle('left'), color: tokens.colors.textSecondary, whiteSpace: 'nowrap' }}>
+                    {notifyParts.length ? notifyParts.join(', ') : <span style={{ color: tokens.colors.textMuted }}>—</span>}
+                  </td>
+                  <td style={listCellStyle('left')}>
+                    {testResult[ch.id] ? (
+                      testResult[ch.id].success ? (
+                        <Badge variant="success">Connected</Badge>
+                      ) : (
+                        <Badge variant="danger">Failed</Badge>
+                      )
+                    ) : (
+                      <span style={{ color: tokens.colors.textMuted }}>—</span>
+                    )}
+                  </td>
+                  <td style={{ ...listCellStyle('right'), whiteSpace: 'nowrap' }}>
+                    <div style={{ display: 'inline-flex', gap: 6 }}>
+                      <Button variant="secondary" size="sm" onClick={() => handleTest(ch.id)}>Test</Button>
+                      <Button
+                        variant={ch.is_active ? 'primary' : 'secondary'}
+                        size="sm"
+                        onClick={() => handleToggleActive(ch)}
+                      >
+                        {ch.is_active ? 'Active' : 'Inactive'}
+                      </Button>
+                      <Button variant="secondary" size="sm" onClick={() => handleEdit(ch)}>Edit</Button>
+                      <Button variant="danger" size="sm" onClick={() => handleDelete(ch.id)}>Delete</Button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+            {channels.length === 0 && (
+              <tr>
+                <td colSpan={6} style={{ textAlign: 'center', padding: '48px 24px' }}>
+                  <div style={{ fontSize: 18, fontWeight: 700, color: tokens.colors.textPrimary, marginBottom: 8 }}>
+                    No channels yet
+                  </div>
+                  <div style={{ fontSize: 13, color: tokens.colors.textSecondary }}>
+                    Add a Discord channel to receive notifications.
+                  </div>
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
       </div>
 
       <Modal

@@ -3,8 +3,20 @@ import { api, getActiveWorkspaceId } from '../../api';
 import type { PromptTemplate } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
-import { Button, Input, Modal, Badge, Card } from '../common';
+import { Button, Input, Modal, Badge } from '../common';
 import { relativeTime } from '../../utils/time';
+
+const listHeadStyle = (align: 'left' | 'right'): React.CSSProperties => ({
+  textAlign: align,
+  padding: '8px 12px',
+  fontWeight: 600,
+});
+
+const listCellStyle = (align: 'left' | 'right'): React.CSSProperties => ({
+  textAlign: align,
+  padding: '10px 12px',
+  verticalAlign: 'middle',
+});
 
 export default function PromptTemplateManager({ workspaceId }: { workspaceId?: string } = {}) {
   const { showToast } = useToast();
@@ -150,35 +162,78 @@ export default function PromptTemplateManager({ workspaceId }: { workspaceId?: s
           <div style={{ fontSize: 13, color: tokens.colors.textSecondary }}>Create a reusable prompt template for tickets in this workspace.</div>
         </div>
       ) : (
-        <div style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))',
-          gap: tokens.spacing.md,
-        }}>
-          {templates.map((t) => (
-            <Card key={t.id} padding="12px 14px">
-              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
-                <div style={{ fontSize: '13px', fontWeight: 600, color: tokens.colors.textStrong, lineHeight: 1.3 }}>
-                  {t.name}
-                </div>
-                {t.category && <Badge variant="neutral">{t.category}</Badge>}
-              </div>
-              {t.description && (
-                <div style={{ fontSize: '12px', color: tokens.colors.textSecondary, marginBottom: 10, lineHeight: 1.4 }}>
-                  {t.description}
-                </div>
-              )}
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-                <div style={{ fontSize: '11px', color: tokens.colors.textMuted }}>
-                  {relativeTime(t.updated_at || t.created_at)}
-                </div>
-                <div style={{ display: 'flex', gap: 6 }}>
-                  <Button variant="secondary" size="sm" onClick={() => startEdit(t)}>Edit</Button>
-                  <Button variant="danger" size="sm" onClick={() => setDeleteTarget(t)}>Delete</Button>
-                </div>
-              </div>
-            </Card>
-          ))}
+        <div
+          style={{
+            background: tokens.colors.surfaceCard,
+            border: `1px solid ${tokens.colors.border}`,
+            borderRadius: tokens.radii.md,
+            overflowX: 'auto',
+          }}
+        >
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+            <thead>
+              <tr
+                style={{
+                  background: tokens.colors.surface,
+                  color: tokens.colors.textMuted,
+                  fontSize: 11,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.05em',
+                }}
+              >
+                <th style={listHeadStyle('left')}>Name</th>
+                <th style={listHeadStyle('left')}>Category</th>
+                <th style={listHeadStyle('left')}>Description</th>
+                <th style={listHeadStyle('left')}>Updated</th>
+                <th style={listHeadStyle('right')}>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {templates.map((t) => (
+                <tr key={t.id} style={{ borderTop: `1px solid ${tokens.colors.border}` }}>
+                  <td
+                    style={{
+                      ...listCellStyle('left'),
+                      maxWidth: 240,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                      color: tokens.colors.textStrong,
+                      fontWeight: 600,
+                    }}
+                    title={t.name}
+                  >
+                    {t.name}
+                  </td>
+                  <td style={listCellStyle('left')}>
+                    {t.category ? <Badge variant="neutral">{t.category}</Badge> : <span style={{ color: tokens.colors.textMuted }}>—</span>}
+                  </td>
+                  <td
+                    style={{
+                      ...listCellStyle('left'),
+                      maxWidth: 360,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                      color: tokens.colors.textSecondary,
+                    }}
+                    title={t.description || ''}
+                  >
+                    {t.description || <span style={{ color: tokens.colors.textMuted }}>—</span>}
+                  </td>
+                  <td style={{ ...listCellStyle('left'), color: tokens.colors.textMuted, whiteSpace: 'nowrap' }}>
+                    {relativeTime(t.updated_at || t.created_at)}
+                  </td>
+                  <td style={{ ...listCellStyle('right'), whiteSpace: 'nowrap' }}>
+                    <div style={{ display: 'inline-flex', gap: 6 }}>
+                      <Button variant="secondary" size="sm" onClick={() => startEdit(t)}>Edit</Button>
+                      <Button variant="danger" size="sm" onClick={() => setDeleteTarget(t)}>Delete</Button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
 

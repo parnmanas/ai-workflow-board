@@ -5,6 +5,18 @@ import { tokens } from '../../tokens';
 import { Button, Input, Select, Badge, Modal, Card } from '../common';
 import { formatAgentDisplayName } from '../../utils/agentName';
 
+const apiKeyHeadStyle = (align: 'left' | 'right'): React.CSSProperties => ({
+  textAlign: align,
+  padding: '8px 12px',
+  fontWeight: 600,
+});
+
+const apiKeyCellStyle = (align: 'left' | 'right'): React.CSSProperties => ({
+  textAlign: align,
+  padding: '10px 12px',
+  verticalAlign: 'middle',
+});
+
 export default function ApiKeyManager({ workspaceId }: { workspaceId?: string } = {}) {
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -173,62 +185,162 @@ export default function ApiKeyManager({ workspaceId }: { workspaceId?: string } 
         )}
       </Modal>
 
-      {/* Keys List — CSS Grid for auto-responsive columns */}
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))',
-        gap: tokens.spacing.md,
-      }}>
-        {keys.map(key => {
-          const status = getKeyStatus(key);
-          return (
-            <Card key={key.id} padding="12px 14px">
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
-                <div style={{ flex: 1 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <span style={{ fontSize: '13px', fontWeight: 600, color: tokens.colors.textStrong }}>{key.name}</span>
+      {/* Keys list — table layout so long names truncate with ellipsis
+          while action buttons stay pinned in the rightmost column. The
+          previous card grid hid actions whenever name + badges
+          overflowed the card's min-width (320px). */}
+      <div
+        style={{
+          background: tokens.colors.surfaceCard,
+          border: `1px solid ${tokens.colors.border}`,
+          borderRadius: tokens.radii.md,
+          overflowX: 'auto',
+        }}
+      >
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+          <thead>
+            <tr
+              style={{
+                background: tokens.colors.surface,
+                color: tokens.colors.textMuted,
+                fontSize: 11,
+                textTransform: 'uppercase',
+                letterSpacing: '0.05em',
+              }}
+            >
+              <th style={apiKeyHeadStyle('left')}>Name</th>
+              <th style={apiKeyHeadStyle('left')}>Status</th>
+              <th style={apiKeyHeadStyle('left')}>Scope</th>
+              <th style={apiKeyHeadStyle('left')}>Masked Key</th>
+              <th style={apiKeyHeadStyle('left')}>Agent</th>
+              <th style={apiKeyHeadStyle('right')}>Used</th>
+              <th style={apiKeyHeadStyle('left')}>Last Used</th>
+              <th style={apiKeyHeadStyle('left')}>Expires</th>
+              <th style={apiKeyHeadStyle('right')}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {keys.map((key) => {
+              const status = getKeyStatus(key);
+              return (
+                <tr key={key.id} style={{ borderTop: `1px solid ${tokens.colors.border}` }}>
+                  <td
+                    style={{
+                      ...apiKeyCellStyle('left'),
+                      maxWidth: 240,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                      color: tokens.colors.textStrong,
+                      fontWeight: 600,
+                    }}
+                    title={key.name}
+                  >
+                    {key.name}
+                  </td>
+                  <td style={apiKeyCellStyle('left')}>
                     <Badge variant={status.variant}>{status.label}</Badge>
+                  </td>
+                  <td style={apiKeyCellStyle('left')}>
                     <Badge variant="neutral">{key.scope}</Badge>
-                  </div>
-                  <div style={{ fontSize: '12px', color: tokens.colors.textMuted, fontFamily: 'monospace', marginTop: 2 }}>
+                  </td>
+                  <td
+                    style={{
+                      ...apiKeyCellStyle('left'),
+                      fontFamily: 'monospace',
+                      color: tokens.colors.textMuted,
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
                     {key.key_masked}
+                  </td>
+                  <td
+                    style={{
+                      ...apiKeyCellStyle('left'),
+                      maxWidth: 200,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                    title={key.agent ? formatAgentDisplayName(key.agent) : undefined}
+                  >
+                    {key.agent ? (
+                      <span style={{ color: tokens.colors.accentLight }}>
+                        {formatAgentDisplayName(key.agent)}
+                      </span>
+                    ) : (
+                      <span style={{ color: tokens.colors.textMuted }}>—</span>
+                    )}
+                  </td>
+                  <td
+                    style={{
+                      ...apiKeyCellStyle('right'),
+                      color: tokens.colors.textSecondary,
+                      fontVariantNumeric: 'tabular-nums',
+                    }}
+                  >
+                    {key.use_count}
+                  </td>
+                  <td
+                    style={{
+                      ...apiKeyCellStyle('left'),
+                      color: tokens.colors.textSecondary,
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {key.last_used_at ? new Date(key.last_used_at).toLocaleDateString() : '—'}
+                  </td>
+                  <td
+                    style={{
+                      ...apiKeyCellStyle('left'),
+                      color: tokens.colors.textSecondary,
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {key.expires_at ? new Date(key.expires_at).toLocaleDateString() : 'never'}
+                  </td>
+                  <td style={{ ...apiKeyCellStyle('right'), whiteSpace: 'nowrap' }}>
+                    <div style={{ display: 'inline-flex', gap: 6 }}>
+                      {key.is_active ? (
+                        <>
+                          <Button variant="secondary" size="sm" onClick={() => handleEdit(key)}>
+                            Edit
+                          </Button>
+                          <Button variant="danger" size="sm" onClick={() => handleRevoke(key.id)}>
+                            Revoke
+                          </Button>
+                        </>
+                      ) : (
+                        <Button variant="danger" size="sm" onClick={() => handleDelete(key.id)}>
+                          Delete
+                        </Button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+            {keys.length === 0 && (
+              <tr>
+                <td colSpan={9} style={{ textAlign: 'center', padding: '48px 24px' }}>
+                  <div
+                    style={{
+                      fontSize: 18,
+                      fontWeight: 700,
+                      color: tokens.colors.textPrimary,
+                      marginBottom: 8,
+                    }}
+                  >
+                    No API keys yet
                   </div>
-                </div>
-                <div style={{ display: 'flex', gap: 6 }}>
-                  {key.is_active ? (
-                    <>
-                      <Button variant="secondary" size="sm" onClick={() => handleEdit(key)}>Edit</Button>
-                      <Button variant="danger" size="sm" onClick={() => handleRevoke(key.id)}>Revoke</Button>
-                    </>
-                  ) : (
-                    <Button variant="danger" size="sm" onClick={() => handleDelete(key.id)}>Delete</Button>
-                  )}
-                </div>
-              </div>
-
-              {/* Meta info */}
-              <div style={{ display: 'flex', gap: 16, fontSize: '11px', color: tokens.colors.textMuted }}>
-                {key.agent && (
-                  <span>Agent: <span style={{ color: tokens.colors.accentLight }}>{formatAgentDisplayName(key.agent)}</span></span>
-                )}
-                <span>Used: {key.use_count} times</span>
-                {key.last_used_at && (
-                  <span>Last: {new Date(key.last_used_at).toLocaleDateString()}</span>
-                )}
-                {key.expires_at && (
-                  <span>Expires: {new Date(key.expires_at).toLocaleDateString()}</span>
-                )}
-                <span>Created: {new Date(key.created_at).toLocaleDateString()}</span>
-              </div>
-            </Card>
-          );
-        })}
-        {keys.length === 0 && (
-          <div style={{ textAlign: 'center', padding: '48px 24px', gridColumn: '1 / -1' }}>
-            <div style={{ fontSize: 18, fontWeight: 700, color: tokens.colors.textPrimary, marginBottom: 8 }}>No API keys yet</div>
-            <div style={{ fontSize: 13, color: tokens.colors.textSecondary }}>Create your first key to enable MCP authentication.</div>
-          </div>
-        )}
+                  <div style={{ fontSize: 13, color: tokens.colors.textSecondary }}>
+                    Create your first key to enable MCP authentication.
+                  </div>
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
       </div>
 
       {/* Usage Guide */}
