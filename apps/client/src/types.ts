@@ -499,6 +499,22 @@ export interface FsRootsResult {
   cwd: string;               // plugin process cwd (may or may not be in scope)
   roots: string[];           // configured scope roots (realpath'd)
   enabled: boolean;          // false when plugin has fs_browser off or no valid roots
+  // os.platform() reported by the manager. Lets the picker enable
+  // Windows-only affordances (drive-list mode) without sniffing path
+  // shapes. Older managers may omit this field.
+  platform?: string;
+}
+
+// Drive-letter / volume-root listing for cross-volume navigation. On
+// Windows the picker fetches this when the user goes "up" from a drive
+// root (`C:\`) so they can switch to D:/E:/etc; on UNIX the result is
+// always the single `/` root.
+export interface FsDriveEntry {
+  name: string;
+  path: string;
+}
+export interface FsDrivesResult {
+  drives: FsDriveEntry[];
 }
 
 // ─── Subagent monitor (v0.32) ───────────────────────────────
@@ -598,6 +614,11 @@ export interface AgentManagerInstance {
   pid: number;
   started_at: string;
   last_seen_at: string;
+  // Agent.name from the agents table — the operator-facing label edited
+  // via "Edit Identity". Server enriches this on the list response so the
+  // admin list can show the configured name instead of the OS hostname.
+  // null when the Agent row is missing or has no name set.
+  agent_name?: string | null;
   // ST-4 manager-mode fields. Daemons/proxies leave these undefined.
   agent_ids?: string[];
   working_dirs?: string[];

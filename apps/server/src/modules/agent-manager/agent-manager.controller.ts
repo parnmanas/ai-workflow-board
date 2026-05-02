@@ -279,9 +279,21 @@ export class AgentManagerController {
   @UseGuards(PermissionGuard)
   @RequirePermission(PERMISSIONS.ADMIN_ACCESS)
   @ApiOperation({ summary: 'List currently-heartbeating daemon/proxy/manager instances' })
-  list(@Query('workspace_id') workspaceId: string, @Res() res: Response) {
+  async list(@Query('workspace_id') workspaceId: string, @Res() res: Response) {
     const data = workspaceId ? this.registry.listForWorkspace(workspaceId) : this.registry.list();
-    return res.json(data);
+    // Enrich each instance with the backing Agent.name so the admin list can
+    // render the configured identity (the operator-facing label they edit
+    // under "Edit Identity") instead of the OS hostname. Fallback to
+    // hostname when the Agent row is missing or has no name set — keeps
+    // the previous default behavior for stale rows.
+    const agentIds = Array.from(new Set(data.map((i) => i.agent_id).filter(Boolean)));
+    const nameMap = new Map<string, string>();
+    if (agentIds.length > 0) {
+      const agents = await this.agentRepo.find({ where: { id: In(agentIds) } });
+      for (const a of agents) if (a.name) nameMap.set(a.id, a.name);
+    }
+    const enriched = data.map((inst) => ({ ...inst, agent_name: nameMap.get(inst.agent_id) || null }));
+    return res.json(enriched);
   }
 
   @ApiBearerAuth('user-session')

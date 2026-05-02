@@ -24,12 +24,25 @@ import { LogService } from './log.service';
  *   real filesystem layout); server is a pure forwarder.
  */
 
-export type FsOp = 'list' | 'stat' | 'read' | 'roots';
+export type FsOp = 'list' | 'stat' | 'read' | 'roots' | 'drives';
 
 export interface FsRootsResult {
   cwd: string;
   roots: string[];
   enabled: boolean;
+  // Optional: manager-reported os.platform() value (e.g. 'win32', 'linux',
+  // 'darwin'). Lets the picker enable Windows-specific affordances like
+  // the drive-list mode without sniffing path shapes.
+  platform?: string;
+}
+
+export interface FsDriveEntry {
+  name: string;   // 'C:' on Windows, '/' on UNIX
+  path: string;   // 'C:\\' on Windows, '/' on UNIX
+}
+
+export interface FsDrivesResult {
+  drives: FsDriveEntry[];
 }
 
 export interface FsListEntry {
@@ -68,7 +81,7 @@ export interface FsReadResult {
 
 export interface FsPluginResponse {
   ok: boolean;
-  data?: FsListResult | FsStatResult | FsReadResult | FsRootsResult;
+  data?: FsListResult | FsStatResult | FsReadResult | FsRootsResult | FsDrivesResult;
   error?: string;
   code?: string;
 }
