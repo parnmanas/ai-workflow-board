@@ -57,8 +57,44 @@ export interface Agent {
    *  Drives the `<ManagerName>/<AgentName>` display format used everywhere
    *  in the UI; undefined for legacy / standalone agents (no slash prefix). */
   manager_name?: string;
+  /** Live process snapshot from InstanceRegistry. Set by `/api/agents` and
+   *  `/api/agents/:id` when the agent is currently being heartbeated by a
+   *  proxy/daemon process or supervised by an agent-manager instance. The
+   *  AI Agents admin page renders mode/version/host/heartbeat from this so
+   *  managed agents (which have no SSE session of their own) are visible. */
+  live_instance?: AgentLiveInstance;
+  /** Subagent rollup attached server-side from SubagentMonitor. Lets the AI
+   *  Agents admin page show "5 active / 23 total" without an extra fetch. */
+  subagents?: AgentSubagentRollup;
   created_at: string;
   updated_at: string;
+}
+
+/** Subset of AgentManagerInstance attached to each Agent in /api/agents. The
+ *  full record is still available via /api/admin/agent-manager/instances when
+ *  the operator wants the master/detail layout. */
+export interface AgentLiveInstance {
+  instance_id: string;
+  mode: 'daemon' | 'proxy' | 'manager';
+  hostname: string;
+  plugin_version: string;
+  cli: string;
+  cli_adapters: string[];
+  pid: number;
+  started_at: string;
+  last_seen_at: string;
+  /** True when this agent is supervised by a manager (manager.agent_ids
+   *  includes this id). False when this agent IS the instance's primary
+   *  agent_id (proxy / daemon / a manager identity itself). */
+  supervised: boolean;
+  working_dirs?: string[];
+  agent_ids?: string[];
+}
+
+export interface AgentSubagentRollup {
+  total: number;
+  active: number;
+  recent: SubagentSummary[];
 }
 
 export interface PromptTemplate {

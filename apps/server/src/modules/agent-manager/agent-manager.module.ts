@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Agent } from '../../entities/Agent';
 import { ApiKey } from '../../entities/ApiKey';
@@ -21,7 +21,12 @@ import { CommandLedgerService } from './command-ledger.service';
   // ApiKey row repository is needed locally because pair/redeem creates a
   // bearer for the freshly-paired manager. Agent repo is needed for both
   // pair/redeem (manager identity) and createManagedAgent (CLI-typed agent).
-  imports: [AgentsModule, TypeOrmModule.forFeature([Agent, ApiKey])],
+  //
+  // forwardRef around AgentsModule: AgentsModule now also imports this module
+  // (to inject InstanceRegistryService into AgentsController for live-data
+  // enrichment of /api/agents). NestJS resolves the cycle via forwardRef on
+  // both sides.
+  imports: [forwardRef(() => AgentsModule), TypeOrmModule.forFeature([Agent, ApiKey])],
   controllers: [AgentManagerController],
   providers: [
     InstanceRegistryService,
