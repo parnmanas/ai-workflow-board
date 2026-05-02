@@ -1,6 +1,11 @@
-// Gemini CLI adapter — stateless one-shot. Gemini doesn't speak AWB's MCP
-// tools, so the manager collects gemini's stdout via collectOneshotResult()
-// and posts the answer back to AWB through its own REST connection.
+// Codex CLI adapter — stateless one-shot, mirrors the Gemini path.
+// Like Gemini, codex doesn't speak AWB MCP tools natively, so the
+// manager collects codex's stdout via collectOneshotResult() and posts
+// the answer back through its own REST connection.
+//
+// configDirEnv returns CODEX_HOME so per-agent isolation puts codex's
+// settings / auth / history under <MANAGER_HOME>/agents/<id>/cli-home/
+// rather than sharing the operator's $HOME.
 
 import { resolveCliBin } from '../cli-resolver.js';
 import {
@@ -11,8 +16,8 @@ import {
   type SpawnDescriptor,
 } from './base.js';
 
-export class GeminiCliAdapter extends CliAdapter {
-  static cliType = 'gemini';
+export class CodexCliAdapter extends CliAdapter {
+  static cliType = 'codex';
 
   constructor() {
     super();
@@ -20,7 +25,7 @@ export class GeminiCliAdapter extends CliAdapter {
   }
 
   resolveBin(configured?: string | null): string {
-    return resolveCliBin('gemini', configured);
+    return resolveCliBin('codex', configured);
   }
 
   buildOneshotSpawn({ rolePrompt, taskText }: OneshotSpec): SpawnDescriptor {
@@ -56,9 +61,6 @@ export class GeminiCliAdapter extends CliAdapter {
   }
 
   configDirEnv(): string {
-    // Gemini CLI uses GEMINI_HOME (matches `gemini --help`'s config-dir
-    // override). Per-agent isolation puts its settings + auth + history
-    // under <MANAGER_HOME>/agents/<id>/cli-home/.
-    return 'GEMINI_HOME';
+    return 'CODEX_HOME';
   }
 }

@@ -51,6 +51,11 @@ export interface AgentExecutionContext {
    *  adapter per cliType so the cost is one createAdapter() per cli over
    *  the manager's lifetime. */
   cli: string;
+  /** ST-7 follow-up: per-agent CLI home dir. Spawn injects this into the
+   *  child env via the adapter's configDirEnv() (CLAUDE_CONFIG_DIR /
+   *  GEMINI_HOME / CODEX_HOME) so per-agent sessions / plugins /
+   *  settings stay isolated under <MANAGER_HOME>/agents/<id>/cli-home/. */
+  cli_home_dir: string;
 }
 
 // ─── Session manager interfaces ──────────────────────────────────────────
@@ -234,6 +239,7 @@ export class EventDispatcher {
       cwd: ctx.working_dir,
       mcp_config_path: ctx.mcp_config_path,
       cli: ctx.cli || 'claude',
+      cli_home_dir: ctx.cli_home_dir,
     };
   }
 

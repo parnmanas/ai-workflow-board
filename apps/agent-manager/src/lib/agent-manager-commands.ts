@@ -46,6 +46,8 @@ import {
   writeManagedAgentConfig,
   mcpConfigPathFor,
   subagentLogPathFor,
+  cliHomeDirFor,
+  ensureCliHomeDir,
   eraseSecrets,
   maskKey,
 } from './managed-agent-store.js';
@@ -232,6 +234,13 @@ export class AgentManagerCommandHandler {
     }
     const mcpConfigPath = await writeMcpConfig(agentId, this.#config.url, rawApiKey);
 
+    // ST-7 follow-up: per-agent CLI home dir. Created lazily here so the
+    // CLI (claude/codex/gemini) writes its sessions / plugins / settings
+    // into a dir scoped to this agent rather than ~/.<cli>/ on the
+    // shared host.
+    await ensureCliHomeDir(agentId);
+    const cliHomeDir = cliHomeDirFor(agentId);
+
     // 5. context registry — EventDispatcher reads this on every event
     if (this.#deps.contextRegistry) {
       this.#deps.contextRegistry.upsert({
@@ -242,6 +251,7 @@ export class AgentManagerCommandHandler {
         mcp_config_path: mcpConfigPath,
         api_key: rawApiKey,
         subagent_log_path: subagentLogPathFor(agentId),
+        cli_home_dir: cliHomeDir,
         registered_at: new Date().toISOString(),
       });
     }

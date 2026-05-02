@@ -31,6 +31,12 @@ export interface ManagedAgentContext {
   api_key: string;
   /** Per-agent subagent log file path (created lazily by SubagentManager). */
   subagent_log_path: string;
+  /** ST-7 follow-up: per-agent CLI home dir
+   *  (`<MANAGER_HOME>/agents/<id>/cli-home/`). Manager passes it via the
+   *  adapter's configDirEnv() (CLAUDE_CONFIG_DIR / GEMINI_HOME / CODEX_HOME)
+   *  so each managed agent's CLI sessions / plugins / settings stay
+   *  isolated from siblings on the same manager host. */
+  cli_home_dir: string;
   /** ISO timestamp of when this manager last hydrated the context. */
   registered_at: string;
 }
@@ -60,7 +66,13 @@ export class ManagedAgentContextRegistry {
   }
 
   /** Mostly a debug helper; prefer get() in hot paths. */
-  fromDiskConfig(cfg: ManagedAgentDiskConfig, apiKey: string, mcpConfigPath: string, subagentLogPath: string): ManagedAgentContext {
+  fromDiskConfig(
+    cfg: ManagedAgentDiskConfig,
+    apiKey: string,
+    mcpConfigPath: string,
+    subagentLogPath: string,
+    cliHomeDir: string,
+  ): ManagedAgentContext {
     return {
       agent_id: cfg.agent_id,
       name: cfg.name,
@@ -69,6 +81,7 @@ export class ManagedAgentContextRegistry {
       mcp_config_path: mcpConfigPath,
       api_key: apiKey,
       subagent_log_path: subagentLogPath,
+      cli_home_dir: cliHomeDir,
       registered_at: new Date().toISOString(),
     };
   }

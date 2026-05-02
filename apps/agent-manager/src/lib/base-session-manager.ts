@@ -77,6 +77,7 @@ export interface SpawnOpts {
     cwd: string;
     mcp_config_path: string;
     cli: string;
+    cli_home_dir: string;
   };
 }
 
@@ -240,12 +241,17 @@ export class BaseSessionManager {
       }
 
       const resolvedBin = adapter.resolveBin(this._config.delegation.claudeBin);
+      // ST-7 follow-up: per-agent CLI home isolation (see SubagentManager).
+      const cliHomeEnvKey = adapter.configDirEnv();
+      const cliHomeEnv = cliHomeEnvKey && agentContext?.cli_home_dir
+        ? { [cliHomeEnvKey]: agentContext.cli_home_dir }
+        : {};
       const child = spawn(resolvedBin, descriptor.args, {
         stdio: descriptor.stdio || ['pipe', 'pipe', 'pipe'],
         detached: true,
         windowsHide: true,
         cwd: effectiveCwd,
-        env: { ...process.env, AWB_API_KEY: effectiveApiKey },
+        env: { ...process.env, AWB_API_KEY: effectiveApiKey, ...cliHomeEnv },
         shell: descriptor.shell ?? /\.(cmd|bat|ps1)$/i.test(resolvedBin),
       }) as ChildProcessByStdio<Writable, Readable, Readable>;
       child.once('error', (err: any) => {

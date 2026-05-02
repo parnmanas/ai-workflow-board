@@ -41,6 +41,8 @@ import {
   readApiKey,
   mcpConfigPathFor,
   subagentLogPathFor,
+  cliHomeDirFor,
+  ensureCliHomeDir,
 } from './lib/managed-agent-store.js';
 import type { SessionAwareConfig } from './lib/base-session-manager.js';
 import type { SubagentAwareConfig } from './lib/subagent-manager.js';
@@ -443,6 +445,10 @@ async function runRuntime(
         skipped++;
         continue;
       }
+      // ST-7 follow-up: ensure cli-home/ exists before context register so
+      // a rehydrated agent's first event-spawn can immediately point its
+      // CLI's CLAUDE_CONFIG_DIR / GEMINI_HOME / CODEX_HOME at the dir.
+      await ensureCliHomeDir(id);
       managedAgentContexts.upsert({
         agent_id: id,
         name: cfg.name,
@@ -451,6 +457,7 @@ async function runRuntime(
         mcp_config_path: mcpConfigPathFor(id),
         api_key: apiKey,
         subagent_log_path: subagentLogPathFor(id),
+        cli_home_dir: cliHomeDirFor(id),
         registered_at: new Date().toISOString(),
       });
       managedAgents.upsert({ agent_id: id, name: cfg.name, cli: cfg.cli, working_dir: cfg.working_dir });

@@ -98,4 +98,11 @@ export class ClaudeCliAdapter extends CliAdapter {
   collectOneshotResult(_lines: string[]): string | null {
     return null;
   }
+
+  configDirEnv(): string {
+    // Claude CLI honors CLAUDE_CONFIG_DIR; setting it redirects ~/.claude
+    // (settings, plugins, projects, sessions) to the per-agent dir so
+    // multi-tenant managers don't cross-contaminate state.
+    return 'CLAUDE_CONFIG_DIR';
+  }
 }

@@ -52,6 +52,24 @@ export function subagentLogPathFor(agentId: string): string {
   return join(managedAgentDir(agentId), 'subagent.log');
 }
 
+/**
+ * Per-agent CLI home directory. The manager points the spawned CLI at
+ * this path via its config-dir env var (CLAUDE_CONFIG_DIR / GEMINI_HOME
+ * / CODEX_HOME) so each managed agent's CLI state — sessions, plugins,
+ * settings — stays isolated. Directory is created lazily on first
+ * spawn_agent so we don't litter empty dirs for agents that never run.
+ */
+export function cliHomeDirFor(agentId: string): string {
+  return join(managedAgentDir(agentId), 'cli-home');
+}
+
+/** mkdir -p (0700) for the per-agent CLI home. Idempotent. */
+export async function ensureCliHomeDir(agentId: string): Promise<string> {
+  const dir = cliHomeDirFor(agentId);
+  await fsp.mkdir(dir, { recursive: true, mode: 0o700 });
+  return dir;
+}
+
 /** mkdir -p with 0700 perms; safe to call repeatedly. */
 export async function ensureManagedAgentDir(agentId: string): Promise<string> {
   const dir = managedAgentDir(agentId);

@@ -283,12 +283,20 @@ export class SubagentManager implements SubagentManagerContract {
       }
 
       const resolvedBin = adapter.resolveBin(this.#config.delegation.claudeBin);
+      // ST-7 follow-up: inject the per-agent CLI home dir via the
+      // adapter-specific env var (CLAUDE_CONFIG_DIR / GEMINI_HOME /
+      // CODEX_HOME). When the adapter doesn't have one (custom CLI),
+      // this is a no-op and the spawn inherits the manager's env.
+      const cliHomeEnvKey = adapter.configDirEnv();
+      const cliHomeEnv = cliHomeEnvKey && ctx?.cli_home_dir
+        ? { [cliHomeEnvKey]: ctx.cli_home_dir }
+        : {};
       const child = spawn(resolvedBin, descriptor.args, {
         stdio: descriptor.stdio || ['ignore', 'pipe', 'pipe'],
         detached: true,
         windowsHide: true,
         cwd: effectiveCwd,
-        env: { ...process.env, AWB_API_KEY: effectiveApiKey },
+        env: { ...process.env, AWB_API_KEY: effectiveApiKey, ...cliHomeEnv },
         shell: descriptor.shell ?? /\.(cmd|bat|ps1)$/i.test(resolvedBin),
       });
       child.once('error', (err: any) => {

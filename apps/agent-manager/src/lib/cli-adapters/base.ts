@@ -86,4 +86,18 @@ export abstract class CliAdapter {
   collectOneshotResult(_lines: string[]): string | null {
     return null;
   }
+
+  /**
+   * Env-var name the underlying CLI consults to override its config home
+   * directory. Manager uses this to point each managed agent at its own
+   * `<MANAGER_HOME>/agents/<id>/cli-home/` so per-agent CLI state
+   * (sessions, plugins, settings) stays isolated.
+   *
+   * Returning `null` means "this CLI has no config-home env var" — the
+   * manager skips injection and the spawn shares whatever the manager
+   * process inherited (typically the operator's $HOME).
+   */
+  configDirEnv(): string | null {
+    return null;
+  }
 }
