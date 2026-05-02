@@ -287,13 +287,18 @@ export class EventDispatcher {
       return;
     }
 
+    // ST-7 follow-up: never short-circuit with FS_BROWSER_DISABLED on the
+    // dispatcher side. The previous null-fsBrowser branch was a defensive
+    // belt that misled operators into thinking they needed to enable
+    // fs_browser in config — but config gating was already removed in
+    // fs-browser.ts. If main.ts somehow forgot to wire a FsBrowser, lazy-
+    // construct one here with empty config so browsing still works (the
+    // FsBrowser default is unrestricted-from-$HOME). Logged once when it
+    // happens so the wiring bug is visible.
     if (!this.#fsBrowser) {
-      await postFsResponse(this.#config, requestId, {
-        ok: false,
-        error: 'fs_browser is not wired on this manager instance',
-        code: 'FS_BROWSER_DISABLED',
-      });
-      return;
+      log('handleFsRequest: no FsBrowser wired — lazy-constructing a default. Fix main.ts wiring.');
+      const { FsBrowser } = await import('./fs-browser.js');
+      this.#fsBrowser = new FsBrowser(this.#config, null);
     }
 
     const result = await this.#fsBrowser.handle({

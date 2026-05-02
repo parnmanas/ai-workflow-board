@@ -358,7 +358,13 @@ async function runRuntime(
 
   const chatSessionManager = new ChatSessionManager(config);
   const ticketSessionManager = new TicketSessionManager(config);
-  const fsBrowser = new FsBrowser(config, (config as any).fs_browser || {});
+  // ST-7 follow-up: fs_browser is always-on. Construct with whatever's in
+  // config.fs_browser (roots etc.) but the FsBrowser class no longer
+  // gates behind an enabled flag — missing/empty roots = unrestricted
+  // browsing from $HOME. Loud log line so operators can confirm in
+  // proxy.log that the new code is live without grepping dist.
+  const fsBrowser = new FsBrowser(config, (config as any).fs_browser || null);
+  log('fs_browser: always-on (ST-7) — construction OK, ready to handle fs_request events');
 
   const subagentMonitor = new SubagentMonitor(config as any, null);
   subagentManager.setMonitor(subagentMonitor);
