@@ -18,7 +18,7 @@ import {
 import { importLegacyConfig } from './lib/legacy-import.js';
 import { runSelfUpdate } from './lib/self-update.js';
 import { runSetup, type SetupOptions } from './lib/setup.js';
-import { installService, uninstallService } from './lib/service-install.js';
+import { installService, uninstallService, type ServicePlatform } from './lib/service-install.js';
 import { PresenceHeartbeat } from './lib/presence-heartbeat.js';
 import { InstanceHeartbeat } from './lib/instance-heartbeat.js';
 import { EventStream } from './lib/event-stream.js';
@@ -106,8 +106,8 @@ function printHelp(): void {
 Usage:
   awb-agent-manager                       start the manager (uses saved config)
   awb-agent-manager setup [opts]          first-run pairing wizard
-  awb-agent-manager service install [..]  register as a systemd service
-  awb-agent-manager service uninstall     remove the systemd service
+  awb-agent-manager service install [..]  register as a background service (auto-detects host)
+  awb-agent-manager service uninstall     remove the registered service
   awb-agent-manager [options]             start with overrides
 
 Options:
@@ -126,11 +126,20 @@ Setup options (\`awb-agent-manager setup ...\`):
       --force                Overwrite an existing config.json
 
 Service options (\`awb-agent-manager service install ...\`):
-      --system               Install at /etc/systemd/system/ (sudo, runs at boot pre-login)
-                             Default: ~/.config/systemd/user/ (no sudo, needs \`loginctl enable-linger\`)
+      --system               Install at system scope (sudo / admin, runs at boot)
+                             Default: user scope (no admin, runs at logon)
+      --platform <p>         Force a specific service backend instead of auto-detect:
+                             auto (default) | systemd | sysvinit | synology | launchd | windows
       --exec-path <path>     Override path to dist/main.js (default: this binary's location)
-      --dry-run              Print the unit file without writing or running systemctl
-      --unit-only            Write the unit file but skip daemon-reload + enable + restart
+      --dry-run              Print the unit/plist/script without writing or running registrar
+      --unit-only            Write the unit file but skip daemon-reload / load / register
+
+Platform mapping (auto):
+  linux + systemd        → ~/.config/systemd/user/ (user) | /etc/systemd/system/ (--system)
+  linux + Synology DSM   → /usr/local/etc/rc.d/awb-agent-manager.sh (always system)
+  linux without systemd  → /etc/init.d/awb-agent-manager (always system, sysvinit)
+  darwin (macOS)         → ~/Library/LaunchAgents/ (user) | /Library/LaunchDaemons/ (--system)
+  win32                  → Task Scheduler task 'awb-agent-manager' (logon | --system boot)
 
 Config search order:
   1. --config flag
@@ -206,15 +215,17 @@ async function main(): Promise<void> {
   }
 
   // ─ service install / uninstall ─────────────────────────────────────
-  // `awb-agent-manager service install [--system] [--exec-path <p>] [--dry-run]`
-  // Generates a systemd unit + enables + starts. User mode by default
-  // (no sudo). System mode requires sudo. See lib/service-install.ts.
+  // `awb-agent-manager service install [--system] [--platform <p>] [--exec-path <p>] [--dry-run]`
+  // Auto-detects the host's service manager (systemd/sysvinit/synology/
+  // launchd/windows) and dispatches to the matching installer. User mode
+  // by default (no sudo/admin). --system requires sudo (Linux/macOS) or
+  // an elevated shell (Windows). See lib/service-install.ts.
   if (argv[0] === 'service') {
     const sub = argv[1] || '';
     if (sub !== 'install' && sub !== 'uninstall') {
       process.stderr.write(
         `\n  ✗ service: unknown subcommand '${sub}' (expected: install | uninstall)\n\n` +
-          `  Usage: awb-agent-manager service <install|uninstall> [--system] [--exec-path <p>] [--dry-run] [--unit-only]\n\n`,
+          `  Usage: awb-agent-manager service <install|uninstall> [--system] [--platform <p>] [--exec-path <p>] [--dry-run] [--unit-only]\n\n`,
       );
       process.exit(2);
     }
@@ -227,6 +238,7 @@ async function main(): Promise<void> {
           'dry-run': { type: 'boolean' },
           'unit-only': { type: 'boolean' },
           'exec-path': { type: 'string' },
+          platform: { type: 'string' },
         },
         allowPositionals: false,
         strict: true,
@@ -239,11 +251,21 @@ async function main(): Promise<void> {
     const dryRun = Boolean(serviceValues['dry-run']);
     const unitOnly = Boolean(serviceValues['unit-only']);
     const execPath = serviceValues['exec-path'] as string | undefined;
+    const platformRaw = serviceValues.platform as string | undefined;
+    const validPlatforms = ['auto', 'systemd', 'sysvinit', 'synology', 'launchd', 'windows'] as const;
+    if (platformRaw && !(validPlatforms as readonly string[]).includes(platformRaw)) {
+      process.stderr.write(
+        `\n  ✗ service ${sub}: invalid --platform '${platformRaw}' ` +
+          `(expected: ${validPlatforms.join(' | ')})\n\n`,
+      );
+      process.exit(2);
+    }
+    const platform = (platformRaw || 'auto') as 'auto' | ServicePlatform;
     try {
       if (sub === 'install') {
-        await installService({ system: isSystem, execPath, dryRun, unitOnly });
+        await installService({ system: isSystem, execPath, dryRun, unitOnly, platform });
       } else {
-        await uninstallService({ system: isSystem });
+        await uninstallService({ system: isSystem, platform });
       }
       process.exit(0);
     } catch (err: any) {
