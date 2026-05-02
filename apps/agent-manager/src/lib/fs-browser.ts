@@ -7,6 +7,7 @@
 // blocks both `..` tricks and symlinks that escape scope.
 
 import { promises as fsp, realpathSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { resolve as pathResolve, sep as PATH_SEP } from 'node:path';
 import { log } from './logging.js';
 import type { FsBrowser as FsBrowserContract, FsBrowserResult } from './event-dispatcher.js';
@@ -29,15 +30,23 @@ interface FsHandleArgs {
 }
 
 export class FsBrowser implements FsBrowserContract {
-  private enabled: boolean;
+  /**
+   * Always-on as of ST-7 follow-up. The legacy opt-in gate
+   * (`fs_browser.enabled`) was removed because the only callers are
+   * AWB-admin-authenticated UI surfaces — the manager's filesystem is
+   * already implicitly trusted to anyone who can reach the AWB admin
+   * dashboard, so requiring an explicit config section was friction
+   * without a corresponding security gain.
+   */
   private rawRoots: string[];
   private roots: string[] = [];
+  private hasExplicitRoots: boolean;
 
   constructor(_config: AwbConfig, fsSection?: FsBrowserSection | null) {
-    this.enabled = !!fsSection && fsSection.enabled !== false;
     this.rawRoots = Array.isArray(fsSection?.roots)
       ? fsSection!.roots!.filter((r): r is string => typeof r === 'string' && !!r)
       : [];
+    this.hasExplicitRoots = this.rawRoots.length > 0;
     this.resolveRootsSync();
   }
 
@@ -51,11 +60,30 @@ export class FsBrowser implements FsBrowserContract {
         log(`[fs-browser] scope root unreachable, dropped: ${root} (${err?.code || err?.message})`);
       }
     }
-    if (this.enabled && this.roots.length === 0) {
-      log('[fs-browser] fs_browser section present but no valid roots — requests will be denied');
-    } else if (this.enabled) {
-      log(`[fs-browser] enabled with ${this.roots.length} root(s): ${this.roots.join(', ')}`);
+    if (this.hasExplicitRoots && this.roots.length === 0) {
+      log('[fs-browser] explicit roots configured but none resolved — falling back to unrestricted browsing');
+    } else if (this.roots.length > 0) {
+      log(`[fs-browser] enabled with ${this.roots.length} configured root(s): ${this.roots.join(', ')}`);
+    } else {
+      log('[fs-browser] enabled (unrestricted — no fs_browser.roots configured; UI starts at $HOME)');
     }
+  }
+
+  /**
+   * Suggested starting points for the picker when no explicit roots are
+   * set. Order matters — picker uses the first hit that contains cwd.
+   */
+  private defaultStartingPoints(): string[] {
+    const out = new Set<string>();
+    try {
+      const home = realpathSync(pathResolve(homedir()));
+      if (home) out.add(home);
+    } catch { /* no $HOME available */ }
+    try {
+      const cwd = realpathSync(process.cwd());
+      if (cwd) out.add(cwd);
+    } catch { /* unlikely */ }
+    return Array.from(out);
   }
 
   async handle(req: FsHandleArgs): Promise<FsBrowserResult> {
@@ -65,19 +93,21 @@ export class FsBrowser implements FsBrowserContract {
     const op = req.op;
 
     if (op === 'roots') {
+      // When the operator hasn't pinned roots, expose the default starting
+      // points (home + cwd) so the picker has somewhere meaningful to land.
+      // `enabled` is always true now — the field is kept on the wire for
+      // back-compat with older clients that gate UI on it.
+      const advertisedRoots = this.roots.length > 0 ? this.roots.slice() : this.defaultStartingPoints();
       return {
         ok: true,
         data: {
           cwd: process.cwd(),
-          roots: this.roots.slice(),
-          enabled: this.enabled && this.roots.length > 0,
+          roots: advertisedRoots,
+          enabled: true,
         },
       };
     }
 
-    if (!this.enabled || this.roots.length === 0) {
-      return { ok: false, error: 'File browsing is disabled on this agent', code: 'FS_BROWSER_DISABLED' };
-    }
     const rawPath = req.path;
     if (typeof rawPath !== 'string' || !rawPath) {
       return { ok: false, error: 'path is required', code: 'PATH_INVALID' };
@@ -93,7 +123,10 @@ export class FsBrowser implements FsBrowserContract {
       return { ok: false, error: err?.message ?? String(err), code: err?.code || 'ENOENT' };
     }
 
-    if (!this.inScope(realPath)) {
+    // Scope enforcement only kicks in when roots are explicitly configured.
+    // Without a roots list, the picker can browse anywhere on the manager
+    // host (intentional default for ST-7 single-operator setups).
+    if (this.roots.length > 0 && !this.inScope(realPath)) {
       return { ok: false, error: `Path outside configured roots: ${rawPath}`, code: 'SCOPE_DENIED' };
     }
 

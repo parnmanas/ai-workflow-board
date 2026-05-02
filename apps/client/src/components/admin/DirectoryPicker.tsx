@@ -121,12 +121,18 @@ export default function DirectoryPicker({
         const info = await api.getAgentFsRoots(managerAgentId);
         if (cancelled) return;
         setRoots(info);
-        if (!info.enabled || info.roots.length === 0) {
-          setError(
-            'fs_browser is not enabled on this manager. Add `"fs_browser": ' +
-              '{ "enabled": true, "roots": ["/abs/path"] }` to the manager\'s ' +
-              'config.json (~/.config/awb-agent-manager/config.json) and restart it.',
-          );
+        // ST-7: fs_browser defaults to enabled with $HOME + cwd as starting
+        // points; the picker only fails here if the manager is offline or
+        // the request times out. Older managers may still report
+        // enabled=false, so we keep a fallback path of "use cwd if we got
+        // it" rather than blocking the picker.
+        const fallbackStart = initialPath || info.cwd || (info.roots[0] || '');
+        if (info.roots.length === 0) {
+          if (fallbackStart) {
+            await loadPath(fallbackStart);
+          } else {
+            setError('Manager returned no starting directories.');
+          }
           return;
         }
         const start = initialPath
@@ -152,7 +158,13 @@ export default function DirectoryPicker({
   }, [path, onPick, onClose]);
 
   const parent = path ? parentOf(path) : null;
-  const inScope = roots && roots.roots.some((r) => path === r || path.startsWith(r + '/') || path.startsWith(r + '\\'));
+  // ST-7: scope check is informational only now (manager defaults to
+  // unrestricted browsing). When the operator has pinned roots we still
+  // surface "outside scope" as a hint; we don't block confirmation since
+  // a manual override could still be intentional.
+  const hasExplicitRoots = roots && roots.roots.length > 0;
+  const outsideExplicitRoots = hasExplicitRoots
+    && !roots.roots.some((r) => path === r || path.startsWith(r + '/') || path.startsWith(r + '\\'));
 
   return (
     <Modal
@@ -163,7 +175,7 @@ export default function DirectoryPicker({
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
-          <Button variant="primary" onClick={handleUseHere} disabled={!path || !inScope}>
+          <Button variant="primary" onClick={handleUseHere} disabled={!path}>
             Use this directory
           </Button>
         </>
@@ -304,9 +316,9 @@ export default function DirectoryPicker({
           <div style={{ fontSize: 11, color: tokens.colors.textSecondary }}>
             <strong style={{ color: tokens.colors.textPrimary }}>Selected:</strong>{' '}
             <code style={{ fontFamily: 'monospace', fontSize: 11 }}>{path}</code>
-            {!inScope && (
-              <span style={{ color: tokens.colors.danger, marginLeft: 8 }}>
-                (outside configured roots — adjust manager fs_browser.roots to use)
+            {outsideExplicitRoots && (
+              <span style={{ color: tokens.colors.warning, marginLeft: 8 }}>
+                (outside the manager's configured fs_browser.roots — pick anyway if intentional)
               </span>
             )}
           </div>
