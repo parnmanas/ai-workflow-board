@@ -595,7 +595,10 @@ export type AgentManagerCommandKind =
   | 'stop_agent'
   | 'restart_agent'
   | 'set_working_dir'
-  | 'reload_config';
+  | 'reload_config'
+  | 'update_plugins'
+  | 'refresh_mcp_config'
+  | 'pull_working_dir';
 
 export interface AgentManagerCommandResult {
   ok: boolean;

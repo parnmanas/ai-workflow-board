@@ -327,7 +327,10 @@ export type AgentManagerCommand =
   | 'stop_agent'         // SIGTERM the running CLI for an agent identity
   | 'restart_agent'      // stop + spawn
   | 'set_working_dir'    // update Agent.working_dir on disk + reload
-  | 'reload_config';     // re-read config.json (e.g., after admin edits delegation tunables)
+  | 'reload_config'      // re-read config.json (e.g., after admin edits delegation tunables)
+  | 'update_plugins'     // git pull every plugin marketplace under the managed agent's cli-home
+  | 'refresh_mcp_config' // rewrite mcp-config.json so spawned subagents see the current AWB url
+  | 'pull_working_dir';  // git -C <agent.working_dir> pull --ff-only (best-effort, non-fatal)
 
 export interface AgentManagerCommandPayload {
   // The dispatch correlation id — manager echoes it on /command/ack so the
