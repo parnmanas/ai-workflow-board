@@ -20,6 +20,18 @@ export class TicketSessionManager
   extends BaseSessionManager
   implements TicketSessionManagerContract
 {
+  // Synchronous reservation table for in-flight spawns. _sessions only
+  // gets populated at the END of _spawnSession (and ticketId is stamped
+  // by the caller a few lines later), so two concurrent dispatchTrigger
+  // calls on the same agent can both pass the cap check before either
+  // session lands. This map flips synchronously between the cap check and
+  // the await on _spawnSession, so a racing dispatch sees it.
+  //
+  // Key shape: sessionKey (`${ticketId}:${role}`) so same-(ticket, role)
+  // burst dispatches can short-circuit, while the per-agent cap counts
+  // distinct ticketIds across all entries.
+  #inflight = new Map<string, { agentId: string; ticketId: string }>();
+
   constructor(config: SessionAwareConfig) {
     super(config, {
       keyField: 'sessionKey',
@@ -47,23 +59,41 @@ export class TicketSessionManager
     // enforces this against AgentStatusService.active_tasks, but
     // set_current_task lags the trigger by the spawn round-trip — two
     // back-to-back triggers can both pass the server gate before either
-    // has stamped current_task. Mirror the cap here using the manager's
-    // own session map (which flips synchronously on spawn).
+    // has stamped current_task. Mirror the cap here, counting both:
+    //   - _sessions: spawned children (registered at the END of _spawnSession)
+    //   - #inflight: reservations placed synchronously on dispatch entry,
+    //     covering the spawn-in-flight window where _sessions is still empty
     //
-    // Allowed: same agent already has a session for THIS ticket (a new
-    //   trigger on a live ticket session is a follow-up turn, not a new
-    //   ticket). The early-exit at line ~76 handles that case.
-    // Dropped: same agentId has active sessions on N OTHER tickets where
-    //   N >= maxConcurrentTicketsPerAgent.
+    // Allowed: same agent already has a session OR inflight reservation for
+    //   THIS (ticket, role) — new trigger collapses to a follow-up turn or
+    //   gets deduped by the inflight guard a few lines down.
+    // Dropped: same agentId has reservations/sessions on N OTHER tickets
+    //   where N >= maxConcurrentTicketsPerAgent.
     const maxConcurrent = Math.max(
       1,
       Math.floor(spec.maxConcurrentTicketsPerAgent ?? 1),
     );
     if (spec.agentId && !this._getSession(sessionKey)) {
+      // Same (ticket, role) already spawning — drop as duplicate so the
+      // first spawn wins. The next trigger for the same key will arrive
+      // after _sessions.set and become a follow-up turn naturally.
+      if (this.#inflight.has(sessionKey)) {
+        log(
+          `[ticket-session] dispatch dropped (spawn already in-flight for same key): ticket=${spec.ticketId.slice(0, 8)} role=${role}`,
+        );
+        if (dedupKey) this._forgetDedup(dedupKey);
+        return { dispatched: false, reason: 'inflight_spawn' };
+      }
       const otherTickets = new Set<string>();
       for (const sess of this._sessions.values()) {
         if (sess.agentId === spec.agentId && sess.ticketId && sess.ticketId !== spec.ticketId) {
           otherTickets.add(sess.ticketId);
+        }
+      }
+      for (const [k, info] of this.#inflight) {
+        if (k === sessionKey) continue;
+        if (info.agentId === spec.agentId && info.ticketId && info.ticketId !== spec.ticketId) {
+          otherTickets.add(info.ticketId);
         }
       }
       if (otherTickets.size >= maxConcurrent) {
@@ -112,6 +142,15 @@ export class TicketSessionManager
       return { dispatched: false, reason: 'cap_busy' };
     }
 
+    // Reserve synchronously so concurrent dispatches on the same agent see
+    // this slot before _spawnSession lands a SessionRecord in _sessions.
+    // Cleared after the spawn outcome is known (success or failure) — the
+    // session itself takes over the cap accounting from that point.
+    this.#inflight.set(sessionKey, {
+      agentId: spec.agentId || '',
+      ticketId: spec.ticketId,
+    });
+
     const firstTurnText = composeTriggerPrompt(
       spec.ticket,
       spec.rolePrompt || '',
@@ -125,20 +164,32 @@ export class TicketSessionManager
       ticket_title: spec.ticket?.title || '',
       role,
     };
-    const spawned = await this._spawnSession(
-      sessionKey,
-      spec.rolePrompt || '',
-      firstTurnText,
-      { monitorMeta, agentContext: spec.agentContext },
-    );
+    let spawned: SessionRecord | null = null;
+    try {
+      spawned = await this._spawnSession(
+        sessionKey,
+        spec.rolePrompt || '',
+        firstTurnText,
+        { monitorMeta, agentContext: spec.agentContext },
+      );
+      // Stamp identity fields BEFORE releasing the inflight reservation, so
+      // a concurrent dispatch never observes a session with empty
+      // ticketId/agentId (which the cap counter skips). _spawnSession lands
+      // the record in _sessions before returning, then we fill these in.
+      if (spawned) {
+        spawned.ticketId = spec.ticketId;
+        spawned.role = role;
+        spawned.agentId = spec.agentId || '';
+      }
+    } finally {
+      // Spawn outcome resolved and identity stamped — _sessions takes over
+      // cap accounting from here.
+      this.#inflight.delete(sessionKey);
+    }
     if (!spawned) {
       if (dedupKey) this._forgetDedup(dedupKey);
       return { dispatched: false, reason: 'spawn_failed' };
     }
-
-    spawned.ticketId = spec.ticketId;
-    spawned.role = role;
-    spawned.agentId = spec.agentId || '';
 
     if (spawned.agentId) {
       fireAndForgetTool(this._config, 'set_current_task', {

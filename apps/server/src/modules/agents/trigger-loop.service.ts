@@ -31,8 +31,25 @@ import { AgentStatusService } from './agent-status.service';
 const COMMENT_ACTION = 'created';
 const COMMENT_ENTITY = 'comment';
 
+// Synchronous reservation TTL for in-flight emits whose set_current_task
+// hasn't landed yet. Long enough to absorb a normal subagent spawn round-trip
+// (sub-second in practice), short enough that a silently-dropped trigger
+// (manager restart, network blip) doesn't keep the cap closed forever — the
+// supervisor's 30 min stale check will eventually re-push.
+const PENDING_DISPATCH_TTL_MS = 30_000;
+
 @Injectable()
 export class TriggerLoopService implements OnModuleInit {
+  // agent_id → Map<ticket_id, emitted_at_ms>. Counts toward the per-board
+  // max_concurrent_tickets_per_agent cap alongside AgentStatusService's
+  // active_tasks. Active_tasks is plugin-signal driven and only flips on
+  // set_current_task, which lags the SSE emit by the manager spawn round-
+  // trip; without this the cap permits a burst of N back-to-back triggers
+  // before any of them stamp the active map. Entries here are added
+  // synchronously between cap check and emit, so a concurrent _emitTrigger
+  // racing on the same agent observes them.
+  private readonly pendingDispatches = new Map<string, Map<string, number>>();
+
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly logService: LogService,
@@ -310,9 +327,18 @@ export class TriggerLoopService implements OnModuleInit {
       });
     }
 
+    // Cap check + reservation MUST be atomic relative to other concurrent
+    // _emitTrigger calls — i.e. no `await` between reading the in-flight set
+    // and adding our entry to it. Activity events arrive via fire-and-forget
+    // listeners, so multiple _handleActivity / supervisor pushes can interleave
+    // their awaits and reach this point on the same agent simultaneously.
+    // Snapshotting active + pending into a Set, deciding, then mutating
+    // pending — all synchronous — closes the race window.
     const activeTicketIds = this.agentStatusService.getActiveTicketIds(agentId);
-    const alreadyOnTarget = activeTicketIds.includes(ticket.id);
-    if (!alreadyOnTarget && activeTicketIds.length >= maxConcurrent) {
+    const pendingTicketIds = this._getPendingTicketIds(agentId);
+    const inflightSet = new Set<string>([...activeTicketIds, ...pendingTicketIds]);
+    const alreadyOnTarget = inflightSet.has(ticket.id);
+    if (!alreadyOnTarget && inflightSet.size >= maxConcurrent) {
       this.logService.info(
         'MCP',
         'agent_trigger skipped (per-board cap reached)',
@@ -323,6 +349,7 @@ export class TriggerLoopService implements OnModuleInit {
           source: triggerSource,
           max_concurrent: maxConcurrent,
           active_ticket_ids: activeTicketIds,
+          pending_ticket_ids: pendingTicketIds,
         },
       );
       // Activity-log the skip so admins can see what was queued/dropped.
@@ -337,13 +364,18 @@ export class TriggerLoopService implements OnModuleInit {
           actor_id: 'system',
           actor_name: 'TriggerLoopService',
           action: 'trigger_skipped_cap',
-          new_value: `agent=${agentId} max=${maxConcurrent} active=${activeTicketIds.length}`,
+          new_value: `agent=${agentId} max=${maxConcurrent} active=${activeTicketIds.length} pending=${pendingTicketIds.length}`,
           role,
           trigger_source: triggerSource,
         }),
       );
       return '';
     }
+
+    // Reserve synchronously, before emit. A subsequent _emitTrigger that
+    // races past the awaits above will see this entry and either find
+    // alreadyOnTarget=true (same ticket re-fire is fine) or hit the cap.
+    this._addPendingDispatch(agentId, ticket.id);
 
     // Ephemeral trigger_id — plugin-side dedup key, no server persistence.
     const triggerId = randomUUID();
@@ -374,6 +406,40 @@ export class TriggerLoopService implements OnModuleInit {
     });
 
     return triggerId;
+  }
+
+  /**
+   * Snapshot of pending dispatches for an agent, after TTL eviction.
+   * Synchronous — counterpart to AgentStatusService.getActiveTicketIds in
+   * the cap calculation. Side-effect: prunes expired entries on read so the
+   * map stays bounded.
+   */
+  private _getPendingTicketIds(agentId: string): string[] {
+    const map = this.pendingDispatches.get(agentId);
+    if (!map || map.size === 0) return [];
+    const cutoff = Date.now() - PENDING_DISPATCH_TTL_MS;
+    const out: string[] = [];
+    const expired: string[] = [];
+    for (const [tid, ts] of map) {
+      if (ts >= cutoff) out.push(tid);
+      else expired.push(tid);
+    }
+    for (const tid of expired) map.delete(tid);
+    if (map.size === 0) this.pendingDispatches.delete(agentId);
+    return out;
+  }
+
+  /**
+   * Reserve a pending slot for (agent, ticket). Refreshes the timestamp on
+   * re-fires so the TTL window resets while triggers keep arriving.
+   */
+  private _addPendingDispatch(agentId: string, ticketId: string): void {
+    let map = this.pendingDispatches.get(agentId);
+    if (!map) {
+      map = new Map<string, number>();
+      this.pendingDispatches.set(agentId, map);
+    }
+    map.set(ticketId, Date.now());
   }
 }
 
