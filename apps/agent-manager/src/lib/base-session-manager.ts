@@ -206,7 +206,18 @@ export class BaseSessionManager {
       });
 
       if (descriptor.needsMcpConfig) {
-        if (agentContext?.mcp_config_path) {
+        // Per-session config is required whenever the server needs to attribute
+        // a comment to a specific (ticket, role) — without the
+        // X-AWB-Subagent-Role / X-AWB-Subagent-Ticket-Id headers, the server's
+        // resolveAuthorRole falls back to listing every role the agent holds on
+        // the ticket, so a comment from one role lands tagged with all of them.
+        // The static per-agent mcp_config_path written by spawn_agent only
+        // carries Authorization + X-AWB-Client-Type, so we can't use it for
+        // ticket sessions. Chat / non-ticket sessions stay on the static path
+        // (no role pinning needed there).
+        const needsSessionPin = !!(monitorMeta?.ticket_id && monitorMeta?.role);
+
+        if (agentContext?.mcp_config_path && !needsSessionPin) {
           configPath = agentContext.mcp_config_path;
           configPathIsTemp = false;
         } else {
@@ -218,7 +229,7 @@ export class BaseSessionManager {
           await fsp.mkdir(dirname(configPath), { recursive: true, mode: 0o700 });
           const headers: Record<string, string> = {
             Authorization: `Bearer ${effectiveApiKey}`,
-            'X-AWB-Client-Type': 'subagent',
+            'X-AWB-Client-Type': agentContext ? 'managed-subagent' : 'subagent',
           };
           if (monitorMeta?.ticket_id) headers['X-AWB-Subagent-Ticket-Id'] = monitorMeta.ticket_id;
           if (monitorMeta?.role) headers['X-AWB-Subagent-Role'] = monitorMeta.role;
