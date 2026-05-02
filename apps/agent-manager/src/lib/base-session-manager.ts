@@ -15,7 +15,7 @@ import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
 import { SUBAGENTS_BASE_DIR, STOP_GRACE_MS } from './constants.js';
 import { log } from './logging.js';
-import { ClaudeCliAdapter } from './cli-adapters/claude.js';
+import { createAdapter } from './cli-adapters/index.js';
 import { ADAPTER_CAPABILITIES, PARSE_STAGE, type CliAdapter, type ParseResult } from './cli-adapters/base.js';
 import type { AwbConfig } from './rest.js';
 import type { SubagentMonitor, SubagentTapHandle } from './subagent-monitor.js';
@@ -65,15 +65,18 @@ export interface SpawnOpts {
   monitorMeta?: MonitorMeta;
   /**
    * ST-6: per-call managed-agent runtime context. When provided, the
-   * spawned CLI runs with cwd=ctx.cwd, MCP auth = ctx.api_key, and reuses
-   * ctx.mcp_config_path instead of a freshly-written temp config.
-   * Optional — undefined falls back to manager-config defaults.
+   * spawned CLI runs with cwd=ctx.cwd, MCP auth = ctx.api_key, reuses
+   * ctx.mcp_config_path instead of a freshly-written temp config, and
+   * (ST-7) picks the adapter for ctx.cli — claude / codex / gemini.
+   * Optional — undefined falls back to manager-config defaults + the
+   * default-claude adapter.
    */
   agentContext?: {
     agent_id: string;
     api_key: string;
     cwd: string;
     mcp_config_path: string;
+    cli: string;
   };
 }
 
@@ -89,6 +92,11 @@ export interface SessionRecord {
   [key: string]: any;
   pid: number;
   cli_type: string;
+  /** ST-7 cli refactor: the adapter instance the child was spawned with.
+   *  Persistent sessions stay bound to one adapter for their entire life
+   *  (formatTurn / parseStdoutLine across many turns), so we hold the ref
+   *  rather than re-resolving from cli_type on every callback. */
+  adapter: CliAdapter;
   child: ChildProcessByStdio<Writable, Readable, Readable>;
   configPath: string | null;
   /** ST-6: false when configPath is the agent's persistent mcp-config.json
@@ -109,7 +117,9 @@ export interface SessionRecord {
 
 export class BaseSessionManager {
   protected readonly _config: SessionAwareConfig;
-  protected readonly _adapter: CliAdapter;
+  /** ST-7: per-cliType adapter cache. Same scheme as SubagentManager —
+   *  one createAdapter() per cli over the manager's lifetime. */
+  #adapters = new Map<string, CliAdapter>();
   protected readonly _sessions = new Map<string, SessionRecord>();
   #dedupSet = new Set<string>();
   #dedupQueue: string[] = [];
@@ -123,13 +133,27 @@ export class BaseSessionManager {
 
   #monitor: SubagentMonitor | null = null;
 
-  constructor(config: SessionAwareConfig, options: BaseSessionOptions, adapter?: CliAdapter) {
+  constructor(config: SessionAwareConfig, options: BaseSessionOptions) {
     this._config = config;
     this.#keyField = options.keyField;
     this.#logTag = options.logTag;
     this.#cfgPrefix = options.cfgPrefix;
     this.#kindLabel = options.kindLabel;
-    this._adapter = adapter || new ClaudeCliAdapter();
+  }
+
+  /** Default-claude getter for legacy callers that introspect the manager. */
+  protected get _adapter(): CliAdapter {
+    return this._adapterFor('claude');
+  }
+
+  protected _adapterFor(cli: string | null | undefined): CliAdapter {
+    const t = String(cli || 'claude').toLowerCase();
+    let a = this.#adapters.get(t);
+    if (!a) {
+      a = createAdapter(t);
+      this.#adapters.set(t, a);
+    }
+    return a;
   }
 
   setMonitor(monitor: SubagentMonitor | null): void {
@@ -152,9 +176,15 @@ export class BaseSessionManager {
     firstTurnText: string,
     { onProgress, monitorMeta, agentContext }: SpawnOpts = {},
   ): Promise<SessionRecord | null> {
-    if (!this._adapter.has(PERSISTENT_SESSION)) {
+    // ST-7: pick the adapter for this agent's CLI choice (claude/codex/gemini)
+    // and bind it to the session record so future turns formatTurn /
+    // parseStdoutLine through the same adapter even if the manager later
+    // hosts agents with different CLIs.
+    const adapter = this._adapterFor(agentContext?.cli);
+
+    if (!adapter.has(PERSISTENT_SESSION)) {
       log(
-        `${this.#logTag} adapter cli=${this._adapter.cliType} does not support persistent sessions; refusing to spawn`,
+        `${this.#logTag} adapter cli=${adapter.cliType} does not support persistent sessions; refusing to spawn`,
       );
       return null;
     }
@@ -169,7 +199,7 @@ export class BaseSessionManager {
     let configPathIsTemp = false;
     let pidPath: string | null = null;
     try {
-      let descriptor = this._adapter.buildSessionSpawn({
+      let descriptor = adapter.buildSessionSpawn({
         rolePrompt: rolePrompt || '',
         mcpConfigPath: null,
       });
@@ -203,13 +233,13 @@ export class BaseSessionManager {
           await fsp.writeFile(configPath, JSON.stringify(mcpConfig), { mode: 0o600 });
         }
 
-        descriptor = this._adapter.buildSessionSpawn({
+        descriptor = adapter.buildSessionSpawn({
           rolePrompt: rolePrompt || '',
           mcpConfigPath: configPath,
         });
       }
 
-      const resolvedBin = this._adapter.resolveBin(this._config.delegation.claudeBin);
+      const resolvedBin = adapter.resolveBin(this._config.delegation.claudeBin);
       const child = spawn(resolvedBin, descriptor.args, {
         stdio: descriptor.stdio || ['pipe', 'pipe', 'pipe'],
         detached: true,
@@ -220,7 +250,7 @@ export class BaseSessionManager {
       }) as ChildProcessByStdio<Writable, Readable, Readable>;
       child.once('error', (err: any) => {
         log(
-          `${this.#logTag} spawn error: code=${err?.code || ''} cli=${this._adapter.cliType} bin=${resolvedBin} msg=${err?.message}`,
+          `${this.#logTag} spawn error: code=${err?.code || ''} cli=${adapter.cliType} bin=${resolvedBin} msg=${err?.message}`,
         );
       });
       child.unref();
@@ -240,7 +270,8 @@ export class BaseSessionManager {
       const sess: SessionRecord = {
         [this.#keyField]: sessionKey,
         pid: child.pid,
-        cli_type: this._adapter.cliType,
+        cli_type: adapter.cliType,
+        adapter,
         child,
         configPath,
         configPathIsTemp,
@@ -272,7 +303,7 @@ export class BaseSessionManager {
       this.#wireExit(sess);
 
       log(
-        `Subagent spawned: pid=${sess.pid} cli=${this._adapter.cliType} kind=${this.#kindLabel} ${this.#keyField}=${sessionKey}`,
+        `Subagent spawned: pid=${sess.pid} cli=${adapter.cliType} kind=${this.#kindLabel} ${this.#keyField}=${sessionKey}`,
       );
 
       this.#startTurn(sess, onProgress);
@@ -379,7 +410,7 @@ export class BaseSessionManager {
   }
 
   protected _writeTurn(sess: SessionRecord, text: string): void {
-    const wire = this._adapter.formatTurn(String(text));
+    const wire = sess.adapter.formatTurn(String(text));
     try {
       sess.child.stdin.write(wire + '\n');
       sess.tap?.inLine(wire);
@@ -408,7 +439,7 @@ export class BaseSessionManager {
       const tag = this.#logTag.replace(/^\[|\]$/g, '');
       rlOut.on('line', (line) => {
         sess.tap?.outLine(line);
-        const parsed = this._adapter.parseStdoutLine(line);
+        const parsed = sess.adapter.parseStdoutLine(line);
         this.#advanceTurn(sess, parsed);
         if (parsed.isResult) {
           const subtype = parsed.raw?.subtype || '-';

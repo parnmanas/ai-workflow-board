@@ -10,7 +10,6 @@ import {
 import { composeTriggerPrompt } from './prompts.js';
 import { fireAndForgetTool } from './mcp-client.js';
 import { log } from './logging.js';
-import type { CliAdapter } from './cli-adapters/base.js';
 import type {
   TicketDispatchResult,
   TicketSessionManager as TicketSessionManagerContract,
@@ -21,17 +20,13 @@ export class TicketSessionManager
   extends BaseSessionManager
   implements TicketSessionManagerContract
 {
-  constructor(config: SessionAwareConfig, adapter?: CliAdapter) {
-    super(
-      config,
-      {
-        keyField: 'sessionKey',
-        logTag: '[ticket-session]',
-        cfgPrefix: 'cfg-ticket-',
-        kindLabel: 'ticket_session',
-      },
-      adapter,
-    );
+  constructor(config: SessionAwareConfig) {
+    super(config, {
+      keyField: 'sessionKey',
+      logTag: '[ticket-session]',
+      cfgPrefix: 'cfg-ticket-',
+      kindLabel: 'ticket_session',
+    });
   }
 
   #makeKey(ticketId: string, role: string): string {

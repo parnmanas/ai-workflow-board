@@ -45,6 +45,12 @@ export interface AgentExecutionContext {
   cwd: string;
   /** Pre-written `claude --mcp-config` file. Manager writes once per agent. */
   mcp_config_path: string;
+  /** ST-6 follow-up: which CLI to fork (claude / codex / gemini / custom).
+   *  Per-agent rather than manager-wide so one manager host can drive a
+   *  mix of agents. SubagentManager / BaseSessionManager memoize the
+   *  adapter per cliType so the cost is one createAdapter() per cli over
+   *  the manager's lifetime. */
+  cli: string;
 }
 
 // ─── Session manager interfaces ──────────────────────────────────────────
@@ -227,6 +233,7 @@ export class EventDispatcher {
       api_key: ctx.api_key,
       cwd: ctx.working_dir,
       mcp_config_path: ctx.mcp_config_path,
+      cli: ctx.cli || 'claude',
     };
   }
 

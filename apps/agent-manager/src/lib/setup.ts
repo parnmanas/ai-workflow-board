@@ -26,8 +26,6 @@ export interface SetupOptions {
   url?: string;
   /** Pairing token (raw or 6-char display code). Prompted if absent. */
   token?: string;
-  /** CLI to drive (claude / codex / gemini). Default claude. */
-  cli?: string;
   /** Stable instance id reported on every heartbeat. Default `<hostname>-<rand>`. */
   instanceId?: string;
   /** When true, never prompt — fail fast on missing fields. */
@@ -43,7 +41,6 @@ export interface SetupResult {
   workspaceId: string;
 }
 
-const DEFAULT_CLI_CHOICES = ['claude', 'codex', 'gemini'] as const;
 const DEFAULT_URL_HINT = 'https://awb.example.com:7700';
 
 function maskKey(raw: string): string {
@@ -145,7 +142,6 @@ export async function runSetup(options: SetupOptions): Promise<SetupResult> {
 
   let url = options.url?.trim() || '';
   let token = options.token?.trim() || '';
-  let cli = (options.cli || '').trim().toLowerCase();
   const instanceId = options.instanceId?.trim() || autoInstanceId();
 
   if (!options.nonInteractive) {
@@ -158,19 +154,15 @@ export async function runSetup(options: SetupOptions): Promise<SetupResult> {
           'Pairing token (paste from AWB Admin → Agent Manager → Pair manager…)',
         );
       }
-      if (!cli) cli = await prompt.ask(`CLI to drive (${DEFAULT_CLI_CHOICES.join('/')})`, 'claude');
+      // ST-7: CLI is per-managed-agent now (set in AWB UI when creating
+      // each agent), not a manager-wide setting. No prompt here.
     } finally {
       prompt.close();
     }
-  } else {
-    if (!cli) cli = 'claude';
   }
 
   if (!url) throw new Error('AWB server URL is required (--url or interactive prompt)');
   if (!token) throw new Error('Pairing token is required (--token or interactive prompt)');
-  if (!DEFAULT_CLI_CHOICES.includes(cli as any) && cli !== 'custom') {
-    process.stderr.write(`  warn: cli="${cli}" is not a known adapter; manager will fall back to claude.\n`);
-  }
   // Light URL sanity check — pair/redeem will fail anyway on garbage but a
   // local error is friendlier than the round-trip.
   try {
@@ -184,12 +176,12 @@ export async function runSetup(options: SetupOptions): Promise<SetupResult> {
 
   const issued = await redeem(url, token, instanceId);
 
+  // ST-7: cli omitted from config — per-agent now.
   const configBody = {
     url,
     apiKey: issued.api_key,
     workspace_id: issued.workspace_id,
     agent_id: issued.agent_id,
-    cli,
   };
   writeConfigJson(targetPath, configBody);
 

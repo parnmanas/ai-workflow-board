@@ -10,7 +10,6 @@ import {
 } from './base-session-manager.js';
 import { fetchChatRoomHistory } from './rest.js';
 import { composeChatRoomPrompt } from './prompts.js';
-import type { CliAdapter } from './cli-adapters/base.js';
 import type {
   ChatDispatchArgs,
   ChatDispatchResult,
@@ -32,17 +31,13 @@ export class ChatSessionManager
   #historyRing = new Map<string, ChatHistoryEntry[]>();
   #HISTORY_MAX = 30;
 
-  constructor(config: SessionAwareConfig, adapter?: CliAdapter) {
-    super(
-      config,
-      {
-        keyField: 'roomId',
-        logTag: '[chat-session]',
-        cfgPrefix: 'cfg-chat-',
-        kindLabel: 'chat_session',
-      },
-      adapter,
-    );
+  constructor(config: SessionAwareConfig) {
+    super(config, {
+      keyField: 'roomId',
+      logTag: '[chat-session]',
+      cfgPrefix: 'cfg-chat-',
+      kindLabel: 'chat_session',
+    });
   }
 
   recordRoomMessage(payload: any): void {

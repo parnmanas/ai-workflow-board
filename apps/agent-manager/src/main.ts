@@ -29,11 +29,7 @@ import { onFlushThreshold } from './lib/event-log-recorder.js';
 import { cleanupOrphanSubagents } from './lib/orphan-cleanup.js';
 import { FsBrowser } from './lib/fs-browser.js';
 import { SubagentMonitor } from './lib/subagent-monitor.js';
-import {
-  ADAPTER_CAPABILITIES,
-  KNOWN_ADAPTER_CLI_TYPES,
-  createAdapter,
-} from './lib/cli-adapters/index.js';
+import { KNOWN_ADAPTER_CLI_TYPES } from './lib/cli-adapters/index.js';
 import { promptComposer } from './lib/prompts.js';
 import { ManagedAgentRegistry } from './lib/managed-agents.js';
 import { ManagedAgentContextRegistry } from './lib/managed-agent-context.js';
@@ -113,10 +109,12 @@ Options:
 Setup options (\`awb-agent-manager setup ...\`):
       --url <url>            AWB server base URL (skip prompt)
       --token <token>        Pairing token from AWB Admin → Agent Manager
-      --cli <name>           claude / codex / gemini (default claude)
       --instance-id <id>     Stable id reported on heartbeats (default <hostname>-<rand>)
       --non-interactive      Fail fast on missing fields instead of prompting
       --force                Overwrite an existing config.json
+
+      Note: CLI is per-managed-agent now (set in AWB Admin → Agent
+      Manager → Managed Agents → Create), not a manager-wide value.
 
 Config search order:
   1. --config flag
@@ -149,7 +147,6 @@ function parseSetupArgs(argv: string[]): SetupOptions {
       config: { type: 'string', short: 'c' },
       url: { type: 'string' },
       token: { type: 'string' },
-      cli: { type: 'string' },
       'instance-id': { type: 'string' },
       'non-interactive': { type: 'boolean' },
       force: { type: 'boolean', short: 'f' },
@@ -161,7 +158,6 @@ function parseSetupArgs(argv: string[]): SetupOptions {
     configPath: (values.config as string | undefined) || undefined,
     url: (values.url as string | undefined) || undefined,
     token: (values.token as string | undefined) || undefined,
-    cli: (values.cli as string | undefined) || undefined,
     instanceId: (values['instance-id'] as string | undefined) || undefined,
     nonInteractive: Boolean(values['non-interactive']) || !process.stdin.isTTY,
     force: Boolean(values.force),
@@ -248,7 +244,10 @@ async function main(): Promise<void> {
   process.stdout.write(`  config:      ${configPath}\n`);
   process.stdout.write(`  url:         ${config.url}\n`);
   process.stdout.write(`  workspace:   ${config.workspace_id ?? '(none)'}\n`);
-  process.stdout.write(`  cli:         ${config.cli ?? 'claude'}\n`);
+  // ST-7 cli refactor: the manager no longer pins to a single CLI. Each
+  // managed agent picks its own (claude/codex/gemini), set per-row in
+  // AWB Admin → Agent Manager → Managed Agents. Legacy `cli` field on
+  // config.json is now ignored at runtime.
 
   if (flags.dryRun) {
     log('--dry-run: exiting after config load (config=loaded)');
@@ -300,10 +299,8 @@ async function runRuntime(
     throw err;
   }
 
-  const adapter = createAdapter(config.cli);
-  const persistent = adapter.has(ADAPTER_CAPABILITIES.PERSISTENT_SESSION);
   log(
-    `agent-manager starting (server=${config.url} version=${version} cli=${adapter.cliType} persistent_sessions=${persistent})`,
+    `agent-manager starting (server=${config.url} version=${version} per-agent cli)`,
   );
   log(
     `Delegation: maxConcurrent=${config.delegation.maxConcurrent} ttl=${config.delegation.ttlMinutes}min idle=${config.delegation.idleMinutes}min cliBin=${config.delegation.claudeBin}`,
@@ -331,7 +328,7 @@ async function runRuntime(
     })
     .catch((err: any) => log(`Orphan subagent cleanup failed: ${err?.message ?? err}`));
 
-  const subagentManager = new SubagentManager(config, adapter);
+  const subagentManager = new SubagentManager(config);
   subagentManager.init().catch((err: any) =>
     log(`SubagentManager init failed: ${err?.message ?? err}`),
   );
@@ -353,15 +350,14 @@ async function runRuntime(
       if (!next?.url || !next?.apiKey) return 'reload skipped: config missing';
       const disruptive =
         next.url !== config.url ||
-        next.apiKey !== config.apiKey ||
-        String(next.cli || '') !== String(config.cli || '');
+        next.apiKey !== config.apiKey;
       Object.assign(config, next);
-      return disruptive ? 'reloaded (disruptive — server/apiKey/cli need restart)' : 'reloaded';
+      return disruptive ? 'reloaded (disruptive — server/apiKey need restart)' : 'reloaded';
     },
   });
 
-  const chatSessionManager = new ChatSessionManager(config, adapter);
-  const ticketSessionManager = new TicketSessionManager(config, adapter);
+  const chatSessionManager = new ChatSessionManager(config);
+  const ticketSessionManager = new TicketSessionManager(config);
   const fsBrowser = new FsBrowser(config, (config as any).fs_browser || {});
 
   const subagentMonitor = new SubagentMonitor(config as any, null);
@@ -447,7 +443,10 @@ async function runRuntime(
     instanceHeartbeat._real = new InstanceHeartbeat(config, agentId, {
       mode: 'manager',
       version,
-      cli: adapter.cliType,
+      // Manager hosts a mix of per-agent CLIs now (ST-7); the UI cli
+      // field is a coarse label and 'mixed' beats picking one arbitrary
+      // adapter that may not even be in use.
+      cli: 'mixed',
       cliAdapters: KNOWN_ADAPTER_CLI_TYPES.slice() as string[],
       // ST-5b — pass the registry as a snapshot source so each heartbeat
       // reports the currently-supervised agent_ids and their working dirs.

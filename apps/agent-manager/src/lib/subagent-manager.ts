@@ -21,7 +21,7 @@ import {
   STOP_GRACE_MS,
 } from './constants.js';
 import { log } from './logging.js';
-import { ClaudeCliAdapter } from './cli-adapters/claude.js';
+import { createAdapter } from './cli-adapters/index.js';
 import { ADAPTER_CAPABILITIES, type CliAdapter } from './cli-adapters/base.js';
 import { fireAndForgetTool } from './mcp-client.js';
 import type { AwbConfig } from './rest.js';
@@ -83,7 +83,14 @@ export interface SubagentExitInfo {
 export class SubagentManager implements SubagentManagerContract {
   #map = new Map<number, AnyRecord>();
   #config: SubagentAwareConfig;
-  #adapter: CliAdapter;
+  /**
+   * ST-7 cli refactor: per-cliType adapter cache. The manager is no longer
+   * pinned to a single CLI; spawn() resolves the right adapter from
+   * `agentContext.cli` so a single manager host can drive a mix of
+   * claude / codex / gemini agents. createAdapter() runs at most once per
+   * cli over the manager's lifetime.
+   */
+  #adapters = new Map<string, CliAdapter>();
   #sweepTimer: NodeJS.Timeout | null = null;
   #reservationCounter = 0;
   #persistPath: string;
@@ -93,9 +100,8 @@ export class SubagentManager implements SubagentManagerContract {
 
   onExit?: (info: SubagentExitInfo) => void;
 
-  constructor(config: SubagentAwareConfig, adapter?: CliAdapter) {
+  constructor(config: SubagentAwareConfig) {
     this.#config = config;
-    this.#adapter = adapter || new ClaudeCliAdapter();
     this.#persistPath = SUBAGENTS_PERSIST_PATH;
     this.#pidDir = SUBAGENTS_BASE_DIR;
   }
@@ -117,12 +123,28 @@ export class SubagentManager implements SubagentManagerContract {
     this.#sweepTimer = setInterval(() => this.#sweep(), TTL_SWEEP_INTERVAL_MS);
     this.#sweepTimer.unref?.();
     log(
-      `SubagentManager initialized (cli=${this.#adapter.cliType}, pidDir=${this.#pidDir}, cap=${this.#config.delegation.maxConcurrent}, ttl=${this.#config.delegation.ttlMinutes}min)`,
+      `SubagentManager initialized (per-agent cli, pidDir=${this.#pidDir}, cap=${this.#config.delegation.maxConcurrent}, ttl=${this.#config.delegation.ttlMinutes}min)`,
     );
   }
 
+  /**
+   * Resolve an adapter for the requested CLI, memoized so each cliType
+   * only constructs once. Falls back to the claude adapter for missing /
+   * unknown values (createAdapter handles that itself).
+   */
+  #adapterFor(cli: string | null | undefined): CliAdapter {
+    const t = String(cli || 'claude').toLowerCase();
+    let a = this.#adapters.get(t);
+    if (!a) {
+      a = createAdapter(t);
+      this.#adapters.set(t, a);
+    }
+    return a;
+  }
+
+  /** Default-claude adapter for the legacy single-agent code paths. */
   get adapter(): CliAdapter {
-    return this.#adapter;
+    return this.#adapterFor('claude');
   }
 
   async #sweepOrphanCfgs(): Promise<void> {
@@ -204,17 +226,20 @@ export class SubagentManager implements SubagentManagerContract {
     const reservationId = -(++this.#reservationCounter);
     this.#map.set(reservationId, { kind: 'reservation', started_at: Date.now() });
 
-    // ST-6: per-call managed-agent context. When provided we (a) reuse the
-    // pre-written mcp-config.json instead of a temp one, (b) authenticate as
-    // the managed agent (apiKey override), and (c) cd into the managed
-    // agent's working_dir so the CLI sees the right project root.
+    // ST-6 / ST-7: per-call managed-agent context. When provided we
+    // (a) reuse the pre-written mcp-config.json instead of a temp one,
+    // (b) authenticate as the managed agent (apiKey override),
+    // (c) cd into the managed agent's working_dir, and
+    // (d) pick the adapter for the agent's CLI choice (claude/codex/gemini)
+    //     instead of using a manager-wide default.
     const ctx = spec.agentContext;
+    const adapter = this.#adapterFor(ctx?.cli);
     const effectiveApiKey = ctx?.api_key || this.#config.apiKey;
     const effectiveCwd = ctx?.cwd || undefined;
     let configPath: string | null = null;
     let configPathIsTemp = false;
     try {
-      const descriptor = this.#adapter.buildOneshotSpawn({
+      const descriptor = adapter.buildOneshotSpawn({
         rolePrompt: spec.rolePrompt || '',
         taskText: spec.taskText,
         mcpConfigPath: null,
@@ -249,7 +274,7 @@ export class SubagentManager implements SubagentManagerContract {
 
         Object.assign(
           descriptor,
-          this.#adapter.buildOneshotSpawn({
+          adapter.buildOneshotSpawn({
             rolePrompt: spec.rolePrompt || '',
             taskText: spec.taskText,
             mcpConfigPath: configPath,
@@ -257,7 +282,7 @@ export class SubagentManager implements SubagentManagerContract {
         );
       }
 
-      const resolvedBin = this.#adapter.resolveBin(this.#config.delegation.claudeBin);
+      const resolvedBin = adapter.resolveBin(this.#config.delegation.claudeBin);
       const child = spawn(resolvedBin, descriptor.args, {
         stdio: descriptor.stdio || ['ignore', 'pipe', 'pipe'],
         detached: true,
@@ -268,7 +293,7 @@ export class SubagentManager implements SubagentManagerContract {
       });
       child.once('error', (err: any) => {
         log(
-          `Subagent spawn error: code=${err?.code || ''} cli=${this.#adapter.cliType} bin=${resolvedBin} msg=${err?.message}`,
+          `Subagent spawn error: code=${err?.code || ''} cli=${adapter.cliType} bin=${resolvedBin} msg=${err?.message}`,
         );
       });
       child.unref();
@@ -291,7 +316,7 @@ export class SubagentManager implements SubagentManagerContract {
       const record: SubagentRecord = {
         pid,
         kind: spec.kind,
-        cli_type: this.#adapter.cliType,
+        cli_type: adapter.cliType,
         trigger_id: spec.triggerId || null,
         chat_request_id: spec.chatRequestId || null,
         ticket_id: spec.ticketId || null,
@@ -302,7 +327,7 @@ export class SubagentManager implements SubagentManagerContract {
         config_path: configPath,
         config_path_is_temp: configPathIsTemp,
         process_handle: child,
-        captureOutput: !this.#adapter.has(NATIVE_MCP),
+        captureOutput: !adapter.has(NATIVE_MCP),
         outLines: [],
         tap: null,
       };
@@ -324,7 +349,7 @@ export class SubagentManager implements SubagentManagerContract {
       this.#wireStdioCapture(child, pid);
 
       log(
-        `Subagent spawned: pid=${pid} cli=${this.#adapter.cliType} kind=${spec.kind} ticket=${spec.ticketId || '-'}`,
+        `Subagent spawned: pid=${pid} cli=${adapter.cliType} kind=${spec.kind} ticket=${spec.ticketId || '-'}`,
       );
       return { spawned: true, pid };
     } catch (err: any) {
@@ -355,7 +380,10 @@ export class SubagentManager implements SubagentManagerContract {
 
       if (record.captureOutput && record.ticket_id && code === 0 && !signal) {
         try {
-          const answer = this.#adapter.collectOneshotResult(record.outLines);
+          // Use the same adapter that spawned this child — picked by
+          // record.cli_type so we don't aggregate gemini's stdout with
+          // claude's parser.
+          const answer = this.#adapterFor(record.cli_type).collectOneshotResult(record.outLines);
           if (answer) await this.#postOneshotAnswer(record, answer);
         } catch (err: any) {
           log(`Subagent post-answer failed pid=${pid}: ${err?.message ?? err}`);
