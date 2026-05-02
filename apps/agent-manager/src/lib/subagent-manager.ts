@@ -348,6 +348,10 @@ export class SubagentManager implements SubagentManagerContract {
               ? `oneshot:chat:${spec.chatRequestId}`
               : `oneshot:${pid}`,
           pid,
+          // Same per-agent attribution as BaseSessionManager._spawnSession:
+          // when a managed-agent context is in play, the subagent should be
+          // owned by the managed agent on the server's subagent list.
+          apiKey: ctx?.api_key,
         }) || null;
       this.#map.delete(reservationId);
       this.#map.set(pid, record);

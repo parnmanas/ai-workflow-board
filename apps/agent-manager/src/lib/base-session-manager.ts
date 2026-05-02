@@ -315,6 +315,13 @@ export class BaseSessionManager {
           ticketId: monitorMeta?.ticket_id,
           ticketTitle: monitorMeta?.ticket_title,
           role: monitorMeta?.role,
+          // Attribute managed-agent subagents to the managed agent (not the
+          // manager) by re-using the per-agent apiKey for the monitor POSTs.
+          // Without this, every subagent on the AWB UI's subagent list lands
+          // under the manager identity even though it's executing for a
+          // managed agent — see subagent-monitor.ts for the per-key bucket
+          // and reconcile fan-out that supports this.
+          apiKey: agentContext?.api_key,
         }) || null;
       this.#wireStdio(sess);
       this.#wireExit(sess);
