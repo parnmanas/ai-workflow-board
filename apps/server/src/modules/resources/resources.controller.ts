@@ -42,11 +42,11 @@ export class ResourcesController {
     }
     if (type) {
       qb.andWhere('r.type = :t', { t: type });
-    } else {
-      // comment_attachment is server-managed and would clutter the default
-      // listing; callers must opt in by passing type=comment_attachment.
-      qb.andWhere('r.type != :hidden', { hidden: 'comment_attachment' });
     }
+    // No default type filter — the UI Resources page wants to surface
+    // comment attachments alongside user-created resources so files uploaded
+    // through ticket comments are discoverable. MCP `list_resources` keeps
+    // its own default that hides comment_attachment from agents to cut noise.
     const resources = await qb.orderBy('r.name', 'ASC').getMany();
     const parsed = resources.map((r) => ({
       ...r,

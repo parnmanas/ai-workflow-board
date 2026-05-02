@@ -39,7 +39,8 @@ type StreamNamedEventType =
   | 'user_mention'  // Mention feature — sidebar unread badge sync
   | 'comment_typing'   // Phase-9 typed comments — "user is composing" indicator
   | 'ticket_presence'  // Tier-1 E — viewer set for a ticket (panel-open indicator)
-  | 'subagent_registered' | 'subagent_log' | 'subagent_ended';  // v0.32 subagent monitor
+  | 'subagent_registered' | 'subagent_log' | 'subagent_ended'  // v0.32 subagent monitor
+  | 'agent_instance_update';  // Phase 3 Agent Manager dashboard
 
 interface BoardStreamContextValue {
   /** Subscribe to a named SSE event (board_update/agent_typing/agent_trigger). */
@@ -193,6 +194,11 @@ export function BoardStreamProvider({ children }: ProviderProps) {
 
       eventSource.addEventListener('ticket_presence', (event: MessageEvent) => {
         dispatch('ticket_presence', event.data);
+      });
+
+      // Phase 3 — Agent Manager dashboard: live daemon/proxy registry updates.
+      eventSource.addEventListener('agent_instance_update', (event: MessageEvent) => {
+        dispatch('agent_instance_update', event.data);
       });
 
       eventSource.onerror = () => {

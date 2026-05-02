@@ -20,7 +20,9 @@ export type StreamEventType =
   | 'fs_request'           // File browser: server → plugin reverse RPC to read agent-machine files
   | 'subagent_registered'  // Subagent monitor: plugin spawned a subagent
   | 'subagent_log'         // Subagent monitor: stream-json line in/out
-  | 'subagent_ended';      // Subagent monitor: subagent process exited
+  | 'subagent_ended'       // Subagent monitor: subagent process exited
+  | 'agent_instance_update' // Agent Manager: daemon/proxy instance heartbeat / removal
+  | 'agent_manager_command'; // ST-4: AWB → awb-agent-manager control message (spawn/stop/reload-config)
 
 export interface StreamEventScope {
   board_id?: string;
@@ -282,4 +284,59 @@ export interface SubagentEndedPayload {
   // ISO-8601 instant at which the server will purge this record from the
   // in-memory registry. Drives the "expires in 47h 32m" hint in the UI.
   expires_at?: string;
+}
+
+// Phase 3 — Agent Manager dashboard. Emitted by InstanceRegistryService on
+// every heartbeat upsert and on TTL eviction, so the admin UI can render
+// live instance state without polling. The full record is shipped on each
+// event because the dashboard list is small (one row per running daemon /
+// proxy on each host) and the diff would be more code than the payload.
+export interface AgentInstanceUpdatePayload {
+  action: 'registered' | 'updated' | 'removed';
+  instance: {
+    instance_id: string;
+    agent_id: string;
+    workspace_id: string | null;
+    mode: 'daemon' | 'proxy' | 'manager';
+    hostname: string;
+    plugin_version: string;
+    cli: string;
+    cli_adapters: string[];
+    pid: number;
+    started_at: string;
+    last_seen_at: string;
+    agent_ids?: string[];
+    working_dirs?: string[];
+    paired_at?: string;
+  };
+}
+
+// ST-4 — AWB → awb-agent-manager control messages. The manager subscribes
+// to its own SSE stream (auth via the agent API key it minted at pair time),
+// matches `instance_id` to the one it advertises in its heartbeat, and
+// dispatches the named command. ack arrives via REST POST so the failure
+// path of an in-flight SSE doesn't strand the request.
+export type AgentManagerCommand =
+  | 'spawn_agent'        // start a CLI for a specific agent identity
+  | 'stop_agent'         // SIGTERM the running CLI for an agent identity
+  | 'restart_agent'      // stop + spawn
+  | 'set_working_dir'    // update Agent.working_dir on disk + reload
+  | 'reload_config';     // re-read config.json (e.g., after admin edits delegation tunables)
+
+export interface AgentManagerCommandPayload {
+  // The dispatch correlation id — manager echoes it on /command/ack so the
+  // admin UI can tell whether the command landed and which one this was.
+  command_id: string;
+  // Targets the manager process: must match InstanceRecord.instance_id the
+  // manager advertised in its last heartbeat. Other instances on the same
+  // host (or other agents on the same manager-agent identity) ignore the
+  // event.
+  instance_id: string;
+  // The supervising agent-manager Agent row (used for SSE filtering — only
+  // this agent's stream sees the command).
+  agent_id: string;
+  command: AgentManagerCommand;
+  args: Record<string, any>;
+  issued_by: string;     // user_id of the admin who triggered the command
+  issued_at: string;     // ISO-8601
 }

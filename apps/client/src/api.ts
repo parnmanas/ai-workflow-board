@@ -20,6 +20,13 @@ import type {
   SubagentSummary,
   SubagentTranscript,
   AgentProxySession,
+  AgentManagerInstance,
+  PairingTokenMint,
+  PairingTokenSafe,
+  AgentManagerCommandKind,
+  AgentManagerCommandResult,
+  ManagedAgentCreateBody,
+  Agent,
   TicketAttachmentMeta,
 } from './types';
 
@@ -630,6 +637,55 @@ export const api = {
   // (ticket lifecycle, MCP round-trips, multi-agent scoping, large data,
   // etc.) from the admin UI without dropping to a shell.
   runQaFlows: () => request<any>('/admin/qa/run-flows', { method: 'POST' }),
+
+  // ─── Admin Agent Manager (Phase 3) ─────────────────────
+  // Live registry of daemon/proxy plugin instances heartbeating against the
+  // server. One Agent row may have multiple instances (a developer running
+  // proxy.mjs on one host and daemon.mjs on another shares one agent id);
+  // this surface preserves the per-process detail.
+  listAgentManagerInstances: (workspaceId?: string) => {
+    const qs = new URLSearchParams();
+    if (workspaceId) qs.set('workspace_id', workspaceId);
+    const q = qs.toString();
+    return request<AgentManagerInstance[]>(`/admin/agent-manager/instances${q ? '?' + q : ''}`);
+  },
+  getAgentManagerInstanceSubagents: (instanceId: string) =>
+    request<SubagentSummary[]>(`/admin/agent-manager/instances/${encodeURIComponent(instanceId)}/subagents`),
+  getAgentManagerInstanceLogs: (instanceId: string, limit = 200) =>
+    request<any[]>(`/admin/agent-manager/instances/${encodeURIComponent(instanceId)}/logs?limit=${limit}`),
+  restartAgentManagerInstance: (instanceId: string) =>
+    request<any>(`/admin/agent-manager/instances/${encodeURIComponent(instanceId)}/restart`, { method: 'POST' }),
+
+  // ─── ST-4/5 Agent-manager pairing & control ───────────
+  // Pairing token lifecycle. mintAgentManagerPairing returns the raw token
+  // ONCE — the UI must show it, copy it, and discard it. listAgentManagerPairings
+  // returns the masked rows (no token, just the display code) for the table.
+  mintAgentManagerPairing: (body: { agent_name?: string }) =>
+    request<PairingTokenMint>('/admin/agent-manager/pair', { method: 'POST', body: JSON.stringify(body || {}) }),
+  listAgentManagerPairings: () =>
+    request<PairingTokenSafe[]>('/admin/agent-manager/pair'),
+  revokeAgentManagerPairing: (id: string) =>
+    request<{ ok: true }>(`/admin/agent-manager/pair/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  // Control command — admin → manager instance over SSE. The 202 response
+  // is the dispatch ack only; the manager later calls /command/ack with the
+  // execution outcome (currently consumed only by server logs, surfacing it
+  // in the UI is a future enhancement).
+  sendAgentManagerCommand: (
+    instanceId: string,
+    body: { command: AgentManagerCommandKind; args?: Record<string, any> },
+  ) =>
+    request<AgentManagerCommandResult>(
+      `/admin/agent-manager/instances/${encodeURIComponent(instanceId)}/command`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+
+  // Create an agent identity that the manager will spawn. Differs from the
+  // generic POST /agents in two ways: (1) cli is validated against the
+  // claude/codex/gemini/custom whitelist, (2) manager_agent_id is sanity-
+  // checked against the same workspace before save.
+  createManagedAgent: (body: ManagedAgentCreateBody) =>
+    request<Agent>('/admin/agent-manager/agents', { method: 'POST', body: JSON.stringify(body) }),
 
   // ─── Admin Logs ────────────────────────────────────────
   getLogs: (params?: { level?: string; category?: string; since?: string; until?: string; limit?: number; search?: string }) => {

@@ -173,7 +173,7 @@ export class AgentsController {
 
   @Post()
   async create(@Body() body: any, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
-    const { name, description = '', type = 'custom', avatar_url = '', is_active = 1 } = body;
+    const { name, description = '', type = 'custom', avatar_url = '', is_active = 1, working_dir = '', manager_agent_id = null } = body;
     if (!name) return res.status(400).json({ error: 'name is required' });
 
     // Use workspace injected by WorkspaceGuard — ignore body-supplied workspace_id to
@@ -189,7 +189,12 @@ export class AgentsController {
     }
 
     const agent = await this.agentRepo.save(
-      this.agentRepo.create({ name, description, type, avatar_url, is_active, workspace_id: effectiveWorkspaceId }),
+      this.agentRepo.create({
+        name, description, type, avatar_url, is_active,
+        workspace_id: effectiveWorkspaceId,
+        working_dir: typeof working_dir === 'string' ? working_dir : '',
+        manager_agent_id: typeof manager_agent_id === 'string' && manager_agent_id ? manager_agent_id : null,
+      }),
     );
     return res.status(201).json(agent);
   }
@@ -200,7 +205,7 @@ export class AgentsController {
       where: { id, ...(workspaceId ? { workspace_id: workspaceId } : {}) },
     }, 'Agent not found');
 
-    const { name, description, type, avatar_url, is_active, role_prompt, role_prompt_meta } = body;
+    const { name, description, type, avatar_url, is_active, role_prompt, role_prompt_meta, working_dir, manager_agent_id } = body;
     if (name !== undefined) {
       const trimmed = typeof name === 'string' ? name.trim() : '';
       if (!trimmed) return res.status(400).json({ error: 'name cannot be empty' });
@@ -213,6 +218,15 @@ export class AgentsController {
     // Phase 1 role prompt fields (D-14 / ROLE-02)
     if (role_prompt !== undefined) agent.role_prompt = role_prompt;
     if (role_prompt_meta !== undefined) agent.role_prompt_meta = role_prompt_meta;
+    // ST-4 — agent-manager fields. working_dir is plain text; manager_agent_id
+    // can be null to detach an agent from a manager (e.g. moved to a host
+    // running the legacy proxy).
+    if (working_dir !== undefined) {
+      agent.working_dir = typeof working_dir === 'string' ? working_dir : '';
+    }
+    if (manager_agent_id !== undefined) {
+      agent.manager_agent_id = typeof manager_agent_id === 'string' && manager_agent_id ? manager_agent_id : null;
+    }
 
     const updated = await this.agentRepo.save(agent);
     return res.json(updated);

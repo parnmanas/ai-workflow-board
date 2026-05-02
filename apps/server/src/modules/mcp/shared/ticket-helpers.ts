@@ -173,7 +173,10 @@ export function inferTicketAttachmentMimetype(fileName: string, explicit?: strin
     png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp',
     svg: 'image/svg+xml',
     pdf: 'application/pdf', txt: 'text/plain', md: 'text/markdown', json: 'application/json',
-    zip: 'application/zip', csv: 'text/csv', mp4: 'video/mp4', mov: 'video/quicktime',
+    zip: 'application/zip', csv: 'text/csv',
+    mp4: 'video/mp4', m4v: 'video/mp4', mov: 'video/quicktime',
+    webm: 'video/webm', mkv: 'video/x-matroska', ogv: 'video/ogg',
+    mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4',
     log: 'text/plain', xml: 'application/xml', html: 'text/html',
   };
   return extMap[ext] || 'application/octet-stream';

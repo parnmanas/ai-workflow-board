@@ -122,6 +122,7 @@ export default function Sidebar({ isMobile, isOpen, onClose, wsId, boards }: Sid
     { key: 'admin-qa',      path: '/admin/qa',      label: 'QA Tests',    icon: 'Q' },
     { key: 'admin-logs',    path: '/admin/logs',    label: 'Server Logs', icon: 'L' },
     { key: 'admin-agent-logs', path: '/admin/agent-logs', label: 'Agent Logs',  icon: 'G', badge: counts.agentErrors },
+    { key: 'admin-agent-manager', path: '/admin/agent-manager', label: 'Agent Manager', icon: 'M' },
     { key: 'admin-settings', path: '/admin/settings', label: 'Settings',    icon: 'S' },
   ];
 

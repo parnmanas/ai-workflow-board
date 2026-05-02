@@ -1,0 +1,22 @@
+import React from 'react';
+import { useParams } from 'react-router-dom';
+import { useBoard } from '../hooks/useBoard';
+import ResourceManager from './admin/ResourceManager';
+import PageHeader from './PageHeader';
+
+export default function BoardResourcesPage() {
+  const { wsId, boardId } = useParams<{ wsId: string; boardId: string }>();
+  const { board } = useBoard(boardId ?? '');
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+      <PageHeader
+        title="Resources"
+        description={board?.name}
+      />
+      <div style={{ flex: 1, overflow: 'auto', minHeight: 0, padding: '24px' }}>
+        <ResourceManager workspaceId={wsId} boardId={boardId} />
+      </div>
+    </div>
+  );
+}

@@ -10,6 +10,7 @@ import AppLayout from './components/AppLayout';
 import ChatPage from './components/ChatPage';
 import AgentsPage from './components/AgentsPage';
 import BoardSettingsPage from './components/BoardSettingsPage';
+import BoardResourcesPage from './components/BoardResourcesPage';
 import BoardsIndexPage from './components/BoardsIndexPage';
 import WorkspaceUsersPage from './components/WorkspaceUsersPage';
 import WorkspaceChannelsPage from './components/WorkspaceChannelsPage';
@@ -149,6 +150,7 @@ function AppContent() {
           <Route index element={<Navigate to="boards" replace />} />
           <Route path="boards" element={<BoardsIndexPage />} />
           <Route path="boards/:boardId" element={<Board />} />
+          <Route path="boards/:boardId/resources" element={<BoardResourcesPage />} />
           <Route path="boards/:boardId/settings" element={<BoardSettingsPage />} />
           <Route path="chat" element={<ChatPage />} />
           <Route path="users" element={<WorkspaceUsersPage />} />
