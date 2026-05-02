@@ -3,8 +3,20 @@ import { api, getActiveWorkspaceId } from '../../api';
 import type { Credential } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
-import { Button, Input, Modal, Badge, Card } from '../common';
+import { Button, Input, Modal, Badge } from '../common';
 import { relativeTime } from '../../utils/time';
+
+const listHeadStyle = (align: 'left' | 'right'): React.CSSProperties => ({
+  textAlign: align,
+  padding: '8px 12px',
+  fontWeight: 600,
+});
+
+const listCellStyle = (align: 'left' | 'right'): React.CSSProperties => ({
+  textAlign: align,
+  padding: '10px 12px',
+  verticalAlign: 'middle',
+});
 
 const PROVIDERS = [
   { value: 'github', label: 'GitHub', icon: 'G' },
@@ -152,45 +164,114 @@ export default function CredentialManager({ workspaceId }: { workspaceId?: strin
           </div>
         </div>
       ) : (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: tokens.spacing.md }}>
-          {credentials.map((c) => (
-            <Card key={c.id} padding="12px 14px">
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-                <div style={{
-                  width: 28, height: 28, borderRadius: tokens.radii.md,
-                  background: `${providerColor(c.provider)}20`,
-                  color: providerColor(c.provider),
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  fontSize: '12px', fontWeight: 700, flexShrink: 0,
-                }}>
-                  {(PROVIDERS.find(p => p.value === c.provider)?.icon || 'C')}
-                </div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <div style={{ fontSize: '13px', fontWeight: 600, color: tokens.colors.textStrong, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        <div
+          style={{
+            background: tokens.colors.surfaceCard,
+            border: `1px solid ${tokens.colors.border}`,
+            borderRadius: tokens.radii.md,
+            overflowX: 'auto',
+          }}
+        >
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+            <thead>
+              <tr
+                style={{
+                  background: tokens.colors.surface,
+                  color: tokens.colors.textMuted,
+                  fontSize: 11,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.05em',
+                }}
+              >
+                <th style={listHeadStyle('left')}>Name</th>
+                <th style={listHeadStyle('left')}>Provider</th>
+                <th style={listHeadStyle('left')}>Description</th>
+                <th style={listHeadStyle('left')}>Fields</th>
+                <th style={listHeadStyle('left')}>Updated</th>
+                <th style={listHeadStyle('right')}>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {credentials.map((c) => {
+                const fieldKeys = Object.keys(c.credential_fields);
+                const fieldsLabel = fieldKeys.length === 0
+                  ? '—'
+                  : fieldKeys.map((k) => `${k}${c.credential_fields[k] ? '' : ' (empty)'}`).join(', ');
+                return (
+                  <tr key={c.id} style={{ borderTop: `1px solid ${tokens.colors.border}` }}>
+                    <td
+                      style={{
+                        ...listCellStyle('left'),
+                        maxWidth: 240,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        color: tokens.colors.textStrong,
+                        fontWeight: 600,
+                      }}
+                      title={c.name}
+                    >
+                      <span
+                        style={{
+                          display: 'inline-block',
+                          width: 18,
+                          height: 18,
+                          borderRadius: tokens.radii.sm,
+                          background: `${providerColor(c.provider)}20`,
+                          color: providerColor(c.provider),
+                          textAlign: 'center',
+                          lineHeight: '18px',
+                          fontSize: 10,
+                          fontWeight: 700,
+                          marginRight: 8,
+                          verticalAlign: 'middle',
+                        }}
+                      >
+                        {PROVIDERS.find((p) => p.value === c.provider)?.icon || 'C'}
+                      </span>
                       {c.name}
-                    </div>
-                    <Badge variant="neutral">{c.provider}</Badge>
-                  </div>
-                  {c.description && (
-                    <div style={{ fontSize: '12px', color: tokens.colors.textSecondary, marginTop: 2 }}>{c.description}</div>
-                  )}
-                </div>
-              </div>
-              <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginBottom: 6 }}>
-                {Object.entries(c.credential_fields).map(([k, v]) => (
-                  <div key={k}>{k}: <span style={{ fontFamily: 'monospace' }}>{v || '(empty)'}</span></div>
-                ))}
-              </div>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <div style={{ fontSize: '11px', color: tokens.colors.textMuted }}>{relativeTime(c.updated_at || c.created_at)}</div>
-                <div style={{ display: 'flex', gap: 6 }}>
-                  <Button variant="secondary" size="sm" onClick={() => startEdit(c)}>Edit</Button>
-                  <Button variant="danger" size="sm" onClick={() => setDeleteTarget(c)}>Delete</Button>
-                </div>
-              </div>
-            </Card>
-          ))}
+                    </td>
+                    <td style={listCellStyle('left')}>
+                      <Badge variant="neutral">{c.provider}</Badge>
+                    </td>
+                    <td
+                      style={{
+                        ...listCellStyle('left'),
+                        maxWidth: 280,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        color: tokens.colors.textSecondary,
+                      }}
+                      title={c.description || ''}
+                    >
+                      {c.description || <span style={{ color: tokens.colors.textMuted }}>—</span>}
+                    </td>
+                    <td
+                      style={{
+                        ...listCellStyle('left'),
+                        color: tokens.colors.textMuted,
+                        fontFamily: 'monospace',
+                        whiteSpace: 'nowrap',
+                      }}
+                      title={fieldsLabel}
+                    >
+                      {fieldsLabel}
+                    </td>
+                    <td style={{ ...listCellStyle('left'), color: tokens.colors.textMuted, whiteSpace: 'nowrap' }}>
+                      {relativeTime(c.updated_at || c.created_at)}
+                    </td>
+                    <td style={{ ...listCellStyle('right'), whiteSpace: 'nowrap' }}>
+                      <div style={{ display: 'inline-flex', gap: 6 }}>
+                        <Button variant="secondary" size="sm" onClick={() => startEdit(c)}>Edit</Button>
+                        <Button variant="danger" size="sm" onClick={() => setDeleteTarget(c)}>Delete</Button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       )}
 
