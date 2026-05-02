@@ -379,22 +379,40 @@ export class SubagentManager implements SubagentManagerContract {
   }
 
   #wireStdioCapture(child: ChildProcess, pid: number): void {
+    // ST-6 follow-up: prefix log lines with the managed agent's short id when
+    // we know one. Multi-tenant manager hosts spawn children for many agents
+    // through a shared log stream, so without this you can't tell which
+    // agent's subagent printed what. Falls back to bare `[subagent:<pid>]`
+    // for the legacy single-agent case where agent_id is not set on the spawn
+    // record.
+    const tagFor = (record: SubagentRecord | undefined): string => {
+      if (record && record.agent_id) {
+        return `[subagent:${pid}][agent:${record.agent_id.slice(0, 8)}]`;
+      }
+      return `[subagent:${pid}]`;
+    };
+
     if (child.stdout) {
       const rlOut = createInterface({ input: child.stdout });
       rlOut.on('line', (line) => {
-        const record = this.#map.get(pid);
-        if (record && record.kind !== 'reservation') {
+        const rec = this.#map.get(pid);
+        const record = rec && rec.kind !== 'reservation' ? (rec as SubagentRecord) : undefined;
+        if (record) {
           record.tap?.outLine(line);
           if (record.captureOutput) {
             if (record.outLines.length < 10000) record.outLines.push(line);
           }
         }
-        log(`[subagent:${pid}] ${line}`);
+        log(`${tagFor(record)} ${line}`);
       });
     }
     if (child.stderr) {
       const rlErr = createInterface({ input: child.stderr });
-      rlErr.on('line', (line) => log(`[subagent:${pid}:err] ${line}`));
+      rlErr.on('line', (line) => {
+        const rec = this.#map.get(pid);
+        const record = rec && rec.kind !== 'reservation' ? (rec as SubagentRecord) : undefined;
+        log(`${tagFor(record)}[err] ${line}`);
+      });
     }
   }
 

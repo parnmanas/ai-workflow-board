@@ -142,3 +142,37 @@ export function maskKey(raw: string): string {
   if (raw.length <= 12) return raw.slice(0, 4) + '***';
   return raw.slice(0, 8) + '***' + raw.slice(-4);
 }
+
+/**
+ * Enumerate managed-agent directories that exist on disk. Used by the
+ * manager bootstrap to rehydrate AgentContexts after a restart so events
+ * for previously-spawned managed agents resume routing without the admin
+ * having to click Spawn again. Returns agent_ids only — caller is
+ * responsible for reading config.json + apikey and validating that they
+ * form a usable context (a half-written dir is silently skipped).
+ */
+export async function listManagedAgentDirs(): Promise<string[]> {
+  let entries: string[];
+  try {
+    entries = await fsp.readdir(MANAGED_AGENTS_DIR);
+  } catch {
+    return [];
+  }
+  const out: string[] = [];
+  for (const name of entries) {
+    const full = join(MANAGED_AGENTS_DIR, name);
+    try {
+      const stat = await fsp.stat(full);
+      if (!stat.isDirectory()) continue;
+      // Loose UUID-ish check — directories that aren't agent ids
+      // shouldn't make it in here, but guard anyway. Falls back to
+      // "config.json present" as the source of truth so a non-uuid
+      // agent id doesn't get silently dropped.
+      const cfg = configPathFor(name);
+      if (existsSync(cfg)) out.push(name);
+    } catch {
+      /* permission / vanished — skip */
+    }
+  }
+  return out;
+}

@@ -37,6 +37,13 @@ import { promptComposer } from './lib/prompts.js';
 import { ManagedAgentRegistry } from './lib/managed-agents.js';
 import { ManagedAgentContextRegistry } from './lib/managed-agent-context.js';
 import { AgentManagerCommandHandler } from './lib/agent-manager-commands.js';
+import {
+  listManagedAgentDirs,
+  readManagedAgentConfig,
+  readApiKey,
+  mcpConfigPathFor,
+  subagentLogPathFor,
+} from './lib/managed-agent-store.js';
 import type { SessionAwareConfig } from './lib/base-session-manager.js';
 import type { SubagentAwareConfig } from './lib/subagent-manager.js';
 
@@ -313,6 +320,45 @@ async function runRuntime(
     }
     log(msg);
   };
+
+  // ST-6 follow-up: rehydrate previously-spawned managed agents from disk.
+  // Without this, every manager restart leaves the entire managed-agent
+  // population unreachable until an admin re-clicks Spawn on each row.
+  // We register the AgentContext + mark the registry running PRE-SSE so the
+  // first events after restart already have routes; agents missing either
+  // config.json or apikey are skipped silently (a stop_agent erased their
+  // secrets, or they were never fully spawned).
+  try {
+    const dirs = await listManagedAgentDirs();
+    let rehydrated = 0;
+    let skipped = 0;
+    for (const id of dirs) {
+      const cfg = await readManagedAgentConfig(id);
+      const apiKey = await readApiKey(id);
+      if (!cfg || !apiKey || !cfg.working_dir) {
+        skipped++;
+        continue;
+      }
+      managedAgentContexts.upsert({
+        agent_id: id,
+        name: cfg.name,
+        cli: cfg.cli,
+        working_dir: cfg.working_dir,
+        mcp_config_path: mcpConfigPathFor(id),
+        api_key: apiKey,
+        subagent_log_path: subagentLogPathFor(id),
+        registered_at: new Date().toISOString(),
+      });
+      managedAgents.upsert({ agent_id: id, name: cfg.name, cli: cfg.cli, working_dir: cfg.working_dir });
+      managedAgents.markRunning(id, process.pid);
+      rehydrated++;
+    }
+    if (rehydrated || skipped) {
+      log(`Managed-agent rehydrate: rehydrated=${rehydrated} skipped=${skipped} (of ${dirs.length} on-disk dirs)`);
+    }
+  } catch (err: any) {
+    log(`Managed-agent rehydrate failed: ${err?.message ?? err}`);
+  }
 
   const eventStream = new EventStream({
     config,
