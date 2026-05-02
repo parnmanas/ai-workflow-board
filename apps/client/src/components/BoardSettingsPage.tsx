@@ -1,14 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { api } from '../api';
-import { PromptTemplate } from '../types';
+import { Board, PromptTemplate } from '../types';
 import { useBoard } from '../hooks/useBoard';
 import { useToast } from '../contexts/ToastContext';
 import { useLoading } from '../contexts/LoadingContext';
 import PageHeader from './PageHeader';
 import ColumnManager from './ColumnManager';
 import { tokens } from '../tokens';
-import { Button } from './common';
+import { Button, Input } from './common';
 
 export default function BoardSettingsPage() {
   const { showToast } = useToast();
@@ -92,6 +92,14 @@ export default function BoardSettingsPage() {
         description={board.name}
       />
       <div style={{ ...pageStyle, flex: 1, overflow: 'auto', minHeight: 0 }}>
+        <ConcurrencySetting
+          board={board}
+          onSave={async (n) => {
+            await api.updateBoard(board.id, { max_concurrent_tickets_per_agent: n });
+            await refresh();
+            showToast('Concurrency limit saved', 'success');
+          }}
+        />
         <ColumnManager
           columns={board.columns}
           boardId={board.id}
@@ -115,5 +123,80 @@ export default function BoardSettingsPage() {
         />
       </div>
     </div>
+  );
+}
+
+interface ConcurrencySettingProps {
+  board: Board;
+  onSave(n: number): Promise<void>;
+}
+
+function ConcurrencySetting({ board, onSave }: ConcurrencySettingProps) {
+  const initial = Math.max(1, Math.floor(board.max_concurrent_tickets_per_agent ?? 1));
+  const [value, setValue] = useState<string>(String(initial));
+  const [busy, setBusy] = useState(false);
+
+  // Re-sync the input if the board prop refreshes (e.g. after another tab
+  // raised the limit). Avoids the field looking stale after a refresh.
+  useEffect(() => {
+    setValue(String(Math.max(1, Math.floor(board.max_concurrent_tickets_per_agent ?? 1))));
+  }, [board.max_concurrent_tickets_per_agent]);
+
+  const parsed = Math.floor(Number(value));
+  const valid = Number.isFinite(parsed) && parsed >= 1;
+  const dirty = valid && parsed !== initial;
+
+  return (
+    <section
+      style={{
+        padding: 16,
+        marginBottom: 16,
+        background: tokens.colors.surfaceCard,
+        border: `1px solid ${tokens.colors.border}`,
+        borderRadius: tokens.radii.md,
+      }}
+    >
+      <h3 style={{ margin: 0, fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>
+        Agent concurrency
+      </h3>
+      <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, marginBottom: 12 }}>
+        Max distinct tickets one agent can be actively working on at once on this board.
+        Default <strong>1</strong> — same agent assigned to multiple tickets would otherwise
+        spawn parallel subagents that stomp on the same working_dir. Raise only when concurrent
+        local-repo work is genuinely safe (e.g. a read-only review queue).
+      </div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+        <div style={{ width: 120 }}>
+          <Input
+            label="Max tickets / agent"
+            type="number"
+            min={1}
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+          />
+        </div>
+        <Button
+          variant="primary"
+          size="sm"
+          disabled={!dirty || busy || !valid}
+          onClick={async () => {
+            if (!valid || !dirty) return;
+            setBusy(true);
+            try {
+              await onSave(parsed);
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          {busy ? 'Saving…' : 'Save'}
+        </Button>
+        {!valid && (
+          <span style={{ fontSize: 11, color: tokens.colors.danger, alignSelf: 'center' }}>
+            Must be ≥ 1
+          </span>
+        )}
+      </div>
+    </section>
   );
 }

@@ -22,19 +22,31 @@ import { activityEvents } from '../../services/activity.service';
 // Internal shape — held in memory with Date objects for precision. The wire
 // shape (AgentStatusPayload in common/types/stream-events.ts) carries ISO-8601
 // strings; conversion happens at the EventsController listener boundary.
+//
+// `active_tasks` (internal-only) tracks every ticket the agent has an active
+// subagent for, keyed by ticket_id. The wire-facing `current_task` (singular)
+// is derived as the most-recently-claimed entry so the existing SSE shape
+// stays unchanged. Multiple-active-task tracking is what the per-board
+// `max_concurrent_tickets_per_agent` gate counts against.
+interface ActiveTask {
+  ticket_id: string;
+  ticket_title: string;
+  claimed_at: Date;
+  // Role slug the subagent was spawned for (assignee/reporter/reviewer
+  // or a workspace-custom slug). Optional because pre-v0.34 plugins do
+  // not pin a role; the dashboard renders without it when undefined.
+  role?: string;
+}
 interface AgentStatus {
   agent_id: string;
   is_online: boolean;
   last_seen_at: Date | null;
-  current_task?: {
-    ticket_id: string;
-    ticket_title: string;
-    claimed_at: Date;
-    // Role slug the subagent was spawned for (assignee/reporter/reviewer
-    // or a workspace-custom slug). Optional because pre-v0.34 plugins do
-    // not pin a role; the dashboard renders without it when undefined.
-    role?: string;
-  };
+  // Map<ticket_id, ActiveTask>. Internal-only; never serialized to SSE.
+  active_tasks?: Map<string, ActiveTask>;
+  // Derived from active_tasks — most-recently-claimed entry, or undefined
+  // when active_tasks is empty. Kept on the object so the existing
+  // event-registry mapper and dashboard reads stay unchanged.
+  current_task?: ActiveTask;
 }
 
 const SWEEP_INTERVAL_MS = 30_000;
@@ -107,6 +119,24 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Distinct ticket_ids this agent currently has live subagents on, after
+   * the stale-cutoff filter (mirrors what the sweep would clear). Used by
+   * TriggerLoopService's per-board cap check — comparing list length
+   * against `Board.max_concurrent_tickets_per_agent` decides whether a
+   * new trigger emits or gets skipped.
+   */
+  getActiveTicketIds(agent_id: string): string[] {
+    const status = this.state.get(agent_id);
+    if (!status?.active_tasks || status.active_tasks.size === 0) return [];
+    const cutoff = new Date(Date.now() - CURRENT_TASK_STALE_MS);
+    const out: string[] = [];
+    for (const [ticketId, task] of status.active_tasks) {
+      if (task.claimed_at >= cutoff) out.push(ticketId);
+    }
+    return out;
+  }
+
+  /**
    * Emit the internal (Date-containing) shape on the activityEvents bus.
    * EventsController.agentStatusListener converts Date → ISO string at the
    * envelope construction boundary.
@@ -133,16 +163,20 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
       is_online: true,
       last_seen_at: new Date(),
     };
+    const tasks = new Map(existing.active_tasks ?? []);
+    const task: ActiveTask = {
+      ticket_id,
+      ticket_title: ticket?.title ?? '(unknown ticket)',
+      claimed_at: new Date(),
+      role: role || undefined,
+    };
+    tasks.set(ticket_id, task);
     const updated: AgentStatus = {
       ...existing,
       is_online: true,
       last_seen_at: new Date(),
-      current_task: {
-        ticket_id,
-        ticket_title: ticket?.title ?? '(unknown ticket)',
-        claimed_at: new Date(),
-        role: role || undefined,
-      },
+      active_tasks: tasks,
+      current_task: pickMostRecent(tasks),
     };
     this.state.set(agent_id, updated);
     this._emit(updated);
@@ -160,10 +194,26 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
   clearCurrentTask(agent_id: string, expectedTicketId?: string): void {
     if (!agent_id) return;
     const status = this.state.get(agent_id);
-    if (!status?.current_task) return;
-    if (expectedTicketId && status.current_task.ticket_id !== expectedTicketId) return;
+    if (!status?.active_tasks || status.active_tasks.size === 0) return;
 
-    const updated: AgentStatus = { ...status, current_task: undefined };
+    const tasks = new Map(status.active_tasks);
+    if (expectedTicketId) {
+      // Targeted clear: drop just this ticket's entry. No-op if a newer
+      // setCurrentTask already replaced it (which on a Map means the same
+      // key is still present but with a fresher claimed_at — caller's
+      // intent was to clear THIS task, so we still drop it; the manager
+      // would call setCurrentTask again on the next session anyway).
+      if (!tasks.delete(expectedTicketId)) return;
+    } else {
+      // Force-clear all (agent shutdown). Mirrors pre-multi-task behavior.
+      tasks.clear();
+    }
+
+    const updated: AgentStatus = {
+      ...status,
+      active_tasks: tasks.size > 0 ? tasks : undefined,
+      current_task: tasks.size > 0 ? pickMostRecent(tasks) : undefined,
+    };
     this.state.set(agent_id, updated);
     this._emit(updated);
   }
@@ -182,24 +232,38 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
       const prev = this.state.get(a.id);
       const is_online = !!(a.last_seen_at && a.last_seen_at > threshold);
 
-      // Stale current_task auto-clear: covers plugin crashes that skipped
+      // Stale-task auto-clear: covers plugin crashes that skipped
       // clearCurrentTask. Never blocks legitimate long work — sweep just
       // forgets the badge after CURRENT_TASK_STALE_MS, the next setCurrentTask
-      // re-establishes it.
-      const taskIsStale = !!prev?.current_task && prev.current_task.claimed_at < staleTaskCutoff;
-      const next_current_task = !is_online || taskIsStale ? undefined : prev?.current_task;
+      // re-establishes it. With multi-task tracking we filter the Map and
+      // keep entries newer than the cutoff (offline agents drop everything).
+      let nextTasks: Map<string, ActiveTask> | undefined;
+      if (is_online && prev?.active_tasks) {
+        const kept = new Map<string, ActiveTask>();
+        for (const [tid, t] of prev.active_tasks) {
+          if (t.claimed_at >= staleTaskCutoff) kept.set(tid, t);
+        }
+        if (kept.size > 0) nextTasks = kept;
+      }
+      const next_current_task = nextTasks ? pickMostRecent(nextTasks) : undefined;
 
       const prevLastSeenMs = prev?.last_seen_at?.getTime();
       const nextLastSeenMs = a.last_seen_at?.getTime();
-      const taskChanged = !!prev?.current_task && next_current_task === undefined;
+      const prevTaskCount = prev?.active_tasks?.size ?? 0;
+      const nextTaskCount = nextTasks?.size ?? 0;
+      const tasksChanged = prevTaskCount !== nextTaskCount;
       const stateChanged =
-        !prev || prev.is_online !== is_online || prevLastSeenMs !== nextLastSeenMs || taskChanged;
+        !prev ||
+        prev.is_online !== is_online ||
+        prevLastSeenMs !== nextLastSeenMs ||
+        tasksChanged;
       if (!stateChanged) continue;
 
       const updated: AgentStatus = {
         agent_id: a.id,
         is_online,
         last_seen_at: a.last_seen_at,
+        active_tasks: nextTasks,
         current_task: next_current_task,
       };
       this.state.set(a.id, updated);
@@ -212,4 +276,15 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
       }
     }
   }
+}
+
+// Pick the most-recently-claimed entry from a non-empty active_tasks map.
+// Used to derive the wire-facing `current_task` (singular) so the existing
+// dashboard doesn't need to learn about the multi-task internal shape.
+function pickMostRecent(tasks: Map<string, ActiveTask>): ActiveTask | undefined {
+  let best: ActiveTask | undefined;
+  for (const t of tasks.values()) {
+    if (!best || t.claimed_at > best.claimed_at) best = t;
+  }
+  return best;
 }

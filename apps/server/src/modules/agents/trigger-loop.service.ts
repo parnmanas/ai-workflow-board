@@ -12,6 +12,7 @@ import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
+import { AgentStatusService } from './agent-status.service';
 
 // Pure SSE emitter. The AgentTrigger DB table was removed in v0.25.0 —
 // delivery is fire-and-forget. Backstop for dropped SSE is now
@@ -35,6 +36,7 @@ export class TriggerLoopService implements OnModuleInit {
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly logService: LogService,
+    private readonly agentStatusService: AgentStatusService,
   ) {}
 
   onModuleInit() {
@@ -283,6 +285,66 @@ export class TriggerLoopService implements OnModuleInit {
       this.logService.warn('MCP', 'column_prompt lookup failed (continuing without)', { err: String(e), ticket_id: ticket.id });
     }
 
+    // Per-board cap: a board may want to keep one agent on at most N tickets
+    // at a time (default 1) so concurrent subagents don't stomp on the same
+    // working_dir. Look up the limit, count this agent's active tickets
+    // (excluding the target — re-firing on a ticket the agent is already
+    // working on is allowed; that's just a new turn on the live session),
+    // and skip emission when the cap is reached.
+    let maxConcurrent = 1;
+    try {
+      const col = await this.dataSource
+        .getRepository(BoardColumn)
+        .findOne({ where: { id: ticket.column_id } });
+      if (col) {
+        const board = await this.dataSource
+          .getRepository(Board)
+          .findOne({ where: { id: col.board_id } });
+        if (board && Number.isFinite(board.max_concurrent_tickets_per_agent)) {
+          maxConcurrent = Math.max(1, Math.floor(board.max_concurrent_tickets_per_agent));
+        }
+      }
+    } catch (e) {
+      this.logService.warn('MCP', 'board cap lookup failed (defaulting to 1)', {
+        err: String(e), ticket_id: ticket.id,
+      });
+    }
+
+    const activeTicketIds = this.agentStatusService.getActiveTicketIds(agentId);
+    const alreadyOnTarget = activeTicketIds.includes(ticket.id);
+    if (!alreadyOnTarget && activeTicketIds.length >= maxConcurrent) {
+      this.logService.info(
+        'MCP',
+        'agent_trigger skipped (per-board cap reached)',
+        {
+          ticket_id: ticket.id,
+          agent_id: agentId,
+          role,
+          source: triggerSource,
+          max_concurrent: maxConcurrent,
+          active_ticket_ids: activeTicketIds,
+        },
+      );
+      // Activity-log the skip so admins can see what was queued/dropped.
+      // Mirrors the manual-trigger audit row shape; trigger_source carries
+      // the original source so post-mortems aren't blind.
+      const activityLogRepo = this.dataSource.getRepository(ActivityLog);
+      await activityLogRepo.save(
+        activityLogRepo.create({
+          entity_type: 'ticket',
+          entity_id: ticket.id,
+          ticket_id: ticket.id,
+          actor_id: 'system',
+          actor_name: 'TriggerLoopService',
+          action: 'trigger_skipped_cap',
+          new_value: `agent=${agentId} max=${maxConcurrent} active=${activeTicketIds.length}`,
+          role,
+          trigger_source: triggerSource,
+        }),
+      );
+      return '';
+    }
+
     // Ephemeral trigger_id — plugin-side dedup key, no server persistence.
     const triggerId = randomUUID();
 
@@ -300,6 +362,11 @@ export class TriggerLoopService implements OnModuleInit {
       triggered_by: triggeredBy,
       timestamp: now.toISOString(),
       force_respawn: forceRespawn,
+      // Manager keeps a defensive cap as a second line of defense in case
+      // two triggers race past this server gate (in-memory active_tasks
+      // only flips on set_current_task, which lags the trigger by the
+      // subagent spawn round-trip).
+      max_concurrent_tickets_per_agent: maxConcurrent,
     });
 
     this.logService.info('MCP', 'agent_trigger emitted (fire-and-forget)', {

@@ -25,6 +25,19 @@ export class Board {
                                   // Keyed by BoardColumn.id. Template content is attached to agent_trigger SSE events
                                   // when a ticket moves into the mapped column.
 
+  // Per-board cap on how many distinct tickets a single agent can be
+  // actively working on at once. Default 1 — same agent assigned to
+  // multiple tickets would otherwise have parallel subagents stomping on
+  // the same working_dir (git index, build artefacts, etc.). Tighter
+  // boards bumping this to 2+ trade local-repo safety for throughput;
+  // loose boards (e.g. read-only review queues) can set it higher
+  // freely. Server-side trigger emission and manager-side dispatch
+  // both honor this — server skips out-of-cap triggers with an activity
+  // log entry, manager keeps a defensive drop in case two triggers
+  // raced past the server gate.
+  @Column({ type: 'int', default: 1 })
+  max_concurrent_tickets_per_agent: number;
+
   @CreateDateColumn()
   created_at: Date;
 
