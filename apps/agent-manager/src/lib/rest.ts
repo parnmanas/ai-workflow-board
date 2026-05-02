@@ -135,10 +135,17 @@ export async function postCommandAck(
 }
 
 /**
- * ST-5b — pull a managed agent's record from AWB. Used when the manager
+ * ST-7 — pull a managed agent's record from AWB. Used when the manager
  * receives a spawn_agent / set_working_dir command and needs to know the
  * canonical working_dir / cli for that agent identity. Returns null on any
  * failure; caller decides whether to surface error or fall through.
+ *
+ * Endpoint switched from /api/agents/:id (user-session gated, always 401
+ * for the manager's agent apiKey) to the manager-auth peer at
+ * /api/agent-manager/managed-agents/:id, which validates ownership
+ * server-side (target.manager_agent_id === caller). Server also enriches
+ * spawn_agent args at dispatch time, so a 404/403 here is no longer
+ * fatal — the SSE payload typically already carries the same fields.
  */
 export async function fetchAgentRecord(
   config: AwbConfig,
@@ -146,7 +153,7 @@ export async function fetchAgentRecord(
 ): Promise<{ id: string; name: string; type: string; working_dir: string; manager_agent_id: string | null } | null> {
   if (!agentId) return null;
   try {
-    const url = `${trimSlash(config.url)}/api/agents/${encodeURIComponent(agentId)}`;
+    const url = `${trimSlash(config.url)}/api/agent-manager/managed-agents/${encodeURIComponent(agentId)}`;
     const resp = await fetch(url, {
       headers: {
         'X-Agent-Key': config.apiKey,

@@ -546,6 +546,50 @@ export class AgentManagerController {
     });
   }
 
+  // ─── ST-7 manager → server: read a managed-agent record the manager owns ─
+  //
+  // Mirror of the apikey provision route above: AgentAuthGuard + ownership
+  // check (`target.manager_agent_id === caller`). Manager calls this from
+  // `fetchAgentRecord` to hydrate a managed agent's canonical name / cli /
+  // working_dir before spawn / set_working_dir. Replaces the previous reach
+  // into `/api/agents/:id`, which is gated by user-session permissions and
+  // always returned 401 to the manager — see the matching enrichment in
+  // sendCommand for the dispatch-time fallback.
+  @ApiSecurity('agent-api-key')
+  @Get('api/agent-manager/managed-agents/:id')
+  @UseGuards(AgentAuthGuard)
+  @ApiOperation({
+    summary: 'Manager → server: fetch the canonical record of a managed agent it owns',
+  })
+  async getManagedAgentForManager(
+    @Param('id') targetAgentId: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const callerAgentId = (req as any).currentAgentId as string | null;
+    if (!callerAgentId) return res.status(401).json({ error: 'manager apiKey could not be resolved to an agent_id' });
+
+    const target = await this.agentRepo.findOne({ where: { id: targetAgentId } });
+    if (!target) return res.status(404).json({ error: 'target agent not found' });
+
+    if (target.manager_agent_id !== callerAgentId) {
+      this.logService.warn(
+        'AgentManager',
+        `Refused agent record fetch: caller=${callerAgentId.slice(0, 8)} is not owner of target=${targetAgentId.slice(0, 8)} (owner=${target.manager_agent_id || 'none'})`,
+      );
+      return res.status(403).json({ error: 'caller is not the owning manager for this agent' });
+    }
+
+    return res.json({
+      id: target.id,
+      name: target.name,
+      type: target.type,
+      working_dir: target.working_dir,
+      manager_agent_id: target.manager_agent_id,
+      workspace_id: target.workspace_id,
+    });
+  }
+
   // Admin-side equivalent — useful for operator-driven rotation without a
   // live manager (e.g. the manager box died and we want to re-provision
   // before standing up a new one). Same payload shape as the manager path.
