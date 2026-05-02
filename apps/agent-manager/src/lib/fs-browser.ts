@@ -176,18 +176,32 @@ export class FsBrowser implements FsBrowserContract {
         let size = 0;
         let mtime = '';
         let mode = 0;
+        let isSymlink = false;
         try {
-          const st = await fsp.lstat(full);
-          mode = st.mode;
-          size = Number(st.size) || 0;
-          mtime = st.mtime.toISOString();
-          if (st.isDirectory()) type = 'directory';
-          else if (st.isSymbolicLink()) type = 'symlink';
-          else if (st.isFile()) type = 'file';
+          const lst = await fsp.lstat(full);
+          mode = lst.mode;
+          size = Number(lst.size) || 0;
+          mtime = lst.mtime.toISOString();
+          if (lst.isSymbolicLink()) {
+            isSymlink = true;
+            // Follow the link so the picker sees the *effective* kind —
+            // a link to a directory should be navigable as a directory,
+            // not filtered out as `type: 'symlink'`. Broken links fall
+            // back to `type: 'symlink'` so the entry still surfaces.
+            try {
+              const tgt = await fsp.stat(full);
+              if (tgt.isDirectory()) type = 'directory';
+              else if (tgt.isFile()) type = 'file';
+              else type = 'symlink';
+            } catch {
+              type = 'symlink';
+            }
+          } else if (lst.isDirectory()) type = 'directory';
+          else if (lst.isFile()) type = 'file';
         } catch {
           /* permission etc. — keep name, leave type='other' */
         }
-        return { name: dirent.name, type, size, mtime, mode };
+        return { name: dirent.name, type, size, mtime, mode, is_symlink: isSymlink };
       }),
     );
 
