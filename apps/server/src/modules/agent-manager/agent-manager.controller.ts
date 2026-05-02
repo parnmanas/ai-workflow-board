@@ -376,7 +376,7 @@ export class AgentManagerController {
   @ApiOperation({
     summary: 'Send a control command (spawn/stop/restart/set_working_dir/reload_config) to a manager instance',
   })
-  sendCommand(
+  async sendCommand(
     @Param('id') id: string,
     @Body() body: any,
     @CurrentUser() user: CurrentUserData | undefined,
@@ -395,7 +395,29 @@ export class AgentManagerController {
     if (!ALLOWED_COMMANDS.has(command)) {
       return res.status(400).json({ error: `unknown command "${command}"` });
     }
-    const args = typeof body?.args === 'object' && body.args ? body.args : {};
+    const args: Record<string, any> = typeof body?.args === 'object' && body.args ? { ...body.args } : {};
+
+    // For spawn_agent: hydrate the agent record server-side and fill any
+    // missing args (name / cli / working_dir / manager_agent_id) before
+    // emitting. Admin-supplied args win — they're allowed to override the
+    // DB value for one-off scenarios. The manager used to fetch this from
+    // /api/agents/:id over its agent apiKey, but that endpoint is gated by
+    // user-session permissions and always returned 401, leaving spawn_agent
+    // dependent on whatever the caller happened to pass. Filling at
+    // dispatch time gets rid of that round-trip and the auth mismatch.
+    if (command === 'spawn_agent' && typeof args.agent_id === 'string' && args.agent_id) {
+      const target = await this.agentRepo.findOne({ where: { id: args.agent_id } });
+      if (target) {
+        if (args.name === undefined) args.name = target.name;
+        if (args.cli === undefined) args.cli = target.type;
+        if (args.working_dir === undefined && target.working_dir) {
+          args.working_dir = target.working_dir;
+        }
+        if (args.manager_agent_id === undefined && target.manager_agent_id) {
+          args.manager_agent_id = target.manager_agent_id;
+        }
+      }
+    }
     const command_id = randomBytes(8).toString('hex');
     const issued_at = new Date().toISOString();
 
