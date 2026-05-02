@@ -126,6 +126,12 @@ export interface TicketTriggerArgs {
   forceRespawn: boolean;
   /** ST-6: per-event managed-agent runtime context. Optional. */
   agentContext?: AgentExecutionContext;
+  /** Per-board cap for distinct active tickets per agent. Server's
+   *  TriggerLoopService already enforces this; the manager keeps a
+   *  defensive drop in case two triggers raced past the server gate
+   *  before the first set_current_task arrived. Defaults to 1 when the
+   *  server didn't include it (older server). */
+  maxConcurrentTicketsPerAgent?: number;
 }
 
 export interface TicketDispatchResult {
@@ -368,6 +374,10 @@ export class EventDispatcher {
           ticket,
           forceRespawn: ev.force_respawn === true,
           agentContext,
+          maxConcurrentTicketsPerAgent:
+            typeof ev.max_concurrent_tickets_per_agent === 'number'
+              ? ev.max_concurrent_tickets_per_agent
+              : undefined,
         });
 
         if (result.dispatched) {
