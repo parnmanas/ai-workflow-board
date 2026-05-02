@@ -68,46 +68,58 @@ After redeeming, the manager stores its API key and agent identity in
 
 1. **Mint** — In the AWB admin UI: _Admin → Agent Manager → Pair manager…_.
    The dialog returns a raw token (long-form) and a 6-char display code; copy
-   either. Both are shown only once.
-2. **Redeem** — On the host that will run the manager:
+   either. Both are shown only once. TTL 10 minutes, single-use.
+2. **Run the wizard** — On the host that will run the manager:
 
    ```bash
-   curl -X POST "$AWB_URL/api/agent-manager/pair/redeem" \
-     -H 'content-type: application/json' \
-     -d '{"token":"<raw-token-or-6-char-code>","instance_id":"'"$(hostname)-1"'"}'
+   awb-agent-manager setup
    ```
 
-   The response includes `api_key`, `agent_id`, and `workspace_id`. Save them
-   into `~/.config/awb-agent-manager/config.json`:
+   You'll be prompted for:
+   - AWB server URL (e.g. `https://awb.example.com:7700`)
+   - Pairing token (paste from step 1)
+   - CLI to drive (`claude` / `codex` / `gemini`, default `claude`)
 
-   ```json
-   {
-     "url": "https://awb.example.com",
-     "apiKey": "<api_key from redeem response>",
-     "workspace_id": "<workspace_id>",
-     "agent_id": "<agent_id>",
-     "cli": "claude"
-   }
+   The wizard calls `/api/agent-manager/pair/redeem`, then writes
+   `~/.config/awb-agent-manager/config.json` with mode 0600. Output:
+
+   ```
+     ✓ paired
+       agent_id     <uuid>
+       workspace_id <uuid>
+       apiKey       awb_abcd***xyz9
+     ✓ wrote ~/.config/awb-agent-manager/config.json (mode 0600)
+
+     Next: run `awb-agent-manager` to start the manager.
    ```
 
-   _(A `pair` subcommand that does this in one step is on the roadmap. Until
-   then, the redeem call above is the manual path.)_
+   Non-interactive form (CI / Ansible — fails fast on missing fields):
+
+   ```bash
+   awb-agent-manager setup \
+     --url https://awb.example.com:7700 \
+     --token ABCXYZ123 \
+     --cli claude \
+     --non-interactive
+   ```
+
+   `instance_id` defaults to `<hostname>-<rand6>` — pass `--instance-id <id>`
+   for a stable label across re-pairings on the same box. `--force`
+   overwrites an existing config.json.
+
 3. **Start** — `awb-agent-manager`. The process registers with the AWB
    instance dashboard and starts listening for `agent_manager_command` SSE
    events.
-4. **Add managed agents** — Back in AWB, _Agent Manager → Managed Agents →
-   Create_. Pick the CLI (`claude` / `codex` / `gemini` / `custom`), point at a
-   working directory, and click _Spawn_.
 
-   > ⚠ **CLI lifecycle is currently stubbed.** `Spawn` / `Stop` / `Restart`
-   > only update the manager's in-memory `ManagedAgentRegistry` and report a
-   > stubbed ack — no child process is forked yet. The real `child_process`
-   > launcher (per-agent log file, `working_dir` validation, ready-signal
-   > gating, restart/log-rotation policy) lands in a follow-up ticket. Until
-   > then, run the chosen CLI on the host yourself; AWB heartbeats and SSE
-   > events still flow through this manager. See `docs/agent-manager.md`
-   > _SSE event contract → `agent_manager_command` payload_ for the per-command
-   > status table.
+4. **Add managed agents** — Back in AWB, _Agent Manager → Managed Agents →
+   Create_. Pick the CLI (`claude` / `codex` / `gemini` / `custom`), point at
+   a working directory, and leave _Spawn on this manager after create_ on for
+   one-click setup. The manager provisions a per-agent apiKey, writes its
+   on-disk config + mcp-config.json, and starts routing matching ticket /
+   chat / mention events to subagents that run under that agent's identity.
+
+   On manager restart, agents previously spawned this way auto-rehydrate
+   from disk — no need to re-click Spawn.
 
 ## Migration from the claude-plugin daemon (≤ v0.39)
 

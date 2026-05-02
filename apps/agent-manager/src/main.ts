@@ -17,6 +17,7 @@ import {
 } from './lib/agent-lockfile.js';
 import { importLegacyConfig } from './lib/legacy-import.js';
 import { runSelfUpdate } from './lib/self-update.js';
+import { runSetup, type SetupOptions } from './lib/setup.js';
 import { PresenceHeartbeat } from './lib/presence-heartbeat.js';
 import { InstanceHeartbeat } from './lib/instance-heartbeat.js';
 import { EventStream } from './lib/event-stream.js';
@@ -97,7 +98,9 @@ function printHelp(): void {
   process.stdout.write(`awb-agent-manager — standalone AWB subagent runner
 
 Usage:
-  awb-agent-manager [options]
+  awb-agent-manager                   start the manager (uses saved config)
+  awb-agent-manager setup [opts]      first-run pairing wizard
+  awb-agent-manager [options]         start with overrides
 
 Options:
   -c, --config <path>     Path to config.json (default: ${CONFIG_PATH})
@@ -106,6 +109,14 @@ Options:
       --dry-run           Load config and exit without starting runtime
   -h, --help              Show this help text
   -v, --version           Print version
+
+Setup options (\`awb-agent-manager setup ...\`):
+      --url <url>            AWB server base URL (skip prompt)
+      --token <token>        Pairing token from AWB Admin → Agent Manager
+      --cli <name>           claude / codex / gemini (default claude)
+      --instance-id <id>     Stable id reported on heartbeats (default <hostname>-<rand>)
+      --non-interactive      Fail fast on missing fields instead of prompting
+      --force                Overwrite an existing config.json
 
 Config search order:
   1. --config flag
@@ -127,8 +138,54 @@ Signals:
 `);
 }
 
+/**
+ * Parse `setup` subcommand argv. Distinct from parseFlags so the runtime
+ * flag set stays narrow (no setup-only flags polluting -h output).
+ */
+function parseSetupArgs(argv: string[]): SetupOptions {
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      config: { type: 'string', short: 'c' },
+      url: { type: 'string' },
+      token: { type: 'string' },
+      cli: { type: 'string' },
+      'instance-id': { type: 'string' },
+      'non-interactive': { type: 'boolean' },
+      force: { type: 'boolean', short: 'f' },
+    },
+    allowPositionals: true,
+    strict: false,
+  });
+  return {
+    configPath: (values.config as string | undefined) || undefined,
+    url: (values.url as string | undefined) || undefined,
+    token: (values.token as string | undefined) || undefined,
+    cli: (values.cli as string | undefined) || undefined,
+    instanceId: (values['instance-id'] as string | undefined) || undefined,
+    nonInteractive: Boolean(values['non-interactive']) || !process.stdin.isTTY,
+    force: Boolean(values.force),
+  };
+}
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
+
+  // ── Subcommand dispatch ───────────────────────────────────────────
+  // `awb-agent-manager setup [opts]` runs the pairing wizard and exits;
+  // never starts the runtime. Skipping help/version checks for setup
+  // because runSetup has its own argv parsing (and no `setup --help` UX
+  // ambiguity to resolve yet).
+  if (argv[0] === 'setup') {
+    try {
+      await runSetup(parseSetupArgs(argv.slice(1)));
+      process.exit(0);
+    } catch (err: any) {
+      process.stderr.write(`\n  ✗ setup failed: ${err?.message ?? err}\n\n`);
+      process.exit(1);
+    }
+  }
+
   const flags = parseFlags(argv);
 
   if (flags.help) {
@@ -169,14 +226,18 @@ async function main(): Promise<void> {
       );
     } else {
       process.stdout.write(
-        `  hint:        no legacy plugin config at ${LEGACY_CONFIG_PATH} either — run pairing.\n`,
+        `\n  No config yet. Run the pairing wizard to set one up:\n\n` +
+          `      awb-agent-manager setup\n\n` +
+          `  Or non-interactively (CI / Ansible):\n\n` +
+          `      awb-agent-manager setup --url <awb-url> --token <pairing-token> [--cli claude]\n\n` +
+          `  The token comes from AWB Admin → Agent Manager → "Pair manager…".\n`,
       );
     }
     if (flags.dryRun) {
       log('--dry-run: exiting after config load (config=missing)');
       return;
     }
-    log('No config — exiting. Run pairing first or pass --config <path>.');
+    log('No config — exiting. Run `awb-agent-manager setup` first.');
     process.exit(1);
   }
 
