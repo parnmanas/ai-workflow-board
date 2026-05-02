@@ -3,6 +3,7 @@ import { api } from '../../api';
 import { useAuth } from '../../contexts/AuthContext';
 import { tokens } from '../../tokens';
 import type { ChatRoomDetail } from '../../types';
+import { formatAgentDisplayName } from '../../utils/agentName';
 
 // ─── Style constants (mirror ChatPage.tsx COLORS) ────────────────────────────
 
@@ -60,7 +61,7 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
       const excludeIds = new Set([...existingParticipantIds, currentUser?.id].filter(Boolean));
       const list: PickerParticipant[] = [
         ...users.map((u: any) => ({ id: u.id, name: u.name, type: 'user' as const })),
-        ...agents.map((a: any) => ({ id: a.id, name: a.name, type: 'agent' as const })),
+        ...agents.map((a: any) => ({ id: a.id, name: formatAgentDisplayName(a), type: 'agent' as const })),
       ].filter((p) => !excludeIds.has(p.id));
       setParticipants(list);
     });

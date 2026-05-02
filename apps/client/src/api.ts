@@ -848,7 +848,16 @@ export interface TicketRoleAssignmentRow {
 // ─── Mention types ───────────────────────────────────────
 export interface MentionCandidatesResponse {
   users: Array<{ id: string; name: string; avatar_url: string }>;
-  agents: Array<{ id: string; name: string; avatar_url: string }>;
+  // ST-7: agent rows carry manager_name when supervised by an
+  // agent-manager so the mention autocompleter can render them as
+  // <ManagerName>/<AgentName>.
+  agents: Array<{
+    id: string;
+    name: string;
+    avatar_url: string;
+    manager_agent_id?: string | null;
+    manager_name?: string | null;
+  }>;
   // v0.34: workspace roles can resolve to agents *or* users now.
   role_shortcuts: Array<{ key: string; label: string; resolved_type: 'agent' | 'user'; resolved_id: string }>;
 }

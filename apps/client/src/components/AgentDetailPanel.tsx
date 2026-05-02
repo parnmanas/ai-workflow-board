@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import type { AgentDetail, ActivityRow } from '../types';
 import { tokens } from '../tokens';
+import { formatAgentDisplayName } from '../utils/agentName';
 import AgentFileBrowser from './AgentFileBrowser';
 
 /**
@@ -133,7 +134,7 @@ export default function AgentDetailPanel({
   };
 
   const isOnline = detail?.is_online ?? agent?.is_online ?? false;
-  const agentName = detail?.name || agent?.name || 'Agent';
+  const agentName = formatAgentDisplayName(detail || agent || { name: 'Agent' });
 
   const sectionLabelStyle: React.CSSProperties = {
     fontSize: 11,

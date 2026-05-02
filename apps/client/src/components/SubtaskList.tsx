@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { Droppable } from '@hello-pangea/dnd';
 import { Ticket, Agent } from '../types';
 import { tokens } from '../tokens';
+import { formatAgentDisplayName } from '../utils/agentName';
 
 interface ChildTicketListProps {
   parentTicket: Ticket;
@@ -343,7 +344,7 @@ export default function ChildTicketList({ parentTicket, agents, maxDepth, boardT
             </select>
             <select value={createForm.assignee} onChange={e => setCreateForm({ ...createForm, assignee: e.target.value })} style={inputStyle}>
               <option value="">Unassigned</option>
-              {agents.filter(a => a.is_active).map(a => <option key={a.id} value={a.name}>{a.name}</option>)}
+              {agents.filter(a => a.is_active).map(a => <option key={a.id} value={a.name}>{formatAgentDisplayName(a)}</option>)}
             </select>
           </div>
           <div>

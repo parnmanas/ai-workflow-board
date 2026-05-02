@@ -3,6 +3,7 @@ import { api } from '../../api';
 import { ApiKey, Agent } from '../../types';
 import { tokens } from '../../tokens';
 import { Button, Input, Select, Badge, Modal, Card } from '../common';
+import { formatAgentDisplayName } from '../../utils/agentName';
 
 export default function ApiKeyManager({ workspaceId }: { workspaceId?: string } = {}) {
   const [keys, setKeys] = useState<ApiKey[]>([]);
@@ -158,7 +159,7 @@ export default function ApiKeyManager({ workspaceId }: { workspaceId?: string } 
                 value={form.agent_id}
                 onChange={e => setForm({ ...form, agent_id: (e.target as HTMLSelectElement).value })}
                 placeholder="No agent"
-                options={agents.map(a => ({ value: a.id, label: a.name }))}
+                options={agents.map(a => ({ value: a.id, label: formatAgentDisplayName(a) }))}
               />
               <Input
                 label="Expires In (Days)"
@@ -208,7 +209,7 @@ export default function ApiKeyManager({ workspaceId }: { workspaceId?: string } 
               {/* Meta info */}
               <div style={{ display: 'flex', gap: 16, fontSize: '11px', color: tokens.colors.textMuted }}>
                 {key.agent && (
-                  <span>Agent: <span style={{ color: tokens.colors.accentLight }}>{key.agent.name}</span></span>
+                  <span>Agent: <span style={{ color: tokens.colors.accentLight }}>{formatAgentDisplayName(key.agent)}</span></span>
                 )}
                 <span>Used: {key.use_count} times</span>
                 {key.last_used_at && (

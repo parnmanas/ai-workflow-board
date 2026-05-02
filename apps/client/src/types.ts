@@ -52,6 +52,11 @@ export interface Agent {
   // ST-4 — agent-manager-managed agents. Empty/null on legacy rows.
   working_dir?: string;
   manager_agent_id?: string | null;
+  /** ST-7: name of the manager Agent that supervises this agent. Populated
+   *  by the server's agent listing endpoints (one DB lookup per request).
+   *  Drives the `<ManagerName>/<AgentName>` display format used everywhere
+   *  in the UI; undefined for legacy / standalone agents (no slash prefix). */
+  manager_name?: string;
   created_at: string;
   updated_at: string;
 }
@@ -285,6 +290,11 @@ export interface AgentCurrentTask {
 export interface DashboardAgent {
   id: string;
   name: string;
+  /** ST-7 — same semantics as Agent.manager_name. Server populates on
+   *  /api/agents/dashboard so the dashboard tile can render
+   *  "<ManagerName>/<AgentName>". Optional for back-compat. */
+  manager_agent_id?: string | null;
+  manager_name?: string;
   avatar_url?: string;
   is_online: boolean;
   last_seen_at: string | null;

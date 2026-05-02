@@ -6,6 +6,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 import type { AgentDetail, ActivityRow, AgentProxySession } from '../types';
 import { tokens } from '../tokens';
+import { formatAgentDisplayName } from '../utils/agentName';
 import AgentFileBrowser from './AgentFileBrowser';
 import AgentSubagentsPanel from './AgentSubagentsPanel';
 import { useParams } from 'react-router-dom';
@@ -497,7 +498,7 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
                   whiteSpace: 'nowrap',
                 }}
               >
-                {detail?.name || (loading ? 'Loading...' : 'Agent')}
+                {detail ? formatAgentDisplayName(detail) : (loading ? 'Loading...' : 'Agent')}
               </div>
             )}
             <div

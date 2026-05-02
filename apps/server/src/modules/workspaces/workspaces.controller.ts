@@ -237,6 +237,26 @@ export class WorkspacesController {
       this.agentRepo.find({ where: { workspace_id: id, is_active: 1 }, order: { name: 'ASC' } }),
     ]);
 
+    // ST-7: enrich agents with manager_name so the client autocompleter
+    // can render managed agents as <ManagerName>/<AgentName>. Single
+    // batched lookup keyed off distinct manager_agent_ids — no extra
+    // round-trip when the workspace has no managed agents.
+    const managerIds = Array.from(
+      new Set(agents.map((a) => a.manager_agent_id).filter((x): x is string => !!x)),
+    );
+    const managerNameById = new Map<string, string>();
+    if (managerIds.length > 0) {
+      const managers = await this.agentRepo.find({
+        where: { id: In(managerIds) },
+        select: { id: true, name: true } as any,
+      });
+      for (const m of managers) managerNameById.set(m.id, m.name);
+    }
+    const formatAgent = (a: Agent): string => {
+      const mgr = a.manager_agent_id ? managerNameById.get(a.manager_agent_id) : '';
+      return mgr ? `${mgr}/${a.name}` : a.name;
+    };
+
     const allUserIds = [...new Set([
       ...members.filter(s => s.type === 'user').map(s => s.id),
       ...owners.filter(s => s.type === 'user').map(s => s.id),
@@ -275,7 +295,7 @@ export class WorkspacesController {
           if (!a) continue;
           if (a.agent_id) {
             const agent = agentById.get(a.agent_id);
-            const label = agent ? `${role.slug} (${agent.name})` : role.slug;
+            const label = agent ? `${role.slug} (${formatAgent(agent)})` : role.slug;
             roleShortcuts.push({
               key: role.slug,
               label,
@@ -298,7 +318,13 @@ export class WorkspacesController {
 
     return res.json({
       users,
-      agents: agents.map(a => ({ id: a.id, name: a.name, avatar_url: a.avatar_url })),
+      agents: agents.map((a) => ({
+        id: a.id,
+        name: a.name,
+        avatar_url: a.avatar_url,
+        manager_agent_id: a.manager_agent_id ?? null,
+        manager_name: a.manager_agent_id ? managerNameById.get(a.manager_agent_id) || null : null,
+      })),
       role_shortcuts: roleShortcuts,
     });
   }

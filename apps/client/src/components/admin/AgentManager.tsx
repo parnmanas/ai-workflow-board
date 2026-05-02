@@ -4,6 +4,7 @@ import { Agent } from '../../types';
 import { tokens } from '../../tokens';
 import { Button, Input, Select, Badge, Modal, Card } from '../common';
 import { useCrudList } from '../../hooks/useCrudList';
+import { formatAgentDisplayName } from '../../utils/agentName';
 
 export default function AgentManager() {
   const { items: agents, showForm, setShowForm, editingId, setEditingId, refresh: load } =
@@ -80,7 +81,7 @@ export default function AgentManager() {
                 fontSize: '14px', fontWeight: 700, color: typeColors[agent.type] || tokens.colors.textSecondary,
               }}>AI</div>
               <div style={{ flex: 1 }}>
-                <div style={{ fontSize: '13px', fontWeight: 600, color: tokens.colors.textStrong }}>{agent.name}</div>
+                <div style={{ fontSize: '13px', fontWeight: 600, color: tokens.colors.textStrong }}>{formatAgentDisplayName(agent)}</div>
                 <div style={{ fontSize: '11px', color: tokens.colors.textMuted }}>{agent.description || 'No description'}</div>
               </div>
               <Badge variant={agentTypeBadgeVariant(agent.type)}>{agent.type}</Badge>

@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import type { DashboardAgent } from '../types';
 import { tokens } from '../tokens';
 import { Badge } from './common';
+import { formatAgentDisplayName } from '../utils/agentName';
 
 /**
  * AgentCard — Phase 3 Plan 03-03 §Component Inventory #2.
@@ -65,7 +66,11 @@ export default function AgentCard({ agent, onOpenDetail }: AgentCardProps) {
 
   const isOnline = agent.is_online === true;
   const hasTask = !!agent.current_task;
+  // Glyph stays bare-name first-char so two managed agents under different
+  // managers don't both flash the manager's initial; the full
+  // <manager>/<agent> rendering happens on the name line below.
   const glyph = (agent.name && agent.name[0] ? agent.name[0] : '?').toUpperCase();
+  const displayName = formatAgentDisplayName(agent);
 
   const handleOpen = () => onOpenDetail(agent.id);
 
@@ -201,7 +206,7 @@ export default function AgentCard({ agent, onOpenDetail }: AgentCardProps) {
         (e.currentTarget as HTMLDivElement).style.outline = 'none';
       }}
       style={containerStyle}
-      aria-label={`Agent ${agent.name}, ${isOnline ? 'online' : 'offline'}`}
+      aria-label={`Agent ${displayName}, ${isOnline ? 'online' : 'offline'}`}
     >
       {/* Header row */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -220,7 +225,7 @@ export default function AgentCard({ agent, onOpenDetail }: AgentCardProps) {
             gap: 2,
           }}
         >
-          <div style={nameStyle}>{agent.name}</div>
+          <div style={nameStyle} title={displayName}>{displayName}</div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
             <Badge variant={isOnline ? 'success' : 'neutral'}>{isOnline ? 'ONLINE' : 'OFFLINE'}</Badge>
             {!isOnline && (

@@ -1,7 +1,7 @@
 import { Controller, Get, Post, Patch, Delete, Body, Param, Query, Req, Res, UseGuards } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, Repository, In } from 'typeorm';
 import { Agent } from '../../entities/Agent';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { Workspace } from '../../entities/Workspace';
@@ -58,14 +58,39 @@ export class AgentsController {
     const isAdmin = (req as any).currentUser?.role === 'admin';
     if (scope === 'all' && isAdmin) {
       const agents = await this.agentRepo.find({ order: { name: 'ASC' } });
-      return res.json(agents);
+      return res.json(await this._enrichManagerNames(agents));
     }
     if (!workspaceId) return res.json([]);
     const agents = await this.agentRepo.find({
       where: { workspace_id: workspaceId },
       order: { name: 'ASC' },
     });
-    return res.json(agents);
+    return res.json(await this._enrichManagerNames(agents));
+  }
+
+  /**
+   * Add `manager_name` to managed agents so the client can render them as
+   * `<ManagerName>/<AgentName>` everywhere without a second round trip.
+   * One DB call total — looks up every distinct manager_agent_id in the
+   * input set and patches the rows in place.
+   */
+  private async _enrichManagerNames<T extends Pick<Agent, 'id' | 'manager_agent_id' | 'name'>>(
+    agents: T[],
+  ): Promise<Array<T & { manager_name?: string }>> {
+    const managerIds = Array.from(new Set(
+      agents.map((a) => a.manager_agent_id).filter((id): id is string => !!id),
+    ));
+    if (managerIds.length === 0) return agents;
+    const managers = await this.agentRepo.find({
+      where: { id: In(managerIds) },
+      select: { id: true, name: true } as any,
+    });
+    const nameById = new Map(managers.map((m) => [m.id, m.name]));
+    return agents.map((a) =>
+      a.manager_agent_id
+        ? { ...(a as any), manager_name: nameById.get(a.manager_agent_id) || undefined }
+        : a,
+    );
   }
 
   @Get('dashboard')
@@ -79,7 +104,8 @@ export class AgentsController {
       order: { name: 'ASC' },
     });
 
-    const rows = agents.map((agent) => {
+    const enriched = await this._enrichManagerNames(agents);
+    const rows = enriched.map((agent) => {
       // Phase 3 D-42 — pull live current_task from AgentStatusService (in-memory)
       const liveStatus = this.agentStatusService.getOne(agent.id);
       const currentTask = liveStatus?.current_task
@@ -94,6 +120,8 @@ export class AgentsController {
       return {
         id: agent.id,
         name: agent.name,
+        manager_agent_id: (agent as any).manager_agent_id ?? null,
+        manager_name: (agent as any).manager_name,
         avatar_url: agent.avatar_url,
         is_online: !!agent.is_online,
         last_seen_at: agent.last_seen_at ? agent.last_seen_at.toISOString() : null,
@@ -162,12 +190,13 @@ export class AgentsController {
         }
       : undefined;
 
+    const [enriched] = await this._enrichManagerNames([agent]);
     if (isAdmin) {
-      return res.json({ ...agent, current_task: currentTask, redacted: false });
+      return res.json({ ...enriched, current_task: currentTask, redacted: false });
     }
 
     // Non-admin: strip role_prompt + role_prompt_meta before returning
-    const { role_prompt, role_prompt_meta, ...safe } = agent as any;
+    const { role_prompt, role_prompt_meta, ...safe } = enriched as any;
     return res.json({ ...safe, role_prompt: '', role_prompt_meta: null, current_task: currentTask, redacted: true });
   }
 

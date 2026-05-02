@@ -7,6 +7,7 @@ import MessageList from './MessageList';
 import NewChatModal from './ParticipantPicker';
 import { type MentionParticipant } from './utils/markdown';
 import { MentionTextarea, MentionCandidate } from '../common/MentionTextarea';
+import { formatAgentDisplayName } from '../../utils/agentName';
 
 // ─── Style constants (mirror ChatPage.tsx COLORS) ────────────────────────────
 
@@ -63,7 +64,11 @@ function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessageInputProps) {
       .then(data => {
         setMentionCandidates([
           ...data.users.map(u => ({ type: 'user' as const, id: u.id, name: u.name })),
-          ...data.agents.map(a => ({ type: 'agent' as const, id: a.id, name: a.name })),
+          ...data.agents.map(a => ({
+            type: 'agent' as const,
+            id: a.id,
+            name: formatAgentDisplayName(a),
+          })),
         ]);
       })
       .catch(() => setMentionCandidates([]));

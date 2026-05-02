@@ -12,6 +12,7 @@ import type {
 import { useBoardStreamEvent } from '../../contexts/BoardStreamContext';
 import { useToast } from '../../contexts/ToastContext';
 import { Button, Input, Modal, Select } from '../common';
+import { formatAgentDisplayName } from '../../utils/agentName';
 
 /**
  * Phase 3 — admin dashboard for live daemon/proxy plugin instances.
@@ -805,7 +806,7 @@ function ManagedAgentsSection({ inst }: ManagedAgentsSectionProps) {
               >
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
                   <div style={{ minWidth: 0, flex: 1 }}>
-                    <span style={{ fontWeight: 600 }}>{a.name}</span>
+                    <span style={{ fontWeight: 600 }}>{formatAgentDisplayName(a)}</span>
                     <span
                       style={{
                         marginLeft: 8,

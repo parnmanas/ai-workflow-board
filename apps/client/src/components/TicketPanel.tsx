@@ -11,6 +11,7 @@ import { TypingIndicator } from './TypingIndicator';
 import { tokens } from '../tokens';
 import { MentionTextarea, MentionCandidate } from './common/MentionTextarea';
 import { ALL_COMMENT_TYPES, COMMENT_TYPE_STYLES, defaultVisibleTypes, resolveCommentType, hasStaleOpenQuestion } from './comment-types';
+import { formatAgentDisplayName } from '../utils/agentName';
 
 export interface WorkspaceRoleSummary {
   id: string; slug: string; name: string;
@@ -485,11 +486,13 @@ export default function TicketPanel({
     return () => document.removeEventListener('keydown', handler);
   }, [onClose]);
 
-  // Form state — sync when activeTicket changes
+  // Form state — sync when activeTicket changes. Agent display name uses
+  // ST-7 <ManagerName>/<AgentName> when the agent is owned by an
+  // agent-manager, plain name otherwise.
   const resolveAgentName = (id: string | undefined, name: string) => {
     if (id) {
       const agent = agents.find(a => a.id === id);
-      if (agent) return agent.name;
+      if (agent) return formatAgentDisplayName(agent);
     }
     return name;
   };
@@ -601,12 +604,12 @@ export default function TicketPanel({
     const pushRole = (key: 'assignee' | 'reporter' | 'reviewer', id: string | undefined) => {
       if (!id) return;
       const a = agentById.get(id);
-      roleItems.push({ type: 'role', id: key, name: key, sublabel: a ? a.name : id });
+      roleItems.push({ type: 'role', id: key, name: key, sublabel: a ? formatAgentDisplayName(a) : id });
     };
     pushRole('assignee', activeTicket.assignee_id);
     pushRole('reporter', activeTicket.reporter_id);
     pushRole('reviewer', activeTicket.reviewer_id);
-    const agentItems: MentionCandidate[] = agents.map(a => ({ type: 'agent', id: a.id, name: a.name }));
+    const agentItems: MentionCandidate[] = agents.map(a => ({ type: 'agent', id: a.id, name: formatAgentDisplayName(a) }));
     setMentionCandidates([...roleItems, ...agentItems]);
 
     const workspaceId = getActiveWorkspaceId() || '';
@@ -616,7 +619,13 @@ export default function TicketPanel({
         const next: MentionCandidate[] = [
           ...data.role_shortcuts.map(r => ({ type: 'role' as const, id: r.key, name: r.key, sublabel: r.label.replace(`${r.key} `, '') })),
           ...data.users.map(u => ({ type: 'user' as const, id: u.id, name: u.name })),
-          ...data.agents.map(a => ({ type: 'agent' as const, id: a.id, name: a.name })),
+          // Enrich server-returned agent rows with manager_name from the
+          // local agents list (which carries it). Falls back to bare name
+          // when a candidate isn't in the local list yet.
+          ...data.agents.map(a => {
+            const full = agents.find(x => x.id === a.id);
+            return { type: 'agent' as const, id: a.id, name: formatAgentDisplayName(full || a) };
+          }),
         ];
         const seen = new Set<string>();
         setMentionCandidates(next.filter(c => {
@@ -1385,10 +1394,21 @@ export default function TicketPanel({
               // wakeable (no agent endpoint to call). Mark hasAgent
               // accordingly so the menu disables them with the same "unassigned"
               // visual cue.
+              // ST-7: when the holder is an agent, prefer the display
+              // name from the loaded agents list (which carries
+              // manager_name) over the bare name in the assignment row
+              // payload — keeps managed agents rendered as
+              // <ManagerName>/<AgentName> in the trigger menu too.
+              const fullAgent = holder?.type === 'agent' && holder?.id
+                ? agents.find(a => a.id === holder.id)
+                : null;
+              const holderDisplay = fullAgent
+                ? formatAgentDisplayName(fullAgent)
+                : (holder?.name || (holder ? holder.id : 'unassigned'));
               return {
                 slug: r.slug,
                 label: r.name,
-                holderName: holder?.name || (holder ? holder.id : 'unassigned'),
+                holderName: holderDisplay,
                 hasAgent: holder?.type === 'agent',
               };
             })}
@@ -1555,7 +1575,7 @@ export default function TicketPanel({
                         {activeAgents.length > 0 && (
                           <optgroup label="Agents">
                             {activeAgents.map(a => (
-                              <option key={`a-${a.id}`} value={`agent:${a.id}`}>{a.name}</option>
+                              <option key={`a-${a.id}`} value={`agent:${a.id}`}>{formatAgentDisplayName(a)}</option>
                             ))}
                           </optgroup>
                         )}
