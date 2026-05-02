@@ -18,6 +18,11 @@ export const AGENT_PATH = join(AGENT_MANAGER_HOME, 'agent.json');
 export const SUBAGENTS_BASE_DIR = join(AGENT_MANAGER_HOME, 'subagents');
 export const SUBAGENTS_PERSIST_PATH = join(AGENT_MANAGER_HOME, 'subagents.json');
 export const INSTANCES_DIR = join(AGENT_MANAGER_HOME, 'instances');
+// ST-6: per-managed-agent state lives under <home>/agents/<agent_id>/. Each
+// directory holds its own apiKey (issued by the server's provisioning
+// endpoint), an mcp-config.json that wraps that apiKey for `claude
+// --mcp-config`, a cached settings JSON, and a per-agent subagent log.
+export const MANAGED_AGENTS_DIR = join(AGENT_MANAGER_HOME, 'agents');
 export const LOG_DIR = AGENT_MANAGER_HOME;
 export const LOG_PATH = join(LOG_DIR, 'agent-manager.log');
 

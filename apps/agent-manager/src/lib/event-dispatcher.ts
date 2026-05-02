@@ -17,12 +17,35 @@ import {
 } from './rest.js';
 import { recordEvent } from './event-log-recorder.js';
 import type { AwbConfig } from './rest.js';
+import type { ManagedAgentContextRegistry } from './managed-agent-context.js';
 
 // Hard cap on consecutive agent-to-agent turns within a single chat room.
 // Server stamps `agent_chain_depth` on every chat_room_message; when the depth
 // reaches the cap we record into history but stop delegating — the chain
 // resets when a user sends the next message.
 const AGENT_CHAIN_DEPTH_CAP = 3;
+
+// ─── ST-6 per-call agent execution context ──────────────────────────────
+// Manager-side multi-tenancy. When an event targets a managed agent the
+// dispatcher resolves that agent's runtime context (cwd, on-disk
+// mcp-config path, raw apiKey) and threads it through to every spawn site
+// so child claude/codex/gemini processes:
+//   - run with cwd = the agent's working_dir (project root)
+//   - authenticate to AWB MCP under the agent's own apiKey (not the
+//     manager's), so tool-call attribution lands on the agent
+//   - reuse the manager's pre-written mcp-config.json instead of a fresh
+//     per-spawn tempfile (skipped automatically when configPath given)
+//
+// Always optional. When undefined, every manager falls back to its own
+// config.apiKey and the inherited process cwd — matching pre-ST-6
+// behavior so single-agent setups keep working unchanged.
+export interface AgentExecutionContext {
+  agent_id: string;
+  api_key: string;
+  cwd: string;
+  /** Pre-written `claude --mcp-config` file. Manager writes once per agent. */
+  mcp_config_path: string;
+}
 
 // ─── Session manager interfaces ──────────────────────────────────────────
 // These thin contracts mirror the duck-typed surface the dispatcher uses.
@@ -36,6 +59,8 @@ export interface SubagentSpawnArgs {
   chatRequestId?: string;
   ticketId: string;
   agentId: string;
+  /** ST-6: per-event managed-agent runtime context. Optional. */
+  agentContext?: AgentExecutionContext;
 }
 
 export interface SubagentSpawnResult {
@@ -57,6 +82,8 @@ export interface ChatDispatchArgs {
   content: string;
   rolePrompt: string;
   onProgress?: (stage: string) => void;
+  /** ST-6: per-event managed-agent runtime context. Optional. */
+  agentContext?: AgentExecutionContext;
 }
 
 export interface ChatDispatchResult {
@@ -86,6 +113,8 @@ export interface TicketTriggerArgs {
   columnPrompt: ColumnPrompt | null;
   ticket: any;
   forceRespawn: boolean;
+  /** ST-6: per-event managed-agent runtime context. Optional. */
+  agentContext?: AgentExecutionContext;
 }
 
 export interface TicketDispatchResult {
@@ -153,6 +182,11 @@ export interface EventDispatcherDeps {
   // dispatcher stays usable in pre-ST-5b harnesses (and tests that don't
   // care about manager control commands).
   agentManagerCommandHandler?: AgentManagerCommandSink | null;
+  // ST-6 — managed-agent runtime context registry. When set, events
+  // targeted at managed agents owned by this manager dispatch with the
+  // managed agent's apiKey + cwd + mcp-config (instead of the manager's
+  // defaults).
+  managedAgentContexts?: ManagedAgentContextRegistry | null;
 }
 
 export class EventDispatcher {
@@ -163,6 +197,7 @@ export class EventDispatcher {
   #fsBrowser: FsBrowser | null;
   #prompts: PromptComposer | null;
   #agentManagerCommandHandler: AgentManagerCommandSink | null;
+  #managedAgentContexts: ManagedAgentContextRegistry | null;
 
   constructor(config: AwbConfig, deps: EventDispatcherDeps = {}) {
     this.#config = config;
@@ -172,6 +207,27 @@ export class EventDispatcher {
     this.#fsBrowser = deps.fsBrowser ?? null;
     this.#prompts = deps.prompts ?? null;
     this.#agentManagerCommandHandler = deps.agentManagerCommandHandler ?? null;
+    this.#managedAgentContexts = deps.managedAgentContexts ?? null;
+  }
+
+  /**
+   * ST-6: resolve a managed-agent context by id (the event's target agent).
+   * Returns null when (a) no registry is wired, (b) the id doesn't match
+   * any registered managed agent, or (c) the agent is not yet bootstrapped
+   * (apikey not provisioned, working_dir empty). The dispatcher falls
+   * through to manager-default behavior in those cases.
+   */
+  #resolveAgentContext(eventAgentId: string | undefined | null): AgentExecutionContext | undefined {
+    if (!eventAgentId || !this.#managedAgentContexts) return undefined;
+    const ctx = this.#managedAgentContexts.get(eventAgentId);
+    if (!ctx) return undefined;
+    if (!ctx.api_key || !ctx.working_dir || !ctx.mcp_config_path) return undefined;
+    return {
+      agent_id: ctx.agent_id,
+      api_key: ctx.api_key,
+      cwd: ctx.working_dir,
+      mcp_config_path: ctx.mcp_config_path,
+    };
   }
 
   /** Route a raw SSE event payload to the right handler. */
@@ -254,11 +310,20 @@ export class EventDispatcher {
       return;
     }
 
-    // Defensive filter: server now recipient-scopes agent_trigger by
-    // scope.agent_id, so drop any stray cross-agent delivery as a safety net.
+    // Defensive filter: server recipient-scopes agent_trigger by
+    // scope.agent_id. ST-6: when this manager owns the target agent, accept
+    // the event and resolve a per-call execution context so the spawn lands
+    // under the managed agent's identity (cwd / apiKey / mcp-config) rather
+    // than the manager's defaults.
     const selfAgentId = loadAgentInfo()?.agent_id || '';
     const eventAgentId = ev.actor_name || ev.agent_id || '';
-    if (selfAgentId && eventAgentId && selfAgentId !== eventAgentId) {
+    const agentContext = this.#resolveAgentContext(eventAgentId);
+    if (
+      selfAgentId &&
+      eventAgentId &&
+      selfAgentId !== eventAgentId &&
+      !agentContext
+    ) {
       log(`Trigger dropped (not for this agent): target=${eventAgentId} self=${selfAgentId}`);
       return;
     }
@@ -284,6 +349,7 @@ export class EventDispatcher {
           columnPrompt,
           ticket,
           forceRespawn: ev.force_respawn === true,
+          agentContext,
         });
 
         if (result.dispatched) {
@@ -331,10 +397,11 @@ export class EventDispatcher {
           triggerId: ev.field_changed || '',
           ticketId: ev.ticket_id || '',
           agentId: ev.actor_name || '',
+          agentContext,
         });
 
         if (result.spawned) {
-          log(`Trigger dispatched to subagent: ticket=${ev.ticket_id} pid=${result.pid}`);
+          log(`Trigger dispatched to subagent: ticket=${ev.ticket_id} pid=${result.pid}${agentContext ? ` agent=${agentContext.agent_id.slice(0, 8)}` : ''}`);
           return;
         }
         log(`Subagent spawn declined (${result.reason}); no further fallback in standalone mode`);
@@ -360,6 +427,7 @@ export class EventDispatcher {
     // chat_request envelope-native: fields under ev.payload.* (asymmetric vs
     // agent_trigger which is flatten-on-emit).
     const payload = ev.payload || {};
+    const agentContext = this.#resolveAgentContext(payload.agent_id || '');
     const delegation = (this.#config as any)?.delegation ?? {};
     const delegationEnabled = delegation.enabled !== false;
     const persistentChat = delegation.persistentChatSessions !== false;
@@ -383,6 +451,7 @@ export class EventDispatcher {
           content: payload.new_message || '',
           rolePrompt: payload.role_prompt || '',
           onProgress,
+          agentContext,
         });
         if (result.dispatched) {
           log(
@@ -427,6 +496,7 @@ export class EventDispatcher {
             : undefined,
           ticketId: payload.ticket_id || '',
           agentId: payload.agent_id || '',
+          agentContext,
         });
 
         if (result.spawned) {
@@ -466,6 +536,7 @@ export class EventDispatcher {
     const ticketId = ev.ticket_id || '';
     const commentId = ev.comment_id || ev.field_changed || '';
     const agentId = ev.agent_id || ev.actor_name || '';
+    const agentContext = this.#resolveAgentContext(agentId);
     const mention = {
       ticket_id: ticketId,
       comment_id: commentId,
@@ -518,6 +589,7 @@ export class EventDispatcher {
           triggerId: `mention:${commentId}`,
           ticketId,
           agentId,
+          agentContext,
         });
         if (result.spawned) {
           log(

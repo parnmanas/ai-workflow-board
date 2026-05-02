@@ -641,9 +641,11 @@ interface ManagedAgentsSectionProps {
 
 // CLI lifecycle is currently stubbed in the manager (registry-only, no
 // child_process fork). The "(stub)" suffix surfaces that to the operator so
-// a green "dispatched" toast doesn't read as "process is now running".
-// Tracked for follow-up — drop the suffix once the real spawner lands.
-const STUB_SUFFIX = ' (stub)';
+// ST-6: lifecycle is now real — spawn_agent provisions the agent's apiKey,
+// writes its on-disk config + mcp-config.json, registers it in the runtime
+// context, and marks status='running'. stop_agent drops the context and
+// erases on-disk secrets. The previous "(stub)" suffix on labels and the
+// "lifecycle stubbed" toast suffix are dropped accordingly.
 const COMMAND_BUTTONS: {
   kind: AgentManagerCommandKind;
   label: string;
@@ -652,31 +654,25 @@ const COMMAND_BUTTONS: {
 }[] = [
   {
     kind: 'spawn_agent',
-    label: `Spawn${STUB_SUFFIX}`,
+    label: 'Spawn',
     variant: 'primary',
-    title: 'Dispatch spawn_agent. Lifecycle is stubbed — manager updates registry only, no CLI fork yet.',
+    title:
+      "Dispatch spawn_agent: bootstrap on-disk dir + apiKey, register runtime context. " +
+      "The manager spawns subagents per event under this agent's identity.",
   },
   {
     kind: 'stop_agent',
-    label: `Stop${STUB_SUFFIX}`,
+    label: 'Stop',
     variant: 'danger',
-    title: 'Dispatch stop_agent. Lifecycle is stubbed — manager updates registry only.',
+    title: 'Dispatch stop_agent: drop runtime context + erase on-disk secrets. In-flight subagents keep running.',
   },
   {
     kind: 'restart_agent',
-    label: `Restart${STUB_SUFFIX}`,
+    label: 'Restart',
     variant: 'secondary',
-    title: 'Dispatch restart_agent. Lifecycle is stubbed — manager updates registry only.',
+    title: 'Dispatch restart_agent: stop + spawn (re-provisions a fresh apiKey).',
   },
 ];
-
-// Lifecycle commands whose ack from the manager is currently a stub.
-// Used to phrase the dispatch toast honestly.
-const STUBBED_LIFECYCLE: ReadonlySet<AgentManagerCommandKind> = new Set([
-  'spawn_agent',
-  'stop_agent',
-  'restart_agent',
-]);
 
 function ManagedAgentsSection({ inst }: ManagedAgentsSectionProps) {
   const { showToast } = useToast();
@@ -714,12 +710,12 @@ function ManagedAgentsSection({ inst }: ManagedAgentsSectionProps) {
           command: kind,
           args: { agent_id: agentId, ...(extraArgs || {}) },
         });
-        // Dispatch ack only — the manager's execution ack lands on the server
-        // log via POST /command/ack a moment later. For stubbed lifecycle
-        // commands we surface that explicitly so the operator doesn't mistake
-        // the green toast for "the CLI is now running".
-        const stubNote = STUBBED_LIFECYCLE.has(kind) ? ' — lifecycle stubbed, see manager logs for ack' : '';
-        showToast(`${kind} dispatched (id=${resp.command_id.slice(0, 8)})${stubNote}`, 'success');
+        // Dispatch ack only — the manager's execution ack lands on the
+        // server log via POST /command/ack a moment later. The dispatcher
+        // ack here just says "the SSE event was published". Operators
+        // looking for "did the manager actually do it" should check the
+        // manager's logs panel.
+        showToast(`${kind} dispatched (id=${resp.command_id.slice(0, 8)})`, 'success');
       } catch (err: any) {
         showToast(`Command failed: ${err?.message || err}`, 'error');
       } finally {
@@ -873,6 +869,7 @@ function ManagedAgentsSection({ inst }: ManagedAgentsSectionProps) {
         isOpen={createOpen}
         onClose={() => setCreateOpen(false)}
         managerAgentId={inst.agent_id}
+        managerInstanceId={inst.instance_id}
         defaultCli={inst.cli}
         onCreated={() => {
           setCreateOpen(false);
@@ -1147,6 +1144,9 @@ interface CreateManagedAgentDialogProps {
   isOpen: boolean;
   onClose(): void;
   managerAgentId: string;
+  /** Manager instance id — used to dispatch a follow-up spawn_agent SSE
+   *  command after Create succeeds, so the operator gets one-click setup. */
+  managerInstanceId: string;
   defaultCli: string;
   onCreated(): void;
 }
@@ -1158,12 +1158,13 @@ const CLI_OPTIONS: { value: 'claude' | 'codex' | 'gemini' | 'custom'; label: str
   { value: 'custom', label: 'Custom' },
 ];
 
-function CreateManagedAgentDialog({ isOpen, onClose, managerAgentId, defaultCli, onCreated }: CreateManagedAgentDialogProps) {
+function CreateManagedAgentDialog({ isOpen, onClose, managerAgentId, managerInstanceId, defaultCli, onCreated }: CreateManagedAgentDialogProps) {
   const { showToast } = useToast();
   const [name, setName] = useState('');
   const [cli, setCli] = useState<'claude' | 'codex' | 'gemini' | 'custom'>('claude');
   const [workingDir, setWorkingDir] = useState('');
   const [description, setDescription] = useState('');
+  const [autoSpawn, setAutoSpawn] = useState(true);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -1171,6 +1172,7 @@ function CreateManagedAgentDialog({ isOpen, onClose, managerAgentId, defaultCli,
     setName('');
     setWorkingDir('');
     setDescription('');
+    setAutoSpawn(true);
     // Default CLI tracks the manager's primary CLI, but the operator can
     // override it (e.g., spawn a Gemini agent under a Claude-default manager).
     const defaulted = CLI_OPTIONS.find((o) => o.value === defaultCli)?.value || 'claude';
@@ -1183,16 +1185,40 @@ function CreateManagedAgentDialog({ isOpen, onClose, managerAgentId, defaultCli,
       showToast('Name is required', 'error');
       return;
     }
+    const trimmedWorkingDir = workingDir.trim();
+    if (autoSpawn && !trimmedWorkingDir) {
+      showToast('Working directory is required when "Spawn after create" is on', 'error');
+      return;
+    }
     setBusy(true);
     try {
-      await api.createManagedAgent({
+      // Step 1: create the AWB Agent identity. Returns the new Agent row.
+      const created = await api.createManagedAgent({
         name: trimmedName,
         cli,
-        working_dir: workingDir.trim() || undefined,
+        working_dir: trimmedWorkingDir || undefined,
         manager_agent_id: managerAgentId,
         description: description.trim() || undefined,
       });
       showToast(`Agent "${trimmedName}" created`, 'success');
+
+      // Step 2 (optional): one-click spawn — dispatch spawn_agent on the
+      // owning manager so it provisions the apiKey, writes per-agent
+      // mcp-config, and starts routing matching SSE events to the new
+      // agent's identity. Without this the operator has to click Spawn
+      // separately on the row that just appeared.
+      if (autoSpawn && created?.id) {
+        try {
+          const resp = await api.sendAgentManagerCommand(managerInstanceId, {
+            command: 'spawn_agent',
+            args: { agent_id: created.id },
+          });
+          showToast(`spawn_agent dispatched (id=${resp.command_id.slice(0, 8)})`, 'success');
+        } catch (err: any) {
+          showToast(`Auto-spawn failed: ${err?.message || err} (you can retry from the row)`, 'error');
+        }
+      }
+
       onCreated();
     } catch (err: any) {
       showToast(`Create failed: ${err?.message || err}`, 'error');
@@ -1263,6 +1289,21 @@ function CreateManagedAgentDialog({ isOpen, onClose, managerAgentId, defaultCli,
             value={description}
             onChange={(e: React.ChangeEvent<HTMLInputElement>) => setDescription(e.target.value)}
           />
+        </div>
+        <div>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: tokens.colors.textPrimary }}>
+            <input
+              type="checkbox"
+              checked={autoSpawn}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setAutoSpawn(e.target.checked)}
+            />
+            <span>Spawn on this manager after create</span>
+          </label>
+          <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2 }}>
+            One-click setup: the manager provisions an apiKey for this agent,
+            writes its config + mcp-config files, and starts handling matching
+            ticket / chat / mention events. Requires Working directory above.
+          </div>
         </div>
       </div>
     </Modal>

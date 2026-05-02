@@ -9,6 +9,7 @@ import { randomUUID } from 'crypto';
 import { Ticket } from '../../entities/Ticket';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { ActivityLog } from '../../entities/ActivityLog';
+import { Agent } from '../../entities/Agent';
 import { activityEvents } from '../../services/activity.service';
 import { AuthService } from '../../services/auth.service';
 import { ApiKeyService } from '../../services/api-key.service';
@@ -84,6 +85,7 @@ export class EventsController implements OnModuleDestroy {
   constructor(
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
     @InjectRepository(BoardColumn) private readonly colRepo: Repository<BoardColumn>,
+    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly authService: AuthService,
     private readonly apiKeyService: ApiKeyService,
@@ -201,10 +203,34 @@ export class EventsController implements OnModuleDestroy {
 
     this.clientCount++;
     const sseSessionId = randomUUID();
+
+    // ST-6: when an agent identity is also a manager (i.e., has any Agent
+    // rows linking back via manager_agent_id), resolve the owned set ONCE
+    // here so the per-event filter loop is O(1) and doesn't hit the DB on
+    // the hot path. Set is recomputed only on a fresh SSE connect, so a
+    // newly-created managed agent won't show up until the manager
+    // reconnects (it does on every spawn_agent ack via the manager itself
+    // — see agent-manager-commands.ts).
+    let managedAgentIds: Set<string> | undefined;
+    if (authIdentity.type === 'agent' && authIdentity.agentId) {
+      try {
+        const owned = await this.agentRepo.find({
+          where: { manager_agent_id: authIdentity.agentId },
+          select: ['id'],
+        });
+        if (owned.length > 0) {
+          managedAgentIds = new Set(owned.map((a) => a.id));
+        }
+      } catch (err) {
+        this.logService.warn('SSE', `managedAgentIds lookup failed for agent ${authIdentity.agentId.slice(0, 8)}: ${err}`);
+      }
+    }
+
     const identity: SubscriberIdentity = {
       ...authIdentity,
       boardId: (req.query.boardId as string) || undefined,
       sseSessionId,
+      managedAgentIds,
     };
     let proxyCountNow = 0;
     if (identity.agentId) {
@@ -315,7 +341,31 @@ export class EventsController implements OnModuleDestroy {
         filter((event: StreamEvent) => {
           const def = registry.get(event.event_type);
           if (!def) return false;
-          if (def.filter && !def.filter(event, identity)) return false;
+
+          // ST-6: managed-agent fan-out. If this is a manager identity and
+          // the event is targeted at one of its managed agents, run the
+          // per-event filter as if WE are that managed agent. This lets
+          // existing agent-targeted filters (`env.scope.agent_id ===
+          // identity.agentId`) match without a per-filter rewrite. Pinning
+          // logic below uses the effective agent_id too — for managed
+          // agents the manager is normally the only stream so pinning is
+          // a no-op (no entry in agentSseSessions for the managed id);
+          // when a legacy proxy is also connected for the same managed
+          // agent, the pinning naturally picks that proxy and skips the
+          // manager, which is the correct precedence.
+          let effectiveIdentity = identity;
+          let effectiveAgentId = identity.agentId;
+          if (
+            identity.type === 'agent' &&
+            identity.managedAgentIds &&
+            typeof event.scope.agent_id === 'string' &&
+            identity.managedAgentIds.has(event.scope.agent_id)
+          ) {
+            effectiveAgentId = event.scope.agent_id;
+            effectiveIdentity = { ...identity, agentId: event.scope.agent_id };
+          }
+
+          if (def.filter && !def.filter(event, effectiveIdentity)) return false;
           // Per-agent routing: when this agent has 2+ concurrent proxy
           // sessions, agent-recipient events (triggers, mentions, chat,
           // fs_request, agent_typing) flow only to the pinned "main"
@@ -324,10 +374,10 @@ export class EventsController implements OnModuleDestroy {
           // identities are unaffected.
           if (
             identity.type === 'agent' &&
-            identity.agentId &&
+            effectiveAgentId &&
             EventsController.AGENT_ROUTED_EVENTS.has(event.event_type)
           ) {
-            const target = this._resolveRoutingTargetSession(identity.agentId);
+            const target = this._resolveRoutingTargetSession(effectiveAgentId);
             if (target && target !== sseSessionId) return false;
           }
           return true;

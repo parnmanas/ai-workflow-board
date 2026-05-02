@@ -24,6 +24,16 @@ export interface SubscriberIdentity {
    * legacy callers building the identity ad-hoc still type-check.
    */
   sseSessionId?: string;
+  /**
+   * ST-6: When this identity is an agent-manager, the set of managed-agent
+   * ids it owns (Agent rows where manager_agent_id == this.agentId).
+   * Resolved at SSE connect time; used by the controller's filter pipeline
+   * to also deliver agent-targeted events whose target agent is owned by
+   * this manager. Without it, the manager's SSE stream would only see
+   * events for the manager's own identity and never see triggers / chat /
+   * mentions destined for the managed agents it spawns.
+   */
+  managedAgentIds?: Set<string>;
 }
 
 /**

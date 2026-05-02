@@ -478,4 +478,103 @@ export class AgentManagerController {
     );
     return res.status(201).json(agent);
   }
+
+  // ─── ST-6 manager → server: per-managed-agent API key provisioning ──────
+  //
+  // The manager calls this with its OWN apiKey to rotate-and-fetch an apiKey
+  // scoped to a managed agent it owns. The returned raw key is delivered
+  // exactly once and persisted by the manager into
+  // `<MANAGER_HOME>/agents/<agent_id>/apikey`. Subagents spawned for that
+  // agent then use it via `claude --mcp-config` so MCP-side attribution
+  // lands on the managed agent (not the manager).
+  //
+  // Auth model: AgentAuthGuard validates the manager's apiKey. The owning
+  // check (`Agent[target].manager_agent_id === manager_agent_id`) ensures
+  // a manager can only provision keys for agents it actually owns. An admin
+  // user-session route exists too (below) so an operator can rotate without
+  // a live manager.
+
+  @ApiSecurity('agent-api-key')
+  @Post('api/agent-manager/managed-agents/:id/apikey/provision')
+  @UseGuards(AgentAuthGuard)
+  @ApiOperation({
+    summary: 'Manager → server: rotate and fetch the apiKey for a managed agent it owns',
+  })
+  async provisionManagedAgentKey(@Param('id') targetAgentId: string, @Req() req: Request, @Res() res: Response) {
+    const callerAgentId = (req as any).currentAgentId as string | null;
+    if (!callerAgentId) return res.status(401).json({ error: 'manager apiKey could not be resolved to an agent_id' });
+
+    const target = await this.agentRepo.findOne({ where: { id: targetAgentId } });
+    if (!target) return res.status(404).json({ error: 'target agent not found' });
+
+    if (target.manager_agent_id !== callerAgentId) {
+      this.logService.warn(
+        'AgentManager',
+        `Refused apiKey provision: caller agent=${callerAgentId.slice(0, 8)} is not owner of target=${targetAgentId.slice(0, 8)} (owner=${target.manager_agent_id || 'none'})`,
+      );
+      return res.status(403).json({ error: 'caller is not the owning manager for this agent' });
+    }
+
+    const issued = await this._rotateManagedAgentKey(target);
+    return res.status(201).json({
+      raw_key: issued.raw_key,
+      key_id: issued.key_id,
+      agent_id: target.id,
+      workspace_id: target.workspace_id,
+    });
+  }
+
+  // Admin-side equivalent — useful for operator-driven rotation without a
+  // live manager (e.g. the manager box died and we want to re-provision
+  // before standing up a new one). Same payload shape as the manager path.
+  @ApiBearerAuth('user-session')
+  @Post('api/admin/agent-manager/agents/:id/apikey/provision')
+  @UseGuards(PermissionGuard, WorkspaceGuard)
+  @RequirePermission(PERMISSIONS.MANAGE_AGENTS)
+  @ApiOperation({ summary: 'Admin: rotate and return the managed agent\'s apiKey (one-shot)' })
+  async adminProvisionManagedAgentKey(
+    @Param('id') targetAgentId: string,
+    @CurrentWorkspaceId() workspaceId: string | null,
+    @Res() res: Response,
+  ) {
+    if (!workspaceId) return res.status(400).json({ error: 'workspace_id is required' });
+    const target = await this.agentRepo.findOne({ where: { id: targetAgentId, workspace_id: workspaceId } });
+    if (!target) return res.status(404).json({ error: 'target agent not found in this workspace' });
+
+    const issued = await this._rotateManagedAgentKey(target);
+    return res.status(201).json({
+      raw_key: issued.raw_key,
+      key_id: issued.key_id,
+      agent_id: target.id,
+      workspace_id: target.workspace_id,
+    });
+  }
+
+  /**
+   * Issue a fresh apiKey for a managed agent and revoke any prior keys
+   * created via this same provisioning path. The convention is name-based:
+   * keys produced here carry the prefix `agent-manager-provisioned:` so
+   * routine listings can distinguish them from human-created keys, and
+   * rotations only invalidate previous provisioning-path keys (not user-
+   * minted ones an operator might have created manually).
+   */
+  private async _rotateManagedAgentKey(target: Agent): Promise<{ raw_key: string; key_id: string }> {
+    const provisionPrefix = 'agent-manager-provisioned:';
+    await this.apiKeyService.revokeApiKeysByAgentAndNamePrefix(target.id, provisionPrefix);
+
+    const issued = await this.apiKeyService.createApiKey({
+      name: `${provisionPrefix}${target.name}`,
+      agent_id: target.id,
+      scope: 'full',
+      workspace_id: target.workspace_id,
+      expires_at: null,
+    });
+
+    this.logService.info(
+      'AgentManager',
+      `Provisioned apiKey for managed agent ${target.id.slice(0, 8)} (name=${target.name})`,
+      { key_id: issued.apiKey.id, masked: issued.apiKey.key_masked },
+    );
+    return { raw_key: issued.raw_key, key_id: issued.apiKey.id };
+  }
 }

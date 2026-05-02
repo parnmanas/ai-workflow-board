@@ -35,6 +35,7 @@ import {
 } from './lib/cli-adapters/index.js';
 import { promptComposer } from './lib/prompts.js';
 import { ManagedAgentRegistry } from './lib/managed-agents.js';
+import { ManagedAgentContextRegistry } from './lib/managed-agent-context.js';
 import { AgentManagerCommandHandler } from './lib/agent-manager-commands.js';
 import type { SessionAwareConfig } from './lib/base-session-manager.js';
 import type { SubagentAwareConfig } from './lib/subagent-manager.js';
@@ -271,8 +272,13 @@ async function runRuntime(
   // events. Reported back to AWB on every InstanceHeartbeat ping so the
   // admin UI's manager detail panel can render `agent_ids` / `working_dirs`.
   const managedAgents = new ManagedAgentRegistry();
+  // ST-6 — per-agent runtime context (cwd / apiKey / mcp-config). Filled by
+  // spawn_agent, drained by stop_agent, read by EventDispatcher to route
+  // managed-agent-targeted events under the right identity.
+  const managedAgentContexts = new ManagedAgentContextRegistry();
   const commandHandler = new AgentManagerCommandHandler(config, {
     registry: managedAgents,
+    contextRegistry: managedAgentContexts,
     getInstanceId: () => instanceHeartbeat._real?.instanceId ?? null,
     reloadConfig: async () => {
       const next = loadConfig();
@@ -317,6 +323,7 @@ async function runRuntime(
       fsBrowser,
       prompts: promptComposer,
       agentManagerCommandHandler: commandHandler,
+      managedAgentContexts,
     },
     pluginVersion: version,
     onConnect: kickPresencePing,

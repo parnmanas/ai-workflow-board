@@ -30,8 +30,25 @@
 // so the server log surfaces the outcome to the operator.
 
 import { log } from './logging.js';
-import { postCommandAck, fetchAgentRecord, type AwbConfig } from './rest.js';
+import {
+  postCommandAck,
+  fetchAgentRecord,
+  provisionManagedAgentApiKey,
+  type AwbConfig,
+} from './rest.js';
 import type { ManagedAgentRegistry } from './managed-agents.js';
+import type { ManagedAgentContextRegistry } from './managed-agent-context.js';
+import {
+  ensureManagedAgentDir,
+  readApiKey,
+  writeApiKey,
+  writeMcpConfig,
+  writeManagedAgentConfig,
+  mcpConfigPathFor,
+  subagentLogPathFor,
+  eraseSecrets,
+  maskKey,
+} from './managed-agent-store.js';
 
 type CommandKind =
   | 'spawn_agent'
@@ -65,6 +82,9 @@ export interface CommandHandlerDeps {
   getInstanceId(): string | null;
   /** ManagedAgentRegistry — populated by the handler. */
   registry: ManagedAgentRegistry;
+  /** ST-6: per-agent runtime context registry (cwd / apiKey / mcp-config).
+   * Optional so legacy harnesses without multi-tenant routing keep working. */
+  contextRegistry?: ManagedAgentContextRegistry | null;
   /** Optional config-reload hook; resolves with a short summary string. */
   reloadConfig?: () => Promise<string> | string;
 }
@@ -148,6 +168,24 @@ export class AgentManagerCommandHandler {
     return id;
   }
 
+  /**
+   * ST-6: Real bootstrap for a managed agent.
+   *
+   * Steps (idempotent):
+   *   1. Hydrate canonical record from AWB (cli + working_dir).
+   *   2. Ensure on-disk dir at <MANAGER_HOME>/agents/<id>/.
+   *   3. Cache record into config.json.
+   *   4. Provision (or reuse on-disk) apiKey + write the agent's
+   *      mcp-config.json with that apiKey embedded.
+   *   5. Register a runtime context so EventDispatcher can route to it.
+   *   6. Mark status='running' in the heartbeat registry.
+   *
+   * No long-lived child process: subagents are forked per event with this
+   * context as their cwd / apiKey. spawn_agent is therefore a "register +
+   * provision" step, not a process fork. Stop = drop context + mark
+   * stopped; in-flight subagents already running are NOT killed (they hold
+   * a snapshot of the apiKey/cwd they were spawned with).
+   */
   async #spawnAgent(payload: AgentManagerCommandPayload): Promise<string> {
     const agentId = this.#targetAgentId(payload, 'spawn_agent');
 
@@ -165,23 +203,78 @@ export class AgentManagerCommandHandler {
     const rec = this.#deps.registry.upsert({ agent_id: agentId, name, cli, working_dir: workingDir });
     rec.status = 'spawning';
 
-    // ─── CLI lifecycle stub ───────────────────────────────────────────
-    // Real implementation: launch `claude/codex/gemini` as a child process
-    // chrooted at workingDir, wire stdio to a per-agent log file, and only
-    // markRunning when the cli reports ready. Tracked as ST-6 follow-up.
-    this.#deps.registry.markRunning(agentId, /* fake pid */ -1);
-    return `spawn_agent stub: agent=${agentId.slice(0, 8)} cli=${cli} cwd=${workingDir} (lifecycle stubbed)`;
+    // 2. on-disk dir + 3. cached settings
+    await ensureManagedAgentDir(agentId);
+    await writeManagedAgentConfig({
+      agent_id: agentId,
+      name,
+      cli,
+      working_dir: workingDir,
+      workspace_id: (remote as any)?.workspace_id || '',
+      last_spawn_at: new Date().toISOString(),
+    });
+
+    // 4. apiKey: reuse on-disk if present (faster + avoids unnecessary
+    // rotation); else provision a fresh one. The server's provision
+    // endpoint is idempotent in the "rotate any prior provisioned" sense,
+    // so a fresh provision here is also safe — we just don't gratuitously
+    // rotate every spawn_agent (e.g. on a manager restart).
+    let rawApiKey = await readApiKey(agentId);
+    let provisioned = false;
+    if (!rawApiKey) {
+      const issued = await provisionManagedAgentApiKey(this.#config, agentId);
+      if (!issued?.raw_key) {
+        throw new Error('spawn_agent: apiKey provisioning failed (server returned no key)');
+      }
+      rawApiKey = issued.raw_key;
+      await writeApiKey(agentId, rawApiKey);
+      provisioned = true;
+    }
+    const mcpConfigPath = await writeMcpConfig(agentId, this.#config.url, rawApiKey);
+
+    // 5. context registry — EventDispatcher reads this on every event
+    if (this.#deps.contextRegistry) {
+      this.#deps.contextRegistry.upsert({
+        agent_id: agentId,
+        name,
+        cli,
+        working_dir: workingDir,
+        mcp_config_path: mcpConfigPath,
+        api_key: rawApiKey,
+        subagent_log_path: subagentLogPathFor(agentId),
+        registered_at: new Date().toISOString(),
+      });
+    }
+
+    // 6. mark running. pid=process.pid means "managed by THIS manager";
+    // there's no per-agent permanent process to track, but the heartbeat
+    // surface still wants a live pid for the dashboard.
+    this.#deps.registry.markRunning(agentId, process.pid);
+
+    log(
+      `spawn_agent: agent=${agentId.slice(0, 8)} name=${name} cli=${cli} cwd=${workingDir}` +
+        ` apiKey=${maskKey(rawApiKey)}${provisioned ? ' (provisioned)' : ' (reused)'}`,
+    );
+    return (
+      `spawn_agent ok: agent=${agentId.slice(0, 8)} cli=${cli} cwd=${workingDir}` +
+      ` apiKey=${provisioned ? 'provisioned' : 'reused'}`
+    );
   }
 
   async #stopAgent(payload: AgentManagerCommandPayload): Promise<string> {
     const agentId = this.#targetAgentId(payload, 'stop_agent');
+    const hadContext = this.#deps.contextRegistry?.delete(agentId) ?? false;
     const rec = this.#deps.registry.markStopped(agentId, 'stop_agent command');
-    if (!rec) {
+    // Erase on-disk secrets so the next spawn_agent re-provisions a fresh
+    // key. This is the expected security posture: an admin stopping an
+    // agent invalidates its credentials on the next start.
+    await eraseSecrets(agentId).catch(() => undefined);
+    if (!rec && !hadContext) {
       // Unknown to this manager — likely never spawned here. Treat as a
       // no-op success so the operator's ack reflects "nothing to do".
       return `stop_agent: agent=${agentId.slice(0, 8)} not running on this manager`;
     }
-    return `stop_agent stub: agent=${agentId.slice(0, 8)} marked stopped (lifecycle stubbed)`;
+    return `stop_agent ok: agent=${agentId.slice(0, 8)} (context dropped, secrets erased)`;
   }
 
   async #restartAgent(payload: AgentManagerCommandPayload): Promise<string> {

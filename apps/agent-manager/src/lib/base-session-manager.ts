@@ -63,6 +63,18 @@ export interface MonitorMeta {
 export interface SpawnOpts {
   onProgress?: (stage: string) => void;
   monitorMeta?: MonitorMeta;
+  /**
+   * ST-6: per-call managed-agent runtime context. When provided, the
+   * spawned CLI runs with cwd=ctx.cwd, MCP auth = ctx.api_key, and reuses
+   * ctx.mcp_config_path instead of a freshly-written temp config.
+   * Optional — undefined falls back to manager-config defaults.
+   */
+  agentContext?: {
+    agent_id: string;
+    api_key: string;
+    cwd: string;
+    mcp_config_path: string;
+  };
 }
 
 interface TurnState {
@@ -79,6 +91,9 @@ export interface SessionRecord {
   cli_type: string;
   child: ChildProcessByStdio<Writable, Readable, Readable>;
   configPath: string | null;
+  /** ST-6: false when configPath is the agent's persistent mcp-config.json
+   *  and must not be unlinked on session teardown. */
+  configPathIsTemp: boolean;
   pidPath: string | null;
   turnCount: number;
   startedAt: number;
@@ -135,7 +150,7 @@ export class BaseSessionManager {
     sessionKey: string,
     rolePrompt: string,
     firstTurnText: string,
-    { onProgress, monitorMeta }: SpawnOpts = {},
+    { onProgress, monitorMeta, agentContext }: SpawnOpts = {},
   ): Promise<SessionRecord | null> {
     if (!this._adapter.has(PERSISTENT_SESSION)) {
       log(
@@ -144,7 +159,14 @@ export class BaseSessionManager {
       return null;
     }
 
+    // ST-6: per-call managed-agent context — same semantics as
+    // SubagentManager.spawn. Reuse the agent's pre-written mcp-config when
+    // available; auth + cwd from the managed agent's identity.
+    const effectiveApiKey = agentContext?.api_key || this._config.apiKey;
+    const effectiveCwd = agentContext?.cwd || undefined;
+
     let configPath: string | null = null;
+    let configPathIsTemp = false;
     let pidPath: string | null = null;
     try {
       let descriptor = this._adapter.buildSessionSpawn({
@@ -153,27 +175,33 @@ export class BaseSessionManager {
       });
 
       if (descriptor.needsMcpConfig) {
-        configPath = join(
-          SUBAGENTS_BASE_DIR,
-          `${this.#cfgPrefix}${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
-        );
-        await fsp.mkdir(dirname(configPath), { recursive: true, mode: 0o700 });
-        const headers: Record<string, string> = {
-          Authorization: `Bearer ${this._config.apiKey}`,
-          'X-AWB-Client-Type': 'subagent',
-        };
-        if (monitorMeta?.ticket_id) headers['X-AWB-Subagent-Ticket-Id'] = monitorMeta.ticket_id;
-        if (monitorMeta?.role) headers['X-AWB-Subagent-Role'] = monitorMeta.role;
-        const mcpConfig = {
-          mcpServers: {
-            awb: {
-              type: 'http',
-              url: `${this._config.url.replace(/\/$/, '')}/mcp`,
-              headers,
+        if (agentContext?.mcp_config_path) {
+          configPath = agentContext.mcp_config_path;
+          configPathIsTemp = false;
+        } else {
+          configPath = join(
+            SUBAGENTS_BASE_DIR,
+            `${this.#cfgPrefix}${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
+          );
+          configPathIsTemp = true;
+          await fsp.mkdir(dirname(configPath), { recursive: true, mode: 0o700 });
+          const headers: Record<string, string> = {
+            Authorization: `Bearer ${effectiveApiKey}`,
+            'X-AWB-Client-Type': 'subagent',
+          };
+          if (monitorMeta?.ticket_id) headers['X-AWB-Subagent-Ticket-Id'] = monitorMeta.ticket_id;
+          if (monitorMeta?.role) headers['X-AWB-Subagent-Role'] = monitorMeta.role;
+          const mcpConfig = {
+            mcpServers: {
+              awb: {
+                type: 'http',
+                url: `${this._config.url.replace(/\/$/, '')}/mcp`,
+                headers,
+              },
             },
-          },
-        };
-        await fsp.writeFile(configPath, JSON.stringify(mcpConfig), { mode: 0o600 });
+          };
+          await fsp.writeFile(configPath, JSON.stringify(mcpConfig), { mode: 0o600 });
+        }
 
         descriptor = this._adapter.buildSessionSpawn({
           rolePrompt: rolePrompt || '',
@@ -186,7 +214,8 @@ export class BaseSessionManager {
         stdio: descriptor.stdio || ['pipe', 'pipe', 'pipe'],
         detached: true,
         windowsHide: true,
-        env: { ...process.env, AWB_API_KEY: this._config.apiKey },
+        cwd: effectiveCwd,
+        env: { ...process.env, AWB_API_KEY: effectiveApiKey },
         shell: descriptor.shell ?? /\.(cmd|bat|ps1)$/i.test(resolvedBin),
       }) as ChildProcessByStdio<Writable, Readable, Readable>;
       child.once('error', (err: any) => {
@@ -197,10 +226,13 @@ export class BaseSessionManager {
       child.unref();
 
       if (!child.pid) {
-        if (configPath) await fsp.unlink(configPath).catch(() => {});
+        if (configPath && configPathIsTemp) await fsp.unlink(configPath).catch(() => {});
         return null;
       }
-      if (configPath) {
+      if (configPath && configPathIsTemp) {
+        // Per-spawn pid sidecar so #sweep + orphan cleanup can find this
+        // child by its tempfile. Skipped for the persistent agent-owned
+        // mcp-config — the per-agent dir already groups its children.
         pidPath = configPath.replace(/\.json$/, '.pid');
         await fsp.writeFile(pidPath, String(child.pid), { mode: 0o600 }).catch(() => {});
       }
@@ -211,6 +243,7 @@ export class BaseSessionManager {
         cli_type: this._adapter.cliType,
         child,
         configPath,
+        configPathIsTemp,
         pidPath,
         turnCount: 0,
         startedAt: Date.now(),
@@ -251,7 +284,7 @@ export class BaseSessionManager {
       return sess;
     } catch (err: any) {
       log(`${this.#logTag} spawn error ${this.#keyField}=${sessionKey}: ${err?.message ?? err}`);
-      if (configPath) await fsp.unlink(configPath).catch(() => {});
+      if (configPath && configPathIsTemp) await fsp.unlink(configPath).catch(() => {});
       return null;
     }
   }
@@ -405,7 +438,7 @@ export class BaseSessionManager {
         `${this.#logTag} exit pid=${sess.pid} ${this.#keyField}=${key} code=${code} signal=${signal || '-'} turns=${sess.turnCount} duration=${durationSec}s`,
       );
       if (this._sessions.get(key) === sess) this._sessions.delete(key);
-      if (sess.configPath) {
+      if (sess.configPath && sess.configPathIsTemp) {
         try {
           await fsp.unlink(sess.configPath);
         } catch {

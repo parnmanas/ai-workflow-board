@@ -61,6 +61,9 @@ interface SubagentRecord {
   started_at: number;
   expected_completion_at: number;
   config_path: string | null;
+  /** ST-6: false when config_path is a managed-agent's persistent
+   *  mcp-config.json file we must NOT unlink on subagent exit / cleanup. */
+  config_path_is_temp: boolean;
   process_handle: ChildProcess | null;
   captureOutput: boolean;
   outLines: string[];
@@ -201,7 +204,15 @@ export class SubagentManager implements SubagentManagerContract {
     const reservationId = -(++this.#reservationCounter);
     this.#map.set(reservationId, { kind: 'reservation', started_at: Date.now() });
 
+    // ST-6: per-call managed-agent context. When provided we (a) reuse the
+    // pre-written mcp-config.json instead of a temp one, (b) authenticate as
+    // the managed agent (apiKey override), and (c) cd into the managed
+    // agent's working_dir so the CLI sees the right project root.
+    const ctx = spec.agentContext;
+    const effectiveApiKey = ctx?.api_key || this.#config.apiKey;
+    const effectiveCwd = ctx?.cwd || undefined;
     let configPath: string | null = null;
+    let configPathIsTemp = false;
     try {
       const descriptor = this.#adapter.buildOneshotSpawn({
         rolePrompt: spec.rolePrompt || '',
@@ -210,25 +221,31 @@ export class SubagentManager implements SubagentManagerContract {
       });
 
       if (descriptor.needsMcpConfig) {
-        configPath = join(
-          this.#pidDir,
-          `cfg-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
-        );
-        await fsp.mkdir(dirname(configPath), { recursive: true, mode: 0o700 });
+        if (ctx?.mcp_config_path) {
+          configPath = ctx.mcp_config_path;
+          configPathIsTemp = false;
+        } else {
+          configPath = join(
+            this.#pidDir,
+            `cfg-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
+          );
+          configPathIsTemp = true;
+          await fsp.mkdir(dirname(configPath), { recursive: true, mode: 0o700 });
 
-        const mcpConfig = {
-          mcpServers: {
-            awb: {
-              type: 'http',
-              url: `${this.#config.url.replace(/\/$/, '')}/mcp`,
-              headers: {
-                Authorization: `Bearer ${this.#config.apiKey}`,
-                'X-AWB-Client-Type': 'subagent',
+          const mcpConfig = {
+            mcpServers: {
+              awb: {
+                type: 'http',
+                url: `${this.#config.url.replace(/\/$/, '')}/mcp`,
+                headers: {
+                  Authorization: `Bearer ${effectiveApiKey}`,
+                  'X-AWB-Client-Type': 'subagent',
+                },
               },
             },
-          },
-        };
-        await fsp.writeFile(configPath, JSON.stringify(mcpConfig), { mode: 0o600 });
+          };
+          await fsp.writeFile(configPath, JSON.stringify(mcpConfig), { mode: 0o600 });
+        }
 
         Object.assign(
           descriptor,
@@ -245,7 +262,8 @@ export class SubagentManager implements SubagentManagerContract {
         stdio: descriptor.stdio || ['ignore', 'pipe', 'pipe'],
         detached: true,
         windowsHide: true,
-        env: { ...process.env, AWB_API_KEY: this.#config.apiKey },
+        cwd: effectiveCwd,
+        env: { ...process.env, AWB_API_KEY: effectiveApiKey },
         shell: descriptor.shell ?? /\.(cmd|bat|ps1)$/i.test(resolvedBin),
       });
       child.once('error', (err: any) => {
@@ -282,6 +300,7 @@ export class SubagentManager implements SubagentManagerContract {
         expected_completion_at:
           Date.now() + (this.#config.delegation.ttlMinutes ?? 15) * 60_000,
         config_path: configPath,
+        config_path_is_temp: configPathIsTemp,
         process_handle: child,
         captureOutput: !this.#adapter.has(NATIVE_MCP),
         outLines: [],
@@ -310,7 +329,7 @@ export class SubagentManager implements SubagentManagerContract {
       return { spawned: true, pid };
     } catch (err: any) {
       this.#map.delete(reservationId);
-      if (configPath) {
+      if (configPath && configPathIsTemp) {
         await fsp.unlink(configPath).catch(() => {});
       }
       log(`Subagent spawn error: ${err?.message ?? err}`);
@@ -325,7 +344,7 @@ export class SubagentManager implements SubagentManagerContract {
       const durationSec = Math.round((Date.now() - record.started_at) / 1000);
       this.#map.delete(pid);
       this.#persist();
-      if (record.config_path) {
+      if (record.config_path && record.config_path_is_temp) {
         try {
           await fsp.unlink(record.config_path);
         } catch {
@@ -402,7 +421,7 @@ export class SubagentManager implements SubagentManagerContract {
         if (err?.code === 'ESRCH' || err?.code === 'EPERM') {
           log(`Sweep: pid=${pid} no longer alive, removing record`);
           this.#map.delete(pid);
-          if (record.config_path) {
+          if (record.config_path && record.config_path_is_temp) {
             fsp.rm(dirname(record.config_path), { recursive: true, force: true }).catch(() => {});
           }
           continue;
@@ -453,7 +472,14 @@ export class SubagentManager implements SubagentManagerContract {
       if (!rec || !rec.pid) continue;
       try {
         process.kill(rec.pid, 0);
-        this.#map.set(rec.pid, { ...rec, process_handle: null, outLines: rec.outLines || [] });
+        // Default `config_path_is_temp` to true for legacy persisted records
+        // missing the field — that matches the pre-ST-6 cleanup behavior.
+        this.#map.set(rec.pid, {
+          ...rec,
+          config_path_is_temp: rec.config_path_is_temp ?? true,
+          process_handle: null,
+          outLines: rec.outLines || [],
+        });
         revived++;
       } catch (err: any) {
         if (err?.code === 'ESRCH' || err?.code === 'EPERM') dropped++;

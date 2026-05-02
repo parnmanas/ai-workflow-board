@@ -102,7 +102,7 @@ export class TicketSessionManager
       sessionKey,
       spec.rolePrompt || '',
       firstTurnText,
-      { monitorMeta },
+      { monitorMeta, agentContext: spec.agentContext },
     );
     if (!spawned) {
       if (dedupKey) this._forgetDedup(dedupKey);

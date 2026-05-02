@@ -101,7 +101,7 @@ export class ChatSessionManager
       spec.roomId,
       spec.rolePrompt || '',
       firstTurnText,
-      { onProgress: spec.onProgress, monitorMeta },
+      { onProgress: spec.onProgress, monitorMeta, agentContext: spec.agentContext },
     );
     if (!spawned) return { dispatched: false, reason: 'spawn_failed' };
     return { dispatched: true, pid: spawned.pid, firstTurn: true };

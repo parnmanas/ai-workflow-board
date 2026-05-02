@@ -71,6 +71,29 @@ export class ApiKeyService {
     return true;
   }
 
+  /**
+   * Bulk-revoke active apiKeys whose name starts with `namePrefix` and which
+   * belong to the given agent. Used by the agent-manager apiKey provisioning
+   * path so a rotation only invalidates the prior provisioner-issued key,
+   * not user-minted keys an operator may have separately created for the
+   * same agent.
+   *
+   * Returns the affected row count.
+   */
+  async revokeApiKeysByAgentAndNamePrefix(agentId: string, namePrefix: string): Promise<number> {
+    const result = await this.repo
+      .createQueryBuilder()
+      .update()
+      .set({ is_active: 0 })
+      .where('agent_id = :agent_id AND is_active = :active AND name LIKE :prefix', {
+        agent_id: agentId,
+        active: 1,
+        prefix: `${namePrefix}%`,
+      })
+      .execute();
+    return result.affected ?? 0;
+  }
+
   async deleteApiKey(id: string): Promise<boolean> {
     const result = await this.repo.delete(id);
     return (result.affected ?? 0) > 0;

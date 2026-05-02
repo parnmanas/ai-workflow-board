@@ -164,3 +164,38 @@ export async function fetchAgentRecord(
     return null;
   }
 }
+
+/**
+ * ST-6: rotate-and-fetch the apiKey for a managed agent this manager owns.
+ * The server validates ownership (Agent[target].manager_agent_id === manager's
+ * agent_id) and returns the raw key once. The manager persists the key into
+ * `<MANAGER_HOME>/agents/<agent_id>/apikey` and embeds it in a per-agent
+ * mcp-config.json so spawned subagents authenticate as the managed agent.
+ *
+ * Returns null on any failure — caller decides whether to throw / retry.
+ */
+export async function provisionManagedAgentApiKey(
+  config: AwbConfig,
+  agentId: string,
+): Promise<{ raw_key: string; key_id: string; agent_id: string; workspace_id: string } | null> {
+  if (!agentId) return null;
+  try {
+    const url = `${trimSlash(config.url)}/api/agent-manager/managed-agents/${encodeURIComponent(agentId)}/apikey/provision`;
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'X-Agent-Key': config.apiKey,
+        Accept: 'application/json',
+      },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!resp.ok) {
+      log(`apiKey provision failed: ${resp.status} ${resp.statusText} (agent=${agentId})`);
+      return null;
+    }
+    return (await resp.json()) as any;
+  } catch (err: any) {
+    log(`apiKey provision error: ${err?.message ?? err} (agent=${agentId})`);
+    return null;
+  }
+}
