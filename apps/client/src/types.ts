@@ -503,29 +503,45 @@ export interface SubagentTranscript {
   lines: SubagentLogLine[];
 }
 
-// One live SSE connection (proxy.mjs ↔ AWB) for an agent. The Agent
-// Details modal renders a list so the user can spot multi-proxy
-// situations. `session_id` is server-generated and stable for the
-// lifetime of the connection. Fields mirror SseSessionDetail in
-// EventsController on the server side.
-export interface AgentProxySession {
-  session_id: string;
-  connected_at: string;
-  ip: string;            // X-Plugin-Ip from plugin (preferred), else
-                          // reverse-proxy chain, else 'unknown'
-  plugin_version: string; // X-Plugin-Version from plugin; 'unknown' for
-                          // pre-v0.35.5 plugins that don't ship it
-  user_agent: string;
+// One row in the unified SESSIONS panel for an agent. `source` discriminates
+// real proxy.mjs ↔ AWB SSE buckets ('proxy') from synthesized rows backed by
+// an agent-manager InstanceRegistry record ('manager'). Manager rows surface
+// managed agents — which never open their own SSE connection because the
+// manager mediates everything — under the same panel as legacy proxy rows so
+// the user has a single place to see "what's keeping this agent online".
+// Mirrors SseSessionDetail (+ routing flags) on the server.
+export interface AgentLiveSession {
+  source: 'proxy' | 'manager';
+  session_id: string;       // proxy: server-generated UUID; manager: `mgr:<instance_id>`
+  connected_at: string;     // proxy: SSE connect time; manager: process started_at
+  ip: string;               // proxy: peer IP; manager: 'via manager'
+  plugin_version: string;   // X-Plugin-Version (proxy) or InstanceRecord.plugin_version (manager)
+  user_agent: string;       // empty for manager rows
   board_id: string | null;
   // Routing flags filled by the server. `is_main` = this session currently
   // receives the agent's recipient-scoped events (triggers, mentions, chat,
   // fs_request) when 2+ proxies are connected. `main_pinned` = the user
   // explicitly picked it; when false but `is_main` is true the server
-  // auto-selected (oldest-connected). Both fields are stable for as long as
-  // the bucket of connected sessions doesn't change.
+  // auto-selected (oldest-connected). Both are always false for manager rows —
+  // manager rows don't participate in routing; only proxy rows do.
   is_main: boolean;
   main_pinned: boolean;
+
+  // ── Manager-source only (undefined for proxy rows) ─────────────────────
+  instance_id?: string;
+  manager_agent_id?: string;
+  manager_name?: string;
+  cli?: string;
+  cli_adapters?: string[];
+  hostname?: string;
+  pid?: number;
+  started_at?: string;
+  paired_at?: string;
+  working_dir?: string;
 }
+
+/** @deprecated Use AgentLiveSession. Kept as an alias for ABI compatibility. */
+export type AgentProxySession = AgentLiveSession;
 
 // Phase 3 — single daemon/proxy/manager instance heartbeating against AWB.
 // Mirrors InstanceRecord in

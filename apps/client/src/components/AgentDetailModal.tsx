@@ -4,7 +4,7 @@ import { api } from '../api';
 import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
-import type { AgentDetail, ActivityRow, AgentProxySession } from '../types';
+import type { AgentDetail, ActivityRow, AgentLiveSession } from '../types';
 import { tokens } from '../tokens';
 import { formatAgentDisplayName } from '../utils/agentName';
 import AgentFileBrowser from './AgentFileBrowser';
@@ -219,7 +219,13 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
     }
   };
 
-  const [proxySessions, setProxySessions] = useState<AgentProxySession[]>([]);
+  const [liveSessions, setLiveSessions] = useState<AgentLiveSession[]>([]);
+  // Total rows in the unified SESSIONS panel (proxy + manager-derived).
+  const sessionCount = liveSessions.length;
+  // Proxy-only count drives the routing-collision warning ("⚠ multiple")
+  // and the main-pin selector — manager rows don't participate in
+  // AGENT_ROUTED_EVENTS routing, so they don't contribute to that signal.
+  const proxySessions = liveSessions.filter((s) => s.source === 'proxy');
   const proxyCount = proxySessions.length;
   // Disable buttons during a pin/clear round-trip so a fast double-click
   // can't flip the pinning between two sessions before the first POST settles.
@@ -228,7 +234,7 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
   const refreshProxySessions = async () => {
     try {
       const map = await api.getActiveAgentSessions();
-      setProxySessions(map?.[agentId] ?? []);
+      setLiveSessions(map?.[agentId] ?? []);
     } catch {
       /* swallow — modal stays usable, surface label keeps last value */
     }
@@ -282,7 +288,7 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
     ]);
     if (a.status === 'fulfilled') setDetail(a.value);
     if (b.status === 'fulfilled') setRecentActivity(b.value || []);
-    if (c.status === 'fulfilled') setProxySessions(c.value?.[agentId] ?? []);
+    if (c.status === 'fulfilled') setLiveSessions(c.value?.[agentId] ?? []);
     if (a.status === 'rejected' || b.status === 'rejected') {
       setError('Could not load agent details. Retry.');
     }
@@ -369,11 +375,13 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
   const subtitleTail = detail?.last_seen_at
     ? ` · last seen ${formatRelative(detail.last_seen_at)}`
     : ' · never connected';
-  // Surface live-proxy count so the user sees when more than one Claude
-  // Code session is connected for the same agent — that's the orphan-
-  // cleanup race scenario that silently kills subagents mid-turn.
-  const proxyTail = proxyCount > 0
-    ? ` · ${proxyCount} proxy session${proxyCount === 1 ? '' : 's'}${proxyCount > 1 ? ' ⚠ multiple' : ''}`
+  // Surface live-session count (proxy + manager) so the user sees what's
+  // keeping the agent online. The "⚠ multiple" warning still fires only on
+  // 2+ proxy-source rows because that's the orphan-cleanup race scenario
+  // that silently kills subagents mid-turn — manager-source rows don't
+  // collide because they don't pin AGENT_ROUTED_EVENTS.
+  const proxyTail = sessionCount > 0
+    ? ` · ${sessionCount} session${sessionCount === 1 ? '' : 's'}${proxyCount > 1 ? ' ⚠ multiple proxies' : ''}`
     : '';
 
   const sectionLabelStyle: React.CSSProperties = {
@@ -687,7 +695,7 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
           style={{
             flex: 1,
             // No outer modal scroll on any tab. Each section above
-            // Recent Activity has its own cap (PROXY SESSIONS,
+            // Recent Activity has its own cap (SESSIONS,
             // ROLE PROMPT, DETAILS card), Recent Activity flex-grows
             // and scrolls inside itself, SUBAGENTS / FILES manage
             // their own scroll. Single scrollbar, always.
@@ -868,25 +876,32 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
             </section>
           )}
 
-          {/* PROXY SESSIONS section — live SSE connections from this agent's
-              proxy.mjs instances. More than one row means multiple proxies
-              are concurrently connected (multi-terminal, or a single Claude
-              CLI internally opening more than one stream). The orphan-cleanup
-              race that silently kills subagents shows up here.
-              When proxyCount > 1, the user picks one as "MAIN" and the
-              server routes ticket triggers + chat events only to that
-              session (see events.controller.ts AGENT_ROUTED_EVENTS). */}
+          {/* SESSIONS section — what's currently keeping this agent online.
+              Two row sources unified into one panel:
+                • 'proxy' — a real SSE connection from a proxy.mjs instance.
+                  More than one means multiple proxies are concurrently
+                  connected (multi-terminal, or a single Claude CLI opening
+                  more than one stream). This is the orphan-cleanup race
+                  scenario that silently kills subagents mid-turn, so when
+                  proxyCount > 1 the user picks one as "MAIN" and the server
+                  routes ticket triggers + chat events only to that session
+                  (see events.controller.ts AGENT_ROUTED_EVENTS).
+                • 'manager' — synthesized from the agent-manager
+                  InstanceRegistry. Managed agents never open their own SSE,
+                  so without this row the panel would always be empty for
+                  them even while their manager is heartbeating. Manager rows
+                  do not participate in main-pin routing. */}
           <section>
             <div style={{ ...sectionLabelStyle, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <div>
-                PROXY SESSIONS
-                {proxyCount > 0 && (
+                SESSIONS
+                {sessionCount > 0 && (
                   <span style={{
                     marginLeft: 8,
                     color: proxyCount > 1 ? tokens.colors.warning : tokens.colors.textMuted,
                     fontWeight: proxyCount > 1 ? 700 : 500,
                   }}>
-                    ({proxyCount}){proxyCount > 1 ? ' ⚠ multiple' : ''}
+                    ({sessionCount}){proxyCount > 1 ? ' ⚠ multiple proxies' : ''}
                   </span>
                 )}
               </div>
@@ -914,22 +929,28 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
               )}
             </div>
             <div style={{ ...cardStyle, maxHeight: 240, overflowY: 'auto' }}>
-              {proxyCount === 0 ? (
+              {sessionCount === 0 ? (
                 <div style={{ color: tokens.colors.textMuted, fontSize: 12 }}>
-                  No live proxy connection.
+                  No live session.
                 </div>
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                   {proxyCount > 1 && (
                     <div style={{ fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.5 }}>
-                      Pick the session that should receive ticket triggers and chat messages. Other
-                      sessions stay connected for observability but won't spawn subagents.
+                      Pick the proxy that should receive ticket triggers and chat messages. Other
+                      proxy sessions stay connected for observability but won't spawn subagents.
                     </div>
                   )}
-                  {proxySessions.map((s) => {
-                    const showSelector = proxyCount > 1;
-                    const isPinned = s.main_pinned;
-                    const isAutoMain = s.is_main && !s.main_pinned;
+                  {liveSessions.map((s) => {
+                    const isManager = s.source === 'manager';
+                    // Main-pin selector + MAIN badge are routing-only signals;
+                    // manager rows never participate in routing so they're
+                    // hidden there. Selector also stays hidden when there's
+                    // only one proxy to pick (no ambiguity to resolve).
+                    const showSelector = !isManager && proxyCount > 1;
+                    const isPinned = !isManager && s.main_pinned;
+                    const isAutoMain = !isManager && s.is_main && !s.main_pinned;
+                    const showMainBadge = !isManager && s.is_main;
                     const rowBusy = pinningSessionId === s.session_id;
                     return (
                       <div
@@ -937,8 +958,8 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
                         style={{
                           padding: '8px 10px',
                           borderRadius: 6,
-                          background: s.is_main ? tokens.colors.surface : tokens.colors.surfaceSubtle,
-                          border: `1px solid ${s.is_main ? tokens.colors.accent : tokens.colors.border}`,
+                          background: showMainBadge ? tokens.colors.surface : tokens.colors.surfaceSubtle,
+                          border: `1px solid ${showMainBadge ? tokens.colors.accent : tokens.colors.border}`,
                           fontSize: 12,
                           lineHeight: 1.5,
                         }}
@@ -967,7 +988,23 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
                               </span>
                             </label>
                           )}
-                          {s.is_main && (
+                          <span
+                            style={{
+                              fontSize: 10,
+                              fontWeight: 700,
+                              padding: '1px 6px',
+                              borderRadius: tokens.radii.sm,
+                              background: 'transparent',
+                              color: isManager ? tokens.colors.textSecondary : tokens.colors.textMuted,
+                              border: `1px solid ${isManager ? tokens.colors.textSecondary : tokens.colors.border}`,
+                              textTransform: 'uppercase',
+                              letterSpacing: 0.6,
+                            }}
+                            title={isManager ? 'Synthesized from agent-manager InstanceRegistry' : 'Live proxy.mjs SSE connection'}
+                          >
+                            {isManager ? 'Manager' : 'Proxy'}
+                          </span>
+                          {showMainBadge && (
                             <span
                               style={{
                                 fontSize: 10,
@@ -986,38 +1023,100 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
                             </span>
                           )}
                         </div>
-                        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: showSelector || s.is_main ? 4 : 0 }}>
-                          <span>
-                            <span style={{ color: tokens.colors.textMuted }}>connected: </span>
-                            {formatRelative(s.connected_at)}
-                          </span>
-                          <span>
-                            <span style={{ color: tokens.colors.textMuted }}>ip: </span>
-                            <span style={{ fontFamily: 'monospace', color: s.ip === 'unknown' ? tokens.colors.warning : undefined }}>
-                              {s.ip || 'unknown'}
-                            </span>
-                          </span>
-                          <span>
-                            <span style={{ color: tokens.colors.textMuted }}>plugin: </span>
-                            <span style={{ fontFamily: 'monospace', color: s.plugin_version === 'unknown' ? tokens.colors.warning : undefined }}>
-                              {s.plugin_version || 'unknown'}
-                            </span>
-                          </span>
-                          {s.board_id && (
-                            <span>
-                              <span style={{ color: tokens.colors.textMuted }}>board: </span>
-                              <span style={{ fontFamily: 'monospace' }}>{s.board_id.slice(0, 8)}</span>
-                            </span>
-                          )}
-                        </div>
-                        {s.user_agent && (
-                          <div style={{ marginTop: 4, color: tokens.colors.textMuted, fontFamily: 'monospace', wordBreak: 'break-all' }}>
-                            {s.user_agent}
-                          </div>
+                        {isManager ? (
+                          <>
+                            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 4 }}>
+                              <span>
+                                <span style={{ color: tokens.colors.textMuted }}>via: </span>
+                                <span style={{ fontFamily: 'monospace' }}>
+                                  {s.manager_name || (s.manager_agent_id ? s.manager_agent_id.slice(0, 8) : 'unknown')}
+                                </span>
+                              </span>
+                              <span>
+                                <span style={{ color: tokens.colors.textMuted }}>cli: </span>
+                                <span style={{ fontFamily: 'monospace' }}>
+                                  {s.cli || 'unknown'}
+                                  {s.cli_adapters && s.cli_adapters.length > 0
+                                    ? ` (+${s.cli_adapters.length})`
+                                    : ''}
+                                </span>
+                              </span>
+                              <span>
+                                <span style={{ color: tokens.colors.textMuted }}>version: </span>
+                                <span style={{ fontFamily: 'monospace', color: s.plugin_version === 'unknown' ? tokens.colors.warning : undefined }}>
+                                  {s.plugin_version || 'unknown'}
+                                </span>
+                              </span>
+                              <span>
+                                <span style={{ color: tokens.colors.textMuted }}>host: </span>
+                                <span style={{ fontFamily: 'monospace' }}>{s.hostname || 'unknown'}</span>
+                              </span>
+                              {typeof s.pid === 'number' && s.pid > 0 && (
+                                <span>
+                                  <span style={{ color: tokens.colors.textMuted }}>pid: </span>
+                                  <span style={{ fontFamily: 'monospace' }}>{s.pid}</span>
+                                </span>
+                              )}
+                              {s.started_at && (
+                                <span>
+                                  <span style={{ color: tokens.colors.textMuted }}>uptime: </span>
+                                  {formatRelative(s.started_at)}
+                                </span>
+                              )}
+                              {s.paired_at && (
+                                <span>
+                                  <span style={{ color: tokens.colors.textMuted }}>paired: </span>
+                                  {formatRelative(s.paired_at)}
+                                </span>
+                              )}
+                            </div>
+                            {s.working_dir && (
+                              <div style={{ marginTop: 4, color: tokens.colors.textMuted, fontFamily: 'monospace', wordBreak: 'break-all' }}>
+                                cwd: {s.working_dir}
+                              </div>
+                            )}
+                            {s.instance_id && (
+                              <div style={{ marginTop: 4, color: tokens.colors.textDisabled, fontFamily: 'monospace', fontSize: 11 }}>
+                                instance: {s.instance_id}
+                              </div>
+                            )}
+                          </>
+                        ) : (
+                          <>
+                            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: showSelector || showMainBadge ? 4 : 0 }}>
+                              <span>
+                                <span style={{ color: tokens.colors.textMuted }}>connected: </span>
+                                {formatRelative(s.connected_at)}
+                              </span>
+                              <span>
+                                <span style={{ color: tokens.colors.textMuted }}>ip: </span>
+                                <span style={{ fontFamily: 'monospace', color: s.ip === 'unknown' ? tokens.colors.warning : undefined }}>
+                                  {s.ip || 'unknown'}
+                                </span>
+                              </span>
+                              <span>
+                                <span style={{ color: tokens.colors.textMuted }}>plugin: </span>
+                                <span style={{ fontFamily: 'monospace', color: s.plugin_version === 'unknown' ? tokens.colors.warning : undefined }}>
+                                  {s.plugin_version || 'unknown'}
+                                </span>
+                              </span>
+                              {s.board_id && (
+                                <span>
+                                  <span style={{ color: tokens.colors.textMuted }}>board: </span>
+                                  <span style={{ fontFamily: 'monospace' }}>{s.board_id.slice(0, 8)}</span>
+                                </span>
+                              )}
+                            </div>
+                            {s.user_agent && (
+                              <div style={{ marginTop: 4, color: tokens.colors.textMuted, fontFamily: 'monospace', wordBreak: 'break-all' }}>
+                                {s.user_agent}
+                              </div>
+                            )}
+                            <div style={{ marginTop: 4, color: tokens.colors.textDisabled, fontFamily: 'monospace', fontSize: 11 }}>
+                              session: {s.session_id}
+                            </div>
+                          </>
                         )}
-                        <div style={{ marginTop: 4, color: tokens.colors.textDisabled, fontFamily: 'monospace', fontSize: 11 }}>
-                          session: {s.session_id}
-                        </div>
                       </div>
                     );
                   })}
