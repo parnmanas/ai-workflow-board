@@ -72,6 +72,12 @@ export interface AgentTriggerPayload {
   // ticket before handling the trigger. Set when a wedged session has failed
   // to advance my_last_update_at after the initial supervisor re-push.
   force_respawn?: boolean;
+  // Per-board cap on distinct active tickets per agent. Server's
+  // TriggerLoopService is the primary enforcer; this field is forwarded so
+  // the manager can keep a defensive drop in case two triggers raced past
+  // the server gate (set_current_task lags the trigger by the spawn
+  // round-trip). Defaults to 1 in the manager when absent.
+  max_concurrent_tickets_per_agent?: number;
 }
 
 // Phase 2 D-26 — finalized payload shape emitted by chat producers.

@@ -111,7 +111,7 @@ export class BoardsController {
   async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     const board = await findOrFail(this.boardRepo, { where: { id } }, 'Board not found');
 
-    const { name, description, routing_config, column_prompts } = body;
+    const { name, description, routing_config, column_prompts, max_concurrent_tickets_per_agent } = body;
     if (name !== undefined) board.name = name;
     if (description !== undefined) board.description = description;
     if (routing_config !== undefined) board.routing_config = JSON.stringify(routing_config);
@@ -125,6 +125,15 @@ export class BoardsController {
         }
         board.column_prompts = Object.keys(cleaned).length === 0 ? null : JSON.stringify(cleaned);
       }
+    }
+    if (max_concurrent_tickets_per_agent !== undefined) {
+      const n = Math.floor(Number(max_concurrent_tickets_per_agent));
+      if (!Number.isFinite(n) || n < 1) {
+        return res.status(400).json({
+          error: 'max_concurrent_tickets_per_agent must be a positive integer (>= 1)',
+        });
+      }
+      board.max_concurrent_tickets_per_agent = n;
     }
 
     await this.boardRepo.save(board);

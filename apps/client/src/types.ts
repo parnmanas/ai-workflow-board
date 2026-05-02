@@ -236,6 +236,11 @@ export interface Board {
   description: string;
   routing_config: string; // JSON: { [columnName]: 'assignee' | 'reporter' | 'reviewer' }
   column_prompts?: string | null; // JSON: { [columnId: string]: promptTemplateId: string }
+  // Max distinct tickets one agent can be actively working on at once
+  // under this board. Default 1; raise per-board when concurrent local-repo
+  // work is safe. Drives the trigger gate on the server side and the
+  // defensive cap on the manager side.
+  max_concurrent_tickets_per_agent?: number;
   columns: Column[];
   created_at: string;
   updated_at: string;

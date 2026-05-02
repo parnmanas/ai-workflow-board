@@ -144,6 +144,10 @@ export const EVENT_TYPES: EventDefinition[] = [
         ticket_prompt: event.ticket_prompt || '',
         trigger_source: event.trigger_source || '',
         column_prompt: event.column_prompt ?? null,
+        max_concurrent_tickets_per_agent:
+          typeof event.max_concurrent_tickets_per_agent === 'number'
+            ? event.max_concurrent_tickets_per_agent
+            : undefined,
       };
       return {
         payload,
@@ -179,6 +183,9 @@ export const EVENT_TYPES: EventDefinition[] = [
         // this, ev.column_prompt stays undefined on the proxy side and the
         // column workflow guide never reaches the agent.
         column_prompt: p.column_prompt,
+        // Per-board cap forwarded so the manager can keep a defensive drop
+        // alongside the server-side gate.
+        max_concurrent_tickets_per_agent: p.max_concurrent_tickets_per_agent,
         timestamp: env.timestamp,
       };
     },
