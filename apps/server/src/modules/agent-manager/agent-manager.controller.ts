@@ -2,7 +2,7 @@ import { ApiBearerAuth, ApiSecurity, ApiTags, ApiOperation } from '@nestjs/swagg
 import { Body, Controller, Delete, Get, Param, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { randomBytes } from 'crypto';
 import { Agent } from '../../entities/Agent';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
@@ -111,6 +111,34 @@ export class AgentManagerController {
       working_dirs,
       paired_at,
     });
+
+    // Mark every managed agent the manager is supervising as alive. Managed
+    // agents have no long-running process of their own — they only spawn
+    // short-lived ticket-session subagents per trigger — so without this
+    // their Agent.last_seen_at never advances and the AI Agents page shows
+    // them OFFLINE forever even when the manager has them in agent_ids[]
+    // ("live" on the Agent Manager detail page). AgentStatusService's 30s
+    // sweep reads last_seen_at and emits agent_status SSE, so this update
+    // is the only handoff needed.
+    //
+    // Ownership-scoped to the calling manager (manager_agent_id === agent_id)
+    // so a heartbeat from manager A can never accidentally signal aliveness
+    // for agents B owns. Empty/legacy heartbeats from non-manager modes
+    // skip the update entirely.
+    if (mode === 'manager' && agent_ids && agent_ids.length > 0) {
+      try {
+        await this.agentRepo.update(
+          { id: In(agent_ids), manager_agent_id: agent_id },
+          { last_seen_at: new Date(), is_online: 1 },
+        );
+      } catch (err: any) {
+        this.logService.warn('AgentManager', 'Failed to refresh managed-agent presence on heartbeat', {
+          err: err?.message ?? String(err),
+          manager_agent_id: agent_id,
+          managed_agent_count: agent_ids.length,
+        });
+      }
+    }
 
     return res.json({ ok: true, instance_id: rec.instance_id, last_seen_at: rec.last_seen_at });
   }
