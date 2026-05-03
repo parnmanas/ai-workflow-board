@@ -50,10 +50,17 @@ export function registerTicketChildTools(server: McpServer, ctx: ToolContext): v
       const creatorType = created_by ? created_by_type : (caller?.agentId ? 'agent' : (reporter ? 'agent' : ''));
       const creatorId = created_by_id || (caller?.agentId) || (reporter ? await resolveAgentId(dataSource, '', reporter) : '');
 
+      let resolvedReporter = reporter;
+      let resolvedReporterId = reporter_id;
+      if (!resolvedReporter && !resolvedReporterId && creatorId) {
+        resolvedReporter = creatorName;
+        resolvedReporterId = creatorId;
+      }
+
       const position = await maxChildPosition(dataSource, parent_id);
       const child = await ticketRepo.save(ticketRepo.create({
         parent_id, depth: newDepth, column_id: null as any, title, description, priority, status,
-        assignee, reporter, assignee_id, reporter_id,
+        assignee, reporter: resolvedReporter, assignee_id, reporter_id: resolvedReporterId,
         labels: JSON.stringify(labels), position,
         // Inherit workspace_id from parent so role lookups work immediately.
         workspace_id: parent.workspace_id || '',
