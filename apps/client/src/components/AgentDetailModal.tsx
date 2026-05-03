@@ -1297,9 +1297,11 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
                   border: `1px solid ${tokens.colors.border}`,
                   borderRadius: tokens.radii.md,
                   // flex:1 + minHeight:0 — parent <section> is flex:1 with
-                  // minHeight:200, modal body is overflow:hidden + flex
-                  // column, so this feed claims all remaining vertical
-                  // space and scrolls inside itself. Single scrollbar.
+                  // minHeight:320, modal body is overflowY:auto + flex
+                  // column. On tall viewports this inner scroll engages
+                  // first and the body never scrolls; on short ones the
+                  // body's outer scroll takes over so the panel can keep
+                  // its minHeight without clipping the sections above.
                   flex: 1,
                   minHeight: 0,
                   overflowY: 'auto',
