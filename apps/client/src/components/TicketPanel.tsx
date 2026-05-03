@@ -35,7 +35,9 @@ interface TicketPanelProps {
   boardTickets?: Ticket[];
   typingIndicators: Record<string, string | null>;
   onClose: () => void;
-  onUpdate: (id: string, data: Record<string, any>) => void;
+  // May be sync or async — the Save/Discard footer awaits the result so the
+  // button can show "Saving…" until the round trip completes.
+  onUpdate: (id: string, data: Record<string, any>) => void | Promise<void>;
   onDelete: (id: string) => void;
   onCreateChild: (parentId: string, data: { title: string; description?: string; priority?: string; assignee?: string; reporter?: string }) => void;
   onDeleteChild: (childId: string) => void;
@@ -44,7 +46,7 @@ interface TicketPanelProps {
   onReparentChild?: (parentId: string, childId: string) => void;
   // Set (or clear) the holder of a workspace role on this ticket. Mutually
   // exclusive agent_id / user_id; pass both null/'' to clear.
-  onSetRoleAssignment?: (ticketId: string, roleId: string, holder: { agent_id?: string | null; user_id?: string | null }) => void;
+  onSetRoleAssignment?: (ticketId: string, roleId: string, holder: { agent_id?: string | null; user_id?: string | null }) => void | Promise<void>;
   onAddComment: (
     ticketId: string,
     content: string,
@@ -361,8 +363,15 @@ export default function TicketPanel({
   // and we want fresh data on panel open. Refetch when the ticket id or
   // updated_at changes so a write through onSetRoleAssignment converges.
   const [roleAssignments, setRoleAssignments] = useState<TicketRoleAssignmentRow[]>([]);
-  // Pending writes — UI shows "saving…" on the relevant role row.
-  const [savingRoleId, setSavingRoleId] = useState<string | null>(null);
+  // Buffered role-assignment edits keyed by role id. Drains to the server on
+  // Save (clearing matching keys); cleared wholesale on Discard / ticket
+  // switch. Each value is the holder spec that would be sent to
+  // onSetRoleAssignment if/when the user commits.
+  const [roleDrafts, setRoleDrafts] = useState<Record<string, { agent_id: string | null; user_id: string | null }>>({});
+  // True while a Save round-trip is in flight — disables the Save/Discard
+  // footer buttons and the role pickers so the user can't fire a second
+  // commit before the first has resolved.
+  const [savingDraft, setSavingDraft] = useState(false);
   const { user } = useAuth();
   const { showToast } = useToast();
 
@@ -479,12 +488,9 @@ export default function TicketPanel({
     }
   }, [activeTicket.id, retriggering, showToast]);
 
-  // ESC key closes panel
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
-    document.addEventListener('keydown', handler);
-    return () => document.removeEventListener('keydown', handler);
-  }, [onClose]);
+  // ESC key requests close — the real handler is installed below, after
+  // requestClose is in scope (which depends on form-draft state declared
+  // further down). Closing with unsaved edits prompts.
 
   // Form state — sync when activeTicket changes. Agent display name uses
   // ST-7 <ManagerName>/<AgentName> when the agent is owned by an
@@ -553,26 +559,37 @@ export default function TicketPanel({
   const [attachmentBusy, setAttachmentBusy] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
 
+  // Form drafts reset on ticket switch only. Remote updates (updated_at
+  // bumps from cross-tab edits, comments, etc.) must NOT clobber the user's
+  // unsaved edits — the Save/Discard footer is the only commit/rollback
+  // path now that the panel buffers all field edits.
   useEffect(() => {
     setTitle(activeTicket.title);
     setDescription(activeTicket.description);
     setPriority(activeTicket.priority);
-    setAssignee(resolveAgentName(activeTicket.assignee_id, activeTicket.assignee));
-    setReporter(resolveAgentName(activeTicket.reporter_id, activeTicket.reporter));
-    setReviewerId(activeTicket.reviewer_id || '');
     setSelectedChannelIds(activeTicket.channel_ids || []);
     setBaseRepoId(activeTicket.base_repo_resource_id || '');
     setBaseBranch(activeTicket.base_branch || '');
     setBranchOptions([]);
     setBranchesError(null);
+    setRoleDrafts({});
     setCommentContent('');
     setCommentAttachments([]);
+    setActiveTab('detail');
+  }, [activeTicket.id]);
+
+  // Authoritative server-side facts — display names and the attachment list
+  // — keep refreshing on updated_at because they have no client-side draft
+  // concept. The form drafts above are isolated from this stream.
+  useEffect(() => {
+    setAssignee(resolveAgentName(activeTicket.assignee_id, activeTicket.assignee));
+    setReporter(resolveAgentName(activeTicket.reporter_id, activeTicket.reporter));
+    setReviewerId(activeTicket.reviewer_id || '');
     // Seed from the ticket payload (only loadTicketFull populates this; the
     // board listing doesn't), then fetch fresh metadata so the list is
     // always authoritative regardless of which load path supplied the prop.
     setTicketAttachments(activeTicket.attachments || []);
     setAttachmentError(null);
-    setActiveTab('detail');
     let cancelled = false;
     api.listTicketAttachments(activeTicket.id)
       .then(rows => { if (!cancelled) setTicketAttachments(rows || []); })
@@ -651,9 +668,123 @@ export default function TicketPanel({
       .catch(() => { /* keep fallback */ });
   }, [activeTicket.id, activeTicket.assignee_id, activeTicket.reporter_id, activeTicket.reviewer_id, agents]);
 
-  const saveField = (field: string, value: any) => {
-    onUpdate(activeTicket.id, { [field]: value });
+  // Order-insensitive equality for channel id arrays — the server stores them
+  // as a list but neither side guarantees a stable order.
+  const channelIdsEqual = (a: string[], b: string[]) => {
+    if (a.length !== b.length) return false;
+    const sa = [...a].sort();
+    const sb = [...b].sort();
+    for (let i = 0; i < sa.length; i++) if (sa[i] !== sb[i]) return false;
+    return true;
   };
+
+  // Ticket-field drafts that differ from the server-side row. Empty when the
+  // form matches the ticket exactly. The Save handler PATCHes whatever lives
+  // in this object in a single round trip, which collapses the previous
+  // per-field activity log entries (and their fanned-out trigger reservations)
+  // into a single ticket_update event.
+  const dirtyTicketFields = useMemo(() => {
+    const out: Record<string, any> = {};
+    if (title !== activeTicket.title) out.title = title;
+    if ((description || '') !== (activeTicket.description || '')) out.description = description;
+    if (priority !== activeTicket.priority) out.priority = priority;
+    if (!channelIdsEqual(selectedChannelIds, activeTicket.channel_ids || [])) {
+      out.channel_ids = selectedChannelIds;
+    }
+    if ((baseRepoId || '') !== (activeTicket.base_repo_resource_id || '')) {
+      out.base_repo_resource_id = baseRepoId || null;
+    }
+    if ((baseBranch || '') !== (activeTicket.base_branch || '')) {
+      out.base_branch = baseBranch || null;
+    }
+    return out;
+  }, [
+    title, description, priority, selectedChannelIds, baseRepoId, baseBranch,
+    activeTicket.title, activeTicket.description, activeTicket.priority,
+    activeTicket.channel_ids, activeTicket.base_repo_resource_id, activeTicket.base_branch,
+  ]);
+
+  // Role drafts that genuinely change the current holder. A draft equal to
+  // the live assignment is dropped (e.g., user picks Bob then switches back to
+  // the previously-assigned Alice — that's a no-op, no need to fire a save).
+  const dirtyRoleDrafts = useMemo(() => {
+    const assignmentByRoleId = new Map(roleAssignments.map(r => [r.role.id, r]));
+    const out: Record<string, { agent_id: string | null; user_id: string | null }> = {};
+    for (const [roleId, draft] of Object.entries(roleDrafts)) {
+      const currentRow = assignmentByRoleId.get(roleId);
+      const currentHolder = currentRow?.holder || null;
+      const draftAgentId = draft.agent_id || null;
+      const draftUserId = draft.user_id || null;
+      const currentAgentId = currentHolder?.type === 'agent' ? (currentHolder.id || null) : null;
+      const currentUserId = currentHolder?.type === 'user' ? (currentHolder.id || null) : null;
+      if (draftAgentId !== currentAgentId || draftUserId !== currentUserId) {
+        out[roleId] = draft;
+      }
+    }
+    return out;
+  }, [roleDrafts, roleAssignments]);
+
+  const isDirty = Object.keys(dirtyTicketFields).length > 0 || Object.keys(dirtyRoleDrafts).length > 0;
+
+  const handleDiscardDraft = useCallback(() => {
+    setTitle(activeTicket.title);
+    setDescription(activeTicket.description);
+    setPriority(activeTicket.priority);
+    setSelectedChannelIds(activeTicket.channel_ids || []);
+    setBaseRepoId(activeTicket.base_repo_resource_id || '');
+    setBaseBranch(activeTicket.base_branch || '');
+    setRoleDrafts({});
+  }, [
+    activeTicket.title, activeTicket.description, activeTicket.priority,
+    activeTicket.channel_ids, activeTicket.base_repo_resource_id, activeTicket.base_branch,
+  ]);
+
+  const handleSaveDraft = useCallback(async () => {
+    if (savingDraft) return;
+    // Snapshot the in-flight commit so drafts the user adds DURING the save
+    // round trip survive — only the keys we actually sent get cleared on
+    // success, leaving newer edits ready for the next Save click.
+    const ticketFieldsToSave = dirtyTicketFields;
+    const roleDraftsToSave = { ...dirtyRoleDrafts };
+    if (Object.keys(ticketFieldsToSave).length === 0 && Object.keys(roleDraftsToSave).length === 0) return;
+    setSavingDraft(true);
+    try {
+      const ops: Array<Promise<unknown>> = [];
+      if (Object.keys(ticketFieldsToSave).length > 0) {
+        ops.push(Promise.resolve(onUpdate(activeTicket.id, ticketFieldsToSave)));
+      }
+      if (onSetRoleAssignment) {
+        for (const [roleId, holder] of Object.entries(roleDraftsToSave)) {
+          ops.push(Promise.resolve(onSetRoleAssignment(activeTicket.id, roleId, holder)));
+        }
+      }
+      await Promise.all(ops);
+      setRoleDrafts(prev => {
+        const next = { ...prev };
+        for (const k of Object.keys(roleDraftsToSave)) delete next[k];
+        return next;
+      });
+      showToast('Saved', 'success');
+    } catch (e: any) {
+      showToast(`Save failed: ${e?.message || 'unknown error'}`, 'error');
+    } finally {
+      setSavingDraft(false);
+    }
+  }, [savingDraft, dirtyTicketFields, dirtyRoleDrafts, activeTicket.id, onUpdate, onSetRoleAssignment, showToast]);
+
+  // Wrap close so X / Escape prompt before discarding unsaved edits. The
+  // post-Delete close path uses raw onClose (the ticket is gone — there's
+  // nothing to save).
+  const requestClose = useCallback(() => {
+    if (isDirty && !window.confirm('Discard unsaved ticket edits?')) return;
+    onClose();
+  }, [isDirty, onClose]);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') requestClose(); };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [requestClose]);
 
   // Load the repository resources visible to this ticket. We pull workspace +
   // board scope in one shot (no board_id filter) so workspace-wide repos show
@@ -1508,7 +1639,7 @@ export default function TicketPanel({
             background: tokens.colors.dangerBg, color: tokens.colors.dangerLight, border: 'none', borderRadius: tokens.radii.md,
             padding: '4px 12px', fontSize: '12px', cursor: 'pointer',
           }}>Delete</button>
-          <button onClick={onClose} style={{
+          <button onClick={requestClose} style={{
             background: tokens.colors.border, color: tokens.colors.textStrong, border: 'none', borderRadius: tokens.radii.md,
             padding: '4px 12px', fontSize: '16px', cursor: 'pointer',
           }}>x</button>
@@ -1544,7 +1675,6 @@ export default function TicketPanel({
             <input
               value={title}
               onChange={e => setTitle(e.target.value)}
-              onBlur={() => title !== activeTicket.title && saveField('title', title)}
               style={{
                 width: '100%', background: 'transparent', border: 'none', color: tokens.colors.textPrimary,
                 fontSize: '18px', fontWeight: 700, outline: 'none', marginBottom: 14,
@@ -1557,7 +1687,7 @@ export default function TicketPanel({
                 <label style={labelStyle}>Priority</label>
                 <select
                   value={priority}
-                  onChange={e => { setPriority(e.target.value as any); saveField('priority', e.target.value); }}
+                  onChange={e => setPriority(e.target.value as any)}
                   style={{
                     background: tokens.colors.surfaceCard, border: `2px solid ${priorityColors[priority]}`,
                     borderRadius: tokens.radii.md, padding: '5px 8px',
@@ -1591,32 +1721,30 @@ export default function TicketPanel({
                 return sortedRoles.map(role => {
                   const row = assignmentByRoleId.get(role.id);
                   const holder = row?.holder || null;
-                  const value = holder
-                    ? `${holder.type}:${holder.id}`
-                    : '';
-                  const saving = savingRoleId === role.id;
+                  // Buffered draft (if any) wins over the server-authoritative
+                  // holder so the picker reflects the user's pending choice
+                  // before they hit Save.
+                  const draft = roleDrafts[role.id];
+                  const value = draft
+                    ? (draft.agent_id ? `agent:${draft.agent_id}` : draft.user_id ? `user:${draft.user_id}` : '')
+                    : holder ? `${holder.type}:${holder.id}` : '';
                   return (
                     <div key={role.id}>
                       <label style={labelStyle}>{role.name}</label>
                       <select
                         value={value}
-                        disabled={!onSetRoleAssignment || saving}
-                        onChange={async e => {
+                        disabled={!onSetRoleAssignment || savingDraft}
+                        onChange={e => {
                           if (!onSetRoleAssignment) return;
                           const raw = e.target.value;
-                          const next = !raw
+                          const next: { agent_id: string | null; user_id: string | null } = !raw
                             ? { agent_id: null, user_id: null }
                             : raw.startsWith('agent:')
                               ? { agent_id: raw.slice(6), user_id: null }
                               : raw.startsWith('user:')
                                 ? { agent_id: null, user_id: raw.slice(5) }
                                 : { agent_id: null, user_id: null };
-                          setSavingRoleId(role.id);
-                          try {
-                            await onSetRoleAssignment(activeTicket.id, role.id, next);
-                          } finally {
-                            setSavingRoleId(null);
-                          }
+                          setRoleDrafts(prev => ({ ...prev, [role.id]: next }));
                         }}
                         title={role.description || ''}
                         style={{
@@ -1625,7 +1753,7 @@ export default function TicketPanel({
                           cursor: !onSetRoleAssignment ? 'not-allowed' : 'pointer',
                         }}
                       >
-                        <option value="">Unassigned{saving ? ' · saving…' : ''}</option>
+                        <option value="">Unassigned</option>
                         {activeAgents.length > 0 && (
                           <optgroup label="Agents">
                             {activeAgents.map(a => (
@@ -1660,7 +1788,6 @@ export default function TicketPanel({
                     const next = e.target.value;
                     setBaseRepoId(next);
                     setBaseBranch('');
-                    onUpdate(activeTicket.id, { base_repo_resource_id: next, base_branch: '' });
                   }}
                   style={{
                     background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
@@ -1681,11 +1808,7 @@ export default function TicketPanel({
                 <select
                   value={baseBranch}
                   disabled={!baseRepoId || branchesLoading}
-                  onChange={e => {
-                    const next = e.target.value;
-                    setBaseBranch(next);
-                    onUpdate(activeTicket.id, { base_branch: next });
-                  }}
+                  onChange={e => setBaseBranch(e.target.value)}
                   style={{
                     background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
                     padding: '5px 8px', color: tokens.colors.textStrong, fontSize: '12px', width: '100%',
@@ -1735,7 +1858,6 @@ export default function TicketPanel({
               <textarea
                 value={description}
                 onChange={e => setDescription(e.target.value)}
-                onBlur={() => description !== activeTicket.description && saveField('description', description)}
                 placeholder="Add description..."
                 rows={3}
                 style={{
@@ -1881,7 +2003,6 @@ export default function TicketPanel({
                               ? selectedChannelIds.filter(id => id !== ch.id)
                               : [...selectedChannelIds, ch.id];
                             setSelectedChannelIds(next);
-                            onUpdate(activeTicket.id, { channel_ids: next });
                           }}
                           style={{ accentColor: tokens.colors.accent, cursor: isSelected && selectedChannelIds.length <= 1 ? 'not-allowed' : 'pointer' }}
                         />
@@ -2097,6 +2218,58 @@ export default function TicketPanel({
           </div>
         )}
       </div>
+
+      {/* Save / Discard footer — visible only on the detail tab when at
+         least one buffered edit differs from the server. Comments and
+         attachments have their own explicit Send/Upload buttons; they don't
+         participate in this draft state. */}
+      {activeTab === 'detail' && isDirty && (
+        <div style={{
+          flexShrink: 0,
+          display: 'flex', alignItems: 'center', gap: 8,
+          padding: '8px 16px',
+          borderTop: `1px solid ${tokens.colors.border}`,
+          background: tokens.colors.surfaceCard,
+        }}>
+          <span style={{ fontSize: '11px', color: tokens.colors.textMuted, flex: 1 }}>
+            Unsaved changes
+          </span>
+          <button
+            type="button"
+            onClick={handleDiscardDraft}
+            disabled={savingDraft}
+            style={{
+              background: 'transparent',
+              color: tokens.colors.textSecondary,
+              border: `1px solid ${tokens.colors.border}`,
+              borderRadius: tokens.radii.md,
+              padding: '5px 12px',
+              fontSize: '12px',
+              cursor: savingDraft ? 'not-allowed' : 'pointer',
+            }}
+          >
+            Discard
+          </button>
+          <button
+            type="button"
+            onClick={handleSaveDraft}
+            disabled={savingDraft}
+            style={{
+              background: tokens.colors.accent,
+              color: 'white',
+              border: 'none',
+              borderRadius: tokens.radii.md,
+              padding: '5px 14px',
+              fontSize: '12px',
+              fontWeight: 600,
+              cursor: savingDraft ? 'not-allowed' : 'pointer',
+              opacity: savingDraft ? 0.6 : 1,
+            }}
+          >
+            {savingDraft ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      )}
 
       {/* Image / video preview modal */}
       {imagePreview && (
