@@ -13,6 +13,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { Agent } from '../../../entities/Agent';
 import { BoardColumn } from '../../../entities/BoardColumn';
+import { Resource } from '../../../entities/Resource';
 import { Ticket } from '../../../entities/Ticket';
 import { ok, err, safeJsonParse } from '../shared/helpers';
 import { loadTicketFull } from '../shared/ticket-parsing';
@@ -155,6 +156,8 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       // Track old values before updating
       const oldAssignee = ticket.assignee;
       const oldReporter = ticket.reporter;
+      const oldBaseRepoId = ticket.base_repo_resource_id;
+      const oldBaseBranch = ticket.base_branch;
 
       const changes: string[] = [];
       if (title !== undefined) { ticket.title = title; changes.push('title'); }
@@ -174,12 +177,25 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       if (labels !== undefined) { ticket.labels = JSON.stringify(labels); changes.push('labels'); }
       if (channel_ids !== undefined) { ticket.channel_ids = JSON.stringify(channel_ids); changes.push('channel_ids'); }
       if (base_repo_resource_id !== undefined) {
-        ticket.base_repo_resource_id = base_repo_resource_id || '';
-        changes.push('base_repo');
+        const next = base_repo_resource_id || '';
+        if (next && ticket.workspace_id) {
+          // Mirror the REST guard: pin only repos that live in the ticket's
+          // workspace so a guessed cross-workspace id can't bleed url/name
+          // into the SSE prompt.
+          const repoExists = await dataSource.getRepository(Resource).findOne({
+            where: { id: next, workspace_id: ticket.workspace_id },
+          });
+          if (!repoExists) return err('base_repo_resource_id not found in this workspace');
+        }
+        ticket.base_repo_resource_id = next;
+        // Skip the activity-feed entry on idempotent writes — matches REST
+        // semantics so a no-op `update_ticket` doesn't spam the log.
+        if (next !== (oldBaseRepoId || '')) changes.push('base_repo');
       }
       if (base_branch !== undefined) {
-        ticket.base_branch = base_branch || '';
-        changes.push('base_branch');
+        const next = base_branch || '';
+        ticket.base_branch = next;
+        if (next !== (oldBaseBranch || '')) changes.push('base_branch');
       }
 
       await ticketRepo.save(ticket);

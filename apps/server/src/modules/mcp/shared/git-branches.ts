@@ -35,11 +35,16 @@ function applyCredential(url: string, credential?: { username?: string; token?: 
   const token = credential.token || '';
   if (!token) return url;
   if (!/^https?:\/\//i.test(url)) return url;
-  const username = credential.username || credential.token ? (credential.username || 'x-access-token') : '';
+  // Default to GitHub's `x-access-token` username when callers supply only a
+  // token. (Earlier form mixed `||` and `?:` with surprising precedence; the
+  // `if (!token) return url` guard above made it work, but it was brittle.)
+  const username = credential.username || 'x-access-token';
   try {
     const u = new URL(url);
-    u.username = encodeURIComponent(username);
-    u.password = encodeURIComponent(token);
+    // The URL setters run the userinfo percent-encoder themselves — passing
+    // an already-encoded value would double-encode `%`/`@`/etc.
+    u.username = username;
+    u.password = token;
     return u.toString();
   } catch {
     return url;
@@ -54,8 +59,11 @@ export async function listRepoBranches(opts: ListRepoBranchesOptions): Promise<R
   const stdout = await new Promise<string>((resolve, reject) => {
     // GIT_TERMINAL_PROMPT=0 stops git from blocking on a credential prompt
     // when the URL needs auth we didn't provide — fail fast instead of hanging
-    // the request.
-    const child = spawn('git', ['ls-remote', '--heads', url], {
+    // the request. The `--` end-of-options separator stops a Resource URL
+    // that begins with `-` (e.g. `--upload-pack=…`) from being parsed as a
+    // git flag — `--upload-pack` is a known RCE primitive and a workspace
+    // member can write any string they want into Resource.url.
+    const child = spawn('git', ['ls-remote', '--heads', '--', url], {
       env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
     });
     let out = '';

@@ -285,12 +285,18 @@ export class TriggerLoopService implements OnModuleInit {
     // SSE payload so agent-manager doesn't need a second round-trip to render
     // the prompt block — name/url/default_branch come along for free. Failing
     // the lookup is non-fatal; the agent prompt just omits the repo line.
+    // Workspace-scoped lookup (defense-in-depth — writes are guarded too):
+    // a stale id pointing at another workspace's Resource never gets its
+    // url/name shipped out to the assignee here.
     const baseRepoId = freshTicket?.base_repo_resource_id || ticket.base_repo_resource_id || '';
     const baseBranch = freshTicket?.base_branch || ticket.base_branch || '';
+    const baseRepoWorkspaceId = freshTicket?.workspace_id || ticket.workspace_id || '';
     let baseRepo: { id: string; name: string; url: string; default_branch: string } | null = null;
-    if (baseRepoId) {
+    if (baseRepoId && baseRepoWorkspaceId) {
       try {
-        const r = await this.dataSource.getRepository(Resource).findOne({ where: { id: baseRepoId } });
+        const r = await this.dataSource.getRepository(Resource).findOne({
+          where: { id: baseRepoId, workspace_id: baseRepoWorkspaceId },
+        });
         if (r) {
           baseRepo = {
             id: r.id,

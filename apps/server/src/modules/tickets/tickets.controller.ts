@@ -337,7 +337,20 @@ export class TicketsController {
     if (channel_ids !== undefined) ticket.channel_ids = JSON.stringify(channel_ids);
     // Phase 1 ticket prompt snapshot (D-17 / ROLE-08)
     if (prompt_text !== undefined) ticket.prompt_text = prompt_text;
-    if (base_repo_resource_id !== undefined) ticket.base_repo_resource_id = base_repo_resource_id || '';
+    if (base_repo_resource_id !== undefined) {
+      const next = base_repo_resource_id || '';
+      if (next && ticket.workspace_id) {
+        // Confine the picker to the ticket's workspace — without this an
+        // attacker who guesses (or scrapes) a Resource id from another
+        // workspace could pin it here, and the trigger SSE / loadTicketFull
+        // snapshot would happily surface its url to the assignee.
+        const repoExists = await this.dataSource.getRepository(Resource).findOne({
+          where: { id: next, workspace_id: ticket.workspace_id },
+        });
+        if (!repoExists) return res.status(400).json({ error: 'base_repo_resource_id not found in this workspace' });
+      }
+      ticket.base_repo_resource_id = next;
+    }
     if (base_branch !== undefined) ticket.base_branch = base_branch || '';
 
     await this.ticketRepo.save(ticket);
