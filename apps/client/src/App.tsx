@@ -11,12 +11,14 @@ import ChatPage from './components/ChatPage';
 import AgentsPage from './components/AgentsPage';
 import BoardSettingsPage from './components/BoardSettingsPage';
 import BoardResourcesPage from './components/BoardResourcesPage';
+import BoardActionsPage from './components/BoardActionsPage';
 import BoardsIndexPage from './components/BoardsIndexPage';
 import WorkspaceUsersPage from './components/WorkspaceUsersPage';
 import WorkspaceChannelsPage from './components/WorkspaceChannelsPage';
 import WorkspaceApiKeysPage from './components/WorkspaceApiKeysPage';
 import WorkspacePromptTemplatesPage from './components/WorkspacePromptTemplatesPage';
 import WorkspaceResourcesPage from './components/WorkspaceResourcesPage';
+import WorkspaceActionsPage from './components/WorkspaceActionsPage';
 import WorkspaceCredentialsPage from './components/WorkspaceCredentialsPage';
 import WorkspaceRolesPage from './components/WorkspaceRolesPage';
 import AgentDetailPage from './components/AgentDetailPage';
@@ -151,6 +153,7 @@ function AppContent() {
           <Route path="boards" element={<BoardsIndexPage />} />
           <Route path="boards/:boardId" element={<Board />} />
           <Route path="boards/:boardId/resources" element={<BoardResourcesPage />} />
+          <Route path="boards/:boardId/actions" element={<BoardActionsPage />} />
           <Route path="boards/:boardId/settings" element={<BoardSettingsPage />} />
           <Route path="chat" element={<ChatPage />} />
           <Route path="users" element={<WorkspaceUsersPage />} />
@@ -160,6 +163,7 @@ function AppContent() {
           <Route path="api-keys" element={<WorkspaceApiKeysPage />} />
           <Route path="prompt-templates" element={<WorkspacePromptTemplatesPage />} />
           <Route path="resources" element={<WorkspaceResourcesPage />} />
+          <Route path="actions" element={<WorkspaceActionsPage />} />
           <Route path="credentials" element={<WorkspaceCredentialsPage />} />
           <Route path="roles" element={<WorkspaceRolesPage />} />
         </Route>

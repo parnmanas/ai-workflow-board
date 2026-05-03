@@ -1,6 +1,8 @@
 import type {
   PromptTemplate,
   Resource,
+  Action,
+  ActionRun,
   Credential,
   ChatMessage,
   ChatThread,
@@ -581,6 +583,55 @@ export const api = {
       '/resources/branches/test',
       { method: 'POST', body: JSON.stringify(data) },
     ),
+
+  // ─── Actions ──────────────────────────────────────────
+  listActions: (workspaceId: string, boardId?: string | null) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    if (boardId !== undefined) params.set('board_id', boardId || '');
+    return request<Action[]>(`/actions?${params.toString()}`);
+  },
+  getAction: (id: string) => request<Action>(`/actions/${id}`),
+  createAction: (data: {
+    workspace_id: string;
+    board_id?: string | null;
+    name: string;
+    description?: string;
+    prompt?: string;
+    target_agent_id: string;
+    schedule_cron?: string;
+    enabled?: boolean;
+    max_runs?: number;
+  }) =>
+    request<Action>('/actions', { method: 'POST', body: JSON.stringify(data) }),
+  updateAction: (
+    id: string,
+    data: {
+      workspace_id: string;
+      name?: string;
+      description?: string;
+      prompt?: string;
+      target_agent_id?: string;
+      board_id?: string | null;
+      schedule_cron?: string;
+      enabled?: boolean;
+      max_runs?: number;
+    },
+  ) =>
+    request<Action>(`/actions/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteAction: (id: string, workspaceId: string) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    return request<{ success: true; id: string }>(`/actions/${id}?${params.toString()}`, { method: 'DELETE' });
+  },
+  runAction: (id: string) =>
+    request<{ run_id: string; room_id: string; prompt: string }>(`/actions/${id}/run`, { method: 'POST', body: '{}' }),
+  listActionRuns: (id: string, workspaceId: string, limit = 20) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId, limit: String(limit) });
+    return request<ActionRun[]>(`/actions/${id}/runs?${params.toString()}`);
+  },
+  getActionRun: (runId: string, workspaceId: string) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    return request<ActionRun>(`/actions/runs/${runId}?${params.toString()}`);
+  },
 
   // ─── Credentials ──────────────────────────────────────
   listCredentials: (workspaceId: string, provider?: string) => {

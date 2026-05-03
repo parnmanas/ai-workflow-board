@@ -146,6 +146,36 @@ export interface RepoBranch {
   sha: string;
 }
 
+// User-defined Action: a saved prompt addressed to a target Agent. Each Run
+// creates a new ChatRoom and posts the rendered prompt as the first message;
+// the agent's reply (and any follow-ups) live in that room.
+export interface Action {
+  id: string;
+  workspace_id: string;
+  board_id: string | null;
+  name: string;
+  description: string;
+  prompt: string;
+  target_agent_id: string;
+  schedule_cron: string;
+  enabled: boolean;
+  max_runs: number;
+  last_run_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ActionRun {
+  id: string;
+  action_id: string;
+  workspace_id: string;
+  room_id: string;
+  triggered_by_type: 'user' | 'system' | 'agent';
+  triggered_by_id: string;
+  prompt_rendered: string;
+  created_at: string;
+}
+
 export interface Credential {
   id: string;
   workspace_id: string;
