@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Agent } from '../../entities/Agent';
 import { Ticket } from '../../entities/Ticket';
@@ -17,9 +17,17 @@ import { SubagentMonitorService } from '../../services/subagent-monitor.service'
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
+import { AgentManagerModule } from '../agent-manager/agent-manager.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Agent, Ticket, Subagent, SubagentLogLine])],
+  // forwardRef avoids the AgentsModule ↔ AgentManagerModule cycle:
+  // AgentManagerModule already imports AgentsModule (for SubagentMonitorService),
+  // and now AgentsModule needs InstanceRegistryService from AgentManagerModule
+  // to enrich /api/agents responses with live heartbeat data.
+  imports: [
+    TypeOrmModule.forFeature([Agent, Ticket, Subagent, SubagentLogLine]),
+    forwardRef(() => AgentManagerModule),
+  ],
   controllers: [AgentsController, FsBrowserController, SubagentMonitorController],
   providers: [AuthGuard, PermissionGuard, AgentAuthGuard, AgentConnectionService, TriggerLoopService, AgentStatusService, AllocationService, TicketSupervisorService, FsBrowserService, SubagentMonitorService],
   exports: [AgentConnectionService, TriggerLoopService, AgentStatusService, AllocationService, FsBrowserService, SubagentMonitorService],

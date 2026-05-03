@@ -58,7 +58,10 @@ type CommandKind =
   | 'stop_agent'
   | 'restart_agent'
   | 'set_working_dir'
-  | 'reload_config';
+  | 'reload_config'
+  | 'update_plugins'
+  | 'refresh_mcp_config'
+  | 'pull_working_dir';
 
 const KNOWN_COMMANDS: ReadonlySet<CommandKind> = new Set<CommandKind>([
   'spawn_agent',
@@ -66,6 +69,9 @@ const KNOWN_COMMANDS: ReadonlySet<CommandKind> = new Set<CommandKind>([
   'restart_agent',
   'set_working_dir',
   'reload_config',
+  'update_plugins',
+  'refresh_mcp_config',
+  'pull_working_dir',
 ]);
 
 export interface AgentManagerCommandPayload {
@@ -156,6 +162,12 @@ export class AgentManagerCommandHandler {
         return this.#setWorkingDir(payload);
       case 'reload_config':
         return this.#reloadConfig();
+      case 'update_plugins':
+        return this.#updatePlugins(payload);
+      case 'refresh_mcp_config':
+        return this.#refreshMcpConfig(payload);
+      case 'pull_working_dir':
+        return this.#pullWorkingDir(payload);
     }
   }
 
@@ -337,4 +349,197 @@ export class AgentManagerCommandHandler {
     const summary = await hook();
     return `reload_config: ${summary || 'reloaded'}`;
   }
+
+  /**
+   * Refresh the on-disk mcp-config.json for a managed agent so spawned
+   * subagents pick up the current AWB url + the agent's existing apiKey.
+   * Idempotent: if the file is already up-to-date the rewrite is a no-op for
+   * downstream consumers (claude reads it on each spawn). The apiKey is NOT
+   * rotated — for a fresh provision use stop_agent + spawn_agent. Use cases:
+   *   - operator changed the AWB server's public URL (e.g., domain rename)
+   *   - upgraded the manager and the mcp-config schema needs a rewrite
+   */
+  async #refreshMcpConfig(payload: AgentManagerCommandPayload): Promise<string> {
+    const agentId = this.#targetAgentId(payload, 'refresh_mcp_config');
+    const rawApiKey = await readApiKey(agentId);
+    if (!rawApiKey) {
+      throw new Error(
+        `refresh_mcp_config: no apiKey on disk for agent=${agentId.slice(0, 8)} ` +
+          `(spawn_agent first to provision)`,
+      );
+    }
+    const path = await writeMcpConfig(agentId, this.#config.url, rawApiKey);
+    return `refresh_mcp_config ok: agent=${agentId.slice(0, 8)} path=${path}`;
+  }
+
+  /**
+   * Update claude plugin marketplaces in the managed agent's cli-home. Each
+   * marketplace under `<cli-home>/plugins/marketplaces/<id>/` is a git
+   * checkout of the marketplace repo, so a `git pull --ff-only` in that dir
+   * is the cheapest way to refresh the plugin source without restarting the
+   * agent. Implementation:
+   *   - List `<cli-home>/plugins/marketplaces/` (silently skip if missing).
+   *   - For each entry that is a git repo, run `git pull --ff-only`. Failures
+   *     are collected per-entry and reported back; a single failed
+   *     marketplace doesn't block the others.
+   *   - For non-claude managed agents (codex/gemini), the dir layout doesn't
+   *     match — return a "not applicable" success rather than fail loudly.
+   */
+  async #updatePlugins(payload: AgentManagerCommandPayload): Promise<string> {
+    const agentId = this.#targetAgentId(payload, 'update_plugins');
+    const ctx = this.#deps.contextRegistry?.get(agentId);
+    if (!ctx) {
+      throw new Error(
+        `update_plugins: agent=${agentId.slice(0, 8)} is not registered ` +
+          `(spawn_agent first so the manager owns its cli-home)`,
+      );
+    }
+    if (ctx.cli !== 'claude') {
+      return `update_plugins: agent=${agentId.slice(0, 8)} cli=${ctx.cli} (not applicable — claude only)`;
+    }
+    const result = await runPluginUpdate(ctx.cli_home_dir);
+    return (
+      `update_plugins ok: agent=${agentId.slice(0, 8)} updated=${result.updated} ` +
+      `skipped=${result.skipped} failed=${result.failed}` +
+      (result.failed > 0 ? ` — first error: ${result.errors[0] || '(none)'}` : '')
+    );
+  }
+
+  /**
+   * Best-effort `git -C <agent.working_dir> pull --ff-only` — useful when an
+   * operator wants the managed agent's repo brought up to date before the
+   * next ticket lands. The manager owns the working_dir for cwd routing but
+   * is otherwise hands-off; a long-running git operation here can stall the
+   * dispatch loop, so the call is bounded by a short timeout. Working_dir is
+   * taken from args.working_dir (server-enriched from Agent.working_dir).
+   */
+  async #pullWorkingDir(payload: AgentManagerCommandPayload): Promise<string> {
+    const agentId = this.#targetAgentId(payload, 'pull_working_dir');
+    const workingDir = String(payload.args?.working_dir ?? '').trim();
+    if (!workingDir) {
+      throw new Error('pull_working_dir: working_dir is required (server should enrich it)');
+    }
+    const result = await runGitPull(workingDir);
+    if (!result.ok) {
+      throw new Error(
+        `pull_working_dir failed: agent=${agentId.slice(0, 8)} cwd=${workingDir} — ${result.detail}`,
+      );
+    }
+    return `pull_working_dir ok: agent=${agentId.slice(0, 8)} cwd=${workingDir} — ${result.detail}`;
+  }
+}
+
+// ─── helpers (kept module-scoped to avoid bloating the class API) ───────
+
+/**
+ * Run `git pull --ff-only` for every git checkout under
+ * `<cli-home>/plugins/marketplaces/`. Returns counts so the caller can
+ * report a single line summary. Per-marketplace errors don't fail the
+ * batch — they're collected for the caller to surface.
+ */
+async function runPluginUpdate(
+  cliHomeDir: string,
+): Promise<{ updated: number; skipped: number; failed: number; errors: string[] }> {
+  const { promises: fsp, existsSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const marketplacesDir = join(cliHomeDir, 'plugins', 'marketplaces');
+  if (!existsSync(marketplacesDir)) {
+    return { updated: 0, skipped: 0, failed: 0, errors: [] };
+  }
+  let entries: string[];
+  try {
+    entries = await fsp.readdir(marketplacesDir);
+  } catch (err: any) {
+    return { updated: 0, skipped: 0, failed: 1, errors: [err?.message ?? String(err)] };
+  }
+  let updated = 0;
+  let skipped = 0;
+  let failed = 0;
+  const errors: string[] = [];
+  for (const name of entries) {
+    const dir = join(marketplacesDir, name);
+    try {
+      const stat = await fsp.stat(dir);
+      if (!stat.isDirectory()) {
+        skipped++;
+        continue;
+      }
+    } catch {
+      skipped++;
+      continue;
+    }
+    if (!existsSync(join(dir, '.git'))) {
+      skipped++;
+      continue;
+    }
+    const res = await runGitPull(dir);
+    if (res.ok) {
+      updated++;
+    } else {
+      failed++;
+      errors.push(`${name}: ${res.detail}`);
+    }
+  }
+  return { updated, skipped, failed, errors };
+}
+
+/**
+ * Run `git pull --ff-only` in a single directory with a hard 30s timeout.
+ * Returns ok=false with detail on any failure (not-a-repo, network, conflict,
+ * timeout) so callers can decide whether to throw or aggregate. Stderr is
+ * preferred over stdout for the detail line because git's interesting
+ * failure messages land there.
+ */
+async function runGitPull(
+  dir: string,
+): Promise<{ ok: boolean; detail: string }> {
+  const { spawn } = await import('node:child_process');
+  const { existsSync } = await import('node:fs');
+  if (!existsSync(dir)) {
+    return { ok: false, detail: `directory does not exist: ${dir}` };
+  }
+  return new Promise((resolve) => {
+    const child = spawn('git', ['-C', dir, 'pull', '--ff-only'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        /* already gone */
+      }
+      resolve({ ok: false, detail: 'timeout after 30s' });
+    }, 30_000);
+    child.stdout?.on('data', (b) => {
+      stdout += String(b);
+    });
+    child.stderr?.on('data', (b) => {
+      stderr += String(b);
+    });
+    child.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ ok: false, detail: `spawn failed: ${err?.message ?? err}` });
+    });
+    child.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const lastLine = (stderr.trim() || stdout.trim()).split('\n').filter(Boolean).pop() || '';
+      if (code === 0) {
+        resolve({ ok: true, detail: lastLine.slice(0, 200) || 'up-to-date' });
+      } else {
+        resolve({
+          ok: false,
+          detail: `exit=${code} ${lastLine.slice(0, 200) || '(no output)'}`,
+        });
+      }
+    });
+  });
 }

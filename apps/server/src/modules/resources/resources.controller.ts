@@ -9,6 +9,7 @@ import { RequirePermission } from '../../common/decorators/require-permission.de
 import { PERMISSIONS } from '../../common/types/permissions';
 import { findOrFail } from '../../common/find-or-fail';
 import { inferResourceMimetype } from '../mcp/shared/resource-helpers';
+import { listRepoBranches } from '../mcp/shared/git-branches';
 
 @ApiBearerAuth('user-session')
 @ApiTags('resources')
@@ -73,7 +74,7 @@ export class ResourcesController {
     const {
       workspace_id, board_id = null, credential_id = null, name, description = '', type = 'link',
       url = '', content = '', file_data = '', file_name = '', file_mimetype = '',
-      tags = [],
+      tags = [], default_branch = '',
     } = body;
     if (!workspace_id) return res.status(400).json({ error: 'workspace_id is required' });
     if (!name || !name.trim()) return res.status(400).json({ error: 'name is required' });
@@ -95,6 +96,7 @@ export class ResourcesController {
         file_name,
         file_mimetype: effectiveMimetype,
         tags: JSON.stringify(Array.isArray(tags) ? tags : []),
+        default_branch: typeof default_branch === 'string' ? default_branch : '',
       }),
     );
     return res.status(201).json({
@@ -126,12 +128,35 @@ export class ResourcesController {
     if (body.board_id !== undefined) resource.board_id = body.board_id || null;
     if (body.credential_id !== undefined) resource.credential_id = body.credential_id || null;
     if (body.tags !== undefined) resource.tags = JSON.stringify(Array.isArray(body.tags) ? body.tags : []);
+    if (body.default_branch !== undefined) resource.default_branch = typeof body.default_branch === 'string' ? body.default_branch : '';
 
     const saved = await this.resourceRepo.save(resource);
     return res.json({
       ...saved,
       tags: (() => { try { return JSON.parse(saved.tags || '[]'); } catch { return []; } })(),
     });
+  }
+
+  @Get(':id/branches')
+  async branches(
+    @Param('id') id: string,
+    @Query('workspace_id') workspaceId: string,
+    @Res() res: Response,
+  ) {
+    if (!workspaceId) return res.status(400).json({ error: 'workspace_id query parameter is required' });
+    const resource = await findOrFail(this.resourceRepo, { where: { id, workspace_id: workspaceId } }, 'Resource not found in workspace');
+    if (resource.type !== 'repository') {
+      return res.status(400).json({ error: `resource type must be 'repository' (got '${resource.type}')` });
+    }
+    if (!resource.url) {
+      return res.status(400).json({ error: "resource has no URL — set the repository's URL before listing branches" });
+    }
+    try {
+      const branches = await listRepoBranches({ url: resource.url, defaultBranch: resource.default_branch || '' });
+      return res.json({ branches, default_branch: resource.default_branch || '' });
+    } catch (err: any) {
+      return res.status(502).json({ error: 'failed to list branches', detail: String(err?.message || err) });
+    }
   }
 
   @Delete(':id')

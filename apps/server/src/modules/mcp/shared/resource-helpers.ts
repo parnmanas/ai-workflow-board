@@ -82,6 +82,7 @@ export function resourceToJson(r: Resource) {
     file_name: r.file_name,
     file_mimetype: r.file_mimetype,
     has_file: !!r.file_data,
+    default_branch: r.default_branch || '',
     tags: parseResourceTags(r),
     created_at: r.created_at,
     updated_at: r.updated_at,

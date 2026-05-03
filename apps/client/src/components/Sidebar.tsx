@@ -305,32 +305,48 @@ export default function Sidebar({ isMobile, isOpen, onClose, wsId, boards }: Sid
                         <NavBadge count={counts.tickets.perBoard[b.id]} />
                       )}
                     </button>
-                    {/* Board Settings sub-entry when board is active */}
+                    {/* Board sub-entries (Resources, Settings) when board is active */}
                     {active && (
-                      <button
-                        onClick={() => { navigate(`/ws/${wsId}/boards/${b.id}/settings`); if (isMobile) onClose(); }}
-                        style={{
-                          width: '100%',
-                          padding: '6px 16px 6px 32px',
-                          fontSize: 12,
-                          color: tokens.colors.textSecondary,
-                          cursor: 'pointer',
-                          background: 'transparent',
-                          border: 'none',
-                          textAlign: 'left',
-                          fontFamily: 'inherit',
-                        }}
-                        onMouseEnter={(e) => {
-                          (e.currentTarget as HTMLButtonElement).style.color = tokens.colors.textStrong;
-                          (e.currentTarget as HTMLButtonElement).style.background = tokens.colors.surfaceHover;
-                        }}
-                        onMouseLeave={(e) => {
-                          (e.currentTarget as HTMLButtonElement).style.color = tokens.colors.textSecondary;
-                          (e.currentTarget as HTMLButtonElement).style.background = 'transparent';
-                        }}
-                      >
-                        Board Settings
-                      </button>
+                      <>
+                        {[
+                          { label: 'Board Resources', path: `/ws/${wsId}/boards/${b.id}/resources` },
+                          { label: 'Board Settings',  path: `/ws/${wsId}/boards/${b.id}/settings`  },
+                        ].map((sub) => {
+                          const subActive = location.pathname === sub.path;
+                          return (
+                            <button
+                              key={sub.path}
+                              onClick={() => { navigate(sub.path); if (isMobile) onClose(); }}
+                              style={{
+                                width: '100%',
+                                padding: '6px 16px 6px 32px',
+                                fontSize: 12,
+                                color: subActive ? tokens.colors.textStrong : tokens.colors.textSecondary,
+                                fontWeight: subActive ? 600 : 400,
+                                cursor: 'pointer',
+                                background: subActive ? tokens.colors.surfaceHover : 'transparent',
+                                border: 'none',
+                                textAlign: 'left',
+                                fontFamily: 'inherit',
+                              }}
+                              onMouseEnter={(e) => {
+                                if (!subActive) {
+                                  (e.currentTarget as HTMLButtonElement).style.color = tokens.colors.textStrong;
+                                  (e.currentTarget as HTMLButtonElement).style.background = tokens.colors.surfaceHover;
+                                }
+                              }}
+                              onMouseLeave={(e) => {
+                                if (!subActive) {
+                                  (e.currentTarget as HTMLButtonElement).style.color = tokens.colors.textSecondary;
+                                  (e.currentTarget as HTMLButtonElement).style.background = 'transparent';
+                                }
+                              }}
+                            >
+                              {sub.label}
+                            </button>
+                          );
+                        })}
+                      </>
                     )}
                   </React.Fragment>
                 );

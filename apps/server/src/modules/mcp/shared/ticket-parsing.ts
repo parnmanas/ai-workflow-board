@@ -181,5 +181,34 @@ export async function loadTicketFull(scope: RepoScope, id: string) {
       gc.attachments = sortAttachments(attachmentsByTicket.get(gc.id) || []);
     }
   }
+  // Resolve the ticket's base repository (if any) into a small embedded
+  // snapshot so the client + agent get url / name / default_branch in one
+  // round-trip. Failing the lookup is non-fatal: leaves base_repo: null and
+  // the picker UI / agent prompt fall back to the bare id.
+  // Workspace-scoped lookup: even though writes are guarded, the read also
+  // filters by ticket.workspace_id so a stale/cross-workspace id (e.g. from
+  // a ticket cloned across workspaces) never leaks the foreign url here.
+  if (ticket.base_repo_resource_id) {
+    try {
+      const repo = ticket.workspace_id
+        ? await scope.getRepository(Resource).findOne({
+            where: { id: ticket.base_repo_resource_id, workspace_id: ticket.workspace_id },
+          })
+        : null;
+      out.base_repo = repo
+        ? {
+            id: repo.id,
+            name: repo.name,
+            url: repo.url,
+            default_branch: repo.default_branch || '',
+            type: repo.type,
+          }
+        : null;
+    } catch {
+      out.base_repo = null;
+    }
+  } else {
+    out.base_repo = null;
+  }
   return out;
 }

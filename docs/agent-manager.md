@@ -132,12 +132,13 @@ interface AgentManagerCommand {
   instance_id: string;     // target manager instance (drop if not us)
   command_id: string;      // ack key
   command: 'spawn_agent' | 'stop_agent' | 'restart_agent'
-         | 'set_working_dir' | 'reload_config';
+         | 'set_working_dir' | 'reload_config'
+         | 'update_plugins' | 'refresh_mcp_config' | 'pull_working_dir';
   agent_id: string;        // server fans out scoped to the manager identity;
                            // this is the MANAGER's id, not the target managed
                            // agent. The target travels in args.agent_id.
   args?: {
-    agent_id?: string;     // REQUIRED for *_agent / set_working_dir;
+    agent_id?: string;     // REQUIRED for *_agent / set_working_dir / maintenance verbs;
                            // identifies the managed-agent target on this manager
     working_dir?: string;
     cli?: 'claude' | 'codex' | 'gemini' | 'custom';
@@ -160,17 +161,16 @@ The server-side ack endpoint enforces:
 - Each `command_id` is one-shot: a successful ack consumes the ledger
   entry. Replays land on `410 Gone`.
 
-| Command           | Status                          |
-|-------------------|---------------------------------|
-| `set_working_dir` | Real — registry update + heartbeat |
-| `reload_config`   | Real — re-reads `config.json`. URL/apiKey/cli changes flagged disruptive |
-| `spawn_agent`     | **Stubbed** — registry transitions only; CLI fork is TODO |
-| `stop_agent`      | **Stubbed** — registry transitions only                       |
-| `restart_agent`   | **Stubbed** — `stop` + `spawn` composition                    |
-
-The CLI lifecycle stubs are intentional. The runtime contract (registry
-state machine + ack format) is final; the child-process spawner will be
-filled in without changing the SSE contract.
+| Command              | Status                          |
+|----------------------|---------------------------------|
+| `set_working_dir`    | Real — registry update + heartbeat |
+| `reload_config`      | Real — re-reads `config.json`. URL/apiKey/cli changes flagged disruptive |
+| `spawn_agent`        | Real — provisions apiKey, writes mcp-config, registers context (ST-6) |
+| `stop_agent`         | Real — drops context + erases on-disk secrets                          |
+| `restart_agent`      | Real — `stop` + `spawn` composition                                    |
+| `update_plugins`     | Real — `git pull --ff-only` on every claude marketplace under `<cli-home>/plugins/marketplaces/*` |
+| `refresh_mcp_config` | Real — rewrites `mcp-config.json` with current AWB url + existing apiKey |
+| `pull_working_dir`   | Real — `git pull --ff-only` inside `Agent.working_dir` (30s timeout)    |
 
 ## Heartbeats
 
@@ -230,16 +230,13 @@ Minimum manual smoke pass before each version bump:
   client all compile clean.
 - Pairing dry-run — mint via admin UI → redeem via curl → manager starts and
   the instance shows up on the dashboard.
-- `agent_manager_command` round-trip — `set_working_dir` and
-  `reload_config` ack `ok`; `spawn_agent` / `stop_agent` / `restart_agent`
-  ack with the expected `STUB:` detail (CLI lifecycle is intentionally not
-  forking yet — see _SSE event contract_ table).
-
-When the CLI lifecycle stubs are filled in, port at minimum the
-`subagent-delegation` test (it covers the load-bearing path: trigger event →
-working_dir scoped subagent → ack) and add a `command-ledger.service.spec`
-smoke test for the ack ownership check. Until then, regressions surface
-through the manual pass above.
+- `agent_manager_command` round-trip — every verb (`spawn_agent`,
+  `stop_agent`, `restart_agent`, `set_working_dir`, `reload_config`,
+  `update_plugins`, `refresh_mcp_config`, `pull_working_dir`) acks `ok` for
+  the happy path. Maintenance verbs additionally exercise:
+  `update_plugins` against an agent with a non-empty
+  `<cli-home>/plugins/marketplaces/`; `refresh_mcp_config` against an agent
+  with an existing apiKey; `pull_working_dir` against a clean checkout.
 
 ## Versioning + sync rules
 

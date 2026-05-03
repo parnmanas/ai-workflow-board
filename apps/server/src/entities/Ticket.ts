@@ -67,6 +67,19 @@ export class Ticket {
   @Column({ type: 'varchar', default: 'todo' })
   status: string;
 
+  // Repository resource the ticket builds against. Empty when the ticket is
+  // pure-discussion / non-code. UI sources the picker from workspace+board
+  // resources of type='repository'; the agent uses this id (plus base_branch)
+  // to locate the clone URL and pull the latest before branching.
+  @Column({ type: 'varchar', default: '' })
+  base_repo_resource_id: string;
+
+  // Branch the agent should treat as the base when starting work — the feature
+  // branch is cut from this. Empty falls back to the repository's default
+  // branch (Resource.default_branch, then origin/HEAD).
+  @Column({ type: 'varchar', default: '' })
+  base_branch: string;
+
   @Column({ type: 'varchar', default: '' })
   created_by: string;
 

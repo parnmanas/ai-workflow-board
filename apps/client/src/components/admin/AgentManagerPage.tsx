@@ -744,6 +744,38 @@ const COMMAND_BUTTONS: {
   },
 ];
 
+// Maintenance commands — reach into the per-agent cli-home / working_dir
+// from the manager process. These only make sense when the agent is already
+// spawned (the manager owns its cli-home / context registry entry), so they
+// render in a separate row that's disabled while supervised=false.
+const MAINTENANCE_BUTTONS: {
+  kind: AgentManagerCommandKind;
+  label: string;
+  title: string;
+}[] = [
+  {
+    kind: 'update_plugins',
+    label: 'Update plugins',
+    title:
+      'git pull --ff-only on every claude plugin marketplace under the agent\'s ' +
+      'cli-home. Refreshes the marketplace source without restarting the agent.',
+  },
+  {
+    kind: 'refresh_mcp_config',
+    label: 'Refresh MCP',
+    title:
+      'Rewrite the agent\'s mcp-config.json with the current AWB url + existing ' +
+      'apiKey. Use after changing the AWB server URL. Does not rotate the key.',
+  },
+  {
+    kind: 'pull_working_dir',
+    label: 'Pull repo',
+    title:
+      'git pull --ff-only inside the agent\'s working_dir. Best-effort — non-' +
+      'fast-forward / unclean repos are reported as failure but never reset.',
+  },
+];
+
 function ManagedAgentsSection({ inst }: ManagedAgentsSectionProps) {
   const { showToast } = useToast();
   const [agents, setAgents] = useState<Agent[] | null>(null);
@@ -941,6 +973,38 @@ function ManagedAgentsSection({ inst }: ManagedAgentsSectionProps) {
                     />
                   </div>
                 )}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
+                  <span
+                    style={{ fontSize: 10, fontWeight: 600, color: tokens.colors.textMuted, marginRight: 4 }}
+                    title="Operational commands the AgentManager can run on this managed agent without restarting it."
+                  >
+                    Maintenance:
+                  </span>
+                  {MAINTENANCE_BUTTONS.map((btn) => {
+                    const requiresWorkingDir = btn.kind === 'pull_working_dir';
+                    const requiresSupervised = btn.kind !== 'pull_working_dir';
+                    const blocked =
+                      (requiresWorkingDir && !a.working_dir) ||
+                      (requiresSupervised && !supervised);
+                    const blockedTitle = blocked
+                      ? requiresWorkingDir && !a.working_dir
+                        ? 'Set working_dir first.'
+                        : 'Spawn the agent first so the manager owns its cli-home.'
+                      : btn.title;
+                    return (
+                      <Button
+                        key={btn.kind}
+                        size="sm"
+                        variant="ghost"
+                        disabled={blocked || pendingCmd === `${btn.kind}:${a.id}`}
+                        onClick={() => sendCommand(btn.kind, a.id)}
+                        title={blockedTitle}
+                      >
+                        {btn.label}
+                      </Button>
+                    );
+                  })}
+                </div>
               </li>
             );
           })}

@@ -308,11 +308,13 @@ export class TicketsController {
     const actorId = currentUser?.id || undefined;
     const actorName = currentUser?.name || currentUser?.email || undefined;
 
-    const { title, description, priority, assignee, reporter, reviewer_id, assignee_id, reporter_id, labels, channel_ids, status, prompt_text } = body;
+    const { title, description, priority, assignee, reporter, reviewer_id, assignee_id, reporter_id, labels, channel_ids, status, prompt_text, base_repo_resource_id, base_branch } = body;
     const oldAssignee = ticket.assignee;
     const oldReporter = ticket.reporter;
     const oldReviewerId = ticket.reviewer_id;
     const oldStatus = ticket.status;
+    const oldBaseRepoId = ticket.base_repo_resource_id;
+    const oldBaseBranch = ticket.base_branch;
 
     if (title !== undefined) ticket.title = title;
     if (description !== undefined) ticket.description = description;
@@ -335,6 +337,21 @@ export class TicketsController {
     if (channel_ids !== undefined) ticket.channel_ids = JSON.stringify(channel_ids);
     // Phase 1 ticket prompt snapshot (D-17 / ROLE-08)
     if (prompt_text !== undefined) ticket.prompt_text = prompt_text;
+    if (base_repo_resource_id !== undefined) {
+      const next = base_repo_resource_id || '';
+      if (next && ticket.workspace_id) {
+        // Confine the picker to the ticket's workspace — without this an
+        // attacker who guesses (or scrapes) a Resource id from another
+        // workspace could pin it here, and the trigger SSE / loadTicketFull
+        // snapshot would happily surface its url to the assignee.
+        const repoExists = await this.dataSource.getRepository(Resource).findOne({
+          where: { id: next, workspace_id: ticket.workspace_id },
+        });
+        if (!repoExists) return res.status(400).json({ error: 'base_repo_resource_id not found in this workspace' });
+      }
+      ticket.base_repo_resource_id = next;
+    }
+    if (base_branch !== undefined) ticket.base_branch = base_branch || '';
 
     await this.ticketRepo.save(ticket);
 
@@ -391,6 +408,8 @@ export class TicketsController {
     if (title !== undefined) changes.push('title');
     if (description !== undefined) changes.push('description');
     if (priority !== undefined) changes.push('priority');
+    if (base_repo_resource_id !== undefined && (base_repo_resource_id || '') !== (oldBaseRepoId || '')) changes.push('base_repo');
+    if (base_branch !== undefined && (base_branch || '') !== (oldBaseBranch || '')) changes.push('base_branch');
     const otherChanges = changes.filter(c => !['assignee', 'reporter', 'status'].includes(c));
     if (otherChanges.length > 0) {
       await this.activityService.logActivity({

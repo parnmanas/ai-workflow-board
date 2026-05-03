@@ -57,8 +57,44 @@ export interface Agent {
    *  Drives the `<ManagerName>/<AgentName>` display format used everywhere
    *  in the UI; undefined for legacy / standalone agents (no slash prefix). */
   manager_name?: string;
+  /** Live process snapshot from InstanceRegistry. Set by `/api/agents` and
+   *  `/api/agents/:id` when the agent is currently being heartbeated by a
+   *  proxy/daemon process or supervised by an agent-manager instance. The
+   *  AI Agents admin page renders mode/version/host/heartbeat from this so
+   *  managed agents (which have no SSE session of their own) are visible. */
+  live_instance?: AgentLiveInstance;
+  /** Subagent rollup attached server-side from SubagentMonitor. Lets the AI
+   *  Agents admin page show "5 active / 23 total" without an extra fetch. */
+  subagents?: AgentSubagentRollup;
   created_at: string;
   updated_at: string;
+}
+
+/** Subset of AgentManagerInstance attached to each Agent in /api/agents. The
+ *  full record is still available via /api/admin/agent-manager/instances when
+ *  the operator wants the master/detail layout. */
+export interface AgentLiveInstance {
+  instance_id: string;
+  mode: 'daemon' | 'proxy' | 'manager';
+  hostname: string;
+  plugin_version: string;
+  cli: string;
+  cli_adapters: string[];
+  pid: number;
+  started_at: string;
+  last_seen_at: string;
+  /** True when this agent is supervised by a manager (manager.agent_ids
+   *  includes this id). False when this agent IS the instance's primary
+   *  agent_id (proxy / daemon / a manager identity itself). */
+  supervised: boolean;
+  working_dirs?: string[];
+  agent_ids?: string[];
+}
+
+export interface AgentSubagentRollup {
+  total: number;
+  active: number;
+  recent: SubagentSummary[];
 }
 
 export interface PromptTemplate {
@@ -86,8 +122,28 @@ export interface Resource {
   file_name: string;
   file_mimetype: string;
   tags: string[];
+  // For type='repository': the branch tickets default to when no per-ticket
+  // base_branch is set. Empty leaves the choice to git's `origin/HEAD`.
+  default_branch?: string;
   created_at: string;
   updated_at: string;
+}
+
+// Embedded snapshot of the ticket's base repository — populated by
+// loadTicketFull on the server when ticket.base_repo_resource_id is set.
+export interface TicketBaseRepo {
+  id: string;
+  name: string;
+  url: string;
+  default_branch: string;
+  type: string;
+}
+
+// Result of GET /api/resources/:id/branches — git ls-remote output for a
+// repository resource, with the default branch (if configured) pinned first.
+export interface RepoBranch {
+  name: string;
+  sha: string;
 }
 
 export interface Credential {
@@ -203,6 +259,15 @@ export interface Ticket {
   channel_ids: string[]; // GUID array — references Channel.id
   // Phase 1 ticket prompt snapshot (D-17 / ROLE-08)
   prompt_text?: string;
+  // Repository resource the ticket builds against (set via the picker in the
+  // detail tab). The agent uses this + base_branch to pull the right base
+  // before cutting its feature branch. Empty when the ticket is non-code.
+  base_repo_resource_id?: string;
+  base_branch?: string;
+  // Server-hydrated snapshot of base_repo_resource_id (loadTicketFull only).
+  // Carries url + default_branch so the picker UI doesn't need a second
+  // round-trip per ticket open.
+  base_repo?: TicketBaseRepo | null;
   created_by: string; // Name of the creator (user or agent)
   created_by_type: 'user' | 'agent' | ''; // Creator type
   created_by_id: string; // GUID — references User.id or Agent.id
@@ -616,7 +681,10 @@ export type AgentManagerCommandKind =
   | 'stop_agent'
   | 'restart_agent'
   | 'set_working_dir'
-  | 'reload_config';
+  | 'reload_config'
+  | 'update_plugins'
+  | 'refresh_mcp_config'
+  | 'pull_working_dir';
 
 export interface AgentManagerCommandResult {
   ok: boolean;

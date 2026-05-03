@@ -13,6 +13,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { Agent } from '../../../entities/Agent';
 import { BoardColumn } from '../../../entities/BoardColumn';
+import { Resource } from '../../../entities/Resource';
 import { Ticket } from '../../../entities/Ticket';
 import { ok, err, safeJsonParse } from '../shared/helpers';
 import { loadTicketFull } from '../shared/ticket-parsing';
@@ -123,11 +124,13 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
 
   server.tool(
     'update_ticket',
-    'Update a root ticket\'s fields (title, description, priority, assignee, reporter, reviewer_id, labels, channel_ids).\n\n' +
+    'Update a root ticket\'s fields (title, description, priority, assignee, reporter, reviewer_id, labels, channel_ids, base_repo_resource_id, base_branch).\n\n' +
     'NOTE: this tool does NOT change `status` and is intended for ROOT tickets. ' +
     'Status on a root ticket is driven by which column it sits in — use move_ticket to advance it. ' +
     'For SUBTASKS (depth > 0), use update_child_ticket — that\'s also where you mark a finished subtask ' +
-    'with status="done".',
+    'with status="done".\n\n' +
+    'Base repo & branch: pass `base_repo_resource_id` (a workspace/board Resource of type="repository") together with ' +
+    '`base_branch` to pin the branch the ticket\'s feature branch should be cut from. Empty strings clear the binding.',
     {
       ticket_id: z.string().describe('Ticket ID'),
       title: z.string().optional().describe('New title'),
@@ -140,8 +143,10 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       reviewer_id: z.string().optional().describe('Reviewer agent ID'),
       labels: z.array(z.string()).optional().describe('New labels array'),
       channel_ids: z.array(z.string()).optional().describe('New notification channel IDs'),
+      base_repo_resource_id: z.string().optional().describe('Resource ID (type=repository) the ticket builds against. Empty string clears.'),
+      base_branch: z.string().optional().describe('Branch the agent should treat as the base when starting work. Empty string clears.'),
     },
-    async ({ ticket_id, title, description, priority, assignee, reporter, assignee_id, reporter_id, reviewer_id, labels, channel_ids }, extra: { sessionId?: string }) => {
+    async ({ ticket_id, title, description, priority, assignee, reporter, assignee_id, reporter_id, reviewer_id, labels, channel_ids, base_repo_resource_id, base_branch }, extra: { sessionId?: string }) => {
       const ticketRepo = dataSource.getRepository(Ticket);
       const ticket = await ticketRepo.findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Ticket not found');
@@ -151,6 +156,8 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       // Track old values before updating
       const oldAssignee = ticket.assignee;
       const oldReporter = ticket.reporter;
+      const oldBaseRepoId = ticket.base_repo_resource_id;
+      const oldBaseBranch = ticket.base_branch;
 
       const changes: string[] = [];
       if (title !== undefined) { ticket.title = title; changes.push('title'); }
@@ -169,6 +176,27 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       if (reviewer_id !== undefined) { ticket.reviewer_id = reviewer_id; changes.push('reviewer'); }
       if (labels !== undefined) { ticket.labels = JSON.stringify(labels); changes.push('labels'); }
       if (channel_ids !== undefined) { ticket.channel_ids = JSON.stringify(channel_ids); changes.push('channel_ids'); }
+      if (base_repo_resource_id !== undefined) {
+        const next = base_repo_resource_id || '';
+        if (next && ticket.workspace_id) {
+          // Mirror the REST guard: pin only repos that live in the ticket's
+          // workspace so a guessed cross-workspace id can't bleed url/name
+          // into the SSE prompt.
+          const repoExists = await dataSource.getRepository(Resource).findOne({
+            where: { id: next, workspace_id: ticket.workspace_id },
+          });
+          if (!repoExists) return err('base_repo_resource_id not found in this workspace');
+        }
+        ticket.base_repo_resource_id = next;
+        // Skip the activity-feed entry on idempotent writes — matches REST
+        // semantics so a no-op `update_ticket` doesn't spam the log.
+        if (next !== (oldBaseRepoId || '')) changes.push('base_repo');
+      }
+      if (base_branch !== undefined) {
+        const next = base_branch || '';
+        ticket.base_branch = next;
+        if (next !== (oldBaseBranch || '')) changes.push('base_branch');
+      }
 
       await ticketRepo.save(ticket);
 

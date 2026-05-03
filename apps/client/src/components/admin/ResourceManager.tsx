@@ -53,6 +53,7 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
   const [formFileName, setFormFileName] = useState('');
   const [formFileMimetype, setFormFileMimetype] = useState('');
   const [formCredentialId, setFormCredentialId] = useState<string>('');
+  const [formDefaultBranch, setFormDefaultBranch] = useState('');
   const [formErrors, setFormErrors] = useState<{ name?: string }>({});
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [lightboxImage, setLightboxImage] = useState<{ src: string; alt: string } | null>(null);
@@ -144,6 +145,7 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
     setFormFileName('');
     setFormFileMimetype('');
     setFormCredentialId('');
+    setFormDefaultBranch('');
     setFormErrors({});
     setEditResource(null);
     setShowForm(true);
@@ -160,6 +162,7 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
     setFormFileName(resource.file_name || '');
     setFormFileMimetype(resource.file_mimetype || '');
     setFormCredentialId(resource.credential_id || '');
+    setFormDefaultBranch(resource.default_branch || '');
     setFormErrors({});
     setEditResource(resource);
     setShowForm(true);
@@ -217,6 +220,7 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
           file_mimetype: formFileMimetype,
           tags: parsedTags,
           credential_id: formCredentialId || null,
+          default_branch: formType === 'repository' ? formDefaultBranch.trim() : '',
         });
         showToast('Resource updated.', 'success');
       } else {
@@ -233,6 +237,7 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
           file_name: formFileName,
           file_mimetype: formFileMimetype,
           tags: parsedTags,
+          default_branch: formType === 'repository' ? formDefaultBranch.trim() : '',
         });
         showToast('Resource created.', 'success');
       }
@@ -481,6 +486,15 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
               value={formUrl}
               onChange={(e) => setFormUrl(e.target.value)}
               placeholder="https://..."
+            />
+          )}
+
+          {formType === 'repository' && (
+            <Input
+              label="Default Branch"
+              value={formDefaultBranch}
+              onChange={(e) => setFormDefaultBranch(e.target.value)}
+              placeholder="e.g. main (leave blank to fall back to origin/HEAD)"
             />
           )}
 

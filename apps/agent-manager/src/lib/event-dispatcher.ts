@@ -87,13 +87,22 @@ export interface SubagentManager {
 
 export interface ChatDispatchArgs {
   roomId: string;
+  /** Agent identity that should respond to this message. For self-handling
+   *  this is the manager's own agent id; for managed-agent fan-out it is
+   *  the matched managed agent's id. Used as part of the chat session key
+   *  so multiple agents in the same room get separate persistent CLI
+   *  sessions instead of clobbering each other. */
+  agentId: string;
   senderId: string;
   senderName: string;
   createdAt: string;
   content: string;
   rolePrompt: string;
   onProgress?: (stage: string) => void;
-  /** ST-6: per-event managed-agent runtime context. Optional. */
+  /** ST-6: per-event managed-agent runtime context. When set, the chat
+   *  session spawns under this agent's identity (apiKey + cwd + cli) so the
+   *  reply is attributed to the right agent and lands in the room they're
+   *  a member of. Undefined when the manager itself is the participant. */
   agentContext?: AgentExecutionContext;
 }
 
@@ -247,6 +256,37 @@ export class EventDispatcher {
       cli: ctx.cli || 'claude',
       cli_home_dir: ctx.cli_home_dir,
     };
+  }
+
+  /**
+   * Chat-event variant: events.controller delivers a chat_room_message to a
+   * manager whenever any of its managed agents participates in the room, but
+   * the wire payload doesn't single out which one should reply. We pick the
+   * first managed agent in `agent_member_ids` whose runtime context is fully
+   * bootstrapped — that's the identity the spawned chat session runs under.
+   * Returns undefined when no match exists (manager itself is the participant
+   * and the spawn should fall back to manager defaults).
+   */
+  #resolveAgentContextFromMembers(memberIds: string[]): AgentExecutionContext | undefined {
+    if (!memberIds.length || !this.#managedAgentContexts) return undefined;
+    for (const id of memberIds) {
+      const ctx = this.#resolveAgentContext(id);
+      if (ctx) return ctx;
+    }
+    return undefined;
+  }
+
+  /**
+   * Self-gate for chat replies. A message counts as "self" when the sender is
+   * either this manager's own agent_id OR one of the managed agents it
+   * supervises — the latter is what stops a managed agent's reply from
+   * triggering yet another spawn (until the chain-depth cap finally kicks in).
+   */
+  #senderIsSelf(senderId: string | undefined | null): boolean {
+    if (!senderId) return false;
+    const selfAgentId = loadAgentInfo()?.agent_id || '';
+    if (selfAgentId && senderId === selfAgentId) return true;
+    return !!this.#managedAgentContexts?.has(senderId);
   }
 
   /** Route a raw SSE event payload to the right handler. */
@@ -473,6 +513,7 @@ export class EventDispatcher {
       try {
         const result = await this.#chatSessionManager.dispatch({
           roomId: payload.room_id,
+          agentId: payload.agent_id || agentContext?.agent_id || loadAgentInfo()?.agent_id || '',
           senderId: payload.user_id || '',
           senderName: '',
           createdAt: ev.timestamp || '',
@@ -704,13 +745,23 @@ export class EventDispatcher {
 
     const p = ev.payload || ev;
 
+    // Resolve which managed agent (if any) should respond. Manager-fan-out
+    // delivers chat events for any room where one of this manager's managed
+    // agents is a member; the wire payload's agent_member_ids is the set we
+    // pick from. When no managed agent matches we fall through to the
+    // manager's own identity, which is the right behavior for rooms where
+    // the manager itself is a participant.
+    const memberIds: string[] = Array.isArray(p.agent_member_ids) ? p.agent_member_ids : [];
+    const agentContext = this.#resolveAgentContextFromMembers(memberIds);
+
     // Two early-exit cases for agent-sent messages — both still record into
     // the chat ring so future dispatches see complete history:
-    //   1. Self-message: never reply to your own send.
+    //   1. Self-message: never reply to a send from this manager OR any of
+    //      its own managed agents (otherwise a managed agent's reply would
+    //      trigger another spawn until the chain-depth cap kicks in).
     //   2. Loop guard: server-stamped `agent_chain_depth` reached the cap.
     if (p.sender_type === 'agent') {
-      const selfAgentId = loadAgentInfo()?.agent_id || '';
-      if (selfAgentId && p.sender_id === selfAgentId) {
+      if (this.#senderIsSelf(p.sender_id)) {
         this.#chatSessionManager?.recordRoomMessage(p);
         log(
           `Chat room message from self (${p.sender_name || p.sender_id}) — skipping delegation`,
@@ -748,22 +799,31 @@ export class EventDispatcher {
     const persistentChat = delegation.persistentChatSessions !== false;
 
     if (delegationEnabled && persistentChat && this.#chatSessionManager && p.room_id) {
+      // Responder identity: the matched managed agent when fan-out delivered
+      // the event for one, otherwise this manager's own agent_id. Threaded
+      // into the chat session key so multiple agents in the same room don't
+      // share one CLI session.
+      const responderAgentId = agentContext?.agent_id || loadAgentInfo()?.agent_id || '';
       try {
         const result = await this.#chatSessionManager.dispatch({
           roomId: p.room_id,
+          agentId: responderAgentId,
           senderId: p.sender_id || '',
           senderName: p.sender_name || '',
           createdAt: p.created_at || '',
           content: p.content || '',
           rolePrompt: p.role_prompt || '',
           onProgress,
+          agentContext,
         });
         // Record into ring AFTER dispatch so the spawn path sees real prior
         // history rather than self-referencing the message that triggered it.
         this.#chatSessionManager?.recordRoomMessage(p);
         if (result.dispatched) {
           log(
-            `Chat room message dispatched to session: room=${p.room_id} pid=${result.pid}${result.firstTurn ? ' (new session)' : ''}`,
+            `Chat room message dispatched to session: room=${p.room_id} ` +
+              `agent=${responderAgentId.slice(0, 8)} pid=${result.pid}` +
+              `${result.firstTurn ? ' (new session)' : ''}`,
           );
           return;
         }
@@ -804,7 +864,8 @@ export class EventDispatcher {
           rolePrompt,
           chatRequestId: `msg:${p.sender_id}:${p.created_at || ''}`,
           ticketId: '',
-          agentId: '',
+          agentId: agentContext?.agent_id || '',
+          agentContext,
         });
 
         if (result.spawned) {

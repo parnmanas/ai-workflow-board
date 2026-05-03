@@ -68,6 +68,12 @@ export interface AgentTriggerPayload {
   trigger_source: string;
   // phase12 — board column → prompt-template content; null when no template wired
   column_prompt: { template_id: string; name: string; content: string } | null;
+  // Ticket's configured base repository (Resource of type='repository') and
+  // base branch — agent-manager renders these into the in-progress prompt so
+  // the agent fetches + branches off the right ref. Both null/empty when the
+  // ticket leaves them unset (pure-discussion / non-code work).
+  base_repo: { id: string; name: string; url: string; default_branch: string } | null;
+  base_branch: string;
   // TicketSupervisor signal: plugin should kill any live subagent for this
   // ticket before handling the trigger. Set when a wedged session has failed
   // to advance my_last_update_at after the initial supervisor re-push.
@@ -123,6 +129,13 @@ export interface ChatRequestPayload {
   role_prompt: string;
   new_message: string;
   history: ChatRequestHistoryEntry[];
+  // Source room id for the chat_request. Always set when the request was
+  // emitted from a chat room (DM auto-route or @mention) — without it the
+  // agent has no way to know which room to reply into via
+  // mcp__awb__send_chat_room_message, so the persistent-chat-session path
+  // in agent-manager will fall through to the legacy one-shot subagent
+  // (which can only guess the room).
+  room_id?: string;
 }
 
 // Phase 7 — room-based chat
@@ -139,6 +152,15 @@ export interface ChatRoomMessagePayload {
   // Plugin uses it to break agent-to-agent ping-pong loops by skipping
   // delegation once a configurable cap is hit.
   agent_chain_depth?: number;
+  // Agent participants of the room. Carried on the wire so an agent-manager
+  // receiving the SSE event (via the managed-agent fan-out in
+  // events.controller) can resolve which of its managed agents are members
+  // and spawn the chat session under that agent's identity. Without this,
+  // the manager has no way to pick the correct apiKey/cwd and the spawn
+  // would default to the manager's identity — leading to a 403 when the
+  // spawned CLI tries to send_chat_room_message into a room it does not
+  // belong to.
+  agent_member_ids?: string[];
 }
 
 export interface ChatRoomUpdatePayload {
@@ -154,6 +176,8 @@ export interface ChatRoomUpdatePayload {
   // user vs agent when the same UUID collides across domains.
   participant_type?: 'user' | 'agent';
   last_read_at?: string; // ISO-8601
+  // See ChatRoomMessagePayload — same managed-agent fan-out reason.
+  agent_member_ids?: string[];
 }
 
 export interface ChatRoomTypingPayload {
@@ -162,6 +186,8 @@ export interface ChatRoomTypingPayload {
   agent_name: string;
   is_typing: boolean;
   status?: string | null;
+  // See ChatRoomMessagePayload — same managed-agent fan-out reason.
+  agent_member_ids?: string[];
 }
 
 // Mention feature — comment-sourced @-mention delivered to a specific agent.
@@ -327,7 +353,10 @@ export type AgentManagerCommand =
   | 'stop_agent'         // SIGTERM the running CLI for an agent identity
   | 'restart_agent'      // stop + spawn
   | 'set_working_dir'    // update Agent.working_dir on disk + reload
-  | 'reload_config';     // re-read config.json (e.g., after admin edits delegation tunables)
+  | 'reload_config'      // re-read config.json (e.g., after admin edits delegation tunables)
+  | 'update_plugins'     // git pull every plugin marketplace under the managed agent's cli-home
+  | 'refresh_mcp_config' // rewrite mcp-config.json so spawned subagents see the current AWB url
+  | 'pull_working_dir';  // git -C <agent.working_dir> pull --ff-only (best-effort, non-fatal)
 
 export interface AgentManagerCommandPayload {
   // The dispatch correlation id — manager echoes it on /command/ack so the

@@ -121,6 +121,48 @@ After redeeming, the manager stores its API key and agent identity in
    On manager restart, agents previously spawned this way auto-rehydrate
    from disk — no need to re-click Spawn.
 
+## Run as a background service
+
+`awb-agent-manager service install` registers the manager so it starts on
+boot/logon and auto-restarts on crash. The installer detects your host's
+service manager and dispatches accordingly:
+
+| Host                         | Backend                | Default unit path                                  |
+|------------------------------|------------------------|----------------------------------------------------|
+| Linux + systemd              | systemd unit           | `~/.config/systemd/user/awb-agent-manager.service` |
+| Linux + Synology DSM         | rc.d boot script       | `/usr/local/etc/rc.d/awb-agent-manager.sh`         |
+| Linux without systemd        | sysvinit               | `/etc/init.d/awb-agent-manager`                    |
+| macOS                        | launchd                | `~/Library/LaunchAgents/com.awb.agent-manager.plist` |
+| Windows                      | Task Scheduler         | task `awb-agent-manager` (logon trigger)           |
+
+```bash
+# user scope (no admin/sudo) — runs at logon, recommended for laptops
+awb-agent-manager service install
+
+# system scope — runs at boot, requires sudo / Administrator shell
+awb-agent-manager service install --system
+
+# preview without writing or running registrar
+awb-agent-manager service install --dry-run
+
+# force a specific backend (e.g. testing sysvinit on a systemd host)
+awb-agent-manager service install --platform sysvinit
+
+# remove
+awb-agent-manager service uninstall [--system]
+```
+
+Notes:
+- Linux user-mode systemd services stop at logout. Run
+  `sudo loginctl enable-linger $USER` to keep the manager running after the
+  installing user logs out.
+- Synology DSM and bare sysvinit always install at system scope (the boot
+  directories are root-owned). The `--system` flag is implied.
+- Windows user-mode tasks fire at logon only. Re-run with `--system` from
+  an elevated PowerShell for a boot-time task running as `LocalSystem`.
+- macOS uses `launchctl bootstrap` on modern macOS and falls back to
+  `launchctl load -w` on older releases. Logs land in `/tmp/awb-agent-manager.log`.
+
 ## Migration from the claude-plugin daemon (≤ v0.39)
 
 The plugin daemon is gone as of plugin v0.40.0. Everything it owned moved

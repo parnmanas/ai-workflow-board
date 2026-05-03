@@ -37,6 +37,35 @@ interface ChatRoomNewMessage {
   sender_id?: string;
 }
 
+interface BaseRepoLike {
+  id?: string;
+  name?: string;
+  url?: string;
+  default_branch?: string;
+}
+
+/** Append a "Base repository" block to the trigger prompt when the ticket has
+ *  a configured base_repo / base_branch. Tells the spawned subagent to fetch
+ *  + check out that branch and cut its working branch from there, so every
+ *  ticket starts from the latest known-good base instead of whatever the
+ *  agent's working_dir happens to be on. Skipped silently when neither field
+ *  is set, so non-code tickets don't carry git instructions they can't
+ *  satisfy. */
+function appendBaseRepoBlock(
+  lines: string[],
+  baseRepo: BaseRepoLike | null | undefined,
+  baseBranch: string | null | undefined,
+): void {
+  const branch = (baseBranch || baseRepo?.default_branch || '').trim();
+  if (!baseRepo && !branch) return;
+  lines.push('');
+  lines.push('Base repository:');
+  if (baseRepo?.name) lines.push(`- Name: ${baseRepo.name}`);
+  if (baseRepo?.url) lines.push(`- URL: ${baseRepo.url}`);
+  if (branch) lines.push(`- Base branch: ${branch}`);
+  lines.push('- Before editing code, ensure your working_dir is a clone of this repository, then `git fetch` and check out the base branch (creating a fresh feature branch off it for your changes).');
+}
+
 export function composeTriggerPrompt(
   ticket: any,
   _rolePrompt: string,
@@ -70,6 +99,7 @@ export function composeTriggerPrompt(
       lines.push('Ticket instructions:');
       lines.push(ticket.prompt_text);
     }
+    appendBaseRepoBlock(lines, ticket.base_repo ?? null, ticket.base_branch ?? null);
     const comments: CommentLike[] = Array.isArray(ticket.comments)
       ? ticket.comments.slice(-5)
       : [];

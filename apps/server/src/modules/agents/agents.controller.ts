@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Patch, Delete, Body, Param, Query, Req, Res, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Delete, Body, Param, Query, Req, Res, UseGuards, Inject, forwardRef } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, Repository, In } from 'typeorm';
@@ -12,8 +12,42 @@ import { CurrentWorkspaceId } from '../../common/decorators/current-workspace.de
 import { PERMISSIONS, hasPermission } from '../../common/types/permissions';
 import { AgentStatusService } from './agent-status.service';
 import { AllocationService } from './allocation.service';
+import { SubagentMonitorService } from '../../services/subagent-monitor.service';
+import { InstanceRegistryService, InstanceRecord } from '../agent-manager/instance-registry.service';
 import { ApiOperation, ApiParam, ApiQuery, ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { findOrFail } from '../../common/find-or-fail';
+
+/** Subset of InstanceRecord surfaced on /api/agents responses so the AI Agents
+ *  admin UI can render the same heartbeat / version / supervision metadata that
+ *  the dedicated AgentManager admin page shows. `supervised` is a derived flag:
+ *  true when the matched instance is a manager that lists this agent in
+ *  agent_ids[]; false when this agent IS the instance's primary agent (proxy /
+ *  daemon / a manager identity itself). */
+export interface AgentLiveInstance {
+  instance_id: string;
+  mode: 'daemon' | 'proxy' | 'manager';
+  hostname: string;
+  plugin_version: string;
+  cli: string;
+  cli_adapters: string[];
+  pid: number;
+  started_at: string;
+  last_seen_at: string;
+  supervised: boolean;
+  working_dirs?: string[];
+  agent_ids?: string[];
+}
+
+/** Per-agent subagent rollup. Keeps the response bounded — `recent` is at most
+ *  SUBAGENTS_PREVIEW_LIMIT entries (newest first); the full list still lives at
+ *  /api/admin/agent-manager/instances/:id/subagents and /api/subagent-monitor. */
+export interface AgentSubagentRollup {
+  total: number;
+  active: number;
+  recent: any[]; // SubagentSummary[] — duplicated here would import a type from another module path; the field is treated as opaque by callers.
+}
+
+const SUBAGENTS_PREVIEW_LIMIT = 5;
 
 @ApiBearerAuth('user-session')
 @ApiTags('agents')
@@ -26,6 +60,11 @@ export class AgentsController {
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly agentStatusService: AgentStatusService,
     private readonly allocationService: AllocationService,
+    private readonly subagentMonitor: SubagentMonitorService,
+    // forwardRef: AgentManagerModule already imports AgentsModule (for
+    // SubagentMonitorService); the cycle is resolved on both sides.
+    @Inject(forwardRef(() => InstanceRegistryService))
+    private readonly instanceRegistry: InstanceRegistryService,
   ) {}
 
   @Get(':id/allocated-tickets')
@@ -58,14 +97,16 @@ export class AgentsController {
     const isAdmin = (req as any).currentUser?.role === 'admin';
     if (scope === 'all' && isAdmin) {
       const agents = await this.agentRepo.find({ order: { name: 'ASC' } });
-      return res.json(await this._enrichManagerNames(agents));
+      const named = await this._enrichManagerNames(agents);
+      return res.json(await this._enrichLiveData(named));
     }
     if (!workspaceId) return res.json([]);
     const agents = await this.agentRepo.find({
       where: { workspace_id: workspaceId },
       order: { name: 'ASC' },
     });
-    return res.json(await this._enrichManagerNames(agents));
+    const named = await this._enrichManagerNames(agents);
+    return res.json(await this._enrichLiveData(named));
   }
 
   /**
@@ -91,6 +132,102 @@ export class AgentsController {
         ? { ...(a as any), manager_name: nameById.get(a.manager_agent_id) || undefined }
         : a,
     );
+  }
+
+  /**
+   * Attach `live_instance` (heartbeat snapshot from InstanceRegistry) and a
+   * `subagents` rollup (counts + recent preview) to each agent in the input.
+   *
+   * For managed agents, the matched instance is the manager process that lists
+   * the agent in its `agent_ids[]`. For standalone agents (proxy/daemon/manager
+   * identities themselves), the match is the instance whose primary `agent_id`
+   * equals the agent. Without this enrichment, the AI Agents admin page shows
+   * essentially nothing for manager-supervised agents — they don't carry their
+   * own SSE session, so `is_online`/`last_seen_at` on the Agent row stay zero.
+   *
+   * Subagents come from SubagentMonitor: one DB call per distinct workspace,
+   * grouped by agent_id in memory. Each agent gets up to SUBAGENTS_PREVIEW_LIMIT
+   * recent rows so the response stays bounded; the full lists remain at the
+   * existing /api/admin/agent-manager/instances/:id/subagents endpoint.
+   */
+  private async _enrichLiveData<T extends Pick<Agent, 'id' | 'workspace_id'>>(
+    agents: T[],
+  ): Promise<Array<T & { live_instance?: AgentLiveInstance; subagents?: AgentSubagentRollup }>> {
+    if (agents.length === 0) return [];
+
+    // ── live_instance ──────────────────────────────────────────────
+    // Build two indexes off the in-memory registry: by primary agent_id
+    // (proxy/daemon/manager-identity case) and by supervised agent_ids[]
+    // (manager-supervised case).
+    const allInstances = this.instanceRegistry.list();
+    const primaryByAgentId = new Map<string, InstanceRecord>();
+    const supervisorByAgentId = new Map<string, InstanceRecord>();
+    for (const inst of allInstances) {
+      const prev = primaryByAgentId.get(inst.agent_id);
+      if (!prev || prev.last_seen_at < inst.last_seen_at) {
+        primaryByAgentId.set(inst.agent_id, inst);
+      }
+      if (inst.mode === 'manager' && Array.isArray(inst.agent_ids)) {
+        for (const supervisedId of inst.agent_ids) {
+          const prevSup = supervisorByAgentId.get(supervisedId);
+          if (!prevSup || prevSup.last_seen_at < inst.last_seen_at) {
+            supervisorByAgentId.set(supervisedId, inst);
+          }
+        }
+      }
+    }
+
+    // ── subagents ──────────────────────────────────────────────────
+    // SubagentMonitor.listForWorkspace is one DB query per workspace; group
+    // by agent_id in memory. Pull every workspace present in the input set
+    // exactly once so admin scope=all listings don't fan out by agent.
+    const workspaceIds = Array.from(new Set(
+      agents.map((a) => a.workspace_id).filter((w): w is string => !!w),
+    ));
+    const subagentsByAgentId = new Map<string, any[]>();
+    await Promise.all(
+      workspaceIds.map(async (wsId) => {
+        const subs = await this.subagentMonitor.listForWorkspace(wsId);
+        for (const s of subs) {
+          const list = subagentsByAgentId.get(s.agent_id) || [];
+          list.push(s);
+          subagentsByAgentId.set(s.agent_id, list);
+        }
+      }),
+    );
+
+    return agents.map((a) => {
+      const inst = primaryByAgentId.get(a.id) || supervisorByAgentId.get(a.id);
+      const subList = subagentsByAgentId.get(a.id) || [];
+      const enriched: T & { live_instance?: AgentLiveInstance; subagents?: AgentSubagentRollup } = { ...a };
+      if (inst) {
+        enriched.live_instance = {
+          instance_id: inst.instance_id,
+          mode: inst.mode,
+          hostname: inst.hostname,
+          plugin_version: inst.plugin_version,
+          cli: inst.cli,
+          cli_adapters: inst.cli_adapters,
+          pid: inst.pid,
+          started_at: inst.started_at,
+          last_seen_at: inst.last_seen_at,
+          // True only for the manager-supervised case (agent appears in
+          // agent_ids[] but isn't the instance's primary agent_id).
+          supervised: !!supervisorByAgentId.get(a.id) && inst.agent_id !== a.id,
+          working_dirs: inst.working_dirs,
+          agent_ids: inst.agent_ids,
+        };
+      }
+      if (subList.length > 0) {
+        const active = subList.filter((s: any) => !s.ended_at).length;
+        enriched.subagents = {
+          total: subList.length,
+          active,
+          recent: subList.slice(0, SUBAGENTS_PREVIEW_LIMIT),
+        };
+      }
+      return enriched;
+    });
   }
 
   @Get('dashboard')
@@ -190,7 +327,8 @@ export class AgentsController {
         }
       : undefined;
 
-    const [enriched] = await this._enrichManagerNames([agent]);
+    const named = await this._enrichManagerNames([agent]);
+    const [enriched] = await this._enrichLiveData(named);
     if (isAdmin) {
       return res.json({ ...enriched, current_task: currentTask, redacted: false });
     }

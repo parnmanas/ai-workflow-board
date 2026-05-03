@@ -464,6 +464,12 @@ export class RoomMessagingService {
           history: [],
           timestamp: ts,
           mention_depth: 1,
+          // Source room — required for the agent to know where to reply
+          // via mcp__awb__send_chat_room_message. Without it the
+          // agent-manager's persistent-chat-session path is skipped and
+          // the legacy fallback prompt asks the agent to "use the
+          // room_id from the chat request context" with no such field.
+          room_id: roomId,
         });
 
         dispatched.add(agent.id);
@@ -550,6 +556,8 @@ export class RoomMessagingService {
       history: [],
       timestamp: savedMessage.created_at.toISOString(),
       mention_depth: 1,
+      // See _processMentions — required for room-aware reply routing.
+      room_id: roomId,
     });
 
     this.logService.info('ChatRooms', `DM auto-routed to agent ${agent.name} (${agent.id}) in room ${roomId}`);

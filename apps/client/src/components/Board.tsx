@@ -214,6 +214,27 @@ export default function Board() {
     await wrapAction(() => setTicketRoleAssignment(ticketId, roleId, holder));
   }, [wrapAction, setTicketRoleAssignment]);
 
+  // Save the panel's buffered draft as one batch. Bypasses wrapAction (which
+  // swallows errors) so a PATCH failure throws into the panel's catch block —
+  // the panel needs to keep dirty state visible and avoid showing a "Saved"
+  // toast on top of the loading bar's failure toast.
+  const handleSaveTicketDraft = useCallback(async (
+    ticketId: string,
+    ticketFields: Record<string, any>,
+    roleDrafts: Record<string, { agent_id: string | null; user_id: string | null }>,
+  ) => {
+    await withLoading(async () => {
+      const ops: Array<Promise<unknown>> = [];
+      if (Object.keys(ticketFields).length > 0) {
+        ops.push(updateTicket(ticketId, ticketFields));
+      }
+      for (const [roleId, holder] of Object.entries(roleDrafts)) {
+        ops.push(setTicketRoleAssignment(ticketId, roleId, holder));
+      }
+      await Promise.all(ops);
+    });
+  }, [withLoading, updateTicket, setTicketRoleAssignment]);
+
   const handleAddComment = useCallback(async (
     ticketId: string,
     content: string,
@@ -434,6 +455,7 @@ export default function Board() {
                     onDeleteChild={handleDeleteChild}
                     onReparentChild={handleReparentChild}
                     onSetRoleAssignment={handleSetRoleAssignment}
+                    onSaveDraft={handleSaveTicketDraft}
                     onAddComment={handleAddComment}
                     onSetCommentStatus={handleSetCommentStatus}
                     onSelectTicket={setActivePanelTicketId}
