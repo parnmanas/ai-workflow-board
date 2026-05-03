@@ -942,6 +942,10 @@ export interface UserMentionItem {
   source_type: 'comment' | 'chat_message';
   source_id: string;
   ticket_id: string | null;
+  // Resolved board for comment mentions (server-side join through
+  // Ticket → BoardColumn). Null for chat mentions — those deep-link via
+  // room_id instead. Used by MentionInboxBadge to build a navigable URL.
+  board_id: string | null;
   room_id: string | null;
   actor_id: string;
   actor_type: 'user' | 'agent';

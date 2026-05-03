@@ -57,6 +57,7 @@ export function useMentions(workspaceId: string | null): UseMentionsResult {
       source_type: data.source_type,
       source_id: data.source_id,
       ticket_id: data.ticket_id ?? null,
+      board_id: data.board_id ?? null,
       room_id: data.room_id ?? null,
       actor_id: data.actor_id,
       actor_type: data.actor_type,
