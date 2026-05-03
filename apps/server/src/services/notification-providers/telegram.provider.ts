@@ -64,7 +64,7 @@ export class TelegramUserProvider implements INotificationProvider {
     lines.push(`<b>${escape(payload.title)}</b>`);
     if (payload.actor) lines.push(`<i>by ${escape(payload.actor)}</i>`);
     if (payload.body) lines.push('', escape(payload.body));
-    if (payload.url) lines.push('', payload.url);
+    if (payload.url) lines.push('', escape(payload.url));
     return lines.join('\n');
   }
 }

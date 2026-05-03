@@ -35,7 +35,9 @@ interface ChatRoomMessageEvent {
   sender_id: string;
   sender_name: string;
   content: string;
-  member_ids?: string[];
+  // Upstream forwards the Set returned by RoomMembershipService.getRoomMemberIds()
+  // unchanged; allow either shape and normalize at the listener.
+  member_ids?: Set<string> | string[];
   created_at: string;
 }
 
@@ -163,7 +165,7 @@ export class UserChannelDispatcherService implements OnModuleInit, OnModuleDestr
    * the same message.
    */
   private async _handleChat(ev: ChatRoomMessageEvent): Promise<void> {
-    const memberIds = (ev.member_ids || []).filter((id) => !!id && id !== ev.sender_id);
+    const memberIds = Array.from(ev.member_ids || []).filter((id) => !!id && id !== ev.sender_id);
     if (memberIds.length === 0) return;
 
     // Skip pure-mention deliveries — those go through user_mention with the
