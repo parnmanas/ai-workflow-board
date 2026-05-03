@@ -108,13 +108,41 @@ export abstract class CliAdapter {
    * commonly the operator's auth token, which the CLI looks for inside
    * its config home and which a fresh per-agent home would miss.
    *
+   * When the agent has its own per-agent credential configured (the
+   * caller passes `credential` non-null), the adapter is expected to:
+   *   - subscription kind → write the credential file(s) verbatim into
+   *     cli-home and SKIP the operator-HOME symlink for any auth file
+   *     it just wrote (otherwise the next call would clobber the
+   *     per-agent value with the operator's).
+   *   - api_key kind → return the matching `extraEnv` (ANTHROPIC_API_KEY,
+   *     OPENAI_API_KEY, GEMINI_API_KEY) and remove any stale auth
+   *     credential file that might still be symlinked from the operator
+   *     HOME so the env var unambiguously decides auth.
+   *
+   * Returns extra environment variables to inject on every spawn for
+   * this agent (api_key kind contributes; subscription kind returns {}).
+   * Caller stores them in ManagedAgentContext.extra_env so both
+   * subagents (one-shot) and persistent sessions pick them up.
+   *
    * Throws on real I/O failures so the caller can surface them; the
    * caller is expected to wrap in try/catch since prep failure is
    * usually non-fatal (the CLI will surface its own "not authed"
    * error on next run, which is more actionable than a manager log
    * line about a missing file).
    */
-  async prepareCliHome(_cliHomeDir: string): Promise<void> {
-    /* default: no preparation needed */
+  async prepareCliHome(
+    _cliHomeDir: string,
+    _credential?: AdapterCredential | null,
+  ): Promise<{ extraEnv: Record<string, string> }> {
+    return { extraEnv: {} };
   }
+}
+
+/** Decrypted per-agent credential payload as it reaches the adapter. The
+ *  manager has already validated AWB ownership; the adapter only checks the
+ *  provider prefix matches its CLI before applying. */
+export interface AdapterCredential {
+  credential_id: string;
+  provider: string;
+  fields: Record<string, string>;
 }

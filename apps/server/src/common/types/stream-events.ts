@@ -361,7 +361,8 @@ export type AgentManagerCommand =
   | 'reload_config'      // re-read config.json (e.g., after admin edits delegation tunables)
   | 'update_plugins'     // git pull every plugin marketplace under the managed agent's cli-home
   | 'refresh_mcp_config' // rewrite mcp-config.json so spawned subagents see the current AWB url
-  | 'pull_working_dir';  // git -C <agent.working_dir> pull --ff-only (best-effort, non-fatal)
+  | 'pull_working_dir'   // git -C <agent.working_dir> pull --ff-only (best-effort, non-fatal)
+  | 'update_manager';    // self-update: git pull + npm install + build + detached re-exec (cross-platform)
 
 export interface AgentManagerCommandPayload {
   // The dispatch correlation id — manager echoes it on /command/ack so the

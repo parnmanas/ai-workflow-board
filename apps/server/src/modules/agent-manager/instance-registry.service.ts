@@ -40,6 +40,16 @@ export interface InstanceRecord {
   agent_ids?: string[];        // identities the manager currently supervises
   working_dirs?: string[];     // distinct working-dir roots known to the manager
   paired_at?: string;          // ISO timestamp when the manager redeemed its pairing token
+  // Self-update metadata reported by manager-mode instances.
+  // `latest_version` = newest version visible in the manager's git remote
+  // (read from `apps/agent-manager/package.json` on the upstream tracked
+  // branch). `update_available` = strict comparison of plugin_version <
+  // latest_version using a lex/semver-ish tuple. `repo_root` = the local
+  // git checkout the manager would update from. All three undefined for
+  // daemon/proxy or for managers whose upstream probe hasn't completed.
+  latest_version?: string;
+  update_available?: boolean;
+  repo_root?: string;
 }
 
 const INSTANCE_TTL_MS = 90_000;     // 3x default plugin heartbeat interval

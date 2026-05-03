@@ -66,6 +66,16 @@ export class Agent {
   @Column({ type: 'varchar', nullable: true, default: null })
   manager_agent_id: string | null;
 
+  // Optional Credential row that supplies CLI auth for the spawned agent
+  // (claude / codex / gemini). When set, the agent-manager fetches the
+  // decrypted payload at spawn time and either writes it into the per-agent
+  // cli-home (subscription kind: copy of the .credentials.json / auth.json /
+  // oauth file) or sets the corresponding env var (api_key kind:
+  // ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY). null = fall back
+  // to the operator's main HOME (legacy behaviour).
+  @Column({ type: 'varchar', nullable: true, default: null })
+  credential_id: string | null;
+
   @CreateDateColumn()
   created_at: Date;
 

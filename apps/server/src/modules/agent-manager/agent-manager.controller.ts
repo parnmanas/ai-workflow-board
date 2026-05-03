@@ -5,6 +5,8 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { randomBytes } from 'crypto';
 import { Agent } from '../../entities/Agent';
+import { Credential } from '../../entities/Credential';
+import { decrypt } from '../../services/encryption.service';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { WorkspaceGuard } from '../../common/guards/workspace.guard';
@@ -31,6 +33,7 @@ const ALLOWED_COMMANDS: ReadonlySet<AgentManagerCommand> = new Set([
   'update_plugins',
   'refresh_mcp_config',
   'pull_working_dir',
+  'update_manager',
 ] as const);
 
 /**
@@ -59,6 +62,7 @@ export class AgentManagerController {
     private readonly logService: LogService,
     private readonly commandLedger: CommandLedgerService,
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
+    @InjectRepository(Credential) private readonly credentialRepo: Repository<Credential>,
   ) {}
 
   // ─── Plugin / manager → Server ───────────────────────────────────────────
@@ -99,6 +103,22 @@ export class AgentManagerController {
       : undefined;
     const paired_at = typeof body?.paired_at === 'string' && body.paired_at ? body.paired_at : undefined;
 
+    // Self-update metadata. `latest_version` is whatever the manager's
+    // upstream-version probe found on the tracked branch; can lag the
+    // current heartbeat by up to one probe interval. `update_available` is
+    // computed by the manager (it has the comparison context) so the server
+    // doesn't try to second-guess version-string semantics. `repo_root` is
+    // surfaced so the operator can see where an Update would run.
+    const latest_version = typeof body?.latest_version === 'string' && body.latest_version
+      ? body.latest_version
+      : undefined;
+    const update_available = typeof body?.update_available === 'boolean'
+      ? body.update_available
+      : undefined;
+    const repo_root = typeof body?.repo_root === 'string' && body.repo_root
+      ? body.repo_root
+      : undefined;
+
     const rec = this.registry.upsert({
       instance_id,
       agent_id,
@@ -113,6 +133,9 @@ export class AgentManagerController {
       agent_ids,
       working_dirs,
       paired_at,
+      latest_version,
+      update_available,
+      repo_root,
     });
 
     // Mark every managed agent the manager is supervising as alive. Managed
@@ -459,6 +482,9 @@ export class AgentManagerController {
         if (args.manager_agent_id === undefined && target.manager_agent_id) {
           args.manager_agent_id = target.manager_agent_id;
         }
+        if (args.credential_id === undefined && target.credential_id) {
+          args.credential_id = target.credential_id;
+        }
       }
     }
 
@@ -527,6 +553,9 @@ export class AgentManagerController {
     const manager_agent_id = typeof body?.manager_agent_id === 'string' && body.manager_agent_id
       ? body.manager_agent_id
       : null;
+    const credential_id = typeof body?.credential_id === 'string' && body.credential_id
+      ? body.credential_id
+      : null;
     const description = typeof body?.description === 'string' ? body.description : '';
 
     // If a manager_agent_id is supplied, sanity-check it exists in the same
@@ -535,6 +564,12 @@ export class AgentManagerController {
     if (manager_agent_id) {
       const m = await this.agentRepo.findOne({ where: { id: manager_agent_id, workspace_id: workspaceId } });
       if (!m) return res.status(400).json({ error: 'manager_agent_id does not exist in this workspace' });
+    }
+    // Same sanity check for credential_id — fail fast with a clear error rather
+    // than letting spawn time discover the broken FK on the agent-manager side.
+    if (credential_id) {
+      const c = await this.credentialRepo.findOne({ where: { id: credential_id, workspace_id: workspaceId } });
+      if (!c) return res.status(400).json({ error: 'credential_id does not exist in this workspace' });
     }
 
     const agent = await this.agentRepo.save(
@@ -548,6 +583,7 @@ export class AgentManagerController {
         workspace_id: workspaceId,
         working_dir,
         manager_agent_id,
+        credential_id,
         roles: '[]',
       }),
     );
@@ -640,6 +676,76 @@ export class AgentManagerController {
       working_dir: target.working_dir,
       manager_agent_id: target.manager_agent_id,
       workspace_id: target.workspace_id,
+      credential_id: target.credential_id,
+    });
+  }
+
+  // Manager → server: read the decrypted CLI credential for a managed agent
+  // it owns. Same auth model as getManagedAgentForManager: AgentAuthGuard +
+  // ownership check. Returned payload carries provider + raw credential
+  // fields (auth.json contents, api_key string, etc.) so the manager can
+  // either write a credential file into per-agent cli-home (subscription
+  // kind) or set the matching env var at spawn (api_key kind). Returns 204
+  // when the agent has no credential_id set, which the manager treats as
+  // "fall back to operator HOME" (legacy behaviour).
+  @ApiSecurity('agent-api-key')
+  @Get('api/agent-manager/managed-agents/:id/credential')
+  @UseGuards(AgentAuthGuard)
+  @ApiOperation({
+    summary: "Manager → server: fetch the decrypted CLI credential for a managed agent it owns",
+  })
+  async getManagedAgentCredential(
+    @Param('id') targetAgentId: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const callerAgentId = (req as any).currentAgentId as string | null;
+    if (!callerAgentId) return res.status(401).json({ error: 'manager apiKey could not be resolved to an agent_id' });
+
+    const target = await this.agentRepo.findOne({ where: { id: targetAgentId } });
+    if (!target) return res.status(404).json({ error: 'target agent not found' });
+
+    if (target.manager_agent_id !== callerAgentId) {
+      this.logService.warn(
+        'AgentManager',
+        `Refused credential fetch: caller=${callerAgentId.slice(0, 8)} is not owner of target=${targetAgentId.slice(0, 8)} (owner=${target.manager_agent_id || 'none'})`,
+      );
+      return res.status(403).json({ error: 'caller is not the owning manager for this agent' });
+    }
+
+    if (!target.credential_id) return res.status(204).send();
+
+    const cred = await this.credentialRepo.findOne({
+      where: { id: target.credential_id, workspace_id: target.workspace_id },
+    });
+    if (!cred) {
+      this.logService.warn(
+        'AgentManager',
+        `Managed agent credential ${target.credential_id.slice(0, 8)} not found for agent=${target.id.slice(0, 8)} — falling back to none`,
+      );
+      return res.status(404).json({ error: 'credential not found' });
+    }
+
+    let fields: Record<string, string> = {};
+    try {
+      const decoded = JSON.parse(decrypt(cred.encrypted_data));
+      if (decoded && typeof decoded === 'object') {
+        fields = decoded as Record<string, string>;
+      }
+    } catch {
+      // Treat decode failure as "no credential" rather than 500 — the manager
+      // can still spawn the CLI under the operator's HOME and the operator
+      // sees the warning here.
+      this.logService.warn(
+        'AgentManager',
+        `Managed agent credential decrypt failed for cred=${cred.id.slice(0, 8)}`,
+      );
+    }
+
+    return res.json({
+      credential_id: cred.id,
+      provider: cred.provider,
+      fields,
     });
   }
 

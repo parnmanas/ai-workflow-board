@@ -153,6 +153,7 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
   const [subagents, setSubagents] = useState<SubagentSummary[] | null>(null);
   const [logs, setLogs] = useState<any[] | null>(null);
   const [restartPending, setRestartPending] = useState(false);
+  const [updatePending, setUpdatePending] = useState(false);
   // Manager Agent.name + description live in the agents table, separate
   // from inst.hostname (OS hostname). The header shows hostname; this
   // load surfaces the Agent.name (used as the children's display prefix)
@@ -302,8 +303,39 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
             </dt>
             <dd style={{ margin: 0, color: tokens.colors.textStrong }}>
               v{inst.plugin_version}
+              {inst.update_available && inst.latest_version && (
+                <span
+                  style={{
+                    marginLeft: 6,
+                    color: tokens.colors.warning,
+                    fontWeight: 600,
+                    fontSize: 11,
+                  }}
+                  title={`Upstream has v${inst.latest_version} available — click "Update manager" to pull + rebuild + restart in place.`}
+                >
+                  → v{inst.latest_version}
+                </span>
+              )}
+              {!inst.update_available && inst.latest_version && inst.latest_version === inst.plugin_version && (
+                <span
+                  style={{ marginLeft: 6, color: tokens.colors.success, fontSize: 11 }}
+                  title="Manager is on the latest upstream version."
+                >
+                  · up to date
+                </span>
+              )}
             </dd>
           </div>
+          {inst.repo_root && (
+            <div style={{ gridColumn: '1 / -1' }}>
+              <dt style={{ color: tokens.colors.textMuted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                Repo root
+              </dt>
+              <dd style={{ margin: 0, color: tokens.colors.textStrong, fontFamily: 'monospace', fontSize: 11 }}>
+                {inst.repo_root}
+              </dd>
+            </div>
+          )}
           <div>
             <dt style={{ color: tokens.colors.textMuted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
               Started

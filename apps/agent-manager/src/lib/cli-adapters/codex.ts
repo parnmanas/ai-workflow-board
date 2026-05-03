@@ -12,6 +12,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { resolveCliBin } from '../cli-resolver.js';
 import {
+  type AdapterCredential,
   CliAdapter,
   PARSE_STAGE,
   type OneshotSpec,
@@ -138,21 +139,50 @@ export class CodexCliAdapter extends CliAdapter {
     return 'CODEX_HOME';
   }
 
-  async prepareCliHome(cliHomeDir: string): Promise<void> {
-    // Codex authenticates via auth.json (written by `codex login`) inside
-    // CODEX_HOME. A fresh per-agent home has none, so without help every
-    // spawn would fail with HTTP 401 from the OpenAI API after a few
-    // reconnect attempts (verified manually). We also symlink config.toml
-    // so the operator's model / provider / sandbox preferences carry over
-    // — without it, codex falls back to compiled-in defaults that may not
-    // match the model the operator actually wants this agent to run.
-    //
-    // Source resolution: $CODEX_HOME if the operator has redirected the
-    // manager's main codex home, else ~/.codex. Each entry is best-effort:
-    // missing source = operator hasn't `codex login`-ed yet (auth.json) or
-    // hasn't customized config (config.toml); codex itself surfaces a
-    // clearer error than us spamming "missing file" warnings would.
+  async prepareCliHome(
+    cliHomeDir: string,
+    credential?: AdapterCredential | null,
+  ): Promise<{ extraEnv: Record<string, string> }> {
     const mainHome = process.env.CODEX_HOME ?? join(homedir(), '.codex');
+
+    // Always start from a clean slate so credential mode changes
+    // (operator-default → subscription → api_key) take effect on the
+    // next spawn without a leftover from the previous mode winning.
+    for (const name of SHARED_FROM_MAIN_HOME) {
+      const dst = join(cliHomeDir, name);
+      try {
+        await fsp.unlink(dst);
+      } catch (err: any) {
+        if (err?.code !== 'ENOENT') throw err;
+      }
+    }
+
+    if (credential && credential.provider === 'codex_subscription') {
+      // Operator pasted the literal `auth.json` (and optionally `config.toml`)
+      // content into the AWB UI; replay verbatim. config.toml is optional —
+      // when missing we leave it absent so codex uses its compiled defaults.
+      const authJson = credential.fields?.auth_json ?? '';
+      const configToml = credential.fields?.config_toml ?? '';
+      if (authJson) {
+        await fsp.writeFile(join(cliHomeDir, 'auth.json'), authJson, { mode: 0o600 });
+      }
+      if (configToml) {
+        await fsp.writeFile(join(cliHomeDir, 'config.toml'), configToml, { mode: 0o600 });
+      }
+      return { extraEnv: {} };
+    }
+
+    if (credential && credential.provider === 'codex_api_key') {
+      // OPENAI_API_KEY is the standard env var the codex CLI consults for
+      // direct-key auth. We deliberately skip the auth.json symlink so the
+      // env var path is unambiguous; config.toml stays clean too because
+      // the API-key-mode operator probably doesn't want operator-side
+      // model/provider tweaks bleeding into this agent.
+      const apiKey = credential.fields?.api_key ?? '';
+      return { extraEnv: apiKey ? { OPENAI_API_KEY: apiKey } : {} };
+    }
+
+    // No per-agent credential — fall back to operator HOME (legacy behaviour).
     for (const name of SHARED_FROM_MAIN_HOME) {
       const src = join(mainHome, name);
       const dst = join(cliHomeDir, name);
@@ -162,19 +192,8 @@ export class CodexCliAdapter extends CliAdapter {
         continue;
       }
       try {
-        await fsp.unlink(dst);
-      } catch (err: any) {
-        if (err?.code !== 'ENOENT') throw err;
-      }
-      try {
         await fsp.symlink(src, dst);
       } catch (err: any) {
-        // Windows CreateSymbolicLink requires admin or Developer Mode;
-        // without that privilege fs.symlink fails with EPERM. Fall back
-        // to a plain copy — this hook reruns on every spawn, so a fresh
-        // `codex login` / config edit propagates on the next restart.
-        // Mirrors the claude adapter's fallback so codex agents work on
-        // the same operator hosts that the claude path supports.
         if (err?.code === 'EPERM' || err?.code === 'EACCES') {
           await fsp.copyFile(src, dst);
         } else {
@@ -182,5 +201,6 @@ export class CodexCliAdapter extends CliAdapter {
         }
       }
     }
+    return { extraEnv: {} };
   }
 }

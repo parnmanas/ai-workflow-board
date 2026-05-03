@@ -16,7 +16,13 @@ import {
   type LockHandle,
 } from './lib/agent-lockfile.js';
 import { importLegacyConfig } from './lib/legacy-import.js';
-import { runSelfUpdate } from './lib/self-update.js';
+import {
+  defaultRepoRoot,
+  isVersionOlder,
+  probeUpstreamVersion,
+  respawnManager,
+  runSelfUpdate,
+} from './lib/self-update.js';
 import { runSetup, type SetupOptions } from './lib/setup.js';
 import { installService, uninstallService, type ServicePlatform } from './lib/service-install.js';
 import { PresenceHeartbeat } from './lib/presence-heartbeat.js';
@@ -39,6 +45,7 @@ import {
   listManagedAgentDirs,
   readManagedAgentConfig,
   readApiKey,
+  readAgentCredential,
   mcpConfigPathFor,
   subagentLogPathFor,
   cliHomeDirFor,
@@ -157,7 +164,8 @@ Legacy import:
 Signals:
   SIGTERM/SIGINT  graceful drain + exit
   SIGHUP          re-read config.json (delegation tunables hot-reload)
-  SIGUSR1         self-update (currently a stub — install upgrades via npm)
+  SIGUSR1         self-update: git pull + npm install + rebuild + detached re-exec
+                  (POSIX only — Windows operators use the AWB UI Update button)
 `);
 }
 
@@ -407,6 +415,39 @@ async function runRuntime(
     return id;
   });
 
+  // ── Self-update: periodic upstream-version probe ──────────────────────
+  // Runs `git fetch && git show <upstream>:apps/agent-manager/package.json`
+  // every UPSTREAM_PROBE_INTERVAL_MS and caches the latest_version. The
+  // heartbeat payload pulls from this cache so a slow/unavailable git
+  // remote can't stall the heartbeat itself. First probe fires on startup
+  // so the very first heartbeat already carries fresh version info.
+  const repoRoot = defaultRepoRoot();
+  let lastProbedLatestVersion: string | null = null;
+  let lastProbedAt = 0;
+  const UPSTREAM_PROBE_INTERVAL_MS = 10 * 60 * 1000; // 10 min
+  const probeUpstream = async (): Promise<void> => {
+    if (!repoRoot) return; // no .git found above us — operator installed by other means
+    try {
+      const r = await probeUpstreamVersion(repoRoot, { log });
+      if (r?.latest_version) {
+        lastProbedLatestVersion = r.latest_version;
+        lastProbedAt = Date.now();
+      }
+    } catch (err: any) {
+      log(`upstream probe failed (non-fatal): ${err?.message ?? err}`);
+    }
+  };
+  // Kick off the first probe in the background; don't await — startup
+  // shouldn't be gated on git network I/O.
+  if (repoRoot) {
+    void probeUpstream();
+    const probeTimer = setInterval(() => void probeUpstream(), UPSTREAM_PROBE_INTERVAL_MS);
+    probeTimer.unref?.();
+    log(`Self-update probe armed: repo=${repoRoot} interval=${UPSTREAM_PROBE_INTERVAL_MS / 1000}s`);
+  } else {
+    log('Self-update probe: no .git above install — manual updates only');
+  }
+
   const presenceHeartbeat: { _real: PresenceHeartbeat | null } = { _real: null };
   const kickPresencePing = (): void => {
     presenceHeartbeat._real?.pingNow().catch(() => {});
@@ -504,8 +545,16 @@ async function runRuntime(
       // post-spawn point we know we'll hit before the next subagent
       // fork. Failures here are logged but non-fatal — the CLI itself
       // will surface a clearer auth error if the symlink is broken.
+      //
+      // Per-agent credential is read from the on-disk snapshot rather
+      // than re-fetched from AWB. Restart-time fetch would block boot on
+      // network reachability, and the snapshot is refreshed on every
+      // spawn_agent / restart_agent anyway.
+      const credential = await readAgentCredential(id);
+      let extraEnv: Record<string, string> = {};
       try {
-        await createAdapter(cfg.cli).prepareCliHome(cliHomeDirFor(id));
+        const prep = await createAdapter(cfg.cli).prepareCliHome(cliHomeDirFor(id), credential);
+        extraEnv = prep?.extraEnv ?? {};
       } catch (err: any) {
         log(`rehydrate: cli-home prep failed for agent=${id.slice(0, 8)} cli=${cfg.cli}: ${err?.message ?? err}`);
       }
@@ -518,6 +567,7 @@ async function runRuntime(
         api_key: apiKey,
         subagent_log_path: subagentLogPathFor(id),
         cli_home_dir: cliHomeDirFor(id),
+        extra_env: extraEnv,
         registered_at: new Date().toISOString(),
       });
       managedAgents.upsert({ agent_id: id, name: cfg.name, cli: cfg.cli, working_dir: cfg.working_dir });
@@ -565,6 +615,16 @@ async function runRuntime(
       // ST-5b — pass the registry as a snapshot source so each heartbeat
       // reports the currently-supervised agent_ids and their working dirs.
       managedAgents,
+      // Self-update probe — pulls from the cache populated above so the
+      // heartbeat never blocks on git I/O. update_available is computed
+      // here so the manager owns version-string semantics (and an admin UI
+      // bug can't accidentally enable an Update button on a current install).
+      selfUpdateInfo: () => ({
+        latest_version: lastProbedLatestVersion,
+        update_available:
+          !!lastProbedLatestVersion && isVersionOlder(version, lastProbedLatestVersion),
+        repo_root: repoRoot,
+      }),
     });
     instanceHeartbeat._real.start();
     const fireUpload = (): void => {
@@ -615,6 +675,10 @@ async function runRuntime(
   process.once('SIGTERM', () => void shutdown('SIGTERM'));
   process.once('SIGINT', () => void shutdown('SIGINT'));
 
+  // SIGUSR1: same self-update path as the `update_manager` SSE command.
+  // Useful as a CLI fallback (`kill -USR1 <pid>`) when the operator can't
+  // reach the AWB UI. NOT available on Windows (signal is POSIX-only) —
+  // Windows operators use the AWB UI Update button or restart manually.
   let selfUpdateInFlight = false;
   process.on('SIGUSR1', async () => {
     if (selfUpdateInFlight) {
@@ -624,7 +688,15 @@ async function runRuntime(
     selfUpdateInFlight = true;
     try {
       const result = await runSelfUpdate({ log });
-      log(`Self-update: ${result.summary}`);
+      log(`Self-update (SIGUSR1): ${result.summary}`);
+      if (result.changed) {
+        // Same respawn-then-exit pattern as the SSE handler. Brief grace so
+        // logs flush and the OS finishes the spawn syscall.
+        await respawnManager({ log }).catch((err: any) =>
+          log(`Self-update respawn failed: ${err?.message ?? err}`),
+        );
+        setTimeout(() => process.exit(0), 250);
+      }
     } catch (err: any) {
       log(`Self-update failed: ${err?.stack || err?.message || err}`);
     } finally {

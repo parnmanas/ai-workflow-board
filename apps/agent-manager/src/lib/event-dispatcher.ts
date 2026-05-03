@@ -56,6 +56,10 @@ export interface AgentExecutionContext {
    *  GEMINI_HOME / CODEX_HOME) so per-agent sessions / plugins /
    *  settings stay isolated under <MANAGER_HOME>/agents/<id>/cli-home/. */
   cli_home_dir: string;
+  /** Per-agent credential extras (e.g. ANTHROPIC_API_KEY for api_key-mode
+   *  credentials). Empty / undefined for subscription-mode and unset
+   *  agents — those carry auth via files inside cli_home_dir instead. */
+  extra_env?: Record<string, string>;
 }
 
 // ─── Session manager interfaces ──────────────────────────────────────────
@@ -262,6 +266,7 @@ export class EventDispatcher {
       mcp_config_path: ctx.mcp_config_path,
       cli: ctx.cli || 'claude',
       cli_home_dir: ctx.cli_home_dir,
+      extra_env: ctx.extra_env,
     };
   }
 

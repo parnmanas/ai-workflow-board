@@ -150,7 +150,7 @@ export async function postCommandAck(
 export async function fetchAgentRecord(
   config: AwbConfig,
   agentId: string,
-): Promise<{ id: string; name: string; type: string; working_dir: string; manager_agent_id: string | null } | null> {
+): Promise<{ id: string; name: string; type: string; working_dir: string; manager_agent_id: string | null; credential_id?: string | null } | null> {
   if (!agentId) return null;
   try {
     const url = `${trimSlash(config.url)}/api/agent-manager/managed-agents/${encodeURIComponent(agentId)}`;
@@ -181,6 +181,46 @@ export async function fetchAgentRecord(
  *
  * Returns null on any failure — caller decides whether to throw / retry.
  */
+/**
+ * Fetch the decrypted CLI credential for a managed agent the manager owns.
+ * Returns null when the agent has no credential set (server returns 204) and
+ * also on any error (manager falls back to operator-HOME defaults). The
+ * payload shape mirrors the server's
+ * `/api/agent-manager/managed-agents/:id/credential` route.
+ */
+export async function fetchAgentCredential(
+  config: AwbConfig,
+  agentId: string,
+): Promise<{ credential_id: string; provider: string; fields: Record<string, string> } | null> {
+  if (!agentId) return null;
+  try {
+    const url = `${trimSlash(config.url)}/api/agent-manager/managed-agents/${encodeURIComponent(agentId)}/credential`;
+    const resp = await fetch(url, {
+      headers: {
+        'X-Agent-Key': config.apiKey,
+        Accept: 'application/json',
+      },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    // 204 = agent has no credential_id set — caller treats as "use operator HOME".
+    if (resp.status === 204) return null;
+    if (!resp.ok) {
+      log(`agent credential fetch failed: ${resp.status} ${resp.statusText} (agent=${agentId})`);
+      return null;
+    }
+    const body = (await resp.json()) as any;
+    if (!body || typeof body !== 'object' || typeof body.provider !== 'string') return null;
+    return {
+      credential_id: typeof body.credential_id === 'string' ? body.credential_id : '',
+      provider: body.provider,
+      fields: body.fields && typeof body.fields === 'object' ? body.fields : {},
+    };
+  } catch (err: any) {
+    log(`agent credential fetch error: ${err?.message ?? err} (agent=${agentId})`);
+    return null;
+  }
+}
+
 export async function provisionManagedAgentApiKey(
   config: AwbConfig,
   agentId: string,

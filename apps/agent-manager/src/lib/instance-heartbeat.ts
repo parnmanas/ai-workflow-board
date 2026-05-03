@@ -31,12 +31,33 @@ export interface InstanceMeta {
   // ST-5b — managed-agent presence reporter. Optional so legacy callers
   // that don't track managed agents still construct a valid heartbeat.
   managedAgents?: ManagedAgentSnapshot | null;
+  // Self-update probe — read on each heartbeat. Returning null means
+  // "no upstream info to report" (probe still warming up, no .git, etc.)
+  // and the heartbeat omits the corresponding payload fields.
+  selfUpdateInfo?: () => SelfUpdateInfo | null;
 }
 
 /** Tiny duck-typed read-only snapshot of ManagedAgentRegistry. */
 export interface ManagedAgentSnapshot {
   liveAgentIds(): string[];
   workingDirs(): string[];
+}
+
+/**
+ * Snapshot of "where does this manager pull updates from, and is one
+ * pending right now?" — sourced from the periodic upstream-version probe in
+ * main.ts and surfaced on every heartbeat.
+ */
+export interface SelfUpdateInfo {
+  /** Newest version visible in the manager's git remote (or null if probe
+   *  hasn't run yet). */
+  latest_version: string | null;
+  /** Strict "local < remote" comparison — manager owns the semantics, so
+   *  the server doesn't have to second-guess version-string conventions. */
+  update_available: boolean;
+  /** Local git checkout root the update would run in. Useful for the
+   *  admin-side ack so the operator sees `repo=/srv/awb` in the toast. */
+  repo_root: string | null;
 }
 
 export interface InstanceHeartbeatPayload {
@@ -54,6 +75,11 @@ export interface InstanceHeartbeatPayload {
   agent_ids?: string[];
   working_dirs?: string[];
   paired_at?: string;
+  // Self-update fields — present only when selfUpdateInfo() returns non-null.
+  // Old AWB servers (pre-update_manager) ignore unknown keys safely.
+  latest_version?: string;
+  update_available?: boolean;
+  repo_root?: string;
 }
 
 export class InstanceHeartbeat {
@@ -74,9 +100,11 @@ export class InstanceHeartbeat {
       ? meta.cliAdapters.map((s) => String(s)).filter(Boolean)
       : [];
     const managedSnapshot = meta?.managedAgents ?? null;
+    const selfUpdateInfoFn = meta?.selfUpdateInfo;
     this.#payloadFactory = () => {
       const agentIds = managedSnapshot ? managedSnapshot.liveAgentIds() : [];
       const workingDirs = managedSnapshot ? managedSnapshot.workingDirs() : [];
+      const su = selfUpdateInfoFn ? selfUpdateInfoFn() : null;
       return {
         instance_id: this.#instanceId,
         agent_id: this.#agentId,
@@ -92,6 +120,11 @@ export class InstanceHeartbeat {
         // and non-empty; legacy AWB servers (pre-ST-4) don't expect them.
         ...(agentIds.length ? { agent_ids: agentIds } : {}),
         ...(workingDirs.length ? { working_dirs: workingDirs } : {}),
+        // Same: omit when the probe hasn't returned yet so the admin UI
+        // can render "—" instead of a confusing default.
+        ...(su && su.latest_version ? { latest_version: su.latest_version } : {}),
+        ...(su && typeof su.update_available === 'boolean' ? { update_available: su.update_available } : {}),
+        ...(su && su.repo_root ? { repo_root: su.repo_root } : {}),
       };
     };
   }

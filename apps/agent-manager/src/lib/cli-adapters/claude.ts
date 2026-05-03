@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { resolveCliBin } from '../cli-resolver.js';
 import {
   ADAPTER_CAPABILITIES,
+  type AdapterCredential,
   CliAdapter,
   PARSE_STAGE,
   type OneshotSpec,
@@ -109,37 +110,52 @@ export class ClaudeCliAdapter extends CliAdapter {
     return 'CLAUDE_CONFIG_DIR';
   }
 
-  async prepareCliHome(cliHomeDir: string): Promise<void> {
-    // Claude authenticates via .credentials.json (OAuth tokens written
-    // by `claude login`). A fresh per-agent home has none, so without
-    // help every spawn would exit immediately with an auth error
-    // (observed: 0.6s to is_error=true, no useful work done). Symlink
-    // the operator's main credentials so all managed agents share auth
-    // while sessions / projects stay isolated under cli-home.
-    //
-    // Source resolution mirrors constants.ts: $CLAUDE_CONFIG_DIR if the
-    // operator has redirected the manager's main claude home, else
-    // ~/.claude. Skip silently when the source doesn't exist — the
-    // operator simply hasn't `claude login`-ed yet, and claude itself
-    // will then surface a clearer "not authenticated" error than a
-    // missing-file warning.
-    const mainHome = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude');
-    const src = join(mainHome, '.credentials.json');
+  async prepareCliHome(
+    cliHomeDir: string,
+    credential?: AdapterCredential | null,
+  ): Promise<{ extraEnv: Record<string, string> }> {
+    // Always start from a clean slate so a switch between
+    // operator-default → subscription → api_key takes effect on the
+    // next spawn (the previous mode's file would otherwise win).
     const dst = join(cliHomeDir, '.credentials.json');
-
-    try {
-      await fsp.access(src);
-    } catch {
-      return;
-    }
-
-    // Replace whatever's at dst — handles re-spawn after the operator
-    // re-authed (symlink target may have changed) and the legacy case
-    // where a copy was left there before this hook existed.
     try {
       await fsp.unlink(dst);
     } catch (err: any) {
       if (err?.code !== 'ENOENT') throw err;
+    }
+
+    if (credential && credential.provider === 'claude_subscription') {
+      // Operator pasted the literal `.credentials.json` content into the
+      // AWB UI; replay it verbatim. Mode 0600 because OAuth tokens are
+      // bearer credentials at rest.
+      const body = credential.fields?.credentials_json ?? '';
+      if (body) {
+        await fsp.writeFile(dst, body, { mode: 0o600 });
+      }
+      return { extraEnv: {} };
+    }
+
+    if (credential && credential.provider === 'claude_api_key') {
+      // ANTHROPIC_API_KEY overrides the credentials.json path inside the
+      // claude CLI; skipping the operator-HOME symlink keeps the env-var
+      // path unambiguous so an operator-side `claude login` change can't
+      // accidentally take precedence.
+      const apiKey = credential.fields?.api_key ?? '';
+      return { extraEnv: apiKey ? { ANTHROPIC_API_KEY: apiKey } : {} };
+    }
+
+    // No per-agent credential — fall back to the operator's main HOME
+    // (legacy behaviour). Source resolution mirrors constants.ts:
+    // $CLAUDE_CONFIG_DIR if the operator has redirected the manager's
+    // main claude home, else ~/.claude. Skip silently when the source
+    // doesn't exist — the operator simply hasn't `claude login`-ed yet,
+    // and claude itself will surface a clearer "not authenticated" error.
+    const mainHome = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude');
+    const src = join(mainHome, '.credentials.json');
+    try {
+      await fsp.access(src);
+    } catch {
+      return { extraEnv: {} };
     }
     try {
       await fsp.symlink(src, dst);
@@ -154,5 +170,6 @@ export class ClaudeCliAdapter extends CliAdapter {
         throw err;
       }
     }
+    return { extraEnv: {} };
   }
 }

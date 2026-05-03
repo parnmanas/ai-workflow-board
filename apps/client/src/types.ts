@@ -52,6 +52,9 @@ export interface Agent {
   // ST-4 — agent-manager-managed agents. Empty/null on legacy rows.
   working_dir?: string;
   manager_agent_id?: string | null;
+  /** Optional Credential row that supplies CLI auth (subscription / API key)
+   *  for the spawned agent. null = fall back to the operator's main HOME. */
+  credential_id?: string | null;
   /** ST-7: name of the manager Agent that supervises this agent. Populated
    *  by the server's agent listing endpoints (one DB lookup per request).
    *  Drives the `<ManagerName>/<AgentName>` display format used everywhere
@@ -682,6 +685,14 @@ export interface AgentManagerInstance {
   agent_ids?: string[];
   working_dirs?: string[];
   paired_at?: string;
+  // Self-update metadata reported by manager-mode instances. `latest_version`
+  // is the version visible in the manager's git remote on its tracked
+  // branch; `update_available` = strict "older" comparison done manager-side
+  // so the UI doesn't have to. `repo_root` = local checkout the Update
+  // button would run a pull/build in.
+  latest_version?: string;
+  update_available?: boolean;
+  repo_root?: string;
 }
 
 // ST-5 — pairing tokens. PairingTokenMint is the response of
@@ -714,7 +725,8 @@ export type AgentManagerCommandKind =
   | 'reload_config'
   | 'update_plugins'
   | 'refresh_mcp_config'
-  | 'pull_working_dir';
+  | 'pull_working_dir'
+  | 'update_manager';
 
 export interface AgentManagerCommandResult {
   ok: boolean;
