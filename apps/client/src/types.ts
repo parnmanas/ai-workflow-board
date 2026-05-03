@@ -122,8 +122,28 @@ export interface Resource {
   file_name: string;
   file_mimetype: string;
   tags: string[];
+  // For type='repository': the branch tickets default to when no per-ticket
+  // base_branch is set. Empty leaves the choice to git's `origin/HEAD`.
+  default_branch?: string;
   created_at: string;
   updated_at: string;
+}
+
+// Embedded snapshot of the ticket's base repository — populated by
+// loadTicketFull on the server when ticket.base_repo_resource_id is set.
+export interface TicketBaseRepo {
+  id: string;
+  name: string;
+  url: string;
+  default_branch: string;
+  type: string;
+}
+
+// Result of GET /api/resources/:id/branches — git ls-remote output for a
+// repository resource, with the default branch (if configured) pinned first.
+export interface RepoBranch {
+  name: string;
+  sha: string;
 }
 
 export interface Credential {
@@ -239,6 +259,15 @@ export interface Ticket {
   channel_ids: string[]; // GUID array — references Channel.id
   // Phase 1 ticket prompt snapshot (D-17 / ROLE-08)
   prompt_text?: string;
+  // Repository resource the ticket builds against (set via the picker in the
+  // detail tab). The agent uses this + base_branch to pull the right base
+  // before cutting its feature branch. Empty when the ticket is non-code.
+  base_repo_resource_id?: string;
+  base_branch?: string;
+  // Server-hydrated snapshot of base_repo_resource_id (loadTicketFull only).
+  // Carries url + default_branch so the picker UI doesn't need a second
+  // round-trip per ticket open.
+  base_repo?: TicketBaseRepo | null;
   created_by: string; // Name of the creator (user or agent)
   created_by_type: 'user' | 'agent' | ''; // Creator type
   created_by_id: string; // GUID — references User.id or Agent.id

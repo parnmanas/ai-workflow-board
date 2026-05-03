@@ -201,7 +201,11 @@ This ticket is in the In Progress column. Implement the work on a feature branch
 
 1. **Create or reuse the feature branch**
    - \`git fetch origin\`
-   - From the up-to-date default branch, \`git checkout -b ticket/{ticket_id_short}-{slug}\` where:
+   - Resolve the base branch:
+     - If the trigger prompt includes a **Base repository** block, use the \`Base branch\` listed there. Verify your \`working_dir\` is a clone of the listed URL — if it isn't, stop and ask in a comment instead of guessing.
+     - Otherwise, fall back to the repository's default branch (\`origin/HEAD\`).
+   - Pull the base branch to the latest tip: \`git checkout <base-branch> && git pull --ff-only origin <base-branch>\`.
+   - From that up-to-date base, \`git checkout -b ticket/{ticket_id_short}-{slug}\` where:
      - \`ticket_id_short\` — first 8 chars of the ticket id.
      - \`slug\` — lowercase alphanumeric-and-hyphen slug derived from the ticket title (fall back to id only if no usable tokens).
    - If the branch already exists (ticket bounced back from Review), \`git checkout\` and reuse it. Amend or append commits; do **not** start over with a new name.

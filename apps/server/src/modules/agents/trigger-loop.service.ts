@@ -8,6 +8,7 @@ import { BoardColumn } from '../../entities/BoardColumn';
 import { Board } from '../../entities/Board';
 import { Agent } from '../../entities/Agent';
 import { PromptTemplate } from '../../entities/PromptTemplate';
+import { Resource } from '../../entities/Resource';
 import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { LogService } from '../../services/log.service';
@@ -280,6 +281,31 @@ export class TriggerLoopService implements OnModuleInit {
     const freshTicket = await this.dataSource.getRepository(Ticket).findOne({ where: { id: ticket.id } });
     const ticketPrompt = freshTicket?.prompt_text || '';
 
+    // Resolve the ticket's base repository snapshot (if any). Embedded in the
+    // SSE payload so agent-manager doesn't need a second round-trip to render
+    // the prompt block — name/url/default_branch come along for free. Failing
+    // the lookup is non-fatal; the agent prompt just omits the repo line.
+    const baseRepoId = freshTicket?.base_repo_resource_id || ticket.base_repo_resource_id || '';
+    const baseBranch = freshTicket?.base_branch || ticket.base_branch || '';
+    let baseRepo: { id: string; name: string; url: string; default_branch: string } | null = null;
+    if (baseRepoId) {
+      try {
+        const r = await this.dataSource.getRepository(Resource).findOne({ where: { id: baseRepoId } });
+        if (r) {
+          baseRepo = {
+            id: r.id,
+            name: r.name,
+            url: r.url || '',
+            default_branch: r.default_branch || '',
+          };
+        }
+      } catch (e) {
+        this.logService.warn('MCP', 'base_repo lookup failed (continuing without)', {
+          err: String(e), ticket_id: ticket.id, base_repo_id: baseRepoId,
+        });
+      }
+    }
+
     // Column workflow prompt: Board.column_prompts[column_id] → PromptTemplate.content
     let columnPrompt: { template_id: string; name: string; content: string } | null = null;
     try {
@@ -391,6 +417,8 @@ export class TriggerLoopService implements OnModuleInit {
       role_prompt: rolePrompt,
       ticket_prompt: ticketPrompt,
       column_prompt: columnPrompt,
+      base_repo: baseRepo,
+      base_branch: baseBranch,
       triggered_by: triggeredBy,
       timestamp: now.toISOString(),
       force_respawn: forceRespawn,

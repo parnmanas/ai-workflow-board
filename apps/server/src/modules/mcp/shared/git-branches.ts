@@ -1,0 +1,96 @@
+/**
+ * Git branch listing helper.
+ *
+ * Used by the resources controller (`GET /api/resources/:id/branches`) and
+ * by the MCP `list_repo_branches` tool to populate the branch picker in the
+ * Ticket panel. Implementation is `git ls-remote --heads <url>` so the
+ * server doesn't need a working clone — credentials are embedded into the
+ * URL when a Credential row supplies them.
+ *
+ * Returns refs sorted with the repository's `default_branch` (when set)
+ * pinned to the top so the UI's first option is the most useful one.
+ */
+
+import { spawn } from 'child_process';
+
+export interface RepoBranch {
+  name: string;
+  sha: string;
+}
+
+export interface ListRepoBranchesOptions {
+  url: string;
+  credential?: { username?: string; token?: string } | null;
+  defaultBranch?: string;
+  /** Hard cap on git ls-remote runtime. Default 15s — enough for normal
+   *  GitHub/GitLab responses, fast enough that an unreachable host doesn't
+   *  block the request thread for minutes. */
+  timeoutMs?: number;
+}
+
+/** Inject username/token into an https URL when credentials are supplied.
+ *  Leaves ssh:// and git@ URLs untouched (those need a key, not a token). */
+function applyCredential(url: string, credential?: { username?: string; token?: string } | null): string {
+  if (!credential) return url;
+  const token = credential.token || '';
+  if (!token) return url;
+  if (!/^https?:\/\//i.test(url)) return url;
+  const username = credential.username || credential.token ? (credential.username || 'x-access-token') : '';
+  try {
+    const u = new URL(url);
+    u.username = encodeURIComponent(username);
+    u.password = encodeURIComponent(token);
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
+export async function listRepoBranches(opts: ListRepoBranchesOptions): Promise<RepoBranch[]> {
+  if (!opts.url) throw new Error('Repository URL is required');
+  const url = applyCredential(opts.url, opts.credential);
+  const timeoutMs = opts.timeoutMs ?? 15000;
+
+  const stdout = await new Promise<string>((resolve, reject) => {
+    // GIT_TERMINAL_PROMPT=0 stops git from blocking on a credential prompt
+    // when the URL needs auth we didn't provide — fail fast instead of hanging
+    // the request.
+    const child = spawn('git', ['ls-remote', '--heads', url], {
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    });
+    let out = '';
+    let err = '';
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error(`git ls-remote timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    child.stdout.on('data', (d) => { out += d.toString(); });
+    child.stderr.on('data', (d) => { err += d.toString(); });
+    child.on('error', (e) => { clearTimeout(timer); reject(e); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve(out);
+      else reject(new Error(err.trim() || `git ls-remote exited with code ${code}`));
+    });
+  });
+
+  const branches: RepoBranch[] = [];
+  for (const line of stdout.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const [sha, ref] = trimmed.split('\t');
+    if (!sha || !ref || !ref.startsWith('refs/heads/')) continue;
+    branches.push({ name: ref.slice('refs/heads/'.length), sha });
+  }
+
+  // Sort: configured default first, then alphabetical.
+  const def = (opts.defaultBranch || '').trim();
+  branches.sort((a, b) => {
+    if (def) {
+      if (a.name === def) return -1;
+      if (b.name === def) return 1;
+    }
+    return a.name.localeCompare(b.name);
+  });
+  return branches;
+}

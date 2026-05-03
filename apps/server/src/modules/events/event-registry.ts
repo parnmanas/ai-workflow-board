@@ -144,6 +144,8 @@ export const EVENT_TYPES: EventDefinition[] = [
         ticket_prompt: event.ticket_prompt || '',
         trigger_source: event.trigger_source || '',
         column_prompt: event.column_prompt ?? null,
+        base_repo: event.base_repo ?? null,
+        base_branch: event.base_branch || '',
         max_concurrent_tickets_per_agent:
           typeof event.max_concurrent_tickets_per_agent === 'number'
             ? event.max_concurrent_tickets_per_agent

@@ -123,11 +123,13 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
 
   server.tool(
     'update_ticket',
-    'Update a root ticket\'s fields (title, description, priority, assignee, reporter, reviewer_id, labels, channel_ids).\n\n' +
+    'Update a root ticket\'s fields (title, description, priority, assignee, reporter, reviewer_id, labels, channel_ids, base_repo_resource_id, base_branch).\n\n' +
     'NOTE: this tool does NOT change `status` and is intended for ROOT tickets. ' +
     'Status on a root ticket is driven by which column it sits in — use move_ticket to advance it. ' +
     'For SUBTASKS (depth > 0), use update_child_ticket — that\'s also where you mark a finished subtask ' +
-    'with status="done".',
+    'with status="done".\n\n' +
+    'Base repo & branch: pass `base_repo_resource_id` (a workspace/board Resource of type="repository") together with ' +
+    '`base_branch` to pin the branch the ticket\'s feature branch should be cut from. Empty strings clear the binding.',
     {
       ticket_id: z.string().describe('Ticket ID'),
       title: z.string().optional().describe('New title'),
@@ -140,8 +142,10 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       reviewer_id: z.string().optional().describe('Reviewer agent ID'),
       labels: z.array(z.string()).optional().describe('New labels array'),
       channel_ids: z.array(z.string()).optional().describe('New notification channel IDs'),
+      base_repo_resource_id: z.string().optional().describe('Resource ID (type=repository) the ticket builds against. Empty string clears.'),
+      base_branch: z.string().optional().describe('Branch the agent should treat as the base when starting work. Empty string clears.'),
     },
-    async ({ ticket_id, title, description, priority, assignee, reporter, assignee_id, reporter_id, reviewer_id, labels, channel_ids }, extra: { sessionId?: string }) => {
+    async ({ ticket_id, title, description, priority, assignee, reporter, assignee_id, reporter_id, reviewer_id, labels, channel_ids, base_repo_resource_id, base_branch }, extra: { sessionId?: string }) => {
       const ticketRepo = dataSource.getRepository(Ticket);
       const ticket = await ticketRepo.findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Ticket not found');
@@ -169,6 +173,14 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       if (reviewer_id !== undefined) { ticket.reviewer_id = reviewer_id; changes.push('reviewer'); }
       if (labels !== undefined) { ticket.labels = JSON.stringify(labels); changes.push('labels'); }
       if (channel_ids !== undefined) { ticket.channel_ids = JSON.stringify(channel_ids); changes.push('channel_ids'); }
+      if (base_repo_resource_id !== undefined) {
+        ticket.base_repo_resource_id = base_repo_resource_id || '';
+        changes.push('base_repo');
+      }
+      if (base_branch !== undefined) {
+        ticket.base_branch = base_branch || '';
+        changes.push('base_branch');
+      }
 
       await ticketRepo.save(ticket);
 

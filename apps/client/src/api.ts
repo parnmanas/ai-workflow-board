@@ -539,6 +539,7 @@ export const api = {
     file_name?: string;
     file_mimetype?: string;
     tags?: string[];
+    default_branch?: string;
   }) =>
     request<Resource>('/resources', { method: 'POST', body: JSON.stringify(data) }),
   updateResource: (
@@ -556,12 +557,19 @@ export const api = {
       tags?: string[];
       board_id?: string | null;
       credential_id?: string | null;
+      default_branch?: string;
     },
   ) =>
     request<Resource>(`/resources/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteResource: (id: string, workspaceId: string) => {
     const params = new URLSearchParams({ workspace_id: workspaceId });
     return request<{ success: true; id: string }>(`/resources/${id}?${params.toString()}`, { method: 'DELETE' });
+  },
+  listRepoBranches: (id: string, workspaceId: string) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    return request<{ branches: { name: string; sha: string }[]; default_branch: string }>(
+      `/resources/${id}/branches?${params.toString()}`,
+    );
   },
 
   // ─── Credentials ──────────────────────────────────────

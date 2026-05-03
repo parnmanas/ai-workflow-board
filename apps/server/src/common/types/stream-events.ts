@@ -68,6 +68,12 @@ export interface AgentTriggerPayload {
   trigger_source: string;
   // phase12 — board column → prompt-template content; null when no template wired
   column_prompt: { template_id: string; name: string; content: string } | null;
+  // Ticket's configured base repository (Resource of type='repository') and
+  // base branch — agent-manager renders these into the in-progress prompt so
+  // the agent fetches + branches off the right ref. Both null/empty when the
+  // ticket leaves them unset (pure-discussion / non-code work).
+  base_repo: { id: string; name: string; url: string; default_branch: string } | null;
+  base_branch: string;
   // TicketSupervisor signal: plugin should kill any live subagent for this
   // ticket before handling the trigger. Set when a wedged session has failed
   // to advance my_last_update_at after the initial supervisor re-push.

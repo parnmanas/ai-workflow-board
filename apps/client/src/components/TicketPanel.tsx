@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Ticket, Agent, Channel, ActivityLog, CommentType, User, TicketAttachmentMeta } from '../types';
+import { Ticket, Agent, Channel, ActivityLog, CommentType, User, TicketAttachmentMeta, Resource, RepoBranch } from '../types';
 import { api, TicketRoleAssignmentRow, getActiveWorkspaceId } from '../api';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
@@ -504,6 +504,15 @@ export default function TicketPanel({
   const [reporter, setReporter] = useState(resolveAgentName(activeTicket.reporter_id, activeTicket.reporter));
   const [reviewerId, setReviewerId] = useState(activeTicket.reviewer_id || '');
   const [selectedChannelIds, setSelectedChannelIds] = useState<string[]>(activeTicket.channel_ids || []);
+  // Base repository / branch picker state. The repo list is filtered to
+  // type='repository' resources visible from this workspace + board scope.
+  // Branch list is fetched lazily when a repo is selected (git ls-remote).
+  const [baseRepoId, setBaseRepoId] = useState<string>(activeTicket.base_repo_resource_id || '');
+  const [baseBranch, setBaseBranch] = useState<string>(activeTicket.base_branch || '');
+  const [repoOptions, setRepoOptions] = useState<Resource[]>([]);
+  const [branchOptions, setBranchOptions] = useState<RepoBranch[]>([]);
+  const [branchesLoading, setBranchesLoading] = useState(false);
+  const [branchesError, setBranchesError] = useState<string | null>(null);
   const [commentContent, setCommentContent] = useState('');
   // Staged attachments — kept in memory until the user hits Send; server
   // turns each into a Resource (type='comment_attachment') and attaches the
@@ -552,6 +561,10 @@ export default function TicketPanel({
     setReporter(resolveAgentName(activeTicket.reporter_id, activeTicket.reporter));
     setReviewerId(activeTicket.reviewer_id || '');
     setSelectedChannelIds(activeTicket.channel_ids || []);
+    setBaseRepoId(activeTicket.base_repo_resource_id || '');
+    setBaseBranch(activeTicket.base_branch || '');
+    setBranchOptions([]);
+    setBranchesError(null);
     setCommentContent('');
     setCommentAttachments([]);
     // Seed from the ticket payload (only loadTicketFull populates this; the
@@ -641,6 +654,47 @@ export default function TicketPanel({
   const saveField = (field: string, value: any) => {
     onUpdate(activeTicket.id, { [field]: value });
   };
+
+  // Load the repository resources visible to this ticket. We pull workspace +
+  // board scope in one shot (no board_id filter) so workspace-wide repos show
+  // up alongside the per-board ones, then dedupe by id.
+  useEffect(() => {
+    const wsId = workspaceId || getActiveWorkspaceId() || '';
+    if (!wsId) {
+      setRepoOptions([]);
+      return;
+    }
+    let cancelled = false;
+    api.listResources(wsId, undefined, 'repository')
+      .then(rows => { if (!cancelled) setRepoOptions(rows || []); })
+      .catch(() => { if (!cancelled) setRepoOptions([]); });
+    return () => { cancelled = true; };
+  }, [workspaceId]);
+
+  // Lazy-load branches when the user selects a repo (or the ticket loads with
+  // one already pinned). git ls-remote runs server-side and can take a few
+  // seconds; we surface that with a loading flag rather than blocking the
+  // panel render.
+  useEffect(() => {
+    const wsId = workspaceId || getActiveWorkspaceId() || '';
+    if (!wsId || !baseRepoId) {
+      setBranchOptions([]);
+      setBranchesError(null);
+      return;
+    }
+    let cancelled = false;
+    setBranchesLoading(true);
+    setBranchesError(null);
+    api.listRepoBranches(baseRepoId, wsId)
+      .then(({ branches }) => { if (!cancelled) setBranchOptions(branches || []); })
+      .catch(err => {
+        if (cancelled) return;
+        setBranchOptions([]);
+        setBranchesError(err?.message || 'Failed to list branches');
+      })
+      .finally(() => { if (!cancelled) setBranchesLoading(false); });
+    return () => { cancelled = true; };
+  }, [workspaceId, baseRepoId]);
 
   const handleAttach = () => {
     const input = document.createElement('input');
@@ -1591,6 +1645,70 @@ export default function TicketPanel({
                   );
                 });
               })()}
+            </div>
+
+            {/* Base repository / branch — pinned per-ticket so the assignee
+                agent's `in_progress_workflow` cuts its feature branch from
+                the right base instead of whatever the working_dir happens
+                to be on. */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
+              <div>
+                <label style={labelStyle}>Base Repository</label>
+                <select
+                  value={baseRepoId}
+                  onChange={e => {
+                    const next = e.target.value;
+                    setBaseRepoId(next);
+                    setBaseBranch('');
+                    onUpdate(activeTicket.id, { base_repo_resource_id: next, base_branch: '' });
+                  }}
+                  style={{
+                    background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
+                    padding: '5px 8px', color: tokens.colors.textStrong, fontSize: '12px', width: '100%', cursor: 'pointer',
+                  }}
+                >
+                  <option value="">— None —</option>
+                  {repoOptions.map(r => (
+                    <option key={r.id} value={r.id}>{r.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label style={labelStyle}>
+                  Base Branch
+                  {baseRepoId && branchesLoading ? ' · loading…' : ''}
+                </label>
+                <select
+                  value={baseBranch}
+                  disabled={!baseRepoId || branchesLoading}
+                  onChange={e => {
+                    const next = e.target.value;
+                    setBaseBranch(next);
+                    onUpdate(activeTicket.id, { base_branch: next });
+                  }}
+                  style={{
+                    background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
+                    padding: '5px 8px', color: tokens.colors.textStrong, fontSize: '12px', width: '100%',
+                    cursor: !baseRepoId || branchesLoading ? 'not-allowed' : 'pointer',
+                  }}
+                >
+                  <option value="">{baseRepoId ? '— Use repo default —' : '— Select repo first —'}</option>
+                  {/* Pinned base_branch may not be in the live ls-remote list
+                      (branch deleted upstream, or list still loading). Show
+                      it anyway so the picker reflects the persisted value. */}
+                  {baseBranch && !branchOptions.some(b => b.name === baseBranch) && (
+                    <option value={baseBranch}>{baseBranch}</option>
+                  )}
+                  {branchOptions.map(b => (
+                    <option key={b.name} value={b.name}>{b.name}</option>
+                  ))}
+                </select>
+                {branchesError && (
+                  <div style={{ fontSize: '10px', color: tokens.colors.dangerLight, marginTop: 4 }}>
+                    {branchesError}
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* Created By */}

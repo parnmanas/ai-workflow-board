@@ -26,6 +26,13 @@ export class Resource {
   @Column({ type: 'varchar', default: '' })
   url: string;
 
+  // For type='repository': the branch tickets default to when no per-ticket
+  // base_branch is set. Empty leaves the choice to git's `origin/HEAD`. Stored
+  // alongside the repo so the same default applies across every ticket that
+  // points at this resource.
+  @Column({ type: 'varchar', default: '' })
+  default_branch: string;
+
   @Column({ type: 'text', default: '' })
   content: string;
 

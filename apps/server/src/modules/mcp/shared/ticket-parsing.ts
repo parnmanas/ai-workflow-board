@@ -181,5 +181,27 @@ export async function loadTicketFull(scope: RepoScope, id: string) {
       gc.attachments = sortAttachments(attachmentsByTicket.get(gc.id) || []);
     }
   }
+  // Resolve the ticket's base repository (if any) into a small embedded
+  // snapshot so the client + agent get url / name / default_branch in one
+  // round-trip. Failing the lookup is non-fatal: leaves base_repo: null and
+  // the picker UI / agent prompt fall back to the bare id.
+  if (ticket.base_repo_resource_id) {
+    try {
+      const repo = await scope.getRepository(Resource).findOne({ where: { id: ticket.base_repo_resource_id } });
+      out.base_repo = repo
+        ? {
+            id: repo.id,
+            name: repo.name,
+            url: repo.url,
+            default_branch: repo.default_branch || '',
+            type: repo.type,
+          }
+        : null;
+    } catch {
+      out.base_repo = null;
+    }
+  } else {
+    out.base_repo = null;
+  }
   return out;
 }

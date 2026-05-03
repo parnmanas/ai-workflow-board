@@ -2,7 +2,7 @@
  * Resource (workspace/board-scoped document & embedding) MCP tools.
  *
  * Tools: list_resources, get_resource, save_resource, delete_resource,
- *        search_resources, embed_resources
+ *        search_resources, embed_resources, list_repo_branches
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -12,6 +12,7 @@ import { ResourceEmbedding } from '../../../entities/ResourceEmbedding';
 import { cosineSimilarity } from '../../../services/embedding.service';
 import { ok, err } from '../shared/helpers';
 import { parseResourceTags, resourceToJson, embedResource, inferResourceMimetype } from '../shared/resource-helpers';
+import { listRepoBranches } from '../shared/git-branches';
 import type { ToolContext } from './context';
 
 export function registerResourceTools(server: McpServer, ctx: ToolContext): void {
@@ -77,8 +78,9 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
       file_name: z.string().optional().describe('Original file name'),
       file_mimetype: z.string().optional().describe('File MIME type'),
       tags: z.array(z.string()).optional().describe('Tags for categorization'),
+      default_branch: z.string().optional().describe('For type=repository: branch tickets default to when none is set on them. Empty string clears.'),
     },
-    async ({ workspace_id, id, board_id, name, description, type, url, content, file_data, file_name, file_mimetype, tags }) => {
+    async ({ workspace_id, id, board_id, name, description, type, url, content, file_data, file_name, file_mimetype, tags, default_branch }) => {
       const repo = dataSource.getRepository(Resource);
       if (!name || !name.trim()) return err('Resource name is required');
 
@@ -101,6 +103,7 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
         }
         if (board_id !== undefined) existing.board_id = board_id || null;
         if (tags !== undefined) existing.tags = JSON.stringify(tags);
+        if (default_branch !== undefined) existing.default_branch = default_branch || '';
         const saved = await repo.save(existing);
         embedResource(dataSource, logger, embeddingService, saved).catch(() => {});
         return ok(resourceToJson(saved));
@@ -123,11 +126,35 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
         file_name: effectiveFileName,
         file_mimetype: effectiveMimetype,
         tags: JSON.stringify(tags ?? []),
+        default_branch: default_branch ?? '',
       });
       const saved = await repo.save(created);
       embedResource(dataSource, logger, embeddingService, saved).catch(() => {});
       return ok(resourceToJson(saved));
     }
+  );
+
+  server.tool(
+    'list_repo_branches',
+    'List branches of a repository Resource via `git ls-remote --heads`. The Resource must be type="repository" and carry a URL. ' +
+    'Branches sort with the Resource\'s `default_branch` (when set) pinned to the top. Used by the Ticket panel to populate the Base Branch picker, and by agents that want to verify a base_branch exists upstream before pinning it.',
+    {
+      workspace_id: z.string().describe('Workspace ID — scope boundary so the resource lookup is workspace-bounded'),
+      resource_id: z.string().describe('Resource ID (must be type=repository)'),
+    },
+    async ({ workspace_id, resource_id }) => {
+      const repo = dataSource.getRepository(Resource);
+      const resource = await repo.findOne({ where: { id: resource_id, workspace_id } });
+      if (!resource) return err('Resource not found in workspace');
+      if (resource.type !== 'repository') return err(`resource type must be 'repository' (got '${resource.type}')`);
+      if (!resource.url) return err("resource has no URL — set the repository's URL before listing branches");
+      try {
+        const branches = await listRepoBranches({ url: resource.url, defaultBranch: resource.default_branch || '' });
+        return ok({ branches, default_branch: resource.default_branch || '' });
+      } catch (e: any) {
+        return err(`failed to list branches: ${String(e?.message || e)}`);
+      }
+    },
   );
 
   server.tool(
