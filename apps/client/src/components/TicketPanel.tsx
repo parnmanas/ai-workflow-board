@@ -45,8 +45,20 @@ interface TicketPanelProps {
   // onCreateChild (which makes a new ticket).
   onReparentChild?: (parentId: string, childId: string) => void;
   // Set (or clear) the holder of a workspace role on this ticket. Mutually
-  // exclusive agent_id / user_id; pass both null/'' to clear.
+  // exclusive agent_id / user_id; pass both null/'' to clear. Used by legacy
+  // direct-write call sites (none currently inside the panel — Save batches
+  // role drafts through onSaveDraft below).
   onSetRoleAssignment?: (ticketId: string, roleId: string, holder: { agent_id?: string | null; user_id?: string | null }) => void | Promise<void>;
+  // Commit the buffered Save/Discard draft in one shot. MUST reject (throw)
+  // on server failure — the footer relies on the rejection to preserve dirty
+  // state so the user doesn't lose their unsaved edits behind a misleading
+  // success toast. Falls back to per-field onUpdate / onSetRoleAssignment if
+  // omitted (legacy embedders).
+  onSaveDraft?: (
+    ticketId: string,
+    ticketFields: Record<string, any>,
+    roleDrafts: Record<string, { agent_id: string | null; user_id: string | null }>,
+  ) => Promise<void>;
   onAddComment: (
     ticketId: string,
     content: string,
@@ -355,7 +367,7 @@ function fileToBase64(file: File): Promise<string> {
 
 export default function TicketPanel({
   ticket, columnName, agents, users, channels, workspaceRoles, boardTickets, typingIndicators,
-  onClose, onUpdate, onDelete, onCreateChild, onDeleteChild, onReparentChild, onSetRoleAssignment, onAddComment, onSetCommentStatus, onSelectTicket,
+  onClose, onUpdate, onDelete, onCreateChild, onDeleteChild, onReparentChild, onSetRoleAssignment, onSaveDraft, onAddComment, onSetCommentStatus, onSelectTicket,
   currentBoardId, workspaceId, onMoveToBoard,
 }: TicketPanelProps) {
   // ─── Ticket role assignments ────────────────────────────
@@ -749,16 +761,27 @@ export default function TicketPanel({
     if (Object.keys(ticketFieldsToSave).length === 0 && Object.keys(roleDraftsToSave).length === 0) return;
     setSavingDraft(true);
     try {
-      const ops: Array<Promise<unknown>> = [];
-      if (Object.keys(ticketFieldsToSave).length > 0) {
-        ops.push(Promise.resolve(onUpdate(activeTicket.id, ticketFieldsToSave)));
-      }
-      if (onSetRoleAssignment) {
-        for (const [roleId, holder] of Object.entries(roleDraftsToSave)) {
-          ops.push(Promise.resolve(onSetRoleAssignment(activeTicket.id, roleId, holder)));
+      if (onSaveDraft) {
+        await onSaveDraft(activeTicket.id, ticketFieldsToSave, roleDraftsToSave);
+      } else {
+        // Legacy fallback: per-field calls. These wrappers may swallow errors
+        // upstream — we can't enforce throw-on-failure here, so dirty state may
+        // be cleared on a silently-failed save. Embedders should provide
+        // onSaveDraft to get the correct behavior.
+        const ops: Array<Promise<unknown>> = [];
+        if (Object.keys(ticketFieldsToSave).length > 0) {
+          ops.push(Promise.resolve(onUpdate(activeTicket.id, ticketFieldsToSave)));
         }
+        if (onSetRoleAssignment) {
+          for (const [roleId, holder] of Object.entries(roleDraftsToSave)) {
+            ops.push(Promise.resolve(onSetRoleAssignment(activeTicket.id, roleId, holder)));
+          }
+        }
+        await Promise.all(ops);
       }
-      await Promise.all(ops);
+      // Only reached when the save resolved cleanly. A throw skips this block,
+      // so the role drafts the user committed stay buffered, the Save footer
+      // stays visible, and only the upstream error toast fires.
       setRoleDrafts(prev => {
         const next = { ...prev };
         for (const k of Object.keys(roleDraftsToSave)) delete next[k];
@@ -770,7 +793,7 @@ export default function TicketPanel({
     } finally {
       setSavingDraft(false);
     }
-  }, [savingDraft, dirtyTicketFields, dirtyRoleDrafts, activeTicket.id, onUpdate, onSetRoleAssignment, showToast]);
+  }, [savingDraft, dirtyTicketFields, dirtyRoleDrafts, activeTicket.id, onSaveDraft, onUpdate, onSetRoleAssignment, showToast]);
 
   // Wrap close so X / Escape prompt before discarding unsaved edits. The
   // post-Delete close path uses raw onClose (the ticket is gone — there's
