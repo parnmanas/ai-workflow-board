@@ -4,12 +4,13 @@ import { Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Resource } from '../../entities/Resource';
+import { Credential } from '../../entities/Credential';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { PERMISSIONS } from '../../common/types/permissions';
 import { findOrFail } from '../../common/find-or-fail';
 import { inferResourceMimetype } from '../mcp/shared/resource-helpers';
-import { listRepoBranches } from '../mcp/shared/git-branches';
+import { listRepoBranches, resolveGitCredential } from '../mcp/shared/git-branches';
 
 @ApiBearerAuth('user-session')
 @ApiTags('resources')
@@ -19,6 +20,7 @@ import { listRepoBranches } from '../mcp/shared/git-branches';
 export class ResourcesController {
   constructor(
     @InjectRepository(Resource) private readonly resourceRepo: Repository<Resource>,
+    @InjectRepository(Credential) private readonly credentialRepo: Repository<Credential>,
   ) {}
 
   @Get()
@@ -152,8 +154,38 @@ export class ResourcesController {
       return res.status(400).json({ error: "resource has no URL — set the repository's URL before listing branches" });
     }
     try {
-      const branches = await listRepoBranches({ url: resource.url, defaultBranch: resource.default_branch || '' });
+      // Earlier this dropped `resource.credential_id` on the floor — private
+      // repos failed even when a Credential was attached. Resolve it here so
+      // `git ls-remote` runs with the right userinfo for HTTPS auth.
+      const credential = await resolveGitCredential(this.credentialRepo, resource.credential_id, workspaceId);
+      const branches = await listRepoBranches({
+        url: resource.url,
+        credential,
+        defaultBranch: resource.default_branch || '',
+      });
       return res.json({ branches, default_branch: resource.default_branch || '' });
+    } catch (err: any) {
+      return res.status(502).json({ error: 'failed to list branches', detail: String(err?.message || err) });
+    }
+  }
+
+  // Probe a repository URL + optional credential without first persisting a
+  // Resource. Powers the "Test connection" button in the Resource manager so
+  // operators can verify a URL is reachable (and credentials work) before
+  // saving — and so the same path can populate the Default Branch dropdown
+  // with real refs from the remote.
+  @Post('branches/test')
+  async testBranches(@Body() body: any, @Res() res: Response) {
+    const workspaceId = body?.workspace_id;
+    const url = typeof body?.url === 'string' ? body.url.trim() : '';
+    const credentialId = body?.credential_id || null;
+    const defaultBranch = typeof body?.default_branch === 'string' ? body.default_branch : '';
+    if (!workspaceId) return res.status(400).json({ error: 'workspace_id is required' });
+    if (!url) return res.status(400).json({ error: 'url is required' });
+    try {
+      const credential = await resolveGitCredential(this.credentialRepo, credentialId, workspaceId);
+      const branches = await listRepoBranches({ url, credential, defaultBranch });
+      return res.json({ branches, default_branch: defaultBranch });
     } catch (err: any) {
       return res.status(502).json({ error: 'failed to list branches', detail: String(err?.message || err) });
     }
