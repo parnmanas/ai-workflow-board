@@ -706,6 +706,15 @@ export interface AgentManagerInstance {
   agent_ids?: string[];
   working_dirs?: string[];
   paired_at?: string;
+  // Self-update fields — manager-mode only (managed by the manager's
+  // UpdateChecker). Pre-update managers leave these undefined; the UI's
+  // version compare degrades to "no info" in that case.
+  latest_version?: string | null;
+  update_available?: boolean;
+  repo_root?: string | null;
+  default_branch?: string | null;
+  update_last_checked_at?: string | null;
+  update_last_error?: string | null;
 }
 
 // ST-5 — pairing tokens. PairingTokenMint is the response of
@@ -738,7 +747,8 @@ export type AgentManagerCommandKind =
   | 'reload_config'
   | 'update_plugins'
   | 'refresh_mcp_config'
-  | 'pull_working_dir';
+  | 'pull_working_dir'
+  | 'update_manager';
 
 export interface AgentManagerCommandResult {
   ok: boolean;
