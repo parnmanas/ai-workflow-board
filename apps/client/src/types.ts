@@ -52,6 +52,9 @@ export interface Agent {
   // ST-4 — agent-manager-managed agents. Empty/null on legacy rows.
   working_dir?: string;
   manager_agent_id?: string | null;
+  /** Optional Credential row that supplies CLI auth (subscription / API key)
+   *  for the spawned agent. null = fall back to the operator's main HOME. */
+  credential_id?: string | null;
   /** ST-7: name of the manager Agent that supervises this agent. Populated
    *  by the server's agent listing endpoints (one DB lookup per request).
    *  Drives the `<ManagerName>/<AgentName>` display format used everywhere
@@ -728,4 +731,6 @@ export interface ManagedAgentCreateBody {
   working_dir?: string;
   manager_agent_id?: string | null;
   description?: string;
+  /** Optional per-agent CLI credential — see Agent.credential_id. */
+  credential_id?: string | null;
 }

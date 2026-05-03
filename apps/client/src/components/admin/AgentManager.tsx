@@ -1,10 +1,20 @@
-import React, { useMemo, useState } from 'react';
-import { api } from '../../api';
-import { Agent, SubagentSummary } from '../../types';
+import React, { useEffect, useMemo, useState } from 'react';
+import { api, getActiveWorkspaceId } from '../../api';
+import { Agent, Credential, SubagentSummary } from '../../types';
 import { tokens } from '../../tokens';
 import { Button, Input, Select, Badge, Modal, Card } from '../common';
 import { useCrudList } from '../../hooks/useCrudList';
 import { formatAgentDisplayName } from '../../utils/agentName';
+
+/** Map agent.type → credential provider prefix used to filter the credential
+ *  picker. CLIs whose adapter ships in agent-manager (claude / codex / gemini)
+ *  show only credentials with a matching provider prefix; legacy / custom
+ *  agent types skip the picker entirely. */
+const CLI_TO_CREDENTIAL_PREFIX: Record<string, string> = {
+  claude: 'claude_',
+  codex: 'codex_',
+  gemini: 'gemini_',
+};
 
 /** Stale heartbeat threshold — matches the AgentManagerPage badge logic so the
  *  two pages agree on what "live" looks like. Ten seconds shy of the registry
@@ -331,8 +341,29 @@ function SubagentsModal({ agent, onClose }: SubagentsModalProps) {
 export default function AgentManager() {
   const { items: agents, showForm, setShowForm, editingId, setEditingId, refresh: load } =
     useCrudList<Agent>(() => api.getAgentsAll());
-  const [form, setForm] = useState({ name: '', description: '', type: 'custom', role_prompt: '' });
+  const [form, setForm] = useState({ name: '', description: '', type: 'custom', role_prompt: '', credential_id: '' });
   const [subagentDetailAgent, setSubagentDetailAgent] = useState<Agent | null>(null);
+  const [credentials, setCredentials] = useState<Credential[]>([]);
+
+  // Pull credentials once per modal-open. Workspace-scoped: only credentials
+  // in the active workspace are eligible (matches the server's
+  // workspace-scoped FK validation in createManagedAgent).
+  useEffect(() => {
+    if (!showForm) return;
+    const wsId = getActiveWorkspaceId() || '';
+    if (!wsId) { setCredentials([]); return; }
+    let alive = true;
+    api.listCredentials(wsId)
+      .then((rows) => { if (alive) setCredentials(rows); })
+      .catch(() => { if (alive) setCredentials([]); });
+    return () => { alive = false; };
+  }, [showForm]);
+
+  const eligibleCredentials = useMemo(() => {
+    const prefix = CLI_TO_CREDENTIAL_PREFIX[form.type];
+    if (!prefix) return [];
+    return credentials.filter((c) => c.provider.startsWith(prefix));
+  }, [credentials, form.type]);
 
   // Re-resolve the live agent instance every render so the modal reflects the
   // most recent enrichment after `load()` refresh, not the snapshot taken when
@@ -343,17 +374,29 @@ export default function AgentManager() {
   }, [agents, subagentDetailAgent]);
 
   const resetForm = () => {
-    setForm({ name: '', description: '', type: 'custom', role_prompt: '' });
+    setForm({ name: '', description: '', type: 'custom', role_prompt: '', credential_id: '' });
     setEditingId(null);
     setShowForm(false);
   };
 
   const handleSave = async () => {
     if (!form.name.trim()) return;
+    // Drop credential_id when the CLI type doesn't support per-agent
+    // credentials (only claude / codex / gemini do); preserves the existing
+    // null contract for custom / legacy types so the server treats them as
+    // "no credential" rather than mis-setting an FK.
+    const supportsCredential = !!CLI_TO_CREDENTIAL_PREFIX[form.type];
+    const body: Record<string, any> = {
+      name: form.name,
+      description: form.description,
+      type: form.type,
+      role_prompt: form.role_prompt,
+      credential_id: supportsCredential && form.credential_id ? form.credential_id : null,
+    };
     if (editingId) {
-      await api.updateAgent(editingId, form);
+      await api.updateAgent(editingId, body);
     } else {
-      await api.createAgent(form);
+      await api.createAgent(body as any);
     }
     resetForm();
     await load();
@@ -365,6 +408,7 @@ export default function AgentManager() {
       description: agent.description,
       type: agent.type,
       role_prompt: agent.role_prompt || '',
+      credential_id: agent.credential_id || '',
     });
     setEditingId(agent.id);
     setShowForm(true);
@@ -444,6 +488,22 @@ export default function AgentManager() {
             onChange={e => setForm({ ...form, description: e.target.value })}
             placeholder="What does this agent do?"
           />
+          {CLI_TO_CREDENTIAL_PREFIX[form.type] && (
+            <div>
+              <Select
+                label="CLI credential"
+                value={form.credential_id}
+                onChange={e => setForm({ ...form, credential_id: (e.target as HTMLSelectElement).value })}
+                options={[
+                  { value: '', label: 'None — fall back to operator HOME' },
+                  ...eligibleCredentials.map(c => ({ value: c.id, label: `${c.name} · ${c.provider}` })),
+                ]}
+              />
+              <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginTop: 4, lineHeight: 1.5 }}>
+                Per-agent CLI auth. Subscription credentials drop the OAuth file into this agent's cli-home; API-key credentials export the matching env var on every spawn. Manage values in the Credentials page.
+              </div>
+            </div>
+          )}
           {/* Role Prompt section — ROLE-02 / D-14 */}
           <div>
             <label style={{ fontSize: '11px', color: tokens.colors.textSecondary, fontWeight: 600, display: 'block', marginBottom: 6 }}>

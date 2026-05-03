@@ -23,13 +23,62 @@ const PROVIDERS = [
   { value: 'gitlab', label: 'GitLab', icon: 'L' },
   { value: 'openai', label: 'OpenAI', icon: 'O' },
   { value: 'custom', label: 'Custom', icon: 'C' },
+  { value: 'claude_subscription', label: 'Claude · Subscription', icon: 'CS' },
+  { value: 'claude_api_key', label: 'Claude · API Key', icon: 'CK' },
+  { value: 'codex_subscription', label: 'Codex · Subscription', icon: 'OS' },
+  { value: 'codex_api_key', label: 'Codex · API Key', icon: 'OK' },
+  { value: 'gemini_subscription', label: 'Gemini · Subscription', icon: 'GS' },
+  { value: 'gemini_api_key', label: 'Gemini · API Key', icon: 'GK' },
 ];
 
-const PROVIDER_FIELD_LABELS: Record<string, Record<string, { label: string; placeholder: string }>> = {
+interface FieldDef {
+  label: string;
+  placeholder: string;
+  /** Render as a multi-line textarea (for OAuth credential file contents)
+   *  rather than a single-line password input. */
+  multiline?: boolean;
+}
+
+const PROVIDER_FIELD_LABELS: Record<string, Record<string, FieldDef>> = {
   github: { token: { label: 'Personal Access Token', placeholder: 'ghp_...' } },
   gitlab: { token: { label: 'Access Token', placeholder: 'glpat-...' } },
   openai: { api_key: { label: 'API Key', placeholder: 'sk-...' } },
   custom: { token: { label: 'Token / Secret', placeholder: 'Enter secret value' } },
+  claude_subscription: {
+    credentials_json: {
+      label: '.credentials.json',
+      placeholder: 'Paste the contents of ~/.claude/.credentials.json here (the file `claude login` produced).',
+      multiline: true,
+    },
+  },
+  claude_api_key: {
+    api_key: { label: 'ANTHROPIC_API_KEY', placeholder: 'sk-ant-...' },
+  },
+  codex_subscription: {
+    auth_json: {
+      label: 'auth.json',
+      placeholder: 'Paste the contents of ~/.codex/auth.json (produced by `codex login`).',
+      multiline: true,
+    },
+    config_toml: {
+      label: 'config.toml (optional)',
+      placeholder: 'Paste the contents of ~/.codex/config.toml — model / provider preferences. Leave blank to use codex defaults.',
+      multiline: true,
+    },
+  },
+  codex_api_key: {
+    api_key: { label: 'OPENAI_API_KEY', placeholder: 'sk-...' },
+  },
+  gemini_subscription: {
+    oauth_creds_json: {
+      label: 'oauth_creds.json',
+      placeholder: 'Paste the contents of the gemini OAuth credential file (produced by `gemini login`).',
+      multiline: true,
+    },
+  },
+  gemini_api_key: {
+    api_key: { label: 'GEMINI_API_KEY', placeholder: 'AI...' },
+  },
 };
 
 export default function CredentialManager({ workspaceId }: { workspaceId?: string }) {
@@ -143,7 +192,18 @@ export default function CredentialManager({ workspaceId }: { workspaceId?: strin
   }
 
   const providerColor = (p: string) => {
-    const map: Record<string, string> = { github: '#24292f', gitlab: '#fc6d26', openai: '#10a37f', custom: tokens.colors.textSecondary };
+    const map: Record<string, string> = {
+      github: '#24292f',
+      gitlab: '#fc6d26',
+      openai: '#10a37f',
+      custom: tokens.colors.textSecondary,
+      claude_subscription: '#cc785c',
+      claude_api_key: '#cc785c',
+      codex_subscription: '#10a37f',
+      codex_api_key: '#10a37f',
+      gemini_subscription: '#4285f4',
+      gemini_api_key: '#4285f4',
+    };
     return map[p] || tokens.colors.textSecondary;
   };
 
@@ -310,13 +370,23 @@ export default function CredentialManager({ workspaceId }: { workspaceId?: strin
                 {fieldDef.label}
               </label>
               <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginBottom: 4 }}>Encrypted at rest (AES-256-GCM)</div>
-              <input
-                type="password"
-                value={formFields[fieldKey] || ''}
-                onChange={(e) => setFormFields(prev => ({ ...prev, [fieldKey]: e.target.value }))}
-                placeholder={fieldDef.placeholder}
-                style={{ width: '100%', background: tokens.colors.surface, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md, padding: '8px 10px', color: tokens.colors.textStrong, fontSize: '13px', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', boxSizing: 'border-box', outline: 'none' }}
-              />
+              {fieldDef.multiline ? (
+                <textarea
+                  value={formFields[fieldKey] || ''}
+                  onChange={(e) => setFormFields(prev => ({ ...prev, [fieldKey]: e.target.value }))}
+                  placeholder={fieldDef.placeholder}
+                  rows={8}
+                  style={{ width: '100%', minHeight: 140, background: tokens.colors.surface, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md, padding: '8px 10px', color: tokens.colors.textStrong, fontSize: '12px', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', boxSizing: 'border-box', outline: 'none', resize: 'vertical' }}
+                />
+              ) : (
+                <input
+                  type="password"
+                  value={formFields[fieldKey] || ''}
+                  onChange={(e) => setFormFields(prev => ({ ...prev, [fieldKey]: e.target.value }))}
+                  placeholder={fieldDef.placeholder}
+                  style={{ width: '100%', background: tokens.colors.surface, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md, padding: '8px 10px', color: tokens.colors.textStrong, fontSize: '13px', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', boxSizing: 'border-box', outline: 'none' }}
+                />
+              )}
             </div>
           ))}
         </div>

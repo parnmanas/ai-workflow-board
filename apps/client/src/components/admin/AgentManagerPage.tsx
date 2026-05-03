@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { api } from '../../api';
+import { api, getActiveWorkspaceId } from '../../api';
 import { tokens } from '../../tokens';
 import type {
   Agent,
   AgentManagerCommandKind,
   AgentManagerInstance,
+  Credential,
   PairingTokenMint,
   PairingTokenSafe,
   SubagentSummary,
@@ -1451,6 +1452,10 @@ function ManagedAgentDialog({
   // filesystem via the existing fs reverse-RPC. Lets the user click a
   // directory instead of typing an absolute path.
   const [pickerOpen, setPickerOpen] = useState(false);
+  // Per-agent CLI credential. Only claude / codex / gemini have adapters
+  // that consume credentials; custom CLIs leave this null.
+  const [credentialId, setCredentialId] = useState<string>('');
+  const [credentials, setCredentials] = useState<Credential[]>([]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -1462,17 +1467,35 @@ function ManagedAgentDialog({
       setWorkingDir(agent.working_dir || '');
       setDescription(agent.description || '');
       setAutoSpawn(false);
+      setCredentialId(agent.credential_id || '');
     } else {
       setName('');
       setWorkingDir('');
       setDescription('');
       setAutoSpawn(true);
+      setCredentialId('');
       // Default CLI tracks the manager's primary CLI, but the operator can
       // override it (e.g., spawn a Gemini agent under a Claude-default manager).
       const defaulted = CLI_OPTIONS.find((o) => o.value === defaultCli)?.value || 'claude';
       setCli(defaulted);
     }
   }, [isOpen, mode, agent, defaultCli]);
+
+  // Load workspace-scoped credentials once per open. We keep all of them
+  // and filter by the active CLI in the render path so changing CLI
+  // doesn't refetch.
+  useEffect(() => {
+    if (!isOpen) return;
+    const wsId = getActiveWorkspaceId() || '';
+    if (!wsId) { setCredentials([]); return; }
+    let alive = true;
+    api.listCredentials(wsId)
+      .then((rows) => { if (alive) setCredentials(rows); })
+      .catch(() => { if (alive) setCredentials([]); });
+    return () => { alive = false; };
+  }, [isOpen]);
+
+  const eligibleCredentials = credentials.filter((c) => c.provider.startsWith(`${cli}_`));
 
   const submit = async () => {
     const trimmedName = name.trim();
@@ -1493,10 +1516,15 @@ function ManagedAgentDialog({
         // is intentionally locked — changing the underlying binary on a
         // live agent identity would invalidate its on-disk per-agent CLI
         // home dir and confuse routing, so it stays a create-time decision.
+        // Per-agent credential is only meaningful when an adapter consumes it
+        // (claude / codex / gemini); for `custom` we always send null so a
+        // stale id doesn't linger after the operator switched CLI.
+        const supportsCredential = cli !== 'custom';
         await api.updateAgent(agent.id, {
           name: trimmedName,
           description,
           working_dir: trimmedWorkingDir,
+          credential_id: supportsCredential && credentialId ? credentialId : null,
         });
         showToast(`Agent "${trimmedName}" updated`, 'success');
 
@@ -1523,12 +1551,14 @@ function ManagedAgentDialog({
         }
       } else {
         // Create flow.
+        const supportsCredential = cli !== 'custom';
         const created = await api.createManagedAgent({
           name: trimmedName,
           cli,
           working_dir: trimmedWorkingDir || undefined,
           manager_agent_id: managerAgentId,
           description: description.trim() || undefined,
+          credential_id: supportsCredential && credentialId ? credentialId : undefined,
         });
         showToast(`Agent "${trimmedName}" created`, 'success');
 
@@ -1606,6 +1636,24 @@ function ManagedAgentDialog({
             </div>
           )}
         </div>
+        {cli !== 'custom' && (
+          <div>
+            <label style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 4 }}>
+              CLI credential
+            </label>
+            <Select
+              value={credentialId}
+              options={[
+                { value: '', label: 'None — fall back to operator HOME' },
+                ...eligibleCredentials.map((c) => ({ value: c.id, label: `${c.name} · ${c.provider}` })),
+              ]}
+              onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setCredentialId(e.target.value)}
+            />
+            <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2, lineHeight: 1.5 }}>
+              Subscription credentials drop the OAuth file into this agent's cli-home; API-key credentials export the matching env var on every spawn. Add or rotate values in the Credentials page.
+            </div>
+          </div>
+        )}
         <div>
           <label style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 4 }}>
             Working directory
