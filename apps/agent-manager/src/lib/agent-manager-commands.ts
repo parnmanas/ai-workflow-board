@@ -33,6 +33,7 @@ import { log } from './logging.js';
 import {
   postCommandAck,
   fetchAgentRecord,
+  fetchAgentCredential,
   provisionManagedAgentApiKey,
   type AwbConfig,
 } from './rest.js';
@@ -44,6 +45,9 @@ import {
   writeApiKey,
   writeMcpConfig,
   writeManagedAgentConfig,
+  writeAgentCredential,
+  eraseAgentCredential,
+  type ManagedAgentCredential,
   mcpConfigPathFor,
   subagentLogPathFor,
   cliHomeDirFor,
@@ -254,6 +258,25 @@ export class AgentManagerCommandHandler {
     await ensureCliHomeDir(agentId);
     const cliHomeDir = cliHomeDirFor(agentId);
 
+    // Per-agent CLI credential — fetch from AWB (paid via the manager's
+    // apiKey, server enforces ownership). Three outcomes:
+    //   - server returns 204 (no credential set) → null, fall back to
+    //     legacy operator-HOME symlink path
+    //   - server returns the decrypted payload → write it to disk for
+    //     rehydrate and apply via the adapter
+    //   - any error → null, log + fall back (the CLI's own auth error
+    //     is more actionable than blocking spawn here)
+    // Provider must match the agent's CLI (e.g. claude_subscription on a
+    // claude agent); a mismatch is logged and ignored so a typo on the
+    // AWB side doesn't silently start sending OpenAI keys to claude.
+    const credentialIdHint = typeof payload.args?.credential_id === 'string' ? payload.args.credential_id : '';
+    const credential = await this.#resolveAgentCredential(agentId, cli, credentialIdHint);
+    if (credential) {
+      await writeAgentCredential(agentId, credential);
+    } else {
+      await eraseAgentCredential(agentId);
+    }
+
     // Adapter-specific cli-home bootstrap — typically credential
     // propagation so the spawned CLI doesn't immediately fail with an
     // auth error on a fresh per-agent home (claude reads
@@ -262,8 +285,10 @@ export class AgentManagerCommandHandler {
     // Best-effort: a propagation failure is logged but doesn't block
     // spawn — the CLI's own auth error is more actionable than a
     // missing-file abort here.
+    let extraEnv: Record<string, string> = {};
     try {
-      await createAdapter(cli).prepareCliHome(cliHomeDir);
+      const prep = await createAdapter(cli).prepareCliHome(cliHomeDir, credential);
+      extraEnv = prep?.extraEnv ?? {};
     } catch (err: any) {
       log(`spawn_agent: cli-home prep failed for agent=${agentId.slice(0, 8)} cli=${cli}: ${err?.message ?? err}`);
     }
@@ -279,6 +304,7 @@ export class AgentManagerCommandHandler {
         api_key: rawApiKey,
         subagent_log_path: subagentLogPathFor(agentId),
         cli_home_dir: cliHomeDir,
+        extra_env: extraEnv,
         registered_at: new Date().toISOString(),
       });
     }
@@ -288,14 +314,56 @@ export class AgentManagerCommandHandler {
     // surface still wants a live pid for the dashboard.
     this.#deps.registry.markRunning(agentId, process.pid);
 
+    const credentialNote = credential ? ` credential=${credential.provider}` : ' credential=none';
     log(
       `spawn_agent: agent=${agentId.slice(0, 8)} name=${name} cli=${cli} cwd=${workingDir}` +
-        ` apiKey=${maskKey(rawApiKey)}${provisioned ? ' (provisioned)' : ' (reused)'}`,
+        ` apiKey=${maskKey(rawApiKey)}${provisioned ? ' (provisioned)' : ' (reused)'}${credentialNote}`,
     );
     return (
       `spawn_agent ok: agent=${agentId.slice(0, 8)} cli=${cli} cwd=${workingDir}` +
-      ` apiKey=${provisioned ? 'provisioned' : 'reused'}`
+      ` apiKey=${provisioned ? 'provisioned' : 'reused'}${credentialNote}`
     );
+  }
+
+  /**
+   * Pull the per-agent CLI credential from AWB and validate that its
+   * provider prefix matches the agent's CLI (e.g. `claude_subscription` on
+   * a claude agent). Returns null when AWB has none configured, when the
+   * fetch fails, or when the provider doesn't match — caller falls back to
+   * legacy operator-HOME credential propagation.
+   *
+   * `credentialIdHint` is the credential_id the server enriched the spawn
+   * payload with at dispatch time; we use it for diagnostic logging only —
+   * the manager never trusts client-supplied credential payloads, only
+   * what the server returns over its authenticated REST endpoint.
+   */
+  async #resolveAgentCredential(
+    agentId: string,
+    cli: string,
+    credentialIdHint: string,
+  ): Promise<ManagedAgentCredential | null> {
+    const fetched = await fetchAgentCredential(this.#config, agentId);
+    if (!fetched) {
+      if (credentialIdHint) {
+        log(
+          `spawn_agent: agent=${agentId.slice(0, 8)} expected credential=${credentialIdHint.slice(0, 8)} but server returned none`,
+        );
+      }
+      return null;
+    }
+    const expectedPrefix = `${cli}_`;
+    if (!fetched.provider.startsWith(expectedPrefix)) {
+      log(
+        `spawn_agent: agent=${agentId.slice(0, 8)} credential provider=${fetched.provider}` +
+          ` does not match cli=${cli}; ignoring`,
+      );
+      return null;
+    }
+    return {
+      credential_id: fetched.credential_id,
+      provider: fetched.provider,
+      fields: fetched.fields,
+    };
   }
 
   async #stopAgent(payload: AgentManagerCommandPayload): Promise<string> {

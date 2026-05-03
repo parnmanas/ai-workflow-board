@@ -309,12 +309,16 @@ export class SubagentManager implements SubagentManagerContract {
       const cliHomeEnv = cliHomeEnvKey && ctx?.cli_home_dir
         ? { [cliHomeEnvKey]: ctx.cli_home_dir }
         : {};
+      // Per-agent credential extras (ANTHROPIC_API_KEY / OPENAI_API_KEY /
+      // GEMINI_API_KEY) — populated by the adapter's prepareCliHome on
+      // spawn_agent. Empty for subscription-mode and unset agents.
+      const credentialEnv = ctx?.extra_env ?? {};
       const child = spawn(resolvedBin, descriptor.args, {
         stdio: descriptor.stdio || ['ignore', 'pipe', 'pipe'],
         detached: true,
         windowsHide: true,
         cwd: effectiveCwd,
-        env: { ...process.env, AWB_API_KEY: effectiveApiKey, ...cliHomeEnv },
+        env: { ...process.env, AWB_API_KEY: effectiveApiKey, ...cliHomeEnv, ...credentialEnv },
         shell: descriptor.shell ?? /\.(cmd|bat|ps1)$/i.test(resolvedBin),
       });
       child.once('error', (err: any) => {

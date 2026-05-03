@@ -39,6 +39,7 @@ import {
   listManagedAgentDirs,
   readManagedAgentConfig,
   readApiKey,
+  readAgentCredential,
   mcpConfigPathFor,
   subagentLogPathFor,
   cliHomeDirFor,
@@ -504,8 +505,16 @@ async function runRuntime(
       // post-spawn point we know we'll hit before the next subagent
       // fork. Failures here are logged but non-fatal — the CLI itself
       // will surface a clearer auth error if the symlink is broken.
+      //
+      // Per-agent credential is read from the on-disk snapshot rather
+      // than re-fetched from AWB. Restart-time fetch would block boot on
+      // network reachability, and the snapshot is refreshed on every
+      // spawn_agent / restart_agent anyway.
+      const credential = await readAgentCredential(id);
+      let extraEnv: Record<string, string> = {};
       try {
-        await createAdapter(cfg.cli).prepareCliHome(cliHomeDirFor(id));
+        const prep = await createAdapter(cfg.cli).prepareCliHome(cliHomeDirFor(id), credential);
+        extraEnv = prep?.extraEnv ?? {};
       } catch (err: any) {
         log(`rehydrate: cli-home prep failed for agent=${id.slice(0, 8)} cli=${cfg.cli}: ${err?.message ?? err}`);
       }
@@ -518,6 +527,7 @@ async function runRuntime(
         api_key: apiKey,
         subagent_log_path: subagentLogPathFor(id),
         cli_home_dir: cliHomeDirFor(id),
+        extra_env: extraEnv,
         registered_at: new Date().toISOString(),
       });
       managedAgents.upsert({ agent_id: id, name: cfg.name, cli: cfg.cli, working_dir: cfg.working_dir });
