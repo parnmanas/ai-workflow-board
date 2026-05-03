@@ -129,6 +129,13 @@ export interface ChatRequestPayload {
   role_prompt: string;
   new_message: string;
   history: ChatRequestHistoryEntry[];
+  // Source room id for the chat_request. Always set when the request was
+  // emitted from a chat room (DM auto-route or @mention) — without it the
+  // agent has no way to know which room to reply into via
+  // mcp__awb__send_chat_room_message, so the persistent-chat-session path
+  // in agent-manager will fall through to the legacy one-shot subagent
+  // (which can only guess the room).
+  room_id?: string;
 }
 
 // Phase 7 — room-based chat
@@ -145,6 +152,15 @@ export interface ChatRoomMessagePayload {
   // Plugin uses it to break agent-to-agent ping-pong loops by skipping
   // delegation once a configurable cap is hit.
   agent_chain_depth?: number;
+  // Agent participants of the room. Carried on the wire so an agent-manager
+  // receiving the SSE event (via the managed-agent fan-out in
+  // events.controller) can resolve which of its managed agents are members
+  // and spawn the chat session under that agent's identity. Without this,
+  // the manager has no way to pick the correct apiKey/cwd and the spawn
+  // would default to the manager's identity — leading to a 403 when the
+  // spawned CLI tries to send_chat_room_message into a room it does not
+  // belong to.
+  agent_member_ids?: string[];
 }
 
 export interface ChatRoomUpdatePayload {
@@ -160,6 +176,8 @@ export interface ChatRoomUpdatePayload {
   // user vs agent when the same UUID collides across domains.
   participant_type?: 'user' | 'agent';
   last_read_at?: string; // ISO-8601
+  // See ChatRoomMessagePayload — same managed-agent fan-out reason.
+  agent_member_ids?: string[];
 }
 
 export interface ChatRoomTypingPayload {
@@ -168,6 +186,8 @@ export interface ChatRoomTypingPayload {
   agent_name: string;
   is_typing: boolean;
   status?: string | null;
+  // See ChatRoomMessagePayload — same managed-agent fan-out reason.
+  agent_member_ids?: string[];
 }
 
 // Mention feature — comment-sourced @-mention delivered to a specific agent.

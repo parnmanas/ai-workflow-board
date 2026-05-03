@@ -376,16 +376,41 @@ export class EventsController implements OnModuleDestroy {
           // when a legacy proxy is also connected for the same managed
           // agent, the pinning naturally picks that proxy and skips the
           // manager, which is the correct precedence.
+          //
+          // Two shapes of "targeted at a managed agent":
+          //   1. Single-recipient events (agent_trigger, comment_mention,
+          //      chat_request, fs_request, agent_manager_command): one
+          //      target id sits at scope.agent_id.
+          //   2. Multi-recipient room events (chat_room_message /
+          //      chat_room_update / chat_room_typing): the room's agent
+          //      participants live in scope.agent_member_ids. The manager
+          //      should accept the event when ANY of its managed agents is
+          //      a member; effective identity becomes that managed agent so
+          //      roomMemberFilter passes. The agent-manager side derives
+          //      WHICH managed agents to dispatch to from the wire payload's
+          //      agent_member_ids array — for multi-managed-agent rooms it
+          //      can spawn one chat session per matching agent.
           let effectiveIdentity = identity;
           let effectiveAgentId = identity.agentId;
           if (
             identity.type === 'agent' &&
-            identity.managedAgentIds &&
-            typeof event.scope.agent_id === 'string' &&
-            identity.managedAgentIds.has(event.scope.agent_id)
+            identity.managedAgentIds
           ) {
-            effectiveAgentId = event.scope.agent_id;
-            effectiveIdentity = { ...identity, agentId: event.scope.agent_id };
+            if (
+              typeof event.scope.agent_id === 'string' &&
+              identity.managedAgentIds.has(event.scope.agent_id)
+            ) {
+              effectiveAgentId = event.scope.agent_id;
+              effectiveIdentity = { ...identity, agentId: event.scope.agent_id };
+            } else if (event.scope.agent_member_ids instanceof Set) {
+              for (const memberId of event.scope.agent_member_ids) {
+                if (identity.managedAgentIds.has(memberId)) {
+                  effectiveAgentId = memberId;
+                  effectiveIdentity = { ...identity, agentId: memberId };
+                  break;
+                }
+              }
+            }
           }
 
           if (def.filter && !def.filter(event, effectiveIdentity)) return false;

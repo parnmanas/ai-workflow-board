@@ -37,7 +37,13 @@ import { EventDefinition, SubscriberIdentity } from './types';
 
 // ── Helpers used by multiple filter functions ─────────────────────────────
 
-/** Participant-based filter: only members of the room receive the event. */
+/** Participant-based filter: only members of the room receive the event.
+ *
+ * Manager fan-out: events.controller rewrites a manager's identity to the
+ * matching managed-agent before invoking this filter (see the override block
+ * around `effectiveIdentity` there), so this filter only needs to compare
+ * against identity.agentId — managed-agent membership is already resolved at
+ * the call site. */
 function roomMemberFilter(envelope: StreamEvent<any>, identity: SubscriberIdentity): boolean {
   if (identity.type === 'user') {
     const memberSet = envelope.scope.member_ids as Set<string> | undefined;
@@ -274,6 +280,11 @@ export const EVENT_TYPES: EventDefinition[] = [
         role_prompt: event.role_prompt || '',
         new_message: event.new_message,
         history: Array.isArray(event.history) ? event.history : [],
+        // room_id passes through when the emitter set it. agent-manager
+        // gates the persistent-chat-session path on its presence — without
+        // it the request falls through to the legacy one-shot subagent
+        // path that has no room context to reply into.
+        room_id: typeof event.room_id === 'string' ? event.room_id : undefined,
       };
       return {
         payload,
@@ -304,6 +315,13 @@ export const EVENT_TYPES: EventDefinition[] = [
         // v0.33: trailing agent-chain depth — plugin uses to break loops.
         agent_chain_depth: typeof event.agent_chain_depth === 'number'
           ? event.agent_chain_depth
+          : undefined,
+        // Carry agent membership on the wire so an agent-manager can pick
+        // which managed agent should respond. The Set-typed scope copy
+        // below stays for server-side filtering; the array form is the
+        // wire shape consumers see.
+        agent_member_ids: event.agent_member_ids
+          ? Array.from(event.agent_member_ids as Set<string>)
           : undefined,
       };
       return {
@@ -336,6 +354,9 @@ export const EVENT_TYPES: EventDefinition[] = [
         // B3: read-event reader identity + marker, populated only when present.
         participant_type: event.participant_type,
         last_read_at: event.last_read_at,
+        agent_member_ids: event.agent_member_ids
+          ? Array.from(event.agent_member_ids as Set<string>)
+          : undefined,
       };
       return {
         payload,
@@ -361,6 +382,9 @@ export const EVENT_TYPES: EventDefinition[] = [
         agent_name: event.agent_name || 'Agent',
         is_typing: !!event.is_typing,
         status: event.status ?? null,
+        agent_member_ids: event.agent_member_ids
+          ? Array.from(event.agent_member_ids as Set<string>)
+          : undefined,
       };
       return {
         payload,
