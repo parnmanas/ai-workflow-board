@@ -80,10 +80,18 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
         const tRepo = manager.getRepository(Ticket);
 
         const resolvedAssigneeId = await resolveAgentId(dataSource, assignee_id, assignee);
-        const resolvedReporterId = await resolveAgentId(dataSource, reporter_id, reporter);
+        let resolvedReporter = reporter;
+        let resolvedReporterId = await resolveAgentId(dataSource, reporter_id, reporter);
+        // Default Reporter to the ticket's creator when none was supplied —
+        // mirrors the REST controller so an agent that calls create_ticket
+        // ends up listed as Reporter automatically.
+        if (!resolvedReporter && !resolvedReporterId && creatorId) {
+          resolvedReporter = creatorName;
+          resolvedReporterId = creatorId;
+        }
         const position = await maxTicketPosition(dataSource, resolvedColumnId!);
         const t = await tRepo.save(tRepo.create({
-          column_id: resolvedColumnId!, title, description, priority, assignee, reporter,
+          column_id: resolvedColumnId!, title, description, priority, assignee, reporter: resolvedReporter,
           assignee_id: resolvedAssigneeId, reporter_id: resolvedReporterId, reviewer_id,
           labels: JSON.stringify(labels), channel_ids: JSON.stringify(channel_ids), position,
           created_by: creatorName, created_by_type: creatorType, created_by_id: creatorId,

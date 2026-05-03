@@ -22,6 +22,7 @@ import { EventsModule } from './modules/events/events.module';
 import { SharedServicesModule } from './services/shared-services.module';
 import { ChatRoomsModule } from './modules/chat-rooms/chat-rooms.module';
 import { ResourcesModule } from './modules/resources/resources.module';
+import { ActionsModule } from './modules/actions/actions.module';
 import { CredentialsModule } from './modules/credentials/credentials.module';
 import { AgentLogsModule } from './modules/agent-logs/agent-logs.module';
 import { MentionsModule } from './modules/mentions/mentions.module';
@@ -75,6 +76,7 @@ import { AgentManagerModule } from './modules/agent-manager/agent-manager.module
     EventsModule,
     ChatRoomsModule,
     ResourcesModule,
+    ActionsModule,
     CredentialsModule,
     AgentLogsModule,
     MentionsModule,

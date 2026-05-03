@@ -25,3 +25,5 @@ export { TicketRoleAssignment } from './TicketRoleAssignment';
 export { TicketAttachment } from './TicketAttachment';
 export { Subagent } from './Subagent';
 export { SubagentLogLine } from './SubagentLogLine';
+export { Action } from './Action';
+export { ActionRun } from './ActionRun';

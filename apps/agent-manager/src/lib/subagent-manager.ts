@@ -246,7 +246,18 @@ export class SubagentManager implements SubagentManagerContract {
       });
 
       if (descriptor.needsMcpConfig) {
-        if (ctx?.mcp_config_path) {
+        // Per-spawn role pin — same contract BaseSessionManager._spawnSession
+        // uses. When a trigger / mention spawn carries (ticketId, role), the
+        // server's resolveAuthorRole needs the X-AWB-Subagent-Role +
+        // X-AWB-Subagent-Ticket-Id headers to attribute the spawned subagent's
+        // comments to the single triggering role. The per-agent static
+        // mcp_config_path only carries Authorization + X-AWB-Client-Type, so
+        // we can't reuse it for role-pinned spawns; write a fresh temp config
+        // instead. Non-role spawns (chat, no ticket) keep reusing the static
+        // config to avoid the extra fs write.
+        const needsSessionPin = !!(spec.ticketId && spec.role);
+
+        if (ctx?.mcp_config_path && !needsSessionPin) {
           configPath = ctx.mcp_config_path;
           configPathIsTemp = false;
         } else {
@@ -257,15 +268,18 @@ export class SubagentManager implements SubagentManagerContract {
           configPathIsTemp = true;
           await fsp.mkdir(dirname(configPath), { recursive: true, mode: 0o700 });
 
+          const headers: Record<string, string> = {
+            Authorization: `Bearer ${effectiveApiKey}`,
+            'X-AWB-Client-Type': ctx ? 'managed-subagent' : 'subagent',
+          };
+          if (spec.ticketId) headers['X-AWB-Subagent-Ticket-Id'] = spec.ticketId;
+          if (spec.role) headers['X-AWB-Subagent-Role'] = spec.role;
           const mcpConfig = {
             mcpServers: {
               awb: {
                 type: 'http',
                 url: `${this.#config.url.replace(/\/$/, '')}/mcp`,
-                headers: {
-                  Authorization: `Bearer ${effectiveApiKey}`,
-                  'X-AWB-Client-Type': 'subagent',
-                },
+                headers,
               },
             },
           };

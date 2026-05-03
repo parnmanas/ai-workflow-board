@@ -43,6 +43,7 @@ interface CandidateProvider {
 const CANDIDATE_PROVIDERS: Record<string, CandidateProvider> = {
   claude: { unix: claudeUnixCandidates, windows: claudeWindowsCandidates },
   gemini: { unix: geminiUnixCandidates, windows: geminiWindowsCandidates },
+  codex: { unix: codexUnixCandidates, windows: codexWindowsCandidates },
 };
 
 function parentExeMatching(nameRegex: RegExp): string | null {
@@ -176,5 +177,30 @@ function geminiWindowsCandidates(home: string): string[] {
     join(pkgBin, 'gemini.exe'),
     join(appdata, 'npm', 'gemini.exe'),
     join(localAppData, 'Programs', 'google', 'gemini-cli', 'gemini.exe'),
+  ];
+}
+
+function codexUnixCandidates(home: string): string[] {
+  return [
+    join(home, '.npm-global/bin/codex'),
+    join(home, '.bun/bin/codex'),
+    join(home, '.local/bin/codex'),
+    join(home, '.volta/bin/codex'),
+    join(home, '.npm-packages/bin/codex'),
+    join(home, 'node_modules/.bin/codex'),
+    '/usr/local/bin/codex',
+    '/opt/homebrew/bin/codex',
+    '/usr/bin/codex',
+  ];
+}
+
+function codexWindowsCandidates(home: string): string[] {
+  const appdata = process.env.APPDATA || join(home, 'AppData', 'Roaming');
+  const localAppData = process.env.LOCALAPPDATA || join(home, 'AppData', 'Local');
+  const pkgBin = join(appdata, 'npm', 'node_modules', '@openai', 'codex', 'bin');
+  return [
+    join(pkgBin, 'codex.exe'),
+    join(appdata, 'npm', 'codex.exe'),
+    join(localAppData, 'Programs', 'openai', 'codex', 'codex.exe'),
   ];
 }

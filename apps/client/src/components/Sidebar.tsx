@@ -111,6 +111,7 @@ export default function Sidebar({ isMobile, isOpen, onClose, wsId, boards }: Sid
     { key: 'agents',           path: `/ws/${wsId}/agents`,           label: 'AI Agents',        icon: 'A' },
     { key: 'prompt-templates', path: `/ws/${wsId}/prompt-templates`, label: 'Prompt Templates', icon: 'P' },
     { key: 'resources',        path: `/ws/${wsId}/resources`,        label: 'Resources',        icon: 'R' },
+    { key: 'actions',          path: `/ws/${wsId}/actions`,          label: 'Actions',          icon: 'N' },
     { key: 'credentials',      path: `/ws/${wsId}/credentials`,      label: 'Credentials',      icon: 'X' },
     { key: 'channels',         path: `/ws/${wsId}/channels`,         label: 'Channels',         icon: 'H' },
     { key: 'api-keys',         path: `/ws/${wsId}/api-keys`,         label: 'API Keys',         icon: 'K' },
@@ -310,6 +311,7 @@ export default function Sidebar({ isMobile, isOpen, onClose, wsId, boards }: Sid
                       <>
                         {[
                           { label: 'Board Resources', path: `/ws/${wsId}/boards/${b.id}/resources` },
+                          { label: 'Board Actions',   path: `/ws/${wsId}/boards/${b.id}/actions`   },
                           { label: 'Board Settings',  path: `/ws/${wsId}/boards/${b.id}/settings`  },
                         ].map((sub) => {
                           const subActive = location.pathname === sub.path;

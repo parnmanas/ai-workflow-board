@@ -93,12 +93,19 @@ export class TicketsController {
     await findOrFail(this.colRepo, { where: { id: columnId } }, 'Column not found');
 
     const resolvedAssigneeId = await resolveAgentId(this.dataSource, assignee_id, assignee);
-    const resolvedReporterId = await resolveAgentId(this.dataSource, reporter_id, reporter);
+    let resolvedReporter = reporter;
+    let resolvedReporterId = await resolveAgentId(this.dataSource, reporter_id, reporter);
     const creator = this.resolveCreator(req, body);
+    // Default Reporter to the ticket's creator when none was supplied — keeps
+    // the original requester reachable without forcing the create form to ask.
+    if (!resolvedReporter && !resolvedReporterId && creator.created_by_id) {
+      resolvedReporter = creator.created_by;
+      resolvedReporterId = creator.created_by_id;
+    }
 
     const position = await maxTicketPosition(this.dataSource, columnId);
     const ticket = await this.ticketRepo.save(this.ticketRepo.create({
-      column_id: columnId, title, description, priority, assignee, reporter,
+      column_id: columnId, title, description, priority, assignee, reporter: resolvedReporter,
       assignee_id: resolvedAssigneeId, reporter_id: resolvedReporterId,
       labels: JSON.stringify(labels), channel_ids: JSON.stringify(channel_ids),
       position, parent_id: null, depth: 0, status: 'todo',
@@ -154,13 +161,18 @@ export class TicketsController {
     if (!title) return res.status(400).json({ error: 'title is required' });
 
     const resolvedAssigneeId = await resolveAgentId(this.dataSource, assignee_id, assignee);
-    const resolvedReporterId = await resolveAgentId(this.dataSource, reporter_id, reporter);
+    let resolvedReporter = reporter;
+    let resolvedReporterId = await resolveAgentId(this.dataSource, reporter_id, reporter);
     const creator = this.resolveCreator(req, body);
+    if (!resolvedReporter && !resolvedReporterId && creator.created_by_id) {
+      resolvedReporter = creator.created_by;
+      resolvedReporterId = creator.created_by_id;
+    }
 
     const position = await maxChildPosition(this.dataSource, parentId);
     const child = await this.ticketRepo.save(this.ticketRepo.create({
       parent_id: parentId, depth: childDepth, column_id: null as any,
-      title, description, priority, status, assignee, reporter,
+      title, description, priority, status, assignee, reporter: resolvedReporter,
       assignee_id: resolvedAssigneeId, reporter_id: resolvedReporterId,
       labels: JSON.stringify(labels), channel_ids: JSON.stringify(channel_ids), position,
       // Inherit workspace_id from parent so role lookups resolve immediately

@@ -21,6 +21,7 @@ import { RoomCrudService } from '../chat-rooms/room-crud.service';
 import { RoomMembershipService } from '../chat-rooms/room-membership.service';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { TicketRoleAssignmentService } from '../workspace-roles/ticket-role-assignment.service';
+import { ActionsService } from '../actions/actions.service';
 import { MentionService } from '../../services/mention.service';
 import { ActivityService, activityEvents } from '../../services/activity.service';
 import { EmbeddingService } from '../../services/embedding.service';
@@ -143,6 +144,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     private readonly roomMembershipService: RoomMembershipService,
     private readonly roomMessagingService: RoomMessagingService,
     private readonly ticketRoleAssignmentService: TicketRoleAssignmentService,
+    private readonly actionsService: ActionsService,
   ) {}
 
   onModuleInit() {
@@ -246,6 +248,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       roomMembershipService: this.roomMembershipService,
       roomMessagingService: this.roomMessagingService,
       ticketRoleAssignmentService: this.ticketRoleAssignmentService,
+      actionsService: this.actionsService,
     };
   }
 

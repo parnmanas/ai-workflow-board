@@ -34,6 +34,7 @@ import type { RoomCrudService } from '../../chat-rooms/room-crud.service';
 import type { RoomMembershipService } from '../../chat-rooms/room-membership.service';
 import type { RoomMessagingService } from '../../chat-rooms/room-messaging.service';
 import type { TicketRoleAssignmentService } from '../../workspace-roles/ticket-role-assignment.service';
+import type { ActionsService } from '../../actions/actions.service';
 
 /**
  * Minimal surface that MCP tools need from the logging subsystem.
@@ -78,6 +79,10 @@ export interface ToolContext {
   // to keep the assignment table in sync with legacy column writes.
   // Standalone context omits it; tools degrade by skipping the sync.
   ticketRoleAssignmentService?: TicketRoleAssignmentService;
+  // Actions feature: required by `run_action` MCP tool which needs to dispatch
+  // a Run (create room, add participants, send first message). The CRUD tools
+  // operate directly on repositories and don't need this.
+  actionsService?: ActionsService;
 }
 
 /**

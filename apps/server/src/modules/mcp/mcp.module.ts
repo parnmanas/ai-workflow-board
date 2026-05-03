@@ -6,6 +6,7 @@ import { AgentsModule } from '../agents/agents.module';
 import { McpServicesModule } from './mcp-services.module';
 import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
 import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module';
+import { ActionsModule } from '../actions/actions.module';
 
 @Module({
   imports: [
@@ -14,6 +15,7 @@ import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module'
     McpServicesModule,
     ChatRoomsModule,
     WorkspaceRolesModule,
+    ActionsModule,
   ],
   controllers: [McpController],
 })
