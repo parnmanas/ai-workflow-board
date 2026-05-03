@@ -16,6 +16,17 @@ const PROVIDER_FIELDS: Record<string, { label: string; fields: string[] }> = {
   gitlab: { label: 'GitLab', fields: ['token'] },
   openai: { label: 'OpenAI', fields: ['api_key'] },
   custom: { label: 'Custom', fields: ['token'] },
+  // Per-agent CLI credentials. Two kinds per CLI: subscription (raw OAuth
+  // credential file content the CLI's `login` command produced — pasted in
+  // by the operator and replayed verbatim into the per-agent cli-home) and
+  // api_key (a billing-token string the manager exports as ANTHROPIC_API_KEY
+  // / OPENAI_API_KEY / GEMINI_API_KEY when spawning).
+  claude_subscription: { label: 'Claude (Subscription)', fields: ['credentials_json'] },
+  claude_api_key: { label: 'Claude (API Key)', fields: ['api_key'] },
+  codex_subscription: { label: 'Codex (Subscription)', fields: ['auth_json', 'config_toml'] },
+  codex_api_key: { label: 'Codex (API Key)', fields: ['api_key'] },
+  gemini_subscription: { label: 'Gemini (Subscription)', fields: ['oauth_creds_json'] },
+  gemini_api_key: { label: 'Gemini (API Key)', fields: ['api_key'] },
 };
 
 function maskCredentialData(decryptedJson: string): Record<string, string> {
