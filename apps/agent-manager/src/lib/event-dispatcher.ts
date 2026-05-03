@@ -70,6 +70,13 @@ export interface SubagentSpawnArgs {
   chatRequestId?: string;
   ticketId: string;
   agentId: string;
+  /** Workspace role slug the spawn is acting as. When set together with
+   *  ticketId, SubagentManager pins it onto the per-spawn mcp-config via
+   *  X-AWB-Subagent-Role / X-AWB-Subagent-Ticket-Id headers so server-side
+   *  resolveAuthorRole attributes the comment to the single triggered role
+   *  instead of the agent's full multi-role set. Empty for chat / non-role
+   *  spawns. */
+  role?: string;
   /** ST-6: per-event managed-agent runtime context. Optional. */
   agentContext?: AgentExecutionContext;
 }
@@ -465,6 +472,11 @@ export class EventDispatcher {
           triggerId: ev.field_changed || '',
           ticketId: ev.ticket_id || '',
           agentId: ev.actor_name || '',
+          // Persistent ticket sessions already pin (ticket_id, role) on
+          // their per-session mcp-config; mirror it on the one-shot fallback
+          // so a subagent spawned through this path attributes its comments
+          // to the triggering role instead of every role the agent holds.
+          role: ev.action || '',
           agentContext,
         });
 
@@ -658,6 +670,11 @@ export class EventDispatcher {
           triggerId: `mention:${commentId}`,
           ticketId,
           agentId,
+          // Pin role only for role-shortcut mentions (@assignee / @reviewer).
+          // Direct @-mentions don't carry a role, so leaving it empty lets
+          // server-side resolveAuthorRole pick the agent's single held role
+          // (or stay null when ambiguous) instead of pinning a guess.
+          role: mention.mention_source === 'role' ? mention.role_shortcut || '' : '',
           agentContext,
         });
         if (result.spawned) {

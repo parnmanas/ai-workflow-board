@@ -29,10 +29,9 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
   const { dataSource, activityService, mentionService, logger, ticketRoleAssignmentService } = ctx;
 
   /**
-   * Snapshot which role(s) an agent comment was authored as, on the ticket
-   * the comment lives on. Stored under `metadata.author_role` (string when
-   * the role is unambiguous, array when the same agent legitimately holds
-   * multiple roles on the ticket and didn't pin one explicitly).
+   * Snapshot which role an agent comment was authored as, on the ticket the
+   * comment lives on. Stored under `metadata.author_role` (string when the
+   * role is unambiguous; otherwise omitted entirely).
    *
    * Resolution order:
    *   1. caller-supplied `author_role` (override — the agent knows what it
@@ -41,10 +40,13 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
    *      ticket-session-manager spawns one subagent per (ticket, role) and
    *      pins the role on that child's MCP config — this is the common path
    *      for agent-authored comments).
-   *   3. TicketRoleAssignmentService lookup of every role this agent holds
-   *      on the ticket (best-effort fallback when neither override nor
-   *      session header is present — e.g. an older plugin or a top-level
-   *      proxy session).
+   *   3. TicketRoleAssignmentService lookup. Only used when the agent holds
+   *      exactly ONE role on the ticket — falling back to "all roles the
+   *      agent holds" stamps every role onto the comment, which is exactly
+   *      the multi-role attribution bug we want to avoid. When the agent
+   *      holds 2+ roles and didn't pin one, return null and let the UI
+   *      render the comment without a role badge instead of attributing it
+   *      to roles the agent isn't currently acting as.
    *
    * Returns `null` when nothing resolves, so callers can omit the field
    * entirely rather than write a misleading empty string.
@@ -56,7 +58,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
     authorId: string,
     sessionRole: string | undefined,
     sessionTicketId: string | undefined,
-  ): Promise<string | string[] | null> {
+  ): Promise<string | null> {
     const explicit = (requestedRole || '').trim().toLowerCase();
     if (explicit) return explicit;
     if (authorType !== 'agent') return null;
@@ -70,9 +72,11 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       const slugs = resolved
         .filter(r => r.holder?.type === 'agent' && r.holder.id === authorId)
         .map(r => r.role.slug);
-      if (slugs.length === 0) return null;
       if (slugs.length === 1) return slugs[0];
-      return slugs;
+      // 0 holdings → not on this ticket; 2+ → ambiguous (e.g. same agent is
+      // both assignee and reviewer). Either way we don't have enough info to
+      // say which role the agent is acting as right now, so omit the badge.
+      return null;
     } catch {
       return null;
     }
@@ -80,7 +84,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
 
   function mergeAuthorRoleIntoMetadata(
     metadata: Record<string, unknown> | undefined,
-    authorRole: string | string[] | null,
+    authorRole: string | null,
   ): Record<string, unknown> {
     const base = metadata && typeof metadata === 'object' ? { ...metadata } : {};
     if (authorRole === null) return base;
