@@ -594,10 +594,18 @@ export default function TicketPanel({
     setRoleDrafts({});
     setCommentContent('');
     setCommentAttachments([]);
-    // Mention deep-link override: if a comment id is queued, jump straight
-    // to the comments tab on first paint instead of the default detail view.
-    setActiveTab(scrollToCommentId ? 'comments' : 'detail');
-  }, [activeTicket.id, scrollToCommentId]);
+    setActiveTab('detail');
+  }, [activeTicket.id]);
+
+  // Mention deep-link override — when a comment id is queued (at panel mount
+  // or arriving on the currently-open ticket), jump to the comments tab so
+  // the scroll-and-highlight has somewhere to land. Skip the null clear:
+  // Board.tsx resets scrollToCommentId after the highlight fires, and re-
+  // running the form-drafts reset above would wipe the user's unsaved edits
+  // and snap the tab back to detail mid-highlight.
+  useEffect(() => {
+    if (scrollToCommentId) setActiveTab('comments');
+  }, [scrollToCommentId]);
 
   // Authoritative server-side facts — display names and the attachment list
   // — keep refreshing on updated_at because they have no client-side draft
