@@ -43,6 +43,14 @@ export class ChatRoom {
   @Column({ type: 'varchar', nullable: true, default: null })
   ticket_id: string | null;
 
+  // When non-null, this room hosts a Run of the Actions feature (one room per
+  // Run, FIFO-pruned to Action.max_runs). Lets the regular chat list filter
+  // these out so they don't pile up next to user-initiated DMs / groups, and
+  // lets the Action detail view surface the room without joining through
+  // ActionRun.
+  @Column({ type: 'varchar', nullable: true, default: null })
+  action_id: string | null;
+
   @CreateDateColumn()
   created_at: Date;
 

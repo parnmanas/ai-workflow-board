@@ -65,6 +65,11 @@ export class RoomCrudService {
         { userId },
       )
       .where('r.workspace_id = :wsId', { wsId: workspaceId })
+      // Action-Run rooms (action_id IS NOT NULL) are surfaced inside the
+      // Actions detail view, not the global chat list — hiding them here
+      // keeps the chat sidebar from filling up with one row per Run as the
+      // FIFO ring grows.
+      .andWhere('r.action_id IS NULL')
       // Unread count: messages after last_read_at (datetime comparison per CHAT-12)
       .addSelect(
         `(SELECT COUNT(*) FROM chat_room_messages m WHERE ${t('m.room_id')} = ${t('r.id')} AND (p.last_read_at IS NULL OR m.created_at > p.last_read_at))`,
@@ -397,10 +402,13 @@ export class RoomCrudService {
    * in. Does not compute per-user unread counts (caller may not be a member).
    */
   async listAllWorkspaceRooms(workspaceId: string): Promise<any[]> {
-    const rooms = await this.roomRepo.find({
-      where: { workspace_id: workspaceId },
-      order: { last_message_at: 'DESC' },
-    });
+    // Same action_id IS NULL filter as listRooms — observer view also wants to
+    // skip Action-Run rooms because they belong to the Actions surface.
+    const rooms = await this.roomRepo.createQueryBuilder('r')
+      .where('r.workspace_id = :wsId', { wsId: workspaceId })
+      .andWhere('r.action_id IS NULL')
+      .orderBy('r.last_message_at', 'DESC')
+      .getMany();
     if (rooms.length === 0) return [];
     const roomIds = rooms.map(r => r.id);
     const participantRows = await this.participantRepo
