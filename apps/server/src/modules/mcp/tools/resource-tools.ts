@@ -8,11 +8,12 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { Resource } from '../../../entities/Resource';
+import { Credential } from '../../../entities/Credential';
 import { ResourceEmbedding } from '../../../entities/ResourceEmbedding';
 import { cosineSimilarity } from '../../../services/embedding.service';
 import { ok, err } from '../shared/helpers';
 import { parseResourceTags, resourceToJson, embedResource, inferResourceMimetype } from '../shared/resource-helpers';
-import { listRepoBranches } from '../shared/git-branches';
+import { listRepoBranches, resolveGitCredential } from '../shared/git-branches';
 import type { ToolContext } from './context';
 
 export function registerResourceTools(server: McpServer, ctx: ToolContext): void {
@@ -149,7 +150,16 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
       if (resource.type !== 'repository') return err(`resource type must be 'repository' (got '${resource.type}')`);
       if (!resource.url) return err("resource has no URL — set the repository's URL before listing branches");
       try {
-        const branches = await listRepoBranches({ url: resource.url, defaultBranch: resource.default_branch || '' });
+        const credential = await resolveGitCredential(
+          dataSource.getRepository(Credential),
+          resource.credential_id,
+          workspace_id,
+        );
+        const branches = await listRepoBranches({
+          url: resource.url,
+          credential,
+          defaultBranch: resource.default_branch || '',
+        });
         return ok({ branches, default_branch: resource.default_branch || '' });
       } catch (e: any) {
         return err(`failed to list branches: ${String(e?.message || e)}`);

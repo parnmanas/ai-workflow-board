@@ -42,6 +42,12 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=7701
 
+# `git` is needed at runtime for `git ls-remote --heads` against repository
+# Resources (branch picker in the Ticket panel + Resource manager test).
+# node:22-alpine omits it, so without this the branches endpoint fails with
+# `spawn git ENOENT`.
+RUN apk add --no-cache git
+
 # Copy root package files for workspace resolution
 COPY package.json package-lock.json* turbo.json ./
 COPY apps/server/package.json apps/server/

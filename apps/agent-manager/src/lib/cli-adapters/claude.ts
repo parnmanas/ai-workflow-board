@@ -141,6 +141,18 @@ export class ClaudeCliAdapter extends CliAdapter {
     } catch (err: any) {
       if (err?.code !== 'ENOENT') throw err;
     }
-    await fsp.symlink(src, dst);
+    try {
+      await fsp.symlink(src, dst);
+    } catch (err: any) {
+      // Windows CreateSymbolicLink requires admin or Developer Mode;
+      // without that privilege fs.symlink fails with EPERM. Fall back
+      // to a plain copy — this hook reruns on every spawn, so the
+      // operator's next `claude login` propagates on the next restart.
+      if (err?.code === 'EPERM' || err?.code === 'EACCES') {
+        await fsp.copyFile(src, dst);
+      } else {
+        throw err;
+      }
+    }
   }
 }
