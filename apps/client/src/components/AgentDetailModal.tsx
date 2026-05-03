@@ -685,21 +685,17 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
           </div>
         </div>
 
-        {/* Scroll body — INFO tab uses outer scroll (cards stack); SUBAGENTS
-            tab needs the body to NOT scroll so the inner two-pane layout
-            (list / transcript) can clip its own overflows independently.
-            FILES tab is similar to subagents in that it manages its own
-            scroll, but the existing overflowY:auto here is harmless for
-            it because the file tree component already constrains height. */}
+        {/* Scroll body — outer scroll kicks in only when the viewport is
+            shorter than the sum of every section's min-height. In tall
+            viewports, RECENT ACTIVITY (INFO) and the FILES panel still
+            flex-grow into remaining space and scroll *inside* themselves
+            — single scrollbar, no duplicate. SUBAGENTS uses its own
+            inner two-pane scroll and ignores the outer one because the
+            tab content fits within the body height. */}
         <div
           style={{
             flex: 1,
-            // No outer modal scroll on any tab. Each section above
-            // Recent Activity has its own cap (SESSIONS,
-            // ROLE PROMPT, DETAILS card), Recent Activity flex-grows
-            // and scrolls inside itself, SUBAGENTS / FILES manage
-            // their own scroll. Single scrollbar, always.
-            overflowY: 'hidden',
+            overflowY: 'auto',
             padding: 24,
             display: 'flex',
             flexDirection: 'column',
@@ -1230,8 +1226,11 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
             )}
           </section>
 
-          {/* RECENT ACTIVITY section */}
-          <section style={{ flex: 1, minHeight: 200, display: 'flex', flexDirection: 'column' }}>
+          {/* RECENT ACTIVITY section. minHeight keeps the feed usable on
+             short viewports — once the sum of sections + this min exceeds
+             the modal body, the body's outer scroll kicks in instead of
+             squeezing this panel down to a 1-row sliver. */}
+          <section style={{ flex: 1, minHeight: 320, display: 'flex', flexDirection: 'column' }}>
             <div
               style={{
                 display: 'flex',
@@ -1298,9 +1297,11 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
                   border: `1px solid ${tokens.colors.border}`,
                   borderRadius: tokens.radii.md,
                   // flex:1 + minHeight:0 — parent <section> is flex:1 with
-                  // minHeight:200, modal body is overflow:hidden + flex
-                  // column, so this feed claims all remaining vertical
-                  // space and scrolls inside itself. Single scrollbar.
+                  // minHeight:320, modal body is overflowY:auto + flex
+                  // column. On tall viewports this inner scroll engages
+                  // first and the body never scrolls; on short ones the
+                  // body's outer scroll takes over so the panel can keep
+                  // its minHeight without clipping the sections above.
                   flex: 1,
                   minHeight: 0,
                   overflowY: 'auto',
@@ -1403,12 +1404,13 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
 
           {/* FILES tab — the tab bar above gates visibility. The component
              is mounted only while the tab is active so it skips the initial
-             /fs/roots fetch until the user asks for it. flex:1 + minHeight:0
-             so the file list claims the full modal body height instead of
-             collapsing to its intrinsic content size — pairs with the body's
-             overflowY:hidden on this tab. */}
+             /fs/roots fetch until the user asks for it. flex:1 lets the file
+             browser claim remaining vertical space; minHeight:320 keeps it
+             usable on short viewports (header + crumbs + listing + viewer
+             would otherwise collapse) and pairs with the body's outer
+             overflowY:auto so the page scrolls instead of clipping. */}
           {activeTab === 'files' && detail && (
-            <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+            <div style={{ flex: 1, minHeight: 320, display: 'flex', flexDirection: 'column' }}>
               <AgentFileBrowser agentId={detail.id} isOnline={isOnline} />
             </div>
           )}

@@ -296,7 +296,11 @@ export class SubagentManager implements SubagentManagerContract {
         );
       }
 
-      const resolvedBin = adapter.resolveBin(this.#config.delegation.claudeBin);
+      // See base-session-manager: `delegation.claudeBin` is claude-only;
+      // forwarding it to codex / gemini spawned the wrong binary.
+      const binOverride =
+        adapter.cliType === 'claude' ? this.#config.delegation.claudeBin : null;
+      const resolvedBin = adapter.resolveBin(binOverride);
       // ST-7 follow-up: inject the per-agent CLI home dir via the
       // adapter-specific env var (CLAUDE_CONFIG_DIR / GEMINI_HOME /
       // CODEX_HOME). When the adapter doesn't have one (custom CLI),
@@ -305,12 +309,16 @@ export class SubagentManager implements SubagentManagerContract {
       const cliHomeEnv = cliHomeEnvKey && ctx?.cli_home_dir
         ? { [cliHomeEnvKey]: ctx.cli_home_dir }
         : {};
+      // Per-agent credential extras (ANTHROPIC_API_KEY / OPENAI_API_KEY /
+      // GEMINI_API_KEY) — populated by the adapter's prepareCliHome on
+      // spawn_agent. Empty for subscription-mode and unset agents.
+      const credentialEnv = ctx?.extra_env ?? {};
       const child = spawn(resolvedBin, descriptor.args, {
         stdio: descriptor.stdio || ['ignore', 'pipe', 'pipe'],
         detached: true,
         windowsHide: true,
         cwd: effectiveCwd,
-        env: { ...process.env, AWB_API_KEY: effectiveApiKey, ...cliHomeEnv },
+        env: { ...process.env, AWB_API_KEY: effectiveApiKey, ...cliHomeEnv, ...credentialEnv },
         shell: descriptor.shell ?? /\.(cmd|bat|ps1)$/i.test(resolvedBin),
       });
       child.once('error', (err: any) => {

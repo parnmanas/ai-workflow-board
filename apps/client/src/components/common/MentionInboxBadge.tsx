@@ -24,12 +24,23 @@ export function MentionInboxBadge({ workspaceId }: Props) {
     await markRead(item.id);
     setOpen(false);
     if (item.source_type === 'comment' && item.ticket_id && workspaceId) {
-      // Ticket detail panel opens via query param on the board view.
-      // We don't know the board id here, so surface the ticket via the
-      // workspace default — Board.tsx reads `?ticket=<id>` and opens the panel.
-      navigate(`/ws/${workspaceId}/boards?ticket=${encodeURIComponent(item.ticket_id)}`);
+      // Comment deep link: server resolves board_id via Ticket → BoardColumn so
+      // we can land directly on the board route. Without board_id (e.g. ticket
+      // moved between boards races, or a legacy stored row) fall back to the
+      // workspace boards index — BoardsIndexPage will surface a chooser.
+      const ticketParam = encodeURIComponent(item.ticket_id);
+      const commentParam = encodeURIComponent(item.source_id);
+      if (item.board_id) {
+        navigate(`/ws/${workspaceId}/boards/${encodeURIComponent(item.board_id)}?ticket=${ticketParam}&comment=${commentParam}`);
+      } else {
+        navigate(`/ws/${workspaceId}/boards?ticket=${ticketParam}&comment=${commentParam}`);
+      }
     } else if (item.source_type === 'chat_message' && item.room_id && workspaceId) {
-      navigate(`/ws/${workspaceId}/chat?room=${encodeURIComponent(item.room_id)}`);
+      // Chat deep link: ChatPage reads `?room=` to select the room and
+      // `?message=` to scroll-and-highlight the targeted message.
+      const roomParam = encodeURIComponent(item.room_id);
+      const messageParam = encodeURIComponent(item.source_id);
+      navigate(`/ws/${workspaceId}/chat?room=${roomParam}&message=${messageParam}`);
     }
   };
 

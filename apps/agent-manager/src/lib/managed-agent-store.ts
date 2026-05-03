@@ -48,6 +48,53 @@ export function mcpConfigPathFor(agentId: string): string {
   return join(managedAgentDir(agentId), 'mcp-config.json');
 }
 
+export function credentialPathFor(agentId: string): string {
+  return join(managedAgentDir(agentId), 'credential.json');
+}
+
+export interface ManagedAgentCredential {
+  /** AWB Credential row id — diagnostic only; the manager doesn't talk back. */
+  credential_id: string;
+  /** Credential.provider — one of `claude_subscription` / `claude_api_key` /
+   *  `codex_subscription` / `codex_api_key` / `gemini_subscription` /
+   *  `gemini_api_key`. The manager validates that the prefix matches the
+   *  agent's CLI before applying — a mismatch silently falls through to
+   *  legacy operator-HOME behaviour. */
+  provider: string;
+  /** Decrypted credential payload. Field set varies by provider — see
+   *  PROVIDER_FIELDS in apps/server/src/modules/credentials/credentials.controller.ts. */
+  fields: Record<string, string>;
+}
+
+export async function readAgentCredential(agentId: string): Promise<ManagedAgentCredential | null> {
+  const path = credentialPathFor(agentId);
+  if (!existsSync(path)) return null;
+  try {
+    const raw = JSON.parse(readFileSync(path, 'utf8'));
+    if (!raw || typeof raw !== 'object') return null;
+    if (typeof raw.provider !== 'string' || !raw.provider) return null;
+    return {
+      credential_id: typeof raw.credential_id === 'string' ? raw.credential_id : '',
+      provider: raw.provider,
+      fields: raw.fields && typeof raw.fields === 'object' ? raw.fields : {},
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function writeAgentCredential(
+  agentId: string,
+  credential: ManagedAgentCredential,
+): Promise<void> {
+  await ensureManagedAgentDir(agentId);
+  await fsp.writeFile(credentialPathFor(agentId), JSON.stringify(credential, null, 2), { mode: 0o600 });
+}
+
+export async function eraseAgentCredential(agentId: string): Promise<void> {
+  await fsp.unlink(credentialPathFor(agentId)).catch(() => undefined);
+}
+
 export function subagentLogPathFor(agentId: string): string {
   return join(managedAgentDir(agentId), 'subagent.log');
 }
@@ -146,11 +193,15 @@ export async function writeMcpConfig(
   return path;
 }
 
-/** Remove the on-disk apiKey + mcp-config for an agent (e.g., on stop). */
+/** Remove the on-disk apiKey + mcp-config for an agent (e.g., on stop).
+ *  Also clears the per-agent CLI credential snapshot — on the next spawn the
+ *  manager re-fetches it from AWB so a credential-rotation in the AWB UI
+ *  takes effect without leaving a stale copy on this host. */
 export async function eraseSecrets(agentId: string): Promise<void> {
   await Promise.allSettled([
     fsp.unlink(apiKeyPathFor(agentId)),
     fsp.unlink(mcpConfigPathFor(agentId)),
+    fsp.unlink(credentialPathFor(agentId)),
   ]);
 }
 

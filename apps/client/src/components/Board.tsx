@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { DragDropContext, Droppable, DragStart, DropResult } from '@hello-pangea/dnd';
 import { Group, Panel, Separator } from 'react-resizable-panels';
 import { Ticket } from '../types';
@@ -35,7 +35,15 @@ export default function Board() {
   // Board and workspace identity come from the URL — no localStorage reads needed.
   const { wsId, boardId } = useParams<{ wsId: string; boardId: string }>();
 
+  // Deep-link query params (`?ticket=<id>&comment=<id>`) drive the mention
+  // inbox jump-to-comment flow. The ticket id opens the right-hand panel and
+  // the comment id is forwarded to TicketPanel → CommentList for scroll-and-
+  // highlight. Params are consumed (cleared from the URL) once applied so a
+  // page reload doesn't keep re-triggering the highlight.
+  const [searchParams, setSearchParams] = useSearchParams();
+
   const [activePanelTicketId, setActivePanelTicketId] = useState<string | null>(null);
+  const [scrollToCommentId, setScrollToCommentId] = useState<string | null>(null);
 
   const panelBoardScrollRef = useDragToScroll<HTMLDivElement>({ axis: 'x' });
   const fullBoardScrollRef = useDragToScroll<HTMLDivElement>({ axis: 'x' });
@@ -100,6 +108,25 @@ export default function Board() {
       setActivePanelTicketId(null);
     }
   }, [activePanelTicketId, board, activePanelTicket]);
+
+  // Apply `?ticket=&comment=` deep-link params once the board has loaded.
+  // Wait until the ticket actually exists in the loaded board before
+  // consuming the params so a refresh while the board is still fetching
+  // doesn't drop the request on the floor. After applying we strip the
+  // params from the URL so back/forward navigation behaves naturally.
+  useEffect(() => {
+    if (!board) return;
+    const ticketParam = searchParams.get('ticket');
+    if (!ticketParam) return;
+    if (!findTicketById(board, ticketParam)) return;
+    setActivePanelTicketId(ticketParam);
+    const commentParam = searchParams.get('comment');
+    setScrollToCommentId(commentParam || null);
+    const next = new URLSearchParams(searchParams);
+    next.delete('ticket');
+    next.delete('comment');
+    setSearchParams(next, { replace: true });
+  }, [board, searchParams, setSearchParams]);
 
   // --- Wrapped action handlers ---
 
@@ -462,6 +489,8 @@ export default function Board() {
                     currentBoardId={boardId}
                     workspaceId={wsId}
                     onMoveToBoard={handleMoveTicketToBoard}
+                    scrollToCommentId={scrollToCommentId}
+                    onScrollToCommentConsumed={() => setScrollToCommentId(null)}
                   />
                 </Panel>
               </Group>

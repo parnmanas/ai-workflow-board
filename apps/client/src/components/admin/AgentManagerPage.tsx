@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { api } from '../../api';
+import { api, getActiveWorkspaceId } from '../../api';
 import { tokens } from '../../tokens';
 import type {
   Agent,
   AgentManagerCommandKind,
   AgentManagerInstance,
+  Credential,
   PairingTokenMint,
   PairingTokenSafe,
   SubagentSummary,
@@ -153,6 +154,7 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
   const [subagents, setSubagents] = useState<SubagentSummary[] | null>(null);
   const [logs, setLogs] = useState<any[] | null>(null);
   const [restartPending, setRestartPending] = useState(false);
+  const [updatePending, setUpdatePending] = useState(false);
   // Manager Agent.name + description live in the agents table, separate
   // from inst.hostname (OS hostname). The header shows hostname; this
   // load surfaces the Agent.name (used as the children's display prefix)
@@ -218,6 +220,28 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
       showToast(msg, 'info');
     } finally {
       setRestartPending(false);
+    }
+  };
+
+  // Dispatch update_manager SSE command. The manager runs git pull + npm
+  // install + build, acks success, then re-execs with --force. We see the
+  // re-exec on the client side as an `agent_instance_update` event with the
+  // new plugin_version, so no extra polling is needed here.
+  const handleUpdate = async () => {
+    if (updatePending) return;
+    if (!confirm('Update this manager? It will pull the latest source, rebuild, and restart.')) return;
+    setUpdatePending(true);
+    try {
+      const resp = await api.sendAgentManagerCommand(inst.instance_id, { command: 'update_manager' });
+      showToast(
+        `update_manager dispatched (id=${resp.command_id.slice(0, 8)}) — manager will rebuild + re-exec; ` +
+          `it'll reappear in ~30s with the new version.`,
+        'success',
+      );
+    } catch (err: any) {
+      showToast(`update_manager failed: ${err?.message || err}`, 'error');
+    } finally {
+      setUpdatePending(false);
     }
   };
 
@@ -302,6 +326,9 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
             </dt>
             <dd style={{ margin: 0, color: tokens.colors.textStrong }}>
               v{inst.plugin_version}
+              {inst.mode === 'manager' && (
+                <ManagerVersionBadge inst={inst} />
+              )}
             </dd>
           </div>
           <div>
@@ -382,6 +409,28 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
               title="Rename the manager Agent identity. The new name becomes the prefix for every child agent in the UI."
             >
               Edit identity
+            </button>
+          )}
+          {inst.mode === 'manager' && inst.update_available && (
+            <button
+              onClick={handleUpdate}
+              disabled={updatePending}
+              style={{
+                padding: '6px 14px',
+                fontSize: 12,
+                fontWeight: 600,
+                background: updatePending ? tokens.colors.surfaceHover : tokens.colors.success,
+                color: updatePending ? tokens.colors.textMuted : tokens.colors.surface,
+                border: 'none',
+                borderRadius: tokens.radii.md,
+                cursor: updatePending ? 'wait' : 'pointer',
+                fontFamily: 'inherit',
+              }}
+              title={`Update from v${inst.plugin_version} → v${inst.latest_version || '?'} (git pull + npm install + build, then re-exec).`}
+            >
+              {updatePending
+                ? 'Updating…'
+                : `Update → v${inst.latest_version || '?'}`}
             </button>
           )}
           <button
@@ -1451,6 +1500,10 @@ function ManagedAgentDialog({
   // filesystem via the existing fs reverse-RPC. Lets the user click a
   // directory instead of typing an absolute path.
   const [pickerOpen, setPickerOpen] = useState(false);
+  // Per-agent CLI credential. Only claude / codex / gemini have adapters
+  // that consume credentials; custom CLIs leave this null.
+  const [credentialId, setCredentialId] = useState<string>('');
+  const [credentials, setCredentials] = useState<Credential[]>([]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -1462,17 +1515,35 @@ function ManagedAgentDialog({
       setWorkingDir(agent.working_dir || '');
       setDescription(agent.description || '');
       setAutoSpawn(false);
+      setCredentialId(agent.credential_id || '');
     } else {
       setName('');
       setWorkingDir('');
       setDescription('');
       setAutoSpawn(true);
+      setCredentialId('');
       // Default CLI tracks the manager's primary CLI, but the operator can
       // override it (e.g., spawn a Gemini agent under a Claude-default manager).
       const defaulted = CLI_OPTIONS.find((o) => o.value === defaultCli)?.value || 'claude';
       setCli(defaulted);
     }
   }, [isOpen, mode, agent, defaultCli]);
+
+  // Load workspace-scoped credentials once per open. We keep all of them
+  // and filter by the active CLI in the render path so changing CLI
+  // doesn't refetch.
+  useEffect(() => {
+    if (!isOpen) return;
+    const wsId = getActiveWorkspaceId() || '';
+    if (!wsId) { setCredentials([]); return; }
+    let alive = true;
+    api.listCredentials(wsId)
+      .then((rows) => { if (alive) setCredentials(rows); })
+      .catch(() => { if (alive) setCredentials([]); });
+    return () => { alive = false; };
+  }, [isOpen]);
+
+  const eligibleCredentials = credentials.filter((c) => c.provider.startsWith(`${cli}_`));
 
   const submit = async () => {
     const trimmedName = name.trim();
@@ -1493,10 +1564,15 @@ function ManagedAgentDialog({
         // is intentionally locked — changing the underlying binary on a
         // live agent identity would invalidate its on-disk per-agent CLI
         // home dir and confuse routing, so it stays a create-time decision.
+        // Per-agent credential is only meaningful when an adapter consumes it
+        // (claude / codex / gemini); for `custom` we always send null so a
+        // stale id doesn't linger after the operator switched CLI.
+        const supportsCredential = cli !== 'custom';
         await api.updateAgent(agent.id, {
           name: trimmedName,
           description,
           working_dir: trimmedWorkingDir,
+          credential_id: supportsCredential && credentialId ? credentialId : null,
         });
         showToast(`Agent "${trimmedName}" updated`, 'success');
 
@@ -1523,12 +1599,14 @@ function ManagedAgentDialog({
         }
       } else {
         // Create flow.
+        const supportsCredential = cli !== 'custom';
         const created = await api.createManagedAgent({
           name: trimmedName,
           cli,
           working_dir: trimmedWorkingDir || undefined,
           manager_agent_id: managerAgentId,
           description: description.trim() || undefined,
+          credential_id: supportsCredential && credentialId ? credentialId : undefined,
         });
         showToast(`Agent "${trimmedName}" created`, 'success');
 
@@ -1606,6 +1684,24 @@ function ManagedAgentDialog({
             </div>
           )}
         </div>
+        {cli !== 'custom' && (
+          <div>
+            <label style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 4 }}>
+              CLI credential
+            </label>
+            <Select
+              value={credentialId}
+              options={[
+                { value: '', label: 'None — fall back to operator HOME' },
+                ...eligibleCredentials.map((c) => ({ value: c.id, label: `${c.name} · ${c.provider}` })),
+              ]}
+              onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setCredentialId(e.target.value)}
+            />
+            <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2, lineHeight: 1.5 }}>
+              Subscription credentials drop the OAuth file into this agent's cli-home; API-key credentials export the matching env var on every spawn. Add or rotate values in the Credentials page.
+            </div>
+          </div>
+        )}
         <div>
           <label style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 4 }}>
             Working directory
@@ -1671,5 +1767,62 @@ function ManagedAgentDialog({
         )}
       </div>
     </Modal>
+  );
+}
+
+// ─── ManagerVersionBadge — render `(→ vX.Y.Z available)` next to plugin_version
+// when the manager's UpdateChecker says a newer build is on origin/<branch>. A
+// pre-update manager (no UpdateChecker fields in the heartbeat) renders nothing
+// so we don't gaslight operators on instances that genuinely don't ship the
+// self-update path.
+function ManagerVersionBadge({ inst }: { inst: AgentManagerInstance }) {
+  // Field absence vs `false` matters here: undefined === pre-update manager
+  // (silent fallback), false === checker ran and there's no update, true ===
+  // checker ran and an update is on origin.
+  if (inst.update_available === undefined) return null;
+  // No git checkout under the manager process — auto-update is structurally
+  // impossible. Distinct from "checker ran and failed" so operators don't
+  // chase a phantom network error on a binary install.
+  if (inst.repo_root === null) {
+    return (
+      <span
+        style={{ marginLeft: 8, fontSize: 11, color: tokens.colors.textMuted }}
+        title="Manager isn't running from a git checkout — install upgrades manually."
+      >
+        (manual updates only)
+      </span>
+    );
+  }
+  if (inst.update_last_error) {
+    return (
+      <span
+        style={{ marginLeft: 8, fontSize: 11, color: tokens.colors.warning }}
+        title={`Self-update checker error: ${inst.update_last_error}`}
+      >
+        (update check failed)
+      </span>
+    );
+  }
+  if (!inst.update_available) {
+    return (
+      <span
+        style={{ marginLeft: 8, fontSize: 11, color: tokens.colors.textMuted }}
+        title={
+          inst.update_last_checked_at
+            ? `Up to date as of ${inst.update_last_checked_at}`
+            : 'Update checker has not yet completed its first poll'
+        }
+      >
+        (up to date)
+      </span>
+    );
+  }
+  return (
+    <span
+      style={{ marginLeft: 8, fontSize: 11, fontWeight: 600, color: tokens.colors.success }}
+      title={`Latest on ${inst.default_branch || 'main'}: v${inst.latest_version}. Use the Update button to pull + rebuild.`}
+    >
+      → v{inst.latest_version} available
+    </span>
   );
 }

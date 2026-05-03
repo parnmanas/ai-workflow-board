@@ -1,4 +1,4 @@
-import React, { useRef, useMemo, useCallback } from 'react';
+import React, { useRef, useMemo, useCallback, useEffect } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Comment, CommentType } from '../types';
 import { tokens } from '../tokens';
@@ -27,9 +27,15 @@ interface CommentListProps {
   // set keep showing in the list (filter chip controls visibility) but
   // their unread dot is suppressed — "I see this exists, just don't ping me".
   mutedTypes?: Set<CommentType>;
+  // Mention deep link target — when set, scroll the comment with this id
+  // into view and briefly highlight it. Parent clears it via
+  // onScrollToCommentConsumed once the jump has been performed so a
+  // subsequent virtual rerender doesn't re-fire the highlight.
+  scrollToCommentId?: string | null;
+  onScrollToCommentConsumed?: () => void;
 }
 
-export default function CommentList({ comments, onImagePreview, onSetCommentStatus, onReply, replyingToCommentId, lastReadAt, mutedTypes }: CommentListProps) {
+export default function CommentList({ comments, onImagePreview, onSetCommentStatus, onReply, replyingToCommentId, lastReadAt, mutedTypes, scrollToCommentId, onScrollToCommentConsumed }: CommentListProps) {
   const lastReadMs = lastReadAt ? new Date(lastReadAt).getTime() : null;
   const parentRef = useRef<HTMLDivElement>(null);
 
@@ -108,6 +114,46 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
     virtualizer.scrollToIndex(index, { align: 'center', behavior: 'smooth' });
   }, [flatRows, virtualizer]);
 
+  // Mention deep-link jump-and-highlight. Two-stage: ask the virtualizer to
+  // scroll the row into the rendered window, then on next paint look the row
+  // up by data-comment-id and flash a tinted background that fades out over
+  // 1.5s — mirrors the chat MessageList highlight idiom (ChatPage.tsx). If
+  // the target id isn't in flatRows (filtered out by chip / parent collapsed)
+  // we still call back to onConsumed so the parent doesn't keep retrying.
+  useEffect(() => {
+    if (!scrollToCommentId) return;
+    const index = flatRows.findIndex(r => r.comment.id === scrollToCommentId);
+    if (index < 0) {
+      onScrollToCommentConsumed?.();
+      return;
+    }
+    virtualizer.scrollToIndex(index, { align: 'center', behavior: 'smooth' });
+    // Two rAF ticks lets the virtualizer mount the row before we look it up.
+    // 80ms fallback covers the case where the row is already mounted (no
+    // additional measurement pass scheduled) but the smooth scroll is still
+    // animating — the highlight reads as a deliberate ping either way.
+    const timer = window.setTimeout(() => {
+      const root = parentRef.current;
+      if (!root) { onScrollToCommentConsumed?.(); return; }
+      const el = root.querySelector(`[data-comment-id="${scrollToCommentId}"]`) as HTMLElement | null;
+      if (el) {
+        // Capture the per-type tint that React painted on first render and
+        // fade back to it instead of '' — clearing would leave the row with
+        // no background because React's reconciler short-circuits the
+        // re-apply (same prop value → DOM untouched).
+        const originalBg = el.style.background;
+        el.style.transition = 'background 0s';
+        el.style.background = 'rgba(99,102,241,0.20)';
+        window.setTimeout(() => {
+          el.style.transition = 'background 1.5s ease';
+          el.style.background = originalBg;
+        }, 50);
+      }
+      onScrollToCommentConsumed?.();
+    }, 80);
+    return () => window.clearTimeout(timer);
+  }, [scrollToCommentId, flatRows, virtualizer, onScrollToCommentConsumed]);
+
   if (comments.length === 0) {
     // Same flex: 1 footprint as the populated state so the parent column
     // doesn't collapse and yank the compose input up to the top of the panel.
@@ -163,6 +209,7 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
               key={`comment-${c.id}`}
               ref={virtualizer.measureElement}
               data-index={virtualItem.index}
+              data-comment-id={c.id}
               style={{
                 position: 'absolute', top: virtualItem.start, left: indentPx, right: 0,
                 background: tstyle.bg,

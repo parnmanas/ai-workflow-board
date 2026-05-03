@@ -2,8 +2,11 @@
 // tools, so the manager collects gemini's stdout via collectOneshotResult()
 // and posts the answer back to AWB through its own REST connection.
 
+import { promises as fsp } from 'node:fs';
+import { join } from 'node:path';
 import { resolveCliBin } from '../cli-resolver.js';
 import {
+  type AdapterCredential,
   CliAdapter,
   PARSE_STAGE,
   type OneshotSpec,
@@ -60,5 +63,41 @@ export class GeminiCliAdapter extends CliAdapter {
     // override). Per-agent isolation puts its settings + auth + history
     // under <MANAGER_HOME>/agents/<id>/cli-home/.
     return 'GEMINI_HOME';
+  }
+
+  async prepareCliHome(
+    cliHomeDir: string,
+    credential?: AdapterCredential | null,
+  ): Promise<{ extraEnv: Record<string, string> }> {
+    // The gemini CLI persists its OAuth credential under the config-dir as
+    // `oauth_creds.json`. We don't sync from operator HOME here (no legacy
+    // hook existed) — only honour the per-agent credential. When none is
+    // set the CLI itself surfaces a clearer "not authenticated" error
+    // than us scribbling files to disk would.
+    const oauthDst = join(cliHomeDir, 'oauth_creds.json');
+    try {
+      await fsp.unlink(oauthDst);
+    } catch (err: any) {
+      if (err?.code !== 'ENOENT') throw err;
+    }
+
+    if (credential && credential.provider === 'gemini_subscription') {
+      const body = credential.fields?.oauth_creds_json ?? '';
+      if (body) {
+        await fsp.writeFile(oauthDst, body, { mode: 0o600 });
+      }
+      return { extraEnv: {} };
+    }
+
+    if (credential && credential.provider === 'gemini_api_key') {
+      const apiKey = credential.fields?.api_key ?? '';
+      // GEMINI_API_KEY is the canonical env var; some integrations also
+      // honour GOOGLE_API_KEY, set both for compatibility.
+      return {
+        extraEnv: apiKey ? { GEMINI_API_KEY: apiKey, GOOGLE_API_KEY: apiKey } : {},
+      };
+    }
+
+    return { extraEnv: {} };
   }
 }

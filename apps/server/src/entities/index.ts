@@ -19,6 +19,7 @@ export { SystemSetting } from './SystemSetting';
 export { Credential } from './Credential';
 export { AgentErrorLog } from './AgentErrorLog';
 export { UserMention } from './UserMention';
+export { UserChannel } from './UserChannel';
 export { TicketReadState } from './TicketReadState';
 export { WorkspaceRole } from './WorkspaceRole';
 export { TicketRoleAssignment } from './TicketRoleAssignment';

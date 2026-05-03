@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { tokens } from '../../tokens';
 import { useNotifications } from '../../contexts/NotificationContext';
+import { UserChannelsModal } from './UserChannelsModal';
 
 /**
  * Dropdown panel for browser notification preferences.
@@ -17,6 +18,7 @@ import { useNotifications } from '../../contexts/NotificationContext';
 export function NotificationSettingsPanel() {
   const { prefs, setPref, notificationPermission, requestNotificationPermission } = useNotifications();
   const [open, setOpen] = useState(false);
+  const [channelsModalOpen, setChannelsModalOpen] = useState(false);
   const hasNotificationAPI = typeof window !== 'undefined' && 'Notification' in window;
   const permission = notificationPermission;
 
@@ -151,8 +153,27 @@ export function NotificationSettingsPanel() {
           <Toggle label="Admin (pending users, agent errors)" checked={prefs.admin} onChange={(v) => setPref('admin', v)} rowStyle={rowStyle} />
           <div style={{ borderTop: `1px solid ${tokens.colors.border}`, margin: '6px 0' }} />
           <Toggle label="Audio cue" checked={prefs.audio} onChange={(v) => setPref('audio', v)} rowStyle={rowStyle} />
+          <div style={{ borderTop: `1px solid ${tokens.colors.border}`, margin: '8px 0 6px' }} />
+          <button
+            onClick={() => { setOpen(false); setChannelsModalOpen(true); }}
+            style={{
+              width: '100%',
+              padding: '6px 10px',
+              fontSize: 11,
+              fontWeight: 600,
+              background: 'transparent',
+              color: tokens.colors.textPrimary,
+              border: `1px solid ${tokens.colors.border}`,
+              borderRadius: tokens.radii.sm,
+              cursor: 'pointer',
+              textAlign: 'left',
+            }}
+          >
+            External channels (Discord / Slack / Telegram)…
+          </button>
         </div>
       )}
+      <UserChannelsModal isOpen={channelsModalOpen} onClose={() => setChannelsModalOpen(false)} />
     </div>
   );
 }

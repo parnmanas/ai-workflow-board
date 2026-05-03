@@ -16,7 +16,7 @@ import {
   type LockHandle,
 } from './lib/agent-lockfile.js';
 import { importLegacyConfig } from './lib/legacy-import.js';
-import { runSelfUpdate } from './lib/self-update.js';
+import { runSelfUpdate, UpdateChecker } from './lib/self-update.js';
 import { runSetup, type SetupOptions } from './lib/setup.js';
 import { installService, uninstallService, type ServicePlatform } from './lib/service-install.js';
 import { PresenceHeartbeat } from './lib/presence-heartbeat.js';
@@ -39,6 +39,7 @@ import {
   listManagedAgentDirs,
   readManagedAgentConfig,
   readApiKey,
+  readAgentCredential,
   mcpConfigPathFor,
   subagentLogPathFor,
   cliHomeDirFor,
@@ -157,7 +158,9 @@ Legacy import:
 Signals:
   SIGTERM/SIGINT  graceful drain + exit
   SIGHUP          re-read config.json (delegation tunables hot-reload)
-  SIGUSR1         self-update (currently a stub — install upgrades via npm)
+  SIGUSR1         self-update: git pull + npm install + npm run build, then
+                  re-exec with --force so the new build adopts the lockfile.
+                  No-op when the manager is not running from a git checkout.
 `);
 }
 
@@ -413,6 +416,14 @@ async function runRuntime(
   };
   const instanceHeartbeat: { _real: InstanceHeartbeat | null } = { _real: null };
 
+  // Background remote-version checker. Runs `git fetch` + reads
+  // `apps/agent-manager/package.json` from origin/<branch> on a slow
+  // (5min) timer, caching the result so InstanceHeartbeat can attach
+  // `latest_version` / `update_available` to every payload without
+  // paying the network cost on each tick.
+  const updateChecker = new UpdateChecker({ log });
+  updateChecker.start();
+
   cleanupOrphanSubagents()
     .then((r) => {
       if (r.scanned > 0)
@@ -504,8 +515,16 @@ async function runRuntime(
       // post-spawn point we know we'll hit before the next subagent
       // fork. Failures here are logged but non-fatal — the CLI itself
       // will surface a clearer auth error if the symlink is broken.
+      //
+      // Per-agent credential is read from the on-disk snapshot rather
+      // than re-fetched from AWB. Restart-time fetch would block boot on
+      // network reachability, and the snapshot is refreshed on every
+      // spawn_agent / restart_agent anyway.
+      const credential = await readAgentCredential(id);
+      let extraEnv: Record<string, string> = {};
       try {
-        await createAdapter(cfg.cli).prepareCliHome(cliHomeDirFor(id));
+        const prep = await createAdapter(cfg.cli).prepareCliHome(cliHomeDirFor(id), credential);
+        extraEnv = prep?.extraEnv ?? {};
       } catch (err: any) {
         log(`rehydrate: cli-home prep failed for agent=${id.slice(0, 8)} cli=${cfg.cli}: ${err?.message ?? err}`);
       }
@@ -518,6 +537,7 @@ async function runRuntime(
         api_key: apiKey,
         subagent_log_path: subagentLogPathFor(id),
         cli_home_dir: cliHomeDirFor(id),
+        extra_env: extraEnv,
         registered_at: new Date().toISOString(),
       });
       managedAgents.upsert({ agent_id: id, name: cfg.name, cli: cfg.cli, working_dir: cfg.working_dir });
@@ -565,6 +585,9 @@ async function runRuntime(
       // ST-5b — pass the registry as a snapshot source so each heartbeat
       // reports the currently-supervised agent_ids and their working dirs.
       managedAgents,
+      // Self-update tracker; lets the heartbeat carry latest_version +
+      // update_available so the admin UI can render an Update button.
+      updateChecker,
     });
     instanceHeartbeat._real.start();
     const fireUpload = (): void => {
@@ -580,6 +603,7 @@ async function runRuntime(
     log(`agent-manager received ${signal} — terminating subagents`);
     presenceHeartbeat._real?.stop();
     instanceHeartbeat._real?.stop();
+    updateChecker.stop();
     if (uploadTimer) {
       clearInterval(uploadTimer);
       uploadTimer = null;
@@ -615,20 +639,16 @@ async function runRuntime(
   process.once('SIGTERM', () => void shutdown('SIGTERM'));
   process.once('SIGINT', () => void shutdown('SIGINT'));
 
-  let selfUpdateInFlight = false;
+  // SIGUSR1 → self-update. `runSelfUpdate` owns the in-flight guard now (see
+  // self-update.ts), so SIGUSR1 racing with the SSE `update_manager` path
+  // shares the same module-level mutex instead of each handler maintaining
+  // its own. A contended SIGUSR1 just gets a no-op summary back.
   process.on('SIGUSR1', async () => {
-    if (selfUpdateInFlight) {
-      log('SIGUSR1: self-update already in flight, ignoring');
-      return;
-    }
-    selfUpdateInFlight = true;
     try {
       const result = await runSelfUpdate({ log });
       log(`Self-update: ${result.summary}`);
     } catch (err: any) {
       log(`Self-update failed: ${err?.stack || err?.message || err}`);
-    } finally {
-      selfUpdateInFlight = false;
     }
   });
 

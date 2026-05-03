@@ -19,6 +19,7 @@ import { execSync } from 'node:child_process';
 import { accessSync, constants as fsConstants, readlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, basename } from 'node:path';
+import { KNOWN_CLI_TYPES } from './constants.js';
 import { log } from './logging.js';
 
 const isWindows = process.platform === 'win32';
@@ -68,9 +69,20 @@ export function resolveCliBin(cliType: string, configured?: string | null): stri
   if (cached) return cached;
 
   if (configured && configured !== ct) {
-    cache.set(ct, configured);
-    log(`[cli-resolver:${ct}] using configured path: ${configured}`);
-    return configured;
+    // Defense: if `configured` is the literal name of a *different* known
+    // CLI (e.g. "claude" passed for codex), it's almost certainly the
+    // legacy `delegation.claudeBin` default leaking through. Ignore it
+    // and fall through to normal lookup so codex / gemini spawns find
+    // their actual binary instead of launching claude with foreign argv.
+    if ((KNOWN_CLI_TYPES as readonly string[]).includes(configured)) {
+      log(
+        `[cli-resolver:${ct}] ignoring configured="${configured}" — it names a different known CLI; falling through to lookup`,
+      );
+    } else {
+      cache.set(ct, configured);
+      log(`[cli-resolver:${ct}] using configured path: ${configured}`);
+      return configured;
+    }
   }
 
   if (ct === 'claude') {

@@ -20,6 +20,7 @@ import { randomUUID } from 'node:crypto';
 import { HEARTBEAT_INTERVAL_MS, REQUEST_TIMEOUT_MS } from './constants.js';
 import { log } from './logging.js';
 import type { AwbConfig } from './rest.js';
+import type { UpdateChecker } from './self-update.js';
 
 export type InstanceMode = 'manager';
 
@@ -31,6 +32,11 @@ export interface InstanceMeta {
   // ST-5b — managed-agent presence reporter. Optional so legacy callers
   // that don't track managed agents still construct a valid heartbeat.
   managedAgents?: ManagedAgentSnapshot | null;
+  // Self-update tracker; included in every heartbeat so the admin UI can
+  // render `current → latest` + an Update button without polling another
+  // endpoint. Optional so harnesses that opt out of auto-update still
+  // construct a valid heartbeat.
+  updateChecker?: UpdateChecker | null;
 }
 
 /** Tiny duck-typed read-only snapshot of ManagedAgentRegistry. */
@@ -54,6 +60,14 @@ export interface InstanceHeartbeatPayload {
   agent_ids?: string[];
   working_dirs?: string[];
   paired_at?: string;
+  // Self-update fields — populated when InstanceMeta carries an UpdateChecker.
+  // Older AWB servers ignore them; newer ones surface them on the admin UI.
+  latest_version?: string | null;
+  update_available?: boolean;
+  repo_root?: string | null;
+  default_branch?: string | null;
+  update_last_checked_at?: string | null;
+  update_last_error?: string | null;
 }
 
 export class InstanceHeartbeat {
@@ -74,9 +88,11 @@ export class InstanceHeartbeat {
       ? meta.cliAdapters.map((s) => String(s)).filter(Boolean)
       : [];
     const managedSnapshot = meta?.managedAgents ?? null;
+    const updateChecker = meta?.updateChecker ?? null;
     this.#payloadFactory = () => {
       const agentIds = managedSnapshot ? managedSnapshot.liveAgentIds() : [];
       const workingDirs = managedSnapshot ? managedSnapshot.workingDirs() : [];
+      const updateStatus = updateChecker ? updateChecker.status() : null;
       return {
         instance_id: this.#instanceId,
         agent_id: this.#agentId,
@@ -92,6 +108,16 @@ export class InstanceHeartbeat {
         // and non-empty; legacy AWB servers (pre-ST-4) don't expect them.
         ...(agentIds.length ? { agent_ids: agentIds } : {}),
         ...(workingDirs.length ? { working_dirs: workingDirs } : {}),
+        ...(updateStatus
+          ? {
+              latest_version: updateStatus.latest_version,
+              update_available: updateStatus.update_available,
+              repo_root: updateStatus.repo_root,
+              default_branch: updateStatus.branch,
+              update_last_checked_at: updateStatus.last_checked_at,
+              update_last_error: updateStatus.last_error,
+            }
+          : {}),
       };
     };
   }

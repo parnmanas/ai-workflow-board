@@ -11,6 +11,7 @@ import { BoardColumn } from '../entities/BoardColumn';
 import { RelationTuple } from '../entities/RelationTuple';
 import { WorkspaceRole } from '../entities/WorkspaceRole';
 import { TicketRoleAssignment } from '../entities/TicketRoleAssignment';
+import { UserChannel } from '../entities/UserChannel';
 import { ActivityService } from './activity.service';
 import { AuthService } from './auth.service';
 import { ApiKeyService } from './api-key.service';
@@ -21,6 +22,13 @@ import { SystemCommentService } from './system-comment.service';
 import { ReBACService } from './rebac.service';
 import { MentionService } from './mention.service';
 import { PresenceService } from './presence.service';
+import {
+  DiscordUserProvider,
+  SlackUserProvider,
+  TelegramUserProvider,
+  NotificationProviderRegistry,
+  UserChannelDispatcherService,
+} from './notification-providers';
 
 /**
  * Global cross-cutting services.
@@ -41,7 +49,7 @@ import { PresenceService } from './presence.service';
   imports: [
     TypeOrmModule.forFeature([
       ActivityLog, ApiKey, Agent, Channel, Comment, Ticket, User, BoardColumn, RelationTuple,
-      WorkspaceRole, TicketRoleAssignment,
+      WorkspaceRole, TicketRoleAssignment, UserChannel,
     ]),
   ],
   providers: [
@@ -55,6 +63,11 @@ import { PresenceService } from './presence.service';
     ReBACService,
     MentionService,
     PresenceService,
+    DiscordUserProvider,
+    SlackUserProvider,
+    TelegramUserProvider,
+    NotificationProviderRegistry,
+    UserChannelDispatcherService,
   ],
   exports: [
     ActivityService,
@@ -65,6 +78,8 @@ import { PresenceService } from './presence.service';
     ReBACService,
     MentionService,
     PresenceService,
+    NotificationProviderRegistry,
+    UserChannelDispatcherService,
   ],
 })
 export class SharedServicesModule {}

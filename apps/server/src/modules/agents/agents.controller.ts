@@ -340,7 +340,7 @@ export class AgentsController {
 
   @Post()
   async create(@Body() body: any, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
-    const { name, description = '', type = 'custom', avatar_url = '', is_active = 1, working_dir = '', manager_agent_id = null } = body;
+    const { name, description = '', type = 'custom', avatar_url = '', is_active = 1, working_dir = '', manager_agent_id = null, credential_id = null } = body;
     if (!name) return res.status(400).json({ error: 'name is required' });
 
     // Use workspace injected by WorkspaceGuard — ignore body-supplied workspace_id to
@@ -361,6 +361,7 @@ export class AgentsController {
         workspace_id: effectiveWorkspaceId,
         working_dir: typeof working_dir === 'string' ? working_dir : '',
         manager_agent_id: typeof manager_agent_id === 'string' && manager_agent_id ? manager_agent_id : null,
+        credential_id: typeof credential_id === 'string' && credential_id ? credential_id : null,
       }),
     );
     return res.status(201).json(agent);
@@ -372,7 +373,7 @@ export class AgentsController {
       where: { id, ...(workspaceId ? { workspace_id: workspaceId } : {}) },
     }, 'Agent not found');
 
-    const { name, description, type, avatar_url, is_active, role_prompt, role_prompt_meta, working_dir, manager_agent_id } = body;
+    const { name, description, type, avatar_url, is_active, role_prompt, role_prompt_meta, working_dir, manager_agent_id, credential_id } = body;
     if (name !== undefined) {
       const trimmed = typeof name === 'string' ? name.trim() : '';
       if (!trimmed) return res.status(400).json({ error: 'name cannot be empty' });
@@ -393,6 +394,12 @@ export class AgentsController {
     }
     if (manager_agent_id !== undefined) {
       agent.manager_agent_id = typeof manager_agent_id === 'string' && manager_agent_id ? manager_agent_id : null;
+    }
+    if (credential_id !== undefined) {
+      // Empty string / falsy = clear; non-empty string = set. Detaching an
+      // agent from its credential is a one-line UI affordance, so accept null
+      // and '' the same way working_dir / manager_agent_id do.
+      agent.credential_id = typeof credential_id === 'string' && credential_id ? credential_id : null;
     }
 
     const updated = await this.agentRepo.save(agent);

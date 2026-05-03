@@ -40,6 +40,15 @@ export interface InstanceRecord {
   agent_ids?: string[];        // identities the manager currently supervises
   working_dirs?: string[];     // distinct working-dir roots known to the manager
   paired_at?: string;          // ISO timestamp when the manager redeemed its pairing token
+  // Self-update fields — manager-mode only. Daemons/proxies leave undefined.
+  // The manager's UpdateChecker fills these from `git fetch` + remote
+  // package.json on a slow timer; older managers leave them undefined.
+  latest_version?: string | null;       // version on origin/<branch>
+  update_available?: boolean;           // latest > current (semver-aware)
+  repo_root?: string | null;            // absolute path of the manager's git checkout
+  default_branch?: string | null;       // branch the checker is tracking ('main')
+  update_last_checked_at?: string | null;
+  update_last_error?: string | null;
 }
 
 const INSTANCE_TTL_MS = 90_000;     // 3x default plugin heartbeat interval

@@ -52,6 +52,9 @@ export interface Agent {
   // ST-4 — agent-manager-managed agents. Empty/null on legacy rows.
   working_dir?: string;
   manager_agent_id?: string | null;
+  /** Optional Credential row that supplies CLI auth (subscription / API key)
+   *  for the spawned agent. null = fall back to the operator's main HOME. */
+  credential_id?: string | null;
   /** ST-7: name of the manager Agent that supervises this agent. Populated
    *  by the server's agent listing endpoints (one DB lookup per request).
    *  Drives the `<ManagerName>/<AgentName>` display format used everywhere
@@ -197,6 +200,27 @@ export interface Channel {
   notify_on_status_change: number;
   notify_on_update: number;
   notify_on_comment: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Per-user outbound notification channel binding (discord/slack/telegram).
+ * Server returns `has_credentials: boolean` rather than the encrypted blob —
+ * the bot token is never echoed back over the API.
+ */
+export interface UserNotificationChannel {
+  id: string;
+  user_id: string;
+  provider: string; // 'discord' | 'slack' | 'telegram'
+  target: string;
+  label: string;
+  is_active: number;
+  notify_mention: number;
+  notify_chat: number;
+  notify_ticket: number;
+  has_credentials: boolean;
+  verified_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -682,6 +706,15 @@ export interface AgentManagerInstance {
   agent_ids?: string[];
   working_dirs?: string[];
   paired_at?: string;
+  // Self-update fields — manager-mode only (managed by the manager's
+  // UpdateChecker). Pre-update managers leave these undefined; the UI's
+  // version compare degrades to "no info" in that case.
+  latest_version?: string | null;
+  update_available?: boolean;
+  repo_root?: string | null;
+  default_branch?: string | null;
+  update_last_checked_at?: string | null;
+  update_last_error?: string | null;
 }
 
 // ST-5 — pairing tokens. PairingTokenMint is the response of
@@ -714,7 +747,8 @@ export type AgentManagerCommandKind =
   | 'reload_config'
   | 'update_plugins'
   | 'refresh_mcp_config'
-  | 'pull_working_dir';
+  | 'pull_working_dir'
+  | 'update_manager';
 
 export interface AgentManagerCommandResult {
   ok: boolean;
@@ -728,4 +762,6 @@ export interface ManagedAgentCreateBody {
   working_dir?: string;
   manager_agent_id?: string | null;
   description?: string;
+  /** Optional per-agent CLI credential — see Agent.credential_id. */
+  credential_id?: string | null;
 }

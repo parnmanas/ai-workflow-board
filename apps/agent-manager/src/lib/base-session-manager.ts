@@ -78,6 +78,7 @@ export interface SpawnOpts {
     mcp_config_path: string;
     cli: string;
     cli_home_dir: string;
+    extra_env?: Record<string, string>;
   };
 }
 
@@ -251,18 +252,27 @@ export class BaseSessionManager {
         });
       }
 
-      const resolvedBin = adapter.resolveBin(this._config.delegation.claudeBin);
+      // `delegation.claudeBin` is the legacy operator override for the
+      // claude binary path only — passing it to non-claude adapters
+      // caused codex / gemini spawns to launch the literal "claude" bin
+      // (resolver short-circuits on `configured`, returning it verbatim).
+      const binOverride =
+        adapter.cliType === 'claude' ? this._config.delegation.claudeBin : null;
+      const resolvedBin = adapter.resolveBin(binOverride);
       // ST-7 follow-up: per-agent CLI home isolation (see SubagentManager).
       const cliHomeEnvKey = adapter.configDirEnv();
       const cliHomeEnv = cliHomeEnvKey && agentContext?.cli_home_dir
         ? { [cliHomeEnvKey]: agentContext.cli_home_dir }
         : {};
+      // Per-agent credential extras — see SubagentManager for the
+      // matching one-shot path.
+      const credentialEnv = agentContext?.extra_env ?? {};
       const child = spawn(resolvedBin, descriptor.args, {
         stdio: descriptor.stdio || ['pipe', 'pipe', 'pipe'],
         detached: true,
         windowsHide: true,
         cwd: effectiveCwd,
-        env: { ...process.env, AWB_API_KEY: effectiveApiKey, ...cliHomeEnv },
+        env: { ...process.env, AWB_API_KEY: effectiveApiKey, ...cliHomeEnv, ...credentialEnv },
         shell: descriptor.shell ?? /\.(cmd|bat|ps1)$/i.test(resolvedBin),
       }) as ChildProcessByStdio<Writable, Readable, Readable>;
       child.once('error', (err: any) => {

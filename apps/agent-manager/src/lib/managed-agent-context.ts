@@ -37,6 +37,12 @@ export interface ManagedAgentContext {
    *  so each managed agent's CLI sessions / plugins / settings stay
    *  isolated from siblings on the same manager host. */
   cli_home_dir: string;
+  /** Extra environment variables exported on every spawn for this agent.
+   *  Populated by adapter.prepareCliHome() when the agent's per-agent
+   *  credential is the api_key kind (e.g. ANTHROPIC_API_KEY,
+   *  OPENAI_API_KEY, GEMINI_API_KEY). Empty for subscription credentials
+   *  or no credential at all. */
+  extra_env?: Record<string, string>;
   /** ISO timestamp of when this manager last hydrated the context. */
   registered_at: string;
 }

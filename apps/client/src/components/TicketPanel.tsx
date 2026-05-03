@@ -78,6 +78,12 @@ interface TicketPanelProps {
   // Move a root ticket to another board. Optional column id picks a specific
   // column on the target board; omit for the destination's first column.
   onMoveToBoard?: (ticketId: string, targetBoardId: string, opts?: { target_column_id?: string }) => void;
+  // Mention deep-link target — when set, switch to the comments tab and
+  // forward to CommentList for scroll-and-highlight. Parent clears it via
+  // onScrollToCommentConsumed once the panel has acknowledged the request,
+  // so reopening the same ticket later doesn't re-fire the highlight.
+  scrollToCommentId?: string | null;
+  onScrollToCommentConsumed?: () => void;
 }
 
 function findInTree(root: Ticket, id: string): Ticket | null {
@@ -369,6 +375,7 @@ export default function TicketPanel({
   ticket, columnName, agents, users, channels, workspaceRoles, boardTickets, typingIndicators,
   onClose, onUpdate, onDelete, onCreateChild, onDeleteChild, onReparentChild, onSetRoleAssignment, onSaveDraft, onAddComment, onSetCommentStatus, onSelectTicket,
   currentBoardId, workspaceId, onMoveToBoard,
+  scrollToCommentId, onScrollToCommentConsumed,
 }: TicketPanelProps) {
   // ─── Ticket role assignments ────────────────────────────
   // Per-ticket fetch — the board endpoint doesn't include assignments yet,
@@ -589,6 +596,16 @@ export default function TicketPanel({
     setCommentAttachments([]);
     setActiveTab('detail');
   }, [activeTicket.id]);
+
+  // Mention deep-link override — when a comment id is queued (at panel mount
+  // or arriving on the currently-open ticket), jump to the comments tab so
+  // the scroll-and-highlight has somewhere to land. Skip the null clear:
+  // Board.tsx resets scrollToCommentId after the highlight fires, and re-
+  // running the form-drafts reset above would wipe the user's unsaved edits
+  // and snap the tab back to detail mid-highlight.
+  useEffect(() => {
+    if (scrollToCommentId) setActiveTab('comments');
+  }, [scrollToCommentId]);
 
   // Authoritative server-side facts — display names and the attachment list
   // — keep refreshing on updated_at because they have no client-side draft
@@ -2180,6 +2197,8 @@ export default function TicketPanel({
               replyingToCommentId={replyingTo?.id || null}
               lastReadAt={lastReadAt}
               mutedTypes={mutedTypes}
+              scrollToCommentId={scrollToCommentId ?? null}
+              onScrollToCommentConsumed={onScrollToCommentConsumed}
             />
 
             <TypingIndicator agentName={typingIndicators[navStack[navStack.length - 1]] ?? null} />

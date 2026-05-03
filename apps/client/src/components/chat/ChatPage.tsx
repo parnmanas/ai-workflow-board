@@ -6,6 +6,7 @@ import {
   useMemo,
 } from 'react';
 import { Group, Panel, Separator } from 'react-resizable-panels';
+import { useSearchParams } from 'react-router-dom';
 import { api, getActiveWorkspaceId } from '../../api';
 import { useAuth } from '../../contexts/AuthContext';
 import { useBoardStreamEvent } from '../../contexts/BoardStreamContext';
@@ -142,6 +143,25 @@ export default function ChatPage() {
       })
       .finally(() => setLoading(false));
   }, [showAllRooms]);
+
+  // Mention deep link: `?room=<id>&message=<id>` selects the room and queues
+  // a scroll-and-highlight on the targeted message. We strip both params from
+  // the URL once applied so back/forward doesn't keep re-firing the highlight.
+  // The message scroll is best-effort — if the row isn't in the initial 50
+  // we'd need history pagination to find it; that's acceptable for v1.
+  const [searchParams, setSearchParams] = useSearchParams();
+  useEffect(() => {
+    const roomParam = searchParams.get('room');
+    const messageParam = searchParams.get('message');
+    if (!roomParam) return;
+    setActiveRoomId(roomParam);
+    if (isMobile) setMobileView('room');
+    if (messageParam) setScrollToMessageId(messageParam);
+    const next = new URLSearchParams(searchParams);
+    next.delete('room');
+    next.delete('message');
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams, isMobile]);
 
   // Load messages + mark read on room change
   useEffect(() => {
