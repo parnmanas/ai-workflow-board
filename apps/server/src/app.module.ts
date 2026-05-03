@@ -28,6 +28,7 @@ import { AgentLogsModule } from './modules/agent-logs/agent-logs.module';
 import { MentionsModule } from './modules/mentions/mentions.module';
 import { WorkspaceRolesModule } from './modules/workspace-roles/workspace-roles.module';
 import { AgentManagerModule } from './modules/agent-manager/agent-manager.module';
+import { UserChannelsModule } from './modules/user-channels/user-channels.module';
 
 @Module({
   imports: [
@@ -82,6 +83,7 @@ import { AgentManagerModule } from './modules/agent-manager/agent-manager.module
     MentionsModule,
     WorkspaceRolesModule,
     AgentManagerModule,
+    UserChannelsModule,
   ],
 })
 export class AppModule {}
