@@ -15,7 +15,7 @@ import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { LogService } from '../../services/log.service';
 import { findOrFail } from '../../common/find-or-fail';
 import { renderActionPrompt, buildRenderContext } from './action-prompt';
-import { parseCron } from './action-scheduler.service';
+import { parseCron } from './cron';
 
 function makeError(status: number, message: string): Error & { status: number } {
   const err = new Error(message) as Error & { status: number };
