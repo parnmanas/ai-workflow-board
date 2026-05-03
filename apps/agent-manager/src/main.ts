@@ -16,7 +16,7 @@ import {
   type LockHandle,
 } from './lib/agent-lockfile.js';
 import { importLegacyConfig } from './lib/legacy-import.js';
-import { runSelfUpdate } from './lib/self-update.js';
+import { runSelfUpdate, UpdateChecker } from './lib/self-update.js';
 import { runSetup, type SetupOptions } from './lib/setup.js';
 import { installService, uninstallService, type ServicePlatform } from './lib/service-install.js';
 import { PresenceHeartbeat } from './lib/presence-heartbeat.js';
@@ -158,7 +158,9 @@ Legacy import:
 Signals:
   SIGTERM/SIGINT  graceful drain + exit
   SIGHUP          re-read config.json (delegation tunables hot-reload)
-  SIGUSR1         self-update (currently a stub — install upgrades via npm)
+  SIGUSR1         self-update: git pull + npm install + npm run build, then
+                  re-exec with --force so the new build adopts the lockfile.
+                  No-op when the manager is not running from a git checkout.
 `);
 }
 
@@ -414,6 +416,14 @@ async function runRuntime(
   };
   const instanceHeartbeat: { _real: InstanceHeartbeat | null } = { _real: null };
 
+  // Background remote-version checker. Runs `git fetch` + reads
+  // `apps/agent-manager/package.json` from origin/<branch> on a slow
+  // (5min) timer, caching the result so InstanceHeartbeat can attach
+  // `latest_version` / `update_available` to every payload without
+  // paying the network cost on each tick.
+  const updateChecker = new UpdateChecker({ log });
+  updateChecker.start();
+
   cleanupOrphanSubagents()
     .then((r) => {
       if (r.scanned > 0)
@@ -575,6 +585,9 @@ async function runRuntime(
       // ST-5b — pass the registry as a snapshot source so each heartbeat
       // reports the currently-supervised agent_ids and their working dirs.
       managedAgents,
+      // Self-update tracker; lets the heartbeat carry latest_version +
+      // update_available so the admin UI can render an Update button.
+      updateChecker,
     });
     instanceHeartbeat._real.start();
     const fireUpload = (): void => {
@@ -590,6 +603,7 @@ async function runRuntime(
     log(`agent-manager received ${signal} — terminating subagents`);
     presenceHeartbeat._real?.stop();
     instanceHeartbeat._real?.stop();
+    updateChecker.stop();
     if (uploadTimer) {
       clearInterval(uploadTimer);
       uploadTimer = null;

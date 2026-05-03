@@ -56,6 +56,7 @@ import {
   maskKey,
 } from './managed-agent-store.js';
 import { createAdapter } from './cli-adapters/index.js';
+import { runSelfUpdate } from './self-update.js';
 
 type CommandKind =
   | 'spawn_agent'
@@ -65,7 +66,8 @@ type CommandKind =
   | 'reload_config'
   | 'update_plugins'
   | 'refresh_mcp_config'
-  | 'pull_working_dir';
+  | 'pull_working_dir'
+  | 'update_manager';
 
 const KNOWN_COMMANDS: ReadonlySet<CommandKind> = new Set<CommandKind>([
   'spawn_agent',
@@ -76,6 +78,7 @@ const KNOWN_COMMANDS: ReadonlySet<CommandKind> = new Set<CommandKind>([
   'update_plugins',
   'refresh_mcp_config',
   'pull_working_dir',
+  'update_manager',
 ]);
 
 export interface AgentManagerCommandPayload {
@@ -172,7 +175,28 @@ export class AgentManagerCommandHandler {
         return this.#refreshMcpConfig(payload);
       case 'pull_working_dir':
         return this.#pullWorkingDir(payload);
+      case 'update_manager':
+        return this.#updateManager();
     }
+  }
+
+  /**
+   * Pull the latest agent-manager source, reinstall deps, rebuild dist/,
+   * then schedule a detached re-exec so the new build takes over the
+   * lockfile from the dying parent. Same flow on Linux + Windows — the
+   * runSelfUpdate helper handles the platform-specific bits (npm.cmd via
+   * shell:true on Windows, bare npm everywhere else).
+   *
+   * The ack lands first (callers always ack on dispatch return); the
+   * re-exec is scheduled on a ~1.5s timer inside runSelfUpdate so the
+   * ack POST can complete before the parent process exits.
+   */
+  async #updateManager(): Promise<string> {
+    const result = await runSelfUpdate({ log });
+    if (!result.changed) {
+      throw new Error(`update_manager: ${result.summary}`);
+    }
+    return `update_manager ok: ${result.summary}`;
   }
 
   /**
