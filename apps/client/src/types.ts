@@ -204,6 +204,27 @@ export interface Channel {
   updated_at: string;
 }
 
+/**
+ * Per-user outbound notification channel binding (discord/slack/telegram).
+ * Server returns `has_credentials: boolean` rather than the encrypted blob —
+ * the bot token is never echoed back over the API.
+ */
+export interface UserNotificationChannel {
+  id: string;
+  user_id: string;
+  provider: string; // 'discord' | 'slack' | 'telegram'
+  target: string;
+  label: string;
+  is_active: number;
+  notify_mention: number;
+  notify_chat: number;
+  notify_ticket: number;
+  has_credentials: boolean;
+  verified_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ActivityLog {
   id: string; // GUID
   entity_type: string;

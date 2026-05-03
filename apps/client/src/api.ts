@@ -31,6 +31,7 @@ import type {
   ManagedAgentCreateBody,
   Agent,
   TicketAttachmentMeta,
+  UserNotificationChannel,
 } from './types';
 
 const BASE = '/api';
@@ -471,6 +472,28 @@ export const api = {
     request<any>(`/channels/${id}`, { method: 'DELETE' }),
   testChannel: (id: string) =>
     request<any>(`/channels/${id}/test`, { method: 'POST' }),
+
+  // ─── My notification channels (per-user) ──────────────────
+  getMyChannelProviders: () =>
+    request<{ id: string; required_credentials: string[] }[]>('/me/channels/providers'),
+  getMyChannels: () => request<UserNotificationChannel[]>('/me/channels'),
+  createMyChannel: (data: {
+    provider: string;
+    target: string;
+    label?: string;
+    credentials?: Record<string, string>;
+    is_active?: number;
+    notify_mention?: number;
+    notify_chat?: number;
+    notify_ticket?: number;
+  }) =>
+    request<UserNotificationChannel>('/me/channels', { method: 'POST', body: JSON.stringify(data) }),
+  updateMyChannel: (id: string, data: Record<string, any>) =>
+    request<UserNotificationChannel>(`/me/channels/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteMyChannel: (id: string) =>
+    request<{ success: true }>(`/me/channels/${id}`, { method: 'DELETE' }),
+  testMyChannel: (id: string) =>
+    request<{ success: boolean; error?: string }>(`/me/channels/${id}/test`, { method: 'POST' }),
 
   // ─── API Keys ──────────────────────────────────────────
   getApiKeys: () => request<any[]>('/keys'),
