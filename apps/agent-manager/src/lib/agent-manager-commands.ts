@@ -190,6 +190,13 @@ export class AgentManagerCommandHandler {
    * The ack lands first (callers always ack on dispatch return); the
    * re-exec is scheduled on a ~1.5s timer inside runSelfUpdate so the
    * ack POST can complete before the parent process exits.
+   *
+   * Concurrency: runSelfUpdate enforces a module-level in-flight mutex
+   * shared with the SIGUSR1 handler. A second update_manager dispatched
+   * while one is still running short-circuits to {changed:false,
+   * summary:'self-update already in flight'}; we throw on that so the
+   * REST ack carries 'error' rather than silently no-op'ing — operators
+   * see the contention on the admin UI.
    */
   async #updateManager(): Promise<string> {
     const result = await runSelfUpdate({ log });

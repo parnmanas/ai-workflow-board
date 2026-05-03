@@ -639,20 +639,16 @@ async function runRuntime(
   process.once('SIGTERM', () => void shutdown('SIGTERM'));
   process.once('SIGINT', () => void shutdown('SIGINT'));
 
-  let selfUpdateInFlight = false;
+  // SIGUSR1 → self-update. `runSelfUpdate` owns the in-flight guard now (see
+  // self-update.ts), so SIGUSR1 racing with the SSE `update_manager` path
+  // shares the same module-level mutex instead of each handler maintaining
+  // its own. A contended SIGUSR1 just gets a no-op summary back.
   process.on('SIGUSR1', async () => {
-    if (selfUpdateInFlight) {
-      log('SIGUSR1: self-update already in flight, ignoring');
-      return;
-    }
-    selfUpdateInFlight = true;
     try {
       const result = await runSelfUpdate({ log });
       log(`Self-update: ${result.summary}`);
     } catch (err: any) {
       log(`Self-update failed: ${err?.stack || err?.message || err}`);
-    } finally {
-      selfUpdateInFlight = false;
     }
   });
 

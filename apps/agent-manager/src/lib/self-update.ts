@@ -401,6 +401,23 @@ export class UpdateChecker {
 }
 
 /**
+ * Module-level mutex shared by every entry point that can kick off a self-update
+ * (SSE `update_manager`, SIGUSR1, future direct callers). Hoisting this out of
+ * `main.ts` is load-bearing: prior versions kept the flag local to
+ * `runRuntime()` and only guarded SIGUSR1, so two concurrent SSE dispatches
+ * (or one SSE + one SIGUSR1) would race in three places — workspace-root
+ * `npm install`, `tsc` writing `dist/`, and the double `setTimeout(reExecManager,
+ * 1500)` lockfile-takeover loop. Gating `runSelfUpdate` itself collapses all
+ * those entry points onto a single in-flight bit.
+ */
+let selfUpdateInFlight = false;
+
+/** Test-only escape hatch: clear the in-flight flag between unit tests. */
+export function _resetSelfUpdateInFlightForTests(): void {
+  selfUpdateInFlight = false;
+}
+
+/**
  * Run the full self-update pipeline: pull → install → build → re-exec.
  *
  * Returns once the build completes. The detached re-exec is scheduled on a
@@ -410,9 +427,47 @@ export class UpdateChecker {
  * Cross-platform: uses `npm` with shell:true on Windows (so .cmd shims
  * resolve via PATH) and bare `npm` everywhere else. No shell scripts,
  * same code path on Linux + Windows.
+ *
+ * Mutex: a module-level `selfUpdateInFlight` guard short-circuits concurrent
+ * calls from any entry point (SSE / SIGUSR1 / direct). The contended caller
+ * gets `{ changed: false, summary: 'self-update already in flight' }`; the
+ * SSE dispatcher promotes this to an error ack so the operator sees the
+ * contention on the admin UI rather than silently no-op'ing.
  */
 export async function runSelfUpdate(opts: SelfUpdateOpts = {}): Promise<SelfUpdateResult> {
   const out = opts.log ?? log;
+  if (selfUpdateInFlight) {
+    const summary = 'self-update already in flight';
+    out(`Self-update: ${summary}`);
+    return { changed: false, summary };
+  }
+  selfUpdateInFlight = true;
+  try {
+    return await runSelfUpdateLocked(opts, out);
+  } finally {
+    // Release on every exit path EXCEPT a successful re-exec — at that point
+    // the parent is on its way out (process.exit on the 250ms tail) and the
+    // child has its own fresh module instance with its own flag = false. If
+    // we cleared it here a quick second SSE arriving in that 1.5s grace
+    // window could race the re-exec; leaving it set is the safer default.
+    if (!_lastReExecScheduled) {
+      selfUpdateInFlight = false;
+    }
+    _lastReExecScheduled = false;
+  }
+}
+
+/**
+ * Tracks whether the most recent runSelfUpdate scheduled a detached re-exec.
+ * Used by the runSelfUpdate finally{} to decide whether to release the
+ * in-flight flag — see the comment there for the rationale.
+ */
+let _lastReExecScheduled = false;
+
+async function runSelfUpdateLocked(
+  opts: SelfUpdateOpts,
+  out: (msg: string) => void,
+): Promise<SelfUpdateResult> {
   const repoRoot = detectRepoRoot();
   if (!repoRoot) {
     const summary =
@@ -486,6 +541,9 @@ export async function runSelfUpdate(opts: SelfUpdateOpts = {}): Promise<SelfUpda
   // 4. Schedule the detached re-exec on a short timer so the caller can
   // finish its ack POST + final log line before we exit. 1.5s is plenty
   // for the local POST round-trip on the loopback that the manager uses.
+  // Mark the re-exec so runSelfUpdate's finally{} keeps the in-flight flag
+  // set during the 1.5s grace window — see comment there.
+  _lastReExecScheduled = true;
   setTimeout(() => {
     try {
       reExecManager(out);
