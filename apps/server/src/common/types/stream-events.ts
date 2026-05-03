@@ -345,6 +345,14 @@ export interface AgentInstanceUpdatePayload {
     agent_ids?: string[];
     working_dirs?: string[];
     paired_at?: string;
+    // Self-update fields — populated by manager-mode heartbeats. Pre-update
+    // managers leave them undefined; the admin UI handles the missing case.
+    latest_version?: string | null;
+    update_available?: boolean;
+    repo_root?: string | null;
+    default_branch?: string | null;
+    update_last_checked_at?: string | null;
+    update_last_error?: string | null;
   };
 }
 
@@ -361,7 +369,8 @@ export type AgentManagerCommand =
   | 'reload_config'      // re-read config.json (e.g., after admin edits delegation tunables)
   | 'update_plugins'     // git pull every plugin marketplace under the managed agent's cli-home
   | 'refresh_mcp_config' // rewrite mcp-config.json so spawned subagents see the current AWB url
-  | 'pull_working_dir';  // git -C <agent.working_dir> pull --ff-only (best-effort, non-fatal)
+  | 'pull_working_dir'   // git -C <agent.working_dir> pull --ff-only (best-effort, non-fatal)
+  | 'update_manager';    // pull + install + build the manager itself, then re-exec
 
 export interface AgentManagerCommandPayload {
   // The dispatch correlation id — manager echoes it on /command/ack so the

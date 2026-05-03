@@ -33,6 +33,7 @@ const ALLOWED_COMMANDS: ReadonlySet<AgentManagerCommand> = new Set([
   'update_plugins',
   'refresh_mcp_config',
   'pull_working_dir',
+  'update_manager',
 ] as const);
 
 /**
@@ -102,6 +103,29 @@ export class AgentManagerController {
       : undefined;
     const paired_at = typeof body?.paired_at === 'string' && body.paired_at ? body.paired_at : undefined;
 
+    // Self-update fields — manager fills these via its UpdateChecker. Older
+    // managers omit them and we leave the registry record's fields undefined.
+    // `null` here is a meaningful "checker has run but couldn't read the
+    // remote ref"; preserve it so the UI can distinguish "not yet checked"
+    // from "checked, no update".
+    const hasField = (k: string): boolean => Object.prototype.hasOwnProperty.call(body || {}, k);
+    const latest_version = hasField('latest_version')
+      ? (typeof body.latest_version === 'string' ? body.latest_version : null)
+      : undefined;
+    const update_available = hasField('update_available') ? Boolean(body.update_available) : undefined;
+    const repo_root = hasField('repo_root')
+      ? (typeof body.repo_root === 'string' ? body.repo_root : null)
+      : undefined;
+    const default_branch = hasField('default_branch')
+      ? (typeof body.default_branch === 'string' ? body.default_branch : null)
+      : undefined;
+    const update_last_checked_at = hasField('update_last_checked_at')
+      ? (typeof body.update_last_checked_at === 'string' ? body.update_last_checked_at : null)
+      : undefined;
+    const update_last_error = hasField('update_last_error')
+      ? (typeof body.update_last_error === 'string' ? body.update_last_error : null)
+      : undefined;
+
     const rec = this.registry.upsert({
       instance_id,
       agent_id,
@@ -116,6 +140,12 @@ export class AgentManagerController {
       agent_ids,
       working_dirs,
       paired_at,
+      latest_version,
+      update_available,
+      repo_root,
+      default_branch,
+      update_last_checked_at,
+      update_last_error,
     });
 
     // Mark every managed agent the manager is supervising as alive. Managed
