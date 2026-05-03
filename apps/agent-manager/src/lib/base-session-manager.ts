@@ -251,7 +251,13 @@ export class BaseSessionManager {
         });
       }
 
-      const resolvedBin = adapter.resolveBin(this._config.delegation.claudeBin);
+      // `delegation.claudeBin` is the legacy operator override for the
+      // claude binary path only — passing it to non-claude adapters
+      // caused codex / gemini spawns to launch the literal "claude" bin
+      // (resolver short-circuits on `configured`, returning it verbatim).
+      const binOverride =
+        adapter.cliType === 'claude' ? this._config.delegation.claudeBin : null;
+      const resolvedBin = adapter.resolveBin(binOverride);
       // ST-7 follow-up: per-agent CLI home isolation (see SubagentManager).
       const cliHomeEnvKey = adapter.configDirEnv();
       const cliHomeEnv = cliHomeEnvKey && agentContext?.cli_home_dir

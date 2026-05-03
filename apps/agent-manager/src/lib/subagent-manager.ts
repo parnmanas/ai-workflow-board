@@ -296,7 +296,11 @@ export class SubagentManager implements SubagentManagerContract {
         );
       }
 
-      const resolvedBin = adapter.resolveBin(this.#config.delegation.claudeBin);
+      // See base-session-manager: `delegation.claudeBin` is claude-only;
+      // forwarding it to codex / gemini spawned the wrong binary.
+      const binOverride =
+        adapter.cliType === 'claude' ? this.#config.delegation.claudeBin : null;
+      const resolvedBin = adapter.resolveBin(binOverride);
       // ST-7 follow-up: inject the per-agent CLI home dir via the
       // adapter-specific env var (CLAUDE_CONFIG_DIR / GEMINI_HOME /
       // CODEX_HOME). When the adapter doesn't have one (custom CLI),
