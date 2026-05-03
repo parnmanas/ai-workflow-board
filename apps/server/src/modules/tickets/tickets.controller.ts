@@ -1444,6 +1444,17 @@ export class TicketsController {
     const preview = (comment.content || '').slice(0, 500);
     const ts = (comment.created_at instanceof Date ? comment.created_at : new Date()).toISOString();
 
+    // Deep-link plumbing: resolve board_id once so each user-mention SSE
+    // payload carries enough context for MentionInboxBadge to navigate to
+    // /ws/<wsId>/boards/<boardId>?ticket=<id>&comment=<id> without a
+    // second round-trip. Lookup is best-effort — if the column row is
+    // missing for any reason the inbox falls back to the boards index.
+    let boardId: string | null = null;
+    if (ticket.column_id) {
+      const col = await this.colRepo.findOne({ where: { id: ticket.column_id } });
+      boardId = col?.board_id ?? null;
+    }
+
     for (const m of resolved) {
       if (m.type === 'agent') {
         const agent = await this.agentRepo.findOne({ where: { id: m.id } });
@@ -1488,6 +1499,7 @@ export class TicketsController {
           source_type: 'comment',
           source_id: comment.id,
           ticket_id: ticket.id,
+          board_id: boardId,
           room_id: null,
           actor_id: actor.id,
           actor_type: 'user',

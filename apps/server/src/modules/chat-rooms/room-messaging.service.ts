@@ -499,6 +499,10 @@ export class RoomMessagingService {
           source_type: 'chat_message',
           source_id: savedMessage.id,
           ticket_id: ticket?.id ?? null,
+          // Chat mentions deep-link to /ws/<wsId>/chat?room=<id>&message=<id>;
+          // board_id is intentionally null even when the room is bound to a
+          // ticket so the inbox doesn't try to resolve a board route.
+          board_id: null,
           room_id: roomId,
           actor_id: senderId,
           actor_type: 'user',

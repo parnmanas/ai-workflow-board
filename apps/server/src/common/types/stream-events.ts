@@ -246,6 +246,11 @@ export interface UserMentionPayload {
   source_type: 'comment' | 'chat_message';
   source_id: string;
   ticket_id: string | null;
+  // Resolved board for comment mentions so the inbox can build a
+  // /ws/<wsId>/boards/<boardId>?ticket=<id>&comment=<id> deep link
+  // without a second round-trip. Null for chat mentions (deep link
+  // uses room_id instead).
+  board_id: string | null;
   room_id: string | null;
   actor_id: string;
   actor_type: 'user' | 'agent';

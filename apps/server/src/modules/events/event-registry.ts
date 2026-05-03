@@ -471,6 +471,7 @@ export const EVENT_TYPES: EventDefinition[] = [
         source_type: event.source_type,
         source_id: event.source_id,
         ticket_id: event.ticket_id ?? null,
+        board_id: event.board_id ?? null,
         room_id: event.room_id ?? null,
         actor_id: event.actor_id || '',
         actor_type: event.actor_type || 'user',
