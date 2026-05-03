@@ -571,6 +571,16 @@ export const api = {
       `/resources/${id}/branches?${params.toString()}`,
     );
   },
+  testRepoBranches: (data: {
+    workspace_id: string;
+    url: string;
+    credential_id?: string | null;
+    default_branch?: string;
+  }) =>
+    request<{ branches: { name: string; sha: string }[]; default_branch: string }>(
+      '/resources/branches/test',
+      { method: 'POST', body: JSON.stringify(data) },
+    ),
 
   // ─── Credentials ──────────────────────────────────────
   listCredentials: (workspaceId: string, provider?: string) => {

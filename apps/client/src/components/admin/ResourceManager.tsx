@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { api, getActiveWorkspaceId } from '../../api';
-import type { Resource, Credential } from '../../types';
+import type { Resource, Credential, RepoBranch } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 import { Button, Input, Modal, Badge, Card } from '../common';
@@ -57,6 +57,20 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
   const [formErrors, setFormErrors] = useState<{ name?: string }>({});
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [lightboxImage, setLightboxImage] = useState<{ src: string; alt: string } | null>(null);
+
+  // Branch-test state for the repository form. Lives at the modal level so the
+  // success result can drive the Default Branch picker (dropdown of real refs
+  // when we have them, free-text input otherwise — a not-yet-pushed branch
+  // should still be pinnable).
+  const [branchTestLoading, setBranchTestLoading] = useState(false);
+  const [branchTestError, setBranchTestError] = useState<string | null>(null);
+  const [branchTestResult, setBranchTestResult] = useState<RepoBranch[] | null>(null);
+
+  const resetBranchTest = useCallback(() => {
+    setBranchTestLoading(false);
+    setBranchTestError(null);
+    setBranchTestResult(null);
+  }, []);
 
   const effectiveWorkspaceId = workspaceId || (getActiveWorkspaceId() || '');
 
@@ -147,6 +161,7 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
     setFormCredentialId('');
     setFormDefaultBranch('');
     setFormErrors({});
+    resetBranchTest();
     setEditResource(null);
     setShowForm(true);
   };
@@ -164,6 +179,7 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
     setFormCredentialId(resource.credential_id || '');
     setFormDefaultBranch(resource.default_branch || '');
     setFormErrors({});
+    resetBranchTest();
     setEditResource(resource);
     setShowForm(true);
   };
@@ -172,6 +188,47 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
     setShowForm(false);
     setEditResource(null);
     setFormErrors({});
+    resetBranchTest();
+  };
+
+  // Stale branch-list once the URL or credential changes — the previously
+  // fetched refs no longer describe the new target. Default Branch keeps its
+  // value: the user may have typed it themselves, and we shouldn't clobber.
+  useEffect(() => {
+    resetBranchTest();
+  }, [formUrl, formCredentialId, formType, resetBranchTest]);
+
+  const handleTestBranches = async () => {
+    if (!effectiveWorkspaceId) {
+      setBranchTestError('Select a workspace first.');
+      return;
+    }
+    if (!formUrl.trim()) {
+      setBranchTestError('Enter a repository URL first.');
+      return;
+    }
+    setBranchTestLoading(true);
+    setBranchTestError(null);
+    setBranchTestResult(null);
+    try {
+      const result = await api.testRepoBranches({
+        workspace_id: effectiveWorkspaceId,
+        url: formUrl.trim(),
+        credential_id: formCredentialId || null,
+        default_branch: formDefaultBranch.trim(),
+      });
+      setBranchTestResult(result.branches);
+      // Pre-fill with the remote's first branch when the user hasn't typed
+      // anything — saves a click in the common case where the repo's main
+      // branch is exactly what they want pinned.
+      if (!formDefaultBranch.trim() && result.branches.length > 0) {
+        setFormDefaultBranch(result.branches[0].name);
+      }
+    } catch (err: any) {
+      setBranchTestError(err?.message || 'Failed to list branches');
+    } finally {
+      setBranchTestLoading(false);
+    }
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -480,7 +537,7 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
             placeholder="One-line summary"
           />
 
-          {(formType === 'link' || formType === 'repository') && (
+          {formType === 'link' && (
             <Input
               label="URL"
               value={formUrl}
@@ -490,12 +547,106 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
           )}
 
           {formType === 'repository' && (
-            <Input
-              label="Default Branch"
-              value={formDefaultBranch}
-              onChange={(e) => setFormDefaultBranch(e.target.value)}
-              placeholder="e.g. main (leave blank to fall back to origin/HEAD)"
-            />
+            <div>
+              <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8 }}>
+                <div style={{ flex: 1 }}>
+                  <Input
+                    label="URL"
+                    value={formUrl}
+                    onChange={(e) => setFormUrl(e.target.value)}
+                    placeholder="https://github.com/owner/repo.git"
+                  />
+                </div>
+                <Button
+                  variant="secondary"
+                  size="md"
+                  onClick={handleTestBranches}
+                  disabled={branchTestLoading || !formUrl.trim()}
+                  loading={branchTestLoading}
+                  type="button"
+                >
+                  Test connection
+                </Button>
+              </div>
+              {branchTestError && (
+                <div
+                  data-testid="resource-branch-test-error"
+                  style={{
+                    fontSize: '12px',
+                    color: tokens.colors.danger,
+                    marginTop: 6,
+                    lineHeight: 1.4,
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                  }}
+                >
+                  {branchTestError}
+                </div>
+              )}
+              {!branchTestError && branchTestResult && (
+                <div
+                  data-testid="resource-branch-test-success"
+                  style={{ fontSize: '12px', color: tokens.colors.success, marginTop: 6 }}
+                >
+                  {branchTestResult.length === 0
+                    ? 'Connected — but the remote has no branches.'
+                    : `Connected — ${branchTestResult.length} branch${branchTestResult.length === 1 ? '' : 'es'} found.`}
+                </div>
+              )}
+            </div>
+          )}
+
+          {formType === 'repository' && (
+            <div>
+              <label
+                style={{
+                  fontSize: tokens.typography.fontSizeXs,
+                  fontWeight: tokens.typography.fontWeightSemibold,
+                  color: tokens.colors.textMuted,
+                  textTransform: 'uppercase',
+                  display: 'block',
+                  marginBottom: tokens.spacing.xs,
+                }}
+              >
+                Default Branch
+              </label>
+              <input
+                list={branchTestResult ? 'resource-branch-options' : undefined}
+                value={formDefaultBranch}
+                onChange={(e) => setFormDefaultBranch(e.target.value)}
+                placeholder="e.g. main (leave blank to fall back to origin/HEAD)"
+                style={{
+                  background: tokens.colors.surface,
+                  border: `1px solid ${tokens.colors.border}`,
+                  borderRadius: tokens.radii.md,
+                  padding: '8px 10px',
+                  color: tokens.colors.textStrong,
+                  fontSize: tokens.typography.fontSizeMd,
+                  outline: 'none',
+                  width: '100%',
+                  boxSizing: 'border-box',
+                  fontFamily: 'inherit',
+                }}
+              />
+              {branchTestResult && branchTestResult.length > 0 && (
+                <>
+                  <datalist id="resource-branch-options">
+                    {branchTestResult.map((b) => (
+                      <option key={b.sha} value={b.name} />
+                    ))}
+                  </datalist>
+                  <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginTop: 4 }}>
+                    Pick from {branchTestResult.length} fetched branch
+                    {branchTestResult.length === 1 ? '' : 'es'}, or type a custom name.
+                  </div>
+                </>
+              )}
+              {!branchTestResult && (
+                <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginTop: 4 }}>
+                  Run "Test connection" to load branches from the remote.
+                </div>
+              )}
+            </div>
           )}
 
           {(formType === 'document' || formType === 'link') && (
