@@ -15,6 +15,7 @@ import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { LogService } from '../../services/log.service';
 import { findOrFail } from '../../common/find-or-fail';
 import { renderActionPrompt, buildRenderContext } from './action-prompt';
+import { parseCron } from './action-scheduler.service';
 
 function makeError(status: number, message: string): Error & { status: number } {
   const err = new Error(message) as Error & { status: number };
@@ -24,10 +25,11 @@ function makeError(status: number, message: string): Error & { status: number } 
 
 export interface DispatchActionArgs {
   actionId: string;
-  // 'user' = web UI clicked Run; 'system' = scheduler. The triggering user
-  // (when present) is added as a participant to the room so they can read
-  // and reply to the agent.
-  triggeredByType: 'user' | 'system';
+  // 'user' = web UI clicked Run; 'system' = scheduler; 'agent' = MCP-authenticated
+  // agent dispatched the run. The triggering user (when type='user') is added as
+  // a participant so they can read and reply to the agent. For 'system' / 'agent'
+  // a synthetic participant carries the message — see dispatch() for the rationale.
+  triggeredByType: 'user' | 'system' | 'agent';
   triggeredById: string;
 }
 
@@ -107,6 +109,22 @@ export class ActionsService {
       throw makeError(400, 'target agent belongs to a different workspace');
     }
 
+    // Same scope rule for the optional board pin: the board must live in this
+    // workspace, otherwise list/scoping queries silently miss the action.
+    if (input.board_id) {
+      const board = await this.boardRepo.findOne({ where: { id: input.board_id } });
+      if (!board) throw makeError(400, 'board not found');
+      if (board.workspace_id !== input.workspace_id) {
+        throw makeError(400, 'board belongs to a different workspace');
+      }
+    }
+
+    if (input.schedule_cron && input.schedule_cron.trim()) {
+      if (!parseCron(input.schedule_cron)) {
+        throw makeError(400, 'schedule_cron is invalid — expected 5 fields with `*` or integers');
+      }
+    }
+
     const created = this.actionRepo.create({
       workspace_id: input.workspace_id,
       board_id: input.board_id || null,
@@ -139,8 +157,23 @@ export class ActionsService {
       }
       existing.target_agent_id = patch.target_agent_id;
     }
-    if (patch.board_id !== undefined) existing.board_id = patch.board_id || null;
-    if (patch.schedule_cron !== undefined) existing.schedule_cron = patch.schedule_cron || '';
+    if (patch.board_id !== undefined) {
+      if (patch.board_id) {
+        const board = await this.boardRepo.findOne({ where: { id: patch.board_id } });
+        if (!board) throw makeError(400, 'board not found');
+        if (board.workspace_id !== workspaceId) {
+          throw makeError(400, 'board belongs to a different workspace');
+        }
+      }
+      existing.board_id = patch.board_id || null;
+    }
+    if (patch.schedule_cron !== undefined) {
+      const next = patch.schedule_cron || '';
+      if (next.trim() && !parseCron(next)) {
+        throw makeError(400, 'schedule_cron is invalid — expected 5 fields with `*` or integers');
+      }
+      existing.schedule_cron = next;
+    }
     if (patch.enabled !== undefined) existing.enabled = !!patch.enabled;
     if (patch.max_runs !== undefined) {
       const n = Number(patch.max_runs);
@@ -272,33 +305,19 @@ export class ActionsService {
     // created.
     await this._pruneOldRuns(action.id, action.max_runs);
 
-    // Send the rendered prompt as the user's first message. Agent-side: this
-    // is what fans out as chat_room_message, which the agent-manager picks
-    // up and dispatches to its persistent chat session for the target agent.
+    // Send the rendered prompt as the user's first message — chat_room_message
+    // is what the agent-manager listens on to route the prompt into the target
+    // agent's chat session, no extra dispatcher needed.
     //
-    // For system-triggered Runs (scheduler) there's no user — we send under
-    // the agent's own identity instead so RoomMessagingService can validate
-    // the participant. The agent will see a system note and respond to
-    // itself; this is fine for scheduled use cases where the prompt is
-    // self-contained ("git commit + push", "summarize today's PRs", etc.).
+    // For non-user triggers (scheduler / agent caller) there is no real user to
+    // send as. We synthesize a `participant_type='user'` row with id `'system'`
+    // and name `'Scheduler'` so RoomMessagingService.requireActiveParticipant
+    // passes — the chat infra only compares ids in the participant table, so
+    // a non-UUID literal works.
     let senderType: 'user' | 'agent' = 'user';
     let senderId = args.triggeredById;
     let senderName = user?.name || user?.email || 'User';
     if (!user) {
-      // Use a synthetic user (the action's target agent stands in) so the
-      // message can be saved. The agent-manager will still trigger because
-      // chat_room_message fires regardless of sender; we set sender_type to
-      // 'agent' so loop-break logic doesn't dispatch the agent to reply to
-      // the prompt-as-agent — wait, that breaks the dispatch.
-      //
-      // The simplest correct behavior: for system-triggered runs, send as
-      // sender_type='user' with id 'system' and name 'Scheduler'. Sending
-      // requires an active participant though — so we add 'system' as a
-      // user-type participant. This is awkward but it's the smallest path.
-      //
-      // We add a synthetic system user participant; the chat infra never
-      // looks the id up (it just compares ids in the participant table), so
-      // a free-form 'system' string works.
       await this.participantRepo.save(this.participantRepo.create({
         room_id: room.id,
         participant_type: 'user',

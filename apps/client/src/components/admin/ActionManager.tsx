@@ -540,7 +540,7 @@ function ActionDetail({ action, agents, workspaceId, onBack, onEdit, onDelete, o
                     Run {r.id.slice(0, 8)}
                   </div>
                   <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2 }}>
-                    {relativeTime(r.created_at)} · {r.triggered_by_type === 'system' ? 'scheduler' : 'manual'}
+                    {relativeTime(r.created_at)} · {r.triggered_by_type === 'system' ? 'scheduler' : r.triggered_by_type === 'agent' ? 'agent' : 'manual'}
                   </div>
                 </button>
               );
@@ -593,25 +593,35 @@ function ActionDetail({ action, agents, workspaceId, onBack, onEdit, onDelete, o
           </div>
 
           {activeRun && (
-            <div style={{ padding: 8, borderTop: `1px solid ${tokens.colors.border}`, display: 'flex', gap: 6 }}>
-              <input
-                value={reply}
-                onChange={(e) => setReply(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleReply(); } }}
-                placeholder="Reply to the agent…"
-                style={{
-                  flex: 1,
-                  background: tokens.colors.surface,
-                  border: `1px solid ${tokens.colors.border}`,
-                  borderRadius: tokens.radii.md,
-                  padding: '8px 10px',
-                  color: tokens.colors.textStrong,
-                  fontSize: 13,
-                  fontFamily: 'inherit',
-                }}
-              />
-              <Button variant="primary" size="sm" disabled={sending || !reply.trim()} onClick={handleReply}>Send</Button>
-            </div>
+            activeRun.triggered_by_type === 'user' ? (
+              <div style={{ padding: 8, borderTop: `1px solid ${tokens.colors.border}`, display: 'flex', gap: 6 }}>
+                <input
+                  value={reply}
+                  onChange={(e) => setReply(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleReply(); } }}
+                  placeholder="Reply to the agent…"
+                  style={{
+                    flex: 1,
+                    background: tokens.colors.surface,
+                    border: `1px solid ${tokens.colors.border}`,
+                    borderRadius: tokens.radii.md,
+                    padding: '8px 10px',
+                    color: tokens.colors.textStrong,
+                    fontSize: 13,
+                    fontFamily: 'inherit',
+                  }}
+                />
+                <Button variant="primary" size="sm" disabled={sending || !reply.trim()} onClick={handleReply}>Send</Button>
+              </div>
+            ) : (
+              // Non-user-triggered runs (scheduler / agent-dispatched) have no
+              // real user as a participant, so a reply would 403 on the
+              // participant gate. Surface the read-only state instead of
+              // letting the user type into a dead box.
+              <div style={{ padding: 8, borderTop: `1px solid ${tokens.colors.border}`, fontSize: 12, color: tokens.colors.textMuted, textAlign: 'center' }}>
+                {activeRun.triggered_by_type === 'system' ? 'Scheduled run' : 'Agent-triggered run'} · read-only
+              </div>
+            )
           )}
         </div>
       </div>

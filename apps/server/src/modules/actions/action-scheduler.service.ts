@@ -23,7 +23,10 @@ interface CronSpec {
 // each slot — no ranges, lists or step values. That's intentional: this is the
 // minimum that lets users say "every hour" / "every Monday at 9am" without
 // pulling in a cron library and its parsing edge cases.
-function parseCron(expr: string): CronSpec | null {
+//
+// Exported so ActionsService.create/update can reject malformed expressions
+// at write time instead of saving them and silently never firing.
+export function parseCron(expr: string): CronSpec | null {
   const parts = (expr || '').trim().split(/\s+/);
   if (parts.length !== 5) return null;
   const fields: Array<keyof CronSpec> = ['minute', 'hour', 'dom', 'month', 'dow'];

@@ -159,15 +159,16 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
     },
     async ({ action_id }, extra: { sessionId?: string }) => {
       if (!actionsService) return err('Actions service unavailable in this MCP context');
-      // Triggering identity: agent caller (MCP session) gets attributed as
-      // 'agent'. Without an authenticated agent we still allow the run but
-      // attribute it to 'system' so chat history shows where it came from.
+      // Triggering identity: an authenticated agent caller (MCP session bound
+      // to an agentId) is attributed as 'agent' with that agent's id. Without
+      // an authenticated agent the run is attributed to 'system' so the chat
+      // history still shows where it came from.
       const caller = getCallerAgent(extra);
       try {
         const result = await actionsService.dispatch({
           actionId: action_id,
-          triggeredByType: caller?.agentId ? 'system' : 'system',
-          triggeredById: '',
+          triggeredByType: caller?.agentId ? 'agent' : 'system',
+          triggeredById: caller?.agentId ?? '',
         });
         return ok({ run_id: result.run.id, room_id: result.room_id, prompt: result.prompt });
       } catch (e: any) {
