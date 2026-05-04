@@ -8,16 +8,26 @@ const AUTH_TAG_LENGTH = 16;
 
 let _encryptionKey: Buffer | null = null;
 
+function resolveDataDir(): string {
+  if (process.env.AWB_DATA_DIR) return process.env.AWB_DATA_DIR;
+  return path.join(__dirname, '..', '..', '..', '..', 'database');
+}
+
 function getKeyPath(): string {
-  const dbDir = path.join(__dirname, '..', '..', '..', '..', 'database');
-  if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
-  return path.join(dbDir, '.encryption_key');
+  return path.join(resolveDataDir(), '.encryption_key');
 }
 
 function deriveKey(secret: string): Buffer {
   return createHash('sha256').update(secret).digest();
 }
 
+// Encryption key resolution order:
+//   1. ENCRYPTION_KEY env var (recommended for prod — operator owns key persistence)
+//   2. <data-dir>/.encryption_key file (auto-generated on first use; needs writable dir)
+// In Docker the default <repo>/database is /app/database — root-owned and not
+// writable by the `node` user. Operators must either set ENCRYPTION_KEY or
+// point AWB_DATA_DIR at a mounted writable volume; otherwise saving any
+// credential surfaces an EACCES on mkdir.
 function getEncryptionKey(): Buffer {
   if (_encryptionKey) return _encryptionKey;
 
@@ -28,16 +38,28 @@ function getEncryptionKey(): Buffer {
   }
 
   const keyPath = getKeyPath();
-  if (fs.existsSync(keyPath)) {
-    const stored = fs.readFileSync(keyPath, 'utf-8').trim();
-    _encryptionKey = Buffer.from(stored, 'hex');
+  const dataDir = path.dirname(keyPath);
+  try {
+    if (fs.existsSync(keyPath)) {
+      const stored = fs.readFileSync(keyPath, 'utf-8').trim();
+      _encryptionKey = Buffer.from(stored, 'hex');
+      return _encryptionKey;
+    }
+    if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+    const generated = randomBytes(32);
+    fs.writeFileSync(keyPath, generated.toString('hex'), { mode: 0o600 });
+    _encryptionKey = generated;
     return _encryptionKey;
+  } catch (err: any) {
+    if (err && (err.code === 'EACCES' || err.code === 'EROFS' || err.code === 'EPERM')) {
+      throw new Error(
+        `Encryption key store is not writable at ${dataDir} (${err.code}). ` +
+        `Set the ENCRYPTION_KEY environment variable, or set AWB_DATA_DIR to a writable path ` +
+        `(e.g. mount a volume in Docker). The credential was NOT saved.`
+      );
+    }
+    throw err;
   }
-
-  const generated = randomBytes(32);
-  fs.writeFileSync(keyPath, generated.toString('hex'), { mode: 0o600 });
-  _encryptionKey = generated;
-  return _encryptionKey;
 }
 
 export function encrypt(plaintext: string): string {
