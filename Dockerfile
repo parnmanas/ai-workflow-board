@@ -61,10 +61,18 @@ COPY --from=builder /app/apps/client/dist ./apps/client/dist
 # Install production dependencies only
 RUN npm install --omit=dev --workspace=server
 
-# Drop to the `node` user baked into node:22-alpine. The server never
-# writes to /app at runtime (logs are in-memory, DB is external Postgres,
-# SQLite code path is dev-only), so world-readable files from the
-# root-owned install stages are fine for execution.
+# Writable data dir for the server. Currently used by the Credentials
+# encryption service to persist its auto-generated AES key when
+# ENCRYPTION_KEY isn't set. Owned by `node` so the runtime user can
+# create the key file; in compose this is the mount point for a named
+# volume so the key survives container rebuilds.
+RUN mkdir -p /app/data && chown node:node /app/data
+ENV AWB_DATA_DIR=/app/data
+
+# Drop to the `node` user baked into node:22-alpine. The server only
+# writes to AWB_DATA_DIR at runtime (logs are in-memory, DB is external
+# Postgres, SQLite code path is dev-only), so world-readable files from
+# the root-owned install stages are fine for execution.
 USER node
 
 EXPOSE 7701

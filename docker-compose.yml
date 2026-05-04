@@ -35,11 +35,20 @@ services:
       DB_NAME: ${DB_NAME:-ai_workflow}
       DB_USER: ${DB_USER:-postgres}
       DB_PASS: ${DB_PASS}
-      # Required to use the Credentials feature in production. Without it the
-      # server tries to write a key file to /app/database, which the container
-      # user can't create — credential save fails with EACCES. Generate once
-      # and keep stable across deploys: openssl rand -hex 32
+      # Optional. If set, used as the AES-256-GCM key for the Credentials
+      # feature. If unset the server falls back to an auto-generated key file
+      # under AWB_DATA_DIR (the awbdata volume below), which survives
+      # container rebuilds. Set this if you'd rather manage the key yourself
+      # (e.g. rotate it, share it across replicas). Generate with:
+      # openssl rand -hex 32
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
+    volumes:
+      # Persistent writable dir for the server (matches AWB_DATA_DIR baked
+      # into the image). Holds the auto-generated Credentials encryption
+      # key when ENCRYPTION_KEY isn't set — losing this volume makes every
+      # stored credential undecryptable.
+      - awbdata:/app/data
 
 volumes:
   pgdata:
+  awbdata:
