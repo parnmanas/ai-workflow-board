@@ -393,7 +393,19 @@ export class AgentsController {
       agent.working_dir = typeof working_dir === 'string' ? working_dir : '';
     }
     if (manager_agent_id !== undefined) {
-      agent.manager_agent_id = typeof manager_agent_id === 'string' && manager_agent_id ? manager_agent_id : null;
+      const next = typeof manager_agent_id === 'string' && manager_agent_id ? manager_agent_id : null;
+      if (next) {
+        // Mirror the createManagedAgent contract — verify the target row
+        // exists and is a manager identity (type='manager'). Cross-workspace
+        // links are intentionally allowed: a global manager can supervise
+        // children in any workspace it has been minted identities for.
+        const m = await this.agentRepo.findOne({ where: { id: next } });
+        if (!m) return res.status(400).json({ error: 'manager_agent_id does not exist' });
+        if (m.type !== 'manager') {
+          return res.status(400).json({ error: 'manager_agent_id must reference a manager-type agent' });
+        }
+      }
+      agent.manager_agent_id = next;
     }
     if (credential_id !== undefined) {
       // Empty string / falsy = clear; non-empty string = set. Detaching an
