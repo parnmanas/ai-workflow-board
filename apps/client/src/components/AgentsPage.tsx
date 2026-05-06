@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
@@ -7,11 +7,66 @@ import { useToast } from '../contexts/ToastContext';
 import PageHeader from './PageHeader';
 import AgentCard from './AgentCard';
 import { tokens } from '../tokens';
-import { Button } from './common';
+import { Button, Input, Select, Modal } from './common';
 import type {
   DashboardAgent,
   AgentCurrentTask,
+  Credential,
+  ManagedAgentCreateBody,
 } from '../types';
+
+/** Map agent.type → credential provider prefix used to filter the credential
+ *  picker. Mirrors the same map in admin/AgentManager.tsx — keep them in sync.
+ *  CLIs whose adapter ships in agent-manager (claude / codex / gemini) show
+ *  only credentials with a matching provider prefix; `custom` skips it. */
+const CLI_TO_CREDENTIAL_PREFIX: Record<string, string> = {
+  claude: 'claude_',
+  codex: 'codex_',
+  gemini: 'gemini_',
+};
+
+/** CLI types the agent-manager spawn pipeline accepts — must match the
+ *  server's ALLOWED_CLI_TYPES whitelist in agent-manager.controller.ts. */
+type ManagedCli = ManagedAgentCreateBody['cli'];
+
+/** CLI options surfaced in the Managed Agent picker. Mirrors the type
+ *  whitelist in admin/AgentManager.tsx so the workspace form offers the same
+ *  set the server's createManagedAgent contract accepts. */
+const MANAGED_CLI_OPTIONS: Array<{ value: ManagedCli; label: string }> = [
+  { value: 'claude', label: 'Claude' },
+  { value: 'codex', label: 'Codex' },
+  { value: 'gemini', label: 'Gemini' },
+  { value: 'custom', label: 'Custom' },
+];
+
+interface ManagerOption {
+  id: string;
+  name: string;
+  description: string;
+  workspace_id: string;
+  is_active: number;
+}
+
+/** Initial state for the Managed Agent create form. Defaulting cli=claude
+ *  matches the most common case (claude-code-driven agents) and lets the
+ *  Working Directory field surface its required marker immediately. */
+const EMPTY_MANAGED_FORM: {
+  name: string;
+  description: string;
+  cli: ManagedCli;
+  manager_agent_id: string;
+  working_dir: string;
+  credential_id: string;
+  role_prompt: string;
+} = {
+  name: '',
+  description: '',
+  cli: 'claude',
+  manager_agent_id: '',
+  working_dir: '',
+  credential_id: '',
+  role_prompt: '',
+};
 
 /**
  * AgentsPage — card grid + modal layout matching BoardsIndexPage pattern.
@@ -60,6 +115,17 @@ export default function AgentsPage() {
   }, [navigate, wsId]);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [createForm, setCreateForm] = useState({ name: '', description: '', type: 'custom' });
+
+  // Managed-agent ("via AgentManager") creation surface — separate from the
+  // legacy "+ New Agent" modal because the agent-manager spawn contract
+  // requires extra fields (manager pick, working_dir, optional credential)
+  // that don't apply to plain workspace agents. UI mirrors the managed-mode
+  // form in admin/AgentManager.tsx.
+  const [showManagedModal, setShowManagedModal] = useState(false);
+  const [managedForm, setManagedForm] = useState<typeof EMPTY_MANAGED_FORM>(EMPTY_MANAGED_FORM);
+  const [managers, setManagers] = useState<ManagerOption[]>([]);
+  const [credentials, setCredentials] = useState<Credential[]>([]);
+  const [creatingManaged, setCreatingManaged] = useState(false);
 
   const pendingStatusRef = useRef<StatusUpdate[]>([]);
   const agentsReadyRef = useRef(false);
@@ -146,6 +212,105 @@ export default function AgentsPage() {
     }
   }, [createForm, creating, loadSnapshot, wsId, showToast]);
 
+  // ─── Managed-agent picker data ────────────────────────────────
+  // Pull managers + credentials only when the managed modal opens to keep
+  // the page boot lean. Managers list is cross-workspace (admins pair them
+  // globally); credentials are scoped to the URL workspace because that's
+  // where the new managed agent will be created.
+  useEffect(() => {
+    if (!showManagedModal) return;
+    let alive = true;
+    api.listAgentManagers()
+      .then((rows) => { if (alive) setManagers(rows); })
+      .catch(() => { if (alive) setManagers([]); });
+    if (wsId) {
+      api.listCredentials(wsId)
+        .then((rows) => { if (alive) setCredentials(rows); })
+        .catch(() => { if (alive) setCredentials([]); });
+    } else {
+      setCredentials([]);
+    }
+    return () => { alive = false; };
+  }, [showManagedModal, wsId]);
+
+  const eligibleCredentials = useMemo(() => {
+    const prefix = CLI_TO_CREDENTIAL_PREFIX[managedForm.cli];
+    if (!prefix) return [];
+    return credentials.filter((c) => c.provider.startsWith(prefix));
+  }, [credentials, managedForm.cli]);
+
+  // working_dir is optional for `custom` (the manager doesn't know how to
+  // launch a custom CLI without operator-supplied scripts anyway), required
+  // otherwise — same rule the admin AgentManager surfaces in its label.
+  const managedWorkingDirRequired = managedForm.cli !== 'custom';
+
+  const resetManagedForm = useCallback(() => {
+    setManagedForm(EMPTY_MANAGED_FORM);
+    setShowManagedModal(false);
+  }, []);
+
+  const handleCreateManagedAgent = useCallback(async () => {
+    if (creatingManaged) return;
+    if (!managedForm.name.trim()) return;
+    if (!managedForm.manager_agent_id) {
+      showToast('Pick an Agent Manager', 'error');
+      return;
+    }
+    if (managedWorkingDirRequired && !managedForm.working_dir.trim()) {
+      showToast('Working directory is required', 'error');
+      return;
+    }
+    setCreatingManaged(true);
+    try {
+      // Drop credential_id when the CLI doesn't support per-agent
+      // credentials (only claude / codex / gemini do); preserves the
+      // server's null contract for `custom` so it doesn't mis-set an FK.
+      const supportsCredential = !!CLI_TO_CREDENTIAL_PREFIX[managedForm.cli];
+      const credential_id = supportsCredential && managedForm.credential_id
+        ? managedForm.credential_id
+        : undefined;
+      const body: ManagedAgentCreateBody = {
+        name: managedForm.name.trim(),
+        cli: managedForm.cli,
+        manager_agent_id: managedForm.manager_agent_id,
+        working_dir: managedForm.working_dir.trim() || undefined,
+        description: managedForm.description.trim() || undefined,
+        credential_id,
+      };
+      // Pin to the URL wsId — defensive against per-tab active workspace
+      // drift, same pattern as createAgent above.
+      const created = await api.createManagedAgent(body, wsId);
+      // role_prompt isn't part of the createManagedAgent contract on the
+      // server (admin AgentManager handles it the same way) — mirror the
+      // follow-up PATCH so an operator can set a role at create time.
+      if (managedForm.role_prompt.trim()) {
+        try {
+          await api.updateAgent(created.id, { role_prompt: managedForm.role_prompt } as any);
+        } catch (err: any) {
+          // Surface the partial failure but don't roll back — the agent is
+          // already created and visible; the operator can edit role_prompt
+          // from the admin panel.
+          showToast(`Agent created, but role prompt failed: ${err?.message || 'unknown'}`, 'error');
+        }
+      }
+      resetManagedForm();
+      await loadSnapshot();
+      showToast('Managed agent created', 'success');
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to create managed agent', 'error');
+    } finally {
+      setCreatingManaged(false);
+    }
+  }, [
+    managedForm,
+    creatingManaged,
+    managedWorkingDirRequired,
+    wsId,
+    loadSnapshot,
+    showToast,
+    resetManagedForm,
+  ]);
+
   // ─── Render ───────────────────────────────────────────────────
   const agentsList = agents || [];
   const agentCount = agentsList.length;
@@ -157,7 +322,14 @@ export default function AgentsPage() {
         description="Live agent status"
         actions={
           user?.role === 'admin' ? (
-            <Button variant="primary" size="md" onClick={() => setShowCreateModal(true)}>+ New Agent</Button>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <Button variant="secondary" size="md" onClick={() => setShowManagedModal(true)}>
+                + New Managed Agent
+              </Button>
+              <Button variant="primary" size="md" onClick={() => setShowCreateModal(true)}>
+                + New Agent
+              </Button>
+            </div>
           ) : undefined
         }
       />
@@ -357,6 +529,133 @@ export default function AgentsPage() {
           </div>
         </div>
       )}
+
+      {/* Create Managed Agent modal — mirrors admin/AgentManager.tsx managed
+          mode but as a dedicated surface so the workspace AI Agents tab can
+          add agent-manager-spawned identities without dropping into Admin. */}
+      <Modal
+        isOpen={showManagedModal}
+        onClose={resetManagedForm}
+        title="New Managed Agent"
+        maxWidth={600}
+        footer={
+          <>
+            <Button variant="secondary" onClick={resetManagedForm} disabled={creatingManaged}>Cancel</Button>
+            <Button
+              variant="primary"
+              onClick={handleCreateManagedAgent}
+              disabled={
+                !managedForm.name.trim() ||
+                !managedForm.manager_agent_id ||
+                (managedWorkingDirRequired && !managedForm.working_dir.trim()) ||
+                creatingManaged
+              }
+            >
+              {creatingManaged ? 'Creating…' : 'Create'}
+            </Button>
+          </>
+        }
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <Input
+              label="Name *"
+              value={managedForm.name}
+              onChange={e => setManagedForm(f => ({ ...f, name: e.target.value }))}
+              placeholder="Agent name"
+              autoFocus
+            />
+            <Select
+              label="Type"
+              value={managedForm.cli}
+              onChange={e => setManagedForm(f => ({ ...f, cli: (e.target as HTMLSelectElement).value as ManagedCli }))}
+              options={MANAGED_CLI_OPTIONS}
+            />
+          </div>
+          <Input
+            label="Description"
+            value={managedForm.description}
+            onChange={e => setManagedForm(f => ({ ...f, description: e.target.value }))}
+            placeholder="What does this agent do?"
+          />
+          <div>
+            <Select
+              label="Agent Manager *"
+              value={managedForm.manager_agent_id}
+              onChange={e => setManagedForm(f => ({ ...f, manager_agent_id: (e.target as HTMLSelectElement).value }))}
+              options={[
+                { value: '', label: managers.length === 0 ? 'No managers paired yet' : 'Select a manager…' },
+                ...managers.map(m => ({ value: m.id, label: m.name })),
+              ]}
+            />
+            <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginTop: 4, lineHeight: 1.5 }}>
+              The picked manager spawns this agent's CLI on its host.
+              {managers.length === 0 && ' Pair one from the AgentManager admin page first.'}
+            </div>
+          </div>
+          <div>
+            <Input
+              label={`Working directory${managedWorkingDirRequired ? ' *' : ' (optional)'}`}
+              value={managedForm.working_dir}
+              onChange={e => setManagedForm(f => ({ ...f, working_dir: e.target.value }))}
+              placeholder="/abs/path/on/manager/host"
+            />
+            <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginTop: 4, lineHeight: 1.5 }}>
+              Path on the manager host where the CLI will be spawned. The manager will refuse to spawn this agent until a working_dir is set.
+            </div>
+          </div>
+          {CLI_TO_CREDENTIAL_PREFIX[managedForm.cli] && (
+            <div>
+              <Select
+                label="CLI credential"
+                value={managedForm.credential_id}
+                onChange={e => setManagedForm(f => ({ ...f, credential_id: (e.target as HTMLSelectElement).value }))}
+                options={[
+                  { value: '', label: 'None — fall back to operator HOME' },
+                  ...eligibleCredentials.map(c => ({ value: c.id, label: `${c.name} · ${c.provider}` })),
+                ]}
+              />
+              <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginTop: 4, lineHeight: 1.5 }}>
+                Per-agent CLI auth. Subscription credentials drop the OAuth file into this agent's cli-home; API-key credentials export the matching env var on every spawn. Manage values in the Credentials page.
+              </div>
+            </div>
+          )}
+          <div>
+            <label style={{
+              fontSize: '11px',
+              color: tokens.colors.textSecondary,
+              fontWeight: 600,
+              display: 'block',
+              marginBottom: 6,
+            }}>
+              Role Prompt
+            </label>
+            <div style={{ fontSize: '11px', fontWeight: 400, color: tokens.colors.textMuted, marginBottom: 8, lineHeight: 1.5 }}>
+              Markdown instructions delivered to this agent on every trigger. Persists across triggers and chat sessions.
+            </div>
+            <textarea
+              value={managedForm.role_prompt}
+              onChange={e => setManagedForm(f => ({ ...f, role_prompt: e.target.value }))}
+              placeholder="You are an agent responsible for..."
+              style={{
+                width: '100%',
+                minHeight: 180,
+                background: tokens.colors.surface,
+                border: `1px solid ${tokens.colors.border}`,
+                borderRadius: tokens.radii.md,
+                padding: '10px 12px',
+                color: tokens.colors.textStrong,
+                fontSize: '12px',
+                fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+                lineHeight: 1.5,
+                resize: 'vertical',
+                outline: 'none',
+                boxSizing: 'border-box',
+              }}
+            />
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }
