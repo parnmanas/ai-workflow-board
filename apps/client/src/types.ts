@@ -711,6 +711,10 @@ export interface AgentManagerInstance {
   agent_ids?: string[];
   working_dirs?: string[];
   paired_at?: string;
+  // Per-managed-agent CLI credential metadata. One row per supervised
+  // agent the manager could read auth state for. Older managers leave
+  // this undefined; the UI degrades to "no credential metadata" then.
+  agent_credentials?: AgentCredentialEntry[];
   // Self-update fields — manager-mode only (managed by the manager's
   // UpdateChecker). Pre-update managers leave these undefined; the UI's
   // version compare degrades to "no info" in that case.
@@ -720,6 +724,27 @@ export interface AgentManagerInstance {
   default_branch?: string | null;
   update_last_checked_at?: string | null;
   update_last_error?: string | null;
+}
+
+/**
+ * Per-managed-agent CLI credential snapshot, reported on the manager's
+ * heartbeat. Mirrors AgentCredentialEntry on the manager + server. Never
+ * carries the raw token.
+ *
+ * `kind`:
+ *   - 'subscription' — per-agent OAuth credential (OAuth file in cli-home).
+ *   - 'api_key' — env-var auth; no expiry concept.
+ *   - 'operator_home' — fallback symlink/copy of operator's HOME credential.
+ *   - 'unknown' — file present but unrecognized shape.
+ *   - 'missing' — no credential file on disk for this agent.
+ */
+export interface AgentCredentialEntry {
+  agent_id: string;
+  cli: string;
+  kind: 'subscription' | 'api_key' | 'operator_home' | 'unknown' | 'missing';
+  /** OAuth access-token expiry (Unix ms); null when not applicable. */
+  expires_at_ms: number | null;
+  refresh_token_present: boolean;
 }
 
 // ST-5 — pairing tokens. PairingTokenMint is the response of

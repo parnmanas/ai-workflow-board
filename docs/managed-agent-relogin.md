@@ -7,6 +7,11 @@ flows and when to use which.
 
 Symptoms that say a re-login is overdue:
 
+- **AWB Admin → Agent Manager → Managed agents** shows a yellow/red
+  badge next to the agent (`expires in <N>h`, `expired`, `no refresh`,
+  `no credential`). The badge is driven by the manager heartbeat reading
+  `agents/<id>/cli-home/.credentials.json` every 30s; a yellow badge means
+  re-login proactively, a red badge means turns are already failing.
 - `apps/agent-manager` log shows `result subtype=success is_error=true`
   every turn, finishing in 1–2s, and the session is killed as `UNHEALTHY`
   every 25 min and respawned without progress.

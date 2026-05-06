@@ -528,6 +528,17 @@ async function runRuntime(
       } catch (err: any) {
         log(`rehydrate: cli-home prep failed for agent=${id.slice(0, 8)} cli=${cfg.cli}: ${err?.message ?? err}`);
       }
+      // Mirror the spawn-time `credential_kind` mapping (see
+      // agent-manager-commands.ts → credentialKind). Rehydrate uses the
+      // on-disk credential snapshot rather than a fresh AWB fetch, so the
+      // mapping has to be in two places — keep the rules identical.
+      const credentialKind: 'subscription' | 'api_key' | 'operator_home' = !credential
+        ? 'operator_home'
+        : credential.provider.endsWith('_subscription')
+          ? 'subscription'
+          : credential.provider.endsWith('_api_key')
+            ? 'api_key'
+            : 'subscription';
       managedAgentContexts.upsert({
         agent_id: id,
         name: cfg.name,
@@ -538,6 +549,7 @@ async function runRuntime(
         subagent_log_path: subagentLogPathFor(id),
         cli_home_dir: cliHomeDirFor(id),
         extra_env: extraEnv,
+        credential_kind: credentialKind,
         registered_at: new Date().toISOString(),
       });
       managedAgents.upsert({ agent_id: id, name: cfg.name, cli: cfg.cli, working_dir: cfg.working_dir });
@@ -588,6 +600,80 @@ async function runRuntime(
       // Self-update tracker; lets the heartbeat carry latest_version +
       // update_available so the admin UI can render an Update button.
       updateChecker,
+      // Per-agent CLI credential expiry monitor. Reads each context's
+      // cli-home `.credentials.json` (or equivalent) every heartbeat
+      // and ships the parsed expiry / refresh_token presence to AWB so
+      // the admin UI can flag agents whose token is about to silently
+      // fail. Never includes the raw token. See AgentCredentialEntry
+      // for field semantics; readCredentialMeta on the adapter is the
+      // contract.
+      agentCredentialMetaProvider: async () => {
+        const out: Array<{
+          agent_id: string;
+          cli: string;
+          kind: 'subscription' | 'api_key' | 'operator_home' | 'unknown' | 'missing';
+          expires_at_ms: number | null;
+          refresh_token_present: boolean;
+        }> = [];
+        for (const ctx of managedAgentContexts.list()) {
+          // api_key auth has no expiry concept — short-circuit so we
+          // don't issue a pointless disk read. Stamped at spawn / rehydrate
+          // (see ManagedAgentContext.credential_kind).
+          if (ctx.credential_kind === 'api_key') {
+            out.push({
+              agent_id: ctx.agent_id,
+              cli: ctx.cli,
+              kind: 'api_key',
+              expires_at_ms: null,
+              refresh_token_present: false,
+            });
+            continue;
+          }
+          let meta: { kind: 'subscription' | 'api_key' | 'unknown'; expires_at_ms: number | null; refresh_token_present: boolean } | null = null;
+          try {
+            meta = await createAdapter(ctx.cli).readCredentialMeta(ctx.cli_home_dir);
+          } catch (err: any) {
+            log(
+              `agentCredentialMetaProvider: read failed for agent=${ctx.agent_id.slice(0, 8)} cli=${ctx.cli}: ${err?.message ?? err}`,
+            );
+            meta = null;
+          }
+          if (!meta) {
+            // File absent — surface as 'missing' (api_key was already
+            // handled above; reaching here means the operator either
+            // never authed on the host or the symlink is broken).
+            out.push({
+              agent_id: ctx.agent_id,
+              cli: ctx.cli,
+              kind: 'missing',
+              expires_at_ms: null,
+              refresh_token_present: false,
+            });
+            continue;
+          }
+          // For 'operator_home' contexts, the file we just read came from
+          // the operator's HOME (symlinked / copied at spawn time). The
+          // expiry data is real but its kind isn't strictly 'subscription'
+          // from AWB's perspective — preserve the spawn-time kind so the
+          // admin UI can label "operator HOME" rather than "subscription".
+          //
+          // The adapter contract says readCredentialMeta will not return
+          // kind='api_key' (api_key has no on-disk file to read) but
+          // narrow defensively in case a future adapter does.
+          const kind: 'subscription' | 'api_key' | 'operator_home' | 'unknown' =
+            ctx.credential_kind === 'operator_home' && meta.kind === 'subscription'
+              ? 'operator_home'
+              : meta.kind;
+          out.push({
+            agent_id: ctx.agent_id,
+            cli: ctx.cli,
+            kind,
+            expires_at_ms: meta.expires_at_ms,
+            refresh_token_present: meta.refresh_token_present,
+          });
+        }
+        return out;
+      },
     });
     instanceHeartbeat._real.start();
     const fireUpload = (): void => {

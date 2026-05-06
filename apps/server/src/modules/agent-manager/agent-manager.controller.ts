@@ -103,6 +103,31 @@ export class AgentManagerController {
       : undefined;
     const paired_at = typeof body?.paired_at === 'string' && body.paired_at ? body.paired_at : undefined;
 
+    // Per-managed-agent credential metadata (manager-mode only). Each row
+    // is opportunistically validated — bad shapes are dropped silently
+    // because the heartbeat is best-effort and a rolling-out manager
+    // version is the more likely cause than malice. The token itself is
+    // NEVER on the wire, so the worst-case server-side mistake here is
+    // showing a stale badge until the next heartbeat.
+    const agent_credentials = Array.isArray(body?.agent_credentials)
+      ? body.agent_credentials
+          .filter((row: any) => row && typeof row === 'object' && typeof row.agent_id === 'string' && row.agent_id)
+          .map((row: any) => ({
+            agent_id: String(row.agent_id),
+            cli: typeof row.cli === 'string' && row.cli ? row.cli : 'unknown',
+            kind:
+              row.kind === 'subscription' || row.kind === 'api_key' ||
+              row.kind === 'operator_home' || row.kind === 'unknown' || row.kind === 'missing'
+                ? row.kind
+                : 'unknown',
+            expires_at_ms:
+              typeof row.expires_at_ms === 'number' && Number.isFinite(row.expires_at_ms)
+                ? row.expires_at_ms
+                : null,
+            refresh_token_present: row.refresh_token_present === true,
+          }))
+      : undefined;
+
     // Self-update fields — manager fills these via its UpdateChecker. Older
     // managers omit them and we leave the registry record's fields undefined.
     // `null` here is a meaningful "checker has run but couldn't read the
@@ -140,6 +165,7 @@ export class AgentManagerController {
       agent_ids,
       working_dirs,
       paired_at,
+      agent_credentials,
       latest_version,
       update_available,
       repo_root,

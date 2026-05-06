@@ -8,6 +8,7 @@ import { resolveCliBin } from '../cli-resolver.js';
 import {
   ADAPTER_CAPABILITIES,
   type AdapterCredential,
+  type AgentCredentialMeta,
   CliAdapter,
   PARSE_STAGE,
   type OneshotSpec,
@@ -108,6 +109,70 @@ export class ClaudeCliAdapter extends CliAdapter {
     // (settings, plugins, projects, sessions) to the per-agent dir so
     // multi-tenant managers don't cross-contaminate state.
     return 'CLAUDE_CONFIG_DIR';
+  }
+
+  /**
+   * Read `<cliHomeDir>/.credentials.json` and surface enough metadata for
+   * AWB to flag agents whose OAuth token is about to expire. The file
+   * shape claude writes:
+   *
+   *   { "claudeAiOauth": { "accessToken": "...", "refreshToken": "...",
+   *                        "expiresAt": <unix-ms>, ... } }
+   *
+   * `expiresAt` ticks forward whenever the CLI silently rotates the
+   * access token (refreshToken roundtrip), so re-reading on every
+   * heartbeat gives AWB a live view rather than a stale "spawn-time"
+   * snapshot.
+   *
+   * Return values:
+   *   - file present + parses + has claudeAiOauth → kind:'subscription'
+   *     with `expires_at_ms` and `refresh_token_present` from the file.
+   *     refresh_token absence is the more dangerous case (any expiry =
+   *     hard re-auth) so we surface it explicitly.
+   *   - file present + does NOT match expected shape → kind:'unknown'.
+   *     Surfaces "you've pointed me at something I don't recognize"
+   *     instead of silently appearing healthy.
+   *   - file absent → null. Caller treats this as "api_key mode" or
+   *     "operator HOME unavailable" depending on context the heartbeat
+   *     provider has access to.
+   *
+   * Errors never throw — best-effort read; any I/O / parse failure
+   * collapses to `null` so the heartbeat never wedges on credential
+   * inspection.
+   */
+  async readCredentialMeta(cliHomeDir: string): Promise<AgentCredentialMeta | null> {
+    const path = join(cliHomeDir, '.credentials.json');
+    let raw: string;
+    try {
+      raw = await fsp.readFile(path, 'utf8');
+    } catch (err: any) {
+      // ENOENT is the normal "no subscription file here" case (api_key
+      // mode, or operator HOME never had `claude login` run). Anything
+      // else (EACCES on a permission-tightened dir, etc.) collapses
+      // identically — the admin UI just sees no metadata and falls
+      // through to the existing legacy display.
+      if (err?.code === 'ENOENT') return null;
+      return null;
+    }
+    let parsed: any = null;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      // Present-but-corrupt — surface as unknown so an operator notices
+      // the file exists but the manager can't read it (rather than
+      // letting it look "healthy with no expiry data").
+      return { kind: 'unknown', expires_at_ms: null, refresh_token_present: false };
+    }
+    const oauth = parsed?.claudeAiOauth;
+    if (!oauth || typeof oauth !== 'object') {
+      return { kind: 'unknown', expires_at_ms: null, refresh_token_present: false };
+    }
+    const expires =
+      typeof oauth.expiresAt === 'number' && Number.isFinite(oauth.expiresAt)
+        ? oauth.expiresAt
+        : null;
+    const refresh_token_present = typeof oauth.refreshToken === 'string' && oauth.refreshToken.length > 0;
+    return { kind: 'subscription', expires_at_ms: expires, refresh_token_present };
   }
 
   async prepareCliHome(

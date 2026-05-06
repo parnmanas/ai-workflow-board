@@ -40,6 +40,11 @@ export interface InstanceRecord {
   agent_ids?: string[];        // identities the manager currently supervises
   working_dirs?: string[];     // distinct working-dir roots known to the manager
   paired_at?: string;          // ISO timestamp when the manager redeemed its pairing token
+  // Per-managed-agent CLI credential snapshots (manager-mode only). One
+  // entry per supervised agent the manager could read auth metadata for.
+  // Older managers (pre credential-expiry telemetry) leave undefined; the
+  // dashboard collapses to "no credential metadata" in that case.
+  agent_credentials?: AgentCredentialEntry[];
   // Self-update fields — manager-mode only. Daemons/proxies leave undefined.
   // The manager's UpdateChecker fills these from `git fetch` + remote
   // package.json on a slow timer; older managers leave them undefined.
@@ -49,6 +54,29 @@ export interface InstanceRecord {
   default_branch?: string | null;       // branch the checker is tracking ('main')
   update_last_checked_at?: string | null;
   update_last_error?: string | null;
+}
+
+/**
+ * Per-managed-agent credential metadata as reported on the heartbeat.
+ * Mirrors the AgentCredentialEntry interface in
+ * `apps/agent-manager/src/lib/instance-heartbeat.ts` — keep the two in
+ * sync if the wire shape changes. Intentionally NEVER carries the raw
+ * token; only derived expiry metadata.
+ *
+ * `kind`:
+ *   - 'subscription' — per-agent OAuth credential file present.
+ *   - 'api_key' — env-var auth; no expiry concept.
+ *   - 'operator_home' — fallback symlink/copy of operator's HOME credential.
+ *   - 'unknown' — file present but unrecognized shape.
+ *   - 'missing' — no credential file on disk for this agent.
+ */
+export interface AgentCredentialEntry {
+  agent_id: string;
+  cli: string;
+  kind: 'subscription' | 'api_key' | 'operator_home' | 'unknown' | 'missing';
+  /** OAuth access-token expiry (Unix ms); null when not applicable. */
+  expires_at_ms: number | null;
+  refresh_token_present: boolean;
 }
 
 const INSTANCE_TTL_MS = 90_000;     // 3x default plugin heartbeat interval

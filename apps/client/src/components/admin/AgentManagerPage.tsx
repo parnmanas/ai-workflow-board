@@ -3,6 +3,7 @@ import { api, getActiveWorkspaceId } from '../../api';
 import { tokens } from '../../tokens';
 import type {
   Agent,
+  AgentCredentialEntry,
   AgentManagerCommandKind,
   AgentManagerInstance,
   Credential,
@@ -754,6 +755,185 @@ export default function AgentManagerPage() {
 // one consumer. If a second page ever needs the pairing wizard, lift it
 // into a shared admin component module.
 
+// ─── Credential expiry badge ──────────────────────────────────────────
+//
+// Surfaces per-agent OAuth token state on each managed-agent row so the
+// operator notices "expires in 12h" before the agent silently starts
+// returning is_error=true on every turn. Heartbeat data comes from
+// inst.agent_credentials (manager → server → here); never the raw token.
+//
+// Severity rules:
+//   1. expired (now ≥ expires_at_ms) → red, regardless of refresh_token
+//   2. <48h to expiry → yellow
+//   3. refresh_token_present === false → yellow (any expiry = silent fail)
+//   4. kind === 'unknown' / 'missing' → yellow (no metadata to validate)
+//   5. kind === 'api_key' → no badge (env var has no expiry concept)
+//   6. >48h with refresh token → no badge (healthy)
+
+const EXPIRY_WARNING_MS = 48 * 60 * 60 * 1000;
+
+/** Public path inside the AWB repo that documents the re-login runbook.
+ *  Linked from the badge hovercard. We intentionally show the path rather
+ *  than a hardcoded URL — operators read the docs from their own checkout
+ *  on the manager host (where they'll need to re-auth claude anyway). */
+const RELOGIN_DOC_PATH = 'docs/managed-agent-relogin.md';
+
+type CredentialBadgeSeverity = 'expired' | 'expiring' | 'no-refresh' | 'unknown' | 'missing';
+
+interface CredentialBadgeData {
+  severity: CredentialBadgeSeverity;
+  label: string;
+  /** One-line summary shown in the hovercard before the runbook link. */
+  detail: string;
+}
+
+/**
+ * Decide whether (and how) to badge an agent given its credential entry.
+ * Returns null when the agent is healthy or the badge would be noise
+ * (api_key kind, no entry yet from a pre-feature manager, etc.).
+ */
+function classifyCredential(entry: AgentCredentialEntry | undefined): CredentialBadgeData | null {
+  if (!entry) return null;                          // pre-feature manager
+  if (entry.kind === 'api_key') return null;        // no expiry concept
+
+  const now = Date.now();
+
+  if (entry.kind === 'missing') {
+    return {
+      severity: 'missing',
+      label: 'no credential',
+      detail: 'No credential file in this agent\'s cli-home — every spawn will hit "not authenticated" until an operator runs the re-login runbook on the manager host.',
+    };
+  }
+
+  if (entry.kind === 'unknown') {
+    return {
+      severity: 'unknown',
+      label: 'credential ?',
+      detail: 'Credential file exists in cli-home but its shape is unrecognized. Check the manager\'s log and re-run the re-login runbook if needed.',
+    };
+  }
+
+  // subscription / operator_home — both carry a real expires_at.
+  if (typeof entry.expires_at_ms === 'number') {
+    const remaining = entry.expires_at_ms - now;
+    if (remaining <= 0) {
+      return {
+        severity: 'expired',
+        label: 'expired',
+        detail: entry.refresh_token_present
+          ? 'OAuth access token has expired but a refresh token is present — claude should auto-renew on the next turn. If turns keep failing with is_error=true, run the re-login runbook.'
+          : 'OAuth access token has expired and no refresh token is on disk. The manager cannot auto-renew; an operator must re-login on the manager host.',
+      };
+    }
+    if (!entry.refresh_token_present) {
+      // No refresh token = any expiry is silent failure waiting to happen.
+      // Always badge regardless of remaining time.
+      return {
+        severity: 'no-refresh',
+        label: `no refresh · ${formatRemaining(remaining)}`,
+        detail: `OAuth credential has no refresh_token, so when the access token expires (${formatRemaining(remaining)}) every turn will silently fail. Re-run the re-login runbook to capture a credential file with a refresh_token.`,
+      };
+    }
+    if (remaining < EXPIRY_WARNING_MS) {
+      return {
+        severity: 'expiring',
+        label: `expires in ${formatRemaining(remaining)}`,
+        detail: `OAuth access token expires in ${formatRemaining(remaining)}. A refresh token is present so claude will normally auto-renew silently — but if it fails, every turn returns is_error=true with no signal. Re-run the runbook proactively if you'd rather not depend on that path.`,
+      };
+    }
+    // healthy — refresh_token present, > 48h remaining
+    return null;
+  }
+
+  // subscription / operator_home with no expires_at_ms → unrecognized; surface.
+  return {
+    severity: 'unknown',
+    label: 'credential ?',
+    detail: 'Manager could not parse the OAuth file in cli-home. Re-run the re-login runbook if turns are failing.',
+  };
+}
+
+function formatRemaining(ms: number): string {
+  if (ms <= 0) return '0m';
+  const min = Math.floor(ms / 60_000);
+  if (min < 60) return `${min}m`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h`;
+  const days = Math.floor(hr / 24);
+  return `${days}d`;
+}
+
+function CredentialExpiryBadge({ entry }: { entry: AgentCredentialEntry | undefined }) {
+  const data = classifyCredential(entry);
+  const [hover, setHover] = useState(false);
+  if (!data) return null;
+  const palette: Record<CredentialBadgeSeverity, { bg: string; fg: string; border: string }> = {
+    expired:    { bg: `${tokens.colors.danger}20`,  fg: tokens.colors.danger,  border: tokens.colors.danger },
+    expiring:   { bg: `${tokens.colors.warning}20`, fg: tokens.colors.warning, border: tokens.colors.warning },
+    'no-refresh': { bg: `${tokens.colors.warning}20`, fg: tokens.colors.warning, border: tokens.colors.warning },
+    unknown:    { bg: `${tokens.colors.warning}20`, fg: tokens.colors.warning, border: tokens.colors.warning },
+    missing:    { bg: `${tokens.colors.danger}20`,  fg: tokens.colors.danger,  border: tokens.colors.danger },
+  };
+  const c = palette[data.severity];
+  return (
+    <span
+      style={{ position: 'relative', display: 'inline-flex' }}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+    >
+      <span
+        style={{
+          marginLeft: 6,
+          fontSize: 10,
+          fontWeight: 700,
+          padding: '1px 6px',
+          borderRadius: 4,
+          background: c.bg,
+          color: c.fg,
+          border: `1px solid ${c.border}40`,
+          textTransform: 'uppercase',
+          letterSpacing: '0.04em',
+          whiteSpace: 'nowrap',
+          cursor: 'help',
+        }}
+      >
+        ⚠ {data.label}
+      </span>
+      {hover && (
+        <span
+          role="tooltip"
+          style={{
+            position: 'absolute',
+            top: 'calc(100% + 4px)',
+            left: 0,
+            zIndex: 10,
+            minWidth: 280,
+            maxWidth: 360,
+            padding: '8px 10px',
+            background: tokens.colors.surfaceCard,
+            color: tokens.colors.textStrong,
+            border: `1px solid ${tokens.colors.border}`,
+            borderRadius: tokens.radii.md,
+            boxShadow: '0 4px 12px rgba(0,0,0,0.18)',
+            fontSize: 11,
+            lineHeight: 1.5,
+            fontWeight: 400,
+            textTransform: 'none',
+            letterSpacing: 0,
+            whiteSpace: 'normal',
+          }}
+        >
+          {data.detail}
+          <div style={{ marginTop: 6, color: tokens.colors.textMuted }}>
+            See <code style={{ background: tokens.colors.surface, padding: '0 4px', borderRadius: 3 }}>{RELOGIN_DOC_PATH}</code> in the AWB repo for the re-login runbook on the manager host.
+          </div>
+        </span>
+      )}
+    </span>
+  );
+}
+
 interface ManagedAgentsSectionProps {
   inst: AgentManagerInstance;
 }
@@ -828,6 +1008,17 @@ const MAINTENANCE_BUTTONS: {
 function ManagedAgentsSection({ inst }: ManagedAgentsSectionProps) {
   const { showToast } = useToast();
   const [agents, setAgents] = useState<Agent[] | null>(null);
+  // Lookup table for inst.agent_credentials by agent_id; rebuilt whenever
+  // a fresh heartbeat lands on the SSE-driven inst object. Older managers
+  // don't ship the array — the map stays empty and badges short-circuit
+  // to null inside CredentialExpiryBadge so the UI degrades gracefully.
+  const credentialsByAgentId = useMemo(() => {
+    const m = new Map<string, AgentCredentialEntry>();
+    for (const row of inst.agent_credentials ?? []) {
+      m.set(row.agent_id, row);
+    }
+    return m;
+  }, [inst.agent_credentials]);
   // null = closed, Agent = editing that row. Edit-only here now — managed
   // agent CREATION moved to the workspace AI Agents tab so the new agent
   // gets created in the operator's actual workspace instead of inheriting
@@ -1014,6 +1205,7 @@ function ManagedAgentsSection({ inst }: ManagedAgentsSectionProps) {
                     >
                       ● {supervised ? 'live' : 'offline'}
                     </span>
+                    <CredentialExpiryBadge entry={credentialsByAgentId.get(a.id)} />
                   </div>
                   <div style={{ display: 'flex', gap: 4 }}>
                     <Button
