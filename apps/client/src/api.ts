@@ -779,9 +779,30 @@ export const api = {
   // Create an agent identity that the manager will spawn. Differs from the
   // generic POST /agents in two ways: (1) cli is validated against the
   // claude/codex/gemini/custom whitelist, (2) manager_agent_id is sanity-
-  // checked against the same workspace before save.
+  // checked (existence + type='manager'); the manager itself can live in a
+  // different workspace from the new agent — managers are paired globally
+  // by an admin and supervise children across workspaces.
   createManagedAgent: (body: ManagedAgentCreateBody) =>
     request<Agent>('/admin/agent-manager/agents', { method: 'POST', body: JSON.stringify(body) }),
+
+  // Cross-workspace manager picker source — the workspace AI Agents tab
+  // uses this to populate the optional Agent Manager dropdown so an agent
+  // in workspace B can be attached to a manager paired in workspace A.
+  // MANAGE_AGENTS-gated; returns one row per Agent with type='manager'.
+  listAgentManagers: () =>
+    request<Array<{ id: string; name: string; description: string; workspace_id: string; is_active: number }>>(
+      '/admin/agent-manager/managers',
+    ),
+
+  // Re-home an existing managed agent into a different workspace. Used by
+  // the AgentManager admin page's per-row workspace picker so pre-existing
+  // agents created against a global manager can be relocated to the
+  // workspace they actually belong to without recreating them.
+  setManagedAgentWorkspace: (agentId: string, workspaceId: string) =>
+    request<Agent>(`/admin/agent-manager/agents/${encodeURIComponent(agentId)}/workspace`, {
+      method: 'PATCH',
+      body: JSON.stringify({ workspace_id: workspaceId }),
+    }),
 
   // ─── Admin Logs ────────────────────────────────────────
   getLogs: (params?: { level?: string; category?: string; since?: string; until?: string; limit?: number; search?: string }) => {

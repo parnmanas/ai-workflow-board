@@ -611,7 +611,6 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
                 Default Branch
               </label>
               <input
-                list={branchTestResult ? 'resource-branch-options' : undefined}
                 value={formDefaultBranch}
                 onChange={(e) => setFormDefaultBranch(e.target.value)}
                 placeholder="e.g. main (leave blank to fall back to origin/HEAD)"
@@ -630,14 +629,46 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
               />
               {branchTestResult && branchTestResult.length > 0 && (
                 <>
-                  <datalist id="resource-branch-options">
+                  {/* Native <datalist> filters options by the input's current value,
+                      so auto-filling the input after Test connection collapsed the
+                      list to a single match. Use a plain <select> instead — every
+                      fetched branch is always visible. */}
+                  <select
+                    data-testid="resource-branch-picker"
+                    value={
+                      branchTestResult.some((b) => b.name === formDefaultBranch)
+                        ? formDefaultBranch
+                        : ''
+                    }
+                    onChange={(e) => {
+                      if (e.target.value) setFormDefaultBranch(e.target.value);
+                    }}
+                    style={{
+                      background: tokens.colors.surface,
+                      border: `1px solid ${tokens.colors.border}`,
+                      borderRadius: tokens.radii.md,
+                      padding: '8px 10px',
+                      color: tokens.colors.textStrong,
+                      fontSize: tokens.typography.fontSizeMd,
+                      outline: 'none',
+                      width: '100%',
+                      boxSizing: 'border-box',
+                      fontFamily: 'inherit',
+                      marginTop: tokens.spacing.xs,
+                    }}
+                  >
+                    <option value="">
+                      — Pick from {branchTestResult.length} fetched branch
+                      {branchTestResult.length === 1 ? '' : 'es'} —
+                    </option>
                     {branchTestResult.map((b) => (
-                      <option key={b.sha} value={b.name} />
+                      <option key={b.sha} value={b.name}>
+                        {b.name}
+                      </option>
                     ))}
-                  </datalist>
+                  </select>
                   <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginTop: 4 }}>
-                    Pick from {branchTestResult.length} fetched branch
-                    {branchTestResult.length === 1 ? '' : 'es'}, or type a custom name.
+                    Pick from the dropdown, or type a custom name above.
                   </div>
                 </>
               )}

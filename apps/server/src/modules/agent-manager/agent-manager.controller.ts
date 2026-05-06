@@ -1,5 +1,5 @@
 import { ApiBearerAuth, ApiSecurity, ApiTags, ApiOperation } from '@nestjs/swagger';
-import { Body, Controller, Delete, Get, Param, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
@@ -568,12 +568,19 @@ export class AgentManagerController {
       : null;
     const description = typeof body?.description === 'string' ? body.description : '';
 
-    // If a manager_agent_id is supplied, sanity-check it exists in the same
-    // workspace — silently dropping a typo'd link would make spawn-routing
-    // mysteriously fail.
+    // If a manager_agent_id is supplied, sanity-check the row exists and is
+    // actually a manager identity (type='manager', minted by pair/redeem). The
+    // manager is intentionally *not* required to live in the same workspace as
+    // the agent it supervises — managers are paired once by an admin and may
+    // run agents for any workspace they're given identities in. Silently
+    // dropping a typo'd link would make spawn-routing mysteriously fail, so
+    // we still fail fast on a missing/wrong-type row.
     if (manager_agent_id) {
-      const m = await this.agentRepo.findOne({ where: { id: manager_agent_id, workspace_id: workspaceId } });
-      if (!m) return res.status(400).json({ error: 'manager_agent_id does not exist in this workspace' });
+      const m = await this.agentRepo.findOne({ where: { id: manager_agent_id } });
+      if (!m) return res.status(400).json({ error: 'manager_agent_id does not exist' });
+      if (m.type !== 'manager') {
+        return res.status(400).json({ error: 'manager_agent_id must reference a manager-type agent' });
+      }
     }
     // Same sanity check for credential_id — fail fast with a clear error rather
     // than letting spawn time discover the broken FK on the agent-manager side.
@@ -598,6 +605,79 @@ export class AgentManagerController {
       }),
     );
     return res.status(201).json(agent);
+  }
+
+  // ─── Cross-workspace manager listing ──────────────────────────────────
+  //
+  // Managers are paired by an admin into whatever workspace was active when
+  // the pairing token was minted, but the workspace AI Agents tab needs to
+  // surface every reachable manager so an operator can attach an agent in
+  // their own workspace to a globally-paired manager. We deliberately
+  // bypass the WorkspaceGuard scoping here — MANAGE_AGENTS still gates
+  // access — so managers minted in workspace A are visible to MANAGE_AGENTS
+  // holders in workspace B. Returns only the columns the picker needs.
+  @ApiBearerAuth('user-session')
+  @Get('api/admin/agent-manager/managers')
+  @UseGuards(PermissionGuard, WorkspaceGuard)
+  @RequirePermission(PERMISSIONS.MANAGE_AGENTS)
+  @ApiOperation({
+    summary: 'List every Agent row with type=manager (cross-workspace)',
+  })
+  async listManagers(@Res() res: Response) {
+    const managers = await this.agentRepo.find({
+      where: { type: 'manager' },
+      order: { name: 'ASC' },
+    });
+    return res.json(
+      managers.map((m) => ({
+        id: m.id,
+        name: m.name,
+        description: m.description,
+        workspace_id: m.workspace_id,
+        is_active: m.is_active,
+      })),
+    );
+  }
+
+  // ─── Move a managed agent to a different workspace ────────────────────
+  //
+  // Pre-existing managed agents created against a global manager already
+  // ended up in the manager's pairing-time workspace. The AgentManager
+  // admin page now exposes a per-row workspace picker so operators can
+  // re-home those agents into the correct workspace without recreating
+  // them. type and manager_agent_id are intentionally untouched.
+  @ApiBearerAuth('user-session')
+  @Patch('api/admin/agent-manager/agents/:id/workspace')
+  @UseGuards(PermissionGuard, WorkspaceGuard)
+  @RequirePermission(PERMISSIONS.MANAGE_AGENTS)
+  @ApiOperation({
+    summary: 'Move an existing managed-agent identity into a different workspace',
+  })
+  async setManagedAgentWorkspace(
+    @Param('id') agentId: string,
+    @Body() body: any,
+    @Res() res: Response,
+  ) {
+    const target_workspace_id =
+      typeof body?.workspace_id === 'string' && body.workspace_id ? body.workspace_id : '';
+    if (!target_workspace_id) return res.status(400).json({ error: 'workspace_id is required' });
+
+    const agent = await this.agentRepo.findOne({ where: { id: agentId } });
+    if (!agent) return res.status(404).json({ error: 'agent not found' });
+    // Guard against re-homing a manager identity through this endpoint —
+    // managers don't carry per-workspace meaning the same way managed
+    // children do (children inherit their manager regardless of ws).
+    if (agent.type === 'manager') {
+      return res.status(400).json({ error: 'cannot move a manager-type agent through this endpoint' });
+    }
+
+    agent.workspace_id = target_workspace_id;
+    const updated = await this.agentRepo.save(agent);
+    this.logService.info(
+      'AgentManager',
+      `Managed agent moved id=${agent.id.slice(0, 8)} → ws=${target_workspace_id.slice(0, 8)}`,
+    );
+    return res.json(updated);
   }
 
   // ─── ST-6 manager → server: per-managed-agent API key provisioning ──────

@@ -52,6 +52,11 @@ export interface Agent {
   // ST-4 — agent-manager-managed agents. Empty/null on legacy rows.
   working_dir?: string;
   manager_agent_id?: string | null;
+  /** Workspace this agent identity belongs to. Server populates on every
+   *  list/get; the AgentManager admin page uses it to render the per-row
+   *  workspace picker that lets operators relocate managed agents that
+   *  were created against a global manager. */
+  workspace_id?: string;
   /** Optional Credential row that supplies CLI auth (subscription / API key)
    *  for the spawned agent. null = fall back to the operator's main HOME. */
   credential_id?: string | null;

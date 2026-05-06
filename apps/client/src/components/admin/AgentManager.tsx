@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { api, getActiveWorkspaceId } from '../../api';
-import { Agent, Credential, SubagentSummary } from '../../types';
+import { Agent, Credential, ManagedAgentCreateBody, SubagentSummary } from '../../types';
 import { tokens } from '../../tokens';
 import { Button, Input, Select, Badge, Modal, Card } from '../common';
 import { useCrudList } from '../../hooks/useCrudList';
@@ -338,12 +338,35 @@ function SubagentsModal({ agent, onClose }: SubagentsModalProps) {
   );
 }
 
+/** CLI types the agent-manager can spawn — the server's createManagedAgent
+ *  whitelist. Picking a manager from the optional dropdown switches the form
+ *  into "managed agent" mode and constrains Type to one of these. Legacy
+ *  types (gpt, etc.) stay available when no manager is picked. */
+const MANAGED_CLI_TYPES = new Set(['claude', 'codex', 'gemini', 'custom']);
+
+interface ManagerOption {
+  id: string;
+  name: string;
+  description: string;
+  workspace_id: string;
+  is_active: number;
+}
+
 export default function AgentManager() {
   const { items: agents, showForm, setShowForm, editingId, setEditingId, refresh: load } =
     useCrudList<Agent>(() => api.getAgentsAll());
-  const [form, setForm] = useState({ name: '', description: '', type: 'custom', role_prompt: '', credential_id: '' });
+  const [form, setForm] = useState({
+    name: '',
+    description: '',
+    type: 'custom',
+    role_prompt: '',
+    credential_id: '',
+    manager_agent_id: '',
+    working_dir: '',
+  });
   const [subagentDetailAgent, setSubagentDetailAgent] = useState<Agent | null>(null);
   const [credentials, setCredentials] = useState<Credential[]>([]);
+  const [managers, setManagers] = useState<ManagerOption[]>([]);
 
   // Pull credentials once per modal-open. Workspace-scoped: only credentials
   // in the active workspace are eligible (matches the server's
@@ -359,11 +382,30 @@ export default function AgentManager() {
     return () => { alive = false; };
   }, [showForm]);
 
+  // Pull the cross-workspace manager list once per modal-open. Managers are
+  // global (admin pairs them once); the picker lets an operator attach this
+  // workspace's agent to a manager paired in any workspace. Empty list = no
+  // managers paired yet, so the form silently falls back to legacy mode.
+  useEffect(() => {
+    if (!showForm) return;
+    let alive = true;
+    api.listAgentManagers()
+      .then((rows) => { if (alive) setManagers(rows); })
+      .catch(() => { if (alive) setManagers([]); });
+    return () => { alive = false; };
+  }, [showForm]);
+
   const eligibleCredentials = useMemo(() => {
     const prefix = CLI_TO_CREDENTIAL_PREFIX[form.type];
     if (!prefix) return [];
     return credentials.filter((c) => c.provider.startsWith(prefix));
   }, [credentials, form.type]);
+
+  // Managed-agent mode: a manager is picked. The save path then routes to
+  // createManagedAgent (which validates cli + manager_agent_id) and surfaces
+  // the working_dir input so the manager knows where to spawn the CLI.
+  const isManagedMode = !!form.manager_agent_id;
+  const managedTypeInvalid = isManagedMode && !MANAGED_CLI_TYPES.has(form.type);
 
   // Re-resolve the live agent instance every render so the modal reflects the
   // most recent enrichment after `load()` refresh, not the snapshot taken when
@@ -374,29 +416,67 @@ export default function AgentManager() {
   }, [agents, subagentDetailAgent]);
 
   const resetForm = () => {
-    setForm({ name: '', description: '', type: 'custom', role_prompt: '', credential_id: '' });
+    setForm({
+      name: '',
+      description: '',
+      type: 'custom',
+      role_prompt: '',
+      credential_id: '',
+      manager_agent_id: '',
+      working_dir: '',
+    });
     setEditingId(null);
     setShowForm(false);
   };
 
   const handleSave = async () => {
     if (!form.name.trim()) return;
+    if (managedTypeInvalid) return;
     // Drop credential_id when the CLI type doesn't support per-agent
     // credentials (only claude / codex / gemini do); preserves the existing
     // null contract for custom / legacy types so the server treats them as
     // "no credential" rather than mis-setting an FK.
     const supportsCredential = !!CLI_TO_CREDENTIAL_PREFIX[form.type];
-    const body: Record<string, any> = {
-      name: form.name,
-      description: form.description,
-      type: form.type,
-      role_prompt: form.role_prompt,
-      credential_id: supportsCredential && form.credential_id ? form.credential_id : null,
-    };
+    const credential_id = supportsCredential && form.credential_id ? form.credential_id : null;
+
     if (editingId) {
-      await api.updateAgent(editingId, body);
+      // Edit covers both modes — PATCH /api/agents/:id accepts every field
+      // we need (manager_agent_id and working_dir included). Empty
+      // manager_agent_id clears the link (detach to legacy proxy mode).
+      await api.updateAgent(editingId, {
+        name: form.name,
+        description: form.description,
+        type: form.type,
+        role_prompt: form.role_prompt,
+        credential_id,
+        manager_agent_id: form.manager_agent_id || null,
+        working_dir: form.working_dir,
+      } as any);
+    } else if (isManagedMode) {
+      // Create-with-manager: route through the createManagedAgent contract
+      // so the server validates cli + manager existence. role_prompt is not
+      // part of that body, so we set it via a follow-up PATCH if non-empty.
+      const body: ManagedAgentCreateBody = {
+        name: form.name,
+        cli: form.type as ManagedAgentCreateBody['cli'],
+        working_dir: form.working_dir.trim() || undefined,
+        manager_agent_id: form.manager_agent_id,
+        description: form.description || undefined,
+        credential_id: credential_id || undefined,
+      };
+      const created = await api.createManagedAgent(body);
+      if (form.role_prompt) {
+        await api.updateAgent(created.id, { role_prompt: form.role_prompt } as any);
+      }
     } else {
-      await api.createAgent(body as any);
+      // Legacy create — no manager, plain workspace-scoped agent identity.
+      await api.createAgent({
+        name: form.name,
+        description: form.description,
+        type: form.type,
+        role_prompt: form.role_prompt,
+        credential_id,
+      } as any);
     }
     resetForm();
     await load();
@@ -409,6 +489,8 @@ export default function AgentManager() {
       type: agent.type,
       role_prompt: agent.role_prompt || '',
       credential_id: agent.credential_id || '',
+      manager_agent_id: agent.manager_agent_id || '',
+      working_dir: agent.working_dir || '',
     });
     setEditingId(agent.id);
     setShowForm(true);
@@ -459,7 +541,9 @@ export default function AgentManager() {
         footer={
           <>
             <Button variant="secondary" onClick={resetForm}>Cancel</Button>
-            <Button variant="primary" onClick={handleSave}>{editingId ? 'Update' : 'Create'}</Button>
+            <Button variant="primary" onClick={handleSave} disabled={managedTypeInvalid}>
+              {editingId ? 'Update' : 'Create'}
+            </Button>
           </>
         }
       >
@@ -477,7 +561,9 @@ export default function AgentManager() {
               onChange={e => setForm({ ...form, type: (e.target as HTMLSelectElement).value })}
               options={[
                 { value: 'claude', label: 'Claude' },
-                { value: 'gpt', label: 'GPT' },
+                { value: 'codex', label: 'Codex' },
+                { value: 'gemini', label: 'Gemini' },
+                { value: 'gpt', label: 'GPT (legacy)' },
                 { value: 'custom', label: 'Custom' },
               ]}
             />
@@ -488,6 +574,43 @@ export default function AgentManager() {
             onChange={e => setForm({ ...form, description: e.target.value })}
             placeholder="What does this agent do?"
           />
+          {/* Optional manager picker — empty = legacy proxy mode (no
+              spawn supervision); picking a manager switches the form into
+              managed-agent mode (working_dir + CLI restricted to the
+              spawn whitelist). */}
+          <div>
+            <Select
+              label="Agent Manager (optional)"
+              value={form.manager_agent_id}
+              onChange={e => setForm({ ...form, manager_agent_id: (e.target as HTMLSelectElement).value })}
+              options={[
+                { value: '', label: 'None — legacy / proxy mode' },
+                ...managers.map(m => ({ value: m.id, label: m.name })),
+              ]}
+            />
+            <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginTop: 4, lineHeight: 1.5 }}>
+              Pick a paired manager to have it spawn this agent's CLI. Leave blank to keep the existing proxy / standalone behaviour.
+              {managers.length === 0 && ' No managers paired yet — pair one from the AgentManager admin page.'}
+            </div>
+          </div>
+          {isManagedMode && (
+            <div>
+              <Input
+                label={`Working directory${form.type === 'custom' ? ' (optional)' : ' *'}`}
+                value={form.working_dir}
+                onChange={e => setForm({ ...form, working_dir: e.target.value })}
+                placeholder="/abs/path/on/manager/host"
+              />
+              <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginTop: 4, lineHeight: 1.5 }}>
+                Path on the manager host where the CLI will be spawned. The manager will refuse to spawn this agent until a working_dir is set.
+              </div>
+            </div>
+          )}
+          {managedTypeInvalid && (
+            <div style={{ fontSize: '11px', color: tokens.colors.warning, lineHeight: 1.5 }}>
+              ⚠ Type "{form.type}" is not supported by the agent-manager spawn pipeline. Choose Claude, Codex, Gemini, or Custom — or clear the Agent Manager picker to keep the legacy behaviour.
+            </div>
+          )}
           {CLI_TO_CREDENTIAL_PREFIX[form.type] && (
             <div>
               <Select
