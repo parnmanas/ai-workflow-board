@@ -828,20 +828,27 @@ const MAINTENANCE_BUTTONS: {
 function ManagedAgentsSection({ inst }: ManagedAgentsSectionProps) {
   const { showToast } = useToast();
   const [agents, setAgents] = useState<Agent[] | null>(null);
-  const [createOpen, setCreateOpen] = useState(false);
-  // null = closed, Agent = editing that row. Single dialog for create + edit
-  // since they share the same form (mode flag inside the dialog handles the
-  // CLI lock + autoSpawn checkbox visibility).
+  // null = closed, Agent = editing that row. Edit-only here now — managed
+  // agent CREATION moved to the workspace AI Agents tab so the new agent
+  // gets created in the operator's actual workspace instead of inheriting
+  // the manager's pairing-time workspace. Operators relocate pre-existing
+  // managed agents through the per-row workspace picker below.
   const [editAgent, setEditAgent] = useState<Agent | null>(null);
   const [pendingCmd, setPendingCmd] = useState<string | null>(null); // `${cmd}:${agentId}`
+  // Workspace dropdown source for the per-row workspace picker — managers
+  // are global, but each managed agent must live in exactly one workspace.
+  // Loaded once per section mount and reused across all rows.
+  const [workspaces, setWorkspaces] = useState<Array<{ id: string; name: string }>>([]);
 
   // The manager Agent identity is `inst.agent_id` (created by pair/redeem).
-  // Children are agents in the same workspace whose `manager_agent_id`
-  // matches. Fetch the workspace agent listing once and filter client-side
-  // — fewer endpoints, and the listing is already cheap (typically <50 rows).
+  // Children are agents whose `manager_agent_id` matches — they may live in
+  // ANY workspace (managed agents created from a workspace AI Agents tab
+  // get the operator's workspace, not the manager's). Hit the admin
+  // cross-workspace agent listing so children outside the operator's
+  // currently-active workspace are still visible from this admin page.
   const refresh = useCallback(async () => {
     try {
-      const all = await api.getAgents();
+      const all = await api.getAgentsAll();
       const children = (all as Agent[]).filter((a) => a.manager_agent_id === inst.agent_id);
       setAgents(children);
     } catch (err: any) {
@@ -854,6 +861,30 @@ function ManagedAgentsSection({ inst }: ManagedAgentsSectionProps) {
     setAgents(null);
     refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    let alive = true;
+    api.getWorkspaces()
+      .then((rows: any[]) => {
+        if (!alive) return;
+        setWorkspaces(rows.map((w: any) => ({ id: w.id, name: w.name || w.id })));
+      })
+      .catch(() => { if (alive) setWorkspaces([]); });
+    return () => { alive = false; };
+  }, []);
+
+  const moveWorkspace = useCallback(
+    async (agentId: string, workspaceId: string) => {
+      try {
+        await api.setManagedAgentWorkspace(agentId, workspaceId);
+        showToast('Workspace updated', 'success');
+        refresh();
+      } catch (err: any) {
+        showToast(`Move failed: ${err?.message || err}`, 'error');
+      }
+    },
+    [refresh, showToast],
+  );
 
   const sendCommand = useCallback(
     async (kind: AgentManagerCommandKind, agentId: string, extraArgs?: Record<string, any>) => {
@@ -928,9 +959,6 @@ function ManagedAgentsSection({ inst }: ManagedAgentsSectionProps) {
           >
             Reload config
           </Button>
-          <Button size="sm" variant="primary" onClick={() => setCreateOpen(true)}>
-            Create agent…
-          </Button>
         </div>
       </div>
 
@@ -938,7 +966,7 @@ function ManagedAgentsSection({ inst }: ManagedAgentsSectionProps) {
         <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>Loading…</div>
       ) : agents.length === 0 ? (
         <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>
-          No agents linked to this manager yet. Click <strong>Create agent…</strong> to add one.
+          No agents linked to this manager yet. Create one from a workspace's <strong>AI Agents</strong> tab and pick this manager from the optional dropdown.
         </div>
       ) : (
         <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -1013,6 +1041,36 @@ function ManagedAgentsSection({ inst }: ManagedAgentsSectionProps) {
                 <div style={{ fontSize: 11, color: tokens.colors.textMuted, fontFamily: 'monospace' }}>
                   id <code>{a.id.slice(0, 8)}</code> · cwd <code>{a.working_dir || '—'}</code>
                 </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: tokens.colors.textMuted, flexWrap: 'wrap' }}>
+                  <span style={{ fontWeight: 600 }}>Workspace:</span>
+                  <select
+                    value={a.workspace_id || ''}
+                    onChange={(e) => {
+                      const next = e.target.value;
+                      if (!next || next === a.workspace_id) return;
+                      moveWorkspace(a.id, next);
+                    }}
+                    style={{
+                      fontSize: 11,
+                      padding: '2px 6px',
+                      background: tokens.colors.surfaceCard,
+                      color: tokens.colors.textStrong,
+                      border: `1px solid ${tokens.colors.border}`,
+                      borderRadius: tokens.radii.sm,
+                      fontFamily: 'inherit',
+                    }}
+                    title="Move this managed agent into a different workspace. The manager_agent_id link is preserved."
+                  >
+                    {workspaces.length === 0 && (
+                      <option value={a.workspace_id || ''}>{a.workspace_id ? a.workspace_id.slice(0, 8) : '—'}</option>
+                    )}
+                    {workspaces.map((w) => (
+                      <option key={w.id} value={w.id}>
+                        {w.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
                 {!a.working_dir && (
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: tokens.colors.warning }}>
                     <span>⚠ working_dir not set — manager will refuse to spawn.</span>
@@ -1060,18 +1118,6 @@ function ManagedAgentsSection({ inst }: ManagedAgentsSectionProps) {
         </ul>
       )}
 
-      <ManagedAgentDialog
-        isOpen={createOpen}
-        onClose={() => setCreateOpen(false)}
-        managerAgentId={inst.agent_id}
-        managerInstanceId={inst.instance_id}
-        defaultCli={inst.cli}
-        mode="create"
-        onSubmitted={() => {
-          setCreateOpen(false);
-          refresh();
-        }}
-      />
       <ManagedAgentDialog
         isOpen={editAgent !== null}
         onClose={() => setEditAgent(null)}
