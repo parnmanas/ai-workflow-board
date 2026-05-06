@@ -213,6 +213,18 @@ to refuse running concurrently with the old plugin daemon.
 - **Lockfile** — prevents two managers writing the same `subagents.json`. A
   hostile take-over still requires PID forge; honest installations are safe.
 
+## Operational runbooks
+
+- **Re-login a managed claude CLI** — see
+  [`docs/managed-agent-relogin.md`](managed-agent-relogin.md). Covers both
+  the direct path (`scripts/relogin-managed-agent.{ps1,sh}` redirecting
+  `CLAUDE_CONFIG_DIR` to the per-agent cli-home) and the remote-injection
+  path (paste `.credentials.json` into AWB Admin → Credentials →
+  Claude (Subscription), attach to agent, restart). Required when subagent
+  turns return `is_error=true` in 1–2 s and sessions are killed as
+  UNHEALTHY every 25 minutes — the canonical signature of an expired
+  OAuth token.
+
 ## Testing
 
 > **No automated tests yet — all behavior is verified manually.** The plugin

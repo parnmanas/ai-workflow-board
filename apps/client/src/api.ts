@@ -782,8 +782,17 @@ export const api = {
   // checked (existence + type='manager'); the manager itself can live in a
   // different workspace from the new agent — managers are paired globally
   // by an admin and supervise children across workspaces.
-  createManagedAgent: (body: ManagedAgentCreateBody) =>
-    request<Agent>('/admin/agent-manager/agents', { method: 'POST', body: JSON.stringify(body) }),
+  //
+  // Optional `workspaceId` lets callers (e.g. the workspace AI Agents page)
+  // pin the request to the URL's wsId rather than relying on the per-tab
+  // active workspace — same defensive override as createAgent.
+  createManagedAgent: (body: ManagedAgentCreateBody, workspaceId?: string) => {
+    const init: RequestInit = { method: 'POST', body: JSON.stringify(body) };
+    if (workspaceId) {
+      init.headers = { ...getAuthHeaders(), 'X-Workspace-Id': workspaceId };
+    }
+    return request<Agent>('/admin/agent-manager/agents', init);
+  },
 
   // Cross-workspace manager picker source — the workspace AI Agents tab
   // uses this to populate the optional Agent Manager dropdown so an agent
