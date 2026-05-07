@@ -6,6 +6,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 import PageHeader from './PageHeader';
 import AgentCard from './AgentCard';
+import DirectoryPicker from './admin/DirectoryPicker';
 import { tokens } from '../tokens';
 import { Button, Input, Select, Modal } from './common';
 import type {
@@ -126,6 +127,11 @@ export default function AgentsPage() {
   const [managers, setManagers] = useState<ManagerOption[]>([]);
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [creatingManaged, setCreatingManaged] = useState(false);
+  // ST-7 directory picker — opens a modal that browses the picked manager's
+  // host filesystem via the existing /api/agents/:id/fs/* reverse-RPC, so
+  // the operator clicks a directory instead of typing an absolute path that
+  // is meaningful only on that specific manager host.
+  const [pickerOpen, setPickerOpen] = useState(false);
 
   const pendingStatusRef = useRef<StatusUpdate[]>([]);
   const agentsReadyRef = useRef(false);
@@ -246,7 +252,21 @@ export default function AgentsPage() {
 
   const resetManagedForm = useCallback(() => {
     setManagedForm(EMPTY_MANAGED_FORM);
+    setPickerOpen(false);
     setShowManagedModal(false);
+  }, []);
+
+  // Switching the Agent Manager invalidates the previously-picked
+  // working_dir: a path on host A is meaningless on host B (and the FS
+  // browser will list a different filesystem entirely). Reset the field so
+  // the operator has to re-pick from the new manager's tree.
+  const handleManagerChange = useCallback((nextManagerId: string) => {
+    setManagedForm((f) => (
+      f.manager_agent_id === nextManagerId
+        ? f
+        : { ...f, manager_agent_id: nextManagerId, working_dir: '' }
+    ));
+    setPickerOpen(false);
   }, []);
 
   const handleCreateManagedAgent = useCallback(async () => {
@@ -582,28 +602,64 @@ export default function AgentsPage() {
             <Select
               label="Agent Manager *"
               value={managedForm.manager_agent_id}
-              onChange={e => setManagedForm(f => ({ ...f, manager_agent_id: (e.target as HTMLSelectElement).value }))}
+              onChange={e => handleManagerChange((e.target as HTMLSelectElement).value)}
               options={[
                 { value: '', label: managers.length === 0 ? 'No managers paired yet' : 'Select a manager…' },
                 ...managers.map(m => ({ value: m.id, label: m.name })),
               ]}
             />
             <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginTop: 4, lineHeight: 1.5 }}>
-              The picked manager spawns this agent's CLI on its host.
+              The picked manager spawns this agent's CLI on its host. Changing this clears the working directory — paths are host-specific.
               {managers.length === 0 && ' Pair one from the AgentManager admin page first.'}
             </div>
           </div>
           <div>
-            <Input
-              label={`Working directory${managedWorkingDirRequired ? ' *' : ' (optional)'}`}
-              value={managedForm.working_dir}
-              onChange={e => setManagedForm(f => ({ ...f, working_dir: e.target.value }))}
-              placeholder="/abs/path/on/manager/host"
-            />
+            <label style={{
+              fontSize: '11px',
+              color: tokens.colors.textSecondary,
+              fontWeight: 600,
+              display: 'block',
+              marginBottom: 6,
+            }}>
+              {`Working directory${managedWorkingDirRequired ? ' *' : ' (optional)'}`}
+            </label>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'stretch' }}>
+              <div style={{ flex: 1 }}>
+                <Input
+                  value={managedForm.working_dir}
+                  onChange={e => setManagedForm(f => ({ ...f, working_dir: e.target.value }))}
+                  placeholder="/abs/path/on/manager/host (or click Browse)"
+                />
+              </div>
+              <Button
+                variant="ghost"
+                onClick={() => setPickerOpen(true)}
+                disabled={!managedForm.manager_agent_id}
+                title={managedForm.manager_agent_id
+                  ? "Browse the manager host's filesystem via SSE reverse-RPC"
+                  : 'Pick an Agent Manager first.'}
+              >
+                📁 Browse…
+              </Button>
+            </div>
             <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginTop: 4, lineHeight: 1.5 }}>
               Path on the manager host where the CLI will be spawned. The manager will refuse to spawn this agent until a working_dir is set.
             </div>
           </div>
+          {/* Mounted only while the user has actually picked a manager —
+              DirectoryPicker keys its fs/* requests off managerAgentId, so
+              opening it without one would hit /agents//fs/roots and 404. */}
+          {managedForm.manager_agent_id && (
+            <DirectoryPicker
+              isOpen={pickerOpen}
+              onClose={() => setPickerOpen(false)}
+              managerAgentId={managedForm.manager_agent_id}
+              initialPath={managedForm.working_dir.trim() || undefined}
+              onPick={(picked) => {
+                setManagedForm(f => ({ ...f, working_dir: picked }));
+              }}
+            />
+          )}
           {CLI_TO_CREDENTIAL_PREFIX[managedForm.cli] && (
             <div>
               <Select
