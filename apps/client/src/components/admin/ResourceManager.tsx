@@ -629,46 +629,74 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
               />
               {branchTestResult && branchTestResult.length > 0 && (
                 <>
-                  {/* Native <datalist> filters options by the input's current value,
-                      so auto-filling the input after Test connection collapsed the
-                      list to a single match. Use a plain <select> instead — every
-                      fetched branch is always visible. */}
-                  <select
+                  {/* Always-visible branch list. A collapsed <select> hides every
+                      option except the currently-selected one, which made a
+                      remote with N branches *look* like it had only one — the
+                      complaint that bounced this ticket. Render each fetched
+                      branch as a clickable row so the user can confirm the
+                      count at a glance and pick a non-default in one click. */}
+                  <div
                     data-testid="resource-branch-picker"
-                    value={
-                      branchTestResult.some((b) => b.name === formDefaultBranch)
-                        ? formDefaultBranch
-                        : ''
-                    }
-                    onChange={(e) => {
-                      if (e.target.value) setFormDefaultBranch(e.target.value);
-                    }}
+                    role="listbox"
+                    aria-label="Fetched branches"
                     style={{
                       background: tokens.colors.surface,
                       border: `1px solid ${tokens.colors.border}`,
                       borderRadius: tokens.radii.md,
-                      padding: '8px 10px',
-                      color: tokens.colors.textStrong,
-                      fontSize: tokens.typography.fontSizeMd,
-                      outline: 'none',
-                      width: '100%',
-                      boxSizing: 'border-box',
-                      fontFamily: 'inherit',
                       marginTop: tokens.spacing.xs,
+                      maxHeight: 180,
+                      overflowY: 'auto',
                     }}
                   >
-                    <option value="">
-                      — Pick from {branchTestResult.length} fetched branch
-                      {branchTestResult.length === 1 ? '' : 'es'} —
-                    </option>
-                    {branchTestResult.map((b) => (
-                      <option key={b.sha} value={b.name}>
-                        {b.name}
-                      </option>
-                    ))}
-                  </select>
+                    {branchTestResult.map((b, idx) => {
+                      const selected = b.name === formDefaultBranch;
+                      return (
+                        <div
+                          key={b.sha}
+                          role="option"
+                          aria-selected={selected}
+                          data-testid={`resource-branch-option-${b.name}`}
+                          onClick={() => setFormDefaultBranch(b.name)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              setFormDefaultBranch(b.name);
+                            }
+                          }}
+                          tabIndex={0}
+                          style={{
+                            padding: '6px 10px',
+                            cursor: 'pointer',
+                            fontSize: tokens.typography.fontSizeMd,
+                            color: selected ? tokens.colors.accentSubtle : tokens.colors.textStrong,
+                            background: selected ? tokens.colors.surfaceCard : 'transparent',
+                            borderTop: idx === 0 ? 'none' : `1px solid ${tokens.colors.border}`,
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 8,
+                            outline: 'none',
+                          }}
+                        >
+                          <span
+                            aria-hidden
+                            style={{
+                              display: 'inline-block',
+                              width: 8,
+                              height: 8,
+                              borderRadius: 4,
+                              background: selected ? tokens.colors.success : tokens.colors.border,
+                              flexShrink: 0,
+                            }}
+                          />
+                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {b.name}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
                   <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginTop: 4 }}>
-                    Pick from the dropdown, or type a custom name above.
+                    Click a branch to pin as default, or type a custom name above for not-yet-pushed branches.
                   </div>
                 </>
               )}
