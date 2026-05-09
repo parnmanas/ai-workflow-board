@@ -610,40 +610,69 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
               >
                 Default Branch
               </label>
-              <input
-                value={formDefaultBranch}
-                onChange={(e) => setFormDefaultBranch(e.target.value)}
-                placeholder="e.g. main (leave blank to fall back to origin/HEAD)"
-                style={{
-                  background: tokens.colors.surface,
-                  border: `1px solid ${tokens.colors.border}`,
-                  borderRadius: tokens.radii.md,
-                  padding: '8px 10px',
-                  color: tokens.colors.textStrong,
-                  fontSize: tokens.typography.fontSizeMd,
-                  outline: 'none',
-                  width: '100%',
-                  boxSizing: 'border-box',
-                  fontFamily: 'inherit',
-                }}
-              />
+
+              {/* When Test connection found refs, the listbox is the primary
+                  picker — moved ABOVE the freetext input. Two earlier fixes
+                  (8cc8df2, f3692ea) put a list under a single-line input that
+                  was already auto-filled with the first branch name; the
+                  reporter kept reading "1 row only" because the input is what
+                  the eye lands on after the success banner. Now the count
+                  header + N rows are the primary affordance, and the input
+                  drops below as a secondary "or type a custom name" field.
+
+                  Per-row React key is `b.name` (refs/heads/* names are unique
+                  by git invariant). `b.sha` was the previous key but multiple
+                  branches commonly point at the same commit (e.g. a freshly
+                  cut feature branch shares HEAD with main), and duplicate
+                  keys can drop rows during reconciliation. */}
               {branchTestResult && branchTestResult.length > 0 && (
-                <>
-                  {/* Always-visible branch list. A collapsed <select> hides every
-                      option except the currently-selected one, which made a
-                      remote with N branches *look* like it had only one — the
-                      complaint that bounced this ticket. Render each fetched
-                      branch as a clickable row so the user can confirm the
-                      count at a glance and pick a non-default in one click. */}
+                <div
+                  data-testid="resource-branch-picker"
+                  data-branch-count={branchTestResult.length}
+                  style={{ marginBottom: tokens.spacing.xs }}
+                >
                   <div
-                    data-testid="resource-branch-picker"
+                    role="status"
+                    aria-live="polite"
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
+                      padding: '6px 10px',
+                      background: tokens.colors.surfaceCard,
+                      border: `1px solid ${tokens.colors.border}`,
+                      borderTopLeftRadius: tokens.radii.md,
+                      borderTopRightRadius: tokens.radii.md,
+                      borderBottom: 'none',
+                      fontSize: '11px',
+                      fontWeight: tokens.typography.fontWeightSemibold,
+                      color: tokens.colors.success,
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.04em',
+                    }}
+                  >
+                    <span
+                      aria-hidden
+                      style={{
+                        display: 'inline-block',
+                        width: 8,
+                        height: 8,
+                        borderRadius: 4,
+                        background: tokens.colors.success,
+                      }}
+                    />
+                    <span data-testid="resource-branch-picker-count">
+                      {`${branchTestResult.length} branch${branchTestResult.length === 1 ? '' : 'es'} from remote`}
+                    </span>
+                  </div>
+                  <div
                     role="listbox"
                     aria-label="Fetched branches"
                     style={{
                       background: tokens.colors.surface,
                       border: `1px solid ${tokens.colors.border}`,
-                      borderRadius: tokens.radii.md,
-                      marginTop: tokens.spacing.xs,
+                      borderBottomLeftRadius: tokens.radii.md,
+                      borderBottomRightRadius: tokens.radii.md,
                       maxHeight: 180,
                       overflowY: 'auto',
                     }}
@@ -652,7 +681,7 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
                       const selected = b.name === formDefaultBranch;
                       return (
                         <div
-                          key={b.sha}
+                          key={b.name}
                           role="option"
                           aria-selected={selected}
                           data-testid={`resource-branch-option-${b.name}`}
@@ -688,21 +717,51 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
                               flexShrink: 0,
                             }}
                           />
-                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, minWidth: 0 }}>
                             {b.name}
                           </span>
                         </div>
                       );
                     })}
                   </div>
-                  <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginTop: 4 }}>
-                    Click a branch to pin as default, or type a custom name above for not-yet-pushed branches.
-                  </div>
-                </>
+                </div>
               )}
+
+              <input
+                value={formDefaultBranch}
+                onChange={(e) => setFormDefaultBranch(e.target.value)}
+                placeholder={
+                  branchTestResult && branchTestResult.length > 0
+                    ? 'Or type a different branch name (e.g. for a not-yet-pushed branch)'
+                    : 'e.g. main (leave blank to fall back to origin/HEAD)'
+                }
+                style={{
+                  background: tokens.colors.surface,
+                  border: `1px solid ${tokens.colors.border}`,
+                  borderRadius: tokens.radii.md,
+                  padding: '8px 10px',
+                  color: tokens.colors.textStrong,
+                  fontSize: tokens.typography.fontSizeMd,
+                  outline: 'none',
+                  width: '100%',
+                  boxSizing: 'border-box',
+                  fontFamily: 'inherit',
+                }}
+              />
+
               {!branchTestResult && (
                 <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginTop: 4 }}>
                   Run "Test connection" to load branches from the remote.
+                </div>
+              )}
+              {branchTestResult && branchTestResult.length === 0 && (
+                <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginTop: 4 }}>
+                  Connected — but the remote has no branches yet.
+                </div>
+              )}
+              {branchTestResult && branchTestResult.length > 0 && (
+                <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginTop: 4 }}>
+                  Click a branch above to pin as default, or type a custom name.
                 </div>
               )}
             </div>
