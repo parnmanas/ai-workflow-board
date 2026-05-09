@@ -4,11 +4,12 @@ import { api } from '../api';
 import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
-import type { AgentDetail, ActivityRow, AgentLiveSession } from '../types';
+import type { Agent, AgentDetail, ActivityRow, AgentLiveSession, Credential } from '../types';
 import { tokens } from '../tokens';
 import { formatAgentDisplayName } from '../utils/agentName';
 import AgentFileBrowser from './AgentFileBrowser';
 import AgentSubagentsPanel from './AgentSubagentsPanel';
+import ManagedAgentDialog from './admin/ManagedAgentDialog';
 import { useParams } from 'react-router-dom';
 
 /**
@@ -168,14 +169,30 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
   // the response back into `detail` so the header refreshes without a
   // round-trip GET.
   const canEdit = !!detail && !detail.redacted;
+  const isManaged = !!detail?.manager_agent_id;
   const [editing, setEditing] = useState(false);
   const [savingEdit, setSavingEdit] = useState(false);
   const [editName, setEditName] = useState('');
   const [editDescription, setEditDescription] = useState('');
   const [editAvatarUrl, setEditAvatarUrl] = useState('');
+  // Managed-agent edits go through the same ManagedAgentDialog the admin
+  // AgentManager page uses (ticket 7988c041 — same agent identity should
+  // expose the same fields and validation in both surfaces). Inline editing
+  // stays the path for legacy / standalone agents whose Agent row doesn't
+  // carry the agent-manager fields (working_dir / credential / cli).
+  const [managedDialogOpen, setManagedDialogOpen] = useState(false);
+  // Cache of credentials keyed by id, populated lazily when a managed
+  // agent's INFO tab needs to render a credential name. Keyed on the
+  // credential row, not the agent — saves a re-fetch when navigating
+  // between detail surfaces in the same workspace.
+  const [credentialName, setCredentialName] = useState<string | null>(null);
 
   const beginEdit = () => {
     if (!detail) return;
+    if (isManaged) {
+      setManagedDialogOpen(true);
+      return;
+    }
     setEditName(detail.name || '');
     setEditDescription(detail.description || '');
     setEditAvatarUrl(detail.avatar_url || '');
@@ -299,6 +316,26 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
     loadDetail();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentId]);
+
+  // Resolve credential_id → credential.name for the MANAGED AGENT card.
+  // Skipped on non-managed agents and on agents with no credential. Errors
+  // degrade silently — the panel just falls back to showing the credential
+  // id, which is still better than rendering nothing.
+  useEffect(() => {
+    setCredentialName(null);
+    const credId = (detail as any)?.credential_id as string | null | undefined;
+    const wsId = detail?.workspace_id;
+    if (!credId || !wsId) return;
+    let alive = true;
+    api.listCredentials(wsId)
+      .then((rows: Credential[]) => {
+        if (!alive) return;
+        const match = rows.find((r) => r.id === credId);
+        setCredentialName(match ? `${match.name} · ${match.provider}` : null);
+      })
+      .catch(() => { /* swallow — see comment */ });
+    return () => { alive = false; };
+  }, [detail?.id, (detail as any)?.credential_id, detail?.workspace_id]);
 
   // Move focus to the close button on mount for keyboard users.
   useEffect(() => {
@@ -872,6 +909,47 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
             </section>
           )}
 
+          {/* MANAGED AGENT section — read-only mirror of the fields the
+              admin AgentManager page exposes for this same identity. Before
+              ticket 7988c041 the AI Agents detail surface ignored these
+              entirely, so the same agent looked completely different
+              depending on which page the operator opened. Edit here opens
+              the same ManagedAgentDialog the admin page uses, so save
+              semantics (CLI lock, working_dir SSE notify, credential
+              cleanup on `custom`) stay identical between surfaces. */}
+          {isManaged && detail && (
+            <section>
+              <div style={sectionLabelStyle}>MANAGED AGENT</div>
+              <div style={cardStyle}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'max-content 1fr', columnGap: 12, rowGap: 6 }}>
+                  <div style={{ color: tokens.colors.textMuted }}>Manager</div>
+                  <div style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', wordBreak: 'break-all' }}>
+                    {detail.manager_name || detail.manager_agent_id || '-'}
+                  </div>
+                  <div style={{ color: tokens.colors.textMuted }}>CLI</div>
+                  <div style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' }}>
+                    {detail.type || 'unknown'}
+                  </div>
+                  <div style={{ color: tokens.colors.textMuted }}>Working dir</div>
+                  <div style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', wordBreak: 'break-all' }}>
+                    {detail.working_dir || <span style={{ color: tokens.colors.textMuted }}>(not set)</span>}
+                  </div>
+                  <div style={{ color: tokens.colors.textMuted }}>Credential</div>
+                  <div style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', wordBreak: 'break-all' }}>
+                    {(detail as any).credential_id
+                      ? (credentialName || (detail as any).credential_id)
+                      : <span style={{ color: tokens.colors.textMuted }}>None - fall back to operator HOME</span>}
+                  </div>
+                </div>
+                {canEdit && (
+                  <div style={{ marginTop: 12, fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.5 }}>
+                    Click <b>Edit</b> in the header to open the managed-agent form (same as the AgentManager admin page). CLI is fixed once an identity is created.
+                  </div>
+                )}
+              </div>
+            </section>
+          )}
+
           {/* SESSIONS section — what's currently keeping this agent online.
               Two row sources unified into one panel:
                 • 'proxy' — a real SSE connection from a proxy.mjs instance.
@@ -1433,6 +1511,32 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
           )}
         </div>
       </div>
+      {/* Managed-agent edit dialog. Reuses the exact form the admin
+          AgentManager page renders, so the same agent identity exposes the
+          same fields + validation regardless of which surface opened it
+          (ticket 7988c041). managerInstanceId is best-effort — only sent
+          when the server attached a live_instance to the agent (manager is
+          currently heartbeating); when absent the dialog skips the
+          set_working_dir SSE notify and tells the operator to restart on
+          the manager. */}
+      {detail && isManaged && (
+        <ManagedAgentDialog
+          isOpen={managedDialogOpen}
+          onClose={() => setManagedDialogOpen(false)}
+          managerAgentId={detail.manager_agent_id || ''}
+          managerInstanceId={detail.live_instance?.instance_id}
+          defaultCli={detail.type || 'claude'}
+          mode="edit"
+          agent={detail as unknown as Agent}
+          onSubmitted={() => {
+            setManagedDialogOpen(false);
+            // Re-fetch so the INFO tab + header reflect the saved values
+            // (name, description, working_dir, credential_id all change in
+            // a single PATCH).
+            loadDetail();
+          }}
+        />
+      )}
     </>
   );
 }

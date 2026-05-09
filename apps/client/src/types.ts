@@ -440,6 +440,18 @@ export interface AgentDetail extends DashboardAgent {
   role_prompt: string;                                // '' when redacted per D-44
   role_prompt_meta: { updated_at: string; updated_by: string } | null;
   redacted: boolean;                                  // true for non-admin viewer per D-44
+  /** Managed-agent fields. Populated for agents created via the agent-manager
+   *  spawn pipeline (manager_agent_id !== null); empty/null on standalone
+   *  agents. The detail modal surfaces these in the INFO tab so the same
+   *  identity reads the same way on the AI Agents page and the AgentManager
+   *  admin page (ticket 7988c041). */
+  working_dir?: string;
+  credential_id?: string | null;
+  /** Set by `_enrichLiveData` server-side when this agent has a heartbeating
+   *  process (proxy / daemon) or a supervising manager. The AgentDetail INFO
+   *  tab uses live_instance.instance_id to dispatch `set_working_dir` SSE
+   *  commands when the operator edits a managed agent's working_dir. */
+  live_instance?: AgentLiveInstance;
 }
 
 // ActivityRow mirrors the ActivityLog entity shape emitted by GET /api/activity
