@@ -13,7 +13,7 @@ import { Agent } from '../../../entities/Agent';
 import { Ticket } from '../../../entities/Ticket';
 import { ok, err } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
-import { maxChildPosition, resolveAgentId, shiftTicketPositions } from '../shared/ticket-helpers';
+import { maxChildPosition, resolveAgentId, resolveAgentIdAndName, shiftTicketPositions } from '../shared/ticket-helpers';
 import type { ToolContext } from './context';
 
 export function registerTicketChildTools(server: McpServer, ctx: ToolContext): void {
@@ -50,8 +50,14 @@ export function registerTicketChildTools(server: McpServer, ctx: ToolContext): v
       const creatorType = created_by ? created_by_type : (caller?.agentId ? 'agent' : (reporter ? 'agent' : ''));
       const creatorId = created_by_id || (caller?.agentId) || (reporter ? await resolveAgentId(dataSource, '', reporter) : '');
 
-      let resolvedReporter = reporter;
-      let resolvedReporterId = reporter_id;
+      // Backfill name↔id from the Agent table when only one side was supplied
+      // (mirrors the root `create_ticket` fix — see ticket-crud-tools.ts).
+      const assigneeResolved = await resolveAgentIdAndName(dataSource, assignee_id, assignee);
+      const reporterResolved = await resolveAgentIdAndName(dataSource, reporter_id, reporter);
+      let resolvedAssigneeId = assigneeResolved.id;
+      let resolvedAssignee = assigneeResolved.name;
+      let resolvedReporterId = reporterResolved.id;
+      let resolvedReporter = reporterResolved.name;
       if (!resolvedReporter && !resolvedReporterId && creatorId) {
         resolvedReporter = creatorName;
         resolvedReporterId = creatorId;
@@ -60,7 +66,8 @@ export function registerTicketChildTools(server: McpServer, ctx: ToolContext): v
       const position = await maxChildPosition(dataSource, parent_id);
       const child = await ticketRepo.save(ticketRepo.create({
         parent_id, depth: newDepth, column_id: null as any, title, description, priority, status,
-        assignee, reporter: resolvedReporter, assignee_id, reporter_id: resolvedReporterId,
+        assignee: resolvedAssignee, reporter: resolvedReporter,
+        assignee_id: resolvedAssigneeId, reporter_id: resolvedReporterId,
         labels: JSON.stringify(labels), position,
         // Inherit workspace_id from parent so role lookups work immediately.
         workspace_id: parent.workspace_id || '',
@@ -121,10 +128,27 @@ export function registerTicketChildTools(server: McpServer, ctx: ToolContext): v
       if (description !== undefined) ticket.description = description;
       if (status !== undefined) ticket.status = status;
       if (priority !== undefined) ticket.priority = priority;
-      if (assignee !== undefined) ticket.assignee = assignee;
-      if (reporter !== undefined) ticket.reporter = reporter;
-      if (assignee_id !== undefined) ticket.assignee_id = assignee_id;
-      if (reporter_id !== undefined) ticket.reporter_id = reporter_id;
+      // Same backfill as root update_ticket: when only one side of the pair
+      // changes, look the other up from the Agent table so TicketCard /
+      // activity log don't see a half-stale row.
+      if (assignee !== undefined || assignee_id !== undefined) {
+        const resolved = await resolveAgentIdAndName(
+          dataSource,
+          assignee_id !== undefined ? assignee_id : (ticket.assignee_id || ''),
+          assignee !== undefined ? assignee : (ticket.assignee || ''),
+        );
+        ticket.assignee = assignee !== undefined ? assignee : resolved.name;
+        ticket.assignee_id = assignee_id !== undefined ? assignee_id : resolved.id;
+      }
+      if (reporter !== undefined || reporter_id !== undefined) {
+        const resolved = await resolveAgentIdAndName(
+          dataSource,
+          reporter_id !== undefined ? reporter_id : (ticket.reporter_id || ''),
+          reporter !== undefined ? reporter : (ticket.reporter || ''),
+        );
+        ticket.reporter = reporter !== undefined ? reporter : resolved.name;
+        ticket.reporter_id = reporter_id !== undefined ? reporter_id : resolved.id;
+      }
       if (labels !== undefined) ticket.labels = JSON.stringify(labels);
 
       const updated = await ticketRepo.save(ticket);
