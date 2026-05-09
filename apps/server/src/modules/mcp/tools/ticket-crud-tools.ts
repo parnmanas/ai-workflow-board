@@ -15,14 +15,77 @@ import { Agent } from '../../../entities/Agent';
 import { BoardColumn } from '../../../entities/BoardColumn';
 import { Resource } from '../../../entities/Resource';
 import { Ticket } from '../../../entities/Ticket';
+import { WorkspaceRole } from '../../../entities/WorkspaceRole';
 import { ok, err, safeJsonParse } from '../shared/helpers';
 import { loadTicketFull } from '../shared/ticket-parsing';
-import { findColumnByName, maxTicketPosition, resolveAgentId, resolveAgentIdAndName, shiftTicketPositions, deleteCommentAttachmentsForTicket } from '../shared/ticket-helpers';
+import {
+  findColumnByName,
+  maxTicketPosition,
+  refreshTicketWorkspaceId,
+  resolveAgentId,
+  resolveAgentIdAndName,
+  shiftTicketPositions,
+  deleteCommentAttachmentsForTicket,
+} from '../shared/ticket-helpers';
 import { getCallerAgent } from '../shared/session-auth';
 import type { ToolContext } from './context';
 
+/**
+ * Schema for the per-ticket `role_assignments[]` payload accepted by
+ * create/update tools. Each entry pins a workspace-scoped role (by slug —
+ * planner, assignee, reviewer, or any custom role the workspace defines)
+ * onto the ticket. Pass `agent_id`/`user_id` to set, both empty/null to
+ * clear the slot. Mutually exclusive — the helper rejects rows that supply
+ * both. Unknown slug returns an explicit error so silent typos don't hide.
+ */
+const RoleAssignmentInputSchema = z.object({
+  role_slug: z.string().describe('Workspace role slug (e.g. "assignee", "reporter", "reviewer", "planner", or any custom slug)'),
+  agent_id: z.string().optional().describe('Agent ID holding the role (mutually exclusive with user_id)'),
+  user_id: z.string().optional().describe('User ID holding the role (mutually exclusive with agent_id)'),
+});
+
+/**
+ * Apply a `role_assignments[]` array onto a ticket. Resolves each slug
+ * against the ticket's workspace WorkspaceRole row and writes the holder
+ * via TicketRoleAssignmentService. Empty `role_slug` is silently skipped;
+ * unknown slug throws so callers can fix typos. Mutual exclusion of
+ * agent_id / user_id is enforced by `setHolder`.
+ *
+ * Returns the list of (slug, role_id, holder) entries actually applied so
+ * the caller can include them in activity logs / debug output.
+ */
+async function applyRoleAssignments(
+  ctx: ToolContext,
+  ticketId: string,
+  workspaceId: string,
+  assignments: Array<z.infer<typeof RoleAssignmentInputSchema>> | undefined,
+): Promise<Array<{ slug: string; role_id: string; agent_id: string | null; user_id: string | null }>> {
+  if (!assignments || assignments.length === 0) return [];
+  if (!ctx.ticketRoleAssignmentService) {
+    throw new Error('role_assignments require the integrated server (TicketRoleAssignmentService not wired)');
+  }
+  if (!workspaceId) {
+    throw new Error('Cannot apply role_assignments — ticket has no workspace_id (column → board lookup failed)');
+  }
+  const applied: Array<{ slug: string; role_id: string; agent_id: string | null; user_id: string | null }> = [];
+  const roleRepo = ctx.dataSource.getRepository(WorkspaceRole);
+  for (const a of assignments) {
+    const slug = (a.role_slug || '').trim();
+    if (!slug) continue;
+    const role = await roleRepo.findOne({ where: { workspace_id: workspaceId, slug } });
+    if (!role) {
+      throw new Error(`Unknown role slug "${slug}" in workspace ${workspaceId}`);
+    }
+    const agent_id = a.agent_id || null;
+    const user_id = a.user_id || null;
+    await ctx.ticketRoleAssignmentService.setHolder(ticketId, role.id, { agent_id, user_id });
+    applied.push({ slug, role_id: role.id, agent_id, user_id });
+  }
+  return applied;
+}
+
 export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): void {
-  const { dataSource, activityService, ticketRoleAssignmentService } = ctx;
+  const { dataSource, activityService, logger, ticketRoleAssignmentService } = ctx;
 
   server.tool(
     'get_ticket',
@@ -37,16 +100,18 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
 
   server.tool(
     'create_ticket',
-    'Create a new ticket. You can specify either column_id (numeric) or column_name + board_id to find the column by name.',
+    'Create a new ticket. You can specify either column_id (numeric) or column_name + board_id to find the column by name.\n\n' +
+    'Role assignment: prefer the generalized `role_assignments` array (`[{role_slug, agent_id?, user_id?}]`) — it can pin any workspace role including `planner` and custom roles. The legacy `assignee_id` / `reporter_id` / `reviewer_id` fields still work and continue to populate the matching builtin slugs. Name fields (`assignee`, `reporter`) are deprecated; ID-based identification is required because workspaces commonly host multiple agents with the same display name.',
     {
       title: z.string().describe('Ticket title'),
       description: z.string().optional().default('').describe('Ticket description'),
       priority: z.enum(['low', 'medium', 'high', 'critical']).optional().default('medium').describe('Priority level'),
-      assignee: z.string().optional().default('').describe('Assignee name'),
-      reporter: z.string().optional().default('').describe('Reporter name'),
-      assignee_id: z.string().optional().default('').describe('Assignee user ID'),
-      reporter_id: z.string().optional().default('').describe('Reporter user ID'),
+      assignee: z.string().optional().default('').describe('DEPRECATED — pass assignee_id instead. Name lookup throws when 2+ agents share the name (manager + subagent collision is common).'),
+      reporter: z.string().optional().default('').describe('DEPRECATED — pass reporter_id instead. Same multi-match risk as `assignee`.'),
+      assignee_id: z.string().optional().default('').describe('Assignee agent ID (preferred over `assignee` name)'),
+      reporter_id: z.string().optional().default('').describe('Reporter agent ID (preferred over `reporter` name)'),
       reviewer_id: z.string().optional().default('').describe('Reviewer agent ID'),
+      role_assignments: z.array(RoleAssignmentInputSchema).optional().describe('Per-role assignments (slug → agent/user). Use this to set planner or any workspace custom role. Builtin slugs (assignee/reporter/reviewer) here override the legacy fields above when both are supplied for the same slug.'),
       labels: z.array(z.string()).optional().default([]).describe('Labels'),
       channel_ids: z.array(z.string()).optional().default([]).describe('Notification channel IDs'),
       column_id: z.string().optional().describe('Column ID (use this OR column_name)'),
@@ -57,7 +122,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       created_by_type: z.enum(['user', 'agent']).optional().default('agent').describe('Creator type'),
       created_by_id: z.string().optional().default('').describe('Creator ID'),
     },
-    async ({ title, description, priority, assignee, reporter, assignee_id, reporter_id, reviewer_id, labels, channel_ids, column_id, column_name, board_id, subtasks, created_by, created_by_type, created_by_id }, extra: { sessionId?: string }) => {
+    async ({ title, description, priority, assignee, reporter, assignee_id, reporter_id, reviewer_id, role_assignments, labels, channel_ids, column_id, column_name, board_id, subtasks, created_by, created_by_type, created_by_id }, extra: { sessionId?: string }) => {
       let resolvedColumnId = column_id;
       if (!resolvedColumnId && column_name) {
         if (!board_id) return err('board_id is required when using column_name');
@@ -74,19 +139,18 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       const caller = getCallerAgent(extra);
       const creatorName = created_by || (caller?.agentName) || reporter || assignee || '';
       const creatorType = created_by ? created_by_type : (caller?.agentId ? 'agent' : (reporter ? 'agent' : ''));
-      const creatorId = created_by_id || (caller?.agentId) || (reporter ? await resolveAgentId(dataSource, '', reporter) : '');
+      const creatorId = created_by_id || (caller?.agentId) || (reporter ? await resolveAgentId(dataSource, '', reporter, logger) : '');
 
       const ticket = await dataSource.transaction(async (manager) => {
         const tRepo = manager.getRepository(Ticket);
 
-        // Backfill name↔id from the Agent table when the caller passed only
-        // one side. The MCP `create_ticket` path is regularly invoked with
-        // just `assignee_id` / `reporter_id` (e.g. Ralf/GameClient agents),
-        // and TicketCard reads the legacy `assignee` / `reporter` text
-        // columns — without this, the card shows "Unassigned" even though
-        // the trigger loop sees the assignment via *_id.
-        const assigneeResolved = await resolveAgentIdAndName(dataSource, assignee_id, assignee);
-        const reporterResolved = await resolveAgentIdAndName(dataSource, reporter_id, reporter);
+        // Backfill name↔id from the Agent table whichever side the caller
+        // omitted, and re-format the name as `Manager/Agent` so TicketCard,
+        // activity log, and system comments all show the same string. The
+        // helper logs a deprecation warn on name-only lookup and throws on
+        // multi-match — see `resolveAgentIdAndName` (B3 in role-assignment fix).
+        const assigneeResolved = await resolveAgentIdAndName(dataSource, assignee_id, assignee, logger);
+        const reporterResolved = await resolveAgentIdAndName(dataSource, reporter_id, reporter, logger);
         let resolvedAssigneeId = assigneeResolved.id;
         let resolvedAssignee = assigneeResolved.name;
         let resolvedReporterId = reporterResolved.id;
@@ -120,6 +184,15 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
         return t;
       });
 
+      // B1: backfill workspace_id from column → board so the v0.34
+      // assignment-table sync below actually fires. The Ticket row's
+      // `workspace_id` defaults to '' and the MCP create path doesn't pass
+      // it; without this step the next guard (`ticket.workspace_id`) is
+      // falsy, the sync silently skips, and the trigger loop / mention
+      // resolution never see the new ticket. Mirrors REST controller's
+      // pre-existing `_refreshWorkspaceId` step.
+      await refreshTicketWorkspaceId(dataSource, ticket);
+
       // v0.34: mirror builtin trio onto TicketRoleAssignment so the trigger
       // loop / mention resolution / allocation see the new ticket.
       if (ticketRoleAssignmentService && ticket.workspace_id) {
@@ -129,6 +202,13 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           reviewer_id: ticket.reviewer_id || '',
         });
       }
+
+      // B2: apply generalized `role_assignments[]` (planner / arbitrary
+      // workspace custom roles). Runs AFTER syncBuiltinTrio so a payload
+      // that supplies both `assignee_id` (legacy) and a `role_assignments`
+      // entry for slug=`assignee` lands on the role-assignment value as the
+      // final write — explicit slug wins over the legacy mirror.
+      await applyRoleAssignments(ctx, ticket.id, ticket.workspace_id, role_assignments);
 
       await activityService.logActivity({
         entity_type: 'ticket', entity_id: ticket.id, action: 'created',
@@ -142,11 +222,12 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
 
   server.tool(
     'update_ticket',
-    'Update a root ticket\'s fields (title, description, priority, assignee, reporter, reviewer_id, labels, channel_ids, base_repo_resource_id, base_branch).\n\n' +
+    'Update a root ticket\'s fields (title, description, priority, assignee, reporter, reviewer_id, labels, channel_ids, base_repo_resource_id, base_branch, role_assignments).\n\n' +
     'NOTE: this tool does NOT change `status` and is intended for ROOT tickets. ' +
     'Status on a root ticket is driven by which column it sits in — use move_ticket to advance it. ' +
     'For SUBTASKS (depth > 0), use update_child_ticket — that\'s also where you mark a finished subtask ' +
     'with status="done".\n\n' +
+    'Role assignment: prefer `role_assignments` (`[{role_slug, agent_id?, user_id?}]`) — handles `planner` and any workspace custom role. Legacy `assignee_id` / `reporter_id` / `reviewer_id` still apply for those three slugs. Pass `agent_id: ""` (empty string) inside `role_assignments` to clear a slot.\n\n' +
     'Base repo & branch: pass `base_repo_resource_id` (a workspace/board Resource of type="repository") together with ' +
     '`base_branch` to pin the branch the ticket\'s feature branch should be cut from. Empty strings clear the binding.',
     {
@@ -154,17 +235,18 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       title: z.string().optional().describe('New title'),
       description: z.string().optional().describe('New description'),
       priority: z.enum(['low', 'medium', 'high', 'critical']).optional().describe('New priority'),
-      assignee: z.string().optional().describe('New assignee name'),
-      reporter: z.string().optional().describe('New reporter name'),
-      assignee_id: z.string().optional().describe('New assignee user ID'),
-      reporter_id: z.string().optional().describe('New reporter user ID'),
+      assignee: z.string().optional().describe('DEPRECATED — pass assignee_id instead.'),
+      reporter: z.string().optional().describe('DEPRECATED — pass reporter_id instead.'),
+      assignee_id: z.string().optional().describe('New assignee agent ID'),
+      reporter_id: z.string().optional().describe('New reporter agent ID'),
       reviewer_id: z.string().optional().describe('Reviewer agent ID'),
+      role_assignments: z.array(RoleAssignmentInputSchema).optional().describe('Per-role assignments (slug → agent/user). Use to set planner or any workspace custom role. Builtin slugs (assignee/reporter/reviewer) here override the legacy fields above when both are supplied.'),
       labels: z.array(z.string()).optional().describe('New labels array'),
       channel_ids: z.array(z.string()).optional().describe('New notification channel IDs'),
       base_repo_resource_id: z.string().optional().describe('Resource ID (type=repository) the ticket builds against. Empty string clears.'),
       base_branch: z.string().optional().describe('Branch the agent should treat as the base when starting work. Empty string clears.'),
     },
-    async ({ ticket_id, title, description, priority, assignee, reporter, assignee_id, reporter_id, reviewer_id, labels, channel_ids, base_repo_resource_id, base_branch }, extra: { sessionId?: string }) => {
+    async ({ ticket_id, title, description, priority, assignee, reporter, assignee_id, reporter_id, reviewer_id, role_assignments, labels, channel_ids, base_repo_resource_id, base_branch }, extra: { sessionId?: string }) => {
       const ticketRepo = dataSource.getRepository(Ticket);
       const ticket = await ticketRepo.findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Ticket not found');
@@ -200,6 +282,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           dataSource,
           assignee_id !== undefined ? assignee_id : '',
           assignee !== undefined ? assignee : '',
+          logger,
         );
         ticket.assignee_id = assignee_id !== undefined ? assignee_id : (resolved.id || ticket.assignee_id);
         ticket.assignee    = assignee    !== undefined ? assignee    : (resolved.name || ticket.assignee);
@@ -210,6 +293,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           dataSource,
           reporter_id !== undefined ? reporter_id : '',
           reporter !== undefined ? reporter : '',
+          logger,
         );
         ticket.reporter_id = reporter_id !== undefined ? reporter_id : (resolved.id || ticket.reporter_id);
         ticket.reporter    = reporter    !== undefined ? reporter    : (resolved.name || ticket.reporter);
@@ -242,6 +326,13 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
 
       await ticketRepo.save(ticket);
 
+      // B1: backfill workspace_id if the row was created via the legacy
+      // (pre-fix) MCP path that left the column empty. Without this an
+      // update_ticket call on such a ticket can't reach the assignment
+      // table either, so the trigger loop stays blind even after the bug
+      // moves to the maintenance phase.
+      await refreshTicketWorkspaceId(dataSource, ticket);
+
       // v0.34: assignment-table sync. Only synced fields the caller actually
       // included; undefined slots preserve their existing assignment.
       if (ticketRoleAssignmentService && ticket.workspace_id) {
@@ -253,6 +344,12 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           await ticketRoleAssignmentService.syncBuiltinTrio(ticket.id, ticket.workspace_id, trio);
         }
       }
+
+      // B2: apply role_assignments[] (planner / arbitrary custom roles).
+      // Same explicit-slug-wins policy as create_ticket — `role_assignments`
+      // for a builtin slug overrides the legacy `*_id` mirror above.
+      const appliedRoles = await applyRoleAssignments(ctx, ticket.id, ticket.workspace_id, role_assignments);
+      if (appliedRoles.length > 0) changes.push('role_assignments');
 
       // Log assignee/reporter changes separately for system comment generation.
       // Trigger off the post-save name (which now reflects backfilled lookups)

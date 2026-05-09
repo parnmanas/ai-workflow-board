@@ -33,6 +33,7 @@ import { loadTicketFull, parseComments, expandCommentAttachments } from '../mcp/
 import {
   maxTicketPosition,
   maxChildPosition,
+  refreshTicketWorkspaceId,
   resolveAgentIdAndName,
   shiftTicketPositions,
   deleteCommentAttachmentsForTicket,
@@ -87,7 +88,7 @@ export class TicketsController {
 
   @Post('columns/:columnId/tickets')
   async create(@Param('columnId') columnId: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
-    const { title, description = '', priority = 'medium', assignee = '', reporter = '', assignee_id = '', reporter_id = '', labels = [], channel_ids = [] } = body;
+    const { title, description = '', priority = 'medium', assignee = '', reporter = '', assignee_id = '', reporter_id = '', labels = [], channel_ids = [], role_assignments } = body;
     if (!title) return res.status(400).json({ error: 'title is required' });
 
     await findOrFail(this.colRepo, { where: { id: columnId } }, 'Column not found');
@@ -121,12 +122,22 @@ export class TicketsController {
 
     // Mirror onto TicketRoleAssignment so trigger loop / allocation /
     // mention resolution see the new ticket via the v0.34 path.
-    await this._refreshWorkspaceId(ticket);
+    await refreshTicketWorkspaceId(this.dataSource, ticket);
     if (ticket.workspace_id) {
       await this.ticketRoleAssignments.syncBuiltinTrio(ticket.id, ticket.workspace_id, {
         assignee_id: resolvedAssigneeId,
         reporter_id: resolvedReporterId,
       });
+    }
+
+    // REST/MCP parity: accept role_assignments[] (planner / custom roles).
+    // Same explicit-slug-wins policy as MCP — applied AFTER syncBuiltinTrio.
+    if (Array.isArray(role_assignments) && role_assignments.length > 0) {
+      try {
+        await this._applyRoleAssignments(ticket.id, ticket.workspace_id, role_assignments);
+      } catch (e: any) {
+        return res.status(400).json({ error: e?.message || 'role_assignments rejected' });
+      }
     }
 
     await this.activityService.logActivity({
@@ -140,20 +151,29 @@ export class TicketsController {
   }
 
   /**
-   * Tickets currently inherit workspace_id from their column → board.
-   * Pull it once after creation so the assignment-table sync below has
-   * the value to scope WorkspaceRole lookups against.
+   * Apply REST `role_assignments[]` payload onto a ticket. Mirrors the MCP
+   * `applyRoleAssignments` helper so `planner` and any workspace custom
+   * role can be set from either surface. Throws on unknown slug; empty slug
+   * is silently skipped.
    */
-  private async _refreshWorkspaceId(ticket: Ticket): Promise<void> {
-    if (ticket.workspace_id) return;
-    const col = ticket.column_id
-      ? await this.colRepo.findOne({ where: { id: ticket.column_id } })
-      : null;
-    if (!col) return;
-    const board = await this.dataSource.getRepository(Board).findOne({ where: { id: col.board_id } });
-    if (board?.workspace_id) {
-      ticket.workspace_id = board.workspace_id;
-      await this.ticketRepo.update(ticket.id, { workspace_id: ticket.workspace_id });
+  private async _applyRoleAssignments(
+    ticketId: string,
+    workspaceId: string,
+    assignments: Array<{ role_slug?: string; agent_id?: string; user_id?: string }>,
+  ): Promise<void> {
+    if (!workspaceId) {
+      throw new Error('Cannot apply role_assignments — ticket has no workspace_id');
+    }
+    const roleRepo = this.dataSource.getRepository(WorkspaceRole);
+    for (const a of assignments) {
+      const slug = (a?.role_slug || '').trim();
+      if (!slug) continue;
+      const role = await roleRepo.findOne({ where: { workspace_id: workspaceId, slug } });
+      if (!role) throw new Error(`Unknown role slug "${slug}" in workspace ${workspaceId}`);
+      await this.ticketRoleAssignments.setHolder(ticketId, role.id, {
+        agent_id: a?.agent_id || null,
+        user_id: a?.user_id || null,
+      });
     }
   }
 
@@ -332,7 +352,7 @@ export class TicketsController {
     const actorId = currentUser?.id || undefined;
     const actorName = currentUser?.name || currentUser?.email || undefined;
 
-    const { title, description, priority, assignee, reporter, reviewer_id, assignee_id, reporter_id, labels, channel_ids, status, prompt_text, base_repo_resource_id, base_branch } = body;
+    const { title, description, priority, assignee, reporter, reviewer_id, assignee_id, reporter_id, labels, channel_ids, status, prompt_text, base_repo_resource_id, base_branch, role_assignments } = body;
     const oldAssignee = ticket.assignee;
     const oldReporter = ticket.reporter;
     const oldReviewerId = ticket.reviewer_id;
@@ -392,6 +412,12 @@ export class TicketsController {
 
     await this.ticketRepo.save(ticket);
 
+    // B1 carry-over: backfill workspace_id for legacy tickets created via
+    // the pre-fix MCP path (Ticket row stored with default ''). REST PATCH
+    // is the most likely surface to hit such a row first; without this any
+    // assignment-table sync below would silently skip.
+    await refreshTicketWorkspaceId(this.dataSource, ticket);
+
     // v0.34: mirror builtin role changes onto TicketRoleAssignment so the
     // trigger loop / mention resolution stay in sync. Each slot is only
     // synced when the caller actually included the field — passing
@@ -404,6 +430,15 @@ export class TicketsController {
       if (reviewer_id !== undefined) trio.reviewer_id = ticket.reviewer_id || '';
       if (Object.keys(trio).length > 0) {
         await this.ticketRoleAssignments.syncBuiltinTrio(ticket.id, ticket.workspace_id, trio);
+      }
+    }
+
+    // REST/MCP parity: accept role_assignments[] (planner / custom roles).
+    if (Array.isArray(role_assignments) && role_assignments.length > 0) {
+      try {
+        await this._applyRoleAssignments(ticket.id, ticket.workspace_id, role_assignments);
+      } catch (e: any) {
+        return res.status(400).json({ error: e?.message || 'role_assignments rejected' });
       }
     }
 
