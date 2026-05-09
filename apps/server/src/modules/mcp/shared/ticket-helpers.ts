@@ -62,6 +62,31 @@ export async function resolveAgentId(scope: RepoScope, id: string, name: string)
 }
 
 /**
+ * Resolve both the agent id and display name from whichever side the caller
+ * supplied. Callers that hand us an id without a name (the MCP `create_ticket`
+ * path used by remote agents) would otherwise leave the legacy `assignee` /
+ * `reporter` text columns blank — TicketCard reads those columns directly and
+ * renders "Unassigned" until someone re-saves with the name. Backfilling here
+ * keeps both columns consistent on a single write.
+ *
+ * Lookup miss (id points at a non-agent — e.g. a User row, or stale id) keeps
+ * whatever the caller supplied: matches the historical `resolveAgentId`
+ * behavior so user assignees aren't accidentally cleared.
+ */
+export async function resolveAgentIdAndName(
+  scope: RepoScope,
+  id: string,
+  name: string,
+): Promise<{ id: string; name: string }> {
+  if (!id && !name) return { id: '', name: '' };
+  if (id && name) return { id, name };
+  const where = id ? { id } : { name };
+  const agent = await scope.getRepository(Agent).findOne({ where }).catch(() => null);
+  if (!agent) return { id: id || '', name: name || '' };
+  return { id: agent.id, name: agent.name };
+}
+
+/**
  * Shift sibling ticket positions within a scope.
  *
  *   scope: { column_id }  → root tickets in a board column (parent_id IS NULL).

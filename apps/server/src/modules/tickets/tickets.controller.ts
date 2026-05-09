@@ -33,7 +33,7 @@ import { loadTicketFull, parseComments, expandCommentAttachments } from '../mcp/
 import {
   maxTicketPosition,
   maxChildPosition,
-  resolveAgentId,
+  resolveAgentIdAndName,
   shiftTicketPositions,
   deleteCommentAttachmentsForTicket,
   inferTicketAttachmentMimetype,
@@ -92,9 +92,15 @@ export class TicketsController {
 
     await findOrFail(this.colRepo, { where: { id: columnId } }, 'Column not found');
 
-    const resolvedAssigneeId = await resolveAgentId(this.dataSource, assignee_id, assignee);
-    let resolvedReporter = reporter;
-    let resolvedReporterId = await resolveAgentId(this.dataSource, reporter_id, reporter);
+    // Backfill name↔id whichever side the caller omitted — the MCP path
+    // hands us *_id only and TicketCard reads the legacy text columns
+    // directly. See `resolveAgentIdAndName` for the lookup semantics.
+    const assigneeResolved = await resolveAgentIdAndName(this.dataSource, assignee_id, assignee);
+    const reporterResolved = await resolveAgentIdAndName(this.dataSource, reporter_id, reporter);
+    let resolvedAssigneeId = assigneeResolved.id;
+    let resolvedAssignee = assigneeResolved.name;
+    let resolvedReporterId = reporterResolved.id;
+    let resolvedReporter = reporterResolved.name;
     const creator = this.resolveCreator(req, body);
     // Default Reporter to the ticket's creator when none was supplied — keeps
     // the original requester reachable without forcing the create form to ask.
@@ -105,7 +111,8 @@ export class TicketsController {
 
     const position = await maxTicketPosition(this.dataSource, columnId);
     const ticket = await this.ticketRepo.save(this.ticketRepo.create({
-      column_id: columnId, title, description, priority, assignee, reporter: resolvedReporter,
+      column_id: columnId, title, description, priority,
+      assignee: resolvedAssignee, reporter: resolvedReporter,
       assignee_id: resolvedAssigneeId, reporter_id: resolvedReporterId,
       labels: JSON.stringify(labels), channel_ids: JSON.stringify(channel_ids),
       position, parent_id: null, depth: 0, status: 'todo',
@@ -160,9 +167,13 @@ export class TicketsController {
     const { title, description = '', priority = 'medium', status = 'todo', assignee = '', reporter = '', assignee_id = '', reporter_id = '', labels = [], channel_ids = [] } = body;
     if (!title) return res.status(400).json({ error: 'title is required' });
 
-    const resolvedAssigneeId = await resolveAgentId(this.dataSource, assignee_id, assignee);
-    let resolvedReporter = reporter;
-    let resolvedReporterId = await resolveAgentId(this.dataSource, reporter_id, reporter);
+    // Backfill name↔id from the Agent table (see root `create` above).
+    const assigneeResolved = await resolveAgentIdAndName(this.dataSource, assignee_id, assignee);
+    const reporterResolved = await resolveAgentIdAndName(this.dataSource, reporter_id, reporter);
+    let resolvedAssigneeId = assigneeResolved.id;
+    let resolvedAssignee = assigneeResolved.name;
+    let resolvedReporterId = reporterResolved.id;
+    let resolvedReporter = reporterResolved.name;
     const creator = this.resolveCreator(req, body);
     if (!resolvedReporter && !resolvedReporterId && creator.created_by_id) {
       resolvedReporter = creator.created_by;
@@ -172,7 +183,8 @@ export class TicketsController {
     const position = await maxChildPosition(this.dataSource, parentId);
     const child = await this.ticketRepo.save(this.ticketRepo.create({
       parent_id: parentId, depth: childDepth, column_id: null as any,
-      title, description, priority, status, assignee, reporter: resolvedReporter,
+      title, description, priority, status,
+      assignee: resolvedAssignee, reporter: resolvedReporter,
       assignee_id: resolvedAssigneeId, reporter_id: resolvedReporterId,
       labels: JSON.stringify(labels), channel_ids: JSON.stringify(channel_ids), position,
       // Inherit workspace_id from parent so role lookups resolve immediately
@@ -332,17 +344,30 @@ export class TicketsController {
     if (description !== undefined) ticket.description = description;
     if (priority !== undefined) ticket.priority = priority;
     if (status !== undefined) ticket.status = status;
-    if (assignee !== undefined) {
-      ticket.assignee = assignee;
-      ticket.assignee_id = await resolveAgentId(this.dataSource, assignee_id || '', assignee);
-    } else if (assignee_id !== undefined) {
-      ticket.assignee_id = assignee_id;
+    // Same name↔id backfill rule as the create path: when the caller flips
+    // only one side of the pair, look the other up in the Agent table so
+    // TicketCard / activity log don't see a half-stale row. Empty strings
+    // are passed for the omitted side so the helper actually does a DB
+    // lookup — pre-filling from the existing row makes both helper args
+    // truthy and trips the `if (id && name)` short-circuit, which silently
+    // re-saves the previous holder's name on an id-only update.
+    if (assignee !== undefined || assignee_id !== undefined) {
+      const resolved = await resolveAgentIdAndName(
+        this.dataSource,
+        assignee_id !== undefined ? assignee_id : '',
+        assignee !== undefined ? assignee : '',
+      );
+      ticket.assignee_id = assignee_id !== undefined ? assignee_id : (resolved.id || ticket.assignee_id);
+      ticket.assignee    = assignee    !== undefined ? assignee    : (resolved.name || ticket.assignee);
     }
-    if (reporter !== undefined) {
-      ticket.reporter = reporter;
-      ticket.reporter_id = await resolveAgentId(this.dataSource, reporter_id || '', reporter);
-    } else if (reporter_id !== undefined) {
-      ticket.reporter_id = reporter_id;
+    if (reporter !== undefined || reporter_id !== undefined) {
+      const resolved = await resolveAgentIdAndName(
+        this.dataSource,
+        reporter_id !== undefined ? reporter_id : '',
+        reporter !== undefined ? reporter : '',
+      );
+      ticket.reporter_id = reporter_id !== undefined ? reporter_id : (resolved.id || ticket.reporter_id);
+      ticket.reporter    = reporter    !== undefined ? reporter    : (resolved.name || ticket.reporter);
     }
     if (reviewer_id !== undefined) ticket.reviewer_id = reviewer_id;
     if (labels !== undefined) ticket.labels = JSON.stringify(labels);
@@ -390,18 +415,21 @@ export class TicketsController {
         actor_id: actorId, actor_name: actorName,
       });
     }
-    if (assignee !== undefined && assignee !== oldAssignee) {
+    // Trigger off the post-save name (which now reflects backfilled lookups)
+    // so a caller passing only `assignee_id` still produces a legible
+    // activity entry instead of an empty `→` arrow.
+    if ((assignee !== undefined || assignee_id !== undefined) && ticket.assignee !== oldAssignee) {
       await this.activityService.logActivity({
         entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
-        field_changed: 'assignee', old_value: oldAssignee || '', new_value: assignee || '',
+        field_changed: 'assignee', old_value: oldAssignee || '', new_value: ticket.assignee || '',
         ticket_id: ticket.parent_id || ticket.id,
         actor_id: actorId, actor_name: actorName,
       });
     }
-    if (reporter !== undefined && reporter !== oldReporter) {
+    if ((reporter !== undefined || reporter_id !== undefined) && ticket.reporter !== oldReporter) {
       await this.activityService.logActivity({
         entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
-        field_changed: 'reporter', old_value: oldReporter || '', new_value: reporter || '',
+        field_changed: 'reporter', old_value: oldReporter || '', new_value: ticket.reporter || '',
         ticket_id: ticket.parent_id || ticket.id,
         actor_id: actorId, actor_name: actorName,
       });

@@ -17,7 +17,7 @@ import { Resource } from '../../../entities/Resource';
 import { Ticket } from '../../../entities/Ticket';
 import { ok, err, safeJsonParse } from '../shared/helpers';
 import { loadTicketFull } from '../shared/ticket-parsing';
-import { findColumnByName, maxTicketPosition, resolveAgentId, shiftTicketPositions, deleteCommentAttachmentsForTicket } from '../shared/ticket-helpers';
+import { findColumnByName, maxTicketPosition, resolveAgentId, resolveAgentIdAndName, shiftTicketPositions, deleteCommentAttachmentsForTicket } from '../shared/ticket-helpers';
 import { getCallerAgent } from '../shared/session-auth';
 import type { ToolContext } from './context';
 
@@ -79,9 +79,18 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       const ticket = await dataSource.transaction(async (manager) => {
         const tRepo = manager.getRepository(Ticket);
 
-        const resolvedAssigneeId = await resolveAgentId(dataSource, assignee_id, assignee);
-        let resolvedReporter = reporter;
-        let resolvedReporterId = await resolveAgentId(dataSource, reporter_id, reporter);
+        // Backfill name↔id from the Agent table when the caller passed only
+        // one side. The MCP `create_ticket` path is regularly invoked with
+        // just `assignee_id` / `reporter_id` (e.g. Ralf/GameClient agents),
+        // and TicketCard reads the legacy `assignee` / `reporter` text
+        // columns — without this, the card shows "Unassigned" even though
+        // the trigger loop sees the assignment via *_id.
+        const assigneeResolved = await resolveAgentIdAndName(dataSource, assignee_id, assignee);
+        const reporterResolved = await resolveAgentIdAndName(dataSource, reporter_id, reporter);
+        let resolvedAssigneeId = assigneeResolved.id;
+        let resolvedAssignee = assigneeResolved.name;
+        let resolvedReporterId = reporterResolved.id;
+        let resolvedReporter = reporterResolved.name;
         // Default Reporter to the ticket's creator when none was supplied —
         // mirrors the REST controller so an agent that calls create_ticket
         // ends up listed as Reporter automatically.
@@ -91,7 +100,8 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
         }
         const position = await maxTicketPosition(dataSource, resolvedColumnId!);
         const t = await tRepo.save(tRepo.create({
-          column_id: resolvedColumnId!, title, description, priority, assignee, reporter: resolvedReporter,
+          column_id: resolvedColumnId!, title, description, priority,
+          assignee: resolvedAssignee, reporter: resolvedReporter,
           assignee_id: resolvedAssigneeId, reporter_id: resolvedReporterId, reviewer_id,
           labels: JSON.stringify(labels), channel_ids: JSON.stringify(channel_ids), position,
           created_by: creatorName, created_by_type: creatorType, created_by_id: creatorId,
@@ -171,16 +181,40 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       if (title !== undefined) { ticket.title = title; changes.push('title'); }
       if (description !== undefined) { ticket.description = description; changes.push('description'); }
       if (priority !== undefined) { ticket.priority = priority; changes.push('priority'); }
-      if (assignee !== undefined && assignee !== oldAssignee) {
-        ticket.assignee = assignee;
-        ticket.assignee_id = await resolveAgentId(dataSource, assignee_id || '', assignee);
-        changes.push('assignee');
-      } else if (assignee_id !== undefined) { ticket.assignee_id = assignee_id; }
-      if (reporter !== undefined && reporter !== oldReporter) {
-        ticket.reporter = reporter;
-        ticket.reporter_id = await resolveAgentId(dataSource, reporter_id || '', reporter);
-        changes.push('reporter');
-      } else if (reporter_id !== undefined) { ticket.reporter_id = reporter_id; }
+      // When the caller updates either side of the (id, name) pair, backfill
+      // the other from the Agent table. Without this, an agent that calls
+      // update_ticket with only `assignee_id` clears nothing but also leaves
+      // the legacy `assignee` text column at its previous (stale) value, and
+      // a caller that only swaps `assignee` keeps the old `assignee_id`
+      // pointing at the previous holder.
+      //
+      // Pass empty strings for the omitted side so `resolveAgentIdAndName`
+      // actually does a DB lookup — pre-filling from `ticket.assignee` /
+      // `ticket.assignee_id` makes both helper args truthy and the helper's
+      // `if (id && name) return { id, name }` short-circuit fires, which
+      // skips the lookup and silently re-saves the previous holder's name.
+      // The existing row only kicks in as a last-resort fallback when the
+      // lookup misses (id points at a User row or stale agent).
+      if (assignee !== undefined || assignee_id !== undefined) {
+        const resolved = await resolveAgentIdAndName(
+          dataSource,
+          assignee_id !== undefined ? assignee_id : '',
+          assignee !== undefined ? assignee : '',
+        );
+        ticket.assignee_id = assignee_id !== undefined ? assignee_id : (resolved.id || ticket.assignee_id);
+        ticket.assignee    = assignee    !== undefined ? assignee    : (resolved.name || ticket.assignee);
+        if (ticket.assignee !== oldAssignee) changes.push('assignee');
+      }
+      if (reporter !== undefined || reporter_id !== undefined) {
+        const resolved = await resolveAgentIdAndName(
+          dataSource,
+          reporter_id !== undefined ? reporter_id : '',
+          reporter !== undefined ? reporter : '',
+        );
+        ticket.reporter_id = reporter_id !== undefined ? reporter_id : (resolved.id || ticket.reporter_id);
+        ticket.reporter    = reporter    !== undefined ? reporter    : (resolved.name || ticket.reporter);
+        if (ticket.reporter !== oldReporter) changes.push('reporter');
+      }
       if (reviewer_id !== undefined) { ticket.reviewer_id = reviewer_id; changes.push('reviewer'); }
       if (labels !== undefined) { ticket.labels = JSON.stringify(labels); changes.push('labels'); }
       if (channel_ids !== undefined) { ticket.channel_ids = JSON.stringify(channel_ids); changes.push('channel_ids'); }
@@ -220,18 +254,21 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
         }
       }
 
-      // Log assignee/reporter changes separately for system comment generation
-      if (assignee !== undefined && assignee !== oldAssignee) {
+      // Log assignee/reporter changes separately for system comment generation.
+      // Trigger off the post-save name (which now reflects backfilled lookups)
+      // so a caller passing only `assignee_id` still produces a legible
+      // activity entry instead of an empty `→` arrow.
+      if ((assignee !== undefined || assignee_id !== undefined) && ticket.assignee !== oldAssignee) {
         await activityService.logActivity({
           entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
-          field_changed: 'assignee', old_value: oldAssignee || '', new_value: assignee || '',
+          field_changed: 'assignee', old_value: oldAssignee || '', new_value: ticket.assignee || '',
           ticket_id: ticket.id, actor_id: caller?.agentId, actor_name: caller?.agentName,
         });
       }
-      if (reporter !== undefined && reporter !== oldReporter) {
+      if ((reporter !== undefined || reporter_id !== undefined) && ticket.reporter !== oldReporter) {
         await activityService.logActivity({
           entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
-          field_changed: 'reporter', old_value: oldReporter || '', new_value: reporter || '',
+          field_changed: 'reporter', old_value: oldReporter || '', new_value: ticket.reporter || '',
           ticket_id: ticket.id, actor_id: caller?.agentId, actor_name: caller?.agentName,
         });
       }
