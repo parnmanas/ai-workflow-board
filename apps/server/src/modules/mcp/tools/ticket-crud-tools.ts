@@ -187,30 +187,32 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       // the legacy `assignee` text column at its previous (stale) value, and
       // a caller that only swaps `assignee` keeps the old `assignee_id`
       // pointing at the previous holder.
+      //
+      // Pass empty strings for the omitted side so `resolveAgentIdAndName`
+      // actually does a DB lookup — pre-filling from `ticket.assignee` /
+      // `ticket.assignee_id` makes both helper args truthy and the helper's
+      // `if (id && name) return { id, name }` short-circuit fires, which
+      // skips the lookup and silently re-saves the previous holder's name.
+      // The existing row only kicks in as a last-resort fallback when the
+      // lookup misses (id points at a User row or stale agent).
       if (assignee !== undefined || assignee_id !== undefined) {
         const resolved = await resolveAgentIdAndName(
           dataSource,
-          assignee_id !== undefined ? assignee_id : (ticket.assignee_id || ''),
-          assignee !== undefined ? assignee : (ticket.assignee || ''),
+          assignee_id !== undefined ? assignee_id : '',
+          assignee !== undefined ? assignee : '',
         );
-        // If the caller passed an explicit value, treat it as authoritative
-        // for that side — the lookup only fills the *other* side.
-        if (assignee !== undefined) ticket.assignee = assignee;
-        else ticket.assignee = resolved.name;
-        if (assignee_id !== undefined) ticket.assignee_id = assignee_id;
-        else ticket.assignee_id = resolved.id;
+        ticket.assignee_id = assignee_id !== undefined ? assignee_id : (resolved.id || ticket.assignee_id);
+        ticket.assignee    = assignee    !== undefined ? assignee    : (resolved.name || ticket.assignee);
         if (ticket.assignee !== oldAssignee) changes.push('assignee');
       }
       if (reporter !== undefined || reporter_id !== undefined) {
         const resolved = await resolveAgentIdAndName(
           dataSource,
-          reporter_id !== undefined ? reporter_id : (ticket.reporter_id || ''),
-          reporter !== undefined ? reporter : (ticket.reporter || ''),
+          reporter_id !== undefined ? reporter_id : '',
+          reporter !== undefined ? reporter : '',
         );
-        if (reporter !== undefined) ticket.reporter = reporter;
-        else ticket.reporter = resolved.name;
-        if (reporter_id !== undefined) ticket.reporter_id = reporter_id;
-        else ticket.reporter_id = resolved.id;
+        ticket.reporter_id = reporter_id !== undefined ? reporter_id : (resolved.id || ticket.reporter_id);
+        ticket.reporter    = reporter    !== undefined ? reporter    : (resolved.name || ticket.reporter);
         if (ticket.reporter !== oldReporter) changes.push('reporter');
       }
       if (reviewer_id !== undefined) { ticket.reviewer_id = reviewer_id; changes.push('reviewer'); }

@@ -130,24 +130,27 @@ export function registerTicketChildTools(server: McpServer, ctx: ToolContext): v
       if (priority !== undefined) ticket.priority = priority;
       // Same backfill as root update_ticket: when only one side of the pair
       // changes, look the other up from the Agent table so TicketCard /
-      // activity log don't see a half-stale row.
+      // activity log don't see a half-stale row. Pass empty strings for the
+      // omitted side so the helper actually does a DB lookup — pre-filling
+      // from the existing row hits the helper's `if (id && name)` short-
+      // circuit and silently re-saves the previous holder's name.
       if (assignee !== undefined || assignee_id !== undefined) {
         const resolved = await resolveAgentIdAndName(
           dataSource,
-          assignee_id !== undefined ? assignee_id : (ticket.assignee_id || ''),
-          assignee !== undefined ? assignee : (ticket.assignee || ''),
+          assignee_id !== undefined ? assignee_id : '',
+          assignee !== undefined ? assignee : '',
         );
-        ticket.assignee = assignee !== undefined ? assignee : resolved.name;
-        ticket.assignee_id = assignee_id !== undefined ? assignee_id : resolved.id;
+        ticket.assignee_id = assignee_id !== undefined ? assignee_id : (resolved.id || ticket.assignee_id);
+        ticket.assignee    = assignee    !== undefined ? assignee    : (resolved.name || ticket.assignee);
       }
       if (reporter !== undefined || reporter_id !== undefined) {
         const resolved = await resolveAgentIdAndName(
           dataSource,
-          reporter_id !== undefined ? reporter_id : (ticket.reporter_id || ''),
-          reporter !== undefined ? reporter : (ticket.reporter || ''),
+          reporter_id !== undefined ? reporter_id : '',
+          reporter !== undefined ? reporter : '',
         );
-        ticket.reporter = reporter !== undefined ? reporter : resolved.name;
-        ticket.reporter_id = reporter_id !== undefined ? reporter_id : resolved.id;
+        ticket.reporter_id = reporter_id !== undefined ? reporter_id : (resolved.id || ticket.reporter_id);
+        ticket.reporter    = reporter    !== undefined ? reporter    : (resolved.name || ticket.reporter);
       }
       if (labels !== undefined) ticket.labels = JSON.stringify(labels);
 
