@@ -398,7 +398,15 @@ export default function ChatPage() {
   }
 
   function handleMessageSent(msg: ChatRoomMessageItem) {
-    setMessages((prev) => [...prev, msg]);
+    // Dedup against the SSE `chat_room_message` broadcast: when the
+    // server's SSE fan-out beats the POST response back to us, the
+    // SSE handler will already have appended the same row. Without
+    // this guard the user sees their own message twice until refresh
+    // (see ticket 3203bbaf — Chat Echo back 버그).
+    setMessages((prev) => {
+      if (prev.some((m) => m.id === msg.id)) return prev;
+      return [...prev, msg];
+    });
   }
 
   function handleLeaveRoom(roomId: string) {

@@ -298,14 +298,23 @@ export class AgentsController {
   @Get(':id')
   @RequirePermission(PERMISSIONS.VIEW_ACTIVITY)
   async get(@Param('id') id: string, @Req() req: Request, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
+    // System admins bypass workspace scoping on the :id endpoints (mirrors
+    // the `?scope=all` rule on list). Without this, an admin viewing a
+    // managed agent from the global AgentManager page 404s whenever the
+    // agent's workspace differs from the operator's currently-active
+    // workspace — the AgentManager page itself fetches cross-workspace via
+    // getAgentsAll(), so the detail / edit / delete surfaces have to follow
+    // the same rule or the round-trip breaks. Workspace admins (with
+    // MANAGE_AGENTS only inside their own workspace) stay scoped.
+    const isSystemAdmin = (req as any).currentUser?.role === 'admin';
     const agent = await findOrFail(this.agentRepo, {
-      where: { id, ...(workspaceId ? { workspace_id: workspaceId } : {}) },
+      where: { id, ...(workspaceId && !isSystemAdmin ? { workspace_id: workspaceId } : {}) },
     }, 'Agent not found');
 
     // Phase 3 D-44 — role_prompt is admin-gated. Non-admin viewers receive a redacted payload.
     // req.currentUser is populated by AuthGuard (runs before PermissionGuard) and cannot be spoofed from headers.
     const currentUser = (req as any).currentUser;
-    const isAdmin = currentUser
+    const canSeeRolePrompt = currentUser
       ? hasPermission(
           currentUser.role || 'user',
           currentUser.permissions || [],
@@ -329,7 +338,7 @@ export class AgentsController {
 
     const named = await this._enrichManagerNames([agent]);
     const [enriched] = await this._enrichLiveData(named);
-    if (isAdmin) {
+    if (canSeeRolePrompt) {
       return res.json({ ...enriched, current_task: currentTask, redacted: false });
     }
 
@@ -368,9 +377,15 @@ export class AgentsController {
   }
 
   @Patch(':id')
-  async update(@Param('id') id: string, @Body() body: any, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
+  async update(@Param('id') id: string, @Body() body: any, @Req() req: Request, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
+    // System admins bypass workspace scoping (mirrors GET ?scope=all and the
+    // get-by-id rule above). Fixes the AgentManager admin page edit flow:
+    // the page lists agents cross-workspace via getAgentsAll() but Edit was
+    // 404ing whenever the operator's active workspace differed from the
+    // agent's workspace. Workspace-scoped admins stay scoped.
+    const isSystemAdmin = (req as any).currentUser?.role === 'admin';
     const agent = await findOrFail(this.agentRepo, {
-      where: { id, ...(workspaceId ? { workspace_id: workspaceId } : {}) },
+      where: { id, ...(workspaceId && !isSystemAdmin ? { workspace_id: workspaceId } : {}) },
     }, 'Agent not found');
 
     const { name, description, type, avatar_url, is_active, role_prompt, role_prompt_meta, working_dir, manager_agent_id, credential_id } = body;
@@ -419,9 +434,11 @@ export class AgentsController {
   }
 
   @Delete(':id')
-  async delete(@Param('id') id: string, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
+  async delete(@Param('id') id: string, @Req() req: Request, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
+    // System admins bypass workspace scoping (parallel to GET / PATCH above).
+    const isSystemAdmin = (req as any).currentUser?.role === 'admin';
     const agent = await findOrFail(this.agentRepo, {
-      where: { id, ...(workspaceId ? { workspace_id: workspaceId } : {}) },
+      where: { id, ...(workspaceId && !isSystemAdmin ? { workspace_id: workspaceId } : {}) },
     }, 'Agent not found');
     await this.agentRepo.delete(agent.id);
     return res.json({ success: true });
