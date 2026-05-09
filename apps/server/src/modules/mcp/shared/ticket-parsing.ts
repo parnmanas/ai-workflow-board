@@ -11,11 +11,15 @@
 
 import type { DataSource, EntityManager } from 'typeorm';
 import { In } from 'typeorm';
+import { Agent } from '../../../entities/Agent';
 import { Ticket } from '../../../entities/Ticket';
+import { TicketRoleAssignment } from '../../../entities/TicketRoleAssignment';
 import { Resource } from '../../../entities/Resource';
 import { TicketAttachment } from '../../../entities/TicketAttachment';
+import { User } from '../../../entities/User';
+import { WorkspaceRole } from '../../../entities/WorkspaceRole';
 import { safeJsonParse } from './helpers';
-import { projectTicketAttachment } from './ticket-helpers';
+import { formatAgentDisplayName, projectTicketAttachment } from './ticket-helpers';
 
 type RepoScope = DataSource | EntityManager;
 
@@ -181,6 +185,14 @@ export async function loadTicketFull(scope: RepoScope, id: string) {
       gc.attachments = sortAttachments(attachmentsByTicket.get(gc.id) || []);
     }
   }
+  // v0.34: hydrate `role_assignments` for root + every descendant in one
+  // batched lookup. Each entry surfaces the role slug / id and the resolved
+  // holder ({ type, id, name }) — so an MCP caller can verify planner /
+  // assignee / any custom role with a single `get_ticket`. Replicates
+  // `TicketRoleAssignmentService.resolveForTicket` inline so this works in
+  // the standalone MCP entry point (no DI / no service wiring).
+  await hydrateRoleAssignments(scope, out);
+
   // Resolve the ticket's base repository (if any) into a small embedded
   // snapshot so the client + agent get url / name / default_branch in one
   // round-trip. Failing the lookup is non-fatal: leaves base_repo: null and
@@ -211,4 +223,92 @@ export async function loadTicketFull(scope: RepoScope, id: string) {
     out.base_repo = null;
   }
   return out;
+}
+
+/**
+ * Single-batched lookup of `ticket_role_assignments` for a ticket tree.
+ * Mutates each node in `tree` (root + children + grandchildren) by setting
+ * `node.role_assignments` to:
+ *
+ *   [{ role_id, slug, holder: { type, id, name } | null }, ...]
+ *
+ * sorted by `role.position`. Slugs include builtin (assignee/reporter/
+ * reviewer) and any workspace-scoped custom role (e.g. `planner`) that has
+ * a holder pinned. Empty arrays for nodes with no assignment rows.
+ *
+ * Holder name uses `formatAgentDisplayName` so the same Manager/Agent
+ * formatting that `resolveAgentIdAndName` writes into the legacy text
+ * columns is what comes back from `get_ticket`. Roles whose role row was
+ * deleted underneath the assignment are dropped (matches
+ * `TicketRoleAssignmentService.resolveForTicket` semantics).
+ */
+async function hydrateRoleAssignments(scope: RepoScope, root: any): Promise<void> {
+  const allTicketIds: string[] = [
+    root.id,
+    ...root.children.map((c: any) => c.id),
+    ...root.children.flatMap((c: any) => (c.children || []).map((gc: any) => gc.id)),
+  ];
+  if (allTicketIds.length === 0) return;
+  const rows = await scope.getRepository(TicketRoleAssignment)
+    .find({ where: { ticket_id: In(allTicketIds) } as any })
+    .catch(() => [] as TicketRoleAssignment[]);
+
+  // Always set the field — even when empty — so callers don't have to
+  // defend against `undefined` in the response shape.
+  const empty: any[] = [];
+  root.role_assignments = empty;
+  for (const c of root.children) {
+    c.role_assignments = [] as any[];
+    for (const gc of (c.children || [])) gc.role_assignments = [] as any[];
+  }
+  if (rows.length === 0) return;
+
+  const roleIds = [...new Set(rows.map(r => r.role_id))];
+  const agentIds = [...new Set(rows.map(r => r.agent_id).filter((x): x is string => !!x))];
+  const userIds = [...new Set(rows.map(r => r.user_id).filter((x): x is string => !!x))];
+  const [roles, agents, users] = await Promise.all([
+    scope.getRepository(WorkspaceRole).find({ where: { id: In(roleIds) } }),
+    agentIds.length
+      ? scope.getRepository(Agent).find({ where: { id: In(agentIds) } })
+      : Promise.resolve([] as Agent[]),
+    userIds.length
+      ? scope.getRepository(User).find({ where: { id: In(userIds) } })
+      : Promise.resolve([] as User[]),
+  ]);
+  const roleMap = new Map(roles.map(r => [r.id, r]));
+  const agentMap = new Map(agents.map(a => [a.id, a]));
+  const userMap = new Map(users.map(u => [u.id, u]));
+  // Pre-resolve manager-display once per agent so the tree-walk below stays
+  // O(rows) without re-querying the manager table per assignment.
+  const displayByAgentId = new Map<string, string>();
+  for (const a of agents) {
+    displayByAgentId.set(a.id, await formatAgentDisplayName(scope, a));
+  }
+
+  const byTicket = new Map<string, any[]>();
+  for (const r of rows) {
+    const role = roleMap.get(r.role_id);
+    if (!role) continue;
+    let holder: any = null;
+    if (r.agent_id && agentMap.has(r.agent_id)) {
+      holder = { type: 'agent', id: r.agent_id, name: displayByAgentId.get(r.agent_id) || agentMap.get(r.agent_id)!.name };
+    } else if (r.user_id && userMap.has(r.user_id)) {
+      const u = userMap.get(r.user_id)!;
+      holder = { type: 'user', id: u.id, name: u.name || u.email };
+    }
+    const entry = { role_id: role.id, slug: role.slug, holder, position: role.position };
+    const list = byTicket.get(r.ticket_id) || [];
+    list.push(entry);
+    byTicket.set(r.ticket_id, list);
+  }
+  const sortAndStrip = (list: any[]) =>
+    list.slice().sort((a, b) => a.position - b.position)
+      .map(({ position: _p, ...rest }) => rest);
+  root.role_assignments = sortAndStrip(byTicket.get(root.id) || []);
+  for (const c of root.children) {
+    c.role_assignments = sortAndStrip(byTicket.get(c.id) || []);
+    for (const gc of (c.children || [])) {
+      gc.role_assignments = sortAndStrip(byTicket.get(gc.id) || []);
+    }
+  }
 }

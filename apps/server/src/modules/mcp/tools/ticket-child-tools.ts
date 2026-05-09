@@ -13,11 +13,11 @@ import { Agent } from '../../../entities/Agent';
 import { Ticket } from '../../../entities/Ticket';
 import { ok, err } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
-import { maxChildPosition, resolveAgentId, resolveAgentIdAndName, shiftTicketPositions } from '../shared/ticket-helpers';
+import { maxChildPosition, refreshTicketWorkspaceId, resolveAgentId, resolveAgentIdAndName, shiftTicketPositions } from '../shared/ticket-helpers';
 import type { ToolContext } from './context';
 
 export function registerTicketChildTools(server: McpServer, ctx: ToolContext): void {
-  const { dataSource, activityService, ticketRoleAssignmentService } = ctx;
+  const { dataSource, activityService, logger, ticketRoleAssignmentService } = ctx;
 
   server.tool(
     'create_child_ticket',
@@ -48,12 +48,12 @@ export function registerTicketChildTools(server: McpServer, ctx: ToolContext): v
       const caller = getCallerAgent(extra);
       const creatorName = created_by || (caller?.agentName) || reporter || assignee || '';
       const creatorType = created_by ? created_by_type : (caller?.agentId ? 'agent' : (reporter ? 'agent' : ''));
-      const creatorId = created_by_id || (caller?.agentId) || (reporter ? await resolveAgentId(dataSource, '', reporter) : '');
+      const creatorId = created_by_id || (caller?.agentId) || (reporter ? await resolveAgentId(dataSource, '', reporter, logger) : '');
 
       // Backfill name↔id from the Agent table when only one side was supplied
       // (mirrors the root `create_ticket` fix — see ticket-crud-tools.ts).
-      const assigneeResolved = await resolveAgentIdAndName(dataSource, assignee_id, assignee);
-      const reporterResolved = await resolveAgentIdAndName(dataSource, reporter_id, reporter);
+      const assigneeResolved = await resolveAgentIdAndName(dataSource, assignee_id, assignee, logger);
+      const reporterResolved = await resolveAgentIdAndName(dataSource, reporter_id, reporter, logger);
       let resolvedAssigneeId = assigneeResolved.id;
       let resolvedAssignee = assigneeResolved.name;
       let resolvedReporterId = reporterResolved.id;
@@ -62,6 +62,11 @@ export function registerTicketChildTools(server: McpServer, ctx: ToolContext): v
         resolvedReporter = creatorName;
         resolvedReporterId = creatorId;
       }
+
+      // B1: if the parent's workspace_id is still the legacy '' (e.g. parent
+      // was created via the pre-fix MCP path), backfill it now so this child
+      // — which inherits below — also lands with a usable workspace_id.
+      await refreshTicketWorkspaceId(dataSource, parent);
 
       const position = await maxChildPosition(dataSource, parent_id);
       const child = await ticketRepo.save(ticketRepo.create({
@@ -139,6 +144,7 @@ export function registerTicketChildTools(server: McpServer, ctx: ToolContext): v
           dataSource,
           assignee_id !== undefined ? assignee_id : '',
           assignee !== undefined ? assignee : '',
+          logger,
         );
         ticket.assignee_id = assignee_id !== undefined ? assignee_id : (resolved.id || ticket.assignee_id);
         ticket.assignee    = assignee    !== undefined ? assignee    : (resolved.name || ticket.assignee);
@@ -148,6 +154,7 @@ export function registerTicketChildTools(server: McpServer, ctx: ToolContext): v
           dataSource,
           reporter_id !== undefined ? reporter_id : '',
           reporter !== undefined ? reporter : '',
+          logger,
         );
         ticket.reporter_id = reporter_id !== undefined ? reporter_id : (resolved.id || ticket.reporter_id);
         ticket.reporter    = reporter    !== undefined ? reporter    : (resolved.name || ticket.reporter);
@@ -155,6 +162,12 @@ export function registerTicketChildTools(server: McpServer, ctx: ToolContext): v
       if (labels !== undefined) ticket.labels = JSON.stringify(labels);
 
       const updated = await ticketRepo.save(ticket);
+
+      // B1: backfill workspace_id for legacy children that lost it (the
+      // pre-fix MCP create path left it ''). Children inherit from parent
+      // at create time, but a child whose parent was created before the
+      // workspace_id backfill landed may still be empty.
+      await refreshTicketWorkspaceId(dataSource, ticket);
 
       // v0.34: assignment-table sync (only fields the caller included).
       if (ticketRoleAssignmentService && ticket.workspace_id) {

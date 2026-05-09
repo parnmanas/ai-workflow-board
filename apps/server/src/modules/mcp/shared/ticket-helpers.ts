@@ -8,6 +8,7 @@
 import type { DataSource, EntityManager, Repository } from 'typeorm';
 import { In } from 'typeorm';
 import { Agent } from '../../../entities/Agent';
+import { Board } from '../../../entities/Board';
 import { BoardColumn } from '../../../entities/BoardColumn';
 import { Ticket } from '../../../entities/Ticket';
 import { Comment } from '../../../entities/Comment';
@@ -51,14 +52,67 @@ export async function maxChildPosition(scope: RepoScope, parentId: string): Prom
 }
 
 /**
+ * Logger sink accepted by the agent-resolution helpers. Optional in every
+ * call site — when omitted the helpers stay silent (used by tests + the
+ * standalone MCP entry point). When present we surface name-based lookup
+ * deprecation + backfill events so operators can spot legacy callers.
+ */
+export interface AgentResolveLogger {
+  warn?(category: string, message: string, meta?: Record<string, any>): any;
+  info?(category: string, message: string, meta?: Record<string, any>): any;
+}
+
+/**
+ * Format an agent for display in TicketCard / activity log / system comment.
+ * `Manager/Agent` when the agent has a `manager_agent_id` we can resolve;
+ * just `Agent` otherwise (no manager, or manager row missing — survives
+ * dangling ids without breaking the write). Centralized so the four MCP
+ * entry points (root + child × create + update) and the REST controller all
+ * agree, which is what kills the same-name disambiguation problem in B3.
+ */
+export async function formatAgentDisplayName(
+  scope: RepoScope,
+  agent: Agent,
+): Promise<string> {
+  if (!agent.manager_agent_id) return agent.name;
+  const manager = await scope.getRepository(Agent)
+    .findOne({ where: { id: agent.manager_agent_id } })
+    .catch(() => null);
+  if (!manager) return agent.name;
+  return `${manager.name}/${agent.name}`;
+}
+
+/**
  * Resolve an agent UUID from either a raw ID (passthrough) or a display name.
  * Returns the empty string when neither yields a match.
+ *
+ * Name lookup is documented as deprecated: the workspace can host multiple
+ * agents with identical `name` (e.g. `Ralf` as both a manager Agent row and
+ * a Claude subagent), and a silent first-match pick routes triggers to the
+ * wrong agent type. We log a warn on the name path and throw on multi-match
+ * — callers must migrate to ID-based lookup.
  */
-export async function resolveAgentId(scope: RepoScope, id: string, name: string): Promise<string> {
+export async function resolveAgentId(
+  scope: RepoScope,
+  id: string,
+  name: string,
+  logger?: AgentResolveLogger,
+): Promise<string> {
   if (id) return id;
   if (!name) return '';
-  const agent = await scope.getRepository(Agent).findOne({ where: { name } }).catch(() => null);
-  return agent?.id || '';
+  const agents = await scope.getRepository(Agent)
+    .find({ where: { name } })
+    .catch(() => [] as Agent[]);
+  if (agents.length === 0) return '';
+  if (agents.length > 1) {
+    const ids = agents.map(a => a.id).join(', ');
+    throw new Error(
+      `Agent name "${name}" matches ${agents.length} agents (ids: ${ids}). ` +
+      `Pass *_id directly — name-based lookup is ambiguous.`,
+    );
+  }
+  logger?.warn?.('MCP', 'Deprecated name-based agent lookup', { name, agent_id: agents[0].id });
+  return agents[0].id;
 }
 
 /**
@@ -66,24 +120,91 @@ export async function resolveAgentId(scope: RepoScope, id: string, name: string)
  * supplied. Callers that hand us an id without a name (the MCP `create_ticket`
  * path used by remote agents) would otherwise leave the legacy `assignee` /
  * `reporter` text columns blank — TicketCard reads those columns directly and
- * renders "Unassigned" until someone re-saves with the name. Backfilling here
- * keeps both columns consistent on a single write.
+ * renders "Unassigned" until someone re-saves with the name.
+ *
+ * Display rules (B3):
+ *   - When the resolved Agent has `manager_agent_id`, the returned `name` is
+ *     `<manager.name>/<agent.name>` so the same string works for activity
+ *     log, system comments, and TicketCard regardless of how many agents
+ *     share a leaf name. The lookup happens even when the caller pre-filled
+ *     `name`, so the format stays canonical.
+ *   - Name-only lookup logs a deprecation warn and throws on multi-match —
+ *     `resolveAgentId` shares the same policy. ID-only lookup is the
+ *     happy path and stays silent.
  *
  * Lookup miss (id points at a non-agent — e.g. a User row, or stale id) keeps
- * whatever the caller supplied: matches the historical `resolveAgentId`
- * behavior so user assignees aren't accidentally cleared.
+ * whatever the caller supplied so user assignees / unknown ids aren't
+ * accidentally cleared.
  */
 export async function resolveAgentIdAndName(
   scope: RepoScope,
   id: string,
   name: string,
+  logger?: AgentResolveLogger,
 ): Promise<{ id: string; name: string }> {
   if (!id && !name) return { id: '', name: '' };
-  if (id && name) return { id, name };
-  const where = id ? { id } : { name };
-  const agent = await scope.getRepository(Agent).findOne({ where }).catch(() => null);
-  if (!agent) return { id: id || '', name: name || '' };
-  return { id: agent.id, name: agent.name };
+  const agentRepo = scope.getRepository(Agent);
+  if (id) {
+    // Always look the id up so we can build the canonical Manager/Agent
+    // display, even when the caller pre-filled `name`. Falling back to the
+    // caller's name on miss preserves user-id assignees.
+    const agent = await agentRepo.findOne({ where: { id } }).catch(() => null);
+    if (!agent) return { id, name: name || '' };
+    const display = await formatAgentDisplayName(scope, agent);
+    return { id: agent.id, name: display };
+  }
+  // Name-only: deprecated path.
+  const agents = await agentRepo.find({ where: { name } }).catch(() => [] as Agent[]);
+  if (agents.length === 0) return { id: '', name };
+  if (agents.length > 1) {
+    const ids = agents.map(a => a.id).join(', ');
+    throw new Error(
+      `Agent name "${name}" matches ${agents.length} agents (ids: ${ids}). ` +
+      `Pass *_id directly — name-based lookup is ambiguous.`,
+    );
+  }
+  logger?.warn?.('MCP', 'Deprecated name-based agent lookup', { name, agent_id: agents[0].id });
+  const display = await formatAgentDisplayName(scope, agents[0]);
+  return { id: agents[0].id, name: display };
+}
+
+/**
+ * Backfill `ticket.workspace_id` from its column → board when the row was
+ * saved with the empty default (`Ticket.workspace_id` defaults to '' so MCP
+ * create paths that don't supply it land empty). Mutates the in-memory
+ * ticket and persists the new value via a targeted UPDATE so the very next
+ * `syncBuiltinTrio` / `setHolder` call has the workspace context it needs
+ * to find the workspace's WorkspaceRole rows.
+ *
+ * No-op when workspace_id is already set, or when the column / board lookup
+ * misses (e.g. transient race during column delete) — failing here would
+ * cascade into a confusing assignment-sync skip; the caller's later read
+ * will discover the empty workspace_id and degrade gracefully on its own.
+ *
+ * Mirrors the REST controller's previous private `_refreshWorkspaceId`
+ * helper (`tickets.controller.ts`); extracted here so MCP and REST share a
+ * single implementation. The MCP `create_ticket` path historically skipped
+ * this step entirely, which silently broke the v0.34 trigger loop for
+ * every ticket created via MCP.
+ */
+export async function refreshTicketWorkspaceId(
+  scope: RepoScope,
+  ticket: Ticket,
+): Promise<void> {
+  if (ticket.workspace_id) return;
+  if (!ticket.column_id) return;
+  const col = await scope.getRepository(BoardColumn)
+    .findOne({ where: { id: ticket.column_id } })
+    .catch(() => null);
+  if (!col) return;
+  const board = await scope.getRepository(Board)
+    .findOne({ where: { id: col.board_id } })
+    .catch(() => null);
+  if (!board?.workspace_id) return;
+  ticket.workspace_id = board.workspace_id;
+  await scope.getRepository(Ticket)
+    .update(ticket.id, { workspace_id: board.workspace_id })
+    .catch(() => { /* persist failure is non-fatal — caller still has the value in-memory */ });
 }
 
 /**
