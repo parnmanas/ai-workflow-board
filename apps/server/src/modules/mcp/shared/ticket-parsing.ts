@@ -12,6 +12,7 @@
 import type { DataSource, EntityManager } from 'typeorm';
 import { In } from 'typeorm';
 import { Agent } from '../../../entities/Agent';
+import { BoardColumn } from '../../../entities/BoardColumn';
 import { Ticket } from '../../../entities/Ticket';
 import { TicketRoleAssignment } from '../../../entities/TicketRoleAssignment';
 import { Resource } from '../../../entities/Resource';
@@ -221,6 +222,36 @@ export async function loadTicketFull(scope: RepoScope, id: string) {
     }
   } else {
     out.base_repo = null;
+  }
+
+  // Hydrate the linked next-ticket snapshot so the picker UI can render its
+  // title + current column without a second round-trip. Workspace-scoped
+  // for the same defense-in-depth reason as base_repo above — a stale id
+  // pointing at another workspace's row never leaks its title here.
+  // Failing the lookup is non-fatal: leaves next_ticket: null and the UI
+  // shows "(deleted)" / falls back to the bare id.
+  if (ticket.next_ticket_id) {
+    try {
+      const next = await scope.getRepository(Ticket).findOne({
+        where: ticket.workspace_id
+          ? { id: ticket.next_ticket_id, workspace_id: ticket.workspace_id }
+          : { id: ticket.next_ticket_id },
+      });
+      if (next) {
+        let columnName = '';
+        if (next.column_id) {
+          const col = await scope.getRepository(BoardColumn).findOne({ where: { id: next.column_id } });
+          columnName = col?.name || '';
+        }
+        out.next_ticket = { id: next.id, title: next.title, column_name: columnName };
+      } else {
+        out.next_ticket = null;
+      }
+    } catch {
+      out.next_ticket = null;
+    }
+  } else {
+    out.next_ticket = null;
   }
   return out;
 }
