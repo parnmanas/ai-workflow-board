@@ -45,7 +45,7 @@
  * The next capacity event will retry. The supervisor 30-min stale check
  * remains as a final eventual-consistency backstop.
  */
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { Injectable, OnModuleInit, forwardRef, Inject } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { ActivityLog } from '../../entities/ActivityLog';
@@ -58,6 +58,7 @@ import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { LogService } from '../../services/log.service';
 import { ActivityService, activityEvents } from '../../services/activity.service';
 import { AgentStatusService } from './agent-status.service';
+import { TriggerLoopService } from './trigger-loop.service';
 import { priorityIndex } from './priority';
 
 function safeJsonParse<T>(s: string | null | undefined, fallback: T): T {
@@ -72,6 +73,12 @@ export class BacklogPromotionService implements OnModuleInit {
     private readonly logService: LogService,
     private readonly activityService: ActivityService,
     private readonly agentStatusService: AgentStatusService,
+    // forwardRef so the BacklogPromotion ↔ TriggerLoop dependency edge
+    // doesn't fight Nest's eager-instantiation order (TriggerLoop currently
+    // takes AgentDispatchQueueService via forwardRef; staying symmetric here
+    // keeps the graph stable if either side grows another back-edge later).
+    @Inject(forwardRef(() => TriggerLoopService))
+    private readonly triggerLoop: TriggerLoopService,
   ) {}
 
   onModuleInit(): void {
@@ -212,8 +219,13 @@ export class BacklogPromotionService implements OnModuleInit {
       const assignByRoleId = new Map(assignments.map(a => [a.role_id, a]));
 
       let eligible = true;
-      const checkedHolders: string[] = [];
-      for (const roleId of requiredRoleIds) {
+      // (role_slug, holder_agent_id) pairs we will emit triggers to once
+      // the move commits. Built up alongside the eligibility check so we
+      // don't re-walk the role list in the post-save loop.
+      const dispatchTargets: Array<{ slug: string; holderId: string }> = [];
+      for (let i = 0; i < requiredRoleIds.length; i++) {
+        const roleId = requiredRoleIds[i];
+        const slug = destSlugs[i];
         const a = assignByRoleId.get(roleId);
         if (!a || !a.agent_id) {
           // Role unfilled on the candidate — can't promote, the trigger
@@ -231,31 +243,33 @@ export class BacklogPromotionService implements OnModuleInit {
           eligible = false;
           break;
         }
-        checkedHolders.push(a.agent_id);
+        dispatchTargets.push({ slug, holderId: a.agent_id });
       }
       if (!eligible) continue;
 
-      // Single-transaction move: ticket.column_id update + activity row.
-      // The activity row's `action: 'moved'` runs through the standard
-      // TriggerLoopService listener, so the destination column's
-      // `role_routing` triggers the right roles automatically — no need
-      // for this service to emit triggers itself.
+      // Move: ticket.column_id update + audit `moved` activity row.
+      //
+      // We deliberately do NOT rely on the `moved` activity to wake the
+      // destination role holders. The activity is written with
+      // `actor_id: 'system'`, which `TriggerLoopService._handleActivity`
+      // skips by design (the system-actor filter exists to prevent
+      // listener-loops on system-comment-style writes). Instead this
+      // service explicitly calls `triggerLoop.emitAgentTrigger()` per
+      // (role, holder) below, so promotion has a deterministic dispatch
+      // path independent of listener semantics.
+      //
+      // Status bump is omitted by design — `move_ticket` MCP / REST do
+      // not auto-mutate ticket.status either, so promotion mirrors the
+      // canonical move semantics rather than re-introducing a hardcoded
+      // status string. Workspaces that key on the legacy enum can derive
+      // it from `BoardColumn.kind` instead (`'intake' → backlog`,
+      // `'active' → todo`, etc.).
       const fromColumnId = ticket.column_id;
       const fromCol = columns.find(c => c.id === fromColumnId) || null;
       ticket.column_id = destination.id;
       ticket.position = 0;
-      // Bump status to match the destination's lifecycle hint. Most
-      // boards reuse the same enum string regardless of column, but this
-      // mirrors the existing move_ticket behaviour for backward compat.
-      // (Server-side promotion writes 'todo' to mirror the human-flow
-      // default; if your workspace customises status semantics, adapt
-      // this in a follow-up.)
-      (ticket as any).status = 'todo';
       await ticketRepo.save(ticket);
 
-      // Standard `moved` activity — written through ActivityService so
-      // the trigger-loop listener gets a chance to fire the destination
-      // roles in the same flow as a manual move_ticket call.
       try {
         await this.activityService.logActivity({
           entity_type: 'ticket',
@@ -274,6 +288,34 @@ export class BacklogPromotionService implements OnModuleInit {
           err: String(e), ticket_id: ticket.id,
         });
       }
+
+      // Explicit per-holder dispatch. Going through `emitAgentTrigger`
+      // means the cap-check / pending-reservation / queue-on-cap path is
+      // honoured exactly as it would be for a manual move_ticket call —
+      // including enqueue when a holder is busy on another ticket. The
+      // `triggered_by` field is the *causing* idle-event agent (or
+      // 'backlog_promotion' for direct calls) so post-mortems can
+      // correlate the wake-up to the slot that opened.
+      const triggeredBy = opts?.triggerAgentId || 'backlog_promotion';
+      for (const target of dispatchTargets) {
+        try {
+          await this.triggerLoop.emitAgentTrigger(
+            ticket,
+            target.holderId,
+            target.slug,
+            'backlog_promotion',
+            triggeredBy,
+          );
+        } catch (e) {
+          // A failed emit on one role mustn't block the others or roll
+          // back the move; the supervisor stale-allocation re-push is
+          // the eventual-consistency backstop for any holder we missed.
+          this.logService.warn('BacklogPromotion', 'destination role emit failed (continuing)', {
+            err: String(e), ticket_id: ticket.id, role: target.slug, agent_id: target.holderId,
+          });
+        }
+      }
+      const checkedHolders = dispatchTargets.map(t => t.holderId);
 
       // Audit row — separate from the 'moved' activity so dashboards can
       // distinguish a server-owned promotion from a manual / agent move.
