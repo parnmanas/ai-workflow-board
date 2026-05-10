@@ -16,6 +16,7 @@ import { DEFAULT_COLUMNS, BUILTIN_ROLES, DEFAULT_BOARD_ROUTING } from '../../../
 import { DEFAULT_PROMPT_TEMPLATES } from '../../../database/default-prompt-templates';
 import { PromptTemplate } from '../../../entities/PromptTemplate';
 import { ok, err } from '../shared/helpers';
+import { writeRoutingConfigThrough } from '../../boards/routing-config.helper';
 import type { ToolContext } from './context';
 
 export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): void {
@@ -86,6 +87,8 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
 
       const defaultCols = DEFAULT_COLUMNS.map(c => ({ ...c, board_id: board.id }));
       const savedCols = await colRepo.save(defaultCols.map(c => colRepo.create(c)));
+      // v0.41 — fan board.routing_config into per-column role_routing.
+      await writeRoutingConfigThrough(dataSource, board.id);
 
       // v0.34: seed built-in role preset (planner/assignee/reporter/reviewer).
       const roleRepo = dataSource.getRepository(WorkspaceRole);

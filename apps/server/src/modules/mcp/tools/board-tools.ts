@@ -14,6 +14,7 @@ import { DEFAULT_COLUMNS, DEFAULT_BOARD_ROUTING } from '../../../db';
 import { DEFAULT_PROMPT_TEMPLATES } from '../../../database/default-prompt-templates';
 import { PromptTemplate } from '../../../entities/PromptTemplate';
 import { ok, err, safeJsonParse } from '../shared/helpers';
+import { writeRoutingConfigThrough } from '../../boards/routing-config.helper';
 import type { ToolContext } from './context';
 
 export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
@@ -162,6 +163,8 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
       }));
       const defaultCols = DEFAULT_COLUMNS.map(c => ({ ...c, board_id: board.id }));
       const savedCols = await colRepo.save(defaultCols.map(c => colRepo.create(c)));
+      // v0.41 — write routing_config through to per-column role_routing.
+      await writeRoutingConfigThrough(dataSource, board.id);
 
       // Idempotently seed default workflow templates into the workspace
       // (existing rows by name are left alone) and auto-link each new
@@ -219,7 +222,8 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
 
       if (name !== undefined) board.name = name;
       if (description !== undefined) board.description = description;
-      if (routing_config !== undefined) {
+      const routingChanged = routing_config !== undefined;
+      if (routingChanged) {
         if (routing_config === null) {
           board.routing_config = '{}';
         } else {
@@ -240,6 +244,12 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
       }
 
       await boardRepo.save(board);
+      // v0.41 — fan routing_config edits through to per-column role_routing
+      // so the runtime trigger / allocation paths read slugs straight off the
+      // BoardColumn rows. See routing-config.helper for the contract.
+      if (routingChanged) {
+        await writeRoutingConfigThrough(dataSource, board.id);
+      }
       return ok(board);
     }
   );

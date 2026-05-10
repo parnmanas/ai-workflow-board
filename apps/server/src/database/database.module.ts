@@ -10,6 +10,7 @@ import { BoardColumn } from '../entities/BoardColumn';
 import { WorkspaceRole } from '../entities/WorkspaceRole';
 import { PromptTemplate } from '../entities/PromptTemplate';
 import { LogService } from '../services/log.service';
+import { writeRoutingConfigThrough } from '../modules/boards/routing-config.helper';
 
 const entityList = Object.values(entitiesBarrel);
 
@@ -91,6 +92,11 @@ export class DatabaseModule implements OnModuleInit {
         board_id: board.id,
       }));
       const savedCols = await colRepo.save(defaultCols.map(c => colRepo.create(c)));
+
+      // v0.41 — fan board.routing_config into per-column role_routing rows
+      // so the trigger-loop / allocation paths can read role slugs straight
+      // off the column without parsing the lowercased-name blob each time.
+      await writeRoutingConfigThrough(this.dataSource, board.id);
 
       // v0.34 — seed the same role preset every newly-created workspace
       // gets so the default workspace doesn't end up role-less if the

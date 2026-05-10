@@ -19,6 +19,7 @@ import { PromptTemplatesService } from '../prompt-templates/prompt-templates.ser
 import { ReBACService } from '../../services/rebac.service';
 import { findOrFail } from '../../common/find-or-fail';
 import { parseComments, expandCommentAttachments } from '../mcp/shared/ticket-parsing';
+import { writeRoutingConfigThrough } from '../boards/routing-config.helper';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 
@@ -64,6 +65,8 @@ export class WorkspacesController {
     }));
     const defaultCols = DEFAULT_COLUMNS.map(c => ({ ...c, board_id: board.id }));
     const savedCols = await this.colRepo.save(defaultCols.map(c => this.colRepo.create(c)));
+    // v0.41 — fan board.routing_config into per-column role_routing.
+    await writeRoutingConfigThrough(this.dataSource, board.id);
 
     // v0.34: every new workspace gets the same builtin role preset that
     // existing workspaces received from the migration. Mention syntax,
