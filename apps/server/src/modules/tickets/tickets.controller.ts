@@ -40,6 +40,7 @@ import {
   inferTicketAttachmentMimetype,
   projectTicketAttachment,
   approxBase64Size,
+  validateNextTicketId,
 } from '../mcp/shared/ticket-helpers';
 import { findOrFail } from '../../common/find-or-fail';
 
@@ -88,10 +89,35 @@ export class TicketsController {
 
   @Post('columns/:columnId/tickets')
   async create(@Param('columnId') columnId: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
-    const { title, description = '', priority = 'medium', assignee = '', reporter = '', assignee_id = '', reporter_id = '', labels = [], channel_ids = [], role_assignments } = body;
+    const { title, description = '', priority = 'medium', assignee = '', reporter = '', assignee_id = '', reporter_id = '', labels = [], channel_ids = [], role_assignments, next_ticket_id } = body;
     if (!title) return res.status(400).json({ error: 'title is required' });
 
     await findOrFail(this.colRepo, { where: { id: columnId } }, 'Column not found');
+
+    // Resolve the destination column's workspace upfront so the next_ticket_id
+    // workspace-guard runs against the correct value (the freshly-created
+    // ticket row's workspace_id is set by refreshTicketWorkspaceId AFTER save).
+    let prospectiveWorkspaceId = '';
+    try {
+      const col = await this.colRepo.findOne({ where: { id: columnId } });
+      if (col) {
+        const board = await this.dataSource.getRepository(Board).findOne({ where: { id: col.board_id } });
+        prospectiveWorkspaceId = board?.workspace_id || '';
+      }
+    } catch { /* non-fatal — validateNextTicketId will skip the workspace guard */ }
+
+    let resolvedNextTicketId: string | null = null;
+    if (next_ticket_id !== undefined) {
+      try {
+        // currentTicketId=null on create — the row doesn't have an id yet, so
+        // the self-link guard inside the helper is a no-op here. Still safe
+        // to call because UUIDs are unforgeable; a fresh ticket can't pre-
+        // collide with itself.
+        resolvedNextTicketId = await validateNextTicketId(this.dataSource, next_ticket_id, null, prospectiveWorkspaceId);
+      } catch (e: any) {
+        return res.status(400).json({ error: e?.message || 'next_ticket_id rejected' });
+      }
+    }
 
     // Backfill name↔id whichever side the caller omitted — the MCP path
     // hands us *_id only and TicketCard reads the legacy text columns
@@ -117,6 +143,7 @@ export class TicketsController {
       assignee_id: resolvedAssigneeId, reporter_id: resolvedReporterId,
       labels: JSON.stringify(labels), channel_ids: JSON.stringify(channel_ids),
       position, parent_id: null, depth: 0, status: 'todo',
+      next_ticket_id: resolvedNextTicketId,
       created_by: creator.created_by, created_by_type: creator.created_by_type, created_by_id: creator.created_by_id,
     }));
 
@@ -352,13 +379,14 @@ export class TicketsController {
     const actorId = currentUser?.id || undefined;
     const actorName = currentUser?.name || currentUser?.email || undefined;
 
-    const { title, description, priority, assignee, reporter, reviewer_id, assignee_id, reporter_id, labels, channel_ids, status, prompt_text, base_repo_resource_id, base_branch, role_assignments } = body;
+    const { title, description, priority, assignee, reporter, reviewer_id, assignee_id, reporter_id, labels, channel_ids, status, prompt_text, base_repo_resource_id, base_branch, role_assignments, next_ticket_id } = body;
     const oldAssignee = ticket.assignee;
     const oldReporter = ticket.reporter;
     const oldReviewerId = ticket.reviewer_id;
     const oldStatus = ticket.status;
     const oldBaseRepoId = ticket.base_repo_resource_id;
     const oldBaseBranch = ticket.base_branch;
+    const oldNextTicketId = ticket.next_ticket_id;
 
     if (title !== undefined) ticket.title = title;
     if (description !== undefined) ticket.description = description;
@@ -409,6 +437,18 @@ export class TicketsController {
       ticket.base_repo_resource_id = next;
     }
     if (base_branch !== undefined) ticket.base_branch = base_branch || '';
+    if (next_ticket_id !== undefined) {
+      try {
+        ticket.next_ticket_id = await validateNextTicketId(
+          this.dataSource,
+          next_ticket_id,
+          ticket.id,
+          ticket.workspace_id || '',
+        );
+      } catch (e: any) {
+        return res.status(400).json({ error: e?.message || 'next_ticket_id rejected' });
+      }
+    }
 
     await this.ticketRepo.save(ticket);
 
@@ -485,6 +525,7 @@ export class TicketsController {
     if (priority !== undefined) changes.push('priority');
     if (base_repo_resource_id !== undefined && (base_repo_resource_id || '') !== (oldBaseRepoId || '')) changes.push('base_repo');
     if (base_branch !== undefined && (base_branch || '') !== (oldBaseBranch || '')) changes.push('base_branch');
+    if (next_ticket_id !== undefined && (ticket.next_ticket_id || '') !== (oldNextTicketId || '')) changes.push('next_ticket');
     const otherChanges = changes.filter(c => !['assignee', 'reporter', 'status'].includes(c));
     if (otherChanges.length > 0) {
       await this.activityService.logActivity({
