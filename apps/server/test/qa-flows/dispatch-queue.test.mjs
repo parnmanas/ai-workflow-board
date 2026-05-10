@@ -77,15 +77,12 @@ test('Dispatch queue: cap-skip → enqueue → priority-ordered dispatch + depth
   await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label: 'solo' });
   await createUser(app, getDataSourceToken, { name: 'driver' });
 
-  // Seed three builtin roles so dispatch can resolve assignment slugs
-  // through WorkspaceRole.slug.
+  // Builtin roles (assignee/reporter/reviewer/planner) are seeded by
+  // createWorkspace itself — just look up the assignee row we'll bind
+  // the manual TicketRoleAssignment fixtures to below.
   const roleRepo = ds.getRepository('WorkspaceRole');
-  const roles = await roleRepo.save([
-    roleRepo.create({ workspace_id: ws.id, slug: 'assignee', name: 'Assignee', position: 0, role_prompt: '', description: '', is_builtin: true }),
-    roleRepo.create({ workspace_id: ws.id, slug: 'reporter', name: 'Reporter', position: 1, role_prompt: '', description: '', is_builtin: true }),
-    roleRepo.create({ workspace_id: ws.id, slug: 'reviewer', name: 'Reviewer', position: 2, role_prompt: '', description: '', is_builtin: true }),
-  ]);
-  const assigneeRole = roles.find((r) => r.slug === 'assignee');
+  const assigneeRole = await roleRepo.findOne({ where: { workspace_id: ws.id, slug: 'assignee' } });
+  assert.ok(assigneeRole, 'createWorkspace should have seeded the assignee role');
 
   // Board with max_concurrent_tickets_per_agent=1 (the pre-v0.41 silent-drop
   // trigger) so any second concurrent trigger for `agent` MUST go to the queue.
