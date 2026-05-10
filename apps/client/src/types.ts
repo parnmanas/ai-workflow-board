@@ -327,6 +327,14 @@ export interface Ticket {
   // Carries url + default_branch so the picker UI doesn't need a second
   // round-trip per ticket open.
   base_repo?: TicketBaseRepo | null;
+  // Optional pointer to the ticket TriggerLoopService should auto-trigger
+  // once this one lands on a terminal column. Cleared/empty → no chain.
+  next_ticket_id?: string | null;
+  // Server-hydrated snapshot of next_ticket_id (loadTicketFull only) —
+  // title + current column name so the Next Ticket picker can render the
+  // link without a second round-trip. null when unset or when the linked
+  // ticket is missing / lives in another workspace.
+  next_ticket?: { id: string; title: string; column_name: string } | null;
   created_by: string; // Name of the creator (user or agent)
   created_by_type: 'user' | 'agent' | ''; // Creator type
   created_by_id: string; // GUID — references User.id or Agent.id
