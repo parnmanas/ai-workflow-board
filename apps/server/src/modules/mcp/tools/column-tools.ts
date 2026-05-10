@@ -6,9 +6,16 @@
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { Board } from '../../../entities/Board';
 import { BoardColumn } from '../../../entities/BoardColumn';
+import { computeRoleRoutingForNewColumn } from '../../boards/routing-config.helper';
 import { ok, err } from '../shared/helpers';
 import type { ToolContext } from './context';
+
+// Workflow kinds the runtime dispatch path keys off of (BoardColumn.kind).
+// Empty-string is allowed and treated as 'active' at runtime — it's the
+// back-compat default for columns that predate v0.41.
+const COLUMN_KIND_VALUES = ['', 'intake', 'active', 'review', 'merging', 'terminal'] as const;
 
 export function registerColumnTools(server: McpServer, ctx: ToolContext): void {
   const { dataSource } = ctx;
@@ -20,8 +27,14 @@ export function registerColumnTools(server: McpServer, ctx: ToolContext): void {
       board_id: z.string().describe('Board ID'),
       name: z.string().describe('Column name'),
       color: z.string().optional().default('#e2e8f0').describe('Column color (hex)'),
+      kind: z.enum(COLUMN_KIND_VALUES).optional()
+        .describe("Workflow kind used by runtime dispatch (intake|active|review|merging|terminal). Omit to default to '' (treated as 'active')."),
+      role_routing: z.array(z.string()).optional()
+        .describe("Role slugs to wake when a ticket lands on this column (e.g. ['assignee']). Omit to inherit from the parent board's routing_config under the (lowercased) column name."),
+      is_terminal: z.boolean().optional()
+        .describe('Whether tickets in this column are workflow end-state. Auto-syncs with `kind` (kind="terminal" implies is_terminal=true).'),
     },
-    async ({ board_id, name, color }) => {
+    async ({ board_id, name, color, kind, role_routing, is_terminal }) => {
       const repo = dataSource.getRepository(BoardColumn);
       const maxResult = await repo
         .createQueryBuilder('col')
@@ -29,15 +42,47 @@ export function registerColumnTools(server: McpServer, ctx: ToolContext): void {
         .where('col.board_id = :boardId', { boardId: board_id })
         .getRawOne();
       const position = (maxResult?.max ?? -1) + 1;
-      const column = await repo.save(repo.create({ board_id, name, position, color }));
+
+      // v0.41 — every runtime dispatch path reads BoardColumn.role_routing
+      // (NOT Board.routing_config). A new column created without an explicit
+      // role_routing arg still has to start with the slugs the operator
+      // already configured under that column name on the parent board, or
+      // it'll silently ignore routing for that column. Matches the
+      // writeRoutingConfigThrough path used elsewhere.
+      let roleRoutingJson: string;
+      if (role_routing !== undefined) {
+        roleRoutingJson = JSON.stringify(role_routing.filter(s => typeof s === 'string'));
+      } else {
+        const board = await dataSource.getRepository(Board).findOne({ where: { id: board_id } });
+        roleRoutingJson = board ? computeRoleRoutingForNewColumn(board, name) : '[]';
+      }
+
+      // is_terminal / kind synchronization mirrors update_column: kind='terminal'
+      // implies is_terminal=true; an unset kind on an is_terminal=true column
+      // upgrades to 'terminal'. Otherwise default kind='' (legacy 'active').
+      let resolvedKind: typeof COLUMN_KIND_VALUES[number] = (kind ?? '') as any;
+      let resolvedTerminal = !!is_terminal;
+      if (kind === 'terminal') {
+        if (is_terminal === false) {
+          return err("kind='terminal' requires is_terminal=true (or omit is_terminal to auto-sync)");
+        }
+        resolvedTerminal = true;
+      } else if (resolvedTerminal && !resolvedKind) {
+        resolvedKind = 'terminal';
+      }
+
+      const column = await repo.save(repo.create({
+        board_id,
+        name,
+        position,
+        color,
+        kind: resolvedKind,
+        role_routing: roleRoutingJson,
+        is_terminal: resolvedTerminal,
+      }));
       return ok(column);
     }
   );
-
-  // Workflow kinds the runtime dispatch path keys off of (BoardColumn.kind).
-  // Empty-string is allowed and treated as 'active' at runtime — it's the
-  // back-compat default for columns that predate v0.41.
-  const COLUMN_KIND_VALUES = ['', 'intake', 'active', 'review', 'merging', 'terminal'] as const;
 
   server.tool(
     'update_column',
