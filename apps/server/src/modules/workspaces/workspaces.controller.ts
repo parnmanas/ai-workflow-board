@@ -130,9 +130,33 @@ export class WorkspacesController {
   async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     const ws = await findOrFail(this.wsRepo, { where: { id } }, 'Workspace not found');
 
-    const { name, description } = body;
+    const {
+      name, description,
+      supervisor_stale_ms, supervisor_resend_ms, dispatch_queue_depth,
+    } = body;
     if (name !== undefined) ws.name = name;
     if (description !== undefined) ws.description = description;
+
+    // v0.41 — cadence settings (AC #4). These bound the supervisor
+    // backstop frequency and the per-agent dispatch queue depth. Defaults
+    // (30 min / 5 min / 100) live in the entity column; we accept any
+    // positive finite integer here and silently ignore garbage so a bad
+    // PATCH can't wedge the workspace into "0 ms stale check".
+    if (supervisor_stale_ms !== undefined) {
+      const v = Number(supervisor_stale_ms);
+      if (Number.isFinite(v) && v > 0) ws.supervisor_stale_ms = Math.floor(v);
+      else return res.status(400).json({ error: 'supervisor_stale_ms must be a positive number' });
+    }
+    if (supervisor_resend_ms !== undefined) {
+      const v = Number(supervisor_resend_ms);
+      if (Number.isFinite(v) && v > 0) ws.supervisor_resend_ms = Math.floor(v);
+      else return res.status(400).json({ error: 'supervisor_resend_ms must be a positive number' });
+    }
+    if (dispatch_queue_depth !== undefined) {
+      const v = Number(dispatch_queue_depth);
+      if (Number.isFinite(v) && v > 0) ws.dispatch_queue_depth = Math.floor(v);
+      else return res.status(400).json({ error: 'dispatch_queue_depth must be a positive number' });
+    }
 
     await this.wsRepo.save(ws);
     return res.json(ws);

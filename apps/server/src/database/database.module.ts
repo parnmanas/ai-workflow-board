@@ -126,6 +126,13 @@ export class DatabaseModule implements OnModuleInit {
       const tplIdByName = new Map(seededTemplates.map(t => [t.name, t.id]));
       const colPrompts: Record<string, string> = {};
       for (const col of savedCols) {
+        // SEED-ONLY name match — runtime dispatch reads `BoardColumn.kind`
+        // and `role_routing` exclusively (see ticket 47a90ea3 AC #3). This
+        // hits at workspace-creation time only to pair the default prompt
+        // templates with the freshly-minted default columns. TODO: migrate
+        // `default-prompt-templates.ts::column_match` from a lowercased
+        // name to a `kind_match: ColumnKind` enum so this last seed-time
+        // hardcode goes away too.
         const def = DEFAULT_PROMPT_TEMPLATES.find(d => d.column_match === col.name.toLowerCase());
         if (!def) continue;
         const tplId = tplIdByName.get(def.name);

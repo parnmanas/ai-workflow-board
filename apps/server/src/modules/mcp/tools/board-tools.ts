@@ -189,6 +189,10 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
       ]);
       const colPrompts: Record<string, string> = {};
       for (const col of savedCols) {
+        // SEED-ONLY name match (workspace/board creation). Runtime dispatch
+        // never reads column names — see ticket 47a90ea3 AC #3. TODO:
+        // migrate `column_match` to a `kind_match` enum so the last seed
+        // hardcode goes away.
         const def = DEFAULT_PROMPT_TEMPLATES.find(d => d.column_match === col.name.toLowerCase());
         if (!def) continue;
         const tplId = tplIdByName.get(def.name);
