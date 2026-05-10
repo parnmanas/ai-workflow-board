@@ -125,8 +125,18 @@ export class TriggerLoopService implements OnModuleInit {
       isTerminal = !!fallback?.is_terminal;
     }
 
-    // Terminal columns never trigger. Completion is the terminal column's job.
-    if (isTerminal) return;
+    // Terminal columns never trigger themselves. Completion is the terminal
+    // column's job. But a terminal landing can hand off to the next ticket
+    // in a chain: if `column_move` lands on a terminal column AND the moved
+    // ticket has `next_ticket_id` set, dispatch a `trigger_source: 'next_ticket'`
+    // round for the linked ticket's current column. This is the only path
+    // where one ticket's activity wakes a different ticket's roles.
+    if (isTerminal) {
+      if (log.action === 'moved' && ticket.next_ticket_id) {
+        await this._dispatchNextTicket(ticket, log.actor_id || '');
+      }
+      return;
+    }
 
     const routingConfig = safeJsonParse(routingConfigStr, {}) as Record<string, string | string[]>;
     if (!routingConfig || !Object.prototype.hasOwnProperty.call(routingConfig, columnName)) {
@@ -169,6 +179,106 @@ export class TriggerLoopService implements OnModuleInit {
       if (triggerSource !== 'column_move' && targetAgentId === log.actor_id) continue;
 
       await this._emitTrigger(ticket, targetAgentId, slug, triggerSource, log.actor_id || '');
+    }
+  }
+
+  /**
+   * Hand off from a finished ticket to its `next_ticket_id`: dispatch a
+   * `trigger_source: 'next_ticket'` round for the linked ticket's CURRENT
+   * column's routing roles. Mirrors the `column_move` loop body — workspace
+   * scope, role-slug → WorkspaceRole → TicketRoleAssignment, one emit per
+   * unique (slug, holder agent_id) pair.
+   *
+   * Skip cases (silent — log only):
+   *   - linked ticket missing
+   *   - linked ticket has no column (child / orphan)
+   *   - linked column itself is terminal (would just dead-end)
+   *   - linked column has no routing entry
+   *   - role unset on the linked ticket (no holder to wake)
+   *
+   * `actorId` is the original mover so the activity log audit trail still
+   * points at the human/agent who closed the source ticket.
+   */
+  private async _dispatchNextTicket(sourceTicket: Ticket, actorId: string): Promise<void> {
+    const nextId = sourceTicket.next_ticket_id;
+    if (!nextId) return;
+
+    const ticketRepo = this.dataSource.getRepository(Ticket);
+    const nextTicket = await ticketRepo.findOne({ where: { id: nextId } });
+    if (!nextTicket) {
+      this.logService.info('MCP', 'next_ticket dispatch skipped (linked ticket missing)', {
+        source_ticket_id: sourceTicket.id, next_ticket_id: nextId,
+      });
+      return;
+    }
+    if (!nextTicket.column_id) {
+      this.logService.info('MCP', 'next_ticket dispatch skipped (linked ticket has no column)', {
+        source_ticket_id: sourceTicket.id, next_ticket_id: nextId,
+      });
+      return;
+    }
+
+    // Resolve the linked ticket's current column + its board's routing_config.
+    // Same JOIN shape as the column_move path so SQLite is happy.
+    const colRepo = this.dataSource.getRepository(BoardColumn);
+    const colRow = await colRepo
+      .createQueryBuilder('col')
+      .innerJoin('boards', 'b', 'b.id = col.board_id')
+      .addSelect('col.name', 'name')
+      .addSelect('b.routing_config', 'routing_config')
+      .addSelect('col.is_terminal', 'is_terminal')
+      .where('col.id = :colId', { colId: nextTicket.column_id })
+      .getRawOne();
+    if (!colRow) return;
+
+    const nextIsTerminal = !!colRow.is_terminal;
+    if (nextIsTerminal) {
+      // The linked ticket already finished — nothing to do.
+      this.logService.info('MCP', 'next_ticket dispatch skipped (linked ticket sits on terminal column)', {
+        source_ticket_id: sourceTicket.id, next_ticket_id: nextId,
+      });
+      return;
+    }
+
+    const columnName: string = String(colRow.name || '').toLowerCase();
+    const routingConfigStr: string | null = colRow.routing_config ?? null;
+    const routingConfig = safeJsonParse(routingConfigStr, {}) as Record<string, string | string[]>;
+    if (!routingConfig || !Object.prototype.hasOwnProperty.call(routingConfig, columnName)) {
+      this.logService.info('MCP', 'next_ticket dispatch skipped (no routing entry for linked column)', {
+        source_ticket_id: sourceTicket.id, next_ticket_id: nextId, column: columnName,
+      });
+      return;
+    }
+    const rolesRaw = routingConfig[columnName];
+    const roles: string[] = Array.isArray(rolesRaw) ? rolesRaw : [rolesRaw];
+    if (roles.length === 0) return;
+
+    // Resolve role slugs against the linked ticket's workspace + assignments.
+    // Dedupe per (slug, holder) so a routing config that lists the same slug
+    // twice — or two distinct slugs that happen to share a holder agent_id —
+    // emits at most once per unique pair. The cap enforcement inside
+    // _emitTrigger is on (agent, ticket); the (slug, holder) dedup here is
+    // belt-and-suspenders against double-firing the same role wake-up.
+    const roleRepo = this.dataSource.getRepository(WorkspaceRole);
+    const assignRepo = this.dataSource.getRepository(TicketRoleAssignment);
+    const seen = new Set<string>();
+    for (const slug of roles) {
+      const role = await roleRepo.findOne({
+        where: { workspace_id: nextTicket.workspace_id, slug },
+      });
+      if (!role) continue;
+      const assignment = await assignRepo.findOne({
+        where: { ticket_id: nextTicket.id, role_id: role.id },
+      });
+      const targetAgentId = assignment?.agent_id || null;
+      if (!targetAgentId) continue;
+      const dedupeKey = `${slug}|${targetAgentId}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+      // No self-trigger guard here — by definition the actor that closed the
+      // source ticket may also hold a role on the next ticket, and we DO
+      // want to wake that subagent now (the chain semantics promise it).
+      await this._emitTrigger(nextTicket, targetAgentId, slug, 'next_ticket', actorId);
     }
   }
 

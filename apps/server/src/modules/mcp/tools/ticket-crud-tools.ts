@@ -12,6 +12,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { Agent } from '../../../entities/Agent';
+import { Board } from '../../../entities/Board';
 import { BoardColumn } from '../../../entities/BoardColumn';
 import { Resource } from '../../../entities/Resource';
 import { Ticket } from '../../../entities/Ticket';
@@ -26,6 +27,7 @@ import {
   resolveAgentIdAndName,
   shiftTicketPositions,
   deleteCommentAttachmentsForTicket,
+  validateNextTicketId,
 } from '../shared/ticket-helpers';
 import { getCallerAgent } from '../shared/session-auth';
 import type { ToolContext } from './context';
@@ -118,11 +120,12 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       column_name: z.string().optional().describe('Column name (case-insensitive, requires board_id)'),
       board_id: z.string().optional().describe('Board ID (used with column_name)'),
       subtasks: z.array(z.string()).optional().default([]).describe('List of subtask titles to create inline'),
+      next_ticket_id: z.string().optional().describe('Optional pointer to the ticket TriggerLoopService should auto-trigger once this one lands on a terminal column. Must live in the same workspace; cleared when omitted or empty.'),
       created_by: z.string().optional().default('').describe('Creator name (user or agent)'),
       created_by_type: z.enum(['user', 'agent']).optional().default('agent').describe('Creator type'),
       created_by_id: z.string().optional().default('').describe('Creator ID'),
     },
-    async ({ title, description, priority, assignee, reporter, assignee_id, reporter_id, reviewer_id, role_assignments, labels, channel_ids, column_id, column_name, board_id, subtasks, created_by, created_by_type, created_by_id }, extra: { sessionId?: string }) => {
+    async ({ title, description, priority, assignee, reporter, assignee_id, reporter_id, reviewer_id, role_assignments, labels, channel_ids, column_id, column_name, board_id, subtasks, next_ticket_id, created_by, created_by_type, created_by_id }, extra: { sessionId?: string }) => {
       let resolvedColumnId = column_id;
       if (!resolvedColumnId && column_name) {
         if (!board_id) return err('board_id is required when using column_name');
@@ -134,6 +137,26 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
 
       const col = await dataSource.getRepository(BoardColumn).findOne({ where: { id: resolvedColumnId } });
       if (!col) return err('Column not found');
+
+      // Resolve the destination column's workspace upfront — needed by the
+      // next_ticket_id workspace-guard which has to run before save (the
+      // freshly-created Ticket row's workspace_id is set by
+      // refreshTicketWorkspaceId AFTER save).
+      let prospectiveWorkspaceId = '';
+      try {
+        const board = await dataSource.getRepository(Board).findOne({ where: { id: col.board_id } });
+        prospectiveWorkspaceId = board?.workspace_id || '';
+      } catch { /* validateNextTicketId will skip the workspace guard if empty */ }
+
+      let resolvedNextTicketId: string | null = null;
+      if (next_ticket_id !== undefined) {
+        try {
+          // currentTicketId=null on create — see validateNextTicketId notes.
+          resolvedNextTicketId = await validateNextTicketId(dataSource, next_ticket_id, null, prospectiveWorkspaceId);
+        } catch (e: any) {
+          return err(e?.message || 'next_ticket_id rejected');
+        }
+      }
 
       // Auto-fill creator from authenticated agent if not provided
       const caller = getCallerAgent(extra);
@@ -168,6 +191,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           assignee: resolvedAssignee, reporter: resolvedReporter,
           assignee_id: resolvedAssigneeId, reporter_id: resolvedReporterId, reviewer_id,
           labels: JSON.stringify(labels), channel_ids: JSON.stringify(channel_ids), position,
+          next_ticket_id: resolvedNextTicketId,
           created_by: creatorName, created_by_type: creatorType, created_by_id: creatorId,
         }));
 
@@ -222,7 +246,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
 
   server.tool(
     'update_ticket',
-    'Update a root ticket\'s fields (title, description, priority, assignee, reporter, reviewer_id, labels, channel_ids, base_repo_resource_id, base_branch, role_assignments).\n\n' +
+    'Update a root ticket\'s fields (title, description, priority, assignee, reporter, reviewer_id, labels, channel_ids, base_repo_resource_id, base_branch, next_ticket_id, role_assignments).\n\n' +
     'NOTE: this tool does NOT change `status` and is intended for ROOT tickets. ' +
     'Status on a root ticket is driven by which column it sits in — use move_ticket to advance it. ' +
     'For SUBTASKS (depth > 0), use update_child_ticket — that\'s also where you mark a finished subtask ' +
@@ -245,8 +269,9 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       channel_ids: z.array(z.string()).optional().describe('New notification channel IDs'),
       base_repo_resource_id: z.string().optional().describe('Resource ID (type=repository) the ticket builds against. Empty string clears.'),
       base_branch: z.string().optional().describe('Branch the agent should treat as the base when starting work. Empty string clears.'),
+      next_ticket_id: z.string().optional().describe('Optional pointer to the ticket TriggerLoopService should auto-trigger once this one lands on a terminal column. Must live in the same workspace and cannot self-link. Empty string clears.'),
     },
-    async ({ ticket_id, title, description, priority, assignee, reporter, assignee_id, reporter_id, reviewer_id, role_assignments, labels, channel_ids, base_repo_resource_id, base_branch }, extra: { sessionId?: string }) => {
+    async ({ ticket_id, title, description, priority, assignee, reporter, assignee_id, reporter_id, reviewer_id, role_assignments, labels, channel_ids, base_repo_resource_id, base_branch, next_ticket_id }, extra: { sessionId?: string }) => {
       const ticketRepo = dataSource.getRepository(Ticket);
       const ticket = await ticketRepo.findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Ticket not found');
@@ -258,6 +283,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       const oldReporter = ticket.reporter;
       const oldBaseRepoId = ticket.base_repo_resource_id;
       const oldBaseBranch = ticket.base_branch;
+      const oldNextTicketId = ticket.next_ticket_id;
 
       const changes: string[] = [];
       if (title !== undefined) { ticket.title = title; changes.push('title'); }
@@ -322,6 +348,19 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
         const next = base_branch || '';
         ticket.base_branch = next;
         if (next !== (oldBaseBranch || '')) changes.push('base_branch');
+      }
+      if (next_ticket_id !== undefined) {
+        try {
+          ticket.next_ticket_id = await validateNextTicketId(
+            dataSource,
+            next_ticket_id,
+            ticket.id,
+            ticket.workspace_id || '',
+          );
+        } catch (e: any) {
+          return err(e?.message || 'next_ticket_id rejected');
+        }
+        if ((ticket.next_ticket_id || '') !== (oldNextTicketId || '')) changes.push('next_ticket');
       }
 
       await ticketRepo.save(ticket);

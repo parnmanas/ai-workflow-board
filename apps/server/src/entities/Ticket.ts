@@ -80,6 +80,14 @@ export class Ticket {
   @Column({ type: 'varchar', default: '' })
   base_branch: string;
 
+  // Optional pointer to the next ticket the team wants picked up automatically
+  // once this one finishes. When this ticket lands on a terminal column,
+  // TriggerLoopService dispatches a `trigger_source: 'next_ticket'` round
+  // for the linked ticket's current column's routing roles. Same-workspace +
+  // no-self-link guarded at write time. Empty / null disables the chain.
+  @Column({ type: 'varchar', nullable: true, default: null })
+  next_ticket_id: string | null;
+
   @Column({ type: 'varchar', default: '' })
   created_by: string;
 

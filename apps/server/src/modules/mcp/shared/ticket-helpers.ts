@@ -208,6 +208,45 @@ export async function refreshTicketWorkspaceId(
 }
 
 /**
+ * Validate a `next_ticket_id` candidate before persisting it on a ticket:
+ *   - empty / null / undefined  → returns null (clears the link)
+ *   - same id as the ticket itself → throws (no self-link)
+ *   - target row missing → throws
+ *   - target lives in a different workspace → throws
+ *
+ * Mirrors the `base_repo_resource_id` workspace guard so a guessed id from
+ * another workspace can never wire a cross-workspace trigger here.
+ *
+ * `currentTicketId` is the ticket being updated (or null when creating, in
+ * which case the self-link check is skipped — a new ticket can't reference
+ * itself before it has an id). `currentWorkspaceId` is the workspace the
+ * link is being established in; when empty, only the existence + self-link
+ * checks run (workspace guard skipped to keep parity with refreshTicketWorkspaceId
+ * deferred backfill — same posture as base_repo_resource_id).
+ */
+export async function validateNextTicketId(
+  scope: RepoScope,
+  raw: unknown,
+  currentTicketId: string | null,
+  currentWorkspaceId: string,
+): Promise<string | null> {
+  if (raw === undefined || raw === null) return null;
+  const candidate = String(raw).trim();
+  if (!candidate) return null;
+  if (currentTicketId && candidate === currentTicketId) {
+    throw new Error('next_ticket_id cannot point at the ticket itself');
+  }
+  const target = await scope.getRepository(Ticket).findOne({ where: { id: candidate } });
+  if (!target) {
+    throw new Error('next_ticket_id not found');
+  }
+  if (currentWorkspaceId && target.workspace_id && target.workspace_id !== currentWorkspaceId) {
+    throw new Error('next_ticket_id must point to a ticket in the same workspace');
+  }
+  return candidate;
+}
+
+/**
  * Shift sibling ticket positions within a scope.
  *
  *   scope: { column_id }  → root tickets in a board column (parent_id IS NULL).

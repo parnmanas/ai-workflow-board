@@ -534,6 +534,9 @@ export default function TicketPanel({
   // Branch list is fetched lazily when a repo is selected (git ls-remote).
   const [baseRepoId, setBaseRepoId] = useState<string>(activeTicket.base_repo_resource_id || '');
   const [baseBranch, setBaseBranch] = useState<string>(activeTicket.base_branch || '');
+  // Next ticket picker — empty string = unset. Drafts are committed via the
+  // same Save/Discard footer as the rest of the form (dirtyTicketFields).
+  const [nextTicketId, setNextTicketId] = useState<string>(activeTicket.next_ticket_id || '');
   const [repoOptions, setRepoOptions] = useState<Resource[]>([]);
   const [branchOptions, setBranchOptions] = useState<RepoBranch[]>([]);
   const [branchesLoading, setBranchesLoading] = useState(false);
@@ -589,6 +592,7 @@ export default function TicketPanel({
     setSelectedChannelIds(activeTicket.channel_ids || []);
     setBaseRepoId(activeTicket.base_repo_resource_id || '');
     setBaseBranch(activeTicket.base_branch || '');
+    setNextTicketId(activeTicket.next_ticket_id || '');
     setBranchOptions([]);
     setBranchesError(null);
     setRoleDrafts({});
@@ -726,11 +730,17 @@ export default function TicketPanel({
     if ((baseBranch || '') !== (activeTicket.base_branch || '')) {
       out.base_branch = baseBranch || null;
     }
+    if ((nextTicketId || '') !== (activeTicket.next_ticket_id || '')) {
+      // Empty draft → null clears the link on the server (REST + MCP both
+      // treat null/'' as "clear next_ticket_id"). Non-empty → the picked id.
+      out.next_ticket_id = nextTicketId || null;
+    }
     return out;
   }, [
-    title, description, priority, selectedChannelIds, baseRepoId, baseBranch,
+    title, description, priority, selectedChannelIds, baseRepoId, baseBranch, nextTicketId,
     activeTicket.title, activeTicket.description, activeTicket.priority,
     activeTicket.channel_ids, activeTicket.base_repo_resource_id, activeTicket.base_branch,
+    activeTicket.next_ticket_id,
   ]);
 
   // Role drafts that genuinely change the current holder. A draft equal to
@@ -762,10 +772,12 @@ export default function TicketPanel({
     setSelectedChannelIds(activeTicket.channel_ids || []);
     setBaseRepoId(activeTicket.base_repo_resource_id || '');
     setBaseBranch(activeTicket.base_branch || '');
+    setNextTicketId(activeTicket.next_ticket_id || '');
     setRoleDrafts({});
   }, [
     activeTicket.title, activeTicket.description, activeTicket.priority,
     activeTicket.channel_ids, activeTicket.base_repo_resource_id, activeTicket.base_branch,
+    activeTicket.next_ticket_id,
   ]);
 
   const handleSaveDraft = useCallback(async () => {
@@ -1872,6 +1884,47 @@ export default function TicketPanel({
                   </div>
                 )}
               </div>
+            </div>
+
+            {/* Next Ticket — when this ticket lands on a terminal column,
+                TriggerLoopService dispatches a `next_ticket` round for the
+                linked ticket's CURRENT column's routing roles. Picker is
+                drawn from boardTickets (excludes self + non-root tickets
+                are already filtered out by Board.tsx). The server-hydrated
+                next_ticket snapshot keeps the option visible even when the
+                linked ticket lives outside the current board view. */}
+            <div style={{ marginBottom: 14 }}>
+              <label style={labelStyle}>
+                Next Ticket
+                {activeTicket.next_ticket?.column_name
+                  ? ` · currently in ${activeTicket.next_ticket.column_name}`
+                  : ''}
+              </label>
+              <select
+                value={nextTicketId}
+                onChange={e => setNextTicketId(e.target.value)}
+                style={{
+                  background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
+                  padding: '5px 8px', color: tokens.colors.textStrong, fontSize: '12px', width: '100%', cursor: 'pointer',
+                }}
+              >
+                <option value="">— None —</option>
+                {/* Persisted link comes first so it always renders, even if
+                    the linked ticket lives on another board (boardTickets
+                    only carries the current board) or the picker hasn't
+                    received boardTickets yet. */}
+                {activeTicket.next_ticket && !(boardTickets || []).some(t => t.id === activeTicket.next_ticket!.id) && (
+                  <option value={activeTicket.next_ticket.id}>
+                    {activeTicket.next_ticket.title}
+                    {activeTicket.next_ticket.column_name ? ` (${activeTicket.next_ticket.column_name})` : ''}
+                  </option>
+                )}
+                {(boardTickets || [])
+                  .filter(t => t.id !== activeTicket.id)
+                  .map(t => (
+                    <option key={t.id} value={t.id}>{t.title}</option>
+                  ))}
+              </select>
             </div>
 
             {/* Created By */}
