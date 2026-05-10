@@ -169,20 +169,48 @@ export class TriggerLoopService implements OnModuleInit {
       });
       const targetAgentId = assignment?.agent_id || null;
       if (!targetAgentId) continue;
-      // Self-trigger guard, action-type aware (v0.34 onward):
+      // Self-trigger guard, action-type aware (v0.34 onward, refined v0.41):
+      //
       //   - comment / ticket_update: same agent_id implies the actor's own
       //     role context — re-firing on the same (ticket, role) would just
       //     wake the same persistent subagent that just produced the event,
-      //     which is a deadlock-shaped feedback loop. Skip.
-      //   - column_move: the destination column inherently shifts role
-      //     responsibility (e.g. Review → Merging changes owner from
-      //     reviewer to assignee). With v0.34's per-(ticket, role) plugin
-      //     subagents, the same agent_id holding both source and destination
-      //     roles still spawns a *separate* subagent for the new role —
-      //     there's no LLM-level self-loop to prevent. Pre-v0.34 the guard
-      //     was correct because everything ran in one session; now it
-      //     silently deadlocks any same-agent-multi-role workflow.
-      if (triggerSource !== 'column_move' && targetAgentId === log.actor_id) continue;
+      //     which is a deadlock-shaped feedback loop. Always skip.
+      //
+      //   - column_move: the destination column may shift role responsibility
+      //     (e.g. Review → Merging changes owner from reviewer → assignee).
+      //     With v0.34's per-(ticket, role) plugin subagents, a SAME-agent
+      //     DIFFERENT-role transition spawns a separate subagent for the new
+      //     role — there's no LLM-level loop to prevent and dropping the
+      //     trigger would silently deadlock single-agent multi-role workflows
+      //     (a single AWB agent holding assignee+reviewer+merger on the same
+      //     ticket is the production default).
+      //
+      //     But a SAME-agent SAME-role transition (e.g. assignee moves their
+      //     own ticket To Do → In Progress, both columns route to assignee)
+      //     IS a self-loop: the actor just performed the move that would
+      //     have triggered them, and re-emitting just spawns a redundant
+      //     subagent. Pre-v0.41 (and the bypass that lived here from v0.34
+      //     onward) the column_move case was unguarded entirely — it
+      //     happened to be safe in production only because fixtures /
+      //     prod tickets typically had no TicketRoleAssignment row, so
+      //     `targetAgentId` was null and the loop short-circuited above.
+      //     Once role assignments are reliably seeded the bypass becomes
+      //     a live self-loop, exercised by self-trigger-guard.test.mjs.
+      //
+      //     Discriminator: the actor is in role-shift (don't skip) iff the
+      //     actor holds at least one role on THIS ticket that is NOT the
+      //     target role. Otherwise the actor's only role is the target
+      //     role, the move is a same-role self-action, and we skip.
+      if (targetAgentId === log.actor_id) {
+        if (triggerSource !== 'column_move') continue;
+        const actorAssignments = await assignRepo.find({
+          where: { ticket_id: ticket.id, agent_id: log.actor_id || '' },
+        });
+        const hasOtherRole = actorAssignments.some(
+          (a) => a.role_id && a.role_id !== role.id,
+        );
+        if (!hasOtherRole) continue;
+      }
 
       await this._emitTrigger(ticket, targetAgentId, slug, triggerSource, log.actor_id || '');
     }
