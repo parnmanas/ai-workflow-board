@@ -126,6 +126,20 @@ export class TriggerLoopService implements OnModuleInit {
     // wakes a different ticket's roles.
     const isTerminal = (col as any).is_terminal === true || (col as any).kind === 'terminal';
     if (isTerminal) {
+      // Sweep any stale queued triggers that still target this ticket
+      // — they're no longer dispatchable now that the ticket sits on a
+      // terminal column. Without this sweep, dead entries would compete
+      // with valid items for the bounded queue depth and could evict
+      // legitimate high-priority work via the lowest-priority drop
+      // policy. Lazy cleanup at dispatch time only handles the head.
+      if (log.action === 'moved') {
+        const removed = this.dispatchQueue.removeForTicketEverywhere(ticket.id);
+        if (removed > 0) {
+          this.logService.info('MCP', 'terminal landing swept stale queue entries', {
+            ticket_id: ticket.id, column_id: col.id, removed,
+          });
+        }
+      }
       if (log.action === 'moved' && ticket.next_ticket_id) {
         await this._dispatchNextTicket(ticket, log.actor_id || '');
       }
@@ -570,37 +584,56 @@ export class TriggerLoopService implements OnModuleInit {
    * emits 'agent_idle' on every clearCurrentTask / sweep-driven shrink of
    * active_tasks, and we look for a queued trigger for that agent. If the
    * cap is still closed (race against another trigger that reserved the
-   * slot first), the head is left in the queue and the next idle signal
-   * picks it up.
+   * slot first), the dequeued item is requeued at its priority and the
+   * next idle signal retries.
    *
    * Re-fetches the ticket / column at dispatch time so a stale queue
    * entry can't ship out a wrong trigger payload — terminal landings
-   * cancel the dispatch and remove the item silently. Same for tickets
+   * cancel the dispatch and drop the item silently. Same for tickets
    * that disappeared (deleted while queued).
+   *
+   * Concurrency contract — `_tryDispatchFromQueue` may run twice on the
+   * same agent simultaneously (clearCurrentTask + sweep stale-task
+   * cleanup interleaved, or two clears within the same tick). The previous
+   * peek-then-dequeue layout would let one coroutine peek head A, the
+   * other dequeue head A, the first dequeue head B, and the first emit
+   * with `ticket=A, role=B.role` — a mismatched payload. The fix below
+   * dequeues FIRST and re-resolves ticket/col exclusively from the
+   * dequeued `item`, so each coroutine dispatches its own item self-
+   * consistently or requeues it without ever crossing references.
    */
   private async _tryDispatchFromQueue(agentId: string): Promise<void> {
     if (!agentId) return;
-    const head = this.dispatchQueue.peek(agentId);
-    if (!head) return;
+    // Cheap fast-bail without mutating state — dequeueHead is the
+    // authoritative gate. peek() never affects ordering, so a concurrent
+    // dequeue racing past this check just means we exit early; correct.
+    if (!this.dispatchQueue.peek(agentId)) return;
 
-    // Cap re-check — another concurrent _emitTrigger may have consumed
-    // the freed slot before this idle signal landed. Leave the queue
-    // head where it is and wait for the next idle signal.
-    const activeTicketIds = this.agentStatusService.getActiveTicketIds(agentId);
-    const pendingTicketIds = this._getPendingTicketIds(agentId);
-    const inflight = new Set([...activeTicketIds, ...pendingTicketIds]);
-    let maxConcurrent = 1;
+    // Authoritative pop. Every subsequent read uses `item.ticket_id` /
+    // `item.role` — never a separate peek snapshot. `item` is now this
+    // coroutine's exclusive responsibility: emit it, drop it, or requeue.
+    const item = await this.dispatchQueue.dequeueHead(agentId);
+    if (!item) return;
+
     try {
-      const ticket = await this.dataSource.getRepository(Ticket).findOne({ where: { id: head.ticket_id } });
+      const ticket = await this.dataSource
+        .getRepository(Ticket)
+        .findOne({ where: { id: item.ticket_id } });
       if (!ticket || !ticket.column_id) {
         // Ticket vanished or got detached from any column — drop the
-        // stale queue entry, don't dispatch.
-        await this.dispatchQueue.dequeueHead(agentId);
+        // stale queue entry, don't dispatch and don't requeue.
+        this.logService.info('MCP', 'dispatched_from_queue dropped (ticket missing)', {
+          agent_id: agentId, ticket_id: item.ticket_id, role: item.role,
+        });
         return;
       }
-      const col = await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } });
+      const col = await this.dataSource
+        .getRepository(BoardColumn)
+        .findOne({ where: { id: ticket.column_id } });
       if (!col) {
-        await this.dispatchQueue.dequeueHead(agentId);
+        this.logService.info('MCP', 'dispatched_from_queue dropped (column missing)', {
+          agent_id: agentId, ticket_id: item.ticket_id, role: item.role,
+        });
         return;
       }
       // Terminal column landed while the trigger was in the queue — the
@@ -609,23 +642,38 @@ export class TriggerLoopService implements OnModuleInit {
       // comment) that don't need this stale entry.
       const isTerminal = (col as any).is_terminal === true || (col as any).kind === 'terminal';
       if (isTerminal) {
-        await this.dispatchQueue.dequeueHead(agentId);
-        return;
-      }
-      const board = await this.dataSource.getRepository(Board).findOne({ where: { id: col.board_id } });
-      if (board && Number.isFinite(board.max_concurrent_tickets_per_agent)) {
-        maxConcurrent = Math.max(1, Math.floor(board.max_concurrent_tickets_per_agent));
-      }
-      if (!inflight.has(head.ticket_id) && inflight.size >= maxConcurrent) {
-        // Still capped — keep the item where it is.
+        this.logService.info('MCP', 'dispatched_from_queue dropped (terminal landing)', {
+          agent_id: agentId, ticket_id: item.ticket_id, role: item.role,
+        });
         return;
       }
 
-      // Pop and dispatch via emitAgentTrigger which owns the cap-check
-      // gate. On cap-still-closed it would re-enqueue; on success the
-      // queue entry has already been removed so the trigger won't double.
-      const item = await this.dispatchQueue.dequeueHead(agentId);
-      if (!item) return;
+      // Cap snapshot is taken HERE — right before dispatch — so a
+      // concurrent _emitTrigger that reserved a slot between dequeue
+      // and emit is observed and we requeue instead of overcommitting.
+      const activeTicketIds = this.agentStatusService.getActiveTicketIds(agentId);
+      const pendingTicketIds = this._getPendingTicketIds(agentId);
+      const inflight = new Set<string>([...activeTicketIds, ...pendingTicketIds]);
+      let maxConcurrent = 1;
+      const board = await this.dataSource
+        .getRepository(Board)
+        .findOne({ where: { id: col.board_id } });
+      if (board && Number.isFinite(board.max_concurrent_tickets_per_agent)) {
+        maxConcurrent = Math.max(1, Math.floor(board.max_concurrent_tickets_per_agent));
+      }
+      if (!inflight.has(item.ticket_id) && inflight.size >= maxConcurrent) {
+        // Cap closed mid-dispatch — put the item back at its priority
+        // (no fresh `trigger_enqueued` row; the original is still on
+        // record from the cap-skip emit). The next agent_idle signal
+        // will retry.
+        this.dispatchQueue.requeueAtPriority(item);
+        this.logService.info('MCP', 'dispatch-from-queue requeued (cap closed mid-dispatch)', {
+          agent_id: agentId, ticket_id: item.ticket_id, role: item.role,
+          inflight_count: inflight.size, max_concurrent: maxConcurrent,
+        });
+        return;
+      }
+
       await this._emitTrigger(
         ticket,
         item.agent_id,
@@ -636,8 +684,12 @@ export class TriggerLoopService implements OnModuleInit {
       );
     } catch (e) {
       this.logService.error('MCP', 'TriggerLoop dispatch-from-queue failed', {
-        err: String(e), agent_id: agentId, head_ticket_id: head.ticket_id,
+        err: String(e), agent_id: agentId, item_ticket_id: item.ticket_id, item_role: item.role,
       });
+      // Don't requeue on exception — exceptions usually indicate a
+      // persistent fault (DB unreachable, schema drift, etc.) that
+      // would just loop forever. The supervisor stale-allocation
+      // re-push is the eventual-consistency backstop.
     }
   }
 

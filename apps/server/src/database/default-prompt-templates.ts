@@ -30,7 +30,19 @@ export interface DefaultPromptTemplateDef {
   name: string;
   description: string;
   category: string;
-  /** Lowercased column name (matches DEFAULT_COLUMNS .name) to auto-link this template to. Empty string → no auto-link. */
+  /**
+   * Lowercased column name (matches DEFAULT_COLUMNS .name) to auto-link this
+   * template to. Empty string → no auto-link.
+   *
+   * SEED-ONLY surface — used at workspace/board creation time to pair the
+   * default templates with the freshly-minted default columns. Runtime
+   * dispatch (`apps/server/src/modules/agents/**`) never reads column names;
+   * it goes through `BoardColumn.kind` and `role_routing` exclusively (ticket
+   * 47a90ea3 AC #3 enforces zero `name.toLowerCase()` compares in the
+   * dispatch path). Migrating this field to `kind_match: ColumnKind` would
+   * remove the last seed-time hardcode; tracked as a follow-up rather than
+   * landed in this ticket since it's outside the runtime starvation scope.
+   */
   column_match: string;
   content: string;
 }
@@ -380,7 +392,7 @@ This ticket is in the Done column. Merging already landed the code and deleted t
    - One line acknowledging the ticket is fully complete from the reporter's side.
    - Reference the merge commit SHA from the Merging comment (copy it, do not re-compute).
 
-That's it. The terminal landing fires \`agent_idle\` on every role holder for this board, which both drains the dispatch queue (any high-priority queued triggers go out) and gives \`BacklogPromotionService\` a chance to pull the next intake ticket forward. No manual scheduling pass is needed or wanted.
+That's it. The terminal landing eventually fires \`agent_idle\` for the merging agent (when its subagent exits), which drains that agent's dispatch queue and gives \`BacklogPromotionService\` a chance to pull the next intake ticket forward. No manual scheduling pass is needed or wanted.
 
 ## Notes
 

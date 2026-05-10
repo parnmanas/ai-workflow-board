@@ -114,7 +114,17 @@ export class AgentDispatchQueueService {
    * was higher priority).
    */
   async enqueue(item: QueueItem): Promise<{ enqueued: boolean; dropped?: QueueItem }> {
-    const queue = this.queues.get(item.agent_id) ?? [];
+    // CRITICAL — get-or-create + register the queue array SYNCHRONOUSLY
+    // (no await between get and set). Two concurrent enqueues for the
+    // same fresh agent both read `undefined`, both `?? []` to a NEW
+    // array, and only the last `set` wins — silently dropping one item.
+    // Touching `this.queues.set` before the await binds both calls to
+    // the same array reference so the race becomes a no-op double-push.
+    let queue = this.queues.get(item.agent_id);
+    if (!queue) {
+      queue = [];
+      this.queues.set(item.agent_id, queue);
+    }
 
     // Resolve the workspace-level depth cap. Fallback to the default if
     // the workspace row is unreachable — preferable to dropping the item
@@ -123,7 +133,6 @@ export class AgentDispatchQueueService {
 
     queue.push(item);
     sortQueueInPlace(queue);
-    this.queues.set(item.agent_id, queue);
 
     let dropped: QueueItem | undefined;
     if (queue.length > depth) {
@@ -210,6 +219,46 @@ export class AgentDispatchQueueService {
     if (next.length === 0) this.queues.delete(agentId);
     else this.queues.set(agentId, next);
     return before - next.length;
+  }
+
+  /**
+   * Drop every queued item for the given ticket across ALL per-agent
+   * queues. Wired to the terminal-landing path: once a ticket reaches a
+   * terminal column, any queued trigger naming that ticket is stale by
+   * definition (the destination column is no longer triggerable). Without
+   * this sweep, depth-cap pressure could evict still-valid high-priority
+   * items in favour of these dead entries until each one drifts up to the
+   * head and gets dropped lazily by `_tryDispatchFromQueue`.
+   *
+   * Returns total items removed across all agents.
+   */
+  removeForTicketEverywhere(ticketId: string): number {
+    let removed = 0;
+    for (const agentId of Array.from(this.queues.keys())) {
+      removed += this.removeForTicket(agentId, ticketId);
+    }
+    return removed;
+  }
+
+  /**
+   * Re-insert a previously dequeued item without writing a fresh
+   * `trigger_enqueued` audit row. Used by `_tryDispatchFromQueue` when
+   * the cap is found still-closed AFTER the dequeue: we put the item
+   * back in priority order and wait for the next idle signal. The
+   * original `trigger_enqueued` from the cap-skip emit is still on
+   * record, so re-enqueue would be misleading double-counting.
+   *
+   * Bypasses the depth cap on purpose — re-insertion is recovery from
+   * our own dequeue, not an enqueue admitting a new item.
+   */
+  requeueAtPriority(item: QueueItem): void {
+    let queue = this.queues.get(item.agent_id);
+    if (!queue) {
+      queue = [];
+      this.queues.set(item.agent_id, queue);
+    }
+    queue.push(item);
+    sortQueueInPlace(queue);
   }
 
   /**
