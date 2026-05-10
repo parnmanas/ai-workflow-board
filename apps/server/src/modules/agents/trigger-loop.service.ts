@@ -1,4 +1,4 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { Injectable, OnModuleInit, forwardRef, Inject } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { randomUUID } from 'crypto';
@@ -14,6 +14,8 @@ import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
 import { AgentStatusService } from './agent-status.service';
+import { AgentDispatchQueueService, QueueItem } from './agent-dispatch-queue.service';
+import { priorityIndex } from './priority';
 
 // Pure SSE emitter. The AgentTrigger DB table was removed in v0.25.0 —
 // delivery is fire-and-forget. Backstop for dropped SSE is now
@@ -55,12 +57,28 @@ export class TriggerLoopService implements OnModuleInit {
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly logService: LogService,
     private readonly agentStatusService: AgentStatusService,
+    @Inject(forwardRef(() => AgentDispatchQueueService))
+    private readonly dispatchQueue: AgentDispatchQueueService,
   ) {}
 
   onModuleInit() {
     activityEvents.on('activity', (log: ActivityLog) => {
       this._handleActivity(log).catch((e: unknown) => {
         this.logService.error('MCP', 'TriggerLoop error in _handleActivity', { err: e });
+      });
+    });
+
+    // v0.41 — close the loop on cap-skip → enqueue → dispatch.
+    //
+    // AgentStatusService emits 'agent_idle' whenever an agent's active_tasks
+    // shrinks (clearCurrentTask path or sweep stale-task cleanup). Use that
+    // as the capacity signal: pull the highest-priority queued item for
+    // this agent and try to fire it. The dispatch path re-checks the cap
+    // and ticket existence so a stale queue entry can't stomp on a busy
+    // agent — see _tryDispatchFromQueue for the contract.
+    activityEvents.on('agent_idle', (payload: { agent_id: string }) => {
+      this._tryDispatchFromQueue(payload?.agent_id || '').catch((e: unknown) => {
+        this.logService.error('MCP', 'TriggerLoop error in _tryDispatchFromQueue', { err: e });
       });
     });
   }
@@ -86,51 +104,27 @@ export class TriggerLoopService implements OnModuleInit {
     const ticket = await ticketRepo.findOne({ where: { id: log.ticket_id } });
     if (!ticket) return;
 
-    // Resolve the column name:
-    //   'moved': destination column is in new_value
-    //   other:   ticket's current column
-    let columnName: string;
-    if (log.action === 'moved' && log.new_value) {
-      columnName = log.new_value.toLowerCase();
-    } else if (ticket.column_id) {
-      const col = await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } });
-      if (!col) return;
-      columnName = col.name.toLowerCase();
-    } else {
-      return;
-    }
+    // v0.41 — column resolution is column-id driven, not name-driven.
+    // The ticket's current column_id is the ground truth (the previous
+    // code resolved by lowercased column name to look up routing_config,
+    // a hardcoded path now banned). For 'moved' activities the ticket
+    // already points at the destination column row by the time the
+    // ActivityLog is written, so reading ticket.column_id covers both
+    // cases without a name match.
+    if (!ticket.column_id) return;
+    const col = await this.dataSource
+      .getRepository(BoardColumn)
+      .findOne({ where: { id: ticket.column_id } });
+    if (!col) return;
 
-    // Resolve routing_config from the ticket's board. Split query to keep SQLite happy.
-    const colRepo = this.dataSource.getRepository(BoardColumn);
-    const colRow = await colRepo
-      .createQueryBuilder('col')
-      .innerJoin('boards', 'b', 'b.id = col.board_id')
-      .addSelect('b.routing_config', 'routing_config')
-      .addSelect('col.is_terminal', 'is_terminal')
-      .where('LOWER(col.name) = LOWER(:name)', { name: columnName })
-      .andWhere('col.board_id IN (SELECT bc.board_id FROM columns bc WHERE bc.id = :colId)', { colId: ticket.column_id || '' })
-      .getRawOne();
-
-    let routingConfigStr: string | null = colRow?.routing_config ?? null;
-    let isTerminal: boolean = !!colRow?.is_terminal;
-    if (!routingConfigStr && log.action === 'moved') {
-      const fallback = await colRepo
-        .createQueryBuilder('col')
-        .innerJoin('boards', 'b', 'b.id = col.board_id')
-        .addSelect('b.routing_config', 'routing_config')
-        .addSelect('col.is_terminal', 'is_terminal')
-        .where('LOWER(col.name) = LOWER(:name)', { name: columnName })
-        .getRawOne();
-      routingConfigStr = fallback?.routing_config ?? null;
-      isTerminal = !!fallback?.is_terminal;
-    }
-
-    // Terminal columns never trigger themselves. Completion is the terminal
-    // column's job. But a terminal landing can hand off to the next ticket
-    // in a chain: if `column_move` lands on a terminal column AND the moved
-    // ticket has `next_ticket_id` set, dispatch a `trigger_source: 'next_ticket'`
-    // round for the linked ticket's current column. This is the only path
-    // where one ticket's activity wakes a different ticket's roles.
+    // Terminal columns never trigger themselves. Completion is the
+    // terminal column's job. But a terminal landing can hand off to the
+    // next ticket in a chain: if `column_move` lands on a terminal column
+    // AND the moved ticket has `next_ticket_id` set, dispatch a
+    // `trigger_source: 'next_ticket'` round for the linked ticket's
+    // current column. This is the only path where one ticket's activity
+    // wakes a different ticket's roles.
+    const isTerminal = (col as any).is_terminal === true || (col as any).kind === 'terminal';
     if (isTerminal) {
       if (log.action === 'moved' && ticket.next_ticket_id) {
         await this._dispatchNextTicket(ticket, log.actor_id || '');
@@ -138,13 +132,11 @@ export class TriggerLoopService implements OnModuleInit {
       return;
     }
 
-    const routingConfig = safeJsonParse(routingConfigStr, {}) as Record<string, string | string[]>;
-    if (!routingConfig || !Object.prototype.hasOwnProperty.call(routingConfig, columnName)) {
-      return;
-    }
-    const rolesRaw = routingConfig[columnName];
-    const roles: string[] = Array.isArray(rolesRaw) ? rolesRaw : [rolesRaw];
-    if (roles.length === 0) return;
+    // v0.41 — read role slugs straight off the column row. Replaces the
+    // old `Board.routing_config[col.name.toLowerCase()]` lookup; column
+    // name compares are forbidden in the dispatch path.
+    const roles = safeJsonParse<string[]>((col as any).role_routing, []);
+    if (!Array.isArray(roles) || roles.length === 0) return;
 
     // Resolve role slugs against the ticket's workspace roles + assignments.
     // Pre-v0.34 this loop indexed `ROLE_TO_FIELD[role]` and read the agent ID
@@ -218,20 +210,15 @@ export class TriggerLoopService implements OnModuleInit {
       return;
     }
 
-    // Resolve the linked ticket's current column + its board's routing_config.
-    // Same JOIN shape as the column_move path so SQLite is happy.
-    const colRepo = this.dataSource.getRepository(BoardColumn);
-    const colRow = await colRepo
-      .createQueryBuilder('col')
-      .innerJoin('boards', 'b', 'b.id = col.board_id')
-      .addSelect('col.name', 'name')
-      .addSelect('b.routing_config', 'routing_config')
-      .addSelect('col.is_terminal', 'is_terminal')
-      .where('col.id = :colId', { colId: nextTicket.column_id })
-      .getRawOne();
-    if (!colRow) return;
+    // v0.41 — resolve the linked ticket's column row by id. Routing reads
+    // `BoardColumn.role_routing` directly; no Board.routing_config /
+    // lowercased-name lookup is performed.
+    const col = await this.dataSource
+      .getRepository(BoardColumn)
+      .findOne({ where: { id: nextTicket.column_id } });
+    if (!col) return;
 
-    const nextIsTerminal = !!colRow.is_terminal;
+    const nextIsTerminal = (col as any).is_terminal === true || (col as any).kind === 'terminal';
     if (nextIsTerminal) {
       // The linked ticket already finished — nothing to do.
       this.logService.info('MCP', 'next_ticket dispatch skipped (linked ticket sits on terminal column)', {
@@ -240,18 +227,13 @@ export class TriggerLoopService implements OnModuleInit {
       return;
     }
 
-    const columnName: string = String(colRow.name || '').toLowerCase();
-    const routingConfigStr: string | null = colRow.routing_config ?? null;
-    const routingConfig = safeJsonParse(routingConfigStr, {}) as Record<string, string | string[]>;
-    if (!routingConfig || !Object.prototype.hasOwnProperty.call(routingConfig, columnName)) {
-      this.logService.info('MCP', 'next_ticket dispatch skipped (no routing entry for linked column)', {
-        source_ticket_id: sourceTicket.id, next_ticket_id: nextId, column: columnName,
+    const roles = safeJsonParse<string[]>((col as any).role_routing, []);
+    if (!Array.isArray(roles) || roles.length === 0) {
+      this.logService.info('MCP', 'next_ticket dispatch skipped (no role_routing on linked column)', {
+        source_ticket_id: sourceTicket.id, next_ticket_id: nextId, column_id: col.id,
       });
       return;
     }
-    const rolesRaw = routingConfig[columnName];
-    const roles: string[] = Array.isArray(rolesRaw) ? rolesRaw : [rolesRaw];
-    if (roles.length === 0) return;
 
     // Resolve role slugs against the linked ticket's workspace + assignments.
     // Dedupe per (slug, holder) so a routing config that lists the same slug
@@ -481,9 +463,13 @@ export class TriggerLoopService implements OnModuleInit {
     const inflightSet = new Set<string>([...activeTicketIds, ...pendingTicketIds]);
     const alreadyOnTarget = inflightSet.has(ticket.id);
     if (!alreadyOnTarget && inflightSet.size >= maxConcurrent) {
+      // v0.41 — cap-exceeded triggers are ENQUEUED, not silently dropped.
+      // The dispatch queue resorts by priority_index so a high-priority
+      // Review column-move that arrives mid-promotion jumps ahead of any
+      // medium / low items already pending for this agent.
       this.logService.info(
         'MCP',
-        'agent_trigger skipped (per-board cap reached)',
+        'agent_trigger queued (per-board cap reached)',
         {
           ticket_id: ticket.id,
           agent_id: agentId,
@@ -494,24 +480,24 @@ export class TriggerLoopService implements OnModuleInit {
           pending_ticket_ids: pendingTicketIds,
         },
       );
-      // Activity-log the skip so admins can see what was queued/dropped.
-      // Mirrors the manual-trigger audit row shape; trigger_source carries
-      // the original source so post-mortems aren't blind.
-      const activityLogRepo = this.dataSource.getRepository(ActivityLog);
-      await activityLogRepo.save(
-        activityLogRepo.create({
-          entity_type: 'ticket',
-          entity_id: ticket.id,
-          ticket_id: ticket.id,
-          actor_id: 'system',
-          actor_name: 'TriggerLoopService',
-          action: 'trigger_skipped_cap',
-          new_value: `agent=${agentId} max=${maxConcurrent} active=${activeTicketIds.length} pending=${pendingTicketIds.length}`,
-          role,
-          trigger_source: triggerSource,
-        }),
-      );
-      return '';
+      const triggerId = randomUUID();
+      const queueItem: QueueItem = {
+        ticket_id: ticket.id,
+        role,
+        agent_id: agentId,
+        workspace_id: ticket.workspace_id,
+        priority_index: priorityIndex(ticket.priority),
+        trigger_id: triggerId,
+        trigger_source: triggerSource,
+        enqueued_at: Date.now(),
+        triggered_by: triggeredBy,
+        force_respawn: opts?.forceRespawn === true,
+      };
+      const { enqueued } = await this.dispatchQueue.enqueue(queueItem);
+      // Return the trigger_id either way — callers can correlate it
+      // against the dispatched_from_queue / queue_dropped_low_priority
+      // activity rows to see what happened.
+      return enqueued ? triggerId : '';
     }
 
     // Reserve synchronously, before emit. A subsequent _emitTrigger that
@@ -549,7 +535,110 @@ export class TriggerLoopService implements OnModuleInit {
       ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource, force_respawn: forceRespawn,
     });
 
+    // v0.41 — observability hook required by ticket 47a90ea3 acceptance #5.
+    // Every successful dispatch leaves a `trigger_emitted` ActivityLog row
+    // so admins can correlate against `trigger_enqueued` / `dispatched_from_queue`
+    // / `queue_dropped_low_priority` and see the full lifecycle of a trigger.
+    try {
+      const activityLogRepo = this.dataSource.getRepository(ActivityLog);
+      await activityLogRepo.save(activityLogRepo.create({
+        entity_type: 'ticket',
+        entity_id: ticket.id,
+        ticket_id: ticket.id,
+        actor_id: 'system',
+        actor_name: 'TriggerLoopService',
+        action: 'trigger_emitted',
+        new_value: `agent=${agentId} priority_index=${priorityIndex(ticket.priority)} force_respawn=${forceRespawn}`,
+        role,
+        trigger_source: triggerSource,
+      }));
+    } catch (e) {
+      // Never block the emit on observability writes. A missed log row
+      // is preferable to a missed trigger.
+      this.logService.warn('MCP', 'trigger_emitted activity log write failed (non-fatal)', {
+        err: String(e), ticket_id: ticket.id, agent_id: agentId,
+      });
+    }
+
     return triggerId;
+  }
+
+  /**
+   * v0.41 — drain the dispatch queue head for the given agent, if any.
+   *
+   * Wired to the activityEvents `'agent_idle'` signal: AgentStatusService
+   * emits 'agent_idle' on every clearCurrentTask / sweep-driven shrink of
+   * active_tasks, and we look for a queued trigger for that agent. If the
+   * cap is still closed (race against another trigger that reserved the
+   * slot first), the head is left in the queue and the next idle signal
+   * picks it up.
+   *
+   * Re-fetches the ticket / column at dispatch time so a stale queue
+   * entry can't ship out a wrong trigger payload — terminal landings
+   * cancel the dispatch and remove the item silently. Same for tickets
+   * that disappeared (deleted while queued).
+   */
+  private async _tryDispatchFromQueue(agentId: string): Promise<void> {
+    if (!agentId) return;
+    const head = this.dispatchQueue.peek(agentId);
+    if (!head) return;
+
+    // Cap re-check — another concurrent _emitTrigger may have consumed
+    // the freed slot before this idle signal landed. Leave the queue
+    // head where it is and wait for the next idle signal.
+    const activeTicketIds = this.agentStatusService.getActiveTicketIds(agentId);
+    const pendingTicketIds = this._getPendingTicketIds(agentId);
+    const inflight = new Set([...activeTicketIds, ...pendingTicketIds]);
+    let maxConcurrent = 1;
+    try {
+      const ticket = await this.dataSource.getRepository(Ticket).findOne({ where: { id: head.ticket_id } });
+      if (!ticket || !ticket.column_id) {
+        // Ticket vanished or got detached from any column — drop the
+        // stale queue entry, don't dispatch.
+        await this.dispatchQueue.dequeueHead(agentId);
+        return;
+      }
+      const col = await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } });
+      if (!col) {
+        await this.dispatchQueue.dequeueHead(agentId);
+        return;
+      }
+      // Terminal column landed while the trigger was in the queue — the
+      // dispatch is no longer meaningful; drop silently. The terminal
+      // landing has its own handlers (next_ticket_id chain, completion
+      // comment) that don't need this stale entry.
+      const isTerminal = (col as any).is_terminal === true || (col as any).kind === 'terminal';
+      if (isTerminal) {
+        await this.dispatchQueue.dequeueHead(agentId);
+        return;
+      }
+      const board = await this.dataSource.getRepository(Board).findOne({ where: { id: col.board_id } });
+      if (board && Number.isFinite(board.max_concurrent_tickets_per_agent)) {
+        maxConcurrent = Math.max(1, Math.floor(board.max_concurrent_tickets_per_agent));
+      }
+      if (!inflight.has(head.ticket_id) && inflight.size >= maxConcurrent) {
+        // Still capped — keep the item where it is.
+        return;
+      }
+
+      // Pop and dispatch via emitAgentTrigger which owns the cap-check
+      // gate. On cap-still-closed it would re-enqueue; on success the
+      // queue entry has already been removed so the trigger won't double.
+      const item = await this.dispatchQueue.dequeueHead(agentId);
+      if (!item) return;
+      await this._emitTrigger(
+        ticket,
+        item.agent_id,
+        item.role,
+        item.trigger_source,
+        item.triggered_by,
+        { forceRespawn: item.force_respawn === true },
+      );
+    } catch (e) {
+      this.logService.error('MCP', 'TriggerLoop dispatch-from-queue failed', {
+        err: String(e), agent_id: agentId, head_ticket_id: head.ticket_id,
+      });
+    }
   }
 
   /**
@@ -587,7 +676,7 @@ export class TriggerLoopService implements OnModuleInit {
   }
 }
 
-function safeJsonParse(val: string | null | undefined, fallback: any): any {
-  try { return JSON.parse(val || JSON.stringify(fallback)); }
+function safeJsonParse<T = any>(val: string | null | undefined, fallback: T): T {
+  try { return JSON.parse(val || JSON.stringify(fallback)) as T; }
   catch { return fallback; }
 }

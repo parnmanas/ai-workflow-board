@@ -22,13 +22,18 @@ import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import { Agent } from '../../entities/Agent';
 import { Ticket } from '../../entities/Ticket';
+import { Workspace } from '../../entities/Workspace';
 import { LogService } from '../../services/log.service';
 import { AllocationService, AllocatedTicketRow } from './allocation.service';
 import { TriggerLoopService } from './trigger-loop.service';
 
 const SUPERVISOR_TICK_MS = 60_000;
-const SUPERVISOR_STALE_MS = 30 * 60_000;
-const SUPERVISOR_RESEND_MS = 5 * 60_000;
+// Defaults — overridable per Workspace via Workspace.supervisor_stale_ms /
+// Workspace.supervisor_resend_ms (v0.41 makes these runtime settings).
+// The constants live here only as the in-code fallback for workspaces
+// whose row hasn't been backfilled yet, or when a settings lookup errors.
+const DEFAULT_SUPERVISOR_STALE_MS = 30 * 60_000;
+const DEFAULT_SUPERVISOR_RESEND_MS = 5 * 60_000;
 // Match AgentStatusService.OFFLINE_THRESHOLD_MS. Agents whose last_seen_at is
 // older than this are considered offline and skipped — no point pushing
 // triggers to a proxy that isn't listening.
@@ -58,7 +63,10 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
       });
     }, SUPERVISOR_TICK_MS);
     this.logService.info('TicketSupervisor', 'Service initialized', {
-      tick_ms: SUPERVISOR_TICK_MS, stale_ms: SUPERVISOR_STALE_MS, resend_ms: SUPERVISOR_RESEND_MS,
+      tick_ms: SUPERVISOR_TICK_MS,
+      default_stale_ms: DEFAULT_SUPERVISOR_STALE_MS,
+      default_resend_ms: DEFAULT_SUPERVISOR_RESEND_MS,
+      note: 'cadence is per-workspace (Workspace.supervisor_stale_ms / supervisor_resend_ms)',
     });
   }
 
@@ -80,12 +88,44 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
     const agents = await this.agentRepo.find();
     const liveKeys = new Set<string>();
 
+    // v0.41 — workspace-keyed cadence cache. Avoids re-querying the
+    // Workspace row for every (agent, ticket, role) row in this tick.
+    // Cadence settings change rarely; the worst-case lag of one tick
+    // (60s) is acceptable for an admin tweak to propagate.
+    const cadenceByWorkspace = new Map<string, { staleMs: number; resendMs: number }>();
+    const resolveCadence = async (workspaceId: string): Promise<{ staleMs: number; resendMs: number }> => {
+      let cadence = cadenceByWorkspace.get(workspaceId);
+      if (cadence) return cadence;
+      let staleMs = DEFAULT_SUPERVISOR_STALE_MS;
+      let resendMs = DEFAULT_SUPERVISOR_RESEND_MS;
+      try {
+        const ws = await this.dataSource.getRepository(Workspace).findOne({ where: { id: workspaceId } });
+        if (ws) {
+          if (Number.isFinite(ws.supervisor_stale_ms) && ws.supervisor_stale_ms > 0) {
+            staleMs = Math.floor(ws.supervisor_stale_ms);
+          }
+          if (Number.isFinite(ws.supervisor_resend_ms) && ws.supervisor_resend_ms > 0) {
+            resendMs = Math.floor(ws.supervisor_resend_ms);
+          }
+        }
+      } catch (e) {
+        this.logService.warn('TicketSupervisor', 'failed to load workspace cadence — using defaults', {
+          err: String(e), workspace_id: workspaceId,
+        });
+      }
+      cadence = { staleMs, resendMs };
+      cadenceByWorkspace.set(workspaceId, cadence);
+      return cadence;
+    };
+
     for (const agent of agents) {
       if (!agent.last_seen_at || agent.last_seen_at < onlineCutoff) continue;
       if (!agent.workspace_id) continue;
 
       const result = await this.allocationService.getAllocatedTickets(agent.id, agent.workspace_id);
       if (!Array.isArray(result)) continue;
+
+      const { staleMs, resendMs } = await resolveCadence(agent.workspace_id);
 
       for (const row of result) {
         const key = this._key(agent.id, row.ticket_id, row.role);
@@ -94,7 +134,7 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
         const lastUpdateMs = row.my_last_update_at ? Date.parse(row.my_last_update_at) : 0;
         const stalenessMs = lastUpdateMs > 0 ? (now - lastUpdateMs) : Infinity;
 
-        if (stalenessMs < SUPERVISOR_STALE_MS) {
+        if (stalenessMs < staleMs) {
           this.state.delete(key);
           continue;
         }
@@ -107,7 +147,7 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
           continue;
         }
 
-        if (now - entry.lastEmitAt >= SUPERVISOR_RESEND_MS) {
+        if (now - entry.lastEmitAt >= resendMs) {
           await this._emit(row, agent.id, true, now);
           entry.lastEmitAt = now;
         }
