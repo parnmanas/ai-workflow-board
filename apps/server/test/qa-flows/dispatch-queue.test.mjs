@@ -22,11 +22,15 @@
 //
 // Reproducer for the GameClient starvation pattern:
 //   - 1 agent, 1 board, max_concurrent_tickets_per_agent = 1.
-//   - Agent already busy on a ticket (active_tasks holds T_busy).
-//   - Two more triggers arrive: T_med (priority=medium) then T_critical
-//     (priority=critical). Both should land in the queue; head should be
-//     T_critical because it has the smaller priority_index.
-//   - clearCurrentTask(T_busy) → agent_idle → queue head dispatches first.
+//   - Agent already busy on a ticket (T_busy parked in In Progress, i.e.
+//     workflow-load = 1 — process-level active_tasks no longer drives
+//     the cap as of ticket e79eef92).
+//   - Two more triggers arrive for tickets sitting in Backlog (so they
+//     aren't themselves part of workflow-load): T_med (medium) then
+//     T_critical (critical). Both should land in the queue; head should
+//     be T_critical because it has the smaller priority_index.
+//   - Move T_busy → Done (workflow-load = 0) and call clearCurrentTask
+//     to fire agent_idle → queue head dispatches first.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -109,17 +113,21 @@ test('Dispatch queue: cap-skip → enqueue → priority-ordered dispatch + depth
   await colRepo.update(done.id, { kind: 'terminal', role_routing: '[]' });
 
   step('Create 3 tickets at different priorities, all assigned to `agent`');
-  // T_busy — the ticket the agent is already working on (cap-occupier).
-  // T_med — medium priority, should enqueue and rank BEHIND T_critical.
-  // T_critical — critical priority, should enqueue and BECOME the queue head.
+  // T_busy — parked in In Progress to close the workflow-state cap
+  // (max_concurrent=1).
+  // T_med / T_critical — parked in BACKLOG (intake) so they don't
+  // themselves count toward workflow-load. Direct emitAgentTrigger
+  // bypasses role_routing, so it's fine that Backlog routes to reporter.
+  // The cap-skip flag we're testing kicks in because T_busy already
+  // occupies the workflow slot.
   const tBusy = await createTicket(app, getDataSourceToken, {
     columnId: inProgress.id, workspaceId: ws.id, title: 't-busy', priority: 'medium',
   });
   const tMed = await createTicket(app, getDataSourceToken, {
-    columnId: inProgress.id, workspaceId: ws.id, title: 't-med', priority: 'medium',
+    columnId: backlog.id, workspaceId: ws.id, title: 't-med', priority: 'medium',
   });
   const tCritical = await createTicket(app, getDataSourceToken, {
-    columnId: inProgress.id, workspaceId: ws.id, title: 't-critical', priority: 'critical',
+    columnId: backlog.id, workspaceId: ws.id, title: 't-critical', priority: 'critical',
   });
   const assignRepo = ds.getRepository('TicketRoleAssignment');
   for (const tk of [tBusy, tMed, tCritical]) {
@@ -128,7 +136,12 @@ test('Dispatch queue: cap-skip → enqueue → priority-ordered dispatch + depth
     }));
   }
 
-  step('Mark agent busy on T_busy (active_tasks size=1, max_concurrent=1)');
+  step('Stamp agent.current_task for the dashboard (workflow-load=1 already closes the cap)');
+  // setCurrentTask is now status-badge-only — process-level signal that
+  // a subagent is alive. The dispatch cap reads workflow-state, not
+  // active_tasks (ticket e79eef92). We still call it here so the
+  // subsequent clearCurrentTask fires `agent_idle`, which is the
+  // trigger that drains the queue.
   await agentStatus.setCurrentTask(agent.id, tBusy.id, 'assignee');
 
   step('Fire trigger for T_med — cap closed, expect ENQUEUE');
@@ -154,7 +167,12 @@ test('Dispatch queue: cap-skip → enqueue → priority-ordered dispatch + depth
   assert.ok(enqueuedTicketIds.has(tMed.id), 'expected trigger_enqueued for T_med');
   assert.ok(enqueuedTicketIds.has(tCritical.id), 'expected trigger_enqueued for T_critical');
 
-  step('Clear T_busy active task — agent_idle should dispatch the queue head (T_critical)');
+  step('Move T_busy → Done + clear active task — workflow-load drops to 0, agent_idle dispatches head');
+  // Under the workflow-state cap, just clearing active_tasks is NOT
+  // enough to re-open the slot — T_busy must leave the non-terminal /
+  // non-intake column set. So move T_busy to Done first, then fire the
+  // clearCurrentTask plugin signal (which is what triggers agent_idle).
+  await ds.getRepository('Ticket').update(tBusy.id, { column_id: done.id });
   agentStatus.clearCurrentTask(agent.id, tBusy.id);
   // Allow the activityEvents listener chain to drain.
   await new Promise((r) => setTimeout(r, 250));
@@ -178,14 +196,14 @@ test('Dispatch queue: cap-skip → enqueue → priority-ordered dispatch + depth
   // Drop dispatch_queue_depth so the next enqueue triggers a queue_dropped_low_priority.
   const wsRepo = ds.getRepository('Workspace');
   await wsRepo.update(ws.id, { dispatch_queue_depth: 1 });
-  // Re-occupy the agent so subsequent emits cap-skip again.
-  await agentStatus.setCurrentTask(agent.id, tBusy.id, 'assignee');
-  // Start with the queue containing only T_med (medium). Add one more
-  // medium ticket — sort ties on enqueued_at ASC, so the depth=1 cap
-  // evicts the LATER one. Then add a critical ticket — that one survives
-  // and evicts a medium.
+  // Cap is already closed because T_critical was just emitted and its
+  // pendingDispatches entry is still alive (TTL 30s, well above the
+  // sub-second test runtime). workflow-load is 0 (T_busy is in Done),
+  // but `inflight = workflow-load ∪ pendingDispatches` includes the
+  // T_critical reservation — so the next T_low1 emit still cap-skips.
+  // No fresh setCurrentTask needed.
   const tLow1 = await createTicket(app, getDataSourceToken, {
-    columnId: inProgress.id, workspaceId: ws.id, title: 't-low1', priority: 'low',
+    columnId: backlog.id, workspaceId: ws.id, title: 't-low1', priority: 'low',
   });
   await assignRepo.save(assignRepo.create({
     ticket_id: tLow1.id, role_id: assigneeRole.id, agent_id: agent.id, user_id: null,
