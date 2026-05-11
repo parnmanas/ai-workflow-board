@@ -57,7 +57,7 @@ import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { LogService } from '../../services/log.service';
 import { ActivityService, activityEvents } from '../../services/activity.service';
-import { AgentStatusService } from './agent-status.service';
+import { AgentWorkloadService } from './agent-workload.service';
 import { TriggerLoopService } from './trigger-loop.service';
 import { priorityIndex } from './priority';
 
@@ -72,7 +72,7 @@ export class BacklogPromotionService implements OnModuleInit {
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly logService: LogService,
     private readonly activityService: ActivityService,
-    private readonly agentStatusService: AgentStatusService,
+    private readonly agentWorkload: AgentWorkloadService,
     // forwardRef so the BacklogPromotion ↔ TriggerLoop dependency edge
     // doesn't fight Nest's eager-instantiation order (TriggerLoop currently
     // takes AgentDispatchQueueService via forwardRef; staying symmetric here
@@ -223,6 +223,13 @@ export class BacklogPromotionService implements OnModuleInit {
       // the move commits. Built up alongside the eligibility check so we
       // don't re-walk the role list in the post-save loop.
       const dispatchTargets: Array<{ slug: string; holderId: string }> = [];
+      // Audit-trail material for a workflow-load skip — captured up here
+      // so the activity row can record which holder/slug closed the cap.
+      let skipReason: {
+        slug: string;
+        holderId: string;
+        load: string[];
+      } | null = null;
       for (let i = 0; i < requiredRoleIds.length; i++) {
         const roleId = requiredRoleIds[i];
         const slug = destSlugs[i];
@@ -233,19 +240,57 @@ export class BacklogPromotionService implements OnModuleInit {
           eligible = false;
           break;
         }
-        // Capacity check on the destination role holder. We only count
-        // active_tasks (plugin-signal driven) for this gate — pendingDispatches
-        // is owned by TriggerLoopService and isn't visible here. If a
-        // queue handoff races against a promotion, the trigger-loop's
-        // own cap re-check at emit time still gates correctly.
-        const active = this.agentStatusService.getActiveTicketIds(a.agent_id);
-        if (active.length >= maxConcurrent && !active.includes(ticket.id)) {
+        // Capacity check — WORKFLOW-STATE, not process-state. We count
+        // every ticket this agent currently holds the destination role on,
+        // sitting on a non-terminal & non-intake column of this board.
+        // Process-level signals (`AgentStatusService.active_tasks`) are
+        // unreliable here: a WAIT-only turn clears the active_task and
+        // re-opens the cap even though the assignee still owns N parked
+        // tickets in To Do/In Progress. The trigger-loop's emit gate
+        // unions this set with `pendingDispatches` for the short-lived
+        // "trigger fired, ticket not yet moved" window.
+        const load = await this.agentWorkload.getWorkflowLoadTicketIds(
+          a.agent_id, boardId, slug,
+        );
+        if (load.length >= maxConcurrent && !load.includes(ticket.id)) {
           eligible = false;
+          skipReason = { slug, holderId: a.agent_id, load };
           break;
         }
         dispatchTargets.push({ slug, holderId: a.agent_id });
       }
-      if (!eligible) continue;
+      if (!eligible) {
+        // Observability: an audit row for every promotion that the
+        // workflow-state cap blocked. Lets ops correlate a backlog that
+        // isn't draining ("no promotion happened") to the specific holder
+        // that's at-cap on a non-terminal column. Process-state-only skips
+        // are silent because they're not load-bearing — workflow-state is.
+        if (skipReason) {
+          try {
+            const activityLogRepo = this.dataSource.getRepository(ActivityLog);
+            await activityLogRepo.save(activityLogRepo.create({
+              entity_type: 'ticket',
+              entity_id: ticket.id,
+              ticket_id: ticket.id,
+              actor_id: 'system',
+              actor_name: 'BacklogPromotionService',
+              action: 'backlog_promotion_skipped_workflow_load',
+              new_value:
+                `board=${boardId} role=${skipReason.slug} ` +
+                `holder=${skipReason.holderId} ` +
+                `current_count=${skipReason.load.length}/${maxConcurrent} ` +
+                `ticket_ids=${skipReason.load.join(',')}`,
+              role: skipReason.slug,
+              trigger_source: 'backlog_promotion',
+            }));
+          } catch (e) {
+            this.logService.warn('BacklogPromotion', 'workflow-load skip audit write failed (continuing)', {
+              err: String(e), ticket_id: ticket.id,
+            });
+          }
+        }
+        continue;
+      }
 
       // Move: ticket.column_id update + audit `moved` activity row.
       //
