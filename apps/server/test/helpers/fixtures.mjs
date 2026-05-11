@@ -10,10 +10,43 @@ import { traceEvent } from './trace.mjs';
 
 const stamp = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
+// Built-in role slug list mirrored from server-side BUILTIN_ROLES — the
+// fixture path bypasses the workspaces controller which would otherwise
+// seed these via WorkspaceRolesService.seedBuiltinRoles. Without these
+// rows the v0.34+ trigger-loop / ticket-role-assignment paths can't
+// resolve role slugs for fixture-built workspaces.
+const BUILTIN_ROLE_SLUGS = [
+  { slug: 'planner', name: 'Planner', position: 0 },
+  { slug: 'assignee', name: 'Assignee', position: 1 },
+  { slug: 'reporter', name: 'Reporter', position: 2 },
+  { slug: 'reviewer', name: 'Reviewer', position: 3 },
+];
+
 export async function createWorkspace(app, getDataSourceToken, name = 'qa') {
   const ds = app.get(getDataSourceToken());
   const repo = ds.getRepository('Workspace');
   const row = await repo.save(repo.create({ name: `ws-${name}-${stamp()}`, description: 'qa workspace' }));
+  // Mirror seedBuiltinRoles — every WorkspaceRole.slug used by built-in
+  // routing must exist before tickets bind role assignments to it.
+  // Idempotent (find-or-create per slug) so a test that wants to seed
+  // additional / overriding role rows on the same workspace doesn't trip
+  // the (workspace_id, slug) unique index.
+  const roleRepo = ds.getRepository('WorkspaceRole');
+  for (const def of BUILTIN_ROLE_SLUGS) {
+    const existing = await roleRepo.findOne({
+      where: { workspace_id: row.id, slug: def.slug },
+    });
+    if (existing) continue;
+    await roleRepo.save(roleRepo.create({
+      workspace_id: row.id,
+      slug: def.slug,
+      name: def.name,
+      role_prompt: '',
+      description: `qa builtin ${def.slug}`,
+      position: def.position,
+      is_builtin: true,
+    }));
+  }
   traceEvent('fixture', { kind: 'workspace', id: row.id, name: row.name });
   return row;
 }
@@ -88,20 +121,33 @@ export async function createBoard(
   app,
   getDataSourceToken,
   workspaceId,
-  { name = 'board', routingConfig = {} } = {},
+  { name = 'board', routingConfig = {}, maxConcurrent } = {},
 ) {
   const ds = app.get(getDataSourceToken());
   const repo = ds.getRepository('Board');
-  const row = await repo.save(
-    repo.create({
-      name: `${name}-${stamp()}`,
-      description: 'qa',
-      workspace_id: workspaceId,
-      // Board.routing_config is stored as JSON string keyed by lowercase column name.
-      routing_config: JSON.stringify(routingConfig),
-    }),
-  );
-  traceEvent('fixture', { kind: 'board', id: row.id, name: row.name, routing_config: routingConfig });
+  const fields = {
+    name: `${name}-${stamp()}`,
+    description: 'qa',
+    workspace_id: workspaceId,
+    // Board.routing_config is stored as JSON string keyed by lowercase column name.
+    routing_config: JSON.stringify(routingConfig),
+  };
+  // The production schema default for max_concurrent_tickets_per_agent is 1
+  // (migration 1760000000012). Several QA flows (concurrency stress, multi-
+  // ticket dispatch) need to fire >1 trigger per agent in parallel, so
+  // tests that exercise those paths must opt into a higher cap. Tests that
+  // care about the cap-skip → enqueue path leave this at 1.
+  if (maxConcurrent !== undefined) {
+    fields.max_concurrent_tickets_per_agent = maxConcurrent;
+  }
+  const row = await repo.save(repo.create(fields));
+  traceEvent('fixture', {
+    kind: 'board',
+    id: row.id,
+    name: row.name,
+    routing_config: routingConfig,
+    max_concurrent_tickets_per_agent: row.max_concurrent_tickets_per_agent,
+  });
   return row;
 }
 
@@ -109,10 +155,23 @@ export async function createColumn(
   app,
   getDataSourceToken,
   boardId,
-  { name, position, isTerminal = false, workspaceId = '' } = {},
+  { name, position, isTerminal = false, workspaceId = '', kind, roleRouting } = {},
 ) {
   const ds = app.get(getDataSourceToken());
   const repo = ds.getRepository('BoardColumn');
+  // v0.41 introduced BoardColumn.kind / role_routing as the canonical
+  // routing-source-of-truth (replacing name-string lookups against the
+  // legacy Board.routing_config blob). Default `kind` from is_terminal +
+  // position so existing call sites that only pass name/position keep
+  // routing through "active" columns; tests that need explicit
+  // intake/review/merging classification can override.
+  const resolvedKind =
+    kind ||
+    (isTerminal
+      ? 'terminal'
+      : position === 0
+        ? 'intake'
+        : 'active');
   const row = await repo.save(
     repo.create({
       board_id: boardId,
@@ -120,9 +179,19 @@ export async function createColumn(
       name,
       position,
       is_terminal: isTerminal,
+      kind: resolvedKind,
+      role_routing: JSON.stringify(Array.isArray(roleRouting) ? roleRouting : []),
     }),
   );
-  traceEvent('fixture', { kind: 'column', id: row.id, name, position, is_terminal: isTerminal });
+  traceEvent('fixture', {
+    kind: 'column',
+    id: row.id,
+    name,
+    position,
+    is_terminal: isTerminal,
+    column_kind: resolvedKind,
+    role_routing: roleRouting ?? [],
+  });
   return row;
 }
 
@@ -161,6 +230,31 @@ export async function createTicket(
       status: 'todo',
     }),
   );
+  // Mirror the legacy assignee_id / reporter_id / reviewer_id columns onto
+  // TicketRoleAssignment rows so the v0.34+ trigger-loop / allocation /
+  // mention paths can resolve a holder. Production paths do this via
+  // TicketRoleAssignmentService.syncBuiltinTrio in tickets.controller; the
+  // raw-repo fixture has to do the same write or no trigger ever fires.
+  if (workspaceId) {
+    const roleRepo = ds.getRepository('WorkspaceRole');
+    const assignRepo = ds.getRepository('TicketRoleAssignment');
+    const slugs = [
+      ['assignee', assigneeId],
+      ['reporter', reporterId],
+      ['reviewer', reviewerId],
+    ];
+    for (const [slug, agentId] of slugs) {
+      if (!agentId) continue;
+      const role = await roleRepo.findOne({ where: { workspace_id: workspaceId, slug } });
+      if (!role) continue;
+      await assignRepo.save(assignRepo.create({
+        ticket_id: row.id,
+        role_id: role.id,
+        agent_id: agentId,
+        user_id: null,
+      }));
+    }
+  }
   traceEvent('fixture', {
     kind: 'ticket',
     id: row.id,
@@ -185,7 +279,11 @@ export async function createTicket(
  *
  * Keys are lowercased because TriggerLoopService lowercases before lookup.
  */
-export async function setupKanbanScene(app, getDataSourceToken, { workspaceName = 'scene' } = {}) {
+export async function setupKanbanScene(
+  app,
+  getDataSourceToken,
+  { workspaceName = 'scene', maxConcurrent } = {},
+) {
   const ws = await createWorkspace(app, getDataSourceToken, workspaceName);
   const routing = {
     'in progress': ['assignee'],
@@ -195,32 +293,46 @@ export async function setupKanbanScene(app, getDataSourceToken, { workspaceName 
   const board = await createBoard(app, getDataSourceToken, ws.id, {
     name: 'kanban',
     routingConfig: routing,
+    maxConcurrent,
   });
+  // Per-column role_routing must mirror the board-level routing map —
+  // since v0.41 every runtime read is from BoardColumn.role_routing only.
+  const roleFor = (colName) => routing[colName.toLowerCase()] || [];
   const todo = await createColumn(app, getDataSourceToken, board.id, {
     name: 'Todo',
     position: 0,
     workspaceId: ws.id,
+    kind: 'intake',
+    roleRouting: roleFor('Todo'),
   });
   const inProgress = await createColumn(app, getDataSourceToken, board.id, {
     name: 'In Progress',
     position: 1,
     workspaceId: ws.id,
+    kind: 'active',
+    roleRouting: roleFor('In Progress'),
   });
   const review = await createColumn(app, getDataSourceToken, board.id, {
     name: 'Review',
     position: 2,
     workspaceId: ws.id,
+    kind: 'review',
+    roleRouting: roleFor('Review'),
   });
   const done = await createColumn(app, getDataSourceToken, board.id, {
     name: 'Done',
     position: 3,
     workspaceId: ws.id,
     isTerminal: true,
+    kind: 'terminal',
+    roleRouting: roleFor('Done'),
   });
   const blocked = await createColumn(app, getDataSourceToken, board.id, {
     name: 'Blocked',
     position: 4,
     workspaceId: ws.id,
+    kind: 'active',
+    roleRouting: roleFor('Blocked'),
   });
   return {
     ws,

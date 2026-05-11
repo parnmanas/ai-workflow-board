@@ -3,12 +3,12 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, In } from 'typeorm';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { Agent } from '../../entities/Agent';
-import { Board } from '../../entities/Board';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { Comment } from '../../entities/Comment';
 import { Ticket } from '../../entities/Ticket';
 import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
+import { priorityIndex } from './priority';
 
 export interface AllocatedTicketRow {
   ticket_id: string;
@@ -20,14 +20,6 @@ export interface AllocatedTicketRow {
   priority_index: number;
   title: string;
   my_last_update_at: string | null;
-}
-
-// Keep in sync with plugin-side ordering. Index 0 = highest priority.
-const PRIORITY_ORDER = ['critical', 'high', 'medium', 'low'] as const;
-
-function priorityIndex(p: string | null | undefined): number {
-  const i = PRIORITY_ORDER.indexOf(((p || 'medium').toLowerCase() as typeof PRIORITY_ORDER[number]));
-  return i >= 0 ? i : PRIORITY_ORDER.length;
 }
 
 function safeJsonParse<T>(s: string | null | undefined, fallback: T): T {
@@ -96,14 +88,7 @@ export class AllocationService {
       .createQueryBuilder('col')
       .where('col.id IN (:...ids)', { ids: colIds })
       .getMany();
-    const boardIds = Array.from(new Set(columns.map(c => c.board_id)));
-    const boards = boardIds.length === 0 ? []
-      : await this.dataSource.getRepository(Board)
-        .createQueryBuilder('b')
-        .where('b.id IN (:...ids)', { ids: boardIds })
-        .getMany();
     const colById = new Map(columns.map(c => [c.id, c]));
-    const boardById = new Map(boards.map(b => [b.id, b]));
 
     const rows: AllocatedTicketRow[] = [];
     const rowTicketIds = new Set<string>();
@@ -112,18 +97,16 @@ export class AllocationService {
       if (!ticket.column_id) continue;
       const col = colById.get(ticket.column_id);
       if (!col) continue;
+      // Terminal columns never trigger — kind='terminal' OR is_terminal=true
+      // (the boolean is the legacy parallel field; both must hold for the
+      // backfill to converge but checking either is defensive).
       if ((col as any).is_terminal === true) continue;
-      const board = boardById.get(col.board_id);
-      if (!board) continue;
+      if ((col as any).kind === 'terminal') continue;
 
-      const routing = safeJsonParse<Record<string, string | string[]>>(board.routing_config, {});
-      const columnKey = (col.name || '').toLowerCase();
-      const rawRoles = Object.prototype.hasOwnProperty.call(routing, columnKey)
-        ? routing[columnKey]
-        : undefined;
-      if (rawRoles === undefined) continue;
-      const slugList = Array.isArray(rawRoles) ? rawRoles : [rawRoles];
-      if (slugList.length === 0) continue;
+      // v0.41 — read role slugs straight off the column row. Replaces the
+      // old `Board.routing_config[col.name.toLowerCase()]` lookup.
+      const slugList = safeJsonParse<string[]>((col as any).role_routing, []);
+      if (!Array.isArray(slugList) || slugList.length === 0) continue;
 
       const myRoleIds = myRoleIdsByTicket.get(ticket.id) ?? new Set<string>();
       for (const slug of slugList) {
@@ -181,6 +164,18 @@ export class AllocationService {
       const ts = maxByTicket.get(r.ticket_id);
       r.my_last_update_at = ts ? new Date(ts).toISOString() : null;
     }
+
+    // v0.41 — sort by priority_index ASC so callers (supervisor re-push,
+    // diagnostic dashboards) see highest-priority first. Within the same
+    // priority, oldest-stale row first by my_last_update_at — stale items
+    // are the ones supervisor cares about, sorting them first makes the
+    // re-push cadence pick them up before fresher rows.
+    rows.sort((a, b) => {
+      if (a.priority_index !== b.priority_index) return a.priority_index - b.priority_index;
+      const ta = a.my_last_update_at ? Date.parse(a.my_last_update_at) : 0;
+      const tb = b.my_last_update_at ? Date.parse(b.my_last_update_at) : 0;
+      return ta - tb;
+    });
 
     return rows;
   }

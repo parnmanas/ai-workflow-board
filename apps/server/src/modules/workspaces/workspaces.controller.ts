@@ -19,6 +19,7 @@ import { PromptTemplatesService } from '../prompt-templates/prompt-templates.ser
 import { ReBACService } from '../../services/rebac.service';
 import { findOrFail } from '../../common/find-or-fail';
 import { parseComments, expandCommentAttachments } from '../mcp/shared/ticket-parsing';
+import { writeRoutingConfigThrough } from '../boards/routing-config.helper';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 
@@ -64,6 +65,8 @@ export class WorkspacesController {
     }));
     const defaultCols = DEFAULT_COLUMNS.map(c => ({ ...c, board_id: board.id }));
     const savedCols = await this.colRepo.save(defaultCols.map(c => this.colRepo.create(c)));
+    // v0.41 — fan board.routing_config into per-column role_routing.
+    await writeRoutingConfigThrough(this.dataSource, board.id);
 
     // v0.34: every new workspace gets the same builtin role preset that
     // existing workspaces received from the migration. Mention syntax,
@@ -127,9 +130,33 @@ export class WorkspacesController {
   async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     const ws = await findOrFail(this.wsRepo, { where: { id } }, 'Workspace not found');
 
-    const { name, description } = body;
+    const {
+      name, description,
+      supervisor_stale_ms, supervisor_resend_ms, dispatch_queue_depth,
+    } = body;
     if (name !== undefined) ws.name = name;
     if (description !== undefined) ws.description = description;
+
+    // v0.41 — cadence settings (AC #4). These bound the supervisor
+    // backstop frequency and the per-agent dispatch queue depth. Defaults
+    // (30 min / 5 min / 100) live in the entity column; we accept any
+    // positive finite integer here and silently ignore garbage so a bad
+    // PATCH can't wedge the workspace into "0 ms stale check".
+    if (supervisor_stale_ms !== undefined) {
+      const v = Number(supervisor_stale_ms);
+      if (Number.isFinite(v) && v > 0) ws.supervisor_stale_ms = Math.floor(v);
+      else return res.status(400).json({ error: 'supervisor_stale_ms must be a positive number' });
+    }
+    if (supervisor_resend_ms !== undefined) {
+      const v = Number(supervisor_resend_ms);
+      if (Number.isFinite(v) && v > 0) ws.supervisor_resend_ms = Math.floor(v);
+      else return res.status(400).json({ error: 'supervisor_resend_ms must be a positive number' });
+    }
+    if (dispatch_queue_depth !== undefined) {
+      const v = Number(dispatch_queue_depth);
+      if (Number.isFinite(v) && v > 0) ws.dispatch_queue_depth = Math.floor(v);
+      else return res.status(400).json({ error: 'dispatch_queue_depth must be a positive number' });
+    }
 
     await this.wsRepo.save(ws);
     return res.json(ws);

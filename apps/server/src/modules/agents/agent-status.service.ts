@@ -216,6 +216,21 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
     };
     this.state.set(agent_id, updated);
     this._emit(updated);
+
+    // v0.41 — capacity signal for AgentDispatchQueueService.
+    //
+    // Whenever an agent's active_tasks shrinks (a subagent finished or
+    // exited), broadcast an 'agent_idle' event so the dispatch queue can
+    // pull the highest-priority pending item for this agent and emit it.
+    // This is the single edge that closes the loop: cap-exceeded triggers
+    // were enqueued instead of dropped (TriggerLoopService) and the queue
+    // re-runs them as soon as the agent has room.
+    activityEvents.emit('agent_idle', {
+      agent_id,
+      cleared_ticket_id: expectedTicketId,
+      remaining_active_count: tasks.size,
+      timestamp: new Date().toISOString(),
+    });
   }
 
   /**
@@ -268,6 +283,20 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
       };
       this.state.set(a.id, updated);
       this._emit(updated);
+
+      // v0.41 — sweep-driven idle signal. If active_tasks shrank as a
+      // result of stale-task cleanup (plugin crashed before clearing),
+      // surface the same 'agent_idle' event so the dispatch queue gets
+      // a chance to drain its head item. Same contract as the
+      // clearCurrentTask path; only the trigger differs.
+      if (is_online && tasksChanged && nextTaskCount < prevTaskCount) {
+        activityEvents.emit('agent_idle', {
+          agent_id: a.id,
+          cleared_ticket_id: undefined,
+          remaining_active_count: nextTaskCount,
+          timestamp: new Date().toISOString(),
+        });
+      }
 
       // D-54: persist is_online flip when crossing from online → offline.
       // We only write when it actually changed to avoid write amplification.

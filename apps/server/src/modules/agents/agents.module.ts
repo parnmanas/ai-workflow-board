@@ -12,6 +12,8 @@ import { TriggerLoopService } from './trigger-loop.service';
 import { AgentStatusService } from './agent-status.service';
 import { AllocationService } from './allocation.service';
 import { TicketSupervisorService } from './ticket-supervisor.service';
+import { AgentDispatchQueueService } from './agent-dispatch-queue.service';
+import { BacklogPromotionService } from './backlog-promotion.service';
 import { FsBrowserService } from '../../services/fs-browser.service';
 import { SubagentMonitorService } from '../../services/subagent-monitor.service';
 import { AuthGuard } from '../../common/guards/auth.guard';
@@ -29,7 +31,17 @@ import { AgentManagerModule } from '../agent-manager/agent-manager.module';
     forwardRef(() => AgentManagerModule),
   ],
   controllers: [AgentsController, FsBrowserController, SubagentMonitorController],
-  providers: [AuthGuard, PermissionGuard, AgentAuthGuard, AgentConnectionService, TriggerLoopService, AgentStatusService, AllocationService, TicketSupervisorService, FsBrowserService, SubagentMonitorService],
-  exports: [AgentConnectionService, TriggerLoopService, AgentStatusService, AllocationService, FsBrowserService, SubagentMonitorService],
+  providers: [
+    AuthGuard, PermissionGuard, AgentAuthGuard,
+    AgentConnectionService, TriggerLoopService, AgentStatusService, AllocationService,
+    TicketSupervisorService,
+    AgentDispatchQueueService, BacklogPromotionService,
+    FsBrowserService, SubagentMonitorService,
+  ],
+  exports: [
+    AgentConnectionService, TriggerLoopService, AgentStatusService, AllocationService,
+    AgentDispatchQueueService, BacklogPromotionService,
+    FsBrowserService, SubagentMonitorService,
+  ],
 })
 export class AgentsModule {}

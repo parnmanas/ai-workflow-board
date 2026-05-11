@@ -10,6 +10,7 @@ import { BoardColumn } from '../entities/BoardColumn';
 import { WorkspaceRole } from '../entities/WorkspaceRole';
 import { PromptTemplate } from '../entities/PromptTemplate';
 import { LogService } from '../services/log.service';
+import { writeRoutingConfigThrough } from '../modules/boards/routing-config.helper';
 
 const entityList = Object.values(entitiesBarrel);
 
@@ -92,6 +93,11 @@ export class DatabaseModule implements OnModuleInit {
       }));
       const savedCols = await colRepo.save(defaultCols.map(c => colRepo.create(c)));
 
+      // v0.41 — fan board.routing_config into per-column role_routing rows
+      // so the trigger-loop / allocation paths can read role slugs straight
+      // off the column without parsing the lowercased-name blob each time.
+      await writeRoutingConfigThrough(this.dataSource, board.id);
+
       // v0.34 — seed the same role preset every newly-created workspace
       // gets so the default workspace doesn't end up role-less if the
       // 1760000000008 migration runs before this block (or never runs at
@@ -120,6 +126,13 @@ export class DatabaseModule implements OnModuleInit {
       const tplIdByName = new Map(seededTemplates.map(t => [t.name, t.id]));
       const colPrompts: Record<string, string> = {};
       for (const col of savedCols) {
+        // SEED-ONLY name match — runtime dispatch reads `BoardColumn.kind`
+        // and `role_routing` exclusively (see ticket 47a90ea3 AC #3). This
+        // hits at workspace-creation time only to pair the default prompt
+        // templates with the freshly-minted default columns. TODO: migrate
+        // `default-prompt-templates.ts::column_match` from a lowercased
+        // name to a `kind_match: ColumnKind` enum so this last seed-time
+        // hardcode goes away too.
         const def = DEFAULT_PROMPT_TEMPLATES.find(d => d.column_match === col.name.toLowerCase());
         if (!def) continue;
         const tplId = tplIdByName.get(def.name);

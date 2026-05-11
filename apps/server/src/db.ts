@@ -37,18 +37,28 @@ const entities = Object.values(entitiesBarrel);
 // stop polling tickets parked there and the column toggles available in
 // Board Settings reflect it. Other presets stay non-terminal so tickets
 // can flow through them in either direction.
-export const DEFAULT_COLUMNS: Array<{ name: string; position: number; color: string; is_terminal?: boolean }> = [
-  { name: 'Backlog',     position: 0, color: '#94a3b8' },
-  { name: 'To Do',       position: 1, color: '#60a5fa' },
+export const DEFAULT_COLUMNS: Array<{
+  name: string;
+  position: number;
+  color: string;
+  is_terminal?: boolean;
+  /**
+   * v0.41 — workflow-kind classification. Seeded into BoardColumn.kind so
+   * runtime never has to match column names. See ColumnKind in the entity.
+   */
+  kind: 'intake' | 'active' | 'review' | 'merging' | 'terminal';
+}> = [
+  { name: 'Backlog',     position: 0, color: '#94a3b8',                       kind: 'intake'   },
+  { name: 'To Do',       position: 1, color: '#60a5fa',                       kind: 'active'   },
   // 'Plan' inserts a deliberate planning beat between intake and execution
   // so the planner role has a column to live in. New default routing pairs
   // each planning column with the planner role; teams that prefer the v1
   // To Do → In Progress flow can rename or delete it.
-  { name: 'Plan',        position: 2, color: '#22d3ee' },
-  { name: 'In Progress', position: 3, color: '#fbbf24' },
-  { name: 'Review',      position: 4, color: '#a78bfa' },
-  { name: 'Merging',     position: 5, color: '#f472b6' },
-  { name: 'Done',        position: 6, color: '#34d399', is_terminal: true },
+  { name: 'Plan',        position: 2, color: '#22d3ee',                       kind: 'active'   },
+  { name: 'In Progress', position: 3, color: '#fbbf24',                       kind: 'active'   },
+  { name: 'Review',      position: 4, color: '#a78bfa',                       kind: 'review'   },
+  { name: 'Merging',     position: 5, color: '#f472b6',                       kind: 'merging'  },
+  { name: 'Done',        position: 6, color: '#34d399', is_terminal: true,    kind: 'terminal' },
 ];
 
 /**

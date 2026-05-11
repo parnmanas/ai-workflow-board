@@ -16,6 +16,7 @@ import { DEFAULT_COLUMNS, BUILTIN_ROLES, DEFAULT_BOARD_ROUTING } from '../../../
 import { DEFAULT_PROMPT_TEMPLATES } from '../../../database/default-prompt-templates';
 import { PromptTemplate } from '../../../entities/PromptTemplate';
 import { ok, err } from '../shared/helpers';
+import { writeRoutingConfigThrough } from '../../boards/routing-config.helper';
 import type { ToolContext } from './context';
 
 export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): void {
@@ -86,6 +87,8 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
 
       const defaultCols = DEFAULT_COLUMNS.map(c => ({ ...c, board_id: board.id }));
       const savedCols = await colRepo.save(defaultCols.map(c => colRepo.create(c)));
+      // v0.41 — fan board.routing_config into per-column role_routing.
+      await writeRoutingConfigThrough(dataSource, board.id);
 
       // v0.34: seed built-in role preset (planner/assignee/reporter/reviewer).
       const roleRepo = dataSource.getRepository(WorkspaceRole);
@@ -114,6 +117,10 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
       const tplIdByName = new Map(seededTemplates.map(t => [t.name, t.id]));
       const colPrompts: Record<string, string> = {};
       for (const col of savedCols) {
+        // SEED-ONLY name match (create_workspace MCP path). Runtime
+        // dispatch never reads column names — see ticket 47a90ea3 AC #3.
+        // TODO: migrate `column_match` to a `kind_match` enum so the
+        // last seed hardcode goes away.
         const def = DEFAULT_PROMPT_TEMPLATES.find(d => d.column_match === col.name.toLowerCase());
         if (!def) continue;
         const tplId = tplIdByName.get(def.name);
@@ -130,19 +137,31 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
 
   server.tool(
     'update_workspace',
-    'Update a workspace name or description',
+    'Update a workspace name, description, or trigger-loop cadence settings (supervisor_stale_ms / supervisor_resend_ms / dispatch_queue_depth)',
     {
       workspace_id: z.string().describe('Workspace ID'),
       name: z.string().optional().describe('New name'),
       description: z.string().optional().describe('New description'),
+      supervisor_stale_ms: z.number().positive().optional()
+        .describe('Time-since-last-update before TicketSupervisor considers an allocation stale. Default 1800000 (30 min).'),
+      supervisor_resend_ms: z.number().positive().optional()
+        .describe('Cooldown between supervisor force-respawn re-pushes. Default 300000 (5 min).'),
+      dispatch_queue_depth: z.number().positive().optional()
+        .describe('Per-agent dispatch queue depth cap. When full, the lowest-priority pending item is dropped. Default 100.'),
     },
-    async ({ workspace_id, name, description }) => {
+    async ({ workspace_id, name, description, supervisor_stale_ms, supervisor_resend_ms, dispatch_queue_depth }) => {
       const wsRepo = dataSource.getRepository(Workspace);
       const ws = await wsRepo.findOne({ where: { id: workspace_id } });
       if (!ws) return err('Workspace not found');
 
       if (name !== undefined) ws.name = name;
       if (description !== undefined) ws.description = description;
+      // v0.41 — cadence settings (AC #4). Zod's `.positive()` already
+      // gates non-positive / non-finite input, so a successful args
+      // parse means we can floor and assign without re-validating.
+      if (supervisor_stale_ms !== undefined) ws.supervisor_stale_ms = Math.floor(supervisor_stale_ms);
+      if (supervisor_resend_ms !== undefined) ws.supervisor_resend_ms = Math.floor(supervisor_resend_ms);
+      if (dispatch_queue_depth !== undefined) ws.dispatch_queue_depth = Math.floor(dispatch_queue_depth);
 
       await wsRepo.save(ws);
       return ok(ws);

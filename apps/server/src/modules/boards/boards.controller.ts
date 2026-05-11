@@ -12,6 +12,7 @@ import { DEFAULT_BOARD_ROUTING } from '../../db';
 import { PromptTemplatesService } from '../prompt-templates/prompt-templates.service';
 import { findOrFail } from '../../common/find-or-fail';
 import { parseComments, expandCommentAttachments } from '../mcp/shared/ticket-parsing';
+import { writeRoutingConfigThrough } from './routing-config.helper';
 
 @ApiBearerAuth('user-session')
 @ApiTags('boards')
@@ -52,6 +53,9 @@ export class BoardsController {
     }));
     const defaultCols = DEFAULT_COLUMNS.map(c => ({ ...c, board_id: board.id }));
     const savedCols = await this.colRepo.save(defaultCols.map(c => this.colRepo.create(c)));
+    // v0.41 — propagate the just-written routing_config into per-column
+    // role_routing so runtime dispatch reads slugs from the column rows.
+    await writeRoutingConfigThrough(this.dataSource, board.id);
 
     // Auto-link each new column to its matching default workflow template.
     // seedDefaults is idempotent — existing workspaces (where the templates
@@ -114,7 +118,8 @@ export class BoardsController {
     const { name, description, routing_config, column_prompts, max_concurrent_tickets_per_agent } = body;
     if (name !== undefined) board.name = name;
     if (description !== undefined) board.description = description;
-    if (routing_config !== undefined) board.routing_config = JSON.stringify(routing_config);
+    const routingChanged = routing_config !== undefined;
+    if (routingChanged) board.routing_config = JSON.stringify(routing_config);
     if (column_prompts !== undefined) {
       if (column_prompts === null) {
         board.column_prompts = null;
@@ -137,6 +142,11 @@ export class BoardsController {
     }
 
     await this.boardRepo.save(board);
+    // v0.41 — fan routing_config edits through to per-column role_routing.
+    // Done after the board save so the propagation reads the latest blob.
+    if (routingChanged) {
+      await writeRoutingConfigThrough(this.dataSource, board.id);
+    }
     return res.json(board);
   }
 

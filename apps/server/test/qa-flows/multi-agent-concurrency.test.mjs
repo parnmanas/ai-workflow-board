@@ -36,8 +36,15 @@ test('5 assignees × 4 tickets each: every trigger lands at the owning agent, no
   t.after(() => app.close().catch(() => {}));
   const { getDataSourceToken, ActivityService } = modules;
 
+  // Each assignee owns TICKETS_PER_ASSIGNEE tickets and we fire all of them
+  // in parallel. The production-default per-board cap is 1 (migration
+  // 1760000000012), which would queue all but the first trigger per agent
+  // and fail the completeness assertion below. The test is about delivery /
+  // isolation, not cap enforcement, so we bump the cap above the per-agent
+  // ticket count.
   const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, {
     workspaceName: 'concurrency',
+    maxConcurrent: TICKETS_PER_ASSIGNEE,
   });
   const user = await createUser(app, getDataSourceToken, { name: 'driver' });
 

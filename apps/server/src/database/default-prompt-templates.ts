@@ -30,7 +30,19 @@ export interface DefaultPromptTemplateDef {
   name: string;
   description: string;
   category: string;
-  /** Lowercased column name (matches DEFAULT_COLUMNS .name) to auto-link this template to. Empty string → no auto-link. */
+  /**
+   * Lowercased column name (matches DEFAULT_COLUMNS .name) to auto-link this
+   * template to. Empty string → no auto-link.
+   *
+   * SEED-ONLY surface — used at workspace/board creation time to pair the
+   * default templates with the freshly-minted default columns. Runtime
+   * dispatch (`apps/server/src/modules/agents/**`) never reads column names;
+   * it goes through `BoardColumn.kind` and `role_routing` exclusively (ticket
+   * 47a90ea3 AC #3 enforces zero `name.toLowerCase()` compares in the
+   * dispatch path). Migrating this field to `kind_match: ColumnKind` would
+   * remove the last seed-time hardcode; tracked as a follow-up rather than
+   * landed in this ticket since it's outside the runtime starvation scope.
+   */
   column_match: string;
   content: string;
 }
@@ -38,50 +50,33 @@ export interface DefaultPromptTemplateDef {
 export const DEFAULT_PROMPT_TEMPLATES: DefaultPromptTemplateDef[] = [
   {
     name: 'backlog_workflow',
-    description: 'Backlog column default workflow — reporter scans the backlog and promotes the highest-priority ticket with idle assignee + reviewer into To Do.',
+    description: 'Backlog column default workflow — reporter narrates server-driven backlog promotions; scheduling is owned by BacklogPromotionService.',
     category: 'default_workflow',
     column_match: 'backlog',
-    content: `# Backlog — Work Scheduler (reporter)
+    content: `# Backlog — Narrate Server-Driven Promotions (reporter)
 
-This ticket is in the Backlog column and you were triggered as the board's reporter. Your job is **not to process this specific ticket** — it is to scan the entire backlog and move the *highest-priority ticket that can actually start right now* into the To Do column. That ticket may or may not be this one.
+This ticket sits in an intake column. **Backlog → first-active promotion is now owned by the server's \`BacklogPromotionService\`** — it runs whenever an agent on the board frees up, picks the highest-priority intake ticket whose destination-column role holders are below cap, and moves it in a single transaction.
 
-> **Environment**: reporter runs with no local repo. This prompt is MCP-only — never issue git, gh, or shell commands.
+Your job here as reporter is **not to scan or schedule** — that path was a per-trigger full-board scan that self-amplified into a starvation loop. Instead, observe what the server already did and narrate it briefly so the audit trail is human-readable.
+
+> **Environment**: reporter runs with no local repo. MCP-only; no git, no gh, no shell commands.
 
 ## Steps
 
-1. **Load board context**
-   - \`mcp__awb__get_ticket\` to confirm this ticket's \`column_id\`.
-   - \`mcp__awb__get_board\` to fetch the full board state — every column, every ticket's \`assignee_id\` / \`reviewer_id\` / \`priority\` / \`status\` / \`created_at\`.
+1. **Read the ticket** — \`mcp__awb__get_ticket\` to load this ticket's recent comments and activity.
 
-2. **Build the candidate queue** — sort backlog tickets:
-   - **Primary**: priority (\`critical\` → \`high\` → \`medium\` → \`low\`).
-   - **Secondary**: \`created_at\` ascending (older first within the same priority).
-   - **Skip**: tickets missing \`assignee_id\` or \`reviewer_id\`. Those need human scheduling.
-
-3. **Idle check** (iterate the queue in priority order):
-   - A role is **busy** if the agent bound to it appears as \`assignee_id\` OR \`reviewer_id\` on any ticket in the same board's To Do, In Progress, Review, or Merging columns.
-   - Apply the check to both the candidate's assignee and reviewer.
-   - The first candidate whose **assignee AND reviewer are both idle** is the pick → go to step 4.
-   - If the entire queue is busy: \`mcp__awb__add_comment\` on *this* ticket with one line — \`"no idle capacity; top candidates busy: {id1 — reason}, {id2 — reason}"\` — and stop. Do not \`move_ticket\`.
-
-4. **Promote the picked ticket to To Do**
-   - \`mcp__awb__add_comment\` on the picked ticket:
-     - Scheduler identity (reporter name / agent_id).
-     - One-line rationale (e.g., \`"priority=high; assignee=bob and reviewer=alice both have no active tickets"\`).
-     - If higher-priority candidates were skipped, summarise 1–3 of them (e.g., \`"ticket {id} skipped: assignee=bob busy on in_progress ticket {id}"\`).
-   - \`mcp__awb__move_ticket\` to the **To Do** column.
-
-5. **Marker on this ticket** — if the picked ticket is **not** this one, \`mcp__awb__add_comment\` here: \`"scheduled {picked-id} into To Do instead"\`. Leave this ticket in Backlog.
+2. **Decide whether anything needs saying**:
+   - **Server promoted this ticket out of intake** (you'll see a \`backlog_promoted\` audit row in the recent activity, or a \`moved\` comment authored by \`BacklogPromotionService\`) → \`add_comment\` with one line acknowledging the move and the reason if surfaced (priority, role holder freed, etc.). That's it.
+   - **This ticket is still in the intake column** → no-op. Do **not** move it yourself, do **not** scan the rest of the backlog, do **not** comment. The next capacity event will fire the server-side promotion when it's eligible.
+   - **Intake is empty / no candidates eligible** → no-op. The server already determined nothing can be promoted right now; an extra comment from the reporter just adds noise.
 
 ## Notes
 
-- **Do not move this ticket just because you were triggered on it.** This prompt is a scheduler, not a "process this one" worker.
-- **Never interrupt work to make room for a critical ticket.** If a \`priority: critical\` backlog ticket's assignee or reviewer is busy, leave a comment noting the situation and stop. A human decides whether to interrupt.
-- **One \`move_ticket\` per trigger.** Do not schedule multiple tickets in a single pass.
-- **The scheduler never creates or deletes tickets.** Empty backlog or all-busy state does not justify conjuring work or removing tickets. Humans define scope.
-- **Board-scoped idle check.** Cross-board activity is ignored; scheduling unit is a single board.
-- **No self-mention.** Reporter comments must not use \`@[role:reporter|...]\`. Reference other roles by name instead. Self-mentions cause recursive triggers.
-- If the reporter is also the assignee or reviewer on some ticket, those tickets still count toward their busy check.
+- **Do not \`move_ticket\` from this prompt.** Promotions are server-owned; manual moves bypass the priority + capacity checks and are a regression risk.
+- **Do not iterate the backlog or fetch the full board.** That was the v0.40 anti-pattern: every reporter trigger re-scanned, every scan wrote 2 comments, every comment was a fresh trigger. The server-side promotion is single-transaction and idempotent.
+- **No self-mention.** Reporter comments must not use \`@[role:reporter|...]\`.
+- If a backlog ticket has been sitting un-promoted for a long time and you suspect a bug, comment with the suspected blocker (e.g. \`"reviewer slot has been busy for 90 min — supervisor check?"\`) and stop. Humans decide whether to override.
+- The reporter still owns answering planner / assignee / reviewer questions on tickets you filed — that's a separate trigger path (\`comment\` activity on a ticket you reported), not this one.
 `,
   },
   {
@@ -378,42 +373,33 @@ This ticket is in the Merging column, which means Review approved the diff. Your
   },
   {
     name: 'done_workflow',
-    description: 'Done column default workflow — reporter verifies the merge trail, records completion, and runs one backlog-scheduling pass if the board is idle. MCP-only, no local git.',
+    description: 'Done column default workflow — reporter verifies the merge trail and records completion. Backlog scheduling is server-owned (BacklogPromotionService).',
     category: 'default_workflow',
     column_match: 'done',
-    content: `# Done — Completion + Next-Ticket Scheduling (reporter)
+    content: `# Done — Completion (reporter)
 
-This ticket is in the Done column. Merging already landed the code and deleted the feature branch. Your job is administrative: record the completion on the reporter side and, if the board is idle, pull the next work from Backlog.
+This ticket is in the Done column. Merging already landed the code and deleted the feature branch. Your job is administrative: record the completion on the reporter side. **Backlog scheduling is no longer your responsibility** — \`BacklogPromotionService\` runs server-side on the same capacity event the supervisor watches, so a freed agent triggers the next promotion automatically.
 
-> **Environment**: reporter may have no local repo. This prompt is MCP-only. Do not issue git, gh, or shell commands.
+> **Environment**: reporter may have no local repo. MCP-only. No git, gh, or shell commands.
 
 ## Steps
 
 1. **Sanity-check the merge trail**
    - \`mcp__awb__get_ticket\` on this ticket — confirm the Merging-stage comment exists and includes a merge commit SHA plus branch-deletion confirmation.
-   - If the confirmation is **missing** or says \`"manual merge required"\`, \`add_comment\` \`"done reached without merge confirmation — please verify"\` and stop. Do not run the scheduler below.
+   - If the confirmation is **missing** or says \`"manual merge required"\`, \`add_comment\` \`"done reached without merge confirmation — please verify"\` and stop.
 
 2. **Completion comment** — \`add_comment\` with:
    - One line acknowledging the ticket is fully complete from the reporter's side.
    - Reference the merge commit SHA from the Merging comment (copy it, do not re-compute).
 
-3. **Investment pass** — run the Backlog scheduler inline:
-   - \`mcp__awb__get_board\` for the full board state.
-   - If **To Do AND In Progress are both empty**, follow the \`backlog_workflow\` selection algorithm:
-     - Priority order: \`critical\` → \`high\` → \`medium\` → \`low\`; break ties by \`created_at\` ascending.
-     - Skip tickets missing assignee or reviewer.
-     - Pick the first candidate whose assignee AND reviewer are both idle (no presence as assignee or reviewer on any To Do / In Progress / Review / Merging ticket on the same board).
-     - \`add_comment\` on the pick with the scheduling rationale, then \`move_ticket\` to **To Do**.
-   - If the board still has active work (anything in To Do, In Progress, Review, or Merging), **do nothing** — the next natural trigger will handle scheduling.
-   - **One investment per done event.** Do not schedule multiple tickets in a single pass.
+That's it. The terminal landing eventually fires \`agent_idle\` for the merging agent (when its subagent exits), which drains that agent's dispatch queue and gives \`BacklogPromotionService\` a chance to pull the next intake ticket forward. No manual scheduling pass is needed or wanted.
 
 ## Notes
 
-- **No local git, no \`gh\`, no branch operations here.** Merge / push / delete already happened in Merging. If any of those are missing, the right response is a comment, not a retry.
-- **No self-mention.** Reporter comments must not use \`@[role:reporter|...]\`. Reference other roles by name instead. Self-mentions cause recursive triggers.
-- **Never forcibly interrupt.** Even if a critical backlog ticket is waiting and everyone looks busy, do not shuffle tickets to make room — leave a note and let a human decide.
-- If this ticket's backlog is empty too, there is nothing to schedule. Leave the completion comment and stop.
-- Same scheduling constraints as \`backlog_workflow\` apply: board-scoped idle check, missing assignee / reviewer skipped, one move per trigger.
+- **No local git, no \`gh\`, no branch operations here.** Merge / push / delete already happened in Merging.
+- **No self-mention.** Reporter comments must not use \`@[role:reporter|...]\`.
+- **Do not run a backlog scan.** Scanning is forbidden — the server owns it. Manual scans were the v0.40 starvation source.
+- If you suspect the server-side promotion is stuck (e.g. backlog has critical work but the freed agent didn't pick anything up), comment with the suspicion and stop. Humans investigate; you don't override.
 `,
   },
 ];
