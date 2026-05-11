@@ -176,10 +176,40 @@ export class BacklogPromotionService implements OnModuleInit {
       .getMany();
     if (candidates.length === 0) return null;
 
-    // Sort by priority_index ASC then created_at ASC. priority_index is
-    // the SINGLE allowed sort key for priority — see the priority.ts
-    // helper. Within the same priority, oldest-created ticket wins.
+    // Chain-target prefix: a candidate that some other ticket's
+    // `next_ticket_id` points at must win over an unrelated higher-priority
+    // candidate. Without this prefix, an `A.next_ticket_id = B` chain where
+    // A has already reached terminal but B is still in intake gets bypassed
+    // — promotion picks a critical-priority `C` ahead of `B`, and the
+    // `_dispatchNextTicket` path (which wakes B's *current* column's
+    // role-holders) can't compensate because B is still in an intake column
+    // routed to `reporter`, not `assignee`. The prefix is computed against
+    // the entire candidate set in one IN-list query, so the cost is one
+    // round-trip regardless of board size, and parent location doesn't
+    // matter (a candidate is a chain target whether the pointing ticket is
+    // terminal, active, or somewhere else).
+    const candidateIds = candidates.map(c => c.id);
+    const chainParents = candidateIds.length
+      ? await ticketRepo
+          .createQueryBuilder('t')
+          .where('t.next_ticket_id IN (:...ids)', { ids: candidateIds })
+          .getMany()
+      : [];
+    const isChainTarget = new Set(
+      chainParents.map(p => p.next_ticket_id).filter(Boolean) as string[],
+    );
+
+    // Sort key: chain_target ASC (chain wins), then priority_index ASC,
+    // then created_at ASC. priority_index is the SINGLE allowed sort key
+    // for priority — see the priority.ts helper. Within the same chain
+    // tier and same priority, oldest-created ticket wins. The chain
+    // prefix is additive only: ties on chain_target preserve the
+    // previous priority/created_at order so the no-chain regression case
+    // matches the pre-fix output exactly.
     candidates.sort((a, b) => {
+      const ax = isChainTarget.has(a.id) ? 0 : 1;
+      const bx = isChainTarget.has(b.id) ? 0 : 1;
+      if (ax !== bx) return ax - bx;
       const pa = priorityIndex(a.priority);
       const pb = priorityIndex(b.priority);
       if (pa !== pb) return pa - pb;
@@ -374,6 +404,7 @@ export class BacklogPromotionService implements OnModuleInit {
           actor_name: 'BacklogPromotionService',
           action: 'backlog_promoted',
           new_value: `from=${fromColumnId} to=${destination.id} priority_index=${priorityIndex(ticket.priority)} ` +
+                     `chain_target=${isChainTarget.has(ticket.id)} ` +
                      `triggered_by=${opts?.triggerAgentId || 'manual'} holders=${checkedHolders.join(',')}`,
           trigger_source: 'backlog_promotion',
         }));
@@ -387,6 +418,7 @@ export class BacklogPromotionService implements OnModuleInit {
         board_id: boardId, ticket_id: ticket.id,
         from_column_id: fromColumnId, to_column_id: destination.id,
         priority_index: priorityIndex(ticket.priority),
+        chain_target: isChainTarget.has(ticket.id),
         triggered_by: opts?.triggerAgentId || null,
       });
       return ticket.id;

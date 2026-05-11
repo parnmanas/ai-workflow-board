@@ -390,6 +390,7 @@ export class QaController {
       { file: 'mcp-tools-surface.test.mjs', category: 'Flow-MCP' },
       { file: 'mcp-schema-version.test.mjs', category: 'Flow-MCP' },
       { file: 'mcp-agent-roundtrip.test.mjs', category: 'Flow-MCP' },
+      { file: 'backlog-promotion-chain.test.mjs', category: 'Flow-Lifecycle' },
       { file: 'multi-agent-concurrency.test.mjs', category: 'Flow-Concurrency' },
       { file: 'multi-user-chat.test.mjs', category: 'Flow-Chat' },
       { file: 'large-data.test.mjs', category: 'Flow-Scale' },
