@@ -85,6 +85,14 @@ export interface QueueItem {
   triggered_by: string;
   /** Whether the original cap-skip emit was a force_respawn. Preserved end-to-end. */
   force_respawn?: boolean;
+  /**
+   * Cap-skip rationale token surfaced on the `trigger_enqueued` audit
+   * row. Currently `'workflow-state'` for the workflow-load gate
+   * introduced by ticket e79eef92; future gates (e.g. `'rate-limit'`,
+   * `'maintenance'`) can reuse the channel. Optional because not every
+   * caller computes a gate label.
+   */
+  gate?: string;
 }
 
 /**
@@ -154,8 +162,12 @@ export class AgentDispatchQueueService {
     // by reference identity — a fresh QueueItem is only ever inserted once.
     const enqueued = !dropped || dropped !== item;
     if (enqueued) {
+      // gate=... token appended when the caller labelled the cap-skip
+      // rationale. See QueueItem.gate; required by ticket e79eef92
+      // acceptance ("emit skip 시 trigger_enqueued 메타에 gate=workflow-state").
+      const gateToken = item.gate ? ` gate=${item.gate}` : '';
       await this._logActivity(item, 'trigger_enqueued',
-        `agent=${item.agent_id} depth=${queue.length}/${depth} priority_index=${item.priority_index}`);
+        `agent=${item.agent_id} depth=${queue.length}/${depth} priority_index=${item.priority_index}${gateToken}`);
       this.logService.info('AgentDispatchQueue', 'trigger enqueued', {
         agent_id: item.agent_id, ticket_id: item.ticket_id, role: item.role,
         priority_index: item.priority_index, depth: queue.length, max_depth: depth,

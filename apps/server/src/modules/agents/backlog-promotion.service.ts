@@ -57,7 +57,7 @@ import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { LogService } from '../../services/log.service';
 import { ActivityService, activityEvents } from '../../services/activity.service';
-import { AgentStatusService } from './agent-status.service';
+import { AgentWorkloadService } from './agent-workload.service';
 import { TriggerLoopService } from './trigger-loop.service';
 import { priorityIndex } from './priority';
 
@@ -72,7 +72,7 @@ export class BacklogPromotionService implements OnModuleInit {
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly logService: LogService,
     private readonly activityService: ActivityService,
-    private readonly agentStatusService: AgentStatusService,
+    private readonly agentWorkload: AgentWorkloadService,
     // forwardRef so the BacklogPromotion ↔ TriggerLoop dependency edge
     // doesn't fight Nest's eager-instantiation order (TriggerLoop currently
     // takes AgentDispatchQueueService via forwardRef; staying symmetric here
@@ -176,10 +176,40 @@ export class BacklogPromotionService implements OnModuleInit {
       .getMany();
     if (candidates.length === 0) return null;
 
-    // Sort by priority_index ASC then created_at ASC. priority_index is
-    // the SINGLE allowed sort key for priority — see the priority.ts
-    // helper. Within the same priority, oldest-created ticket wins.
+    // Chain-target prefix: a candidate that some other ticket's
+    // `next_ticket_id` points at must win over an unrelated higher-priority
+    // candidate. Without this prefix, an `A.next_ticket_id = B` chain where
+    // A has already reached terminal but B is still in intake gets bypassed
+    // — promotion picks a critical-priority `C` ahead of `B`, and the
+    // `_dispatchNextTicket` path (which wakes B's *current* column's
+    // role-holders) can't compensate because B is still in an intake column
+    // routed to `reporter`, not `assignee`. The prefix is computed against
+    // the entire candidate set in one IN-list query, so the cost is one
+    // round-trip regardless of board size, and parent location doesn't
+    // matter (a candidate is a chain target whether the pointing ticket is
+    // terminal, active, or somewhere else).
+    const candidateIds = candidates.map(c => c.id);
+    const chainParents = candidateIds.length
+      ? await ticketRepo
+          .createQueryBuilder('t')
+          .where('t.next_ticket_id IN (:...ids)', { ids: candidateIds })
+          .getMany()
+      : [];
+    const isChainTarget = new Set(
+      chainParents.map(p => p.next_ticket_id).filter(Boolean) as string[],
+    );
+
+    // Sort key: chain_target ASC (chain wins), then priority_index ASC,
+    // then created_at ASC. priority_index is the SINGLE allowed sort key
+    // for priority — see the priority.ts helper. Within the same chain
+    // tier and same priority, oldest-created ticket wins. The chain
+    // prefix is additive only: ties on chain_target preserve the
+    // previous priority/created_at order so the no-chain regression case
+    // matches the pre-fix output exactly.
     candidates.sort((a, b) => {
+      const ax = isChainTarget.has(a.id) ? 0 : 1;
+      const bx = isChainTarget.has(b.id) ? 0 : 1;
+      if (ax !== bx) return ax - bx;
       const pa = priorityIndex(a.priority);
       const pb = priorityIndex(b.priority);
       if (pa !== pb) return pa - pb;
@@ -223,6 +253,13 @@ export class BacklogPromotionService implements OnModuleInit {
       // the move commits. Built up alongside the eligibility check so we
       // don't re-walk the role list in the post-save loop.
       const dispatchTargets: Array<{ slug: string; holderId: string }> = [];
+      // Audit-trail material for a workflow-load skip — captured up here
+      // so the activity row can record which holder/slug closed the cap.
+      let skipReason: {
+        slug: string;
+        holderId: string;
+        load: string[];
+      } | null = null;
       for (let i = 0; i < requiredRoleIds.length; i++) {
         const roleId = requiredRoleIds[i];
         const slug = destSlugs[i];
@@ -233,19 +270,57 @@ export class BacklogPromotionService implements OnModuleInit {
           eligible = false;
           break;
         }
-        // Capacity check on the destination role holder. We only count
-        // active_tasks (plugin-signal driven) for this gate — pendingDispatches
-        // is owned by TriggerLoopService and isn't visible here. If a
-        // queue handoff races against a promotion, the trigger-loop's
-        // own cap re-check at emit time still gates correctly.
-        const active = this.agentStatusService.getActiveTicketIds(a.agent_id);
-        if (active.length >= maxConcurrent && !active.includes(ticket.id)) {
+        // Capacity check — WORKFLOW-STATE, not process-state. We count
+        // every ticket this agent currently holds the destination role on,
+        // sitting on a non-terminal & non-intake column of this board.
+        // Process-level signals (`AgentStatusService.active_tasks`) are
+        // unreliable here: a WAIT-only turn clears the active_task and
+        // re-opens the cap even though the assignee still owns N parked
+        // tickets in To Do/In Progress. The trigger-loop's emit gate
+        // unions this set with `pendingDispatches` for the short-lived
+        // "trigger fired, ticket not yet moved" window.
+        const load = await this.agentWorkload.getWorkflowLoadTicketIds(
+          a.agent_id, boardId, slug,
+        );
+        if (load.length >= maxConcurrent && !load.includes(ticket.id)) {
           eligible = false;
+          skipReason = { slug, holderId: a.agent_id, load };
           break;
         }
         dispatchTargets.push({ slug, holderId: a.agent_id });
       }
-      if (!eligible) continue;
+      if (!eligible) {
+        // Observability: an audit row for every promotion that the
+        // workflow-state cap blocked. Lets ops correlate a backlog that
+        // isn't draining ("no promotion happened") to the specific holder
+        // that's at-cap on a non-terminal column. Process-state-only skips
+        // are silent because they're not load-bearing — workflow-state is.
+        if (skipReason) {
+          try {
+            const activityLogRepo = this.dataSource.getRepository(ActivityLog);
+            await activityLogRepo.save(activityLogRepo.create({
+              entity_type: 'ticket',
+              entity_id: ticket.id,
+              ticket_id: ticket.id,
+              actor_id: 'system',
+              actor_name: 'BacklogPromotionService',
+              action: 'backlog_promotion_skipped_workflow_load',
+              new_value:
+                `board=${boardId} role=${skipReason.slug} ` +
+                `holder=${skipReason.holderId} ` +
+                `current_count=${skipReason.load.length}/${maxConcurrent} ` +
+                `ticket_ids=${skipReason.load.join(',')}`,
+              role: skipReason.slug,
+              trigger_source: 'backlog_promotion',
+            }));
+          } catch (e) {
+            this.logService.warn('BacklogPromotion', 'workflow-load skip audit write failed (continuing)', {
+              err: String(e), ticket_id: ticket.id,
+            });
+          }
+        }
+        continue;
+      }
 
       // Move: ticket.column_id update + audit `moved` activity row.
       //
@@ -329,6 +404,7 @@ export class BacklogPromotionService implements OnModuleInit {
           actor_name: 'BacklogPromotionService',
           action: 'backlog_promoted',
           new_value: `from=${fromColumnId} to=${destination.id} priority_index=${priorityIndex(ticket.priority)} ` +
+                     `chain_target=${isChainTarget.has(ticket.id)} ` +
                      `triggered_by=${opts?.triggerAgentId || 'manual'} holders=${checkedHolders.join(',')}`,
           trigger_source: 'backlog_promotion',
         }));
@@ -342,6 +418,7 @@ export class BacklogPromotionService implements OnModuleInit {
         board_id: boardId, ticket_id: ticket.id,
         from_column_id: fromColumnId, to_column_id: destination.id,
         priority_index: priorityIndex(ticket.priority),
+        chain_target: isChainTarget.has(ticket.id),
         triggered_by: opts?.triggerAgentId || null,
       });
       return ticket.id;

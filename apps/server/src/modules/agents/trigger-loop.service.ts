@@ -13,7 +13,7 @@ import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
-import { AgentStatusService } from './agent-status.service';
+import { AgentWorkloadService } from './agent-workload.service';
 import { AgentDispatchQueueService, QueueItem } from './agent-dispatch-queue.service';
 import { priorityIndex } from './priority';
 
@@ -43,20 +43,19 @@ const PENDING_DISPATCH_TTL_MS = 30_000;
 
 @Injectable()
 export class TriggerLoopService implements OnModuleInit {
-  // agent_id → Map<ticket_id, emitted_at_ms>. Counts toward the per-board
-  // max_concurrent_tickets_per_agent cap alongside AgentStatusService's
-  // active_tasks. Active_tasks is plugin-signal driven and only flips on
-  // set_current_task, which lags the SSE emit by the manager spawn round-
-  // trip; without this the cap permits a burst of N back-to-back triggers
-  // before any of them stamp the active map. Entries here are added
+  // agent_id → Map<ticket_id, emitted_at_ms>. Short-window race guard for
+  // the gap between emit and the ticket landing on a non-terminal column
+  // (where AgentWorkloadService would observe it). Entries are added
   // synchronously between cap check and emit, so a concurrent _emitTrigger
-  // racing on the same agent observes them.
+  // racing on the same agent observes them. TTL'd via PENDING_DISPATCH_TTL_MS
+  // — workflow-state is the persistent fact, pendingDispatches is the
+  // transient one.
   private readonly pendingDispatches = new Map<string, Map<string, number>>();
 
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly logService: LogService,
-    private readonly agentStatusService: AgentStatusService,
+    private readonly agentWorkload: AgentWorkloadService,
     @Inject(forwardRef(() => AgentDispatchQueueService))
     private readonly dispatchQueue: AgentDispatchQueueService,
   ) {}
@@ -470,16 +469,16 @@ export class TriggerLoopService implements OnModuleInit {
 
     // Per-board cap: a board may want to keep one agent on at most N tickets
     // at a time (default 1) so concurrent subagents don't stomp on the same
-    // working_dir. Look up the limit, count this agent's active tickets
-    // (excluding the target — re-firing on a ticket the agent is already
-    // working on is allowed; that's just a new turn on the live session),
-    // and skip emission when the cap is reached.
+    // working_dir. Resolve the cap AND the board id — both feed the
+    // workflow-state cap check below.
     let maxConcurrent = 1;
+    let boardId = '';
     try {
       const col = await this.dataSource
         .getRepository(BoardColumn)
         .findOne({ where: { id: ticket.column_id } });
       if (col) {
+        boardId = col.board_id;
         const board = await this.dataSource
           .getRepository(Board)
           .findOne({ where: { id: col.board_id } });
@@ -493,16 +492,26 @@ export class TriggerLoopService implements OnModuleInit {
       });
     }
 
-    // Cap check + reservation MUST be atomic relative to other concurrent
-    // _emitTrigger calls — i.e. no `await` between reading the in-flight set
-    // and adding our entry to it. Activity events arrive via fire-and-forget
-    // listeners, so multiple _handleActivity / supervisor pushes can interleave
-    // their awaits and reach this point on the same agent simultaneously.
-    // Snapshotting active + pending into a Set, deciding, then mutating
-    // pending — all synchronous — closes the race window.
-    const activeTicketIds = this.agentStatusService.getActiveTicketIds(agentId);
+    // Cap check (workflow-state) — counts every ticket this agent
+    // currently has parked on a non-terminal & non-intake column of this
+    // board, unioned with `pendingDispatches` for the short-lived "trigger
+    // emitted, ticket not yet moved" race window. The previous gate read
+    // `AgentStatusService.active_tasks`, which only flips on plugin
+    // setCurrentTask / clearCurrentTask — a WAIT-only turn cleared it and
+    // re-opened the cap even though the assignee still owned N parked
+    // tickets. workflow-state is the persistent fact; pendingDispatches
+    // covers the sub-second emit→land gap.
+    //
+    // The cap-check + pendingDispatches reservation MUST be atomic with
+    // respect to concurrent _emitTrigger calls — no `await` between
+    // reading `pendingTicketIds` and `_addPendingDispatch` below. We do
+    // the workflow-load DB read FIRST (the only await), then snapshot
+    // pending, decide, and reserve — all synchronous after the await.
+    const workflowLoadIds = boardId
+      ? await this.agentWorkload.getWorkflowLoadTicketIds(agentId, boardId)
+      : [];
     const pendingTicketIds = this._getPendingTicketIds(agentId);
-    const inflightSet = new Set<string>([...activeTicketIds, ...pendingTicketIds]);
+    const inflightSet = new Set<string>([...workflowLoadIds, ...pendingTicketIds]);
     const alreadyOnTarget = inflightSet.has(ticket.id);
     if (!alreadyOnTarget && inflightSet.size >= maxConcurrent) {
       // v0.41 — cap-exceeded triggers are ENQUEUED, not silently dropped.
@@ -518,8 +527,9 @@ export class TriggerLoopService implements OnModuleInit {
           role,
           source: triggerSource,
           max_concurrent: maxConcurrent,
-          active_ticket_ids: activeTicketIds,
+          workflow_load_ticket_ids: workflowLoadIds,
           pending_ticket_ids: pendingTicketIds,
+          gate: 'workflow-state',
         },
       );
       const triggerId = randomUUID();
@@ -534,6 +544,12 @@ export class TriggerLoopService implements OnModuleInit {
         enqueued_at: Date.now(),
         triggered_by: triggeredBy,
         force_respawn: opts?.forceRespawn === true,
+        // `gate=workflow-state` is recorded on the `trigger_enqueued`
+        // audit row by AgentDispatchQueueService — see _logActivity.
+        // Lets ops correlate cap-skip rationale ("workflow-state full"
+        // vs the pre-fix "active_tasks full") when post-morteming a
+        // stalled board.
+        gate: 'workflow-state',
       };
       const { enqueued } = await this.dispatchQueue.enqueue(queueItem);
       // Return the trigger_id either way — callers can correlate it
@@ -679,9 +695,9 @@ export class TriggerLoopService implements OnModuleInit {
       // Cap snapshot is taken HERE — right before dispatch — so a
       // concurrent _emitTrigger that reserved a slot between dequeue
       // and emit is observed and we requeue instead of overcommitting.
-      const activeTicketIds = this.agentStatusService.getActiveTicketIds(agentId);
-      const pendingTicketIds = this._getPendingTicketIds(agentId);
-      const inflight = new Set<string>([...activeTicketIds, ...pendingTicketIds]);
+      // workflow-state ∪ pendingDispatches: the persistent fact + the
+      // short-lived "trigger emitted but not yet landed" guard. Same
+      // composition as _emitTrigger's pre-emit gate.
       let maxConcurrent = 1;
       const board = await this.dataSource
         .getRepository(Board)
@@ -689,6 +705,11 @@ export class TriggerLoopService implements OnModuleInit {
       if (board && Number.isFinite(board.max_concurrent_tickets_per_agent)) {
         maxConcurrent = Math.max(1, Math.floor(board.max_concurrent_tickets_per_agent));
       }
+      const workflowLoadIds = await this.agentWorkload.getWorkflowLoadTicketIds(
+        agentId, col.board_id,
+      );
+      const pendingTicketIds = this._getPendingTicketIds(agentId);
+      const inflight = new Set<string>([...workflowLoadIds, ...pendingTicketIds]);
       if (!inflight.has(item.ticket_id) && inflight.size >= maxConcurrent) {
         // Cap closed mid-dispatch — put the item back at its priority
         // (no fresh `trigger_enqueued` row; the original is still on
@@ -723,8 +744,9 @@ export class TriggerLoopService implements OnModuleInit {
 
   /**
    * Snapshot of pending dispatches for an agent, after TTL eviction.
-   * Synchronous — counterpart to AgentStatusService.getActiveTicketIds in
-   * the cap calculation. Side-effect: prunes expired entries on read so the
+   * Synchronous — short-lived race guard unioned with workflow-state
+   * (`AgentWorkloadService.getWorkflowLoadTicketIds`) in the cap
+   * calculation. Side-effect: prunes expired entries on read so the
    * map stays bounded.
    */
   private _getPendingTicketIds(agentId: string): string[] {
