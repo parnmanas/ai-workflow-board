@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { randomUUID } from 'crypto';
 import { Action } from '../../entities/Action';
 import { ActionRun } from '../../entities/ActionRun';
 import { ChatRoom } from '../../entities/ChatRoom';
@@ -233,19 +234,16 @@ export class ActionsService {
       ? await this.userRepo.findOne({ where: { id: args.triggeredById } })
       : null;
 
-    // Create the run row early so we have a stable run_id to interpolate into
-    // the prompt (`{{run.id}}`) and to stamp on the room name.
-    const runScaffold = this.runRepo.create({
-      action_id: action.id,
-      workspace_id: action.workspace_id,
-      room_id: '',           // filled in after room creation, see below
-      triggered_by_type: args.triggeredByType,
-      triggered_by_id: args.triggeredById || '',
-      prompt_rendered: '',   // filled below
-    });
-    // Pre-allocate the id by saving and re-loading so cron interpolation can
-    // reference it; we patch room_id + prompt_rendered in the same row.
-    const tempRun = await this.runRepo.save(runScaffold);
+    // Pre-allocate the run's UUID up front so {{run.id}} resolves before any
+    // DB write, and so we can save the ActionRun row exactly once with every
+    // field populated. The previous flow saved a half-empty scaffold first
+    // (room_id: '', prompt_rendered: '') to grab tempRun.id, then patched
+    // those two columns in a second save. That broke on production.private
+    // after commit d971fa1 widened action_runs.room_id from varchar to uuid
+    // — Postgres rejects '' with `invalid input syntax for type uuid: ""`.
+    // Generating the id here lets us write a complete row up front and
+    // avoid the empty-string sentinel entirely.
+    const runId = randomUUID();
 
     const ctx = buildRenderContext({
       workspace: workspace ? { id: workspace.id, name: workspace.name } : null,
@@ -253,20 +251,33 @@ export class ActionsService {
       user: user ? { id: user.id, name: user.name, email: user.email } : null,
       agent: { id: agent.id, name: agent.name },
       action: { id: action.id, name: action.name },
-      runId: tempRun.id,
+      runId,
     });
     const rendered = renderActionPrompt(action.prompt || '', ctx);
 
     // Create the room. We use 'group' as the underlying type so the chat
     // controller's existing rules (rename, multi-participant, etc.) apply.
     // The action_id stamp is what differentiates Action runs from regular
-    // chat groups in the list view.
+    // chat groups in the list view. Created BEFORE the run row so we have
+    // a real room.id to stamp on it.
     const room = await this.roomRepo.save(this.roomRepo.create({
       workspace_id: action.workspace_id,
       type: 'group',
-      name: `Action: ${action.name} · ${tempRun.id.slice(0, 8)}`,
+      name: `Action: ${action.name} · ${runId.slice(0, 8)}`,
       action_id: action.id,
       last_message_at: null,
+    }));
+
+    // Now persist the run with every column filled in — one INSERT, no
+    // placeholder columns, no second UPDATE.
+    const tempRun = await this.runRepo.save(this.runRepo.create({
+      id: runId,
+      action_id: action.id,
+      workspace_id: action.workspace_id,
+      room_id: room.id,
+      triggered_by_type: args.triggeredByType,
+      triggered_by_id: args.triggeredById || '',
+      prompt_rendered: rendered,
     }));
 
     // Add participants directly (bypassing addParticipants' "caller must be a
@@ -290,11 +301,6 @@ export class ActionsService {
       }));
     }
     await this.participantRepo.save(rows);
-
-    // Patch run row with room + rendered prompt.
-    tempRun.room_id = room.id;
-    tempRun.prompt_rendered = rendered;
-    await this.runRepo.save(tempRun);
 
     // Update Action.last_run_at so the scheduler doesn't double-fire on the
     // same minute boundary.
