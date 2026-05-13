@@ -41,9 +41,21 @@
  *     terminal-column landing path / explicit operator action.
  *
  * Promotion is best-effort: if no ticket on any intake column has a
- * fully-filled role set with holders below cap, the call is a no-op.
- * The next capacity event will retry. The supervisor 30-min stale check
- * remains as a final eventual-consistency backstop.
+ * fully-filled role set with holders whose focus selector returns null
+ * (i.e. they aren't already busy on a non-intake / non-terminal
+ * ticket), the call is a no-op. The next capacity event will retry.
+ * The supervisor 30-min stale check remains as a final eventual-
+ * consistency backstop.
+ *
+ * Promotion gate (ticket 4a6cdfd7, replaces the workflow-load cap):
+ *
+ *   For each destination role on the promoted ticket, the holder is
+ *   eligible iff `AgentWorkloadService.getFocusTicket(holder, board,
+ *   slug)` returns null. A non-null return means the holder already
+ *   has a focus ticket on this board, so promoting another one onto
+ *   them would just stack a non-emittable trigger. The audit trail
+ *   records each skip as `backlog_promotion_skipped_focus_held` with
+ *   `holder=` and `focus_ticket_id=` in `new_value`.
  */
 import { Injectable, OnModuleInit, forwardRef, Inject } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
@@ -73,10 +85,11 @@ export class BacklogPromotionService implements OnModuleInit {
     private readonly logService: LogService,
     private readonly activityService: ActivityService,
     private readonly agentWorkload: AgentWorkloadService,
-    // forwardRef so the BacklogPromotion ↔ TriggerLoop dependency edge
-    // doesn't fight Nest's eager-instantiation order (TriggerLoop currently
-    // takes AgentDispatchQueueService via forwardRef; staying symmetric here
-    // keeps the graph stable if either side grows another back-edge later).
+    // forwardRef preserved purely as a defensive measure: BacklogPromotion
+    // and TriggerLoop share AgentWorkloadService and don't strictly need
+    // a forward edge after the dispatch queue removal, but keeping it
+    // here means a future back-edge addition doesn't require module
+    // surgery again.
     @Inject(forwardRef(() => TriggerLoopService))
     private readonly triggerLoop: TriggerLoopService,
   ) {}
@@ -241,7 +254,6 @@ export class BacklogPromotionService implements OnModuleInit {
       requiredRoleIds.push(role.id);
     }
 
-    const maxConcurrent = Math.max(1, Math.floor(board.max_concurrent_tickets_per_agent || 1));
     const assignRepo = this.dataSource.getRepository(TicketRoleAssignment);
 
     for (const ticket of candidates) {
@@ -253,12 +265,12 @@ export class BacklogPromotionService implements OnModuleInit {
       // the move commits. Built up alongside the eligibility check so we
       // don't re-walk the role list in the post-save loop.
       const dispatchTargets: Array<{ slug: string; holderId: string }> = [];
-      // Audit-trail material for a workflow-load skip — captured up here
-      // so the activity row can record which holder/slug closed the cap.
+      // Audit-trail material for a focus-held skip — captured up here
+      // so the activity row can record which holder/slug closed the gate.
       let skipReason: {
         slug: string;
         holderId: string;
-        load: string[];
+        focusTicketId: string;
       } | null = null;
       for (let i = 0; i < requiredRoleIds.length; i++) {
         const roleId = requiredRoleIds[i];
@@ -270,31 +282,29 @@ export class BacklogPromotionService implements OnModuleInit {
           eligible = false;
           break;
         }
-        // Capacity check — WORKFLOW-STATE, not process-state. We count
-        // every ticket this agent currently holds the destination role on,
-        // sitting on a non-terminal & non-intake column of this board.
-        // Process-level signals (`AgentStatusService.active_tasks`) are
-        // unreliable here: a WAIT-only turn clears the active_task and
-        // re-opens the cap even though the assignee still owns N parked
-        // tickets in To Do/In Progress. The trigger-loop's emit gate
-        // unions this set with `pendingDispatches` for the short-lived
-        // "trigger fired, ticket not yet moved" window.
-        const load = await this.agentWorkload.getWorkflowLoadTicketIds(
+        // Focus-selector gate (ticket 4a6cdfd7) — replaces the previous
+        // per-candidate workflow-load cap loop. A holder that currently
+        // has ANY focus ticket on this board (for this role slug) is
+        // ineligible: the focus model says one ticket per agent per
+        // board / role, and that ticket is `focusTicketId`. The
+        // candidate itself is in an intake column so it can never be
+        // its own focus (the selector excludes intake by construction);
+        // a non-null return here therefore names a DIFFERENT ticket
+        // already occupying the slot.
+        const focusTicketId = await this.agentWorkload.getFocusTicket(
           a.agent_id, boardId, slug,
         );
-        if (load.length >= maxConcurrent && !load.includes(ticket.id)) {
+        if (focusTicketId) {
           eligible = false;
-          skipReason = { slug, holderId: a.agent_id, load };
+          skipReason = { slug, holderId: a.agent_id, focusTicketId };
           break;
         }
         dispatchTargets.push({ slug, holderId: a.agent_id });
       }
       if (!eligible) {
-        // Observability: an audit row for every promotion that the
-        // workflow-state cap blocked. Lets ops correlate a backlog that
-        // isn't draining ("no promotion happened") to the specific holder
-        // that's at-cap on a non-terminal column. Process-state-only skips
-        // are silent because they're not load-bearing — workflow-state is.
+        // Observability: an audit row for every promotion blocked by a
+        // focus-held holder. Lets ops correlate "this backlog isn't
+        // draining" to the specific (holder, focus_ticket) pair.
         if (skipReason) {
           try {
             const activityLogRepo = this.dataSource.getRepository(ActivityLog);
@@ -304,17 +314,16 @@ export class BacklogPromotionService implements OnModuleInit {
               ticket_id: ticket.id,
               actor_id: 'system',
               actor_name: 'BacklogPromotionService',
-              action: 'backlog_promotion_skipped_workflow_load',
+              action: 'backlog_promotion_skipped_focus_held',
               new_value:
                 `board=${boardId} role=${skipReason.slug} ` +
                 `holder=${skipReason.holderId} ` +
-                `current_count=${skipReason.load.length}/${maxConcurrent} ` +
-                `ticket_ids=${skipReason.load.join(',')}`,
+                `focus_ticket_id=${skipReason.focusTicketId}`,
               role: skipReason.slug,
               trigger_source: 'backlog_promotion',
             }));
           } catch (e) {
-            this.logService.warn('BacklogPromotion', 'workflow-load skip audit write failed (continuing)', {
+            this.logService.warn('BacklogPromotion', 'focus-held skip audit write failed (continuing)', {
               err: String(e), ticket_id: ticket.id,
             });
           }
@@ -365,10 +374,11 @@ export class BacklogPromotionService implements OnModuleInit {
       }
 
       // Explicit per-holder dispatch. Going through `emitAgentTrigger`
-      // means the cap-check / pending-reservation / queue-on-cap path is
-      // honoured exactly as it would be for a manual move_ticket call —
-      // including enqueue when a holder is busy on another ticket. The
-      // `triggered_by` field is the *causing* idle-event agent (or
+      // re-applies the focus-selector gate inside `_emitTrigger` for
+      // free — so an emit that loses the focus race (e.g. another role
+      // already landed a higher-column ticket on the same agent
+      // between our eligibility check and this emit) drops silently.
+      // The `triggered_by` field is the *causing* idle-event agent (or
       // 'backlog_promotion' for direct calls) so post-mortems can
       // correlate the wake-up to the slot that opened.
       const triggeredBy = opts?.triggerAgentId || 'backlog_promotion';

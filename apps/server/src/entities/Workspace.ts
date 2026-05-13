@@ -43,10 +43,15 @@ export class Workspace {
   supervisor_resend_ms: number;
 
   /**
-   * Per-agent dispatch queue depth cap. When the queue is full, the
-   * lowest-priority pending item is dropped (and a `queue_dropped_low_priority`
-   * activity row is logged). Default: 100 — well above any realistic
-   * single-agent backlog so drops are a real overload signal, not normal.
+   * @deprecated since ticket 4a6cdfd7 (WorkflowFocusSelector). The
+   * per-agent dispatch queue was removed when the cap model was
+   * replaced with the focus selector — triggers are now either emitted
+   * immediately (focus = ticket) or dropped silently (focus ≠ ticket).
+   *
+   * The column is kept on the entity / REST setter / MCP setter so
+   * older clients setting `dispatch_queue_depth` still get HTTP 200
+   * rather than 400; a follow-up cleanup ticket can drop the column
+   * after one release cycle. No runtime code reads this value.
    */
   @Column({ type: 'int', default: 100 })
   dispatch_queue_depth: number;

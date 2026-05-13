@@ -12,7 +12,6 @@ import { TriggerLoopService } from './trigger-loop.service';
 import { AgentStatusService } from './agent-status.service';
 import { AllocationService } from './allocation.service';
 import { TicketSupervisorService } from './ticket-supervisor.service';
-import { AgentDispatchQueueService } from './agent-dispatch-queue.service';
 import { AgentWorkloadService } from './agent-workload.service';
 import { BacklogPromotionService } from './backlog-promotion.service';
 import { FsBrowserService } from '../../services/fs-browser.service';
@@ -36,13 +35,13 @@ import { AgentManagerModule } from '../agent-manager/agent-manager.module';
     AuthGuard, PermissionGuard, AgentAuthGuard,
     AgentConnectionService, TriggerLoopService, AgentStatusService, AllocationService,
     TicketSupervisorService,
-    AgentDispatchQueueService, BacklogPromotionService,
+    BacklogPromotionService,
     AgentWorkloadService,
     FsBrowserService, SubagentMonitorService,
   ],
   exports: [
     AgentConnectionService, TriggerLoopService, AgentStatusService, AllocationService,
-    AgentDispatchQueueService, BacklogPromotionService,
+    BacklogPromotionService,
     AgentWorkloadService,
     FsBrowserService, SubagentMonitorService,
   ],
