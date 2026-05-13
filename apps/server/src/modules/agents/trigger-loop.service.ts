@@ -1,4 +1,4 @@
-import { Injectable, OnModuleInit, forwardRef, Inject } from '@nestjs/common';
+import { Injectable, OnModuleInit } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { randomUUID } from 'crypto';
@@ -14,7 +14,6 @@ import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
 import { AgentWorkloadService } from './agent-workload.service';
-import { AgentDispatchQueueService, QueueItem } from './agent-dispatch-queue.service';
 import { priorityIndex } from './priority';
 
 // Pure SSE emitter. The AgentTrigger DB table was removed in v0.25.0 —
@@ -29,55 +28,36 @@ import { priorityIndex } from './priority';
 //   - 'updated': ticket field changed
 //
 // All resolve the ticket's current column, look up routing_config, and emit
-// one agent_trigger per (role, role-holding agent_id) pair.
+// one agent_trigger per (role, role-holding agent_id) pair — but ONLY if
+// the (agent, board, role) focus selector picks THIS ticket. Non-focus
+// triggers are silently dropped (no DB row, no SSE emit) so a board with
+// N parked tickets doesn't thrash the agent.
+//
+// Focus gate (ticket 4a6cdfd7):
+//   - `AgentWorkloadService.getFocusTicket(agent, board, role)` returns
+//     the single ticket id that the agent should be working on for this
+//     (board, role) right now. Trigger emits iff the candidate ticket is
+//     that focus ticket.
+//   - Manual triggers (`emitManualTrigger`) explicitly opt out of the
+//     gate via `opts.bypassFocus = true` — they're deliberate user
+//     overrides and the audit trail already records the human / agent
+//     actor on the `trigger_dispatched` row.
 
 const COMMENT_ACTION = 'created';
 const COMMENT_ENTITY = 'comment';
 
-// Synchronous reservation TTL for in-flight emits whose set_current_task
-// hasn't landed yet. Long enough to absorb a normal subagent spawn round-trip
-// (sub-second in practice), short enough that a silently-dropped trigger
-// (manager restart, network blip) doesn't keep the cap closed forever — the
-// supervisor's 30 min stale check will eventually re-push.
-const PENDING_DISPATCH_TTL_MS = 30_000;
-
 @Injectable()
 export class TriggerLoopService implements OnModuleInit {
-  // agent_id → Map<ticket_id, emitted_at_ms>. Short-window race guard for
-  // the gap between emit and the ticket landing on a non-terminal column
-  // (where AgentWorkloadService would observe it). Entries are added
-  // synchronously between cap check and emit, so a concurrent _emitTrigger
-  // racing on the same agent observes them. TTL'd via PENDING_DISPATCH_TTL_MS
-  // — workflow-state is the persistent fact, pendingDispatches is the
-  // transient one.
-  private readonly pendingDispatches = new Map<string, Map<string, number>>();
-
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly logService: LogService,
     private readonly agentWorkload: AgentWorkloadService,
-    @Inject(forwardRef(() => AgentDispatchQueueService))
-    private readonly dispatchQueue: AgentDispatchQueueService,
   ) {}
 
   onModuleInit() {
     activityEvents.on('activity', (log: ActivityLog) => {
       this._handleActivity(log).catch((e: unknown) => {
         this.logService.error('MCP', 'TriggerLoop error in _handleActivity', { err: e });
-      });
-    });
-
-    // v0.41 — close the loop on cap-skip → enqueue → dispatch.
-    //
-    // AgentStatusService emits 'agent_idle' whenever an agent's active_tasks
-    // shrinks (clearCurrentTask path or sweep stale-task cleanup). Use that
-    // as the capacity signal: pull the highest-priority queued item for
-    // this agent and try to fire it. The dispatch path re-checks the cap
-    // and ticket existence so a stale queue entry can't stomp on a busy
-    // agent — see _tryDispatchFromQueue for the contract.
-    activityEvents.on('agent_idle', (payload: { agent_id: string }) => {
-      this._tryDispatchFromQueue(payload?.agent_id || '').catch((e: unknown) => {
-        this.logService.error('MCP', 'TriggerLoop error in _tryDispatchFromQueue', { err: e });
       });
     });
   }
@@ -125,20 +105,6 @@ export class TriggerLoopService implements OnModuleInit {
     // wakes a different ticket's roles.
     const isTerminal = (col as any).is_terminal === true || (col as any).kind === 'terminal';
     if (isTerminal) {
-      // Sweep any stale queued triggers that still target this ticket
-      // — they're no longer dispatchable now that the ticket sits on a
-      // terminal column. Without this sweep, dead entries would compete
-      // with valid items for the bounded queue depth and could evict
-      // legitimate high-priority work via the lowest-priority drop
-      // policy. Lazy cleanup at dispatch time only handles the head.
-      if (log.action === 'moved') {
-        const removed = this.dispatchQueue.removeForTicketEverywhere(ticket.id);
-        if (removed > 0) {
-          this.logService.info('MCP', 'terminal landing swept stale queue entries', {
-            ticket_id: ticket.id, column_id: col.id, removed,
-          });
-        }
-      }
       if (log.action === 'moved' && ticket.next_ticket_id) {
         await this._dispatchNextTicket(ticket, log.actor_id || '');
       }
@@ -279,9 +245,8 @@ export class TriggerLoopService implements OnModuleInit {
     // Resolve role slugs against the linked ticket's workspace + assignments.
     // Dedupe per (slug, holder) so a routing config that lists the same slug
     // twice — or two distinct slugs that happen to share a holder agent_id —
-    // emits at most once per unique pair. The cap enforcement inside
-    // _emitTrigger is on (agent, ticket); the (slug, holder) dedup here is
-    // belt-and-suspenders against double-firing the same role wake-up.
+    // emits at most once per unique pair. The focus selector inside
+    // _emitTrigger gates whether the emit actually lands.
     const roleRepo = this.dataSource.getRepository(WorkspaceRole);
     const assignRepo = this.dataSource.getRepository(TicketRoleAssignment);
     const seen = new Set<string>();
@@ -308,7 +273,12 @@ export class TriggerLoopService implements OnModuleInit {
   /**
    * Manually wake an agent on a ticket — bound to the "Trigger" button on the
    * ticket UI and any other deliberate user-initiated kick. Just emits the SSE
-   * event; no DB row, no cooldown, no ack. Returns the ephemeral trigger_id.
+   * event; no DB row beyond the explicit `trigger_dispatched` audit, no
+   * cooldown, no ack. Returns the ephemeral trigger_id.
+   *
+   * Manual triggers BYPASS the focus selector gate (opts.bypassFocus = true).
+   * The button is a deliberate user override — clicking it on five
+   * different tickets is a documented way to wake five separate subagents.
    */
   async emitManualTrigger(
     ticketId: string,
@@ -354,7 +324,9 @@ export class TriggerLoopService implements OnModuleInit {
       trigger_source: 'manual',
     }));
 
-    const triggerId = await this._emitTrigger(ticket, targetAgentId, role, 'manual', actor.id);
+    const triggerId = await this._emitTrigger(
+      ticket, targetAgentId, role, 'manual', actor.id, { bypassFocus: true },
+    );
     return { trigger_id: triggerId, ticket_id: ticketId, agent_id: targetAgentId, role };
   }
 
@@ -365,6 +337,12 @@ export class TriggerLoopService implements OnModuleInit {
    * `opts.forceRespawn: true` to tell the plugin to kill any live subagent for
    * this ticket before handling — used when a wedged session hasn't advanced
    * my_last_update_at after an initial re-push.
+   *
+   * Note: supervisor / backlog-promotion / activity-driven emits ALL pass
+   * through the focus selector gate inside `_emitTrigger`. Only
+   * `emitManualTrigger` bypasses it. This is intentional: even a
+   * supervisor 30-min stale re-push for a non-focus ticket should stay
+   * silent — the focus ticket is what wakes the agent each cycle.
    */
   async emitAgentTrigger(
     ticket: Ticket,
@@ -382,9 +360,16 @@ export class TriggerLoopService implements OnModuleInit {
    * loaded fresh at dispatch time) and emit via activityEvents so the
    * EventsController SSE listener forwards it to connected agents.
    *
-   * Fire-and-forget: no DB row, no ack, no retry. TicketSupervisorService
-   * re-pushes stale allocations (my_last_update_at older than 30 min) and
-   * escalates to force_respawn after the cooldown if silence persists.
+   * Focus selector gate (ticket 4a6cdfd7):
+   *   Unless `opts.bypassFocus` is true, the emit only lands if the
+   *   focus selector picks THIS ticket as the agent's focus for
+   *   (board, role). Otherwise the call returns '' and writes no
+   *   DB rows — non-focus triggers are silent (AC #8).
+   *
+   * Fire-and-forget after the gate: no DB row, no ack, no retry.
+   * TicketSupervisorService re-pushes stale allocations
+   * (my_last_update_at older than 30 min) and escalates to
+   * force_respawn after the cooldown if silence persists.
    */
   private async _emitTrigger(
     ticket: Ticket,
@@ -392,9 +377,38 @@ export class TriggerLoopService implements OnModuleInit {
     role: string,
     triggerSource: string,
     triggeredBy: string,
-    opts?: { forceRespawn?: boolean },
+    opts?: { forceRespawn?: boolean; bypassFocus?: boolean },
   ): Promise<string> {
     const now = new Date();
+
+    // Resolve the ticket's column ONCE up front — needed for board_id
+    // (focus selector), the audit-row ranking summary, and any
+    // downstream lookup. Cheap, single repo hit, avoids the three
+    // separate findOne calls the pre-fix code did.
+    const col = ticket.column_id
+      ? await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } })
+      : null;
+    const boardId = col?.board_id ?? '';
+
+    // Focus selector gate. The selector returns the single ticket id
+    // this agent should be working on for (board, role) right now —
+    // ranked by column.position DESC, is_chain_target ASC, priority
+    // ASC, created_at ASC. Manual triggers bypass via opts.bypassFocus.
+    //
+    // Drops are SILENT: no SSE emit, no DB row, no audit. Per AC #8 of
+    // ticket 4a6cdfd7 we want zero queue churn on drops. The selector
+    // result is logged at info level so an operator running the server
+    // log tail can still see why a particular emit dropped.
+    if (!opts?.bypassFocus && boardId) {
+      const focusTicketId = await this.agentWorkload.getFocusTicket(agentId, boardId, role);
+      if (focusTicketId !== ticket.id) {
+        this.logService.info('MCP', 'agent_trigger dropped (not focus)', {
+          ticket_id: ticket.id, agent_id: agentId, role,
+          source: triggerSource, focus_ticket_id: focusTicketId,
+        });
+        return '';
+      }
+    }
 
     // Compose role_prompt = workspace role's prompt + agent's own prompt.
     // Both layers loaded fresh here so any edits since last dispatch propagate
@@ -448,7 +462,6 @@ export class TriggerLoopService implements OnModuleInit {
     // Column workflow prompt: Board.column_prompts[column_id] → PromptTemplate.content
     let columnPrompt: { template_id: string; name: string; content: string } | null = null;
     try {
-      const col = await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } });
       if (col) {
         const board = await this.dataSource.getRepository(Board).findOne({ where: { id: col.board_id } });
         const raw = board?.column_prompts;
@@ -467,101 +480,45 @@ export class TriggerLoopService implements OnModuleInit {
       this.logService.warn('MCP', 'column_prompt lookup failed (continuing without)', { err: String(e), ticket_id: ticket.id });
     }
 
-    // Per-board cap: a board may want to keep one agent on at most N tickets
-    // at a time (default 1) so concurrent subagents don't stomp on the same
-    // working_dir. Resolve the cap AND the board id — both feed the
-    // workflow-state cap check below.
+    // Manager-side defensive cap hint, kept on the wire for backward
+    // compat with plugin / agent-manager versions that read this field
+    // as a second line of defense. Server-side enforcement is now the
+    // focus selector above, NOT this cap. After plugin / manager bumps
+    // can drop the field, this `findOne` goes too.
     let maxConcurrent = 1;
-    let boardId = '';
-    try {
-      const col = await this.dataSource
-        .getRepository(BoardColumn)
-        .findOne({ where: { id: ticket.column_id } });
-      if (col) {
-        boardId = col.board_id;
+    if (boardId) {
+      try {
         const board = await this.dataSource
           .getRepository(Board)
-          .findOne({ where: { id: col.board_id } });
+          .findOne({ where: { id: boardId } });
         if (board && Number.isFinite(board.max_concurrent_tickets_per_agent)) {
           maxConcurrent = Math.max(1, Math.floor(board.max_concurrent_tickets_per_agent));
         }
+      } catch (e) {
+        this.logService.warn('MCP', 'board cap lookup failed (defaulting to 1)', {
+          err: String(e), ticket_id: ticket.id,
+        });
       }
+    }
+
+    // Chain-target flag for the audit row — one IN query scoped to this
+    // single ticket id. Trivial cost; surfaces the selector's ranking
+    // input on every emit so post-mortems can reconstruct "why did the
+    // selector pick this?" from ActivityLog alone (AC #8).
+    let chainTarget = false;
+    try {
+      const parents = await this.dataSource
+        .getRepository(Ticket)
+        .createQueryBuilder('t')
+        .where('t.next_ticket_id = :id', { id: ticket.id })
+        .limit(1)
+        .getMany();
+      chainTarget = parents.length > 0;
     } catch (e) {
-      this.logService.warn('MCP', 'board cap lookup failed (defaulting to 1)', {
+      this.logService.warn('MCP', 'chain_target lookup failed (audit row will say false)', {
         err: String(e), ticket_id: ticket.id,
       });
     }
-
-    // Cap check (workflow-state) — counts every ticket this agent
-    // currently has parked on a non-terminal & non-intake column of this
-    // board, unioned with `pendingDispatches` for the short-lived "trigger
-    // emitted, ticket not yet moved" race window. The previous gate read
-    // `AgentStatusService.active_tasks`, which only flips on plugin
-    // setCurrentTask / clearCurrentTask — a WAIT-only turn cleared it and
-    // re-opened the cap even though the assignee still owned N parked
-    // tickets. workflow-state is the persistent fact; pendingDispatches
-    // covers the sub-second emit→land gap.
-    //
-    // The cap-check + pendingDispatches reservation MUST be atomic with
-    // respect to concurrent _emitTrigger calls — no `await` between
-    // reading `pendingTicketIds` and `_addPendingDispatch` below. We do
-    // the workflow-load DB read FIRST (the only await), then snapshot
-    // pending, decide, and reserve — all synchronous after the await.
-    const workflowLoadIds = boardId
-      ? await this.agentWorkload.getWorkflowLoadTicketIds(agentId, boardId)
-      : [];
-    const pendingTicketIds = this._getPendingTicketIds(agentId);
-    const inflightSet = new Set<string>([...workflowLoadIds, ...pendingTicketIds]);
-    const alreadyOnTarget = inflightSet.has(ticket.id);
-    if (!alreadyOnTarget && inflightSet.size >= maxConcurrent) {
-      // v0.41 — cap-exceeded triggers are ENQUEUED, not silently dropped.
-      // The dispatch queue resorts by priority_index so a high-priority
-      // Review column-move that arrives mid-promotion jumps ahead of any
-      // medium / low items already pending for this agent.
-      this.logService.info(
-        'MCP',
-        'agent_trigger queued (per-board cap reached)',
-        {
-          ticket_id: ticket.id,
-          agent_id: agentId,
-          role,
-          source: triggerSource,
-          max_concurrent: maxConcurrent,
-          workflow_load_ticket_ids: workflowLoadIds,
-          pending_ticket_ids: pendingTicketIds,
-          gate: 'workflow-state',
-        },
-      );
-      const triggerId = randomUUID();
-      const queueItem: QueueItem = {
-        ticket_id: ticket.id,
-        role,
-        agent_id: agentId,
-        workspace_id: ticket.workspace_id,
-        priority_index: priorityIndex(ticket.priority),
-        trigger_id: triggerId,
-        trigger_source: triggerSource,
-        enqueued_at: Date.now(),
-        triggered_by: triggeredBy,
-        force_respawn: opts?.forceRespawn === true,
-        // `gate=workflow-state` is recorded on the `trigger_enqueued`
-        // audit row by AgentDispatchQueueService — see _logActivity.
-        // Lets ops correlate cap-skip rationale ("workflow-state full"
-        // vs the pre-fix "active_tasks full") when post-morteming a
-        // stalled board.
-        gate: 'workflow-state',
-      };
-      const { enqueued } = await this.dispatchQueue.enqueue(queueItem);
-      // Return the trigger_id either way — callers can correlate it
-      // against the dispatched_from_queue / queue_dropped_low_priority
-      // activity rows to see what happened.
-      return enqueued ? triggerId : '';
-    }
-
-    // Reserve synchronously, before emit. A subsequent _emitTrigger that
-    // races past the awaits above will see this entry and either find
-    // alreadyOnTarget=true (same ticket re-fire is fine) or hit the cap.
-    this._addPendingDispatch(agentId, ticket.id);
 
     // Ephemeral trigger_id — plugin-side dedup key, no server persistence.
     const triggerId = randomUUID();
@@ -582,10 +539,10 @@ export class TriggerLoopService implements OnModuleInit {
       triggered_by: triggeredBy,
       timestamp: now.toISOString(),
       force_respawn: forceRespawn,
-      // Manager keeps a defensive cap as a second line of defense in case
-      // two triggers race past this server gate (in-memory active_tasks
-      // only flips on set_current_task, which lags the trigger by the
-      // subagent spawn round-trip).
+      // Manager-side legacy hint — read above as a defensive cap for
+      // plugin / agent-manager versions that haven't been bumped past
+      // the focus-selector cutover. Server-side dispatch is gated by
+      // the focus selector, not this field.
       max_concurrent_tickets_per_agent: maxConcurrent,
     });
 
@@ -593,12 +550,15 @@ export class TriggerLoopService implements OnModuleInit {
       ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource, force_respawn: forceRespawn,
     });
 
-    // v0.41 — observability hook required by ticket 47a90ea3 acceptance #5.
-    // Every successful dispatch leaves a `trigger_emitted` ActivityLog row
-    // so admins can correlate against `trigger_enqueued` / `dispatched_from_queue`
-    // / `queue_dropped_low_priority` and see the full lifecycle of a trigger.
+    // Observability hook required by ticket 4a6cdfd7 acceptance #8.
+    // Every successful dispatch leaves a `trigger_emitted` ActivityLog
+    // row with the selector ranking inputs in `new_value` so admins
+    // can correlate the chosen-focus decision against the parked tickets.
     try {
       const activityLogRepo = this.dataSource.getRepository(ActivityLog);
+      const createdAtIso = ticket.created_at
+        ? new Date(ticket.created_at).toISOString()
+        : '';
       await activityLogRepo.save(activityLogRepo.create({
         entity_type: 'ticket',
         entity_id: ticket.id,
@@ -606,7 +566,13 @@ export class TriggerLoopService implements OnModuleInit {
         actor_id: 'system',
         actor_name: 'TriggerLoopService',
         action: 'trigger_emitted',
-        new_value: `agent=${agentId} priority_index=${priorityIndex(ticket.priority)} force_respawn=${forceRespawn}`,
+        new_value:
+          `agent=${agentId} ` +
+          `column_position=${col?.position ?? -1} ` +
+          `chain_target=${chainTarget} ` +
+          `priority_index=${priorityIndex(ticket.priority)} ` +
+          `created_at=${createdAtIso} ` +
+          `force_respawn=${forceRespawn}`,
         role,
         trigger_source: triggerSource,
       }));
@@ -619,162 +585,6 @@ export class TriggerLoopService implements OnModuleInit {
     }
 
     return triggerId;
-  }
-
-  /**
-   * v0.41 — drain the dispatch queue head for the given agent, if any.
-   *
-   * Wired to the activityEvents `'agent_idle'` signal: AgentStatusService
-   * emits 'agent_idle' on every clearCurrentTask / sweep-driven shrink of
-   * active_tasks, and we look for a queued trigger for that agent. If the
-   * cap is still closed (race against another trigger that reserved the
-   * slot first), the dequeued item is requeued at its priority and the
-   * next idle signal retries.
-   *
-   * Re-fetches the ticket / column at dispatch time so a stale queue
-   * entry can't ship out a wrong trigger payload — terminal landings
-   * cancel the dispatch and drop the item silently. Same for tickets
-   * that disappeared (deleted while queued).
-   *
-   * Concurrency contract — `_tryDispatchFromQueue` may run twice on the
-   * same agent simultaneously (clearCurrentTask + sweep stale-task
-   * cleanup interleaved, or two clears within the same tick). The previous
-   * peek-then-dequeue layout would let one coroutine peek head A, the
-   * other dequeue head A, the first dequeue head B, and the first emit
-   * with `ticket=A, role=B.role` — a mismatched payload. The fix below
-   * dequeues FIRST and re-resolves ticket/col exclusively from the
-   * dequeued `item`, so each coroutine dispatches its own item self-
-   * consistently or requeues it without ever crossing references.
-   */
-  private async _tryDispatchFromQueue(agentId: string): Promise<void> {
-    if (!agentId) return;
-    // Cheap fast-bail without mutating state — dequeueHead is the
-    // authoritative gate. peek() never affects ordering, so a concurrent
-    // dequeue racing past this check just means we exit early; correct.
-    if (!this.dispatchQueue.peek(agentId)) return;
-
-    // Authoritative pop. Every subsequent read uses `item.ticket_id` /
-    // `item.role` — never a separate peek snapshot. `item` is now this
-    // coroutine's exclusive responsibility: emit it, drop it, or requeue.
-    const item = await this.dispatchQueue.dequeueHead(agentId);
-    if (!item) return;
-
-    try {
-      const ticket = await this.dataSource
-        .getRepository(Ticket)
-        .findOne({ where: { id: item.ticket_id } });
-      if (!ticket || !ticket.column_id) {
-        // Ticket vanished or got detached from any column — drop the
-        // stale queue entry, don't dispatch and don't requeue.
-        this.logService.info('MCP', 'dispatched_from_queue dropped (ticket missing)', {
-          agent_id: agentId, ticket_id: item.ticket_id, role: item.role,
-        });
-        return;
-      }
-      const col = await this.dataSource
-        .getRepository(BoardColumn)
-        .findOne({ where: { id: ticket.column_id } });
-      if (!col) {
-        this.logService.info('MCP', 'dispatched_from_queue dropped (column missing)', {
-          agent_id: agentId, ticket_id: item.ticket_id, role: item.role,
-        });
-        return;
-      }
-      // Terminal column landed while the trigger was in the queue — the
-      // dispatch is no longer meaningful; drop silently. The terminal
-      // landing has its own handlers (next_ticket_id chain, completion
-      // comment) that don't need this stale entry.
-      const isTerminal = (col as any).is_terminal === true || (col as any).kind === 'terminal';
-      if (isTerminal) {
-        this.logService.info('MCP', 'dispatched_from_queue dropped (terminal landing)', {
-          agent_id: agentId, ticket_id: item.ticket_id, role: item.role,
-        });
-        return;
-      }
-
-      // Cap snapshot is taken HERE — right before dispatch — so a
-      // concurrent _emitTrigger that reserved a slot between dequeue
-      // and emit is observed and we requeue instead of overcommitting.
-      // workflow-state ∪ pendingDispatches: the persistent fact + the
-      // short-lived "trigger emitted but not yet landed" guard. Same
-      // composition as _emitTrigger's pre-emit gate.
-      let maxConcurrent = 1;
-      const board = await this.dataSource
-        .getRepository(Board)
-        .findOne({ where: { id: col.board_id } });
-      if (board && Number.isFinite(board.max_concurrent_tickets_per_agent)) {
-        maxConcurrent = Math.max(1, Math.floor(board.max_concurrent_tickets_per_agent));
-      }
-      const workflowLoadIds = await this.agentWorkload.getWorkflowLoadTicketIds(
-        agentId, col.board_id,
-      );
-      const pendingTicketIds = this._getPendingTicketIds(agentId);
-      const inflight = new Set<string>([...workflowLoadIds, ...pendingTicketIds]);
-      if (!inflight.has(item.ticket_id) && inflight.size >= maxConcurrent) {
-        // Cap closed mid-dispatch — put the item back at its priority
-        // (no fresh `trigger_enqueued` row; the original is still on
-        // record from the cap-skip emit). The next agent_idle signal
-        // will retry.
-        this.dispatchQueue.requeueAtPriority(item);
-        this.logService.info('MCP', 'dispatch-from-queue requeued (cap closed mid-dispatch)', {
-          agent_id: agentId, ticket_id: item.ticket_id, role: item.role,
-          inflight_count: inflight.size, max_concurrent: maxConcurrent,
-        });
-        return;
-      }
-
-      await this._emitTrigger(
-        ticket,
-        item.agent_id,
-        item.role,
-        item.trigger_source,
-        item.triggered_by,
-        { forceRespawn: item.force_respawn === true },
-      );
-    } catch (e) {
-      this.logService.error('MCP', 'TriggerLoop dispatch-from-queue failed', {
-        err: String(e), agent_id: agentId, item_ticket_id: item.ticket_id, item_role: item.role,
-      });
-      // Don't requeue on exception — exceptions usually indicate a
-      // persistent fault (DB unreachable, schema drift, etc.) that
-      // would just loop forever. The supervisor stale-allocation
-      // re-push is the eventual-consistency backstop.
-    }
-  }
-
-  /**
-   * Snapshot of pending dispatches for an agent, after TTL eviction.
-   * Synchronous — short-lived race guard unioned with workflow-state
-   * (`AgentWorkloadService.getWorkflowLoadTicketIds`) in the cap
-   * calculation. Side-effect: prunes expired entries on read so the
-   * map stays bounded.
-   */
-  private _getPendingTicketIds(agentId: string): string[] {
-    const map = this.pendingDispatches.get(agentId);
-    if (!map || map.size === 0) return [];
-    const cutoff = Date.now() - PENDING_DISPATCH_TTL_MS;
-    const out: string[] = [];
-    const expired: string[] = [];
-    for (const [tid, ts] of map) {
-      if (ts >= cutoff) out.push(tid);
-      else expired.push(tid);
-    }
-    for (const tid of expired) map.delete(tid);
-    if (map.size === 0) this.pendingDispatches.delete(agentId);
-    return out;
-  }
-
-  /**
-   * Reserve a pending slot for (agent, ticket). Refreshes the timestamp on
-   * re-fires so the TTL window resets while triggers keep arriving.
-   */
-  private _addPendingDispatch(agentId: string, ticketId: string): void {
-    let map = this.pendingDispatches.get(agentId);
-    if (!map) {
-      map = new Map<string, number>();
-      this.pendingDispatches.set(agentId, map);
-    }
-    map.set(ticketId, Date.now());
   }
 }
 

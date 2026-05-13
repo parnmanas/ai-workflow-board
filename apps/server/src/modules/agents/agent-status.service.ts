@@ -217,14 +217,12 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
     this.state.set(agent_id, updated);
     this._emit(updated);
 
-    // v0.41 — capacity signal for AgentDispatchQueueService.
-    //
-    // Whenever an agent's active_tasks shrinks (a subagent finished or
-    // exited), broadcast an 'agent_idle' event so the dispatch queue can
-    // pull the highest-priority pending item for this agent and emit it.
-    // This is the single edge that closes the loop: cap-exceeded triggers
-    // were enqueued instead of dropped (TriggerLoopService) and the queue
-    // re-runs them as soon as the agent has room.
+    // 'agent_idle' broadcast — preserved for BacklogPromotionService,
+    // which subscribes to attempt a single promotion pass on each board
+    // the freed agent has any role assignment on. The dispatch-queue
+    // listener that used to consume this signal was removed in ticket
+    // 4a6cdfd7 (focus-selector replacement); the supervisor 60s tick
+    // is the canonical recovery path for missed focus rotations.
     activityEvents.emit('agent_idle', {
       agent_id,
       cleared_ticket_id: expectedTicketId,
