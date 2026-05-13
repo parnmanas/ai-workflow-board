@@ -6,6 +6,7 @@ import {
   UpdateDateColumn,
   Index,
 } from 'typeorm';
+import { nullablePassThroughUuid } from '../database/uuid-column';
 
 /**
  * One row per (ticket, role) slot — the single source of truth for who is
@@ -39,11 +40,11 @@ export class TicketRoleAssignment {
   role_id: string;
 
   /** Agent holding the role. Mutually exclusive with user_id. */
-  @Column({ type: 'varchar', nullable: true, default: null })
+  @Column({ type: 'uuid', nullable: true, transformer: nullablePassThroughUuid })
   agent_id: string | null;
 
   /** Human user holding the role. Mutually exclusive with agent_id. */
-  @Column({ type: 'varchar', nullable: true, default: null })
+  @Column({ type: 'uuid', nullable: true, transformer: nullablePassThroughUuid })
   user_id: string | null;
 
   @CreateDateColumn()

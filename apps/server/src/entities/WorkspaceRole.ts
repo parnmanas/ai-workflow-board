@@ -26,7 +26,7 @@ export class WorkspaceRole {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'varchar' })
+  @Column({ type: 'uuid' })
   workspace_id: string;
 
   /** Mention / routing-config key. Workspace-unique (case sensitive). */

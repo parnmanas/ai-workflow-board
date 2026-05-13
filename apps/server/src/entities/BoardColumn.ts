@@ -1,6 +1,7 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, ManyToOne, OneToMany, JoinColumn } from 'typeorm';
 import { Board } from './Board';
 import { Ticket } from './Ticket';
+import { emptyToNullUuid } from '../database/uuid-column';
 
 /**
  * Workflow classification a column plays in the lifecycle. Data-driven
@@ -33,7 +34,7 @@ export class BoardColumn {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'varchar', nullable: true, default: '' })
+  @Column({ type: 'uuid', nullable: true, transformer: emptyToNullUuid })
   workspace_id: string;
 
   // FK to boards.id (uuid). Typed `uuid` so PG joins like

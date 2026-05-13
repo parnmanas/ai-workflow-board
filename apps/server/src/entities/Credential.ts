@@ -5,7 +5,7 @@ export class Credential {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'varchar' })
+  @Column({ type: 'uuid' })
   workspace_id: string;
 
   @Column({ type: 'varchar' })

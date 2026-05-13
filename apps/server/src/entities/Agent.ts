@@ -1,4 +1,5 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
+import { emptyToNullUuid, nullablePassThroughUuid } from '../database/uuid-column';
 
 @Entity('agents')
 export class Agent {
@@ -38,10 +39,10 @@ export class Agent {
   @Column({ type: 'varchar', default: '' })
   webhook_url: string;
 
-  @Column({ type: 'varchar', default: '' })
+  @Column({ type: 'uuid', nullable: true, transformer: emptyToNullUuid })
   workspace_id: string;
 
-  @Column({ type: 'varchar', nullable: true, default: null })
+  @Column({ type: 'uuid', nullable: true, transformer: nullablePassThroughUuid })
   parent_agent_id: string | null;
 
   @Column({ type: 'text', default: '' })
@@ -63,7 +64,7 @@ export class Agent {
   // bare plugin proxy). Set when an admin creates an agent identity through
   // the agent-manager UI so the manager can route spawn/stop SSE commands
   // to the right host.
-  @Column({ type: 'varchar', nullable: true, default: null })
+  @Column({ type: 'uuid', nullable: true, transformer: nullablePassThroughUuid })
   manager_agent_id: string | null;
 
   // Optional Credential row that supplies CLI auth for the spawned agent
@@ -73,7 +74,7 @@ export class Agent {
   // oauth file) or sets the corresponding env var (api_key kind:
   // ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY). null = fall back
   // to the operator's main HOME (legacy behaviour).
-  @Column({ type: 'varchar', nullable: true, default: null })
+  @Column({ type: 'uuid', nullable: true, transformer: nullablePassThroughUuid })
   credential_id: string | null;
 
   @CreateDateColumn()

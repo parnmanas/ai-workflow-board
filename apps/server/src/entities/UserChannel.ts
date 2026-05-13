@@ -13,7 +13,7 @@ export class UserChannel {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'varchar' })
+  @Column({ type: 'uuid' })
   user_id: string;
 
   // 'discord' | 'slack' | 'telegram'

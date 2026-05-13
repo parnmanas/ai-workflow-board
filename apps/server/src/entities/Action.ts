@@ -1,4 +1,5 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
+import { nullablePassThroughUuid } from '../database/uuid-column';
 
 // User-defined "Action": a saved prompt addressed to a target Agent. When a
 // user (or scheduler) runs the action, AWB creates a fresh ChatRoom and posts
@@ -13,10 +14,10 @@ export class Action {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'varchar' })
+  @Column({ type: 'uuid' })
   workspace_id: string;
 
-  @Column({ type: 'varchar', nullable: true, default: null })
+  @Column({ type: 'uuid', nullable: true, transformer: nullablePassThroughUuid })
   board_id: string | null;
 
   @Column({ type: 'varchar' })
@@ -33,7 +34,7 @@ export class Action {
   // Required: which agent receives the rendered prompt on every Run. Per the
   // ticket-locked decision (Q1=a) Actions are pinned to one agent at create
   // time; the "pick agent at run time" alternative was rejected.
-  @Column({ type: 'varchar' })
+  @Column({ type: 'uuid' })
   target_agent_id: string;
 
   // Optional cron-style schedule. Empty string = manual-only. Format: a

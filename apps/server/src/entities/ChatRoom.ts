@@ -1,4 +1,5 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
+import { nullablePassThroughUuid } from '../database/uuid-column';
 
 @Entity('chat_rooms')
 export class ChatRoom {
@@ -6,7 +7,7 @@ export class ChatRoom {
   id: string;
 
   // Workspace scope — plain FK per project convention (no relation decorator)
-  @Column({ type: 'varchar' })
+  @Column({ type: 'uuid' })
   workspace_id: string;
 
   // 'dm' = exactly 2 participants, 'group' = 3-50 participants (CHAT-02)
@@ -40,7 +41,7 @@ export class ChatRoom {
   //
   // To remove: write a data migration that drops the column, then strip
   // the read site in room-messaging.service.ts.
-  @Column({ type: 'varchar', nullable: true, default: null })
+  @Column({ type: 'uuid', nullable: true, transformer: nullablePassThroughUuid })
   ticket_id: string | null;
 
   // When non-null, this room hosts a Run of the Actions feature (one room per
@@ -48,7 +49,7 @@ export class ChatRoom {
   // these out so they don't pile up next to user-initiated DMs / groups, and
   // lets the Action detail view surface the room without joining through
   // ActionRun.
-  @Column({ type: 'varchar', nullable: true, default: null })
+  @Column({ type: 'uuid', nullable: true, transformer: nullablePassThroughUuid })
   action_id: string | null;
 
   @CreateDateColumn()

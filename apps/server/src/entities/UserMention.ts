@@ -1,4 +1,5 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, Index } from 'typeorm';
+import { nullablePassThroughUuid } from '../database/uuid-column';
 
 /**
  * Records an @-mention targeting a specific user. Persisted so we can power
@@ -14,27 +15,28 @@ export class UserMention {
   id: string;
 
   // Mentioned user
-  @Column({ type: 'varchar' })
+  @Column({ type: 'uuid' })
   user_id: string;
 
-  @Column({ type: 'varchar' })
+  @Column({ type: 'uuid' })
   workspace_id: string;
 
   // Where the mention lives
   @Column({ type: 'varchar' })
   source_type: string; // 'comment' | 'chat_message'
 
-  @Column({ type: 'varchar' })
+  @Column({ type: 'uuid' })
   source_id: string; // comment.id or chat_room_messages.id
 
-  @Column({ type: 'varchar', nullable: true, default: null })
+  @Column({ type: 'uuid', nullable: true, transformer: nullablePassThroughUuid })
   ticket_id: string | null;
 
-  @Column({ type: 'varchar', nullable: true, default: null })
+  @Column({ type: 'uuid', nullable: true, transformer: nullablePassThroughUuid })
   room_id: string | null;
 
-  // Who did the mentioning
-  @Column({ type: 'varchar' })
+  // Who did the mentioning — User.id or Agent.id depending on actor_type.
+  // Both are uuid PKs.
+  @Column({ type: 'uuid' })
   actor_id: string;
 
   @Column({ type: 'varchar', default: 'user' })

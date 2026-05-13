@@ -1,11 +1,12 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
+import { emptyToNullUuid } from '../database/uuid-column';
 
 @Entity('channels')
 export class Channel {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'varchar', nullable: true, default: '' })
+  @Column({ type: 'uuid', nullable: true, transformer: emptyToNullUuid })
   workspace_id: string;
 
   @Column({ type: 'varchar' })
