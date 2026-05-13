@@ -336,6 +336,11 @@ export class AgentManagerCommandHandler {
         subagent_log_path: subagentLogPathFor(agentId),
         cli_home_dir: cliHomeDir,
         extra_env: extraEnv,
+        // Threaded through so spawn sites can strip operator-inherited auth
+        // env vars (ANTHROPIC_API_KEY / OPENAI_API_KEY / …) when an agent
+        // has its own credential — without this, the operator's shell env
+        // silently overrides the per-agent .credentials.json/auth.json.
+        credential_provider: credential?.provider ?? null,
         registered_at: new Date().toISOString(),
       });
     }

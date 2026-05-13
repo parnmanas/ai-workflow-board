@@ -313,12 +313,33 @@ export class SubagentManager implements SubagentManagerContract {
       // GEMINI_API_KEY) — populated by the adapter's prepareCliHome on
       // spawn_agent. Empty for subscription-mode and unset agents.
       const credentialEnv = ctx?.extra_env ?? {};
+      // Start from inherited env, then strip operator-side auth vars when
+      // this agent has its own credential. Without the strip an operator's
+      // shell-level ANTHROPIC_API_KEY (or OPENAI_API_KEY / GEMINI_API_KEY /
+      // GOOGLE_API_KEY) overrides the per-agent .credentials.json/auth.json
+      // the adapter wrote into cli-home, silently bypassing per-agent auth.
+      const baseEnv = { ...process.env };
+      if (ctx?.credential_provider) {
+        const stripped: string[] = [];
+        for (const k of adapter.authEnvKeys()) {
+          if (k in baseEnv) {
+            delete baseEnv[k];
+            stripped.push(k);
+          }
+        }
+        if (stripped.length > 0) {
+          log(
+            `Subagent env strip: agent=${ctx.agent_id.slice(0, 8)} provider=${ctx.credential_provider} ` +
+              `removed=${stripped.join(',')} (operator-inherited auth would have overridden per-agent credential)`,
+          );
+        }
+      }
       const child = spawn(resolvedBin, descriptor.args, {
         stdio: descriptor.stdio || ['ignore', 'pipe', 'pipe'],
         detached: true,
         windowsHide: true,
         cwd: effectiveCwd,
-        env: { ...process.env, AWB_API_KEY: effectiveApiKey, ...cliHomeEnv, ...credentialEnv },
+        env: { ...baseEnv, AWB_API_KEY: effectiveApiKey, ...cliHomeEnv, ...credentialEnv },
         shell: descriptor.shell ?? /\.(cmd|bat|ps1)$/i.test(resolvedBin),
       });
       child.once('error', (err: any) => {

@@ -65,6 +65,14 @@ export class GeminiCliAdapter extends CliAdapter {
     return 'GEMINI_HOME';
   }
 
+  authEnvKeys(): string[] {
+    // Both GEMINI_API_KEY and GOOGLE_API_KEY are honored by the gemini CLI
+    // (and various Google AI SDKs) for direct-key auth; either would shadow
+    // the per-agent oauth_creds.json (subscription kind) or the per-agent
+    // GEMINI_API_KEY (api_key kind).
+    return ['GEMINI_API_KEY', 'GOOGLE_API_KEY'];
+  }
+
   async prepareCliHome(
     cliHomeDir: string,
     credential?: AdapterCredential | null,

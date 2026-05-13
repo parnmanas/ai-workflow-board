@@ -538,6 +538,10 @@ async function runRuntime(
         subagent_log_path: subagentLogPathFor(id),
         cli_home_dir: cliHomeDirFor(id),
         extra_env: extraEnv,
+        // Pulled from the on-disk credential snapshot — same value spawn_agent
+        // wrote at last bootstrap. Lets spawn sites strip operator-inherited
+        // auth env vars after a manager restart without re-fetching from AWB.
+        credential_provider: credential?.provider ?? null,
         registered_at: new Date().toISOString(),
       });
       managedAgents.upsert({ agent_id: id, name: cfg.name, cli: cfg.cli, working_dir: cfg.working_dir });

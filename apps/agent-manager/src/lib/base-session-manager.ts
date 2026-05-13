@@ -79,6 +79,11 @@ export interface SpawnOpts {
     cli: string;
     cli_home_dir: string;
     extra_env?: Record<string, string>;
+    /** Provider string of the per-agent credential. When set, _spawnSession
+     *  strips operator-inherited auth env vars (per adapter.authEnvKeys())
+     *  before merging extra_env so the agent's credential isn't silently
+     *  overridden by the operator's shell environment. */
+    credential_provider?: string | null;
   };
 }
 
@@ -267,12 +272,34 @@ export class BaseSessionManager {
       // Per-agent credential extras — see SubagentManager for the
       // matching one-shot path.
       const credentialEnv = agentContext?.extra_env ?? {};
+      // Strip operator-inherited auth env vars when this agent has its
+      // own credential — otherwise the operator's shell-level
+      // ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY / GOOGLE_API_KEY
+      // silently overrides the per-agent .credentials.json / auth.json /
+      // oauth_creds.json file the adapter wrote into cli-home.
+      const baseEnv = { ...process.env };
+      if (agentContext?.credential_provider) {
+        const stripped: string[] = [];
+        for (const k of adapter.authEnvKeys()) {
+          if (k in baseEnv) {
+            delete baseEnv[k];
+            stripped.push(k);
+          }
+        }
+        if (stripped.length > 0) {
+          log(
+            `${this.#logTag} env strip: agent=${agentContext.agent_id.slice(0, 8)} ` +
+              `provider=${agentContext.credential_provider} removed=${stripped.join(',')} ` +
+              `(operator-inherited auth would have overridden per-agent credential)`,
+          );
+        }
+      }
       const child = spawn(resolvedBin, descriptor.args, {
         stdio: descriptor.stdio || ['pipe', 'pipe', 'pipe'],
         detached: true,
         windowsHide: true,
         cwd: effectiveCwd,
-        env: { ...process.env, AWB_API_KEY: effectiveApiKey, ...cliHomeEnv, ...credentialEnv },
+        env: { ...baseEnv, AWB_API_KEY: effectiveApiKey, ...cliHomeEnv, ...credentialEnv },
         shell: descriptor.shell ?? /\.(cmd|bat|ps1)$/i.test(resolvedBin),
       }) as ChildProcessByStdio<Writable, Readable, Readable>;
       child.once('error', (err: any) => {

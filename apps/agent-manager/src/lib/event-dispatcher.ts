@@ -60,6 +60,12 @@ export interface AgentExecutionContext {
    *  credentials). Empty / undefined for subscription-mode and unset
    *  agents — those carry auth via files inside cli_home_dir instead. */
   extra_env?: Record<string, string>;
+  /** Provider string of the per-agent credential applied at spawn time
+   *  (`claude_subscription`, `claude_api_key`, `codex_subscription`, …).
+   *  null / undefined when no per-agent credential was set — spawn sites
+   *  read this to decide whether to strip operator-inherited auth env vars
+   *  (ANTHROPIC_API_KEY etc.) before merging the agent's credential. */
+  credential_provider?: string | null;
 }
 
 // ─── Session manager interfaces ──────────────────────────────────────────
@@ -267,6 +273,7 @@ export class EventDispatcher {
       cli: ctx.cli || 'claude',
       cli_home_dir: ctx.cli_home_dir,
       extra_env: ctx.extra_env,
+      credential_provider: ctx.credential_provider ?? null,
     };
   }
 

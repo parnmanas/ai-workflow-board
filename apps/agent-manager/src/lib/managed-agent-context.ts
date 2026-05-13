@@ -43,6 +43,16 @@ export interface ManagedAgentContext {
    *  OPENAI_API_KEY, GEMINI_API_KEY). Empty for subscription credentials
    *  or no credential at all. */
   extra_env?: Record<string, string>;
+  /** Provider string of the per-agent credential applied at spawn (e.g.
+   *  `claude_subscription`, `claude_api_key`, `codex_api_key`). null /
+   *  undefined when the operator did NOT configure a per-agent credential
+   *  for this agent (legacy operator-HOME fallback). Spawn sites use this
+   *  to decide whether to strip operator-side auth env vars
+   *  (ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY / GOOGLE_API_KEY)
+   *  from the child env before applying the per-agent credential — without
+   *  the strip, an inherited env var silently overrides the per-agent
+   *  .credentials.json / auth.json / oauth_creds.json file. */
+  credential_provider?: string | null;
   /** ISO timestamp of when this manager last hydrated the context. */
   registered_at: string;
 }
