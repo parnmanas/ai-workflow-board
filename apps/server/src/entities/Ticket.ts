@@ -10,7 +10,11 @@ export class Ticket {
   @Column({ type: 'varchar', nullable: true, default: '' })
   workspace_id: string;
 
-  @Column({ type: 'varchar', nullable: true })
+  // FK to columns.id (uuid). Typed `uuid` so PG joins like
+  // `c.id = t.column_id` (see AgentWorkloadService.getWorkflowLoadTicketIds)
+  // don't blow up with `operator does not exist: character varying = uuid`.
+  // database/pre-sync-postgres.ts handles the in-place widening on first boot.
+  @Column({ type: 'uuid', nullable: true })
   column_id: string;
 
   @Column({ type: 'varchar', nullable: true, default: null })

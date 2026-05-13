@@ -36,7 +36,11 @@ export class BoardColumn {
   @Column({ type: 'varchar', nullable: true, default: '' })
   workspace_id: string;
 
-  @Column({ type: 'varchar' })
+  // FK to boards.id (uuid). Typed `uuid` so PG joins like
+  // `b.id = col.board_id` (allocation.service.ts, ticket-crud-tools.ts)
+  // don't blow up with `operator does not exist: character varying = uuid`.
+  // database/pre-sync-postgres.ts handles the in-place widening on first boot.
+  @Column({ type: 'uuid' })
   board_id: string;
 
   @Column({ type: 'varchar' })
