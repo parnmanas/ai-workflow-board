@@ -1,4 +1,5 @@
-// QA flow: workflow-state per-agent cap (ticket e79eef92).
+// QA flow: workflow-state per-agent gate
+// (ticket e79eef92, audit-row updated for ticket 4a6cdfd7).
 //
 // What this proves
 // ────────────────
@@ -7,9 +8,12 @@
 // `AgentStatusService.active_tasks` (i.e. "is the subagent process
 // alive right now"). A ticket parked on a non-terminal & non-intake
 // column counts as workflow load for its assignee, even if no subagent
-// process is currently running on it.
+// process is currently running on it. With ticket 4a6cdfd7, the gate
+// is the focus selector (`AgentWorkloadService.getFocusTicket`) — but
+// it's built on top of the same workflow-load filter, so the four
+// scenarios below are still the right load-bearing tests.
 //
-// We cover the four acceptance cases verbatim from the ticket:
+// We cover the four acceptance cases:
 //
 //   1. Reproducer — cap=1, agent A has one ticket parked in In Progress
 //      and 5 fresh backlog tickets (all assigned to A). `tryPromote`
@@ -28,11 +32,11 @@
 //   3. Cross-board independence — same agent has a ticket parked on
 //      Board X's In Progress, but Board Y is empty for that agent.
 //      Board Y's tryPromote with 1 backlog ticket assigned to A
-//      promotes successfully (cap is per-board).
+//      promotes successfully (gate is per-board).
 //
-//   4. Audit row — every workflow-load skip writes a
-//      `backlog_promotion_skipped_workflow_load` ActivityLog row with
-//      holder / current_count / ticket_ids in `new_value`.
+//   4. Audit row — every focus-held skip writes a
+//      `backlog_promotion_skipped_focus_held` ActivityLog row with
+//      `holder=` and `focus_ticket_id=` in `new_value`.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -124,8 +128,14 @@ test('BacklogPromotion workflow-state cap: parked tickets count, WAIT-only turns
   }
 
   async function readSkipAudit(boardId) {
+    // The audit row name changed in ticket 4a6cdfd7 (WorkflowFocusSelector)
+    // from `backlog_promotion_skipped_workflow_load` to
+    // `backlog_promotion_skipped_focus_held` when the cap model was
+    // replaced with the selector. The three scenarios this flow
+    // exercises still apply; just the action name and the new_value
+    // payload shape changed.
     const rows = await activityLogRepo.find({
-      where: { action: 'backlog_promotion_skipped_workflow_load' },
+      where: { action: 'backlog_promotion_skipped_focus_held' },
       order: { created_at: 'ASC' },
     });
     return rows.filter((r) => (r.new_value || '').includes(`board=${boardId}`));
@@ -171,7 +181,7 @@ test('BacklogPromotion workflow-state cap: parked tickets count, WAIT-only turns
     assert.equal(r, null, `retry #${i + 1} must remain null`);
   }
 
-  step('  audit rows: one backlog_promotion_skipped_workflow_load per attempt');
+  step('  audit rows: one backlog_promotion_skipped_focus_held per attempt');
   const skip1 = await readSkipAudit(c1.board.id);
   assert.ok(skip1.length >= 6, `expected ≥6 skip audit rows for case1 (got ${skip1.length})`);
   for (const row of skip1) {
@@ -180,15 +190,15 @@ test('BacklogPromotion workflow-state cap: parked tickets count, WAIT-only turns
       new RegExp(`holder=${alice.id}`),
       `audit row must record holder=${alice.id.slice(0, 8)} (got ${row.new_value})`,
     );
+    // Under the focus-selector model the audit row carries the focus
+    // ticket id (the one occupying Alice's slot), not the old
+    // current_count + ticket_ids list. The focus = T_busy in case 1
+    // because that's the only ticket Alice has parked on a
+    // non-terminal, non-intake column at this point in the scenario.
     assert.match(
       row.new_value || '',
-      /current_count=1\/1/,
-      `audit row must record current_count=1/1 (got ${row.new_value})`,
-    );
-    assert.match(
-      row.new_value || '',
-      new RegExp(`ticket_ids=.*${tBusy.id}`),
-      `audit row must include T_busy in ticket_ids (got ${row.new_value})`,
+      new RegExp(`focus_ticket_id=${tBusy.id}`),
+      `audit row must record focus_ticket_id=${tBusy.id.slice(0, 8)} (got ${row.new_value})`,
     );
   }
 
@@ -268,10 +278,10 @@ test('BacklogPromotion workflow-state cap: parked tickets count, WAIT-only turns
   const pY = await backlogPromotion.tryPromote(cY.board.id);
   assert.equal(pY, tYBacklog.id, `board Y promotes its only backlog ticket (got ${pY?.slice(0, 8)})`);
 
-  // Activity-log evidence: dump the skipped-workflow-load rows so a
+  // Activity-log evidence: dump the skipped-focus-held rows so a
   // reviewer reading the test log can read the audit trail directly.
-  step('Activity-log evidence — backlog_promotion_skipped_workflow_load rows');
-  const allSkips = await activityLogRepo.find({ where: { action: 'backlog_promotion_skipped_workflow_load' } });
+  step('Activity-log evidence — backlog_promotion_skipped_focus_held rows');
+  const allSkips = await activityLogRepo.find({ where: { action: 'backlog_promotion_skipped_focus_held' } });
   console.log(`  total skip rows across all boards: ${allSkips.length}`);
   for (const r of allSkips.slice(0, 12)) {
     console.log(`    ticket=${r.ticket_id.slice(0, 8)}  ${r.new_value}`);
