@@ -110,6 +110,15 @@ export class ClaudeCliAdapter extends CliAdapter {
     return 'CLAUDE_CONFIG_DIR';
   }
 
+  authEnvKeys(): string[] {
+    // ANTHROPIC_API_KEY overrides the .credentials.json the adapter wrote
+    // into the per-agent cli-home; ANTHROPIC_AUTH_TOKEN is the OAuth-bearer
+    // counterpart used by some claude integrations. Both are stripped from
+    // the child env when a per-agent credential is configured so the
+    // operator's shell-level auth doesn't silently win.
+    return ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'];
+  }
+
   async prepareCliHome(
     cliHomeDir: string,
     credential?: AdapterCredential | null,

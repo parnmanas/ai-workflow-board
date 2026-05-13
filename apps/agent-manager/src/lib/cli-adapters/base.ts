@@ -102,6 +102,24 @@ export abstract class CliAdapter {
   }
 
   /**
+   * Names of operator-inherited environment variables that this CLI consults
+   * for authentication (typically API keys). When the spawned agent has its
+   * own per-agent credential configured, the manager removes these from the
+   * child env BEFORE merging the per-agent credential's extraEnv — without
+   * the strip, an operator-side `ANTHROPIC_API_KEY` (or `OPENAI_API_KEY`,
+   * `GEMINI_API_KEY`, `GOOGLE_API_KEY`) silently overrides the per-agent
+   * `.credentials.json` / `auth.json` / `oauth_creds.json` file the adapter
+   * just wrote into the per-agent cli-home, defeating the whole point of
+   * per-agent credentials.
+   *
+   * Returning [] (default) means "no env vars to strip" — used by adapters
+   * that do not have a known operator-inherited auth env var.
+   */
+  authEnvKeys(): string[] {
+    return [];
+  }
+
+  /**
    * Optional hook called once per spawn_agent after `ensureCliHomeDir`
    * creates the per-agent dir. Override to copy / symlink any
    * credentials or shared state the CLI needs before it can run — most

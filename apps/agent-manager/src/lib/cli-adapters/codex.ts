@@ -139,6 +139,13 @@ export class CodexCliAdapter extends CliAdapter {
     return 'CODEX_HOME';
   }
 
+  authEnvKeys(): string[] {
+    // OPENAI_API_KEY is what codex consults for direct-key auth; when the
+    // operator set it in their shell it would shadow the per-agent
+    // auth.json (subscription) or per-agent OPENAI_API_KEY (api_key kind).
+    return ['OPENAI_API_KEY'];
+  }
+
   async prepareCliHome(
     cliHomeDir: string,
     credential?: AdapterCredential | null,
