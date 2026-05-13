@@ -148,22 +148,35 @@ jobs:
             # ── Health check ──
             # 새 컨테이너가 크래시 루프·DB 연결 실패·마이그레이션 오류 등으로
             # 죽어도 docker run 자체는 성공이라 workflow 가 ✅ 로 끝나는 문제.
-            # /api/health 에 30초간 2초 간격 재시도; 끝까지 실패하면 컨테이너
+            # /api/health 에 최대 10분간 2초 간격 재시도; 끝까지 실패하면 컨테이너
             # 로그 덤프 후 exit 1 로 workflow 를 빨갛게 만듦.
+            #
+            # 왜 10분인가 — pre-sync-postgres 가 60+ FK 컬럼에 대해
+            # `ALTER COLUMN TYPE uuid USING col::uuid` 를 돌리는데, 각 ALTER 는
+            # 테이블 전체 rewrite + ACCESS EXCLUSIVE 락이라 운영 데이터에선
+            # 컬럼당 수십초씩 걸릴 수 있음. 첫 deploy 때 한번만 큰 비용을 내고
+            # 이후엔 (currentType === 'uuid') 단축평가로 즉시 끝남.
+            # pre-sync 가 살아있는지는 진행 로그(`[pre-sync-postgres] ALTER …`)
+            # 가 매 컬럼마다 찍히므로 hang 인지 진짜 작업 중인지 구분 가능.
             echo "Waiting for /api/health to return ok..."
             HEALTH_OK=0
-            for i in $(seq 1 15); do
+            for i in $(seq 1 300); do
               status=$(docker exec ai-workflow-board wget -qO- http://127.0.0.1:7701/api/health 2>/dev/null | grep -o '"status":"[^"]*"' || true)
               if [ "$status" = '"status":"ok"' ]; then
                 HEALTH_OK=1
-                echo "Health check OK after ${i} attempt(s)"
+                echo "Health check OK after ${i} attempt(s) (~$((i*2))s)"
                 break
+              fi
+              # 30초마다 진행 상황 로그 (pre-sync 중인지 확인용)
+              if [ $((i % 15)) -eq 0 ]; then
+                echo "  …still waiting (~$((i*2))s elapsed); last container log line:"
+                docker logs --tail 1 ai-workflow-board 2>&1 | sed 's/^/    /' || true
               fi
               sleep 2
             done
             if [ "$HEALTH_OK" != "1" ]; then
-              echo "=== HEALTH CHECK FAILED after 30s — dumping container logs ==="
-              docker logs --tail 100 ai-workflow-board || true
+              echo "=== HEALTH CHECK FAILED after 600s — dumping container logs ==="
+              docker logs --tail 200 ai-workflow-board || true
               echo "=== container state ==="
               docker inspect --format '{{.State.Status}} exit={{.State.ExitCode}} err={{.State.Error}}' ai-workflow-board || true
               exit 1
