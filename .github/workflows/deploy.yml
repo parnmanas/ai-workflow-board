@@ -127,12 +127,22 @@ jobs:
             docker rm ai-workflow-board || true
 
             # 새 앱 컨테이너 실행 (같은 네트워크에서 DB에 연결)
+            #
+            # awb-data 볼륨: 컨테이너의 /app/data (Dockerfile 의 AWB_DATA_DIR)
+            # 에 마운트 — Credentials 모듈이 ENCRYPTION_KEY env 가 없을 때
+            # auto-generate 하는 .encryption_key 파일을 보존한다. 이 마운트
+            # 없으면 매 deploy 마다 (docker stop → rm → run 사이클) 키가 새로
+            # 생성돼서 이전에 저장된 모든 Credential.encrypted_data 가 복호
+            # 불가능해진다 (Postgres row 는 그대로지만 plaintext 복원 불가).
+            # 영구 해결책으론 GitHub secrets 에 ENCRYPTION_KEY 를 두고
+            # APP_ENV_FILE 에 추가하는 게 더 안전 (volume 유실에도 살아남음).
             docker run -d \
               --name ai-workflow-board \
               --network awb-net \
               --restart unless-stopped \
               -p 7701:7701 \
               --env-file "$APP_ENV_FILE" \
+              -v awb-data:/app/data \
               ghcr.io/${{ github.repository_owner }}/ai-workflow-board:latest
 
             # ── Health check ──
