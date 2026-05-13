@@ -69,6 +69,22 @@ type CommandKind =
   | 'pull_working_dir'
   | 'update_manager';
 
+// Primary required field per credential provider — the one that carries the
+// actual auth secret. When the server returns a credential row with this
+// field empty/missing, the manager treats it as misconfigured and falls back
+// to operator HOME with an explicit error log (rather than writing an empty
+// `.credentials.json` / `auth.json` / `oauth_creds.json` into cli-home,
+// which silently breaks CLI auth). Optional secondary fields like codex's
+// `config_toml` are intentionally excluded — they're not auth-bearing.
+const REQUIRED_CREDENTIAL_FIELDS: Record<string, string[]> = {
+  claude_subscription: ['credentials_json'],
+  claude_api_key: ['api_key'],
+  codex_subscription: ['auth_json'],
+  codex_api_key: ['api_key'],
+  gemini_subscription: ['oauth_creds_json'],
+  gemini_api_key: ['api_key'],
+};
+
 const KNOWN_COMMANDS: ReadonlySet<CommandKind> = new Set<CommandKind>([
   'spawn_agent',
   'stop_agent',
@@ -394,6 +410,32 @@ export class AgentManagerCommandHandler {
           ` does not match cli=${cli}; ignoring`,
       );
       return null;
+    }
+    // Server returned a credential row, but the required field for this
+    // provider is empty. Two real-world causes seen so far:
+    //   1. Operator created the credential row in AWB UI without pasting the
+    //      `.credentials.json` / `auth.json` / `oauth_creds.json` content.
+    //   2. Server-side decrypt failed silently (pre-fix the controller would
+    //      catch JSON.parse on '' and return 200 OK with fields={}). New
+    //      controller now returns 503 in that case, but stale servers still
+    //      observe this codepath.
+    // Either way: writing an empty credential file silently breaks auth in a
+    // way that's hard to diagnose from the CLI's own error. Log loud + return
+    // null so caller falls back to operator HOME (legacy).
+    const required = REQUIRED_CREDENTIAL_FIELDS[fetched.provider];
+    if (required) {
+      const present = required.filter((k) => {
+        const v = fetched.fields?.[k];
+        return typeof v === 'string' && v.length > 0;
+      });
+      if (present.length === 0) {
+        log(
+          `spawn_agent: agent=${agentId.slice(0, 8)} credential=${fetched.provider} ` +
+            `(id=${fetched.credential_id.slice(0, 8)}) has empty required field(s) ${required.join(',')} — ` +
+            `re-edit the credential in AWB Admin → Credentials. Falling back to operator HOME.`,
+        );
+        return null;
+      }
     }
     return {
       credential_id: fetched.credential_id,

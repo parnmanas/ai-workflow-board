@@ -816,20 +816,49 @@ export class AgentManagerController {
       return res.status(404).json({ error: 'credential not found' });
     }
 
-    let fields: Record<string, string> = {};
-    try {
-      const decoded = JSON.parse(decrypt(cred.encrypted_data));
-      if (decoded && typeof decoded === 'object') {
-        fields = decoded as Record<string, string>;
-      }
-    } catch {
-      // Treat decode failure as "no credential" rather than 500 — the manager
-      // can still spawn the CLI under the operator's HOME and the operator
-      // sees the warning here.
-      this.logService.warn(
+    // Disambiguate "stored fields legitimately empty" from "decrypt silently
+    // failed". encryption.service.decrypt() returns '' on key mismatch — the
+    // legacy code path then JSON.parse'd that, threw, and returned 200 OK
+    // with fields={} (silent), which downstream surfaced as a managed agent
+    // running with no auth at all. Now: if the ciphertext was 'enc:'-prefixed
+    // (i.e. genuinely encrypted) but decrypt returned '', surface as 503 with
+    // a clear message so the operator can re-edit the credential to re-encrypt
+    // it under the current key.
+    const ciphertext = cred.encrypted_data || '';
+    const plaintext = ciphertext ? decrypt(ciphertext) : '';
+    if (ciphertext.startsWith('enc:') && !plaintext) {
+      this.logService.error(
         'AgentManager',
-        `Managed agent credential decrypt failed for cred=${cred.id.slice(0, 8)}`,
+        `Credential decrypt failed for cred=${cred.id.slice(0, 8)} (provider=${cred.provider}). ` +
+          `Likely cause: ENCRYPTION_KEY env / .encryption_key file changed since the credential was saved. ` +
+          `Operator must re-edit the credential in Admin → Credentials to re-encrypt it under the current key.`,
       );
+      return res.status(503).json({
+        error: 'credential_decrypt_failed',
+        credential_id: cred.id,
+        provider: cred.provider,
+        detail:
+          'Server failed to decrypt the stored credential. The encryption key may have changed since ' +
+          'the credential was saved. Re-edit the credential in Admin → Credentials to re-encrypt it.',
+      });
+    }
+
+    let fields: Record<string, string> = {};
+    if (plaintext) {
+      try {
+        const decoded = JSON.parse(plaintext);
+        if (decoded && typeof decoded === 'object') {
+          fields = decoded as Record<string, string>;
+        }
+      } catch {
+        // Plaintext didn't parse as JSON — treat as empty fields and warn.
+        // Caller (manager) already handles the empty-fields case with its own
+        // explicit ERROR log so the operator sees what's mis-configured.
+        this.logService.warn(
+          'AgentManager',
+          `Credential plaintext is not valid JSON for cred=${cred.id.slice(0, 8)}`,
+        );
+      }
     }
 
     return res.json({
