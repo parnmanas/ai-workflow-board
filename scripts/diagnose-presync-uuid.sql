@@ -17,101 +17,104 @@
 -- Output: NOTICE lines listing every (table, column) with bad rows, the empty-
 -- string count, and the non-uuid (non-empty) count.
 
+-- IMPORTANT: the third VALUES column is the *target* nullability after
+-- pre-sync runs (mirrors COLUMNS_TO_UUID's `nullable` field). Do NOT use the
+-- production DB's current is_nullable — pre-sync DROPs NOT NULL itself for
+-- target=true columns, so '' on a currently-NOT-NULL/target-nullable column
+-- is auto-scrubbed and is NOT a blocker. Only target=false columns abort.
 DO $$
 DECLARE
   r          RECORD;
   cnt_empty  BIGINT;
   cnt_bad    BIGINT;
   cnt_total  BIGINT;
-  is_nullbl  BOOLEAN;
   any_bad    BOOLEAN := FALSE;
 BEGIN
   FOR r IN
     SELECT * FROM (VALUES
       -- Phase A
-      ('ticket_role_assignments', 'ticket_id'),
-      ('ticket_role_assignments', 'role_id'),
-      ('tickets',                 'column_id'),
-      ('columns',                 'board_id'),
+      ('ticket_role_assignments', 'ticket_id',  FALSE),
+      ('ticket_role_assignments', 'role_id',    FALSE),
+      ('tickets',                 'column_id',  TRUE ),
+      ('columns',                 'board_id',   FALSE),
       -- Phase B: workspace_id
-      ('tickets',              'workspace_id'),
-      ('comments',             'workspace_id'),
-      ('activity_logs',        'workspace_id'),
-      ('ticket_attachments',   'workspace_id'),
-      ('api_keys',             'workspace_id'),
-      ('ticket_read_state',    'workspace_id'),
-      ('columns',              'workspace_id'),
-      ('channels',             'workspace_id'),
-      ('agent_error_logs',     'workspace_id'),
-      ('boards',               'workspace_id'),
-      ('agents',               'workspace_id'),
-      ('prompt_templates',     'workspace_id'),
-      ('workspace_roles',      'workspace_id'),
-      ('chat_rooms',           'workspace_id'),
-      ('chat_room_messages',   'workspace_id'),
-      ('user_mentions',        'workspace_id'),
-      ('credentials',          'workspace_id'),
-      ('resources',            'workspace_id'),
-      ('actions',              'workspace_id'),
-      ('action_runs',          'workspace_id'),
-      ('subagents',            'workspace_id'),
+      ('tickets',              'workspace_id', TRUE ),
+      ('comments',             'workspace_id', TRUE ),
+      ('activity_logs',        'workspace_id', TRUE ),
+      ('ticket_attachments',   'workspace_id', TRUE ),
+      ('api_keys',             'workspace_id', TRUE ),
+      ('ticket_read_state',    'workspace_id', TRUE ),
+      ('columns',              'workspace_id', TRUE ),
+      ('channels',             'workspace_id', TRUE ),
+      ('agent_error_logs',     'workspace_id', TRUE ),
+      ('boards',               'workspace_id', TRUE ),
+      ('agents',               'workspace_id', TRUE ),
+      ('prompt_templates',     'workspace_id', TRUE ),
+      ('workspace_roles',      'workspace_id', FALSE),
+      ('chat_rooms',           'workspace_id', FALSE),
+      ('chat_room_messages',   'workspace_id', FALSE),
+      ('user_mentions',        'workspace_id', FALSE),
+      ('credentials',          'workspace_id', FALSE),
+      ('resources',            'workspace_id', FALSE),
+      ('actions',              'workspace_id', FALSE),
+      ('action_runs',          'workspace_id', FALSE),
+      ('subagents',            'workspace_id', FALSE),
       -- Phase B: ticket / column / board FK
-      ('comments',           'ticket_id'),
-      ('ticket_attachments', 'ticket_id'),
-      ('ticket_read_state',  'ticket_id'),
-      ('tickets',            'parent_id'),
-      ('tickets',            'next_ticket_id'),
-      ('comments',           'parent_id'),
-      ('chat_rooms',         'ticket_id'),
-      ('user_mentions',      'ticket_id'),
-      ('subagents',          'ticket_id'),
-      ('actions',            'board_id'),
+      ('comments',           'ticket_id',     FALSE),
+      ('ticket_attachments', 'ticket_id',     FALSE),
+      ('ticket_read_state',  'ticket_id',     FALSE),
+      ('tickets',            'parent_id',     TRUE ),
+      ('tickets',            'next_ticket_id', TRUE),
+      ('comments',           'parent_id',     TRUE ),
+      ('chat_rooms',         'ticket_id',     TRUE ),
+      ('user_mentions',      'ticket_id',     TRUE ),
+      ('subagents',          'ticket_id',     TRUE ),
+      ('actions',            'board_id',      TRUE ),
       -- Phase B: user / agent / resource / credential FK
-      ('tickets',                 'assignee_id'),
-      ('tickets',                 'reporter_id'),
-      ('tickets',                 'reviewer_id'),
-      ('tickets',                 'locked_by_agent_id'),
-      ('tickets',                 'base_repo_resource_id'),
-      ('tickets',                 'created_by_id'),
-      ('comments',                'author_id'),
-      ('ticket_attachments',      'uploaded_by_id'),
-      ('ticket_read_state',       'user_id'),
-      ('users',                   'requested_workspace_id'),
-      ('user_channels',           'user_id'),
-      ('user_mentions',           'user_id'),
-      ('user_mentions',           'source_id'),
-      ('user_mentions',           'actor_id'),
-      ('user_mentions',           'room_id'),
-      ('ticket_role_assignments', 'agent_id'),
-      ('ticket_role_assignments', 'user_id'),
-      ('agents',                  'parent_agent_id'),
-      ('agents',                  'manager_agent_id'),
-      ('agents',                  'credential_id'),
-      ('api_keys',                'agent_id'),
-      ('resources',               'board_id'),
-      ('resources',               'credential_id'),
-      ('resource_embeddings',     'resource_id'),
-      ('subagents',               'agent_id'),
-      ('agent_error_logs',        'agent_id'),
-      ('chat_rooms',              'action_id'),
-      ('chat_room_participants',  'room_id'),
-      ('chat_room_participants',  'participant_id'),
-      ('chat_room_messages',      'room_id'),
-      ('chat_room_messages',      'sender_id'),
-      ('actions',                 'target_agent_id'),
-      ('action_runs',             'action_id'),
-      ('action_runs',             'room_id'),
-      ('action_runs',             'triggered_by_id')
-    ) AS t(table_name, column_name)
+      ('tickets',                 'assignee_id',           TRUE ),
+      ('tickets',                 'reporter_id',           TRUE ),
+      ('tickets',                 'reviewer_id',           TRUE ),
+      ('tickets',                 'locked_by_agent_id',    TRUE ),
+      ('tickets',                 'base_repo_resource_id', TRUE ),
+      ('tickets',                 'created_by_id',         TRUE ),
+      ('comments',                'author_id',             TRUE ),
+      ('ticket_attachments',      'uploaded_by_id',        TRUE ),
+      ('ticket_read_state',       'user_id',               FALSE),
+      ('users',                   'requested_workspace_id', TRUE),
+      ('user_channels',           'user_id',               FALSE),
+      ('user_mentions',           'user_id',               FALSE),
+      ('user_mentions',           'source_id',             FALSE),
+      ('user_mentions',           'actor_id',              FALSE),
+      ('user_mentions',           'room_id',               TRUE ),
+      ('ticket_role_assignments', 'agent_id',              TRUE ),
+      ('ticket_role_assignments', 'user_id',               TRUE ),
+      ('agents',                  'parent_agent_id',       TRUE ),
+      ('agents',                  'manager_agent_id',      TRUE ),
+      ('agents',                  'credential_id',         TRUE ),
+      ('api_keys',                'agent_id',              TRUE ),
+      ('resources',               'board_id',              TRUE ),
+      ('resources',               'credential_id',         TRUE ),
+      ('resource_embeddings',     'resource_id',           FALSE),
+      ('subagents',               'agent_id',              FALSE),
+      ('agent_error_logs',        'agent_id',              FALSE),
+      ('chat_rooms',              'action_id',             TRUE ),
+      ('chat_room_participants',  'room_id',               FALSE),
+      ('chat_room_participants',  'participant_id',        FALSE),
+      ('chat_room_messages',      'room_id',               FALSE),
+      ('chat_room_messages',      'sender_id',             FALSE),
+      ('actions',                 'target_agent_id',       FALSE),
+      ('action_runs',             'action_id',             FALSE),
+      ('action_runs',             'room_id',               FALSE),
+      ('action_runs',             'triggered_by_id',       TRUE )
+    ) AS t(table_name, column_name, target_nullable)
   LOOP
     -- Skip targets where the column is missing OR already widened to uuid
     -- (so this script keeps working after the migration finishes).
-    SELECT (is_nullable = 'YES')
-      INTO is_nullbl
-      FROM information_schema.columns
-     WHERE table_name = r.table_name
-       AND column_name = r.column_name
-       AND data_type = 'character varying';
+    PERFORM 1
+       FROM information_schema.columns
+      WHERE table_name = r.table_name
+        AND column_name = r.column_name
+        AND data_type = 'character varying';
     IF NOT FOUND THEN
       CONTINUE;
     END IF;
@@ -131,15 +134,15 @@ BEGIN
 
     EXECUTE format('SELECT COUNT(*) FROM %I', r.table_name) INTO cnt_total;
 
-    -- For nullable columns, '' is auto-scrubbed by pre-sync (UPDATE ... = NULL),
-    -- so it's NOT a blocker. Only flag '' on NOT NULL columns or non-empty
-    -- garbage anywhere.
-    IF (cnt_empty > 0 AND NOT is_nullbl) OR cnt_bad > 0 THEN
+    -- target_nullable=TRUE  → '' is auto-scrubbed by pre-sync (UPDATE ... = NULL)
+    --                         so empty rows are NOT a blocker. Garbage still is.
+    -- target_nullable=FALSE → empty rows ARE a blocker (pre-sync aborts).
+    IF (cnt_empty > 0 AND NOT r.target_nullable) OR cnt_bad > 0 THEN
       any_bad := TRUE;
-      RAISE NOTICE '  % . %  (nullable=%, total=%):  empty=%  non_uuid_garbage=%',
+      RAISE NOTICE '  % . %  (target_nullable=%, total=%):  empty=%  non_uuid_garbage=%',
         rpad(r.table_name, 26),
         rpad(r.column_name, 24),
-        is_nullbl,
+        r.target_nullable,
         cnt_total,
         cnt_empty,
         cnt_bad;
@@ -151,8 +154,8 @@ BEGIN
   ELSE
     RAISE NOTICE '----';
     RAISE NOTICE 'For each row above:';
-    RAISE NOTICE '  - empty>0 on NOT NULL  → must DELETE the row OR backfill workspace_id';
-    RAISE NOTICE '  - non_uuid_garbage>0   → must DELETE / fix the row';
+    RAISE NOTICE '  - empty>0 on target_nullable=f  → must DELETE the row OR backfill the column';
+    RAISE NOTICE '  - non_uuid_garbage>0            → must DELETE / fix the row';
     RAISE NOTICE 'Use SELECT to inspect specific rows before deleting, e.g.:';
     RAISE NOTICE '  SELECT id, * FROM user_mentions WHERE workspace_id = '''';';
   END IF;
