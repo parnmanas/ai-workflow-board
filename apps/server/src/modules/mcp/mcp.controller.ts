@@ -341,8 +341,19 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       // Skip for internal clients (presence heartbeat) that only call ping tool.
       // Skip for subagents spawned directly via Claude CLI (no proxy.mjs in path):
       // the gate's purpose is to detect outdated proxy.mjs versions, which is
-      // meaningless when the client isn't a proxy at all. Subagent-manager marks
-      // these sessions with X-AWB-Client-Type: subagent.
+      // meaningless when the client isn't a proxy at all. Two flavors emit no
+      // proxy and must both bypass:
+      //   - 'subagent'         : SubagentManager one-shots (Claude CLI native MCP)
+      //   - 'managed-subagent' : BaseSessionManager persistent chat / ticket
+      //                          sessions for managed agents (also Claude CLI
+      //                          native MCP). Without bypassing this one,
+      //                          every chat / ticket subagent spawned by the
+      //                          agent-manager fails `initialize` with
+      //                          "MCP proxy schemaVersion mismatch — upgrade
+      //                          proxy.mjs to v2" and no mcp__awb__* tools
+      //                          ever become available — manifests as silent
+      //                          chat/ticket no-ops even with a fresh
+      //                          credential rotation in place.
       if (req.method === 'POST' && req.body?.method === 'initialize') {
         const clientName = req.body?.params?.clientInfo?.name;
         const clientTypeHeader = String(req.headers['x-awb-client-type'] || '').toLowerCase();
@@ -352,7 +363,8 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
           ? schemaVerRaw.version
           : schemaVerRaw;
         const isInternalClient = clientName === 'awb-presence-heartbeat';
-        const isSubagent = clientTypeHeader === 'subagent';
+        const isSubagent =
+          clientTypeHeader === 'subagent' || clientTypeHeader === 'managed-subagent';
         if (schemaVer !== 2 && !isInternalClient && !isSubagent) {
           return res.status(200).json({
             jsonrpc: '2.0',
