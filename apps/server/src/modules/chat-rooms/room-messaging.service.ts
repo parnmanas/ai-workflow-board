@@ -239,6 +239,95 @@ export class RoomMessagingService {
   }
 
   /**
+   * Send a SYSTEM message to a room — synthetic source (no User / Agent
+   * row behind it), used by in-process detectors and supervisors that
+   * need to surface state to a chat room WITHOUT impersonating a user
+   * and WITHOUT routing through the MCP send_chat_room_message tool.
+   *
+   * Why this exists (ticket 8e934802 — Stale-WAIT detector):
+   *   `StuckTicketDetectorService` posts an alert whenever a ticket
+   *   newly crosses the stale-WAIT threshold. Going through the normal
+   *   `sendMessage` path would require manufacturing a fake participant
+   *   row (the participant gate would 403 otherwise) and the mention /
+   *   DM-agent dispatch helpers would fire on a system-authored
+   *   message — wrong. This bypass writes the row, updates
+   *   last_message_at for the sort, and emits the same SSE event so
+   *   connected clients render the alert exactly like a normal message.
+   *
+   * Skips by design:
+   *   - active-participant gate (system has no participant row)
+   *   - mention / DM-agent dispatch (system never triggers subagents)
+   *   - markRead auto-advance (no participant to advance)
+   *
+   * `sender_id` is fixed at 'system' so a UI can render a distinctive
+   * badge without joining against User/Agent. Caller supplies the
+   * markdown content; length cap matches user-sent messages.
+   */
+  async sendSystemMessage(roomId: string, workspaceId: string, content: string): Promise<any> {
+    if (!content || typeof content !== 'string') {
+      throw makeError(400, 'content is required');
+    }
+    const trimmed = content.trim();
+    if (!trimmed) throw makeError(400, 'content cannot be empty');
+    if (trimmed.length > CONTENT_MAX) {
+      throw makeError(400, `Message exceeds ${CONTENT_MAX} character limit`);
+    }
+
+    const room = await this.roomRepo.findOne({ where: { id: roomId } });
+    if (!room) throw makeError(404, 'Room not found');
+
+    const savedMsg = await this.messageRepo.save(
+      this.messageRepo.create({
+        room_id: roomId,
+        workspace_id: workspaceId || room.workspace_id || '',
+        sender_type: 'system',
+        sender_id: 'system',
+        content: trimmed,
+        images: '[]',
+      }),
+    );
+
+    await this.roomRepo.update(roomId, { last_message_at: new Date() });
+
+    const memberIds = await this.membership.getRoomMemberIds(roomId);
+    const agentMemberIds = await this.membership.getRoomAgentMemberIds(roomId);
+
+    activityEvents.emit('chat_room_message', {
+      room_id: roomId,
+      workspace_id: savedMsg.workspace_id,
+      message_id: savedMsg.id,
+      sender_type: 'system',
+      sender_id: 'system',
+      sender_name: 'System',
+      content: trimmed,
+      images: savedMsg.images,
+      created_at: savedMsg.created_at.toISOString(),
+      // Synthetic source: no agent chain involvement, so the plugin's
+      // chain-depth short-circuit never sees this message.
+      agent_chain_depth: 0,
+      member_ids: memberIds,
+      agent_member_ids: agentMemberIds,
+    });
+
+    this.logService.info('ChatRooms', `system message posted to room ${roomId}`, {
+      room_id: roomId, workspace_id: savedMsg.workspace_id, message_id: savedMsg.id,
+    });
+
+    return {
+      id: savedMsg.id,
+      room_id: savedMsg.room_id,
+      workspace_id: savedMsg.workspace_id,
+      sender_type: 'system',
+      sender_id: 'system',
+      sender_name: 'System',
+      content: savedMsg.content,
+      images: savedMsg.images,
+      created_at: savedMsg.created_at,
+      updated_at: savedMsg.updated_at,
+    };
+  }
+
+  /**
    * Mark room as read up to the latest message (monotonic advance only).
    * Only advances last_read_at if the latest message is newer than current last_read_at.
    *
