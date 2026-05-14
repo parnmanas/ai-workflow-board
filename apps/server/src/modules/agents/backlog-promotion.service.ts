@@ -156,6 +156,20 @@ export class BacklogPromotionService implements OnModuleInit {
     const board = await boardRepo.findOne({ where: { id: boardId } });
     if (!board) return null;
 
+    // Board pause gate. Pausing must also block the silent backlog→active
+    // move, not just downstream agent triggers — otherwise the moment a
+    // capacity event fires we'd shuffle tickets into the "To Do" column on
+    // a paused board and the human operator would see queue churn they
+    // didn't ask for. Cheap check, early return, no audit row (the
+    // promotion just becomes a no-op identical to "no eligible candidate").
+    if (board.paused_at) {
+      this.logService.info('BacklogPromotion', 'tryPromote skipped (board paused)', {
+        board_id: boardId, paused_at: new Date(board.paused_at).toISOString(),
+        triggered_by: opts?.triggerAgentId || null,
+      });
+      return null;
+    }
+
     const columns = await colRepo.find({ where: { board_id: boardId }, order: { position: 'ASC' } });
     if (columns.length === 0) return null;
 

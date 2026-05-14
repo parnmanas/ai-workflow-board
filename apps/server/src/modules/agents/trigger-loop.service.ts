@@ -390,6 +390,49 @@ export class TriggerLoopService implements OnModuleInit {
       : null;
     const boardId = col?.board_id ?? '';
 
+    // Board pause gate. _emitTrigger is the SINGLE chokepoint every dispatch
+    // path funnels through (activity-driven column_move / comment /
+    // ticket_update, supervisor stale-re-push, backlog_promotion, and even
+    // emitManualTrigger which bypasses the focus gate but not this one). So
+    // a non-null Board.paused_at here drops the trigger regardless of source.
+    //
+    // Drop semantics mirror the focus-selector drop: silent on the wire (no
+    // SSE emit), one info-level log line, and an ActivityLog row so an
+    // operator can grep "why did my agent never wake up" → "board paused".
+    // The audit row uses action='agent_trigger_dropped_board_paused' to
+    // distinguish it from the focus-selector silent drop (which logs only).
+    if (boardId) {
+      const board = await this.dataSource.getRepository(Board).findOne({ where: { id: boardId } });
+      if (board?.paused_at) {
+        this.logService.info('MCP', 'agent_trigger dropped (board paused)', {
+          ticket_id: ticket.id, agent_id: agentId, role,
+          source: triggerSource, board_id: boardId,
+          paused_at: new Date(board.paused_at).toISOString(),
+        });
+        try {
+          const activityLogRepo = this.dataSource.getRepository(ActivityLog);
+          await activityLogRepo.save(activityLogRepo.create({
+            entity_type: 'ticket',
+            entity_id: ticket.id,
+            ticket_id: ticket.id,
+            actor_id: 'system',
+            actor_name: 'TriggerLoopService',
+            action: 'agent_trigger_dropped_board_paused',
+            new_value: `agent=${agentId} board=${boardId} paused_at=${new Date(board.paused_at).toISOString()}`,
+            role,
+            trigger_source: triggerSource,
+          }));
+        } catch (e) {
+          // Audit failure must not gate the drop itself — pause is already
+          // in effect, the missed row is the only collateral.
+          this.logService.warn('MCP', 'paused-drop audit write failed (drop still applied)', {
+            err: String(e), ticket_id: ticket.id, board_id: boardId,
+          });
+        }
+        return '';
+      }
+    }
+
     // Focus selector gate. The selector returns the single ticket id
     // this agent should be working on for (board, role) right now —
     // ranked by column.position DESC, is_chain_target ASC, priority
