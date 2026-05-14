@@ -56,6 +56,21 @@ export class Workspace {
   @Column({ type: 'int', default: 100 })
   dispatch_queue_depth: number;
 
+  /**
+   * Chat room to receive system alerts (e.g. stale-WAIT detector pings
+   * from `StuckTicketDetectorService`, ticket 8e934802). Optional — when
+   * null, the detector falls back to the workspace's oldest chat room
+   * (`created_at ASC`) so an unconfigured workspace still surfaces the
+   * alert somewhere visible. Operators set this via the workspace
+   * settings PATCH when they want a dedicated #alerts room.
+   *
+   * No FK constraint — the column is a soft pointer so deleting the
+   * chat room doesn't fail the cascade; the detector tolerates a stale
+   * id by falling through to the oldest-room lookup.
+   */
+  @Column({ type: 'varchar', nullable: true, default: null })
+  alerts_chat_room_id: string | null;
+
   @CreateDateColumn()
   created_at: Date;
 
