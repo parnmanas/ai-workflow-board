@@ -206,6 +206,22 @@ export class TicketSessionManager
           agent_id: spawned.agentId,
           ticket_id: spec.ticketId,
         });
+        // Release any lock the subagent acquired via claim_ticket. Without
+        // this, a child that died mid-turn (MCP init fail, SIGKILL, idle
+        // timeout, claude CLI crash after a successful claim_ticket call,
+        // …) leaves locked_by_agent_id set until the server-side 30-min
+        // sweep fires. The WorkflowFocusSelector then keeps picking that
+        // (now-stuck) ticket as the agent's focus, cap=1 blocks every
+        // other To Do ticket on the board, and nothing moves until an
+        // operator manually clears the lock — exactly the GameClient A-5
+        // failure we observed on 2026-05-14. Server enforces ownership on
+        // release_ticket (lock owner == agent_id), so this is a clean
+        // no-op when the child never claimed and only frees the specific
+        // ticket lock the agent holds.
+        fireAndForgetTool(this._config, 'release_ticket', {
+          ticket_id: spec.ticketId,
+          agent_id: spawned.agentId,
+        });
       }
     });
 
