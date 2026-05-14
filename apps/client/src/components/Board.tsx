@@ -430,6 +430,28 @@ export default function Board() {
         description={board?.description}
         actions={
           <>
+            {board?.paused_at && (
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    await api.resumeBoard(board.id);
+                    await refresh();
+                    showToast('Board resumed', 'success');
+                  } catch (err: any) {
+                    showToast(err?.message || 'Failed to resume board', 'error');
+                  }
+                }}
+                style={{
+                  ...headerActionStyle,
+                  background: tokens.colors.warning,
+                  color: '#fff',
+                  border: 'none',
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                }}
+              >▶ Resume Board</button>
+            )}
             <Link to={resourcesLink} style={headerActionStyle}>
               📁 Resources
             </Link>
@@ -439,6 +461,34 @@ export default function Board() {
           </>
         }
       />
+
+      {/*
+        Pause banner — surfaces the board-wide stop on every column view so
+        humans dragging cards understand why agents aren't picking work up.
+        The server gate inside TriggerLoopService._emitTrigger is the source
+        of truth; this is purely informational.
+      */}
+      {board?.paused_at && (
+        <div
+          role="status"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            padding: '8px 16px',
+            background: tokens.colors.warningBg,
+            color: tokens.colors.warningLight,
+            fontSize: 13,
+            borderBottom: `1px solid ${tokens.colors.warning}`,
+          }}
+        >
+          <span style={{ fontSize: 16 }}>⏸</span>
+          <span>
+            <strong>Board is paused.</strong> Agent triggers are suspended (since{' '}
+            {new Date(board.paused_at).toLocaleString()}). Click <em>▶ Resume Board</em> to wake agents.
+          </span>
+        </div>
+      )}
 
       {board ? (
         <>

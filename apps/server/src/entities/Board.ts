@@ -48,6 +48,18 @@ export class Board {
   @Column({ type: Date, nullable: true, default: null })
   archived_at: Date | null;
 
+  // Board-wide soft pause. When non-null, every trigger emission for tickets
+  // on this board is dropped (TriggerLoopService._emitTrigger checks this as
+  // the first gate, covering activity-driven, supervisor, backlog-promotion,
+  // and manual paths since they all funnel through that single chokepoint).
+  // BacklogPromotionService.tryPromote also short-circuits so paused boards
+  // don't silently shuffle tickets out of intake. The board UI still works
+  // — humans can read, comment, drag tickets — only agent wake-ups stop.
+  // Resume by clearing back to null. Mirrors the archived_at soft-flag
+  // pattern: nullable timestamp, ISO date = paused-since.
+  @Column({ type: Date, nullable: true, default: null })
+  paused_at: Date | null;
+
   @ManyToOne(() => Workspace, ws => ws.boards, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'workspace_id' })
   workspace: Workspace;

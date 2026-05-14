@@ -35,11 +35,21 @@
  *      ticket nearing completion finish before any newer-column
  *      candidates get a slice of attention. Column positions are
  *      board-defined integers; no name compare.
- *   2. `is_chain_target ASC` — a ticket pointed at by some other
- *      ticket's `next_ticket_id` wins the tie. Matches the existing
- *      backlog-promotion chain-prefix semantics (ticket 8b3fa67e) so
- *      a B in a `A.next_ticket_id = B` chain promotes ahead of an
- *      unrelated higher-priority C.
+ *   2. `hasUnresolvedPredecessor ASC` — chain-head wins the tie. A
+ *      candidate is "head-ready" iff its predecessor (the ticket whose
+ *      `next_ticket_id` points at it) is NOT also in the current
+ *      candidate set. If the predecessor IS in the set, the candidate
+ *      is "waiting" and gets pushed back so the selector picks the
+ *      predecessor first. Reuses the same `next_ticket_id IN (:...ids)`
+ *      query shape as `backlog-promotion.service.ts` (ticket 8b3fa67e)
+ *      so the static grep guard sees identical shape in both files.
+ *
+ *      Why predecessor-aware and not just `is_chain_target`: the old
+ *      boolean "is anything pointing at me?" can't distinguish two
+ *      adjacent chain members. In a `B-3 → B-4 → B-5` chain with the
+ *      candidate set `{B-4, B-5}`, both rows are chain-targets, the
+ *      tie falls through to priority, and a high-priority B-5 starves
+ *      a medium-priority B-4 forever (ticket ee0324ac).
  *   3. `priorityIndex(priority) ASC` — critical < high < medium < low
  *      < unknown. Goes through the shared `priorityIndex` helper —
  *      raw-priority-string compares are banned across the dispatch
@@ -146,9 +156,10 @@ export class AgentWorkloadService {
    *
    * Implementation note — sort happens in JS rather than SQL because
    * the 4-key compound order (`column.position DESC`,
-   * `is_chain_target ASC`, `priorityIndex ASC`, `created_at ASC`) is
-   * awkward to express portably across sqlite + postgres without
-   * driver-specific `CASE WHEN` / `DISTINCT ON` clauses. The candidate
+   * `hasUnresolvedPredecessor ASC`, `priorityIndex ASC`,
+   * `created_at ASC`) is awkward to express portably across sqlite +
+   * postgres without driver-specific `CASE WHEN` / `DISTINCT ON`
+   * clauses. The candidate
    * set is bounded by the agent's parked-ticket count for one board,
    * which is small in practice (cap=1 board → ≤ a few dozen even
    * during a thrash).
@@ -180,28 +191,51 @@ export class AgentWorkloadService {
       : [];
     const colById = new Map(columns.map(c => [c.id, c]));
 
-    // Chain-target prefix: a ticket that some other ticket's
-    // `next_ticket_id` points at wins the tie. One IN query against
-    // the full candidate set, matching the trick used in
-    // `backlog-promotion.service.ts` so the static grep
-    // (`workflow-focus-selector-guard.test.mjs`) sees the same shape
-    // in both files.
+    // Chain-head prefix: a candidate whose predecessor (the ticket
+    // whose `next_ticket_id` points at it) is ALSO in the current
+    // candidate set is "waiting" and must rank behind a "head-ready"
+    // candidate whose predecessor is absent (finished / never existed
+    // / parked elsewhere).
+    //
+    // Single IN-query against the full candidate set, then materialised
+    // into a child→parent map so step 2 can ask "is my predecessor
+    // still in play?" in O(1). Query shape kept identical to
+    // `backlog-promotion.service.ts` so the static grep guard
+    // (`workflow-focus-selector-guard.test.mjs`) sees the same line in
+    // both files (ticket 8b3fa67e).
+    //
+    // Why not the older "is_chain_target" boolean (ticket ee0324ac):
+    // every middle-of-chain candidate is also a chain-target — so an
+    // `A→B→C` chain with the candidate set `{B,C}` ties on step 2 and
+    // falls through to priority, where a high-priority C starves a
+    // medium-priority B forever. Predecessor-awareness picks B first
+    // (its parent A is not in the set, so it's head-ready), advances
+    // it through, and only then unlocks C. With no chain at all the
+    // map is empty and every candidate is trivially head-ready, so
+    // the no-chain regression path is unchanged.
     const chainParents = await ticketRepo
       .createQueryBuilder('t')
       .where('t.next_ticket_id IN (:...ids)', { ids: candidateIds })
       .getMany();
-    const isChainTarget = new Set(
-      chainParents.map(p => p.next_ticket_id).filter(Boolean) as string[],
-    );
+    const parentOfChild = new Map<string, string>();
+    for (const p of chainParents) {
+      if (p.next_ticket_id) parentOfChild.set(p.next_ticket_id, p.id);
+    }
+    const candidateSet = new Set(candidateIds);
+    const hasUnresolvedPredecessor = (id: string): boolean => {
+      const parent = parentOfChild.get(id);
+      return parent != null && candidateSet.has(parent);
+    };
 
     tickets.sort((a, b) => {
       // 1. Column position DESC. Higher column = closer to done = wins.
       const pa = colById.get(a.column_id || '')?.position ?? -Infinity;
       const pb = colById.get(b.column_id || '')?.position ?? -Infinity;
       if (pa !== pb) return pb - pa;
-      // 2. is_chain_target ASC (0 chain, 1 non-chain). Chain wins.
-      const ca = isChainTarget.has(a.id) ? 0 : 1;
-      const cb = isChainTarget.has(b.id) ? 0 : 1;
+      // 2. hasUnresolvedPredecessor ASC. 0 = head-ready, 1 = waiting on
+      // a predecessor that's still in the candidate set. Head-ready wins.
+      const ca = hasUnresolvedPredecessor(a.id) ? 1 : 0;
+      const cb = hasUnresolvedPredecessor(b.id) ? 1 : 0;
       if (ca !== cb) return ca - cb;
       // 3. priority_index ASC. critical(0) < high(1) < medium(2) < low(3).
       const ia = priorityIndex(a.priority);
