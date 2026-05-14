@@ -116,6 +116,24 @@ test('AgentWorkloadService exposes both getFocusTicket and getWorkflowLoadTicket
     /priorityIndex/,
     'getFocusTicket must use the priorityIndex helper — raw priority string compares are banned in the dispatch path.',
   );
+  // Step 2 of the selector must be predecessor-aware — "is my parent in
+  // the candidate set?" — not the older "is anything pointing at me?"
+  // boolean. The boolean version can't distinguish two adjacent chain
+  // members in the same candidate set, so a high-priority middle node
+  // can starve its medium-priority predecessor forever (ticket ee0324ac).
+  // The fix builds a child→parent map and asks O(1) "do I still have
+  // an unresolved predecessor here?".
+  const code = stripComments(fs.readFileSync(AGENT_WORKLOAD, 'utf8'));
+  assert.match(
+    code,
+    /parentOfChild/,
+    'getFocusTicket step 2 must materialise the chainParents query into a child→parent map (`parentOfChild`) so head-readiness is decidable per-candidate (ticket ee0324ac).',
+  );
+  assert.match(
+    code,
+    /hasUnresolvedPredecessor/,
+    'getFocusTicket step 2 must rank candidates by `hasUnresolvedPredecessor` (head-ready first), not the old `is_chain_target` boolean — the boolean ties across adjacent chain members (ticket ee0324ac).',
+  );
 });
 
 test('backlog-promotion writes the backlog_promotion_skipped_focus_held audit row on focus-held skip', () => {
