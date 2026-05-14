@@ -444,9 +444,18 @@ async function runRuntime(
   // spawn_agent, drained by stop_agent, read by EventDispatcher to route
   // managed-agent-targeted events under the right identity.
   const managedAgentContexts = new ManagedAgentContextRegistry();
+  // Construct the session managers BEFORE the command handler so stop_agent /
+  // restart_agent can force-kill an agent's live chat / ticket children
+  // through them. Without this wiring, a credential rotation only rewrote
+  // disk and the still-running child kept dispatching turns under the stale
+  // OAuth until idle/maxTurns retired it (10+ minutes).
+  const chatSessionManager = new ChatSessionManager(config);
+  const ticketSessionManager = new TicketSessionManager(config);
   const commandHandler = new AgentManagerCommandHandler(config, {
     registry: managedAgents,
     contextRegistry: managedAgentContexts,
+    chatSessionManager,
+    ticketSessionManager,
     getInstanceId: () => instanceHeartbeat._real?.instanceId ?? null,
     reloadConfig: async () => {
       const next = loadConfig();
@@ -458,9 +467,6 @@ async function runRuntime(
       return disruptive ? 'reloaded (disruptive — server/apiKey need restart)' : 'reloaded';
     },
   });
-
-  const chatSessionManager = new ChatSessionManager(config);
-  const ticketSessionManager = new TicketSessionManager(config);
   // ST-7 follow-up: fs_browser is always-on. Construct with whatever's in
   // config.fs_browser (roots etc.) but the FsBrowser class no longer
   // gates behind an enabled flag — missing/empty roots = unrestricted

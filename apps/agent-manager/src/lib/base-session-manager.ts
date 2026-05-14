@@ -660,6 +660,65 @@ export class BaseSessionManager {
     if (idx >= 0) this.#dedupQueue.splice(idx, 1);
   }
 
+  /**
+   * Force-terminate every live session owned by `agentId`. Used by
+   * stop_agent / restart_agent so that a credential rotation actually
+   * takes effect — a SessionRecord's child captured the per-agent
+   * .credentials.json + env at spawn time, and would otherwise keep
+   * authenticating with the stale credential until idle timeout or
+   * maxTurns retired it on its own (10+ minutes). Without this,
+   * pasting a fresh credential in AWB Admin → Credentials and
+   * clicking restart_agent only refreshed disk artefacts; the running
+   * child kept dispatching turns against the expired OAuth token.
+   *
+   * Caller-side cleanup (configPath/pidPath unlink, tap.end, _sessions
+   * delete) lives in `#wireExit`; we only deliver the signals and let
+   * the exit handler do the bookkeeping. SIGTERM first, then SIGKILL
+   * after STOP_GRACE_MS for any survivor — same pattern as stop().
+   * Returns the number of sessions that were signalled so the command
+   * ack log can surface it.
+   */
+  async stopForAgent(agentId: string): Promise<{ count: number }> {
+    if (!agentId) return { count: 0 };
+    const victims = Array.from(this._sessions.values()).filter((s) => s.agentId === agentId);
+    if (victims.length === 0) return { count: 0 };
+    for (const sess of victims) {
+      if (sess.idleTimer) {
+        clearTimeout(sess.idleTimer);
+        sess.idleTimer = null;
+      }
+      try {
+        sess.child.stdin.end();
+      } catch {
+        /* already closed */
+      }
+      try {
+        process.kill(sess.pid, 'SIGTERM');
+      } catch {
+        /* already dead */
+      }
+    }
+    log(
+      `${this.#logTag} stopForAgent: agent=${agentId.slice(0, 8)} signalled ${victims.length} session(s) — SIGTERM`,
+    );
+    setTimeout(() => {
+      for (const sess of victims) {
+        try {
+          process.kill(sess.pid, 0);
+          // Still alive — escalate.
+          try {
+            process.kill(sess.pid, 'SIGKILL');
+          } catch {
+            /* gone between probe and kill */
+          }
+        } catch {
+          /* already exited; nothing to do */
+        }
+      }
+    }, STOP_GRACE_MS).unref?.();
+    return { count: victims.length };
+  }
+
   async stop(): Promise<void> {
     if (this.#healthTimer) {
       clearInterval(this.#healthTimer);
