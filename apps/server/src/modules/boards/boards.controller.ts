@@ -166,6 +166,25 @@ export class BoardsController {
     return res.json(board);
   }
 
+  // Pause: idempotent — repeat calls just refresh paused_at to "now". Cheaper
+  // than a 409 / no-op detour and keeps the audit trail (updated_at) honest
+  // about who hit the button last.
+  @Post(':id/pause')
+  async pause(@Param('id') id: string, @Res() res: Response) {
+    const board = await findOrFail(this.boardRepo, { where: { id } }, 'Board not found');
+    board.paused_at = new Date();
+    await this.boardRepo.save(board);
+    return res.json(board);
+  }
+
+  @Post(':id/resume')
+  async resume(@Param('id') id: string, @Res() res: Response) {
+    const board = await findOrFail(this.boardRepo, { where: { id } }, 'Board not found');
+    board.paused_at = null;
+    await this.boardRepo.save(board);
+    return res.json(board);
+  }
+
   @Delete(':id')
   async delete(@Param('id') id: string, @Res() res: Response) {
     const result = await this.boardRepo.delete(id);
