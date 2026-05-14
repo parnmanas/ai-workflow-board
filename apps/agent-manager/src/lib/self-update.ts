@@ -584,7 +584,31 @@ function reExecManager(out: (msg: string) => void): void {
     windowsHide: true,
   });
   child.unref();
-  // Give the child a moment to start before the parent exits, mainly so
-  // the child's first log line lands after ours and we don't interleave.
-  setTimeout(() => process.exit(0), 250).unref?.();
+  // Trigger main.ts's shutdown handler (chat/ticket session SIGTERM,
+  // monitor stop, lockfile release) BEFORE the parent exits. Previously
+  // this was `process.exit(0)`, which short-circuited the SIGTERM handler
+  // entirely — every running chat-session / ticket-session CLI child
+  // survived re-exec as a detached + unref'd orphan that the new manager
+  // could no longer find (in-memory `_sessions` empty after re-exec;
+  // orphan-cleanup misses chat-sessions because they reuse the agent's
+  // persistent mcp-config and write no .pid sidecar). The net effect was
+  // that an `update_manager` carrying a server-side fix would re-exec
+  // into a v-new manager while v-old chat-session children kept talking
+  // to the server with whatever MCP / credential snapshot they captured
+  // at spawn time. Asking the platform's SIGTERM handler to do the
+  // cleanup is the cheap, well-tested path.
+  //
+  // Windows note: Node's libuv emits a synthetic 'SIGTERM' from
+  // process.kill(pid, 'SIGTERM') in-process; it never reaches the
+  // platform's console-control-event mechanism so we don't need
+  // CTRL_BREAK_EVENT magic here.
+  setTimeout(() => {
+    try {
+      process.kill(process.pid, 'SIGTERM');
+    } catch {
+      // Last-ditch fallback: if SIGTERM somehow can't be delivered to
+      // self, still exit so the new child takes over cleanly.
+      process.exit(0);
+    }
+  }, 250).unref?.();
 }
