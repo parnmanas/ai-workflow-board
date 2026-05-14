@@ -243,6 +243,13 @@ export const api = {
     request<any>(`/boards/${boardId}/archive`, { method: 'POST' }),
   restoreBoard: async (boardId: string) =>
     request<any>(`/boards/${boardId}/restore`, { method: 'POST' }),
+  // Board pause: server flips Board.paused_at and drops every agent_trigger
+  // for tickets on this board until resumed. Idempotent — re-calling pause
+  // refreshes the timestamp.
+  pauseBoard: async (boardId: string) =>
+    request<any>(`/boards/${boardId}/pause`, { method: 'POST' }),
+  resumeBoard: async (boardId: string) =>
+    request<any>(`/boards/${boardId}/resume`, { method: 'POST' }),
 
   // ─── Columns ──────────────────────────────────────────
   createColumn: (boardId: string, data: { name: string; color?: string; description?: string }) =>

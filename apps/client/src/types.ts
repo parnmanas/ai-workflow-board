@@ -376,6 +376,11 @@ export interface Board {
   columns: Column[];
   created_at: string;
   updated_at: string;
+  archived_at?: string | null;
+  // Board-wide soft pause. When set, the server drops every agent_trigger
+  // for tickets on this board and BacklogPromotionService becomes a no-op.
+  // UI surfaces a banner + flips Pause ↔ Resume on the index card.
+  paused_at?: string | null;
 }
 
 export interface Workspace {

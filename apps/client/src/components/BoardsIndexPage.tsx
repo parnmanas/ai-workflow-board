@@ -100,6 +100,19 @@ export default function BoardsIndexPage() {
     }
   };
 
+  // Pause / Resume — toggles the same Board.paused_at field on the server.
+  // Optimistic update keeps the card label flipping snappy; on failure we
+  // surface the error and the next page load reconciles state.
+  const handlePauseToggle = async (board: any) => {
+    const willPause = !board.paused_at;
+    try {
+      const updated = willPause ? await api.pauseBoard(board.id) : await api.resumeBoard(board.id);
+      setBoards(prev => prev.map(b => b.id === board.id ? { ...b, paused_at: updated.paused_at } : b));
+    } catch {
+      setError(willPause ? 'Failed to pause board.' : 'Failed to resume board.');
+    }
+  };
+
   const openRename = (board: any) => {
     setRenamingBoard(board);
     setRenameValue(board.name);
@@ -158,18 +171,37 @@ export default function BoardsIndexPage() {
                 key={board.id}
                 onClick={() => navigate(`/ws/${wsId}/boards/${board.id}`)}
               >
-                <div style={{ fontSize: 15, fontWeight: 700, color: tokens.colors.textPrimary, marginBottom: 8 }}>
-                  {board.name}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: tokens.colors.textPrimary }}>
+                    {board.name}
+                  </div>
+                  {board.paused_at && (
+                    <span
+                      title={`Paused since ${new Date(board.paused_at).toLocaleString()}`}
+                      style={{
+                        fontSize: 10, fontWeight: 700, letterSpacing: '0.05em',
+                        textTransform: 'uppercase',
+                        padding: '2px 6px', borderRadius: 4,
+                        background: tokens.colors.warning,
+                        color: '#fff',
+                      }}
+                    >⏸ Paused</span>
+                  )}
                 </div>
                 <div style={{ fontSize: 13, color: tokens.colors.textSecondary }}>
                   {board.description || 'No description'}
                 </div>
-                <div style={{ marginTop: 12, display: 'flex', gap: 8 }}>
+                <div style={{ marginTop: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                   <Button
                     variant="ghost"
                     size="sm"
                     onClick={(e) => { e.stopPropagation(); openRename(board); }}
                   >Rename</Button>
+                  <Button
+                    variant={board.paused_at ? 'primary' : 'secondary'}
+                    size="sm"
+                    onClick={(e) => { e.stopPropagation(); handlePauseToggle(board); }}
+                  >{board.paused_at ? 'Resume' : 'Pause'}</Button>
                   <Button
                     variant="danger"
                     size="sm"
