@@ -39,6 +39,7 @@ import {
 } from './rest.js';
 import type { ManagedAgentRegistry } from './managed-agents.js';
 import type { ManagedAgentContextRegistry } from './managed-agent-context.js';
+import type { BaseSessionManager } from './base-session-manager.js';
 import {
   ensureManagedAgentDir,
   readApiKey,
@@ -117,6 +118,14 @@ export interface CommandHandlerDeps {
   /** ST-6: per-agent runtime context registry (cwd / apiKey / mcp-config).
    * Optional so legacy harnesses without multi-tenant routing keep working. */
   contextRegistry?: ManagedAgentContextRegistry | null;
+  /** Persistent session managers owned by main.ts. Wired so stop_agent /
+   * restart_agent can force-kill the agent's live chat / ticket CLI children
+   * — without this, a credential rotation only refreshes disk artefacts and
+   * the in-memory child keeps authenticating with the stale credential until
+   * its idle / maxTurns timer expires (10+ minutes). Optional so the legacy
+   * test harness (deps without session managers) keeps wiring up. */
+  chatSessionManager?: Pick<BaseSessionManager, 'stopForAgent'> | null;
+  ticketSessionManager?: Pick<BaseSessionManager, 'stopForAgent'> | null;
   /** Optional config-reload hook; resolves with a short summary string. */
   reloadConfig?: () => Promise<string> | string;
 }
@@ -448,16 +457,41 @@ export class AgentManagerCommandHandler {
     const agentId = this.#targetAgentId(payload, 'stop_agent');
     const hadContext = this.#deps.contextRegistry?.delete(agentId) ?? false;
     const rec = this.#deps.registry.markStopped(agentId, 'stop_agent command');
+    // Force-kill the agent's live chat/ticket CLI children FIRST. Each child
+    // captured its env (.credentials.json, ANTHROPIC_AUTH_TOKEN, …) at spawn
+    // time; without this signal pass, restart_agent + a freshly pasted
+    // credential only refresh disk artefacts and the running child keeps
+    // dispatching turns against the expired OAuth until its idle timer
+    // (default 10min) or maxTurns kicks it out. Failures are non-fatal —
+    // we still want to drop the context + secrets even if a manager has
+    // somehow constructed the handler without session managers.
+    let chatKilled = 0;
+    let ticketKilled = 0;
+    try {
+      const r = await this.#deps.chatSessionManager?.stopForAgent(agentId);
+      chatKilled = r?.count ?? 0;
+    } catch (err: any) {
+      log(`stop_agent: chatSessionManager.stopForAgent failed: ${err?.message ?? err}`);
+    }
+    try {
+      const r = await this.#deps.ticketSessionManager?.stopForAgent(agentId);
+      ticketKilled = r?.count ?? 0;
+    } catch (err: any) {
+      log(`stop_agent: ticketSessionManager.stopForAgent failed: ${err?.message ?? err}`);
+    }
     // Erase on-disk secrets so the next spawn_agent re-provisions a fresh
     // key. This is the expected security posture: an admin stopping an
     // agent invalidates its credentials on the next start.
     await eraseSecrets(agentId).catch(() => undefined);
-    if (!rec && !hadContext) {
+    if (!rec && !hadContext && chatKilled === 0 && ticketKilled === 0) {
       // Unknown to this manager — likely never spawned here. Treat as a
       // no-op success so the operator's ack reflects "nothing to do".
       return `stop_agent: agent=${agentId.slice(0, 8)} not running on this manager`;
     }
-    return `stop_agent ok: agent=${agentId.slice(0, 8)} (context dropped, secrets erased)`;
+    return (
+      `stop_agent ok: agent=${agentId.slice(0, 8)} ` +
+      `(context dropped, secrets erased, chat_sessions=${chatKilled} ticket_sessions=${ticketKilled})`
+    );
   }
 
   async #restartAgent(payload: AgentManagerCommandPayload): Promise<string> {
