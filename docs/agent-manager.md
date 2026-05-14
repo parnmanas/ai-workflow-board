@@ -265,3 +265,36 @@ Minimum manual smoke pass before each version bump:
 
 See the parent repo's `CLAUDE.md` _Agent Manager sync_ rule for how the
 ralf monorepo coordinates submodule ref bumps after these changes land.
+
+## Server-side complements
+
+These knobs live on the AWB server (not the manager) but interact with
+the lifecycle of agents the manager drives. They are surfaced here so an
+operator tuning manager behaviour has a single place to find related
+runtime settings.
+
+### Stale-WAIT detector (`StuckTicketDetectorService`)
+
+`apps/server/src/modules/agents/stuck-ticket-detector.service.ts` is a
+periodic sweep that flags tickets where an assignee subagent has logged
+N consecutive WAIT-shaped comments without any column move, claim, or
+release in between. When a ticket newly crosses the threshold, the
+detector posts a system-authored message into the workspace's chat
+room — by default the workspace's oldest room, overridable via
+`Workspace.alerts_chat_room_id`. Dedup state is held in the additive
+`stuck_alerts` table (PK `ticket_id`). Admin observability lives at
+`GET /api/admin/stuck-tickets` (gated by `AdminGuard`), with
+`POST /:id/realert` to force a re-fire and `DELETE /:id` to dismiss.
+
+| Var | Default | Purpose |
+|---|---|---|
+| `STUCK_DETECTOR_ENABLED` | `true` | Kill-switch. `false` / `0` / `no` / `off` all disable. |
+| `STUCK_DETECTOR_SWEEP_MS` | `900000` (15 min) | Sweep cadence. |
+| `STUCK_DETECTOR_WINDOW` | `4` | Number of consecutive agent comments that form the WAIT signature. |
+| `STUCK_DETECTOR_MIN_SPAN_MS` | `7200000` (2 h) | Minimum window duration — fast-loop comments are excluded. |
+| `STUCK_DETECTOR_MIN_AGE_MS` | `7200000` (2 h) | Grace period: newly-touched tickets are skipped. |
+| `STUCK_DETECTOR_REALERT_MS` | `86400000` (24 h) | Re-alert cooldown. |
+
+The detector is intentionally text-agnostic — it counts comments and
+lifecycle events, not phrasings. Agents that phrase WAIT differently are
+still caught.
