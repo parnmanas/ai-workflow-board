@@ -272,11 +272,18 @@ test('StuckTicketDetectorService — acceptance bullets 1..5', async (t) => {
 
     const messaging = app.get(RoomMessagingService);
     const logService = app.get(LogService);
+    // v0.42 — detector now depends on ColumnRolePolicyService for the
+    // policy-violation enrichment branch. Resolve from the live app so
+    // the construct call matches the production wiring.
+    const ColumnRolePolicyService =
+      (await import('file://' + path.join(DIST_ROOT, 'modules', 'column-policies', 'column-role-policy.service.js')))
+        .ColumnRolePolicyService;
+    const policies = app.get(ColumnRolePolicyService);
     // Construct a disabled detector directly. ds is the shared
     // DataSource — the detector reads its own env via process.env.
     const prev = process.env.STUCK_DETECTOR_ENABLED;
     process.env.STUCK_DETECTOR_ENABLED = 'false';
-    const disabled = new detectorModule.StuckTicketDetectorService(ds, logService, messaging);
+    const disabled = new detectorModule.StuckTicketDetectorService(ds, logService, messaging, policies);
     process.env.STUCK_DETECTOR_ENABLED = prev;
 
     const before = await alertRepo.find({ where: { ticket_id: ticket.id } });
