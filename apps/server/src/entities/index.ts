@@ -29,3 +29,4 @@ export { SubagentLogLine } from './SubagentLogLine';
 export { Action } from './Action';
 export { ActionRun } from './ActionRun';
 export { StuckTicketAlert } from './StuckTicketAlert';
+export { ColumnRolePolicy } from './ColumnRolePolicy';
