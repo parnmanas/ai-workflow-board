@@ -48,6 +48,10 @@ import { Ticket } from '../../entities/Ticket';
 import { Workspace } from '../../entities/Workspace';
 import { LogService } from '../../services/log.service';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
+import {
+  ColumnRolePolicyService,
+  PolicyEvaluation,
+} from '../column-policies/column-role-policy.service';
 
 const DEFAULTS = {
   ENABLED: true,
@@ -112,6 +116,7 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly logService: LogService,
     private readonly messaging: RoomMessagingService,
+    private readonly policies: ColumnRolePolicyService,
   ) {
     this.config = readConfigFromEnv();
   }
@@ -418,6 +423,16 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
    * cycle count, age in hours, and a one-line excerpt of the latest
    * agent comment so the operator can triage from the notification
    * itself without opening the ticket.
+   *
+   * Policy enrichment (ticket f886ada7): if there's an enabled
+   * `expected_action=move` policy for the ticket's (column, role) pair
+   * AND no gate label matches AND `cycleCount` is at-or-past the policy's
+   * `max_cycles_without_progress`, the same alert is upgraded to
+   * "Stale-WAIT + policy violation" with the configured target column,
+   * gate-label vs. attached-label diff, and a structured activity_log
+   * row gets written. Re-uses the same `stuck_alerts` dedup row so the
+   * operator gets exactly one notification per dedup window — not one
+   * stale-WAIT + one policy_violation in lockstep.
    */
   private async _postStuckAlert(
     ticket: Ticket,
@@ -432,28 +447,126 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
       });
       return;
     }
-    const boardName = await this._resolveBoardName(ticket);
+    const column = ticket.column_id
+      ? await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } })
+      : null;
+    const boardName = column ? await this._resolveBoardNameForColumn(column) : '(no board)';
     const ageH = Math.max(0,
       (now.getTime() - new Date(ticket.updated_at || ticket.created_at).getTime()) / 3_600_000);
     const excerpt = oneLineExcerpt(latestComment.content);
     const ticketLink = `/ws/${ticket.workspace_id}/ticket/${ticket.id}`;
-    const lines: string[] = [
-      `⚠️ **Stale-WAIT detected** — \`${ticket.id}\``,
-      `**${ticket.title}**`,
-      `Board: ${boardName} · cycles: ${cycleCount} · age: ${ageH.toFixed(1)}h`,
-      `Latest agent comment: _${excerpt}_`,
-      `[Open ticket](${ticketLink})`,
-    ];
+
+    // ── Policy enrichment ──
+    //
+    // The detector confirmed stale-WAIT shape independently. The policy
+    // layer (ticket f886ada7) classifies whether that WAIT was *expected*
+    // (legitimate gate label attached) or *unexpected* (no gate label =
+    // agent forgot to move_ticket). We only escalate the message when
+    // the violation cycle threshold is crossed; otherwise the original
+    // stale-WAIT alert ships unchanged.
+    const labels = parseTicketLabels(ticket.labels);
+    const evaluation = column
+      ? await this.policies.evaluate(column, labels)
+      : null;
+    const isPolicyViolation = !!evaluation
+      && evaluation.isViolation
+      && cycleCount >= evaluation.minCyclesThreshold;
+
+    const lines: string[] = [];
+    if (isPolicyViolation && evaluation) {
+      const targetColName = evaluation.targetColumnIds.length > 0
+        ? await this._resolveColumnName(evaluation.targetColumnIds[0])
+        : '(unset)';
+      const roleList = evaluation.roleSlugs.join(', ') || '(none)';
+      const gateList = evaluation.gateLabels.length > 0
+        ? evaluation.gateLabels.join(', ')
+        : '(none)';
+      const attachedList = labels.length > 0 ? labels.join(', ') : '(none)';
+      lines.push(`⚠️ **Stale-WAIT + policy violation** — \`${ticket.id}\``);
+      lines.push(`**${ticket.title}**`);
+      lines.push(
+        `Board: ${boardName} · current column: ${column?.name ?? '(unknown)'} ` +
+        `→ expected: ${targetColName} · role(s): ${roleList}`,
+      );
+      lines.push(
+        `cycles: ${cycleCount} (threshold ${evaluation.minCyclesThreshold}) · age: ${ageH.toFixed(1)}h`,
+      );
+      lines.push(`Gate labels (configured): ${gateList}`);
+      lines.push(`Attached labels: ${attachedList}`);
+      lines.push(`Latest agent comment: _${excerpt}_`);
+      lines.push(`[Open ticket](${ticketLink})`);
+      await this._writePolicyViolationActivity(ticket, evaluation, cycleCount, now);
+    } else {
+      lines.push(`⚠️ **Stale-WAIT detected** — \`${ticket.id}\``);
+      lines.push(`**${ticket.title}**`);
+      lines.push(`Board: ${boardName} · cycles: ${cycleCount} · age: ${ageH.toFixed(1)}h`);
+      lines.push(`Latest agent comment: _${excerpt}_`);
+      lines.push(`[Open ticket](${ticketLink})`);
+    }
     try {
       await this.messaging.sendSystemMessage(targetRoomId, ticket.workspace_id, lines.join('\n\n'));
       this.logService.info('StuckDetector', 'alert posted', {
         ticket_id: ticket.id, room_id: targetRoomId, cycle_count: cycleCount,
+        policy_violation: isPolicyViolation,
       });
     } catch (e) {
       this.logService.error('StuckDetector', 'alert post failed', {
         err: String(e), ticket_id: ticket.id, room_id: targetRoomId,
       });
     }
+  }
+
+  private async _writePolicyViolationActivity(
+    ticket: Ticket,
+    evaluation: PolicyEvaluation,
+    cycleCount: number,
+    now: Date,
+  ): Promise<void> {
+    try {
+      const repo = this.dataSource.getRepository(ActivityLog);
+      await repo.save(repo.create({
+        workspace_id: ticket.workspace_id ?? '',
+        entity_type: 'ticket',
+        entity_id: ticket.id,
+        action: 'policy_violation',
+        // Encode the policy id(s) so an admin tool can join back; field_changed
+        // is otherwise meaningless for this synthetic event.
+        field_changed: 'column_role_policy',
+        old_value: '',
+        new_value: JSON.stringify({
+          policy_ids: evaluation.movePolicies.map(p => p.id),
+          role_slugs: evaluation.roleSlugs,
+          target_column_ids: evaluation.targetColumnIds,
+          cycle_count: cycleCount,
+          gate_labels: evaluation.gateLabels,
+        }),
+        actor_id: '',
+        actor_name: 'StuckTicketDetector',
+        ticket_id: ticket.id,
+        role: '',
+        trigger_source: 'system',
+        created_at: now,
+      }));
+    } catch (e) {
+      this.logService.warn('StuckDetector', 'policy_violation activity write failed (continuing)', {
+        err: String(e), ticket_id: ticket.id,
+      });
+    }
+  }
+
+  private async _resolveColumnName(columnId: string): Promise<string> {
+    if (!columnId) return '(unset)';
+    const col = await this.dataSource
+      .getRepository(BoardColumn)
+      .findOne({ where: { id: columnId } });
+    return col?.name ?? '(unknown)';
+  }
+
+  private async _resolveBoardNameForColumn(col: BoardColumn): Promise<string> {
+    const board = await this.dataSource
+      .getRepository(Board)
+      .findOne({ where: { id: col.board_id } });
+    return board?.name ?? '(unknown board)';
   }
 
   private async _emitUnstuck(
@@ -636,8 +749,24 @@ function oneLineExcerpt(content: string, max = 240): string {
   return firstLine.slice(0, max - 1).trimEnd() + '…';
 }
 
+/**
+ * Parse the `Ticket.labels` JSON string defensively. Returns `[]` on any
+ * malformed input — labels are operator-curated and a malformed blob
+ * shouldn't crash the sweep.
+ */
+function parseTicketLabels(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((s): s is string => typeof s === 'string' && s.length > 0);
+  } catch {
+    return [];
+  }
+}
+
 // Exported helpers for unit tests
-export const __test_helpers__ = { oneLineExcerpt };
+export const __test_helpers__ = { oneLineExcerpt, parseTicketLabels };
 
 // Suppress unused-import warnings in builds where these are only
 // referenced from query strings (TypeORM operator imports kept for

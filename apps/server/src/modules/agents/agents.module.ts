@@ -23,6 +23,7 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { AgentManagerModule } from '../agent-manager/agent-manager.module';
 import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
+import { ColumnPoliciesModule } from '../column-policies/column-policies.module';
 
 @Module({
   // forwardRef avoids the AgentsModule ↔ AgentManagerModule cycle:
@@ -37,6 +38,9 @@ import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
     // its sendSystemMessage helper. Direct import — no cycle (chat-rooms
     // does not depend on agents).
     ChatRoomsModule,
+    // ColumnPoliciesModule exports ColumnRolePolicyService — read-only
+    // consumer inside the stuck detector sweep (ticket f886ada7).
+    ColumnPoliciesModule,
   ],
   controllers: [AgentsController, FsBrowserController, SubagentMonitorController],
   providers: [
