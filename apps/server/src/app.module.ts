@@ -29,6 +29,7 @@ import { MentionsModule } from './modules/mentions/mentions.module';
 import { WorkspaceRolesModule } from './modules/workspace-roles/workspace-roles.module';
 import { AgentManagerModule } from './modules/agent-manager/agent-manager.module';
 import { UserChannelsModule } from './modules/user-channels/user-channels.module';
+import { ColumnPoliciesModule } from './modules/column-policies/column-policies.module';
 
 @Module({
   imports: [
@@ -84,6 +85,7 @@ import { UserChannelsModule } from './modules/user-channels/user-channels.module
     WorkspaceRolesModule,
     AgentManagerModule,
     UserChannelsModule,
+    ColumnPoliciesModule,
   ],
 })
 export class AppModule {}

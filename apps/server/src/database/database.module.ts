@@ -11,6 +11,7 @@ import { WorkspaceRole } from '../entities/WorkspaceRole';
 import { PromptTemplate } from '../entities/PromptTemplate';
 import { LogService } from '../services/log.service';
 import { writeRoutingConfigThrough } from '../modules/boards/routing-config.helper';
+import { seedDefaultColumnRolePolicies } from '../modules/column-policies/seed-helper';
 
 const entityList = Object.values(entitiesBarrel);
 
@@ -142,7 +143,14 @@ export class DatabaseModule implements OnModuleInit {
         await boardRepo.update({ id: board.id }, { column_prompts: JSON.stringify(colPrompts) });
       }
 
-      this.dbLog(`Seeded default workspace with board, ${defaultCols.length} columns, ${BUILTIN_ROLES.length} roles, and ${seededTemplates.length} prompt templates`);
+      // v0.42 — seed default ColumnRolePolicy rows for the freshly-created
+      // default board (ticket f886ada7). Mirrors the 1760000000017
+      // migration's logic — which only operates on PRE-existing boards —
+      // so the first-run workspace gets the alert layer active out of the
+      // box without a second restart.
+      const policiesSeeded = await seedDefaultColumnRolePolicies(this.dataSource, { boardId: board.id });
+
+      this.dbLog(`Seeded default workspace with board, ${defaultCols.length} columns, ${BUILTIN_ROLES.length} roles, ${seededTemplates.length} prompt templates, and ${policiesSeeded} column-role policies`);
     }
   }
 }

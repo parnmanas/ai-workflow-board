@@ -882,6 +882,49 @@ export const api = {
   updateSettings: (settings: Record<string, string>) =>
     request<any>('/admin/settings', { method: 'PATCH', body: JSON.stringify({ settings }) }),
 
+  // ─── Admin Column Policies (ticket f886ada7) ───────────
+  listColumnPolicies: () =>
+    request<{ boards: Array<{
+      board_id: string;
+      board_name: string;
+      workspace_id: string;
+      columns: Array<{
+        id: string;
+        name: string;
+        position: number;
+        kind: string;
+        is_terminal: boolean;
+        role_routing: string[];
+        policies: Array<{
+          id: string;
+          board_id: string;
+          column_id: string;
+          role_slug: string;
+          expected_action: 'move' | 'wait_until_label_removed' | 'terminal';
+          target_column_id: string;
+          gate_labels: string[];
+          max_cycles_without_progress: number;
+          on_violation: 'alert' | 'auto_move' | 'escalate_meta_ticket';
+          enabled: boolean;
+          created_at: string;
+          updated_at: string;
+        }>;
+      }>;
+    }> }>('/admin/column-policies'),
+
+  updateColumnPolicy: (policyId: string, patch: {
+    enabled?: boolean;
+    max_cycles_without_progress?: number;
+    on_violation?: 'alert' | 'auto_move' | 'escalate_meta_ticket';
+    expected_action?: 'move' | 'wait_until_label_removed' | 'terminal';
+    target_column_id?: string;
+    gate_labels?: string[];
+  }) =>
+    request<{ success: boolean; policy: any }>(`/admin/column-policies/${policyId}`, {
+      method: 'PUT',
+      body: JSON.stringify(patch),
+    }),
+
   // ── Phase 7: Chat Rooms ─────────────────────────
   listChatRooms: (scope?: 'workspace') =>
     request<ChatRoomListItem[]>(scope === 'workspace' ? '/chat-rooms?scope=workspace' : '/chat-rooms'),

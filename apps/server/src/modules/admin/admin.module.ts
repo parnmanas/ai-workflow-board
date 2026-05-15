@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { User } from '../../entities/User';
 import { Workspace } from '../../entities/Workspace';
@@ -6,13 +6,22 @@ import { SystemSetting } from '../../entities/SystemSetting';
 import { LogsController } from './logs.controller';
 import { PendingUsersController } from './pending-users.controller';
 import { SettingsController } from './settings.controller';
+import { StuckTicketsController } from './stuck-tickets.controller';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { AdminGuard } from '../../common/guards/admin.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
+import { AgentsModule } from '../agents/agents.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([User, Workspace, SystemSetting])],
-  controllers: [LogsController, PendingUsersController, SettingsController],
+  imports: [
+    TypeOrmModule.forFeature([User, Workspace, SystemSetting]),
+    // AgentsModule exports StuckTicketDetectorService, which the new
+    // /api/admin/stuck-tickets controller consults for current alert
+    // rows / re-alert / dismiss. forwardRef defends against any future
+    // cycle if AgentsModule starts importing AdminModule symbols.
+    forwardRef(() => AgentsModule),
+  ],
+  controllers: [LogsController, PendingUsersController, SettingsController, StuckTicketsController],
   providers: [AuthGuard, AdminGuard, PermissionGuard],
 })
 export class AdminModule {}

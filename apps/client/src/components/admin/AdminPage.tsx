@@ -7,6 +7,7 @@ import LogViewer from './LogViewer';
 import AgentLogViewer from './AgentLogViewer';
 import AgentManagerPage from './AgentManagerPage';
 import SettingsManager from './SettingsManager';
+import ColumnPoliciesManager from './ColumnPoliciesManager';
 import { tokens } from '../../tokens';
 
 const pageTitles: Record<string, { title: string; description?: string }> = {
@@ -15,6 +16,7 @@ const pageTitles: Record<string, { title: string; description?: string }> = {
   logs: { title: 'Server Logs', description: 'View server logs' },
   'agent-logs': { title: 'Agent Logs', description: 'Per-agent plugin error reports' },
   'agent-manager': { title: 'Agent Manager', description: 'Live daemon/proxy instances heartbeating against this server' },
+  'column-policies': { title: 'Column Policies', description: 'Declarative column×role enforcement that catches stuck tickets' },
   settings: { title: 'Settings', description: 'System configuration' },
 };
 
@@ -39,6 +41,7 @@ export default function AdminPage() {
       <Route path="logs" element={<AdminRoute page="logs"><LogViewer /></AdminRoute>} />
       <Route path="agent-logs" element={<AdminRoute page="agent-logs"><AgentLogViewer /></AdminRoute>} />
       <Route path="agent-manager" element={<AdminRoute page="agent-manager"><AgentManagerPage /></AdminRoute>} />
+      <Route path="column-policies" element={<AdminRoute page="column-policies"><ColumnPoliciesManager /></AdminRoute>} />
       <Route path="settings" element={<AdminRoute page="settings"><SettingsManager /></AdminRoute>} />
       <Route path="*" element={<Navigate to="/admin/users" replace />} />
     </Routes>

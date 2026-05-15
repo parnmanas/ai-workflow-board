@@ -430,27 +430,37 @@ export default function Board() {
         description={board?.description}
         actions={
           <>
-            {board?.paused_at && (
+            {board && (
               <button
                 type="button"
                 onClick={async () => {
+                  const willPause = !board.paused_at;
                   try {
-                    await api.resumeBoard(board.id);
+                    if (willPause) {
+                      await api.pauseBoard(board.id);
+                    } else {
+                      await api.resumeBoard(board.id);
+                    }
                     await refresh();
-                    showToast('Board resumed', 'success');
+                    showToast(willPause ? 'Board paused' : 'Board resumed', 'success');
                   } catch (err: any) {
-                    showToast(err?.message || 'Failed to resume board', 'error');
+                    showToast(
+                      err?.message || (willPause ? 'Failed to pause board' : 'Failed to resume board'),
+                      'error'
+                    );
                   }
                 }}
                 style={{
                   ...headerActionStyle,
-                  background: tokens.colors.warning,
-                  color: '#fff',
-                  border: 'none',
-                  fontWeight: 600,
                   cursor: 'pointer',
+                  ...(board.paused_at ? {
+                    background: tokens.colors.warning,
+                    color: '#fff',
+                    border: 'none',
+                    fontWeight: 600,
+                  } : {}),
                 }}
-              >▶ Resume Board</button>
+              >{board.paused_at ? '▶ Resume Board' : '⏸ Pause Board'}</button>
             )}
             <Link to={resourcesLink} style={headerActionStyle}>
               📁 Resources

@@ -265,3 +265,77 @@ Minimum manual smoke pass before each version bump:
 
 See the parent repo's `CLAUDE.md` _Agent Manager sync_ rule for how the
 ralf monorepo coordinates submodule ref bumps after these changes land.
+
+## Server-side complements
+
+These knobs live on the AWB server (not the manager) but interact with
+the lifecycle of agents the manager drives. They are surfaced here so an
+operator tuning manager behaviour has a single place to find related
+runtime settings.
+
+### Stale-WAIT detector (`StuckTicketDetectorService`)
+
+`apps/server/src/modules/agents/stuck-ticket-detector.service.ts` is a
+periodic sweep that flags tickets where an assignee subagent has logged
+N consecutive WAIT-shaped comments without any column move, claim, or
+release in between. When a ticket newly crosses the threshold, the
+detector posts a system-authored message into the workspace's chat
+room — by default the workspace's oldest room, overridable via
+`Workspace.alerts_chat_room_id`. Dedup state is held in the additive
+`stuck_alerts` table (PK `ticket_id`). Admin observability lives at
+`GET /api/admin/stuck-tickets` (gated by `AdminGuard`), with
+`POST /:id/realert` to force a re-fire and `DELETE /:id` to dismiss.
+
+| Var | Default | Purpose |
+|---|---|---|
+| `STUCK_DETECTOR_ENABLED` | `true` | Kill-switch. `false` / `0` / `no` / `off` all disable. |
+| `STUCK_DETECTOR_SWEEP_MS` | `900000` (15 min) | Sweep cadence. |
+| `STUCK_DETECTOR_WINDOW` | `4` | Number of consecutive agent comments that form the WAIT signature. |
+| `STUCK_DETECTOR_MIN_SPAN_MS` | `7200000` (2 h) | Minimum window duration — fast-loop comments are excluded. |
+| `STUCK_DETECTOR_MIN_AGE_MS` | `7200000` (2 h) | Grace period: newly-touched tickets are skipped. |
+| `STUCK_DETECTOR_REALERT_MS` | `86400000` (24 h) | Re-alert cooldown. |
+
+The detector is intentionally text-agnostic — it counts comments and
+lifecycle events, not phrasings. Agents that phrase WAIT differently are
+still caught.
+
+### ColumnRolePolicy enrichment (`ColumnRolePolicyService`)
+
+`apps/server/src/modules/column-policies/column-role-policy.service.ts`
+layers a declarative "what should this column×role cycle have produced?"
+check on top of the stale-WAIT shape. One row per `(board_id, column_id,
+role_slug)` tuple in the `column_role_policies` table. Migration
+`1760000000017-CreateColumnRolePolicies` seeds defaults for every
+pre-existing board on first boot (`expected_action='move'`, gate
+`["BLOCKED-*"]`, `max_cycles_without_progress=4`, `on_violation='alert'`).
+The same seeder runs against the freshly-created default board in
+`DatabaseModule.onModuleInit` so a brand-new workspace gets the alert
+layer active without a second restart.
+
+When the stuck detector confirms stale-WAIT shape, it calls
+`ColumnRolePolicyService.evaluate(column, ticketLabels)` and inspects the
+result:
+
+  - If a configured `gate_labels` glob (case-insensitive, supports `*`)
+    matches one of the ticket's attached labels, the WAIT is treated as
+    legitimate — the stuck detector still emits its plain "Stale-WAIT
+    detected" alert (the WAIT itself has crossed the cycle threshold).
+  - Otherwise the alert is upgraded to **"Stale-WAIT + policy violation"**
+    with the configured target column, role(s) responsible, gate labels
+    configured vs. attached, and a `policy_violation` row gets written to
+    `activity_logs` (encoded with the matched policy id(s), role slugs,
+    cycle count, and gate labels). Re-uses the same `stuck_alerts` dedup
+    row so the operator gets one notification per dedup window — not two.
+
+Admin surface — `GET /api/admin/column-policies` lists every board's
+policies + column metadata; `PUT /api/admin/column-policies/:id` edits a
+single row's `gate_labels` / `max_cycles_without_progress` /
+`on_violation` / `expected_action` / `enabled` toggle. Changes take effect
+on the next sweep — the detector reads policies fresh each tick, no
+restart required. The Admin UI tab lives at
+`/admin/column-policies` (`ColumnPoliciesManager.tsx`).
+
+No new env vars — every knob is per-policy in the DB. `auto_move` and
+`escalate_meta_ticket` are accepted enum values on the row but PR #2
+treats them identically to `alert`; the auto-move path lands in PR #4 of
+the epic (ticket f886ada7).

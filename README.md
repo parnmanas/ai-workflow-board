@@ -157,6 +157,12 @@ The server runs on port **7701** with PostgreSQL. Both the web UI and MCP endpoi
 | `ENCRYPTION_KEY` | (auto-generated) | Key for encrypting stored credentials (AES-256-GCM) |
 | `MCP_DEV_MODE` | `false` | Set `true` to skip MCP API key validation in dev |
 | `AGENT_DEV_MODE` | `false` | Set `true` to skip agent auth in dev |
+| `STUCK_DETECTOR_ENABLED` | `true` | Kill-switch for the stale-WAIT detector (`StuckTicketDetectorService`). Set to `false`/`0`/`no`/`off` to disable. |
+| `STUCK_DETECTOR_SWEEP_MS` | `900000` (15 min) | How often the stale-WAIT detector sweeps the active/intake board columns. |
+| `STUCK_DETECTOR_WINDOW` | `4` | Number of consecutive agent comments that form the "WAIT" signature. |
+| `STUCK_DETECTOR_MIN_SPAN_MS` | `7200000` (2 h) | Minimum span between the first and last comment in the window — guards against fast-loop false positives. |
+| `STUCK_DETECTOR_MIN_AGE_MS` | `7200000` (2 h) | Grace period: tickets touched more recently than this are skipped. |
+| `STUCK_DETECTOR_REALERT_MS` | `86400000` (24 h) | Cooldown between re-alerts for the same ticket. |
 
 > **API Keys**: Create and manage API keys in the web UI (**Workspace > API Keys**). Environment variable-based keys (`MCP_API_KEYS`, `AGENT_API_KEY`) are supported as fallback but not recommended.
 
