@@ -24,7 +24,7 @@ import { LogService } from './log.service';
  *   real filesystem layout); server is a pure forwarder.
  */
 
-export type FsOp = 'list' | 'stat' | 'read' | 'roots' | 'drives';
+export type FsOp = 'list' | 'stat' | 'read' | 'roots' | 'drives' | 'mkdir';
 
 export interface FsRootsResult {
   cwd: string;
@@ -79,9 +79,23 @@ export interface FsReadResult {
   mtime: string;
 }
 
+/**
+ * mkdir response: real path of the directory the plugin created and a stat
+ * snapshot so the UI can render the new entry without an extra round-trip.
+ * Shape is intentionally a subset of FsStatResult so callers can fall back to
+ * a regular stat() if they only need the metadata.
+ */
+export interface FsMkdirResult {
+  path: string;
+  type: 'directory';
+  size: number;
+  mtime: string;
+  mode: number;
+}
+
 export interface FsPluginResponse {
   ok: boolean;
-  data?: FsListResult | FsStatResult | FsReadResult | FsRootsResult | FsDrivesResult;
+  data?: FsListResult | FsStatResult | FsReadResult | FsRootsResult | FsDrivesResult | FsMkdirResult;
   error?: string;
   code?: string;
 }
@@ -116,7 +130,7 @@ export class FsBrowserService {
   async request(
     agentId: string,
     op: FsOp,
-    args: { path?: string; offset?: number; limit?: number },
+    args: { path?: string; offset?: number; limit?: number; name?: string },
   ): Promise<FsPluginResponse> {
     const agent = await this.agentRepo.findOne({ where: { id: agentId } });
     if (!agent) throw new Error('Agent not found');
@@ -154,6 +168,7 @@ export class FsBrowserService {
       path: args.path,
       offset: args.offset,
       limit: args.limit,
+      name: args.name,
       timestamp: new Date().toISOString(),
     });
 

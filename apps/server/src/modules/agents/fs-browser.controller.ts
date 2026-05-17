@@ -119,6 +119,27 @@ export class FsBrowserController {
     return this.forward(id, 'read', { path, offset: off, limit: lim }, req, res);
   }
 
+  @Post('api/agents/:id/fs/mkdir')
+  @UseGuards(PermissionGuard)
+  @RequirePermission(PERMISSIONS.BROWSE_AGENT_FS)
+  @ApiOperation({
+    summary: 'Create a new directory on the agent machine',
+    description: 'POST {path, name}. `path` is the existing parent (validated against scope by the plugin), `name` is a single path segment for the new folder. Non-recursive — fails with EEXIST if the target already exists. Reuses BROWSE_AGENT_FS since the picker UX that triggers this is the same surface that needs browse to confirm.',
+  })
+  async mkdir(
+    @Param('id') id: string,
+    @Body() body: { path?: string; name?: string },
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const path = typeof body?.path === 'string' ? body.path : '';
+    const name = typeof body?.name === 'string' ? body.name.trim() : '';
+    if (!name || name === '.' || name === '..' || /[\\/\0]/.test(name)) {
+      return res.status(400).json({ error: 'name must be a non-empty single path segment without separators', code: 'PATH_INVALID' });
+    }
+    return this.forward(id, 'mkdir', { path, name }, req, res);
+  }
+
   // ─── Plugin-facing: response receiver ─────────────────────────────
 
   @Post('api/fs/responses/:requestId')
@@ -167,7 +188,7 @@ export class FsBrowserController {
   private async forward(
     agentId: string,
     op: FsOp,
-    args: { path?: string; offset?: number; limit?: number },
+    args: { path?: string; offset?: number; limit?: number; name?: string },
     req: Request,
     res: Response,
   ) {
@@ -187,7 +208,8 @@ export class FsBrowserController {
       return res.status(503).json({ error: 'Agent is offline', code: 'AGENT_OFFLINE' });
     }
 
-    this.logService.info('FsBrowser', `${userLabel} ${op} ${args.path ?? ''} on agent ${agent.name} (${agent.id})`);
+    const argLabel = op === 'mkdir' ? `${args.path ?? ''}/${args.name ?? ''}` : (args.path ?? '');
+    this.logService.info('FsBrowser', `${userLabel} ${op} ${argLabel} on agent ${agent.name} (${agent.id})`);
 
     try {
       const result = await this.fsBrowser.request(agentId, op, args);
@@ -214,6 +236,7 @@ function mapErrorCode(code: string | undefined): number {
     case 'EACCES': return 403;
     case 'EISDIR': return 400;
     case 'ENOTDIR': return 400;
+    case 'EEXIST': return 409;
     case 'TIMEOUT': return 504;
     case 'PATH_INVALID': return 400;
     default: return 500;
