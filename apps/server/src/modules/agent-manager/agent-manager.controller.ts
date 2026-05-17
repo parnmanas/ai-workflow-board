@@ -221,6 +221,13 @@ export class AgentManagerController {
     // identity per pairing redemption — sharing one Agent row across multiple
     // hosts is supported (commands fan-out by agent_id), but each redemption
     // gets its own row so revoking one host doesn't kick the others off.
+    //
+    // workspace_id is intentionally '' (workspace-less). A manager identity
+    // isn't a per-workspace concept — it supervises managed children that may
+    // live in any workspace — so the AI Agents tab in every workspace should
+    // see it. The pair record still carries the original workspace_id for
+    // audit / cleanup, and the API key below stays scoped there so its
+    // permission surface remains workspace-bounded.
     const agentName = (rec.agent_name || `awb-agent-manager (${hostname})`).slice(0, 200);
     const agent = await this.agentRepo.save(
       this.agentRepo.create({
@@ -228,7 +235,7 @@ export class AgentManagerController {
         description: 'awb-agent-manager — paired instance (ST-4)',
         type: 'manager',
         is_active: 1,
-        workspace_id: rec.workspace_id,
+        workspace_id: '',
         roles: '[]',
       }),
     );
