@@ -101,6 +101,13 @@ export default function DirectoryPicker({
   const [drives, setDrives] = useState<FsDriveEntry[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Inline new-folder UI. Lives inside the listing pane so the user stays in
+  // the same visual context (vs. spawning a nested modal). `mkdirError` is
+  // surfaced inline so EEXIST/SCOPE_DENIED don't blow away the create input.
+  const [mkdirOpen, setMkdirOpen] = useState(false);
+  const [mkdirName, setMkdirName] = useState('');
+  const [mkdirBusy, setMkdirBusy] = useState(false);
+  const [mkdirError, setMkdirError] = useState<string | null>(null);
 
   const isWindowsManager = roots?.platform === 'win32' || (path && /^[A-Za-z]:[\\/]/.test(path));
   const crumbs = useMemo(() => (path ? splitCrumbs(path) : []), [path]);
@@ -134,6 +141,11 @@ export default function DirectoryPicker({
       }
       setLoading(true);
       setError(null);
+      // Reset the inline mkdir UI on any navigation so the input doesn't
+      // bleed across directories (and re-appear with a stale name).
+      setMkdirOpen(false);
+      setMkdirName('');
+      setMkdirError(null);
       try {
         const result = await api.listAgentFs(managerAgentId, target);
         setListing(result);
@@ -148,6 +160,30 @@ export default function DirectoryPicker({
     },
     [managerAgentId, loadDrives],
   );
+
+  const handleMkdirSubmit = useCallback(async () => {
+    const name = mkdirName.trim();
+    if (!name || !path) return;
+    // Mirror the server's segment validation so we surface the error before
+    // a round-trip when the user types `foo/bar` etc. Server is still the
+    // source of truth — this is just nicer feedback.
+    if (name === '.' || name === '..' || /[\\/\0]/.test(name)) {
+      setMkdirError('Folder name must be a single segment without "/" or "\\"');
+      return;
+    }
+    setMkdirBusy(true);
+    setMkdirError(null);
+    try {
+      await api.mkdirAgentFs(managerAgentId, path, name);
+      // Reload the current directory so the new entry appears, then close
+      // the input. loadPath resets mkdirOpen/Name/Error itself.
+      await loadPath(path);
+    } catch (err: any) {
+      setMkdirError(err?.message || 'Failed to create folder');
+    } finally {
+      setMkdirBusy(false);
+    }
+  }, [managerAgentId, path, mkdirName, loadPath]);
 
   // Initial discovery on open: fetch roots + cwd, choose a sensible start.
   useEffect(() => {
@@ -318,6 +354,105 @@ export default function DirectoryPicker({
                 </button>
               </React.Fragment>
             ))}
+            {/* New-folder trigger — only meaningful when we're inside a real
+                directory listing. Hidden in drives mode (volume roots cannot
+                be created) and while the picker is still loading. */}
+            {mode === 'browse' && path && (
+              <button
+                type="button"
+                onClick={() => {
+                  setMkdirOpen((v) => !v);
+                  setMkdirError(null);
+                }}
+                disabled={loading || mkdirBusy}
+                style={{
+                  marginLeft: 'auto',
+                  padding: '2px 8px',
+                  border: `1px solid ${tokens.colors.border}`,
+                  background: mkdirOpen ? tokens.colors.surfaceSubtle : 'transparent',
+                  borderRadius: tokens.radii.sm,
+                  fontSize: 11,
+                  cursor: 'pointer',
+                  color: tokens.colors.textSecondary,
+                }}
+                title="Create a new folder in this directory"
+              >
+                + New folder
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Inline mkdir input — opened by the breadcrumbs-row button. */}
+        {mode === 'browse' && mkdirOpen && (
+          <div
+            style={{
+              display: 'flex',
+              gap: 6,
+              alignItems: 'center',
+              flexWrap: 'wrap',
+              padding: '6px 8px',
+              background: tokens.colors.surfaceSubtle,
+              border: `1px solid ${tokens.colors.border}`,
+              borderRadius: tokens.radii.sm,
+            }}
+          >
+            <span style={{ fontSize: 11, color: tokens.colors.textMuted, fontWeight: 700 }}>
+              New folder in:
+            </span>
+            <code style={{ fontFamily: 'monospace', fontSize: 11, color: tokens.colors.textSecondary }}>
+              {path}
+            </code>
+            <input
+              type="text"
+              autoFocus
+              value={mkdirName}
+              onChange={(e) => { setMkdirName(e.target.value); setMkdirError(null); }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !mkdirBusy && mkdirName.trim()) {
+                  e.preventDefault();
+                  void handleMkdirSubmit();
+                } else if (e.key === 'Escape') {
+                  setMkdirOpen(false);
+                  setMkdirName('');
+                  setMkdirError(null);
+                }
+              }}
+              placeholder="folder name"
+              disabled={mkdirBusy}
+              style={{
+                flex: 1,
+                minWidth: 140,
+                padding: '4px 8px',
+                fontSize: 12,
+                fontFamily: 'monospace',
+                border: `1px solid ${tokens.colors.border}`,
+                borderRadius: tokens.radii.sm,
+                background: tokens.colors.surfaceCard,
+                color: tokens.colors.textPrimary,
+              }}
+            />
+            <Button
+              size="sm"
+              variant="primary"
+              onClick={handleMkdirSubmit}
+              disabled={mkdirBusy || !mkdirName.trim()}
+            >
+              {mkdirBusy ? 'Creating…' : 'Create'}
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => { setMkdirOpen(false); setMkdirName(''); setMkdirError(null); }}
+              disabled={mkdirBusy}
+            >
+              Cancel
+            </Button>
+            {mkdirError && (
+              <div style={{ width: '100%', fontSize: 11, color: tokens.colors.danger }}>
+                {mkdirError}
+              </div>
+            )}
           </div>
         )}
 

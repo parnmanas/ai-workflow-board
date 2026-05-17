@@ -20,6 +20,7 @@ import type {
   FsReadResult,
   FsRootsResult,
   FsDrivesResult,
+  FsMkdirResult,
   SubagentSummary,
   SubagentTranscript,
   AgentProxySession,
@@ -442,6 +443,15 @@ export const api = {
     if (opts?.limit !== undefined) params.set('limit', String(opts.limit));
     return request<FsReadResult>(`/agents/${encodeURIComponent(agentId)}/fs/read?${params.toString()}`);
   },
+  // Create a directory on the agent machine. `path` is the existing parent;
+  // `name` is a single segment for the new folder (server rejects separators).
+  // Returns the new directory's stat snapshot on 200; 409 EEXIST when it
+  // already exists; 403 SCOPE_DENIED when the parent is outside scope.
+  mkdirAgentFs: (agentId: string, path: string, name: string): Promise<FsMkdirResult> =>
+    request<FsMkdirResult>(`/agents/${encodeURIComponent(agentId)}/fs/mkdir`, {
+      method: 'POST',
+      body: JSON.stringify({ path, name }),
+    }),
   // ─── Subagent monitor (v0.32) ─────────────────────────────
   listSubagents: (workspaceId: string): Promise<SubagentSummary[]> =>
     request<SubagentSummary[]>(`/subagent-monitor/workspaces/${encodeURIComponent(workspaceId)}`),

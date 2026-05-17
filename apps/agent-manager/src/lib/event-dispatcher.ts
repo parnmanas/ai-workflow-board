@@ -186,6 +186,7 @@ export interface FsBrowser {
     path: string;
     offset?: number;
     limit?: number;
+    name?: string;
   }): Promise<FsBrowserResult>;
 }
 
@@ -377,6 +378,7 @@ export class EventDispatcher {
       path: ev.path,
       offset: ev.offset,
       limit: ev.limit,
+      name: ev.name,
     });
     await postFsResponse(this.#config, requestId, result);
     log(

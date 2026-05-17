@@ -618,6 +618,16 @@ export interface FsRootsResult {
   platform?: string;
 }
 
+// Result of POST /api/agents/:id/fs/mkdir. Shape is a subset of FsStatResult
+// so the picker can render the new entry without an extra round-trip.
+export interface FsMkdirResult {
+  path: string;
+  type: 'directory';
+  size: number;
+  mtime: string;
+  mode: number;
+}
+
 // Drive-letter / volume-root listing for cross-volume navigation. On
 // Windows the picker fetches this when the user goes "up" from a drive
 // root (`C:\`) so they can switch to D:/E:/etc; on UNIX the result is

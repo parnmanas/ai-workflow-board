@@ -101,8 +101,13 @@ export class AgentsController {
       return res.json(await this._enrichLiveData(named));
     }
     if (!workspaceId) return res.json([]);
+    // Include workspace-less rows ('') so manager-type agents — which aren't
+    // pinned to a workspace by design — surface in every workspace's AI
+    // Agents tab. See agent-manager.controller.ts pairRedeem for the create
+    // side, and the BackfillManagerAgentsWorkspaceless migration for the
+    // historical backfill.
     const agents = await this.agentRepo.find({
-      where: { workspace_id: workspaceId },
+      where: { workspace_id: In([workspaceId, '']) },
       order: { name: 'ASC' },
     });
     const named = await this._enrichManagerNames(agents);
@@ -236,8 +241,10 @@ export class AgentsController {
     // Safe default: return empty array when workspace_id is absent — prevents cross-workspace data leak
     if (!workspaceId) return res.json([]);
 
+    // Mirror list() — include workspace-less rows so manager identities show
+    // up on the dashboard in every workspace.
     const agents = await this.agentRepo.find({
-      where: { workspace_id: workspaceId },
+      where: { workspace_id: In([workspaceId, '']) },
       order: { name: 'ASC' },
     });
 
@@ -281,9 +288,11 @@ export class AgentsController {
     @CurrentWorkspaceId() workspaceId: string | null,
     @Res() res: Response,
   ) {
-    // Verify agent belongs to requesting workspace before returning activity
+    // Verify agent belongs to requesting workspace before returning activity.
+    // Workspace-less agents (manager identities) are visible to every
+    // workspace's activity view.
     await findOrFail(this.agentRepo, {
-      where: { id, ...(workspaceId ? { workspace_id: workspaceId } : {}) },
+      where: { id, ...(workspaceId ? { workspace_id: In([workspaceId, '']) } : {}) },
     }, 'Agent not found');
 
     const limit = Math.min(Math.max(parseInt(limitRaw) || 50, 1), 200);
@@ -308,7 +317,10 @@ export class AgentsController {
     // MANAGE_AGENTS only inside their own workspace) stay scoped.
     const isSystemAdmin = (req as any).currentUser?.role === 'admin';
     const agent = await findOrFail(this.agentRepo, {
-      where: { id, ...(workspaceId && !isSystemAdmin ? { workspace_id: workspaceId } : {}) },
+      // Non-admins can read agents in their workspace OR workspace-less
+      // agents (manager identities). Editing/deleting workspace-less agents
+      // still requires admin via the patch/delete handlers below.
+      where: { id, ...(workspaceId && !isSystemAdmin ? { workspace_id: In([workspaceId, '']) } : {}) },
     }, 'Agent not found');
 
     // Phase 3 D-44 — role_prompt is admin-gated. Non-admin viewers receive a redacted payload.

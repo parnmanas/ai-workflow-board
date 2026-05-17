@@ -27,6 +27,11 @@ interface FsHandleArgs {
   path: string;
   offset?: number;
   limit?: number;
+  // mkdir-only: name of the new directory to create under `path` (which must
+  // be the existing parent). Validated for separators / `..` / empty before
+  // being joined, so the caller cannot smuggle a traversal through the name
+  // field even if the parent passes scope check.
+  name?: string;
 }
 
 export class FsBrowser implements FsBrowserContract {
@@ -179,6 +184,8 @@ export class FsBrowser implements FsBrowserContract {
             ok: true,
             data: await this.read(realPath, req.offset ?? 0, req.limit ?? DEFAULT_READ_CAP),
           };
+        case 'mkdir':
+          return { ok: true, data: await this.mkdir(realPath, req.name) };
         default:
           return { ok: false, error: `Unknown op: ${op}`, code: 'PATH_INVALID' };
       }
@@ -244,6 +251,49 @@ export class FsBrowser implements FsBrowserContract {
     );
 
     return { path: realPath, entries: out, truncated };
+  }
+
+  private async mkdir(parentRealPath: string, name: string | undefined): Promise<any> {
+    // Validate the name in isolation — scope check on the parent doesn't help
+    // if the name itself escapes (e.g., `../foo`). Reject anything containing
+    // a path separator, traversal token, or that resolves to empty.
+    if (typeof name !== 'string') {
+      const err: any = new Error('name is required');
+      err.code = 'PATH_INVALID';
+      throw err;
+    }
+    const trimmed = name.trim();
+    if (!trimmed || trimmed === '.' || trimmed === '..') {
+      const err: any = new Error('name must be a non-empty single path segment');
+      err.code = 'PATH_INVALID';
+      throw err;
+    }
+    if (trimmed.includes('/') || trimmed.includes('\\') || trimmed.includes('\0')) {
+      const err: any = new Error('name must not contain path separators');
+      err.code = 'PATH_INVALID';
+      throw err;
+    }
+
+    const parentStat = await fsp.stat(parentRealPath);
+    if (!parentStat.isDirectory()) {
+      const err: any = new Error(`Parent is not a directory: ${parentRealPath}`);
+      err.code = 'ENOTDIR';
+      throw err;
+    }
+
+    const target = `${parentRealPath}${PATH_SEP}${trimmed}`;
+    // Non-recursive: surface EEXIST when the folder already exists so the UI
+    // can show a useful error. The picker only ever creates a single level.
+    await fsp.mkdir(target);
+
+    const st = await fsp.stat(target);
+    return {
+      path: target,
+      type: 'directory' as const,
+      size: Number(st.size) || 0,
+      mtime: st.mtime.toISOString(),
+      mode: st.mode,
+    };
   }
 
   private async stat(realPath: string): Promise<any> {
