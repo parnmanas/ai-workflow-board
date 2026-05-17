@@ -1,9 +1,10 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, getActiveWorkspaceId } from '../../api';
-import { Agent, Credential, ManagedAgentCreateBody, SubagentSummary } from '../../types';
+import { Agent, AgentManagerCommandKind, Credential, ManagedAgentCreateBody, SubagentSummary } from '../../types';
 import { tokens } from '../../tokens';
 import { Button, Input, Select, Badge, Modal, Card } from '../common';
 import { useCrudList } from '../../hooks/useCrudList';
+import { useToast } from '../../contexts/ToastContext';
 import { formatAgentDisplayName } from '../../utils/agentName';
 
 /** Map agent.type → credential provider prefix used to filter the credential
@@ -74,6 +75,38 @@ function agentTypeBadgeVariant(type: string): 'info' | 'success' | 'neutral' {
   return 'neutral';
 }
 
+/** Lifecycle commands surfaced on managed-agent cards. Mirrors the
+ *  COMMAND_BUTTONS list in AgentManagerPage's ManagedAgentsSection so the
+ *  two surfaces agree on what an operator can do with a managed agent.
+ *  Spawn / Stop / Restart only — maintenance commands (update_plugins,
+ *  refresh_mcp_config, pull_working_dir) stay on the per-manager page
+ *  because they're rarely used from the workspace AI Agents view. */
+const MANAGED_COMMAND_BUTTONS: {
+  kind: AgentManagerCommandKind;
+  label: string;
+  variant: 'primary' | 'danger' | 'secondary';
+  title: string;
+}[] = [
+  {
+    kind: 'spawn_agent',
+    label: 'Spawn',
+    variant: 'primary',
+    title: 'Dispatch spawn_agent to the owning manager — bootstraps on-disk dir + apiKey and registers runtime context.',
+  },
+  {
+    kind: 'stop_agent',
+    label: 'Stop',
+    variant: 'danger',
+    title: 'Dispatch stop_agent to the owning manager — drops runtime context + erases on-disk secrets. In-flight subagents keep running.',
+  },
+  {
+    kind: 'restart_agent',
+    label: 'Restart',
+    variant: 'secondary',
+    title: 'Dispatch restart_agent: stop + spawn (re-provisions a fresh apiKey).',
+  },
+];
+
 interface AgentCardProps {
   agent: Agent;
   onEdit(): void;
@@ -82,10 +115,41 @@ interface AgentCardProps {
 }
 
 function AgentCard({ agent, onEdit, onDelete, onShowSubagents }: AgentCardProps) {
+  const { showToast } = useToast();
   const inst = agent.live_instance;
   const subRollup = agent.subagents;
   const dotColor = liveDotColor(agent);
   const dotTitle = liveDotTitle(agent);
+
+  // Managed agents (agent.manager_agent_id set) get the Spawn / Stop /
+  // Restart action row. Standalone proxy / daemon / manager-identity rows
+  // skip it — those don't have an owning manager to dispatch the command to.
+  // `live_instance.instance_id` for a managed agent points at the
+  // supervising manager process (see agents.controller _enrichLiveData),
+  // which is exactly what /admin/agent-manager/instances/:id/command needs.
+  const isManaged = !!agent.manager_agent_id;
+  const managerInstanceId = inst?.instance_id ?? null;
+  const [pendingCmd, setPendingCmd] = useState<AgentManagerCommandKind | null>(null);
+
+  const sendCommand = useCallback(async (kind: AgentManagerCommandKind) => {
+    if (!managerInstanceId) {
+      showToast('Owning manager is offline — start it before dispatching a command.', 'error');
+      return;
+    }
+    if (pendingCmd) return;
+    setPendingCmd(kind);
+    try {
+      const resp = await api.sendAgentManagerCommand(managerInstanceId, {
+        command: kind,
+        args: { agent_id: agent.id },
+      });
+      showToast(`${kind} dispatched (id=${resp.command_id.slice(0, 8)})`, 'success');
+    } catch (err: any) {
+      showToast(`Command failed: ${err?.message || err}`, 'error');
+    } finally {
+      setPendingCmd(null);
+    }
+  }, [agent.id, managerInstanceId, pendingCmd, showToast]);
 
   // Used for the agent avatar icon color
   const typeColors: Record<string, string> = {
@@ -162,6 +226,35 @@ function AgentCard({ agent, onEdit, onDelete, onShowSubagents }: AgentCardProps)
         <Button variant="secondary" size="sm" onClick={onEdit}>Edit</Button>
         <Button variant="danger" size="sm" onClick={onDelete}>Delete</Button>
       </div>
+
+      {/* Managed-agent lifecycle buttons. Only render for agents owned by a
+          manager (agent.manager_agent_id set); standalone identities have no
+          owning manager to route commands through. Disabled when the owning
+          manager has no live instance — the command endpoint would 404. */}
+      {isManaged && (
+        <div
+          style={{
+            display: 'flex',
+            gap: 6,
+            padding: '8px 12px',
+            borderTop: `1px solid ${tokens.colors.border}`,
+            background: tokens.colors.surfaceCard,
+          }}
+        >
+          {MANAGED_COMMAND_BUTTONS.map((btn) => (
+            <Button
+              key={btn.kind}
+              size="sm"
+              variant={btn.variant}
+              disabled={!managerInstanceId || pendingCmd === btn.kind}
+              onClick={() => sendCommand(btn.kind)}
+              title={managerInstanceId ? btn.title : 'Owning manager is offline — start it before dispatching this command.'}
+            >
+              {btn.label}
+            </Button>
+          ))}
+        </div>
+      )}
 
       {/* Live instance + working dir + subagents — only render when there's
           something to show, so legacy agents stay compact. */}
