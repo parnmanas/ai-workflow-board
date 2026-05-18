@@ -133,7 +133,8 @@ interface AgentManagerCommand {
   command_id: string;      // ack key
   command: 'spawn_agent' | 'stop_agent' | 'restart_agent'
          | 'set_working_dir' | 'reload_config'
-         | 'update_plugins' | 'refresh_mcp_config' | 'pull_working_dir';
+         | 'update_plugins' | 'refresh_mcp_config' | 'pull_working_dir'
+         | 'update_manager' | 'restart_manager';
   agent_id: string;        // server fans out scoped to the manager identity;
                            // this is the MANAGER's id, not the target managed
                            // agent. The target travels in args.agent_id.
@@ -171,6 +172,8 @@ The server-side ack endpoint enforces:
 | `update_plugins`     | Real — `git pull --ff-only` on every claude marketplace under `<cli-home>/plugins/marketplaces/*` |
 | `refresh_mcp_config` | Real — rewrites `mcp-config.json` with current AWB url + existing apiKey |
 | `pull_working_dir`   | Real — `git pull --ff-only` inside `Agent.working_dir` (30s timeout)    |
+| `update_manager`     | Real — `git pull` + `npm install` + build, then detached re-exec       |
+| `restart_manager`    | Real — re-exec in place (no pull/install/build); takes over the lockfile |
 
 ## Heartbeats
 
