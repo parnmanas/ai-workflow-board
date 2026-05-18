@@ -128,6 +128,13 @@ export interface CommandHandlerDeps {
   ticketSessionManager?: Pick<BaseSessionManager, 'stopForAgent'> | null;
   /** Optional config-reload hook; resolves with a short summary string. */
   reloadConfig?: () => Promise<string> | string;
+  /** Force-drop and re-establish the SSE connection. Called after a successful
+   * `spawn_agent` so the server's cached `managedAgentIds` set (which is
+   * snapshotted once per SSE connect — see events.controller.ts:236-244)
+   * picks up the freshly-registered managed agent. Without this, the next
+   * chat_request/agent_trigger/comment_mention for that agent is silently
+   * dropped by the server fan-out filter and no subagent ever spawns. */
+  requestStreamReconnect?: () => void;
 }
 
 export class AgentManagerCommandHandler {
@@ -374,6 +381,15 @@ export class AgentManagerCommandHandler {
     // there's no per-agent permanent process to track, but the heartbeat
     // surface still wants a live pid for the dashboard.
     this.#deps.registry.markRunning(agentId, process.pid);
+
+    // 7. force a fresh SSE connect so the server's cached managedAgentIds
+    // set picks up this agent. Without this, the next chat_request /
+    // agent_trigger / comment_mention targeted at <agentId> is silently
+    // filtered out by the server's per-event fan-out and the user reports
+    // a brand-new managed agent that "doesn't respond to anything".
+    // Fire-and-forget — the reconnect is async, the ack POST flows over
+    // its own HTTP connection so it isn't disturbed by the SSE drop.
+    this.#deps.requestStreamReconnect?.();
 
     const credentialNote = credential ? ` credential=${credential.provider}` : ' credential=none';
     log(
