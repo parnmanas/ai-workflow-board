@@ -451,12 +451,19 @@ async function runRuntime(
   // OAuth until idle/maxTurns retired it (10+ minutes).
   const chatSessionManager = new ChatSessionManager(config);
   const ticketSessionManager = new TicketSessionManager(config);
+  // Late-bound reference to the SSE stream — the EventStream is constructed
+  // after this command handler (it depends on commandHandler for dispatch),
+  // so the spawn_agent → reconnect hook captures this slot and resolves it
+  // at call time. The first spawn always lands after eventStream.start().
+  let eventStreamRef: EventStream | null = null;
+
   const commandHandler = new AgentManagerCommandHandler(config, {
     registry: managedAgents,
     contextRegistry: managedAgentContexts,
     chatSessionManager,
     ticketSessionManager,
     getInstanceId: () => instanceHeartbeat._real?.instanceId ?? null,
+    requestStreamReconnect: () => eventStreamRef?.reconnect(),
     reloadConfig: async () => {
       const next = loadConfig();
       if (!next?.url || !next?.apiKey) return 'reload skipped: config missing';
@@ -575,6 +582,7 @@ async function runRuntime(
     pluginVersion: version,
     onConnect: kickPresencePing,
   });
+  eventStreamRef = eventStream;
   eventStream.start();
   log('SSE event stream started');
 

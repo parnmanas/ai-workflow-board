@@ -231,8 +231,12 @@ export class EventsController implements OnModuleDestroy {
     // here so the per-event filter loop is O(1) and doesn't hit the DB on
     // the hot path. Set is recomputed only on a fresh SSE connect, so a
     // newly-created managed agent won't show up until the manager
-    // reconnects (it does on every spawn_agent ack via the manager itself
-    // — see agent-manager-commands.ts).
+    // reconnects. The agent-manager side honors this contract by calling
+    // EventStream.reconnect() at the end of every spawn_agent — see
+    // apps/agent-manager/src/lib/agent-manager-commands.ts (#spawnAgent
+    // step 7) and event-stream.ts (#reconnect). Without that pairing the
+    // server silently drops chat_request / agent_trigger / comment_mention
+    // events for any agent created after the manager's current SSE connect.
     let managedAgentIds: Set<string> | undefined;
     if (authIdentity.type === 'agent' && authIdentity.agentId) {
       try {

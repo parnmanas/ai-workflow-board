@@ -7,7 +7,9 @@
 //     agent_id:     string,            // server fills with the MANAGER'S identity
 //                                      // (NOT the target managed agent — see below)
 //     command:      'spawn_agent' | 'stop_agent' | 'restart_agent'
-//                 | 'set_working_dir' | 'reload_config',
+//                 | 'set_working_dir' | 'reload_config'
+//                 | 'update_plugins' | 'refresh_mcp_config' | 'pull_working_dir'
+//                 | 'update_manager' | 'restart_manager',
 //     args:         Record<string, any>,   // command-specific (e.g. { working_dir })
 //     issued_by:    string,            // user id of the admin
 //     issued_at:    string,
@@ -57,7 +59,7 @@ import {
   maskKey,
 } from './managed-agent-store.js';
 import { createAdapter } from './cli-adapters/index.js';
-import { runSelfUpdate } from './self-update.js';
+import { runSelfUpdate, restartManager } from './self-update.js';
 
 type CommandKind =
   | 'spawn_agent'
@@ -68,7 +70,8 @@ type CommandKind =
   | 'update_plugins'
   | 'refresh_mcp_config'
   | 'pull_working_dir'
-  | 'update_manager';
+  | 'update_manager'
+  | 'restart_manager';
 
 // Primary required field per credential provider — the one that carries the
 // actual auth secret. When the server returns a credential row with this
@@ -96,6 +99,7 @@ const KNOWN_COMMANDS: ReadonlySet<CommandKind> = new Set<CommandKind>([
   'refresh_mcp_config',
   'pull_working_dir',
   'update_manager',
+  'restart_manager',
 ]);
 
 export interface AgentManagerCommandPayload {
@@ -128,6 +132,13 @@ export interface CommandHandlerDeps {
   ticketSessionManager?: Pick<BaseSessionManager, 'stopForAgent'> | null;
   /** Optional config-reload hook; resolves with a short summary string. */
   reloadConfig?: () => Promise<string> | string;
+  /** Force-drop and re-establish the SSE connection. Called after a successful
+   * `spawn_agent` so the server's cached `managedAgentIds` set (which is
+   * snapshotted once per SSE connect — see events.controller.ts:236-244)
+   * picks up the freshly-registered managed agent. Without this, the next
+   * chat_request/agent_trigger/comment_mention for that agent is silently
+   * dropped by the server fan-out filter and no subagent ever spawns. */
+  requestStreamReconnect?: () => void;
 }
 
 export class AgentManagerCommandHandler {
@@ -202,6 +213,8 @@ export class AgentManagerCommandHandler {
         return this.#pullWorkingDir(payload);
       case 'update_manager':
         return this.#updateManager();
+      case 'restart_manager':
+        return this.#restartManager();
     }
   }
 
@@ -229,6 +242,25 @@ export class AgentManagerCommandHandler {
       throw new Error(`update_manager: ${result.summary}`);
     }
     return `update_manager ok: ${result.summary}`;
+  }
+
+  /**
+   * Re-exec the manager in place — no git pull, no install, no build. The
+   * old process schedules a detached child on a 1.5s timer (so this method
+   * can return + the REST ack POST can land first), then SIGTERMs itself
+   * so the platform's shutdown handler tears down chat / ticket sessions
+   * cleanly before exit.
+   *
+   * Shares restartManager's mutex with runSelfUpdate so a restart racing an
+   * update doesn't double-schedule the re-exec; the loser gets a
+   * `{changed:false}` and we throw so the REST ack carries 'error'.
+   */
+  async #restartManager(): Promise<string> {
+    const result = await restartManager({ log });
+    if (!result.changed) {
+      throw new Error(`restart_manager: ${result.summary}`);
+    }
+    return `restart_manager ok: ${result.summary}`;
   }
 
   /**
@@ -374,6 +406,15 @@ export class AgentManagerCommandHandler {
     // there's no per-agent permanent process to track, but the heartbeat
     // surface still wants a live pid for the dashboard.
     this.#deps.registry.markRunning(agentId, process.pid);
+
+    // 7. force a fresh SSE connect so the server's cached managedAgentIds
+    // set picks up this agent. Without this, the next chat_request /
+    // agent_trigger / comment_mention targeted at <agentId> is silently
+    // filtered out by the server's per-event fan-out and the user reports
+    // a brand-new managed agent that "doesn't respond to anything".
+    // Fire-and-forget — the reconnect is async, the ack POST flows over
+    // its own HTTP connection so it isn't disturbed by the SSE drop.
+    this.#deps.requestStreamReconnect?.();
 
     const credentialNote = credential ? ` credential=${credential.provider}` : ' credential=none';
     log(
