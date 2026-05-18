@@ -788,7 +788,8 @@ export type AgentManagerCommandKind =
   | 'update_plugins'
   | 'refresh_mcp_config'
   | 'pull_working_dir'
-  | 'update_manager';
+  | 'update_manager'
+  | 'restart_manager';
 
 export interface AgentManagerCommandResult {
   ok: boolean;

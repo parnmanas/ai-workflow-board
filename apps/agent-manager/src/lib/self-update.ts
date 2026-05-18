@@ -556,6 +556,54 @@ async function runSelfUpdateLocked(
 }
 
 /**
+ * Re-exec the running manager in place — no git pull, no install, no build.
+ * Used by the `restart_manager` SSE command (and a future `awb-agent-manager
+ * restart` CLI sub-command) when an operator wants a clean process bounce
+ * without pulling new source.
+ *
+ * Shares the same `selfUpdateInFlight` mutex as `runSelfUpdate` so a restart
+ * racing an in-flight update doesn't double-schedule the re-exec timer or
+ * fight over the agent lockfile. Same 1.5s tail as the update path so the
+ * caller can finish its ack POST + log line before the parent exits.
+ */
+export async function restartManager(opts: SelfUpdateOpts = {}): Promise<SelfUpdateResult> {
+  const out = opts.log ?? log;
+  if (selfUpdateInFlight) {
+    const summary = 'restart_manager skipped: self-update / restart already in flight';
+    out(`Restart: ${summary}`);
+    return { changed: false, summary };
+  }
+  selfUpdateInFlight = true;
+  try {
+    const version = readBundledVersion();
+    if (opts.noReExec) {
+      const summary = `restart_manager: re-exec skipped (v${version})`;
+      out(`Restart: ${summary}`);
+      return { changed: true, summary, willReExec: false };
+    }
+    const summary = `restart_manager: re-execing manager (v${version}) in place`;
+    out(`Restart: ${summary}`);
+    _lastReExecScheduled = true;
+    setTimeout(() => {
+      try {
+        reExecManager(out);
+      } catch (err: any) {
+        out(`Restart: re-exec failed: ${err?.stack || err?.message || err}`);
+      }
+    }, 1500).unref?.();
+    return { changed: true, summary, willReExec: true };
+  } finally {
+    // Same release rule as runSelfUpdate: keep the flag set across the
+    // 1.5s grace window so a second restart_manager arriving in that
+    // gap can't race the re-exec we just scheduled.
+    if (!_lastReExecScheduled) {
+      selfUpdateInFlight = false;
+    }
+    _lastReExecScheduled = false;
+  }
+}
+
+/**
  * Spawn a detached child running the freshly-built dist/main.js, then
  * exit the current process. The child gets `--force` so it can take over
  * the agent lockfile from the dying parent without a 60s wait.

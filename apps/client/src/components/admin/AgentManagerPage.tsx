@@ -22,8 +22,9 @@ import ManagedAgentDialog from './ManagedAgentDialog';
  *
  * Layout: master/detail split. Left column lists every heartbeating instance
  * grouped by host; right column shows the selected instance's subagents,
- * recent server-side logs touching that agent, and a (Phase 4-stub) restart
- * button.
+ * recent server-side logs touching that agent, and a restart button that
+ * dispatches `restart_manager` over the agent_manager_command SSE channel
+ * (manager-mode only — re-execs the daemon in place, no git pull).
  *
  * Real-time refresh: subscribes to `agent_instance_update` SSE events fired
  * by InstanceRegistryService on every upsert / TTL eviction. Steady-state
@@ -207,18 +208,23 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
     loadManagerInfo();
   }, [inst.instance_id, loadSubagents, loadLogs, loadManagerInfo]);
 
+  // Dispatch restart_manager SSE command via the /restart admin endpoint.
+  // Server returns 202 with command_id + a short message; the manager later
+  // re-execs and reappears as an `agent_instance_update` event with the
+  // same plugin_version (no polling needed here).
   const handleRestart = async () => {
     if (restartPending) return;
+    if (!confirm('Restart this manager? It will re-exec in place; in-flight subagents keep running.')) return;
     setRestartPending(true);
     try {
-      const resp: any = await api.restartAgentManagerInstance(inst.instance_id).catch((err) => err);
-      if (resp instanceof Error) throw resp;
-      showToast(resp?.message || 'Restart triggered', 'info');
+      const resp: any = await api.restartAgentManagerInstance(inst.instance_id);
+      const idTail = typeof resp?.command_id === 'string' ? ` (id=${resp.command_id.slice(0, 8)})` : '';
+      showToast(
+        `${resp?.message || 'restart_manager dispatched'}${idTail} — manager will reappear in ~30s.`,
+        'success',
+      );
     } catch (err: any) {
-      // 501 stub returns { error: 'not_implemented', message: '…' } — surface
-      // the message so the operator knows exactly what to do until Phase 4.
-      const msg = err?.message ? err.message : 'Restart endpoint is not implemented yet.';
-      showToast(msg, 'info');
+      showToast(`Restart failed: ${err?.message || err}`, 'error');
     } finally {
       setRestartPending(false);
     }
@@ -448,7 +454,7 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
               cursor: restartPending ? 'wait' : 'pointer',
               fontFamily: 'inherit',
             }}
-            title="Phase 4 self-update will deliver SIGUSR1. Until then this is a stub."
+            title="Dispatch restart_manager: manager re-execs in place (no git pull / build). Manager-mode only."
           >
             Restart instance
           </button>

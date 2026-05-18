@@ -34,6 +34,7 @@ const ALLOWED_COMMANDS: ReadonlySet<AgentManagerCommand> = new Set([
   'refresh_mcp_config',
   'pull_working_dir',
   'update_manager',
+  'restart_manager',
 ] as const);
 
 /**
@@ -372,27 +373,72 @@ export class AgentManagerController {
     return res.json(matched.slice(0, limit));
   }
 
+  // Trigger an in-place restart of a manager instance.
+  //
+  // Dispatches `restart_manager` over the agent_manager_command SSE channel
+  // — the manager re-execs itself (no git pull / install / build), so the
+  // new process takes over the agent lockfile from the dying parent. Daemon /
+  // proxy instances don't speak this command and return 409 here rather than
+  // queuing a no-op dispatch the operator would never see acked.
+  //
+  // user-session auth is mandatory because the dispatch carries `issued_by` —
+  // we read it through @CurrentUser and 401 on the unauthenticated case
+  // even though PermissionGuard typically catches it.
   @ApiBearerAuth('user-session')
   @Post('api/admin/agent-manager/instances/:id/restart')
   @UseGuards(PermissionGuard)
   @RequirePermission(PERMISSIONS.ADMIN_ACCESS)
   @ApiOperation({
-    summary: 'Trigger an instance restart (Phase 4 self-update — currently a stub)',
+    summary: 'Dispatch restart_manager to a manager instance (re-exec in place)',
   })
-  restart(@Param('id') id: string, @Res() res: Response) {
+  restart(
+    @Param('id') id: string,
+    @CurrentUser() user: CurrentUserData | undefined,
+    @Res() res: Response,
+  ) {
+    if (!user) return res.status(401).json({ error: 'unauthenticated' });
     const inst = this.registry.get(id);
     if (!inst) return res.status(404).json({ error: 'Instance not found or expired' });
+    if (inst.mode !== 'manager') {
+      return res.status(409).json({
+        error: 'instance_is_not_manager',
+        message:
+          'Restart is only supported for awb-agent-manager instances; daemon/proxy instances do not have a re-exec hook.',
+      });
+    }
+
+    const command_id = randomBytes(8).toString('hex');
+    const issued_at = new Date().toISOString();
+    const payload: AgentManagerCommandPayload = {
+      command_id,
+      instance_id: inst.instance_id,
+      agent_id: inst.agent_id,
+      command: 'restart_manager',
+      args: {},
+      issued_by: user.id,
+      issued_at,
+    };
+    // Ledger first, then emit — same ordering as sendCommand: a fast manager
+    // could ack before our local write commits and the ack handler would
+    // then 410 a legitimate response.
+    this.commandLedger.record({
+      command_id,
+      instance_id: inst.instance_id,
+      agent_id: inst.agent_id,
+      command: 'restart_manager',
+      issued_at,
+    });
+    activityEvents.emit('agent_manager_command', { ...payload, timestamp: issued_at });
     this.logService.info(
       'AgentManager',
-      `Restart requested for instance ${id} (agent=${inst.agent_id}, host=${inst.hostname}, mode=${inst.mode})`,
-      { instance: inst },
+      `Sent command restart_manager to instance ${inst.instance_id} (agent=${inst.agent_id})`,
+      { command_id, issued_by: user.id },
     );
-    return res.status(501).json({
-      error: 'not_implemented',
-      message:
-        'Restart is wired to the Phase 4 self-update endpoint. Until that lands, ' +
-        'send SIGUSR1 directly to the process: `kill -USR1 <pid>` on the host.',
-      instance: inst,
+    return res.status(202).json({
+      ok: true,
+      command_id,
+      issued_at,
+      message: 'restart_manager dispatched — manager will re-exec in place',
     });
   }
 
