@@ -214,7 +214,7 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
   // same plugin_version (no polling needed here).
   const handleRestart = async () => {
     if (restartPending) return;
-    if (!confirm('Restart this manager? It will re-exec in place; in-flight subagents keep running.')) return;
+    if (!confirm('Restart this manager? Every in-flight subagent, chat session, and ticket session on this host will be terminated. The manager will re-exec in place and reappear in ~30s.')) return;
     setRestartPending(true);
     try {
       const resp: any = await api.restartAgentManagerInstance(inst.instance_id);
