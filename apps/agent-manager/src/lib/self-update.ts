@@ -379,9 +379,20 @@ export class UpdateChecker {
         };
         return;
       }
-      // Re-read current_version each tick so the cache stays correct after
-      // a self-update (the on-disk package.json changed under us).
-      const current = readWorkingTreeVersion(repoRoot) || this.#status.current_version;
+      // current_version is the in-memory snapshot captured at process start
+      // (constructor: readWorkingTreeVersion → readBundledVersion). We do NOT
+      // re-read working tree each tick: the working tree only matters at boot,
+      // when it must equal the running binary's version. Re-reading was a bug
+      // — on hosts where the operator git-pulls in the same checkout (dev
+      // machines, manager + dev share a workspace) it pulled the working tree
+      // ahead of the actually-running process, making `latest == current ==
+      // working_tree_future_version` and silently hiding the Update button
+      // while the running code was still stale.
+      //
+      // Self-update doesn't need the re-read either: it ends in detached
+      // re-exec, so the post-update new process re-runs the constructor
+      // against the just-pulled tree and the cache restarts fresh.
+      const current = this.#status.current_version;
       const update_available = compareSemver(latest, current) > 0;
       this.#status = {
         ...this.#status,
