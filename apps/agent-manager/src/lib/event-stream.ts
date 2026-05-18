@@ -57,6 +57,7 @@ export class EventStream {
   #url: string;
   #retryDelay = RECONNECT_INITIAL_MS;
   #abortController: AbortController | null = null;
+  #reconnectTimer: NodeJS.Timeout | null = null;
   #stopped = false;
   #dispatcher: EventDispatcher;
   #onConnect: (() => void) | null;
@@ -77,7 +78,40 @@ export class EventStream {
 
   stop(): void {
     this.#stopped = true;
+    if (this.#reconnectTimer) {
+      clearTimeout(this.#reconnectTimer);
+      this.#reconnectTimer = null;
+    }
     this.#abortController?.abort();
+  }
+
+  /**
+   * Force-drop the current SSE connection and reconnect immediately. Used by
+   * `agent_manager_command spawn_agent` so the server-side `managedAgentIds`
+   * snapshot (cached once at SSE connect — see events.controller.ts) is
+   * recomputed and includes the freshly-registered managed agent. Without
+   * this, the next `chat_request` / `agent_trigger` / `comment_mention` for
+   * that agent is silently filtered out on the server, and no subagent ever
+   * spawns.
+   *
+   * Handles three concurrent states cleanly:
+   *   - active connect → abort the fetch/reader, the catch swallows AbortError.
+   *   - waiting in backoff → clear the pending timer.
+   *   - already stopped → no-op.
+   * A fresh #connect() is then scheduled on the next tick.
+   */
+  reconnect(): void {
+    if (this.#stopped) return;
+    log('SSE forced reconnect (managedAgentIds refresh)');
+    this.#retryDelay = RECONNECT_INITIAL_MS;
+    if (this.#reconnectTimer) {
+      clearTimeout(this.#reconnectTimer);
+      this.#reconnectTimer = null;
+    }
+    const prev = this.#abortController;
+    this.#abortController = null;
+    prev?.abort();
+    setImmediate(() => void this.#connect());
   }
 
   async #connect(): Promise<void> {
@@ -160,7 +194,10 @@ export class EventStream {
 
   #scheduleReconnect(): void {
     if (this.#stopped) return;
-    setTimeout(() => void this.#connect(), this.#retryDelay);
+    this.#reconnectTimer = setTimeout(() => {
+      this.#reconnectTimer = null;
+      void this.#connect();
+    }, this.#retryDelay);
     this.#retryDelay = Math.min(this.#retryDelay * 1.5, RECONNECT_MAX_MS);
   }
 }
