@@ -615,15 +615,59 @@ export async function restartManager(opts: SelfUpdateOpts = {}): Promise<SelfUpd
 }
 
 /**
- * Spawn a detached child running the freshly-built dist/main.js, then
- * exit the current process. The child gets `--force` so it can take over
- * the agent lockfile from the dying parent without a 60s wait.
+ * True when the running process was launched by a systemd unit. systemd v232+
+ * always sets INVOCATION_ID for unit-started processes; JOURNAL_STREAM is the
+ * older fallback. Either one is sufficient — both being absent means we're
+ * running outside systemd (Windows, raw bash, macOS launchd, …).
  *
- * Same flow on Linux + Windows: detached child + ignored stdio + unref so
- * the parent's exit doesn't kill the child. No shell scripts, no platform
- * forking.
+ * We don't trust /proc/1/comm because user-session managers can run under a
+ * non-systemd init, and we don't trust NOTIFY_SOCKET because Type=simple units
+ * (ours) don't get one.
+ */
+function isManagedBySystemd(): boolean {
+  return Boolean(process.env.INVOCATION_ID || process.env.JOURNAL_STREAM);
+}
+
+/**
+ * Re-exec the manager so the just-built dist/main.js takes over.
+ *
+ * Two strategies depending on the supervisor:
+ *
+ * 1. **systemd** (Linux + a `.service` unit): the parent exits 1 and lets the
+ *    unit's `Restart=on-failure` bring up a fresh process. We MUST NOT spawn
+ *    a detached child here — systemd's default `KillMode=control-group` would
+ *    sweep the new child into the same cgroup teardown when the parent dies,
+ *    killing the very process we just launched. Symptom: `update_manager` SSE
+ *    command lands, build succeeds, parent exits, child appears for a moment
+ *    in `ps`, then the entire unit goes inactive(dead) and the operator's
+ *    Update button vanishes with no replacement process.
+ *
+ * 2. **everything else** (Windows, raw bash, macOS launchd, npm-global
+ *    install): spawn a detached child with --force and SIGTERM-self. No
+ *    cgroup means the child outlives the parent's exit; the --force lets the
+ *    child take over the agent lockfile without a 60s wait.
  */
 function reExecManager(out: (msg: string) => void): void {
+  if (isManagedBySystemd()) {
+    out('Self-update: re-exec via systemd (Restart=on-failure → exit 1)');
+    // We still trigger the SIGTERM shutdown handler so chat / ticket sessions
+    // get cleaned up; the handler short-circuits to process.exit(1) at the
+    // tail so systemd sees a failure exit code and respawns.
+    setTimeout(() => {
+      try {
+        process.kill(process.pid, 'SIGTERM');
+        // SIGTERM handlers call process.exit(0) on the happy path, which
+        // would mark the unit "success" and skip the Restart=on-failure
+        // trigger. Schedule an exit(1) tail after the shutdown grace window
+        // so we still land on a non-zero code even if the handler ran first.
+        setTimeout(() => process.exit(1), 5_000).unref?.();
+      } catch {
+        process.exit(1);
+      }
+    }, 250).unref?.();
+    return;
+  }
+
   const execPath = process.execPath;
   const scriptPath = process.argv[1];
   // Strip any pre-existing --force / -f from the original argv so we
