@@ -334,9 +334,16 @@ export class SubagentManager implements SubagentManagerContract {
           );
         }
       }
+      // detached on Windows is incompatible with windowsHide: DETACHED_PROCESS
+      // (set by node when detached: true on win32) is mutually exclusive with
+      // CREATE_NO_WINDOW, so the cmd.exe shell that wraps .cmd/.bat targets
+      // ends up calling AllocConsole() and briefly flashes a console. Windows
+      // children outlive the parent by default, so detached buys us nothing
+      // there; keep it on POSIX where it puts the child in a new process
+      // group and shields it from terminal SIGHUP.
       const child = spawn(resolvedBin, descriptor.args, {
         stdio: descriptor.stdio || ['ignore', 'pipe', 'pipe'],
-        detached: true,
+        detached: process.platform !== 'win32',
         windowsHide: true,
         cwd: effectiveCwd,
         env: { ...baseEnv, AWB_API_KEY: effectiveApiKey, ...cliHomeEnv, ...credentialEnv },
