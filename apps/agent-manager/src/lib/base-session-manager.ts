@@ -294,9 +294,12 @@ export class BaseSessionManager {
           );
         }
       }
+      // See subagent-manager spawn site for why detached is POSIX-only:
+      // DETACHED_PROCESS on win32 fights with CREATE_NO_WINDOW and flashes a
+      // cmd console when the resolved binary is a .cmd/.bat shim.
       const child = spawn(resolvedBin, descriptor.args, {
         stdio: descriptor.stdio || ['pipe', 'pipe', 'pipe'],
-        detached: true,
+        detached: process.platform !== 'win32',
         windowsHide: true,
         cwd: effectiveCwd,
         env: { ...baseEnv, AWB_API_KEY: effectiveApiKey, ...cliHomeEnv, ...credentialEnv },
