@@ -137,17 +137,6 @@ export function readBundledVersion(): string {
 }
 
 /**
- * Best-effort current branch detection. Falls back to 'main' when
- * `git rev-parse` fails (detached HEAD, missing git binary, …).
- */
-function detectBranch(repoRoot: string): string {
-  const r = runSync('git', ['-C', repoRoot, 'rev-parse', '--abbrev-ref', 'HEAD'], 5_000);
-  const branch = r.ok ? r.stdout.trim() : '';
-  if (!branch || branch === 'HEAD') return 'main';
-  return branch;
-}
-
-/**
  * Detect the remote's default branch (usually 'main') from the local
  * `origin/HEAD` symbolic ref. This is what the UpdateChecker should
  * track — not the currently-checked-out branch, which on a dev machine
@@ -535,7 +524,7 @@ async function runSelfUpdateLocked(
     return { changed: false, summary };
   }
 
-  const branch = detectBranch(repoRoot);
+  const branch = detectDefaultBranch(repoRoot);
   out(`Self-update: starting (root=${repoRoot} branch=${branch})`);
 
   // 1. git pull --ff-only origin <branch>
