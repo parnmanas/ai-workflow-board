@@ -148,6 +148,30 @@ function detectBranch(repoRoot: string): string {
 }
 
 /**
+ * Detect the remote's default branch (usually 'main') from the local
+ * `origin/HEAD` symbolic ref. This is what the UpdateChecker should
+ * track — not the currently-checked-out branch, which on a dev machine
+ * could be anything (`production.private`, a feature branch, …).
+ *
+ * Falls back to 'main' when `origin/HEAD` is unset (bare clone, fresh
+ * remote, `git remote set-head origin --delete`).
+ */
+function detectDefaultBranch(repoRoot: string): string {
+  // `git symbolic-ref refs/remotes/origin/HEAD` → refs/remotes/origin/main
+  const r = runSync(
+    'git',
+    ['-C', repoRoot, 'symbolic-ref', 'refs/remotes/origin/HEAD'],
+    5_000,
+  );
+  if (r.ok) {
+    const ref = r.stdout.trim(); // e.g. "refs/remotes/origin/main"
+    const match = ref.match(/^refs\/remotes\/origin\/(.+)$/);
+    if (match?.[1]) return match[1];
+  }
+  return 'main';
+}
+
+/**
  * Compare two semver-ish strings. Returns -1, 0, 1 for a<b, a==b, a>b.
  * Tolerates any prerelease / build suffix by stripping it (we only care
  * about the numeric core).
@@ -287,7 +311,7 @@ export class UpdateChecker {
     this.#intervalMs = opts.intervalMs ?? DEFAULT_CHECK_INTERVAL_MS;
     this.#log = opts.log ?? log;
     const repoRoot = detectRepoRoot();
-    const branch = repoRoot ? detectBranch(repoRoot) : null;
+    const branch = repoRoot ? detectDefaultBranch(repoRoot) : null;
     const current_version = (repoRoot && readWorkingTreeVersion(repoRoot)) || readBundledVersion();
     // last_error is reserved for actionable failures (fetch couldn't reach
     // the remote, package.json couldn't be read, …). The "not running from
@@ -360,6 +384,30 @@ export class UpdateChecker {
         FETCH_TIMEOUT_MS,
       );
       if (!fetchResult.ok) {
+        // Fetch failed (SSH key unavailable in systemd context, network
+        // down, …). Still try reading the existing `origin/<branch>` ref —
+        // it may be stale but is far more useful than showing "check failed"
+        // with no version info at all. Only set last_error if the fallback
+        // read also fails.
+        const stale = readRemoteVersion(repoRoot, branch);
+        if (stale) {
+          const current = this.#status.current_version;
+          const update_available = compareSemver(stale, current) > 0;
+          const detail = (fetchResult.stderr.trim() || fetchResult.stdout.trim() || 'unknown')
+            .split('\n')
+            .filter(Boolean)
+            .pop()
+            ?.slice(0, 240) || 'fetch failed';
+          this.#status = {
+            ...this.#status,
+            current_version: current,
+            latest_version: stale,
+            update_available,
+            // Keep the existing last_checked_at — the data is stale, not fresh.
+            last_error: `git fetch failed (using cached ref): ${detail}`,
+          };
+          return;
+        }
         const detail = (fetchResult.stderr.trim() || fetchResult.stdout.trim() || 'unknown')
           .split('\n')
           .filter(Boolean)
