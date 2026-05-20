@@ -120,16 +120,32 @@ function readWorkingTreeVersion(repoRoot: string): string | null {
 }
 
 /**
- * Read the manager's own running version from the bundled package.json
- * (sibling of dist/). Falls back to '0.0.0' so callers don't crash on a
- * missing file in odd packaging scenarios.
+ * Read the manager's own running version from a build-time snapshot of
+ * package.json baked into dist/ during `npm run build`.
+ *
+ * Priority:
+ *   1. `dist/package.json`  — copied by the build script, frozen at build
+ *      time. Immune to subsequent `git pull` / `git checkout` touching the
+ *      working-tree package.json while the process is still running the old
+ *      dist.
+ *   2. `../../package.json` — fallback for dev mode (`tsx watch src/…`)
+ *      where dist/ doesn't exist yet; in that case the working tree IS the
+ *      running code, so reading the live file is correct.
+ *   3. `'0.0.0'`           — last-resort so callers never crash.
  */
 export function readBundledVersion(): string {
   try {
     const here = dirname(fileURLToPath(import.meta.url));
-    // dist/lib/self-update.js → ../../package.json
-    const pkgPath = resolve(here, '..', '..', 'package.json');
-    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
+    // When running from dist/lib/self-update.js, ../package.json is
+    // dist/package.json (build-time snapshot).
+    const distPkg = resolve(here, '..', 'package.json');
+    if (existsSync(distPkg)) {
+      const pkg = JSON.parse(readFileSync(distPkg, 'utf8'));
+      if (typeof pkg?.version === 'string') return pkg.version;
+    }
+    // Fallback: ../../package.json (working-tree root, used in dev mode).
+    const rootPkg = resolve(here, '..', '..', 'package.json');
+    const pkg = JSON.parse(readFileSync(rootPkg, 'utf8'));
     return typeof pkg?.version === 'string' ? pkg.version : '0.0.0';
   } catch {
     return '0.0.0';
@@ -301,7 +317,13 @@ export class UpdateChecker {
     this.#log = opts.log ?? log;
     const repoRoot = detectRepoRoot();
     const branch = repoRoot ? detectDefaultBranch(repoRoot) : null;
-    const current_version = (repoRoot && readWorkingTreeVersion(repoRoot)) || readBundledVersion();
+    // Prefer the build-time snapshot (dist/package.json) over the working-tree
+    // file. On dev machines the repo root is also the running source tree, so
+    // `readWorkingTreeVersion(repoRoot)` returns whatever version the working
+    // tree currently has — which drifts ahead of the actually-running dist
+    // after a `git pull` that wasn't followed by a rebuild. The bundled
+    // version is frozen at build time and always matches the running code.
+    const current_version = readBundledVersion() || (repoRoot && readWorkingTreeVersion(repoRoot)) || '0.0.0';
     // last_error is reserved for actionable failures (fetch couldn't reach
     // the remote, package.json couldn't be read, …). The "not running from
     // a git checkout" case is signalled via repo_root === null + a one-line
