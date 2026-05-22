@@ -534,6 +534,26 @@ export async function runSelfUpdate(opts: SelfUpdateOpts = {}): Promise<SelfUpda
  */
 let _lastReExecScheduled = false;
 
+/**
+ * Set by reExecManager (systemd branch) just before it sends SIGTERM to self.
+ * Read by main.ts's shutdown handler so the final `process.exit(...)` can pick
+ * the right code: 1 when we're tearing down to let systemd's
+ * `Restart=on-failure` respawn us into the just-built dist, 0 for a normal
+ * operator-driven stop.
+ *
+ * Without this flag the shutdown handler always exits 0 → systemd sees
+ * "success" → no restart → service goes inactive(dead) and the operator has to
+ * `systemctl --user start awb-agent-manager` by hand. The SIGTERM-then-exit(1)
+ * tail in reExecManager can't compensate because shutdown's own exit(0) fires
+ * first and terminates the process synchronously.
+ */
+let _systemdReExecPending = false;
+
+/** Read by main.ts's shutdown handler to pick its exit code. */
+export function isSystemdReExecPending(): boolean {
+  return _systemdReExecPending;
+}
+
 async function runSelfUpdateLocked(
   opts: SelfUpdateOpts,
   out: (msg: string) => void,
@@ -775,20 +795,24 @@ function isManagedBySystemd(): boolean {
 function reExecManager(out: (msg: string) => void): void {
   if (isManagedBySystemd()) {
     out('Self-update: re-exec via systemd (Restart=on-failure → exit 1)');
-    // We still trigger the SIGTERM shutdown handler so chat / ticket sessions
-    // get cleaned up; the handler short-circuits to process.exit(1) at the
-    // tail so systemd sees a failure exit code and respawns.
+    // We trigger the SIGTERM shutdown handler so chat / ticket sessions get
+    // cleaned up, but we MUST set _systemdReExecPending first so the handler's
+    // final `process.exit(...)` picks exit code 1 instead of 0. Without the
+    // flag the handler's exit(0) fires synchronously the moment cleanup
+    // finishes; any setTimeout backup we schedule here is dead — the process
+    // is already gone — and systemd sees a clean exit code, marks the unit
+    // success, and refuses to honor Restart=on-failure.
+    _systemdReExecPending = true;
     setTimeout(() => {
       try {
         process.kill(process.pid, 'SIGTERM');
-        // SIGTERM handlers call process.exit(0) on the happy path, which
-        // would mark the unit "success" and skip the Restart=on-failure
-        // trigger. Schedule an exit(1) tail after the shutdown grace window
-        // so we still land on a non-zero code even if the handler ran first.
-        setTimeout(() => process.exit(1), 5_000).unref?.();
       } catch {
         process.exit(1);
       }
+      // Backup: if the SIGTERM handler hangs (subagent stop stuck, lockfile
+      // release timeout, …), force exit(1) after the shutdown grace window
+      // so we still respawn instead of holding the unit in a half-dead state.
+      setTimeout(() => process.exit(1), 30_000).unref?.();
     }, 250).unref?.();
     return;
   }

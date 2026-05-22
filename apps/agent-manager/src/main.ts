@@ -16,7 +16,7 @@ import {
   type LockHandle,
 } from './lib/agent-lockfile.js';
 import { importLegacyConfig } from './lib/legacy-import.js';
-import { runSelfUpdate, UpdateChecker } from './lib/self-update.js';
+import { isSystemdReExecPending, runSelfUpdate, UpdateChecker } from './lib/self-update.js';
 import { runSetup, type SetupOptions } from './lib/setup.js';
 import { installService, uninstallService, type ServicePlatform } from './lib/service-install.js';
 import { PresenceHeartbeat } from './lib/presence-heartbeat.js';
@@ -652,7 +652,11 @@ async function runRuntime(
     } catch (err: any) {
       log(`shutdown (lockfile): ${err?.message ?? err}`);
     }
-    process.exit(0);
+    // exit(1) when reExecManager set the flag — systemd's Restart=on-failure
+    // needs a non-zero exit code to respawn us into the just-built dist.
+    // exit(0) for normal operator-driven stops so `systemctl --user stop` is
+    // honored and the unit doesn't bounce forever.
+    process.exit(isSystemdReExecPending() ? 1 : 0);
   };
   process.once('SIGTERM', () => void shutdown('SIGTERM'));
   process.once('SIGINT', () => void shutdown('SIGINT'));
