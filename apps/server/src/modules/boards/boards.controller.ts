@@ -174,6 +174,9 @@ export class BoardsController {
     const agentById = new Map(agents.map(a => [a.id, a]));
 
     // Compute focus for each (agent, role) pair.
+    // TODO: parallelize getFocusTicket calls (Promise.all) once the N+1
+    // queries inside getFocusTicket are batched — sequential for now to
+    // avoid overwhelming DB with concurrent per-ticket queries.
     const focusTickets: Array<{ agent_id: string; agent_name: string; role: string; ticket_id: string }> = [];
     for (const { agent_id, role_id } of pairs) {
       const role = roleById.get(role_id);

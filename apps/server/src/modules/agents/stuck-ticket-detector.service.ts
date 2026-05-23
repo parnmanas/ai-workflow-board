@@ -505,7 +505,7 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
       // ticket's gate signals stay in comments — moving to Backlog just
       // removes it from the active queue so other tickets can promote.
       const hasGateLabels = evaluation.gateLabels.some(gl =>
-        labels.some(l => globMatch(l, gl)),
+        labels.some(l => globMatch(gl, l)),
       );
       if (hasGateLabels && cycleCount >= evaluation.minCyclesThreshold) {
         const demoted = await this._demoteToIntake(ticket, column, cycleCount, now);

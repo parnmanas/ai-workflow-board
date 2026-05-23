@@ -264,6 +264,8 @@ export class AgentWorkloadService {
     //   ticket can be promoted and dispatched. The BLOCKED ticket stays in
     //   its column and continues to receive heartbeat pings via the
     //   supervisor backstop — it just stops blocking the queue.
+    // TODO: batch the activity lookups for all BLOCKED tickets in one query
+    // to avoid N+1 sequential queries per candidate (lastRelease, lastClaim, moveCount).
     const activityRepo = this.dataSource.getRepository(ActivityLog);
     const nonBlockedTickets: Ticket[] = [];
     for (const t of tickets) {
