@@ -65,6 +65,7 @@ export default function Board() {
     createChildTicket, setTicketRoleAssignment, addComment, setCommentStatus,
     createColumn, updateColumn, deleteColumn,
     typingIndicators,
+    focusTicketMap,
   } = useBoard(boardId ?? '');
 
   // Workspace's other boards — drives the drag-and-drop "move to board" strip
@@ -520,7 +521,7 @@ export default function Board() {
                     }}
                   >
                     {board.columns.map(col => (
-                      <Column key={col.id} column={col} onTicketClick={handleTicketClick} onCreateTicket={handleCreateTicket} />
+                      <Column key={col.id} column={col} onTicketClick={handleTicketClick} onCreateTicket={handleCreateTicket} focusTicketMap={focusTicketMap} />
                     ))}
                   </div>
                 </Panel>
@@ -571,7 +572,7 @@ export default function Board() {
                 }}
               >
                 {board.columns.map(col => (
-                  <Column key={col.id} column={col} onTicketClick={handleTicketClick} onCreateTicket={handleCreateTicket} />
+                  <Column key={col.id} column={col} onTicketClick={handleTicketClick} onCreateTicket={handleCreateTicket} focusTicketMap={focusTicketMap} />
                 ))}
               </div>
             </DragDropContext>

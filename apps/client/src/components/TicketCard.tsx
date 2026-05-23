@@ -9,6 +9,7 @@ interface TicketCardProps {
   ticket: Ticket;
   index: number;
   onClick: () => void;
+  focusHolders?: Array<{ agent_name: string; role: string }>;
 }
 
 const priorityVariants: Record<string, 'neutral' | 'info' | 'warning' | 'danger'> = {
@@ -25,7 +26,7 @@ const priorityLabels: Record<string, string> = {
   critical: 'CRIT',
 };
 
-export default function TicketCard({ ticket, index, onClick }: TicketCardProps) {
+export default function TicketCard({ ticket, index, onClick, focusHolders }: TicketCardProps) {
   const doneChildren = (ticket.children || []).filter(c => c.status === 'done').length;
   const totalChildren = (ticket.children || []).length;
   const progress = totalChildren > 0 ? (doneChildren / totalChildren) * 100 : 0;
@@ -72,6 +73,22 @@ export default function TicketCard({ ticket, index, onClick }: TicketCardProps) 
                   }}
                   aria-label="Stale open question"
                 >?</span>
+              )}
+              {focusHolders && focusHolders.length > 0 && (
+                <span
+                  title={`Focus ticket for: ${focusHolders.map(h => `${h.agent_name} (${h.role})`).join(', ')}`}
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                    padding: '1px 5px',
+                    borderRadius: tokens.radii.sm,
+                    background: tokens.colors.accentLight,
+                    color: tokens.colors.accent,
+                    fontSize: '9px', fontWeight: 700,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.5px',
+                  }}
+                  aria-label="Focus ticket"
+                >FOCUS</span>
               )}
             </div>
             <span style={{ fontSize: '10px', color: tokens.colors.textMuted }}>#{ticket.id}</span>

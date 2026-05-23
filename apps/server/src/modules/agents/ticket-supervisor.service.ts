@@ -21,11 +21,18 @@ import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import { Agent } from '../../entities/Agent';
+import { StuckTicketAlert } from '../../entities/StuckTicketAlert';
 import { Ticket } from '../../entities/Ticket';
 import { Workspace } from '../../entities/Workspace';
 import { LogService } from '../../services/log.service';
 import { AllocationService, AllocatedTicketRow } from './allocation.service';
 import { TriggerLoopService } from './trigger-loop.service';
+
+// Minimum resend cadence for tickets flagged as stuck (ticket b55e4421).
+// Prevents force_respawn spam on BLOCKED tickets that the stuck detector
+// has already identified — each respawn writes a redundant heartbeat
+// comment and wastes LLM budget for zero output.
+const STUCK_TICKET_MIN_RESEND_MS = 60 * 60_000; // 1 hour
 
 const SUPERVISOR_TICK_MS = 60_000;
 // Defaults — overridable per Workspace via Workspace.supervisor_stale_ms /
@@ -127,6 +134,25 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
 
       const { staleMs, resendMs } = await resolveCadence(agent.workspace_id);
 
+      // Pre-fetch stuck alert rows for this agent's tickets so the
+      // per-row loop doesn't need N+1 queries (ticket b55e4421).
+      const alertRepo = this.dataSource.getRepository(StuckTicketAlert);
+      const stuckTicketIds = new Set<string>();
+      try {
+        const ticketIds = result.map((r: AllocatedTicketRow) => r.ticket_id).filter(Boolean);
+        if (ticketIds.length > 0) {
+          const alerts = await alertRepo
+            .createQueryBuilder('sa')
+            .where('sa.ticket_id IN (:...ids)', { ids: ticketIds })
+            .getMany();
+          for (const a of alerts) stuckTicketIds.add(a.ticket_id);
+        }
+      } catch (e) {
+        this.logService.warn('TicketSupervisor', 'stuck-alert prefetch failed (continuing without)', {
+          err: String(e), agent_id: agent.id,
+        });
+      }
+
       for (const row of result) {
         const key = this._key(agent.id, row.ticket_id, row.role);
         liveKeys.add(key);
@@ -139,6 +165,16 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
           continue;
         }
 
+        // Stuck-ticket throttle (ticket b55e4421): if the stuck detector
+        // has already flagged this ticket, suppress force_respawn and
+        // extend the resend cadence to STUCK_TICKET_MIN_RESEND_MS. Each
+        // force_respawn on a BLOCKED ticket just writes a redundant
+        // heartbeat comment — pure waste.
+        const isStuck = stuckTicketIds.has(row.ticket_id);
+        const effectiveResendMs = isStuck
+          ? Math.max(resendMs, STUCK_TICKET_MIN_RESEND_MS)
+          : resendMs;
+
         const entry = this.state.get(key);
 
         if (!entry) {
@@ -147,8 +183,11 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
           continue;
         }
 
-        if (now - entry.lastEmitAt >= resendMs) {
-          await this._emit(row, agent.id, true, now);
+        if (now - entry.lastEmitAt >= effectiveResendMs) {
+          // Suppress force_respawn for stuck tickets — a non-force
+          // re-push still lets the subagent check the gate, but
+          // doesn't kill a potentially useful session.
+          await this._emit(row, agent.id, isStuck ? false : true, now);
           entry.lastEmitAt = now;
         }
       }
