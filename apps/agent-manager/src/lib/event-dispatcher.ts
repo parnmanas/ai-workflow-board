@@ -87,6 +87,10 @@ export interface SubagentSpawnArgs {
    *  instead of the agent's full multi-role set. Empty for chat / non-role
    *  spawns. */
   role?: string;
+  /** Chat room id for one-shot chat spawns. When set, non-MCP adapters
+   *  (codex, gemini) post their collected result to this room via REST
+   *  instead of as a ticket comment. */
+  roomId?: string;
   /** ST-6: per-event managed-agent runtime context. Optional. */
   agentContext?: AgentExecutionContext;
 }
@@ -591,6 +595,7 @@ export class EventDispatcher {
             : undefined,
           ticketId: payload.ticket_id || '',
           agentId: payload.agent_id || '',
+          roomId: payload.room_id || '',
           agentContext,
         });
 
@@ -896,6 +901,7 @@ export class EventDispatcher {
           chatRequestId: `msg:${p.sender_id}:${p.created_at || ''}`,
           ticketId: '',
           agentId: agentContext?.agent_id || '',
+          roomId: p.room_id || '',
           agentContext,
         });
 
