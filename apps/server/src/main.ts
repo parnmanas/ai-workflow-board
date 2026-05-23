@@ -9,8 +9,15 @@ import { AllExceptionsFilter } from './common/filters/http-exception.filter';
 import { RequestLoggerInterceptor } from './common/interceptors/request-logger.interceptor';
 import { ApiKeyService } from './services/api-key.service';
 import { LogService } from './services/log.service';
+import { cleanupNullWorkspaceRows } from './database/null-workspace-cleanup';
 
 async function bootstrap() {
+  // Runs BEFORE NestFactory so TypeORM's auto-synchronize doesn't trip on
+  // the "column ... contains null values" blocker when Postgres still has
+  // legacy NULL rows on tables whose entity declares the column NOT NULL.
+  // No-op on sqlite/mysql. See null-workspace-cleanup.ts for the rationale.
+  await cleanupNullWorkspaceRows();
+
   const app = await NestFactory.create(AppModule);
 
   // Raise Express body-parser limit from its 100KB default. Agent plugins
