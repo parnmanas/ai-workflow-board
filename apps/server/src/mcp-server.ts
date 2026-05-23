@@ -28,7 +28,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { initDb, AppDataSource } from './db';
-import { cleanupNullWorkspaceRows } from './database/null-workspace-cleanup';
+import { preSyncPostgres } from './database/pre-sync-postgres';
 import { createStandaloneContext } from './modules/mcp/tools';
 import { createMcpServerForContext } from './modules/mcp/internal/create-mcp-server';
 import { expressToWebRequest, sendWebResponse } from './modules/mcp/internal/express-bridge';
@@ -198,8 +198,8 @@ async function startHttp() {
 // ─── Main ───────────────────────────────────────────────────
 
 async function main() {
-  // See null-workspace-cleanup.ts — must run before TypeORM initializes.
-  await cleanupNullWorkspaceRows();
+  // See pre-sync-postgres.ts — must run before TypeORM initializes.
+  await preSyncPostgres();
   await initDb();
 
   const transport = (process.env.MCP_TRANSPORT || 'stdio').toLowerCase();
