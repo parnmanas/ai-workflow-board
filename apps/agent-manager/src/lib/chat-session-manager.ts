@@ -11,7 +11,9 @@ import {
   type SessionAwareConfig,
   type SessionRecord,
 } from './base-session-manager.js';
-import { fetchChatRoomHistory } from './rest.js';
+import type { ParseResult } from './cli-adapters/base.js';
+import { fetchChatRoomHistory, postChatRoomMessage } from './rest.js';
+import { log } from './logging.js';
 import { composeChatRoomPrompt } from './prompts.js';
 import type {
   ChatDispatchArgs,
@@ -27,12 +29,23 @@ interface ChatHistoryEntry {
   created_at?: string;
 }
 
+/** Max lines kept in the per-session output ring buffer. */
+const OUTPUT_RING_MAX = 80;
+/** Max characters sent in the fallback chat message body. */
+const FALLBACK_MAX_CHARS = 1500;
+
 export class ChatSessionManager
   extends BaseSessionManager
   implements ChatSessionManagerContract
 {
   #historyRing = new Map<string, ChatHistoryEntry[]>();
   #HISTORY_MAX = 30;
+
+  // Per-session tracking for fallback detection.
+  // Keyed by session pid (unique per child) to avoid leaking across sessions
+  // that reuse the same sessionKey after respawn.
+  #chatSent = new Set<number>();
+  #outputRings = new Map<number, string[]>();
 
   constructor(config: SessionAwareConfig) {
     super(config, {
@@ -118,8 +131,85 @@ export class ChatSessionManager
     // per-room or per-agent queries don't have to re-parse the composite key.
     spawned.roomId = spec.roomId;
     spawned.agentId = spec.agentId;
+    spawned._effectiveApiKey = spec.agentContext?.api_key || this._config.apiKey;
     return { dispatched: true, pid: spawned.pid, firstTurn: true };
   }
+
+  // -- Fallback detection overrides ------------------------------------------
+
+  protected _onStdoutParsed(sess: SessionRecord, parsed: ParseResult, rawLine: string): void {
+    // Buffer non-JSON lines (plain-text errors from the CLI).
+    if (!parsed.raw) {
+      const trimmed = rawLine.trim();
+      if (trimmed) this.#pushOutput(sess.pid, trimmed);
+    }
+    // Detect send_chat_room_message tool use in Claude stream-json output.
+    // assistant messages carry content blocks; each tool_use block has a `name`.
+    if (parsed.raw?.type === 'assistant') {
+      const content = parsed.raw?.message?.content;
+      if (Array.isArray(content)) {
+        for (const block of content) {
+          if (
+            block?.type === 'tool_use' &&
+            typeof block.name === 'string' &&
+            block.name.includes('send_chat_room_message')
+          ) {
+            this.#chatSent.add(sess.pid);
+          }
+        }
+      }
+    }
+  }
+
+  protected _onStderrLine(sess: SessionRecord, line: string): void {
+    const trimmed = line.trim();
+    if (trimmed) this.#pushOutput(sess.pid, trimmed);
+  }
+
+  protected async _onChildExit(
+    sess: SessionRecord,
+    _code: number | null,
+    _signal: NodeJS.Signals | null,
+  ): Promise<void> {
+    const sent = this.#chatSent.has(sess.pid);
+    const ring = this.#outputRings.get(sess.pid);
+
+    // Cleanup tracking state regardless of outcome.
+    this.#chatSent.delete(sess.pid);
+    this.#outputRings.delete(sess.pid);
+
+    if (sent) return; // Agent replied normally — nothing to do.
+
+    const roomId: string | undefined = sess.roomId;
+    const agentId: string | undefined = sess.agentId;
+    if (!roomId || !agentId) return;
+
+    // Build a human-readable fallback from buffered output.
+    let body = (ring ?? []).join('\n').trim();
+    if (body.length > FALLBACK_MAX_CHARS) {
+      body = '…' + body.slice(-FALLBACK_MAX_CHARS);
+    }
+
+    const message = body
+      ? `⚠️ Agent가 응답하지 못했습니다. CLI 출력:\n\`\`\`\n${body}\n\`\`\``
+      : '⚠️ Agent가 응답하지 못했습니다 (출력 없음).';
+
+    log(`[chat-session] fallback message for room=${roomId} agent=${agentId} pid=${sess.pid} outputLen=${body.length}`);
+    const cfg = { ...this._config, apiKey: sess._effectiveApiKey || this._config.apiKey };
+    await postChatRoomMessage(cfg, roomId, agentId, message);
+  }
+
+  #pushOutput(pid: number, line: string): void {
+    let ring = this.#outputRings.get(pid);
+    if (!ring) {
+      ring = [];
+      this.#outputRings.set(pid, ring);
+    }
+    ring.push(line);
+    while (ring.length > OUTPUT_RING_MAX) ring.shift();
+  }
+
+  // ---------------------------------------------------------------------------
 
   _snapshot(): Array<Pick<SessionRecord, 'pid' | 'turnCount' | 'startedAt' | 'lastTouchedAt'> & {
     roomId: string;

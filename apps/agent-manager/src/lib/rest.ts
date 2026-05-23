@@ -221,6 +221,40 @@ export async function fetchAgentCredential(
   }
 }
 
+/**
+ * Send a message to an AWB chat room on behalf of an agent.
+ * Fire-and-log on failure — caller is a best-effort fallback path.
+ */
+export async function postChatRoomMessage(
+  config: AwbConfig,
+  roomId: string,
+  agentId: string,
+  content: string,
+): Promise<boolean> {
+  if (!roomId || !content) return false;
+  try {
+    const url = `${trimSlash(config.url)}/api/agent/chat-rooms/${encodeURIComponent(roomId)}/messages`;
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'X-Agent-Key': config.apiKey,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({ agent_id: agentId, content }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!resp.ok) {
+      log(`chat fallback POST failed: ${resp.status} ${resp.statusText} (room=${roomId})`);
+      return false;
+    }
+    return true;
+  } catch (err: any) {
+    log(`chat fallback POST error: ${err?.message ?? err} (room=${roomId})`);
+    return false;
+  }
+}
+
 export async function provisionManagedAgentApiKey(
   config: AwbConfig,
   agentId: string,
