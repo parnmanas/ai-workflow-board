@@ -37,6 +37,16 @@
  * an entity-level declaration are cruft from a previous schema state
  * and don't need to come back.
  *
+ * Special case: columns that participate in an `@ManyToOne` to a uuid
+ * PK MUST stay uuid even though the @Column declaration says varchar
+ * — TypeORM's PG driver responds to the FK-target type by trying to
+ * rebuild the column with the matching type, which triggers the same
+ * `ADD COLUMN … NOT NULL contains null values` blocker. The 8 known
+ * columns (see MANY_TO_ONE_FK_COLUMNS) are skipped by the generic
+ * varchar cast and forcibly re-aligned to uuid afterward, cleaning up
+ * any '' / non-uuid values along the way (nullable → set NULL, not
+ * nullable → delete the row).
+ *
  * (b) is fixed by deleting NULL rows on a curated list of NOT-NULL
  * FK-like columns. The list is hardcoded because TypeORM metadata
  * isn't loaded yet at this boot stage; source of truth is the entity
@@ -73,6 +83,49 @@
  */
 
 import { Client } from 'pg';
+
+/**
+ * The 8 columns that have an @ManyToOne to a uuid-PK entity (source:
+ * grep `@ManyToOne` across entities + checking referencedColumnName).
+ * TypeORM's PG driver expects these to be uuid even though the
+ * @Column declaration says varchar — the FK type-match drives column
+ * type, not the @Column override. Casting these to varchar (which
+ * the generic uuid → varchar pass would otherwise do) breaks the
+ * symmetry and TypeORM tries to rebuild the column to uuid, hitting
+ * the ADD COLUMN NOT NULL blocker.
+ *
+ * Excluded from the generic varchar cast and re-aligned to uuid in
+ * a dedicated pass below. SubagentLogLine.subagent_id has @ManyToOne
+ * but references Subagent.subagent_id (varchar) — NOT a uuid PK —
+ * so it stays out of this list and gets cast to varchar normally.
+ */
+interface ManyToOneFkColumn {
+  table: string;
+  column: string;
+  /** false = entity declares NOT NULL (no `nullable: true`). Drives
+   *  '' / invalid-uuid cleanup: nullable → SET NULL, NOT NULL → DELETE
+   *  the row (orphan by definition). */
+  nullable: boolean;
+}
+
+const MANY_TO_ONE_FK_COLUMNS: ReadonlyArray<ManyToOneFkColumn> = [
+  { table: 'api_keys',               column: 'agent_id',     nullable: true  },
+  { table: 'boards',                 column: 'workspace_id', nullable: true  },
+  { table: 'chat_room_participants', column: 'room_id',      nullable: false },
+  { table: 'columns',                column: 'board_id',     nullable: false },
+  { table: 'comments',               column: 'ticket_id',    nullable: false },
+  { table: 'ticket_attachments',     column: 'ticket_id',    nullable: false },
+  { table: 'tickets',                column: 'column_id',    nullable: true  },
+  { table: 'tickets',                column: 'parent_id',    nullable: true  },
+];
+
+const KEEP_AS_UUID: ReadonlySet<string> = new Set(
+  MANY_TO_ONE_FK_COLUMNS.map((c) => `${c.table}.${c.column}`),
+);
+
+/** Canonical 8-4-4-4-12 hex uuid layout (case-insensitive). Values
+ *  failing this regex can't be cast to uuid and must be scrubbed. */
+const UUID_REGEX = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$';
 
 /**
  * Curated list of NOT-NULL FK-like columns (entity declares
@@ -219,13 +272,88 @@ async function castNonPkUuidColumnsToVarchar(client: Client): Promise<number> {
       ORDER BY c.table_name, c.column_name`,
   );
 
+  let castCount = 0;
   for (const { table_name, column_name } of res.rows) {
+    if (KEEP_AS_UUID.has(`${table_name}.${column_name}`)) {
+      // ManyToOne FK to uuid PK — must stay uuid (handled by
+      // alignManyToOneFkColumnsToUuid below).
+      continue;
+    }
     await client.query(
       `ALTER TABLE ${table_name} ALTER COLUMN ${column_name} TYPE varchar USING ${column_name}::text`,
     );
     logLine(`${table_name}.${column_name}: cast uuid → varchar`);
+    castCount++;
   }
-  return res.rows.length;
+  return castCount;
+}
+
+/**
+ * Force each @ManyToOne FK column to uuid type, scrubbing '' /
+ * non-uuid values along the way. Idempotent: skips columns already
+ * at uuid type.
+ *
+ * Order is important — this runs AFTER castNonPkUuidColumnsToVarchar
+ * because the generic cast may have left these columns as varchar in
+ * an earlier pre-sync iteration; this pass recovers them. On a fresh
+ * DB they're already uuid and the function is a no-op.
+ *
+ * Cleanup rules:
+ *   nullable column → UPDATE SET col = NULL WHERE col is non-uuid
+ *   NOT NULL column → DELETE WHERE col IS NULL OR col is non-uuid
+ *                     (an orphan row by definition; the entity
+ *                     guarantees the FK target exists)
+ */
+async function alignManyToOneFkColumnsToUuid(client: Client): Promise<number> {
+  let alignedCount = 0;
+  for (const spec of MANY_TO_ONE_FK_COLUMNS) {
+    if (!(await tableExists(client, spec.table))) continue;
+
+    const colInfo = await client.query<{ data_type: string }>(
+      `SELECT data_type
+         FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name   = $1
+          AND column_name  = $2`,
+      [spec.table, spec.column],
+    );
+    if (colInfo.rows.length === 0) continue;
+    if (colInfo.rows[0].data_type === 'uuid') continue; // already aligned
+
+    if (spec.nullable) {
+      const u = await client.query(
+        `UPDATE ${spec.table}
+            SET ${spec.column} = NULL
+          WHERE ${spec.column} IS NOT NULL
+            AND ${spec.column} !~ $1`,
+        [UUID_REGEX],
+      );
+      if (u.rowCount && u.rowCount > 0) {
+        logLine(
+          `${spec.table}.${spec.column}: scrubbed ${u.rowCount} non-uuid values → NULL`,
+        );
+      }
+    } else {
+      const d = await client.query(
+        `DELETE FROM ${spec.table}
+          WHERE ${spec.column} IS NULL
+             OR ${spec.column} !~ $1`,
+        [UUID_REGEX],
+      );
+      if (d.rowCount && d.rowCount > 0) {
+        logLine(
+          `${spec.table}.${spec.column}: deleted ${d.rowCount} rows with NULL / non-uuid`,
+        );
+      }
+    }
+
+    await client.query(
+      `ALTER TABLE ${spec.table} ALTER COLUMN ${spec.column} TYPE uuid USING ${spec.column}::uuid`,
+    );
+    logLine(`${spec.table}.${spec.column}: aligned → uuid (ManyToOne FK)`);
+    alignedCount++;
+  }
+  return alignedCount;
 }
 
 export async function preSyncPostgres(): Promise<void> {
@@ -254,6 +382,7 @@ export async function preSyncPostgres(): Promise<void> {
 
   let fksDropped = 0;
   let uuidCast = 0;
+  let uuidAligned = 0;
   let rowsDeleted = 0;
 
   try {
@@ -270,11 +399,16 @@ export async function preSyncPostgres(): Promise<void> {
       logLine(`dropped ${fksDropped} FK constraints (TypeORM will recreate)`);
     }
 
-    // 2. Generic uuid → varchar realignment for every non-PK uuid column.
-    //    Stops TypeORM's column-rebuild path from firing on the type diff.
+    // 2. Generic uuid → varchar realignment for every non-PK uuid column,
+    //    EXCEPT the 8 ManyToOne FK columns that must stay uuid.
     uuidCast = await castNonPkUuidColumnsToVarchar(client);
 
-    // 3. NULL-row cleanup on the curated NOT-NULL column list.
+    // 3. Re-align the 8 ManyToOne FK columns back to uuid if a previous
+    //    pre-sync iteration cast them to varchar. Scrubs '' / non-uuid
+    //    values so the ALTER … TYPE uuid cast succeeds.
+    uuidAligned = await alignManyToOneFkColumnsToUuid(client);
+
+    // 4. NULL-row cleanup on the curated NOT-NULL column list.
     //    Stops TypeORM's `SET NOT NULL` from failing on legacy NULL rows.
     //    Tables with `dependentBy` cascade first so deleting the parent
     //    doesn't leave dependent rows pointing at a deleted row.
@@ -327,6 +461,6 @@ export async function preSyncPostgres(): Promise<void> {
   }
 
   logLine(
-    `done in ${Date.now() - startedAt}ms (fk-dropped=${fksDropped}, uuid-cast=${uuidCast}, rows-deleted=${rowsDeleted})`,
+    `done in ${Date.now() - startedAt}ms (fk-dropped=${fksDropped}, uuid-cast=${uuidCast}, uuid-aligned=${uuidAligned}, rows-deleted=${rowsDeleted})`,
   );
 }
