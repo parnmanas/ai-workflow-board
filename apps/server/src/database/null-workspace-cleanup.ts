@@ -1,30 +1,46 @@
 /**
- * Defensive boot-time cleanup for tables whose entity declares
- * workspace_id NOT NULL but where Postgres still has lingering NULL rows
- * from an earlier nullable schema window. Without this, TypeORM
- * synchronize aborts with:
+ * Defensive boot-time pre-sync for the workspace_id columns that keep
+ * tripping TypeORM synchronize on Postgres. Two failure modes addressed:
  *
- *   QueryFailedError: column "workspace_id" of relation "<table>"
- *   contains null values
+ *   (a) Column type mismatch — a previous pre-sync iteration widened
+ *       varchar → uuid; the current entity declares varchar; TypeORM
+ *       responds to the type diff with a column-rebuild that issues
+ *       `ADD COLUMN … NOT NULL` against a table that already has rows.
+ *       PG rejects that with:
+ *         column "workspace_id" of relation "<table>" contains null values
+ *       (the error names NULL because the freshly-added column is NULL
+ *       on every existing row, not because the original column has NULLs).
+ *
+ *   (b) Lingering NULL rows — entity says NOT NULL but the live column
+ *       allows NULL and has some, so the plain `SET NOT NULL` TypeORM
+ *       wants to apply also fails with the same error message.
+ *
+ * Pre-sync handles both by aligning each target column back to varchar
+ * (cast uuid → text is safe; uuids serialise as their canonical hex)
+ * and deleting NULL rows before TypeORM ever sees the schema.
  *
  * Runs BEFORE TypeORM initializes (called from main.ts bootstrap and
  * mcp-server.ts boot). Connects via raw `pg` Client since the TypeORM
  * DataSource is not yet up.
  *
- * Postgres-only. Sqlite (local dev) lets the NULL through synchronize
- * without complaint; MySQL coerces NULL to '' on NOT NULL columns. The
- * blocker is specific to Postgres' strict NOT NULL enforcement during
- * ALTER … SET NOT NULL.
+ * Postgres-only. Sqlite (local dev) doesn't enforce these constraints
+ * the same way and never hits the blocker; mysql coerces NULL to ''.
+ * Skipped when DB_TYPE != postgres.
  *
- * Idempotent — re-running on a clean DB is a no-op. Safe to call on
- * every boot.
+ * Idempotent — re-running on a clean DB is a no-op (every step
+ * short-circuits when the live column already matches the target
+ * shape and there are no NULL rows). Safe to call on every boot.
  *
  * Failure semantics — connection / SQL errors throw with a wrapped
  * message identifying this as the pre-sync step, so the bootstrap
- * stack surfaces "null-workspace cleanup failed: …" instead of a bare
- * pg error pointing nowhere obvious. The DELETE batch is wrapped in
- * a single transaction; any per-table failure rolls the whole batch
- * back so a partial cleanup never lands.
+ * stack surfaces "null-workspace pre-sync failed: …" instead of a bare
+ * pg error pointing nowhere obvious. All work is wrapped in one
+ * transaction; per-table failure rolls the whole batch back so a
+ * partial pre-sync never lands.
+ *
+ * Always emits an entry + exit log line ("starting" / "done in Nms
+ * type-aligned=X rows-deleted=Y") so an operator can confirm the
+ * pre-sync ran without inferring from the absence of error logs.
  */
 
 import { Client } from 'pg';
@@ -86,10 +102,49 @@ async function tableExists(client: Client, name: string): Promise<boolean> {
   return res.rows[0]?.exists === true;
 }
 
+/**
+ * Cast `workspace_id` back to varchar if the live column is anything
+ * else (uuid being the actual culprit; the deleted Phase-B pre-sync
+ * widened these and the resurrection of the entities as varchar leaves
+ * the type stale). Returns true if a cast was applied.
+ *
+ * Safe even when rows have legacy '' values (varchar already, no-op)
+ * or uuids (cast `uuid::text` always works — uuids serialise to their
+ * canonical hex string). No FK constraints on workspace_id columns in
+ * this codebase (only `boards.workspace_id` has @ManyToOne, and that
+ * table's column is nullable so it's outside this defensive scope).
+ */
+async function alignWorkspaceIdToVarchar(
+  client: Client,
+  table: string,
+): Promise<boolean> {
+  const res = await client.query<{ data_type: string }>(
+    `SELECT data_type
+       FROM information_schema.columns
+      WHERE table_schema = current_schema()
+        AND table_name   = $1
+        AND column_name  = 'workspace_id'`,
+    [table],
+  );
+  if (res.rows.length === 0) return false;
+  const dataType = res.rows[0].data_type;
+  // PG returns 'character varying' for @Column({ type: 'varchar' });
+  // 'text' is functionally equivalent and TypeORM won't churn on it.
+  if (dataType === 'character varying' || dataType === 'text') return false;
+
+  await client.query(
+    `ALTER TABLE ${table} ALTER COLUMN workspace_id TYPE varchar USING workspace_id::text`,
+  );
+  return true;
+}
+
 export async function cleanupNullWorkspaceRows(): Promise<void> {
   if ((process.env.DB_TYPE || 'sqlite') !== 'postgres') {
     return;
   }
+
+  const startedAt = Date.now();
+  logLine('starting pre-sync for workspace_id columns');
 
   const client = new Client({
     host:     process.env.DB_HOST || 'localhost',
@@ -103,12 +158,28 @@ export async function cleanupNullWorkspaceRows(): Promise<void> {
     await client.connect();
   } catch (err: any) {
     throw new Error(
-      `null-workspace cleanup: connect to Postgres failed: ${err?.message ?? err}`,
+      `null-workspace pre-sync: connect to Postgres failed: ${err?.message ?? err}`,
     );
   }
 
+  let typeAligned = 0;
+  let rowsDeleted = 0;
+
   try {
     await client.query('BEGIN');
+
+    // 0. Type alignment — bring every target column back to varchar so
+    //    TypeORM's column-rebuild path doesn't fire. Must happen BEFORE
+    //    NULL deletion so the subsequent SET NOT NULL TypeORM applies
+    //    is a simple in-place change, not a rebuild.
+    for (const table of TABLES_NOT_NULL_WORKSPACE) {
+      if (!(await tableExists(client, table))) continue;
+      const aligned = await alignWorkspaceIdToVarchar(client, table);
+      if (aligned) {
+        typeAligned++;
+        logLine(`${table}: aligned workspace_id type → varchar`);
+      }
+    }
 
     // 1. chat_rooms — cascade dependents by room_id, then delete the rooms.
     if (await tableExists(client, 'chat_rooms')) {
@@ -124,6 +195,7 @@ export async function cleanupNullWorkspaceRows(): Promise<void> {
             [roomIds],
           );
           if (r.rowCount && r.rowCount > 0) {
+            rowsDeleted += r.rowCount;
             logLine(
               `${dep}: deleted ${r.rowCount} rows tied to ${roomIds.length} orphan rooms`,
             );
@@ -132,6 +204,7 @@ export async function cleanupNullWorkspaceRows(): Promise<void> {
         const r = await client.query(
           `DELETE FROM chat_rooms WHERE workspace_id IS NULL`,
         );
+        rowsDeleted += r.rowCount ?? 0;
         logLine(
           `chat_rooms: deleted ${r.rowCount ?? 0} orphan rooms with NULL workspace_id`,
         );
@@ -146,6 +219,7 @@ export async function cleanupNullWorkspaceRows(): Promise<void> {
         `DELETE FROM ${table} WHERE workspace_id IS NULL`,
       );
       if (r.rowCount && r.rowCount > 0) {
+        rowsDeleted += r.rowCount;
         logLine(`${table}: deleted ${r.rowCount} rows with NULL workspace_id`);
       }
     }
@@ -154,10 +228,14 @@ export async function cleanupNullWorkspaceRows(): Promise<void> {
   } catch (err: any) {
     await client.query('ROLLBACK').catch(() => {});
     throw new Error(
-      `null-workspace cleanup failed (rolled back): ${err?.message ?? err}. ` +
-        `Fix the underlying DB state and retry; the cleanup is idempotent.`,
+      `null-workspace pre-sync failed (rolled back): ${err?.message ?? err}. ` +
+        `Fix the underlying DB state and retry; the pre-sync is idempotent.`,
     );
   } finally {
     await client.end().catch(() => {});
   }
+
+  logLine(
+    `done in ${Date.now() - startedAt}ms — type-aligned=${typeAligned}, rows-deleted=${rowsDeleted}`,
+  );
 }
