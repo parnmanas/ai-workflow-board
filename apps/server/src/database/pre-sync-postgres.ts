@@ -82,7 +82,15 @@
  *   [pre-sync] done in <ms>ms (fk-dropped=F, uuid-cast=U, rows-deleted=R)
  */
 
+import 'reflect-metadata';
 import { Client } from 'pg';
+import { getMetadataArgsStorage } from 'typeorm';
+// Pulling the entity barrel forces every @Entity / @Column decorator to
+// run so getMetadataArgsStorage() returns a populated index. Without
+// this import, discovery below returns zero columns.
+import * as entitiesBarrel from '../entities';
+// Reference the namespace so the import isn't tree-shaken / lint-pruned.
+void entitiesBarrel;
 
 /**
  * The 8 columns that have an @ManyToOne to a uuid-PK entity (source:
@@ -128,29 +136,23 @@ const KEEP_AS_UUID: ReadonlySet<string> = new Set(
 const UUID_REGEX = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$';
 
 /**
- * Curated list of NOT-NULL FK-like columns (entity declares
- * `@Column({ type: 'varchar' })` without `nullable: true`). Used for
- * the NULL-row cleanup pass — TypeORM's `SET NOT NULL` will fail if
- * the live column still has NULL rows. Source of truth:
- * apps/server/src/entities/*.ts. Add new entries when introducing
- * non-nullable FK columns.
+ * Hand-curated cascade rules for parents whose dependent rows are
+ * pinned by an FK column without an ON DELETE CASCADE on the DB
+ * (entities use plain FK columns per project convention). When the
+ * parent's listed column is NULL and the parent row gets deleted,
+ * the dependents must also go — otherwise we leave rows pointing at
+ * a parent that no longer exists.
  *
- * Optional `dependentBy` triggers a cascade pass: rows on each named
- * dependent table whose `<column>` matches a soon-to-be-deleted parent
- * are deleted first so plain FK columns (no ON DELETE CASCADE on the
- * DB side) don't leave orphans pointing at a deleted row.
+ * Currently only chat_rooms.workspace_id has dependents under this
+ * scheme. New parent/dependent relationships go here.
  */
-interface NotNullColumn {
+interface CascadeSpec {
   table: string;
   column: string;
-  dependentBy?: ReadonlyArray<{ table: string; column: string }>;
+  dependentBy: ReadonlyArray<{ table: string; column: string }>;
 }
 
-const NOT_NULL_COLUMNS: ReadonlyArray<NotNullColumn> = [
-  // ── workspace_id columns (entity declares NOT NULL) ──
-  { table: 'actions',                column: 'workspace_id' },
-  { table: 'action_runs',            column: 'workspace_id' },
-  { table: 'agents',                 column: 'workspace_id' },
+const CASCADE_PARENTS: ReadonlyArray<CascadeSpec> = [
   {
     table: 'chat_rooms',
     column: 'workspace_id',
@@ -159,37 +161,77 @@ const NOT_NULL_COLUMNS: ReadonlyArray<NotNullColumn> = [
       { table: 'chat_room_participants', column: 'room_id' },
     ],
   },
-  { table: 'chat_room_messages',     column: 'workspace_id' },
-  { table: 'credentials',            column: 'workspace_id' },
-  { table: 'prompt_templates',       column: 'workspace_id' },
-  { table: 'resources',              column: 'workspace_id' },
-  { table: 'subagents',              column: 'workspace_id' },
-  { table: 'user_mentions',          column: 'workspace_id' },
-  { table: 'workspace_roles',        column: 'workspace_id' },
-
-  // ── Other NOT-NULL FK columns ──
-  { table: 'actions',                column: 'target_agent_id' },
-  { table: 'action_runs',            column: 'action_id' },
-  { table: 'action_runs',            column: 'room_id' },
-  { table: 'agent_error_logs',       column: 'agent_id' },
-  { table: 'chat_room_messages',     column: 'room_id' },
-  { table: 'chat_room_messages',     column: 'sender_id' },
-  { table: 'chat_room_participants', column: 'participant_id' },
-  { table: 'chat_room_participants', column: 'room_id' },
-  { table: 'columns',                column: 'board_id' },
-  { table: 'comments',               column: 'ticket_id' },
-  { table: 'resource_embeddings',    column: 'resource_id' },
-  { table: 'subagents',              column: 'agent_id' },
-  { table: 'ticket_attachments',     column: 'ticket_id' },
-  { table: 'ticket_read_state',      column: 'ticket_id' },
-  { table: 'ticket_read_state',      column: 'user_id' },
-  { table: 'ticket_role_assignments', column: 'ticket_id' },
-  { table: 'ticket_role_assignments', column: 'role_id' },
-  { table: 'user_channels',          column: 'user_id' },
-  { table: 'user_mentions',          column: 'user_id' },
-  { table: 'user_mentions',          column: 'source_id' },
-  { table: 'user_mentions',          column: 'actor_id' },
 ];
+
+/**
+ * NOT-NULL column discovered by walking @Column / @PrimaryColumn
+ * decorator metadata across every loaded entity. Hand-maintained
+ * lists kept getting whacked by the next column the operator hadn't
+ * thought of (chat_rooms.workspace_id → chat_room_participants.
+ * participant_id → comments.ticket_id → comments.author_id …); this
+ * walk replaces the list with reflection over the same source of
+ * truth TypeORM itself reads.
+ */
+interface DiscoveredNotNullColumn {
+  table: string;
+  column: string;
+  /** undefined when the entity has no `default:` key. Drives the
+   *  cleanup branch: a default lets us backfill NULL rows to a sane
+   *  value (`@Column({ default: '' })` etc.); no default means the
+   *  row is orphan/corrupt and must be deleted. */
+  defaultValue: unknown;
+}
+
+function discoverNotNullColumnsFromEntities(): DiscoveredNotNullColumn[] {
+  const storage = getMetadataArgsStorage();
+
+  const tableByTarget = new Map<Function, string>();
+  for (const t of storage.tables) {
+    const name = typeof t.name === 'string' ? t.name : null;
+    if (name) tableByTarget.set(t.target as Function, name);
+  }
+
+  const out: DiscoveredNotNullColumn[] = [];
+  for (const col of storage.columns) {
+    const opts = col.options || ({} as Record<string, unknown>);
+    // `nullable: true` is the only explicit "nullable" signal; absence
+    // means NOT NULL by TypeORM default.
+    if ((opts as { nullable?: boolean }).nullable === true) continue;
+    // Skip auto-populated columns — never NULL in practice.
+    if (
+      col.mode === 'createDate' ||
+      col.mode === 'updateDate' ||
+      col.mode === 'deleteDate' ||
+      col.mode === 'version'
+    ) continue;
+
+    const target = col.target as Function;
+    const table = tableByTarget.get(target);
+    if (!table) continue;
+
+    const propertyName = (col as { propertyName: string }).propertyName;
+    const colName = (opts as { name?: string }).name || propertyName;
+
+    out.push({
+      table,
+      column: colName,
+      defaultValue: (opts as { default?: unknown }).default,
+    });
+  }
+  return out;
+}
+
+/**
+ * `defaultValue` from entity metadata is safe to use as a UPDATE bind
+ * parameter only when it's a primitive. Function defaults like
+ * `default: () => 'NOW()'` and object literals can't be bound directly;
+ * we fall back to DELETE for those.
+ */
+function isPrimitiveDefault(v: unknown): boolean {
+  if (v === undefined || v === null) return false;
+  const t = typeof v;
+  return t === 'string' || t === 'number' || t === 'boolean';
+}
 
 function logLine(msg: string): void {
   // Bootstrap-time logging — LogService not constructed yet. console.log
@@ -383,6 +425,7 @@ export async function preSyncPostgres(): Promise<void> {
   let fksDropped = 0;
   let uuidCast = 0;
   let uuidAligned = 0;
+  let rowsBackfilled = 0;
   let rowsDeleted = 0;
 
   try {
@@ -408,44 +451,83 @@ export async function preSyncPostgres(): Promise<void> {
     //    values so the ALTER … TYPE uuid cast succeeds.
     uuidAligned = await alignManyToOneFkColumnsToUuid(client);
 
-    // 4. NULL-row cleanup on the curated NOT-NULL column list.
-    //    Stops TypeORM's `SET NOT NULL` from failing on legacy NULL rows.
-    //    Tables with `dependentBy` cascade first so deleting the parent
-    //    doesn't leave dependent rows pointing at a deleted row.
-    for (const spec of NOT_NULL_COLUMNS) {
+    // 4. Cascade pass — parents with hand-listed dependents pinned by
+    //    FK column (plain FK, no DB-side ON DELETE CASCADE). Runs before
+    //    the generic discovery loop so dependents are removed by room_id
+    //    rather than only by their own (denormalised) workspace_id.
+    for (const spec of CASCADE_PARENTS) {
       if (!(await tableExists(client, spec.table))) continue;
-
-      if (spec.dependentBy && spec.dependentBy.length > 0) {
-        // Resolve parent IDs to delete, cascade to dependents, then delete parents.
-        const badRows = await client.query<{ id: string }>(
-          `SELECT id FROM ${spec.table} WHERE ${spec.column} IS NULL`,
+      const badRows = await client.query<{ id: string }>(
+        `SELECT id FROM ${spec.table} WHERE ${spec.column} IS NULL`,
+      );
+      if (badRows.rows.length === 0) continue;
+      const ids = badRows.rows.map((r) => r.id);
+      for (const dep of spec.dependentBy) {
+        if (!(await tableExists(client, dep.table))) continue;
+        const r = await client.query(
+          `DELETE FROM ${dep.table} WHERE ${dep.column} = ANY($1::text[])`,
+          [ids],
         );
-        if (badRows.rows.length > 0) {
-          const ids = badRows.rows.map((r) => r.id);
-          for (const dep of spec.dependentBy) {
-            if (!(await tableExists(client, dep.table))) continue;
-            const r = await client.query(
-              `DELETE FROM ${dep.table} WHERE ${dep.column} = ANY($1::text[])`,
-              [ids],
-            );
-            if (r.rowCount && r.rowCount > 0) {
-              rowsDeleted += r.rowCount;
-              logLine(
-                `${dep.table}: deleted ${r.rowCount} rows tied to ${ids.length} orphan ${spec.table}`,
-              );
-            }
-          }
+        if (r.rowCount && r.rowCount > 0) {
+          rowsDeleted += r.rowCount;
+          logLine(
+            `${dep.table}: deleted ${r.rowCount} rows tied to ${ids.length} orphan ${spec.table}`,
+          );
         }
       }
+    }
 
-      const r = await client.query(
-        `DELETE FROM ${spec.table} WHERE ${spec.column} IS NULL`,
+    // 5. NULL-row cleanup driven by entity metadata. For every NOT-NULL
+    //    column the entities declare:
+    //      - column has a primitive `default:` → UPDATE NULL → default
+    //        (preserves the row; the entity intent is "this never NULLs,
+    //        and here's the fallback value when no one supplied one")
+    //      - column has no usable default → DELETE rows with NULL (the
+    //        row is orphan/corrupt; the entity guarantees a value exists)
+    //    Skips ManyToOne FK uuid columns — those were already scrubbed
+    //    in step 3 with stricter regex-based validation.
+    const discovered = discoverNotNullColumnsFromEntities();
+    for (const spec of discovered) {
+      if (KEEP_AS_UUID.has(`${spec.table}.${spec.column}`)) continue;
+      if (!(await tableExists(client, spec.table))) continue;
+
+      // Skip columns the live DB doesn't have yet (fresh DB before
+      // synchronize creates them) — avoid spurious "column does not
+      // exist" errors that would abort the whole transaction.
+      const colExists = await client.query<{ exists: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1 FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name   = $1
+              AND column_name  = $2
+         ) AS exists`,
+        [spec.table, spec.column],
       );
-      if (r.rowCount && r.rowCount > 0) {
-        rowsDeleted += r.rowCount;
-        logLine(
-          `${spec.table}.${spec.column}: deleted ${r.rowCount} rows with NULL`,
+      if (colExists.rows[0]?.exists !== true) continue;
+
+      if (isPrimitiveDefault(spec.defaultValue)) {
+        const u = await client.query(
+          `UPDATE ${spec.table}
+              SET ${spec.column} = $1
+            WHERE ${spec.column} IS NULL`,
+          [spec.defaultValue],
         );
+        if (u.rowCount && u.rowCount > 0) {
+          rowsBackfilled += u.rowCount;
+          logLine(
+            `${spec.table}.${spec.column}: backfilled ${u.rowCount} NULL → default`,
+          );
+        }
+      } else {
+        const d = await client.query(
+          `DELETE FROM ${spec.table} WHERE ${spec.column} IS NULL`,
+        );
+        if (d.rowCount && d.rowCount > 0) {
+          rowsDeleted += d.rowCount;
+          logLine(
+            `${spec.table}.${spec.column}: deleted ${d.rowCount} rows with NULL`,
+          );
+        }
       }
     }
 
@@ -461,6 +543,8 @@ export async function preSyncPostgres(): Promise<void> {
   }
 
   logLine(
-    `done in ${Date.now() - startedAt}ms (fk-dropped=${fksDropped}, uuid-cast=${uuidCast}, uuid-aligned=${uuidAligned}, rows-deleted=${rowsDeleted})`,
+    `done in ${Date.now() - startedAt}ms ` +
+      `(fk-dropped=${fksDropped}, uuid-cast=${uuidCast}, uuid-aligned=${uuidAligned}, ` +
+      `rows-backfilled=${rowsBackfilled}, rows-deleted=${rowsDeleted})`,
   );
 }
