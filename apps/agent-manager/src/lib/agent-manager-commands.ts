@@ -398,6 +398,10 @@ export class AgentManagerCommandHandler {
         // has its own credential — without this, the operator's shell env
         // silently overrides the per-agent .credentials.json/auth.json.
         credential_provider: credential?.provider ?? null,
+        // Credential expiry monitoring needs to know the auth mode without
+        // re-running the resolver each heartbeat. Stamp it here from the
+        // resolved credential's provider suffix (after the cli prefix).
+        credential_kind: credentialKind(credential),
         registered_at: new Date().toISOString(),
       });
     }
@@ -651,6 +655,29 @@ export class AgentManagerCommandHandler {
 }
 
 // ─── helpers (kept module-scoped to avoid bloating the class API) ───────
+
+/**
+ * Map a resolved AdapterCredential (or its absence) to the auth mode the
+ * heartbeat surfaces in `agent_credentials`. Only the suffix after the
+ * cli prefix is consulted (`<cli>_subscription` / `<cli>_api_key`); the
+ * cli prefix itself was already validated by `#resolveAgentCredential`.
+ *
+ * `null` credential → 'operator_home' (legacy fallback symlinks the
+ * operator's HOME credential into cli-home, which still has a usable
+ * expiry the heartbeat will report).
+ */
+function credentialKind(
+  credential: ManagedAgentCredential | null,
+): 'subscription' | 'api_key' | 'operator_home' {
+  if (!credential) return 'operator_home';
+  if (credential.provider.endsWith('_subscription')) return 'subscription';
+  if (credential.provider.endsWith('_api_key')) return 'api_key';
+  // Unknown shape — assume subscription so the heartbeat still tries to
+  // read .credentials.json. Worse case the adapter returns null and the
+  // UI shows "no credential metadata" rather than mis-labeling api_key.
+  return 'subscription';
+}
+
 
 /**
  * Run `git pull --ff-only` for every git checkout under
