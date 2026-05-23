@@ -27,6 +27,16 @@
  * and we exclude PKs from the rewrite. No entity uses `@Column({
  * type: 'uuid' })` directly, so the auto-discovery is safe.
  *
+ * Before the cast we drop every FK constraint in the schema. Without
+ * this, PG aborts the ALTER with "foreign key constraint <name> cannot
+ * be implemented" whenever the referenced column type doesn't match
+ * the new type (e.g., `agents.workspace_id` cast to varchar while
+ * `workspaces.id` stays uuid). The drop is bounded to this transaction
+ * — TypeORM's synchronize re-creates declared FKs from @ManyToOne
+ * decorators immediately after, and FKs that existed in the DB without
+ * an entity-level declaration are cruft from a previous schema state
+ * and don't need to come back.
+ *
  * (b) is fixed by deleting NULL rows on a curated list of NOT-NULL
  * FK-like columns. The list is hardcoded because TypeORM metadata
  * isn't loaded yet at this boot stage; source of truth is the entity
@@ -56,9 +66,10 @@
  * Always emits an entry + exit log line so an operator can confirm
  * execution from the boot log:
  *   [pre-sync] starting
+ *   [pre-sync] dropped N FK constraints (TypeORM will recreate)
  *   [pre-sync] <table>.<col>: cast uuid → varchar
  *   [pre-sync] <table>.<col>: deleted N NULL rows
- *   [pre-sync] done in <ms>ms (uuid-cast=X, rows-deleted=Y)
+ *   [pre-sync] done in <ms>ms (fk-dropped=F, uuid-cast=U, rows-deleted=R)
  */
 
 import { Client } from 'pg';
@@ -147,6 +158,38 @@ async function tableExists(client: Client, name: string): Promise<boolean> {
 }
 
 /**
+ * Drop every FOREIGN KEY constraint in the current schema. Run before
+ * the uuid → varchar cast pass so PG doesn't reject ALTER COLUMN TYPE
+ * with "foreign key constraint <name> cannot be implemented" whenever
+ * the cast leaves referrer and referenced column types out of sync.
+ *
+ * Bounded to this transaction. TypeORM synchronize re-creates declared
+ * FKs from @ManyToOne decorators right after pre-sync returns; FKs
+ * that existed in the DB without an entity-level @ManyToOne are
+ * leftovers from a previous schema generation and don't need to come
+ * back. Returns the count of constraints dropped for the exit log.
+ */
+async function dropAllForeignKeys(client: Client): Promise<number> {
+  const res = await client.query<{ table_name: string; constraint_name: string }>(
+    `SELECT tc.table_name, tc.constraint_name
+       FROM information_schema.table_constraints tc
+      WHERE tc.constraint_type = 'FOREIGN KEY'
+        AND tc.table_schema    = current_schema()
+      ORDER BY tc.table_name, tc.constraint_name`,
+  );
+  for (const { table_name, constraint_name } of res.rows) {
+    // IF EXISTS guards against concurrent drops (defensive — should be
+    // impossible inside our own transaction but cheap to be safe).
+    // Constraint name is quoted because TypeORM's auto-names are mixed
+    // case and would otherwise be lower-cased by PG identifier folding.
+    await client.query(
+      `ALTER TABLE ${table_name} DROP CONSTRAINT IF EXISTS "${constraint_name}"`,
+    );
+  }
+  return res.rows.length;
+}
+
+/**
  * Walk every column in the current schema whose data_type is uuid and
  * which is NOT part of a PRIMARY KEY constraint, then cast each to
  * varchar. The cast `<col>::text` is always safe — uuids serialise to
@@ -209,17 +252,29 @@ export async function preSyncPostgres(): Promise<void> {
     );
   }
 
+  let fksDropped = 0;
   let uuidCast = 0;
   let rowsDeleted = 0;
 
   try {
     await client.query('BEGIN');
 
-    // 1. Generic uuid → varchar realignment for every non-PK uuid column.
+    // 1. Drop every FK constraint first. PG rejects ALTER COLUMN TYPE
+    //    with "foreign key constraint <name> cannot be implemented"
+    //    whenever the cast would leave referrer/referenced types out
+    //    of sync (e.g., agents.workspace_id varchar vs workspaces.id
+    //    uuid). TypeORM synchronize re-creates declared FKs from
+    //    @ManyToOne decorators immediately after this returns.
+    fksDropped = await dropAllForeignKeys(client);
+    if (fksDropped > 0) {
+      logLine(`dropped ${fksDropped} FK constraints (TypeORM will recreate)`);
+    }
+
+    // 2. Generic uuid → varchar realignment for every non-PK uuid column.
     //    Stops TypeORM's column-rebuild path from firing on the type diff.
     uuidCast = await castNonPkUuidColumnsToVarchar(client);
 
-    // 2. NULL-row cleanup on the curated NOT-NULL column list.
+    // 3. NULL-row cleanup on the curated NOT-NULL column list.
     //    Stops TypeORM's `SET NOT NULL` from failing on legacy NULL rows.
     //    Tables with `dependentBy` cascade first so deleting the parent
     //    doesn't leave dependent rows pointing at a deleted row.
@@ -272,6 +327,6 @@ export async function preSyncPostgres(): Promise<void> {
   }
 
   logLine(
-    `done in ${Date.now() - startedAt}ms (uuid-cast=${uuidCast}, rows-deleted=${rowsDeleted})`,
+    `done in ${Date.now() - startedAt}ms (fk-dropped=${fksDropped}, uuid-cast=${uuidCast}, rows-deleted=${rowsDeleted})`,
   );
 }
