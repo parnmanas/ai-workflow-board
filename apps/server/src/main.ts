@@ -9,14 +9,15 @@ import { AllExceptionsFilter } from './common/filters/http-exception.filter';
 import { RequestLoggerInterceptor } from './common/interceptors/request-logger.interceptor';
 import { ApiKeyService } from './services/api-key.service';
 import { LogService } from './services/log.service';
-import { cleanupNullWorkspaceRows } from './database/null-workspace-cleanup';
+import { preSyncPostgres } from './database/pre-sync-postgres';
 
 async function bootstrap() {
   // Runs BEFORE NestFactory so TypeORM's auto-synchronize doesn't trip on
-  // the "column ... contains null values" blocker when Postgres still has
-  // legacy NULL rows on tables whose entity declares the column NOT NULL.
-  // No-op on sqlite/mysql. See null-workspace-cleanup.ts for the rationale.
-  await cleanupNullWorkspaceRows();
+  // the "column ... contains null values" blocker. Handles both the
+  // type-mismatch rebuild path (uuid → varchar realignment) and lingering
+  // NULL rows on NOT-NULL columns. No-op on sqlite/mysql.
+  // See pre-sync-postgres.ts for the rationale.
+  await preSyncPostgres();
 
   const app = await NestFactory.create(AppModule);
 
