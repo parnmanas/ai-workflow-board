@@ -23,6 +23,7 @@ import { Resource } from '../../../entities/Resource';
 import { activityEvents } from '../../../services/activity.service';
 import { ok, err, MENTION_SYNTAX_DOC } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
+import { resolveAgentDisplayName } from '../../../utils/agent-name';
 import type { ToolContext } from './context';
 
 export function registerCommentTools(server: McpServer, ctx: ToolContext): void {
@@ -151,16 +152,15 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
 
       if (!resolvedAuthorId) return err('author_id is required (or authenticate with an agent API key)');
 
-      // Resolve author name if not provided
+      // Resolve author name if not provided. For agents always go through
+      // `resolveAgentDisplayName` so the denormalized `author` snapshot picks
+      // up the `<Manager>/<Agent>` prefix — `caller.agentName` carries only
+      // the bare API-key name.
       let authorName = author || '';
       if (!authorName) {
         if (resolvedAuthorType === 'agent') {
-          if (caller?.agentName && caller?.agentId === resolvedAuthorId) {
-            authorName = caller.agentName;
-          } else {
-            const agent = await dataSource.getRepository(Agent).findOne({ where: { id: resolvedAuthorId } });
-            authorName = agent?.name || `Agent #${resolvedAuthorId}`;
-          }
+          const display = await resolveAgentDisplayName(dataSource.getRepository(Agent), resolvedAuthorId);
+          authorName = display || caller?.agentName || `Agent #${resolvedAuthorId}`;
         } else {
           const user = await dataSource.getRepository(User).findOne({ where: { id: resolvedAuthorId } });
           authorName = user?.name || `User #${resolvedAuthorId}`;
@@ -310,12 +310,8 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
     let authorName = requestedName || '';
     if (!authorName) {
       if (authorType === 'agent') {
-        if (caller?.agentName && caller?.agentId === authorId) {
-          authorName = caller.agentName;
-        } else {
-          const agent = await dataSource.getRepository(Agent).findOne({ where: { id: authorId } });
-          authorName = agent?.name || `Agent #${authorId}`;
-        }
+        const display = await resolveAgentDisplayName(dataSource.getRepository(Agent), authorId);
+        authorName = display || caller?.agentName || `Agent #${authorId}`;
       } else {
         const user = await dataSource.getRepository(User).findOne({ where: { id: authorId } });
         authorName = user?.name || `User #${authorId}`;

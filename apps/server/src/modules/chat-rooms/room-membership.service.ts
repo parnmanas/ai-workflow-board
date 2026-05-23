@@ -6,6 +6,7 @@ import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { User } from '../../entities/User';
 import { Agent } from '../../entities/Agent';
 import { activityEvents } from '../../services/activity.service';
+import { resolveAgentDisplayName } from '../../utils/agent-name';
 
 const PARTICIPANT_CAP = 50;
 
@@ -205,8 +206,8 @@ export class RoomMembershipService {
       const user = await this.userRepo.findOne({ where: { id: participantId } });
       return user ? (user.name || user.email) : 'Unknown User';
     } else if (participantType === 'agent') {
-      const agent = await this.agentRepo.findOne({ where: { id: participantId } });
-      return agent ? agent.name : 'Unknown Agent';
+      const display = await resolveAgentDisplayName(this.agentRepo, participantId);
+      return display ?? 'Unknown Agent';
     }
     return 'Unknown';
   }

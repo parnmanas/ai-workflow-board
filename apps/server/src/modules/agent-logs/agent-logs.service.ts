@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { AgentErrorLog } from '../../entities/AgentErrorLog';
 import { Agent } from '../../entities/Agent';
+import { resolveAgentDisplayMap } from '../../utils/agent-name';
 
 const MAX_ENTRIES_PER_UPLOAD = 500;
 const MAX_LIST_LIMIT = 500;
@@ -121,12 +122,13 @@ export class AgentLogsService {
     qb.orderBy('log.occurred_at', 'DESC').limit(limit);
     const rows = await qb.getMany();
 
-    // Join agent names in one query
+    // Join agent names in one query, then format with Manager/Agent prefix
+    // so the log table shows the same identity the rest of the UI does.
     const agentIds = Array.from(new Set(rows.map(r => r.agent_id)));
     const agents = agentIds.length > 0
       ? await this.agentRepo.createQueryBuilder('a').where('a.id IN (:...ids)', { ids: agentIds }).getMany()
       : [];
-    const agentNameMap = new Map(agents.map(a => [a.id, a.name]));
+    const agentNameMap = await resolveAgentDisplayMap(this.agentRepo, agents);
 
     return rows.map(r => ({
       id: r.id,
@@ -170,7 +172,7 @@ export class AgentLogsService {
     const agents = agentIds.length > 0
       ? await this.agentRepo.createQueryBuilder('a').where('a.id IN (:...ids)', { ids: agentIds }).getMany()
       : [];
-    const nameMap = new Map(agents.map(a => [a.id, a.name]));
+    const nameMap = await resolveAgentDisplayMap(this.agentRepo, agents);
 
     return raw.map(r => ({
       agent_id: r.agent_id,
