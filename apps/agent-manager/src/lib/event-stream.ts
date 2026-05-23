@@ -94,14 +94,20 @@ export class EventStream {
    * that agent is silently filtered out on the server, and no subagent ever
    * spawns.
    *
+   * Returns a Promise that resolves once the fresh SSE connection is
+   * established (HTTP 200 received). spawn_agent awaits this so the ack
+   * POST only fires after the server's managedAgentIds cache includes the
+   * new agent — closing the race window where a chat message arriving
+   * between ack and reconnect would be silently dropped.
+   *
    * Handles three concurrent states cleanly:
    *   - active connect → abort the fetch/reader, the catch swallows AbortError.
    *   - waiting in backoff → clear the pending timer.
-   *   - already stopped → no-op.
+   *   - already stopped → resolves immediately (no-op).
    * A fresh #connect() is then scheduled on the next tick.
    */
-  reconnect(): void {
-    if (this.#stopped) return;
+  reconnect(): Promise<void> {
+    if (this.#stopped) return Promise.resolve();
     log('SSE forced reconnect (managedAgentIds refresh)');
     this.#retryDelay = RECONNECT_INITIAL_MS;
     if (this.#reconnectTimer) {
@@ -111,7 +117,19 @@ export class EventStream {
     const prev = this.#abortController;
     this.#abortController = null;
     prev?.abort();
-    setImmediate(() => void this.#connect());
+
+    return new Promise<void>((resolve) => {
+      const origOnConnect = this.#onConnect;
+      this.#onConnect = () => {
+        this.#onConnect = origOnConnect;
+        try { origOnConnect?.(); } catch { /* hook errors must not block */ }
+        resolve();
+      };
+      setImmediate(() => void this.#connect());
+      // Safety net: resolve after 10s even if the connection fails to
+      // establish, so spawn_agent ack is never blocked indefinitely.
+      setTimeout(() => resolve(), 10_000).unref?.();
+    });
   }
 
   async #connect(): Promise<void> {

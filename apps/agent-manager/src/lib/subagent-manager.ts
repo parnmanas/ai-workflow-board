@@ -24,7 +24,7 @@ import { log } from './logging.js';
 import { createAdapter } from './cli-adapters/index.js';
 import { ADAPTER_CAPABILITIES, type CliAdapter } from './cli-adapters/base.js';
 import { fireAndForgetTool } from './mcp-client.js';
-import type { AwbConfig } from './rest.js';
+import { postChatRoomMessage, type AwbConfig } from './rest.js';
 import type {
   SubagentManager as SubagentManagerContract,
   SubagentSpawnArgs,
@@ -58,6 +58,7 @@ interface SubagentRecord {
   chat_request_id: string | null;
   ticket_id: string | null;
   agent_id: string | null;
+  room_id: string | null;
   started_at: number;
   expected_completion_at: number;
   config_path: string | null;
@@ -379,6 +380,7 @@ export class SubagentManager implements SubagentManagerContract {
         chat_request_id: spec.chatRequestId || null,
         ticket_id: spec.ticketId || null,
         agent_id: spec.agentId || null,
+        room_id: spec.roomId || null,
         started_at: Date.now(),
         expected_completion_at:
           Date.now() + (this.#config.delegation.ttlMinutes ?? 15) * 60_000,
@@ -440,13 +442,26 @@ export class SubagentManager implements SubagentManagerContract {
       }
       record.tap?.end({ exit_code: code, signal });
 
-      if (record.captureOutput && record.ticket_id && code === 0 && !signal) {
+      if (record.captureOutput && (record.ticket_id || record.room_id)) {
         try {
           // Use the same adapter that spawned this child — picked by
           // record.cli_type so we don't aggregate gemini's stdout with
           // claude's parser.
           const answer = this.#adapterFor(record.cli_type).collectOneshotResult(record.outLines);
-          if (answer) await this.#postOneshotAnswer(record, answer);
+          if (answer) {
+            if (record.room_id) {
+              await this.#postOneshotChatAnswer(record, answer);
+            } else {
+              await this.#postOneshotAnswer(record, answer);
+            }
+          } else if (record.room_id && code !== 0) {
+            // CLI exited with an error but produced no parseable output —
+            // surface a generic failure so the user isn't left waiting.
+            await this.#postOneshotChatAnswer(
+              record,
+              `⚠️ Agent가 응답하지 못했습니다 (exit code ${code ?? 'unknown'}).`,
+            );
+          }
         } catch (err: any) {
           log(`Subagent post-answer failed pid=${pid}: ${err?.message ?? err}`);
         }
@@ -516,6 +531,16 @@ export class SubagentManager implements SubagentManagerContract {
     });
     log(
       `Subagent posted answer to ticket=${record.ticket_id} (cli=${record.cli_type}, ${trimmed.length} chars)`,
+    );
+  }
+
+  async #postOneshotChatAnswer(record: SubagentRecord, answer: string): Promise<void> {
+    const MAX = 60_000;
+    const trimmed = answer.length > MAX ? answer.slice(0, MAX) + '\n\n…[truncated]' : answer;
+    const agentId = record.agent_id || '';
+    await postChatRoomMessage(this.#config, record.room_id!, agentId, trimmed);
+    log(
+      `Subagent posted chat answer to room=${record.room_id} agent=${agentId.slice(0, 8)} (cli=${record.cli_type}, ${trimmed.length} chars)`,
     );
   }
 
