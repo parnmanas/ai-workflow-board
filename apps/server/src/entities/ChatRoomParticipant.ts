@@ -7,7 +7,7 @@ export class ChatRoomParticipant {
   id: string;
 
   // FK to chat_rooms.id
-  @Column({ type: 'uuid' })
+  @Column({ type: 'varchar' })
   room_id: string;
 
   @ManyToOne(() => ChatRoom)
@@ -18,9 +18,8 @@ export class ChatRoomParticipant {
   @Column({ type: 'varchar' })
   participant_type: string;
 
-  // User.id or Agent.id depending on participant_type — both are uuid PKs,
-  // so widening here is safe regardless of which side the value points to.
-  @Column({ type: 'uuid' })
+  // User.id or Agent.id depending on participant_type
+  @Column({ type: 'varchar' })
   participant_id: string;
 
   // Server-side unread count: use m.created_at > p.last_read_at (CHAT-12, CHAT-13)

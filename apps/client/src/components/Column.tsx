@@ -10,9 +10,10 @@ interface ColumnProps {
   column: ColumnType;
   onTicketClick: (ticket: Ticket) => void;
   onCreateTicket: (columnId: string, title: string, description: string, priority: string) => void;
+  focusTicketMap?: Record<string, Array<{ agent_name: string; role: string }>>;
 }
 
-export default function Column({ column, onTicketClick, onCreateTicket }: ColumnProps) {
+export default function Column({ column, onTicketClick, onCreateTicket, focusTicketMap }: ColumnProps) {
   const [showForm, setShowForm] = useState(false);
   const columnScrollRef = useDragToScroll<HTMLDivElement>({ axis: 'y' });
 
@@ -100,6 +101,7 @@ export default function Column({ column, onTicketClick, onCreateTicket }: Column
                 ticket={ticket}
                 index={index}
                 onClick={() => onTicketClick(ticket)}
+                focusHolders={focusTicketMap?.[ticket.id]}
               />
             ))}
             {provided.placeholder}

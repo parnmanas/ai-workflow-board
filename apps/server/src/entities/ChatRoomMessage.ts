@@ -6,21 +6,20 @@ export class ChatRoomMessage {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  // FK to chat_rooms.id
-  @Column({ type: 'uuid' })
+  // FK to chat_rooms.id — plain varchar per project convention
+  @Column({ type: 'varchar' })
   room_id: string;
 
   // Redundant but stored for direct workspace-scoped queries (matches ChatMessage pattern)
-  @Column({ type: 'uuid' })
+  @Column({ type: 'varchar' })
   workspace_id: string;
 
   // 'user' | 'agent' — Phase 8 @mention routing compatible
   @Column({ type: 'varchar' })
   sender_type: string;
 
-  // User.id or Agent.id; agent must be a room participant to send.
-  // Both User.id and Agent.id are uuid PKs.
-  @Column({ type: 'uuid' })
+  // User.id or Agent.id; agent must be a room participant to send
+  @Column({ type: 'varchar' })
   sender_id: string;
 
   // Markdown text content

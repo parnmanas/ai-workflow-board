@@ -9,15 +9,8 @@ import { AllExceptionsFilter } from './common/filters/http-exception.filter';
 import { RequestLoggerInterceptor } from './common/interceptors/request-logger.interceptor';
 import { ApiKeyService } from './services/api-key.service';
 import { LogService } from './services/log.service';
-import { preSyncPostgres } from './database/pre-sync-postgres';
 
 async function bootstrap() {
-  // Postgres-only pre-sync — widens specific varchar columns to uuid before
-  // TypeORM's synchronize:true step (which can't emit the USING clause this
-  // cast needs). No-op on sqlite/mysql and on already-migrated databases.
-  // See apps/server/src/database/pre-sync-postgres.ts for the full rationale.
-  await preSyncPostgres();
-
   const app = await NestFactory.create(AppModule);
 
   // Raise Express body-parser limit from its 100KB default. Agent plugins

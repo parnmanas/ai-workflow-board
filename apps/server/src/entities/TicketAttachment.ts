@@ -1,6 +1,5 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, ManyToOne, JoinColumn, Index } from 'typeorm';
 import { Ticket } from './Ticket';
-import { emptyToNullUuid } from '../database/uuid-column';
 
 /**
  * Files attached directly to a Ticket. Distinct from Comment attachments —
@@ -14,10 +13,10 @@ export class TicketAttachment {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'uuid', nullable: true, transformer: emptyToNullUuid })
+  @Column({ type: 'varchar', nullable: true, default: '' })
   workspace_id: string;
 
-  @Column({ type: 'uuid' })
+  @Column({ type: 'varchar' })
   ticket_id: string;
 
   @Column({ type: 'varchar' })
@@ -40,7 +39,7 @@ export class TicketAttachment {
   @Column({ type: 'varchar', default: 'user' })
   uploaded_by_type: string;
 
-  @Column({ type: 'uuid', nullable: true, transformer: emptyToNullUuid })
+  @Column({ type: 'varchar', default: '' })
   uploaded_by_id: string;
 
   @Column({ type: 'varchar', default: '' })

@@ -1721,7 +1721,8 @@ function ManagerVersionBadge({ inst }: { inst: AgentManagerInstance }) {
       </span>
     );
   }
-  if (inst.update_last_error) {
+  if (inst.update_last_error && !inst.latest_version) {
+    // Hard failure: fetch failed AND no cached remote ref to fall back on.
     return (
       <span
         style={{ marginLeft: 8, fontSize: 11, color: tokens.colors.warning }}

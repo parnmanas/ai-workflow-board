@@ -10,9 +10,13 @@ import { AuthGuard } from '../../common/guards/auth.guard';
 import { DEFAULT_COLUMNS } from '../../database/database.module';
 import { DEFAULT_BOARD_ROUTING } from '../../db';
 import { PromptTemplatesService } from '../prompt-templates/prompt-templates.service';
+import { Agent } from '../../entities/Agent';
+import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
+import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { findOrFail } from '../../common/find-or-fail';
 import { parseComments, expandCommentAttachments } from '../mcp/shared/ticket-parsing';
 import { writeRoutingConfigThrough } from './routing-config.helper';
+import { AgentWorkloadService } from '../agents/agent-workload.service';
 
 @ApiBearerAuth('user-session')
 @ApiTags('boards')
@@ -25,6 +29,7 @@ export class BoardsController {
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly promptTemplatesService: PromptTemplatesService,
+    private readonly agentWorkload: AgentWorkloadService,
   ) {}
 
   @Get()
@@ -109,6 +114,86 @@ export class BoardsController {
     await expandCommentAttachments(this.dataSource, allComments);
 
     return res.json({ ...board, columns: columnsWithTickets });
+  }
+
+  /**
+   * GET /api/boards/:id/focus-tickets
+   *
+   * Returns the current focus ticket for each (agent, role) pair on this
+   * board. Used by the board UI to display which ticket is the active focus
+   * for each agent role, and which tickets are being skipped because another
+   * ticket holds focus (ticket b55e4421).
+   *
+   * Response shape:
+   *   { focus_tickets: Array<{ agent_id: string; agent_name: string; role: string; ticket_id: string }> }
+   */
+  @Get(':id/focus-tickets')
+  async getFocusTickets(@Param('id') id: string, @Res() res: Response) {
+    const board = await findOrFail(this.boardRepo, { where: { id } }, 'Board not found');
+
+    // Find all unique (agent_id, role_slug) pairs that have tickets on this board.
+    const assignRepo = this.dataSource.getRepository(TicketRoleAssignment);
+    const roleRepo = this.dataSource.getRepository(WorkspaceRole);
+    const columns = await this.colRepo.find({ where: { board_id: board.id } });
+    const colIds = columns.map(c => c.id);
+    if (colIds.length === 0) return res.json({ focus_tickets: [] });
+
+    // Find all tickets on this board's columns.
+    const tickets = await this.ticketRepo
+      .createQueryBuilder('t')
+      .where('t.column_id IN (:...colIds)', { colIds })
+      .getMany();
+    if (tickets.length === 0) return res.json({ focus_tickets: [] });
+
+    const ticketIds = tickets.map(t => t.id);
+    const assignments = await assignRepo
+      .createQueryBuilder('ra')
+      .where('ra.ticket_id IN (:...ids)', { ids: ticketIds })
+      .getMany();
+
+    // Dedupe (agent_id, role_id) pairs.
+    const seen = new Set<string>();
+    const pairs: Array<{ agent_id: string; role_id: string }> = [];
+    for (const a of assignments) {
+      if (!a.agent_id) continue;
+      const key = `${a.agent_id}|${a.role_id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      pairs.push({ agent_id: a.agent_id, role_id: a.role_id });
+    }
+
+    // Resolve role slugs and agent names.
+    const roles = await roleRepo.find({ where: { workspace_id: board.workspace_id } });
+    const roleById = new Map(roles.map(r => [r.id, r]));
+
+    const agentRepo = this.dataSource.getRepository(Agent);
+    const agentIds = Array.from(new Set(pairs.map(p => p.agent_id)));
+    const agents = agentIds.length > 0
+      ? await agentRepo.createQueryBuilder('a').where('a.id IN (:...ids)', { ids: agentIds }).getMany()
+      : [];
+    const agentById = new Map(agents.map(a => [a.id, a]));
+
+    // Compute focus for each (agent, role) pair.
+    // TODO: parallelize getFocusTicket calls (Promise.all) once the N+1
+    // queries inside getFocusTicket are batched — sequential for now to
+    // avoid overwhelming DB with concurrent per-ticket queries.
+    const focusTickets: Array<{ agent_id: string; agent_name: string; role: string; ticket_id: string }> = [];
+    for (const { agent_id, role_id } of pairs) {
+      const role = roleById.get(role_id);
+      if (!role) continue;
+      const focusTicketId = await this.agentWorkload.getFocusTicket(agent_id, board.id, role.slug);
+      if (focusTicketId) {
+        const agent = agentById.get(agent_id);
+        focusTickets.push({
+          agent_id,
+          agent_name: agent?.name ?? agent_id,
+          role: role.slug,
+          ticket_id: focusTicketId,
+        });
+      }
+    }
+
+    return res.json({ focus_tickets: focusTickets });
   }
 
   @Patch(':id')

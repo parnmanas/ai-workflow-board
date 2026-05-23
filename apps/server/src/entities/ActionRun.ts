@@ -1,5 +1,4 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, Index } from 'typeorm';
-import { emptyToNullUuid } from '../database/uuid-column';
 
 // One row per dispatch of an Action. The chat conversation that the agent
 // holds with the user lives in the linked ChatRoom (room_id) — ActionRun is
@@ -11,14 +10,14 @@ export class ActionRun {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'uuid' })
+  @Column({ type: 'varchar' })
   action_id: string;
 
-  @Column({ type: 'uuid' })
+  @Column({ type: 'varchar' })
   workspace_id: string;
 
   // The ChatRoom hosting the agent ↔ user conversation for this Run.
-  @Column({ type: 'uuid' })
+  @Column({ type: 'varchar' })
   room_id: string;
 
   // 'user' | 'system' (scheduler) | 'agent' (future: agent-triggered runs)
@@ -26,7 +25,7 @@ export class ActionRun {
   triggered_by_type: string;
 
   // user_id when triggered_by_type='user'; '' for 'system'.
-  @Column({ type: 'uuid', nullable: true, transformer: emptyToNullUuid })
+  @Column({ type: 'varchar', default: '' })
   triggered_by_id: string;
 
   // The actual prompt sent to the agent after `{{var}}` interpolation.

@@ -17,11 +17,6 @@ export class SubagentLogLine {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  // FK to subagents.subagent_id. Kept as varchar because the Subagent PK
-  // itself is varchar (plugin-generated UUIDs stored as plain strings, no
-  // server-side uuid validation enforced). Widening here without also
-  // widening the PK would break referential integrity, and there's no SQL
-  // JOIN against this column that hits the PG operator-mismatch path.
   @Column({ type: 'varchar' })
   subagent_id: string;
 

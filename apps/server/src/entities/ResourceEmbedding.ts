@@ -5,7 +5,7 @@ export class ResourceEmbedding {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'uuid' })
+  @Column({ type: 'varchar' })
   resource_id: string;
 
   @Column({ type: 'text' })

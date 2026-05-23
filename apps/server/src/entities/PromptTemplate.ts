@@ -1,12 +1,11 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
-import { emptyToNullUuid } from '../database/uuid-column';
 
 @Entity('prompt_templates')
 export class PromptTemplate {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'uuid', nullable: true, transformer: emptyToNullUuid })
+  @Column({ type: 'varchar', default: '' })
   workspace_id: string;
 
   @Column({ type: 'varchar', default: '' })

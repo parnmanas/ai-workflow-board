@@ -1,18 +1,17 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
-import { nullablePassThroughUuid } from '../database/uuid-column';
 
 @Entity('resources')
 export class Resource {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'uuid' })
+  @Column({ type: 'varchar' })
   workspace_id: string;
 
-  @Column({ type: 'uuid', nullable: true, transformer: nullablePassThroughUuid })
+  @Column({ type: 'varchar', nullable: true, default: null })
   board_id: string | null;
 
-  @Column({ type: 'uuid', nullable: true, transformer: nullablePassThroughUuid })
+  @Column({ type: 'varchar', nullable: true, default: null })
   credential_id: string | null;
 
   @Column({ type: 'varchar' })

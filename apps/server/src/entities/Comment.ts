@@ -1,6 +1,5 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, ManyToOne, JoinColumn, Index } from 'typeorm';
 import { Ticket } from './Ticket';
-import { emptyToNullUuid, nullablePassThroughUuid } from '../database/uuid-column';
 
 export type CommentType = 'note' | 'question' | 'answer' | 'decision' | 'chat' | 'system' | 'handoff';
 export type CommentStatus = 'open' | 'resolved' | null;
@@ -13,16 +12,16 @@ export class Comment {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'uuid', nullable: true, transformer: emptyToNullUuid })
+  @Column({ type: 'varchar', nullable: true, default: '' })
   workspace_id: string;
 
-  @Column({ type: 'uuid' })
+  @Column({ type: 'varchar' })
   ticket_id: string;
 
   @Column({ type: 'varchar', default: 'user' })
   author_type: string;
 
-  @Column({ type: 'uuid', nullable: true, transformer: emptyToNullUuid })
+  @Column({ type: 'varchar', default: '' })
   author_id: string;
 
   @Column({ type: 'varchar' })
@@ -53,7 +52,7 @@ export class Comment {
 
   // Threading: 'answer' -> 'question', generic reply chains. Validated to refer
   // to a comment on the same ticket so cross-ticket linkage cannot occur.
-  @Column({ type: 'uuid', nullable: true, transformer: nullablePassThroughUuid })
+  @Column({ type: 'varchar', nullable: true })
   parent_id: string | null;
 
   // Type-specific extension bag (e.g., handoff.target_agent_id, decision.references).

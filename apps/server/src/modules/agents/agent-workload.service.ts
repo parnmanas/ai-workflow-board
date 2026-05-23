@@ -74,9 +74,33 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import { ActivityLog } from '../../entities/ActivityLog';
 import { Ticket } from '../../entities/Ticket';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { priorityIndex } from './priority';
+
+/**
+ * Parse the `Ticket.labels` JSON string defensively. Returns `[]` on any
+ * malformed input.
+ */
+function parseLabels(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((s): s is string => typeof s === 'string' && s.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Returns true if at least one label matches the `BLOCKED-*` glob pattern
+ * (case-insensitive).
+ */
+function hasBlockedLabel(labels: string[]): boolean {
+  return labels.some(l => l.toLowerCase().startsWith('blocked-'));
+}
 
 @Injectable()
 export class AgentWorkloadService {
@@ -227,7 +251,79 @@ export class AgentWorkloadService {
       return parent != null && candidateSet.has(parent);
     };
 
-    tickets.sort((a, b) => {
+    // Heartbeat-only BLOCKED filter (ticket b55e4421):
+    //
+    //   A ticket carrying a BLOCKED-* label whose most recent claim→release
+    //   cycle contains ZERO column moves is in a "heartbeat-only" loop —
+    //   the subagent checked the gate, found it closed, posted a comment,
+    //   and released without advancing the ticket. Treating such a ticket
+    //   as focus permanently locks the role queue (the BacklogPromotionService
+    //   refuses to promote any new ticket while a focus exists).
+    //
+    //   Exclude these tickets from focus consideration so the next eligible
+    //   ticket can be promoted and dispatched. The BLOCKED ticket stays in
+    //   its column and continues to receive heartbeat pings via the
+    //   supervisor backstop — it just stops blocking the queue.
+    // TODO: batch the activity lookups for all BLOCKED tickets in one query
+    // to avoid N+1 sequential queries per candidate (lastRelease, lastClaim, moveCount).
+    const activityRepo = this.dataSource.getRepository(ActivityLog);
+    const nonBlockedTickets: Ticket[] = [];
+    for (const t of tickets) {
+      const labels = parseLabels(t.labels);
+      if (!hasBlockedLabel(labels)) {
+        nonBlockedTickets.push(t);
+        continue;
+      }
+      // Check if the most recent release was heartbeat-only (no column
+      // move between the last claim and release).
+      const lastRelease = await activityRepo
+        .createQueryBuilder('a')
+        .where('a.ticket_id = :tid', { tid: t.id })
+        .andWhere("a.action = 'updated'")
+        .andWhere("a.field_changed = 'locked_by_agent_id'")
+        .andWhere("a.trigger_source = 'agent_release'")
+        .orderBy('a.created_at', 'DESC')
+        .limit(1)
+        .getOne();
+      if (!lastRelease) {
+        // No release record at all — ticket was never claimed/released,
+        // keep it in the candidate set.
+        nonBlockedTickets.push(t);
+        continue;
+      }
+      const lastClaim = await activityRepo
+        .createQueryBuilder('a')
+        .where('a.ticket_id = :tid', { tid: t.id })
+        .andWhere("a.action = 'updated'")
+        .andWhere("a.field_changed = 'locked_by_agent_id'")
+        .andWhere("a.trigger_source = 'agent_claim'")
+        .andWhere('a.created_at <= :releaseAt', { releaseAt: lastRelease.created_at })
+        .orderBy('a.created_at', 'DESC')
+        .limit(1)
+        .getOne();
+      if (!lastClaim) {
+        nonBlockedTickets.push(t);
+        continue;
+      }
+      // Count column moves between claim and release.
+      const moveCount = await activityRepo
+        .createQueryBuilder('a')
+        .where('a.ticket_id = :tid', { tid: t.id })
+        .andWhere("a.action = 'moved'")
+        .andWhere("a.field_changed = 'column'")
+        .andWhere('a.created_at >= :claimAt', { claimAt: lastClaim.created_at })
+        .andWhere('a.created_at <= :releaseAt', { releaseAt: lastRelease.created_at })
+        .getCount();
+      if (moveCount > 0) {
+        // Last cycle had a real column move — ticket is actively progressing.
+        nonBlockedTickets.push(t);
+      }
+      // else: heartbeat-only BLOCKED ticket — excluded from focus.
+    }
+    if (nonBlockedTickets.length === 0) return null;
+    if (nonBlockedTickets.length === 1) return nonBlockedTickets[0].id;
+
+    nonBlockedTickets.sort((a, b) => {
       // 1. Column position DESC. Higher column = closer to done = wins.
       const pa = colById.get(a.column_id || '')?.position ?? -Infinity;
       const pb = colById.get(b.column_id || '')?.position ?? -Infinity;
@@ -249,6 +345,6 @@ export class AgentWorkloadService {
       return ta - tb;
     });
 
-    return tickets[0]?.id ?? null;
+    return nonBlockedTickets[0]?.id ?? null;
   }
 }

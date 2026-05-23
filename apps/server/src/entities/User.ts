@@ -1,5 +1,4 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
-import { nullablePassThroughUuid } from '../database/uuid-column';
 
 @Entity('users')
 export class User {
@@ -31,7 +30,7 @@ export class User {
   permissions: string;
 
   // Workspace the user selected during signup; set by Plan 03 auth flow
-  @Column({ type: 'uuid', nullable: true, transformer: nullablePassThroughUuid })
+  @Column({ type: 'varchar', nullable: true, default: null })
   requested_workspace_id: string | null;
 
   @CreateDateColumn()

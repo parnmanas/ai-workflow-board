@@ -1,5 +1,4 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, Index } from 'typeorm';
-import { emptyToNullUuid } from '../database/uuid-column';
 
 /**
  * Per-(user, ticket) read marker. Tracks when the user last marked the
@@ -20,15 +19,15 @@ export class TicketReadState {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'uuid' })
+  @Column({ type: 'varchar' })
   user_id: string;
 
-  @Column({ type: 'uuid' })
+  @Column({ type: 'varchar' })
   ticket_id: string;
 
   // Denormalized so a global "all unread for me in workspace W" query
   // can be answered without joining tickets.
-  @Column({ type: 'uuid', nullable: true, transformer: emptyToNullUuid })
+  @Column({ type: 'varchar', nullable: true, default: '' })
   workspace_id: string;
 
   // ISO-style timestamp the user last acknowledged. NULL means never read

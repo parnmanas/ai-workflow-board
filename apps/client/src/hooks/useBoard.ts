@@ -18,6 +18,11 @@ export function useBoard(boardId: string = '') {
   const [error, setError] = useState<string | null>(null);
   // typing indicator: map of ticketId -> agentId (or null when cleared)
   const [typingIndicators, setTypingIndicators] = useState<Record<string, string | null>>({});
+  // Focus ticket map: ticketId → array of { agent_name, role } describing
+  // who considers this ticket their current focus. Used by TicketCard to
+  // show a "FOCUS" badge so operators can see why other tickets aren't
+  // being picked up (ticket b55e4421).
+  const [focusTicketMap, setFocusTicketMap] = useState<Record<string, Array<{ agent_name: string; role: string }>>>({});
 
   // Track how many local actions are in progress to avoid duplicate SSE refresh
   const localActionCount = useRef(0);
@@ -37,16 +42,24 @@ export function useBoard(boardId: string = '') {
       // the workspace id from the board payload so a single fetch refreshes
       // alongside the board state.
       const wsId = (boardData as any)?.workspace_id || '';
-      const [usersData, agentsData, channelsData, rolesData] = await Promise.all([
+      const [usersData, agentsData, channelsData, rolesData, focusData] = await Promise.all([
         api.getUsers().catch(() => []),
         api.getAgents().catch(() => []),
         api.getChannels().catch(() => []),
         wsId ? api.listWorkspaceRoles(wsId).catch(() => []) : Promise.resolve([] as any[]),
+        api.getBoardFocusTickets(boardId).catch(() => ({ focus_tickets: [] })),
       ]);
       setUsers(usersData);
       setAgents(agentsData);
       setChannels(channelsData);
       setWorkspaceRoles((rolesData as any[]).slice().sort((a, b) => (a.position ?? 0) - (b.position ?? 0)));
+      // Build focus map: ticketId → [{agent_name, role}]
+      const fMap: Record<string, Array<{ agent_name: string; role: string }>> = {};
+      for (const f of focusData.focus_tickets || []) {
+        if (!fMap[f.ticket_id]) fMap[f.ticket_id] = [];
+        fMap[f.ticket_id].push({ agent_name: f.agent_name, role: f.role });
+      }
+      setFocusTicketMap(fMap);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -250,6 +263,7 @@ export function useBoard(boardId: string = '') {
     error,
     refresh,
     typingIndicators,
+    focusTicketMap,
     createTicket,
     updateTicket,
     moveTicket,

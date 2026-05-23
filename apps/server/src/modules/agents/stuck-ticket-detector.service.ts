@@ -47,10 +47,12 @@ import { StuckTicketAlert } from '../../entities/StuckTicketAlert';
 import { Ticket } from '../../entities/Ticket';
 import { Workspace } from '../../entities/Workspace';
 import { LogService } from '../../services/log.service';
+import { ActivityService } from '../../services/activity.service';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import {
   ColumnRolePolicyService,
   PolicyEvaluation,
+  globMatch,
 } from '../column-policies/column-role-policy.service';
 
 const DEFAULTS = {
@@ -115,6 +117,7 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly logService: LogService,
+    private readonly activityService: ActivityService,
     private readonly messaging: RoomMessagingService,
     private readonly policies: ColumnRolePolicyService,
   ) {
@@ -496,6 +499,21 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
       lines.push(`Latest agent comment: _${excerpt}_`);
       lines.push(`[Open ticket](${ticketLink})`);
       await this._writePolicyViolationActivity(ticket, evaluation, cycleCount, now);
+
+      // Remediation (ticket b55e4421): auto-demote to intake column when
+      // a BLOCKED-* gated ticket has been cycling without progress. The
+      // ticket's gate signals stay in comments — moving to Backlog just
+      // removes it from the active queue so other tickets can promote.
+      const hasGateLabels = evaluation.gateLabels.some(gl =>
+        labels.some(l => globMatch(gl, l)),
+      );
+      if (hasGateLabels && cycleCount >= evaluation.minCyclesThreshold) {
+        const demoted = await this._demoteToIntake(ticket, column, cycleCount, now);
+        if (demoted) {
+          lines.push('');
+          lines.push('**Auto-remediation applied**: ticket moved to Backlog. Move it back to To Do once the gate clears.');
+        }
+      }
     } else {
       lines.push(`⚠️ **Stale-WAIT detected** — \`${ticket.id}\``);
       lines.push(`**${ticket.title}**`);
@@ -551,6 +569,95 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
       this.logService.warn('StuckDetector', 'policy_violation activity write failed (continuing)', {
         err: String(e), ticket_id: ticket.id,
       });
+    }
+  }
+
+  /**
+   * Remediation action (ticket b55e4421): move a BLOCKED-gated ticket back
+   * to its board's intake column and post a system comment explaining why.
+   * Returns true if the ticket was demoted, false if no intake column was
+   * found or the move failed.
+   */
+  private async _demoteToIntake(
+    ticket: Ticket,
+    currentColumn: BoardColumn | null,
+    cycleCount: number,
+    now: Date,
+  ): Promise<boolean> {
+    if (!currentColumn) return false;
+
+    const colRepo = this.dataSource.getRepository(BoardColumn);
+    const ticketRepo = this.dataSource.getRepository(Ticket);
+    const commentRepo = this.dataSource.getRepository(Comment);
+
+    // Find the board's intake column.
+    const intakeCol = await colRepo
+      .createQueryBuilder('c')
+      .where('c.board_id = :boardId', { boardId: currentColumn.board_id })
+      .andWhere("c.kind = 'intake'")
+      .orderBy('c.position', 'ASC')
+      .limit(1)
+      .getOne();
+    if (!intakeCol) {
+      this.logService.warn('StuckDetector', 'no intake column found for remediation', {
+        ticket_id: ticket.id, board_id: currentColumn.board_id,
+      });
+      return false;
+    }
+
+    // Already on intake — nothing to do.
+    if (ticket.column_id === intakeCol.id) return false;
+
+    try {
+      // Move the ticket.
+      const oldColumnId = ticket.column_id;
+      ticket.column_id = intakeCol.id;
+      ticket.position = 0;
+      // Clear any stale lock so the ticket doesn't block future claims.
+      ticket.locked_by_agent_id = null;
+      ticket.locked_at = null;
+      await ticketRepo.save(ticket);
+
+      // Activity log for the move.
+      await this.activityService.logActivity({
+        entity_type: 'ticket',
+        entity_id: ticket.id,
+        action: 'moved',
+        field_changed: 'column',
+        old_value: currentColumn.name,
+        new_value: intakeCol.name,
+        actor_id: 'system',
+        actor_name: 'StuckTicketDetector',
+        ticket_id: ticket.id,
+        trigger_source: 'stuck_detector_remediation',
+      });
+
+      // Post a system comment on the ticket itself.
+      await commentRepo.save(commentRepo.create({
+        ticket_id: ticket.id,
+        workspace_id: ticket.workspace_id,
+        author_type: 'system',
+        author_id: '',
+        author: 'System',
+        content:
+          `This ticket was auto-demoted to **${intakeCol.name}** after ${cycleCount} ` +
+          `heartbeat-only cycles with no forward progress. The gate documented in ` +
+          `earlier comments is still active. Move it back to To Do once the gate clears.`,
+        type: 'system',
+      }));
+
+      this.logService.info('StuckDetector', 'BLOCKED ticket auto-demoted to intake', {
+        ticket_id: ticket.id,
+        from_column: currentColumn.name,
+        to_column: intakeCol.name,
+        cycle_count: cycleCount,
+      });
+      return true;
+    } catch (e) {
+      this.logService.error('StuckDetector', 'remediation move failed', {
+        err: String(e), ticket_id: ticket.id,
+      });
+      return false;
     }
   }
 

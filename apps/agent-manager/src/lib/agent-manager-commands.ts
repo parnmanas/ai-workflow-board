@@ -137,8 +137,10 @@ export interface CommandHandlerDeps {
    * snapshotted once per SSE connect — see events.controller.ts:236-244)
    * picks up the freshly-registered managed agent. Without this, the next
    * chat_request/agent_trigger/comment_mention for that agent is silently
-   * dropped by the server fan-out filter and no subagent ever spawns. */
-  requestStreamReconnect?: () => void;
+   * dropped by the server fan-out filter and no subagent ever spawns.
+   * Returns a Promise that resolves once the SSE stream is re-established,
+   * so spawn_agent can await it before acking. */
+  requestStreamReconnect?: () => Promise<void> | void;
 }
 
 export class AgentManagerCommandHandler {
@@ -416,9 +418,12 @@ export class AgentManagerCommandHandler {
     // agent_trigger / comment_mention targeted at <agentId> is silently
     // filtered out by the server's per-event fan-out and the user reports
     // a brand-new managed agent that "doesn't respond to anything".
-    // Fire-and-forget — the reconnect is async, the ack POST flows over
-    // its own HTTP connection so it isn't disturbed by the SSE drop.
-    this.#deps.requestStreamReconnect?.();
+    // Awaited so the ack POST only fires after the SSE stream is live with
+    // the new agent in its managedAgentIds set — closing the race window
+    // where a user sending a chat message between ack and reconnect would
+    // have it silently dropped. The reconnect() Promise has a built-in
+    // 10s safety timeout so the ack is never blocked indefinitely.
+    await this.#deps.requestStreamReconnect?.();
 
     const credentialNote = credential ? ` credential=${credential.provider}` : ' credential=none';
     log(

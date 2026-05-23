@@ -1,14 +1,13 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, OneToMany, ManyToOne, JoinColumn } from 'typeorm';
 import { BoardColumn } from './BoardColumn';
 import { Workspace } from './Workspace';
-import { emptyToNullUuid } from '../database/uuid-column';
 
 @Entity('boards')
 export class Board {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'uuid', nullable: true, transformer: emptyToNullUuid })
+  @Column({ type: 'varchar', nullable: true })
   workspace_id: string;
 
   @Column({ type: 'varchar' })

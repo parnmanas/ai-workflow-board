@@ -6,7 +6,6 @@ import {
   UpdateDateColumn,
   Index,
 } from 'typeorm';
-import { nullablePassThroughUuid } from '../database/uuid-column';
 
 /**
  * One row per (ticket, role) slot — the single source of truth for who is
@@ -28,23 +27,18 @@ export class TicketRoleAssignment {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  // FK to tickets.id (uuid). Typed `uuid` so PG joins of the form
-  // `ra.ticket_id = t.id` don't raise `operator does not exist: character
-  // varying = uuid`. The widening from varchar is handled by
-  // database/pre-sync-postgres.ts on first boot.
-  @Column({ type: 'uuid' })
+  @Column({ type: 'varchar' })
   ticket_id: string;
 
-  // FK to workspace_roles.id (uuid). Same uuid-alignment rationale as above.
-  @Column({ type: 'uuid' })
+  @Column({ type: 'varchar' })
   role_id: string;
 
   /** Agent holding the role. Mutually exclusive with user_id. */
-  @Column({ type: 'uuid', nullable: true, transformer: nullablePassThroughUuid })
+  @Column({ type: 'varchar', nullable: true, default: null })
   agent_id: string | null;
 
   /** Human user holding the role. Mutually exclusive with agent_id. */
-  @Column({ type: 'uuid', nullable: true, transformer: nullablePassThroughUuid })
+  @Column({ type: 'varchar', nullable: true, default: null })
   user_id: string | null;
 
   @CreateDateColumn()

@@ -221,6 +221,10 @@ export const api = {
 
   // ─── Boards ────────────────────────────────────────────
   getBoard: (id: string) => request<any>(`/boards/${id}`),
+  getBoardFocusTickets: (boardId: string) =>
+    request<{ focus_tickets: Array<{ agent_id: string; agent_name: string; role: string; ticket_id: string }> }>(
+      `/boards/${boardId}/focus-tickets`,
+    ),
   getBoards: (workspaceId?: string) =>
     request<any[]>(workspaceId ? `/boards?workspace_id=${workspaceId}` : '/boards'),
   createBoard: (data: { name: string; description?: string; workspace_id: string }) =>

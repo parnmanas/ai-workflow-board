@@ -1,7 +1,6 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, ManyToOne, OneToMany, JoinColumn } from 'typeorm';
 import { Board } from './Board';
 import { Ticket } from './Ticket';
-import { emptyToNullUuid } from '../database/uuid-column';
 
 /**
  * Workflow classification a column plays in the lifecycle. Data-driven
@@ -34,14 +33,10 @@ export class BoardColumn {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'uuid', nullable: true, transformer: emptyToNullUuid })
+  @Column({ type: 'varchar', nullable: true, default: '' })
   workspace_id: string;
 
-  // FK to boards.id (uuid). Typed `uuid` so PG joins like
-  // `b.id = col.board_id` (allocation.service.ts, ticket-crud-tools.ts)
-  // don't blow up with `operator does not exist: character varying = uuid`.
-  // database/pre-sync-postgres.ts handles the in-place widening on first boot.
-  @Column({ type: 'uuid' })
+  @Column({ type: 'varchar' })
   board_id: string;
 
   @Column({ type: 'varchar' })

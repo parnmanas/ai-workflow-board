@@ -120,16 +120,32 @@ function readWorkingTreeVersion(repoRoot: string): string | null {
 }
 
 /**
- * Read the manager's own running version from the bundled package.json
- * (sibling of dist/). Falls back to '0.0.0' so callers don't crash on a
- * missing file in odd packaging scenarios.
+ * Read the manager's own running version from a build-time snapshot of
+ * package.json baked into dist/ during `npm run build`.
+ *
+ * Priority:
+ *   1. `dist/package.json`  — copied by the build script, frozen at build
+ *      time. Immune to subsequent `git pull` / `git checkout` touching the
+ *      working-tree package.json while the process is still running the old
+ *      dist.
+ *   2. `../../package.json` — fallback for dev mode (`tsx watch src/…`)
+ *      where dist/ doesn't exist yet; in that case the working tree IS the
+ *      running code, so reading the live file is correct.
+ *   3. `'0.0.0'`           — last-resort so callers never crash.
  */
 export function readBundledVersion(): string {
   try {
     const here = dirname(fileURLToPath(import.meta.url));
-    // dist/lib/self-update.js → ../../package.json
-    const pkgPath = resolve(here, '..', '..', 'package.json');
-    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
+    // When running from dist/lib/self-update.js, ../package.json is
+    // dist/package.json (build-time snapshot).
+    const distPkg = resolve(here, '..', 'package.json');
+    if (existsSync(distPkg)) {
+      const pkg = JSON.parse(readFileSync(distPkg, 'utf8'));
+      if (typeof pkg?.version === 'string') return pkg.version;
+    }
+    // Fallback: ../../package.json (working-tree root, used in dev mode).
+    const rootPkg = resolve(here, '..', '..', 'package.json');
+    const pkg = JSON.parse(readFileSync(rootPkg, 'utf8'));
     return typeof pkg?.version === 'string' ? pkg.version : '0.0.0';
   } catch {
     return '0.0.0';
@@ -137,14 +153,27 @@ export function readBundledVersion(): string {
 }
 
 /**
- * Best-effort current branch detection. Falls back to 'main' when
- * `git rev-parse` fails (detached HEAD, missing git binary, …).
+ * Detect the remote's default branch (usually 'main') from the local
+ * `origin/HEAD` symbolic ref. This is what the UpdateChecker should
+ * track — not the currently-checked-out branch, which on a dev machine
+ * could be anything (`production.private`, a feature branch, …).
+ *
+ * Falls back to 'main' when `origin/HEAD` is unset (bare clone, fresh
+ * remote, `git remote set-head origin --delete`).
  */
-function detectBranch(repoRoot: string): string {
-  const r = runSync('git', ['-C', repoRoot, 'rev-parse', '--abbrev-ref', 'HEAD'], 5_000);
-  const branch = r.ok ? r.stdout.trim() : '';
-  if (!branch || branch === 'HEAD') return 'main';
-  return branch;
+function detectDefaultBranch(repoRoot: string): string {
+  // `git symbolic-ref refs/remotes/origin/HEAD` → refs/remotes/origin/main
+  const r = runSync(
+    'git',
+    ['-C', repoRoot, 'symbolic-ref', 'refs/remotes/origin/HEAD'],
+    5_000,
+  );
+  if (r.ok) {
+    const ref = r.stdout.trim(); // e.g. "refs/remotes/origin/main"
+    const match = ref.match(/^refs\/remotes\/origin\/(.+)$/);
+    if (match?.[1]) return match[1];
+  }
+  return 'main';
 }
 
 /**
@@ -287,8 +316,14 @@ export class UpdateChecker {
     this.#intervalMs = opts.intervalMs ?? DEFAULT_CHECK_INTERVAL_MS;
     this.#log = opts.log ?? log;
     const repoRoot = detectRepoRoot();
-    const branch = repoRoot ? detectBranch(repoRoot) : null;
-    const current_version = (repoRoot && readWorkingTreeVersion(repoRoot)) || readBundledVersion();
+    const branch = repoRoot ? detectDefaultBranch(repoRoot) : null;
+    // Prefer the build-time snapshot (dist/package.json) over the working-tree
+    // file. On dev machines the repo root is also the running source tree, so
+    // `readWorkingTreeVersion(repoRoot)` returns whatever version the working
+    // tree currently has — which drifts ahead of the actually-running dist
+    // after a `git pull` that wasn't followed by a rebuild. The bundled
+    // version is frozen at build time and always matches the running code.
+    const current_version = readBundledVersion() || (repoRoot && readWorkingTreeVersion(repoRoot)) || '0.0.0';
     // last_error is reserved for actionable failures (fetch couldn't reach
     // the remote, package.json couldn't be read, …). The "not running from
     // a git checkout" case is signalled via repo_root === null + a one-line
@@ -360,6 +395,30 @@ export class UpdateChecker {
         FETCH_TIMEOUT_MS,
       );
       if (!fetchResult.ok) {
+        // Fetch failed (SSH key unavailable in systemd context, network
+        // down, …). Still try reading the existing `origin/<branch>` ref —
+        // it may be stale but is far more useful than showing "check failed"
+        // with no version info at all. Only set last_error if the fallback
+        // read also fails.
+        const stale = readRemoteVersion(repoRoot, branch);
+        if (stale) {
+          const current = this.#status.current_version;
+          const update_available = compareSemver(stale, current) > 0;
+          const detail = (fetchResult.stderr.trim() || fetchResult.stdout.trim() || 'unknown')
+            .split('\n')
+            .filter(Boolean)
+            .pop()
+            ?.slice(0, 240) || 'fetch failed';
+          this.#status = {
+            ...this.#status,
+            current_version: current,
+            latest_version: stale,
+            update_available,
+            // Keep the existing last_checked_at — the data is stale, not fresh.
+            last_error: `git fetch failed (using cached ref): ${detail}`,
+          };
+          return;
+        }
         const detail = (fetchResult.stderr.trim() || fetchResult.stdout.trim() || 'unknown')
           .split('\n')
           .filter(Boolean)
@@ -475,6 +534,26 @@ export async function runSelfUpdate(opts: SelfUpdateOpts = {}): Promise<SelfUpda
  */
 let _lastReExecScheduled = false;
 
+/**
+ * Set by reExecManager (systemd branch) just before it sends SIGTERM to self.
+ * Read by main.ts's shutdown handler so the final `process.exit(...)` can pick
+ * the right code: 1 when we're tearing down to let systemd's
+ * `Restart=on-failure` respawn us into the just-built dist, 0 for a normal
+ * operator-driven stop.
+ *
+ * Without this flag the shutdown handler always exits 0 → systemd sees
+ * "success" → no restart → service goes inactive(dead) and the operator has to
+ * `systemctl --user start awb-agent-manager` by hand. The SIGTERM-then-exit(1)
+ * tail in reExecManager can't compensate because shutdown's own exit(0) fires
+ * first and terminates the process synchronously.
+ */
+let _systemdReExecPending = false;
+
+/** Read by main.ts's shutdown handler to pick its exit code. */
+export function isSystemdReExecPending(): boolean {
+  return _systemdReExecPending;
+}
+
 async function runSelfUpdateLocked(
   opts: SelfUpdateOpts,
   out: (msg: string) => void,
@@ -487,8 +566,74 @@ async function runSelfUpdateLocked(
     return { changed: false, summary };
   }
 
-  const branch = detectBranch(repoRoot);
+  const branch = detectDefaultBranch(repoRoot);
   out(`Self-update: starting (root=${repoRoot} branch=${branch})`);
+
+  // 0. Reset package-lock.json before pull.
+  //
+  // The previous self-update's step 2 (`npm install` at workspace root) can
+  // silently rewrite the lockfile — npm reorders sub-deps, recomputes
+  // integrity hashes, and resolves optionalDependencies differently across
+  // platforms (Windows vs Linux npm both legitimately produce non-identical
+  // lockfiles from the same package.json). The lockfile is then dirty in
+  // the working tree, which makes the NEXT `git pull --ff-only` abort with
+  // `Your local changes to the following files would be overwritten by
+  // merge: package-lock.json` and self-locks the manager into its current
+  // version forever. Operators see "update_manager: git pull failed" with
+  // a one-line tail that doesn't make the trap obvious.
+  //
+  // The reset is safe: step 2 regenerates package-lock.json from the
+  // workspace's package.json files anyway, so any local lockfile diff is
+  // disposable. We narrowly target this one file (vs e.g. `git reset
+  // --hard` or `git stash`) so a real local mod elsewhere — service-install.ts
+  // hand-edits, operator config tweaks — is still protected by the dirty-tree
+  // guard below.
+  out('Self-update: git checkout -- package-lock.json (regenerated by npm install)');
+  const lockResetResult = await runAsync(
+    'git',
+    ['-C', repoRoot, 'checkout', '--', 'package-lock.json'],
+    repoRoot,
+    10_000,
+    (line) => out(`  [git] ${line}`),
+  );
+  if (!lockResetResult.ok) {
+    // Non-fatal: a missing lockfile (fresh clone before first install) means
+    // there's nothing to reset; a real failure here would also be caught by
+    // the next git pull's own error path. Log and continue.
+    const detail =
+      (lockResetResult.stderr.trim() || lockResetResult.stdout.trim() || 'unknown')
+        .split('\n')
+        .pop() || '';
+    out(`Self-update: lockfile reset returned non-zero (continuing): ${detail.slice(0, 200)}`);
+  }
+
+  // 0b. Dirty-tree guard. After the lockfile reset, ANY remaining dirty
+  // path is a real local mod the operator made on purpose — a code change
+  // they're testing, a hand-tuned config, a partial PR. Plowing it under
+  // with `git pull` (which we already established refuses to FF-merge over
+  // dirty paths anyway) just hides the situation behind a generic git
+  // error. Surface the file list explicitly and abort with a summary the
+  // admin UI can render.
+  const statusResult = await runAsync(
+    'git',
+    ['-C', repoRoot, 'status', '--porcelain'],
+    repoRoot,
+    10_000,
+  );
+  if (statusResult.ok) {
+    const dirty = statusResult.stdout
+      .split('\n')
+      .map((s) => s.trimEnd())
+      .filter(Boolean);
+    if (dirty.length > 0) {
+      const head = dirty.slice(0, 10).join('; ');
+      const tail = dirty.length > 10 ? ` (+${dirty.length - 10} more)` : '';
+      const summary =
+        `working tree has local changes blocking pull — commit, stash, or revert before retrying: ${head}${tail}`;
+      out(`Self-update: ${summary}`);
+      return { changed: false, summary };
+    }
+  }
 
   // 1. git pull --ff-only origin <branch>
   out(`Self-update: git pull --ff-only origin ${branch}`);
@@ -650,20 +795,24 @@ function isManagedBySystemd(): boolean {
 function reExecManager(out: (msg: string) => void): void {
   if (isManagedBySystemd()) {
     out('Self-update: re-exec via systemd (Restart=on-failure → exit 1)');
-    // We still trigger the SIGTERM shutdown handler so chat / ticket sessions
-    // get cleaned up; the handler short-circuits to process.exit(1) at the
-    // tail so systemd sees a failure exit code and respawns.
+    // We trigger the SIGTERM shutdown handler so chat / ticket sessions get
+    // cleaned up, but we MUST set _systemdReExecPending first so the handler's
+    // final `process.exit(...)` picks exit code 1 instead of 0. Without the
+    // flag the handler's exit(0) fires synchronously the moment cleanup
+    // finishes; any setTimeout backup we schedule here is dead — the process
+    // is already gone — and systemd sees a clean exit code, marks the unit
+    // success, and refuses to honor Restart=on-failure.
+    _systemdReExecPending = true;
     setTimeout(() => {
       try {
         process.kill(process.pid, 'SIGTERM');
-        // SIGTERM handlers call process.exit(0) on the happy path, which
-        // would mark the unit "success" and skip the Restart=on-failure
-        // trigger. Schedule an exit(1) tail after the shutdown grace window
-        // so we still land on a non-zero code even if the handler ran first.
-        setTimeout(() => process.exit(1), 5_000).unref?.();
       } catch {
         process.exit(1);
       }
+      // Backup: if the SIGTERM handler hangs (subagent stop stuck, lockfile
+      // release timeout, …), force exit(1) after the shutdown grace window
+      // so we still respawn instead of holding the unit in a half-dead state.
+      setTimeout(() => process.exit(1), 30_000).unref?.();
     }, 250).unref?.();
     return;
   }

@@ -1,5 +1,4 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, Index } from 'typeorm';
-import { nullablePassThroughUuid } from '../database/uuid-column';
 
 @Entity('agent_error_logs')
 @Index(['agent_id', 'occurred_at'])
@@ -8,10 +7,10 @@ export class AgentErrorLog {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'uuid' })
+  @Column({ type: 'varchar' })
   agent_id: string;
 
-  @Column({ type: 'uuid', nullable: true, transformer: nullablePassThroughUuid })
+  @Column({ type: 'varchar', nullable: true, default: null })
   workspace_id: string | null;
 
   @Column({ type: Date })

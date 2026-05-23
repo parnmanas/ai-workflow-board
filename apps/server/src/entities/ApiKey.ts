@@ -1,13 +1,12 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, ManyToOne, JoinColumn } from 'typeorm';
 import { Agent } from './Agent';
-import { emptyToNullUuid, nullablePassThroughUuid } from '../database/uuid-column';
 
 @Entity('api_keys')
 export class ApiKey {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'uuid', nullable: true, transformer: emptyToNullUuid })
+  @Column({ type: 'varchar', nullable: true, default: '' })
   workspace_id: string;
 
   @Column({ type: 'varchar' })
@@ -16,7 +15,7 @@ export class ApiKey {
   @Column({ type: 'varchar', unique: true })
   key: string;
 
-  @Column({ type: 'uuid', nullable: true, transformer: nullablePassThroughUuid })
+  @Column({ type: 'varchar', nullable: true, default: null })
   agent_id: string | null;
 
   @ManyToOne(() => Agent, { nullable: true, onDelete: 'SET NULL' })

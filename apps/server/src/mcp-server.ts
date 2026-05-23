@@ -28,7 +28,6 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { initDb, AppDataSource } from './db';
-import { preSyncPostgres } from './database/pre-sync-postgres';
 import { createStandaloneContext } from './modules/mcp/tools';
 import { createMcpServerForContext } from './modules/mcp/internal/create-mcp-server';
 import { expressToWebRequest, sendWebResponse } from './modules/mcp/internal/express-bridge';
@@ -198,9 +197,6 @@ async function startHttp() {
 // ─── Main ───────────────────────────────────────────────────
 
 async function main() {
-  // Postgres-only pre-sync — see apps/server/src/database/pre-sync-postgres.ts.
-  // Must run before initDb (which triggers TypeORM synchronize).
-  await preSyncPostgres();
   await initDb();
 
   const transport = (process.env.MCP_TRANSPORT || 'stdio').toLowerCase();

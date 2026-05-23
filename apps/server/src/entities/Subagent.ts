@@ -1,6 +1,5 @@
 import { Entity, PrimaryColumn, Column, CreateDateColumn, OneToMany, Index } from 'typeorm';
 import { SubagentLogLine } from './SubagentLogLine';
-import { nullablePassThroughUuid } from '../database/uuid-column';
 
 /**
  * Persistent record of a plugin-spawned subagent. Replaces the previous
@@ -29,10 +28,10 @@ export class Subagent {
   @PrimaryColumn({ type: 'varchar' })
   subagent_id: string;
 
-  @Column({ type: 'uuid' })
+  @Column({ type: 'varchar' })
   agent_id: string;
 
-  @Column({ type: 'uuid' })
+  @Column({ type: 'varchar' })
   workspace_id: string;
 
   // 'chat' | 'ticket' | 'oneshot'
@@ -51,7 +50,7 @@ export class Subagent {
   @Column({ type: 'varchar', nullable: true, default: null })
   label: string | null;
 
-  @Column({ type: 'uuid', nullable: true, transformer: nullablePassThroughUuid })
+  @Column({ type: 'varchar', nullable: true, default: null })
   ticket_id: string | null;
 
   @Column({ type: 'text', nullable: true, default: null })
