@@ -505,6 +505,7 @@ export class BaseSessionManager {
         sess.tap?.outLine(line);
         const parsed = sess.adapter.parseStdoutLine(line);
         this.#advanceTurn(sess, parsed);
+        this._onStdoutParsed(sess, parsed, line);
         if (parsed.isResult) {
           const subtype = parsed.raw?.subtype || '-';
           const isError = parsed.isError === true ? 'true' : (parsed.raw?.is_error ?? '-');
@@ -515,7 +516,10 @@ export class BaseSessionManager {
     if (sess.child.stderr) {
       const rlErr = createInterface({ input: sess.child.stderr });
       const tag = this.#logTag.replace(/^\[|\]$/g, '');
-      rlErr.on('line', (line) => log(`[${tag}:${sess.pid}:err] ${line}`));
+      rlErr.on('line', (line) => {
+        log(`[${tag}:${sess.pid}:err] ${line}`);
+        this._onStderrLine(sess, line);
+      });
     }
   }
 
@@ -532,6 +536,11 @@ export class BaseSessionManager {
       log(
         `${this.#logTag} exit pid=${sess.pid} ${this.#keyField}=${key} code=${code} signal=${signal || '-'} turns=${sess.turnCount} duration=${durationSec}s`,
       );
+      try {
+        await this._onChildExit(sess, code, signal);
+      } catch (err: any) {
+        log(`${this.#logTag} _onChildExit error: ${err?.message ?? err}`);
+      }
       if (this._sessions.get(key) === sess) this._sessions.delete(key);
       if (sess.configPath && sess.configPathIsTemp) {
         try {
@@ -571,6 +580,20 @@ export class BaseSessionManager {
     );
     sess.idleTimer.unref?.();
   }
+
+  /** Override in subclasses to react to each parsed stdout line. */
+  protected _onStdoutParsed(_sess: SessionRecord, _parsed: ParseResult, _rawLine: string): void {}
+
+  /** Override in subclasses to react to each stderr line. */
+  protected _onStderrLine(_sess: SessionRecord, _line: string): void {}
+
+  /** Override in subclasses to run logic when a child exits (before session
+   *  record cleanup). Runs inside the exit handler — keep it fast. */
+  protected async _onChildExit(
+    _sess: SessionRecord,
+    _code: number | null,
+    _signal: NodeJS.Signals | null,
+  ): Promise<void> {}
 
   #ensureHealthSweep(): void {
     if (this.#healthTimer) return;
