@@ -37,6 +37,14 @@ export interface InstanceMeta {
   // endpoint. Optional so harnesses that opt out of auto-update still
   // construct a valid heartbeat.
   updateChecker?: UpdateChecker | null;
+  // Per-tick provider that returns one entry per supervised managed
+  // agent describing its CLI auth state — auth mode, OAuth access-token
+  // expiry, refresh_token presence. Async so adapters can do disk I/O
+  // (read `<cli-home>/.credentials.json` etc.) without blocking the
+  // payload factory. Errors must NOT throw; the provider is best-effort.
+  // Returning [] (or omitting the provider entirely) skips the field;
+  // older AWB servers ignore it, newer ones render expiry badges.
+  agentCredentialMetaProvider?: AgentCredentialMetaProvider | null;
 }
 
 /** Tiny duck-typed read-only snapshot of ManagedAgentRegistry. */
@@ -44,6 +52,27 @@ export interface ManagedAgentSnapshot {
   liveAgentIds(): string[];
   workingDirs(): string[];
 }
+
+/** One row per supervised managed agent. The fields here are derived
+ *  metadata only — the raw token never leaves the manager host. The
+ *  `agent_id` lets AWB join with the Agent.id it already knows. */
+export interface AgentCredentialEntry {
+  agent_id: string;
+  cli: string;
+  /** Auth mode at heartbeat time. 'subscription' / 'api_key' / 'operator_home'
+   *  come from spawn-time decisions; 'unknown' / 'missing' come from the
+   *  on-disk read result (file shape unrecognized / file absent). */
+  kind: 'subscription' | 'api_key' | 'operator_home' | 'unknown' | 'missing';
+  /** OAuth access-token expiry (Unix ms). null when the kind doesn't
+   *  carry an expiry concept (api_key) or the file couldn't be read. */
+  expires_at_ms: number | null;
+  /** True when an OAuth refresh_token is present and the access token
+   *  can auto-renew silently. False / api_key flagging indicates that
+   *  any expiry is silent failure waiting to happen. */
+  refresh_token_present: boolean;
+}
+
+export type AgentCredentialMetaProvider = () => Promise<AgentCredentialEntry[]>;
 
 export interface InstanceHeartbeatPayload {
   instance_id: string;
@@ -60,6 +89,10 @@ export interface InstanceHeartbeatPayload {
   agent_ids?: string[];
   working_dirs?: string[];
   paired_at?: string;
+  // Per-managed-agent CLI credential snapshots — one row per supervised
+  // agent, only when the heartbeat factory was given a provider. See
+  // AgentCredentialEntry for the field semantics.
+  agent_credentials?: AgentCredentialEntry[];
   // Self-update fields — populated when InstanceMeta carries an UpdateChecker.
   // Older AWB servers ignore them; newer ones surface them on the admin UI.
   latest_version?: string | null;
@@ -73,7 +106,7 @@ export interface InstanceHeartbeatPayload {
 export class InstanceHeartbeat {
   #config: AwbConfig;
   #agentId: string | null;
-  #payloadFactory: () => InstanceHeartbeatPayload;
+  #payloadFactory: () => Promise<InstanceHeartbeatPayload>;
   #instanceId: string;
   #startedAt: string;
   #timer: NodeJS.Timeout | null = null;
@@ -89,10 +122,23 @@ export class InstanceHeartbeat {
       : [];
     const managedSnapshot = meta?.managedAgents ?? null;
     const updateChecker = meta?.updateChecker ?? null;
-    this.#payloadFactory = () => {
+    const credentialMetaProvider = meta?.agentCredentialMetaProvider ?? null;
+    this.#payloadFactory = async () => {
       const agentIds = managedSnapshot ? managedSnapshot.liveAgentIds() : [];
       const workingDirs = managedSnapshot ? managedSnapshot.workingDirs() : [];
       const updateStatus = updateChecker ? updateChecker.status() : null;
+      // Best-effort: a provider that throws should never wedge the
+      // heartbeat. Treat any failure as "no credentials this tick" and
+      // let the next tick try again — the field is purely informational.
+      let agentCredentials: AgentCredentialEntry[] = [];
+      if (credentialMetaProvider) {
+        try {
+          agentCredentials = await credentialMetaProvider();
+        } catch (err: any) {
+          log(`Instance heartbeat: credential-meta provider failed: ${err?.message ?? err}`);
+          agentCredentials = [];
+        }
+      }
       return {
         instance_id: this.#instanceId,
         agent_id: this.#agentId,
@@ -108,6 +154,7 @@ export class InstanceHeartbeat {
         // and non-empty; legacy AWB servers (pre-ST-4) don't expect them.
         ...(agentIds.length ? { agent_ids: agentIds } : {}),
         ...(workingDirs.length ? { working_dirs: workingDirs } : {}),
+        ...(agentCredentials.length ? { agent_credentials: agentCredentials } : {}),
         ...(updateStatus
           ? {
               latest_version: updateStatus.latest_version,
@@ -154,7 +201,7 @@ export class InstanceHeartbeat {
 
   async #post(): Promise<void> {
     if (this.#stopped) return;
-    const payload = this.#payloadFactory();
+    const payload = await this.#payloadFactory();
     if (!payload.agent_id) return;
     const url = `${this.#config.url.replace(/\/$/, '')}/api/agent/instance-heartbeat`;
     const resp = await fetch(url, {

@@ -120,6 +120,27 @@ export abstract class CliAdapter {
   }
 
   /**
+   * Snapshot of a managed agent's CLI credential at heartbeat time —
+   * just enough for the AWB admin UI to flag agents whose OAuth token is
+   * about to expire. Read on every InstanceHeartbeat tick by `main.ts`'s
+   * `agentCredentialMetaProvider`; never persisted on disk.
+   *
+   * Adapter contract: read whatever auth file the CLI keeps in
+   * `cli-home` (claude → `.credentials.json`) and compute the values
+   * below. Return `null` to signal "not applicable / nothing to surface"
+   * (the CLI uses an env var, the adapter doesn't model expirations,
+   * etc.). Errors must NOT throw — the heartbeat is best-effort.
+   *
+   * Importantly, the adapter NEVER returns the raw token. The fields
+   * here are all derived metadata; the heartbeat ships the same shape
+   * verbatim to AWB. This keeps the credential body inside the cli-home
+   * dir on the manager host and out of any network traffic.
+   */
+  async readCredentialMeta(_cliHomeDir: string): Promise<AgentCredentialMeta | null> {
+    return null;
+  }
+
+  /**
    * Optional hook called once per spawn_agent after `ensureCliHomeDir`
    * creates the per-agent dir. Override to copy / symlink any
    * credentials or shared state the CLI needs before it can run — most
@@ -163,4 +184,33 @@ export interface AdapterCredential {
   credential_id: string;
   provider: string;
   fields: Record<string, string>;
+}
+
+/**
+ * Heartbeat-side credential snapshot. Produced by
+ * `CliAdapter.readCredentialMeta(cliHomeDir)` once per heartbeat tick;
+ * shipped to AWB via `instance-heartbeat` so the admin UI can render
+ * "expires in N hours" badges without ever seeing the raw token.
+ *
+ * `kind`:
+ *   - 'subscription' — OAuth credential file present (claude
+ *     `.credentials.json` with `claudeAiOauth`); `expires_at_ms` and
+ *     `refresh_token_present` are meaningful.
+ *   - 'api_key' — env-var auth (`ANTHROPIC_API_KEY` etc.); no expiry
+ *     concept, both fields are null/false.
+ *   - 'unknown' — file present but unreadable / not in expected shape.
+ *     Surface this so the UI can warn instead of silently appearing
+ *     "always healthy".
+ */
+export interface AgentCredentialMeta {
+  kind: 'subscription' | 'api_key' | 'unknown';
+  /** OAuth access-token expiry (Unix milliseconds) or null when not
+   *  applicable. Refreshed on every heartbeat so the value tracks the
+   *  CLI's own silent-rotate of the access token. */
+  expires_at_ms: number | null;
+  /** True when an OAuth refresh_token is present and the access token
+   *  can auto-renew. False for api_key kind (no refresh concept) and
+   *  for subscription credentials missing the refresh_token field —
+   *  in that second case, expiry is silent failure waiting to happen. */
+  refresh_token_present: boolean;
 }

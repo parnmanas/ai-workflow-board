@@ -53,6 +53,21 @@ export interface ManagedAgentContext {
    *  the strip, an inherited env var silently overrides the per-agent
    *  .credentials.json / auth.json / oauth_creds.json file. */
   credential_provider?: string | null;
+  /** Spawn-time auth mode for this managed agent. Stamped here (rather
+   *  than re-derived per heartbeat) because it's authoritative regardless
+   *  of whether the OAuth file currently exists on disk:
+   *    - 'subscription' — per-agent OAuth credential ('claude_subscription' /
+   *      'codex_subscription' / 'gemini_subscription'); the cli-home holds
+   *      a `.credentials.json` (or equivalent) the CLI rotates in place.
+   *    - 'api_key' — env-var auth (ANTHROPIC_API_KEY etc.). No expiry.
+   *    - 'operator_home' — no per-agent credential set; the manager copied
+   *      / symlinked the operator's HOME credential file into cli-home.
+   *      Expiry monitoring still works because the on-disk file is present;
+   *      the operator just sees the *operator's* token expiry, not a
+   *      per-agent one.
+   *  The InstanceHeartbeat consults this to short-circuit api_key agents
+   *  to "no expiry" without paying a disk read each tick. */
+  credential_kind?: 'subscription' | 'api_key' | 'operator_home';
   /** ISO timestamp of when this manager last hydrated the context. */
   registered_at: string;
 }
