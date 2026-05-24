@@ -116,7 +116,44 @@ The source ticket id is used to:
       const apiKey = decrypt(rawKey);
       if (!apiKey) return err('Remote AWB API key failed to decrypt. Ask the admin to re-save the key.');
 
-      // 3. Compose the outbound payload. The `self-improvement` label is
+      // 3. Verify the configured destination BEFORE creating anything. The
+      //    remote `create_ticket` tool takes only column_id — a stale or
+      //    typo'd column id pointing at a DIFFERENT board (or a board in a
+      //    different workspace) would otherwise silently file the
+      //    improvement ticket in the wrong place while our local logs claim
+      //    the configured target. Resolve the board, then assert
+      //    workspace match + column membership; bail with a precise error if
+      //    either fails so the admin can fix Settings.
+      const boardCheck = await callRemoteMcpTool(remoteUrl, apiKey, 'get_board', { board_id: remoteBoardId });
+      if (!boardCheck.ok) {
+        logger.error('SelfImprovement', 'remote get_board (preflight) failed', {
+          kind: boardCheck.kind, message: boardCheck.message,
+          remote_url: remoteUrl, remote_board_id: remoteBoardId, source_ticket_id,
+        });
+        return err(`Remote AWB preflight failed (${boardCheck.kind}): ${boardCheck.message}`);
+      }
+      const remoteBoard: any = boardCheck.data || {};
+      const actualWorkspaceId = String(remoteBoard?.workspace_id || '');
+      if (actualWorkspaceId !== remoteWorkspaceId) {
+        return err(
+          `Remote target misconfigured: board "${remoteBoard?.name || remoteBoardId}" lives in ` +
+          `workspace ${actualWorkspaceId || '(unknown)'}, but Settings configures ` +
+          `workspace ${remoteWorkspaceId}. Refusing to file improvement ticket. ` +
+          `Ask the admin to reconcile self_improvement.remote_awb_workspace_id and _board_id.`,
+        );
+      }
+      const remoteColumns: any[] = Array.isArray(remoteBoard?.columns) ? remoteBoard.columns : [];
+      const targetColumn = remoteColumns.find((c: any) => String(c?.id) === remoteColumnId);
+      if (!targetColumn) {
+        return err(
+          `Remote target misconfigured: column ${remoteColumnId} is not a column of board ` +
+          `"${remoteBoard?.name || remoteBoardId}". Refusing to file improvement ticket. ` +
+          `Ask the admin to update self_improvement.remote_awb_column_id to a column that ` +
+          `belongs to the configured board.`,
+        );
+      }
+
+      // 4. Compose the outbound payload. The `self-improvement` label is
       //    enforced here regardless of what the caller passed so the remote
       //    side can apply its own recursion guard. Source link goes in the
       //    description so it survives even if labels are stripped.
@@ -125,7 +162,7 @@ The source ticket id is used to:
         `\n\n---\n_Source: ticket ${source_ticket_id} on board ${sourceBoardId} ` +
         `(self_improvement_mode=${sourceMode})_\n`;
 
-      // 4. Fire the MCP `create_ticket` call against the remote.
+      // 5. Fire the MCP `create_ticket` call against the remote.
       //    `created_by` is omitted — the remote will stamp the agent identity
       //    from the API key (via getCallerAgent + caller.agentName) so
       //    attribution reflects the WHO of the X-API-Key, not a hardcoded
