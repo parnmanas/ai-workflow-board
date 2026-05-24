@@ -524,6 +524,19 @@ export default function TicketPanel({
 
   const [title, setTitle] = useState(activeTicket.title);
   const [description, setDescription] = useState(activeTicket.description);
+  // Dynamic Description textarea sizing: clamp visible rows between 10 and 20,
+  // growing with the content (explicit newlines + estimated soft-wrap at ~80
+  // cols). Keeps short tickets compact-ish while long ones stay readable
+  // without the user having to drag the resize handle every time.
+  const descriptionRows = useMemo(() => {
+    const text = description || '';
+    const wrapWidth = 80;
+    const visualLines = text.split('\n').reduce(
+      (acc, line) => acc + Math.max(1, Math.ceil(line.length / wrapWidth)),
+      0,
+    );
+    return Math.max(10, Math.min(20, visualLines));
+  }, [description]);
   const [priority, setPriority] = useState(activeTicket.priority);
   const [assignee, setAssignee] = useState(resolveAgentName(activeTicket.assignee_id, activeTicket.assignee));
   const [reporter, setReporter] = useState(resolveAgentName(activeTicket.reporter_id, activeTicket.reporter));
@@ -1952,7 +1965,7 @@ export default function TicketPanel({
                 value={description}
                 onChange={e => setDescription(e.target.value)}
                 placeholder="Add description..."
-                rows={3}
+                rows={descriptionRows}
                 style={{
                   width: '100%', background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`,
                   borderRadius: tokens.radii.lg, padding: '8px 10px', color: tokens.colors.textStrong, fontSize: '13px',
