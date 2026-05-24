@@ -191,10 +191,20 @@ export class AgentManagerController {
       }
     }
 
+    // Manager instances are workspace-less by design (operator invariant).
+    // The manager process sends its config.json workspace_id in the heartbeat
+    // body for backwards compat, but we ignore it and force NULL into the
+    // InstanceRegistry record — otherwise the AgentManager admin page
+    // (`{inst.workspace_id || '—'}`) keeps rendering a workspace badge even
+    // after the DB `agent.workspace_id` was stripped to NULL.
+    const incomingWs =
+      typeof body?.workspace_id === 'string' && body.workspace_id ? body.workspace_id : fallbackWorkspaceId;
+    const effectiveInstanceWs = mode === 'manager' ? null : incomingWs;
+
     const rec = this.registry.upsert({
       instance_id,
       agent_id,
-      workspace_id: typeof body?.workspace_id === 'string' && body.workspace_id ? body.workspace_id : fallbackWorkspaceId,
+      workspace_id: effectiveInstanceWs,
       mode,
       hostname: typeof body?.hostname === 'string' && body.hostname ? body.hostname : 'unknown',
       plugin_version: typeof body?.plugin_version === 'string' && body.plugin_version ? body.plugin_version : 'unknown',
