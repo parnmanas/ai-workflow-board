@@ -11,14 +11,20 @@
  * new tool needed for that case (the reviewer subagent calls create_ticket
  * with `labels: ['self-improvement']` and the board's Backlog column).
  *
- * Gating:
+ * Gating (all must pass; failure modes are distinct error strings so the
+ * reviewer subagent can self-diagnose):
+ *   - Caller binding: the MCP session must carry an agent identity AND its
+ *     pinned subagentRole must be `reviewer` AND its pinned subagentTicketId
+ *     must equal the `source_ticket_id` argument. This is the load-bearing
+ *     check — without it, any agent session that can guess a source ticket id
+ *     on an eligible board could spam the admin's configured remote instance.
  *   - All four SystemSetting keys must be populated (URL, workspace_id,
  *     board_id, column_id) AND the API key must decrypt cleanly. Missing /
  *     blank keys → return an explicit error so the reviewer subagent knows
  *     the admin hasn't set up the remote target.
- *   - The board the reviewer is currently working on must have its
- *     `self_improvement_mode` set to `remote_awb` or `both` — enforced here
- *     using the ticket id the reviewer passes in for source attribution.
+ *   - The board the source ticket lives on must have its
+ *     `self_improvement_mode` set to `remote_awb` or `both` — second gate
+ *     after the caller-binding check above.
  *
  * Transport choice: outbound calls go over the remote AWB's `/mcp` endpoint
  * via the MCP SDK Client, NOT the REST tickets controller. The latter is
@@ -35,6 +41,7 @@ import { Board } from '../../../entities/Board';
 import { decrypt } from '../../../services/encryption.service';
 import { ok, err } from '../shared/helpers';
 import { callRemoteMcpTool } from '../shared/remote-mcp-client';
+import { getCallerAgent } from '../shared/session-auth';
 import type { ToolContext } from './context';
 
 export function registerSelfImprovementTools(server: McpServer, ctx: ToolContext): void {
@@ -63,11 +70,55 @@ The source ticket id is used to:
       priority: z.enum(['low', 'medium', 'high', 'critical']).optional().default('low').describe('Improvement priority on the remote board (default low — these are not blocking the team).'),
       labels: z.array(z.string()).optional().default([]).describe('Extra labels for the remote ticket. The `self-improvement` label is added automatically; do not re-add it.'),
     },
-    async ({ source_ticket_id, title, description, priority, labels }) => {
-      // 1. Resolve source ticket + board to verify the source board opts into
+    async ({ source_ticket_id, title, description, priority, labels }, extra: { sessionId?: string }) => {
+      // 1. Authorize the caller. This tool decrypts a server-side API key and
+      //    issues a writable remote MCP call, so it must be tightly scoped to
+      //    the post-Done retrospective context the trigger loop dispatches.
+      //
+      //    The subagent-manager (apps/agent-manager) pins per-spawn headers
+      //    X-AWB-Subagent-Role + X-AWB-Subagent-Ticket-Id when it spawns a
+      //    reviewer for a specific ticket. The MCP controller stashes those on
+      //    the session at init time. We require:
+      //      - a known caller (rejects unauthenticated / dev-mode sessions
+      //        that have no agent identity);
+      //      - subagentRole === 'reviewer' (only the reviewer role legitimately
+      //        runs a self-improvement retrospective);
+      //      - subagentTicketId === source_ticket_id (the reviewer must be
+      //        acting AS the reviewer of THIS ticket, not just have somehow
+      //        learned a foreign ticket id).
+      //
+      //    Without these checks, any agent session that can guess or read an
+      //    eligible source_ticket_id could file unlimited remote tickets on
+      //    behalf of the admin's API key. The board-mode gate below is
+      //    necessary but not sufficient — see the second gate.
+      const caller = getCallerAgent(extra);
+      if (!caller) {
+        return err(
+          'Unauthorized: create_remote_improvement_ticket requires an authenticated reviewer ' +
+          'subagent session. No agent identity is bound to this MCP session.',
+        );
+      }
+      const subagentRole = (caller.subagentRole || '').toLowerCase();
+      if (subagentRole !== 'reviewer') {
+        return err(
+          'Forbidden: create_remote_improvement_ticket may only be called from a reviewer ' +
+          `subagent. This session is pinned to role='${subagentRole || '(none)'}'. ` +
+          'It is dispatched as part of the post-Done ticket_done_review retrospective.',
+        );
+      }
+      if (!caller.subagentTicketId || caller.subagentTicketId !== source_ticket_id) {
+        return err(
+          `Forbidden: source_ticket_id (${source_ticket_id}) does not match the reviewer ` +
+          `subagent's pinned ticket (${caller.subagentTicketId || '(none)'}). The reviewer ` +
+          'may only file improvement tickets derived from the ticket they were spawned to review.',
+        );
+      }
+
+      // 2. Resolve source ticket + board to verify the source board opts into
       //    remote filing. A reviewer running a retrospective on a board that
       //    only allows same_board improvements should NOT be able to bypass
-      //    by calling this tool directly.
+      //    by calling this tool directly. Second gate after the caller-binding
+      //    checks above — defense in depth, not a substitute.
       const sourceTicket = await dataSource.getRepository(Ticket).findOne({ where: { id: source_ticket_id } });
       if (!sourceTicket) return err(`Source ticket not found: ${source_ticket_id}`);
 
@@ -88,7 +139,7 @@ The source ticket id is used to:
         );
       }
 
-      // 2. Load + validate the remote target SystemSetting bundle.
+      // 3. Load + validate the remote target SystemSetting bundle.
       const settingRepo = dataSource.getRepository(SystemSetting);
       const settings = await settingRepo.find({
         where: [
@@ -116,7 +167,7 @@ The source ticket id is used to:
       const apiKey = decrypt(rawKey);
       if (!apiKey) return err('Remote AWB API key failed to decrypt. Ask the admin to re-save the key.');
 
-      // 3. Verify the configured destination BEFORE creating anything. The
+      // 4. Verify the configured destination BEFORE creating anything. The
       //    remote `create_ticket` tool takes only column_id — a stale or
       //    typo'd column id pointing at a DIFFERENT board (or a board in a
       //    different workspace) would otherwise silently file the
@@ -153,7 +204,7 @@ The source ticket id is used to:
         );
       }
 
-      // 4. Compose the outbound payload. The `self-improvement` label is
+      // 5. Compose the outbound payload. The `self-improvement` label is
       //    enforced here regardless of what the caller passed so the remote
       //    side can apply its own recursion guard. Source link goes in the
       //    description so it survives even if labels are stripped.
@@ -162,7 +213,7 @@ The source ticket id is used to:
         `\n\n---\n_Source: ticket ${source_ticket_id} on board ${sourceBoardId} ` +
         `(self_improvement_mode=${sourceMode})_\n`;
 
-      // 5. Fire the MCP `create_ticket` call against the remote.
+      // 6. Fire the MCP `create_ticket` call against the remote.
       //    `created_by` is omitted — the remote will stamp the agent identity
       //    from the API key (via getCallerAgent + caller.agentName) so
       //    attribution reflects the WHO of the X-API-Key, not a hardcoded
