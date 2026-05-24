@@ -17,7 +17,7 @@ import { BoardColumn } from '../../../entities/BoardColumn';
 import { Resource } from '../../../entities/Resource';
 import { Ticket } from '../../../entities/Ticket';
 import { WorkspaceRole } from '../../../entities/WorkspaceRole';
-import { ok, err, safeJsonParse } from '../shared/helpers';
+import { ok, err, safeJsonParse, sanitizeHarnessMarkers } from '../shared/helpers';
 import { loadTicketFull } from '../shared/ticket-parsing';
 import {
   findColumnByName,
@@ -126,6 +126,8 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       created_by_id: z.string().optional().default('').describe('Creator ID'),
     },
     async ({ title, description, priority, assignee, reporter, assignee_id, reporter_id, reviewer_id, role_assignments, labels, channel_ids, column_id, column_name, board_id, subtasks, next_ticket_id, created_by, created_by_type, created_by_id }, extra: { sessionId?: string }) => {
+      const __createSanitizeCaller = getCallerAgent(extra);
+      description = sanitizeHarnessMarkers(description, { logger, toolName: 'create_ticket', fieldName: 'description', agentId: __createSanitizeCaller?.agentId });
       let resolvedColumnId = column_id;
       if (!resolvedColumnId && column_name) {
         if (!board_id) return err('board_id is required when using column_name');
@@ -287,7 +289,10 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
 
       const changes: string[] = [];
       if (title !== undefined) { ticket.title = title; changes.push('title'); }
-      if (description !== undefined) { ticket.description = description; changes.push('description'); }
+      if (description !== undefined) {
+        ticket.description = sanitizeHarnessMarkers(description, { logger, toolName: 'update_ticket', fieldName: 'description', agentId: caller?.agentId });
+        changes.push('description');
+      }
       if (priority !== undefined) { ticket.priority = priority; changes.push('priority'); }
       // When the caller updates either side of the (id, name) pair, backfill
       // the other from the Agent table. Without this, an agent that calls

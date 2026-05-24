@@ -21,7 +21,7 @@ import { User } from '../../../entities/User';
 import { UserMention } from '../../../entities/UserMention';
 import { Resource } from '../../../entities/Resource';
 import { activityEvents } from '../../../services/activity.service';
-import { ok, err, MENTION_SYNTAX_DOC } from '../shared/helpers';
+import { ok, err, MENTION_SYNTAX_DOC, sanitizeHarnessMarkers } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
 import { resolveAgentDisplayName } from '../../../utils/agent-name';
 import type { ToolContext } from './context';
@@ -120,6 +120,13 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
     async ({ ticket_id, author_type, author_id, author, content, type, parent_id, metadata, author_role, attachment_resource_ids }, extra: { sessionId?: string }) => {
       const ticket = await dataSource.getRepository(Ticket).findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Ticket not found');
+
+      // Strip any `<system-reminder>…</system-reminder>` or sibling harness
+      // markers a confused CLI subagent echoed from its model context into
+      // the comment body (ticket ce6c8d58). Pre-resolve the caller for the
+      // log line so we know which agent is leaking.
+      const __callerForSanitize = getCallerAgent(extra);
+      content = sanitizeHarnessMarkers(content, { logger, toolName: 'add_comment', fieldName: 'content', agentId: __callerForSanitize?.agentId });
 
       // Validate type — REST endpoint shape parity. Zod already restricts to the
       // allowed enum, but we also reject 'system' explicitly so an agent can't
@@ -341,6 +348,8 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       const resolved = await resolveAuthor(author_type, author_id, author, extra);
       if ('error' in resolved) return err(resolved.error);
 
+      content = sanitizeHarnessMarkers(content, { logger, toolName: 'ask_question', fieldName: 'content', agentId: resolved.authorId });
+
       const commentRepo = dataSource.getRepository(Comment);
       const callerCtx = getCallerAgent(extra);
       const resolvedAuthorRole = await resolveAuthorRole(
@@ -437,6 +446,8 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       const resolved = await resolveAuthor(author_type, author_id, author, extra);
       if ('error' in resolved) return err(resolved.error);
 
+      content = sanitizeHarnessMarkers(content, { logger, toolName: 'answer_question', fieldName: 'content', agentId: resolved.authorId });
+
       const callerCtx = getCallerAgent(extra);
       const resolvedAuthorRole = await resolveAuthorRole(
         question.ticket_id, author_role, resolved.authorType, resolved.authorId,
@@ -489,6 +500,8 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
 
       const resolved = await resolveAuthor(author_type, author_id, author, extra);
       if ('error' in resolved) return err(resolved.error);
+
+      content = sanitizeHarnessMarkers(content, { logger, toolName: 'record_decision', fieldName: 'content', agentId: resolved.authorId });
 
       const commentRepo = dataSource.getRepository(Comment);
       const callerCtx = getCallerAgent(extra);
@@ -560,6 +573,8 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
 
       const resolved = await resolveAuthor(author_type, author_id, author, extra);
       if ('error' in resolved) return err(resolved.error);
+
+      content = sanitizeHarnessMarkers(content, { logger, toolName: 'handoff_to_agent', fieldName: 'content', agentId: resolved.authorId });
 
       // Snapshot the previous assignee BEFORE the swap so the handoff
       // metadata records who passed the baton (useful for audit trails
