@@ -276,6 +276,27 @@ export class AgentManagerController {
 
     this.logService.info('AgentManager', `Pairing redeemed id=${rec.id} ws=${rec.workspace_id} agent=${agent.id}`);
 
+    // Audit: each redeem mints a *new* manager Agent row. If the operator
+    // re-paired a host that already had an operator-set name (e.g. "Ralf"),
+    // the new row carries the hostname-derived fallback unless rec.agent_name
+    // was supplied. Children whose manager_agent_id gets re-pointed to this
+    // new row will then display the new prefix — a frequent source of "all
+    // my agents got renamed" reports. Log so the trail is in /admin/logs.
+    this.logService.info(
+      'AgentIdentity',
+      `Manager agent created via pair/redeem: name="${agent.name}" (id=${agent.id.slice(0, 8)} hostname=${hostname} ws=${rec.workspace_id} pairing=${rec.id})`,
+      {
+        agent_id: agent.id,
+        agent_name: agent.name,
+        agent_type: 'manager',
+        hostname,
+        workspace_id: rec.workspace_id,
+        pairing_id: rec.id,
+        rec_agent_name: rec.agent_name || null,
+        via: 'POST /api/agent-manager/pair/redeem',
+      },
+    );
+
     return res.status(201).json({
       ok: true,
       api_key: apiKey.raw_key,

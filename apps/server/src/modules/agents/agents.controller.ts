@@ -14,6 +14,7 @@ import { AgentStatusService } from './agent-status.service';
 import { AllocationService } from './allocation.service';
 import { SubagentMonitorService } from '../../services/subagent-monitor.service';
 import { InstanceRegistryService, InstanceRecord } from '../agent-manager/instance-registry.service';
+import { LogService } from '../../services/log.service';
 import { ApiOperation, ApiParam, ApiQuery, ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { findOrFail } from '../../common/find-or-fail';
 
@@ -65,6 +66,7 @@ export class AgentsController {
     // SubagentMonitorService); the cycle is resolved on both sides.
     @Inject(forwardRef(() => InstanceRegistryService))
     private readonly instanceRegistry: InstanceRegistryService,
+    private readonly logService: LogService,
   ) {}
 
   @Get(':id/allocated-tickets')
@@ -394,11 +396,29 @@ export class AgentsController {
     // get-by-id rule above). Fixes the AgentManager admin page edit flow:
     // the page lists agents cross-workspace via getAgentsAll() but Edit was
     // 404ing whenever the operator's active workspace differed from the
-    // agent's workspace. Workspace-scoped admins stay scoped.
+    // agent's workspace. Workspace-scoped admins stay scoped — but they are
+    // also allowed to edit workspace-less identities (manager agents) so the
+    // Edit Identity dialog on the AgentManager page works for them. Without
+    // this, GET returned the workspace-less manager (line 323 `In([ws, ''])`)
+    // and the dialog opened, but Save 404'd here and the operator saw a silent
+    // failure.
     const isSystemAdmin = (req as any).currentUser?.role === 'admin';
     const agent = await findOrFail(this.agentRepo, {
-      where: { id, ...(workspaceId && !isSystemAdmin ? { workspace_id: workspaceId } : {}) },
+      where: { id, ...(workspaceId && !isSystemAdmin ? { workspace_id: In([workspaceId, '']) } : {}) },
     }, 'Agent not found');
+
+    // Snapshot pre-update fields used to detect identity changes we want to
+    // audit. Past incident: manager Agent names silently flipped from the
+    // operator-set label (e.g. "Ralf") to a hostname-derived fallback
+    // ("awb-agent-manager (PARN-HOME)") with no record of who / when, because
+    // none of the three mutation paths (this PATCH, MCP update_agent,
+    // pair/redeem create) emitted an audit line. Log here so the next rename
+    // is attributable from /admin/logs without DB forensics.
+    const prevName = agent.name;
+    const prevManagerAgentId = agent.manager_agent_id ?? null;
+    const actorId =
+      (req as any).currentUser?.id || (req as any).currentAgentId || (req as any).apiKey?.agent_id || null;
+    const actorRole = (req as any).currentUser?.role || null;
 
     const { name, description, type, avatar_url, is_active, role_prompt, role_prompt_meta, working_dir, manager_agent_id, credential_id } = body;
     if (name !== undefined) {
@@ -442,15 +462,51 @@ export class AgentsController {
     }
 
     const updated = await this.agentRepo.save(agent);
+
+    if (prevName !== updated.name) {
+      this.logService.info(
+        'AgentIdentity',
+        `Agent name changed: "${prevName}" → "${updated.name}" (id=${updated.id.slice(0, 8)} type=${updated.type})`,
+        {
+          agent_id: updated.id,
+          agent_type: updated.type,
+          field: 'name',
+          before: prevName,
+          after: updated.name,
+          actor_id: actorId,
+          actor_role: actorRole,
+          via: 'PATCH /api/agents/:id',
+        },
+      );
+    }
+    if ((prevManagerAgentId ?? null) !== (updated.manager_agent_id ?? null)) {
+      this.logService.info(
+        'AgentIdentity',
+        `Agent manager_agent_id changed: ${prevManagerAgentId || '(none)'} → ${updated.manager_agent_id || '(none)'} (id=${updated.id.slice(0, 8)} name=${updated.name})`,
+        {
+          agent_id: updated.id,
+          agent_name: updated.name,
+          field: 'manager_agent_id',
+          before: prevManagerAgentId,
+          after: updated.manager_agent_id ?? null,
+          actor_id: actorId,
+          actor_role: actorRole,
+          via: 'PATCH /api/agents/:id',
+        },
+      );
+    }
     return res.json(updated);
   }
 
   @Delete(':id')
   async delete(@Param('id') id: string, @Req() req: Request, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
     // System admins bypass workspace scoping (parallel to GET / PATCH above).
+    // Workspace members with MANAGE_AGENTS can also delete workspace-less
+    // identities (manager agents) — mirrors the GET / PATCH lookup so the
+    // AgentManager admin page can remove a stale paired manager identity.
     const isSystemAdmin = (req as any).currentUser?.role === 'admin';
     const agent = await findOrFail(this.agentRepo, {
-      where: { id, ...(workspaceId && !isSystemAdmin ? { workspace_id: workspaceId } : {}) },
+      where: { id, ...(workspaceId && !isSystemAdmin ? { workspace_id: In([workspaceId, '']) } : {}) },
     }, 'Agent not found');
     await this.agentRepo.delete(agent.id);
     return res.json({ success: true });
