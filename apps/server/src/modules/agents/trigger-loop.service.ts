@@ -108,6 +108,15 @@ export class TriggerLoopService implements OnModuleInit {
       if (log.action === 'moved' && ticket.next_ticket_id) {
         await this._dispatchNextTicket(ticket, log.actor_id || '');
       }
+      // Self-improvement: when a ticket lands on a terminal column AND the
+      // board opts in via `self_improvement_mode != 'off'`, dispatch a
+      // `ticket_done_review` trigger to the reviewer so they can analyse
+      // what just shipped and file follow-up improvement tickets.
+      // Gated tightly by `_dispatchPostDoneReview` (action=moved, reviewer
+      // assignment exists, recursion-guard label not set).
+      if (log.action === 'moved') {
+        await this._dispatchPostDoneReview(ticket, col.board_id, log.actor_id || '');
+      }
       return;
     }
 
@@ -271,6 +280,84 @@ export class TriggerLoopService implements OnModuleInit {
   }
 
   /**
+   * Self-improvement dispatch: when a ticket lands on a terminal column,
+   * wake the reviewer one more time with `trigger_source: 'ticket_done_review'`
+   * so they can analyse the finished work and (optionally) file follow-up
+   * improvement tickets — either on the same board or against the remote AWB
+   * instance configured in admin SystemSetting.
+   *
+   * Gating (all must hold; first failure = silent skip):
+   *   - board exists and `self_improvement_mode != 'off'`
+   *   - ticket labels do NOT include 'self-improvement' (recursion guard —
+   *     stops improvement tickets from spawning more improvement tickets)
+   *   - workspace has a `reviewer` WorkspaceRole AND the ticket has a
+   *     TicketRoleAssignment row pinning a reviewer agent
+   *
+   * Bypasses the focus selector via `bypassFocus: true` — the reviewer may
+   * legitimately be focused on a different ticket but we still want them to
+   * file the retrospective. This mirrors `emitManualTrigger` semantics.
+   *
+   * `actorId` is the human / agent that moved the ticket to Done; carried
+   * through so the audit trail attributes the trigger to that mover.
+   */
+  private async _dispatchPostDoneReview(
+    ticket: Ticket,
+    boardId: string,
+    actorId: string,
+  ): Promise<void> {
+    // Recursion guard: skip tickets that are themselves self-improvement
+    // follow-ups so we don't loop. Labels live as a JSON string on the row.
+    const labels = safeJsonParse<string[]>((ticket as any).labels, []);
+    if (Array.isArray(labels) && labels.includes('self-improvement')) {
+      this.logService.info('MCP', 'post_done_review skipped (recursion guard: self-improvement label)', {
+        ticket_id: ticket.id,
+      });
+      return;
+    }
+
+    if (!boardId) return;
+    const board = await this.dataSource.getRepository(Board).findOne({ where: { id: boardId } });
+    if (!board) return;
+    const mode = (board as any).self_improvement_mode || 'off';
+    if (mode === 'off') return;
+
+    // Resolve reviewer holder. Reuse the same workspace-roles + assignment
+    // lookup as `_handleActivity` so custom workspace role naming still works
+    // — but reviewer is a builtin slug everywhere, so this is the common case.
+    const role = await this.dataSource.getRepository(WorkspaceRole).findOne({
+      where: { workspace_id: ticket.workspace_id, slug: 'reviewer' },
+    });
+    if (!role) {
+      this.logService.info('MCP', 'post_done_review skipped (no reviewer WorkspaceRole)', {
+        ticket_id: ticket.id, workspace_id: ticket.workspace_id,
+      });
+      return;
+    }
+    const assignment = await this.dataSource.getRepository(TicketRoleAssignment).findOne({
+      where: { ticket_id: ticket.id, role_id: role.id },
+    });
+    const reviewerAgentId = assignment?.agent_id || null;
+    if (!reviewerAgentId) {
+      this.logService.info('MCP', 'post_done_review skipped (no reviewer assigned)', {
+        ticket_id: ticket.id,
+      });
+      return;
+    }
+
+    await this._emitTrigger(
+      ticket, reviewerAgentId, 'reviewer', 'ticket_done_review', actorId,
+      {
+        bypassFocus: true,
+        columnPromptOverride: {
+          template_id: 'self-improvement-inline',
+          name: 'Self-Improvement Review',
+          content: TriggerLoopService.SELF_IMPROVEMENT_PROMPT,
+        },
+      },
+    );
+  }
+
+  /**
    * Manually wake an agent on a ticket — bound to the "Trigger" button on the
    * ticket UI and any other deliberate user-initiated kick. Just emits the SSE
    * event; no DB row beyond the explicit `trigger_dispatched` audit, no
@@ -356,6 +443,67 @@ export class TriggerLoopService implements OnModuleInit {
   }
 
   /**
+   * Static self-improvement analysis prompt injected as `column_prompt` on
+   * `ticket_done_review` triggers. Kept inline (not table-driven) so the
+   * post-done flow is self-contained: an admin only has to flip
+   * `Board.self_improvement_mode`, no extra prompt-template seeding step.
+   * Admins who want a custom analysis prompt can map a PromptTemplate to the
+   * board's terminal column via `column_prompts` and the in-line override
+   * here will be ignored — but the table-mapped prompt only ever fires for
+   * normal (non-`ticket_done_review`) terminal-column landings, so the two
+   * paths don't collide.
+   */
+  private static readonly SELF_IMPROVEMENT_PROMPT = `# Self-Improvement Review
+
+This ticket just landed on a terminal column (Done). You are being woken up one
+last time as the reviewer to look back over what shipped and decide whether the
+team can learn something repeatable from it.
+
+## What to do
+
+1. Read the ticket title, description, the comments thread, and the activity log
+   (use \`mcp__awb__get_ticket\` and \`mcp__awb__get_ticket_activity\`). Pay
+   attention to where time was spent, what surprised the assignee, and any
+   reviewer kickbacks.
+
+2. Decide if there is a concrete, actionable improvement worth filing. Examples
+   that DO warrant a new ticket:
+   - A repeated pain point that better tooling / docs / convention would fix.
+   - A test gap exposed by a regression that landed and was hot-patched.
+   - A workflow friction the assignee called out explicitly in a comment.
+   - A reviewer comment that started "next time we should…".
+
+   Examples that do NOT warrant a new ticket:
+   - One-off bugs that were fixed cleanly in this very ticket.
+   - Personal style preferences with no team-wide impact.
+   - Speculative refactor itches without a real driver.
+
+3. If you found one, file it via either:
+   - \`mcp__awb__create_ticket\` — to file on THIS board (Backlog column,
+     priority=low unless clearly urgent). Add label \`self-improvement\` and a
+     short \`Source:\` link back to this ticket id in the description.
+   - \`mcp__awb__create_remote_improvement_ticket\` — to file against the
+     remote AWB instance configured by the admin (only available when the
+     board's \`self_improvement_mode\` is \`remote_awb\` or \`both\`). Use
+     this for improvements that are about AWB itself, not the project.
+
+4. If you found NONE: leave one short comment summarising what you checked
+   and why nothing crossed the bar. That short comment is the audit trail
+   that the retrospective ran.
+
+## Recursion guard
+
+If the ticket you are reviewing already has the \`self-improvement\` label,
+you should never have been woken — exit immediately with no action.
+
+## Tone
+
+Keep follow-up ticket titles tight and outcome-shaped:
+  GOOD: "Add lint rule that bans cross-module entity imports"
+  BAD:  "We had some import problems we should look at"
+`;
+
+  /**
    * Compose the trigger payload (role_prompt / ticket_prompt / column_prompt
    * loaded fresh at dispatch time) and emit via activityEvents so the
    * EventsController SSE listener forwards it to connected agents.
@@ -377,7 +525,16 @@ export class TriggerLoopService implements OnModuleInit {
     role: string,
     triggerSource: string,
     triggeredBy: string,
-    opts?: { forceRespawn?: boolean; bypassFocus?: boolean },
+    opts?: {
+      forceRespawn?: boolean;
+      bypassFocus?: boolean;
+      // Inline override for `column_prompt` — used by `_dispatchPostDoneReview`
+      // to inject the self-improvement analysis prompt onto a terminal-column
+      // trigger that the normal `board.column_prompts[column_id]` path can't
+      // serve (the terminal column's mapped prompt, if any, exists for normal
+      // merging workflow — distinct from the post-done retrospective).
+      columnPromptOverride?: { template_id: string; name: string; content: string };
+    },
   ): Promise<string> {
     const now = new Date();
 
@@ -502,25 +659,32 @@ export class TriggerLoopService implements OnModuleInit {
       }
     }
 
-    // Column workflow prompt: Board.column_prompts[column_id] → PromptTemplate.content
+    // Column workflow prompt: Board.column_prompts[column_id] → PromptTemplate.content.
+    // Override path: callers that need to ship a synthetic prompt (e.g.
+    // `_dispatchPostDoneReview` injecting the self-improvement analysis prompt)
+    // pass `opts.columnPromptOverride` — short-circuit before the lookup.
     let columnPrompt: { template_id: string; name: string; content: string } | null = null;
-    try {
-      if (col) {
-        const board = await this.dataSource.getRepository(Board).findOne({ where: { id: col.board_id } });
-        const raw = board?.column_prompts;
-        if (raw) {
-          const map = safeJsonParse(raw, {});
-          const tplId: string | undefined = map?.[ticket.column_id];
-          if (tplId) {
-            const tpl = await this.dataSource.getRepository(PromptTemplate).findOne({ where: { id: tplId } });
-            if (tpl && tpl.workspace_id === board!.workspace_id) {
-              columnPrompt = { template_id: tpl.id, name: tpl.name, content: tpl.content };
+    if (opts?.columnPromptOverride) {
+      columnPrompt = opts.columnPromptOverride;
+    } else {
+      try {
+        if (col) {
+          const board = await this.dataSource.getRepository(Board).findOne({ where: { id: col.board_id } });
+          const raw = board?.column_prompts;
+          if (raw) {
+            const map = safeJsonParse(raw, {});
+            const tplId: string | undefined = map?.[ticket.column_id];
+            if (tplId) {
+              const tpl = await this.dataSource.getRepository(PromptTemplate).findOne({ where: { id: tplId } });
+              if (tpl && tpl.workspace_id === board!.workspace_id) {
+                columnPrompt = { template_id: tpl.id, name: tpl.name, content: tpl.content };
+              }
             }
           }
         }
+      } catch (e) {
+        this.logService.warn('MCP', 'column_prompt lookup failed (continuing without)', { err: String(e), ticket_id: ticket.id });
       }
-    } catch (e) {
-      this.logService.warn('MCP', 'column_prompt lookup failed (continuing without)', { err: String(e), ticket_id: ticket.id });
     }
 
     // Manager-side defensive cap hint, kept on the wire for backward
