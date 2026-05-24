@@ -12,6 +12,7 @@ import { BoardColumn } from '../entities/BoardColumn';
 import { ActivityLog } from '../entities/ActivityLog';
 import { WorkspaceRole } from '../entities/WorkspaceRole';
 import { TicketRoleAssignment } from '../entities/TicketRoleAssignment';
+import { resolveAgentDisplayName } from '../utils/agent-name';
 
 const ACTION_COLORS: Record<string, number> = {
   created: 0x34d399,
@@ -73,13 +74,17 @@ export class NotificationService implements OnModuleInit, OnModuleDestroy {
           const role = roles.find(r => r.id === a.role_id);
           if (!role) continue;
           if (a.agent_id) {
-            const agent = await this.agentRepo.findOne({ where: { id: a.agent_id } });
+            // Use the canonical `<Manager>/<Agent>` display so Discord embeds
+            // match what the user sees on the board (TicketCard / activity feed
+            // already render the prefixed form). resolveAgentDisplayName falls
+            // back to the bare name if the manager row is missing.
+            const display = await resolveAgentDisplayName(this.agentRepo, a.agent_id);
             if (role.slug === 'assignee') {
               assignee_id = a.agent_id;
-              assignee_name = agent?.name || assignee_name;
+              assignee_name = display || assignee_name;
             } else if (role.slug === 'reporter') {
               reporter_id = a.agent_id;
-              reporter_name = agent?.name || reporter_name;
+              reporter_name = display || reporter_name;
             }
           } else if (a.user_id) {
             const user = await this.userRepo.findOne({ where: { id: a.user_id } });

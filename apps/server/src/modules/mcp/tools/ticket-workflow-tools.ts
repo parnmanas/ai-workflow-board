@@ -17,6 +17,7 @@ import { ok, err } from '../shared/helpers';
 import { loadTicketFull } from '../shared/ticket-parsing';
 import { findColumnByName, maxTicketPosition, shiftTicketPositions } from '../shared/ticket-helpers';
 import { getCallerAgent } from '../shared/session-auth';
+import { resolveAgentDisplayName } from '../../../utils/agent-name';
 import type { ToolContext } from './context';
 
 export function registerTicketWorkflowTools(server: McpServer, ctx: ToolContext): void {
@@ -217,6 +218,7 @@ export function registerTicketWorkflowTools(server: McpServer, ctx: ToolContext)
         throw e;
       }
 
+      const actorDisplay = (await resolveAgentDisplayName(agentRepo, agent.id)) || agent.name;
       await activityService.logActivity({
         entity_type: 'ticket',
         entity_id: ticket_id,
@@ -225,7 +227,7 @@ export function registerTicketWorkflowTools(server: McpServer, ctx: ToolContext)
         old_value: previousOwner ?? '',
         new_value: agent_id,
         actor_id: agent_id,
-        actor_name: agent.name,
+        actor_name: actorDisplay,
         ticket_id,
         role: '',
         trigger_source: 'agent_claim',
