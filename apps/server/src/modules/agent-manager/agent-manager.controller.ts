@@ -152,6 +152,45 @@ export class AgentManagerController {
       ? (typeof body.update_last_error === 'string' ? body.update_last_error : null)
       : undefined;
 
+    // Self-heal: a manager heartbeat that authenticates with a valid apiKey
+    // (apiKey.agent_id is the heartbeat's authoritative agent_id) but whose
+    // Agent row has been deleted out from under us would otherwise leave the
+    // admin AgentManager page showing an instance whose detail endpoint 404s
+    // — operator reports "Edit Identity 안 됨, /api/agents/<id> 404". When
+    // mode='manager', re-mint the Agent row from the heartbeat's hostname so
+    // the operator can rename it via Edit Identity instead of being stuck.
+    // workspace_id=null per the workspace-less invariant.
+    if (mode === 'manager') {
+      try {
+        const exists = await this.agentRepo.findOne({ where: { id: agent_id } });
+        if (!exists) {
+          const hostnameStr =
+            typeof body?.hostname === 'string' && body.hostname ? body.hostname : 'unknown';
+          const recreated = this.agentRepo.create({
+            id: agent_id,
+            name: `awb-agent-manager (${hostnameStr})`,
+            description: 'awb-agent-manager — recreated from heartbeat (Agent row was missing)',
+            type: 'manager',
+            is_active: 1,
+            workspace_id: null,
+            roles: '[]',
+          });
+          await this.agentRepo.save(recreated);
+          this.logService.warn(
+            'AgentManager',
+            `Recreated missing manager Agent row id=${agent_id.slice(0, 8)} name="${recreated.name}" from heartbeat`,
+            { agent_id, hostname: hostnameStr, instance_id, via: 'instance-heartbeat self-heal' },
+          );
+        }
+      } catch (err: any) {
+        this.logService.warn(
+          'AgentManager',
+          `Self-heal failed for manager agent_id=${agent_id.slice(0, 8)}: ${err?.message ?? String(err)}`,
+          { err: err?.message ?? String(err), agent_id, instance_id },
+        );
+      }
+    }
+
     const rec = this.registry.upsert({
       instance_id,
       agent_id,
