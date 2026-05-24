@@ -131,6 +131,40 @@ export class EventsController implements OnModuleDestroy {
             timestamp: mapped.timestamp || new Date().toISOString(),
           };
           this.eventSubject.next(envelope);
+
+          // Defensive: admin-dispatched commands (agent_manager_command) and
+          // similar agent-targeted events fail silently when no SSE subscriber
+          // matches the per-event filter. Without this warn the operator
+          // sees "restart_manager dispatched 200 OK" but the manager never
+          // executes — and there's nothing in the logs to point at the
+          // gap. Specifically catches the `apiKey.agent_id = NULL` /
+          // identity.agentId = undefined class of bug where the subscriber
+          // bucket for the target agent is empty even though the manager's
+          // SSE is connected.
+          if (
+            def.eventType === 'agent_manager_command' &&
+            typeof mapped.scope.agent_id === 'string' &&
+            mapped.scope.agent_id
+          ) {
+            const subscribers = this.agentSseSessions.get(mapped.scope.agent_id);
+            const subscriberCount = subscribers?.size ?? 0;
+            if (subscriberCount === 0) {
+              const cmd = (mapped.payload as any)?.command || 'unknown';
+              const cmdId = (mapped.payload as any)?.command_id || 'unknown';
+              this.logService.warn(
+                'SSE',
+                `${def.eventType} ${cmd} for agent_id=${mapped.scope.agent_id.slice(0, 8)} has 0 SSE subscribers — command will silently no-op (id=${cmdId})`,
+                {
+                  event_type: def.eventType,
+                  command: cmd,
+                  command_id: cmdId,
+                  scope_agent_id: mapped.scope.agent_id,
+                  total_sse_clients: this.clientCount,
+                  hint: 'Check apiKey.agent_id NULL (FK ON DELETE SET NULL aftermath), or manager SSE disconnect, or wrong instance.',
+                },
+              );
+            }
+          }
         } catch (err) {
           this.logService.error('SSE', `Failed to process ${def.emitterEvent} event: ${err}`);
         }
