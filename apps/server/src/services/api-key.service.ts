@@ -94,6 +94,30 @@ export class ApiKeyService {
     return result.affected ?? 0;
   }
 
+  /**
+   * Hard-delete every apiKey row for an agent matching a name prefix.
+   * Use this for system-managed key paths (e.g., managed-agent
+   * provisioning rotation) where the only reason a row exists is the
+   * live secret — the moment we mint a replacement, the old row is
+   * useless and the audit trail is captured in LogService instead.
+   * Without hard-delete the table grew unbounded as every spawn /
+   * restart minted a new row and only soft-revoked the previous,
+   * leaving dozens of `is_active=0` rows per agent.
+   *
+   * Returns the affected row count.
+   */
+  async deleteApiKeysByAgentAndNamePrefix(agentId: string, namePrefix: string): Promise<number> {
+    const result = await this.repo
+      .createQueryBuilder()
+      .delete()
+      .where('agent_id = :agent_id AND name LIKE :prefix', {
+        agent_id: agentId,
+        prefix: `${namePrefix}%`,
+      })
+      .execute();
+    return result.affected ?? 0;
+  }
+
   async deleteApiKey(id: string): Promise<boolean> {
     const result = await this.repo.delete(id);
     return (result.affected ?? 0) > 0;
