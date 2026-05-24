@@ -103,13 +103,18 @@ export class AgentsController {
       return res.json(await this._enrichLiveData(named));
     }
     if (!workspaceId) return res.json([]);
-    // Include workspace-less rows ('') so manager-type agents — which aren't
-    // pinned to a workspace by design — surface in every workspace's AI
-    // Agents tab. See agent-manager.controller.ts pairRedeem for the create
-    // side, and the BackfillManagerAgentsWorkspaceless migration for the
-    // historical backfill.
+    // Manager-type rows are global by design (workspace_id is NULL after
+    // migration 19; '' is the pre-19 shape; some rows may carry a stale
+    // workspace id). Surface them in every workspace's AI Agents tab via a
+    // `type: 'manager'` branch so the listing doesn't depend on the storage
+    // shape of workspace_id at all.
     const agents = await this.agentRepo.find({
-      where: { workspace_id: In([workspaceId, '']) },
+      where: [
+        { workspace_id: workspaceId },
+        { workspace_id: '' },
+        { workspace_id: IsNull() as any },
+        { type: 'manager' },
+      ],
       order: { name: 'ASC' },
     });
     const named = await this._enrichManagerNames(agents);
@@ -244,9 +249,15 @@ export class AgentsController {
     if (!workspaceId) return res.json([]);
 
     // Mirror list() — include workspace-less rows so manager identities show
-    // up on the dashboard in every workspace.
+    // up on the dashboard in every workspace, regardless of workspace_id
+    // storage shape (NULL post-migration 19, '' pre-19, stale id otherwise).
     const agents = await this.agentRepo.find({
-      where: { workspace_id: In([workspaceId, '']) },
+      where: [
+        { workspace_id: workspaceId },
+        { workspace_id: '' },
+        { workspace_id: IsNull() as any },
+        { type: 'manager' },
+      ],
       order: { name: 'ASC' },
     });
 
@@ -322,6 +333,14 @@ export class AgentsController {
     // IsNull() branch, loadManagerInfo on /admin/agent-manager 404s and the
     // Edit Identity button stays disabled, since the dialog only renders when
     // managerInfo loaded.
+    // Manager-type rows are global by design (workspace_id should be NULL,
+    // but historic rows may carry '' or even a stale workspace id from an
+    // earlier code path) — anyone with VIEW_ACTIVITY may read them regardless
+    // of their current workspace. Without the `type: 'manager'` branch, the
+    // AgentManager admin page lists a manager instance (its enrichment uses
+    // no workspace filter) but loadManagerInfo 404s here whenever the
+    // operator's workspace differs from the manager's stored workspace, which
+    // leaves the Edit Identity button disabled.
     const isSystemAdmin = (req as any).currentUser?.role === 'admin';
     const agent = await findOrFail(this.agentRepo, {
       where: workspaceId && !isSystemAdmin
@@ -329,6 +348,7 @@ export class AgentsController {
             { id, workspace_id: workspaceId },
             { id, workspace_id: '' },
             { id, workspace_id: IsNull() as any },
+            { id, type: 'manager' },
           ]
         : { id },
     }, 'Agent not found');
@@ -410,6 +430,8 @@ export class AgentsController {
     // this, GET returned the workspace-less manager (line 323 `In([ws, ''])`)
     // and the dialog opened, but Save 404'd here and the operator saw a silent
     // failure.
+    // Manager rows are global — see GET handler comment. PATCH must mirror
+    // the same predicate or the dialog opens (GET succeeded) but Save 404s.
     const isSystemAdmin = (req as any).currentUser?.role === 'admin';
     const agent = await findOrFail(this.agentRepo, {
       where: workspaceId && !isSystemAdmin
@@ -417,6 +439,7 @@ export class AgentsController {
             { id, workspace_id: workspaceId },
             { id, workspace_id: '' },
             { id, workspace_id: IsNull() as any },
+            { id, type: 'manager' },
           ]
         : { id },
     }, 'Agent not found');
@@ -514,11 +537,7 @@ export class AgentsController {
 
   @Delete(':id')
   async delete(@Param('id') id: string, @Req() req: Request, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
-    // System admins bypass workspace scoping (parallel to GET / PATCH above).
-    // Workspace members with MANAGE_AGENTS can also delete workspace-less
-    // identities (manager agents) — mirrors the GET / PATCH lookup so the
-    // AgentManager admin page can remove a stale paired manager identity.
-    // workspace_id may be '' OR NULL on historic manager rows — see GET notes.
+    // Manager rows are global — same predicate as GET / PATCH.
     const isSystemAdmin = (req as any).currentUser?.role === 'admin';
     const agent = await findOrFail(this.agentRepo, {
       where: workspaceId && !isSystemAdmin
@@ -526,6 +545,7 @@ export class AgentsController {
             { id, workspace_id: workspaceId },
             { id, workspace_id: '' },
             { id, workspace_id: IsNull() as any },
+            { id, type: 'manager' },
           ]
         : { id },
     }, 'Agent not found');
