@@ -11,6 +11,7 @@ import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
 import { MentionService, ResolvedMention } from '../../services/mention.service';
 import { RoomMembershipService } from './room-membership.service';
+import { resolveAgentDisplayName } from '../../utils/agent-name';
 
 const CONTENT_MAX = 10000;
 
@@ -161,6 +162,18 @@ export class RoomMessagingService {
     }
     if (trimmed.length > CONTENT_MAX) {
       throw makeError(400, `Message exceeds ${CONTENT_MAX} character limit`);
+    }
+
+    // Canonicalize agent senders to `<Manager>/<Agent>` so the SSE event +
+    // return value match what getMessages() already returns for history.
+    // Without this the caller decides the rendered name and the MCP path
+    // (`agent.name`) ends up shorter than the agent-api path (which already
+    // resolves the prefix), so the same agent's live messages flicker between
+    // bare and prefixed names. Centralizing here keeps every entry point
+    // (REST, agent-api ack, MCP send_chat_room_message, Actions) consistent.
+    if (senderType === 'agent') {
+      const display = await resolveAgentDisplayName(this.agentRepo, senderId);
+      if (display) senderName = display;
     }
 
     const savedMsg = await this.messageRepo.save(
