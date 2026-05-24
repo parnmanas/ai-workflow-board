@@ -17,6 +17,8 @@ const PROVIDER_OPTIONS = [
   { value: 'openai', label: 'OpenAI' },
 ];
 
+type RemoteTestStatus = { ok: boolean; status?: number; message: string } | null;
+
 export default function SettingsManager() {
   const { showToast } = useToast();
   const [settings, setSettings] = useState<SettingRow[]>([]);
@@ -24,6 +26,8 @@ export default function SettingsManager() {
   const [saving, setSaving] = useState(false);
   const [formValues, setFormValues] = useState<Record<string, string>>({});
   const [dirty, setDirty] = useState(false);
+  const [testingRemote, setTestingRemote] = useState(false);
+  const [remoteTestResult, setRemoteTestResult] = useState<RemoteTestStatus>(null);
 
   const loadSettings = useCallback(async () => {
     setLoading(true);
@@ -56,10 +60,24 @@ export default function SettingsManager() {
       await api.updateSettings(formValues);
       showToast('Settings saved.', 'success');
       await loadSettings();
+      setRemoteTestResult(null);
     } catch (err: any) {
       showToast(err?.message || 'Failed to save settings', 'error');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleTestRemote = async () => {
+    setTestingRemote(true);
+    setRemoteTestResult(null);
+    try {
+      const result = await api.testSelfImprovementRemote();
+      setRemoteTestResult(result);
+    } catch (err: any) {
+      setRemoteTestResult({ ok: false, message: err?.message || 'Test failed' });
+    } finally {
+      setTestingRemote(false);
     }
   };
 
@@ -210,6 +228,93 @@ export default function SettingsManager() {
             onChange={(e) => handleChange('mcp.max_sessions', e.target.value)}
             placeholder="200"
           />
+        </div>
+      </Card>
+
+      {/* ─── Self-Improvement (remote AWB target) ─── */}
+      <Card padding="20px">
+        <div style={{ fontSize: '15px', fontWeight: 700, color: tokens.colors.textStrong, marginBottom: 4 }}>
+          Self-Improvement (remote AWB target)
+        </div>
+        <div style={{ fontSize: '12px', color: tokens.colors.textSecondary, marginBottom: 20, lineHeight: 1.5 }}>
+          When a board opts in with <code>self_improvement_mode = 'remote_awb'</code> or <code>'both'</code>,
+          the reviewer's post-done retrospective can file improvement tickets against another AWB
+          instance — typically the meta-AWB that hosts AWB platform improvements. Configure the
+          target board here. The API key is stored encrypted and never exposed to subagents.
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <Input
+            label="Remote AWB URL"
+            value={formValues['self_improvement.remote_awb_url'] || ''}
+            onChange={(e) => handleChange('self_improvement.remote_awb_url', e.target.value)}
+            placeholder="https://awb.example.com"
+          />
+          <Input
+            label="Workspace ID (on remote)"
+            value={formValues['self_improvement.remote_awb_workspace_id'] || ''}
+            onChange={(e) => handleChange('self_improvement.remote_awb_workspace_id', e.target.value)}
+            placeholder="uuid"
+          />
+          <Input
+            label="Board ID (on remote)"
+            value={formValues['self_improvement.remote_awb_board_id'] || ''}
+            onChange={(e) => handleChange('self_improvement.remote_awb_board_id', e.target.value)}
+            placeholder="uuid"
+          />
+          <Input
+            label="Column ID (on remote, typically Backlog/To-Do)"
+            value={formValues['self_improvement.remote_awb_column_id'] || ''}
+            onChange={(e) => handleChange('self_improvement.remote_awb_column_id', e.target.value)}
+            placeholder="uuid"
+          />
+          <div>
+            <label style={labelStyle}>API Key (X-Agent-Key for remote AWB)</label>
+            <div style={hintStyle}>Stored encrypted. Re-enter to rotate; masked on read.</div>
+            <input
+              type="password"
+              value={formValues['self_improvement.remote_awb_api_key'] || ''}
+              onChange={(e) => handleChange('self_improvement.remote_awb_api_key', e.target.value)}
+              placeholder="awb-…"
+              style={secretInputStyle}
+            />
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={handleTestRemote}
+              disabled={testingRemote || dirty}
+              loading={testingRemote}
+            >
+              Test connection
+            </Button>
+            {dirty && (
+              <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>
+                Save settings before testing.
+              </span>
+            )}
+            {remoteTestResult && !dirty && (
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 8,
+                padding: '6px 10px',
+                borderRadius: tokens.radii.md,
+                background: remoteTestResult.ok
+                  ? `${tokens.colors.accent}15`
+                  : `${tokens.colors.danger || tokens.colors.textMuted}15`,
+              }}>
+                <div style={{
+                  width: 8, height: 8, borderRadius: '50%',
+                  background: remoteTestResult.ok ? tokens.colors.accent : (tokens.colors.danger || tokens.colors.textMuted),
+                }} />
+                <span style={{ fontSize: 12, color: remoteTestResult.ok ? tokens.colors.accent : (tokens.colors.danger || tokens.colors.textMuted) }}>
+                  {remoteTestResult.message}
+                  {typeof remoteTestResult.status === 'number' ? ` (HTTP ${remoteTestResult.status})` : ''}
+                </span>
+              </div>
+            )}
+          </div>
         </div>
       </Card>
 
