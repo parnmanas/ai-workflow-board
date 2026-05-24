@@ -20,17 +20,10 @@ export class TicketSessionManager
   extends BaseSessionManager
   implements TicketSessionManagerContract
 {
-  // Synchronous reservation table for in-flight spawns. _sessions only
-  // gets populated at the END of _spawnSession (and ticketId is stamped
-  // by the caller a few lines later), so two concurrent dispatchTrigger
-  // calls on the same agent can both pass the cap check before either
-  // session lands. This map flips synchronously between the cap check and
-  // the await on _spawnSession, so a racing dispatch sees it.
-  //
-  // Key shape: sessionKey (`${ticketId}:${role}`) so same-(ticket, role)
-  // burst dispatches can short-circuit, while the per-agent cap counts
-  // distinct ticketIds across all entries.
-  #inflight = new Map<string, { agentId: string; ticketId: string }>();
+  // In-flight reservations are tracked on the base class's `_inflight` map
+  // (see comment there). Cap accounting and same-key drop logic below walk
+  // that map directly — both ticket and chat session managers share the
+  // pattern, but each owns its own instance, so the maps don't cross-pollute.
 
   constructor(config: SessionAwareConfig) {
     super(config, {
@@ -61,7 +54,7 @@ export class TicketSessionManager
     // back-to-back triggers can both pass the server gate before either
     // has stamped current_task. Mirror the cap here, counting both:
     //   - _sessions: spawned children (registered at the END of _spawnSession)
-    //   - #inflight: reservations placed synchronously on dispatch entry,
+    //   - _inflight: reservations placed synchronously on dispatch entry,
     //     covering the spawn-in-flight window where _sessions is still empty
     //
     // Allowed: same agent already has a session OR inflight reservation for
@@ -73,11 +66,17 @@ export class TicketSessionManager
       1,
       Math.floor(spec.maxConcurrentTicketsPerAgent ?? 1),
     );
-    if (spec.agentId && !this._getSession(sessionKey)) {
+    // Live-session check uses OS-level pid existence so a stale entry whose
+    // child was reaped without exit-handler cleanup never blocks a fresh
+    // spawn (and never gets reused — that would dispatch a turn into a
+    // broken stdin and stall the AWB trigger loop). Cap accounting below
+    // still walks raw `_sessions.values()` so stale entries don't inflate
+    // the count before the next dispatch purges them through this path.
+    if (spec.agentId && !this._getLiveSession(sessionKey)) {
       // Same (ticket, role) already spawning — drop as duplicate so the
       // first spawn wins. The next trigger for the same key will arrive
       // after _sessions.set and become a follow-up turn naturally.
-      if (this.#inflight.has(sessionKey)) {
+      if (this._inflight.has(sessionKey)) {
         log(
           `[ticket-session] dispatch dropped (spawn already in-flight for same key): ticket=${spec.ticketId.slice(0, 8)} role=${role}`,
         );
@@ -90,7 +89,7 @@ export class TicketSessionManager
           otherTickets.add(sess.ticketId);
         }
       }
-      for (const [k, info] of this.#inflight) {
+      for (const [k, info] of this._inflight) {
         if (k === sessionKey) continue;
         if (info.agentId === spec.agentId && info.ticketId && info.ticketId !== spec.ticketId) {
           otherTickets.add(info.ticketId);
@@ -129,9 +128,15 @@ export class TicketSessionManager
       }
     }
 
-    const sess = this._getSession(sessionKey);
+    const sess = this._getLiveSession(sessionKey);
 
     if (sess) {
+      // Acceptance criterion: explicit "reused existing pid=…" log so an
+      // operator grepping the manager log can distinguish a follow-up turn
+      // from a fresh spawn at a glance.
+      log(
+        `[ticket-session] reused existing pid=${sess.pid} ticket=${spec.ticketId.slice(0, 8)} role=${role} turn=${sess.turnCount + 1}`,
+      );
       this._sendFollowUp(sess, this.#composeTriggerTurn(spec));
       if (spec.agentId && !sess.agentId) sess.agentId = spec.agentId;
       return { dispatched: true, pid: sess.pid };
@@ -146,7 +151,7 @@ export class TicketSessionManager
     // this slot before _spawnSession lands a SessionRecord in _sessions.
     // Cleared after the spawn outcome is known (success or failure) — the
     // session itself takes over the cap accounting from that point.
-    this.#inflight.set(sessionKey, {
+    this._inflight.set(sessionKey, {
       agentId: spec.agentId || '',
       ticketId: spec.ticketId,
     });
@@ -184,7 +189,7 @@ export class TicketSessionManager
     } finally {
       // Spawn outcome resolved and identity stamped — _sessions takes over
       // cap accounting from here.
-      this.#inflight.delete(sessionKey);
+      this._inflight.delete(sessionKey);
     }
     if (!spawned) {
       if (dedupKey) this._forgetDedup(dedupKey);

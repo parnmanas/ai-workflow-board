@@ -122,12 +122,36 @@ export interface SessionRecord {
   onResult?: (raw: any) => void;
 }
 
+/** Reservation placed on `_inflight` from the moment a dispatcher commits to
+ *  spawning a session until the child is either registered in `_sessions` or
+ *  the spawn fails. Subclass-specific identity fields (`ticketId`, `roomId`)
+ *  are optional so the same map can host both ticket-session and chat-session
+ *  reservations; the base class only cares that the key is occupied so a
+ *  concurrent dispatch on the same sessionKey can short-circuit instead of
+ *  racing past the `_getLiveSession` check and double-spawning. */
+export interface InflightReservation {
+  agentId?: string;
+  ticketId?: string;
+  roomId?: string;
+}
+
 export class BaseSessionManager {
   protected readonly _config: SessionAwareConfig;
   /** ST-7: per-cliType adapter cache. Same scheme as SubagentManager —
    *  one createAdapter() per cli over the manager's lifetime. */
   #adapters = new Map<string, CliAdapter>();
   protected readonly _sessions = new Map<string, SessionRecord>();
+  /** Synchronous reservation table for in-flight spawns. `_sessions` only
+   *  gets the new record at the END of `_spawnSession`, so without this map
+   *  two near-simultaneous `dispatchTrigger` / `dispatch` calls can both pass
+   *  `_getLiveSession(sessionKey) === undefined` and each spawn a child. The
+   *  reservation flips synchronously between the live-session check and the
+   *  await on `_spawnSession`, giving the second caller a deterministic
+   *  "spawn already in-flight" signal it can drop on. Subclasses store their
+   *  own identity metadata (`ticketId`, `roomId`, …) on the value so any
+   *  cap-accounting they do across spawned + reserved sessions stays
+   *  consistent. */
+  protected readonly _inflight = new Map<string, InflightReservation>();
   #dedupSet = new Set<string>();
   #dedupQueue: string[] = [];
   #DEDUP_MAX = 200;
@@ -169,6 +193,48 @@ export class BaseSessionManager {
 
   protected _getSession(sessionKey: string): SessionRecord | undefined {
     return this._sessions.get(sessionKey);
+  }
+
+  /** OS-level liveness probe for a child pid. `process.kill(pid, 0)` is a
+   *  non-destructive existence check — ESRCH means the kernel has reaped the
+   *  process, EPERM means it exists but we lack permission to signal it
+   *  (treat as alive — same uid in practice for us). Used by
+   *  `_getLiveSession` to detect a stale `_sessions` entry whose child died
+   *  without the exit handler firing (defensive — shouldn't happen with
+   *  `#wireExit` always attached, but cheap to verify and we've observed the
+   *  failure mode in operator reports). */
+  protected _isPidAlive(pid: number): boolean {
+    if (!pid || pid <= 0) return false;
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (err: any) {
+      // EPERM means the process exists but we can't signal it — count as
+      // alive. Anything else (ESRCH most commonly) means dead.
+      return err?.code === 'EPERM';
+    }
+  }
+
+  /** Return the SessionRecord under `sessionKey` only when its child pid is
+   *  still alive at the OS level. If the in-memory record is stale (pid was
+   *  reaped but exit cleanup didn't run), purge it and return undefined so
+   *  the caller falls through to a fresh spawn. This is the dispatch-side
+   *  source-of-truth reconciliation between `_sessions` and the OS process
+   *  table that the dedup ticket called out as missing. */
+  protected _getLiveSession(sessionKey: string): SessionRecord | undefined {
+    const sess = this._sessions.get(sessionKey);
+    if (!sess) return undefined;
+    if (this._isPidAlive(sess.pid)) return sess;
+    log(
+      `${this.#logTag} stale ${this.#keyField}=${sessionKey} pid=${sess.pid} — child reaped without exit-handler cleanup; purging in-memory record`,
+    );
+    if (sess.idleTimer) {
+      clearTimeout(sess.idleTimer);
+      sess.idleTimer = null;
+    }
+    this.#endTurn(sess);
+    this._sessions.delete(sessionKey);
+    return undefined;
   }
 
   protected _ensureCapacity(): boolean {
@@ -366,8 +432,11 @@ export class BaseSessionManager {
       this.#wireStdio(sess);
       this.#wireExit(sess);
 
+      // Greppable counterpart to subclass "reused existing pid=…" lines. The
+      // dedup ticket's acceptance asks for unambiguous "spawned new" vs
+      // "reused existing" — keep this format stable.
       log(
-        `Subagent spawned: pid=${sess.pid} cli=${adapter.cliType} kind=${this.#kindLabel} ${this.#keyField}=${sessionKey}`,
+        `${this.#logTag} spawned new pid=${sess.pid} cli=${adapter.cliType} kind=${this.#kindLabel} ${this.#keyField}=${sessionKey}`,
       );
 
       this.#startTurn(sess, onProgress);

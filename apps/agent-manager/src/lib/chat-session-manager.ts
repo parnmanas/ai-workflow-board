@@ -94,16 +94,56 @@ export class ChatSessionManager
     }
 
     const sessionKey = this.#makeKey(spec.roomId, spec.agentId);
-    const sess = this._getSession(sessionKey);
+    // OS-level liveness check — same single-source-of-truth reconciliation
+    // ticket-session does. A stale record (child reaped without exit
+    // handler) gets purged here so the next branch falls through to a fresh
+    // spawn instead of dispatching a turn into a dead stdin.
+    const sess = this._getLiveSession(sessionKey);
 
     if (sess) {
+      // Acceptance criterion: explicit "reused existing pid=…" log so the
+      // log stream clearly distinguishes follow-ups from fresh spawns.
+      log(
+        `[chat-session] reused existing pid=${sess.pid} room=${spec.roomId.slice(0, 8)} agent=${(spec.agentId || '').slice(0, 8)} turn=${sess.turnCount + 1}`,
+      );
       this._sendFollowUp(sess, spec.content || '', { onProgress: spec.onProgress });
       return { dispatched: true, pid: sess.pid };
     }
 
+    // Synchronous race guard: if another dispatch is already past this point
+    // for the same (room, agent), drop this one. Without it, two concurrent
+    // chat events with the same dedup-evading payload (e.g. different
+    // sender ids but same room+agent target) can both pass the live-session
+    // check and each spawn a child — exactly the bug ticket
+    // 52e581ce flagged. The reservation flips synchronously between the
+    // check above and the `_spawnSession` await below.
+    if (this._inflight.has(sessionKey)) {
+      log(
+        `[chat-session] dispatch dropped (spawn already in-flight for same key): room=${spec.roomId.slice(0, 8)} agent=${(spec.agentId || '').slice(0, 8)}`,
+      );
+      // Roll back the dedup mark so the retried message (when the in-flight
+      // spawn finishes and a real follow-up turn becomes possible) isn't
+      // silently swallowed as a duplicate.
+      this._forgetDedup(dedupKey);
+      return { dispatched: false, reason: 'inflight_spawn' };
+    }
+
     if (!this._ensureCapacity()) {
+      this._forgetDedup(dedupKey);
       return { dispatched: false, reason: 'cap_busy' };
     }
+
+    // Reserve the in-flight slot SYNCHRONOUSLY here — before any await — so a
+    // racing dispatch on the same (room, agent) trips the guard above on
+    // its second check. The chat path has at least one async hop (history
+    // fetch) before the spawn itself; if we deferred the reservation past
+    // that hop, two concurrent calls would both clear the guard during the
+    // fetch and each call `_spawnSession`, reproducing the duplicate-pid
+    // bug the dedup ticket was opened for.
+    this._inflight.set(sessionKey, {
+      agentId: spec.agentId || '',
+      roomId: spec.roomId,
+    });
 
     let history: ChatHistoryEntry[] = (this.#historyRing.get(spec.roomId) || []).slice();
     if (history.length === 0) {
@@ -120,18 +160,31 @@ export class ChatSessionManager
     });
 
     const monitorMeta: MonitorMeta = {};
-    const spawned = await this._spawnSession(
-      sessionKey,
-      spec.rolePrompt || '',
-      firstTurnText,
-      { onProgress: spec.onProgress, monitorMeta, agentContext: spec.agentContext },
-    );
-    if (!spawned) return { dispatched: false, reason: 'spawn_failed' };
-    // Stamp roomId / agentId on the record so snapshot() and any future
-    // per-room or per-agent queries don't have to re-parse the composite key.
-    spawned.roomId = spec.roomId;
-    spawned.agentId = spec.agentId;
-    spawned._effectiveApiKey = spec.agentContext?.api_key || this._config.apiKey;
+    let spawned: SessionRecord | null = null;
+    try {
+      spawned = await this._spawnSession(
+        sessionKey,
+        spec.rolePrompt || '',
+        firstTurnText,
+        { onProgress: spec.onProgress, monitorMeta, agentContext: spec.agentContext },
+      );
+      // Stamp roomId / agentId on the record BEFORE clearing the inflight
+      // reservation — `_spawnSession` lands the record in `_sessions`
+      // before returning, so a racing dispatch that just passed the
+      // live-session check would otherwise observe a session with empty
+      // identity fields.
+      if (spawned) {
+        spawned.roomId = spec.roomId;
+        spawned.agentId = spec.agentId;
+        spawned._effectiveApiKey = spec.agentContext?.api_key || this._config.apiKey;
+      }
+    } finally {
+      this._inflight.delete(sessionKey);
+    }
+    if (!spawned) {
+      this._forgetDedup(dedupKey);
+      return { dispatched: false, reason: 'spawn_failed' };
+    }
     return { dispatched: true, pid: spawned.pid, firstTurn: true };
   }
 
