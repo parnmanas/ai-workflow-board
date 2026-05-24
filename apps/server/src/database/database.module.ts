@@ -68,28 +68,70 @@ export class DatabaseModule implements OnModuleInit {
 
     // ── Boot-time defensive cleanup — strip workspace_id from manager rows ──
     // Operator invariant: AgentManager rows are NEVER tied to a workspace.
-    // Run on every boot, idempotent. Uses createQueryBuilder().execute() so
-    // the SQL is explicit and immune to FindOperator quirks in `repo.update`
-    // (which can silently emit a no-op WHERE on some TypeORM versions when
-    // criteria contain `Not(IsNull())`).
     //
-    // We log BEFORE counting and AFTER the update — even a 0-row result
-    // confirms the sweep reached the DB — so /admin/logs (category=DB)
-    // proves whether the cleanup ran. Previous version only logged when
-    // affected > 0, which made silent failure indistinguishable from a
-    // clean DB.
+    // Both prior attempts failed silently:
+    //   1. `agentRepo.update({type:'manager', workspace_id: Not(IsNull())},
+    //      {workspace_id: null})` — Not(IsNull()) in criteria was dropped
+    //      on some TypeORM versions, emitting `WHERE type='manager'` only
+    //      but with affected=0.
+    //   2. `createQueryBuilder().update().set({workspace_id: null})` — `null`
+    //      in .set() is treated as "skip this column" in some TypeORM
+    //      versions, so the SQL ended up `UPDATE agents WHERE type='manager'`
+    //      with an empty SET clause (no-op).
+    //
+    // Drop down to raw SQL via DataSource.query() to bypass ORM mediation
+    // entirely. Log before-/after-counts so /admin/logs (category=DB)
+    // proves what actually happened on every boot.
     try {
       const agentRepo = this.dataSource.getRepository(Agent);
-      this.dbLog('Boot cleanup: stripping workspace_id from every manager Agent row…');
-      const result = await agentRepo
-        .createQueryBuilder()
-        .update(Agent)
-        .set({ workspace_id: null })
-        .where("type = :type", { type: 'manager' })
-        .execute();
+      const totalManagers = await agentRepo.count({ where: { type: 'manager' } });
+      const beforeNonNull = await agentRepo
+        .createQueryBuilder('a')
+        .where("a.type = :type", { type: 'manager' })
+        .andWhere('a.workspace_id IS NOT NULL')
+        .getCount();
       this.dbLog(
-        `Boot cleanup: manager workspace_id strip — ${result.affected ?? 0} row(s) updated (UPDATE agents SET workspace_id=NULL WHERE type='manager')`,
+        `Boot cleanup: ${totalManagers} manager row(s) total, ${beforeNonNull} with non-NULL workspace_id — about to strip`,
       );
+
+      const sql = "UPDATE agents SET workspace_id = NULL WHERE type = 'manager'";
+      const raw = await this.dataSource.query(sql);
+      // Postgres returns [rows, rowCount]; sqljs returns void. Try both shapes.
+      const affected =
+        Array.isArray(raw) && typeof raw[1] === 'number'
+          ? raw[1]
+          : (raw && typeof (raw as any).affected === 'number')
+            ? (raw as any).affected
+            : 'unknown';
+
+      const afterNonNull = await agentRepo
+        .createQueryBuilder('a')
+        .where("a.type = :type", { type: 'manager' })
+        .andWhere('a.workspace_id IS NOT NULL')
+        .getCount();
+      this.dbLog(
+        `Boot cleanup: ${sql} → affected=${affected}, non-NULL after=${afterNonNull}`,
+      );
+
+      if (afterNonNull > 0) {
+        // The UPDATE ran but rows still have non-NULL workspace_id. Most
+        // likely cause: synchronize:true couldn't DROP NOT NULL on the
+        // column (entity says nullable but the live schema rejects the
+        // alter), so the raw UPDATE silently coerces NULL → '' or similar.
+        // Dump the row state so the operator can see what's stuck.
+        const stuck = await agentRepo
+          .createQueryBuilder('a')
+          .select(['a.id', 'a.name', 'a.workspace_id'])
+          .where("a.type = :type", { type: 'manager' })
+          .andWhere('a.workspace_id IS NOT NULL')
+          .limit(10)
+          .getMany();
+        this.dbLog(
+          `Boot cleanup: STILL non-NULL after UPDATE — sample: ${stuck
+            .map((s) => `${s.id.slice(0, 8)}=${JSON.stringify(s.workspace_id)}`)
+            .join(', ')}`,
+        );
+      }
     } catch (e) {
       this.dbLog(`Boot cleanup (manager workspace strip) FAILED: ${(e as Error).message}`);
       // Non-fatal — server can still serve, just the legacy rows stay
