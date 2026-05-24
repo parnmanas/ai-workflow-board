@@ -1,5 +1,5 @@
 import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
-import { Controller, Get, Patch, Body, Res, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Body, Res, UseGuards } from '@nestjs/common';
 import { Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -34,6 +34,11 @@ const SETTING_DEFINITIONS: Record<string, { description: string; is_secret: bool
   },
   'self_improvement.remote_awb_board_id': {
     description: 'Board ID on the remote AWB instance where improvement tickets land.',
+    is_secret: false,
+    default_value: '',
+  },
+  'self_improvement.remote_awb_column_id': {
+    description: 'Column ID on the remote AWB board to drop new improvement tickets into (typically Backlog / To Do).',
     is_secret: false,
     default_value: '',
   },
@@ -131,6 +136,49 @@ export class SettingsController {
     }
 
     return res.json({ success: true, updated: results });
+  }
+
+  /**
+   * Probe the configured remote AWB target so the admin can verify the
+   * URL + API key combo works before relying on `create_remote_improvement_ticket`
+   * to fire in production. Hits the remote `/api/health` endpoint with the
+   * stored X-Agent-Key. Returns { ok, status, message } — never echoes the key
+   * back, never returns the raw remote body (just status + a short reason).
+   *
+   * Auth: AdminGuard at the class level already covers it.
+   */
+  @Post('self-improvement/test')
+  async testRemoteTarget(@Res() res: Response) {
+    const rows = await this.settingRepo.find({
+      where: [
+        { key: 'self_improvement.remote_awb_url' },
+        { key: 'self_improvement.remote_awb_api_key' },
+      ],
+    });
+    const byKey = new Map(rows.map(r => [r.key, r.value]));
+    const remoteUrl = (byKey.get('self_improvement.remote_awb_url') || '').trim().replace(/\/$/, '');
+    const rawKey = byKey.get('self_improvement.remote_awb_api_key') || '';
+    if (!remoteUrl) {
+      return res.status(400).json({ ok: false, message: 'remote_awb_url is not set' });
+    }
+    if (!rawKey) {
+      return res.status(400).json({ ok: false, message: 'remote_awb_api_key is not set' });
+    }
+    const apiKey = decrypt(rawKey);
+    if (!apiKey) {
+      return res.status(400).json({ ok: false, message: 'remote_awb_api_key failed to decrypt — re-save the key' });
+    }
+
+    const url = `${remoteUrl}/api/health`;
+    try {
+      const r = await fetch(url, { headers: { 'X-Agent-Key': apiKey } });
+      if (!r.ok) {
+        return res.json({ ok: false, status: r.status, message: `Remote returned HTTP ${r.status}` });
+      }
+      return res.json({ ok: true, status: r.status, message: 'Remote AWB reachable' });
+    } catch (e: any) {
+      return res.json({ ok: false, message: `Network error: ${e?.message || e}` });
+    }
   }
 }
 
