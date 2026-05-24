@@ -1,6 +1,6 @@
 import { ApiTags, ApiSecurity } from '@nestjs/swagger';
-import { Controller, Get, Post, Body, Param, Query, Res, UseGuards } from '@nestjs/common';
-import { Response } from 'express';
+import { Controller, Get, Post, Body, Param, Query, Req, Res, UseGuards } from '@nestjs/common';
+import { Request, Response } from 'express';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import { Board } from '../../entities/Board';
@@ -14,6 +14,7 @@ import { User } from '../../entities/User';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { RoomMembershipService } from '../chat-rooms/room-membership.service';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
+import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
 import {
   findColumnByName,
@@ -39,6 +40,7 @@ export class AgentApiController {
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly membership: RoomMembershipService,
     private readonly messaging: RoomMessagingService,
+    private readonly logService: LogService,
   ) {}
 
   @Get('tickets/:id')
@@ -243,12 +245,54 @@ export class AgentApiController {
    * of the MCP/HTTP timeline. last_seen_at is the source of truth.
    */
   @Post('ping')
-  async ping(@Body() body: any, @Res() res: Response) {
+  async ping(@Body() body: any, @Req() req: Request, @Res() res: Response) {
     const { agent_id } = body || {};
     if (!agent_id) return res.status(400).json({ error: 'agent_id is required' });
     const agentRepo = this.dataSource.getRepository(Agent);
-    const agent = await agentRepo.findOne({ where: { id: agent_id } });
-    if (!agent) return res.status(404).json({ error: 'Agent not found' });
+    let agent = await agentRepo.findOne({ where: { id: agent_id } });
+    // Self-heal mirror of instance-heartbeat (agent-manager.controller.ts:163).
+    // A manager whose Agent row was deleted out from under it would otherwise
+    // 404 on every 30s ping AND never appear searchable in the AI Agents
+    // page until the operator manually re-pairs. Recreate from the API key's
+    // linked agent metadata so the manager rejoins the system on the next
+    // tick — workspace_id=null per the workspace-less invariant for managers,
+    // arbitrary name preserved from the API key so the operator can still
+    // identify it from the admin UI's instance list.
+    if (!agent) {
+      const apiKey = (req as any).apiKey;
+      const linkedAgent = apiKey?.agent;
+      if (linkedAgent && linkedAgent.id === agent_id) {
+        try {
+          const recreated = agentRepo.create({
+            id: agent_id,
+            name: linkedAgent.name || `awb-agent-manager`,
+            description:
+              linkedAgent.description ||
+              'awb-agent-manager — recreated from ping (Agent row was missing)',
+            type: linkedAgent.type === 'manager' ? 'manager' : (linkedAgent.type || 'manager'),
+            is_active: 1,
+            workspace_id: linkedAgent.type === 'manager' ? null : linkedAgent.workspace_id ?? null,
+            roles: linkedAgent.roles || '[]',
+          });
+          await agentRepo.save(recreated);
+          this.logService.warn(
+            'AgentApi',
+            `Recreated missing Agent row id=${agent_id.slice(0, 8)} type=${recreated.type} from ping self-heal`,
+            { agent_id, via: 'ping self-heal' },
+          );
+          agent = recreated;
+        } catch (err: any) {
+          this.logService.error(
+            'AgentApi',
+            `Ping self-heal save failed for agent_id=${agent_id.slice(0, 8)}: ${err?.message ?? String(err)}`,
+            { err: err?.message ?? String(err), agent_id, stack: err?.stack },
+          );
+          return res.status(500).json({ error: 'Ping self-heal failed', detail: err?.message ?? String(err) });
+        }
+      } else {
+        return res.status(404).json({ error: 'Agent not found' });
+      }
+    }
     const now = new Date();
     const patch: Partial<Agent> = { last_seen_at: now, is_online: 1 };
     if (!agent.connected_at) patch.connected_at = now;
