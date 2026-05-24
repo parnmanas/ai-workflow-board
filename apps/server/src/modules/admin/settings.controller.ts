@@ -18,6 +18,30 @@ const SETTING_DEFINITIONS: Record<string, { description: string; is_secret: bool
     is_secret: false,
     default_value: String(DEFAULT_MAX_SESSIONS),
   },
+  // Self-improvement remote AWB target. Only consulted when a board has
+  // `self_improvement_mode` set to 'remote_awb' or 'both'. The API key is
+  // never sent to subagents — `create_remote_improvement_ticket` reads it
+  // server-side and forwards directly to the remote instance.
+  'self_improvement.remote_awb_url': {
+    description: 'Base URL of the remote AWB instance that hosts improvement tickets (e.g. https://awb.example.com). Leave blank to disable remote filing.',
+    is_secret: false,
+    default_value: '',
+  },
+  'self_improvement.remote_awb_workspace_id': {
+    description: 'Workspace ID on the remote AWB instance where improvement tickets land.',
+    is_secret: false,
+    default_value: '',
+  },
+  'self_improvement.remote_awb_board_id': {
+    description: 'Board ID on the remote AWB instance where improvement tickets land.',
+    is_secret: false,
+    default_value: '',
+  },
+  'self_improvement.remote_awb_api_key': {
+    description: 'API key for authenticating to the remote AWB instance. Stored encrypted; never exposed to subagents.',
+    is_secret: true,
+    default_value: '',
+  },
 };
 
 /**

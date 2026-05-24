@@ -381,6 +381,10 @@ export interface Board {
   // for tickets on this board and BacklogPromotionService becomes a no-op.
   // UI surfaces a banner + flips Pause ↔ Resume on the index card.
   paused_at?: string | null;
+  // Per-board self-improvement mode. 'off' (default) suppresses the
+  // post-done reviewer dispatch; 'same_board' / 'remote_awb' / 'both' opt in
+  // and choose where the reviewer files follow-up improvement tickets.
+  self_improvement_mode?: 'off' | 'same_board' | 'remote_awb' | 'both';
 }
 
 export interface Workspace {

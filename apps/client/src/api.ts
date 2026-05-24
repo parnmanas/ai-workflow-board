@@ -237,6 +237,7 @@ export const api = {
       routing_config?: Record<string, string[]>;
       column_prompts?: Record<string, string> | null;
       max_concurrent_tickets_per_agent?: number;
+      self_improvement_mode?: 'off' | 'same_board' | 'remote_awb' | 'both';
     },
   ) =>
     request<any>(`/boards/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
