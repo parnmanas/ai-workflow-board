@@ -333,25 +333,14 @@ export class AgentsController {
     // IsNull() branch, loadManagerInfo on /admin/agent-manager 404s and the
     // Edit Identity button stays disabled, since the dialog only renders when
     // managerInfo loaded.
-    // Manager-type rows are global by design (workspace_id should be NULL,
-    // but historic rows may carry '' or even a stale workspace id from an
-    // earlier code path) — anyone with VIEW_ACTIVITY may read them regardless
-    // of their current workspace. Without the `type: 'manager'` branch, the
-    // AgentManager admin page lists a manager instance (its enrichment uses
-    // no workspace filter) but loadManagerInfo 404s here whenever the
-    // operator's workspace differs from the manager's stored workspace, which
-    // leaves the Edit Identity button disabled.
-    const isSystemAdmin = (req as any).currentUser?.role === 'admin';
-    const agent = await findOrFail(this.agentRepo, {
-      where: workspaceId && !isSystemAdmin
-        ? [
-            { id, workspace_id: workspaceId },
-            { id, workspace_id: '' },
-            { id, workspace_id: IsNull() as any },
-            { id, type: 'manager' },
-          ]
-        : { id },
-    }, 'Agent not found');
+    // No workspace filter on by-id lookups. The lookup is keyed on id only
+    // (a UUID — globally unique) and permission is enforced by the guard
+    // chain (AuthGuard → PermissionGuard with VIEW_ACTIVITY). Filtering on
+    // workspace_id here used to silently 404 manager rows whenever the
+    // operator's current workspace differed from the manager's stored
+    // workspace, and even for in-workspace rows when the storage shape was
+    // unexpected ('' vs NULL vs stale id). Operator directive: id-only.
+    const agent = await findOrFail(this.agentRepo, { where: { id } }, 'Agent not found');
 
     // Phase 3 D-44 — role_prompt is admin-gated. Non-admin viewers receive a redacted payload.
     // req.currentUser is populated by AuthGuard (runs before PermissionGuard) and cannot be spoofed from headers.
@@ -430,19 +419,10 @@ export class AgentsController {
     // this, GET returned the workspace-less manager (line 323 `In([ws, ''])`)
     // and the dialog opened, but Save 404'd here and the operator saw a silent
     // failure.
-    // Manager rows are global — see GET handler comment. PATCH must mirror
-    // the same predicate or the dialog opens (GET succeeded) but Save 404s.
-    const isSystemAdmin = (req as any).currentUser?.role === 'admin';
-    const agent = await findOrFail(this.agentRepo, {
-      where: workspaceId && !isSystemAdmin
-        ? [
-            { id, workspace_id: workspaceId },
-            { id, workspace_id: '' },
-            { id, workspace_id: IsNull() as any },
-            { id, type: 'manager' },
-          ]
-        : { id },
-    }, 'Agent not found');
+    // id-only lookup — symmetric with GET. PermissionGuard already gated this
+    // path with MANAGE_AGENTS; layering a workspace filter on top kept hiding
+    // legitimate edits behind silent 404s. See GET handler comment.
+    const agent = await findOrFail(this.agentRepo, { where: { id } }, 'Agent not found');
 
     // Snapshot pre-update fields used to detect identity changes we want to
     // audit. Past incident: manager Agent names silently flipped from the
@@ -537,18 +517,8 @@ export class AgentsController {
 
   @Delete(':id')
   async delete(@Param('id') id: string, @Req() req: Request, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
-    // Manager rows are global — same predicate as GET / PATCH.
-    const isSystemAdmin = (req as any).currentUser?.role === 'admin';
-    const agent = await findOrFail(this.agentRepo, {
-      where: workspaceId && !isSystemAdmin
-        ? [
-            { id, workspace_id: workspaceId },
-            { id, workspace_id: '' },
-            { id, workspace_id: IsNull() as any },
-            { id, type: 'manager' },
-          ]
-        : { id },
-    }, 'Agent not found');
+    // id-only lookup — symmetric with GET / PATCH.
+    const agent = await findOrFail(this.agentRepo, { where: { id } }, 'Agent not found');
     await this.agentRepo.delete(agent.id);
     return res.json({ success: true });
   }
