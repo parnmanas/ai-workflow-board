@@ -134,9 +134,19 @@ export class AgentWorkloadService {
     // metadata path (TicketRoleAssignment has no @ManyToOne onto Ticket
     // because the legacy assignee_id / reporter_id / reviewer_id columns
     // also point at agent_id; entity-level joins would conflate them).
-    // sqlite + postgres both speak this SQL verbatim — the IS NULL slug
-    // short-circuit keeps the optional filter to a single parameter
-    // binding rather than two separate query shapes.
+    //
+    // Postgres type coercion: tickets.id and workspace_roles.id are uuid
+    // PKs (TypeORM @PrimaryGeneratedColumn('uuid')). ticket_role_assignments
+    // has plain varchar columns for the FK side (no @ManyToOne to drive
+    // the PG driver toward uuid, and pre-sync-postgres casts every
+    // non-KEEP_AS_UUID column back to varchar). Joining varchar = uuid
+    // raises `operator does not exist: character varying = uuid` on
+    // Postgres ("No operator matches the given name and argument types"
+    // — pg won't pick a cast direction). Cast the uuid PK to text on the
+    // join condition so the comparison runs against a uniform type.
+    // SQLite is loose-typed and needs no cast — txt is empty there.
+    const isPostgres = this.dataSource.driver.options.type === 'postgres';
+    const txt = isPostgres ? '::text' : '';
     const qb = this.dataSource
       .createQueryBuilder()
       .select('DISTINCT t.id', 'id')
@@ -144,9 +154,9 @@ export class AgentWorkloadService {
       .innerJoin(
         'ticket_role_assignments',
         'ra',
-        'ra.ticket_id = t.id AND ra.agent_id = :agent_id',
+        `ra.ticket_id = t.id${txt} AND ra.agent_id = :agent_id`,
       )
-      .innerJoin('workspace_roles', 'wr', 'wr.id = ra.role_id')
+      .innerJoin('workspace_roles', 'wr', `wr.id${txt} = ra.role_id`)
       .innerJoin('columns', 'c', 'c.id = t.column_id')
       .where('c.board_id = :board_id')
       .andWhere('c.is_terminal = :falseVal')
