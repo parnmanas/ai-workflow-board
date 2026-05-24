@@ -33,6 +33,16 @@ interface ChatHistoryEntry {
 const OUTPUT_RING_MAX = 80;
 /** Max characters sent in the fallback chat message body. */
 const FALLBACK_MAX_CHARS = 1500;
+/** Min ms between progress messages emitted to a chat room — coalesces
+ *  rapid tool_use bursts so the room isn't flooded. */
+const PROGRESS_MIN_INTERVAL_MS = 1500;
+/** Hard cap on progress messages per chat-session lifetime. The agent's
+ *  final `send_chat_room_message` call is what the user actually waits
+ *  for; progress is just a heartbeat. Capping at 30 keeps even a runaway
+ *  agent from filling the room. */
+const PROGRESS_MAX_PER_SESSION = 30;
+/** Truncation for the summary slice rendered alongside the tool name. */
+const PROGRESS_SUMMARY_MAX = 80;
 
 export class ChatSessionManager
   extends BaseSessionManager
@@ -46,6 +56,10 @@ export class ChatSessionManager
   // that reuse the same sessionKey after respawn.
   #chatSent = new Set<number>();
   #outputRings = new Map<number, string[]>();
+  // Per-session progress emit state. Same pid keying as the others so a
+  // respawned child gets a fresh budget without leaking the previous
+  // session's last-emit timestamp / count.
+  #progressMeta = new Map<number, { lastEmitMs: number; count: number; finalSeen: boolean }>();
 
   constructor(config: SessionAwareConfig) {
     super(config, {
@@ -196,19 +210,39 @@ export class ChatSessionManager
       const trimmed = rawLine.trim();
       if (trimmed) this.#pushOutput(sess.pid, trimmed);
     }
+    // Turn boundary — reset progress budget so the next user message on the
+    // same persistent CLI child gets a fresh window of progress emits.
+    // Without this, `finalSeen=true` from turn 1 would silently suppress all
+    // future turns on the same pid.
+    if (parsed.isResult) {
+      this.#progressMeta.delete(sess.pid);
+    }
     // Detect send_chat_room_message tool use in Claude stream-json output.
     // assistant messages carry content blocks; each tool_use block has a `name`.
     if (parsed.raw?.type === 'assistant') {
       const content = parsed.raw?.message?.content;
       if (Array.isArray(content)) {
+        const progressTools: Array<{ name: string; input: any }> = [];
+        let sawFinal = false;
         for (const block of content) {
-          if (
-            block?.type === 'tool_use' &&
-            typeof block.name === 'string' &&
-            block.name.includes('send_chat_room_message')
-          ) {
+          if (block?.type !== 'tool_use' || typeof block.name !== 'string') continue;
+          if (block.name.includes('send_chat_room_message')) {
             this.#chatSent.add(sess.pid);
+            sawFinal = true;
+            continue;
           }
+          progressTools.push({ name: block.name, input: block.input });
+        }
+        if (progressTools.length > 0) {
+          this.#emitProgress(sess, progressTools);
+        }
+        if (sawFinal) {
+          // Mark the session so any later tool calls (e.g. agent doing a
+          // post-answer log) don't fire another progress line on top of
+          // the user-visible final answer.
+          const meta = this.#progressMeta.get(sess.pid);
+          if (meta) meta.finalSeen = true;
+          else this.#progressMeta.set(sess.pid, { lastEmitMs: 0, count: 0, finalSeen: true });
         }
       }
     }
@@ -230,6 +264,7 @@ export class ChatSessionManager
     // Cleanup tracking state regardless of outcome.
     this.#chatSent.delete(sess.pid);
     this.#outputRings.delete(sess.pid);
+    this.#progressMeta.delete(sess.pid);
 
     if (sent) return; // Agent replied normally — nothing to do.
 
@@ -260,6 +295,126 @@ export class ChatSessionManager
     }
     ring.push(line);
     while (ring.length > OUTPUT_RING_MAX) ring.shift();
+  }
+
+  /** Fire a single coalesced progress message for a batch of tool_use blocks
+   *  observed in one assistant turn. Rate-limited per session and silently
+   *  capped; this is a heartbeat, not a transcript. Posts via the existing
+   *  REST endpoint as a separate message — no schema change. Fire-and-forget
+   *  (we're inside a stdout line handler and must stay non-blocking). */
+  #emitProgress(sess: SessionRecord, tools: Array<{ name: string; input: any }>): void {
+    if (tools.length === 0) return;
+    const roomId: string | undefined = sess.roomId;
+    const agentId: string | undefined = sess.agentId;
+    // roomId/agentId are stamped on the record by `dispatch` immediately
+    // after `_spawnSession` returns, but stdio is wired before that stamp
+    // lands. A `system`/`assistant` line that arrives in the gap (very
+    // unlikely — first assistant turn takes seconds) would have no place
+    // to post to; skip silently rather than guess.
+    if (!roomId || !agentId) return;
+
+    const now = Date.now();
+    let meta = this.#progressMeta.get(sess.pid);
+    if (!meta) {
+      meta = { lastEmitMs: 0, count: 0, finalSeen: false };
+      this.#progressMeta.set(sess.pid, meta);
+    }
+    if (meta.finalSeen) return;
+    if (meta.count >= PROGRESS_MAX_PER_SESSION) return;
+    if (now - meta.lastEmitMs < PROGRESS_MIN_INTERVAL_MS) return;
+
+    const message = this.#formatProgressLine(tools);
+    if (!message) return;
+
+    meta.lastEmitMs = now;
+    meta.count += 1;
+
+    const cfg = { ...this._config, apiKey: sess._effectiveApiKey || this._config.apiKey };
+    // Fire-and-forget — postChatRoomMessage already swallows + logs errors,
+    // so a failed progress post never blocks stdout parsing.
+    void postChatRoomMessage(cfg, roomId, agentId, message);
+  }
+
+  #formatProgressLine(tools: Array<{ name: string; input: any }>): string {
+    const head = tools[0];
+    const headLabel = this.#renderToolLabel(head.name, head.input);
+    if (tools.length === 1) return `_${headLabel}_`;
+    return `_${headLabel} (+${tools.length - 1} more)_`;
+  }
+
+  #renderToolLabel(name: string, input: any): string {
+    const icon = this.#iconForTool(name);
+    const display = this.#displayToolName(name);
+    const summary = this.#summarizeToolInput(name, input);
+    return summary ? `${icon} ${display} — ${summary}` : `${icon} ${display}`;
+  }
+
+  #displayToolName(name: string): string {
+    // mcp__awb__get_ticket → mcp__awb__get_ticket (keep verbatim; operators
+    // recognize the AWB MCP surface by these names).
+    return name;
+  }
+
+  #iconForTool(name: string): string {
+    const lower = name.toLowerCase();
+    if (lower.startsWith('mcp__')) return '📋';
+    if (lower === 'read' || lower === 'glob' || lower === 'grep') return '🔍';
+    if (lower === 'edit' || lower === 'write' || lower === 'notebookedit') return '✏️';
+    if (lower === 'bash') return '💻';
+    if (lower === 'webfetch' || lower === 'websearch') return '🌐';
+    if (lower === 'task' || lower === 'agent') return '🤖';
+    return '🔧';
+  }
+
+  /** Pick the most informative single field from a tool's input and truncate.
+   *  Conservative — we render plain text only, so a malformed input collapses
+   *  to an empty summary rather than a crash. */
+  #summarizeToolInput(name: string, input: any): string {
+    if (!input || typeof input !== 'object') return '';
+    const lower = name.toLowerCase();
+    let raw: unknown = '';
+    if (lower === 'read' || lower === 'edit' || lower === 'write' || lower === 'notebookedit') {
+      raw = input.file_path ?? input.notebook_path ?? '';
+    } else if (lower === 'glob') {
+      raw = input.pattern ?? '';
+    } else if (lower === 'grep') {
+      raw = input.pattern ?? '';
+    } else if (lower === 'bash') {
+      raw = input.command ?? '';
+    } else if (lower === 'webfetch' || lower === 'websearch') {
+      raw = input.url ?? input.query ?? '';
+    } else if (lower === 'task' || lower === 'agent') {
+      raw = input.description ?? input.subagent_type ?? '';
+    } else {
+      // Generic / MCP tools: prefer a small set of well-known identifier
+      // fields, then any short string value as a last resort.
+      const preferred = ['ticket_id', 'room_id', 'content', 'query', 'pattern', 'path', 'url'];
+      for (const k of preferred) {
+        if (typeof (input as any)[k] === 'string' && (input as any)[k]) {
+          raw = (input as any)[k];
+          break;
+        }
+      }
+      if (!raw) {
+        for (const v of Object.values(input)) {
+          if (typeof v === 'string' && v) {
+            raw = v;
+            break;
+          }
+        }
+      }
+    }
+    let s = typeof raw === 'string' ? raw : String(raw ?? '');
+    // Collapse whitespace so multi-line Bash commands / Grep patterns
+    // render on one chat line.
+    s = s.replace(/\s+/g, ' ').trim();
+    if (!s) return '';
+    if (s.length > PROGRESS_SUMMARY_MAX) {
+      s = s.slice(0, PROGRESS_SUMMARY_MAX - 1) + '…';
+    }
+    // Escape backticks / underscores so the chat italic wrapper doesn't
+    // accidentally close inside the summary.
+    return s.replace(/[`_*]/g, (c) => `\\${c}`);
   }
 
   // ---------------------------------------------------------------------------
