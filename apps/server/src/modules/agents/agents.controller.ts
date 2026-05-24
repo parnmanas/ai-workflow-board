@@ -395,10 +395,14 @@ export class AgentsController {
       effectiveWorkspaceId = defaultWs?.id || '';
     }
 
+    // Manager-type agents MUST be workspace-less (operator invariant — they
+    // supervise children across any workspace). Force null here even if the
+    // caller passed a workspace via WorkspaceGuard. Other types get the
+    // effective workspace as before.
     const agent = await this.agentRepo.save(
       this.agentRepo.create({
         name, description, type, avatar_url, is_active,
-        workspace_id: effectiveWorkspaceId,
+        workspace_id: type === 'manager' ? null : effectiveWorkspaceId,
         working_dir: typeof working_dir === 'string' ? working_dir : '',
         manager_agent_id: typeof manager_agent_id === 'string' && manager_agent_id ? manager_agent_id : null,
         credential_id: typeof credential_id === 'string' && credential_id ? credential_id : null,
@@ -476,6 +480,14 @@ export class AgentsController {
       // agent from its credential is a one-line UI affordance, so accept null
       // and '' the same way working_dir / manager_agent_id do.
       agent.credential_id = typeof credential_id === 'string' && credential_id ? credential_id : null;
+    }
+
+    // Operator invariant: manager-type agents are workspace-less. Catches
+    // type-flip (non-manager → manager) plus any in-place save where the
+    // agent was loaded with a stale workspace_id (the boot cleanup is
+    // catch-all but this normalise-on-save makes the rule local).
+    if (agent.type === 'manager') {
+      agent.workspace_id = null;
     }
 
     const updated = await this.agentRepo.save(agent);
