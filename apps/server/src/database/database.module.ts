@@ -12,6 +12,8 @@ import { PromptTemplate } from '../entities/PromptTemplate';
 import { LogService } from '../services/log.service';
 import { writeRoutingConfigThrough } from '../modules/boards/routing-config.helper';
 import { seedDefaultColumnRolePolicies } from '../modules/column-policies/seed-helper';
+import { Agent } from '../entities/Agent';
+import { Not, IsNull } from 'typeorm';
 
 const entityList = Object.values(entitiesBarrel);
 
@@ -62,6 +64,31 @@ export class DatabaseModule implements OnModuleInit {
     } catch (e) {
       this.dbLog(`Migration run failed: ${(e as Error).message}`);
       throw e;
+    }
+
+    // ── Boot-time defensive cleanup — strip workspace_id from manager rows ──
+    // Manager-type agents are global by design and must never carry a
+    // workspace pointer (the AgentManager admin page lists them across
+    // workspaces, and a stale workspace_id makes GET /api/agents/:id 404 for
+    // operators whose current workspace differs). Migration 19 handled the
+    // historical backfill; this defensive sweep on every boot catches rows
+    // that get a workspace_id reassigned through any future code path or
+    // manual DB tweak. Idempotent — touches zero rows when everything is
+    // already NULL.
+    try {
+      const agentRepo = this.dataSource.getRepository(Agent);
+      const result = await agentRepo.update(
+        { type: 'manager', workspace_id: Not(IsNull()) },
+        { workspace_id: null },
+      );
+      const affected = result.affected ?? 0;
+      if (affected > 0) {
+        this.dbLog(`Boot cleanup: stripped workspace_id from ${affected} manager agent row(s)`);
+      }
+    } catch (e) {
+      this.dbLog(`Boot cleanup (manager workspace strip) failed: ${(e as Error).message}`);
+      // Non-fatal — server can still serve, just the legacy rows stay
+      // workspace-pinned until next boot or manual fix.
     }
 
     const wsRepo = this.dataSource.getRepository(Workspace);
