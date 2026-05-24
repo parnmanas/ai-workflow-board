@@ -12,9 +12,16 @@ import { Resource } from '../../entities/Resource';
 import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { LogService } from '../../services/log.service';
-import { activityEvents } from '../../services/activity.service';
+import { ActivityService, activityEvents } from '../../services/activity.service';
 import { AgentWorkloadService } from './agent-workload.service';
 import { priorityIndex } from './priority';
+
+// Sentinel actor written onto auto-advance `moved` activities. Deliberately
+// non-'system' so the trigger loop re-enters and processes the destination
+// column (the 'system' actor short-circuits at the top of `_handleActivity`).
+// Single string constant so audit greps and tests can match it.
+const AUTO_ADVANCE_ACTOR_ID = 'auto-advance';
+const AUTO_ADVANCE_ACTOR_NAME = 'Auto-Advance';
 
 // Pure SSE emitter. The AgentTrigger DB table was removed in v0.25.0 —
 // delivery is fire-and-forget. Backstop for dropped SSE is now
@@ -52,6 +59,7 @@ export class TriggerLoopService implements OnModuleInit {
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly logService: LogService,
     private readonly agentWorkload: AgentWorkloadService,
+    private readonly activityService: ActivityService,
   ) {}
 
   onModuleInit() {
@@ -131,8 +139,14 @@ export class TriggerLoopService implements OnModuleInit {
     // off `ticket.assignee_id` / `reporter_id` / `reviewer_id`. Now slugs are
     // workspace-scoped so we look up the WorkspaceRole row, then the
     // TicketRoleAssignment that pins a holder onto this ticket.
+    //
+    // Two-phase: gather every (slug, role, holder) tuple before dispatch so the
+    // auto-advance check below can ask "did ANY routed role on this column
+    // resolve to a holder on this ticket?". A single-pass loop that emits + skips
+    // can't answer that without a second scan.
     const roleRepo = this.dataSource.getRepository(WorkspaceRole);
     const assignRepo = this.dataSource.getRepository(TicketRoleAssignment);
+    const resolved: Array<{ slug: string; role: WorkspaceRole; targetAgentId: string | null }> = [];
     for (const slug of roles) {
       const role = await roleRepo.findOne({
         where: { workspace_id: ticket.workspace_id, slug },
@@ -141,7 +155,40 @@ export class TriggerLoopService implements OnModuleInit {
       const assignment = await assignRepo.findOne({
         where: { ticket_id: ticket.id, role_id: role.id },
       });
-      const targetAgentId = assignment?.agent_id || null;
+      resolved.push({ slug, role, targetAgentId: assignment?.agent_id || null });
+    }
+
+    // AUTO-ADVANCE: a non-terminal column with routing entries but zero
+    // resolvable holders has nobody to wake up. Push the ticket forward to the
+    // next non-terminal column by position; the resulting `moved` activity
+    // re-enters this loop and either fires the new column's holder(s) or
+    // cascades the advance again. Terminal columns are unreachable here
+    // (early-returned above).
+    //
+    // Gating:
+    //   - `triggerSource === 'column_move'` — only the ticket's own arrival on
+    //     this column should drive the advance. Comments / ticket-field updates
+    //     are local events that shouldn't shove an unrelated ticket downstream
+    //     when its column happens to lack a holder.
+    //   - `resolved.length > 0` — at least one routed slug had to map to a real
+    //     WorkspaceRole row. Empty role_routing already returned above; a
+    //     routing list full of unknown slugs is a config-drift signal, not an
+    //     auto-advance trigger.
+    //   - `every holder null` — auto-advance only when the column is *entirely*
+    //     unheld. A partially-filled column (e.g. Review routes to
+    //     ['reviewer','assignee'] and reviewer is set) still emits for the
+    //     filled role(s); the rest fall through the holder-null `continue`
+    //     below.
+    if (
+      triggerSource === 'column_move' &&
+      resolved.length > 0 &&
+      resolved.every((r) => !r.targetAgentId)
+    ) {
+      await this._autoAdvanceUnassigned(ticket, col);
+      return;
+    }
+
+    for (const { slug, role, targetAgentId } of resolved) {
       if (!targetAgentId) continue;
       // Self-trigger guard, action-type aware (v0.34 onward, refined v0.41):
       //
@@ -188,6 +235,116 @@ export class TriggerLoopService implements OnModuleInit {
 
       await this._emitTrigger(ticket, targetAgentId, slug, triggerSource, log.actor_id || '');
     }
+  }
+
+  /**
+   * Auto-advance an "unheld" ticket: when a non-terminal column triggered on a
+   * column_move has no holder for any of its routed roles, push the ticket
+   * forward to the next non-terminal column on the same board (ordered by
+   * column.position ASC) so the workflow doesn't stall at an empty seat.
+   *
+   * Mechanics:
+   *   - Mirrors the position-shift / column-id update done by the
+   *     `move_ticket` MCP tool (close gap in source column, open slot in
+   *     destination, set column_id/position) inside one transaction.
+   *   - Writes a `moved` ActivityLog with actor_id=AUTO_ADVANCE_ACTOR_ID
+   *     (deliberately NOT 'system' — the system-actor early-return at the top
+   *     of _handleActivity would otherwise swallow the re-entry and the next
+   *     column would never get its holders fired). The same row is what makes
+   *     the UI render the move and what re-enters this loop, so the cascade
+   *     continues until a column has a holder or the next column is terminal.
+   *   - When there is no eligible next column (e.g. ticket already sits on
+   *     the last non-terminal column), logs a skip and leaves the ticket put.
+   *
+   * Cascade safety: bounded by the column count on the board. Each iteration
+   * lands on a strictly higher-position column, so the recursion can advance
+   * at most `columns.length - currentPosition - 1` steps before either firing
+   * a holder or running out of non-terminal columns.
+   */
+  private async _autoAdvanceUnassigned(
+    ticket: Ticket,
+    currentCol: BoardColumn,
+  ): Promise<void> {
+    const colRepo = this.dataSource.getRepository(BoardColumn);
+    const cols = await colRepo.find({
+      where: { board_id: currentCol.board_id },
+      order: { position: 'ASC' },
+    });
+    const nextCol = cols.find(
+      (c) =>
+        c.position > currentCol.position &&
+        !((c as any).is_terminal === true || (c as any).kind === 'terminal'),
+    );
+    if (!nextCol) {
+      this.logService.info('MCP', 'auto_advance skipped (no next non-terminal column)', {
+        ticket_id: ticket.id,
+        current_column_id: currentCol.id,
+        current_column_position: currentCol.position,
+      });
+      return;
+    }
+
+    const fromPosition = ticket.position;
+    const fromColumnId = currentCol.id;
+
+    await this.dataSource.transaction(async (manager) => {
+      const tRepo = manager.getRepository(Ticket);
+
+      // Close the gap left by the ticket in its current column (root tickets only).
+      await tRepo
+        .createQueryBuilder()
+        .update()
+        .set({ position: () => 'position - 1' })
+        .where(
+          'column_id = :colId AND position > :pos AND parent_id IS NULL',
+          { colId: fromColumnId, pos: fromPosition },
+        )
+        .execute();
+
+      // Land at the tail of the destination column.
+      const destCount = await tRepo
+        .createQueryBuilder('t')
+        .where(
+          't.column_id = :colId AND t.id != :id AND t.parent_id IS NULL',
+          { colId: nextCol.id, id: ticket.id },
+        )
+        .getCount();
+
+      await tRepo.update(ticket.id, {
+        column_id: nextCol.id,
+        position: destCount,
+      });
+    });
+
+    // Emit the `moved` activity via ActivityService so SSE listeners (UI,
+    // agent-manager) get the update AND the trigger loop re-enters with the
+    // new column. Non-'system' actor keeps the early-return at the top of
+    // _handleActivity from swallowing the re-entry.
+    await this.activityService.logActivity({
+      entity_type: 'ticket',
+      entity_id: ticket.id,
+      action: 'moved',
+      field_changed: 'column',
+      old_value: currentCol.name,
+      new_value: nextCol.name,
+      ticket_id: ticket.id,
+      actor_id: AUTO_ADVANCE_ACTOR_ID,
+      actor_name: AUTO_ADVANCE_ACTOR_NAME,
+      role: '',
+      trigger_source: 'auto_advance',
+    });
+
+    this.logService.info(
+      'MCP',
+      'auto_advance moved ticket forward (no holder for any routed role)',
+      {
+        ticket_id: ticket.id,
+        from_column_id: fromColumnId,
+        from_column_name: currentCol.name,
+        to_column_id: nextCol.id,
+        to_column_name: nextCol.name,
+      },
+    );
   }
 
   /**
