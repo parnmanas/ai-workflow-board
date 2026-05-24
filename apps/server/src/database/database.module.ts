@@ -67,28 +67,33 @@ export class DatabaseModule implements OnModuleInit {
     }
 
     // ── Boot-time defensive cleanup — strip workspace_id from manager rows ──
-    // Manager-type agents are global by design and must never carry a
-    // workspace pointer (the AgentManager admin page lists them across
-    // workspaces, and a stale workspace_id makes GET /api/agents/:id 404 for
-    // operators whose current workspace differs). Migration 19 handled the
-    // historical backfill; this defensive sweep on every boot catches rows
-    // that get a workspace_id reassigned through any future code path or
-    // manual DB tweak. Idempotent — touches zero rows when everything is
-    // already NULL.
+    // Operator invariant: AgentManager rows are NEVER tied to a workspace.
+    // Run on every boot, idempotent. Uses createQueryBuilder().execute() so
+    // the SQL is explicit and immune to FindOperator quirks in `repo.update`
+    // (which can silently emit a no-op WHERE on some TypeORM versions when
+    // criteria contain `Not(IsNull())`).
+    //
+    // We log BEFORE counting and AFTER the update — even a 0-row result
+    // confirms the sweep reached the DB — so /admin/logs (category=DB)
+    // proves whether the cleanup ran. Previous version only logged when
+    // affected > 0, which made silent failure indistinguishable from a
+    // clean DB.
     try {
       const agentRepo = this.dataSource.getRepository(Agent);
-      const result = await agentRepo.update(
-        { type: 'manager', workspace_id: Not(IsNull()) },
-        { workspace_id: null },
+      this.dbLog('Boot cleanup: stripping workspace_id from every manager Agent row…');
+      const result = await agentRepo
+        .createQueryBuilder()
+        .update(Agent)
+        .set({ workspace_id: null })
+        .where("type = :type", { type: 'manager' })
+        .execute();
+      this.dbLog(
+        `Boot cleanup: manager workspace_id strip — ${result.affected ?? 0} row(s) updated (UPDATE agents SET workspace_id=NULL WHERE type='manager')`,
       );
-      const affected = result.affected ?? 0;
-      if (affected > 0) {
-        this.dbLog(`Boot cleanup: stripped workspace_id from ${affected} manager agent row(s)`);
-      }
     } catch (e) {
-      this.dbLog(`Boot cleanup (manager workspace strip) failed: ${(e as Error).message}`);
+      this.dbLog(`Boot cleanup (manager workspace strip) FAILED: ${(e as Error).message}`);
       // Non-fatal — server can still serve, just the legacy rows stay
-      // workspace-pinned until next boot or manual fix.
+      // workspace-pinned until next boot or manual fix. Visible in logs.
     }
 
     const wsRepo = this.dataSource.getRepository(Workspace);
