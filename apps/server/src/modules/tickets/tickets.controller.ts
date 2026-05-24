@@ -35,6 +35,7 @@ import {
   maxChildPosition,
   refreshTicketWorkspaceId,
   resolveAgentIdAndName,
+  formatAgentDisplayName,
   shiftTicketPositions,
   deleteCommentAttachmentsForTicket,
   inferTicketAttachmentMimetype,
@@ -406,7 +407,15 @@ export class TicketsController {
         assignee !== undefined ? assignee : '',
       );
       ticket.assignee_id = assignee_id !== undefined ? assignee_id : (resolved.id || ticket.assignee_id);
-      ticket.assignee    = assignee    !== undefined ? assignee    : (resolved.name || ticket.assignee);
+      // When the resolver matched a real Agent, write its canonical
+      // `<Manager>/<Agent>` display — beats any bare leaf name the caller
+      // hand-typed. Otherwise fall through to the caller's literal (which
+      // also lets `assignee: ''` clear the column).
+      if (resolved.id) {
+        ticket.assignee = resolved.name;
+      } else if (assignee !== undefined) {
+        ticket.assignee = assignee;
+      }
     }
     if (reporter !== undefined || reporter_id !== undefined) {
       const resolved = await resolveAgentIdAndName(
@@ -415,7 +424,11 @@ export class TicketsController {
         reporter !== undefined ? reporter : '',
       );
       ticket.reporter_id = reporter_id !== undefined ? reporter_id : (resolved.id || ticket.reporter_id);
-      ticket.reporter    = reporter    !== undefined ? reporter    : (resolved.name || ticket.reporter);
+      if (resolved.id) {
+        ticket.reporter = resolved.name;
+      } else if (reporter !== undefined) {
+        ticket.reporter = reporter;
+      }
     }
     if (reviewer_id !== undefined) ticket.reviewer_id = reviewer_id;
     if (labels !== undefined) ticket.labels = JSON.stringify(labels);
@@ -916,7 +929,12 @@ export class TicketsController {
     if (agent_id) {
       const a = await this.agentRepo.findOne({ where: { id: agent_id } });
       if (!a) return res.status(404).json({ error: 'Agent not found' });
-      agentName = a.name;
+      // Canonical `<Manager>/<Agent>` for subagents — matches what the MCP
+      // create/update path writes via `resolveAgentIdAndName`. Without this
+      // the legacy `ticket.assignee` text column stores the bare leaf name
+      // ("AWB") while role_assignments stores the canonical form, so
+      // TicketCard renders the wrong label until someone re-saves.
+      agentName = await formatAgentDisplayName(this.dataSource, a);
     }
     if (user_id) {
       const u = await this.dataSource.getRepository(User).findOne({ where: { id: user_id } });

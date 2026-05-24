@@ -150,7 +150,13 @@ export function registerTicketChildTools(server: McpServer, ctx: ToolContext): v
           logger,
         );
         ticket.assignee_id = assignee_id !== undefined ? assignee_id : (resolved.id || ticket.assignee_id);
-        ticket.assignee    = assignee    !== undefined ? assignee    : (resolved.name || ticket.assignee);
+        // Canonical Manager/Agent display wins over any bare leaf name passed
+        // alongside the id; same rule the root update_ticket path uses.
+        if (resolved.id) {
+          ticket.assignee = resolved.name;
+        } else if (assignee !== undefined) {
+          ticket.assignee = assignee;
+        }
       }
       if (reporter !== undefined || reporter_id !== undefined) {
         const resolved = await resolveAgentIdAndName(
@@ -160,7 +166,11 @@ export function registerTicketChildTools(server: McpServer, ctx: ToolContext): v
           logger,
         );
         ticket.reporter_id = reporter_id !== undefined ? reporter_id : (resolved.id || ticket.reporter_id);
-        ticket.reporter    = reporter    !== undefined ? reporter    : (resolved.name || ticket.reporter);
+        if (resolved.id) {
+          ticket.reporter = resolved.name;
+        } else if (reporter !== undefined) {
+          ticket.reporter = reporter;
+        }
       }
       if (labels !== undefined) ticket.labels = JSON.stringify(labels);
 

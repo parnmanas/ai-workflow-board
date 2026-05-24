@@ -316,7 +316,14 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           logger,
         );
         ticket.assignee_id = assignee_id !== undefined ? assignee_id : (resolved.id || ticket.assignee_id);
-        ticket.assignee    = assignee    !== undefined ? assignee    : (resolved.name || ticket.assignee);
+        // Canonical Manager/Agent display wins over any bare leaf name the
+        // caller might pass alongside the id — keeps TicketCard consistent
+        // with the role_assignments view.
+        if (resolved.id) {
+          ticket.assignee = resolved.name;
+        } else if (assignee !== undefined) {
+          ticket.assignee = assignee;
+        }
         if (ticket.assignee !== oldAssignee) changes.push('assignee');
       }
       if (reporter !== undefined || reporter_id !== undefined) {
@@ -327,7 +334,11 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           logger,
         );
         ticket.reporter_id = reporter_id !== undefined ? reporter_id : (resolved.id || ticket.reporter_id);
-        ticket.reporter    = reporter    !== undefined ? reporter    : (resolved.name || ticket.reporter);
+        if (resolved.id) {
+          ticket.reporter = resolved.name;
+        } else if (reporter !== undefined) {
+          ticket.reporter = reporter;
+        }
         if (ticket.reporter !== oldReporter) changes.push('reporter');
       }
       if (reviewer_id !== undefined) { ticket.reviewer_id = reviewer_id; changes.push('reviewer'); }
