@@ -1067,7 +1067,20 @@ export class AgentManagerController {
    */
   private async _rotateManagedAgentKey(target: Agent): Promise<{ raw_key: string; key_id: string }> {
     const provisionPrefix = 'agent-manager-provisioned:';
-    await this.apiKeyService.revokeApiKeysByAgentAndNamePrefix(target.id, provisionPrefix);
+    // Hard-delete previous provisioning rows (not soft-revoke). Each spawn /
+    // restart used to add one is_active=0 row and never clean it up, so the
+    // table grew unbounded — operator hit "수십개" after only a few weeks
+    // of normal use. The audit trail for "previous key existed and rotated"
+    // is captured in the LogService.info call below; the raw row itself
+    // carries no information once it's superseded.
+    const removed = await this.apiKeyService.deleteApiKeysByAgentAndNamePrefix(target.id, provisionPrefix);
+    if (removed > 0) {
+      this.logService.info(
+        'AgentManager',
+        `Rotated managed-agent apiKey for ${target.id.slice(0, 8)} — deleted ${removed} superseded provisioning row(s)`,
+        { agent_id: target.id, removed },
+      );
+    }
 
     const issued = await this.apiKeyService.createApiKey({
       name: `${provisionPrefix}${target.name}`,
