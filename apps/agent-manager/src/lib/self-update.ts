@@ -621,10 +621,19 @@ async function runSelfUpdateLocked(
     10_000,
   );
   if (statusResult.ok) {
+    // `git status --porcelain` includes untracked files with a `??` prefix.
+    // `git pull` never touches untracked files (it only refuses to FF-merge
+    // when a pull would overwrite a tracked-but-modified path), so blocking
+    // pull on untracked entries is a false positive that self-locks the
+    // manager whenever editors / IDEs / Claude Code leave stray state
+    // (.claude/, .vscode/, .idea/, build artefacts, etc.) in the worktree.
+    // Filter `??` lines out — we still abort on real local modifications
+    // ( M / M  / A  / D  / R  / U  / etc.) which would actually block pull.
     const dirty = statusResult.stdout
       .split('\n')
       .map((s) => s.trimEnd())
-      .filter(Boolean);
+      .filter(Boolean)
+      .filter((line) => !line.startsWith('??'));
     if (dirty.length > 0) {
       const head = dirty.slice(0, 10).join('; ');
       const tail = dirty.length > 10 ? ` (+${dirty.length - 10} more)` : '';
