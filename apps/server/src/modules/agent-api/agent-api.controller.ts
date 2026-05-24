@@ -10,6 +10,7 @@ import { Comment } from '../../entities/Comment';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
 import { Agent } from '../../entities/Agent';
+import { ApiKey } from '../../entities/ApiKey';
 import { User } from '../../entities/User';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { RoomMembershipService } from '../chat-rooms/room-membership.service';
@@ -250,6 +251,35 @@ export class AgentApiController {
     if (!agent_id) return res.status(400).json({ error: 'agent_id is required' });
     const agentRepo = this.dataSource.getRepository(Agent);
     let agent = await agentRepo.findOne({ where: { id: agent_id } });
+
+    // Repair ApiKey.agent_id when it was nulled out by an earlier
+    // `ON DELETE SET NULL` FK firing during an Agent-row deletion window
+    // (pre-sync chaos, manual cleanup, etc.). Without this repair the SSE
+    // auth path reads apiKey.agent_id = null → identity.agentId = undefined
+    // → every per-agent SSE filter (`scope.agent_id === identity.agentId`)
+    // rejects and update_manager / restart_manager / chat_request /
+    // comment_mention silently never reach the manager. Symptom: server
+    // returns 200 on dispatch and emits the event, but no SSE subscriber
+    // matches so it falls into the void.
+    const apiKeyRow = (req as any).apiKey;
+    if (apiKeyRow && agent && !apiKeyRow.agent_id) {
+      try {
+        const apiKeyRepo = this.dataSource.getRepository(ApiKey);
+        await apiKeyRepo.update({ id: apiKeyRow.id }, { agent_id: agent.id });
+        apiKeyRow.agent_id = agent.id;
+        this.logService.warn(
+          'AgentApi',
+          `Re-linked ApiKey id=${apiKeyRow.id.slice(0, 8)} agent_id=${agent.id.slice(0, 8)} (was NULL — ON DELETE SET NULL aftermath)`,
+          { api_key_id: apiKeyRow.id, agent_id: agent.id, via: 'ping repair' },
+        );
+      } catch (err: any) {
+        this.logService.error(
+          'AgentApi',
+          `Ping apiKey repair failed for api_key=${apiKeyRow.id.slice(0, 8)}: ${err?.message ?? String(err)}`,
+          { err: err?.message ?? String(err), api_key_id: apiKeyRow.id },
+        );
+      }
+    }
     // Self-heal mirror of instance-heartbeat (agent-manager.controller.ts:163).
     // A manager whose Agent row was deleted out from under it would otherwise
     // 404 on every 30s ping AND never appear searchable in the AI Agents
