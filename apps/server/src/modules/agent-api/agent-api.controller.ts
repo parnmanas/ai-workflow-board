@@ -23,6 +23,7 @@ import {
 } from '../mcp/shared/ticket-helpers';
 import { loadTicketFull } from '../mcp/shared/ticket-parsing';
 import { findOrFail } from '../../common/find-or-fail';
+import { resolveAgentDisplayName } from '../../utils/agent-name';
 
 @ApiSecurity('agent-api-key')
 @ApiTags('agent-api')
@@ -259,12 +260,19 @@ export class AgentApiController {
   async setChatRoomTyping(@Body() body: any, @Param('roomId') roomId: string, @Res() res: Response) {
     const { agent_id, agent_name, is_typing, status } = body;
     if (!agent_id) return res.status(400).json({ error: 'agent_id is required' });
+    // Resolve canonical Manager/Agent display server-side so the typing
+    // indicator label matches the rest of the chat UI even when the
+    // subagent posts a bare name (or no name at all).
+    const resolvedName =
+      (await resolveAgentDisplayName(this.dataSource.getRepository(Agent), agent_id))
+      || agent_name
+      || 'Agent';
     const memberIds = await this.membership.getRoomMemberIds(roomId);
     const agentMemberIds = await this.membership.getRoomAgentMemberIds(roomId);
     activityEvents.emit('chat_room_typing', {
       room_id: roomId,
       agent_id,
-      agent_name: agent_name || 'Agent',
+      agent_name: resolvedName,
       is_typing: is_typing !== false,
       status: status || null,
       member_ids: memberIds,
@@ -282,8 +290,10 @@ export class AgentApiController {
     const room = await this.dataSource.getRepository(ChatRoom).findOne({ where: { id: roomId } });
     if (!room) return res.status(404).json({ error: 'Room not found' });
 
-    const agent = await this.dataSource.getRepository(Agent).findOne({ where: { id: agent_id } });
-    const agentName = agent?.name || 'Agent';
+    const agentName = await resolveAgentDisplayName(
+      this.dataSource.getRepository(Agent),
+      agent_id,
+    ) || 'Agent';
 
     const msg = await this.messaging.sendMessage(
       roomId, room.workspace_id, 'agent', agent_id, agentName, content,
