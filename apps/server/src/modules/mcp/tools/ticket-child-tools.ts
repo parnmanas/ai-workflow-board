@@ -11,7 +11,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { Agent } from '../../../entities/Agent';
 import { Ticket } from '../../../entities/Ticket';
-import { ok, err } from '../shared/helpers';
+import { ok, err, sanitizeHarnessMarkers } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
 import { maxChildPosition, refreshTicketWorkspaceId, resolveAgentId, resolveAgentIdAndName, shiftTicketPositions } from '../shared/ticket-helpers';
 import type { ToolContext } from './context';
@@ -46,6 +46,7 @@ export function registerTicketChildTools(server: McpServer, ctx: ToolContext): v
       if (newDepth > 2) return err('Maximum nesting depth is 2 (sub-subtask)');
 
       const caller = getCallerAgent(extra);
+      description = sanitizeHarnessMarkers(description, { logger, toolName: 'create_child_ticket', fieldName: 'description', agentId: caller?.agentId });
       const creatorName = created_by || (caller?.agentName) || reporter || assignee || '';
       const creatorType = created_by ? created_by_type : (caller?.agentId ? 'agent' : (reporter ? 'agent' : ''));
       const creatorId = created_by_id || (caller?.agentId) || (reporter ? await resolveAgentId(dataSource, '', reporter, logger) : '');
@@ -130,7 +131,9 @@ export function registerTicketChildTools(server: McpServer, ctx: ToolContext): v
       const oldStatus = ticket.status;
 
       if (title !== undefined) ticket.title = title;
-      if (description !== undefined) ticket.description = description;
+      if (description !== undefined) {
+        ticket.description = sanitizeHarnessMarkers(description, { logger, toolName: 'update_child_ticket', fieldName: 'description', agentId: caller?.agentId });
+      }
       if (status !== undefined) ticket.status = status;
       if (priority !== undefined) ticket.priority = priority;
       // Same backfill as root update_ticket: when only one side of the pair

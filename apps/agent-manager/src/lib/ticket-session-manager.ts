@@ -7,6 +7,7 @@ import {
   type SessionAwareConfig,
   type SessionRecord,
 } from './base-session-manager.js';
+import type { ParseResult } from './cli-adapters/base.js';
 import { composeTriggerPrompt } from './prompts.js';
 import { fireAndForgetTool } from './mcp-client.js';
 import { log } from './logging.js';
@@ -16,21 +17,42 @@ import type {
   TicketTriggerArgs,
 } from './event-dispatcher.js';
 
+/** Natural-language cue an assignee/reviewer writes in their comment when
+ *  they are about to call `move_ticket` next. Conservative — only matches
+ *  the actual phrases observed in prompts and historical broken-LGTM
+ *  comments ("Moving to Merging.", "Moving back to In Progress.", "moving
+ *  the ticket forward."). Used to detect the "comment said it would move,
+ *  but no follow-up move_ticket call arrived" failure mode (ticket
+ *  ce6c8d58).
+ *
+ *  Deliberately does NOT match `move_ticket` token-mentions, since a
+ *  comment that quotes the tool name (e.g. "I considered calling
+ *  move_ticket but stopped") would false-arm and inject a misleading
+ *  follow-up turn. */
+const MOVING_CUE_RE = /\bmov(?:e|ing)\s+(?:to|back|the\s+ticket)\b/i;
+/** Grace period after a `add_comment` with a moving cue before the
+ *  supervisor force-injects a "continue with move_ticket" follow-up. The
+ *  prompt template promises the move is the very next call, so 30s is
+ *  generous — typical Claude turn round-trip is 5-15s. */
+const MOVING_RESUME_GRACE_MS = 30_000;
+
 export class TicketSessionManager
   extends BaseSessionManager
   implements TicketSessionManagerContract
 {
-  // Synchronous reservation table for in-flight spawns. _sessions only
-  // gets populated at the END of _spawnSession (and ticketId is stamped
-  // by the caller a few lines later), so two concurrent dispatchTrigger
-  // calls on the same agent can both pass the cap check before either
-  // session lands. This map flips synchronously between the cap check and
-  // the await on _spawnSession, so a racing dispatch sees it.
-  //
-  // Key shape: sessionKey (`${ticketId}:${role}`) so same-(ticket, role)
-  // burst dispatches can short-circuit, while the per-agent cap counts
-  // distinct ticketIds across all entries.
-  #inflight = new Map<string, { agentId: string; ticketId: string }>();
+  // In-flight reservations are tracked on the base class's `_inflight` map
+  // (see comment there). Cap accounting and same-key drop logic below walk
+  // that map directly — both ticket and chat session managers share the
+  // pattern, but each owns its own instance, so the maps don't cross-pollute.
+
+  /** Per-session state for the "moving cue armed, waiting for move_ticket"
+   *  guard. Keyed by pid (unique per child) so a respawn under the same
+   *  sessionKey gets a fresh slate and the previous child's stale armed
+   *  state can never trigger a follow-up turn on the new child. */
+  #movingCue = new Map<
+    number,
+    { armed: boolean; injected: boolean; timer: NodeJS.Timeout | null }
+  >();
 
   constructor(config: SessionAwareConfig) {
     super(config, {
@@ -61,7 +83,7 @@ export class TicketSessionManager
     // back-to-back triggers can both pass the server gate before either
     // has stamped current_task. Mirror the cap here, counting both:
     //   - _sessions: spawned children (registered at the END of _spawnSession)
-    //   - #inflight: reservations placed synchronously on dispatch entry,
+    //   - _inflight: reservations placed synchronously on dispatch entry,
     //     covering the spawn-in-flight window where _sessions is still empty
     //
     // Allowed: same agent already has a session OR inflight reservation for
@@ -73,11 +95,17 @@ export class TicketSessionManager
       1,
       Math.floor(spec.maxConcurrentTicketsPerAgent ?? 1),
     );
-    if (spec.agentId && !this._getSession(sessionKey)) {
+    // Live-session check uses OS-level pid existence so a stale entry whose
+    // child was reaped without exit-handler cleanup never blocks a fresh
+    // spawn (and never gets reused — that would dispatch a turn into a
+    // broken stdin and stall the AWB trigger loop). Cap accounting below
+    // still walks raw `_sessions.values()` so stale entries don't inflate
+    // the count before the next dispatch purges them through this path.
+    if (spec.agentId && !this._getLiveSession(sessionKey)) {
       // Same (ticket, role) already spawning — drop as duplicate so the
       // first spawn wins. The next trigger for the same key will arrive
       // after _sessions.set and become a follow-up turn naturally.
-      if (this.#inflight.has(sessionKey)) {
+      if (this._inflight.has(sessionKey)) {
         log(
           `[ticket-session] dispatch dropped (spawn already in-flight for same key): ticket=${spec.ticketId.slice(0, 8)} role=${role}`,
         );
@@ -90,7 +118,7 @@ export class TicketSessionManager
           otherTickets.add(sess.ticketId);
         }
       }
-      for (const [k, info] of this.#inflight) {
+      for (const [k, info] of this._inflight) {
         if (k === sessionKey) continue;
         if (info.agentId === spec.agentId && info.ticketId && info.ticketId !== spec.ticketId) {
           otherTickets.add(info.ticketId);
@@ -129,9 +157,15 @@ export class TicketSessionManager
       }
     }
 
-    const sess = this._getSession(sessionKey);
+    const sess = this._getLiveSession(sessionKey);
 
     if (sess) {
+      // Acceptance criterion: explicit "reused existing pid=…" log so an
+      // operator grepping the manager log can distinguish a follow-up turn
+      // from a fresh spawn at a glance.
+      log(
+        `[ticket-session] reused existing pid=${sess.pid} ticket=${spec.ticketId.slice(0, 8)} role=${role} turn=${sess.turnCount + 1}`,
+      );
       this._sendFollowUp(sess, this.#composeTriggerTurn(spec));
       if (spec.agentId && !sess.agentId) sess.agentId = spec.agentId;
       return { dispatched: true, pid: sess.pid };
@@ -146,7 +180,7 @@ export class TicketSessionManager
     // this slot before _spawnSession lands a SessionRecord in _sessions.
     // Cleared after the spawn outcome is known (success or failure) — the
     // session itself takes over the cap accounting from that point.
-    this.#inflight.set(sessionKey, {
+    this._inflight.set(sessionKey, {
       agentId: spec.agentId || '',
       ticketId: spec.ticketId,
     });
@@ -184,7 +218,7 @@ export class TicketSessionManager
     } finally {
       // Spawn outcome resolved and identity stamped — _sessions takes over
       // cap accounting from here.
-      this.#inflight.delete(sessionKey);
+      this._inflight.delete(sessionKey);
     }
     if (!spawned) {
       if (dedupKey) this._forgetDedup(dedupKey);
@@ -308,6 +342,114 @@ export class TicketSessionManager
       'Use mcp__awb__get_ticket to fetch the latest ticket state and continue your work.',
     );
     return lines.join('\n');
+  }
+
+  // -- Post-comment "moving cue" → resume guard ----------------------------
+  // Watches the Claude stream-json output for an `add_comment` call whose
+  // body promises a `move_ticket` follow-up (e.g. "Moving to Merging."). If
+  // the turn ends or 30 seconds pass without the model actually issuing the
+  // `move_ticket` toolcall, we inject a short continuation turn so the
+  // ticket doesn't stall mid-workflow. Independent of [[A]] sanitization
+  // and [[C]] prompt rewrite — even with both in place, a model that drops
+  // its toolcall stream after step 1 would still stall without this guard.
+
+  protected _onStdoutParsed(sess: SessionRecord, parsed: ParseResult, _rawLine: string): void {
+    if (parsed.raw?.type === 'assistant') {
+      const content = parsed.raw?.message?.content;
+      if (Array.isArray(content)) {
+        for (const block of content) {
+          if (block?.type !== 'tool_use' || typeof block.name !== 'string') continue;
+          // `block.name` is the canonical MCP tool id, e.g.
+          // `mcp__awb__add_comment` / `mcp__awb__move_ticket`. Match by
+          // suffix so a future MCP server rename of the prefix doesn't
+          // silently disable the guard.
+          if (block.name.endsWith('add_comment')) {
+            const text = String(block.input?.content || '');
+            if (MOVING_CUE_RE.test(text)) {
+              this.#armMovingCue(sess);
+            }
+          } else if (block.name.endsWith('move_ticket')) {
+            // The promised follow-up arrived — disarm cleanly.
+            this.#disarmMovingCue(sess.pid, 'move_ticket fired');
+          }
+        }
+      }
+    }
+    if (parsed.isResult) {
+      // Turn ended. If we're still armed and haven't already injected, the
+      // model decided this was its final answer without calling
+      // move_ticket — fire the continuation immediately instead of waiting
+      // for the 30s timer (no point making the operator watch the stall).
+      const state = this.#movingCue.get(sess.pid);
+      if (state && state.armed && !state.injected) {
+        this.#injectMovingResume(sess, 'turn ended without move_ticket');
+      }
+    }
+  }
+
+  protected async _onChildExit(
+    sess: SessionRecord,
+    _code: number | null,
+    _signal: NodeJS.Signals | null,
+  ): Promise<void> {
+    // Clear any pending timer / state for this pid so a long-lived manager
+    // doesn't accumulate handles after many session respawns.
+    const state = this.#movingCue.get(sess.pid);
+    if (state?.timer) clearTimeout(state.timer);
+    this.#movingCue.delete(sess.pid);
+  }
+
+  #armMovingCue(sess: SessionRecord): void {
+    const existing = this.#movingCue.get(sess.pid);
+    if (existing && (existing.armed || existing.injected)) return; // already tracking
+    const state: { armed: boolean; injected: boolean; timer: NodeJS.Timeout | null } = {
+      armed: true,
+      injected: false,
+      timer: null,
+    };
+    state.timer = setTimeout(() => {
+      const cur = this.#movingCue.get(sess.pid);
+      if (!cur || !cur.armed || cur.injected) return;
+      this.#injectMovingResume(sess, `${Math.round(MOVING_RESUME_GRACE_MS / 1000)}s elapsed without move_ticket`);
+    }, MOVING_RESUME_GRACE_MS);
+    state.timer.unref?.();
+    this.#movingCue.set(sess.pid, state);
+    log(
+      `[ticket-session] moving-cue armed ticket=${(sess.ticketId || '').slice(0, 8)} role=${sess.role || '_'} pid=${sess.pid}`,
+    );
+  }
+
+  #disarmMovingCue(pid: number, reason: string): void {
+    const state = this.#movingCue.get(pid);
+    if (!state) return;
+    if (state.timer) clearTimeout(state.timer);
+    this.#movingCue.delete(pid);
+    if (state.armed) {
+      log(`[ticket-session] moving-cue disarmed pid=${pid} reason=${reason}`);
+    }
+  }
+
+  #injectMovingResume(sess: SessionRecord, reason: string): void {
+    const state = this.#movingCue.get(sess.pid);
+    if (!state) return;
+    state.injected = true;
+    state.armed = false;
+    if (state.timer) {
+      clearTimeout(state.timer);
+      state.timer = null;
+    }
+    log(
+      `[ticket-session] moving-cue resume injected ticket=${(sess.ticketId || '').slice(0, 8)} role=${sess.role || '_'} pid=${sess.pid} reason=${reason}`,
+    );
+    const text =
+      '[Supervisor] Your previous comment announced a ticket move ("Moving to …") but no `mcp__awb__move_ticket` call followed. ' +
+      'Issue the `mcp__awb__move_ticket` call now to complete the transition — this is the very next tool call you must make, with no prose in between. ' +
+      'If you cannot move the ticket for a real reason (MCP error, you discovered a blocker), add a follow-up comment explaining why instead of staying silent.';
+    try {
+      this._sendFollowUp(sess, text, { checkMaxTurns: false });
+    } catch (err: any) {
+      log(`[ticket-session] moving-cue resume injection failed pid=${sess.pid}: ${err?.message ?? err}`);
+    }
   }
 
   _snapshot(): Array<{

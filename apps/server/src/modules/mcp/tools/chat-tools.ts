@@ -12,12 +12,12 @@ import { z } from 'zod';
 import { Agent } from '../../../entities/Agent';
 import { ChatRoomParticipant } from '../../../entities/ChatRoomParticipant';
 import { activityEvents } from '../../../services/activity.service';
-import { ok, err, MENTION_SYNTAX_DOC } from '../shared/helpers';
+import { ok, err, MENTION_SYNTAX_DOC, sanitizeHarnessMarkers } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
 import type { ToolContext } from './context';
 
 export function registerChatTools(server: McpServer, ctx: ToolContext): void {
-  const { dataSource, roomCrudService, roomMembershipService, roomMessagingService } = ctx;
+  const { dataSource, logger, roomCrudService, roomMembershipService, roomMessagingService } = ctx;
 
   server.tool(
     'set_typing',
@@ -76,6 +76,10 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
       if (!agent) return err('Agent identity not found for this session');
 
       try {
+        // Strip harness markers (see comment-tools.ts add_comment for context
+        // — ticket ce6c8d58). A chat reply with a leaked `<system-reminder>`
+        // block surfaces it verbatim in the room timeline; same root cause.
+        const cleanContent = sanitizeHarnessMarkers(content, { logger, toolName: 'send_chat_room_message', fieldName: 'content', agentId: agent.id });
         // agent.workspace_id is nullable now (manager identities carry NULL).
         // A workspace-less manager posting via MCP is theoretical — it would
         // need an apiKey with workspace_id='', and the chat domain is
@@ -86,7 +90,7 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
           'agent',
           agent.id,
           agent.name,
-          content,
+          cleanContent,
         );
         return ok({
           message_id: msg.id,

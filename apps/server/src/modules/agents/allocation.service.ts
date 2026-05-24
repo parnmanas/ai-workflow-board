@@ -140,12 +140,21 @@ export class AllocationService {
       .groupBy('c.ticket_id')
       .getRawMany<{ ticket_id: string; latest: string | Date | null }>();
 
+    // Exclude lock-lifecycle bookkeeping (agent_claim / agent_release) from
+    // my_last_update_at. These rows are server-emitted — including on the
+    // death-triggered force-release when a manager crashes mid-session — so
+    // counting them resets the supervisor's staleness clock to the lock-
+    // death moment and silences the resend cadence for a full staleness
+    // window (default 30 min) right when supervisor should be re-firing.
     const latestActivity = await this.dataSource.getRepository(ActivityLog)
       .createQueryBuilder('a')
       .select('a.ticket_id', 'ticket_id')
       .addSelect('MAX(a.created_at)', 'latest')
       .where('a.ticket_id IN (:...ids)', { ids: ticketIdsArr })
       .andWhere('a.actor_id = :agentId', { agentId })
+      .andWhere('a.trigger_source NOT IN (:...lifecycleSources)', {
+        lifecycleSources: ['agent_claim', 'agent_release'],
+      })
       .groupBy('a.ticket_id')
       .getRawMany<{ ticket_id: string; latest: string | Date | null }>();
 
