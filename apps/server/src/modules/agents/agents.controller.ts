@@ -1,7 +1,7 @@
 import { Controller, Get, Post, Patch, Delete, Body, Param, Query, Req, Res, UseGuards, Inject, forwardRef } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, Repository, In } from 'typeorm';
+import { DataSource, Repository, In, IsNull } from 'typeorm';
 import { Agent } from '../../entities/Agent';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { Workspace } from '../../entities/Workspace';
@@ -316,13 +316,21 @@ export class AgentsController {
     // workspace — the AgentManager page itself fetches cross-workspace via
     // getAgentsAll(), so the detail / edit / delete surfaces have to follow
     // the same rule or the round-trip breaks. Workspace admins (with
-    // MANAGE_AGENTS only inside their own workspace) stay scoped.
+    // MANAGE_AGENTS only inside their own workspace) stay scoped — but they
+    // can still read workspace-less identities (managers, with workspace_id
+    // stored as '' OR NULL — historic rows may use either). Without the
+    // IsNull() branch, loadManagerInfo on /admin/agent-manager 404s and the
+    // Edit Identity button stays disabled, since the dialog only renders when
+    // managerInfo loaded.
     const isSystemAdmin = (req as any).currentUser?.role === 'admin';
     const agent = await findOrFail(this.agentRepo, {
-      // Non-admins can read agents in their workspace OR workspace-less
-      // agents (manager identities). Editing/deleting workspace-less agents
-      // still requires admin via the patch/delete handlers below.
-      where: { id, ...(workspaceId && !isSystemAdmin ? { workspace_id: In([workspaceId, '']) } : {}) },
+      where: workspaceId && !isSystemAdmin
+        ? [
+            { id, workspace_id: workspaceId },
+            { id, workspace_id: '' },
+            { id, workspace_id: IsNull() as any },
+          ]
+        : { id },
     }, 'Agent not found');
 
     // Phase 3 D-44 — role_prompt is admin-gated. Non-admin viewers receive a redacted payload.
@@ -404,7 +412,13 @@ export class AgentsController {
     // failure.
     const isSystemAdmin = (req as any).currentUser?.role === 'admin';
     const agent = await findOrFail(this.agentRepo, {
-      where: { id, ...(workspaceId && !isSystemAdmin ? { workspace_id: In([workspaceId, '']) } : {}) },
+      where: workspaceId && !isSystemAdmin
+        ? [
+            { id, workspace_id: workspaceId },
+            { id, workspace_id: '' },
+            { id, workspace_id: IsNull() as any },
+          ]
+        : { id },
     }, 'Agent not found');
 
     // Snapshot pre-update fields used to detect identity changes we want to
@@ -504,9 +518,16 @@ export class AgentsController {
     // Workspace members with MANAGE_AGENTS can also delete workspace-less
     // identities (manager agents) — mirrors the GET / PATCH lookup so the
     // AgentManager admin page can remove a stale paired manager identity.
+    // workspace_id may be '' OR NULL on historic manager rows — see GET notes.
     const isSystemAdmin = (req as any).currentUser?.role === 'admin';
     const agent = await findOrFail(this.agentRepo, {
-      where: { id, ...(workspaceId && !isSystemAdmin ? { workspace_id: In([workspaceId, '']) } : {}) },
+      where: workspaceId && !isSystemAdmin
+        ? [
+            { id, workspace_id: workspaceId },
+            { id, workspace_id: '' },
+            { id, workspace_id: IsNull() as any },
+          ]
+        : { id },
     }, 'Agent not found');
     await this.agentRepo.delete(agent.id);
     return res.json({ success: true });
