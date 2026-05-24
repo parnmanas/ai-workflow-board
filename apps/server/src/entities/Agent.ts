@@ -38,8 +38,13 @@ export class Agent {
   @Column({ type: 'varchar', default: '' })
   webhook_url: string;
 
-  @Column({ type: 'varchar', default: '' })
-  workspace_id: string;
+  // Nullable because manager-type agents are workspace-less by design (see
+  // pair/redeem in agent-manager.controller.ts and migration 19) — workspace
+  // membership doesn't apply to them. Other agent types still carry the
+  // workspace they were created in; list endpoints OR `IsNull()` into the
+  // workspace filter so a manager surfaces in every workspace.
+  @Column({ type: 'varchar', nullable: true, default: null })
+  workspace_id: string | null;
 
   @Column({ type: 'varchar', nullable: true, default: null })
   parent_agent_id: string | null;

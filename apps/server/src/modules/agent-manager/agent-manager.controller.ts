@@ -262,7 +262,14 @@ export class AgentManagerController {
         description: 'awb-agent-manager — paired instance (ST-4)',
         type: 'manager',
         is_active: 1,
-        workspace_id: '',
+        // null (not '') is the canonical "no workspace" value. Manager
+        // identities are global by design — they supervise children that
+        // may live in any workspace. Storing '' here historically caused
+        // workspace-scoped lookups (e.g. GET /api/agents/:id with
+        // `In([ws, ''])`) to silently fail when the manager's leftover
+        // workspace_id was something else, leaving the admin page unable
+        // to load Manager identity for editing.
+        workspace_id: null,
         roles: '[]',
       }),
     );
@@ -906,7 +913,14 @@ export class AgentManagerController {
     if (!target.credential_id) return res.status(204).send();
 
     const cred = await this.credentialRepo.findOne({
-      where: { id: target.credential_id, workspace_id: target.workspace_id },
+      where: {
+        id: target.credential_id,
+        // target.workspace_id is nullable now (manager rows store NULL); a
+        // managed agent fetching its credential should never have NULL here,
+        // but the filter is omitted defensively so the lookup keys only on
+        // id when the workspace pointer is missing.
+        ...(target.workspace_id ? { workspace_id: target.workspace_id } : {}),
+      },
     });
     if (!cred) {
       this.logService.warn(
@@ -1010,7 +1024,11 @@ export class AgentManagerController {
       name: `${provisionPrefix}${target.name}`,
       agent_id: target.id,
       scope: 'full',
-      workspace_id: target.workspace_id,
+      // target.workspace_id is nullable (managers carry NULL). Provisioning
+      // a key for a managed agent that has no workspace falls back to '' so
+      // the apiKey row's workspace_id stays a definite string (which the
+      // ApiKey entity / query layer expect).
+      workspace_id: target.workspace_id ?? '',
       expires_at: null,
     });
 

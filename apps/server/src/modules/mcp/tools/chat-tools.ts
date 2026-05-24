@@ -76,9 +76,13 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
       if (!agent) return err('Agent identity not found for this session');
 
       try {
+        // agent.workspace_id is nullable now (manager identities carry NULL).
+        // A workspace-less manager posting via MCP is theoretical — it would
+        // need an apiKey with workspace_id='', and the chat domain is
+        // workspace-scoped — but fall back to '' so the typed contract holds.
         const msg = await roomMessagingService.sendMessage(
           room_id,
-          agent.workspace_id,
+          agent.workspace_id ?? '',
           'agent',
           agent.id,
           agent.name,

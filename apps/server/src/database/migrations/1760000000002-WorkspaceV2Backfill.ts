@@ -95,7 +95,7 @@ export class WorkspaceV2Backfill1760000000002 implements MigrationInterface {
 
     // ── Step 3: Backfill workspace_id on all workspace-scoped entities ──
     // Helper: load all rows for a repo, filter those without workspace_id, save.
-    async function backfillWorkspaceId<T extends { workspace_id: string }>(
+    async function backfillWorkspaceId<T extends { workspace_id: string | null }>(
       repo: import('typeorm').Repository<T>,
     ): Promise<void> {
       const rows = await repo.find();
