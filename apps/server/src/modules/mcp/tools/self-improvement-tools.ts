@@ -13,12 +13,19 @@
  *
  * Gating (all must pass; failure modes are distinct error strings so the
  * reviewer subagent can self-diagnose):
- *   - Caller binding: the MCP session must carry an agent identity AND its
- *     pinned subagentRole must be `reviewer` AND its pinned subagentTicketId
- *     must equal the `source_ticket_id` argument AND its pinned trigger source
- *     must be `ticket_done_review`. This is the load-bearing check — without
- *     it, any agent session that can guess a source ticket id on an eligible
- *     board could spam the admin's configured remote instance.
+ *   - Caller binding (LOAD-BEARING auth): the MCP session must carry an
+ *     agent identity AND that agent must be the holder of the `reviewer`
+ *     WorkspaceRole for the `source_ticket_id` argument's ticket, resolved
+ *     via TicketRoleAssignment. This is a DB-backed check — never trust the
+ *     client-supplied X-AWB-Subagent-* headers as the security boundary,
+ *     since they are written by the agent-manager but not server-signed and
+ *     any agent API-key holder that can open /mcp could spoof them.
+ *   - Trigger-source context gate (defense-in-depth, NOT sole auth proof):
+ *     the session's pinned subagentTriggerSource must be `ticket_done_review`
+ *     so the tool is confined to the post-Done retrospective path that the
+ *     trigger loop dispatches, not arbitrary reviewer wake-ups. Spoofable in
+ *     principle but irrelevant once the DB check above has passed — kept as
+ *     a documented contextual filter, not the security guarantee.
  *   - All four SystemSetting keys must be populated (URL, workspace_id,
  *     board_id, column_id) AND the API key must decrypt cleanly. Missing /
  *     blank keys → return an explicit error so the reviewer subagent knows
@@ -39,6 +46,8 @@ import { SystemSetting } from '../../../entities/SystemSetting';
 import { Ticket } from '../../../entities/Ticket';
 import { BoardColumn } from '../../../entities/BoardColumn';
 import { Board } from '../../../entities/Board';
+import { WorkspaceRole } from '../../../entities/WorkspaceRole';
+import { TicketRoleAssignment } from '../../../entities/TicketRoleAssignment';
 import { decrypt } from '../../../services/encryption.service';
 import { ok, err } from '../shared/helpers';
 import { callRemoteMcpTool } from '../shared/remote-mcp-client';
@@ -76,47 +85,75 @@ The source ticket id is used to:
       //    issues a writable remote MCP call, so it must be tightly scoped to
       //    the post-Done retrospective context the trigger loop dispatches.
       //
-      //    The subagent-manager (apps/agent-manager) pins per-spawn headers
-      //    X-AWB-Subagent-Role + X-AWB-Subagent-Ticket-Id when it spawns a
-      //    reviewer for a specific ticket. The MCP controller stashes those on
-      //    the session at init time. We require:
+      //    SECURITY: the load-bearing check is a DB lookup — does the caller's
+      //    agent_id match the holder of the `reviewer` WorkspaceRole on the
+      //    source ticket (via TicketRoleAssignment)? The client-supplied
+      //    X-AWB-Subagent-* headers (subagentRole / subagentTicketId) are
+      //    written by the agent-manager when it spawns a reviewer subagent
+      //    but they are NOT server-signed: any agent API-key holder that can
+      //    open /mcp could set them freely. So we DO NOT trust them as the
+      //    authorization boundary.
+      //
+      //    We require:
       //      - a known caller (rejects unauthenticated / dev-mode sessions
       //        that have no agent identity);
-      //      - subagentRole === 'reviewer' (only the reviewer role legitimately
-      //        runs a self-improvement retrospective);
-      //      - subagentTicketId === source_ticket_id (the reviewer must be
-      //        acting AS the reviewer of THIS ticket, not just have somehow
-      //        learned a foreign ticket id).
-      //      - subagentTriggerSource === 'ticket_done_review' (the reviewer
-      //        must have been spawned by the post-Done retrospective path,
-      //        not by a normal reviewer trigger on the same ticket).
+      //      - the source ticket exists, has a workspace, and that workspace
+      //        has a `reviewer` WorkspaceRole row;
+      //      - a TicketRoleAssignment binds the reviewer role on this ticket
+      //        to an agent (i.e., the ticket has an assigned reviewer at all);
+      //      - that assignment.agent_id === caller.agentId.
       //
-      //    Without these checks, any agent session that can guess or read an
-      //    eligible source_ticket_id could file unlimited remote tickets on
-      //    behalf of the admin's API key. The board-mode gate below is
-      //    necessary but not sufficient — see the second gate.
+      //    The subagentTriggerSource pin is kept as a defense-in-depth context
+      //    gate only — see the comment below it.
       const caller = getCallerAgent(extra);
-      if (!caller) {
+      if (!caller || !caller.agentId) {
         return err(
           'Unauthorized: create_remote_improvement_ticket requires an authenticated reviewer ' +
-          'subagent session. No agent identity is bound to this MCP session.',
+          'subagent session with a bound agent identity.',
         );
       }
-      const subagentRole = (caller.subagentRole || '').toLowerCase();
-      if (subagentRole !== 'reviewer') {
+
+      // Resolve source ticket up front so the DB-backed reviewer check can use it.
+      const sourceTicket = await dataSource.getRepository(Ticket).findOne({ where: { id: source_ticket_id } });
+      if (!sourceTicket) return err(`Source ticket not found: ${source_ticket_id}`);
+      if (!sourceTicket.workspace_id) {
+        return err(`Source ticket ${source_ticket_id} has no workspace; cannot resolve reviewer role.`);
+      }
+
+      const reviewerRole = await dataSource.getRepository(WorkspaceRole).findOne({
+        where: { workspace_id: sourceTicket.workspace_id, slug: 'reviewer' },
+      });
+      if (!reviewerRole) {
         return err(
-          'Forbidden: create_remote_improvement_ticket may only be called from a reviewer ' +
-          `subagent. This session is pinned to role='${subagentRole || '(none)'}'. ` +
-          'It is dispatched as part of the post-Done ticket_done_review retrospective.',
+          `Source ticket's workspace has no 'reviewer' WorkspaceRole defined. ` +
+          'create_remote_improvement_ticket can only be invoked from the reviewer role.',
         );
       }
-      if (!caller.subagentTicketId || caller.subagentTicketId !== source_ticket_id) {
+      const reviewerAssignment = await dataSource.getRepository(TicketRoleAssignment).findOne({
+        where: { ticket_id: source_ticket_id, role_id: reviewerRole.id },
+      });
+      if (!reviewerAssignment || !reviewerAssignment.agent_id) {
         return err(
-          `Forbidden: source_ticket_id (${source_ticket_id}) does not match the reviewer ` +
-          `subagent's pinned ticket (${caller.subagentTicketId || '(none)'}). The reviewer ` +
-          'may only file improvement tickets derived from the ticket they were spawned to review.',
+          `Forbidden: source ticket ${source_ticket_id} has no assigned reviewer agent. ` +
+          'Only the ticket\'s assigned reviewer may file remote improvement tickets derived from it.',
         );
       }
+      if (reviewerAssignment.agent_id !== caller.agentId) {
+        return err(
+          'Forbidden: caller is not the assigned reviewer of the source ticket. ' +
+          'Only the agent holding the reviewer role on this ticket may file remote improvement ' +
+          'tickets derived from it.',
+        );
+      }
+
+      // 2. Context gate (defense-in-depth, NOT sole auth proof): the session
+      //    must have been opened by the post-Done retrospective path. The
+      //    `X-AWB-Subagent-Trigger-Source` header is client-supplied and so
+      //    cannot be the security boundary — the DB-backed check above is —
+      //    but rejecting calls whose session was opened for a different
+      //    context (a normal reviewer trigger, a chat session, the top-level
+      //    proxy, ...) limits blast radius even if a legitimate reviewer's
+      //    credentials are misused outside the retrospective path.
       if (caller.subagentTriggerSource !== 'ticket_done_review') {
         return err(
           'Forbidden: create_remote_improvement_ticket may only be called from the ' +
@@ -125,14 +162,10 @@ The source ticket id is used to:
         );
       }
 
-      // 2. Resolve source ticket + board to verify the source board opts into
+      // 3. Resolve source ticket's board to verify the source board opts into
       //    remote filing. A reviewer running a retrospective on a board that
       //    only allows same_board improvements should NOT be able to bypass
-      //    by calling this tool directly. Second gate after the caller-binding
-      //    checks above — defense in depth, not a substitute.
-      const sourceTicket = await dataSource.getRepository(Ticket).findOne({ where: { id: source_ticket_id } });
-      if (!sourceTicket) return err(`Source ticket not found: ${source_ticket_id}`);
-
+      //    by calling this tool directly.
       let sourceBoardId = '';
       let sourceMode = 'off';
       if (sourceTicket.column_id) {
@@ -150,7 +183,7 @@ The source ticket id is used to:
         );
       }
 
-      // 3. Load + validate the remote target SystemSetting bundle.
+      // 4. Load + validate the remote target SystemSetting bundle.
       const settingRepo = dataSource.getRepository(SystemSetting);
       const settings = await settingRepo.find({
         where: [
@@ -178,7 +211,7 @@ The source ticket id is used to:
       const apiKey = decrypt(rawKey);
       if (!apiKey) return err('Remote AWB API key failed to decrypt. Ask the admin to re-save the key.');
 
-      // 4. Verify the configured destination BEFORE creating anything. The
+      // 5. Verify the configured destination BEFORE creating anything. The
       //    remote `create_ticket` tool takes only column_id — a stale or
       //    typo'd column id pointing at a DIFFERENT board (or a board in a
       //    different workspace) would otherwise silently file the
@@ -215,7 +248,7 @@ The source ticket id is used to:
         );
       }
 
-      // 5. Compose the outbound payload. The `self-improvement` label is
+      // 6. Compose the outbound payload. The `self-improvement` label is
       //    enforced here regardless of what the caller passed so the remote
       //    side can apply its own recursion guard. Source link goes in the
       //    description so it survives even if labels are stripped.
@@ -224,7 +257,7 @@ The source ticket id is used to:
         `\n\n---\n_Source: ticket ${source_ticket_id} on board ${sourceBoardId} ` +
         `(self_improvement_mode=${sourceMode})_\n`;
 
-      // 6. Fire the MCP `create_ticket` call against the remote.
+      // 7. Fire the MCP `create_ticket` call against the remote.
       //    `created_by` is omitted — the remote will stamp the agent identity
       //    from the API key (via getCallerAgent + caller.agentName) so
       //    attribution reflects the WHO of the X-API-Key, not a hardcoded
