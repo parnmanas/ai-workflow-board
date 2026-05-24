@@ -17,6 +17,7 @@ import { findOrFail } from '../../common/find-or-fail';
 import { parseComments, expandCommentAttachments } from '../mcp/shared/ticket-parsing';
 import { writeRoutingConfigThrough } from './routing-config.helper';
 import { AgentWorkloadService } from '../agents/agent-workload.service';
+import { resolveAgentDisplayMap } from '../../utils/agent-name';
 
 @ApiBearerAuth('user-session')
 @ApiTags('boards')
@@ -171,7 +172,7 @@ export class BoardsController {
     const agents = agentIds.length > 0
       ? await agentRepo.createQueryBuilder('a').where('a.id IN (:...ids)', { ids: agentIds }).getMany()
       : [];
-    const agentById = new Map(agents.map(a => [a.id, a]));
+    const displayNameByAgentId = await resolveAgentDisplayMap(agentRepo, agents);
 
     // Compute focus for each (agent, role) pair.
     // TODO: parallelize getFocusTicket calls (Promise.all) once the N+1
@@ -183,10 +184,9 @@ export class BoardsController {
       if (!role) continue;
       const focusTicketId = await this.agentWorkload.getFocusTicket(agent_id, board.id, role.slug);
       if (focusTicketId) {
-        const agent = agentById.get(agent_id);
         focusTickets.push({
           agent_id,
-          agent_name: agent?.name ?? agent_id,
+          agent_name: displayNameByAgentId.get(agent_id) ?? agent_id,
           role: role.slug,
           ticket_id: focusTicketId,
         });

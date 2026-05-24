@@ -82,6 +82,11 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
       const agent = await agentRepo.findOne({ where: { id: agent_id } });
       if (!agent) return err('Agent not found');
 
+      // Snapshot pre-update name so a rename leaves an audit line. Past
+      // incident: manager Agent names silently flipped without any record
+      // because none of the three mutation paths emitted an audit log.
+      const prevName = agent.name;
+
       if (name !== undefined) agent.name = name;
       if (description !== undefined) agent.description = description;
       if (type !== undefined) agent.type = type;
@@ -91,6 +96,21 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
       if (role_prompt_meta !== undefined) agent.role_prompt_meta = role_prompt_meta as Record<string, any>; // D-18
 
       const updated = await agentRepo.save(agent);
+
+      if (prevName !== updated.name) {
+        logger.info(
+          'AgentIdentity',
+          `Agent name changed via MCP update_agent: "${prevName}" → "${updated.name}" (id=${updated.id.slice(0, 8)} type=${updated.type})`,
+          {
+            agent_id: updated.id,
+            agent_type: updated.type,
+            field: 'name',
+            before: prevName,
+            after: updated.name,
+            via: 'MCP update_agent',
+          },
+        );
+      }
       return ok(updated);
     }
   );

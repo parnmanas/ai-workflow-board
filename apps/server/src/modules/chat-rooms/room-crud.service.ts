@@ -9,6 +9,7 @@ import { Agent } from '../../entities/Agent';
 import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
 import { RoomMembershipService } from './room-membership.service';
+import { resolveAgentDisplayMap } from '../../utils/agent-name';
 
 const PARTICIPANT_CAP = 50;
 
@@ -132,7 +133,7 @@ export class RoomCrudService {
         ? this.userRepo.findByIds(userIds).then(list => new Map(list.map(u => [u.id, u.name || u.email])))
         : Promise.resolve(new Map<string, string>()),
       agentIds.length > 0
-        ? this.agentRepo.findByIds(agentIds).then(list => new Map(list.map(a => [a.id, a.name])))
+        ? this.agentRepo.findByIds(agentIds).then(list => resolveAgentDisplayMap(this.agentRepo, list))
         : Promise.resolve(new Map<string, string>()),
     ]);
 
@@ -434,7 +435,7 @@ export class RoomCrudService {
     const agentIds = [...new Set(participantRows.filter(p => p.participant_type === 'agent').map(p => p.participant_id))];
     const [usersById, agentsById] = await Promise.all([
       userIds.length > 0 ? this.userRepo.findByIds(userIds).then(list => new Map(list.map(u => [u.id, u.name || u.email]))) : Promise.resolve(new Map<string, string>()),
-      agentIds.length > 0 ? this.agentRepo.findByIds(agentIds).then(list => new Map(list.map(a => [a.id, a.name]))) : Promise.resolve(new Map<string, string>()),
+      agentIds.length > 0 ? this.agentRepo.findByIds(agentIds).then(list => resolveAgentDisplayMap(this.agentRepo, list)) : Promise.resolve(new Map<string, string>()),
     ]);
     const nameOf = (type: string, id: string): string => {
       if (type === 'user') return usersById.get(id) || 'Unknown User';
