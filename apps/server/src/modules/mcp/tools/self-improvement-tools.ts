@@ -5,7 +5,7 @@
  * follow-up improvement ticket against the REMOTE AWB instance configured by
  * the admin in SystemSetting (`self_improvement.remote_awb_*`). The remote
  * API key never reaches the subagent — it is read and decrypted server-side
- * here, then attached as the `X-Agent-Key` header on the outbound HTTP call.
+ * here, then attached to the MCP transport headers on the outbound call.
  *
  * The companion local-board path uses the existing `create_ticket` tool — no
  * new tool needed for that case (the reviewer subagent calls create_ticket
@@ -19,6 +19,11 @@
  *   - The board the reviewer is currently working on must have its
  *     `self_improvement_mode` set to `remote_awb` or `both` — enforced here
  *     using the ticket id the reviewer passes in for source attribution.
+ *
+ * Transport choice: outbound calls go over the remote AWB's `/mcp` endpoint
+ * via the MCP SDK Client, NOT the REST tickets controller. The latter is
+ * gated by user-session AuthGuard and would 401 a bearer API key. See
+ * `../shared/remote-mcp-client.ts` for the helper.
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -29,6 +34,7 @@ import { BoardColumn } from '../../../entities/BoardColumn';
 import { Board } from '../../../entities/Board';
 import { decrypt } from '../../../services/encryption.service';
 import { ok, err } from '../shared/helpers';
+import { callRemoteMcpTool } from '../shared/remote-mcp-client';
 import type { ToolContext } from './context';
 
 export function registerSelfImprovementTools(server: McpServer, ctx: ToolContext): void {
@@ -118,63 +124,39 @@ The source ticket id is used to:
       const sourceLink =
         `\n\n---\n_Source: ticket ${source_ticket_id} on board ${sourceBoardId} ` +
         `(self_improvement_mode=${sourceMode})_\n`;
-      const remoteBody = {
+
+      // 4. Fire the MCP `create_ticket` call against the remote.
+      //    `created_by` is omitted — the remote will stamp the agent identity
+      //    from the API key (via getCallerAgent + caller.agentName) so
+      //    attribution reflects the WHO of the X-API-Key, not a hardcoded
+      //    string. workspace_id is implicit in the API key's workspace scope.
+      const result = await callRemoteMcpTool(remoteUrl, apiKey, 'create_ticket', {
+        column_id: remoteColumnId,
         title,
         description: (description || '') + sourceLink,
         priority,
         labels: dedupedLabels,
-        // Tag the remote-side creator so the audit trail shows it came from a
-        // forwarder rather than a human. The remote AgentAuthGuard will
-        // additionally stamp the agent_id from the API key.
-        created_by: 'Self-Improvement Forwarder',
-        created_by_type: 'agent',
-      };
+      });
 
-      // 4. Fire the POST. The remote endpoint is column-scoped:
-      //      POST {remote_url}/api/columns/{column_id}/tickets
-      //    (matches tickets.controller.ts @Post('columns/:columnId/tickets')).
-      //    No retries — a failed call surfaces as an error to the reviewer who
-      //    can either retry by re-running create_remote_improvement_ticket or
-      //    file locally instead.
-      const url = `${remoteUrl}/api/columns/${encodeURIComponent(remoteColumnId)}/tickets`;
-      let response: Response;
-      try {
-        response = await fetch(url, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Agent-Key': apiKey,
-          },
-          body: JSON.stringify(remoteBody),
+      if (!result.ok) {
+        logger.error('SelfImprovement', 'remote create_ticket MCP call failed', {
+          kind: result.kind, message: result.message,
+          remote_url: remoteUrl, source_ticket_id,
         });
-      } catch (e: any) {
-        logger.error('SelfImprovement', 'remote ticket POST network error', {
-          err: String(e?.message || e), remote_url: remoteUrl, source_ticket_id,
-        });
-        return err(`Network error contacting remote AWB at ${remoteUrl}: ${e?.message || e}`);
+        return err(`Remote AWB rejected the request (${result.kind}): ${result.message}`);
       }
 
-      if (!response.ok) {
-        let body = '';
-        try { body = (await response.text()).slice(0, 500); } catch { /* ignore */ }
-        logger.error('SelfImprovement', 'remote ticket POST non-2xx', {
-          status: response.status, body, remote_url: remoteUrl, source_ticket_id,
-        });
-        return err(`Remote AWB rejected the request: HTTP ${response.status}${body ? ` — ${body}` : ''}`);
-      }
-
-      let created: any = null;
-      try { created = await response.json(); } catch { /* ignore */ }
+      const createdId = result.data?.id || '';
       logger.info('SelfImprovement', 'remote improvement ticket created', {
         source_ticket_id,
-        remote_ticket_id: created?.id || '',
+        remote_ticket_id: createdId,
         remote_workspace_id: remoteWorkspaceId,
         remote_board_id: remoteBoardId,
       });
 
       return ok({
         success: true,
-        remote_ticket_id: created?.id || '',
+        remote_ticket_id: createdId,
         remote_url: remoteUrl,
         remote_workspace_id: remoteWorkspaceId,
         remote_board_id: remoteBoardId,

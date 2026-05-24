@@ -8,6 +8,7 @@ import { AdminGuard } from '../../common/guards/admin.guard';
 import { encrypt, decrypt } from '../../services/encryption.service';
 import { maskSecret } from '../../common/mask';
 import { sessionStore, DEFAULT_MAX_SESSIONS } from '../../modules/mcp/internal/session-store';
+import { callRemoteMcpTool } from '../../modules/mcp/shared/remote-mcp-client';
 
 const SETTING_DEFINITIONS: Record<string, { description: string; is_secret: boolean; default_value: string }> = {
   'embedding.provider': { description: 'Embedding provider (openai or none)', is_secret: false, default_value: 'none' },
@@ -141,9 +142,14 @@ export class SettingsController {
   /**
    * Probe the configured remote AWB target so the admin can verify the
    * URL + API key combo works before relying on `create_remote_improvement_ticket`
-   * to fire in production. Hits the remote `/api/health` endpoint with the
-   * stored X-Agent-Key. Returns { ok, status, message } — never echoes the key
-   * back, never returns the raw remote body (just status + a short reason).
+   * to fire in production. Calls the remote `whoami` MCP tool — this exercises
+   * the exact authenticated channel the forwarder will use later, so a green
+   * "Test connection" guarantees the API key is also accepted by the remote's
+   * tool surface (not just that the host is reachable).
+   *
+   * Returns { ok, message, agent }: agent is the remote-resolved identity
+   * (id + name) so the admin can confirm WHICH agent the key represents on
+   * the remote side. Never echoes the API key back.
    *
    * Auth: AdminGuard at the class level already covers it.
    */
@@ -169,16 +175,24 @@ export class SettingsController {
       return res.status(400).json({ ok: false, message: 'remote_awb_api_key failed to decrypt — re-save the key' });
     }
 
-    const url = `${remoteUrl}/api/health`;
-    try {
-      const r = await fetch(url, { headers: { 'X-Agent-Key': apiKey } });
-      if (!r.ok) {
-        return res.json({ ok: false, status: r.status, message: `Remote returned HTTP ${r.status}` });
-      }
-      return res.json({ ok: true, status: r.status, message: 'Remote AWB reachable' });
-    } catch (e: any) {
-      return res.json({ ok: false, message: `Network error: ${e?.message || e}` });
+    const result = await callRemoteMcpTool(remoteUrl, apiKey, 'whoami', {});
+    if (!result.ok) {
+      return res.json({
+        ok: false,
+        kind: result.kind,
+        message: `Remote ${result.kind} failure: ${result.message}`,
+      });
     }
+    const data = result.data || {};
+    return res.json({
+      ok: true,
+      message: data?.authenticated
+        ? `Remote AWB reachable — authenticated as ${data?.agent?.name || data?.agent_name || '(unknown)'}`
+        : 'Remote AWB reachable (no agent context — dev mode?)',
+      agent: data?.agent || null,
+      agent_id: data?.agent_id || null,
+      workspace_id: data?.workspace_id || null,
+    });
   }
 }
 
