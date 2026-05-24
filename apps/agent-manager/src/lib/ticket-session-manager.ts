@@ -133,11 +133,16 @@ export class TicketSessionManager
       }
     }
 
-    if (spec.forceRespawn === true) {
+    // The post-Done retrospective needs a fresh MCP session so the server can
+    // bind X-AWB-Subagent-Trigger-Source=ticket_done_review at initialize
+    // time. Reusing a prior reviewer session would keep the old trigger_source
+    // and incorrectly block create_remote_improvement_ticket.
+    const needsFreshTriggerSession = spec.triggerSource === 'ticket_done_review';
+    if (spec.forceRespawn === true || needsFreshTriggerSession) {
       const prev = this._getSession(sessionKey);
       if (prev) {
         log(
-          `Ticket session force-respawn requested: ticket=${spec.ticketId} role=${role} pid=${prev.pid}`,
+          `Ticket session force-respawn requested: ticket=${spec.ticketId} role=${role} pid=${prev.pid} source=${spec.triggerSource || 'manual'}`,
         );
         if (prev.idleTimer) {
           clearTimeout(prev.idleTimer);
@@ -197,6 +202,7 @@ export class TicketSessionManager
       ticket_id: spec.ticketId,
       ticket_title: spec.ticket?.title || '',
       role,
+      trigger_source: spec.triggerSource || '',
     };
     let spawned: SessionRecord | null = null;
     try {

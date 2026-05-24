@@ -15,9 +15,10 @@
  * reviewer subagent can self-diagnose):
  *   - Caller binding: the MCP session must carry an agent identity AND its
  *     pinned subagentRole must be `reviewer` AND its pinned subagentTicketId
- *     must equal the `source_ticket_id` argument. This is the load-bearing
- *     check — without it, any agent session that can guess a source ticket id
- *     on an eligible board could spam the admin's configured remote instance.
+ *     must equal the `source_ticket_id` argument AND its pinned trigger source
+ *     must be `ticket_done_review`. This is the load-bearing check — without
+ *     it, any agent session that can guess a source ticket id on an eligible
+ *     board could spam the admin's configured remote instance.
  *   - All four SystemSetting keys must be populated (URL, workspace_id,
  *     board_id, column_id) AND the API key must decrypt cleanly. Missing /
  *     blank keys → return an explicit error so the reviewer subagent knows
@@ -86,6 +87,9 @@ The source ticket id is used to:
       //      - subagentTicketId === source_ticket_id (the reviewer must be
       //        acting AS the reviewer of THIS ticket, not just have somehow
       //        learned a foreign ticket id).
+      //      - subagentTriggerSource === 'ticket_done_review' (the reviewer
+      //        must have been spawned by the post-Done retrospective path,
+      //        not by a normal reviewer trigger on the same ticket).
       //
       //    Without these checks, any agent session that can guess or read an
       //    eligible source_ticket_id could file unlimited remote tickets on
@@ -111,6 +115,13 @@ The source ticket id is used to:
           `Forbidden: source_ticket_id (${source_ticket_id}) does not match the reviewer ` +
           `subagent's pinned ticket (${caller.subagentTicketId || '(none)'}). The reviewer ` +
           'may only file improvement tickets derived from the ticket they were spawned to review.',
+        );
+      }
+      if (caller.subagentTriggerSource !== 'ticket_done_review') {
+        return err(
+          'Forbidden: create_remote_improvement_ticket may only be called from the ' +
+          `post-Done ticket_done_review retrospective. This session is pinned to ` +
+          `trigger_source='${caller.subagentTriggerSource || '(none)'}'.`,
         );
       }
 
