@@ -75,10 +75,28 @@ export async function callRemoteMcpTool(
     },
   });
 
-  const client = new Client({
-    name: opts?.clientName || 'awb-self-improvement-forwarder',
-    version: opts?.clientVersion || '1.0.0',
-  });
+  // AWB's MCP controller gates `initialize` on `capabilities.experimental
+  // ['awb/schemaVersion']`: any client that isn't a presence-heartbeat or
+  // a subagent (subagent / managed-subagent client-type) must declare
+  // `{ version: 2 }` or the initialize handshake fails with
+  // `MCP proxy schemaVersion mismatch — upgrade proxy.mjs to v2`. Our
+  // `x-awb-client-type: self-improvement-forwarder` does NOT match either
+  // bypass, so we must advertise the gate value explicitly here — without
+  // it, both the admin "Test connection" probe and
+  // `create_remote_improvement_ticket` get rejected before any tool call.
+  const client = new Client(
+    {
+      name: opts?.clientName || 'awb-self-improvement-forwarder',
+      version: opts?.clientVersion || '1.0.0',
+    },
+    {
+      capabilities: {
+        experimental: {
+          'awb/schemaVersion': { version: 2 },
+        },
+      },
+    },
+  );
 
   try {
     try {
