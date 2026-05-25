@@ -275,6 +275,7 @@ export class SubagentManager implements SubagentManagerContract {
           };
           if (spec.ticketId) headers['X-AWB-Subagent-Ticket-Id'] = spec.ticketId;
           if (spec.role) headers['X-AWB-Subagent-Role'] = spec.role;
+          if (spec.triggerSource) headers['X-AWB-Subagent-Trigger-Source'] = spec.triggerSource;
           const mcpConfig = {
             mcpServers: {
               awb: {

@@ -87,7 +87,7 @@ async function applyRoleAssignments(
 }
 
 export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): void {
-  const { dataSource, activityService, logger, ticketRoleAssignmentService } = ctx;
+  const { dataSource, activityService, logger, ticketRoleAssignmentService, triggerLoopService } = ctx;
 
   server.tool(
     'get_ticket',
@@ -272,8 +272,10 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       base_repo_resource_id: z.string().optional().describe('Resource ID (type=repository) the ticket builds against. Empty string clears.'),
       base_branch: z.string().optional().describe('Branch the agent should treat as the base when starting work. Empty string clears.'),
       next_ticket_id: z.string().optional().describe('Optional pointer to the ticket TriggerLoopService should auto-trigger once this one lands on a terminal column. Must live in the same workspace and cannot self-link. Empty string clears.'),
+      pending_user_action: z.boolean().optional().describe('Park the ticket for user intervention. While true, TriggerLoopService drops every agent_trigger for this ticket, AgentWorkloadService.getFocusTicket skips it, and BacklogPromotionService refuses to promote into its column slot. Pair with `pending_reason` so the user can see why. Use this when a decision genuinely needs a human and would otherwise loop the ticket between System and Agent columns. Prefer the dedicated `pend_ticket` / `unpend_ticket` tools when the call is single-purpose.'),
+      pending_reason: z.string().optional().describe('Free-text explanation rendered verbatim on the ticket detail panel\'s "User" tab. Cleared automatically when pending_user_action transitions to false.'),
     },
-    async ({ ticket_id, title, description, priority, assignee, reporter, assignee_id, reporter_id, reviewer_id, role_assignments, labels, channel_ids, base_repo_resource_id, base_branch, next_ticket_id }, extra: { sessionId?: string }) => {
+    async ({ ticket_id, title, description, priority, assignee, reporter, assignee_id, reporter_id, reviewer_id, role_assignments, labels, channel_ids, base_repo_resource_id, base_branch, next_ticket_id, pending_user_action, pending_reason }, extra: { sessionId?: string }) => {
       const ticketRepo = dataSource.getRepository(Ticket);
       const ticket = await ticketRepo.findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Ticket not found');
@@ -316,7 +318,14 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           logger,
         );
         ticket.assignee_id = assignee_id !== undefined ? assignee_id : (resolved.id || ticket.assignee_id);
-        ticket.assignee    = assignee    !== undefined ? assignee    : (resolved.name || ticket.assignee);
+        // Canonical Manager/Agent display wins over any bare leaf name the
+        // caller might pass alongside the id — keeps TicketCard consistent
+        // with the role_assignments view.
+        if (resolved.id) {
+          ticket.assignee = resolved.name;
+        } else if (assignee !== undefined) {
+          ticket.assignee = assignee;
+        }
         if (ticket.assignee !== oldAssignee) changes.push('assignee');
       }
       if (reporter !== undefined || reporter_id !== undefined) {
@@ -327,7 +336,11 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           logger,
         );
         ticket.reporter_id = reporter_id !== undefined ? reporter_id : (resolved.id || ticket.reporter_id);
-        ticket.reporter    = reporter    !== undefined ? reporter    : (resolved.name || ticket.reporter);
+        if (resolved.id) {
+          ticket.reporter = resolved.name;
+        } else if (reporter !== undefined) {
+          ticket.reporter = reporter;
+        }
         if (ticket.reporter !== oldReporter) changes.push('reporter');
       }
       if (reviewer_id !== undefined) { ticket.reviewer_id = reviewer_id; changes.push('reviewer'); }
@@ -366,6 +379,39 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           return err(e?.message || 'next_ticket_id rejected');
         }
         if ((ticket.next_ticket_id || '') !== (oldNextTicketId || '')) changes.push('next_ticket');
+      }
+
+      // Pending-user-action toggle (ticket a57517be). Tracked separately so
+      // the activity log says "pending" instead of being lumped into a
+      // generic `updated`. The reason / set_at / set_by trio always moves
+      // together with the boolean — flipping false clears them; flipping
+      // true stamps them from the caller / now / caller name.
+      const oldPending = !!ticket.pending_user_action;
+      if (pending_user_action !== undefined) {
+        const next = !!pending_user_action;
+        if (next !== oldPending) {
+          ticket.pending_user_action = next;
+          if (next) {
+            ticket.pending_set_at = new Date();
+            ticket.pending_set_by = caller?.agentName || '';
+            if (pending_reason !== undefined) {
+              ticket.pending_reason = pending_reason || '';
+            }
+          } else {
+            ticket.pending_set_at = null;
+            ticket.pending_set_by = '';
+            ticket.pending_reason = '';
+          }
+          changes.push('pending_user_action');
+        } else if (next && pending_reason !== undefined && pending_reason !== ticket.pending_reason) {
+          // Updating reason without toggling the flag: keep stamps, refresh
+          // the text. Still log so the audit trail shows the new wording.
+          ticket.pending_reason = pending_reason || '';
+          changes.push('pending_reason');
+        }
+      } else if (pending_reason !== undefined && oldPending && pending_reason !== ticket.pending_reason) {
+        ticket.pending_reason = pending_reason || '';
+        changes.push('pending_reason');
       }
 
       await ticketRepo.save(ticket);
@@ -424,6 +470,110 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
         });
       }
 
+      // Ticket a57517be finding 2: an update_ticket call that flips
+      // `pending_user_action` true → false must explicitly wake the
+      // current column's role-holders. Mirrors the dedicated
+      // `unpend_ticket` tool and the REST PATCH path — the activity row
+      // alone does not route through column-based dispatch.
+      if (
+        triggerLoopService &&
+        changes.includes('pending_user_action') &&
+        oldPending &&
+        !ticket.pending_user_action
+      ) {
+        try {
+          await triggerLoopService.dispatchCurrentColumn(
+            ticket.id, 'unpend', caller?.agentId || '',
+          );
+        } catch (e) {
+          logger.warn('MCP', 'update_ticket unpend dispatch failed (continuing)', {
+            err: String(e), ticket_id: ticket.id,
+          });
+        }
+      }
+
+      const updated = await loadTicketFull(dataSource, ticket.id);
+      return ok(updated);
+    }
+  );
+
+  server.tool(
+    'pend_ticket',
+    'Park a ticket for user intervention. Sets `pending_user_action=true` plus a `reason` rendered on the ticket detail panel\'s "User" tab. While pending, the trigger loop drops every agent_trigger for this ticket, the focus selector skips it (so the agent\'s focus moves to another ticket), and BacklogPromotionService refuses to promote into this column slot. Use when a decision genuinely needs a human — typically because the ticket would otherwise loop between System and Agent columns, or because the work has to be split into a follow-up ticket. Pair with `create_ticket` when the right move is to spin up a separate ticket for a scoped follow-up.',
+    {
+      ticket_id: z.string().describe('Ticket ID to park'),
+      reason: z.string().describe('Why human intervention is needed. Surfaced verbatim on the User tab so the user can act without reading the comment log. Keep it specific (e.g. "credentials needed for prod DB migration" beats "stuck").'),
+    },
+    async ({ ticket_id, reason }, extra: { sessionId?: string }) => {
+      const ticketRepo = dataSource.getRepository(Ticket);
+      const ticket = await ticketRepo.findOne({ where: { id: ticket_id } });
+      if (!ticket) return err('Ticket not found');
+      const caller = getCallerAgent(extra);
+      const wasPending = !!ticket.pending_user_action;
+      ticket.pending_user_action = true;
+      ticket.pending_reason = reason || '';
+      if (!wasPending) {
+        ticket.pending_set_at = new Date();
+        ticket.pending_set_by = caller?.agentName || '';
+      }
+      await ticketRepo.save(ticket);
+      await activityService.logActivity({
+        entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
+        field_changed: 'pending_user_action',
+        old_value: wasPending ? 'true' : 'false', new_value: 'true',
+        ticket_id: ticket.id,
+        actor_id: caller?.agentId, actor_name: caller?.agentName,
+      });
+      const updated = await loadTicketFull(dataSource, ticket.id);
+      return ok(updated);
+    }
+  );
+
+  server.tool(
+    'unpend_ticket',
+    'Clear a ticket\'s `pending_user_action` flag. Wakes the dispatch path back up — the focus selector reconsiders the ticket and the next column move (or supervisor re-push) triggers the relevant role holders. Use after the human decision is recorded or after a follow-up ticket has been filed and the original ticket can proceed.',
+    {
+      ticket_id: z.string().describe('Ticket ID to unpark'),
+    },
+    async ({ ticket_id }, extra: { sessionId?: string }) => {
+      const ticketRepo = dataSource.getRepository(Ticket);
+      const ticket = await ticketRepo.findOne({ where: { id: ticket_id } });
+      if (!ticket) return err('Ticket not found');
+      const caller = getCallerAgent(extra);
+      const wasPending = !!ticket.pending_user_action;
+      ticket.pending_user_action = false;
+      ticket.pending_reason = '';
+      ticket.pending_set_at = null;
+      ticket.pending_set_by = '';
+      await ticketRepo.save(ticket);
+      if (wasPending) {
+        await activityService.logActivity({
+          entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
+          field_changed: 'pending_user_action',
+          old_value: 'true', new_value: 'false',
+          ticket_id: ticket.id,
+          actor_id: caller?.agentId, actor_name: caller?.agentName,
+        });
+        // Ticket a57517be finding 2: clearing the flag must explicitly wake
+        // the current column's role-holders. The `pending_user_action` field
+        // activity above does NOT route through column-based dispatch (and
+        // even if it did, `_handleActivity`'s focus-selector gate would still
+        // need the flag flipped first — which it now is). Goes through the
+        // focus selector inside `_emitTrigger` so if the agent is already
+        // focused on another ticket, this stays silent and the focus model
+        // decides when this ticket comes back into rotation.
+        if (triggerLoopService) {
+          try {
+            await triggerLoopService.dispatchCurrentColumn(
+              ticket.id, 'unpend', caller?.agentId || '',
+            );
+          } catch (e) {
+            logger.warn('MCP', 'unpend_ticket dispatch failed (continuing)', {
+              err: String(e), ticket_id: ticket.id,
+            });
+          }
+        }
+      }
       const updated = await loadTicketFull(dataSource, ticket.id);
       return ok(updated);
     }

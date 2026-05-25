@@ -35,6 +35,7 @@ import {
   maxChildPosition,
   refreshTicketWorkspaceId,
   resolveAgentIdAndName,
+  formatAgentDisplayName,
   shiftTicketPositions,
   deleteCommentAttachmentsForTicket,
   inferTicketAttachmentMimetype,
@@ -379,7 +380,7 @@ export class TicketsController {
     const actorId = currentUser?.id || undefined;
     const actorName = currentUser?.name || currentUser?.email || undefined;
 
-    const { title, description, priority, assignee, reporter, reviewer_id, assignee_id, reporter_id, labels, channel_ids, status, prompt_text, base_repo_resource_id, base_branch, role_assignments, next_ticket_id } = body;
+    const { title, description, priority, assignee, reporter, reviewer_id, assignee_id, reporter_id, labels, channel_ids, status, prompt_text, base_repo_resource_id, base_branch, role_assignments, next_ticket_id, pending_user_action, pending_reason } = body;
     const oldAssignee = ticket.assignee;
     const oldReporter = ticket.reporter;
     const oldReviewerId = ticket.reviewer_id;
@@ -387,6 +388,7 @@ export class TicketsController {
     const oldBaseRepoId = ticket.base_repo_resource_id;
     const oldBaseBranch = ticket.base_branch;
     const oldNextTicketId = ticket.next_ticket_id;
+    const oldPending = !!ticket.pending_user_action;
 
     if (title !== undefined) ticket.title = title;
     if (description !== undefined) ticket.description = description;
@@ -406,7 +408,15 @@ export class TicketsController {
         assignee !== undefined ? assignee : '',
       );
       ticket.assignee_id = assignee_id !== undefined ? assignee_id : (resolved.id || ticket.assignee_id);
-      ticket.assignee    = assignee    !== undefined ? assignee    : (resolved.name || ticket.assignee);
+      // When the resolver matched a real Agent, write its canonical
+      // `<Manager>/<Agent>` display — beats any bare leaf name the caller
+      // hand-typed. Otherwise fall through to the caller's literal (which
+      // also lets `assignee: ''` clear the column).
+      if (resolved.id) {
+        ticket.assignee = resolved.name;
+      } else if (assignee !== undefined) {
+        ticket.assignee = assignee;
+      }
     }
     if (reporter !== undefined || reporter_id !== undefined) {
       const resolved = await resolveAgentIdAndName(
@@ -415,7 +425,11 @@ export class TicketsController {
         reporter !== undefined ? reporter : '',
       );
       ticket.reporter_id = reporter_id !== undefined ? reporter_id : (resolved.id || ticket.reporter_id);
-      ticket.reporter    = reporter    !== undefined ? reporter    : (resolved.name || ticket.reporter);
+      if (resolved.id) {
+        ticket.reporter = resolved.name;
+      } else if (reporter !== undefined) {
+        ticket.reporter = reporter;
+      }
     }
     if (reviewer_id !== undefined) ticket.reviewer_id = reviewer_id;
     if (labels !== undefined) ticket.labels = JSON.stringify(labels);
@@ -448,6 +462,35 @@ export class TicketsController {
       } catch (e: any) {
         return res.status(400).json({ error: e?.message || 'next_ticket_id rejected' });
       }
+    }
+
+    // Pending-user-action toggle (ticket a57517be). Mirrors the MCP
+    // update_ticket path: flipping true stamps set_at + set_by, flipping
+    // false clears all three; updating the reason on an already-pending
+    // ticket is a separate small change.
+    let pendingChanged = false;
+    let pendingReasonChanged = false;
+    if (pending_user_action !== undefined) {
+      const next = !!pending_user_action;
+      if (next !== oldPending) {
+        ticket.pending_user_action = next;
+        if (next) {
+          ticket.pending_set_at = new Date();
+          ticket.pending_set_by = actorName || '';
+          if (pending_reason !== undefined) ticket.pending_reason = pending_reason || '';
+        } else {
+          ticket.pending_set_at = null;
+          ticket.pending_set_by = '';
+          ticket.pending_reason = '';
+        }
+        pendingChanged = true;
+      } else if (next && pending_reason !== undefined && pending_reason !== ticket.pending_reason) {
+        ticket.pending_reason = pending_reason || '';
+        pendingReasonChanged = true;
+      }
+    } else if (pending_reason !== undefined && oldPending && pending_reason !== ticket.pending_reason) {
+      ticket.pending_reason = pending_reason || '';
+      pendingReasonChanged = true;
     }
 
     await this.ticketRepo.save(ticket);
@@ -526,6 +569,7 @@ export class TicketsController {
     if (base_repo_resource_id !== undefined && (base_repo_resource_id || '') !== (oldBaseRepoId || '')) changes.push('base_repo');
     if (base_branch !== undefined && (base_branch || '') !== (oldBaseBranch || '')) changes.push('base_branch');
     if (next_ticket_id !== undefined && (ticket.next_ticket_id || '') !== (oldNextTicketId || '')) changes.push('next_ticket');
+    if (pendingReasonChanged) changes.push('pending_reason');
     const otherChanges = changes.filter(c => !['assignee', 'reporter', 'status'].includes(c));
     if (otherChanges.length > 0) {
       await this.activityService.logActivity({
@@ -534,6 +578,39 @@ export class TicketsController {
         ticket_id: ticket.parent_id || ticket.id,
         actor_id: actorId, actor_name: actorName,
       });
+    }
+    // Pending-user-action gets its own activity row so the audit trail
+    // shows the explicit flip rather than being bundled into a generic
+    // "updated". Field name matches the MCP path so a single grep
+    // surfaces every park/unpark event.
+    if (pendingChanged) {
+      await this.activityService.logActivity({
+        entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
+        field_changed: 'pending_user_action',
+        old_value: oldPending ? 'true' : 'false',
+        new_value: ticket.pending_user_action ? 'true' : 'false',
+        ticket_id: ticket.parent_id || ticket.id,
+        actor_id: actorId, actor_name: actorName,
+      });
+    }
+
+    // Ticket a57517be finding 2: an unpend (true → false) must explicitly
+    // wake the ticket's current column's role-holders. The
+    // `field_changed='pending_user_action'` activity row above does NOT
+    // route through column-based dispatch on its own, and before this
+    // flip the focus-selector + trigger-loop gates would have dropped
+    // any incidental wake-up anyway. Mirrors the MCP `unpend_ticket`
+    // tool. Focus selector inside `_emitTrigger` still applies — if the
+    // assignee is already focused on another ticket, this stays silent
+    // and the focus model decides when this ticket comes back in.
+    if (pendingChanged && oldPending && !ticket.pending_user_action) {
+      try {
+        await this.triggerLoop.dispatchCurrentColumn(ticket.id, 'unpend', actorId || '');
+      } catch (e) {
+        this.logService.warn('Tickets', 'unpend dispatch failed (continuing)', {
+          err: String(e), ticket_id: ticket.id,
+        });
+      }
     }
 
     const updated = await loadTicketFull(this.dataSource, ticket.id);
@@ -916,7 +993,12 @@ export class TicketsController {
     if (agent_id) {
       const a = await this.agentRepo.findOne({ where: { id: agent_id } });
       if (!a) return res.status(404).json({ error: 'Agent not found' });
-      agentName = a.name;
+      // Canonical `<Manager>/<Agent>` for subagents — matches what the MCP
+      // create/update path writes via `resolveAgentIdAndName`. Without this
+      // the legacy `ticket.assignee` text column stores the bare leaf name
+      // ("AWB") while role_assignments stores the canonical form, so
+      // TicketCard renders the wrong label until someone re-saves.
+      agentName = await formatAgentDisplayName(this.dataSource, a);
     }
     if (user_id) {
       const u = await this.dataSource.getRepository(User).findOne({ where: { id: user_id } });

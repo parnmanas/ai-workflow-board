@@ -59,6 +59,23 @@ export class Board {
   @Column({ type: Date, nullable: true, default: null })
   paused_at: Date | null;
 
+  // Per-board self-improvement mode. When a ticket on this board lands on a
+  // terminal column, TriggerLoopService inspects this field to decide whether
+  // to dispatch a `trigger_source: 'ticket_done_review'` round to the
+  // reviewer asking them to analyze the finished ticket and (optionally) file
+  // a follow-up improvement ticket. Modes:
+  //   - 'off'         (default) — no post-done dispatch
+  //   - 'same_board'  — reviewer files improvements as new tickets on this
+  //                     board's first non-terminal column
+  //   - 'remote_awb'  — reviewer files improvements against the AWB instance
+  //                     configured in admin SystemSetting (`self_improvement.*`)
+  //   - 'both'        — reviewer may file in either target
+  // Recursion guard: tickets already labeled `self-improvement` are skipped
+  // even when this is non-off, so an improvement ticket landing on Done does
+  // not spawn another improvement ticket.
+  @Column({ type: 'varchar', default: 'off' })
+  self_improvement_mode: string;
+
   @ManyToOne(() => Workspace, ws => ws.boards, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'workspace_id' })
   workspace: Workspace;

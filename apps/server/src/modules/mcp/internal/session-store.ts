@@ -37,6 +37,10 @@ export interface McpAgentContext {
   // Empty when the caller is a top-level agent (proxy.mjs) or a chat session.
   subagentRole?: string;
   subagentTicketId?: string;
+  // Trigger source the subagent was spawned for, pinned by the agent-manager
+  // alongside role + ticket. Lets sensitive tools distinguish the post-Done
+  // retrospective path from other reviewer wake-ups on the same ticket.
+  subagentTriggerSource?: string;
 }
 
 interface SessionEntry {

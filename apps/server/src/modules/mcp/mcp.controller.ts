@@ -249,6 +249,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       roomMessagingService: this.roomMessagingService,
       ticketRoleAssignmentService: this.ticketRoleAssignmentService,
       actionsService: this.actionsService,
+      triggerLoopService: this.triggerLoopService,
     };
   }
 
@@ -449,6 +450,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       // a role argument. Top-level proxy and chat sessions omit the headers.
       const subagentRoleHeader = String(req.headers['x-awb-subagent-role'] || '').toLowerCase().trim() || undefined;
       const subagentTicketIdHeader = String(req.headers['x-awb-subagent-ticket-id'] || '').trim() || undefined;
+      const subagentTriggerSourceHeader = String(req.headers['x-awb-subagent-trigger-source'] || '').trim() || undefined;
 
       // New session (initialization request — no session ID)
       if (req.method === 'POST') {
@@ -464,6 +466,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
               source: mcpAuthInfo.source,
               subagentRole: subagentRoleHeader,
               subagentTicketId: subagentTicketIdHeader,
+              subagentTriggerSource: subagentTriggerSourceHeader,
             });
             // Register agentId → server mapping for push notifications
             if (mcpAuthInfo.agentId) {

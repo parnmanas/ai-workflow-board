@@ -87,6 +87,10 @@ export interface SubagentSpawnArgs {
    *  instead of the agent's full multi-role set. Empty for chat / non-role
    *  spawns. */
   role?: string;
+  /** Server trigger_source that caused this spawn. Sensitive tools can use
+   *  the per-session header to distinguish post-Done retrospective reviewer
+   *  runs from other reviewer wake-ups on the same ticket. */
+  triggerSource?: string;
   /** Chat room id for one-shot chat spawns. When set, non-MCP adapters
    *  (codex, gemini) post their collected result to this room via REST
    *  instead of as a ticket comment. */
@@ -154,6 +158,7 @@ export interface TicketTriggerArgs {
   columnPrompt: ColumnPrompt | null;
   ticket: any;
   forceRespawn: boolean;
+  triggerSource?: string;
   /** ST-6: per-event managed-agent runtime context. Optional. */
   agentContext?: AgentExecutionContext;
   /** Per-board cap for distinct active tickets per agent. Server's
@@ -438,6 +443,7 @@ export class EventDispatcher {
           columnPrompt,
           ticket,
           forceRespawn: ev.force_respawn === true,
+          triggerSource: ev.trigger_source || '',
           agentContext,
           maxConcurrentTicketsPerAgent:
             typeof ev.max_concurrent_tickets_per_agent === 'number'
@@ -495,6 +501,7 @@ export class EventDispatcher {
           // so a subagent spawned through this path attributes its comments
           // to the triggering role instead of every role the agent holds.
           role: ev.action || '',
+          triggerSource: ev.trigger_source || '',
           agentContext,
         });
 

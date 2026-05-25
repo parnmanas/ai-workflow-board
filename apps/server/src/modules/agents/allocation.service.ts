@@ -102,6 +102,12 @@ export class AllocationService {
       // backfill to converge but checking either is defensive).
       if ((col as any).is_terminal === true) continue;
       if ((col as any).kind === 'terminal') continue;
+      // Pending-user-action exclusion (ticket a57517be): tickets parked
+      // for human input drop out of the agent's allocated list so the
+      // supervisor re-push and the agent's "what should I do" view both
+      // skip them. Mirrors the gates inside TriggerLoopService and
+      // AgentWorkloadService.
+      if ((ticket as any).pending_user_action) continue;
 
       // v0.41 — read role slugs straight off the column row. Replaces the
       // old `Board.routing_config[col.name.toLowerCase()]` lookup.

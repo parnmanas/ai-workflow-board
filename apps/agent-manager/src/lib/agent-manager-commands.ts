@@ -377,7 +377,15 @@ export class AgentManagerCommandHandler {
     // missing-file abort here.
     let extraEnv: Record<string, string> = {};
     try {
-      const prep = await createAdapter(cli).prepareCliHome(cliHomeDir, credential);
+      // Pass AWB URL + per-agent apiKey so adapters that consume MCP
+      // servers via a static config file (gemini → settings.json) can
+      // persist the `awb` server into cli-home at spawn_agent time.
+      // Claude / Codex ignore this and keep using `--mcp-config` for
+      // per-spawn role-pinning.
+      const prep = await createAdapter(cli).prepareCliHome(cliHomeDir, credential, {
+        url: this.#config.url,
+        apiKey: rawApiKey,
+      });
       extraEnv = prep?.extraEnv ?? {};
     } catch (err: any) {
       log(`spawn_agent: cli-home prep failed for agent=${agentId.slice(0, 8)} cli=${cli}: ${err?.message ?? err}`);

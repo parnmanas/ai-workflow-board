@@ -88,6 +88,36 @@ export class Ticket {
   @Column({ type: 'varchar', nullable: true, default: null })
   next_ticket_id: string | null;
 
+  // User-intervention pending flag. When true the ticket is "parked" awaiting
+  // a human decision: TriggerLoopService drops every agent_trigger for it
+  // (so the agent's focus moves to another ticket), the auto-advance cascade
+  // skips it, AgentWorkloadService.getFocusTicket excludes it from candidates,
+  // and the UI surfaces it with a high-visibility badge plus a dedicated
+  // "User" tab on the ticket detail panel. Cleared via the same `update_ticket`
+  // / REST PATCH path that sets it — usually after the user answers the
+  // question or splits the work into a follow-up ticket.
+  @Column({ type: 'boolean', default: false })
+  pending_user_action: boolean;
+
+  // Free-text reason the agent (or user) gave when flipping pending_user_action
+  // on. Rendered verbatim on the User tab so the human walking up to the
+  // ticket sees "why am I being asked to step in?" without reading the comment
+  // log. Empty when pending_user_action is false.
+  @Column({ type: 'text', default: '' })
+  pending_reason: string;
+
+  // Timestamp pending_user_action was last flipped to true. Used by the UI to
+  // show "pending for 3h" so a stale pending ticket is obvious. Null when
+  // pending_user_action has never been set, or after it's cleared.
+  @Column({ type: Date, nullable: true, default: null })
+  pending_set_at: Date | null;
+
+  // Display name of the actor (agent or user) that flipped the pending flag.
+  // Stored as a string rather than an id because the source can be either an
+  // Agent or a User row and the User tab only needs the label.
+  @Column({ type: 'varchar', default: '' })
+  pending_set_by: string;
+
   @Column({ type: 'varchar', default: '' })
   created_by: string;
 

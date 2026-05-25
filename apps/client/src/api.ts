@@ -237,6 +237,7 @@ export const api = {
       routing_config?: Record<string, string[]>;
       column_prompts?: Record<string, string> | null;
       max_concurrent_tickets_per_agent?: number;
+      self_improvement_mode?: 'off' | 'same_board' | 'remote_awb' | 'both';
     },
   ) =>
     request<any>(`/boards/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
@@ -895,6 +896,15 @@ export const api = {
     request<{ key: string; value: string; description: string; is_secret: boolean; updated_at: string | null }[]>('/admin/settings'),
   updateSettings: (settings: Record<string, string>) =>
     request<any>('/admin/settings', { method: 'PATCH', body: JSON.stringify({ settings }) }),
+  // Probe the configured remote AWB target for self-improvement filing.
+  // Pings the remote /api/health with the stored X-Agent-Key server-side so
+  // the admin can verify URL + key before relying on the forwarder. Returns
+  // the same shape the controller emits — never echoes the key back.
+  testSelfImprovementRemote: () =>
+    request<{ ok: boolean; status?: number; message: string }>(
+      '/admin/settings/self-improvement/test',
+      { method: 'POST', body: '{}' },
+    ),
 
   // ─── Admin Column Policies (ticket f886ada7) ───────────
   listColumnPolicies: () =>

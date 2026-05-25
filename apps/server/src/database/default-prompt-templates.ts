@@ -120,6 +120,7 @@ This ticket is in the To Do column and you are its assignee. Decide whether to s
 - When in doubt, ask the reviewer or reporter via \`add_comment\` and wait — never start on a guess.
 - If a \`priority: critical\` ticket enters the queue, finish the current commit boundary (commit + push) on your non-critical work cleanly, then pick the critical. Never abandon mid-file.
 - If you are not the assignee, do not \`move_ticket\`. If this looks like a misassignment, leave a comment and stop.
+- **Don't bounce a ticket back to wait.** If a question to the reporter is the real blocker, leave the comment AND call \`mcp__awb__pend_ticket\` with a \`reason\`. This releases the focus so other tickets get worked on while this one waits, and the User tab on the ticket panel surfaces the ask. Bouncing through To Do ↔ another column without parking just re-triggers you in a loop.
 `,
   },
   {
@@ -178,6 +179,7 @@ This ticket is in the Plan column and you were triggered as its planner. Your jo
 - **Cite the spec.** When the plan references a behaviour, link or quote the line from the ticket description / parent / referenced doc that drives it. The assignee should be able to challenge the plan against the source, not against your interpretation.
 - **No self-mention.** Planner comments must not use \`@[role:planner|...]\`. Mention only the reporter, assignee, or reviewer. Self-mentions cause recursive triggers.
 - **Re-planning is OK.** If a ticket bounces back from Review or In Progress with a "the plan was wrong" finding, treat it as a fresh plan trigger — load the latest state, refine the plan, re-hand off. Do not re-use a stale plan unchanged.
+- **Park, don't ping-pong.** When a blocking question goes to the reporter or you've decided the work should split into a follow-up ticket, call \`mcp__awb__pend_ticket\` with a one-line \`reason\` instead of leaving the ticket in Plan (or bouncing it). Parking releases the focus so other tickets advance; the User tab on the ticket panel surfaces the ask so a human can intervene without scanning comments.
 - If you are **not** the planner on this ticket, leave a one-line "not the planner — stopping" comment and exit. Do not \`move_ticket\`.
 `,
   },
@@ -219,11 +221,28 @@ This ticket is in the In Progress column. Implement the work on a feature branch
 
 5. **Move to Review** — \`move_ticket\` to the **Review** column.
 
+## When to park instead of bouncing back
+
+Sometimes the work cannot finish in this ticket and bouncing it back to To Do (or Plan) just re-fires the same agent → same column → same blocker loop. Two cases:
+
+1. **Genuine human decision needed** (credentials, architectural choice with cost trade-offs, missing requirement only the reporter can fill in):
+   - Leave a comment explaining what you need (mention the reporter or whoever can answer).
+   - Call \`mcp__awb__pend_ticket\` with a one-line \`reason\` so the User tab on the ticket panel surfaces the ask without anyone having to read the whole comment thread.
+   - Stop. Do **not** \`move_ticket\` back. Pending tickets release the agent's focus, so other tickets get worked on while this one waits.
+
+2. **Scope overflow** — you discovered the ticket actually requires a separate piece of work that has its own lifecycle (a new entity, a refactor, an unrelated bug to fix first):
+   - File the follow-up with \`mcp__awb__create_ticket\` (same board, sensible column — Backlog or To Do). Reference this ticket's id in the new ticket's description.
+   - Decide whether the current ticket can still finish independently:
+     - **Yes** → continue here; the new ticket runs in parallel.
+     - **No** → \`pend_ticket\` with reason "blocked on <new-ticket-id>" so this ticket stays parked until the prerequisite lands. Optionally set \`next_ticket_id\` on the prerequisite to point back at this one for auto-resume.
+
+Once the human answers or the prerequisite lands, the same human (or a follow-up trigger) calls \`unpend_ticket\` and the dispatch loop wakes the assignee back up.
+
 ## Notes
 
 - **Never push directly to master / main / the default branch.** Reviewer and Merging stages gate that.
 - If the plan is unclear or the requirement is ambiguous, leave a comment and stop — do not guess.
-- Out-of-scope bugs or refactor itches are not yours here. Propose a new ticket in a comment.
+- Out-of-scope bugs or refactor itches are not yours here. Propose a new ticket in a comment (or file it with \`create_ticket\` if it's a hard blocker — see "When to park instead of bouncing back" above).
 - Keep the feature branch rebased onto the latest default before the final push. Merging expects a clean ff.
 - \`--force-with-lease\` is OK on the feature branch only. Force-pushing to a shared branch (default, release, …) is forbidden.
 - For PR-gated repos, open the PR with \`gh pr create --draft\` during this stage and include its URL in the comment so Review can inspect the diff remotely.

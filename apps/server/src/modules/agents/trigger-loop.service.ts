@@ -12,9 +12,16 @@ import { Resource } from '../../entities/Resource';
 import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { LogService } from '../../services/log.service';
-import { activityEvents } from '../../services/activity.service';
+import { ActivityService, activityEvents } from '../../services/activity.service';
 import { AgentWorkloadService } from './agent-workload.service';
 import { priorityIndex } from './priority';
+
+// Sentinel actor written onto auto-advance `moved` activities. Deliberately
+// non-'system' so the trigger loop re-enters and processes the destination
+// column (the 'system' actor short-circuits at the top of `_handleActivity`).
+// Single string constant so audit greps and tests can match it.
+const AUTO_ADVANCE_ACTOR_ID = 'auto-advance';
+const AUTO_ADVANCE_ACTOR_NAME = 'Auto-Advance';
 
 // Pure SSE emitter. The AgentTrigger DB table was removed in v0.25.0 —
 // delivery is fire-and-forget. Backstop for dropped SSE is now
@@ -52,6 +59,7 @@ export class TriggerLoopService implements OnModuleInit {
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly logService: LogService,
     private readonly agentWorkload: AgentWorkloadService,
+    private readonly activityService: ActivityService,
   ) {}
 
   onModuleInit() {
@@ -108,6 +116,15 @@ export class TriggerLoopService implements OnModuleInit {
       if (log.action === 'moved' && ticket.next_ticket_id) {
         await this._dispatchNextTicket(ticket, log.actor_id || '');
       }
+      // Self-improvement: when a ticket lands on a terminal column AND the
+      // board opts in via `self_improvement_mode != 'off'`, dispatch a
+      // `ticket_done_review` trigger to the reviewer so they can analyse
+      // what just shipped and file follow-up improvement tickets.
+      // Gated tightly by `_dispatchPostDoneReview` (action=moved, reviewer
+      // assignment exists, recursion-guard label not set).
+      if (log.action === 'moved') {
+        await this._dispatchPostDoneReview(ticket, col.board_id, log.actor_id || '');
+      }
       return;
     }
 
@@ -122,8 +139,14 @@ export class TriggerLoopService implements OnModuleInit {
     // off `ticket.assignee_id` / `reporter_id` / `reviewer_id`. Now slugs are
     // workspace-scoped so we look up the WorkspaceRole row, then the
     // TicketRoleAssignment that pins a holder onto this ticket.
+    //
+    // Two-phase: gather every (slug, role, holder) tuple before dispatch so the
+    // auto-advance check below can ask "did ANY routed role on this column
+    // resolve to a holder on this ticket?". A single-pass loop that emits + skips
+    // can't answer that without a second scan.
     const roleRepo = this.dataSource.getRepository(WorkspaceRole);
     const assignRepo = this.dataSource.getRepository(TicketRoleAssignment);
+    const resolved: Array<{ slug: string; role: WorkspaceRole; targetAgentId: string | null }> = [];
     for (const slug of roles) {
       const role = await roleRepo.findOne({
         where: { workspace_id: ticket.workspace_id, slug },
@@ -132,7 +155,53 @@ export class TriggerLoopService implements OnModuleInit {
       const assignment = await assignRepo.findOne({
         where: { ticket_id: ticket.id, role_id: role.id },
       });
-      const targetAgentId = assignment?.agent_id || null;
+      resolved.push({ slug, role, targetAgentId: assignment?.agent_id || null });
+    }
+
+    // AUTO-ADVANCE: a non-terminal column with routing entries but zero
+    // resolvable holders has nobody to wake up. Push the ticket forward to the
+    // next non-terminal column by position; the resulting `moved` activity
+    // re-enters this loop and either fires the new column's holder(s) or
+    // cascades the advance again. Terminal columns are unreachable here
+    // (early-returned above).
+    //
+    // Gating:
+    //   - `triggerSource === 'column_move'` — only the ticket's own arrival on
+    //     this column should drive the advance. Comments / ticket-field updates
+    //     are local events that shouldn't shove an unrelated ticket downstream
+    //     when its column happens to lack a holder.
+    //   - `resolved.length > 0` — at least one routed slug had to map to a real
+    //     WorkspaceRole row. Empty role_routing already returned above; a
+    //     routing list full of unknown slugs is a config-drift signal, not an
+    //     auto-advance trigger.
+    //   - `every holder null` — auto-advance only when the column is *entirely*
+    //     unheld. A partially-filled column (e.g. Review routes to
+    //     ['reviewer','assignee'] and reviewer is set) still emits for the
+    //     filled role(s); the rest fall through the holder-null `continue`
+    //     below.
+    // Pending-user-action gate (ticket a57517be):
+    // A ticket parked behind pending_user_action does not auto-advance — the
+    // whole point of the flag is to stop the System ↔ Agent column ping-pong
+    // and wait for a human. The trigger-emit gate below also drops events for
+    // pending tickets, but `_autoAdvanceUnassigned` is a separate side-channel
+    // (it doesn't call `_emitTrigger`) so it needs its own short-circuit here.
+    if (ticket.pending_user_action) {
+      this.logService.info('MCP', 'auto_advance skipped (ticket pending user action)', {
+        ticket_id: ticket.id, current_column_id: col.id,
+      });
+      return;
+    }
+
+    if (
+      triggerSource === 'column_move' &&
+      resolved.length > 0 &&
+      resolved.every((r) => !r.targetAgentId)
+    ) {
+      await this._autoAdvanceUnassigned(ticket, col);
+      return;
+    }
+
+    for (const { slug, role, targetAgentId } of resolved) {
       if (!targetAgentId) continue;
       // Self-trigger guard, action-type aware (v0.34 onward, refined v0.41):
       //
@@ -179,6 +248,116 @@ export class TriggerLoopService implements OnModuleInit {
 
       await this._emitTrigger(ticket, targetAgentId, slug, triggerSource, log.actor_id || '');
     }
+  }
+
+  /**
+   * Auto-advance an "unheld" ticket: when a non-terminal column triggered on a
+   * column_move has no holder for any of its routed roles, push the ticket
+   * forward to the next non-terminal column on the same board (ordered by
+   * column.position ASC) so the workflow doesn't stall at an empty seat.
+   *
+   * Mechanics:
+   *   - Mirrors the position-shift / column-id update done by the
+   *     `move_ticket` MCP tool (close gap in source column, open slot in
+   *     destination, set column_id/position) inside one transaction.
+   *   - Writes a `moved` ActivityLog with actor_id=AUTO_ADVANCE_ACTOR_ID
+   *     (deliberately NOT 'system' — the system-actor early-return at the top
+   *     of _handleActivity would otherwise swallow the re-entry and the next
+   *     column would never get its holders fired). The same row is what makes
+   *     the UI render the move and what re-enters this loop, so the cascade
+   *     continues until a column has a holder or the next column is terminal.
+   *   - When there is no eligible next column (e.g. ticket already sits on
+   *     the last non-terminal column), logs a skip and leaves the ticket put.
+   *
+   * Cascade safety: bounded by the column count on the board. Each iteration
+   * lands on a strictly higher-position column, so the recursion can advance
+   * at most `columns.length - currentPosition - 1` steps before either firing
+   * a holder or running out of non-terminal columns.
+   */
+  private async _autoAdvanceUnassigned(
+    ticket: Ticket,
+    currentCol: BoardColumn,
+  ): Promise<void> {
+    const colRepo = this.dataSource.getRepository(BoardColumn);
+    const cols = await colRepo.find({
+      where: { board_id: currentCol.board_id },
+      order: { position: 'ASC' },
+    });
+    const nextCol = cols.find(
+      (c) =>
+        c.position > currentCol.position &&
+        !((c as any).is_terminal === true || (c as any).kind === 'terminal'),
+    );
+    if (!nextCol) {
+      this.logService.info('MCP', 'auto_advance skipped (no next non-terminal column)', {
+        ticket_id: ticket.id,
+        current_column_id: currentCol.id,
+        current_column_position: currentCol.position,
+      });
+      return;
+    }
+
+    const fromPosition = ticket.position;
+    const fromColumnId = currentCol.id;
+
+    await this.dataSource.transaction(async (manager) => {
+      const tRepo = manager.getRepository(Ticket);
+
+      // Close the gap left by the ticket in its current column (root tickets only).
+      await tRepo
+        .createQueryBuilder()
+        .update()
+        .set({ position: () => 'position - 1' })
+        .where(
+          'column_id = :colId AND position > :pos AND parent_id IS NULL',
+          { colId: fromColumnId, pos: fromPosition },
+        )
+        .execute();
+
+      // Land at the tail of the destination column.
+      const destCount = await tRepo
+        .createQueryBuilder('t')
+        .where(
+          't.column_id = :colId AND t.id != :id AND t.parent_id IS NULL',
+          { colId: nextCol.id, id: ticket.id },
+        )
+        .getCount();
+
+      await tRepo.update(ticket.id, {
+        column_id: nextCol.id,
+        position: destCount,
+      });
+    });
+
+    // Emit the `moved` activity via ActivityService so SSE listeners (UI,
+    // agent-manager) get the update AND the trigger loop re-enters with the
+    // new column. Non-'system' actor keeps the early-return at the top of
+    // _handleActivity from swallowing the re-entry.
+    await this.activityService.logActivity({
+      entity_type: 'ticket',
+      entity_id: ticket.id,
+      action: 'moved',
+      field_changed: 'column',
+      old_value: currentCol.name,
+      new_value: nextCol.name,
+      ticket_id: ticket.id,
+      actor_id: AUTO_ADVANCE_ACTOR_ID,
+      actor_name: AUTO_ADVANCE_ACTOR_NAME,
+      role: '',
+      trigger_source: 'auto_advance',
+    });
+
+    this.logService.info(
+      'MCP',
+      'auto_advance moved ticket forward (no holder for any routed role)',
+      {
+        ticket_id: ticket.id,
+        from_column_id: fromColumnId,
+        from_column_name: currentCol.name,
+        to_column_id: nextCol.id,
+        to_column_name: nextCol.name,
+      },
+    );
   }
 
   /**
@@ -271,6 +450,84 @@ export class TriggerLoopService implements OnModuleInit {
   }
 
   /**
+   * Self-improvement dispatch: when a ticket lands on a terminal column,
+   * wake the reviewer one more time with `trigger_source: 'ticket_done_review'`
+   * so they can analyse the finished work and (optionally) file follow-up
+   * improvement tickets — either on the same board or against the remote AWB
+   * instance configured in admin SystemSetting.
+   *
+   * Gating (all must hold; first failure = silent skip):
+   *   - board exists and `self_improvement_mode != 'off'`
+   *   - ticket labels do NOT include 'self-improvement' (recursion guard —
+   *     stops improvement tickets from spawning more improvement tickets)
+   *   - workspace has a `reviewer` WorkspaceRole AND the ticket has a
+   *     TicketRoleAssignment row pinning a reviewer agent
+   *
+   * Bypasses the focus selector via `bypassFocus: true` — the reviewer may
+   * legitimately be focused on a different ticket but we still want them to
+   * file the retrospective. This mirrors `emitManualTrigger` semantics.
+   *
+   * `actorId` is the human / agent that moved the ticket to Done; carried
+   * through so the audit trail attributes the trigger to that mover.
+   */
+  private async _dispatchPostDoneReview(
+    ticket: Ticket,
+    boardId: string,
+    actorId: string,
+  ): Promise<void> {
+    // Recursion guard: skip tickets that are themselves self-improvement
+    // follow-ups so we don't loop. Labels live as a JSON string on the row.
+    const labels = safeJsonParse<string[]>((ticket as any).labels, []);
+    if (Array.isArray(labels) && labels.includes('self-improvement')) {
+      this.logService.info('MCP', 'post_done_review skipped (recursion guard: self-improvement label)', {
+        ticket_id: ticket.id,
+      });
+      return;
+    }
+
+    if (!boardId) return;
+    const board = await this.dataSource.getRepository(Board).findOne({ where: { id: boardId } });
+    if (!board) return;
+    const mode = (board as any).self_improvement_mode || 'off';
+    if (mode === 'off') return;
+
+    // Resolve reviewer holder. Reuse the same workspace-roles + assignment
+    // lookup as `_handleActivity` so custom workspace role naming still works
+    // — but reviewer is a builtin slug everywhere, so this is the common case.
+    const role = await this.dataSource.getRepository(WorkspaceRole).findOne({
+      where: { workspace_id: ticket.workspace_id, slug: 'reviewer' },
+    });
+    if (!role) {
+      this.logService.info('MCP', 'post_done_review skipped (no reviewer WorkspaceRole)', {
+        ticket_id: ticket.id, workspace_id: ticket.workspace_id,
+      });
+      return;
+    }
+    const assignment = await this.dataSource.getRepository(TicketRoleAssignment).findOne({
+      where: { ticket_id: ticket.id, role_id: role.id },
+    });
+    const reviewerAgentId = assignment?.agent_id || null;
+    if (!reviewerAgentId) {
+      this.logService.info('MCP', 'post_done_review skipped (no reviewer assigned)', {
+        ticket_id: ticket.id,
+      });
+      return;
+    }
+
+    await this._emitTrigger(
+      ticket, reviewerAgentId, 'reviewer', 'ticket_done_review', actorId,
+      {
+        bypassFocus: true,
+        columnPromptOverride: {
+          template_id: 'self-improvement-inline',
+          name: 'Self-Improvement Review',
+          content: TriggerLoopService.SELF_IMPROVEMENT_PROMPT,
+        },
+      },
+    );
+  }
+
+  /**
    * Manually wake an agent on a ticket — bound to the "Trigger" button on the
    * ticket UI and any other deliberate user-initiated kick. Just emits the SSE
    * event; no DB row beyond the explicit `trigger_dispatched` audit, no
@@ -356,6 +613,165 @@ export class TriggerLoopService implements OnModuleInit {
   }
 
   /**
+   * Wake every role holder routed to the ticket's CURRENT column.
+   *
+   * Mirrors the `_handleActivity` column_move dispatch (read
+   * BoardColumn.role_routing → resolve WorkspaceRole → look up
+   * TicketRoleAssignment → emit per holder) but is callable directly from
+   * paths that are NOT activity-driven and shouldn't be made to fake a
+   * `system`-actor activity row (which `_handleActivity` would early-return
+   * on anyway). Currently used by the unpend path (ticket a57517be) — the
+   * MCP `unpend_ticket` tool and the REST PATCH that clears
+   * `pending_user_action` need an explicit wake, because the
+   * `field_changed='pending_user_action'` activity row that the unpend
+   * writes does not by itself route to the column's role holders (it's a
+   * field-update, but `_handleActivity` is keyed off comments / moves /
+   * any update — and on a previously-pending ticket the focus gate would
+   * have dropped activity-driven triggers up until this moment).
+   *
+   * Skip cases (silent, one info log each):
+   *   - ticket missing / has no column_id
+   *   - current column is terminal
+   *   - column's role_routing is empty
+   *   - ticket still has `pending_user_action=true` (caller forgot to clear)
+   *
+   * Per-holder emit goes through `_emitTrigger`, which applies the focus
+   * selector gate (no `bypassFocus` here — if some other ticket is the
+   * agent's focus on this (board, role), the wake stays silent and the
+   * focus model decides when this ticket comes back into rotation).
+   *
+   * Returns the count of emits attempted (NOT a count of "landed" — that's
+   * the focus gate's call, and a 0 return is fine if the focus selector
+   * is gating on a different ticket).
+   */
+  async dispatchCurrentColumn(
+    ticketId: string,
+    triggerSource: string,
+    triggeredBy: string,
+  ): Promise<{ emitted: number }> {
+    const ticketRepo = this.dataSource.getRepository(Ticket);
+    const ticket = await ticketRepo.findOne({ where: { id: ticketId } });
+    if (!ticket || !ticket.column_id) return { emitted: 0 };
+
+    if (ticket.pending_user_action) {
+      this.logService.info('MCP', 'dispatchCurrentColumn skipped (ticket still pending)', {
+        ticket_id: ticket.id, source: triggerSource,
+      });
+      return { emitted: 0 };
+    }
+
+    const col = await this.dataSource
+      .getRepository(BoardColumn)
+      .findOne({ where: { id: ticket.column_id } });
+    if (!col) return { emitted: 0 };
+
+    const isTerminal = (col as any).is_terminal === true || (col as any).kind === 'terminal';
+    if (isTerminal) {
+      this.logService.info('MCP', 'dispatchCurrentColumn skipped (terminal column)', {
+        ticket_id: ticket.id, column_id: col.id, source: triggerSource,
+      });
+      return { emitted: 0 };
+    }
+
+    const slugs = safeJsonParse<string[]>((col as any).role_routing, []);
+    if (!Array.isArray(slugs) || slugs.length === 0) {
+      this.logService.info('MCP', 'dispatchCurrentColumn skipped (empty role_routing)', {
+        ticket_id: ticket.id, column_id: col.id, source: triggerSource,
+      });
+      return { emitted: 0 };
+    }
+
+    const roleRepo = this.dataSource.getRepository(WorkspaceRole);
+    const assignRepo = this.dataSource.getRepository(TicketRoleAssignment);
+    let emitted = 0;
+    const seen = new Set<string>();
+    for (const slug of slugs) {
+      const role = await roleRepo.findOne({
+        where: { workspace_id: ticket.workspace_id, slug },
+      });
+      if (!role) continue;
+      const assignment = await assignRepo.findOne({
+        where: { ticket_id: ticket.id, role_id: role.id },
+      });
+      const targetAgentId = assignment?.agent_id || '';
+      if (!targetAgentId) continue;
+      const dedupeKey = `${slug}|${targetAgentId}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+      try {
+        await this._emitTrigger(ticket, targetAgentId, slug, triggerSource, triggeredBy);
+        emitted++;
+      } catch (e) {
+        this.logService.warn('MCP', 'dispatchCurrentColumn emit failed (continuing)', {
+          err: String(e), ticket_id: ticket.id, role: slug, agent_id: targetAgentId,
+        });
+      }
+    }
+    return { emitted };
+  }
+
+  /**
+   * Static self-improvement analysis prompt injected as `column_prompt` on
+   * `ticket_done_review` triggers. Kept inline (not table-driven) so the
+   * post-done flow is self-contained: an admin only has to flip
+   * `Board.self_improvement_mode`, no extra prompt-template seeding step.
+   * Admins who want a custom analysis prompt can map a PromptTemplate to the
+   * board's terminal column via `column_prompts` and the in-line override
+   * here will be ignored — but the table-mapped prompt only ever fires for
+   * normal (non-`ticket_done_review`) terminal-column landings, so the two
+   * paths don't collide.
+   */
+  private static readonly SELF_IMPROVEMENT_PROMPT = `# Self-Improvement Review
+
+This ticket just landed on a terminal column (Done). You are being woken up one
+last time as the reviewer to look back over what shipped and decide whether the
+team can learn something repeatable from it.
+
+## What to do
+
+1. Read the ticket title, description, the comments thread, and the activity log
+   (use \`mcp__awb__get_ticket\` and \`mcp__awb__get_ticket_activity\`). Pay
+   attention to where time was spent, what surprised the assignee, and any
+   reviewer kickbacks.
+
+2. Decide if there is a concrete, actionable improvement worth filing. Examples
+   that DO warrant a new ticket:
+   - A repeated pain point that better tooling / docs / convention would fix.
+   - A test gap exposed by a regression that landed and was hot-patched.
+   - A workflow friction the assignee called out explicitly in a comment.
+   - A reviewer comment that started "next time we should…".
+
+   Examples that do NOT warrant a new ticket:
+   - One-off bugs that were fixed cleanly in this very ticket.
+   - Personal style preferences with no team-wide impact.
+   - Speculative refactor itches without a real driver.
+
+3. If you found one, file it via either:
+   - \`mcp__awb__create_ticket\` — to file on THIS board (Backlog column,
+     priority=low unless clearly urgent). Add label \`self-improvement\` and a
+     short \`Source:\` link back to this ticket id in the description.
+   - \`mcp__awb__create_remote_improvement_ticket\` — to file against the
+     remote AWB instance configured by the admin (only available when the
+     board's \`self_improvement_mode\` is \`remote_awb\` or \`both\`). Use
+     this for improvements that are about AWB itself, not the project.
+
+4. If you found NONE: leave one short comment summarising what you checked
+   and why nothing crossed the bar. That short comment is the audit trail
+   that the retrospective ran.
+
+## Recursion guard
+
+If the ticket you are reviewing already has the \`self-improvement\` label,
+you should never have been woken — exit immediately with no action.
+
+## Tone
+
+Keep follow-up ticket titles tight and outcome-shaped:
+  GOOD: "Add lint rule that bans cross-module entity imports"
+  BAD:  "We had some import problems we should look at"
+`;
+
+  /**
    * Compose the trigger payload (role_prompt / ticket_prompt / column_prompt
    * loaded fresh at dispatch time) and emit via activityEvents so the
    * EventsController SSE listener forwards it to connected agents.
@@ -377,7 +793,16 @@ export class TriggerLoopService implements OnModuleInit {
     role: string,
     triggerSource: string,
     triggeredBy: string,
-    opts?: { forceRespawn?: boolean; bypassFocus?: boolean },
+    opts?: {
+      forceRespawn?: boolean;
+      bypassFocus?: boolean;
+      // Inline override for `column_prompt` — used by `_dispatchPostDoneReview`
+      // to inject the self-improvement analysis prompt onto a terminal-column
+      // trigger that the normal `board.column_prompts[column_id]` path can't
+      // serve (the terminal column's mapped prompt, if any, exists for normal
+      // merging workflow — distinct from the post-done retrospective).
+      columnPromptOverride?: { template_id: string; name: string; content: string };
+    },
   ): Promise<string> {
     const now = new Date();
 
@@ -427,6 +852,46 @@ export class TriggerLoopService implements OnModuleInit {
           // in effect, the missed row is the only collateral.
           this.logService.warn('MCP', 'paused-drop audit write failed (drop still applied)', {
             err: String(e), ticket_id: ticket.id, board_id: boardId,
+          });
+        }
+        return '';
+      }
+    }
+
+    // Pending-user-action gate (ticket a57517be). Single chokepoint that
+    // every dispatch path runs through — including manual triggers (the
+    // "Trigger" button on a pending ticket would otherwise re-wake the agent
+    // and undo the pause). Operator-grade override: clearing the flag is the
+    // documented way out. Audit row uses `agent_trigger_dropped_pending_user`
+    // so it's grepable separately from the board_paused drop.
+    {
+      const freshForGate = await this.dataSource
+        .getRepository(Ticket)
+        .findOne({ where: { id: ticket.id } });
+      if (freshForGate?.pending_user_action) {
+        this.logService.info('MCP', 'agent_trigger dropped (ticket pending user action)', {
+          ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource,
+          pending_set_at: freshForGate.pending_set_at
+            ? new Date(freshForGate.pending_set_at).toISOString()
+            : null,
+          pending_set_by: freshForGate.pending_set_by || '',
+        });
+        try {
+          const activityLogRepo = this.dataSource.getRepository(ActivityLog);
+          await activityLogRepo.save(activityLogRepo.create({
+            entity_type: 'ticket',
+            entity_id: ticket.id,
+            ticket_id: ticket.id,
+            actor_id: 'system',
+            actor_name: 'TriggerLoopService',
+            action: 'agent_trigger_dropped_pending_user',
+            new_value: `agent=${agentId} reason=${(freshForGate.pending_reason || '').slice(0, 200)}`,
+            role,
+            trigger_source: triggerSource,
+          }));
+        } catch (e) {
+          this.logService.warn('MCP', 'pending-drop audit write failed (drop still applied)', {
+            err: String(e), ticket_id: ticket.id,
           });
         }
         return '';
@@ -502,25 +967,32 @@ export class TriggerLoopService implements OnModuleInit {
       }
     }
 
-    // Column workflow prompt: Board.column_prompts[column_id] → PromptTemplate.content
+    // Column workflow prompt: Board.column_prompts[column_id] → PromptTemplate.content.
+    // Override path: callers that need to ship a synthetic prompt (e.g.
+    // `_dispatchPostDoneReview` injecting the self-improvement analysis prompt)
+    // pass `opts.columnPromptOverride` — short-circuit before the lookup.
     let columnPrompt: { template_id: string; name: string; content: string } | null = null;
-    try {
-      if (col) {
-        const board = await this.dataSource.getRepository(Board).findOne({ where: { id: col.board_id } });
-        const raw = board?.column_prompts;
-        if (raw) {
-          const map = safeJsonParse(raw, {});
-          const tplId: string | undefined = map?.[ticket.column_id];
-          if (tplId) {
-            const tpl = await this.dataSource.getRepository(PromptTemplate).findOne({ where: { id: tplId } });
-            if (tpl && tpl.workspace_id === board!.workspace_id) {
-              columnPrompt = { template_id: tpl.id, name: tpl.name, content: tpl.content };
+    if (opts?.columnPromptOverride) {
+      columnPrompt = opts.columnPromptOverride;
+    } else {
+      try {
+        if (col) {
+          const board = await this.dataSource.getRepository(Board).findOne({ where: { id: col.board_id } });
+          const raw = board?.column_prompts;
+          if (raw) {
+            const map = safeJsonParse(raw, {});
+            const tplId: string | undefined = map?.[ticket.column_id];
+            if (tplId) {
+              const tpl = await this.dataSource.getRepository(PromptTemplate).findOne({ where: { id: tplId } });
+              if (tpl && tpl.workspace_id === board!.workspace_id) {
+                columnPrompt = { template_id: tpl.id, name: tpl.name, content: tpl.content };
+              }
             }
           }
         }
+      } catch (e) {
+        this.logService.warn('MCP', 'column_prompt lookup failed (continuing without)', { err: String(e), ticket_id: ticket.id });
       }
-    } catch (e) {
-      this.logService.warn('MCP', 'column_prompt lookup failed (continuing without)', { err: String(e), ticket_id: ticket.id });
     }
 
     // Manager-side defensive cap hint, kept on the wire for backward
