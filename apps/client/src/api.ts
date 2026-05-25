@@ -276,6 +276,8 @@ export const api = {
     request<any>(`/tickets/${ticketId}/archive`, { method: 'POST' }),
   unarchiveTicket: async (ticketId: string) =>
     request<any>(`/tickets/${ticketId}/unarchive`, { method: 'POST' }),
+  getTicket: async (ticketId: string) =>
+    request<any>(`/tickets/${ticketId}`),
 
   // ─── Columns ──────────────────────────────────────────
   createColumn: (boardId: string, data: { name: string; color?: string; description?: string }) =>

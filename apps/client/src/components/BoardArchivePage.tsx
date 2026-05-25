@@ -233,7 +233,51 @@ interface DetailProps {
   onUnarchive: () => void;
 }
 
+interface ArchiveComment {
+  id: string;
+  author: string;
+  author_type: string;
+  content: string;
+  created_at: string;
+  type?: string;
+}
+
 function ArchivedTicketDetailModal({ ticket, onClose, onUnarchive }: DetailProps) {
+  const [comments, setComments] = useState<ArchiveComment[]>([]);
+  const [commentsLoading, setCommentsLoading] = useState(true);
+  const [commentsError, setCommentsError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setCommentsLoading(true);
+    setCommentsError(null);
+    api.getTicket(ticket.id)
+      .then((full: any) => {
+        if (cancelled) return;
+        const list = Array.isArray(full?.comments) ? full.comments : [];
+        // loadTicketFull returns newest-first; display oldest-first for
+        // chronological context (matches the main ticket detail panel).
+        const ordered = [...list].sort((a: any, b: any) => {
+          const ta = new Date(a.created_at).getTime();
+          const tb = new Date(b.created_at).getTime();
+          return ta - tb;
+        });
+        setComments(ordered);
+      })
+      .catch((err: any) => {
+        if (cancelled) return;
+        setCommentsError(err?.message || 'Failed to load comments');
+      })
+      .finally(() => {
+        if (!cancelled) setCommentsLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [ticket.id]);
+
+  const formatCommentTime = (iso: string) => {
+    try { return new Date(iso).toLocaleString(); } catch { return iso; }
+  };
+
   return (
     <div
       role="dialog"
@@ -292,6 +336,55 @@ function ArchivedTicketDetailModal({ ticket, onClose, onUnarchive }: DetailProps
             }}>{ticket.description}</pre>
           </div>
         )}
+
+        <div style={{ marginTop: 16 }}>
+          <div style={{ fontSize: 11, color: tokens.colors.textMuted, textTransform: 'uppercase', fontWeight: 600, marginBottom: 6 }}>
+            Comments {!commentsLoading && comments.length > 0 ? `(${comments.length})` : ''}
+          </div>
+          {commentsLoading && (
+            <div style={{ fontSize: 13, color: tokens.colors.textMuted }}>Loading…</div>
+          )}
+          {!commentsLoading && commentsError && (
+            <div style={{ fontSize: 13, color: tokens.colors.danger }}>{commentsError}</div>
+          )}
+          {!commentsLoading && !commentsError && comments.length === 0 && (
+            <div style={{ fontSize: 13, color: tokens.colors.textMuted }}>No comments.</div>
+          )}
+          {!commentsLoading && !commentsError && comments.length > 0 && (
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 8,
+                background: tokens.colors.surface,
+                border: `1px solid ${tokens.colors.border}`,
+                borderRadius: tokens.radii.md,
+                padding: 12,
+                maxHeight: 320,
+                overflow: 'auto',
+              }}
+            >
+              {comments.map((c) => (
+                <div
+                  key={c.id}
+                  style={{
+                    fontSize: 13,
+                    color: tokens.colors.textStrong,
+                    paddingBottom: 8,
+                    borderBottom: `1px solid ${tokens.colors.border}`,
+                  }}
+                >
+                  <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginBottom: 2 }}>
+                    <strong style={{ color: tokens.colors.textSecondary }}>{c.author || (c.author_type === 'agent' ? 'Agent' : 'User')}</strong>
+                    {' · '}{formatCommentTime(c.created_at)}
+                    {c.type && c.type !== 'note' ? ` · ${c.type}` : ''}
+                  </div>
+                  <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{c.content}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
 
         <div style={{ marginTop: 20, display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
           <Button variant="primary" size="sm" onClick={onUnarchive}>Unarchive</Button>
