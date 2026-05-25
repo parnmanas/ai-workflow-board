@@ -161,6 +161,13 @@ export class AgentWorkloadService {
       .where('c.board_id = :board_id')
       .andWhere('c.is_terminal = :falseVal')
       .andWhere("c.kind != 'intake'")
+      // Pending-user-action exclusion (ticket a57517be): tickets parked
+      // behind a human decision must not anchor the agent's focus, because
+      // the dispatch path drops their triggers anyway and BacklogPromotionService
+      // refuses to promote a new ticket while a non-null focus exists. Same
+      // bound-parameter pattern as `c.is_terminal` so sqlite (0/1) and
+      // postgres (true/false) both bind correctly.
+      .andWhere('t.pending_user_action = :falseVal')
       .setParameter('agent_id', agent_id)
       .setParameter('board_id', board_id)
       // Use a bound parameter for boolean instead of the literal `false`

@@ -179,6 +179,19 @@ export class TriggerLoopService implements OnModuleInit {
     //     ['reviewer','assignee'] and reviewer is set) still emits for the
     //     filled role(s); the rest fall through the holder-null `continue`
     //     below.
+    // Pending-user-action gate (ticket a57517be):
+    // A ticket parked behind pending_user_action does not auto-advance — the
+    // whole point of the flag is to stop the System ↔ Agent column ping-pong
+    // and wait for a human. The trigger-emit gate below also drops events for
+    // pending tickets, but `_autoAdvanceUnassigned` is a separate side-channel
+    // (it doesn't call `_emitTrigger`) so it needs its own short-circuit here.
+    if (ticket.pending_user_action) {
+      this.logService.info('MCP', 'auto_advance skipped (ticket pending user action)', {
+        ticket_id: ticket.id, current_column_id: col.id,
+      });
+      return;
+    }
+
     if (
       triggerSource === 'column_move' &&
       resolved.length > 0 &&
@@ -741,6 +754,46 @@ Keep follow-up ticket titles tight and outcome-shaped:
           // in effect, the missed row is the only collateral.
           this.logService.warn('MCP', 'paused-drop audit write failed (drop still applied)', {
             err: String(e), ticket_id: ticket.id, board_id: boardId,
+          });
+        }
+        return '';
+      }
+    }
+
+    // Pending-user-action gate (ticket a57517be). Single chokepoint that
+    // every dispatch path runs through — including manual triggers (the
+    // "Trigger" button on a pending ticket would otherwise re-wake the agent
+    // and undo the pause). Operator-grade override: clearing the flag is the
+    // documented way out. Audit row uses `agent_trigger_dropped_pending_user`
+    // so it's grepable separately from the board_paused drop.
+    {
+      const freshForGate = await this.dataSource
+        .getRepository(Ticket)
+        .findOne({ where: { id: ticket.id } });
+      if (freshForGate?.pending_user_action) {
+        this.logService.info('MCP', 'agent_trigger dropped (ticket pending user action)', {
+          ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource,
+          pending_set_at: freshForGate.pending_set_at
+            ? new Date(freshForGate.pending_set_at).toISOString()
+            : null,
+          pending_set_by: freshForGate.pending_set_by || '',
+        });
+        try {
+          const activityLogRepo = this.dataSource.getRepository(ActivityLog);
+          await activityLogRepo.save(activityLogRepo.create({
+            entity_type: 'ticket',
+            entity_id: ticket.id,
+            ticket_id: ticket.id,
+            actor_id: 'system',
+            actor_name: 'TriggerLoopService',
+            action: 'agent_trigger_dropped_pending_user',
+            new_value: `agent=${agentId} reason=${(freshForGate.pending_reason || '').slice(0, 200)}`,
+            role,
+            trigger_source: triggerSource,
+          }));
+        } catch (e) {
+          this.logService.warn('MCP', 'pending-drop audit write failed (drop still applied)', {
+            err: String(e), ticket_id: ticket.id,
           });
         }
         return '';
