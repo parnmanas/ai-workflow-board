@@ -172,6 +172,7 @@ export abstract class CliAdapter {
   async prepareCliHome(
     _cliHomeDir: string,
     _credential?: AdapterCredential | null,
+    _mcp?: AdapterMcpContext | null,
   ): Promise<{ extraEnv: Record<string, string> }> {
     return { extraEnv: {} };
   }
@@ -184,6 +185,22 @@ export interface AdapterCredential {
   credential_id: string;
   provider: string;
   fields: Record<string, string>;
+}
+
+/** AWB MCP endpoint + per-agent apiKey, threaded into `prepareCliHome` so
+ *  adapters whose CLI consumes MCP servers via a static config file (e.g.
+ *  gemini's `settings.json` `mcpServers`) can persist the AWB server into
+ *  the per-agent cli-home at spawn_agent time. Adapters that pass MCP
+ *  config via a per-spawn flag (claude `--mcp-config`) ignore this and
+ *  return early — the manager still writes its own `mcp-config.json` for
+ *  those at the per-agent dir level. */
+export interface AdapterMcpContext {
+  /** Base AWB URL (e.g. `https://awb.example.com`); the `/mcp` suffix is
+   *  appended by the adapter. */
+  url: string;
+  /** Per-agent apiKey (the same one written to `<agent>/apikey`) for the
+   *  `Authorization: Bearer ...` header on the MCP server entry. */
+  apiKey: string;
 }
 
 /**

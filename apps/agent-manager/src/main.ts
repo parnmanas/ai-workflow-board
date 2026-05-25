@@ -536,7 +536,13 @@ async function runRuntime(
       const credential = await readAgentCredential(id);
       let extraEnv: Record<string, string> = {};
       try {
-        const prep = await createAdapter(cfg.cli).prepareCliHome(cliHomeDirFor(id), credential);
+        // Same MCP context as spawn_agent so gemini's settings.json gets
+        // refreshed on rehydrate (operator may have rotated the AWB url
+        // between manager runs).
+        const prep = await createAdapter(cfg.cli).prepareCliHome(cliHomeDirFor(id), credential, {
+          url: config.url,
+          apiKey,
+        });
         extraEnv = prep?.extraEnv ?? {};
       } catch (err: any) {
         log(`rehydrate: cli-home prep failed for agent=${id.slice(0, 8)} cli=${cfg.cli}: ${err?.message ?? err}`);
