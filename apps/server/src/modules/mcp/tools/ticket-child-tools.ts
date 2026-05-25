@@ -14,6 +14,7 @@ import { Ticket } from '../../../entities/Ticket';
 import { ok, err, sanitizeHarnessMarkers } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
 import { maxChildPosition, refreshTicketWorkspaceId, resolveAgentId, resolveAgentIdAndName, shiftTicketPositions } from '../shared/ticket-helpers';
+import { getRootArchivedAt, TicketArchivedError } from '../shared/archive-helpers';
 import type { ToolContext } from './context';
 
 export function registerTicketChildTools(server: McpServer, ctx: ToolContext): void {
@@ -41,6 +42,9 @@ export function registerTicketChildTools(server: McpServer, ctx: ToolContext): v
       const ticketRepo = dataSource.getRepository(Ticket);
       const parent = await ticketRepo.findOne({ where: { id: parent_id } });
       if (!parent) return err('Parent ticket not found');
+
+      const rootArchived = await getRootArchivedAt(dataSource, parent);
+      if (rootArchived) return err(new TicketArchivedError(parent.id).message);
 
       const newDepth = (parent.depth || 0) + 1;
       if (newDepth > 2) return err('Maximum nesting depth is 2 (sub-subtask)');
@@ -126,6 +130,9 @@ export function registerTicketChildTools(server: McpServer, ctx: ToolContext): v
       const ticketRepo = dataSource.getRepository(Ticket);
       const ticket = await ticketRepo.findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Child ticket not found');
+
+      const rootArchivedForUpdate = await getRootArchivedAt(dataSource, ticket);
+      if (rootArchivedForUpdate) return err(new TicketArchivedError(ticket.id).message);
 
       const caller = getCallerAgent(extra);
       const oldStatus = ticket.status;
@@ -219,6 +226,9 @@ export function registerTicketChildTools(server: McpServer, ctx: ToolContext): v
       const ticketRepo = dataSource.getRepository(Ticket);
       const ticket = await ticketRepo.findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Child ticket not found');
+
+      const rootArchivedForDelete = await getRootArchivedAt(dataSource, ticket);
+      if (rootArchivedForDelete) return err(new TicketArchivedError(ticket.id).message);
 
       const caller = getCallerAgent(extra);
       const deletedTitle = ticket.title;

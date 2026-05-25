@@ -209,7 +209,7 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'update_board',
-    'Update a board name, description, routing_config, or column→prompt-template mapping',
+    'Update a board name, description, routing_config, column→prompt-template mapping, or auto-archive policy',
     {
       board_id: z.string().describe('Board ID'),
       name: z.string().optional().describe('New name'),
@@ -218,8 +218,10 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
         .describe('Column→role routing: { [lowercased column name]: ["assignee"|"reviewer"|"reporter", ...] }. Pass null or {} to clear all.'),
       column_prompts: z.record(z.string(), z.string().nullable()).nullable().optional()
         .describe('Column→PromptTemplate mapping: { [column_id]: prompt_template_id }. Pass null or {} to clear all.'),
+      auto_archive_days: z.number().int().min(1).max(365).nullable().optional()
+        .describe('Auto-archive policy: null disables, 1..365 archives Done-column tickets older than N days. The TicketArchiverService background job consumes this setting; changes take effect on the next archiver tick (no restart needed).'),
     },
-    async ({ board_id, name, description, routing_config, column_prompts }) => {
+    async ({ board_id, name, description, routing_config, column_prompts, auto_archive_days }) => {
       const boardRepo = dataSource.getRepository(Board);
       const board = await boardRepo.findOne({ where: { id: board_id } });
       if (!board) return err('Board not found');
@@ -245,6 +247,9 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
           }
           board.column_prompts = Object.keys(cleaned).length === 0 ? null : JSON.stringify(cleaned);
         }
+      }
+      if (auto_archive_days !== undefined) {
+        board.auto_archive_days = auto_archive_days;
       }
 
       await boardRepo.save(board);

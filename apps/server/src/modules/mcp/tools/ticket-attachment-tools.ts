@@ -26,6 +26,7 @@ import {
   projectTicketAttachment,
 } from '../shared/ticket-helpers';
 import { getCallerAgent } from '../shared/session-auth';
+import { TicketArchivedError } from '../shared/archive-helpers';
 import type { ToolContext } from './context';
 
 export function registerTicketAttachmentTools(server: McpServer, ctx: ToolContext): void {
@@ -52,6 +53,7 @@ export function registerTicketAttachmentTools(server: McpServer, ctx: ToolContex
       const ticketRepo = dataSource.getRepository(Ticket);
       const ticket = await ticketRepo.findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Ticket not found');
+      if (ticket.archived_at) return err(new TicketArchivedError(ticket.id).message);
 
       const size = approxBase64Size(file_data);
       if (size > MAX_TICKET_ATTACHMENT_SIZE) {
@@ -140,6 +142,7 @@ export function registerTicketAttachmentTools(server: McpServer, ctx: ToolContex
       if (!row) return err('Attachment not found');
 
       const ticket = await dataSource.getRepository(Ticket).findOne({ where: { id: row.ticket_id } });
+      if (ticket?.archived_at) return err(new TicketArchivedError(ticket.id).message);
       await attRepo.delete({ id: attachment_id });
 
       const caller = getCallerAgent(extra);

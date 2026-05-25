@@ -16,6 +16,7 @@ import { Ticket } from '../../../entities/Ticket';
 import { ok, err } from '../shared/helpers';
 import { loadTicketFull } from '../shared/ticket-parsing';
 import { findColumnByName, maxTicketPosition, shiftTicketPositions } from '../shared/ticket-helpers';
+import { applyTerminalEnteredAtForMove, TicketArchivedError } from '../shared/archive-helpers';
 import { getCallerAgent } from '../shared/session-auth';
 import { resolveAgentDisplayName } from '../../../utils/agent-name';
 import type { ToolContext } from './context';
@@ -48,6 +49,7 @@ export function registerTicketWorkflowTools(server: McpServer, ctx: ToolContext)
       const ticketRepo = dataSource.getRepository(Ticket);
       const ticket = await ticketRepo.findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Ticket not found');
+      if (ticket.archived_at) return err(new TicketArchivedError(ticket.id).message);
 
       const caller = getCallerAgent(extra);
       let destColumnId = target_column_id;
@@ -74,6 +76,15 @@ export function registerTicketWorkflowTools(server: McpServer, ctx: ToolContext)
         await shiftTicketPositions(tRepo, { column_id: destColumnId! }, pos, +1, { inclusive: true, excludeId: ticket.id });
 
         await tRepo.update(ticket.id, { column_id: destColumnId!, position: pos });
+
+        // Stamp / clear terminal_entered_at when the move crosses the
+        // terminal boundary so the archiver has an accurate Done-entry time.
+        const colRepoTx = manager.getRepository(BoardColumn);
+        const [sourceColForStamp, destColForStamp] = await Promise.all([
+          oldColumnId ? colRepoTx.findOne({ where: { id: oldColumnId } }) : Promise.resolve(null),
+          colRepoTx.findOne({ where: { id: destColumnId! } }),
+        ]);
+        await applyTerminalEnteredAtForMove(tRepo, ticket.id, sourceColForStamp, destColForStamp);
       });
 
       // Resolve column names for activity log
@@ -109,6 +120,7 @@ export function registerTicketWorkflowTools(server: McpServer, ctx: ToolContext)
       const ticketRepo = dataSource.getRepository(Ticket);
       const ticket = await ticketRepo.findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Ticket not found');
+      if (ticket.archived_at) return err(new TicketArchivedError(ticket.id).message);
       if (ticket.parent_id || ticket.depth > 0) return err('Only root tickets can be moved across boards');
 
       const boardRepo = dataSource.getRepository(Board);
@@ -154,6 +166,10 @@ export function registerTicketWorkflowTools(server: McpServer, ctx: ToolContext)
         const pos = Math.min(target_position ?? destCount, destCount);
         await shiftTicketPositions(tRepo, { column_id: targetCol!.id }, pos, +1, { inclusive: true, excludeId: ticket.id });
         await tRepo.update(ticket.id, { column_id: targetCol!.id, position: pos });
+
+        // Cross-board move can change terminal status — stamp / clear
+        // terminal_entered_at the same way same-board moves do.
+        await applyTerminalEnteredAtForMove(tRepo, ticket.id, sourceCol, targetCol!);
       });
 
       const caller = getCallerAgent(extra);
@@ -188,6 +204,7 @@ export function registerTicketWorkflowTools(server: McpServer, ctx: ToolContext)
       const ticketRepo = dataSource.getRepository(Ticket);
       const ticket = await ticketRepo.findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Ticket not found');
+      if (ticket.archived_at) return err(new TicketArchivedError(ticket.id).message);
 
       // Check existing lock — allow re-claim by same agent (idempotent refresh)
       if (ticket.locked_by_agent_id && ticket.locked_by_agent_id !== agent_id) {
