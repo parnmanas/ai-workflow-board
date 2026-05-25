@@ -323,9 +323,14 @@ export class TriggerLoopService implements OnModuleInit {
         )
         .getCount();
 
+      // Auto-advance always moves between non-terminal columns (the loop
+      // returns on terminal entry above), so terminal_entered_at can't be
+      // stamped here — but defensively clear it in case a legacy row had
+      // a stale stamp from a previous run.
       await tRepo.update(ticket.id, {
         column_id: nextCol.id,
         position: destCount,
+        terminal_entered_at: null,
       });
     });
 
@@ -852,6 +857,42 @@ Keep follow-up ticket titles tight and outcome-shaped:
           // in effect, the missed row is the only collateral.
           this.logService.warn('MCP', 'paused-drop audit write failed (drop still applied)', {
             err: String(e), ticket_id: ticket.id, board_id: boardId,
+          });
+        }
+        return '';
+      }
+    }
+
+    // Archived-ticket gate (ticket 9b44526b). Single chokepoint shared with
+    // the pause / pending gates below. Re-reads the ticket so a manual
+    // archive that races a queued trigger still wins — same fresh-read
+    // pattern as the pending gate. Even manual triggers honor this; the
+    // documented escape hatch is `unarchive_ticket`.
+    {
+      const freshForArchive = await this.dataSource
+        .getRepository(Ticket)
+        .findOne({ where: { id: ticket.id } });
+      if (freshForArchive?.archived_at) {
+        this.logService.info('MCP', 'agent_trigger dropped (ticket archived)', {
+          ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource,
+          archived_at: new Date(freshForArchive.archived_at).toISOString(),
+        });
+        try {
+          const activityLogRepo = this.dataSource.getRepository(ActivityLog);
+          await activityLogRepo.save(activityLogRepo.create({
+            entity_type: 'ticket',
+            entity_id: ticket.id,
+            ticket_id: ticket.id,
+            actor_id: 'system',
+            actor_name: 'TriggerLoopService',
+            action: 'agent_trigger_dropped_archived',
+            new_value: `agent=${agentId} archived_at=${new Date(freshForArchive.archived_at).toISOString()}`,
+            role,
+            trigger_source: triggerSource,
+          }));
+        } catch (e) {
+          this.logService.warn('MCP', 'archived-drop audit write failed (drop still applied)', {
+            err: String(e), ticket_id: ticket.id,
           });
         }
         return '';

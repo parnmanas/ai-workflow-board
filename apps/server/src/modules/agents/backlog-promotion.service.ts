@@ -209,6 +209,11 @@ export class BacklogPromotionService implements OnModuleInit {
     const candidates = await ticketRepo.createQueryBuilder('t')
       .where('t.column_id IN (:...ids)', { ids: intakeColIds })
       .andWhere('t.pending_user_action = :falseVal', { falseVal: false })
+      // Archived intake tickets (ticket 9b44526b) must not consume a
+      // promotion slot — same reasoning as the pending_user_action
+      // exclusion: the trigger emit gate downstream would drop every
+      // wake-up anyway, leaving the active column held by a ghost.
+      .andWhere('t.archived_at IS NULL')
       .getMany();
     if (candidates.length === 0) return null;
 
@@ -375,6 +380,10 @@ export class BacklogPromotionService implements OnModuleInit {
       const fromCol = columns.find(c => c.id === fromColumnId) || null;
       ticket.column_id = destination.id;
       ticket.position = 0;
+      // Promotion always moves between non-terminal columns (intake →
+      // active), but defensively clear terminal_entered_at to keep the
+      // invariant "non-null only when sitting on a terminal column".
+      ticket.terminal_entered_at = null;
       await ticketRepo.save(ticket);
 
       try {
