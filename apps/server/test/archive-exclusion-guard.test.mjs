@@ -209,6 +209,79 @@ test('archive cursor helpers round-trip + accept legacy bare-timestamp', async (
   assert.deepEqual(parseArchiveCursor(''), { ts: null, id: null });
 });
 
+// Review-bounce guards (2026-05-25). Reviewer flagged three surfaces that
+// either still scanned/mutated archived tickets or silently leaked them:
+//
+//   1. StuckTicketDetector candidate scan + remediation
+//   2. Workspace REST + MCP get_workspace (default-exclusion violation)
+//   3. Create-directly-in-terminal-column missing terminal_entered_at stamp
+//
+// Static-grep guards mirror the rest of this file: cheap, fast, and they
+// survive every refactor short of removing the column itself.
+
+const REVIEW_BOUNCE_ARCHIVE_FILTER_SOURCES = [
+  [
+    'modules/agents/stuck-ticket-detector.service.ts',
+    'StuckTicketDetector candidate scan must skip archived tickets — manual archive is permitted on non-terminal columns, so an archived ticket can otherwise still be flagged and yanked back to intake by the remediation path',
+  ],
+  [
+    'modules/workspaces/workspaces.controller.ts',
+    'GET /api/workspaces/:id is an active board snapshot — archived tickets must not silently inflate it (use the dedicated archive endpoints for archive-inclusive reads)',
+  ],
+  [
+    'modules/mcp/tools/workspace-tools.ts',
+    'MCP get_workspace per-column ticket_count is the same active surface as the REST workspace get — archived rows must not be counted',
+  ],
+];
+for (const [relPath, why] of REVIEW_BOUNCE_ARCHIVE_FILTER_SOURCES) {
+  test(`${path.basename(relPath)} filters archived_at (review-bounce guard)`, () => {
+    const SOURCE = path.resolve(__dirname, '..', 'src', relPath);
+    const src = fs.readFileSync(SOURCE, 'utf8');
+    const code = stripComments(src);
+    assert.match(
+      code,
+      /archived_at\s+IS\s+NULL|archived_at:\s*IsNull/,
+      `${relPath} must exclude archived tickets. ${why}`,
+    );
+  });
+}
+
+// Stamping terminal_entered_at on create. Every create path (REST, MCP,
+// legacy agent-api) must stamp the column when the destination column is
+// already terminal — otherwise the archiver's `terminal_entered_at IS NOT
+// NULL` candidate filter silently skips the row forever.
+const TERMINAL_STAMP_CREATE_SOURCES = [
+  [
+    'modules/tickets/tickets.controller.ts',
+    'POST /api/columns/:columnId/tickets must stamp terminal_entered_at when the destination column is terminal — otherwise an operator-created Done ticket never auto-archives',
+  ],
+  [
+    'modules/mcp/tools/ticket-crud-tools.ts',
+    'MCP create_ticket must stamp terminal_entered_at on direct-to-terminal creates — same archiver eligibility issue as the REST path',
+  ],
+  [
+    'modules/agent-api/agent-api.controller.ts',
+    'Legacy /agent-api create-ticket must stamp terminal_entered_at too — the back-door agent path is still live and writes the same Ticket row shape',
+  ],
+];
+for (const [relPath, why] of TERMINAL_STAMP_CREATE_SOURCES) {
+  test(`${path.basename(relPath)} stamps terminal_entered_at on direct-to-terminal create`, () => {
+    const SOURCE = path.resolve(__dirname, '..', 'src', relPath);
+    const src = fs.readFileSync(SOURCE, 'utf8');
+    const code = stripComments(src);
+    assert.match(
+      code,
+      /isTerminalColumn\([^)]+\)\s*\?\s*new\s+Date\(\)\s*:\s*null/,
+      `${relPath} must compute terminal_entered_at via isTerminalColumn(col) ? new Date() : null on the create path. ${why}`,
+    );
+    assert.match(
+      code,
+      /terminal_entered_at:\s*terminalEnteredAt/,
+      `${relPath} must pass terminal_entered_at into the Ticket row it creates. ${why}`,
+    );
+  });
+}
+
 // The archiver itself must keep the per-board batch cap (operator
 // guardrail — the first tick after enabling auto-archive on a 10k-Done
 // board shouldn't ship 10k writes in one transaction).
