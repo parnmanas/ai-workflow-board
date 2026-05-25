@@ -179,9 +179,23 @@ export class AgentApiController {
 
     const results: any[] = [];
 
+    // Stable rejection payload for archived-ticket mutations on the batch
+    // surface. Mirrors the single-shot `/api/agent/move-ticket` response so
+    // operators wiring batch consumers see the same `ticket_archived` code
+    // they would see from the non-batch path — the policy is "archived
+    // tickets are read-only except lookup, unarchive, and delete" and the
+    // batch loop must not become a backdoor around it.
+    const archivedRejection = (ticketId: string) => ({
+      error: 'ticket_archived',
+      hint: 'Call unarchive first',
+      message: new TicketArchivedError(ticketId).message,
+      ticketId,
+    });
+
     await this.dataSource.transaction(async (manager) => {
       const tRepo = manager.getRepository(Ticket);
       const cRepo = manager.getRepository(Comment);
+      const colRepoTx = manager.getRepository(BoardColumn);
 
       for (const op of operations) {
         try {
@@ -202,8 +216,10 @@ export class AgentApiController {
               if (!col) { results.push({ error: `Column "${op.toColumn}" not found` }); continue; }
               const t = await tRepo.findOne({ where: { id: String(op.ticketId) } });
               if (!t) { results.push({ error: 'Ticket not found' }); continue; }
+              if (t.archived_at) { results.push(archivedRejection(t.id)); continue; }
 
-              await shiftTicketPositions(tRepo, { column_id: t.column_id }, t.position, -1);
+              const sourceColumnId = t.column_id;
+              await shiftTicketPositions(tRepo, { column_id: sourceColumnId }, t.position, -1);
 
               const cnt = await tRepo.createQueryBuilder('t')
                 .where('t.column_id = :colId AND t.id != :id AND t.parent_id IS NULL', { colId: col.id, id: t.id }).getCount();
@@ -212,14 +228,33 @@ export class AgentApiController {
               await shiftTicketPositions(tRepo, { column_id: col.id }, pos, +1, { inclusive: true, excludeId: t.id });
 
               await tRepo.update(t.id, { column_id: col.id, position: pos });
+
+              // Mirror the single-shot move-ticket handler — without this
+              // stamp the archiver candidate query (`terminal_entered_at IS
+              // NOT NULL`) would never see tickets moved into Done through
+              // the batch surface, so auto-archive would silently skip
+              // them forever.
+              const sourceCol = sourceColumnId
+                ? await colRepoTx.findOne({ where: { id: sourceColumnId } })
+                : null;
+              await applyTerminalEnteredAtForMove(tRepo, t.id, sourceCol, col);
+
               results.push({ success: true, ticketId: op.ticketId, movedTo: op.toColumn });
               break;
             }
             case 'add-child':
             case 'add-subtask': {
-              const position = await maxChildPosition(manager, String(op.ticketId));
+              const parentId = String(op.ticketId);
+              const parent = await tRepo.findOne({ where: { id: parentId } });
+              if (!parent) { results.push({ error: 'Parent ticket not found' }); continue; }
+              // Walk to the root — subtasks have no column and carry no
+              // archived_at of their own; the root carries the flag.
+              const rootArchived = await getRootArchivedAt(manager, parent);
+              if (rootArchived) { results.push(archivedRejection(parent.id)); continue; }
+
+              const position = await maxChildPosition(manager, parentId);
               const r = await tRepo.save(tRepo.create({
-                parent_id: String(op.ticketId), depth: 1, column_id: null as any,
+                parent_id: parentId, depth: 1, column_id: null as any,
                 title: op.title, position, status: 'todo',
               }));
               results.push({ success: true, ticketId: r.id });
@@ -232,13 +267,21 @@ export class AgentApiController {
               if (op.title !== undefined) updates.title = op.title;
               if (op.status !== undefined) updates.status = String(op.status);
               const ticketId = String(op.subtaskId || op.ticketId);
+              const sub = await tRepo.findOne({ where: { id: ticketId } });
+              if (!sub) { results.push({ error: 'Ticket not found' }); continue; }
+              const rootArchived = await getRootArchivedAt(manager, sub);
+              if (rootArchived) { results.push(archivedRejection(ticketId)); continue; }
               await tRepo.update(ticketId, updates);
               results.push({ success: true, ticketId });
               break;
             }
             case 'add-comment': {
+              const ticketId = String(op.ticketId);
+              const t = await tRepo.findOne({ where: { id: ticketId } });
+              if (!t) { results.push({ error: 'Ticket not found' }); continue; }
+              if (t.archived_at) { results.push(archivedRejection(ticketId)); continue; }
               const r = await cRepo.save(cRepo.create({
-                ticket_id: String(op.ticketId),
+                ticket_id: ticketId,
                 author_type: op.authorType || 'agent',
                 author_id: String(op.authorId || ''),
                 author: op.author || '',
