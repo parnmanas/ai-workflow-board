@@ -27,6 +27,7 @@ import { loadTicketFull } from '../mcp/shared/ticket-parsing';
 import {
   applyTerminalEnteredAtForMove,
   getRootArchivedAt,
+  isTerminalColumn,
   TicketArchivedError,
 } from '../mcp/shared/archive-helpers';
 import { findOrFail } from '../../common/find-or-fail';
@@ -106,8 +107,13 @@ export class AgentApiController {
       const tRepo = manager.getRepository(Ticket);
 
       const position = await maxTicketPosition(manager, col.id);
+      // Stamp terminal_entered_at when the destination column is already
+      // terminal so the archiver can later pick this row up. The archiver
+      // requires terminal_entered_at IS NOT NULL.
+      const terminalEnteredAt = isTerminalColumn(col) ? new Date() : null;
       const t = await tRepo.save(tRepo.create({
         column_id: col.id, title, description, priority, assignee, labels: '[]', position,
+        terminal_entered_at: terminalEnteredAt,
       }));
 
       if (subtasks.length > 0) {
@@ -204,9 +210,13 @@ export class AgentApiController {
               const col = await findColumnByName(manager, String(op.boardId), op.column);
               if (!col) { results.push({ error: `Column "${op.column}" not found` }); continue; }
               const pos = await maxTicketPosition(manager, col.id);
+              // Stamp terminal_entered_at when landing directly on a terminal
+              // column — same rationale as the single-shot create-ticket above.
+              const terminalEnteredAt = isTerminalColumn(col) ? new Date() : null;
               const r = await tRepo.save(tRepo.create({
                 column_id: col.id, title: op.title, description: op.description || '',
                 priority: op.priority || 'medium', assignee: op.assignee || '', labels: '[]', position: pos,
+                terminal_entered_at: terminalEnteredAt,
               }));
               results.push({ success: true, ticketId: r.id });
               break;

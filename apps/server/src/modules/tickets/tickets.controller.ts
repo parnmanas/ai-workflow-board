@@ -139,6 +139,12 @@ export class TicketsController {
     }
 
     const position = await maxTicketPosition(this.dataSource, columnId);
+    // Stamp terminal_entered_at on create when the destination column is
+    // already terminal (e.g. operator drops a ticket straight into Done).
+    // The archiver requires terminal_entered_at IS NOT NULL, so without this
+    // stamp those tickets would silently never auto-archive.
+    const destColumnForStamp = await this.colRepo.findOne({ where: { id: columnId } });
+    const terminalEnteredAt = isTerminalColumn(destColumnForStamp) ? new Date() : null;
     const ticket = await this.ticketRepo.save(this.ticketRepo.create({
       column_id: columnId, title, description, priority,
       assignee: resolvedAssignee, reporter: resolvedReporter,
@@ -146,6 +152,7 @@ export class TicketsController {
       labels: JSON.stringify(labels), channel_ids: JSON.stringify(channel_ids),
       position, parent_id: null, depth: 0, status: 'todo',
       next_ticket_id: resolvedNextTicketId,
+      terminal_entered_at: terminalEnteredAt,
       created_by: creator.created_by, created_by_type: creator.created_by_type, created_by_id: creator.created_by_id,
     }));
 

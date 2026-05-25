@@ -30,7 +30,7 @@ import {
   validateNextTicketId,
 } from '../shared/ticket-helpers';
 import { getCallerAgent } from '../shared/session-auth';
-import { TicketArchivedError } from '../shared/archive-helpers';
+import { isTerminalColumn, TicketArchivedError } from '../shared/archive-helpers';
 import type { ToolContext } from './context';
 
 /**
@@ -189,12 +189,19 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           resolvedReporterId = creatorId;
         }
         const position = await maxTicketPosition(dataSource, resolvedColumnId!);
+        // Stamp terminal_entered_at when the destination column is already
+        // terminal (e.g. an agent files a ticket directly into Done). Without
+        // this stamp the archiver's `terminal_entered_at IS NOT NULL` guard
+        // would silently skip the row forever. `col` is the already-loaded
+        // destination column from line 141.
+        const terminalEnteredAt = isTerminalColumn(col) ? new Date() : null;
         const t = await tRepo.save(tRepo.create({
           column_id: resolvedColumnId!, title, description, priority,
           assignee: resolvedAssignee, reporter: resolvedReporter,
           assignee_id: resolvedAssigneeId, reporter_id: resolvedReporterId, reviewer_id,
           labels: JSON.stringify(labels), channel_ids: JSON.stringify(channel_ids), position,
           next_ticket_id: resolvedNextTicketId,
+          terminal_entered_at: terminalEnteredAt,
           created_by: creatorName, created_by_type: creatorType, created_by_id: creatorId,
         }));
 
