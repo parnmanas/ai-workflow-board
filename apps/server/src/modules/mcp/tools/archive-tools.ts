@@ -17,7 +17,7 @@ import { Ticket } from '../../../entities/Ticket';
 import { ok, err, safeJsonParse } from '../shared/helpers';
 import { loadTicketFull } from '../shared/ticket-parsing';
 import { getCallerAgent } from '../shared/session-auth';
-import { isTerminalColumn } from '../shared/archive-helpers';
+import { isTerminalColumn, buildArchiveCursor, parseArchiveCursor } from '../shared/archive-helpers';
 import type { ToolContext } from './context';
 
 export function registerArchiveTools(server: McpServer, ctx: ToolContext): void {
@@ -25,13 +25,13 @@ export function registerArchiveTools(server: McpServer, ctx: ToolContext): void 
 
   server.tool(
     'list_archived_tickets',
-    'List archived (soft-deleted) tickets for a board. Pagination via cursor + limit; optional q filters by title (case-insensitive substring). ' +
+    'List archived (soft-deleted) tickets for a board. Pagination via cursor + limit; optional q filters by title / id / label (case-insensitive). ' +
       'Returns rows with archived_at set + their original column id/name so the UI can show "Originally in Done". Lookup-only — use unarchive_ticket to restore.',
     {
       board_id: z.string().describe('Board ID to list archived tickets for'),
-      cursor: z.string().optional().describe('Pagination cursor (returned by a previous call as next_cursor; ISO timestamp of the last row in the previous page).'),
+      cursor: z.string().optional().describe('Pagination cursor returned by a previous call as next_cursor (opaque compound `<isoTimestamp>|<id>`). Bare ISO timestamps from older callers still work.'),
       limit: z.number().int().min(1).max(200).optional().default(50).describe('Max rows per page (1..200, default 50)'),
-      q: z.string().optional().describe('Optional case-insensitive substring filter on title / id'),
+      q: z.string().optional().describe('Optional case-insensitive substring filter on title / exact id match / label name'),
     },
     async ({ board_id, cursor, limit, q }) => {
       const colRepo = dataSource.getRepository(BoardColumn);
@@ -40,23 +40,42 @@ export function registerArchiveTools(server: McpServer, ctx: ToolContext): void 
       if (cols.length === 0) return ok({ tickets: [], next_cursor: null });
 
       const colIds = cols.map(c => c.id);
+      // Compound (archived_at DESC, id DESC) sort — the archiver stamps a
+      // whole batch with the same archived_at, so an archived_at-only cursor
+      // would drop the rest of that batch on the next page. Matches the
+      // REST surface (`GET /api/boards/:id/archived-tickets`) so cursors
+      // are interchangeable between the two.
       let qb = ticketRepo.createQueryBuilder('t')
         .where('t.column_id IN (:...colIds)', { colIds })
         .andWhere('t.archived_at IS NOT NULL')
         .orderBy('t.archived_at', 'DESC')
+        .addOrderBy('t.id', 'DESC')
         .take(limit + 1);
 
       if (cursor) {
-        // Cursor encodes the last seen archived_at (descending) — pull rows
-        // strictly older than it. Same archived_at + same id = stable
-        // tiebreak (sort by id within ties).
-        qb = qb.andWhere('t.archived_at < :cursor', { cursor: new Date(cursor) });
+        const { ts, id } = parseArchiveCursor(cursor);
+        if (ts && id != null) {
+          qb = qb.andWhere(
+            '(t.archived_at < :ts) OR (t.archived_at = :ts AND t.id < :id)',
+            { ts, id },
+          );
+        } else if (ts) {
+          // Legacy bare-timestamp cursor (no tiebreak) — keep older clients
+          // paging forward without dropping silently.
+          qb = qb.andWhere('t.archived_at < :ts', { ts });
+        }
       }
       if (q) {
-        qb = qb.andWhere('(LOWER(t.title) LIKE :q OR t.id = :exactId)', {
-          q: `%${q.toLowerCase()}%`,
-          exactId: q,
-        });
+        // Match title (substring), id (exact), or label (substring of the
+        // JSON-encoded labels column — `["foo","bar"]`).
+        qb = qb.andWhere(
+          '(LOWER(t.title) LIKE :q OR t.id = :exactId OR LOWER(t.labels) LIKE :labelQ)',
+          {
+            q: `%${q.toLowerCase()}%`,
+            exactId: q,
+            labelQ: `%"${q.toLowerCase()}"%`,
+          },
+        );
       }
 
       const rows = await qb.getMany();
@@ -72,7 +91,7 @@ export function registerArchiveTools(server: McpServer, ctx: ToolContext): void 
           column_name: colById.get(t.column_id || '')?.name ?? '',
         })),
         next_cursor: hasMore && page.length > 0
-          ? new Date(page[page.length - 1].archived_at!).toISOString()
+          ? buildArchiveCursor(page[page.length - 1].archived_at!, page[page.length - 1].id)
           : null,
       });
     }

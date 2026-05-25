@@ -80,6 +80,38 @@ export function assertTicketActive<T extends { id: string; archived_at: Date | n
 }
 
 /**
+ * Compound cursor for archived-ticket pagination — `<isoTimestamp>|<id>`.
+ *
+ * The archiver stamps every ticket in a per-board batch with the same
+ * `archived_at` (single `new Date()` reused across the loop). A cursor that
+ * only carries the timestamp and filters `archived_at < cursor` would skip
+ * the rest of that batch when the page boundary lands inside it.
+ *
+ * Pairs with ORDER BY archived_at DESC, id DESC and predicate
+ *   (archived_at < :ts OR (archived_at = :ts AND id < :id))
+ * to walk past same-timestamp ties stably.
+ *
+ * Backwards-compatible: if a caller hands us a bare ISO timestamp (the old
+ * cursor format), we treat it as `(ts, null)` and skip the tiebreak — older
+ * clients still page forward, just with the original same-timestamp gap.
+ */
+export function buildArchiveCursor(archivedAt: Date | string, id: string): string {
+  const iso = archivedAt instanceof Date ? archivedAt.toISOString() : new Date(archivedAt).toISOString();
+  return `${iso}|${id}`;
+}
+
+export function parseArchiveCursor(cursor: string | null | undefined): { ts: Date | null; id: string | null } {
+  if (!cursor) return { ts: null, id: null };
+  const sep = cursor.indexOf('|');
+  const rawTs = sep === -1 ? cursor : cursor.slice(0, sep);
+  // Legacy bare-timestamp cursor → id is null so callers skip the tiebreak.
+  const id = sep === -1 ? null : cursor.slice(sep + 1) || null;
+  const ts = new Date(rawTs);
+  if (Number.isNaN(ts.getTime())) return { ts: null, id: null };
+  return { ts, id };
+}
+
+/**
  * Walk from a ticket up to its root and return the root's archived_at.
  * Used by child-ticket mutation paths so a subtask can't be edited while
  * its parent is archived — the root is the only ticket carrying the flag

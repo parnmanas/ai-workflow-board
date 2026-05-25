@@ -15,6 +15,7 @@ import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { findOrFail } from '../../common/find-or-fail';
 import { parseComments, expandCommentAttachments } from '../mcp/shared/ticket-parsing';
+import { buildArchiveCursor, parseArchiveCursor } from '../mcp/shared/archive-helpers';
 import { writeRoutingConfigThrough } from './routing-config.helper';
 import { AgentWorkloadService } from '../agents/agent-workload.service';
 import { resolveAgentDisplayMap } from '../../utils/agent-name';
@@ -236,20 +237,42 @@ export class BoardsController {
     if (cols.length === 0) return res.json({ tickets: [], next_cursor: null });
     const colIds = cols.map(c => c.id);
 
+    // Compound (archived_at, id) sort + cursor — the archiver stamps a whole
+    // batch with the same `archived_at`, so an `archived_at`-only cursor would
+    // skip the rest of that batch when the page boundary lands inside it.
+    // Encoded as `<isoTimestamp>|<id>`.
     let qb = this.ticketRepo.createQueryBuilder('t')
       .where('t.column_id IN (:...colIds)', { colIds })
       .andWhere('t.archived_at IS NOT NULL')
       .orderBy('t.archived_at', 'DESC')
+      .addOrderBy('t.id', 'DESC')
       .take(limit + 1);
 
     if (cursor) {
-      qb = qb.andWhere('t.archived_at < :cursor', { cursor: new Date(cursor) });
+      const { ts, id } = parseArchiveCursor(cursor);
+      if (ts && id != null) {
+        qb = qb.andWhere(
+          '(t.archived_at < :ts) OR (t.archived_at = :ts AND t.id < :id)',
+          { ts, id },
+        );
+      } else if (ts) {
+        // Legacy bare-timestamp cursor — no tiebreak available, fall back to
+        // the original `< :ts` shape so older clients keep paging forward.
+        qb = qb.andWhere('t.archived_at < :ts', { ts });
+      }
     }
     if (q) {
-      qb = qb.andWhere('(LOWER(t.title) LIKE :q OR t.id = :exactId)', {
-        q: `%${q.toLowerCase()}%`,
-        exactId: q,
-      });
+      // Title / id / label match. Labels are stored as a JSON-encoded string
+      // column; a substring match on the raw JSON catches `["foo","bar"]`
+      // without needing per-row deserialization in SQL.
+      qb = qb.andWhere(
+        '(LOWER(t.title) LIKE :q OR t.id = :exactId OR LOWER(t.labels) LIKE :labelQ)',
+        {
+          q: `%${q.toLowerCase()}%`,
+          exactId: q,
+          labelQ: `%"${q.toLowerCase()}"%`,
+        },
+      );
     }
 
     const rows = await qb.getMany();
@@ -265,7 +288,7 @@ export class BoardsController {
         column_name: colById.get(t.column_id || '')?.name ?? '',
       })),
       next_cursor: hasMore && page.length > 0
-        ? new Date(page[page.length - 1].archived_at!).toISOString()
+        ? buildArchiveCursor(page[page.length - 1].archived_at!, page[page.length - 1].id)
         : null,
     });
   }

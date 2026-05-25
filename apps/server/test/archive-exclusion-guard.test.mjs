@@ -109,6 +109,106 @@ test('archive-helpers.ts exports TicketArchivedError + assertTicketActive', () =
   );
 });
 
+// Compound cursor — the archiver stamps every ticket in a per-board sweep
+// with the same `archived_at`, so a cursor that only carries the timestamp
+// would skip the rest of that batch when a page boundary lands inside it.
+// Both surfaces (REST + MCP) must order on (archived_at, id) and carry both
+// in next_cursor so cursors are interchangeable + same-timestamp ties pass
+// through stably.
+const COMPOUND_CURSOR_SOURCES = [
+  [
+    'modules/boards/boards.controller.ts',
+    'GET /api/boards/:id/archived-tickets must use a compound (archived_at,id) cursor — otherwise a 500-ticket batch stamped with the same archived_at silently skips the rest of the batch at the page boundary',
+  ],
+  [
+    'modules/mcp/tools/archive-tools.ts',
+    'MCP list_archived_tickets must use the same compound cursor — REST + MCP must agree so cursors are interchangeable',
+  ],
+];
+for (const [relPath, why] of COMPOUND_CURSOR_SOURCES) {
+  test(`${path.basename(relPath)} pages archive with a compound (archived_at, id) cursor`, () => {
+    const SOURCE = path.resolve(__dirname, '..', 'src', relPath);
+    const src = fs.readFileSync(SOURCE, 'utf8');
+    const code = stripComments(src);
+    assert.match(
+      code, /addOrderBy\(\s*['"]t\.id['"]/,
+      `${relPath} must order on t.id as the secondary key. ${why}`,
+    );
+    assert.match(
+      code, /t\.archived_at\s*=\s*:ts\s+AND\s+t\.id\s*<\s*:id/,
+      `${relPath} must keep the compound tiebreak predicate (archived_at = :ts AND id < :id). ${why}`,
+    );
+    assert.match(
+      code, /buildArchiveCursor\(/,
+      `${relPath} must emit next_cursor via buildArchiveCursor so it carries (archived_at, id). ${why}`,
+    );
+  });
+}
+
+// Label search — the archive q parameter searches title / id / labels.
+// Reviewer flagged that title/id-only would miss "find every archived
+// ticket with the `legal` label" workflows.
+const LABEL_SEARCH_SOURCES = [
+  [
+    'modules/boards/boards.controller.ts',
+    'GET /api/boards/:id/archived-tickets must let q match labels — operators routinely filter archive by label',
+  ],
+  [
+    'modules/mcp/tools/archive-tools.ts',
+    'MCP list_archived_tickets must let q match labels too — the contract is documented in the tool description',
+  ],
+];
+for (const [relPath, why] of LABEL_SEARCH_SOURCES) {
+  test(`${path.basename(relPath)} archive q matches title / id / label`, () => {
+    const SOURCE = path.resolve(__dirname, '..', 'src', relPath);
+    const src = fs.readFileSync(SOURCE, 'utf8');
+    const code = stripComments(src);
+    assert.match(
+      code, /LOWER\(t\.labels\)\s+LIKE/,
+      `${relPath} must match labels (LOWER(t.labels) LIKE …) in the q clause. ${why}`,
+    );
+  });
+}
+
+// Cursor helpers — `<isoTimestamp>|<id>` round-trips, and the legacy
+// bare-timestamp form still parses so older callers keep working.
+test('archive cursor helpers round-trip + accept legacy bare-timestamp', async () => {
+  // Compiled JS lives in dist/ after `nest build`; fall back gracefully so
+  // running this test before the build still surfaces a useful diagnostic
+  // (the regression-grep tests above don't depend on dist/).
+  const distPath = path.resolve(
+    __dirname, '..', 'dist', 'modules', 'mcp', 'shared', 'archive-helpers.js',
+  );
+  if (!fs.existsSync(distPath)) {
+    console.warn('skip: dist/modules/mcp/shared/archive-helpers.js not built — run `nest build` to exercise this');
+    return;
+  }
+  const mod = await import(distPath);
+  const { buildArchiveCursor, parseArchiveCursor } = mod;
+
+  const ts = new Date('2026-05-25T12:34:56.789Z');
+  const id = '00000000-0000-0000-0000-aaaaaaaaaaaa';
+  const cursor = buildArchiveCursor(ts, id);
+  assert.equal(cursor, `${ts.toISOString()}|${id}`);
+
+  const parsed = parseArchiveCursor(cursor);
+  assert.ok(parsed.ts, 'compound cursor must parse to a Date');
+  assert.equal(parsed.ts.toISOString(), ts.toISOString());
+  assert.equal(parsed.id, id);
+
+  // Legacy bare-timestamp cursor (older clients) — id is null so the
+  // caller skips the tiebreak rather than treating "" as a uuid.
+  const legacy = parseArchiveCursor(ts.toISOString());
+  assert.ok(legacy.ts);
+  assert.equal(legacy.id, null);
+
+  // Garbage cursor → null timestamp so the controller falls back to "no
+  // cursor" instead of throwing.
+  assert.deepEqual(parseArchiveCursor('not-a-timestamp'), { ts: null, id: null });
+  assert.deepEqual(parseArchiveCursor(undefined), { ts: null, id: null });
+  assert.deepEqual(parseArchiveCursor(''), { ts: null, id: null });
+});
+
 // The archiver itself must keep the per-board batch cap (operator
 // guardrail — the first tick after enabling auto-archive on a 10k-Done
 // board shouldn't ship 10k writes in one transaction).
