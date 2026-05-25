@@ -607,13 +607,15 @@ async function runSelfUpdateLocked(
     out(`Self-update: lockfile reset returned non-zero (continuing): ${detail.slice(0, 200)}`);
   }
 
-  // 0b. Dirty-tree guard. After the lockfile reset, ANY remaining dirty
-  // path is a real local mod the operator made on purpose — a code change
-  // they're testing, a hand-tuned config, a partial PR. Plowing it under
-  // with `git pull` (which we already established refuses to FF-merge over
-  // dirty paths anyway) just hides the situation behind a generic git
-  // error. Surface the file list explicitly and abort with a summary the
-  // admin UI can render.
+  // 0b. Auto-stash any remaining dirty tracked files. Previous version
+  // aborted here and the operator was expected to commit/stash/revert by
+  // hand — in practice that means update_manager fails on every run when
+  // any session has uncommitted edits in the shared worktree, and the user
+  // has to interrupt to fix it. Self-update is a non-interactive context;
+  // stash the changes ourselves with a timestamped message so they survive
+  // in the stash list (`git stash list`) and can be recovered manually.
+  //
+  // Untracked files (`??`) are excluded — `git pull` never touches them.
   const statusResult = await runAsync(
     'git',
     ['-C', repoRoot, 'status', '--porcelain'],
@@ -621,24 +623,80 @@ async function runSelfUpdateLocked(
     10_000,
   );
   if (statusResult.ok) {
-    // `git status --porcelain` includes untracked files with a `??` prefix.
-    // `git pull` never touches untracked files (it only refuses to FF-merge
-    // when a pull would overwrite a tracked-but-modified path), so blocking
-    // pull on untracked entries is a false positive that self-locks the
-    // manager whenever editors / IDEs / Claude Code leave stray state
-    // (.claude/, .vscode/, .idea/, build artefacts, etc.) in the worktree.
-    // Filter `??` lines out — we still abort on real local modifications
-    // ( M / M  / A  / D  / R  / U  / etc.) which would actually block pull.
     const dirty = statusResult.stdout
       .split('\n')
       .map((s) => s.trimEnd())
       .filter(Boolean)
       .filter((line) => !line.startsWith('??'));
     if (dirty.length > 0) {
-      const head = dirty.slice(0, 10).join('; ');
-      const tail = dirty.length > 10 ? ` (+${dirty.length - 10} more)` : '';
-      const summary =
-        `working tree has local changes blocking pull — commit, stash, or revert before retrying: ${head}${tail}`;
+      const stashMsg = `self-update auto-stash ${new Date().toISOString()}`;
+      out(
+        `Self-update: working tree has ${dirty.length} dirty file(s); auto-stashing as "${stashMsg}" (recover via: git stash list / git stash pop)`,
+      );
+      for (const line of dirty.slice(0, 10)) out(`  [dirty] ${line}`);
+      if (dirty.length > 10) out(`  [dirty] (+${dirty.length - 10} more)`);
+
+      const stashResult = await runAsync(
+        'git',
+        ['-C', repoRoot, 'stash', 'push', '-u', '-m', stashMsg],
+        repoRoot,
+        15_000,
+        (l) => out(`  [git] ${l}`),
+      );
+      if (!stashResult.ok) {
+        const detail =
+          (stashResult.stderr.trim() || stashResult.stdout.trim() || 'unknown')
+            .split('\n')
+            .pop() || '';
+        const summary = `auto-stash failed: ${detail.slice(0, 240)}`;
+        out(`Self-update: ${summary}`);
+        return { changed: false, summary };
+      }
+    }
+  }
+
+  // 0c. Make sure we're on the default branch. The agent-manager runs from a
+  // shared worktree the operator may also use interactively, so the current
+  // branch can be anything (a ticket branch, a PR branch, etc.). A
+  // `git pull --ff-only origin main` from a different branch either fails
+  // ("not currently on a branch" / "no tracking" / "diverged") or — worse —
+  // succeeds but leaves the working tree pointing at the wrong branch.
+  // Always checkout the default branch first; if that branch doesn't exist
+  // locally yet, create it from origin.
+  const currentBranchResult = await runAsync(
+    'git',
+    ['-C', repoRoot, 'rev-parse', '--abbrev-ref', 'HEAD'],
+    repoRoot,
+    10_000,
+  );
+  const currentBranch = currentBranchResult.ok
+    ? currentBranchResult.stdout.trim()
+    : '';
+  if (currentBranch && currentBranch !== branch) {
+    out(`Self-update: current branch is "${currentBranch}", switching to "${branch}"`);
+    // Check whether the local branch exists.
+    const localExists = await runAsync(
+      'git',
+      ['-C', repoRoot, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`],
+      repoRoot,
+      10_000,
+    );
+    const checkoutArgs = localExists.ok
+      ? ['-C', repoRoot, 'checkout', branch]
+      : ['-C', repoRoot, 'checkout', '-B', branch, `origin/${branch}`];
+    const checkoutResult = await runAsync(
+      'git',
+      checkoutArgs,
+      repoRoot,
+      15_000,
+      (l) => out(`  [git] ${l}`),
+    );
+    if (!checkoutResult.ok) {
+      const detail =
+        (checkoutResult.stderr.trim() || checkoutResult.stdout.trim() || 'unknown')
+          .split('\n')
+          .pop() || '';
+      const summary = `git checkout ${branch} failed: ${detail.slice(0, 240)}`;
       out(`Self-update: ${summary}`);
       return { changed: false, summary };
     }
