@@ -330,6 +330,15 @@ export interface Ticket {
   // Optional pointer to the ticket TriggerLoopService should auto-trigger
   // once this one lands on a terminal column. Cleared/empty → no chain.
   next_ticket_id?: string | null;
+  // Ticket parked awaiting user intervention (ticket a57517be). When true the
+  // server drops every agent_trigger for this ticket, the focus selector
+  // skips it, and the board view renders a high-visibility outline + badge.
+  // The detail panel surfaces a dedicated "User" tab with the reason, set_at,
+  // set_by, and an "Unpend" action button.
+  pending_user_action?: boolean;
+  pending_reason?: string;
+  pending_set_at?: string | null;
+  pending_set_by?: string;
   // Server-hydrated snapshot of next_ticket_id (loadTicketFull only) —
   // title + current column name so the Next Ticket picker can render the
   // link without a second round-trip. null when unset or when the linked

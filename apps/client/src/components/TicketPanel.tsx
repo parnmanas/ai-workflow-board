@@ -578,7 +578,12 @@ export default function TicketPanel({
   // on panel mount so the moment-of-arrival cutoff stays stable while the
   // user reads — re-marking only happens on unmount / ticket switch.
   const [lastReadAt, setLastReadAt] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'detail' | 'comments' | 'activity'>('detail');
+  const [activeTab, setActiveTab] = useState<'detail' | 'comments' | 'activity' | 'user'>('detail');
+  // Pending-user-action edit drafts (ticket a57517be). The User tab lets the
+  // human update the reason without round-tripping through the JSON detail
+  // form; unpending is a single-button action so no draft state needed.
+  const [pendingReasonDraft, setPendingReasonDraft] = useState<string>('');
+  const [pendingBusy, setPendingBusy] = useState(false);
   const [activities, setActivities] = useState<ActivityLog[]>([]);
   // Modal preview can be an image OR a video — discriminate by mimetype so
   // the modal picks the right element. `null` mimetype falls back to <img>
@@ -611,7 +616,12 @@ export default function TicketPanel({
     setRoleDrafts({});
     setCommentContent('');
     setCommentAttachments([]);
-    setActiveTab('detail');
+    setPendingReasonDraft(activeTicket.pending_reason || '');
+    // Auto-switch to the User tab when opening a pending ticket so the human
+    // sees the ask immediately. Skipped when scrollToCommentId is set (a
+    // deep-link from a mention notification — that lives in the comments
+    // tab and the dedicated effect below routes there).
+    setActiveTab(activeTicket.pending_user_action ? 'user' : 'detail');
   }, [activeTicket.id]);
 
   // Mention deep-link override — when a comment id is queued (at panel mount
@@ -655,11 +665,73 @@ export default function TicketPanel({
       .catch(() => { /* non-blocking */ });
   }, [activeTicket.id]));
 
+  // Auto-route to the User tab when this ticket transitions into pending state
+  // from elsewhere (agent flipped pending_user_action while the panel is open).
+  // The activeTicket prop is bumped via board refresh on the same SSE event,
+  // so this effect catches the transition without needing to listen to SSE
+  // directly. Conservative: only switch when not already on Comments/Activity
+  // (avoid stealing focus mid-read).
+  useEffect(() => {
+    if (activeTicket.pending_user_action && activeTab === 'detail') {
+      setActiveTab('user');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTicket.pending_user_action]);
+
   useEffect(() => {
     if (activeTab === 'activity') {
       api.getTicketActivity(activeTicket.id).then(setActivities).catch(() => {});
     }
   }, [activeTab, activeTicket.id]);
+
+  // Resync the pending_reason draft when the server-side value changes (e.g.,
+  // the agent edited the reason in another tab). The draft itself is local —
+  // edits buffer here until the user clicks Save / Pend / Unpend on the User
+  // tab — but a server-side update bumps updated_at and should overwrite an
+  // empty/unchanged draft so the panel stays authoritative.
+  useEffect(() => {
+    setPendingReasonDraft(activeTicket.pending_reason || '');
+  }, [activeTicket.id, activeTicket.updated_at]);
+
+  // Pend / unpend handlers (ticket a57517be). Single-shot REST PATCH calls
+  // that flip the flag and let the SSE board_update event refresh the
+  // ticket; the Unpend button needs no confirmation because the action is
+  // reversible (the agent or user can pend again). Pend requires a reason —
+  // the empty-string guard is the only validation.
+  const handlePendTicket = useCallback(async () => {
+    const reason = pendingReasonDraft.trim();
+    if (!reason) return;
+    setPendingBusy(true);
+    try {
+      await api.updateTicket(activeTicket.id, {
+        pending_user_action: true,
+        pending_reason: reason,
+      });
+    } finally {
+      setPendingBusy(false);
+    }
+  }, [activeTicket.id, pendingReasonDraft]);
+
+  const handleUnpendTicket = useCallback(async () => {
+    setPendingBusy(true);
+    try {
+      await api.updateTicket(activeTicket.id, { pending_user_action: false });
+      setPendingReasonDraft('');
+    } finally {
+      setPendingBusy(false);
+    }
+  }, [activeTicket.id]);
+
+  const handleSavePendingReason = useCallback(async () => {
+    const reason = pendingReasonDraft.trim();
+    if (!activeTicket.pending_user_action) return;
+    setPendingBusy(true);
+    try {
+      await api.updateTicket(activeTicket.id, { pending_reason: reason });
+    } finally {
+      setPendingBusy(false);
+    }
+  }, [activeTicket.id, activeTicket.pending_user_action, pendingReasonDraft]);
 
   // Fetch role assignments for the active ticket. Refetched on
   // activeTicket.updated_at so writes through onSetRoleAssignment (which
@@ -1713,23 +1785,45 @@ export default function TicketPanel({
 
       {/* Tabs */}
       <div style={{ display: 'flex', borderBottom: `1px solid ${tokens.colors.border}`, flexShrink: 0 }}>
-        {(['detail', 'comments', 'activity'] as const).map(tab => (
-          <button key={tab} onClick={() => setActiveTab(tab)} style={{
-            padding: '8px 16px', background: 'transparent', border: 'none',
-            borderBottom: activeTab === tab ? `2px solid ${tokens.colors.accent}` : '2px solid transparent',
-            color: activeTab === tab ? tokens.colors.textStrong : tokens.colors.textSecondary,
-            fontSize: '12px', fontWeight: 600, cursor: 'pointer', textTransform: 'capitalize',
-            display: 'flex', alignItems: 'center', gap: 4,
-          }}>
-            {tab}
-            {tab === 'comments' && userCommentCount > 0 && (
-              <span style={{
-                fontSize: '10px', background: tokens.colors.border, color: tokens.colors.textMuted,
-                borderRadius: 8, padding: '1px 5px', fontWeight: 700,
-              }}>{userCommentCount}</span>
-            )}
-          </button>
-        ))}
+        {(['detail', 'comments', 'activity', 'user'] as const).map(tab => {
+          // Pending-user-action highlight on the User tab (ticket a57517be).
+          // Pulses warning-coloured when the ticket needs intervention so the
+          // user spots it the moment the panel opens — matches the badge
+          // styling on the TicketCard for visual continuity.
+          const isUserTabPending = tab === 'user' && !!activeTicket.pending_user_action;
+          return (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={isUserTabPending && activeTab !== 'user' ? 'awb-pending-pulse' : undefined}
+              style={{
+                padding: '8px 16px',
+                background: isUserTabPending && activeTab !== 'user' ? tokens.colors.warningBg : 'transparent',
+                border: 'none',
+                borderBottom: activeTab === tab
+                  ? `2px solid ${isUserTabPending ? tokens.colors.warning : tokens.colors.accent}`
+                  : '2px solid transparent',
+                color: activeTab === tab
+                  ? (isUserTabPending ? tokens.colors.warningLight : tokens.colors.textStrong)
+                  : (isUserTabPending ? tokens.colors.warningLight : tokens.colors.textSecondary),
+                fontSize: '12px', fontWeight: isUserTabPending ? 700 : 600,
+                cursor: 'pointer', textTransform: 'capitalize',
+                display: 'flex', alignItems: 'center', gap: 4,
+              }}
+            >
+              {tab}
+              {tab === 'comments' && userCommentCount > 0 && (
+                <span style={{
+                  fontSize: '10px', background: tokens.colors.border, color: tokens.colors.textMuted,
+                  borderRadius: 8, padding: '1px 5px', fontWeight: 700,
+                }}>{userCommentCount}</span>
+              )}
+              {tab === 'user' && activeTicket.pending_user_action && (
+                <span aria-hidden="true" style={{ fontSize: '11px' }}>⏸</span>
+              )}
+            </button>
+          );
+        })}
       </div>
 
       {/* Body — scrollable */}
@@ -2284,7 +2378,7 @@ export default function TicketPanel({
 
             {renderCommentInput()}
           </div>
-        ) : (
+        ) : activeTab === 'activity' ? (
           /* Activity Tab */
           <div>
             <h4 style={{ fontSize: '13px', fontWeight: 600, color: tokens.colors.textStrong, marginBottom: 12 }}>
@@ -2322,6 +2416,189 @@ export default function TicketPanel({
                   </div>
                 ))}
               </div>
+            )}
+          </div>
+        ) : (
+          /* User Tab (ticket a57517be) — dedicated surface for human-in-the-loop
+             tickets. When pending_user_action is true the assignee couldn't
+             make progress without a decision; this tab summarises the ask
+             above the comment stream so the user can act without reading the
+             whole thread. When the flag is clear the tab still acts as the
+             primary entry point for parking the ticket. */
+          <div>
+            {activeTicket.pending_user_action ? (
+              <>
+                <div style={{
+                  background: tokens.colors.warningBg,
+                  border: `2px dashed ${tokens.colors.warning}`,
+                  borderRadius: tokens.radii.lg,
+                  padding: '12px 14px',
+                  marginBottom: 16,
+                }}>
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: 8,
+                    marginBottom: 8,
+                  }}>
+                    <span aria-hidden="true" style={{ fontSize: '18px' }}>⏸</span>
+                    <span style={{
+                      fontSize: '13px', fontWeight: 700,
+                      color: tokens.colors.warningLight,
+                      letterSpacing: '0.4px',
+                    }}>
+                      PENDING USER ACTION
+                    </span>
+                  </div>
+                  <div style={{
+                    fontSize: '12px', color: tokens.colors.textSecondary,
+                    marginBottom: 6,
+                  }}>
+                    {activeTicket.pending_set_by && (
+                      <span>Parked by <strong style={{ color: tokens.colors.textStrong }}>{activeTicket.pending_set_by}</strong></span>
+                    )}
+                    {activeTicket.pending_set_at && (
+                      <span> · {new Date(activeTicket.pending_set_at).toLocaleString()}</span>
+                    )}
+                  </div>
+                  {activeTicket.pending_reason && (
+                    <div style={{
+                      background: tokens.colors.surfaceCard,
+                      border: `1px solid ${tokens.colors.border}`,
+                      borderRadius: tokens.radii.md,
+                      padding: '8px 10px',
+                      fontSize: '13px',
+                      color: tokens.colors.textStrong,
+                      whiteSpace: 'pre-wrap',
+                      lineHeight: 1.5,
+                    }}>
+                      {activeTicket.pending_reason}
+                    </div>
+                  )}
+                </div>
+
+                <label style={labelStyle}>Reason</label>
+                <textarea
+                  value={pendingReasonDraft}
+                  onChange={e => setPendingReasonDraft(e.target.value)}
+                  rows={4}
+                  placeholder="Why is this ticket waiting on a human?"
+                  style={{
+                    width: '100%',
+                    background: tokens.colors.surfaceCard,
+                    border: `1px solid ${tokens.colors.border}`,
+                    borderRadius: tokens.radii.md,
+                    color: tokens.colors.textStrong,
+                    padding: '8px 10px',
+                    fontSize: '13px',
+                    resize: 'vertical',
+                    fontFamily: 'inherit',
+                  }}
+                />
+                <div style={{ display: 'flex', gap: 8, marginTop: 10, justifyContent: 'flex-end' }}>
+                  <button
+                    type="button"
+                    onClick={handleSavePendingReason}
+                    disabled={pendingBusy || pendingReasonDraft.trim() === (activeTicket.pending_reason || '').trim()}
+                    style={{
+                      background: tokens.colors.surfaceCard,
+                      border: `1px solid ${tokens.colors.border}`,
+                      borderRadius: tokens.radii.md,
+                      color: tokens.colors.textStrong,
+                      padding: '6px 14px',
+                      fontSize: '12px',
+                      cursor: 'pointer',
+                      opacity: (pendingBusy || pendingReasonDraft.trim() === (activeTicket.pending_reason || '').trim()) ? 0.5 : 1,
+                    }}
+                  >Save reason</button>
+                  <button
+                    type="button"
+                    onClick={handleUnpendTicket}
+                    disabled={pendingBusy}
+                    style={{
+                      background: tokens.colors.successBg,
+                      border: `1px solid ${tokens.colors.successLight}`,
+                      borderRadius: tokens.radii.md,
+                      color: tokens.colors.successLight,
+                      padding: '6px 14px',
+                      fontSize: '12px',
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                      opacity: pendingBusy ? 0.5 : 1,
+                    }}
+                  >▶ Resume (Unpend)</button>
+                </div>
+
+                <h4 style={{
+                  fontSize: '12px', fontWeight: 700,
+                  color: tokens.colors.textSecondary,
+                  marginTop: 22, marginBottom: 8,
+                  textTransform: 'uppercase', letterSpacing: '0.5px',
+                }}>What to do next</h4>
+                <ul style={{
+                  margin: 0, paddingLeft: 18,
+                  fontSize: '12px', color: tokens.colors.textSecondary,
+                  lineHeight: 1.6,
+                }}>
+                  <li>Read the reason above and the latest comments to understand what's blocked.</li>
+                  <li>If the answer is a quick decision: leave a comment, then click <strong>Resume</strong> to release the agent.</li>
+                  <li>If the work needs to split: create a follow-up ticket from the board, then Resume.</li>
+                  <li>Resume re-wakes the dispatch loop — the assignee picks the ticket back up on the next trigger.</li>
+                </ul>
+              </>
+            ) : (
+              <>
+                <div style={{
+                  background: tokens.colors.surfaceCard,
+                  border: `1px solid ${tokens.colors.border}`,
+                  borderRadius: tokens.radii.lg,
+                  padding: '12px 14px',
+                  marginBottom: 16,
+                  color: tokens.colors.textSecondary,
+                  fontSize: '12px',
+                  lineHeight: 1.5,
+                }}>
+                  This ticket is not currently parked for user intervention. Park it
+                  here when a human decision is needed and the agent should stop
+                  re-trying. Parked tickets get a high-visibility badge on the
+                  board and drop out of the agent's focus queue until you resume them.
+                </div>
+
+                <label style={labelStyle}>Park reason</label>
+                <textarea
+                  value={pendingReasonDraft}
+                  onChange={e => setPendingReasonDraft(e.target.value)}
+                  rows={4}
+                  placeholder="Why does this ticket need human intervention?"
+                  style={{
+                    width: '100%',
+                    background: tokens.colors.surfaceCard,
+                    border: `1px solid ${tokens.colors.border}`,
+                    borderRadius: tokens.radii.md,
+                    color: tokens.colors.textStrong,
+                    padding: '8px 10px',
+                    fontSize: '13px',
+                    resize: 'vertical',
+                    fontFamily: 'inherit',
+                  }}
+                />
+                <div style={{ display: 'flex', gap: 8, marginTop: 10, justifyContent: 'flex-end' }}>
+                  <button
+                    type="button"
+                    onClick={handlePendTicket}
+                    disabled={pendingBusy || pendingReasonDraft.trim().length === 0}
+                    style={{
+                      background: tokens.colors.warningBg,
+                      border: `1px solid ${tokens.colors.warning}`,
+                      borderRadius: tokens.radii.md,
+                      color: tokens.colors.warningLight,
+                      padding: '6px 14px',
+                      fontSize: '12px',
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                      opacity: (pendingBusy || pendingReasonDraft.trim().length === 0) ? 0.5 : 1,
+                    }}
+                  >⏸ Park for user</button>
+                </div>
+              </>
             )}
           </div>
         )}

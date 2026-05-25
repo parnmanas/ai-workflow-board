@@ -9,6 +9,15 @@ const style = document.createElement('style');
 style.textContent = `
   @keyframes dotPulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
 
+  /* Ticket pending-user-action badge pulse (ticket a57517be).
+     Subtle background flash so the badge catches the eye without becoming
+     distracting on a board with multiple parked tickets. */
+  @keyframes awb-pending-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 ${tokens.colors.warning}80; transform: scale(1); }
+    50%      { box-shadow: 0 0 0 4px ${tokens.colors.warning}00; transform: scale(1.04); }
+  }
+  .awb-pending-pulse { animation: awb-pending-pulse 1.8s ease-in-out infinite; }
+
   /* AppLayout responsive sidebar (D-12 / UI-SPEC) */
   .awb-shell {
     display: flex;
