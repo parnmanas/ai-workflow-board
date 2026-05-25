@@ -249,6 +249,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       roomMessagingService: this.roomMessagingService,
       ticketRoleAssignmentService: this.ticketRoleAssignmentService,
       actionsService: this.actionsService,
+      triggerLoopService: this.triggerLoopService,
     };
   }
 

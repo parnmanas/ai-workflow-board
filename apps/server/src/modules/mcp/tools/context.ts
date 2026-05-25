@@ -30,6 +30,7 @@ import { GitHubConnectorService } from '../../../services/github-connector.servi
 import { MentionService } from '../../../services/mention.service';
 import type { AgentStatusService } from '../../agents/agent-status.service';
 import type { AllocationService } from '../../agents/allocation.service';
+import type { TriggerLoopService } from '../../agents/trigger-loop.service';
 import type { RoomCrudService } from '../../chat-rooms/room-crud.service';
 import type { RoomMembershipService } from '../../chat-rooms/room-membership.service';
 import type { RoomMessagingService } from '../../chat-rooms/room-messaging.service';
@@ -83,6 +84,13 @@ export interface ToolContext {
   // a Run (create room, add participants, send first message). The CRUD tools
   // operate directly on repositories and don't need this.
   actionsService?: ActionsService;
+  // Ticket a57517be: `unpend_ticket` tool needs to wake the ticket's current
+  // column's role-holders right after clearing `pending_user_action` (the
+  // `field_changed='pending_user_action'` activity row by itself does not
+  // dispatch through the column-routing path). Standalone context omits it;
+  // unpend in that mode degrades to a no-op for the dispatch with a warn log,
+  // since standalone has no live agent session to push to anyway.
+  triggerLoopService?: TriggerLoopService;
 }
 
 /**

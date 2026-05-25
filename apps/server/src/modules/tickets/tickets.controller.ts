@@ -594,6 +594,25 @@ export class TicketsController {
       });
     }
 
+    // Ticket a57517be finding 2: an unpend (true → false) must explicitly
+    // wake the ticket's current column's role-holders. The
+    // `field_changed='pending_user_action'` activity row above does NOT
+    // route through column-based dispatch on its own, and before this
+    // flip the focus-selector + trigger-loop gates would have dropped
+    // any incidental wake-up anyway. Mirrors the MCP `unpend_ticket`
+    // tool. Focus selector inside `_emitTrigger` still applies — if the
+    // assignee is already focused on another ticket, this stays silent
+    // and the focus model decides when this ticket comes back in.
+    if (pendingChanged && oldPending && !ticket.pending_user_action) {
+      try {
+        await this.triggerLoop.dispatchCurrentColumn(ticket.id, 'unpend', actorId || '');
+      } catch (e) {
+        this.logService.warn('Tickets', 'unpend dispatch failed (continuing)', {
+          err: String(e), ticket_id: ticket.id,
+        });
+      }
+    }
+
     const updated = await loadTicketFull(this.dataSource, ticket.id);
     return res.json(updated);
   }

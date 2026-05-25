@@ -613,6 +613,104 @@ export class TriggerLoopService implements OnModuleInit {
   }
 
   /**
+   * Wake every role holder routed to the ticket's CURRENT column.
+   *
+   * Mirrors the `_handleActivity` column_move dispatch (read
+   * BoardColumn.role_routing → resolve WorkspaceRole → look up
+   * TicketRoleAssignment → emit per holder) but is callable directly from
+   * paths that are NOT activity-driven and shouldn't be made to fake a
+   * `system`-actor activity row (which `_handleActivity` would early-return
+   * on anyway). Currently used by the unpend path (ticket a57517be) — the
+   * MCP `unpend_ticket` tool and the REST PATCH that clears
+   * `pending_user_action` need an explicit wake, because the
+   * `field_changed='pending_user_action'` activity row that the unpend
+   * writes does not by itself route to the column's role holders (it's a
+   * field-update, but `_handleActivity` is keyed off comments / moves /
+   * any update — and on a previously-pending ticket the focus gate would
+   * have dropped activity-driven triggers up until this moment).
+   *
+   * Skip cases (silent, one info log each):
+   *   - ticket missing / has no column_id
+   *   - current column is terminal
+   *   - column's role_routing is empty
+   *   - ticket still has `pending_user_action=true` (caller forgot to clear)
+   *
+   * Per-holder emit goes through `_emitTrigger`, which applies the focus
+   * selector gate (no `bypassFocus` here — if some other ticket is the
+   * agent's focus on this (board, role), the wake stays silent and the
+   * focus model decides when this ticket comes back into rotation).
+   *
+   * Returns the count of emits attempted (NOT a count of "landed" — that's
+   * the focus gate's call, and a 0 return is fine if the focus selector
+   * is gating on a different ticket).
+   */
+  async dispatchCurrentColumn(
+    ticketId: string,
+    triggerSource: string,
+    triggeredBy: string,
+  ): Promise<{ emitted: number }> {
+    const ticketRepo = this.dataSource.getRepository(Ticket);
+    const ticket = await ticketRepo.findOne({ where: { id: ticketId } });
+    if (!ticket || !ticket.column_id) return { emitted: 0 };
+
+    if (ticket.pending_user_action) {
+      this.logService.info('MCP', 'dispatchCurrentColumn skipped (ticket still pending)', {
+        ticket_id: ticket.id, source: triggerSource,
+      });
+      return { emitted: 0 };
+    }
+
+    const col = await this.dataSource
+      .getRepository(BoardColumn)
+      .findOne({ where: { id: ticket.column_id } });
+    if (!col) return { emitted: 0 };
+
+    const isTerminal = (col as any).is_terminal === true || (col as any).kind === 'terminal';
+    if (isTerminal) {
+      this.logService.info('MCP', 'dispatchCurrentColumn skipped (terminal column)', {
+        ticket_id: ticket.id, column_id: col.id, source: triggerSource,
+      });
+      return { emitted: 0 };
+    }
+
+    const slugs = safeJsonParse<string[]>((col as any).role_routing, []);
+    if (!Array.isArray(slugs) || slugs.length === 0) {
+      this.logService.info('MCP', 'dispatchCurrentColumn skipped (empty role_routing)', {
+        ticket_id: ticket.id, column_id: col.id, source: triggerSource,
+      });
+      return { emitted: 0 };
+    }
+
+    const roleRepo = this.dataSource.getRepository(WorkspaceRole);
+    const assignRepo = this.dataSource.getRepository(TicketRoleAssignment);
+    let emitted = 0;
+    const seen = new Set<string>();
+    for (const slug of slugs) {
+      const role = await roleRepo.findOne({
+        where: { workspace_id: ticket.workspace_id, slug },
+      });
+      if (!role) continue;
+      const assignment = await assignRepo.findOne({
+        where: { ticket_id: ticket.id, role_id: role.id },
+      });
+      const targetAgentId = assignment?.agent_id || '';
+      if (!targetAgentId) continue;
+      const dedupeKey = `${slug}|${targetAgentId}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+      try {
+        await this._emitTrigger(ticket, targetAgentId, slug, triggerSource, triggeredBy);
+        emitted++;
+      } catch (e) {
+        this.logService.warn('MCP', 'dispatchCurrentColumn emit failed (continuing)', {
+          err: String(e), ticket_id: ticket.id, role: slug, agent_id: targetAgentId,
+        });
+      }
+    }
+    return { emitted };
+  }
+
+  /**
    * Static self-improvement analysis prompt injected as `column_prompt` on
    * `ticket_done_review` triggers. Kept inline (not table-driven) so the
    * post-done flow is self-contained: an admin only has to flip

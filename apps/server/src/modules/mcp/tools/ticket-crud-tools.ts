@@ -87,7 +87,7 @@ async function applyRoleAssignments(
 }
 
 export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): void {
-  const { dataSource, activityService, logger, ticketRoleAssignmentService } = ctx;
+  const { dataSource, activityService, logger, ticketRoleAssignmentService, triggerLoopService } = ctx;
 
   server.tool(
     'get_ticket',
@@ -470,6 +470,28 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
         });
       }
 
+      // Ticket a57517be finding 2: an update_ticket call that flips
+      // `pending_user_action` true → false must explicitly wake the
+      // current column's role-holders. Mirrors the dedicated
+      // `unpend_ticket` tool and the REST PATCH path — the activity row
+      // alone does not route through column-based dispatch.
+      if (
+        triggerLoopService &&
+        changes.includes('pending_user_action') &&
+        oldPending &&
+        !ticket.pending_user_action
+      ) {
+        try {
+          await triggerLoopService.dispatchCurrentColumn(
+            ticket.id, 'unpend', caller?.agentId || '',
+          );
+        } catch (e) {
+          logger.warn('MCP', 'update_ticket unpend dispatch failed (continuing)', {
+            err: String(e), ticket_id: ticket.id,
+          });
+        }
+      }
+
       const updated = await loadTicketFull(dataSource, ticket.id);
       return ok(updated);
     }
@@ -532,6 +554,25 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           ticket_id: ticket.id,
           actor_id: caller?.agentId, actor_name: caller?.agentName,
         });
+        // Ticket a57517be finding 2: clearing the flag must explicitly wake
+        // the current column's role-holders. The `pending_user_action` field
+        // activity above does NOT route through column-based dispatch (and
+        // even if it did, `_handleActivity`'s focus-selector gate would still
+        // need the flag flipped first — which it now is). Goes through the
+        // focus selector inside `_emitTrigger` so if the agent is already
+        // focused on another ticket, this stays silent and the focus model
+        // decides when this ticket comes back into rotation.
+        if (triggerLoopService) {
+          try {
+            await triggerLoopService.dispatchCurrentColumn(
+              ticket.id, 'unpend', caller?.agentId || '',
+            );
+          } catch (e) {
+            logger.warn('MCP', 'unpend_ticket dispatch failed (continuing)', {
+              err: String(e), ticket_id: ticket.id,
+            });
+          }
+        }
       }
       const updated = await loadTicketFull(dataSource, ticket.id);
       return ok(updated);
