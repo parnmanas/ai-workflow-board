@@ -380,7 +380,7 @@ export class TicketsController {
     const actorId = currentUser?.id || undefined;
     const actorName = currentUser?.name || currentUser?.email || undefined;
 
-    const { title, description, priority, assignee, reporter, reviewer_id, assignee_id, reporter_id, labels, channel_ids, status, prompt_text, base_repo_resource_id, base_branch, role_assignments, next_ticket_id } = body;
+    const { title, description, priority, assignee, reporter, reviewer_id, assignee_id, reporter_id, labels, channel_ids, status, prompt_text, base_repo_resource_id, base_branch, role_assignments, next_ticket_id, pending_user_action, pending_reason } = body;
     const oldAssignee = ticket.assignee;
     const oldReporter = ticket.reporter;
     const oldReviewerId = ticket.reviewer_id;
@@ -388,6 +388,7 @@ export class TicketsController {
     const oldBaseRepoId = ticket.base_repo_resource_id;
     const oldBaseBranch = ticket.base_branch;
     const oldNextTicketId = ticket.next_ticket_id;
+    const oldPending = !!ticket.pending_user_action;
 
     if (title !== undefined) ticket.title = title;
     if (description !== undefined) ticket.description = description;
@@ -461,6 +462,35 @@ export class TicketsController {
       } catch (e: any) {
         return res.status(400).json({ error: e?.message || 'next_ticket_id rejected' });
       }
+    }
+
+    // Pending-user-action toggle (ticket a57517be). Mirrors the MCP
+    // update_ticket path: flipping true stamps set_at + set_by, flipping
+    // false clears all three; updating the reason on an already-pending
+    // ticket is a separate small change.
+    let pendingChanged = false;
+    let pendingReasonChanged = false;
+    if (pending_user_action !== undefined) {
+      const next = !!pending_user_action;
+      if (next !== oldPending) {
+        ticket.pending_user_action = next;
+        if (next) {
+          ticket.pending_set_at = new Date();
+          ticket.pending_set_by = actorName || '';
+          if (pending_reason !== undefined) ticket.pending_reason = pending_reason || '';
+        } else {
+          ticket.pending_set_at = null;
+          ticket.pending_set_by = '';
+          ticket.pending_reason = '';
+        }
+        pendingChanged = true;
+      } else if (next && pending_reason !== undefined && pending_reason !== ticket.pending_reason) {
+        ticket.pending_reason = pending_reason || '';
+        pendingReasonChanged = true;
+      }
+    } else if (pending_reason !== undefined && oldPending && pending_reason !== ticket.pending_reason) {
+      ticket.pending_reason = pending_reason || '';
+      pendingReasonChanged = true;
     }
 
     await this.ticketRepo.save(ticket);
@@ -539,11 +569,26 @@ export class TicketsController {
     if (base_repo_resource_id !== undefined && (base_repo_resource_id || '') !== (oldBaseRepoId || '')) changes.push('base_repo');
     if (base_branch !== undefined && (base_branch || '') !== (oldBaseBranch || '')) changes.push('base_branch');
     if (next_ticket_id !== undefined && (ticket.next_ticket_id || '') !== (oldNextTicketId || '')) changes.push('next_ticket');
+    if (pendingReasonChanged) changes.push('pending_reason');
     const otherChanges = changes.filter(c => !['assignee', 'reporter', 'status'].includes(c));
     if (otherChanges.length > 0) {
       await this.activityService.logActivity({
         entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
         field_changed: otherChanges.join(', '),
+        ticket_id: ticket.parent_id || ticket.id,
+        actor_id: actorId, actor_name: actorName,
+      });
+    }
+    // Pending-user-action gets its own activity row so the audit trail
+    // shows the explicit flip rather than being bundled into a generic
+    // "updated". Field name matches the MCP path so a single grep
+    // surfaces every park/unpark event.
+    if (pendingChanged) {
+      await this.activityService.logActivity({
+        entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
+        field_changed: 'pending_user_action',
+        old_value: oldPending ? 'true' : 'false',
+        new_value: ticket.pending_user_action ? 'true' : 'false',
         ticket_id: ticket.parent_id || ticket.id,
         actor_id: actorId, actor_name: actorName,
       });
