@@ -99,3 +99,30 @@ test('backlog_promoted audit row records the chain_target=true|false token', () 
     'backlog_promoted activity new_value must include `chain_target=${isChainTarget.has(ticket.id)}`',
   );
 });
+
+test('tryPromote candidate query filters out pending_user_action tickets', () => {
+  // Regression-grep — ticket a57517be (Ticket Blocking 개선).
+  //
+  // Without this filter a parked Backlog ticket can still be picked as the
+  // promotion candidate, consume the cycle, and have its trigger dropped
+  // downstream by TriggerLoopService — leaving the active column slot
+  // occupied with no driver. The exclusion has to be on the candidate
+  // SELECT, not later in the sort/eligibility loop, so the pending ticket
+  // never even enters the chain-target IN-list.
+  const src = read();
+  // The exclusion sits on the `ticketRepo.createQueryBuilder('t')` block
+  // that builds `candidates`. Match the andWhere clause directly.
+  assert.match(
+    src,
+    /\.andWhere\(\s*['"]t\.pending_user_action\s*=\s*:falseVal['"]/,
+    'candidates query must `.andWhere("t.pending_user_action = :falseVal", ...)` before getMany()',
+  );
+  // Bound parameter must be `false` (not the literal SQL string) so sqlite
+  // 0/1 and postgres true/false both bind correctly — same pattern used by
+  // agent-workload.service.ts for the focus selector.
+  assert.match(
+    src,
+    /falseVal:\s*false/,
+    'pending_user_action filter must bind `falseVal: false` for sqlite/postgres compatibility',
+  );
+});

@@ -198,8 +198,17 @@ export class BacklogPromotionService implements OnModuleInit {
     if (!Array.isArray(destSlugs) || destSlugs.length === 0) return null;
 
     const intakeColIds = intakeCols.map(c => c.id);
+    // Pending-user-action exclusion (ticket a57517be). A parked intake ticket
+    // must not consume the promotion attempt: TriggerLoopService would drop
+    // every agent_trigger we emit for it, leaving the slot occupied in the
+    // active column with no driver. Matches the same exclusion in
+    // AgentWorkloadService.getFocusTicket and the MCP tool-description
+    // contract ("BacklogPromotionService refuses to promote pending tickets").
+    // Bound parameter for boolean — sqlite stores 0/1, postgres true/false;
+    // TypeORM's parameter binding picks the right cast for both drivers.
     const candidates = await ticketRepo.createQueryBuilder('t')
       .where('t.column_id IN (:...ids)', { ids: intakeColIds })
+      .andWhere('t.pending_user_action = :falseVal', { falseVal: false })
       .getMany();
     if (candidates.length === 0) return null;
 
