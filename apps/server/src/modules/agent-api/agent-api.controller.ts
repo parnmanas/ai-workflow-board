@@ -2,7 +2,7 @@ import { ApiTags, ApiSecurity } from '@nestjs/swagger';
 import { Controller, Get, Post, Body, Param, Query, Req, Res, UseGuards } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
+import { Repository, DataSource, IsNull } from 'typeorm';
 import { Board } from '../../entities/Board';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { Ticket } from '../../entities/Ticket';
@@ -24,6 +24,11 @@ import {
   shiftTicketPositions,
 } from '../mcp/shared/ticket-helpers';
 import { loadTicketFull } from '../mcp/shared/ticket-parsing';
+import {
+  applyTerminalEnteredAtForMove,
+  getRootArchivedAt,
+  TicketArchivedError,
+} from '../mcp/shared/archive-helpers';
 import { findOrFail } from '../../common/find-or-fail';
 import { resolveAgentDisplayName } from '../../utils/agent-name';
 
@@ -66,8 +71,12 @@ export class AgentApiController {
       board: board.name,
       description: board.description,
       columns: await Promise.all(columns.map(async col => {
+        // Mirror REST GET /api/boards/:id — archived tickets drop out by
+        // default. Legacy agent-api has no opt-in flag; if a caller needs
+        // the full set they should migrate to the MCP get_board tool with
+        // include_archived=true (or hit the archive endpoint directly).
         const tickets = await this.ticketRepo.find({
-          where: { column_id: col.id },
+          where: { column_id: col.id, archived_at: IsNull() },
           relations: ['children'],
           order: { position: 'ASC' },
         });
@@ -125,14 +134,22 @@ export class AgentApiController {
     if (!ticketId || !toColumn) return res.status(400).json({ error: 'ticketId and toColumn are required' });
 
     const ticket = await findOrFail(this.ticketRepo, { where: { id: ticketId } }, 'Ticket not found');
+    if (ticket.archived_at) {
+      return res.status(409).json({
+        error: 'ticket_archived',
+        hint: 'Call unarchive first',
+        message: new TicketArchivedError(ticket.id).message,
+      });
+    }
 
     const col = await findColumnByName(this.dataSource, boardId, toColumn);
     if (!col) return res.status(404).json({ error: `Column "${toColumn}" not found` });
 
     await this.dataSource.transaction(async (manager) => {
       const tRepo = manager.getRepository(Ticket);
+      const sourceColumnId = ticket.column_id;
 
-      await shiftTicketPositions(tRepo, { column_id: ticket.column_id }, ticket.position, -1);
+      await shiftTicketPositions(tRepo, { column_id: sourceColumnId }, ticket.position, -1);
 
       const destCount = await tRepo.createQueryBuilder('t')
         .where('t.column_id = :colId AND t.id != :id AND t.parent_id IS NULL', { colId: col.id, id: ticket.id }).getCount();
@@ -141,6 +158,15 @@ export class AgentApiController {
       await shiftTicketPositions(tRepo, { column_id: col.id }, pos, +1, { inclusive: true, excludeId: ticket.id });
 
       await tRepo.update(ticket.id, { column_id: col.id, position: pos });
+
+      // Keep terminal_entered_at honest on the legacy surface too — without
+      // this stamp the archiver would never see tickets moved into Done via
+      // this endpoint and would silently skip them forever.
+      const colRepoTx = manager.getRepository(BoardColumn);
+      const sourceCol = sourceColumnId
+        ? await colRepoTx.findOne({ where: { id: sourceColumnId } })
+        : null;
+      await applyTerminalEnteredAtForMove(tRepo, ticket.id, sourceCol, col);
     });
 
     return res.json({ success: true, ticketId, movedTo: toColumn });

@@ -5,6 +5,7 @@
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { IsNull } from 'typeorm';
 import { z } from 'zod';
 import { Workspace } from '../../../entities/Workspace';
 import { Board } from '../../../entities/Board';
@@ -36,9 +37,12 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'get_board',
-    'Get a board with all columns, tickets (with children and comments)',
-    { board_id: z.string().describe('Board ID') },
-    async ({ board_id }) => {
+    'Get a board with all columns, tickets (with children and comments). Archived tickets are excluded by default — pass include_archived=true to surface them.',
+    {
+      board_id: z.string().describe('Board ID'),
+      include_archived: z.boolean().optional().default(false).describe('Include archived tickets (archived_at IS NOT NULL). Default false matches REST /api/boards/:id.'),
+    },
+    async ({ board_id, include_archived }) => {
       const board = await dataSource.getRepository(Board).findOne({ where: { id: board_id } });
       if (!board) return err('Board not found');
 
@@ -50,8 +54,10 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
       const ticketRepo = dataSource.getRepository(Ticket);
       const columnsWithTickets = await Promise.all(
         columns.map(async (col) => {
+          const whereTickets: any = { column_id: col.id };
+          if (!include_archived) whereTickets.archived_at = IsNull();
           const tickets = await ticketRepo.find({
-            where: { column_id: col.id },
+            where: whereTickets,
             relations: ['children', 'children.children', 'comments'],
             order: { position: 'ASC' },
           });
@@ -86,9 +92,12 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'get_board_summary',
-    'Get a compact LLM-friendly board summary with column names, ticket counts, and per-ticket overview',
-    { board_id: z.string().optional().describe('Board ID') },
-    async ({ board_id }) => {
+    'Get a compact LLM-friendly board summary with column names, ticket counts, and per-ticket overview. Archived tickets are excluded by default — pass include_archived=true to surface them.',
+    {
+      board_id: z.string().optional().describe('Board ID'),
+      include_archived: z.boolean().optional().default(false).describe('Include archived tickets (archived_at IS NOT NULL). Default false matches the rest of the active-ticket surface.'),
+    },
+    async ({ board_id, include_archived }) => {
       const board = await dataSource.getRepository(Board).findOne({ where: { id: board_id } });
       if (!board) return err('Board not found');
 
@@ -101,7 +110,9 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
       const columnIds = columns.map(c => c.id);
       const allTickets = columnIds.length > 0
         ? await dataSource.getRepository(Ticket).find({
-            where: columnIds.map(cid => ({ column_id: cid })),
+            where: columnIds.map(cid => include_archived
+              ? { column_id: cid }
+              : { column_id: cid, archived_at: IsNull() }),
             relations: ['children'],
             order: { position: 'ASC' },
           })
