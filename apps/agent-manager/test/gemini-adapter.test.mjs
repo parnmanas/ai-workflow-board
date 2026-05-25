@@ -150,8 +150,11 @@ test('prepareCliHome writes AWB MCP server into settings.json when mcp ctx given
   const settings = JSON.parse(
     await fsp.readFile(join(home, '.gemini', 'settings.json'), 'utf8'),
   );
-  assert.equal(settings.mcpServers.awb.type, 'http');
-  assert.equal(settings.mcpServers.awb.url, 'https://awb.example.com/mcp');
+  // AWB's /mcp is Streamable HTTP — Gemini CLI's schema uses `httpUrl`
+  // for that transport; `url` would be parsed as SSE on older CLIs.
+  assert.equal(settings.mcpServers.awb.httpUrl, 'https://awb.example.com/mcp');
+  assert.equal(settings.mcpServers.awb.url, undefined, 'must not emit `url` — that key means SSE on older gemini-cli');
+  assert.equal(settings.mcpServers.awb.type, undefined, '`type` is only meaningful with `url`, not `httpUrl`');
   assert.equal(settings.mcpServers.awb.headers.Authorization, 'Bearer sk-agent-123');
   assert.equal(settings.mcpServers.awb.headers['X-AWB-Client-Type'], 'managed-subagent');
   assert.equal(settings.mcpServers.awb.trust, true);
@@ -176,8 +179,9 @@ test('prepareCliHome merges AWB MCP server with existing settings.json', async (
   // Operator settings preserved.
   assert.equal(settings.security.auth.selectedType, 'oauth-personal');
   assert.equal(settings.mcpServers.existing.command, '/bin/foo');
-  // AWB entry added.
-  assert.equal(settings.mcpServers.awb.url, 'http://localhost:7701/mcp');
+  // AWB entry added — via the Streamable-HTTP `httpUrl` key, not `url`.
+  assert.equal(settings.mcpServers.awb.httpUrl, 'http://localhost:7701/mcp');
+  assert.equal(settings.mcpServers.awb.url, undefined);
 });
 
 test('prepareCliHome erases stale oauth file on api_key switch', async () => {

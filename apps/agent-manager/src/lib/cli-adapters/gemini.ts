@@ -243,9 +243,14 @@ export class GeminiCliAdapter extends CliAdapter {
     const mcpServers = (settings.mcpServers && typeof settings.mcpServers === 'object')
       ? settings.mcpServers
       : {};
+    // AWB's `/mcp` endpoint is Streamable HTTP (WebStandardStreamableHTTP-
+    // ServerTransport). Gemini CLI's mcpServers schema uses `httpUrl` for
+    // Streamable HTTP and `url` for SSE — bare `url` meant SSE in releases
+    // before the Dec-2025 consolidation (PR google-gemini/gemini-cli#13762),
+    // so emitting `url` would route AWB through the wrong transport on
+    // older CLIs. `httpUrl` is unambiguous on every released version.
     mcpServers.awb = {
-      type: 'http',
-      url: `${awbUrl.replace(/\/$/, '')}/mcp`,
+      httpUrl: `${awbUrl.replace(/\/$/, '')}/mcp`,
       headers: {
         Authorization: `Bearer ${apiKey}`,
         'X-AWB-Client-Type': 'managed-subagent',
