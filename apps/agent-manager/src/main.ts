@@ -663,13 +663,20 @@ async function runRuntime(
             meta = null;
           }
           if (!meta) {
-            // File absent — surface as 'missing' (api_key was already
-            // handled above; reaching here means the operator either
-            // never authed on the host or the symlink is broken).
+            // No disk metadata. Resolution depends on the spawn-time kind:
+            //   - operator_home → expected for adapters that don't implement
+            //     readCredentialMeta (codex/gemini). The agent IS configured;
+            //     the manager just can't introspect the file. Report as
+            //     'operator_home' with null expiry so the UI stays consistent
+            //     across CLIs instead of falsely flagging this as 'missing'.
+            //   - subscription → a real problem: the per-agent OAuth file
+            //     this agent was provisioned with is now gone. Report 'missing'
+            //     so the UI surfaces it loudly.
+            //   - (api_key was already short-circuited above.)
             out.push({
               agent_id: ctx.agent_id,
               cli: ctx.cli,
-              kind: 'missing',
+              kind: ctx.credential_kind === 'operator_home' ? 'operator_home' : 'missing',
               expires_at_ms: null,
               refresh_token_present: false,
             });

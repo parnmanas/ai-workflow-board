@@ -773,9 +773,15 @@ export default function AgentManagerPage() {
 //   1. expired (now ≥ expires_at_ms) → red, regardless of refresh_token
 //   2. <48h to expiry → yellow
 //   3. refresh_token_present === false → yellow (any expiry = silent fail)
-//   4. kind === 'unknown' / 'missing' → yellow (no metadata to validate)
+//   4. kind === 'unknown' / 'missing' → yellow / red (no metadata to validate)
 //   5. kind === 'api_key' → no badge (env var has no expiry concept)
-//   6. >48h with refresh token → no badge (healthy)
+//   6. kind === 'operator_home' → always badge (neutral when healthy or
+//      uninspectable, escalated to expiring/expired/no-refresh when the
+//      operator's introspectable expiry is concerning). Surfacing this
+//      consistently is what keeps codex/gemini agents from looking
+//      "broken" (red 'missing') next to claude agents on the same
+//      operator-HOME fallback.
+//   7. subscription kind with >48h refresh-token-present → no badge (healthy)
 
 const EXPIRY_WARNING_MS = 48 * 60 * 60 * 1000;
 
@@ -785,7 +791,7 @@ const EXPIRY_WARNING_MS = 48 * 60 * 60 * 1000;
  *  on the manager host (where they'll need to re-auth claude anyway). */
 const RELOGIN_DOC_PATH = 'docs/managed-agent-relogin.md';
 
-type CredentialBadgeSeverity = 'expired' | 'expiring' | 'no-refresh' | 'unknown' | 'missing';
+type CredentialBadgeSeverity = 'expired' | 'expiring' | 'no-refresh' | 'unknown' | 'missing' | 'operator-home';
 
 interface CredentialBadgeData {
   severity: CredentialBadgeSeverity;
@@ -796,8 +802,9 @@ interface CredentialBadgeData {
 
 /**
  * Decide whether (and how) to badge an agent given its credential entry.
- * Returns null when the agent is healthy or the badge would be noise
- * (api_key kind, no entry yet from a pre-feature manager, etc.).
+ * Returns null when the agent is healthy on a per-agent credential or
+ * the badge would be noise (api_key kind, no entry yet from a pre-feature
+ * manager). operator_home always badges — see severity rules above.
  */
 function classifyCredential(entry: AgentCredentialEntry | undefined): CredentialBadgeData | null {
   if (!entry) return null;                          // pre-feature manager
@@ -821,7 +828,60 @@ function classifyCredential(entry: AgentCredentialEntry | undefined): Credential
     };
   }
 
-  // subscription / operator_home — both carry a real expires_at.
+  if (entry.kind === 'operator_home') {
+    // No per-agent credential is configured. The manager uses the
+    // operator's HOME credential (claude `.credentials.json`, codex
+    // `auth.json`, etc.) for every spawn. Always show a badge so the
+    // operator sees a consistent state across all CLIs — the previous
+    // behaviour silently hid healthy claude agents (>48h remaining)
+    // while reporting codex/gemini ones as red 'missing', even though
+    // both were in the exact same fallback state.
+    if (typeof entry.expires_at_ms === 'number') {
+      const remaining = entry.expires_at_ms - now;
+      if (remaining <= 0) {
+        return {
+          severity: 'expired',
+          label: 'op HOME expired',
+          detail: entry.refresh_token_present
+            ? 'Operator HOME OAuth access token has expired but a refresh token is present — the CLI should auto-renew on the next turn. If turns keep failing with is_error=true, re-login on the manager host.'
+            : 'Operator HOME OAuth access token has expired and no refresh token is on disk. The manager cannot auto-renew; an operator must re-login on the manager host.',
+        };
+      }
+      if (!entry.refresh_token_present) {
+        return {
+          severity: 'no-refresh',
+          label: `op HOME · no refresh · ${formatRemaining(remaining)}`,
+          detail: `Operator HOME OAuth credential has no refresh_token, so when the access token expires (${formatRemaining(remaining)}) every turn will silently fail. Re-login on the manager host to capture a credential file with a refresh_token.`,
+        };
+      }
+      if (remaining < EXPIRY_WARNING_MS) {
+        return {
+          severity: 'expiring',
+          label: `op HOME · expires in ${formatRemaining(remaining)}`,
+          detail: `Operator HOME OAuth access token expires in ${formatRemaining(remaining)}. A refresh token is present so the CLI will normally auto-renew silently — but if it fails, every turn returns is_error=true with no signal. Re-login proactively if you'd rather not depend on that path.`,
+        };
+      }
+      // Healthy operator HOME (>48h, refresh present). Still badge so the
+      // operator can tell at a glance "no per-agent credential set up here".
+      return {
+        severity: 'operator-home',
+        label: 'operator HOME',
+        detail: `No per-agent credential is configured for this agent. The manager is using the operator's HOME credential (auto-renewing; ${formatRemaining(remaining)} on current access token). Configure a per-agent credential in this workspace's Credentials tab for isolated auth.`,
+      };
+    }
+    // No expiry metadata. Normal for adapters that don't introspect their
+    // credential file (codex / gemini); also covers claude operator-HOME
+    // when the operator hasn't run `claude login` yet — in that case the
+    // CLI will surface its own "not authenticated" error on first spawn,
+    // which is clearer than anything we could synthesize here.
+    return {
+      severity: 'operator-home',
+      label: 'operator HOME',
+      detail: 'No per-agent credential is configured for this agent. The manager is using the operator\'s HOME credential as fallback; the manager cannot introspect this CLI\'s credential file format, so no expiry is shown.',
+    };
+  }
+
+  // subscription kind — per-agent OAuth credential. Carries a real expires_at.
   if (typeof entry.expires_at_ms === 'number') {
     const remaining = entry.expires_at_ms - now;
     if (remaining <= 0) {
@@ -853,7 +913,7 @@ function classifyCredential(entry: AgentCredentialEntry | undefined): Credential
     return null;
   }
 
-  // subscription / operator_home with no expires_at_ms → unrecognized; surface.
+  // subscription with no expires_at_ms → unrecognized; surface.
   return {
     severity: 'unknown',
     label: 'credential ?',
@@ -881,8 +941,15 @@ function CredentialExpiryBadge({ entry }: { entry: AgentCredentialEntry | undefi
     'no-refresh': { bg: `${tokens.colors.warning}20`, fg: tokens.colors.warning, border: tokens.colors.warning },
     unknown:    { bg: `${tokens.colors.warning}20`, fg: tokens.colors.warning, border: tokens.colors.warning },
     missing:    { bg: `${tokens.colors.danger}20`,  fg: tokens.colors.danger,  border: tokens.colors.danger },
+    // Neutral / informational — "no per-agent credential, using operator HOME
+    // fallback". Not a warning state, so use textSecondary instead of the
+    // warning/danger palette to keep the row visually calm.
+    'operator-home': { bg: tokens.colors.surfaceHover, fg: tokens.colors.textSecondary, border: tokens.colors.border },
   };
   const c = palette[data.severity];
+  // Drop the warning glyph for the neutral operator-home state so it doesn't
+  // visually compete with real expiry/missing warnings on the same page.
+  const prefix = data.severity === 'operator-home' ? '' : '⚠ ';
   return (
     <span
       style={{ position: 'relative', display: 'inline-flex' }}
@@ -905,7 +972,7 @@ function CredentialExpiryBadge({ entry }: { entry: AgentCredentialEntry | undefi
           cursor: 'help',
         }}
       >
-        ⚠ {data.label}
+        {prefix}{data.label}
       </span>
       {hover && (
         <span
