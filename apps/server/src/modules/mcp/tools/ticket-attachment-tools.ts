@@ -73,6 +73,8 @@ export function registerTicketAttachmentTools(server: McpServer, ctx: ToolContex
       const mimetype = inferTicketAttachmentMimetype(file_name, file_mimetype);
 
       const row = await attRepo.save(attRepo.create({
+        owner_type: 'ticket',
+        owner_id: ticket_id,
         ticket_id,
         workspace_id: ticket.workspace_id || '',
         file_name,
@@ -141,7 +143,9 @@ export function registerTicketAttachmentTools(server: McpServer, ctx: ToolContex
       const row = await attRepo.findOne({ where: { id: attachment_id } });
       if (!row) return err('Attachment not found');
 
-      const ticket = await dataSource.getRepository(Ticket).findOne({ where: { id: row.ticket_id } });
+      const ticket = row.ticket_id
+        ? await dataSource.getRepository(Ticket).findOne({ where: { id: row.ticket_id } })
+        : null;
       if (ticket?.archived_at) return err(new TicketArchivedError(ticket.id).message);
       await attRepo.delete({ id: attachment_id });
 

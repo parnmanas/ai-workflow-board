@@ -1359,6 +1359,8 @@ export class TicketsController {
       for (const f of incoming) {
         const mimetype = inferTicketAttachmentMimetype(f.file_name, f.file_mimetype);
         const row = await repo.save(repo.create({
+          owner_type: 'ticket',
+          owner_id: id,
           ticket_id: id,
           workspace_id: ticket.workspace_id || '',
           file_name: f.file_name,

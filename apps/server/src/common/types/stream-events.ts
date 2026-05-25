@@ -119,6 +119,14 @@ export interface ChatRequestHistoryEntry {
   message_id: string;
   sender_type: 'user' | 'agent';
   content: string;
+  attachments?: Array<{
+    id: string;
+    filename: string;
+    mime_type: string;
+    size_bytes: number;
+    thumbnail_url?: string;
+    download_url: string;
+  }>;
   created_at: string; // ISO-8601
 }
 
@@ -146,6 +154,14 @@ export interface ChatRoomMessagePayload {
   sender_id: string;
   sender_name: string;
   content: string;
+  attachments?: Array<{
+    id: string;
+    filename: string;
+    mime_type: string;
+    size_bytes: number;
+    thumbnail_url?: string;
+    download_url: string;
+  }>;
   created_at: string; // ISO-8601
   // v0.33: trailing consecutive agent-sender count in the room, including this
   // message. user-sent → 0; agent reply to a user → 1; agent reply to that → 2…

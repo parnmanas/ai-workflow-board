@@ -394,6 +394,41 @@ export function projectTicketAttachment(
   return out;
 }
 
+export function isImageAttachment(row: TicketAttachment): boolean {
+  return /^image\//i.test(row.file_mimetype || '');
+}
+
+export function projectChatAttachment(
+  row: TicketAttachment,
+  options: { includeData?: boolean } = {},
+) {
+  const { includeData = false } = options;
+  const downloadUrl = row.room_id
+    ? `/api/chat-rooms/${row.room_id}/attachments/${row.id}`
+    : `/api/chat-rooms/attachments/${row.id}`;
+  const out: any = {
+    id: row.id,
+    attachment_id: row.id,
+    workspace_id: row.workspace_id,
+    room_id: row.room_id,
+    message_id: row.owner_type === 'chat_message' ? row.owner_id : '',
+    filename: row.file_name,
+    file_name: row.file_name,
+    mime_type: row.file_mimetype,
+    file_mimetype: row.file_mimetype,
+    size_bytes: row.file_size,
+    file_size: row.file_size,
+    download_url: downloadUrl,
+    thumbnail_url: isImageAttachment(row) ? downloadUrl : undefined,
+    uploaded_by_type: row.uploaded_by_type,
+    uploaded_by_id: row.uploaded_by_id,
+    uploaded_by: row.uploaded_by,
+    created_at: row.created_at,
+  };
+  if (includeData) out.file_data = row.file_data;
+  return out;
+}
+
 /**
  * Approximate decoded byte count for a base64 string. Mirrors the formula
  * the comment-attachment path uses (length * 3 / 4); padding overcounts by

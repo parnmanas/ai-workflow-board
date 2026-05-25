@@ -8,10 +8,8 @@ import { BoardColumn } from '../../entities/BoardColumn';
 import { Ticket } from '../../entities/Ticket';
 import { Comment } from '../../entities/Comment';
 import { ChatRoom } from '../../entities/ChatRoom';
-import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
 import { Agent } from '../../entities/Agent';
 import { ApiKey } from '../../entities/ApiKey';
-import { User } from '../../entities/User';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { RoomMembershipService } from '../chat-rooms/room-membership.service';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
@@ -43,7 +41,6 @@ export class AgentApiController {
     @InjectRepository(BoardColumn) private readonly colRepo: Repository<BoardColumn>,
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
     @InjectRepository(Comment) private readonly commentRepo: Repository<Comment>,
-    @InjectRepository(ChatRoomMessage) private readonly messageRepo: Repository<ChatRoomMessage>,
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly membership: RoomMembershipService,
     private readonly messaging: RoomMessagingService,
@@ -449,7 +446,14 @@ export class AgentApiController {
     ) || 'Agent';
 
     const msg = await this.messaging.sendMessage(
-      roomId, room.workspace_id, 'agent', agent_id, agentName, content,
+      roomId,
+      room.workspace_id,
+      'agent',
+      agent_id,
+      agentName,
+      content,
+      undefined,
+      Array.isArray(body.attachment_ids) ? body.attachment_ids : [],
     );
     return res.status(201).json(msg);
   }
@@ -457,46 +461,7 @@ export class AgentApiController {
   @Get('chat-rooms/:roomId/messages')
   async getChatRoomMessages(@Param('roomId') roomId: string, @Res() res: Response, @Query('limit') limitStr?: string) {
     const limit = Math.min(parseInt(limitStr || '50', 10) || 50, 200);
-    const messages = await this.messageRepo
-      .createQueryBuilder('m')
-      .where('m.room_id = :roomId', { roomId })
-      .orderBy('m.created_at', 'DESC')
-      .limit(limit)
-      .getMany();
-
-    const ordered = messages.reverse();
-    const userRepo = this.dataSource.getRepository(User);
-    const agentRepo = this.dataSource.getRepository(Agent);
-    const nameCache = new Map<string, string>();
-
-    const resolved = await Promise.all(ordered.map(async (m) => {
-      const cacheKey = `${m.sender_type}:${m.sender_id}`;
-      let senderName = nameCache.get(cacheKey);
-      if (!senderName) {
-        if (m.sender_type === 'user') {
-          const u = await userRepo.findOne({ where: { id: m.sender_id } });
-          senderName = u ? (u.name || u.email || 'Unknown User') : 'Unknown User';
-        } else if (m.sender_type === 'agent') {
-          const a = await agentRepo.findOne({ where: { id: m.sender_id } });
-          senderName = a ? a.name : 'Unknown Agent';
-        } else {
-          senderName = 'Unknown';
-        }
-        nameCache.set(cacheKey, senderName);
-      }
-      return {
-        id: m.id,
-        room_id: m.room_id,
-        workspace_id: m.workspace_id,
-        sender_type: m.sender_type,
-        sender_id: m.sender_id,
-        sender_name: senderName,
-        content: m.content,
-        created_at: m.created_at,
-        updated_at: m.updated_at,
-      };
-    }));
-
-    return res.json(resolved);
+    const messages = await this.messaging.getMessages(roomId, '', limit, undefined, { observer: true });
+    return res.json(messages);
   }
 }

@@ -1,17 +1,19 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, IsNull } from 'typeorm';
+import { Repository, IsNull, In } from 'typeorm';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
 import { Agent } from '../../entities/Agent';
 import { Ticket } from '../../entities/Ticket';
 import { UserMention } from '../../entities/UserMention';
+import { TicketAttachment } from '../../entities/TicketAttachment';
 import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
 import { MentionService, ResolvedMention } from '../../services/mention.service';
 import { RoomMembershipService } from './room-membership.service';
 import { resolveAgentDisplayName } from '../../utils/agent-name';
+import { projectChatAttachment } from '../mcp/shared/ticket-helpers';
 
 const CONTENT_MAX = 10000;
 
@@ -60,6 +62,9 @@ export class RoomMessagingService {
     @InjectRepository(UserMention)
     private readonly userMentionRepo: Repository<UserMention>,
 
+    @InjectRepository(TicketAttachment)
+    private readonly attachmentRepo: Repository<TicketAttachment>,
+
     private readonly logService: LogService,
 
     private readonly membership: RoomMembershipService,
@@ -107,6 +112,7 @@ export class RoomMessagingService {
     }
 
     const messages = await qb.getMany();
+    const attachmentsByMessage = await this._loadAttachmentsForMessages(messages.map(m => m.id));
 
     // Resolve sender names with caching
     const nameCache = new Map<string, string>();
@@ -126,6 +132,7 @@ export class RoomMessagingService {
           sender_id: msg.sender_id,
           sender_name: senderName,
           content: msg.content,
+          attachments: attachmentsByMessage.get(msg.id) || [],
           created_at: msg.created_at,
           updated_at: msg.updated_at,
         };
@@ -150,6 +157,7 @@ export class RoomMessagingService {
     senderName: string,
     content: string,
     images?: Array<{ data: string; filename: string; mimetype: string }>,
+    attachmentIds?: string[],
   ): Promise<any> {
     await this.membership.requireActiveParticipant(roomId, senderId, senderType);
 
@@ -163,6 +171,17 @@ export class RoomMessagingService {
     if (trimmed.length > CONTENT_MAX) {
       throw makeError(400, `Message exceeds ${CONTENT_MAX} character limit`);
     }
+
+    const resolvedAttachmentIds = Array.isArray(attachmentIds)
+      ? attachmentIds.filter((id): id is string => typeof id === 'string' && id.length > 0)
+      : [];
+    const attachmentRows = await this._validatePendingAttachments(
+      roomId,
+      workspaceId,
+      senderType,
+      senderId,
+      resolvedAttachmentIds,
+    );
 
     // Canonicalize agent senders to `<Manager>/<Agent>` so the SSE event +
     // return value match what getMessages() already returns for history.
@@ -186,6 +205,17 @@ export class RoomMessagingService {
         images: images && images.length > 0 ? JSON.stringify(images) : '[]',
       }),
     );
+
+    let attachments: any[] = [];
+    if (attachmentRows.length > 0) {
+      const ids = attachmentRows.map(r => r.id);
+      await this.attachmentRepo.update(
+        { id: In(ids) },
+        { owner_type: 'chat_message', owner_id: savedMsg.id },
+      );
+      const rows = await this.attachmentRepo.find({ where: { id: In(ids) }, order: { created_at: 'ASC' } });
+      attachments = rows.map(r => projectChatAttachment(r, { includeData: false }));
+    }
 
     // Update denormalized last_message_at for room list sort
     await this.roomRepo.update(roomId, { last_message_at: new Date() });
@@ -215,6 +245,7 @@ export class RoomMessagingService {
       sender_name: senderName,
       content: trimmed,
       images: savedMsg.images,
+      attachments,
       created_at: savedMsg.created_at.toISOString(),
       agent_chain_depth: agentChainDepth,
       member_ids: memberIds,
@@ -246,6 +277,7 @@ export class RoomMessagingService {
       sender_name: senderName,
       content: savedMsg.content,
       images: savedMsg.images,
+      attachments,
       created_at: savedMsg.created_at,
       updated_at: savedMsg.updated_at,
     };
@@ -314,6 +346,7 @@ export class RoomMessagingService {
       sender_name: 'System',
       content: trimmed,
       images: savedMsg.images,
+      attachments: [],
       created_at: savedMsg.created_at.toISOString(),
       // Synthetic source: no agent chain involvement, so the plugin's
       // chain-depth short-circuit never sees this message.
@@ -335,6 +368,7 @@ export class RoomMessagingService {
       sender_name: 'System',
       content: savedMsg.content,
       images: savedMsg.images,
+      attachments: [],
       created_at: savedMsg.created_at,
       updated_at: savedMsg.updated_at,
     };
@@ -510,6 +544,50 @@ export class RoomMessagingService {
       }
     }
     return depth;
+  }
+
+  private async _loadAttachmentsForMessages(messageIds: string[]): Promise<Map<string, any[]>> {
+    const ids = messageIds.filter(Boolean);
+    const out = new Map<string, any[]>();
+    if (ids.length === 0) return out;
+
+    const rows = await this.attachmentRepo.find({
+      where: { owner_type: 'chat_message', owner_id: In(ids) },
+      order: { created_at: 'ASC' },
+    });
+    for (const row of rows) {
+      const list = out.get(row.owner_id) || [];
+      list.push(projectChatAttachment(row, { includeData: false }));
+      out.set(row.owner_id, list);
+    }
+    return out;
+  }
+
+  private async _validatePendingAttachments(
+    roomId: string,
+    workspaceId: string,
+    senderType: string,
+    senderId: string,
+    attachmentIds: string[],
+  ): Promise<TicketAttachment[]> {
+    if (attachmentIds.length === 0) return [];
+    if (attachmentIds.length > 20) throw makeError(400, 'Maximum 20 attachments per message');
+
+    const rows = await this.attachmentRepo.find({ where: { id: In(attachmentIds) } });
+    const byId = new Map(rows.map(r => [r.id, r]));
+    for (const id of attachmentIds) {
+      const row = byId.get(id);
+      if (!row) throw makeError(400, `attachment_ids contains unknown id: ${id}`);
+      if (row.owner_type !== 'chat_message' || row.owner_id) {
+        throw makeError(400, `attachment ${id} is already attached`);
+      }
+      if (row.room_id !== roomId) throw makeError(400, `attachment ${id} belongs to a different room`);
+      if (row.workspace_id !== workspaceId) throw makeError(400, `attachment ${id} belongs to a different workspace`);
+      if (row.uploaded_by_type !== senderType || row.uploaded_by_id !== senderId) {
+        throw makeError(403, `attachment ${id} was uploaded by a different sender`);
+      }
+    }
+    return attachmentIds.map(id => byId.get(id)!).filter(Boolean);
   }
 
   // --- Private helpers (mention dispatch) ---

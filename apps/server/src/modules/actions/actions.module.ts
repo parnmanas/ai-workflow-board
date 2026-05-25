@@ -5,6 +5,7 @@ import { ActionRun } from '../../entities/ActionRun';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
+import { TicketAttachment } from '../../entities/TicketAttachment';
 import { Agent } from '../../entities/Agent';
 import { Board } from '../../entities/Board';
 import { Workspace } from '../../entities/Workspace';
@@ -19,7 +20,7 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Action, ActionRun, ChatRoom, ChatRoomParticipant, ChatRoomMessage, Agent, Board, Workspace, User]),
+    TypeOrmModule.forFeature([Action, ActionRun, ChatRoom, ChatRoomParticipant, ChatRoomMessage, TicketAttachment, Agent, Board, Workspace, User]),
     ChatRoomsModule,
     SharedServicesModule,
   ],

@@ -93,7 +93,7 @@ import * as entitiesBarrel from '../entities';
 void entitiesBarrel;
 
 /**
- * The 8 columns that have an @ManyToOne to a uuid-PK entity (source:
+ * The columns that have an @ManyToOne to a uuid-PK entity (source:
  * grep `@ManyToOne` across entities + checking referencedColumnName).
  * TypeORM's PG driver expects these to be uuid even though the
  * @Column declaration says varchar — the FK type-match drives column
@@ -122,7 +122,7 @@ const MANY_TO_ONE_FK_COLUMNS: ReadonlyArray<ManyToOneFkColumn> = [
   { table: 'chat_room_participants', column: 'room_id',      nullable: false },
   { table: 'columns',                column: 'board_id',     nullable: false },
   { table: 'comments',               column: 'ticket_id',    nullable: false },
-  { table: 'ticket_attachments',     column: 'ticket_id',    nullable: false },
+  { table: 'ticket_attachments',     column: 'ticket_id',    nullable: true  },
   { table: 'tickets',                column: 'column_id',    nullable: true  },
   { table: 'tickets',                column: 'parent_id',    nullable: true  },
 ];

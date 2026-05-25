@@ -22,6 +22,14 @@
 import type { DataSource } from 'typeorm';
 import { ActivityLog } from '../../../entities/ActivityLog';
 import { ApiKey } from '../../../entities/ApiKey';
+import { ChatRoom } from '../../../entities/ChatRoom';
+import { ChatRoomParticipant } from '../../../entities/ChatRoomParticipant';
+import { ChatRoomMessage } from '../../../entities/ChatRoomMessage';
+import { User } from '../../../entities/User';
+import { Agent } from '../../../entities/Agent';
+import { Ticket } from '../../../entities/Ticket';
+import { UserMention } from '../../../entities/UserMention';
+import { TicketAttachment } from '../../../entities/TicketAttachment';
 import { ActivityService } from '../../../services/activity.service';
 import { ApiKeyService } from '../../../services/api-key.service';
 import { LogService } from '../../../services/log.service';
@@ -32,8 +40,8 @@ import type { AgentStatusService } from '../../agents/agent-status.service';
 import type { AllocationService } from '../../agents/allocation.service';
 import type { TriggerLoopService } from '../../agents/trigger-loop.service';
 import type { RoomCrudService } from '../../chat-rooms/room-crud.service';
-import type { RoomMembershipService } from '../../chat-rooms/room-membership.service';
-import type { RoomMessagingService } from '../../chat-rooms/room-messaging.service';
+import { RoomMembershipService } from '../../chat-rooms/room-membership.service';
+import { RoomMessagingService } from '../../chat-rooms/room-messaging.service';
 import type { TicketRoleAssignmentService } from '../../workspace-roles/ticket-role-assignment.service';
 import type { ActionsService } from '../../actions/actions.service';
 
@@ -121,5 +129,36 @@ export function createStandaloneContext(dataSource: DataSource): ToolContext {
   const githubService = new GitHubConnectorService(dataSource);
   const mentionService = new MentionService();
 
-  return { dataSource, activityService, apiKeyService, embeddingService, githubService, mentionService, logger };
+  // v0.33: standalone chat support. Required for send_chat_room_message.
+  const roomMembershipService = new RoomMembershipService(
+    dataSource.getRepository(ChatRoom),
+    dataSource.getRepository(ChatRoomParticipant),
+    dataSource.getRepository(User),
+    dataSource.getRepository(Agent),
+    dataSource,
+  );
+  const roomMessagingService = new RoomMessagingService(
+    dataSource.getRepository(ChatRoom),
+    dataSource.getRepository(ChatRoomParticipant),
+    dataSource.getRepository(ChatRoomMessage),
+    dataSource.getRepository(Agent),
+    dataSource.getRepository(Ticket),
+    dataSource.getRepository(UserMention),
+    dataSource.getRepository(TicketAttachment),
+    logService,
+    roomMembershipService,
+    mentionService,
+  );
+
+  return {
+    dataSource,
+    activityService,
+    apiKeyService,
+    embeddingService,
+    githubService,
+    mentionService,
+    logger,
+    roomMembershipService,
+    roomMessagingService,
+  };
 }

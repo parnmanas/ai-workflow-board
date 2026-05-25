@@ -11,9 +11,12 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { Agent } from '../../../entities/Agent';
 import { ChatRoomParticipant } from '../../../entities/ChatRoomParticipant';
+import { TicketAttachment } from '../../../entities/TicketAttachment';
 import { activityEvents } from '../../../services/activity.service';
+import { MAX_TICKET_ATTACHMENT_SIZE } from '../../../common/constants/upload';
 import { ok, err, MENTION_SYNTAX_DOC, sanitizeHarnessMarkers } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
+import { approxBase64Size, inferTicketAttachmentMimetype, projectChatAttachment } from '../shared/ticket-helpers';
 import type { ToolContext } from './context';
 
 export function registerChatTools(server: McpServer, ctx: ToolContext): void {
@@ -56,8 +59,9 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
     {
       room_id: z.string().describe('Chat room ID to send the message to'),
       content: z.string().min(1).max(10000).describe('Message content (supports markdown: bold, italic, code span, links)'),
+      attachment_ids: z.array(z.string()).optional().describe('Pre-uploaded chat attachment IDs from add_chat_message_attachment or POST /api/chat-rooms/:room_id/attachments.'),
     },
-    async ({ room_id, content }, extra: { sessionId?: string }) => {
+    async ({ room_id, content, attachment_ids }, extra: { sessionId?: string }) => {
       // v0.33: route through RoomMessagingService so the MCP tool, the user
       // REST endpoint (chat-rooms.controller) and the agent ack endpoint
       // (agent-api.controller) all share one save → emit path. That's also
@@ -91,15 +95,65 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
           agent.id,
           agent.name,
           cleanContent,
+          undefined,
+          attachment_ids,
         );
         return ok({
           message_id: msg.id,
           room_id: msg.room_id,
           content: msg.content,
+          attachments: msg.attachments || [],
           created_at: msg.created_at,
         });
       } catch (e: any) {
         return err(e?.message || 'Failed to send chat room message');
+      }
+    }
+  );
+
+  server.tool(
+    'add_chat_message_attachment',
+    'Upload a file into a chat room using the shared attachment storage backend. Pass returned attachment_id in send_chat_room_message.attachment_ids.',
+    {
+      room_id: z.string().describe('Chat room ID'),
+      file_name: z.string().describe('File name with extension'),
+      file_data: z.string().describe('Base64-encoded file bytes (no data: URI prefix)'),
+      file_mimetype: z.string().optional().describe('Explicit MIME type. If omitted, inferred from extension; falls back to application/octet-stream.'),
+    },
+    async ({ room_id, file_name, file_data, file_mimetype }, extra: { sessionId?: string }) => {
+      if (!file_data) return err('file_data is required (base64-encoded bytes)');
+      if (!file_name) return err('file_name is required');
+      if (!roomMembershipService) return err('Chat membership is unavailable in this MCP context');
+
+      const caller = getCallerAgent(extra);
+      if (!caller?.agentId) return err('Unauthorized: agent identity required');
+      const agent = await dataSource.getRepository(Agent).findOne({ where: { id: caller.agentId } });
+      if (!agent?.workspace_id) return err('Could not resolve workspace from caller agent');
+
+      const size = approxBase64Size(file_data);
+      if (size > MAX_TICKET_ATTACHMENT_SIZE) {
+        return err(`Attachment exceeds ${MAX_TICKET_ATTACHMENT_SIZE / 1024 / 1024}MB limit`);
+      }
+
+      try {
+        await roomMembershipService.requireActiveParticipant(room_id, agent.id, 'agent');
+        const row = await dataSource.getRepository(TicketAttachment).save(dataSource.getRepository(TicketAttachment).create({
+          owner_type: 'chat_message',
+          owner_id: '',
+          ticket_id: null,
+          room_id,
+          workspace_id: agent.workspace_id,
+          file_name,
+          file_mimetype: inferTicketAttachmentMimetype(file_name, file_mimetype),
+          file_data,
+          file_size: size,
+          uploaded_by_type: 'agent',
+          uploaded_by_id: agent.id,
+          uploaded_by: caller.agentName || agent.name,
+        }));
+        return ok(projectChatAttachment(row, { includeData: false }));
+      } catch (e: any) {
+        return err(e?.message || 'Failed to upload chat attachment');
       }
     }
   );

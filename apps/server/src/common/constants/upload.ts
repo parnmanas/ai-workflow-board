@@ -15,3 +15,10 @@ export const MAX_COMMENT_ATTACHMENTS = 5;
 // often collect spec PDFs, screenshots, sample inputs, etc.
 export const MAX_TICKET_ATTACHMENT_SIZE = 10 * 1024 * 1024; // 10MB
 export const MAX_TICKET_ATTACHMENTS = 20;
+
+// Generic attachment caps shared by ticket + chat-room owners. Same numbers as
+// the ticket-specific names above; the generic alias is what new chat callers
+// reach for so a future cap diverge (e.g. lower limit for ephemeral chat) can
+// flip these without touching every chat-side call site.
+export const MAX_ATTACHMENT_SIZE = MAX_TICKET_ATTACHMENT_SIZE;
+export const MAX_ATTACHMENTS_PER_OWNER = MAX_TICKET_ATTACHMENTS;

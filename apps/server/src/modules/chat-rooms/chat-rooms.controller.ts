@@ -12,7 +12,9 @@ import {
   Res,
   UseGuards,
 } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
 import { Request, Response } from 'express';
+import { Repository } from 'typeorm';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
@@ -20,7 +22,9 @@ import { PERMISSIONS } from '../../common/types/permissions';
 import { RoomCrudService } from './room-crud.service';
 import { RoomMembershipService } from './room-membership.service';
 import { RoomMessagingService } from './room-messaging.service';
-import { MAX_IMAGE_SIZE, MAX_IMAGES_PER_MESSAGE, ALLOWED_IMAGE_MIMETYPES } from '../../common/constants/upload';
+import { TicketAttachment } from '../../entities/TicketAttachment';
+import { MAX_IMAGE_SIZE, MAX_IMAGES_PER_MESSAGE, ALLOWED_IMAGE_MIMETYPES, MAX_TICKET_ATTACHMENT_SIZE } from '../../common/constants/upload';
+import { approxBase64Size, inferTicketAttachmentMimetype, projectChatAttachment } from '../mcp/shared/ticket-helpers';
 
 @ApiBearerAuth('user-session')
 @ApiTags('chat-rooms')
@@ -31,6 +35,8 @@ export class ChatRoomsController {
     private readonly crud: RoomCrudService,
     private readonly membership: RoomMembershipService,
     private readonly messaging: RoomMessagingService,
+    @InjectRepository(TicketAttachment)
+    private readonly attachmentRepo: Repository<TicketAttachment>,
   ) {}
 
   @Get()
@@ -184,10 +190,114 @@ export class ChatRoomsController {
         user.name || user.email,
         content,
         images,
+        Array.isArray(body.attachment_ids) ? body.attachment_ids : [],
       );
       return res.status(201).json(msg);
     } catch (err: any) {
       return res.status(err.status || 400).json({ error: err.message });
+    }
+  }
+
+  @Post(':roomId/attachments')
+  @RequirePermission(PERMISSIONS.CHAT_SEND)
+  async addAttachment(@Req() req: Request, @Res() res: Response, @Param('roomId') roomId: string, @Body() body: any) {
+    const user = (req as any).currentUser;
+    const wsId = req.headers['x-workspace-id'] as string;
+    if (!wsId) return res.status(400).json({ error: 'Workspace ID required' });
+
+    const incoming: any[] = Array.isArray(body?.attachments)
+      ? body.attachments
+      : (body?.file_data ? [body] : []);
+    if (incoming.length === 0) {
+      return res.status(400).json({ error: 'attachments[] (or a single file_data + file_name) is required' });
+    }
+    for (const f of incoming) {
+      if (!f || typeof f !== 'object' || !f.file_data || !f.file_name) {
+        return res.status(400).json({ error: 'Each attachment must include file_data and file_name' });
+      }
+      if (approxBase64Size(f.file_data) > MAX_TICKET_ATTACHMENT_SIZE) {
+        return res.status(400).json({ error: `Attachment ${f.file_name} exceeds ${MAX_TICKET_ATTACHMENT_SIZE / 1024 / 1024}MB limit` });
+      }
+    }
+
+    try {
+      await this.membership.requireActiveParticipant(roomId, user.id, 'user');
+      const saved: TicketAttachment[] = [];
+      for (const f of incoming) {
+        const row = await this.attachmentRepo.save(this.attachmentRepo.create({
+          owner_type: 'chat_message',
+          owner_id: '',
+          ticket_id: null,
+          room_id: roomId,
+          workspace_id: wsId,
+          file_name: f.file_name,
+          file_mimetype: inferTicketAttachmentMimetype(f.file_name, f.file_mimetype),
+          file_data: f.file_data,
+          file_size: approxBase64Size(f.file_data),
+          uploaded_by_type: 'user',
+          uploaded_by_id: user.id,
+          uploaded_by: user.name || user.email || '',
+        }));
+        saved.push(row);
+      }
+      const out = saved.map(r => projectChatAttachment(r, { includeData: false }));
+      return res.status(201).json(Array.isArray(body?.attachments) ? out : out[0]);
+    } catch (err: any) {
+      return res.status(err.status || 400).json({ error: err.message });
+    }
+  }
+
+  @Get(':roomId/attachments/:attachmentId')
+  @RequirePermission(PERMISSIONS.CHAT_VIEW)
+  async getAttachment(
+    @Req() req: Request,
+    @Res() res: Response,
+    @Param('roomId') roomId: string,
+    @Param('attachmentId') attachmentId: string,
+  ) {
+    const user = (req as any).currentUser;
+    try {
+      await this.membership.requireActiveParticipant(roomId, user.id, 'user');
+      const row = await this.attachmentRepo.findOne({
+        where: { id: attachmentId, room_id: roomId, owner_type: 'chat_message' },
+      });
+      if (!row) return res.status(404).json({ error: 'Attachment not found' });
+      return res.json(projectChatAttachment(row, { includeData: true }));
+    } catch (err: any) {
+      return res.status(err.status || 403).json({ error: err.message });
+    }
+  }
+
+  // Discard a pending upload — only valid before owner_id is bound to a
+  // message. Once attached, the attachment lives and dies with the message
+  // (cleanup on message/room delete, no per-attachment delete after send).
+  // Restricted to the original uploader so a co-participant can't strip a
+  // file from another sender's pending draft.
+  @Delete(':roomId/attachments/:attachmentId')
+  @RequirePermission(PERMISSIONS.CHAT_SEND)
+  async deletePendingAttachment(
+    @Req() req: Request,
+    @Res() res: Response,
+    @Param('roomId') roomId: string,
+    @Param('attachmentId') attachmentId: string,
+  ) {
+    const user = (req as any).currentUser;
+    try {
+      await this.membership.requireActiveParticipant(roomId, user.id, 'user');
+      const row = await this.attachmentRepo.findOne({
+        where: { id: attachmentId, room_id: roomId, owner_type: 'chat_message' },
+      });
+      if (!row) return res.status(404).json({ error: 'Attachment not found' });
+      if (row.owner_id) {
+        return res.status(409).json({ error: 'Attachment is already sent and cannot be deleted directly' });
+      }
+      if (row.uploaded_by_type !== 'user' || row.uploaded_by_id !== user.id) {
+        return res.status(403).json({ error: 'Only the uploader can discard a pending attachment' });
+      }
+      await this.attachmentRepo.delete({ id: attachmentId });
+      return res.json({ ok: true });
+    } catch (err: any) {
+      return res.status(err.status || 403).json({ error: err.message });
     }
   }
 
