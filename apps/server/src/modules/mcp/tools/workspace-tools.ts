@@ -6,6 +6,7 @@
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { IsNull } from 'typeorm';
 import { z } from 'zod';
 import { Workspace } from '../../../entities/Workspace';
 import { Board } from '../../../entities/Board';
@@ -55,7 +56,12 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
           order: { position: 'ASC' },
         });
         const colsSummary = await Promise.all(columns.map(async col => {
-          const ticketCount = await dataSource.getRepository(Ticket).count({ where: { column_id: col.id } });
+          // Archive exclusion (ticket 9b44526b): mirror get_board / get_board_summary
+          // — archived tickets are not part of the active workspace surface and
+          // should not inflate the column ticket_count default callers see.
+          const ticketCount = await dataSource.getRepository(Ticket).count({
+            where: { column_id: col.id, archived_at: IsNull() },
+          });
           return { id: col.id, name: col.name, position: col.position, color: col.color, ticket_count: ticketCount };
         }));
         return { ...board, columns: colsSummary };

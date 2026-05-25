@@ -2,7 +2,7 @@ import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { Controller, Get, Post, Patch, Delete, Body, Param, Query, Res, UseGuards } from '@nestjs/common';
 import { Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { In, IsNull, Repository } from 'typeorm';
 import { Workspace } from '../../entities/Workspace';
 import { Board } from '../../entities/Board';
 import { BoardColumn } from '../../entities/BoardColumn';
@@ -100,7 +100,11 @@ export class WorkspacesController {
       const columns = await this.colRepo.find({ where: { board_id: board.id }, order: { position: 'ASC' } });
       const colsFull = await Promise.all(columns.map(async col => {
         const tickets = await this.ticketRepo.find({
-          where: { column_id: col.id },
+          // Archive exclusion (ticket 9b44526b): workspace board snapshots
+          // must hide archived tickets by default — they have their own
+          // dedicated archive endpoint and including them here would silently
+          // re-inflate every consumer of /api/workspaces/:id.
+          where: { column_id: col.id, archived_at: IsNull() },
           relations: ['children', 'comments'],
           order: { position: 'ASC' },
         });
