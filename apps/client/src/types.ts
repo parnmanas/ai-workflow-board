@@ -394,6 +394,11 @@ export interface Board {
   // post-done reviewer dispatch; 'same_board' / 'remote_awb' / 'both' opt in
   // and choose where the reviewer files follow-up improvement tickets.
   self_improvement_mode?: 'off' | 'same_board' | 'remote_awb' | 'both';
+  // Auto-archive policy: null/absent disables, 1..365 archives Done-column
+  // tickets whose terminal_entered_at is older than N days. Server enforces
+  // the range; UI maps a disabled toggle to null and re-introduces the
+  // previous days value when toggled back on.
+  auto_archive_days?: number | null;
 }
 
 export interface Workspace {

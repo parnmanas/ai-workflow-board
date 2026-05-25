@@ -332,6 +332,7 @@ export default function Board() {
   // Board-scoped action links (workspace-scoped URLs)
   const resourcesLink = wsId && boardId ? `/ws/${wsId}/boards/${boardId}/resources` : '#';
   const settingsLink = wsId && boardId ? `/ws/${wsId}/boards/${boardId}/settings` : '#';
+  const archiveLink = wsId && boardId ? `/ws/${wsId}/boards/${boardId}/archive` : '#';
 
   const headerActionStyle: React.CSSProperties = {
     padding: '6px 14px',
@@ -465,6 +466,9 @@ export default function Board() {
             )}
             <Link to={resourcesLink} style={headerActionStyle}>
               📁 Resources
+            </Link>
+            <Link to={archiveLink} style={headerActionStyle}>
+              🗄 Archive
             </Link>
             <Link to={settingsLink} style={headerActionStyle}>
               ⚙ Settings

@@ -238,6 +238,7 @@ export const api = {
       column_prompts?: Record<string, string> | null;
       max_concurrent_tickets_per_agent?: number;
       self_improvement_mode?: 'off' | 'same_board' | 'remote_awb' | 'both';
+      auto_archive_days?: number | null;
     },
   ) =>
     request<any>(`/boards/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
@@ -256,6 +257,25 @@ export const api = {
     request<any>(`/boards/${boardId}/pause`, { method: 'POST' }),
   resumeBoard: async (boardId: string) =>
     request<any>(`/boards/${boardId}/resume`, { method: 'POST' }),
+  // Archived-ticket surface — distinct from board archive (Board.archived_at)
+  // and the active ticket list (which filters archived_at IS NOT NULL).
+  listArchivedTickets: async (
+    boardId: string,
+    opts?: { cursor?: string; limit?: number; q?: string },
+  ) => {
+    const params = new URLSearchParams();
+    if (opts?.cursor) params.set('cursor', opts.cursor);
+    if (opts?.limit) params.set('limit', String(opts.limit));
+    if (opts?.q) params.set('q', opts.q);
+    const qs = params.toString();
+    return request<{ tickets: any[]; next_cursor: string | null }>(
+      `/boards/${boardId}/archived-tickets${qs ? `?${qs}` : ''}`,
+    );
+  },
+  archiveTicket: async (ticketId: string) =>
+    request<any>(`/tickets/${ticketId}/archive`, { method: 'POST' }),
+  unarchiveTicket: async (ticketId: string) =>
+    request<any>(`/tickets/${ticketId}/unarchive`, { method: 'POST' }),
 
   // ─── Columns ──────────────────────────────────────────
   createColumn: (boardId: string, data: { name: string; color?: string; description?: string }) =>
