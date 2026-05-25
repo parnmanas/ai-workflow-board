@@ -10,7 +10,7 @@ export const activityEvents = new EventEmitter();
 export interface LogActivityParams {
   entity_type: 'ticket' | 'comment';
   entity_id: string | number;
-  action: 'created' | 'updated' | 'moved' | 'deleted' | 'status_changed';
+  action: 'created' | 'updated' | 'moved' | 'deleted' | 'status_changed' | 'archived' | 'unarchived';
   field_changed?: string;
   old_value?: string;
   new_value?: string;

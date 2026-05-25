@@ -118,6 +118,26 @@ export class Ticket {
   @Column({ type: 'varchar', default: '' })
   pending_set_by: string;
 
+  // Soft-archive timestamp for the ticket. When non-null the ticket is
+  // considered archived: excluded from board GET / SSE payloads / supervisor
+  // re-push / backlog promotion / focus selector by default, mutation paths
+  // (move / update / add_comment / claim) reject with 409 ticket_archived,
+  // and only the dedicated archive endpoints + delete remain. Cleared by
+  // unarchive (which also resets terminal_entered_at so the ticket isn't
+  // immediately re-eaten by the archiver tick).
+  @Column({ type: Date, nullable: true, default: null })
+  archived_at: Date | null;
+
+  // Timestamp the ticket entered its current terminal column (kind='terminal'
+  // or is_terminal=true). Written by move_ticket / REST PATCH-move when the
+  // destination column is terminal; nulled on any move out of terminal and on
+  // unarchive. TicketArchiverService uses (now - terminal_entered_at) as the
+  // single age signal — cheaper and more predictable than scanning activity_log
+  // for the last column change. Empty for tickets that haven't touched a
+  // terminal column.
+  @Column({ type: Date, nullable: true, default: null })
+  terminal_entered_at: Date | null;
+
   @Column({ type: 'varchar', default: '' })
   created_by: string;
 
