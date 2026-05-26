@@ -365,3 +365,5 @@ Private repository. All rights reserved.
 
 - **GitHub**: https://github.com/parnmanas/ai-workflow-board
 - **MCP Specification**: https://modelcontextprotocol.io/
+
+<!-- trigger deploy: 2026-05-26T22:23:45+09:00 -->
