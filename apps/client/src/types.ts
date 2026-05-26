@@ -560,12 +560,21 @@ export interface ChatAttachment {
   created_at?: string;
 }
 
+export type ChatRoomMessageType = 'message' | 'progress';
+
 export interface ChatRoomMessageItem {
   id: string;
   room_id: string;
-  sender_type: 'user' | 'agent';
+  sender_type: 'user' | 'agent' | 'system';
   sender_id: string;
   sender_name: string;           // denormalized by server
+  // Discriminator added in v0.41:
+  //   'message'  — real chat turn rendered as a bubble.
+  //   'progress' — agent-manager tool-call heartbeat, rendered as a compact
+  //                muted line (no bubble, no avatar).
+  // Optional/undefined collapses to 'message' for legacy rows persisted before
+  // the column was added.
+  type?: ChatRoomMessageType;
   content: string;
   images?: string | Array<{ data: string; filename: string; mimetype: string }>; // JSON string or parsed array (legacy inline images)
   attachments?: ChatAttachment[]; // new uniform attachment surface (any mimetype)

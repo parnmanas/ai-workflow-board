@@ -135,9 +135,61 @@ export default function MessageList({ messages, participantCount, participants =
       );
     }
 
-    // Collapse sender info if same sender within 60s
+    // Progress rows are tool-call heartbeats the agent-manager posts while
+    // the spawned CLI works. They share the same chat stream as real
+    // messages (so the user can see live activity) but render as a compact
+    // muted italic line instead of a bubble — no avatar header, no read
+    // receipt, no time-collapse interaction with neighboring bubbles. The
+    // server already strips them from agent history replays.
+    const isProgress = msg.type === 'progress';
+    if (isProgress) {
+      // Don't run progress content through renderMarkdown — the emitProgress
+      // formatter already wraps the body in `_..._` for italics, and double-
+      // markdowning (em inside an italic container) renders unpredictably
+      // across browsers. Plain text keeps the muted-line aesthetic clean.
+      rendered.push(
+        <div
+          key={msg.id}
+          data-message-id={msg.id}
+          data-message-type="progress"
+          style={{
+            padding: '2px 16px',
+            display: 'flex',
+            alignItems: 'baseline',
+            gap: 8,
+            color: COLORS.textMuted,
+            fontSize: 11,
+          }}
+        >
+          <span style={{ fontWeight: 500 }}>{msg.sender_name}</span>
+          <span
+            style={{
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+              flex: 1,
+              fontStyle: 'italic',
+            }}
+          >
+            {/* Strip the `_..._` italic wrapper the manager emits — the
+             *  container's italic already conveys the same intent. */}
+            {msg.content.replace(/^_+|_+$/g, '')}
+          </span>
+          <span style={{ fontSize: 10, opacity: 0.7 }}>
+            {formatClockTime(msg.created_at)}
+          </span>
+        </div>,
+      );
+      continue;
+    }
+
+    // Collapse sender info if same sender within 60s.
+    // `prev` is skipped for the collapse comparison when it was a progress
+    // row, since those don't render a sender header anyway — falling
+    // through to the same-window branch would suppress the bubble's
+    // header even though there's no preceding bubble to attach to.
     const prevSameWindow =
       prev &&
+      prev.type !== 'progress' &&
       prev.sender_id === msg.sender_id &&
       sameDay(prev.created_at, msg.created_at) &&
       new Date(msg.created_at).getTime() - new Date(prev.created_at).getTime() < 60000;
