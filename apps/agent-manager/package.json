@@ -1,6 +1,6 @@
 {
   "name": "agent-manager",
-  "version": "0.1.57",
+  "version": "0.2.0",
   "private": true,
   "description": "Standalone subagent runner for AWB — drives Claude / Codex / Gemini CLIs without a host editor",
   "type": "module",
@@ -12,11 +12,12 @@
     "dev": "tsx watch src/main.ts",
     "build": "tsc -p tsconfig.json && node -e \"require('fs').copyFileSync('package.json','dist/package.json')\"",
     "start": "node dist/main.js",
-    "test": "npm run build && node --test test/session-dedup.test.mjs && node --test test/moving-cue-resume.test.mjs && node --test test/gemini-adapter.test.mjs && node --test test/chat-attachment-prep.test.mjs && node --test test/silent-exit-fallback.test.mjs",
+    "test": "npm run build && node --test test/session-dedup.test.mjs && node --test test/moving-cue-resume.test.mjs && node --test test/gemini-adapter.test.mjs && node --test test/chat-attachment-prep.test.mjs && node --test test/silent-exit-fallback.test.mjs && node --test test/host-mcp-server.test.mjs",
     "clean": "rimraf dist"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0"
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

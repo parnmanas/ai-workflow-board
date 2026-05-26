@@ -21,6 +21,7 @@ import { promises as fsp } from 'node:fs';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { MANAGED_AGENTS_DIR } from './constants.js';
+import { resolveSelfCommand } from './self-path.js';
 
 export interface ManagedAgentDiskConfig {
   agent_id: string;
@@ -165,10 +166,25 @@ export async function writeApiKey(agentId: string, raw: string): Promise<void> {
  * the apiKey rotates, and (b) per-spawn temp files have to be cleaned up
  * across crash/restart whereas a fixed path is just an overwrite.
  *
- * The `mcpServers.awb` shape mirrors what the legacy plugin's
- * SubagentManager wrote per-spawn, with the addition of an
- * `X-AWB-Client-Type: managed-subagent` header so server-side logs can
- * distinguish manager-spawned subagents from old-plugin-spawned ones.
+ * Two MCP servers are configured:
+ *
+ *   - `awb`: the central AWB Streamable HTTP endpoint (`/mcp`). Per-agent
+ *     apiKey in the Bearer header so server-side activity logs attribute
+ *     every tool call to this managed agent. `X-AWB-Client-Type:
+ *     managed-subagent` distinguishes manager-spawned subagents from
+ *     legacy plugin spawns.
+ *
+ *   - `host`: a stdio MCP server forked from the agent-manager binary
+ *     itself (`<this-binary> mcp-host`). Exposes cross-OS host tools
+ *     (screenshot, window enumeration, send keys, kill / launch process,
+ *     clipboard, etc.) that let the managed agent drive the operator's
+ *     desktop when a GUI tool like Unity Editor stalls. The server runs
+ *     ON THE OPERATOR'S HOST — not the central AWB server — and inherits
+ *     the manager process's user permissions.
+ *
+ *     Tool surface becomes `mcp__host__*` on the managed-agent side.
+ *     Claude's `--allowedTools` allowlist already includes both
+ *     `mcp__awb__*` and `mcp__host__*` (see cli-adapters/claude.ts).
  */
 export async function writeMcpConfig(
   agentId: string,
@@ -177,6 +193,7 @@ export async function writeMcpConfig(
 ): Promise<string> {
   await ensureManagedAgentDir(agentId);
   const path = mcpConfigPathFor(agentId);
+  const self = resolveSelfCommand();
   const body = {
     mcpServers: {
       awb: {
@@ -186,6 +203,11 @@ export async function writeMcpConfig(
           Authorization: `Bearer ${rawApiKey}`,
           'X-AWB-Client-Type': 'managed-subagent',
         },
+      },
+      host: {
+        type: 'stdio',
+        command: self.command,
+        args: [...self.prefixArgs, 'mcp-host'],
       },
     },
   };
