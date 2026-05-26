@@ -11,10 +11,17 @@ import {
   type SessionAwareConfig,
   type SessionRecord,
 } from './base-session-manager.js';
-import type { ParseResult } from './cli-adapters/base.js';
+import { ADAPTER_CAPABILITIES, type ParseResult, type TurnImage } from './cli-adapters/base.js';
 import { fetchChatRoomHistory, postChatRoomMessage } from './rest.js';
 import { log } from './logging.js';
 import { composeChatRoomPrompt } from './prompts.js';
+import {
+  prepareChatAttachments,
+  renderAttachmentBlock,
+  type PreparedAttachment,
+} from './chat-attachment-prep.js';
+
+const { PERSISTENT_SESSION } = ADAPTER_CAPABILITIES;
 import type {
   ChatDispatchArgs,
   ChatDispatchResult,
@@ -120,7 +127,16 @@ export class ChatSessionManager
       log(
         `[chat-session] reused existing pid=${sess.pid} room=${spec.roomId.slice(0, 8)} agent=${(spec.agentId || '').slice(0, 8)} turn=${sess.turnCount + 1}`,
       );
-      this._sendFollowUp(sess, spec.content || '', { onProgress: spec.onProgress });
+      // Prep attachments using the session's adapter capability — only
+      // fetch image bytes when the live CLI can actually consume them
+      // (PERSISTENT_SESSION + native vision content blocks → Claude).
+      const canEmitImages = sess.adapter.has(PERSISTENT_SESSION) && sess.cli_type === 'claude';
+      const prepared = await prepareChatAttachments(this._config, spec.roomId, spec.attachments, {
+        fetchImages: canEmitImages,
+      });
+      const followupText = this.#followupTurnText(spec, prepared);
+      const images = canEmitImages ? this.#extractTurnImages(prepared) : undefined;
+      this._sendFollowUp(sess, followupText, { onProgress: spec.onProgress, images });
       return { dispatched: true, pid: sess.pid };
     }
 
@@ -167,11 +183,28 @@ export class ChatSessionManager
         history = [];
       }
     }
-    const firstTurnText = composeChatRoomPrompt(spec.roomId, history, {
-      content: spec.content || '',
-      sender_name: spec.senderName || '',
-      sender_id: spec.senderId || '',
-    });
+    // First-turn attachment prep. Only Claude (persistent session + native
+    // vision) gets image bytes fetched here — other CLIs hand-off through
+    // the legacy oneshot path, which prepares attachments without images.
+    const cli = String(spec.agentContext?.cli || 'claude').toLowerCase();
+    const canEmitImages = cli === 'claude';
+    const preparedFirstTurn = await prepareChatAttachments(
+      this._config,
+      spec.roomId,
+      spec.attachments,
+      { fetchImages: canEmitImages },
+    );
+    const firstTurnText = composeChatRoomPrompt(
+      spec.roomId,
+      history,
+      {
+        content: spec.content || '',
+        sender_name: spec.senderName || '',
+        sender_id: spec.senderId || '',
+      },
+      preparedFirstTurn,
+    );
+    const firstTurnImages = canEmitImages ? this.#extractTurnImages(preparedFirstTurn) : undefined;
 
     const monitorMeta: MonitorMeta = {};
     let spawned: SessionRecord | null = null;
@@ -180,7 +213,7 @@ export class ChatSessionManager
         sessionKey,
         spec.rolePrompt || '',
         firstTurnText,
-        { onProgress: spec.onProgress, monitorMeta, agentContext: spec.agentContext },
+        { onProgress: spec.onProgress, monitorMeta, agentContext: spec.agentContext, firstTurnImages },
       );
       // Stamp roomId / agentId on the record BEFORE clearing the inflight
       // reservation — `_spawnSession` lands the record in `_sessions`
@@ -418,6 +451,38 @@ export class ChatSessionManager
   }
 
   // ---------------------------------------------------------------------------
+
+  /** Build the follow-up turn body for a live session. The first turn goes
+   *  through the full `composeChatRoomPrompt` because the persistent CLI
+   *  needs context (room id, instructions); subsequent turns only need the
+   *  new user message + any attachment block, since history is already in
+   *  the model's running context. */
+  #followupTurnText(
+    spec: { content?: string },
+    attachments: PreparedAttachment[],
+  ): string {
+    const text = (spec.content || '').trim();
+    if (attachments.length === 0) return text;
+    const lines: string[] = [];
+    if (text) lines.push(text);
+    for (const ln of renderAttachmentBlock(attachments)) {
+      lines.push(ln);
+    }
+    return lines.join('\n');
+  }
+
+  /** Pull base64 image payloads out of the prepared attachment list. Only
+   *  attachments classified as `image_base64` survived the prep fetch — the
+   *  rest are already represented in the prompt text. */
+  #extractTurnImages(attachments: PreparedAttachment[]): TurnImage[] | undefined {
+    const images: TurnImage[] = [];
+    for (const att of attachments) {
+      if (att.kind === 'image_base64' && att.image_base64) {
+        images.push({ media_type: att.mime_type || 'image/png', data: att.image_base64 });
+      }
+    }
+    return images.length > 0 ? images : undefined;
+  }
 
   _snapshot(): Array<Pick<SessionRecord, 'pid' | 'turnCount' | 'startedAt' | 'lastTouchedAt'> & {
     roomId: string;

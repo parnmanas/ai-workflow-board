@@ -222,6 +222,50 @@ export async function fetchAgentCredential(
 }
 
 /**
+ * Fetch a single chat attachment (with base64 body) for the agent-key holder.
+ * Mirrors the user-session GET /api/chat-rooms/:roomId/attachments/:id but
+ * gated by AgentAuthGuard + participant check, so the manager can pull
+ * attachment bytes for vision / file delivery to subagent prompts without
+ * needing a user session.
+ */
+export async function fetchChatAttachment(
+  config: AwbConfig,
+  roomId: string,
+  attachmentId: string,
+): Promise<{
+  id: string;
+  file_name: string;
+  file_mimetype: string;
+  file_size: number;
+  file_data: string;
+  download_url: string;
+} | null> {
+  if (!roomId || !attachmentId) return null;
+  try {
+    const url = `${trimSlash(config.url)}/api/agent/chat-rooms/${encodeURIComponent(roomId)}/attachments/${encodeURIComponent(attachmentId)}`;
+    const resp = await fetch(url, {
+      headers: {
+        'X-Agent-Key': config.apiKey,
+        Accept: 'application/json',
+      },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!resp.ok) {
+      log(`Chat attachment fetch failed: ${resp.status} ${resp.statusText} (room=${roomId} att=${attachmentId})`);
+      return null;
+    }
+    const body = (await resp.json()) as any;
+    if (!body || typeof body !== 'object' || typeof body.file_data !== 'string') {
+      return null;
+    }
+    return body;
+  } catch (err: any) {
+    log(`Chat attachment fetch error: ${err?.message ?? err} (room=${roomId} att=${attachmentId})`);
+    return null;
+  }
+}
+
+/**
  * Send a message to an AWB chat room on behalf of an agent.
  * Fire-and-log on failure — caller is a best-effort fallback path.
  */

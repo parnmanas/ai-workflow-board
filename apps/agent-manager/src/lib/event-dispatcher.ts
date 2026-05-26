@@ -18,6 +18,7 @@ import {
 import { recordEvent } from './event-log-recorder.js';
 import type { AwbConfig } from './rest.js';
 import type { ManagedAgentContextRegistry } from './managed-agent-context.js';
+import { prepareChatAttachments } from './chat-attachment-prep.js';
 
 // Hard cap on consecutive agent-to-agent turns within a single chat room.
 // Server stamps `agent_chain_depth` on every chat_room_message; when the depth
@@ -129,6 +130,11 @@ export interface ChatDispatchArgs {
    *  reply is attributed to the right agent and lands in the room they're
    *  a member of. Undefined when the manager itself is the participant. */
   agentContext?: AgentExecutionContext;
+  /** Per-message attachments as projected by the server in the SSE / history
+   *  payload. ChatSessionManager fetches the bytes it needs (vision content
+   *  blocks for Claude, inline text for text-ish mime) before assembling the
+   *  turn. Undefined / empty when the message has no attachments. */
+  attachments?: any[];
 }
 
 export interface ChatDispatchResult {
@@ -212,6 +218,7 @@ export interface PromptComposer {
     roomId: string,
     history: any[],
     msg: { content: string; sender_name: string; sender_id: string },
+    attachments?: any[],
   ): string;
   composeCommentMentionPrompt(
     ticket: any,
@@ -858,6 +865,7 @@ export class EventDispatcher {
           rolePrompt: p.role_prompt || '',
           onProgress,
           agentContext,
+          attachments: Array.isArray(p.attachments) ? p.attachments : [],
         });
         // Record into ring AFTER dispatch so the spawn path sees real prior
         // history rather than self-referencing the message that triggered it.
@@ -894,12 +902,27 @@ export class EventDispatcher {
         await this.#setChatRoomTyping(p.room_id, true, 'thinking');
         const history = await fetchChatRoomHistory(this.#config, p.room_id);
         const rolePrompt = p.role_prompt || '';
+        // Oneshot fallback path (Codex / Gemini / non-persistent Claude):
+        // prep attachments WITHOUT image fetches — there's no vision
+        // content block surface here, so images degrade to metadata_only.
+        // Text-ish attachments still get inlined into the prompt.
+        const prepared = await prepareChatAttachments(
+          this.#config,
+          p.room_id,
+          Array.isArray(p.attachments) ? p.attachments : [],
+          { fetchImages: false },
+        );
         const taskText =
-          this.#prompts?.composeChatRoomPrompt(p.room_id, history, {
-            content: p.content || '',
-            sender_name: p.sender_name || '',
-            sender_id: p.sender_id || '',
-          }) ?? `[chat_room] ${p.content || ''}`;
+          this.#prompts?.composeChatRoomPrompt(
+            p.room_id,
+            history,
+            {
+              content: p.content || '',
+              sender_name: p.sender_name || '',
+              sender_id: p.sender_id || '',
+            },
+            prepared,
+          ) ?? `[chat_room] ${p.content || ''}`;
 
         const result = await this.#subagentManager.spawn({
           kind: 'chat',

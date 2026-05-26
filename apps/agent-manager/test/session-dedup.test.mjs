@@ -56,6 +56,7 @@ function makeFakeSession(sessionKey, keyField, pid) {
       cliType: 'test',
       formatTurn: (s) => String(s),
       parseStdoutLine: () => ({ stage: null, isResult: false, raw: null }),
+      has: () => false,
     },
     child,
     configPath: null,

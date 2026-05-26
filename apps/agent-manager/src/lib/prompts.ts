@@ -6,6 +6,7 @@
 // --append-system-prompt (claude) at spawn time.
 
 import type { ColumnPrompt, PromptComposer } from './event-dispatcher.js';
+import { renderAttachmentBlock, type PreparedAttachment } from './chat-attachment-prep.js';
 
 interface CommentLike {
   author_name?: string;
@@ -212,6 +213,7 @@ export function composeChatRoomPrompt(
   roomId: string,
   history: ChatHistoryEntry[],
   newMessage: ChatRoomNewMessage,
+  attachments?: PreparedAttachment[],
 ): string {
   const lines: string[] = [];
   lines.push('You are an AWB chat subagent responding to a user message in a chat room.');
@@ -232,6 +234,12 @@ export function composeChatRoomPrompt(
   lines.push('Latest user message:');
   lines.push(newMessage.content || '');
   lines.push(`From: ${newMessage.sender_name || newMessage.sender_id || 'unknown'}`);
+  if (Array.isArray(attachments) && attachments.length > 0) {
+    lines.push('');
+    for (const ln of renderAttachmentBlock(attachments)) {
+      lines.push(ln);
+    }
+  }
   lines.push('');
   lines.push('Instructions:');
   lines.push('- Compose a helpful reply using your knowledge and the conversation context.');

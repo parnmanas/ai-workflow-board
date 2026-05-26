@@ -16,7 +16,7 @@ import type { Readable, Writable } from 'node:stream';
 import { SUBAGENTS_BASE_DIR, STOP_GRACE_MS } from './constants.js';
 import { log } from './logging.js';
 import { createAdapter } from './cli-adapters/index.js';
-import { ADAPTER_CAPABILITIES, PARSE_STAGE, type CliAdapter, type ParseResult } from './cli-adapters/base.js';
+import { ADAPTER_CAPABILITIES, PARSE_STAGE, type CliAdapter, type ParseResult, type TurnImage } from './cli-adapters/base.js';
 import type { AwbConfig } from './rest.js';
 import type { SubagentMonitor, SubagentTapHandle } from './subagent-monitor.js';
 
@@ -86,6 +86,10 @@ export interface SpawnOpts {
      *  overridden by the operator's shell environment. */
     credential_provider?: string | null;
   };
+  /** Per-turn image attachments for chat sessions. Only honored by adapters
+   *  that support inline image content blocks (Claude); other adapters
+   *  ignore the list (metadata already in the prompt text). */
+  firstTurnImages?: TurnImage[];
 }
 
 interface TurnState {
@@ -248,7 +252,7 @@ export class BaseSessionManager {
     sessionKey: string,
     rolePrompt: string,
     firstTurnText: string,
-    { onProgress, monitorMeta, agentContext }: SpawnOpts = {},
+    { onProgress, monitorMeta, agentContext, firstTurnImages }: SpawnOpts = {},
   ): Promise<SessionRecord | null> {
     // ST-7: pick the adapter for this agent's CLI choice (claude/codex/gemini)
     // and bind it to the session record so future turns formatTurn /
@@ -442,7 +446,7 @@ export class BaseSessionManager {
       );
 
       this.#startTurn(sess, onProgress);
-      this._writeTurn(sess, firstTurnText);
+      this._writeTurn(sess, firstTurnText, firstTurnImages);
       sess.turnCount = 1;
       this._resetIdleTimer(sess);
       this._sessions.set(sessionKey, sess);
@@ -461,10 +465,11 @@ export class BaseSessionManager {
     {
       checkMaxTurns = true,
       onProgress,
-    }: { checkMaxTurns?: boolean; onProgress?: (stage: string) => void } = {},
+      images,
+    }: { checkMaxTurns?: boolean; onProgress?: (stage: string) => void; images?: TurnImage[] } = {},
   ): void {
     this.#startTurn(sess, onProgress);
-    this._writeTurn(sess, turnText);
+    this._writeTurn(sess, turnText, images);
     sess.turnCount++;
     sess.lastTouchedAt = Date.now();
     this._resetIdleTimer(sess);
@@ -544,8 +549,8 @@ export class BaseSessionManager {
     }
   }
 
-  protected _writeTurn(sess: SessionRecord, text: string): void {
-    const wire = sess.adapter.formatTurn(String(text));
+  protected _writeTurn(sess: SessionRecord, text: string, images?: TurnImage[]): void {
+    const wire = sess.adapter.formatTurn(String(text), images);
     try {
       sess.child.stdin.write(wire + '\n');
       sess.tap?.inLine(wire);
