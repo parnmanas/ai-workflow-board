@@ -138,6 +138,26 @@ export class Ticket {
   @Column({ type: Date, nullable: true, default: null })
   terminal_entered_at: Date | null;
 
+  // Claim-verification snapshot (ticket dcb9d661). Written by
+  // TriggerLoopService when an assignee trigger lands on an active column
+  // and the workspace has `claim_verification_enabled=1`. Records the
+  // remote branch tip the agent is being woken on top of. The sweep in
+  // ClaimVerificationService compares this against the latest assignee
+  // comment to enrich the pend-reason with concrete "branch unchanged"
+  // evidence. Best-effort: an empty string means the GitHub lookup
+  // failed (no credential, network, etc.) and the sweep falls back to
+  // ActivityLog-only gating. Cleared along with snapshot_at on any
+  // column move (move_ticket / REST move).
+  @Column({ type: 'varchar', default: '' })
+  branch_tip_sha_at_trigger: string;
+
+  // Timestamp `branch_tip_sha_at_trigger` was written. Used by the sweep
+  // to confirm the SHA snapshot was taken BEFORE the assignee's claim
+  // comment — a snapshot taken after the comment is stale evidence and
+  // gets ignored.
+  @Column({ type: Date, nullable: true, default: null })
+  branch_tip_snapshot_at: Date | null;
+
   @Column({ type: 'varchar', default: '' })
   created_by: string;
 

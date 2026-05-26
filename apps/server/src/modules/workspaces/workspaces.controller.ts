@@ -137,6 +137,7 @@ export class WorkspacesController {
     const {
       name, description,
       supervisor_stale_ms, supervisor_resend_ms, dispatch_queue_depth,
+      claim_verification_enabled, claim_verification_grace_ms,
     } = body;
     if (name !== undefined) ws.name = name;
     if (description !== undefined) ws.description = description;
@@ -160,6 +161,21 @@ export class WorkspacesController {
       const v = Number(dispatch_queue_depth);
       if (Number.isFinite(v) && v > 0) ws.dispatch_queue_depth = Math.floor(v);
       else return res.status(400).json({ error: 'dispatch_queue_depth must be a positive number' });
+    }
+
+    // Claim-verification settings (ticket dcb9d661). `enabled` is stored
+    // as int (0/1) for SQLite compat; we accept boolean / number / string
+    // truthy values and normalise. `grace_ms` requires a positive finite
+    // integer — same shape as the supervisor cadences above.
+    if (claim_verification_enabled !== undefined) {
+      const raw = claim_verification_enabled;
+      const v = (raw === true || raw === 1 || raw === '1' || raw === 'true') ? 1 : 0;
+      ws.claim_verification_enabled = v;
+    }
+    if (claim_verification_grace_ms !== undefined) {
+      const v = Number(claim_verification_grace_ms);
+      if (Number.isFinite(v) && v > 0) ws.claim_verification_grace_ms = Math.floor(v);
+      else return res.status(400).json({ error: 'claim_verification_grace_ms must be a positive number' });
     }
 
     await this.wsRepo.save(ws);
