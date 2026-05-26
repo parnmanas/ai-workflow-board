@@ -795,6 +795,21 @@ export class EventDispatcher {
 
     const p = ev.payload || ev;
 
+    // Progress rows are tool-call heartbeats the agent-manager itself posts
+    // while a spawned CLI is working. They share the chat stream so humans
+    // can watch live, but they must never trigger another agent: fan-out can
+    // deliver Agent A's heartbeat to Agent B (different sender_id, so the
+    // self-guard below would let it through), and a typing indicator + CLI
+    // spawn for a tool-call narration is exactly the loop this discriminator
+    // exists to prevent. recordRoomMessage already drops these from the
+    // in-memory history ring, so this early-exit is purely about delegation.
+    if (p.type === 'progress') {
+      log(
+        `Chat room message is progress heartbeat (room=${p.room_id} sender=${p.sender_name || p.sender_id}) — skipping delegation`,
+      );
+      return;
+    }
+
     // Resolve which managed agent (if any) should respond. Manager-fan-out
     // delivers chat events for any room where one of this manager's managed
     // agents is a member; the wire payload's agent_member_ids is the set we
