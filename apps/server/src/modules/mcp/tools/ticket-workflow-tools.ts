@@ -75,7 +75,18 @@ export function registerTicketWorkflowTools(server: McpServer, ctx: ToolContext)
 
         await shiftTicketPositions(tRepo, { column_id: destColumnId! }, pos, +1, { inclusive: true, excludeId: ticket.id });
 
-        await tRepo.update(ticket.id, { column_id: destColumnId!, position: pos });
+        // Clear the claim-verification branch-tip snapshot (ticket dcb9d661).
+        // The snapshot is tied to the prior column's claim cycle — once the
+        // ticket moves, that cycle is closed. The next assignee trigger on
+        // the destination (if it's also an active column) will re-snapshot
+        // against the fresh baseline. Inline rather than a service call so
+        // move_ticket stays decoupled from the agents module.
+        await tRepo.update(ticket.id, {
+          column_id: destColumnId!,
+          position: pos,
+          branch_tip_sha_at_trigger: '',
+          branch_tip_snapshot_at: null,
+        });
 
         // Stamp / clear terminal_entered_at when the move crosses the
         // terminal boundary so the archiver has an accurate Done-entry time.
@@ -165,7 +176,14 @@ export function registerTicketWorkflowTools(server: McpServer, ctx: ToolContext)
           .getCount();
         const pos = Math.min(target_position ?? destCount, destCount);
         await shiftTicketPositions(tRepo, { column_id: targetCol!.id }, pos, +1, { inclusive: true, excludeId: ticket.id });
-        await tRepo.update(ticket.id, { column_id: targetCol!.id, position: pos });
+        // Clear the claim-verification snapshot — same rationale as the
+        // same-board move above (ticket dcb9d661).
+        await tRepo.update(ticket.id, {
+          column_id: targetCol!.id,
+          position: pos,
+          branch_tip_sha_at_trigger: '',
+          branch_tip_snapshot_at: null,
+        });
 
         // Cross-board move can change terminal status — stamp / clear
         // terminal_entered_at the same way same-board moves do.

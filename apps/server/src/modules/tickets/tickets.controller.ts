@@ -664,7 +664,17 @@ export class TicketsController {
 
       await shiftTicketPositions(tRepo, { column_id: destColumnId }, pos, +1, { inclusive: true, excludeId: ticket.id });
 
-      await tRepo.update(ticket.id, { column_id: destColumnId, position: pos });
+      // Clear the claim-verification branch-tip snapshot (ticket dcb9d661).
+      // Matches the MCP `move_ticket` tool's behaviour: a column move closes
+      // the prior column's claim cycle, so the snapshot tied to it is no
+      // longer evidence the sweep can use. Next assignee trigger on an active
+      // destination re-snapshots with a fresh baseline.
+      await tRepo.update(ticket.id, {
+        column_id: destColumnId,
+        position: pos,
+        branch_tip_sha_at_trigger: '',
+        branch_tip_snapshot_at: null,
+      });
 
       // Stamp / clear terminal_entered_at when the move crosses the terminal
       // boundary. Re-resolved here so cross-DB-driver locking semantics are
