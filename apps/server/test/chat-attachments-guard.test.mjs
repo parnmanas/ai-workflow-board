@@ -173,6 +173,33 @@ test('add_ticket_attachment stamps owner_type=ticket so the generic loader can f
   );
 });
 
+// Review-bounce 2026-05-26: get_ticket_attachment + delete_ticket_attachment
+// read by raw attachment_id and returned / hard-deleted any row. After the
+// generic-owner refactor, chat rows live in the same table, so a caller that
+// learns or guesses a chat attachment id could bypass the chat
+// participant-only download path (`/api/chat-rooms/:roomId/attachments/:id`)
+// or the uploader+pending-only delete tool. Both tools must reject rows
+// whose owner_type is not 'ticket'.
+test('get_ticket_attachment + delete_ticket_attachment refuse non-ticket rows', () => {
+  const code = stripComments(read('modules/mcp/tools/ticket-attachment-tools.ts'));
+  // Two distinct owner-type guards — one per tool. Pin both so the next
+  // refactor can't keep the regex matched on a single shared helper while
+  // silently dropping the check on the second tool.
+  const matches = code.match(/row\.owner_type\s*!==\s*'ticket'/g) || [];
+  assert.ok(
+    matches.length >= 2,
+    `get_ticket_attachment AND delete_ticket_attachment must each reject owner_type !== 'ticket' (saw ${matches.length} guards)`,
+  );
+  // Both tools must also require row.ticket_id — a row with owner_type
+  // accidentally set to 'ticket' but ticket_id=null is still not safe to
+  // project/delete here.
+  const idGuards = code.match(/!\s*row\.ticket_id/g) || [];
+  assert.ok(
+    idGuards.length >= 2,
+    `both tools must also require row.ticket_id be set (saw ${idGuards.length} guards)`,
+  );
+});
+
 // ── Cleanup contract ─────────────────────────────────────────────────
 
 test('ActionsService._deleteRunWithRoom sweeps ticket_attachments for the deleted room', () => {

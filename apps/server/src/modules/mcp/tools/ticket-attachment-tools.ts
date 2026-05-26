@@ -127,7 +127,11 @@ export function registerTicketAttachmentTools(server: McpServer, ctx: ToolContex
     },
     async ({ attachment_id }) => {
       const row = await dataSource.getRepository(TicketAttachment).findOne({ where: { id: attachment_id } });
-      if (!row) return err('Attachment not found');
+      // Chat attachments share this table (owner_type='chat_room' or
+      // 'chat_message'). Pretend they don't exist here so a caller that learns
+      // a chat attachment id can't bypass the chat participant-only download
+      // path (`/api/chat-rooms/:roomId/attachments/:id`).
+      if (!row || row.owner_type !== 'ticket' || !row.ticket_id) return err('Attachment not found');
       return ok(projectTicketAttachment(row, { includeData: true }));
     }
   );
@@ -141,11 +145,12 @@ export function registerTicketAttachmentTools(server: McpServer, ctx: ToolContex
     async ({ attachment_id }, extra: { sessionId?: string }) => {
       const attRepo = dataSource.getRepository(TicketAttachment);
       const row = await attRepo.findOne({ where: { id: attachment_id } });
-      if (!row) return err('Attachment not found');
+      // Same scoping as get_ticket_attachment: refuse to act on chat rows so
+      // this tool can't hard-delete a chat attachment past the uploader +
+      // pending-only checks in delete_chat_message_attachment.
+      if (!row || row.owner_type !== 'ticket' || !row.ticket_id) return err('Attachment not found');
 
-      const ticket = row.ticket_id
-        ? await dataSource.getRepository(Ticket).findOne({ where: { id: row.ticket_id } })
-        : null;
+      const ticket = await dataSource.getRepository(Ticket).findOne({ where: { id: row.ticket_id } });
       if (ticket?.archived_at) return err(new TicketArchivedError(ticket.id).message);
       await attRepo.delete({ id: attachment_id });
 

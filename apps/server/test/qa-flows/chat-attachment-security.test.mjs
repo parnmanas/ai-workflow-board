@@ -31,7 +31,8 @@ const __testDbName = `qa-chat-attach-security-${Date.now()}-${process.pid}.db`;
 process.env.SQLJS_DB_PATH = path.join(os.tmpdir(), __testDbName);
 
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createWorkspace, createUser } from '../helpers/fixtures.mjs';
+import { createWorkspace, createUser, createAgent, createApiKey } from '../helpers/fixtures.mjs';
+import { McpClient } from '../helpers/mcp-client.mjs';
 
 process.env.PORT = process.env.QA_CHAT_ATTACH_SEC_PORT || '7832';
 
@@ -223,6 +224,76 @@ test('chat-attachment security regressions: atomic claim + mime sniffing', async
   });
   const jpgText = await jpgRes.text();
   assert.equal(jpgRes.status, 201, jpgText);
+
+  // ── P3 (review 2026-05-26): cross-owner MCP tool bypass ─────────────
+  //
+  // After the generic-owner refactor, chat rows live in the same
+  // ticket_attachments table as ticket rows. get_ticket_attachment and
+  // delete_ticket_attachment previously looked up by raw attachment_id and
+  // would happily return / hard-delete a chat row, bypassing the chat
+  // participant-only download path and the uploader+pending-only delete
+  // tool. Both MCP tools must now refuse rows where owner_type !== 'ticket'.
+
+  step('P3.1 Create an agent MCP session for the cross-owner probe');
+  const probeAgent = await createAgent(app, getDataSourceToken, ws.id, { name: 'probe' });
+  const probeKey = await createApiKey(app, getDataSourceToken, probeAgent.id, {
+    workspaceId: ws.id, label: 'probe',
+  });
+  const mcp = new McpClient({
+    baseUrl: `http://localhost:${port}`,
+    apiKey: probeKey.raw_key,
+    clientInfo: { name: 'qa-chat-attach-sec-mcp', version: '1.0.0' },
+  });
+  await mcp.initialize();
+  t.after(() => mcp.close().catch(() => {}));
+
+  step('P3.2 get_ticket_attachment on a chat attachment id returns "not found"');
+  // attA was bound to a chat message in P1 (owner_type='chat_message');
+  // rowA still exists in DB and is reachable via /api/chat-rooms/... for
+  // participants. The ticket MCP tool must not project it.
+  const getRes = await mcp.callTool('get_ticket_attachment', { attachment_id: attA.id });
+  assert.ok(
+    getRes && getRes.isError,
+    `get_ticket_attachment must reject a chat row, got: ${JSON.stringify(getRes)}`,
+  );
+  // Confirm the row is still there — the rejection must be from the owner
+  // guard, not because the row got swept by some other path.
+  const stillThere = await attRepo.findOne({ where: { id: attA.id } });
+  assert.ok(stillThere, 'chat attachment row must still exist (only the MCP read should have been blocked)');
+  assert.equal(stillThere.owner_type, 'chat_message');
+
+  step('P3.3 delete_ticket_attachment on a chat attachment id returns "not found" and does not delete');
+  const delRes = await mcp.callTool('delete_ticket_attachment', { attachment_id: attA.id });
+  assert.ok(
+    delRes && delRes.isError,
+    `delete_ticket_attachment must reject a chat row, got: ${JSON.stringify(delRes)}`,
+  );
+  const survivor = await attRepo.findOne({ where: { id: attA.id } });
+  assert.ok(survivor, 'chat attachment row must survive an MCP delete_ticket_attachment attempt');
+  assert.equal(survivor.id, attA.id);
+
+  step('P3.4 Same tools also refuse a pending chat_room-owned row');
+  // Re-upload a single attachment that stays in pending state
+  // (owner_type='chat_room') and confirm the same guards reject it.
+  const pendingUp = await fetch(`http://localhost:${port}/api/chat-rooms/${room.id}/attachments`, {
+    method: 'POST',
+    headers: authHeaders(senderToken, ws.id),
+    body: JSON.stringify({
+      file_name: 'pending.png',
+      file_data: FAKE_PNG,
+    }),
+  });
+  assert.equal(pendingUp.status, 201);
+  const pendingAtt = await pendingUp.json();
+  const pendingRow = await attRepo.findOne({ where: { id: pendingAtt.id } });
+  assert.equal(pendingRow.owner_type, 'chat_room', 'fresh upload should be in pending chat_room state');
+
+  const getPendingRes = await mcp.callTool('get_ticket_attachment', { attachment_id: pendingAtt.id });
+  assert.ok(getPendingRes && getPendingRes.isError, 'get_ticket_attachment must reject a chat_room (pending) row');
+  const delPendingRes = await mcp.callTool('delete_ticket_attachment', { attachment_id: pendingAtt.id });
+  assert.ok(delPendingRes && delPendingRes.isError, 'delete_ticket_attachment must reject a chat_room (pending) row');
+  const pendingSurvivor = await attRepo.findOne({ where: { id: pendingAtt.id } });
+  assert.ok(pendingSurvivor, 'pending chat attachment must survive the ticket MCP delete attempt');
 
   exitAfterTests(0);
 });
