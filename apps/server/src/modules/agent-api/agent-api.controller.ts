@@ -20,7 +20,7 @@ import {
   RoomMessagingService,
 } from '../chat-rooms/room-messaging.service';
 import { LogService } from '../../services/log.service';
-import { activityEvents } from '../../services/activity.service';
+import { ActivityService, activityEvents } from '../../services/activity.service';
 import {
   findColumnByName,
   maxTicketPosition,
@@ -51,6 +51,7 @@ export class AgentApiController {
     private readonly membership: RoomMembershipService,
     private readonly messaging: RoomMessagingService,
     private readonly logService: LogService,
+    private readonly activityService: ActivityService,
   ) {}
 
   @Get('tickets/:id')
@@ -58,6 +59,96 @@ export class AgentApiController {
     const ticket = await loadTicketFull(this.dataSource, id);
     if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
     return res.json(ticket);
+  }
+
+  /**
+   * Silent-exit fallback comment endpoint for the agent-manager.
+   *
+   * The MCP `add_comment` tool rejects `type='system'` so an agent can't forge
+   * audit-log entries. But the agent-manager itself — running outside any
+   * spawned CLI — is a trusted operator that needs to mark "subagent finished
+   * without leaving a trace" with the same provenance the SystemCommentService
+   * uses for column moves. This endpoint is gated by `AgentAuthGuard` (manager
+   * key) and creates a `type='system'` Comment + emits the `activity` event so
+   * board_update SSE cascades to Reviewer triggers normally.
+   *
+   * Body shape (all optional except content):
+   *   - content: rendered fallback body (code-block-wrapped CLI tail).
+   *   - exit_code, cycle_trigger_id, role: stored on `comment.metadata` so the
+   *     UI / debugger can correlate the row with the dead subagent.
+   *   - actor_name: display name to stamp on the activity log; defaults to
+   *     'agent-manager'.
+   */
+  @Post('tickets/:id/silent-exit-comment')
+  async postSilentExitComment(
+    @Param('id') ticketId: string,
+    @Body() body: any,
+    @Res() res: Response,
+  ) {
+    const ticket = await this.ticketRepo.findOne({ where: { id: ticketId } });
+    if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+    // Archived tickets are read-only — refuse so manager retries don't pile
+    // up forever on a terminally-archived row.
+    if (ticket.archived_at) {
+      return res.status(409).json({
+        error: 'ticket_archived',
+        message: new TicketArchivedError(ticket.id).message,
+      });
+    }
+
+    const content = typeof body?.content === 'string' ? body.content.trim() : '';
+    if (!content) return res.status(400).json({ error: 'content is required' });
+
+    const exitCode = body?.exit_code === null || body?.exit_code === undefined
+      ? null
+      : Number(body.exit_code);
+    const cycleTriggerId = typeof body?.cycle_trigger_id === 'string' ? body.cycle_trigger_id : '';
+    const role = typeof body?.role === 'string' ? body.role : '';
+    const actorName = typeof body?.actor_name === 'string' && body.actor_name
+      ? body.actor_name
+      : 'agent-manager';
+
+    const metadata = {
+      reason: 'silent_exit',
+      exit_code: exitCode,
+      cycle_trigger_id: cycleTriggerId || null,
+      author_role: role || null,
+    };
+
+    const commentRepo = this.dataSource.getRepository(Comment);
+    const comment = await commentRepo.save(commentRepo.create({
+      ticket_id: ticketId,
+      author_type: 'system',
+      author_id: '',
+      author: 'System',
+      content,
+      type: 'system',
+      metadata: JSON.stringify(metadata),
+    }));
+
+    // Same activity-event contract the MCP add_comment / REST add-comment
+    // paths use — entity_type='comment' + action='created' flows through
+    // event-registry's board_update mapping and reaches SSE subscribers, which
+    // is how the Reviewer-trigger cascade gets notified. Without this emit the
+    // comment lands silently in the DB and the board never re-renders until a
+    // user reloads.
+    await this.activityService.logActivity({
+      entity_type: 'comment',
+      entity_id: comment.id,
+      action: 'created',
+      ticket_id: ticketId,
+      actor_id: '',
+      actor_name: actorName,
+      new_value: content,
+      field_changed: 'system',
+    });
+
+    this.logService.info(
+      'AgentApi',
+      `Silent-exit system comment posted: ticket=${ticketId.slice(0, 8)} exit=${exitCode ?? '-'} trigger=${cycleTriggerId.slice(0, 8) || '-'}`,
+      { ticket_id: ticketId, comment_id: comment.id, exit_code: exitCode, cycle_trigger_id: cycleTriggerId },
+    );
+    return res.status(201).json(comment);
   }
 
   @Get('board-summary')

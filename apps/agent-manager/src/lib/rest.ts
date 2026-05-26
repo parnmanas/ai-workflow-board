@@ -308,6 +308,54 @@ export async function postChatRoomMessage(
   }
 }
 
+/**
+ * Post a silent-exit system comment on a ticket. Used by the agent-manager
+ * when a ticket subagent (persistent or one-shot) exits without ever
+ * calling `add_comment` OR with a non-zero exit code — leaving no audit
+ * trail on the ticket. The server endpoint (`AgentAuthGuard`-gated) creates
+ * a `type='system'` Comment and emits the standard activity event so SSE
+ * board_update cascades to Reviewer triggers normally.
+ *
+ * Fire-and-log on failure — losing the fallback comment is unfortunate but
+ * the subagent already exited, so retrying is the operator's job.
+ */
+export async function postSilentExitSystemComment(
+  config: AwbConfig,
+  ticketId: string,
+  body: {
+    content: string;
+    exit_code: number | null;
+    cycle_trigger_id?: string;
+    role?: string;
+    actor_name?: string;
+  },
+): Promise<boolean> {
+  if (!ticketId || !body.content) return false;
+  try {
+    const url = `${trimSlash(config.url)}/api/agent/tickets/${encodeURIComponent(ticketId)}/silent-exit-comment`;
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'X-Agent-Key': config.apiKey,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!resp.ok) {
+      log(
+        `silent-exit comment POST failed: ${resp.status} ${resp.statusText} (ticket=${ticketId})`,
+      );
+      return false;
+    }
+    return true;
+  } catch (err: any) {
+    log(`silent-exit comment POST error: ${err?.message ?? err} (ticket=${ticketId})`);
+    return false;
+  }
+}
+
 export async function provisionManagedAgentApiKey(
   config: AwbConfig,
   agentId: string,

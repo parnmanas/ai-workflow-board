@@ -36,8 +36,6 @@ interface ChatHistoryEntry {
   created_at?: string;
 }
 
-/** Max lines kept in the per-session output ring buffer. */
-const OUTPUT_RING_MAX = 80;
 /** Max characters sent in the fallback chat message body. */
 const FALLBACK_MAX_CHARS = 1500;
 /** Min ms between progress messages emitted to a chat room — coalesces
@@ -60,9 +58,11 @@ export class ChatSessionManager
 
   // Per-session tracking for fallback detection.
   // Keyed by session pid (unique per child) to avoid leaking across sessions
-  // that reuse the same sessionKey after respawn.
+  // that reuse the same sessionKey after respawn. Output buffering lives on
+  // the base class (`_outputRings` + `_collectOutputTail`) — both ticket and
+  // chat managers share that ring, this set just records whether the agent
+  // actually called `send_chat_room_message` during this pid's lifetime.
   #chatSent = new Set<number>();
-  #outputRings = new Map<number, string[]>();
   // Per-session progress emit state. Same pid keying as the others so a
   // respawned child gets a fresh budget without leaking the previous
   // session's last-emit timestamp / count.
@@ -245,12 +245,9 @@ export class ChatSessionManager
 
   // -- Fallback detection overrides ------------------------------------------
 
-  protected _onStdoutParsed(sess: SessionRecord, parsed: ParseResult, rawLine: string): void {
-    // Buffer non-JSON lines (plain-text errors from the CLI).
-    if (!parsed.raw) {
-      const trimmed = rawLine.trim();
-      if (trimmed) this.#pushOutput(sess.pid, trimmed);
-    }
+  protected _onStdoutParsed(sess: SessionRecord, parsed: ParseResult, _rawLine: string): void {
+    // Plain-text stdout buffering happens in BaseSessionManager#wireStdio now;
+    // this override only watches for tool_use blocks + turn boundaries.
     // Turn boundary — reset progress budget so the next user message on the
     // same persistent CLI child gets a fresh window of progress emits.
     // Without this, `finalSeen=true` from turn 1 would silently suppress all
@@ -289,9 +286,8 @@ export class ChatSessionManager
     }
   }
 
-  protected _onStderrLine(sess: SessionRecord, line: string): void {
-    const trimmed = line.trim();
-    if (trimmed) this.#pushOutput(sess.pid, trimmed);
+  protected _onStderrLine(_sess: SessionRecord, _line: string): void {
+    // Stderr buffering handled in BaseSessionManager#wireStdio (shared ring).
   }
 
   protected async _onChildExit(
@@ -300,11 +296,12 @@ export class ChatSessionManager
     _signal: NodeJS.Signals | null,
   ): Promise<void> {
     const sent = this.#chatSent.has(sess.pid);
-    const ring = this.#outputRings.get(sess.pid);
+    // Snapshot the buffered output BEFORE the base class clears it (the
+    // base clears the ring after this hook returns).
+    const body = sent ? '' : this._collectOutputTail(sess.pid, FALLBACK_MAX_CHARS);
 
     // Cleanup tracking state regardless of outcome.
     this.#chatSent.delete(sess.pid);
-    this.#outputRings.delete(sess.pid);
     this.#progressMeta.delete(sess.pid);
 
     if (sent) return; // Agent replied normally — nothing to do.
@@ -313,12 +310,6 @@ export class ChatSessionManager
     const agentId: string | undefined = sess.agentId;
     if (!roomId || !agentId) return;
 
-    // Build a human-readable fallback from buffered output.
-    let body = (ring ?? []).join('\n').trim();
-    if (body.length > FALLBACK_MAX_CHARS) {
-      body = '…' + body.slice(-FALLBACK_MAX_CHARS);
-    }
-
     const message = body
       ? `⚠️ Agent가 응답하지 못했습니다. CLI 출력:\n\`\`\`\n${body}\n\`\`\``
       : '⚠️ Agent가 응답하지 못했습니다 (출력 없음).';
@@ -326,16 +317,6 @@ export class ChatSessionManager
     log(`[chat-session] fallback message for room=${roomId} agent=${agentId} pid=${sess.pid} outputLen=${body.length}`);
     const cfg = { ...this._config, apiKey: sess._effectiveApiKey || this._config.apiKey };
     await postChatRoomMessage(cfg, roomId, agentId, message);
-  }
-
-  #pushOutput(pid: number, line: string): void {
-    let ring = this.#outputRings.get(pid);
-    if (!ring) {
-      ring = [];
-      this.#outputRings.set(pid, ring);
-    }
-    ring.push(line);
-    while (ring.length > OUTPUT_RING_MAX) ring.shift();
   }
 
   /** Fire a single coalesced progress message for a batch of tool_use blocks
