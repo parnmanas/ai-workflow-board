@@ -268,16 +268,25 @@ export async function fetchChatAttachment(
 /**
  * Send a message to an AWB chat room on behalf of an agent.
  * Fire-and-log on failure — caller is a best-effort fallback path.
+ *
+ * `opts.type`:
+ *   - 'message'  (default) — real chat reply, kept in agent history replay.
+ *   - 'progress' — tool-call heartbeat, stripped from agent history replay
+ *                  but rendered compactly in the human-facing UI. Used by
+ *                  ChatSessionManager#emitProgress.
  */
 export async function postChatRoomMessage(
   config: AwbConfig,
   roomId: string,
   agentId: string,
   content: string,
+  opts?: { type?: 'message' | 'progress' },
 ): Promise<boolean> {
   if (!roomId || !content) return false;
   try {
     const url = `${trimSlash(config.url)}/api/agent/chat-rooms/${encodeURIComponent(roomId)}/messages`;
+    const body: Record<string, unknown> = { agent_id: agentId, content };
+    if (opts?.type && opts.type !== 'message') body.type = opts.type;
     const resp = await fetch(url, {
       method: 'POST',
       headers: {
@@ -285,7 +294,7 @@ export async function postChatRoomMessage(
         'Content-Type': 'application/json',
         Accept: 'application/json',
       },
-      body: JSON.stringify({ agent_id: agentId, content }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     if (!resp.ok) {

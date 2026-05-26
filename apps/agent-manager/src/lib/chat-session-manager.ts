@@ -87,6 +87,14 @@ export class ChatSessionManager
   recordRoomMessage(payload: any): void {
     const rid = payload?.room_id;
     if (!rid) return;
+    // Skip progress heartbeats so the in-memory history ring stays clean —
+    // the agent-manager emits these itself when the spawned CLI fires a
+    // non-`send_chat_room_message` tool, and feeding them back into the
+    // model would teach it to talk about its tool calls instead of using
+    // them. Mirrors the server-side `excludeProgress` filter on the agent
+    // history REST endpoint.
+    const msgType = typeof payload?.type === 'string' ? payload.type : 'message';
+    if (msgType !== 'message') return;
     let buf = this.#historyRing.get(rid);
     if (!buf) {
       buf = [];
@@ -364,8 +372,10 @@ export class ChatSessionManager
 
     const cfg = { ...this._config, apiKey: sess._effectiveApiKey || this._config.apiKey };
     // Fire-and-forget — postChatRoomMessage already swallows + logs errors,
-    // so a failed progress post never blocks stdout parsing.
-    void postChatRoomMessage(cfg, roomId, agentId, message);
+    // so a failed progress post never blocks stdout parsing. Tagged
+    // type='progress' so the server stamps the discriminator on the row
+    // and the agent history replay excludes it.
+    void postChatRoomMessage(cfg, roomId, agentId, message, { type: 'progress' });
   }
 
   #formatProgressLine(tools: Array<{ name: string; input: any }>): string {

@@ -30,6 +30,12 @@ interface ChatHistoryEntry {
   sender_id?: string;
   content?: string;
   created_at?: string;
+  // 'progress' rows are agent-manager tool-call heartbeats. Defensive
+  // belt-and-suspenders — both the SSE ring and the REST history endpoint
+  // already strip them, but the composer also filters so any future caller
+  // that hand-builds a history list can't accidentally narrate tool calls
+  // back to the model.
+  type?: string;
 }
 
 interface ChatRoomNewMessage {
@@ -220,9 +226,12 @@ export function composeChatRoomPrompt(
   lines.push('');
   lines.push(`Room ID: ${roomId}`);
   lines.push('');
-  if (Array.isArray(history) && history.length > 0) {
+  const realHistory = Array.isArray(history)
+    ? history.filter((h) => !h.type || h.type === 'message')
+    : [];
+  if (realHistory.length > 0) {
     lines.push('Conversation history (oldest first):');
-    for (const h of history.slice(-20)) {
+    for (const h of realHistory.slice(-20)) {
       const who = h.sender_type === 'agent' ? 'Agent' : 'User';
       const name = h.sender_name || h.sender_id || 'unknown';
       const when = h.created_at || '';
