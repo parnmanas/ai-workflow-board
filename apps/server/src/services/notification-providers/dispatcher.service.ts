@@ -34,6 +34,7 @@ interface ChatRoomMessageEvent {
   sender_type: 'user' | 'agent';
   sender_id: string;
   sender_name: string;
+  type?: 'message' | 'progress';
   content: string;
   // Upstream forwards the Set returned by RoomMembershipService.getRoomMemberIds()
   // unchanged; allow either shape and normalize at the listener.
@@ -165,6 +166,10 @@ export class UserChannelDispatcherService implements OnModuleInit, OnModuleDestr
    * the same message.
    */
   private async _handleChat(ev: ChatRoomMessageEvent): Promise<void> {
+    // Progress heartbeats (tool-call narration) are visible live in the room
+    // but not actionable chat — never fire external notifications for them.
+    if (ev.type === 'progress') return;
+
     const memberIds = Array.from(ev.member_ids || []).filter((id) => !!id && id !== ev.sender_id);
     if (memberIds.length === 0) return;
 
