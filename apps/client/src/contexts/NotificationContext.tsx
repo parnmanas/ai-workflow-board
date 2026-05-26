@@ -338,6 +338,10 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
   useBoardStreamEvent('chat_room_message', (raw: any) => {
     if (!user) return;
     if (raw?.workspace_id && currentWorkspaceId && raw.workspace_id !== currentWorkspaceId) return;
+    // Progress rows (tool-call heartbeats) never bump unread/badge/browser
+    // notifications — only real chat turns count. Mirrors server-side unread
+    // semantics and the active ChatPage handler.
+    if (raw?.type === 'progress') return;
     const roomId: string | undefined = raw?.room_id;
     if (!roomId) return;
     const senderId: string | undefined = raw?.sender_id;
