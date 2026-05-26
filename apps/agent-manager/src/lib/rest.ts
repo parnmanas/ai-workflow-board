@@ -222,18 +222,71 @@ export async function fetchAgentCredential(
 }
 
 /**
+ * Fetch a single chat attachment (with base64 body) for the agent-key holder.
+ * Mirrors the user-session GET /api/chat-rooms/:roomId/attachments/:id but
+ * gated by AgentAuthGuard + participant check, so the manager can pull
+ * attachment bytes for vision / file delivery to subagent prompts without
+ * needing a user session.
+ */
+export async function fetchChatAttachment(
+  config: AwbConfig,
+  roomId: string,
+  attachmentId: string,
+): Promise<{
+  id: string;
+  file_name: string;
+  file_mimetype: string;
+  file_size: number;
+  file_data: string;
+  download_url: string;
+} | null> {
+  if (!roomId || !attachmentId) return null;
+  try {
+    const url = `${trimSlash(config.url)}/api/agent/chat-rooms/${encodeURIComponent(roomId)}/attachments/${encodeURIComponent(attachmentId)}`;
+    const resp = await fetch(url, {
+      headers: {
+        'X-Agent-Key': config.apiKey,
+        Accept: 'application/json',
+      },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!resp.ok) {
+      log(`Chat attachment fetch failed: ${resp.status} ${resp.statusText} (room=${roomId} att=${attachmentId})`);
+      return null;
+    }
+    const body = (await resp.json()) as any;
+    if (!body || typeof body !== 'object' || typeof body.file_data !== 'string') {
+      return null;
+    }
+    return body;
+  } catch (err: any) {
+    log(`Chat attachment fetch error: ${err?.message ?? err} (room=${roomId} att=${attachmentId})`);
+    return null;
+  }
+}
+
+/**
  * Send a message to an AWB chat room on behalf of an agent.
  * Fire-and-log on failure — caller is a best-effort fallback path.
+ *
+ * `opts.type`:
+ *   - 'message'  (default) — real chat reply, kept in agent history replay.
+ *   - 'progress' — tool-call heartbeat, stripped from agent history replay
+ *                  but rendered compactly in the human-facing UI. Used by
+ *                  ChatSessionManager#emitProgress.
  */
 export async function postChatRoomMessage(
   config: AwbConfig,
   roomId: string,
   agentId: string,
   content: string,
+  opts?: { type?: 'message' | 'progress' },
 ): Promise<boolean> {
   if (!roomId || !content) return false;
   try {
     const url = `${trimSlash(config.url)}/api/agent/chat-rooms/${encodeURIComponent(roomId)}/messages`;
+    const body: Record<string, unknown> = { agent_id: agentId, content };
+    if (opts?.type && opts.type !== 'message') body.type = opts.type;
     const resp = await fetch(url, {
       method: 'POST',
       headers: {
@@ -241,7 +294,7 @@ export async function postChatRoomMessage(
         'Content-Type': 'application/json',
         Accept: 'application/json',
       },
-      body: JSON.stringify({ agent_id: agentId, content }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     if (!resp.ok) {
@@ -251,6 +304,54 @@ export async function postChatRoomMessage(
     return true;
   } catch (err: any) {
     log(`chat fallback POST error: ${err?.message ?? err} (room=${roomId})`);
+    return false;
+  }
+}
+
+/**
+ * Post a silent-exit system comment on a ticket. Used by the agent-manager
+ * when a ticket subagent (persistent or one-shot) exits without ever
+ * calling `add_comment` OR with a non-zero exit code — leaving no audit
+ * trail on the ticket. The server endpoint (`AgentAuthGuard`-gated) creates
+ * a `type='system'` Comment and emits the standard activity event so SSE
+ * board_update cascades to Reviewer triggers normally.
+ *
+ * Fire-and-log on failure — losing the fallback comment is unfortunate but
+ * the subagent already exited, so retrying is the operator's job.
+ */
+export async function postSilentExitSystemComment(
+  config: AwbConfig,
+  ticketId: string,
+  body: {
+    content: string;
+    exit_code: number | null;
+    cycle_trigger_id?: string;
+    role?: string;
+    actor_name?: string;
+  },
+): Promise<boolean> {
+  if (!ticketId || !body.content) return false;
+  try {
+    const url = `${trimSlash(config.url)}/api/agent/tickets/${encodeURIComponent(ticketId)}/silent-exit-comment`;
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'X-Agent-Key': config.apiKey,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!resp.ok) {
+      log(
+        `silent-exit comment POST failed: ${resp.status} ${resp.statusText} (ticket=${ticketId})`,
+      );
+      return false;
+    }
+    return true;
+  } catch (err: any) {
+    log(`silent-exit comment POST error: ${err?.message ?? err} (ticket=${ticketId})`);
     return false;
   }
 }

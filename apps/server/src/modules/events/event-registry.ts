@@ -310,7 +310,18 @@ export const EVENT_TYPES: EventDefinition[] = [
         sender_type: event.sender_type,
         sender_id: event.sender_id,
         sender_name: event.sender_name,
+        // Forward the discriminator so live consumers (web UI + agent-manager
+        // history ring) can distinguish real turns from progress heartbeats.
+        // Omit when absent so the wire shape stays unchanged for legacy emits.
+        type: event.type === 'progress' || event.type === 'message' ? event.type : undefined,
         content: event.content,
+        // RoomMessagingService projects attachment rows via projectChatAttachment
+        // before emit — the array is already in wire shape, so pass it through
+        // when non-empty (and drop the field entirely otherwise so legacy
+        // consumers that don't read it stay byte-for-byte unchanged).
+        attachments: Array.isArray(event.attachments) && event.attachments.length > 0
+          ? event.attachments
+          : undefined,
         created_at: event.created_at,
         // v0.33: trailing agent-chain depth — plugin uses to break loops.
         agent_chain_depth: typeof event.agent_chain_depth === 'number'

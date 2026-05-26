@@ -23,6 +23,7 @@ import { Resource } from '../../../entities/Resource';
 import { activityEvents } from '../../../services/activity.service';
 import { ok, err, MENTION_SYNTAX_DOC, sanitizeHarnessMarkers } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
+import { TicketArchivedError } from '../shared/archive-helpers';
 import { resolveAgentDisplayName } from '../../../utils/agent-name';
 import type { ToolContext } from './context';
 
@@ -120,6 +121,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
     async ({ ticket_id, author_type, author_id, author, content, type, parent_id, metadata, author_role, attachment_resource_ids }, extra: { sessionId?: string }) => {
       const ticket = await dataSource.getRepository(Ticket).findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Ticket not found');
+      if (ticket.archived_at) return err(new TicketArchivedError(ticket.id).message);
 
       // Strip any `<system-reminder>…</system-reminder>` or sibling harness
       // markers a confused CLI subagent echoed from its model context into
@@ -344,6 +346,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
     async ({ ticket_id, content, author_type, author_id, author, author_role }, extra: { sessionId?: string }) => {
       const ticket = await dataSource.getRepository(Ticket).findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Ticket not found');
+      if (ticket.archived_at) return err(new TicketArchivedError(ticket.id).message);
 
       const resolved = await resolveAuthor(author_type, author_id, author, extra);
       if ('error' in resolved) return err(resolved.error);
@@ -442,6 +445,10 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       const question = await commentRepo.findOne({ where: { id: question_comment_id } });
       if (!question) return err('Question comment not found');
       if (question.type !== 'question') return err('Parent comment is not a question');
+      // Refuse answers on archived tickets — the question + answer pair is a
+      // mutation surface and the ticket is supposed to be read-only.
+      const answerTicket = await dataSource.getRepository(Ticket).findOne({ where: { id: question.ticket_id } });
+      if (answerTicket?.archived_at) return err(new TicketArchivedError(answerTicket.id).message);
 
       const resolved = await resolveAuthor(author_type, author_id, author, extra);
       if ('error' in resolved) return err(resolved.error);
@@ -497,6 +504,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
     async ({ ticket_id, content, references, author_type, author_id, author, author_role }, extra: { sessionId?: string }) => {
       const ticket = await dataSource.getRepository(Ticket).findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Ticket not found');
+      if (ticket.archived_at) return err(new TicketArchivedError(ticket.id).message);
 
       const resolved = await resolveAuthor(author_type, author_id, author, extra);
       if ('error' in resolved) return err(resolved.error);
@@ -561,6 +569,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       const ticketRepo = dataSource.getRepository(Ticket);
       const ticket = await ticketRepo.findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Ticket not found');
+      if (ticket.archived_at) return err(new TicketArchivedError(ticket.id).message);
 
       const agentRepo = dataSource.getRepository(Agent);
       const targetAgent = await agentRepo.findOne({ where: { id: target_agent_id } });

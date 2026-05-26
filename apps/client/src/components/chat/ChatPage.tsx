@@ -282,6 +282,11 @@ export default function ChatPage() {
       });
     }
 
+    // Progress rows are tool-call heartbeats — render them in the active
+    // room as compact muted lines, but skip every unread/toast/sound/title
+    // side effect so they don't masquerade as real chat activity.
+    const isProgress = msg.type === 'progress';
+
     if (msg.room_id === currentActiveRoomId) {
       setMessages((prev) => {
         // Deduplicate: skip if this message was already appended optimistically
@@ -289,11 +294,11 @@ export default function ChatPage() {
         return [...prev, msg];
       });
       // Skip read-receipts when watching as a non-member observer.
-      if (!isObserverRef.current) {
+      if (!isObserverRef.current && !isProgress) {
         api.markChatRoomRead(msg.room_id).catch(() => {});
         markBadgeRead('chat', msg.room_id);
       }
-    } else {
+    } else if (!isProgress) {
       setRooms((prev) =>
         prev.map((r) =>
           r.id === msg.room_id

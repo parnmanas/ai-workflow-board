@@ -38,6 +38,17 @@ export class Board {
   @Column({ type: 'int', default: 1 })
   max_concurrent_tickets_per_agent: number;
 
+  // Auto-archive policy for Done-column tickets on this board. When non-null,
+  // TicketArchiverService archives tickets whose terminal_entered_at is older
+  // than `auto_archive_days` days. null = disabled (the default — opt-in only).
+  // Server-side validation enforces null or 1..365 so an operator can't write
+  // a 0/negative/365+ value that would either archive everything immediately
+  // or never. Single-column representation (vs the spec's enabled+days pair)
+  // makes enabled-without-days an impossible state and mirrors the existing
+  // nullable-marker convention (paused_at, archived_at).
+  @Column({ type: 'int', nullable: true, default: null })
+  auto_archive_days: number | null;
+
   @CreateDateColumn()
   created_at: Date;
 

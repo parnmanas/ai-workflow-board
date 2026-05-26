@@ -15,6 +15,7 @@
 import { promises as fsp } from 'node:fs';
 import { join } from 'node:path';
 import { resolveCliBin } from '../cli-resolver.js';
+import { resolveSelfCommand } from '../self-path.js';
 import {
   type AdapterCredential,
   type AdapterMcpContext,
@@ -184,12 +185,12 @@ export class GeminiCliAdapter extends CliAdapter {
     const geminiDir = join(cliHomeDir, GEMINI_SUBDIR);
     await fsp.mkdir(geminiDir, { recursive: true, mode: 0o700 });
 
-    // Persist the AWB MCP server into per-agent `settings.json` so the
-    // spawned gemini child can call `mcp__awb__*` tools natively. The
-    // file is merged (not overwritten) so any operator-curated settings
-    // — auth.selectedType, theme, etc. — survive a manager restart.
+    // Persist the AWB + host MCP servers into per-agent `settings.json` so the
+    // spawned gemini child can call `mcp__awb__*` and `mcp__host__*` tools
+    // natively. The file is merged (not overwritten) so any operator-curated
+    // settings — auth.selectedType, theme, etc. — survive a manager restart.
     if (mcp?.url && mcp?.apiKey) {
-      await this.#writeAwbMcpSettings(geminiDir, mcp.url, mcp.apiKey);
+      await this.#writeMcpSettings(geminiDir, mcp.url, mcp.apiKey);
     }
 
     // Always start from a clean credential slate so credential mode
@@ -223,10 +224,18 @@ export class GeminiCliAdapter extends CliAdapter {
     return { extraEnv: {} };
   }
 
-  /** Merge an `awb` MCP server entry into `<geminiDir>/settings.json`.
+  /** Merge `awb` + `host` MCP server entries into `<geminiDir>/settings.json`.
    *  Keeps any other settings the operator (or a previous `gemini mcp add`)
-   *  may have written so this re-run is idempotent. */
-  async #writeAwbMcpSettings(
+   *  may have written so this re-run is idempotent.
+   *
+   *  Two servers:
+   *   - `awb` — central AWB Streamable HTTP endpoint (mcp__awb__*)
+   *   - `host` — stdio MCP forked from this agent-manager binary,
+   *     exposing host tools (screenshot, window, input, process, etc.) so
+   *     the managed gemini can drive the operator's desktop the same way
+   *     claude does. Tools become `mcp__host__*` on the gemini side.
+   */
+  async #writeMcpSettings(
     geminiDir: string,
     awbUrl: string,
     apiKey: string,
@@ -258,6 +267,17 @@ export class GeminiCliAdapter extends CliAdapter {
       // `trust: true` skips the per-tool approval prompt — the AWB MCP
       // surface is the operator's own server, and the spawned gemini
       // already runs with --yolo so the prompt would never be answered.
+      trust: true,
+    };
+    // Host-tools server — forked from the same agent-manager binary that
+    // wrote this config so the spawned gemini child has access to
+    // screenshot / window / input / process / file / clipboard tools on
+    // the operator's host. Gemini's mcpServers schema accepts the same
+    // `command + args` shape claude does for stdio servers.
+    const self = resolveSelfCommand();
+    mcpServers.host = {
+      command: self.command,
+      args: [...self.prefixArgs, 'mcp-host'],
       trust: true,
     };
     settings.mcpServers = mcpServers;

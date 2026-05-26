@@ -11,6 +11,7 @@ import type {
   ActivityRow,
   ChatRoomListItem,
   ChatRoomDetail,
+  ChatAttachment,
   ChatRoomMessageItem,
   ChatRoomParticipantInfo,
   AgentErrorLog,
@@ -238,6 +239,7 @@ export const api = {
       column_prompts?: Record<string, string> | null;
       max_concurrent_tickets_per_agent?: number;
       self_improvement_mode?: 'off' | 'same_board' | 'remote_awb' | 'both';
+      auto_archive_days?: number | null;
     },
   ) =>
     request<any>(`/boards/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
@@ -256,6 +258,27 @@ export const api = {
     request<any>(`/boards/${boardId}/pause`, { method: 'POST' }),
   resumeBoard: async (boardId: string) =>
     request<any>(`/boards/${boardId}/resume`, { method: 'POST' }),
+  // Archived-ticket surface — distinct from board archive (Board.archived_at)
+  // and the active ticket list (which filters archived_at IS NOT NULL).
+  listArchivedTickets: async (
+    boardId: string,
+    opts?: { cursor?: string; limit?: number; q?: string },
+  ) => {
+    const params = new URLSearchParams();
+    if (opts?.cursor) params.set('cursor', opts.cursor);
+    if (opts?.limit) params.set('limit', String(opts.limit));
+    if (opts?.q) params.set('q', opts.q);
+    const qs = params.toString();
+    return request<{ tickets: any[]; next_cursor: string | null }>(
+      `/boards/${boardId}/archived-tickets${qs ? `?${qs}` : ''}`,
+    );
+  },
+  archiveTicket: async (ticketId: string) =>
+    request<any>(`/tickets/${ticketId}/archive`, { method: 'POST' }),
+  unarchiveTicket: async (ticketId: string) =>
+    request<any>(`/tickets/${ticketId}/unarchive`, { method: 'POST' }),
+  getTicket: async (ticketId: string) =>
+    request<any>(`/tickets/${ticketId}`),
 
   // ─── Columns ──────────────────────────────────────────
   createColumn: (boardId: string, data: { name: string; color?: string; description?: string }) =>
@@ -971,11 +994,81 @@ export const api = {
     );
   },
 
-  sendChatRoomMessage: (roomId: string, content: string, images?: Array<{ data: string; filename: string; mimetype: string }>) =>
+  sendChatRoomMessage: (
+    roomId: string,
+    content: string,
+    images?: Array<{ data: string; filename: string; mimetype: string }>,
+    attachmentIds?: string[],
+  ) =>
     request<ChatRoomMessageItem>(`/chat-rooms/${roomId}/messages`, {
       method: 'POST',
-      body: JSON.stringify({ content, images: images || [] }),
+      body: JSON.stringify({
+        content,
+        images: images || [],
+        attachment_ids: attachmentIds || [],
+      }),
     }),
+
+  // Pre-send upload — body carries one `{ file_name, file_mimetype, file_data }`
+  // entry. Server stores it with owner_type='chat_room'; on send, the matching
+  // attachment_id flips to owner_type='chat_message'. XHR is used so we can
+  // surface a per-file upload progress bar in the chat input.
+  uploadChatAttachment: (
+    roomId: string,
+    file: { file_name: string; file_mimetype: string; file_data: string },
+    onProgress?: (pct: number) => void,
+    signal?: AbortSignal,
+  ): Promise<ChatAttachment> => {
+    return new Promise<ChatAttachment>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `${BASE}/chat-rooms/${roomId}/attachments`);
+      const headers = getAuthHeaders();
+      for (const [k, v] of Object.entries(headers)) {
+        try { xhr.setRequestHeader(k, v); } catch { /* ignore */ }
+      }
+      if (xhr.upload && onProgress) {
+        xhr.upload.onprogress = (e: ProgressEvent) => {
+          if (e.lengthComputable) onProgress(Math.round((e.loaded * 100) / e.total));
+        };
+      }
+      xhr.onload = () => {
+        if (xhr.status === 401) {
+          localStorage.removeItem('auth_token');
+          window.dispatchEvent(new Event('auth-expired'));
+        }
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try { resolve(JSON.parse(xhr.responseText)); }
+          catch (e) { reject(new Error('Invalid upload response')); }
+        } else {
+          let msg = `Upload failed (${xhr.status})`;
+          try {
+            const body = JSON.parse(xhr.responseText);
+            if (body?.error) msg = body.error;
+          } catch { /* keep default */ }
+          reject(new Error(msg));
+        }
+      };
+      xhr.onerror = () => reject(new Error('Upload network error'));
+      xhr.onabort = () => reject(new DOMException('Aborted', 'AbortError'));
+      if (signal) {
+        if (signal.aborted) { xhr.abort(); return; }
+        signal.addEventListener('abort', () => xhr.abort(), { once: true });
+      }
+      xhr.send(JSON.stringify(file));
+    });
+  },
+
+  deletePendingChatAttachment: (roomId: string, attachmentId: string) =>
+    request<{ ok: boolean }>(`/chat-rooms/${roomId}/attachments/${attachmentId}`, {
+      method: 'DELETE',
+    }),
+
+  // Fetch a single attachment with its base64 payload — used for image preview
+  // rendering and file download (decoded into a Blob client-side).
+  getChatAttachment: (roomId: string, attachmentId: string) =>
+    request<ChatAttachment & { file_data: string }>(
+      `/chat-rooms/${roomId}/attachments/${attachmentId}`,
+    ),
 
   markChatRoomRead: (roomId: string) =>
     request<void>(`/chat-rooms/${roomId}/read`, { method: 'PATCH' }),

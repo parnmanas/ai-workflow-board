@@ -2,21 +2,25 @@ import { ApiTags, ApiSecurity } from '@nestjs/swagger';
 import { Controller, Get, Post, Body, Param, Query, Req, Res, UseGuards } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
+import { Repository, DataSource, IsNull } from 'typeorm';
 import { Board } from '../../entities/Board';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { Ticket } from '../../entities/Ticket';
 import { Comment } from '../../entities/Comment';
 import { ChatRoom } from '../../entities/ChatRoom';
-import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
 import { Agent } from '../../entities/Agent';
 import { ApiKey } from '../../entities/ApiKey';
-import { User } from '../../entities/User';
+import { TicketAttachment } from '../../entities/TicketAttachment';
+import { projectChatAttachment } from '../mcp/shared/ticket-helpers';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { RoomMembershipService } from '../chat-rooms/room-membership.service';
-import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
+import {
+  CHAT_MESSAGE_TYPES,
+  ChatMessageType,
+  RoomMessagingService,
+} from '../chat-rooms/room-messaging.service';
 import { LogService } from '../../services/log.service';
-import { activityEvents } from '../../services/activity.service';
+import { ActivityService, activityEvents } from '../../services/activity.service';
 import {
   findColumnByName,
   maxTicketPosition,
@@ -24,6 +28,12 @@ import {
   shiftTicketPositions,
 } from '../mcp/shared/ticket-helpers';
 import { loadTicketFull } from '../mcp/shared/ticket-parsing';
+import {
+  applyTerminalEnteredAtForMove,
+  getRootArchivedAt,
+  isTerminalColumn,
+  TicketArchivedError,
+} from '../mcp/shared/archive-helpers';
 import { findOrFail } from '../../common/find-or-fail';
 import { resolveAgentDisplayName } from '../../utils/agent-name';
 
@@ -37,11 +47,11 @@ export class AgentApiController {
     @InjectRepository(BoardColumn) private readonly colRepo: Repository<BoardColumn>,
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
     @InjectRepository(Comment) private readonly commentRepo: Repository<Comment>,
-    @InjectRepository(ChatRoomMessage) private readonly messageRepo: Repository<ChatRoomMessage>,
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly membership: RoomMembershipService,
     private readonly messaging: RoomMessagingService,
     private readonly logService: LogService,
+    private readonly activityService: ActivityService,
   ) {}
 
   @Get('tickets/:id')
@@ -49,6 +59,96 @@ export class AgentApiController {
     const ticket = await loadTicketFull(this.dataSource, id);
     if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
     return res.json(ticket);
+  }
+
+  /**
+   * Silent-exit fallback comment endpoint for the agent-manager.
+   *
+   * The MCP `add_comment` tool rejects `type='system'` so an agent can't forge
+   * audit-log entries. But the agent-manager itself — running outside any
+   * spawned CLI — is a trusted operator that needs to mark "subagent finished
+   * without leaving a trace" with the same provenance the SystemCommentService
+   * uses for column moves. This endpoint is gated by `AgentAuthGuard` (manager
+   * key) and creates a `type='system'` Comment + emits the `activity` event so
+   * board_update SSE cascades to Reviewer triggers normally.
+   *
+   * Body shape (all optional except content):
+   *   - content: rendered fallback body (code-block-wrapped CLI tail).
+   *   - exit_code, cycle_trigger_id, role: stored on `comment.metadata` so the
+   *     UI / debugger can correlate the row with the dead subagent.
+   *   - actor_name: display name to stamp on the activity log; defaults to
+   *     'agent-manager'.
+   */
+  @Post('tickets/:id/silent-exit-comment')
+  async postSilentExitComment(
+    @Param('id') ticketId: string,
+    @Body() body: any,
+    @Res() res: Response,
+  ) {
+    const ticket = await this.ticketRepo.findOne({ where: { id: ticketId } });
+    if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+    // Archived tickets are read-only — refuse so manager retries don't pile
+    // up forever on a terminally-archived row.
+    if (ticket.archived_at) {
+      return res.status(409).json({
+        error: 'ticket_archived',
+        message: new TicketArchivedError(ticket.id).message,
+      });
+    }
+
+    const content = typeof body?.content === 'string' ? body.content.trim() : '';
+    if (!content) return res.status(400).json({ error: 'content is required' });
+
+    const exitCode = body?.exit_code === null || body?.exit_code === undefined
+      ? null
+      : Number(body.exit_code);
+    const cycleTriggerId = typeof body?.cycle_trigger_id === 'string' ? body.cycle_trigger_id : '';
+    const role = typeof body?.role === 'string' ? body.role : '';
+    const actorName = typeof body?.actor_name === 'string' && body.actor_name
+      ? body.actor_name
+      : 'agent-manager';
+
+    const metadata = {
+      reason: 'silent_exit',
+      exit_code: exitCode,
+      cycle_trigger_id: cycleTriggerId || null,
+      author_role: role || null,
+    };
+
+    const commentRepo = this.dataSource.getRepository(Comment);
+    const comment = await commentRepo.save(commentRepo.create({
+      ticket_id: ticketId,
+      author_type: 'system',
+      author_id: '',
+      author: 'System',
+      content,
+      type: 'system',
+      metadata: JSON.stringify(metadata),
+    }));
+
+    // Same activity-event contract the MCP add_comment / REST add-comment
+    // paths use — entity_type='comment' + action='created' flows through
+    // event-registry's board_update mapping and reaches SSE subscribers, which
+    // is how the Reviewer-trigger cascade gets notified. Without this emit the
+    // comment lands silently in the DB and the board never re-renders until a
+    // user reloads.
+    await this.activityService.logActivity({
+      entity_type: 'comment',
+      entity_id: comment.id,
+      action: 'created',
+      ticket_id: ticketId,
+      actor_id: '',
+      actor_name: actorName,
+      new_value: content,
+      field_changed: 'system',
+    });
+
+    this.logService.info(
+      'AgentApi',
+      `Silent-exit system comment posted: ticket=${ticketId.slice(0, 8)} exit=${exitCode ?? '-'} trigger=${cycleTriggerId.slice(0, 8) || '-'}`,
+      { ticket_id: ticketId, comment_id: comment.id, exit_code: exitCode, cycle_trigger_id: cycleTriggerId },
+    );
+    return res.status(201).json(comment);
   }
 
   @Get('board-summary')
@@ -66,8 +166,12 @@ export class AgentApiController {
       board: board.name,
       description: board.description,
       columns: await Promise.all(columns.map(async col => {
+        // Mirror REST GET /api/boards/:id — archived tickets drop out by
+        // default. Legacy agent-api has no opt-in flag; if a caller needs
+        // the full set they should migrate to the MCP get_board tool with
+        // include_archived=true (or hit the archive endpoint directly).
         const tickets = await this.ticketRepo.find({
-          where: { column_id: col.id },
+          where: { column_id: col.id, archived_at: IsNull() },
           relations: ['children'],
           order: { position: 'ASC' },
         });
@@ -97,8 +201,13 @@ export class AgentApiController {
       const tRepo = manager.getRepository(Ticket);
 
       const position = await maxTicketPosition(manager, col.id);
+      // Stamp terminal_entered_at when the destination column is already
+      // terminal so the archiver can later pick this row up. The archiver
+      // requires terminal_entered_at IS NOT NULL.
+      const terminalEnteredAt = isTerminalColumn(col) ? new Date() : null;
       const t = await tRepo.save(tRepo.create({
         column_id: col.id, title, description, priority, assignee, labels: '[]', position,
+        terminal_entered_at: terminalEnteredAt,
       }));
 
       if (subtasks.length > 0) {
@@ -125,14 +234,22 @@ export class AgentApiController {
     if (!ticketId || !toColumn) return res.status(400).json({ error: 'ticketId and toColumn are required' });
 
     const ticket = await findOrFail(this.ticketRepo, { where: { id: ticketId } }, 'Ticket not found');
+    if (ticket.archived_at) {
+      return res.status(409).json({
+        error: 'ticket_archived',
+        hint: 'Call unarchive first',
+        message: new TicketArchivedError(ticket.id).message,
+      });
+    }
 
     const col = await findColumnByName(this.dataSource, boardId, toColumn);
     if (!col) return res.status(404).json({ error: `Column "${toColumn}" not found` });
 
     await this.dataSource.transaction(async (manager) => {
       const tRepo = manager.getRepository(Ticket);
+      const sourceColumnId = ticket.column_id;
 
-      await shiftTicketPositions(tRepo, { column_id: ticket.column_id }, ticket.position, -1);
+      await shiftTicketPositions(tRepo, { column_id: sourceColumnId }, ticket.position, -1);
 
       const destCount = await tRepo.createQueryBuilder('t')
         .where('t.column_id = :colId AND t.id != :id AND t.parent_id IS NULL', { colId: col.id, id: ticket.id }).getCount();
@@ -141,6 +258,15 @@ export class AgentApiController {
       await shiftTicketPositions(tRepo, { column_id: col.id }, pos, +1, { inclusive: true, excludeId: ticket.id });
 
       await tRepo.update(ticket.id, { column_id: col.id, position: pos });
+
+      // Keep terminal_entered_at honest on the legacy surface too — without
+      // this stamp the archiver would never see tickets moved into Done via
+      // this endpoint and would silently skip them forever.
+      const colRepoTx = manager.getRepository(BoardColumn);
+      const sourceCol = sourceColumnId
+        ? await colRepoTx.findOne({ where: { id: sourceColumnId } })
+        : null;
+      await applyTerminalEnteredAtForMove(tRepo, ticket.id, sourceCol, col);
     });
 
     return res.json({ success: true, ticketId, movedTo: toColumn });
@@ -153,9 +279,23 @@ export class AgentApiController {
 
     const results: any[] = [];
 
+    // Stable rejection payload for archived-ticket mutations on the batch
+    // surface. Mirrors the single-shot `/api/agent/move-ticket` response so
+    // operators wiring batch consumers see the same `ticket_archived` code
+    // they would see from the non-batch path — the policy is "archived
+    // tickets are read-only except lookup, unarchive, and delete" and the
+    // batch loop must not become a backdoor around it.
+    const archivedRejection = (ticketId: string) => ({
+      error: 'ticket_archived',
+      hint: 'Call unarchive first',
+      message: new TicketArchivedError(ticketId).message,
+      ticketId,
+    });
+
     await this.dataSource.transaction(async (manager) => {
       const tRepo = manager.getRepository(Ticket);
       const cRepo = manager.getRepository(Comment);
+      const colRepoTx = manager.getRepository(BoardColumn);
 
       for (const op of operations) {
         try {
@@ -164,9 +304,13 @@ export class AgentApiController {
               const col = await findColumnByName(manager, String(op.boardId), op.column);
               if (!col) { results.push({ error: `Column "${op.column}" not found` }); continue; }
               const pos = await maxTicketPosition(manager, col.id);
+              // Stamp terminal_entered_at when landing directly on a terminal
+              // column — same rationale as the single-shot create-ticket above.
+              const terminalEnteredAt = isTerminalColumn(col) ? new Date() : null;
               const r = await tRepo.save(tRepo.create({
                 column_id: col.id, title: op.title, description: op.description || '',
                 priority: op.priority || 'medium', assignee: op.assignee || '', labels: '[]', position: pos,
+                terminal_entered_at: terminalEnteredAt,
               }));
               results.push({ success: true, ticketId: r.id });
               break;
@@ -176,8 +320,10 @@ export class AgentApiController {
               if (!col) { results.push({ error: `Column "${op.toColumn}" not found` }); continue; }
               const t = await tRepo.findOne({ where: { id: String(op.ticketId) } });
               if (!t) { results.push({ error: 'Ticket not found' }); continue; }
+              if (t.archived_at) { results.push(archivedRejection(t.id)); continue; }
 
-              await shiftTicketPositions(tRepo, { column_id: t.column_id }, t.position, -1);
+              const sourceColumnId = t.column_id;
+              await shiftTicketPositions(tRepo, { column_id: sourceColumnId }, t.position, -1);
 
               const cnt = await tRepo.createQueryBuilder('t')
                 .where('t.column_id = :colId AND t.id != :id AND t.parent_id IS NULL', { colId: col.id, id: t.id }).getCount();
@@ -186,14 +332,33 @@ export class AgentApiController {
               await shiftTicketPositions(tRepo, { column_id: col.id }, pos, +1, { inclusive: true, excludeId: t.id });
 
               await tRepo.update(t.id, { column_id: col.id, position: pos });
+
+              // Mirror the single-shot move-ticket handler — without this
+              // stamp the archiver candidate query (`terminal_entered_at IS
+              // NOT NULL`) would never see tickets moved into Done through
+              // the batch surface, so auto-archive would silently skip
+              // them forever.
+              const sourceCol = sourceColumnId
+                ? await colRepoTx.findOne({ where: { id: sourceColumnId } })
+                : null;
+              await applyTerminalEnteredAtForMove(tRepo, t.id, sourceCol, col);
+
               results.push({ success: true, ticketId: op.ticketId, movedTo: op.toColumn });
               break;
             }
             case 'add-child':
             case 'add-subtask': {
-              const position = await maxChildPosition(manager, String(op.ticketId));
+              const parentId = String(op.ticketId);
+              const parent = await tRepo.findOne({ where: { id: parentId } });
+              if (!parent) { results.push({ error: 'Parent ticket not found' }); continue; }
+              // Walk to the root — subtasks have no column and carry no
+              // archived_at of their own; the root carries the flag.
+              const rootArchived = await getRootArchivedAt(manager, parent);
+              if (rootArchived) { results.push(archivedRejection(parent.id)); continue; }
+
+              const position = await maxChildPosition(manager, parentId);
               const r = await tRepo.save(tRepo.create({
-                parent_id: String(op.ticketId), depth: 1, column_id: null as any,
+                parent_id: parentId, depth: 1, column_id: null as any,
                 title: op.title, position, status: 'todo',
               }));
               results.push({ success: true, ticketId: r.id });
@@ -206,13 +371,21 @@ export class AgentApiController {
               if (op.title !== undefined) updates.title = op.title;
               if (op.status !== undefined) updates.status = String(op.status);
               const ticketId = String(op.subtaskId || op.ticketId);
+              const sub = await tRepo.findOne({ where: { id: ticketId } });
+              if (!sub) { results.push({ error: 'Ticket not found' }); continue; }
+              const rootArchived = await getRootArchivedAt(manager, sub);
+              if (rootArchived) { results.push(archivedRejection(ticketId)); continue; }
               await tRepo.update(ticketId, updates);
               results.push({ success: true, ticketId });
               break;
             }
             case 'add-comment': {
+              const ticketId = String(op.ticketId);
+              const t = await tRepo.findOne({ where: { id: ticketId } });
+              if (!t) { results.push({ error: 'Ticket not found' }); continue; }
+              if (t.archived_at) { results.push(archivedRejection(ticketId)); continue; }
               const r = await cRepo.save(cRepo.create({
-                ticket_id: String(op.ticketId),
+                ticket_id: ticketId,
                 author_type: op.authorType || 'agent',
                 author_id: String(op.authorId || ''),
                 author: op.author || '',
@@ -359,7 +532,20 @@ export class AgentApiController {
   async sendChatRoomMessage(@Body() body: any, @Param('roomId') roomId: string, @Res() res: Response) {
     const { agent_id, content } = body;
     if (!agent_id) return res.status(400).json({ error: 'agent_id is required' });
-    if (!content) return res.status(400).json({ error: 'content is required' });
+    const attachmentIds = Array.isArray(body.attachment_ids) ? body.attachment_ids : [];
+    // Empty content is valid when attachments carry the payload — service
+    // enforces the "content OR attachment_ids" rule consistently.
+    if ((!content || (typeof content === 'string' && !content.trim())) && attachmentIds.length === 0) {
+      return res.status(400).json({ error: 'content or attachment_ids required' });
+    }
+    // Optional discriminator — agent-manager passes 'progress' for tool-call
+    // heartbeats so they get filtered out of agent history replays. Default
+    // to 'message' for legacy callers that don't set it.
+    const rawType = typeof body.type === 'string' ? body.type : 'message';
+    if (!CHAT_MESSAGE_TYPES.includes(rawType as ChatMessageType)) {
+      return res.status(400).json({ error: `invalid type: ${rawType}` });
+    }
+    const messageType = rawType as ChatMessageType;
 
     const room = await this.dataSource.getRepository(ChatRoom).findOne({ where: { id: roomId } });
     if (!room) return res.status(404).json({ error: 'Room not found' });
@@ -370,7 +556,15 @@ export class AgentApiController {
     ) || 'Agent';
 
     const msg = await this.messaging.sendMessage(
-      roomId, room.workspace_id, 'agent', agent_id, agentName, content,
+      roomId,
+      room.workspace_id,
+      'agent',
+      agent_id,
+      agentName,
+      content ?? '',
+      undefined,
+      attachmentIds,
+      messageType,
     );
     return res.status(201).json(msg);
   }
@@ -378,46 +572,42 @@ export class AgentApiController {
   @Get('chat-rooms/:roomId/messages')
   async getChatRoomMessages(@Param('roomId') roomId: string, @Res() res: Response, @Query('limit') limitStr?: string) {
     const limit = Math.min(parseInt(limitStr || '50', 10) || 50, 200);
-    const messages = await this.messageRepo
-      .createQueryBuilder('m')
-      .where('m.room_id = :roomId', { roomId })
-      .orderBy('m.created_at', 'DESC')
-      .limit(limit)
-      .getMany();
+    // Chat history feeding back into a spawned CLI must NOT include the
+    // manager's own progress narration — `excludeProgress` drops type='progress'
+    // rows at the SQL level. The web UI calls the user-session controller,
+    // which does not set this flag, so humans still see the heartbeat trail.
+    const messages = await this.messaging.getMessages(
+      roomId, '', limit, undefined, { observer: true, excludeProgress: true },
+    );
+    return res.json(messages);
+  }
 
-    const ordered = messages.reverse();
-    const userRepo = this.dataSource.getRepository(User);
-    const agentRepo = this.dataSource.getRepository(Agent);
-    const nameCache = new Map<string, string>();
-
-    const resolved = await Promise.all(ordered.map(async (m) => {
-      const cacheKey = `${m.sender_type}:${m.sender_id}`;
-      let senderName = nameCache.get(cacheKey);
-      if (!senderName) {
-        if (m.sender_type === 'user') {
-          const u = await userRepo.findOne({ where: { id: m.sender_id } });
-          senderName = u ? (u.name || u.email || 'Unknown User') : 'Unknown User';
-        } else if (m.sender_type === 'agent') {
-          const a = await agentRepo.findOne({ where: { id: m.sender_id } });
-          senderName = a ? a.name : 'Unknown Agent';
-        } else {
-          senderName = 'Unknown';
-        }
-        nameCache.set(cacheKey, senderName);
+  // Mirrors the user-session GET /api/chat-rooms/:roomId/attachments/:id but
+  // gated by AgentAuthGuard + agent participant check so the agent-manager
+  // can fetch attachment bytes for vision / file delivery to subagent prompts.
+  // The user-session route stays the canonical UI path; this is a peer that
+  // exists so an agent-key holder doesn't have to spin up a user session just
+  // to read content from a room it's already a participant of.
+  @Get('chat-rooms/:roomId/attachments/:attachmentId')
+  async getChatRoomAttachment(
+    @Req() req: Request,
+    @Res() res: Response,
+    @Param('roomId') roomId: string,
+    @Param('attachmentId') attachmentId: string,
+  ) {
+    const agentId = (req as any).currentAgentId as string | undefined;
+    if (!agentId) return res.status(403).json({ error: 'Agent identity required' });
+    try {
+      await this.membership.requireActiveParticipant(roomId, agentId, 'agent');
+      const row = await this.dataSource.getRepository(TicketAttachment).findOne({
+        where: { id: attachmentId, room_id: roomId },
+      });
+      if (!row || (row.owner_type !== 'chat_room' && row.owner_type !== 'chat_message')) {
+        return res.status(404).json({ error: 'Attachment not found' });
       }
-      return {
-        id: m.id,
-        room_id: m.room_id,
-        workspace_id: m.workspace_id,
-        sender_type: m.sender_type,
-        sender_id: m.sender_id,
-        sender_name: senderName,
-        content: m.content,
-        created_at: m.created_at,
-        updated_at: m.updated_at,
-      };
-    }));
-
-    return res.json(resolved);
+      return res.json(projectChatAttachment(row, { includeData: true }));
+    } catch (err: any) {
+      return res.status(err.status || 403).json({ error: err.message });
+    }
   }
 }

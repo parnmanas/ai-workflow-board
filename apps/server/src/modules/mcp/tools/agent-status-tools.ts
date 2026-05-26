@@ -14,7 +14,9 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { Agent } from '../../../entities/Agent';
+import { Ticket } from '../../../entities/Ticket';
 import { ok, err } from '../shared/helpers';
+import { TicketArchivedError } from '../shared/archive-helpers';
 import type { ToolContext } from './context';
 
 export function registerAgentStatusTools(server: McpServer, ctx: ToolContext): void {
@@ -36,6 +38,12 @@ export function registerAgentStatusTools(server: McpServer, ctx: ToolContext): v
       }
       const agent = await dataSource.getRepository(Agent).findOne({ where: { id: agent_id } });
       if (!agent) return err('Agent not found');
+
+      // Refuse to bind an agent to an archived ticket — the trigger loop
+      // wouldn't dispatch any work for it and the dashboard would render a
+      // stuck "current_task" with no follow-up.
+      const ticketForArchive = await dataSource.getRepository(Ticket).findOne({ where: { id: ticket_id } });
+      if (ticketForArchive?.archived_at) return err(new TicketArchivedError(ticketForArchive.id).message);
 
       await agentStatusService.setCurrentTask(agent_id, ticket_id, role);
       return ok({ agent_id, ticket_id, role: role || null, set_at: new Date().toISOString() });

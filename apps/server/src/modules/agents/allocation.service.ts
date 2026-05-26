@@ -62,6 +62,10 @@ export class AllocationService {
       .innerJoin('boards', 'b', 'b.id = col.board_id')
       .where('b.workspace_id = :workspaceId', { workspaceId })
       .andWhere('t.id IN (:...ticketIds)', { ticketIds: assignedTicketIds })
+      // Archived tickets are excluded so the supervisor stops re-pushing
+      // triggers for them (otherwise the focus-selector would still hand
+      // them out as "stale" and burn LLM budget on completed work).
+      .andWhere('t.archived_at IS NULL')
       .getMany();
 
     if (tickets.length === 0) return [];

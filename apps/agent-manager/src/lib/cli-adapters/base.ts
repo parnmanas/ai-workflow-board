@@ -56,6 +56,15 @@ export interface ParseResult {
   raw: any;
 }
 
+/** Per-turn image attachment payload handed to `formatTurn`. Currently
+ *  Claude is the only adapter that consumes these (stream-json image
+ *  content blocks); other adapters get the list but ignore it. */
+export interface TurnImage {
+  media_type: string;
+  /** Base64 image bytes (no `data:` URI prefix). */
+  data: string;
+}
+
 export abstract class CliAdapter {
   static cliType = 'base';
 
@@ -77,7 +86,17 @@ export abstract class CliAdapter {
     throw new Error(`${this.cliType}: buildSessionSpawn not implemented`);
   }
 
-  formatTurn(_text: string): string {
+  /**
+   * Encode a persistent-session turn. Persistent adapters (Claude) build
+   * stream-json user messages here; one-shot adapters never call this path.
+   *
+   * `images` is an optional array of base64 image attachments the session
+   * manager wants delivered inline (chat attachment vision). Adapters that
+   * support inline image content blocks include them in the turn payload;
+   * others ignore the list (the session manager already pushed the
+   * metadata into the prompt text via composeChatRoomPrompt).
+   */
+  formatTurn(_text: string, _images?: TurnImage[]): string {
     throw new Error(`${this.cliType}: formatTurn not implemented`);
   }
 

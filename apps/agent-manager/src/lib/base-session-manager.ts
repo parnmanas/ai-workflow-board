@@ -16,7 +16,7 @@ import type { Readable, Writable } from 'node:stream';
 import { SUBAGENTS_BASE_DIR, STOP_GRACE_MS } from './constants.js';
 import { log } from './logging.js';
 import { createAdapter } from './cli-adapters/index.js';
-import { ADAPTER_CAPABILITIES, PARSE_STAGE, type CliAdapter, type ParseResult } from './cli-adapters/base.js';
+import { ADAPTER_CAPABILITIES, PARSE_STAGE, type CliAdapter, type ParseResult, type TurnImage } from './cli-adapters/base.js';
 import type { AwbConfig } from './rest.js';
 import type { SubagentMonitor, SubagentTapHandle } from './subagent-monitor.js';
 
@@ -31,6 +31,9 @@ const { PERSISTENT_SESSION } = ADAPTER_CAPABILITIES;
 const UNHEALTHY_TURN_THRESHOLD = 5;
 const UNHEALTHY_DURATION_MS = 30 * 60 * 1000;
 const HEALTH_SWEEP_INTERVAL_MS = 60 * 1000;
+/** Max lines kept in the per-pid stdout/stderr ring used by silent-exit
+ *  fallback hooks. Chat and ticket subclasses both consume this buffer. */
+const OUTPUT_RING_MAX = 100;
 
 export interface BaseSessionOptions {
   keyField: string;
@@ -86,6 +89,10 @@ export interface SpawnOpts {
      *  overridden by the operator's shell environment. */
     credential_provider?: string | null;
   };
+  /** Per-turn image attachments for chat sessions. Only honored by adapters
+   *  that support inline image content blocks (Claude); other adapters
+   *  ignore the list (metadata already in the prompt text). */
+  firstTurnImages?: TurnImage[];
 }
 
 interface TurnState {
@@ -153,6 +160,13 @@ export class BaseSessionManager {
    *  cap-accounting they do across spawned + reserved sessions stays
    *  consistent. */
   protected readonly _inflight = new Map<string, InflightReservation>();
+  /** Per-pid plain-text stdout/stderr tail. Wired in `#wireStdio` for every
+   *  session the base class spawns; subclasses read it in their
+   *  `_onChildExit` hook to build silent-exit fallback messages without
+   *  re-implementing the buffering. Non-JSON stdout lines and all stderr
+   *  lines land here — stream-json events stay out so the buffer is
+   *  human-readable. */
+  protected readonly _outputRings = new Map<number, string[]>();
   #dedupSet = new Set<string>();
   #dedupQueue: string[] = [];
   #DEDUP_MAX = 200;
@@ -248,7 +262,7 @@ export class BaseSessionManager {
     sessionKey: string,
     rolePrompt: string,
     firstTurnText: string,
-    { onProgress, monitorMeta, agentContext }: SpawnOpts = {},
+    { onProgress, monitorMeta, agentContext, firstTurnImages }: SpawnOpts = {},
   ): Promise<SessionRecord | null> {
     // ST-7: pick the adapter for this agent's CLI choice (claude/codex/gemini)
     // and bind it to the session record so future turns formatTurn /
@@ -442,7 +456,7 @@ export class BaseSessionManager {
       );
 
       this.#startTurn(sess, onProgress);
-      this._writeTurn(sess, firstTurnText);
+      this._writeTurn(sess, firstTurnText, firstTurnImages);
       sess.turnCount = 1;
       this._resetIdleTimer(sess);
       this._sessions.set(sessionKey, sess);
@@ -461,10 +475,11 @@ export class BaseSessionManager {
     {
       checkMaxTurns = true,
       onProgress,
-    }: { checkMaxTurns?: boolean; onProgress?: (stage: string) => void } = {},
+      images,
+    }: { checkMaxTurns?: boolean; onProgress?: (stage: string) => void; images?: TurnImage[] } = {},
   ): void {
     this.#startTurn(sess, onProgress);
-    this._writeTurn(sess, turnText);
+    this._writeTurn(sess, turnText, images);
     sess.turnCount++;
     sess.lastTouchedAt = Date.now();
     this._resetIdleTimer(sess);
@@ -544,8 +559,8 @@ export class BaseSessionManager {
     }
   }
 
-  protected _writeTurn(sess: SessionRecord, text: string): void {
-    const wire = sess.adapter.formatTurn(String(text));
+  protected _writeTurn(sess: SessionRecord, text: string, images?: TurnImage[]): void {
+    const wire = sess.adapter.formatTurn(String(text), images);
     try {
       sess.child.stdin.write(wire + '\n');
       sess.tap?.inLine(wire);
@@ -576,6 +591,13 @@ export class BaseSessionManager {
         sess.tap?.outLine(line);
         const parsed = sess.adapter.parseStdoutLine(line);
         this.#advanceTurn(sess, parsed);
+        // Buffer plain-text stdout (non-JSON parser misses) into the tail
+        // ring so subclasses can surface "what went wrong" on silent exit.
+        // Stream-json events are excluded — they're machine-readable noise.
+        if (!parsed.raw) {
+          const trimmed = line.trim();
+          if (trimmed) this.#pushOutputLine(sess.pid, trimmed);
+        }
         this._onStdoutParsed(sess, parsed, line);
         if (parsed.isResult) {
           const subtype = parsed.raw?.subtype || '-';
@@ -589,9 +611,45 @@ export class BaseSessionManager {
       const tag = this.#logTag.replace(/^\[|\]$/g, '');
       rlErr.on('line', (line) => {
         log(`[${tag}:${sess.pid}:err] ${line}`);
+        const trimmed = line.trim();
+        if (trimmed) this.#pushOutputLine(sess.pid, trimmed);
         this._onStderrLine(sess, line);
       });
     }
+  }
+
+  /** Push a line into the per-pid output ring with a fixed cap. Internal —
+   *  subclasses read via `_collectOutputTail`. */
+  #pushOutputLine(pid: number, line: string): void {
+    let ring = this._outputRings.get(pid);
+    if (!ring) {
+      ring = [];
+      this._outputRings.set(pid, ring);
+    }
+    ring.push(line);
+    while (ring.length > OUTPUT_RING_MAX) ring.shift();
+  }
+
+  /** Join the buffered stdout/stderr tail for a session and trim to
+   *  `maxChars` characters (keeps the last slice — the bottom of a CLI's
+   *  error output is almost always where the diagnostic lives). Returns an
+   *  empty string when nothing was buffered. Safe to call after exit so
+   *  long as `_clearOutputBuffer` hasn't run yet. */
+  protected _collectOutputTail(pid: number, maxChars: number): string {
+    const ring = this._outputRings.get(pid);
+    if (!ring || ring.length === 0) return '';
+    let body = ring.join('\n').trim();
+    if (maxChars > 0 && body.length > maxChars) {
+      body = '…' + body.slice(-maxChars);
+    }
+    return body;
+  }
+
+  /** Drop the buffered tail for `pid`. Called automatically after the
+   *  subclass-visible `_onChildExit` hook so subclasses can read the tail
+   *  before it's collected. */
+  protected _clearOutputBuffer(pid: number): void {
+    this._outputRings.delete(pid);
   }
 
   #wireExit(sess: SessionRecord): void {
@@ -612,6 +670,10 @@ export class BaseSessionManager {
       } catch (err: any) {
         log(`${this.#logTag} _onChildExit error: ${err?.message ?? err}`);
       }
+      // Drop the buffered output AFTER the subclass hook so a silent-exit
+      // detector can read it; safe to no-op when the subclass already
+      // cleared it.
+      this._clearOutputBuffer(sess.pid);
       if (this._sessions.get(key) === sess) this._sessions.delete(key);
       if (sess.configPath && sess.configPathIsTemp) {
         try {

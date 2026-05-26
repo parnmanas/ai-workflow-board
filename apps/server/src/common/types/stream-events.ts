@@ -119,6 +119,14 @@ export interface ChatRequestHistoryEntry {
   message_id: string;
   sender_type: 'user' | 'agent';
   content: string;
+  attachments?: Array<{
+    id: string;
+    filename: string;
+    mime_type: string;
+    size_bytes: number;
+    thumbnail_url?: string;
+    download_url: string;
+  }>;
   created_at: string; // ISO-8601
 }
 
@@ -142,10 +150,26 @@ export interface ChatRequestPayload {
 export interface ChatRoomMessagePayload {
   room_id: string;
   message_id: string;
-  sender_type: 'user' | 'agent';
+  sender_type: 'user' | 'agent' | 'system';
   sender_id: string;
   sender_name: string;
+  // Discriminator added in v0.41:
+  //   'message'  — real chat turn (user input or agent's send_chat_room_message reply)
+  //   'progress' — tool-call heartbeat the agent-manager posts while the
+  //                spawned CLI is working. Rendered compactly and stripped
+  //                from agent history replay.
+  // Optional on the wire so legacy clients/agents that omit it default to
+  // 'message' (matches the column default on chat_room_messages).
+  type?: 'message' | 'progress';
   content: string;
+  attachments?: Array<{
+    id: string;
+    filename: string;
+    mime_type: string;
+    size_bytes: number;
+    thumbnail_url?: string;
+    download_url: string;
+  }>;
   created_at: string; // ISO-8601
   // v0.33: trailing consecutive agent-sender count in the room, including this
   // message. user-sent → 0; agent reply to a user → 1; agent reply to that → 2…

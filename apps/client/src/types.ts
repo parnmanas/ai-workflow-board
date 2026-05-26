@@ -394,6 +394,11 @@ export interface Board {
   // post-done reviewer dispatch; 'same_board' / 'remote_awb' / 'both' opt in
   // and choose where the reviewer files follow-up improvement tickets.
   self_improvement_mode?: 'off' | 'same_board' | 'remote_awb' | 'both';
+  // Auto-archive policy: null/absent disables, 1..365 archives Done-column
+  // tickets whose terminal_entered_at is older than N days. Server enforces
+  // the range; UI maps a disabled toggle to null and re-introduces the
+  // previous days value when toggled back on.
+  auto_archive_days?: number | null;
 }
 
 export interface Workspace {
@@ -535,14 +540,44 @@ export interface ChatRoomParticipantInfo {
   joined_at: string;
 }
 
+export interface ChatAttachment {
+  id: string;
+  attachment_id?: string;
+  workspace_id?: string;
+  room_id?: string;
+  message_id?: string;
+  filename: string;
+  file_name?: string;
+  mime_type: string;
+  file_mimetype?: string;
+  size_bytes: number;
+  file_size?: number;
+  download_url: string;
+  thumbnail_url?: string;
+  uploaded_by_type?: string;
+  uploaded_by_id?: string;
+  uploaded_by?: string;
+  created_at?: string;
+}
+
+export type ChatRoomMessageType = 'message' | 'progress';
+
 export interface ChatRoomMessageItem {
   id: string;
   room_id: string;
-  sender_type: 'user' | 'agent';
+  sender_type: 'user' | 'agent' | 'system';
   sender_id: string;
   sender_name: string;           // denormalized by server
+  // Discriminator added in v0.41:
+  //   'message'  — real chat turn rendered as a bubble.
+  //   'progress' — agent-manager tool-call heartbeat, rendered as a compact
+  //                muted line (no bubble, no avatar).
+  // Optional/undefined collapses to 'message' for legacy rows persisted before
+  // the column was added.
+  type?: ChatRoomMessageType;
   content: string;
-  images?: string | Array<{ data: string; filename: string; mimetype: string }>; // JSON string or parsed array
+  images?: string | Array<{ data: string; filename: string; mimetype: string }>; // JSON string or parsed array (legacy inline images)
+  attachments?: ChatAttachment[]; // new uniform attachment surface (any mimetype)
   created_at: string;
 }
 

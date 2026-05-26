@@ -6,6 +6,7 @@
 // --append-system-prompt (claude) at spawn time.
 
 import type { ColumnPrompt, PromptComposer } from './event-dispatcher.js';
+import { renderAttachmentBlock, type PreparedAttachment } from './chat-attachment-prep.js';
 
 interface CommentLike {
   author_name?: string;
@@ -29,6 +30,12 @@ interface ChatHistoryEntry {
   sender_id?: string;
   content?: string;
   created_at?: string;
+  // 'progress' rows are agent-manager tool-call heartbeats. Defensive
+  // belt-and-suspenders — both the SSE ring and the REST history endpoint
+  // already strip them, but the composer also filters so any future caller
+  // that hand-builds a history list can't accidentally narrate tool calls
+  // back to the model.
+  type?: string;
 }
 
 interface ChatRoomNewMessage {
@@ -212,15 +219,19 @@ export function composeChatRoomPrompt(
   roomId: string,
   history: ChatHistoryEntry[],
   newMessage: ChatRoomNewMessage,
+  attachments?: PreparedAttachment[],
 ): string {
   const lines: string[] = [];
   lines.push('You are an AWB chat subagent responding to a user message in a chat room.');
   lines.push('');
   lines.push(`Room ID: ${roomId}`);
   lines.push('');
-  if (Array.isArray(history) && history.length > 0) {
+  const realHistory = Array.isArray(history)
+    ? history.filter((h) => !h.type || h.type === 'message')
+    : [];
+  if (realHistory.length > 0) {
     lines.push('Conversation history (oldest first):');
-    for (const h of history.slice(-20)) {
+    for (const h of realHistory.slice(-20)) {
       const who = h.sender_type === 'agent' ? 'Agent' : 'User';
       const name = h.sender_name || h.sender_id || 'unknown';
       const when = h.created_at || '';
@@ -232,6 +243,12 @@ export function composeChatRoomPrompt(
   lines.push('Latest user message:');
   lines.push(newMessage.content || '');
   lines.push(`From: ${newMessage.sender_name || newMessage.sender_id || 'unknown'}`);
+  if (Array.isArray(attachments) && attachments.length > 0) {
+    lines.push('');
+    for (const ln of renderAttachmentBlock(attachments)) {
+      lines.push(ln);
+    }
+  }
   lines.push('');
   lines.push('Instructions:');
   lines.push('- Compose a helpful reply using your knowledge and the conversation context.');

@@ -108,6 +108,17 @@ export default function BoardSettingsPage() {
             showToast('Self-improvement mode saved', 'success');
           }}
         />
+        <AutoArchiveSetting
+          board={board}
+          onSave={async (days) => {
+            await api.updateBoard(board.id, { auto_archive_days: days });
+            await refresh();
+            showToast(
+              days === null ? 'Auto-archive disabled' : `Auto-archive set to ${days} days`,
+              'success',
+            );
+          }}
+        />
         <ColumnManager
           columns={board.columns}
           boardId={board.id}
@@ -235,6 +246,103 @@ function SelfImprovementSetting({ board, onSave }: SelfImprovementSettingProps) 
           {hint}
         </div>
       )}
+    </section>
+  );
+}
+
+interface AutoArchiveSettingProps {
+  board: Board;
+  onSave(days: number | null): Promise<void>;
+}
+
+// Default days input when the operator first enables auto-archive. Stays
+// 30 unless they explicitly change it; mirrors the spec's recommendation.
+const AUTO_ARCHIVE_DEFAULT_DAYS = 30;
+
+function AutoArchiveSetting({ board, onSave }: AutoArchiveSettingProps) {
+  // null/undefined on the board → disabled. Stash the most-recently-seen
+  // days value so the input retains its number when the user toggles off
+  // and back on without saving in between.
+  const initialDays = board.auto_archive_days ?? null;
+  const [enabled, setEnabled] = useState<boolean>(initialDays !== null);
+  const [days, setDays] = useState<string>(
+    String(initialDays ?? AUTO_ARCHIVE_DEFAULT_DAYS),
+  );
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    const next = board.auto_archive_days ?? null;
+    setEnabled(next !== null);
+    setDays(String(next ?? AUTO_ARCHIVE_DEFAULT_DAYS));
+  }, [board.auto_archive_days]);
+
+  const parsed = Math.floor(Number(days));
+  const validDays = Number.isFinite(parsed) && parsed >= 1 && parsed <= 365;
+  const initialEnabled = initialDays !== null;
+  const dirty = enabled !== initialEnabled
+    || (enabled && validDays && parsed !== initialDays);
+  const saveDisabled = busy || !dirty || (enabled && !validDays);
+
+  return (
+    <section
+      style={{
+        padding: 16,
+        marginBottom: 16,
+        background: tokens.colors.surfaceCard,
+        border: `1px solid ${tokens.colors.border}`,
+        borderRadius: tokens.radii.md,
+      }}
+    >
+      <h3 style={{ margin: 0, fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>
+        Auto-archive Done tickets
+      </h3>
+      <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, marginBottom: 12 }}>
+        Hourly sweep that soft-archives root tickets sitting in a terminal column
+        for longer than <strong>N</strong> days. Archived tickets are excluded
+        from the board view, SSE updates, agent triggers, and focus selection,
+        but remain restorable from the dedicated Archive page. Disabled by default.
+      </div>
+      <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: tokens.colors.textStrong }}>
+          <input
+            type="checkbox"
+            checked={enabled}
+            onChange={(e) => setEnabled(e.target.checked)}
+          />
+          Enable auto-archive
+        </label>
+        <div style={{ width: 140 }}>
+          <Input
+            label="Archive after (days)"
+            type="number"
+            min={1}
+            max={365}
+            value={days}
+            disabled={!enabled}
+            onChange={(e) => setDays(e.target.value)}
+          />
+        </div>
+        <Button
+          variant="primary"
+          size="sm"
+          disabled={saveDisabled}
+          onClick={async () => {
+            setBusy(true);
+            try {
+              await onSave(enabled ? parsed : null);
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          {busy ? 'Saving…' : 'Save'}
+        </Button>
+        {enabled && !validDays && (
+          <span style={{ fontSize: 11, color: tokens.colors.danger }}>
+            Must be 1–365
+          </span>
+        )}
+      </div>
     </section>
   );
 }

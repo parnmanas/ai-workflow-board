@@ -118,6 +118,46 @@ export class Ticket {
   @Column({ type: 'varchar', default: '' })
   pending_set_by: string;
 
+  // Soft-archive timestamp for the ticket. When non-null the ticket is
+  // considered archived: excluded from board GET / SSE payloads / supervisor
+  // re-push / backlog promotion / focus selector by default, mutation paths
+  // (move / update / add_comment / claim) reject with 409 ticket_archived,
+  // and only the dedicated archive endpoints + delete remain. Cleared by
+  // unarchive (which also resets terminal_entered_at so the ticket isn't
+  // immediately re-eaten by the archiver tick).
+  @Column({ type: Date, nullable: true, default: null })
+  archived_at: Date | null;
+
+  // Timestamp the ticket entered its current terminal column (kind='terminal'
+  // or is_terminal=true). Written by move_ticket / REST PATCH-move when the
+  // destination column is terminal; nulled on any move out of terminal and on
+  // unarchive. TicketArchiverService uses (now - terminal_entered_at) as the
+  // single age signal — cheaper and more predictable than scanning activity_log
+  // for the last column change. Empty for tickets that haven't touched a
+  // terminal column.
+  @Column({ type: Date, nullable: true, default: null })
+  terminal_entered_at: Date | null;
+
+  // Claim-verification snapshot (ticket dcb9d661). Written by
+  // TriggerLoopService when an assignee trigger lands on an active column
+  // and the workspace has `claim_verification_enabled=1`. Records the
+  // remote branch tip the agent is being woken on top of. The sweep in
+  // ClaimVerificationService compares this against the latest assignee
+  // comment to enrich the pend-reason with concrete "branch unchanged"
+  // evidence. Best-effort: an empty string means the GitHub lookup
+  // failed (no credential, network, etc.) and the sweep falls back to
+  // ActivityLog-only gating. Cleared along with snapshot_at on any
+  // column move (move_ticket / REST move).
+  @Column({ type: 'varchar', default: '' })
+  branch_tip_sha_at_trigger: string;
+
+  // Timestamp `branch_tip_sha_at_trigger` was written. Used by the sweep
+  // to confirm the SHA snapshot was taken BEFORE the assignee's claim
+  // comment — a snapshot taken after the comment is stale evidence and
+  // gets ignored.
+  @Column({ type: Date, nullable: true, default: null })
+  branch_tip_snapshot_at: Date | null;
+
   @Column({ type: 'varchar', default: '' })
   created_by: string;
 

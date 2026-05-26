@@ -24,7 +24,11 @@ import { log } from './logging.js';
 import { createAdapter } from './cli-adapters/index.js';
 import { ADAPTER_CAPABILITIES, type CliAdapter } from './cli-adapters/base.js';
 import { fireAndForgetTool } from './mcp-client.js';
-import { postChatRoomMessage, type AwbConfig } from './rest.js';
+import {
+  postChatRoomMessage,
+  postSilentExitSystemComment,
+  type AwbConfig,
+} from './rest.js';
 import type {
   SubagentManager as SubagentManagerContract,
   SubagentSpawnArgs,
@@ -33,6 +37,24 @@ import type {
 import type { SubagentMonitor, SubagentTapHandle } from './subagent-monitor.js';
 
 const { NATIVE_MCP } = ADAPTER_CAPABILITIES;
+
+/** Max lines kept in the per-pid plain-text tail ring used by the
+ *  silent-exit fallback. Bounded so a chatty subagent can't blow the
+ *  manager's memory if it never exits cleanly. */
+const TAIL_RING_MAX_LINES = 100;
+/** Max bytes of `tail.join('\n')` posted in the silent-exit system
+ *  comment. 4KB keeps the comment readable in the board UI. */
+const SILENT_EXIT_TAIL_MAX_CHARS = 4096;
+/** MCP tool name suffixes that count as the subagent leaving a real
+ *  ticket comment. Matched by suffix so a future MCP prefix rename
+ *  doesn't break detection. Keep aligned with the ticket-session list. */
+const TICKET_COMMENT_TOOL_SUFFIXES = [
+  'add_comment',
+  'ask_question',
+  'answer_question',
+  'record_decision',
+  'handoff_to_agent',
+];
 
 export interface SubagentDelegationConfig {
   enabled?: boolean;
@@ -68,6 +90,16 @@ interface SubagentRecord {
   process_handle: ChildProcess | null;
   captureOutput: boolean;
   outLines: string[];
+  /** Plain-text stdout / stderr tail for silent-exit fallback. Captured
+   *  for every ticket spawn regardless of `captureOutput` (which gates the
+   *  non-MCP one-shot answer aggregation). Cleared on exit-handler cleanup. */
+  tailLines: string[];
+  /** True once we observed an MCP tool_use call that creates a ticket
+   *  comment (add_comment / ask_question / answer_question /
+   *  record_decision / handoff_to_agent), OR — for non-NATIVE_MCP one-shot
+   *  paths — once `#postOneshotAnswer` succeeded. Skipping the silent-exit
+   *  fallback when this is true keeps clean cycles quiet. */
+  commentSent: boolean;
   tap: SubagentTapHandle | null;
 }
 
@@ -390,6 +422,8 @@ export class SubagentManager implements SubagentManagerContract {
         process_handle: child,
         captureOutput: !adapter.has(NATIVE_MCP),
         outLines: [],
+        tailLines: [],
+        commentSent: false,
         tap: null,
       };
       record.tap =
@@ -468,6 +502,25 @@ export class SubagentManager implements SubagentManagerContract {
         }
       }
 
+      // Silent-exit fallback for ticket subagents. Fires when:
+      //   - exit code != 0 (subagent crashed / was killed), OR
+      //   - exit code == 0 AND no comment-creating tool fired during the
+      //     spawn (the "dead state" the ticket was opened against — trigger
+      //     dispatched but ticket activity has zero trace of work).
+      // Chat-only spawns (room_id but no ticket_id) are already covered by
+      // the room_id branch above and by ChatSessionManager's fallback, so
+      // we skip them here.
+      if (record.ticket_id && (!record.commentSent || code !== 0)) {
+        try {
+          await this.#postSilentExitFallback(record, code);
+        } catch (err: any) {
+          log(`Subagent silent-exit fallback failed pid=${pid}: ${err?.message ?? err}`);
+        }
+      }
+
+      // Drop the tail ring now that all post-exit hooks have read it.
+      record.tailLines = [];
+
       log(
         `Subagent exit: pid=${pid} cli=${record.cli_type || '-'} kind=${record.kind} code=${code} signal=${signal || '-'} duration=${durationSec}s`,
       );
@@ -508,6 +561,8 @@ export class SubagentManager implements SubagentManagerContract {
           if (record.captureOutput) {
             if (record.outLines.length < 10000) record.outLines.push(line);
           }
+          this.#bufferTail(record, line);
+          this.#scanForCommentTool(record, line);
         }
         log(`${tagFor(record)} ${line}`);
       });
@@ -517,8 +572,53 @@ export class SubagentManager implements SubagentManagerContract {
       rlErr.on('line', (line) => {
         const rec = this.#map.get(pid);
         const record = rec && rec.kind !== 'reservation' ? (rec as SubagentRecord) : undefined;
+        if (record) this.#bufferTail(record, line);
         log(`${tagFor(record)}[err] ${line}`);
       });
+    }
+  }
+
+  /** Append a stdout/stderr line to the silent-exit tail ring. Only
+   *  plain-text lines are kept — JSON stream-protocol events are skipped
+   *  so the buffer is human-readable. Bounded to TAIL_RING_MAX_LINES. */
+  #bufferTail(record: SubagentRecord, line: string): void {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    // Skip stream-json lines (Claude / Codex emit assistant turn structure
+    // here; an operator reading the silent-exit fallback wants prose, not
+    // JSON). The cheapest filter: lines starting with `{` are almost
+    // certainly JSON for our adapters.
+    if (trimmed.startsWith('{')) return;
+    record.tailLines.push(trimmed);
+    while (record.tailLines.length > TAIL_RING_MAX_LINES) record.tailLines.shift();
+  }
+
+  /** Watch parsed stream-json lines for tool_use blocks whose name is one
+   *  of the comment-creating MCP tools. Marks `record.commentSent` true on
+   *  the first match. Best-effort: malformed JSON / non-Claude adapters
+   *  fall through silently and the silent-exit fallback still runs based
+   *  on exit code alone. */
+  #scanForCommentTool(record: SubagentRecord, line: string): void {
+    if (record.commentSent) return;
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('{')) return;
+    let parsed: any;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      return;
+    }
+    if (parsed?.type !== 'assistant') return;
+    const content = parsed?.message?.content;
+    if (!Array.isArray(content)) return;
+    for (const block of content) {
+      if (block?.type !== 'tool_use' || typeof block.name !== 'string') continue;
+      for (const suffix of TICKET_COMMENT_TOOL_SUFFIXES) {
+        if (block.name.endsWith(suffix)) {
+          record.commentSent = true;
+          return;
+        }
+      }
     }
   }
 
@@ -530,9 +630,61 @@ export class SubagentManager implements SubagentManagerContract {
       content: trimmed,
       type: 'note',
     });
+    // Treat the aggregated one-shot answer as the audit-trail comment so
+    // the silent-exit fallback doesn't double-post a `system` row on top
+    // of the legitimate `note` that this method just dispatched.
+    record.commentSent = true;
     log(
       `Subagent posted answer to ticket=${record.ticket_id} (cli=${record.cli_type}, ${trimmed.length} chars)`,
     );
+  }
+
+  /** Post a `system`-type comment to a ticket whose one-shot subagent
+   *  exited without leaving any audit-trail comment (or with a non-zero
+   *  exit code). Mirrors the persistent-session path in
+   *  `TicketSessionManager#postSilentExitFallback` so the board sees
+   *  identical fallback rows whether the subagent ran one-shot or in a
+   *  persistent CLI child. Best-effort: a failed POST is logged. */
+  async #postSilentExitFallback(record: SubagentRecord, code: number | null): Promise<void> {
+    const ticketId = record.ticket_id || '';
+    if (!ticketId) return;
+    const tail = this.#collectTail(record);
+    const exitLabel = code === null ? 'null' : String(code);
+    const reasonLabel = code === 0
+      ? 'no audit-trail comments + clean exit'
+      : `non-zero exit code ${exitLabel}`;
+    const triggerId = record.trigger_id || '';
+    const header = `⚠️ Subagent exited without leaving a ticket comment (${reasonLabel}).`;
+    const metaParts: string[] = [];
+    metaParts.push(`cli=${record.cli_type}`);
+    metaParts.push(`exit_code=${exitLabel}`);
+    if (triggerId) metaParts.push(`trigger=${triggerId}`);
+    const metaLine = `_${metaParts.join(' · ')}_`;
+    const body = tail
+      ? `${header}\n\n${metaLine}\n\nLast CLI output:\n\`\`\`\n${tail}\n\`\`\``
+      : `${header}\n\n${metaLine}\n\n(no buffered CLI output captured)`;
+
+    log(
+      `Subagent silent-exit fallback dispatched ticket=${ticketId.slice(0, 8)} pid=${record.pid} ` +
+        `cli=${record.cli_type} exit=${exitLabel} trigger=${triggerId.slice(0, 8) || '-'} outputLen=${tail.length}`,
+    );
+    await postSilentExitSystemComment(this.#config, ticketId, {
+      content: body,
+      exit_code: code,
+      cycle_trigger_id: triggerId,
+      actor_name: 'agent-manager',
+    });
+  }
+
+  /** Join the tail ring and trim to SILENT_EXIT_TAIL_MAX_CHARS, keeping
+   *  the last slice. Returns '' when nothing was buffered. */
+  #collectTail(record: SubagentRecord): string {
+    if (!record.tailLines.length) return '';
+    let body = record.tailLines.join('\n').trim();
+    if (body.length > SILENT_EXIT_TAIL_MAX_CHARS) {
+      body = '…' + body.slice(-SILENT_EXIT_TAIL_MAX_CHARS);
+    }
+    return body;
   }
 
   async #postOneshotChatAnswer(record: SubagentRecord, answer: string): Promise<void> {
@@ -613,6 +765,12 @@ export class SubagentManager implements SubagentManagerContract {
           config_path_is_temp: rec.config_path_is_temp ?? true,
           process_handle: null,
           outLines: rec.outLines || [],
+          // Tail ring + commentSent are runtime-only — revived from
+          // persistence means we missed the live exit and won't be running
+          // the silent-exit fallback for this pid anyway, but the fields
+          // need defaults so the TypeScript shape stays consistent.
+          tailLines: [],
+          commentSent: rec.commentSent ?? false,
         });
         revived++;
       } catch (err: any) {
@@ -629,9 +787,10 @@ export class SubagentManager implements SubagentManagerContract {
     const pids: any[] = [];
     for (const rec of this.#map.values()) {
       if (rec.kind === 'reservation') continue;
-      const { process_handle, outLines, tap, ...serializable } = rec;
+      const { process_handle, outLines, tailLines, tap, ...serializable } = rec;
       void process_handle;
       void outLines;
+      void tailLines;
       void tap;
       pids.push(serializable);
     }
@@ -680,9 +839,10 @@ export class SubagentManager implements SubagentManagerContract {
     const out: any[] = [];
     for (const rec of this.#map.values()) {
       if (rec.kind === 'reservation') continue;
-      const { process_handle, outLines, tap, ...serializable } = rec;
+      const { process_handle, outLines, tailLines, tap, ...serializable } = rec;
       void process_handle;
       void outLines;
+      void tailLines;
       void tap;
       out.push(serializable);
     }

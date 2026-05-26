@@ -7,6 +7,7 @@ import { ActionRun } from '../../entities/ActionRun';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
+import { TicketAttachment } from '../../entities/TicketAttachment';
 import { Agent } from '../../entities/Agent';
 import { Board } from '../../entities/Board';
 import { Workspace } from '../../entities/Workspace';
@@ -69,6 +70,7 @@ export class ActionsService {
     @InjectRepository(ChatRoom) private readonly roomRepo: Repository<ChatRoom>,
     @InjectRepository(ChatRoomParticipant) private readonly participantRepo: Repository<ChatRoomParticipant>,
     @InjectRepository(ChatRoomMessage) private readonly messageRepo: Repository<ChatRoomMessage>,
+    @InjectRepository(TicketAttachment) private readonly attachmentRepo: Repository<TicketAttachment>,
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     @InjectRepository(Board) private readonly boardRepo: Repository<Board>,
     @InjectRepository(Workspace) private readonly workspaceRepo: Repository<Workspace>,
@@ -383,6 +385,10 @@ export class ActionsService {
       // Tear down room + messages + participants. We do raw deletes rather
       // than going through RoomCrudService because there is no leave-room /
       // archive abstraction for groups, and we want this to be a hard delete.
+      // Attachments live in ticket_attachments with no FK back to room_id /
+      // chat_room_messages (only ticket_id has a CASCADE), so we sweep them
+      // explicitly using the denormalized room_id before nuking the room.
+      await this.attachmentRepo.delete({ room_id: run.room_id });
       await this.messageRepo.delete({ room_id: run.room_id });
       await this.participantRepo.delete({ room_id: run.room_id });
       await this.roomRepo.delete({ id: run.room_id });

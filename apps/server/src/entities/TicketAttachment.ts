@@ -2,13 +2,14 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, ManyToOne, Jo
 import { Ticket } from './Ticket';
 
 /**
- * Files attached directly to a Ticket. Distinct from Comment attachments —
- * those go through the Resource table (type='comment_attachment'), this one
- * stores the binary inline against the ticket so file lifecycle stays bound
- * to the ticket itself (cascade-deletes with the ticket, no Resource indirection).
+ * Generic binary attachment storage. The original ticket attachment surface
+ * owns rows with owner_type='ticket'; chat uploads reuse the same table with
+ * owner_type='chat_message' and owner_id set once the message is sent.
  */
 @Entity('ticket_attachments')
 @Index(['ticket_id', 'created_at'])
+@Index(['owner_type', 'owner_id', 'created_at'])
+@Index(['room_id', 'created_at'])
 export class TicketAttachment {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -16,8 +17,17 @@ export class TicketAttachment {
   @Column({ type: 'varchar', nullable: true, default: '' })
   workspace_id: string;
 
-  @Column({ type: 'varchar' })
-  ticket_id: string;
+  @Column({ type: 'varchar', default: 'ticket' })
+  owner_type: string;
+
+  @Column({ type: 'varchar', default: '' })
+  owner_id: string;
+
+  @Column({ type: 'varchar', nullable: true })
+  ticket_id: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  room_id: string | null;
 
   @Column({ type: 'varchar' })
   file_name: string;
@@ -48,7 +58,7 @@ export class TicketAttachment {
   @CreateDateColumn()
   created_at: Date;
 
-  @ManyToOne(() => Ticket, { onDelete: 'CASCADE' })
+  @ManyToOne(() => Ticket, { onDelete: 'CASCADE', nullable: true })
   @JoinColumn({ name: 'ticket_id' })
   ticket: Ticket;
 }

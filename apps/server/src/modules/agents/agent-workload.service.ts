@@ -168,6 +168,13 @@ export class AgentWorkloadService {
       // bound-parameter pattern as `c.is_terminal` so sqlite (0/1) and
       // postgres (true/false) both bind correctly.
       .andWhere('t.pending_user_action = :falseVal')
+      // Archived tickets (ticket 9b44526b) are excluded for the same reason:
+      // they're no longer actionable workflow items, so they must not anchor
+      // focus or block backlog promotion. Trigger emission is also gated
+      // separately in `_emitTrigger`, but excluding them here keeps the
+      // selector output consistent with what the supervisor / allocation
+      // paths already filter out.
+      .andWhere('t.archived_at IS NULL')
       .setParameter('agent_id', agent_id)
       .setParameter('board_id', board_id)
       // Use a bound parameter for boolean instead of the literal `false`

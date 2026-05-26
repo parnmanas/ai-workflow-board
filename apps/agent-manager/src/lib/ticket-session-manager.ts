@@ -11,6 +11,7 @@ import type { ParseResult } from './cli-adapters/base.js';
 import { composeTriggerPrompt } from './prompts.js';
 import { fireAndForgetTool } from './mcp-client.js';
 import { log } from './logging.js';
+import { postSilentExitSystemComment } from './rest.js';
 import type {
   TicketDispatchResult,
   TicketSessionManager as TicketSessionManagerContract,
@@ -36,6 +37,24 @@ const MOVING_CUE_RE = /\bmov(?:e|ing)\s+(?:to|back|the\s+ticket)\b/i;
  *  generous — typical Claude turn round-trip is 5-15s. */
 const MOVING_RESUME_GRACE_MS = 30_000;
 
+/** Cap on bytes posted in the silent-exit fallback body. 4KB keeps the
+ *  comment readable in the board UI and avoids landing a multi-page CLI
+ *  log in ticket activity. */
+const SILENT_EXIT_TAIL_MAX_CHARS = 4096;
+
+/** MCP tool name suffixes that count as the subagent leaving a real
+ *  audit-trail entry. If at least one of these tools fires during the
+ *  session, we skip the silent-exit fallback. ALL of them resolve to a
+ *  Comment row server-side (add_comment + the four typed variants), so any
+ *  of them satisfies the "did the subagent surface anything?" contract. */
+const TICKET_COMMENT_TOOL_SUFFIXES = [
+  'add_comment',
+  'ask_question',
+  'answer_question',
+  'record_decision',
+  'handoff_to_agent',
+];
+
 export class TicketSessionManager
   extends BaseSessionManager
   implements TicketSessionManagerContract
@@ -53,6 +72,17 @@ export class TicketSessionManager
     number,
     { armed: boolean; injected: boolean; timer: NodeJS.Timeout | null }
   >();
+
+  /** PIDs that emitted at least one comment-creating MCP tool_use during
+   *  their lifetime. Used by `_onChildExit` to decide whether to post the
+   *  silent-exit fallback. Cleared per-pid in the exit hook so a long-lived
+   *  manager doesn't leak entries across many session respawns. */
+  #commentSent = new Set<number>();
+  /** Per-pid record of the latest trigger that drove a new turn into this
+   *  session. Threaded into the fallback metadata so an operator looking at
+   *  the system comment can correlate it with the AWB trigger that
+   *  produced the dead cycle. */
+  #lastTriggerId = new Map<number, string>();
 
   constructor(config: SessionAwareConfig) {
     super(config, {
@@ -171,6 +201,11 @@ export class TicketSessionManager
       log(
         `[ticket-session] reused existing pid=${sess.pid} ticket=${spec.ticketId.slice(0, 8)} role=${role} turn=${sess.turnCount + 1}`,
       );
+      // Update the trigger correlation for the silent-exit fallback before
+      // we write the next turn — if the child exits during this cycle,
+      // metadata should point at THIS trigger, not the one that started
+      // the session.
+      if (spec.triggerId) this.#lastTriggerId.set(sess.pid, spec.triggerId);
       this._sendFollowUp(sess, this.#composeTriggerTurn(spec));
       if (spec.agentId && !sess.agentId) sess.agentId = spec.agentId;
       return { dispatched: true, pid: sess.pid };
@@ -220,6 +255,10 @@ export class TicketSessionManager
         spawned.ticketId = spec.ticketId;
         spawned.role = role;
         spawned.agentId = spec.agentId || '';
+        // Stamp the trigger that spawned this session so silent-exit
+        // fallback can correlate the dead cycle back to its origin in
+        // ticket activity / manager logs.
+        if (spec.triggerId) this.#lastTriggerId.set(spawned.pid, spec.triggerId);
       }
     } finally {
       // Spawn outcome resolved and identity stamped — _sessions takes over
@@ -369,6 +408,15 @@ export class TicketSessionManager
           // `mcp__awb__add_comment` / `mcp__awb__move_ticket`. Match by
           // suffix so a future MCP server rename of the prefix doesn't
           // silently disable the guard.
+          //
+          // Two independent observers per block:
+          //   1. moving-cue guard (this ticket's pre-existing behavior)
+          //   2. silent-exit comment detector — if ANY comment-creating
+          //      tool fires, the subagent has left an audit trail and the
+          //      `_onChildExit` fallback skips this pid.
+          if (this.#isCommentTool(block.name)) {
+            this.#commentSent.add(sess.pid);
+          }
           if (block.name.endsWith('add_comment')) {
             const text = String(block.input?.content || '');
             if (MOVING_CUE_RE.test(text)) {
@@ -393,16 +441,92 @@ export class TicketSessionManager
     }
   }
 
+  /** True when the tool name belongs to the comment-creating MCP surface.
+   *  Suffix match is deliberate — adapters rename the `mcp__awb__` prefix
+   *  in some setups; the trailing tool id stays stable. */
+  #isCommentTool(name: string): boolean {
+    for (const suffix of TICKET_COMMENT_TOOL_SUFFIXES) {
+      if (name.endsWith(suffix)) return true;
+    }
+    return false;
+  }
+
   protected async _onChildExit(
     sess: SessionRecord,
-    _code: number | null,
+    code: number | null,
     _signal: NodeJS.Signals | null,
   ): Promise<void> {
-    // Clear any pending timer / state for this pid so a long-lived manager
-    // doesn't accumulate handles after many session respawns.
-    const state = this.#movingCue.get(sess.pid);
-    if (state?.timer) clearTimeout(state.timer);
+    // Snapshot silent-exit decision inputs BEFORE state cleanup so we can
+    // dispatch the fallback after deleting the tracking entries.
+    const commented = this.#commentSent.has(sess.pid);
+    const triggerId = this.#lastTriggerId.get(sess.pid) || '';
+    const ticketId: string = sess.ticketId || '';
+    const role: string = sess.role || '';
+    const tail = commented && code === 0
+      ? ''
+      : this._collectOutputTail(sess.pid, SILENT_EXIT_TAIL_MAX_CHARS);
+
+    // Clear all per-pid tracking. The base class clears `_outputRings`
+    // after this hook returns, so we don't touch it here.
+    const cueState = this.#movingCue.get(sess.pid);
+    if (cueState?.timer) clearTimeout(cueState.timer);
     this.#movingCue.delete(sess.pid);
+    this.#commentSent.delete(sess.pid);
+    this.#lastTriggerId.delete(sess.pid);
+
+    // Silent-exit fallback. Conditions match the ticket acceptance criteria:
+    //   - exit code != 0  → spawned but crashed / killed; surface the tail.
+    //   - exit code == 0 AND no comment-creating tool fired → "clean" exit
+    //     with no audit trail, which is exactly the dead-state operators see
+    //     on the board.
+    // If a comment-creating tool DID fire during this cycle and the exit was
+    // clean, the subagent has already left a real trace and we skip — the
+    // fallback is opt-in noise otherwise.
+    if (commented && code === 0) return;
+    if (!ticketId) return; // sanity — shouldn't happen for a ticket session
+    await this.#postSilentExitFallback(sess, code, triggerId, role, tail);
+  }
+
+  /** Post the silent-exit `system` comment via the agent-key REST endpoint.
+   *  Best-effort: a failed POST is logged but doesn't propagate — the
+   *  child has already exited, so retrying from here only delays cleanup. */
+  async #postSilentExitFallback(
+    sess: SessionRecord,
+    code: number | null,
+    triggerId: string,
+    role: string,
+    tail: string,
+  ): Promise<void> {
+    const ticketId: string = sess.ticketId || '';
+    const exitLabel = code === null ? 'null' : String(code);
+    const reasonLabel = code === 0
+      ? 'no audit-trail comments + clean exit'
+      : `non-zero exit code ${exitLabel}`;
+    const header = `⚠️ Subagent exited without leaving a ticket comment (${reasonLabel}).`;
+    const meta: string[] = [];
+    meta.push(`role=${role || '_'}`);
+    meta.push(`exit_code=${exitLabel}`);
+    if (triggerId) meta.push(`trigger=${triggerId}`);
+    const metaLine = `_${meta.join(' · ')}_`;
+    const body = tail
+      ? `${header}\n\n${metaLine}\n\nLast CLI output:\n\`\`\`\n${tail}\n\`\`\``
+      : `${header}\n\n${metaLine}\n\n(no buffered CLI output captured)`;
+
+    log(
+      `[ticket-session] silent-exit fallback dispatched ticket=${ticketId.slice(0, 8)} role=${role || '_'} pid=${sess.pid} exit=${exitLabel} trigger=${triggerId.slice(0, 8) || '-'} outputLen=${tail.length}`,
+    );
+
+    // Use the managed-agent apiKey when available so the REST endpoint
+    // attributes the system comment to the agent that owned this session.
+    // Falls back to the manager's own apiKey otherwise.
+    const cfg = { ...this._config, apiKey: sess._effectiveApiKey || this._config.apiKey };
+    await postSilentExitSystemComment(cfg, ticketId, {
+      content: body,
+      exit_code: code,
+      cycle_trigger_id: triggerId,
+      role,
+      actor_name: 'agent-manager',
+    });
   }
 
   #armMovingCue(sess: SessionRecord): void {

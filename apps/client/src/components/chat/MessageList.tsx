@@ -1,8 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import { api } from '../../api';
 import { tokens } from '../../tokens';
-import type { ChatRoomMessageItem } from '../../types';
+import type { ChatAttachment, ChatRoomMessageItem } from '../../types';
 import { formatClockTime, daySeparatorLabel, sameDay } from './utils/time';
 import { renderMarkdown, handleMentionAwareCopy, type MentionParticipant } from './utils/markdown';
+import { base64ToBlob, formatBytes, isImageMime, triggerBlobDownload } from './utils/attachments';
 
 // ─── Style constants (mirror ChatPage.tsx COLORS) ────────────────────────────
 
@@ -29,6 +31,21 @@ export interface MessageListProps {
 
 export default function MessageList({ messages, participantCount, participants = [], currentUserId }: MessageListProps) {
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
+  // Object URL cache keyed by attachment id. We never put base64 data URLs in
+  // <img src> because that re-renders the entire base64 string on every diff;
+  // the Blob → ObjectURL indirection lets the browser cache the decoded bytes
+  // and lets us revoke them when the component unmounts.
+  const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
+  const inflightRef = useRef<Set<string>>(new Set());
+  const previewUrlsRef = useRef<Record<string, string>>({});
+  useEffect(() => { previewUrlsRef.current = previewUrls; }, [previewUrls]);
+  useEffect(() => {
+    return () => {
+      for (const url of Object.values(previewUrlsRef.current)) {
+        try { URL.revokeObjectURL(url); } catch { /* ignore */ }
+      }
+    };
+  }, []);
 
   // Close lightbox on Escape key
   useEffect(() => {
@@ -39,6 +56,46 @@ export default function MessageList({ messages, participantCount, participants =
     document.addEventListener('keydown', handleKey);
     return () => document.removeEventListener('keydown', handleKey);
   }, [lightboxImage]);
+
+  function ensureImagePreview(att: ChatAttachment) {
+    const id = att.id || att.attachment_id || '';
+    const roomId = att.room_id || '';
+    if (!id || !roomId) return;
+    if (previewUrlsRef.current[id]) return;
+    if (inflightRef.current.has(id)) return;
+    inflightRef.current.add(id);
+    api.getChatAttachment(roomId, id)
+      .then((full) => {
+        if (!full?.file_data) return;
+        const blob = base64ToBlob(full.file_data, full.mime_type || att.mime_type || '');
+        const url = URL.createObjectURL(blob);
+        setPreviewUrls((prev) => {
+          // Concurrent fetches shouldn't leak URLs.
+          if (prev[id]) {
+            try { URL.revokeObjectURL(url); } catch { /* ignore */ }
+            return prev;
+          }
+          return { ...prev, [id]: url };
+        });
+      })
+      .catch(() => { /* leave thumbnail in placeholder state */ })
+      .finally(() => { inflightRef.current.delete(id); });
+  }
+
+  async function downloadAttachment(att: ChatAttachment) {
+    const id = att.id || att.attachment_id || '';
+    const roomId = att.room_id || '';
+    if (!id || !roomId) return;
+    try {
+      const full = await api.getChatAttachment(roomId, id);
+      if (!full?.file_data) throw new Error('No data');
+      const blob = base64ToBlob(full.file_data, full.mime_type || att.mime_type || '');
+      triggerBlobDownload(blob, full.filename || att.filename || 'download');
+    } catch {
+      // surfacing a per-attachment error inline would be noisy; the click
+      // button stays clickable so the user can retry.
+    }
+  }
 
   const rendered: React.ReactNode[] = [];
 
@@ -78,9 +135,61 @@ export default function MessageList({ messages, participantCount, participants =
       );
     }
 
-    // Collapse sender info if same sender within 60s
+    // Progress rows are tool-call heartbeats the agent-manager posts while
+    // the spawned CLI works. They share the same chat stream as real
+    // messages (so the user can see live activity) but render as a compact
+    // muted italic line instead of a bubble — no avatar header, no read
+    // receipt, no time-collapse interaction with neighboring bubbles. The
+    // server already strips them from agent history replays.
+    const isProgress = msg.type === 'progress';
+    if (isProgress) {
+      // Don't run progress content through renderMarkdown — the emitProgress
+      // formatter already wraps the body in `_..._` for italics, and double-
+      // markdowning (em inside an italic container) renders unpredictably
+      // across browsers. Plain text keeps the muted-line aesthetic clean.
+      rendered.push(
+        <div
+          key={msg.id}
+          data-message-id={msg.id}
+          data-message-type="progress"
+          style={{
+            padding: '2px 16px',
+            display: 'flex',
+            alignItems: 'baseline',
+            gap: 8,
+            color: COLORS.textMuted,
+            fontSize: 11,
+          }}
+        >
+          <span style={{ fontWeight: 500 }}>{msg.sender_name}</span>
+          <span
+            style={{
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+              flex: 1,
+              fontStyle: 'italic',
+            }}
+          >
+            {/* Strip the `_..._` italic wrapper the manager emits — the
+             *  container's italic already conveys the same intent. */}
+            {msg.content.replace(/^_+|_+$/g, '')}
+          </span>
+          <span style={{ fontSize: 10, opacity: 0.7 }}>
+            {formatClockTime(msg.created_at)}
+          </span>
+        </div>,
+      );
+      continue;
+    }
+
+    // Collapse sender info if same sender within 60s.
+    // `prev` is skipped for the collapse comparison when it was a progress
+    // row, since those don't render a sender header anyway — falling
+    // through to the same-window branch would suppress the bubble's
+    // header even though there's no preceding bubble to attach to.
     const prevSameWindow =
       prev &&
+      prev.type !== 'progress' &&
       prev.sender_id === msg.sender_id &&
       sameDay(prev.created_at, msg.created_at) &&
       new Date(msg.created_at).getTime() - new Date(prev.created_at).getTime() < 60000;
@@ -88,7 +197,7 @@ export default function MessageList({ messages, participantCount, participants =
     const isAgent = msg.sender_type === 'agent';
     const isLast = i === messages.length - 1;
 
-    // Parse images JSON (stored as string from server)
+    // Parse images JSON (stored as string from server) — legacy inline path.
     let msgImages: Array<{ data: string; filename: string; mimetype: string }> = [];
     if (msg.images) {
       try {
@@ -98,6 +207,10 @@ export default function MessageList({ messages, participantCount, participants =
         // malformed images field — skip silently
       }
     }
+    // New uniform attachment surface — split for image-inline vs file-button.
+    const attachments: ChatAttachment[] = Array.isArray(msg.attachments) ? msg.attachments : [];
+    const imageAttachments = attachments.filter((a) => isImageMime(a.mime_type || a.file_mimetype));
+    const fileAttachments = attachments.filter((a) => !isImageMime(a.mime_type || a.file_mimetype));
 
     const isMe = msg.sender_type === 'user' && msg.sender_id === currentUserId;
 
@@ -170,7 +283,7 @@ export default function MessageList({ messages, participantCount, participants =
             onCopy={handleMentionAwareCopy}
           >
             {renderMarkdown(msg.content, participants)}
-            {/* Inline image thumbnails */}
+            {/* Legacy inline image thumbnails (pre-attachment-surface messages). */}
             {msgImages.length > 0 && (
               <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap', justifyContent: isMe ? 'flex-end' : 'flex-start' }}>
                 {msgImages.map((img, idx) => (
@@ -189,6 +302,94 @@ export default function MessageList({ messages, participantCount, participants =
                     onClick={() => setLightboxImage(`data:${img.mimetype};base64,${img.data}`)}
                   />
                 ))}
+              </div>
+            )}
+            {/* Image attachments — fetched on demand into a Blob URL. */}
+            {imageAttachments.length > 0 && (
+              <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap', justifyContent: isMe ? 'flex-end' : 'flex-start' }}>
+                {imageAttachments.map((att) => {
+                  const id = att.id || att.attachment_id || '';
+                  const url = previewUrls[id];
+                  if (!url) ensureImagePreview(att);
+                  return (
+                    <div
+                      key={id}
+                      title={att.filename}
+                      style={{
+                        width: 96,
+                        height: 96,
+                        borderRadius: tokens.radii.sm,
+                        background: COLORS.border,
+                        border: `1px solid ${COLORS.border}`,
+                        cursor: url ? 'pointer' : 'default',
+                        overflow: 'hidden',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                      }}
+                      onClick={() => { if (url) setLightboxImage(url); }}
+                    >
+                      {url ? (
+                        <img
+                          src={url}
+                          alt={att.filename || 'Image'}
+                          style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+                        />
+                      ) : (
+                        <span style={{ fontSize: 11, color: COLORS.textSecondary }}>…</span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {/* Non-image attachments — metadata + download button only. */}
+            {fileAttachments.length > 0 && (
+              <div style={{ display: 'flex', gap: 6, marginTop: 8, flexDirection: 'column', alignItems: isMe ? 'flex-end' : 'flex-start' }}>
+                {fileAttachments.map((att) => {
+                  const id = att.id || att.attachment_id || '';
+                  return (
+                    <div
+                      key={id}
+                      style={{
+                        display: 'flex',
+                        gap: 8,
+                        alignItems: 'center',
+                        background: COLORS.dominant,
+                        border: `1px solid ${COLORS.border}`,
+                        borderRadius: tokens.radii.sm,
+                        padding: '6px 10px',
+                        maxWidth: 320,
+                      }}
+                    >
+                      <span style={{ fontSize: 18 }} aria-hidden>📄</span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 12, color: COLORS.textPrimary, fontWeight: 500, whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden' }}>
+                          {att.filename || att.file_name || 'File'}
+                        </div>
+                        <div style={{ fontSize: 10, color: COLORS.textSecondary }}>
+                          {formatBytes(att.size_bytes ?? att.file_size ?? 0)}
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => downloadAttachment(att)}
+                        aria-label={`Download ${att.filename || 'file'}`}
+                        style={{
+                          background: 'transparent',
+                          border: `1px solid ${COLORS.border}`,
+                          color: COLORS.textSecondary,
+                          borderRadius: tokens.radii.sm,
+                          padding: '4px 8px',
+                          fontSize: 11,
+                          cursor: 'pointer',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        Download
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>

@@ -1,17 +1,19 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, IsNull } from 'typeorm';
+import { Repository, IsNull, In } from 'typeorm';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
 import { Agent } from '../../entities/Agent';
 import { Ticket } from '../../entities/Ticket';
 import { UserMention } from '../../entities/UserMention';
+import { TicketAttachment } from '../../entities/TicketAttachment';
 import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
 import { MentionService, ResolvedMention } from '../../services/mention.service';
 import { RoomMembershipService } from './room-membership.service';
 import { resolveAgentDisplayName } from '../../utils/agent-name';
+import { projectChatAttachment } from '../mcp/shared/ticket-helpers';
 
 const CONTENT_MAX = 10000;
 
@@ -19,6 +21,12 @@ const CONTENT_MAX = 10000;
 // stays cheap even on very busy rooms; large enough to expose any realistic
 // loop because the plugin caps long before this many turns.
 const AGENT_CHAIN_LOOKBACK = 8;
+
+// Whitelisted message-type discriminators accepted from external callers
+// (REST / MCP). 'system' is intentionally excluded — only the in-process
+// sendSystemMessage path may stamp that value.
+export const CHAT_MESSAGE_TYPES = ['message', 'progress'] as const;
+export type ChatMessageType = (typeof CHAT_MESSAGE_TYPES)[number];
 
 function makeError(status: number, message: string): Error & { status: number } {
   const err = new Error(message) as Error & { status: number };
@@ -60,6 +68,9 @@ export class RoomMessagingService {
     @InjectRepository(UserMention)
     private readonly userMentionRepo: Repository<UserMention>,
 
+    @InjectRepository(TicketAttachment)
+    private readonly attachmentRepo: Repository<TicketAttachment>,
+
     private readonly logService: LogService,
 
     private readonly membership: RoomMembershipService,
@@ -70,13 +81,18 @@ export class RoomMessagingService {
   /**
    * Paginated message history for a room (cursor-based with `before` message ID).
    * Caller must be an active participant (left_at IS NULL) — else 403.
+   *
+   * `options.excludeProgress` filters out type='progress' rows. The agent-api
+   * GET endpoint sets this so chat history replayed into a spawned CLI never
+   * includes the manager's own tool-call heartbeats (which would teach the
+   * model to talk about its tools instead of using them).
    */
   async getMessages(
     roomId: string,
     userId: string,
     limit: number,
     before?: string,
-    options?: { observer?: boolean },
+    options?: { observer?: boolean; excludeProgress?: boolean },
   ): Promise<any[]> {
     // v0.32: observer mode skips the active-participant gate so admins can
     // read agent-to-agent rooms they're not a member of (workspace-wide chat
@@ -94,6 +110,10 @@ export class RoomMessagingService {
       .orderBy('m.created_at', 'DESC')
       .limit(cappedLimit);
 
+    if (options?.excludeProgress) {
+      qb.andWhere("m.type <> 'progress'");
+    }
+
     if (before) {
       // Cursor pagination: use composite (created_at, id) to avoid skipping messages
       // with identical timestamps (common under message bursts at millisecond precision)
@@ -107,6 +127,7 @@ export class RoomMessagingService {
     }
 
     const messages = await qb.getMany();
+    const attachmentsByMessage = await this._loadAttachmentsForMessages(messages.map(m => m.id));
 
     // Resolve sender names with caching
     const nameCache = new Map<string, string>();
@@ -125,7 +146,9 @@ export class RoomMessagingService {
           sender_type: msg.sender_type,
           sender_id: msg.sender_id,
           sender_name: senderName,
+          type: msg.type || 'message',
           content: msg.content,
+          attachments: attachmentsByMessage.get(msg.id) || [],
           created_at: msg.created_at,
           updated_at: msg.updated_at,
         };
@@ -150,19 +173,40 @@ export class RoomMessagingService {
     senderName: string,
     content: string,
     images?: Array<{ data: string; filename: string; mimetype: string }>,
+    attachmentIds?: string[],
+    type: ChatMessageType = 'message',
   ): Promise<any> {
     await this.membership.requireActiveParticipant(roomId, senderId, senderType);
 
-    if (!content || typeof content !== 'string') {
-      throw makeError(400, 'content is required');
+    if (!CHAT_MESSAGE_TYPES.includes(type)) {
+      throw makeError(400, `Invalid message type: ${type}`);
     }
-    const trimmed = content.trim();
-    if (!trimmed) {
-      throw makeError(400, 'content cannot be empty');
+
+    if (content != null && typeof content !== 'string') {
+      throw makeError(400, 'content must be a string');
     }
+    const trimmed = (content ?? '').trim();
     if (trimmed.length > CONTENT_MAX) {
       throw makeError(400, `Message exceeds ${CONTENT_MAX} character limit`);
     }
+
+    const resolvedAttachmentIds = Array.isArray(attachmentIds)
+      ? attachmentIds.filter((id): id is string => typeof id === 'string' && id.length > 0)
+      : [];
+    // Attachment-only messages (screenshot / file share without a caption) are
+    // a first-class workflow for chat — persist empty content in that case
+    // rather than forcing a placeholder. Only reject when there's no content
+    // AND no attachment to carry, which would be a truly empty send.
+    if (!trimmed && resolvedAttachmentIds.length === 0) {
+      throw makeError(400, 'content or attachment_ids required');
+    }
+    const attachmentRows = await this._validatePendingAttachments(
+      roomId,
+      workspaceId,
+      senderType,
+      senderId,
+      resolvedAttachmentIds,
+    );
 
     // Canonicalize agent senders to `<Manager>/<Agent>` so the SSE event +
     // return value match what getMessages() already returns for history.
@@ -176,22 +220,78 @@ export class RoomMessagingService {
       if (display) senderName = display;
     }
 
-    const savedMsg = await this.messageRepo.save(
-      this.messageRepo.create({
-        room_id: roomId,
-        workspace_id: workspaceId,
-        sender_type: senderType,
-        sender_id: senderId,
-        content: trimmed,
-        images: images && images.length > 0 ? JSON.stringify(images) : '[]',
-      }),
-    );
+    // CAS-style transactional claim: save the message and bind the
+    // attachments inside one transaction. The UPDATE re-asserts the
+    // pending state (`owner_type='chat_room' AND owner_id=:roomId`) so
+    // two concurrent sends with the same attachment_ids can never both
+    // win — the first one flips the rows to 'chat_message', the second
+    // one sees `affected < ids.length` and rolls back. Without this
+    // CAS guard the validate→save→update sequence was lossy: both
+    // senders could pass validation, both save messages, then last
+    // update wins and the first sender's POST/SSE response references
+    // attachment rows whose persisted owner_id points at the OTHER
+    // message — review finding P1 on ticket 92082b55.
+    const { savedMsg, attachments } = await this.messageRepo.manager.transaction(async (em) => {
+      const messageRepoTx = em.getRepository(ChatRoomMessage);
+      const attachmentRepoTx = em.getRepository(TicketAttachment);
+
+      const created = await messageRepoTx.save(
+        messageRepoTx.create({
+          room_id: roomId,
+          workspace_id: workspaceId,
+          sender_type: senderType,
+          sender_id: senderId,
+          type,
+          content: trimmed,
+          images: images && images.length > 0 ? JSON.stringify(images) : '[]',
+        }),
+      );
+
+      let projected: any[] = [];
+      if (attachmentRows.length > 0) {
+        const ids = attachmentRows.map(r => r.id);
+        const result = await attachmentRepoTx
+          .createQueryBuilder()
+          .update()
+          .set({ owner_type: 'chat_message', owner_id: created.id })
+          .where('id IN (:...ids)', { ids })
+          .andWhere('owner_type = :pendingType', { pendingType: 'chat_room' })
+          .andWhere('owner_id = :roomId', { roomId })
+          .execute();
+        if ((result.affected ?? 0) !== ids.length) {
+          // Another concurrent send claimed at least one of these
+          // attachments first. Roll back the message save and surface
+          // 409 so the caller knows the attachment_ids are no longer
+          // pending — they should refresh the room state and retry.
+          throw makeError(409, 'attachment_ids were claimed by another concurrent send');
+        }
+        const rows = await attachmentRepoTx.find({ where: { id: In(ids) } });
+        const byId = new Map(rows.map(r => [r.id, r]));
+        // Preserve the caller's attachment_ids[] order — multi-file
+        // uploads share a millisecond timestamp, so created_at ASC
+        // would scramble them. attachmentRows is already in
+        // attachment_ids[] order from _validatePendingAttachments.
+        projected = ids
+          .map(id => byId.get(id))
+          .filter((r): r is TicketAttachment => !!r)
+          .map(r => projectChatAttachment(r, { includeData: false }));
+      }
+
+      return { savedMsg: created, attachments: projected };
+    });
+
+    // Progress messages are ephemeral tool-call heartbeats; they update
+    // last_message_at so the room list sort reflects activity but skip
+    // mention parsing, DM dispatch, chain-depth accounting, and the
+    // sender's read-marker auto-advance — none of those apply to a
+    // narration row that the agent itself shouldn't see in history.
+    const isRealMessage = type === 'message';
 
     // Update denormalized last_message_at for room list sort
     await this.roomRepo.update(roomId, { last_message_at: new Date() });
 
     // CHAT-18: only parse mentions from user messages — prevents agent-to-agent loops
-    if (senderType === 'user') {
+    if (isRealMessage && senderType === 'user') {
       const dispatched = await this._processMentions(roomId, workspaceId, senderId, senderName, trimmed, savedMsg);
       await this._handleDmAgentRequest(roomId, workspaceId, senderId, trimmed, savedMsg, dispatched);
     }
@@ -204,6 +304,8 @@ export class RoomMessagingService {
     // just-saved message. Plugin uses it to short-circuit dispatch once
     // agents have been talking to each other for too many turns. Always
     // computed (cheap query) so the field is consistent on every emit.
+    // Progress rows are excluded from the lookback inside _computeAgentChainDepth
+    // so a chatty tool-narration burst never inflates the chain.
     const agentChainDepth = await this._computeAgentChainDepth(roomId);
 
     activityEvents.emit('chat_room_message', {
@@ -213,8 +315,10 @@ export class RoomMessagingService {
       sender_type: senderType,
       sender_id: senderId,
       sender_name: senderName,
+      type,
       content: trimmed,
       images: savedMsg.images,
+      attachments,
       created_at: savedMsg.created_at.toISOString(),
       agent_chain_depth: agentChainDepth,
       member_ids: memberIds,
@@ -228,13 +332,18 @@ export class RoomMessagingService {
     //
     // Silently tolerate failures: the message is already saved + broadcast;
     // an unadvanced read marker is recoverable on the next explicit markRead.
-    try {
-      await this.markRead(roomId, senderId, senderType);
-    } catch (err: any) {
-      this.logService.warn(
-        'ChatRooms',
-        `Auto-markRead failed for sender ${senderType}:${senderId} in room ${roomId}: ${err?.message || err}`,
-      );
+    // Skip for progress: those don't bump unread on other participants either
+    // (the client filters them out of the unread count), so the sender's marker
+    // doesn't need to advance on a row no one will ever count.
+    if (isRealMessage) {
+      try {
+        await this.markRead(roomId, senderId, senderType);
+      } catch (err: any) {
+        this.logService.warn(
+          'ChatRooms',
+          `Auto-markRead failed for sender ${senderType}:${senderId} in room ${roomId}: ${err?.message || err}`,
+        );
+      }
     }
 
     return {
@@ -244,8 +353,10 @@ export class RoomMessagingService {
       sender_type: savedMsg.sender_type,
       sender_id: savedMsg.sender_id,
       sender_name: senderName,
+      type: savedMsg.type || 'message',
       content: savedMsg.content,
       images: savedMsg.images,
+      attachments,
       created_at: savedMsg.created_at,
       updated_at: savedMsg.updated_at,
     };
@@ -312,8 +423,13 @@ export class RoomMessagingService {
       sender_type: 'system',
       sender_id: 'system',
       sender_name: 'System',
+      // System alerts are first-class history (stale-WAIT detector etc.):
+      // keep the default 'message' type so agents replaying history still
+      // see them — they're user-visible signals the model should condition on.
+      type: savedMsg.type || 'message',
       content: trimmed,
       images: savedMsg.images,
+      attachments: [],
       created_at: savedMsg.created_at.toISOString(),
       // Synthetic source: no agent chain involvement, so the plugin's
       // chain-depth short-circuit never sees this message.
@@ -333,8 +449,10 @@ export class RoomMessagingService {
       sender_type: 'system',
       sender_id: 'system',
       sender_name: 'System',
+      type: savedMsg.type || 'message',
       content: savedMsg.content,
       images: savedMsg.images,
+      attachments: [],
       created_at: savedMsg.created_at,
       updated_at: savedMsg.updated_at,
     };
@@ -494,6 +612,11 @@ export class RoomMessagingService {
       .createQueryBuilder('m')
       .select(['m.sender_type', 'm.sender_id'])
       .where('m.room_id = :roomId', { roomId })
+      // Progress rows are agent-authored heartbeats — a burst of tool calls
+      // would otherwise look like one agent talking to itself and inflate
+      // the chain depth past the plugin cap, causing the next real reply
+      // to be dropped as "loop detected".
+      .andWhere("m.type <> 'progress'")
       .orderBy('m.created_at', 'DESC')
       .addOrderBy('m.id', 'DESC')
       .limit(AGENT_CHAIN_LOOKBACK)
@@ -510,6 +633,55 @@ export class RoomMessagingService {
       }
     }
     return depth;
+  }
+
+  private async _loadAttachmentsForMessages(messageIds: string[]): Promise<Map<string, any[]>> {
+    const ids = messageIds.filter(Boolean);
+    const out = new Map<string, any[]>();
+    if (ids.length === 0) return out;
+
+    // (created_at, id) tiebreak — within a single multi-file upload all rows
+    // share a millisecond, so id-ASC gives a stable order on history replay.
+    const rows = await this.attachmentRepo.find({
+      where: { owner_type: 'chat_message', owner_id: In(ids) },
+      order: { created_at: 'ASC', id: 'ASC' },
+    });
+    for (const row of rows) {
+      const list = out.get(row.owner_id) || [];
+      list.push(projectChatAttachment(row, { includeData: false }));
+      out.set(row.owner_id, list);
+    }
+    return out;
+  }
+
+  private async _validatePendingAttachments(
+    roomId: string,
+    workspaceId: string,
+    senderType: string,
+    senderId: string,
+    attachmentIds: string[],
+  ): Promise<TicketAttachment[]> {
+    if (attachmentIds.length === 0) return [];
+    if (attachmentIds.length > 20) throw makeError(400, 'Maximum 20 attachments per message');
+
+    const rows = await this.attachmentRepo.find({ where: { id: In(attachmentIds) } });
+    const byId = new Map(rows.map(r => [r.id, r]));
+    for (const id of attachmentIds) {
+      const row = byId.get(id);
+      if (!row) throw makeError(400, `attachment_ids contains unknown id: ${id}`);
+      // Pre-send rows have owner_type='chat_room', owner_id=room_id.
+      // owner_type='chat_message' means the row already belongs to another
+      // sent message (or a stale orphan) and cannot be re-attached.
+      if (row.owner_type !== 'chat_room' || row.owner_id !== roomId) {
+        throw makeError(400, `attachment ${id} is already attached`);
+      }
+      if (row.room_id !== roomId) throw makeError(400, `attachment ${id} belongs to a different room`);
+      if (row.workspace_id !== workspaceId) throw makeError(400, `attachment ${id} belongs to a different workspace`);
+      if (row.uploaded_by_type !== senderType || row.uploaded_by_id !== senderId) {
+        throw makeError(403, `attachment ${id} was uploaded by a different sender`);
+      }
+    }
+    return attachmentIds.map(id => byId.get(id)!).filter(Boolean);
   }
 
   // --- Private helpers (mention dispatch) ---

@@ -11,10 +11,17 @@ import {
   type SessionAwareConfig,
   type SessionRecord,
 } from './base-session-manager.js';
-import type { ParseResult } from './cli-adapters/base.js';
+import { ADAPTER_CAPABILITIES, type ParseResult, type TurnImage } from './cli-adapters/base.js';
 import { fetchChatRoomHistory, postChatRoomMessage } from './rest.js';
 import { log } from './logging.js';
 import { composeChatRoomPrompt } from './prompts.js';
+import {
+  prepareChatAttachments,
+  renderAttachmentBlock,
+  type PreparedAttachment,
+} from './chat-attachment-prep.js';
+
+const { PERSISTENT_SESSION } = ADAPTER_CAPABILITIES;
 import type {
   ChatDispatchArgs,
   ChatDispatchResult,
@@ -29,8 +36,6 @@ interface ChatHistoryEntry {
   created_at?: string;
 }
 
-/** Max lines kept in the per-session output ring buffer. */
-const OUTPUT_RING_MAX = 80;
 /** Max characters sent in the fallback chat message body. */
 const FALLBACK_MAX_CHARS = 1500;
 /** Min ms between progress messages emitted to a chat room — coalesces
@@ -53,9 +58,11 @@ export class ChatSessionManager
 
   // Per-session tracking for fallback detection.
   // Keyed by session pid (unique per child) to avoid leaking across sessions
-  // that reuse the same sessionKey after respawn.
+  // that reuse the same sessionKey after respawn. Output buffering lives on
+  // the base class (`_outputRings` + `_collectOutputTail`) — both ticket and
+  // chat managers share that ring, this set just records whether the agent
+  // actually called `send_chat_room_message` during this pid's lifetime.
   #chatSent = new Set<number>();
-  #outputRings = new Map<number, string[]>();
   // Per-session progress emit state. Same pid keying as the others so a
   // respawned child gets a fresh budget without leaking the previous
   // session's last-emit timestamp / count.
@@ -80,6 +87,14 @@ export class ChatSessionManager
   recordRoomMessage(payload: any): void {
     const rid = payload?.room_id;
     if (!rid) return;
+    // Skip progress heartbeats so the in-memory history ring stays clean —
+    // the agent-manager emits these itself when the spawned CLI fires a
+    // non-`send_chat_room_message` tool, and feeding them back into the
+    // model would teach it to talk about its tool calls instead of using
+    // them. Mirrors the server-side `excludeProgress` filter on the agent
+    // history REST endpoint.
+    const msgType = typeof payload?.type === 'string' ? payload.type : 'message';
+    if (msgType !== 'message') return;
     let buf = this.#historyRing.get(rid);
     if (!buf) {
       buf = [];
@@ -120,7 +135,16 @@ export class ChatSessionManager
       log(
         `[chat-session] reused existing pid=${sess.pid} room=${spec.roomId.slice(0, 8)} agent=${(spec.agentId || '').slice(0, 8)} turn=${sess.turnCount + 1}`,
       );
-      this._sendFollowUp(sess, spec.content || '', { onProgress: spec.onProgress });
+      // Prep attachments using the session's adapter capability — only
+      // fetch image bytes when the live CLI can actually consume them
+      // (PERSISTENT_SESSION + native vision content blocks → Claude).
+      const canEmitImages = sess.adapter.has(PERSISTENT_SESSION) && sess.cli_type === 'claude';
+      const prepared = await prepareChatAttachments(this._config, spec.roomId, spec.attachments, {
+        fetchImages: canEmitImages,
+      });
+      const followupText = this.#followupTurnText(spec, prepared);
+      const images = canEmitImages ? this.#extractTurnImages(prepared) : undefined;
+      this._sendFollowUp(sess, followupText, { onProgress: spec.onProgress, images });
       return { dispatched: true, pid: sess.pid };
     }
 
@@ -167,11 +191,28 @@ export class ChatSessionManager
         history = [];
       }
     }
-    const firstTurnText = composeChatRoomPrompt(spec.roomId, history, {
-      content: spec.content || '',
-      sender_name: spec.senderName || '',
-      sender_id: spec.senderId || '',
-    });
+    // First-turn attachment prep. Only Claude (persistent session + native
+    // vision) gets image bytes fetched here — other CLIs hand-off through
+    // the legacy oneshot path, which prepares attachments without images.
+    const cli = String(spec.agentContext?.cli || 'claude').toLowerCase();
+    const canEmitImages = cli === 'claude';
+    const preparedFirstTurn = await prepareChatAttachments(
+      this._config,
+      spec.roomId,
+      spec.attachments,
+      { fetchImages: canEmitImages },
+    );
+    const firstTurnText = composeChatRoomPrompt(
+      spec.roomId,
+      history,
+      {
+        content: spec.content || '',
+        sender_name: spec.senderName || '',
+        sender_id: spec.senderId || '',
+      },
+      preparedFirstTurn,
+    );
+    const firstTurnImages = canEmitImages ? this.#extractTurnImages(preparedFirstTurn) : undefined;
 
     const monitorMeta: MonitorMeta = {};
     let spawned: SessionRecord | null = null;
@@ -180,7 +221,7 @@ export class ChatSessionManager
         sessionKey,
         spec.rolePrompt || '',
         firstTurnText,
-        { onProgress: spec.onProgress, monitorMeta, agentContext: spec.agentContext },
+        { onProgress: spec.onProgress, monitorMeta, agentContext: spec.agentContext, firstTurnImages },
       );
       // Stamp roomId / agentId on the record BEFORE clearing the inflight
       // reservation — `_spawnSession` lands the record in `_sessions`
@@ -204,12 +245,9 @@ export class ChatSessionManager
 
   // -- Fallback detection overrides ------------------------------------------
 
-  protected _onStdoutParsed(sess: SessionRecord, parsed: ParseResult, rawLine: string): void {
-    // Buffer non-JSON lines (plain-text errors from the CLI).
-    if (!parsed.raw) {
-      const trimmed = rawLine.trim();
-      if (trimmed) this.#pushOutput(sess.pid, trimmed);
-    }
+  protected _onStdoutParsed(sess: SessionRecord, parsed: ParseResult, _rawLine: string): void {
+    // Plain-text stdout buffering happens in BaseSessionManager#wireStdio now;
+    // this override only watches for tool_use blocks + turn boundaries.
     // Turn boundary — reset progress budget so the next user message on the
     // same persistent CLI child gets a fresh window of progress emits.
     // Without this, `finalSeen=true` from turn 1 would silently suppress all
@@ -248,9 +286,8 @@ export class ChatSessionManager
     }
   }
 
-  protected _onStderrLine(sess: SessionRecord, line: string): void {
-    const trimmed = line.trim();
-    if (trimmed) this.#pushOutput(sess.pid, trimmed);
+  protected _onStderrLine(_sess: SessionRecord, _line: string): void {
+    // Stderr buffering handled in BaseSessionManager#wireStdio (shared ring).
   }
 
   protected async _onChildExit(
@@ -259,11 +296,12 @@ export class ChatSessionManager
     _signal: NodeJS.Signals | null,
   ): Promise<void> {
     const sent = this.#chatSent.has(sess.pid);
-    const ring = this.#outputRings.get(sess.pid);
+    // Snapshot the buffered output BEFORE the base class clears it (the
+    // base clears the ring after this hook returns).
+    const body = sent ? '' : this._collectOutputTail(sess.pid, FALLBACK_MAX_CHARS);
 
     // Cleanup tracking state regardless of outcome.
     this.#chatSent.delete(sess.pid);
-    this.#outputRings.delete(sess.pid);
     this.#progressMeta.delete(sess.pid);
 
     if (sent) return; // Agent replied normally — nothing to do.
@@ -272,12 +310,6 @@ export class ChatSessionManager
     const agentId: string | undefined = sess.agentId;
     if (!roomId || !agentId) return;
 
-    // Build a human-readable fallback from buffered output.
-    let body = (ring ?? []).join('\n').trim();
-    if (body.length > FALLBACK_MAX_CHARS) {
-      body = '…' + body.slice(-FALLBACK_MAX_CHARS);
-    }
-
     const message = body
       ? `⚠️ Agent가 응답하지 못했습니다. CLI 출력:\n\`\`\`\n${body}\n\`\`\``
       : '⚠️ Agent가 응답하지 못했습니다 (출력 없음).';
@@ -285,16 +317,6 @@ export class ChatSessionManager
     log(`[chat-session] fallback message for room=${roomId} agent=${agentId} pid=${sess.pid} outputLen=${body.length}`);
     const cfg = { ...this._config, apiKey: sess._effectiveApiKey || this._config.apiKey };
     await postChatRoomMessage(cfg, roomId, agentId, message);
-  }
-
-  #pushOutput(pid: number, line: string): void {
-    let ring = this.#outputRings.get(pid);
-    if (!ring) {
-      ring = [];
-      this.#outputRings.set(pid, ring);
-    }
-    ring.push(line);
-    while (ring.length > OUTPUT_RING_MAX) ring.shift();
   }
 
   /** Fire a single coalesced progress message for a batch of tool_use blocks
@@ -331,8 +353,10 @@ export class ChatSessionManager
 
     const cfg = { ...this._config, apiKey: sess._effectiveApiKey || this._config.apiKey };
     // Fire-and-forget — postChatRoomMessage already swallows + logs errors,
-    // so a failed progress post never blocks stdout parsing.
-    void postChatRoomMessage(cfg, roomId, agentId, message);
+    // so a failed progress post never blocks stdout parsing. Tagged
+    // type='progress' so the server stamps the discriminator on the row
+    // and the agent history replay excludes it.
+    void postChatRoomMessage(cfg, roomId, agentId, message, { type: 'progress' });
   }
 
   #formatProgressLine(tools: Array<{ name: string; input: any }>): string {
@@ -418,6 +442,38 @@ export class ChatSessionManager
   }
 
   // ---------------------------------------------------------------------------
+
+  /** Build the follow-up turn body for a live session. The first turn goes
+   *  through the full `composeChatRoomPrompt` because the persistent CLI
+   *  needs context (room id, instructions); subsequent turns only need the
+   *  new user message + any attachment block, since history is already in
+   *  the model's running context. */
+  #followupTurnText(
+    spec: { content?: string },
+    attachments: PreparedAttachment[],
+  ): string {
+    const text = (spec.content || '').trim();
+    if (attachments.length === 0) return text;
+    const lines: string[] = [];
+    if (text) lines.push(text);
+    for (const ln of renderAttachmentBlock(attachments)) {
+      lines.push(ln);
+    }
+    return lines.join('\n');
+  }
+
+  /** Pull base64 image payloads out of the prepared attachment list. Only
+   *  attachments classified as `image_base64` survived the prep fetch — the
+   *  rest are already represented in the prompt text. */
+  #extractTurnImages(attachments: PreparedAttachment[]): TurnImage[] | undefined {
+    const images: TurnImage[] = [];
+    for (const att of attachments) {
+      if (att.kind === 'image_base64' && att.image_base64) {
+        images.push({ media_type: att.mime_type || 'image/png', data: att.image_base64 });
+      }
+    }
+    return images.length > 0 ? images : undefined;
+  }
 
   _snapshot(): Array<Pick<SessionRecord, 'pid' | 'turnCount' | 'startedAt' | 'lastTouchedAt'> & {
     roomId: string;

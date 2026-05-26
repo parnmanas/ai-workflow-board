@@ -15,6 +15,7 @@ import {
   type ParseResult,
   type SessionSpec,
   type SpawnDescriptor,
+  type TurnImage,
 } from './base.js';
 
 const { PERSISTENT_SESSION, NATIVE_MCP } = ADAPTER_CAPABILITIES;
@@ -41,7 +42,7 @@ export class ClaudeCliAdapter extends CliAdapter {
         mcpConfigPath ?? '',
         '--strict-mcp-config',
         '--allowedTools',
-        'mcp__awb__*',
+        'mcp__awb__*,mcp__host__*',
         '--append-system-prompt',
         rolePrompt || '',
         '--dangerously-skip-permissions',
@@ -64,7 +65,7 @@ export class ClaudeCliAdapter extends CliAdapter {
         mcpConfigPath ?? '',
         '--strict-mcp-config',
         '--allowedTools',
-        'mcp__awb__*',
+        'mcp__awb__*,mcp__host__*',
         '--append-system-prompt',
         rolePrompt || '',
         '--dangerously-skip-permissions',
@@ -74,10 +75,24 @@ export class ClaudeCliAdapter extends CliAdapter {
     };
   }
 
-  formatTurn(text: string): string {
+  formatTurn(text: string, images?: TurnImage[]): string {
+    const content: Array<Record<string, unknown>> = [{ type: 'text', text: String(text) }];
+    if (Array.isArray(images)) {
+      for (const img of images) {
+        if (!img || typeof img.data !== 'string' || !img.data) continue;
+        content.push({
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: img.media_type || 'image/png',
+            data: img.data,
+          },
+        });
+      }
+    }
     const obj = {
       type: 'user',
-      message: { role: 'user', content: [{ type: 'text', text: String(text) }] },
+      message: { role: 'user', content },
     };
     return JSON.stringify(obj);
   }

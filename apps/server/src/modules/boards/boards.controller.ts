@@ -2,7 +2,7 @@ import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { Controller, Get, Post, Patch, Delete, Body, Param, Query, Res, UseGuards } from '@nestjs/common';
 import { Response } from 'express';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
-import { Repository, IsNull, DataSource } from 'typeorm';
+import { Repository, IsNull, Not, DataSource } from 'typeorm';
 import { Board } from '../../entities/Board';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { Ticket } from '../../entities/Ticket';
@@ -15,6 +15,7 @@ import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { findOrFail } from '../../common/find-or-fail';
 import { parseComments, expandCommentAttachments } from '../mcp/shared/ticket-parsing';
+import { buildArchiveCursor, parseArchiveCursor } from '../mcp/shared/archive-helpers';
 import { writeRoutingConfigThrough } from './routing-config.helper';
 import { AgentWorkloadService } from '../agents/agent-workload.service';
 import { resolveAgentDisplayMap } from '../../utils/agent-name';
@@ -81,14 +82,25 @@ export class BoardsController {
   }
 
   @Get(':id')
-  async get(@Param('id') id: string, @Res() res: Response) {
+  async get(
+    @Param('id') id: string,
+    @Query('include_archived') includeArchived: string,
+    @Res() res: Response,
+  ) {
     const board = await findOrFail(this.boardRepo, { where: { id } }, 'Board not found');
+
+    // Archived tickets are excluded by default — they live behind the
+    // `/api/boards/:id/archived-tickets` endpoint. `?include_archived=true`
+    // opts back in (used by admin tooling that needs the full row set).
+    const showArchived = includeArchived === 'true';
 
     const columns = await this.colRepo.find({ where: { board_id: board.id }, order: { position: 'ASC' } });
     const columnsWithTickets = await Promise.all(
       columns.map(async (col) => {
+        const whereTickets: any = { column_id: col.id, parent_id: IsNull() };
+        if (!showArchived) whereTickets.archived_at = IsNull();
         const tickets = await this.ticketRepo.find({
-          where: { column_id: col.id, parent_id: IsNull() },
+          where: whereTickets,
           relations: ['children', 'children.children', 'comments'],
           order: { position: 'ASC' },
         });
@@ -139,10 +151,13 @@ export class BoardsController {
     const colIds = columns.map(c => c.id);
     if (colIds.length === 0) return res.json({ focus_tickets: [] });
 
-    // Find all tickets on this board's columns.
+    // Find all tickets on this board's columns. Archived tickets are
+    // excluded — the focus selector never returns them and the UI
+    // doesn't render badges for them.
     const tickets = await this.ticketRepo
       .createQueryBuilder('t')
       .where('t.column_id IN (:...colIds)', { colIds })
+      .andWhere('t.archived_at IS NULL')
       .getMany();
     if (tickets.length === 0) return res.json({ focus_tickets: [] });
 
@@ -196,11 +211,93 @@ export class BoardsController {
     return res.json({ focus_tickets: focusTickets });
   }
 
+  /**
+   * GET /api/boards/:id/archived-tickets
+   *
+   * Paginated list of archived tickets on this board. Mirrors the MCP
+   * `list_archived_tickets` tool — same cursor + q semantics. Used by the
+   * dedicated Archive UI to render the board's archived ticket history with
+   * search + Unarchive / View detail actions.
+   *
+   * Response: `{ tickets: Ticket[], next_cursor: string | null }`. Each row
+   * includes `column_name` (snapshot of where the ticket was when archived).
+   */
+  @Get(':board_id/archived-tickets')
+  async listArchivedTickets(
+    @Param('board_id') boardId: string,
+    @Query('cursor') cursor: string,
+    @Query('limit') limitRaw: string,
+    @Query('q') q: string,
+    @Res() res: Response,
+  ) {
+    await findOrFail(this.boardRepo, { where: { id: boardId } }, 'Board not found');
+    const limit = Math.max(1, Math.min(200, Number.parseInt(limitRaw || '50', 10) || 50));
+
+    const cols = await this.colRepo.find({ where: { board_id: boardId } });
+    if (cols.length === 0) return res.json({ tickets: [], next_cursor: null });
+    const colIds = cols.map(c => c.id);
+
+    // Compound (archived_at, id) sort + cursor — the archiver stamps a whole
+    // batch with the same `archived_at`, so an `archived_at`-only cursor would
+    // skip the rest of that batch when the page boundary lands inside it.
+    // Encoded as `<isoTimestamp>|<id>`.
+    let qb = this.ticketRepo.createQueryBuilder('t')
+      .where('t.column_id IN (:...colIds)', { colIds })
+      .andWhere('t.archived_at IS NOT NULL')
+      .orderBy('t.archived_at', 'DESC')
+      .addOrderBy('t.id', 'DESC')
+      .take(limit + 1);
+
+    if (cursor) {
+      const { ts, id } = parseArchiveCursor(cursor);
+      if (ts && id != null) {
+        qb = qb.andWhere(
+          '(t.archived_at < :ts) OR (t.archived_at = :ts AND t.id < :id)',
+          { ts, id },
+        );
+      } else if (ts) {
+        // Legacy bare-timestamp cursor — no tiebreak available, fall back to
+        // the original `< :ts` shape so older clients keep paging forward.
+        qb = qb.andWhere('t.archived_at < :ts', { ts });
+      }
+    }
+    if (q) {
+      // Title / id / label match. Labels are stored as a JSON-encoded string
+      // column; a substring match on the raw JSON catches `["foo","bar"]`
+      // without needing per-row deserialization in SQL.
+      qb = qb.andWhere(
+        '(LOWER(t.title) LIKE :q OR t.id = :exactId OR LOWER(t.labels) LIKE :labelQ)',
+        {
+          q: `%${q.toLowerCase()}%`,
+          exactId: q,
+          labelQ: `%"${q.toLowerCase()}"%`,
+        },
+      );
+    }
+
+    const rows = await qb.getMany();
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+    const colById = new Map(cols.map(c => [c.id, c]));
+
+    return res.json({
+      tickets: page.map(t => ({
+        ...t,
+        labels: JSON.parse(t.labels || '[]'),
+        channel_ids: JSON.parse(t.channel_ids || '[]'),
+        column_name: colById.get(t.column_id || '')?.name ?? '',
+      })),
+      next_cursor: hasMore && page.length > 0
+        ? buildArchiveCursor(page[page.length - 1].archived_at!, page[page.length - 1].id)
+        : null,
+    });
+  }
+
   @Patch(':id')
   async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     const board = await findOrFail(this.boardRepo, { where: { id } }, 'Board not found');
 
-    const { name, description, routing_config, column_prompts, max_concurrent_tickets_per_agent, self_improvement_mode } = body;
+    const { name, description, routing_config, column_prompts, max_concurrent_tickets_per_agent, self_improvement_mode, auto_archive_days } = body;
     if (name !== undefined) board.name = name;
     if (description !== undefined) board.description = description;
     if (self_improvement_mode !== undefined) {
@@ -233,6 +330,20 @@ export class BoardsController {
         });
       }
       board.max_concurrent_tickets_per_agent = n;
+    }
+
+    if (auto_archive_days !== undefined) {
+      if (auto_archive_days === null || auto_archive_days === '' || auto_archive_days === false) {
+        board.auto_archive_days = null;
+      } else {
+        const n = Math.floor(Number(auto_archive_days));
+        if (!Number.isFinite(n) || n < 1 || n > 365) {
+          return res.status(400).json({
+            error: 'auto_archive_days must be null or an integer between 1 and 365',
+          });
+        }
+        board.auto_archive_days = n;
+      }
     }
 
     await this.boardRepo.save(board);

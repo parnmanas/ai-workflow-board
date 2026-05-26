@@ -181,6 +181,11 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
       .createQueryBuilder('t')
       .where('t.column_id IN (:...colIds)', { colIds })
       .andWhere('t.updated_at < :ageThreshold', { ageThreshold })
+      // Archive exclusion (ticket 9b44526b): manual archive is permitted on
+      // non-terminal columns, so an archived ticket can still match the
+      // active/intake candidate filter. Without this clause the detector would
+      // flag it and the remediation path would yank it back to intake.
+      .andWhere('t.archived_at IS NULL')
       .getMany();
 
     // Pre-fetch the existing alert rows in one shot — used for both
@@ -233,6 +238,15 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
       if (scannedIds.has(alert.ticket_id)) continue;
       const liveTicket = await ticketRepo.findOne({ where: { id: alert.ticket_id } });
       if (liveTicket) {
+        if (liveTicket.archived_at) {
+          // Manual archive after the alert landed. The archive itself was a
+          // deliberate operator action — no need to spam an unstuck chat post
+          // to announce that we agree. Drop the row silently so the next
+          // sweep doesn't re-process it.
+          await alertRepo.delete({ ticket_id: alert.ticket_id });
+          stats.unstuck += 1;
+          continue;
+        }
         // Resolution-side delete + unstuck post.
         await this._emitUnstuck(liveTicket, alert, now, stats, 'fell_out_of_window');
       } else {
@@ -585,6 +599,10 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     now: Date,
   ): Promise<boolean> {
     if (!currentColumn) return false;
+    // Fresh-read archive gate (ticket 9b44526b): a manual archive can race
+    // the in-memory scan→remediate loop. Don't move an archived row back to
+    // intake even if it slipped past the candidate filter.
+    if (ticket.archived_at) return false;
 
     const colRepo = this.dataSource.getRepository(BoardColumn);
     const ticketRepo = this.dataSource.getRepository(Ticket);

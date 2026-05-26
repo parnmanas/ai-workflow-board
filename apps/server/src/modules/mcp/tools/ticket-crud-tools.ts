@@ -30,6 +30,7 @@ import {
   validateNextTicketId,
 } from '../shared/ticket-helpers';
 import { getCallerAgent } from '../shared/session-auth';
+import { isTerminalColumn, TicketArchivedError } from '../shared/archive-helpers';
 import type { ToolContext } from './context';
 
 /**
@@ -188,12 +189,19 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           resolvedReporterId = creatorId;
         }
         const position = await maxTicketPosition(dataSource, resolvedColumnId!);
+        // Stamp terminal_entered_at when the destination column is already
+        // terminal (e.g. an agent files a ticket directly into Done). Without
+        // this stamp the archiver's `terminal_entered_at IS NOT NULL` guard
+        // would silently skip the row forever. `col` is the already-loaded
+        // destination column from line 141.
+        const terminalEnteredAt = isTerminalColumn(col) ? new Date() : null;
         const t = await tRepo.save(tRepo.create({
           column_id: resolvedColumnId!, title, description, priority,
           assignee: resolvedAssignee, reporter: resolvedReporter,
           assignee_id: resolvedAssigneeId, reporter_id: resolvedReporterId, reviewer_id,
           labels: JSON.stringify(labels), channel_ids: JSON.stringify(channel_ids), position,
           next_ticket_id: resolvedNextTicketId,
+          terminal_entered_at: terminalEnteredAt,
           created_by: creatorName, created_by_type: creatorType, created_by_id: creatorId,
         }));
 
@@ -279,6 +287,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       const ticketRepo = dataSource.getRepository(Ticket);
       const ticket = await ticketRepo.findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Ticket not found');
+      if (ticket.archived_at) return err(new TicketArchivedError(ticket.id).message);
 
       const caller = getCallerAgent(extra);
 
@@ -508,6 +517,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       const ticketRepo = dataSource.getRepository(Ticket);
       const ticket = await ticketRepo.findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Ticket not found');
+      if (ticket.archived_at) return err(new TicketArchivedError(ticket.id).message);
       const caller = getCallerAgent(extra);
       const wasPending = !!ticket.pending_user_action;
       ticket.pending_user_action = true;
@@ -539,6 +549,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       const ticketRepo = dataSource.getRepository(Ticket);
       const ticket = await ticketRepo.findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Ticket not found');
+      if (ticket.archived_at) return err(new TicketArchivedError(ticket.id).message);
       const caller = getCallerAgent(extra);
       const wasPending = !!ticket.pending_user_action;
       ticket.pending_user_action = false;
@@ -633,7 +644,11 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
         .innerJoin('columns', 'col', 'col.id = t.column_id')
         .innerJoin('boards', 'b', 'b.id = col.board_id')
         .where('b.workspace_id = :workspaceId', { workspaceId: workspace_id })
-        .andWhere('(t.assignee_id = :agentId OR t.reporter_id = :agentId OR t.reviewer_id = :agentId)', { agentId: agent_id });
+        .andWhere('(t.assignee_id = :agentId OR t.reporter_id = :agentId OR t.reviewer_id = :agentId)', { agentId: agent_id })
+        // Archived tickets drop out of the agent's active list by default —
+        // they're not actionable workflow items, just history. The Archive
+        // UI / list_archived_tickets tool covers explicit lookup.
+        .andWhere('t.archived_at IS NULL');
 
       if (status) {
         qb = qb.andWhere('t.status = :status', { status });

@@ -394,6 +394,41 @@ export function projectTicketAttachment(
   return out;
 }
 
+export function isImageAttachment(row: TicketAttachment): boolean {
+  return /^image\//i.test(row.file_mimetype || '');
+}
+
+export function projectChatAttachment(
+  row: TicketAttachment,
+  options: { includeData?: boolean } = {},
+) {
+  const { includeData = false } = options;
+  const downloadUrl = row.room_id
+    ? `/api/chat-rooms/${row.room_id}/attachments/${row.id}`
+    : `/api/chat-rooms/attachments/${row.id}`;
+  const out: any = {
+    id: row.id,
+    attachment_id: row.id,
+    workspace_id: row.workspace_id,
+    room_id: row.room_id,
+    message_id: row.owner_type === 'chat_message' ? row.owner_id : '',
+    filename: row.file_name,
+    file_name: row.file_name,
+    mime_type: row.file_mimetype,
+    file_mimetype: row.file_mimetype,
+    size_bytes: row.file_size,
+    file_size: row.file_size,
+    download_url: downloadUrl,
+    thumbnail_url: isImageAttachment(row) ? downloadUrl : undefined,
+    uploaded_by_type: row.uploaded_by_type,
+    uploaded_by_id: row.uploaded_by_id,
+    uploaded_by: row.uploaded_by,
+    created_at: row.created_at,
+  };
+  if (includeData) out.file_data = row.file_data;
+  return out;
+}
+
 /**
  * Approximate decoded byte count for a base64 string. Mirrors the formula
  * the comment-attachment path uses (length * 3 / 4); padding overcounts by
@@ -401,4 +436,118 @@ export function projectTicketAttachment(
  */
 export function approxBase64Size(base64: string): number {
   return Math.floor(((base64?.length || 0) * 3) / 4);
+}
+
+/**
+ * Best-effort magic-byte sniffer for the file formats the chat / ticket
+ * attachment surfaces actually render specially (images for inline
+ * preview + thumbnails; pdf/zip for download). Returns null when the
+ * leading bytes don't match a known signature — sniffable text formats
+ * (text/plain, application/json, source code) deliberately fall through
+ * because every text payload would otherwise have to be parsed before
+ * upload.
+ *
+ * Decodes only the first ~24 base64 chars (≈ 18 bytes) so this stays
+ * cheap on big payloads. Callers pass the same base64 string the
+ * controller saved verbatim, so what we sniff is what hits disk — no
+ * trust-on-claim window between the check and the persistence.
+ */
+const MAGIC_SIGNATURES: Array<{ mime: string; prefix: number[]; offset?: number }> = [
+  { mime: 'image/png',  prefix: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] },
+  { mime: 'image/jpeg', prefix: [0xFF, 0xD8, 0xFF] },
+  { mime: 'image/gif',  prefix: [0x47, 0x49, 0x46, 0x38] },          // "GIF8" — 7a / 9a both fine
+  { mime: 'application/pdf', prefix: [0x25, 0x50, 0x44, 0x46] },     // "%PDF"
+  { mime: 'application/zip', prefix: [0x50, 0x4B, 0x03, 0x04] },     // "PK\x03\x04"
+  { mime: 'image/bmp', prefix: [0x42, 0x4D] },                       // "BM"
+];
+
+export function sniffMimetypeFromBase64(base64: string): string | null {
+  if (!base64) return null;
+  let buf: Buffer;
+  try {
+    buf = Buffer.from(base64.slice(0, 32), 'base64');
+  } catch {
+    return null;
+  }
+  if (buf.length === 0) return null;
+  // RIFF...WEBP — magic split across a length field, so check explicitly.
+  if (
+    buf.length >= 12 &&
+    buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
+    buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50
+  ) {
+    return 'image/webp';
+  }
+  for (const sig of MAGIC_SIGNATURES) {
+    if (buf.length < sig.prefix.length) continue;
+    let matched = true;
+    for (let i = 0; i < sig.prefix.length; i++) {
+      if (buf[i] !== sig.prefix[i]) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched) return sig.mime;
+  }
+  return null;
+}
+
+/**
+ * Verify the caller-claimed mime against the actual bytes, then return
+ * the canonical mime to persist. The acceptance criteria for ticket
+ * 92082b55 (security section) requires this on every chat-attachment
+ * upload so a client cannot smuggle an executable masquerading as
+ * `image/png` past the inline-render guard.
+ *
+ * Decision matrix:
+ *   - bytes are unknown to the sniffer → trust the caller's claim (text/log/source
+ *     files don't have a fixed signature; bouncing every unknown upload would
+ *     break the most common chat use case — pasting a log snippet).
+ *   - sniffed type matches the canonical inferred type → accept the canonical
+ *     mime (no rewrite needed).
+ *   - sniffed type AND inferred type are both known, and they disagree → throw
+ *     400. This is the security guard: a client cannot send PNG bytes labeled
+ *     as `application/pdf`, or vice versa.
+ *   - sniffer found a definitive type but inferred is the application/octet-stream
+ *     fallback (extensionless or unknown extension) → accept the sniffed type so
+ *     the row carries an accurate mime for downstream rendering.
+ */
+// Common non-canonical mime spellings → canonical form. Used when comparing
+// the caller's claim against what the sniffer found, so legitimate uploads
+// from browsers / SDKs that still send legacy spellings (`image/jpg`,
+// `image/x-png`, `application/x-zip-compressed`) don't get rejected by the
+// magic-byte mismatch guard.
+const MIME_ALIASES: Record<string, string> = {
+  'image/jpg': 'image/jpeg',
+  'image/pjpeg': 'image/jpeg',
+  'image/x-png': 'image/png',
+  'application/x-zip': 'application/zip',
+  'application/x-zip-compressed': 'application/zip',
+};
+
+function normalizeMime(mime: string): string {
+  const lower = (mime || '').toLowerCase().trim();
+  return MIME_ALIASES[lower] || lower;
+}
+
+export function validateAttachmentMimetype(
+  fileName: string,
+  claimedMimetype: string | undefined,
+  base64: string,
+): string {
+  const canonical = inferTicketAttachmentMimetype(fileName, claimedMimetype);
+  const sniffed = sniffMimetypeFromBase64(base64);
+  if (!sniffed) return canonical;
+  if (normalizeMime(sniffed) === normalizeMime(canonical)) return canonical;
+  // Extensionless or unknown-extension upload — canonical is the generic
+  // fallback. Use the sniffed type because it's strictly more informative.
+  if (canonical === 'application/octet-stream') return sniffed;
+  // Definitive mismatch — the caller claimed one type but the bytes are
+  // demonstrably another. Reject loudly so the upload never lands on disk
+  // with a misleading mime that lets a non-image render in the lightbox.
+  const err = new Error(
+    `Attachment ${fileName}: claimed mime "${canonical}" does not match file bytes (detected "${sniffed}")`,
+  ) as Error & { status: number };
+  err.status = 400;
+  throw err;
 }

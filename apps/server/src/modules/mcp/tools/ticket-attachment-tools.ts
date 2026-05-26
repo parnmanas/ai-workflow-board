@@ -26,6 +26,7 @@ import {
   projectTicketAttachment,
 } from '../shared/ticket-helpers';
 import { getCallerAgent } from '../shared/session-auth';
+import { TicketArchivedError } from '../shared/archive-helpers';
 import type { ToolContext } from './context';
 
 export function registerTicketAttachmentTools(server: McpServer, ctx: ToolContext): void {
@@ -52,6 +53,7 @@ export function registerTicketAttachmentTools(server: McpServer, ctx: ToolContex
       const ticketRepo = dataSource.getRepository(Ticket);
       const ticket = await ticketRepo.findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Ticket not found');
+      if (ticket.archived_at) return err(new TicketArchivedError(ticket.id).message);
 
       const size = approxBase64Size(file_data);
       if (size > MAX_TICKET_ATTACHMENT_SIZE) {
@@ -71,6 +73,8 @@ export function registerTicketAttachmentTools(server: McpServer, ctx: ToolContex
       const mimetype = inferTicketAttachmentMimetype(file_name, file_mimetype);
 
       const row = await attRepo.save(attRepo.create({
+        owner_type: 'ticket',
+        owner_id: ticket_id,
         ticket_id,
         workspace_id: ticket.workspace_id || '',
         file_name,
@@ -123,7 +127,11 @@ export function registerTicketAttachmentTools(server: McpServer, ctx: ToolContex
     },
     async ({ attachment_id }) => {
       const row = await dataSource.getRepository(TicketAttachment).findOne({ where: { id: attachment_id } });
-      if (!row) return err('Attachment not found');
+      // Chat attachments share this table (owner_type='chat_room' or
+      // 'chat_message'). Pretend they don't exist here so a caller that learns
+      // a chat attachment id can't bypass the chat participant-only download
+      // path (`/api/chat-rooms/:roomId/attachments/:id`).
+      if (!row || row.owner_type !== 'ticket' || !row.ticket_id) return err('Attachment not found');
       return ok(projectTicketAttachment(row, { includeData: true }));
     }
   );
@@ -137,9 +145,13 @@ export function registerTicketAttachmentTools(server: McpServer, ctx: ToolContex
     async ({ attachment_id }, extra: { sessionId?: string }) => {
       const attRepo = dataSource.getRepository(TicketAttachment);
       const row = await attRepo.findOne({ where: { id: attachment_id } });
-      if (!row) return err('Attachment not found');
+      // Same scoping as get_ticket_attachment: refuse to act on chat rows so
+      // this tool can't hard-delete a chat attachment past the uploader +
+      // pending-only checks in delete_chat_message_attachment.
+      if (!row || row.owner_type !== 'ticket' || !row.ticket_id) return err('Attachment not found');
 
       const ticket = await dataSource.getRepository(Ticket).findOne({ where: { id: row.ticket_id } });
+      if (ticket?.archived_at) return err(new TicketArchivedError(ticket.id).message);
       await attRepo.delete({ id: attachment_id });
 
       const caller = getCallerAgent(extra);

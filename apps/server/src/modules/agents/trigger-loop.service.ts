@@ -9,10 +9,12 @@ import { Board } from '../../entities/Board';
 import { Agent } from '../../entities/Agent';
 import { PromptTemplate } from '../../entities/PromptTemplate';
 import { Resource } from '../../entities/Resource';
+import { Workspace } from '../../entities/Workspace';
 import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { LogService } from '../../services/log.service';
 import { ActivityService, activityEvents } from '../../services/activity.service';
+import { GitHubConnectorService, parseGitHubUrl } from '../../services/github-connector.service';
 import { AgentWorkloadService } from './agent-workload.service';
 import { priorityIndex } from './priority';
 
@@ -323,9 +325,14 @@ export class TriggerLoopService implements OnModuleInit {
         )
         .getCount();
 
+      // Auto-advance always moves between non-terminal columns (the loop
+      // returns on terminal entry above), so terminal_entered_at can't be
+      // stamped here — but defensively clear it in case a legacy row had
+      // a stale stamp from a previous run.
       await tRepo.update(ticket.id, {
         column_id: nextCol.id,
         position: destCount,
+        terminal_entered_at: null,
       });
     });
 
@@ -858,6 +865,42 @@ Keep follow-up ticket titles tight and outcome-shaped:
       }
     }
 
+    // Archived-ticket gate (ticket 9b44526b). Single chokepoint shared with
+    // the pause / pending gates below. Re-reads the ticket so a manual
+    // archive that races a queued trigger still wins — same fresh-read
+    // pattern as the pending gate. Even manual triggers honor this; the
+    // documented escape hatch is `unarchive_ticket`.
+    {
+      const freshForArchive = await this.dataSource
+        .getRepository(Ticket)
+        .findOne({ where: { id: ticket.id } });
+      if (freshForArchive?.archived_at) {
+        this.logService.info('MCP', 'agent_trigger dropped (ticket archived)', {
+          ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource,
+          archived_at: new Date(freshForArchive.archived_at).toISOString(),
+        });
+        try {
+          const activityLogRepo = this.dataSource.getRepository(ActivityLog);
+          await activityLogRepo.save(activityLogRepo.create({
+            entity_type: 'ticket',
+            entity_id: ticket.id,
+            ticket_id: ticket.id,
+            actor_id: 'system',
+            actor_name: 'TriggerLoopService',
+            action: 'agent_trigger_dropped_archived',
+            new_value: `agent=${agentId} archived_at=${new Date(freshForArchive.archived_at).toISOString()}`,
+            role,
+            trigger_source: triggerSource,
+          }));
+        } catch (e) {
+          this.logService.warn('MCP', 'archived-drop audit write failed (drop still applied)', {
+            err: String(e), ticket_id: ticket.id,
+          });
+        }
+        return '';
+      }
+    }
+
     // Pending-user-action gate (ticket a57517be). Single chokepoint that
     // every dispatch path runs through — including manual triggers (the
     // "Trigger" button on a pending ticket would otherwise re-wake the agent
@@ -1099,7 +1142,78 @@ Keep follow-up ticket titles tight and outcome-shaped:
       });
     }
 
+    // Claim-verification snapshot (ticket dcb9d661). When an assignee
+    // is being woken on an active column AND the workspace has
+    // claim-verification enabled, capture the current branch tip SHA so
+    // ClaimVerificationService's sweep can later assert "the agent
+    // commented 'done' but the branch tip is the same one we handed
+    // them — no commit landed". Fire-and-forget: a failed GitHub fetch
+    // leaves an empty SHA and the sweep falls back to ActivityLog-only
+    // evidence. Never blocks the dispatch.
+    if (role === 'assignee' && col && (col as any).kind === 'active' && baseRepo && baseRepo.url) {
+      this._snapshotBranchTipSha(ticket, baseRepo, baseBranch).catch((e: unknown) => {
+        this.logService.warn('MCP', 'claim-verification snapshot failed (non-fatal)', {
+          err: String(e), ticket_id: ticket.id, agent_id: agentId,
+        });
+      });
+    }
+
     return triggerId;
+  }
+
+  /**
+   * Best-effort branch-tip snapshot for the claim-verification sweep
+   * (ticket dcb9d661). Only runs when the workspace has the feature
+   * enabled. Writes the SHA + timestamp directly onto the ticket so
+   * the sweep has all the evidence it needs in one row.
+   *
+   * Idempotency: the snapshot is overwritten on each successful
+   * assignee trigger, which matches the spec ("the SHA just before
+   * the latest trigger"). A failed fetch leaves the previous snapshot
+   * untouched so a transient network blip can't erase prior evidence.
+   */
+  private async _snapshotBranchTipSha(
+    ticket: Ticket,
+    baseRepo: { id: string; name: string; url: string; default_branch: string },
+    baseBranch: string,
+  ): Promise<void> {
+    const ws = await this.dataSource.getRepository(Workspace).findOne({
+      where: { id: ticket.workspace_id },
+    });
+    if (!ws || !ws.claim_verification_enabled) return;
+
+    const parsed = parseGitHubUrl(baseRepo.url);
+    if (!parsed) return;
+    const branch = baseBranch || baseRepo.default_branch;
+    if (!branch) return;
+
+    // Resolve a credential the repo Resource may have attached. The
+    // Resource entity stores `credential_id` for GitHub auth; absent →
+    // fall back to GITHUB_TOKEN env via the connector's resolution.
+    let credentialId: string | null = null;
+    try {
+      const resource = await this.dataSource.getRepository(Resource).findOne({
+        where: { id: baseRepo.id },
+      });
+      credentialId = (resource as any)?.credential_id || null;
+    } catch {
+      credentialId = null;
+    }
+
+    const github = new GitHubConnectorService(this.dataSource);
+    const sha = await github.fetchBranchTipSha(parsed.owner, parsed.repo, branch, credentialId);
+    if (!sha) return;
+
+    try {
+      await this.dataSource.getRepository(Ticket).update(
+        { id: ticket.id },
+        { branch_tip_sha_at_trigger: sha, branch_tip_snapshot_at: new Date() },
+      );
+    } catch (e) {
+      this.logService.warn('MCP', 'claim-verification snapshot write failed (non-fatal)', {
+        err: String(e), ticket_id: ticket.id,
+      });
+    }
   }
 }
 

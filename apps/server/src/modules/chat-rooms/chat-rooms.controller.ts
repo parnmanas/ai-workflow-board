@@ -12,7 +12,9 @@ import {
   Res,
   UseGuards,
 } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
 import { Request, Response } from 'express';
+import { Repository } from 'typeorm';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
@@ -20,7 +22,9 @@ import { PERMISSIONS } from '../../common/types/permissions';
 import { RoomCrudService } from './room-crud.service';
 import { RoomMembershipService } from './room-membership.service';
 import { RoomMessagingService } from './room-messaging.service';
-import { MAX_IMAGE_SIZE, MAX_IMAGES_PER_MESSAGE, ALLOWED_IMAGE_MIMETYPES } from '../../common/constants/upload';
+import { TicketAttachment } from '../../entities/TicketAttachment';
+import { MAX_IMAGE_SIZE, MAX_IMAGES_PER_MESSAGE, ALLOWED_IMAGE_MIMETYPES, MAX_TICKET_ATTACHMENT_SIZE } from '../../common/constants/upload';
+import { approxBase64Size, projectChatAttachment, validateAttachmentMimetype } from '../mcp/shared/ticket-helpers';
 
 @ApiBearerAuth('user-session')
 @ApiTags('chat-rooms')
@@ -31,6 +35,8 @@ export class ChatRoomsController {
     private readonly crud: RoomCrudService,
     private readonly membership: RoomMembershipService,
     private readonly messaging: RoomMessagingService,
+    @InjectRepository(TicketAttachment)
+    private readonly attachmentRepo: Repository<TicketAttachment>,
   ) {}
 
   @Get()
@@ -152,8 +158,16 @@ export class ChatRoomsController {
     const user = (req as any).currentUser;
     const wsId = req.headers['x-workspace-id'] as string;
     const { content } = body;
-    if (!content || typeof content !== 'string') {
-      return res.status(400).json({ error: 'content required' });
+    const attachmentIds = Array.isArray(body.attachment_ids) ? body.attachment_ids : [];
+    // Attachment-only messages (screenshot / file share without a caption) are
+    // a supported workflow — defer the empty-payload check to the service so
+    // it can apply the "content OR attachment_ids" rule consistently across
+    // REST / agent-api / MCP entry points.
+    if (content != null && typeof content !== 'string') {
+      return res.status(400).json({ error: 'content must be a string' });
+    }
+    if ((!content || !content.trim()) && attachmentIds.length === 0) {
+      return res.status(400).json({ error: 'content or attachment_ids required' });
     }
 
     // Image validation (T-08-02-02, T-08-02-03)
@@ -182,12 +196,133 @@ export class ChatRoomsController {
         'user',
         user.id,
         user.name || user.email,
-        content,
+        content ?? '',
         images,
+        attachmentIds,
       );
       return res.status(201).json(msg);
     } catch (err: any) {
       return res.status(err.status || 400).json({ error: err.message });
+    }
+  }
+
+  @Post(':roomId/attachments')
+  @RequirePermission(PERMISSIONS.CHAT_SEND)
+  async addAttachment(@Req() req: Request, @Res() res: Response, @Param('roomId') roomId: string, @Body() body: any) {
+    const user = (req as any).currentUser;
+    const wsId = req.headers['x-workspace-id'] as string;
+    if (!wsId) return res.status(400).json({ error: 'Workspace ID required' });
+
+    const incoming: any[] = Array.isArray(body?.attachments)
+      ? body.attachments
+      : (body?.file_data ? [body] : []);
+    if (incoming.length === 0) {
+      return res.status(400).json({ error: 'attachments[] (or a single file_data + file_name) is required' });
+    }
+    for (const f of incoming) {
+      if (!f || typeof f !== 'object' || !f.file_data || !f.file_name) {
+        return res.status(400).json({ error: 'Each attachment must include file_data and file_name' });
+      }
+      if (approxBase64Size(f.file_data) > MAX_TICKET_ATTACHMENT_SIZE) {
+        return res.status(400).json({ error: `Attachment ${f.file_name} exceeds ${MAX_TICKET_ATTACHMENT_SIZE / 1024 / 1024}MB limit` });
+      }
+    }
+
+    try {
+      await this.membership.requireActiveParticipant(roomId, user.id, 'user');
+      const saved: TicketAttachment[] = [];
+      for (const f of incoming) {
+        // Sniff the file bytes BEFORE persistence so a forged mime can
+        // never reach disk. validateAttachmentMimetype throws status=400
+        // on a definitive mismatch (e.g. caller claims image/png but the
+        // bytes are PDF) — caught below and surfaced as 400.
+        const verifiedMime = validateAttachmentMimetype(f.file_name, f.file_mimetype, f.file_data);
+        // Pre-send owner_type='chat_room' (planner-fixed contract). On send,
+        // _validatePendingAttachments transitions to owner_type='chat_message'
+        // and owner_id=message_id. Room-scoped pre-send rows can be GC'd via
+        // the same room_id index without joining against chat_room_messages.
+        const row = await this.attachmentRepo.save(this.attachmentRepo.create({
+          owner_type: 'chat_room',
+          owner_id: roomId,
+          ticket_id: null,
+          room_id: roomId,
+          workspace_id: wsId,
+          file_name: f.file_name,
+          file_mimetype: verifiedMime,
+          file_data: f.file_data,
+          file_size: approxBase64Size(f.file_data),
+          uploaded_by_type: 'user',
+          uploaded_by_id: user.id,
+          uploaded_by: user.name || user.email || '',
+        }));
+        saved.push(row);
+      }
+      const out = saved.map(r => projectChatAttachment(r, { includeData: false }));
+      return res.status(201).json(Array.isArray(body?.attachments) ? out : out[0]);
+    } catch (err: any) {
+      return res.status(err.status || 400).json({ error: err.message });
+    }
+  }
+
+  @Get(':roomId/attachments/:attachmentId')
+  @RequirePermission(PERMISSIONS.CHAT_VIEW)
+  async getAttachment(
+    @Req() req: Request,
+    @Res() res: Response,
+    @Param('roomId') roomId: string,
+    @Param('attachmentId') attachmentId: string,
+  ) {
+    const user = (req as any).currentUser;
+    try {
+      await this.membership.requireActiveParticipant(roomId, user.id, 'user');
+      // Accept both pre-send (owner_type='chat_room') and post-send
+      // (owner_type='chat_message') rows: the room_id anchor enforces
+      // workspace + room scope either way, so the uploader can preview
+      // before send and any room participant can download after send.
+      const row = await this.attachmentRepo.findOne({
+        where: { id: attachmentId, room_id: roomId },
+      });
+      if (!row || (row.owner_type !== 'chat_room' && row.owner_type !== 'chat_message')) {
+        return res.status(404).json({ error: 'Attachment not found' });
+      }
+      return res.json(projectChatAttachment(row, { includeData: true }));
+    } catch (err: any) {
+      return res.status(err.status || 403).json({ error: err.message });
+    }
+  }
+
+  // Discard a pending upload — only valid while owner_type='chat_room'. Once
+  // the message has been sent (owner_type transitions to 'chat_message'),
+  // the attachment lives and dies with the message; per-attachment delete is
+  // no longer accepted. Restricted to the original uploader so a co-participant
+  // can't strip a file from another sender's pending draft.
+  @Delete(':roomId/attachments/:attachmentId')
+  @RequirePermission(PERMISSIONS.CHAT_SEND)
+  async deletePendingAttachment(
+    @Req() req: Request,
+    @Res() res: Response,
+    @Param('roomId') roomId: string,
+    @Param('attachmentId') attachmentId: string,
+  ) {
+    const user = (req as any).currentUser;
+    try {
+      await this.membership.requireActiveParticipant(roomId, user.id, 'user');
+      const row = await this.attachmentRepo.findOne({
+        where: { id: attachmentId, room_id: roomId },
+      });
+      if (!row || (row.owner_type !== 'chat_room' && row.owner_type !== 'chat_message')) {
+        return res.status(404).json({ error: 'Attachment not found' });
+      }
+      if (row.owner_type === 'chat_message') {
+        return res.status(409).json({ error: 'Attachment is already sent and cannot be deleted directly' });
+      }
+      if (row.uploaded_by_type !== 'user' || row.uploaded_by_id !== user.id) {
+        return res.status(403).json({ error: 'Only the uploader can discard a pending attachment' });
+      }
+      await this.attachmentRepo.delete({ id: attachmentId });
+      return res.json({ ok: true });
+    } catch (err: any) {
+      return res.status(err.status || 403).json({ error: err.message });
     }
   }
 

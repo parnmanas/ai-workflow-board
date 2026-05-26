@@ -173,6 +173,7 @@ export async function loadTicketFull(scope: RepoScope, id: string) {
     .find({ where: { ticket_id: In(allTicketIds) } as any });
   const attachmentsByTicket = new Map<string, any[]>();
   for (const row of attachmentRows) {
+    if (!row.ticket_id) continue;
     const list = attachmentsByTicket.get(row.ticket_id) || [];
     list.push(projectTicketAttachment(row, { includeData: false }));
     attachmentsByTicket.set(row.ticket_id, list);

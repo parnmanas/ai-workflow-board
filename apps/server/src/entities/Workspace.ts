@@ -71,6 +71,31 @@ export class Workspace {
   @Column({ type: 'varchar', nullable: true, default: null })
   alerts_chat_room_id: string | null;
 
+  // ─────────────────────────────────────────────────────────────────────
+  // Claim-verification (ticket dcb9d661): detect assignees who post an
+  // "I'm done" comment in an active column without actually pushing a
+  // commit or calling move_ticket, and auto-park the ticket for human
+  // review after a grace window. Off by default until per-workspace
+  // tuning settles — flip on via Workspace settings PATCH.
+  // ─────────────────────────────────────────────────────────────────────
+
+  /**
+   * Master switch for `ClaimVerificationService`. When 0 the sweep
+   * skips this workspace entirely (no DB reads, no GitHub fetches,
+   * no pend) so a disabled workspace has zero per-tick cost. int
+   * (not boolean) for SQLite compat.
+   */
+  @Column({ type: 'int', default: 0 })
+  claim_verification_enabled: number;
+
+  /**
+   * Grace window — milliseconds since the assignee's claim comment
+   * during which a follow-up commit (snapshot SHA advances) or
+   * move_ticket call cancels the pend. Default 10 minutes.
+   */
+  @Column({ type: 'int', default: 600000 })
+  claim_verification_grace_ms: number;
+
   @CreateDateColumn()
   created_at: Date;
 

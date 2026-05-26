@@ -30,6 +30,7 @@ import {
 import { Resource } from '../../entities/Resource';
 import { TicketAttachment } from '../../entities/TicketAttachment';
 import { loadTicketFull, parseComments, expandCommentAttachments } from '../mcp/shared/ticket-parsing';
+import { applyTerminalEnteredAtForMove, getRootArchivedAt, isTerminalColumn, TicketArchivedError } from '../mcp/shared/archive-helpers';
 import {
   maxTicketPosition,
   maxChildPosition,
@@ -138,6 +139,12 @@ export class TicketsController {
     }
 
     const position = await maxTicketPosition(this.dataSource, columnId);
+    // Stamp terminal_entered_at on create when the destination column is
+    // already terminal (e.g. operator drops a ticket straight into Done).
+    // The archiver requires terminal_entered_at IS NOT NULL, so without this
+    // stamp those tickets would silently never auto-archive.
+    const destColumnForStamp = await this.colRepo.findOne({ where: { id: columnId } });
+    const terminalEnteredAt = isTerminalColumn(destColumnForStamp) ? new Date() : null;
     const ticket = await this.ticketRepo.save(this.ticketRepo.create({
       column_id: columnId, title, description, priority,
       assignee: resolvedAssignee, reporter: resolvedReporter,
@@ -145,6 +152,7 @@ export class TicketsController {
       labels: JSON.stringify(labels), channel_ids: JSON.stringify(channel_ids),
       position, parent_id: null, depth: 0, status: 'todo',
       next_ticket_id: resolvedNextTicketId,
+      terminal_entered_at: terminalEnteredAt,
       created_by: creator.created_by, created_by_type: creator.created_by_type, created_by_id: creator.created_by_id,
     }));
 
@@ -208,6 +216,18 @@ export class TicketsController {
   @Post('tickets/:parentId/children')
   async createChild(@Param('parentId') parentId: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     const parent = await findOrFail(this.ticketRepo, { where: { id: parentId } }, 'Parent ticket not found');
+
+    // Archive gate — walk up to the root and check its archived_at. Subtasks
+    // don't carry the flag themselves (archive is board-level, subtasks have
+    // no column); the root row owns it.
+    const rootArchived = await getRootArchivedAt(this.dataSource, parent);
+    if (rootArchived) {
+      return res.status(409).json({
+        error: 'ticket_archived',
+        hint: 'Call unarchive first',
+        message: new TicketArchivedError(parent.id).message,
+      });
+    }
 
     const childDepth = parent.depth + 1;
     if (childDepth > 2) return res.status(400).json({ error: 'Maximum depth of 2 exceeded' });
@@ -281,7 +301,9 @@ export class TicketsController {
     const wsId = (req.headers['x-workspace-id'] as string) || '';
     if (!wsId) return res.status(400).json({ error: 'Workspace ID required' });
 
-    // Involved ticket IDs in this workspace: role holder OR has read-state row.
+    // Involved ticket IDs in this workspace: role holder OR has read-state
+    // row. Archived tickets are excluded so the unread badge doesn't keep
+    // pinging the user for old Done-and-archived work.
     const roleTickets = await this.ticketRepo
       .createQueryBuilder('t')
       .select('t.id', 'id')
@@ -290,6 +312,7 @@ export class TicketsController {
         '(t.assignee_id = :uid OR t.reporter_id = :uid OR t.reviewer_id = :uid)',
         { uid: currentUser.id },
       )
+      .andWhere('t.archived_at IS NULL')
       .getRawMany();
     const readRows = await this.readStateRepo
       .createQueryBuilder('r')
@@ -375,6 +398,8 @@ export class TicketsController {
   @Patch('tickets/:id')
   async update(@Param('id') id: string, @Body() body: any, @Req() req: any, @Res() res: Response) {
     const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
+
+    if (ticket.archived_at) return res.status(409).json({ error: 'ticket_archived', hint: 'Call unarchive first', message: new TicketArchivedError(ticket.id).message });
 
     const currentUser = req.currentUser;
     const actorId = currentUser?.id || undefined;
@@ -622,6 +647,7 @@ export class TicketsController {
     const { targetColumnId, targetPosition } = body;
     const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
 
+    if (ticket.archived_at) return res.status(409).json({ error: 'ticket_archived', hint: 'Call unarchive first', message: new TicketArchivedError(ticket.id).message });
     if (ticket.depth > 0) return res.status(400).json({ error: 'Only root tickets can be moved on the board' });
 
     await this.dataSource.transaction(async (manager) => {
@@ -638,7 +664,27 @@ export class TicketsController {
 
       await shiftTicketPositions(tRepo, { column_id: destColumnId }, pos, +1, { inclusive: true, excludeId: ticket.id });
 
-      await tRepo.update(ticket.id, { column_id: destColumnId, position: pos });
+      // Clear the claim-verification branch-tip snapshot (ticket dcb9d661).
+      // Matches the MCP `move_ticket` tool's behaviour: a column move closes
+      // the prior column's claim cycle, so the snapshot tied to it is no
+      // longer evidence the sweep can use. Next assignee trigger on an active
+      // destination re-snapshots with a fresh baseline.
+      await tRepo.update(ticket.id, {
+        column_id: destColumnId,
+        position: pos,
+        branch_tip_sha_at_trigger: '',
+        branch_tip_snapshot_at: null,
+      });
+
+      // Stamp / clear terminal_entered_at when the move crosses the terminal
+      // boundary. Re-resolved here so cross-DB-driver locking semantics are
+      // preserved — same transaction as the position shifts above.
+      const colRepoTx = manager.getRepository(BoardColumn);
+      const [sourceColForStamp, destColForStamp] = await Promise.all([
+        sourceColumnId ? colRepoTx.findOne({ where: { id: sourceColumnId } }) : Promise.resolve(null),
+        colRepoTx.findOne({ where: { id: destColumnId } }),
+      ]);
+      await applyTerminalEnteredAtForMove(tRepo, ticket.id, sourceColForStamp, destColForStamp);
     });
 
     const updated = await loadTicketFull(this.dataSource, ticket.id);
@@ -677,6 +723,14 @@ export class TicketsController {
   @Patch('tickets/:id/parent')
   async reparent(@Param('id') id: string, @Body() body: any, @Req() req: any, @Res() res: Response) {
     const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
+    const reparentRootArchived = await getRootArchivedAt(this.dataSource, ticket);
+    if (reparentRootArchived) {
+      return res.status(409).json({
+        error: 'ticket_archived',
+        hint: 'Call unarchive first',
+        message: new TicketArchivedError(ticket.id).message,
+      });
+    }
 
     const rawParent = body?.parent_id;
     const newParentId: string | null = rawParent === null || rawParent === '' || rawParent === undefined
@@ -775,6 +829,21 @@ export class TicketsController {
         position: pos,
       });
 
+      // Reparent can change whether the (now-root) ticket sits on a terminal
+      // column: promotion to root with a terminal target, or a child moving
+      // out of a parent that was on terminal. Re-resolve and stamp.
+      if (!newParentId) {
+        const colRepoTx = manager.getRepository(BoardColumn);
+        const [sourceColForStamp, destColForStamp] = await Promise.all([
+          oldColumnId ? colRepoTx.findOne({ where: { id: oldColumnId } }) : Promise.resolve(null),
+          colRepoTx.findOne({ where: { id: targetColumnId! } }),
+        ]);
+        await applyTerminalEnteredAtForMove(tRepo, ticket.id, sourceColForStamp, destColForStamp);
+      } else {
+        // Demoted to subtask — clear the stamp (subtasks have no column).
+        await tRepo.update(ticket.id, { terminal_entered_at: null });
+      }
+
       // 4) Re-stamp depths of descendants. Each was previously at
       // (ticket.depth + offset); set to (newDepth + offset).
       const depthDelta = newDepth - ticket.depth;
@@ -824,6 +893,9 @@ export class TicketsController {
   async moveToBoard(@Param('id') id: string, @Body() body: any, @Req() req: any, @Res() res: Response) {
     const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
 
+    if (ticket.archived_at) {
+      return res.status(409).json({ error: 'ticket_archived', hint: 'Call unarchive first', message: new TicketArchivedError(ticket.id).message });
+    }
     if (ticket.parent_id || ticket.depth > 0) {
       return res.status(400).json({ error: 'Only root tickets can be moved across boards' });
     }
@@ -890,6 +962,10 @@ export class TicketsController {
       // 3) Update the ticket. workspace_id is preserved (same-workspace
       // constraint guaranteed above) so subtasks remain consistent.
       await tRepo.update(ticket.id, { column_id: targetCol!.id, position: pos });
+
+      // Cross-board move can change terminal status — stamp / clear
+      // terminal_entered_at the same way same-board moves do.
+      await applyTerminalEnteredAtForMove(tRepo, ticket.id, sourceCol, targetCol!);
     });
 
     const updated = await loadTicketFull(this.dataSource, ticket.id);
@@ -973,6 +1049,7 @@ export class TicketsController {
     @Res() res: Response,
   ) {
     const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
+    if (ticket.archived_at) return res.status(409).json({ error: 'ticket_archived', hint: 'Call unarchive first', message: new TicketArchivedError(ticket.id).message });
     const agent_id: string | null = body?.agent_id || null;
     const user_id: string | null = body?.user_id || null;
     if (agent_id && user_id) {
@@ -1070,6 +1147,7 @@ export class TicketsController {
       return res.status(400).json({ error: 'role is required (workspace role slug)' });
     }
     const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
+    if (ticket.archived_at) return res.status(409).json({ error: 'ticket_archived', hint: 'Call unarchive first', message: new TicketArchivedError(ticket.id).message });
     const explicitAgentId = body?.agent_id ? String(body.agent_id) : '';
 
     // Resolve the role holder against the workspace role catalog. Legacy
@@ -1114,6 +1192,81 @@ export class TicketsController {
       const status = typeof e?.status === 'number' ? e.status : 500;
       return res.status(status).json({ error: e?.message || 'Manual trigger failed' });
     }
+  }
+
+  // ─── Archive endpoints (ticket 9b44526b) ───────────────────────
+  // Manual archive / restore. Background TicketArchiverService performs the
+  // same archive write — these are the human-driven entry points and the
+  // restore path (the archiver never auto-restores).
+
+  @Post('tickets/:id/archive')
+  async archiveTicket(@Param('id') id: string, @Req() req: any, @Res() res: Response) {
+    const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
+    if (ticket.archived_at) return res.json({ ...ticket, already_archived: true });
+    if (ticket.parent_id || ticket.depth > 0) {
+      return res.status(400).json({ error: 'Only root tickets can be archived' });
+    }
+
+    let isTerminal = false;
+    if (ticket.column_id) {
+      const col = await this.colRepo.findOne({ where: { id: ticket.column_id } });
+      isTerminal = !!col && ((col as any).is_terminal === true || (col as any).kind === 'terminal');
+      if (!isTerminal) {
+        this.logService.info('Archiver', 'manual archive on non-terminal column', {
+          ticket_id: ticket.id, column_id: ticket.column_id, column_name: col?.name,
+        });
+      }
+    }
+
+    ticket.archived_at = new Date();
+    await this.ticketRepo.save(ticket);
+
+    const currentUser = req.currentUser;
+    await this.activityService.logActivity({
+      entity_type: 'ticket', entity_id: ticket.id, action: 'archived',
+      ticket_id: ticket.id,
+      actor_id: currentUser?.id,
+      actor_name: currentUser?.name || currentUser?.email || 'manual',
+      field_changed: 'archived_at',
+      new_value: new Date(ticket.archived_at).toISOString(),
+    });
+
+    const updated = await loadTicketFull(this.dataSource, ticket.id);
+    return res.json({ ...updated, manual: true, on_terminal: isTerminal });
+  }
+
+  @Post('tickets/:id/unarchive')
+  async unarchiveTicket(@Param('id') id: string, @Req() req: any, @Res() res: Response) {
+    const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
+    if (!ticket.archived_at) return res.json({ ...ticket, already_active: true });
+
+    let isTerminalNow = false;
+    if (ticket.column_id) {
+      const col = await this.colRepo.findOne({ where: { id: ticket.column_id } });
+      isTerminalNow = !!col && ((col as any).is_terminal === true || (col as any).kind === 'terminal');
+    }
+
+    const wasArchivedAt = ticket.archived_at;
+    ticket.archived_at = null;
+    // Reset the archiver clock so the unarchived ticket gets the full grace
+    // window again — otherwise a ticket archived after 30 days, then
+    // unarchived, would be re-archived on the next tick.
+    ticket.terminal_entered_at = isTerminalNow ? new Date() : null;
+    await this.ticketRepo.save(ticket);
+
+    const currentUser = req.currentUser;
+    await this.activityService.logActivity({
+      entity_type: 'ticket', entity_id: ticket.id, action: 'unarchived',
+      ticket_id: ticket.id,
+      actor_id: currentUser?.id,
+      actor_name: currentUser?.name || currentUser?.email || 'manual',
+      field_changed: 'archived_at',
+      old_value: new Date(wasArchivedAt).toISOString(),
+      new_value: '',
+    });
+
+    const updated = await loadTicketFull(this.dataSource, ticket.id);
+    return res.json(updated);
   }
 
   @Delete('tickets/:id')
@@ -1180,6 +1333,7 @@ export class TicketsController {
     if (!currentUser) return res.status(401).json({ error: 'Authentication required' });
 
     const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
+    if (ticket.archived_at) return res.status(409).json({ error: 'ticket_archived', hint: 'Call unarchive first', message: new TicketArchivedError(ticket.id).message });
 
     // Accept either a single `{file_name, file_data, file_mimetype}` object
     // OR an array of them under `attachments`. Mirrors the comment endpoint's
@@ -1215,6 +1369,8 @@ export class TicketsController {
       for (const f of incoming) {
         const mimetype = inferTicketAttachmentMimetype(f.file_name, f.file_mimetype);
         const row = await repo.save(repo.create({
+          owner_type: 'ticket',
+          owner_id: id,
           ticket_id: id,
           workspace_id: ticket.workspace_id || '',
           file_name: f.file_name,
@@ -1257,6 +1413,7 @@ export class TicketsController {
     if (!currentUser) return res.status(401).json({ error: 'Authentication required' });
 
     const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
+    if (ticket.archived_at) return res.status(409).json({ error: 'ticket_archived', hint: 'Call unarchive first', message: new TicketArchivedError(ticket.id).message });
     const row = await this.attachmentRepo.findOne({ where: { id: attachmentId, ticket_id: id } });
     if (!row) return res.status(404).json({ error: 'Attachment not found' });
 
@@ -1276,6 +1433,7 @@ export class TicketsController {
     return res.json({ success: true, id: attachmentId });
   }
 
+  // (archive gate applied below after finding the ticket)
   @Post('tickets/:id/comments')
   async addComment(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     const {
@@ -1295,6 +1453,7 @@ export class TicketsController {
     if (!currentUser) return res.status(401).json({ error: 'Authentication required' });
 
     const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
+    if (ticket.archived_at) return res.status(409).json({ error: 'ticket_archived', hint: 'Call unarchive first', message: new TicketArchivedError(ticket.id).message });
 
     const preIds: string[] = Array.isArray(rawAttachmentIds)
       ? rawAttachmentIds.filter((v: any) => typeof v === 'string' && v)
@@ -1570,6 +1729,15 @@ export class TicketsController {
     // accidentally accepting arbitrary strings now.
     if (desired !== 'open' && desired !== 'resolved') {
       return res.status(400).json({ error: "status must be 'open' or 'resolved'" });
+    }
+
+    const ticketForArchive = await this.ticketRepo.findOne({ where: { id: ticketId } });
+    if (ticketForArchive?.archived_at) {
+      return res.status(409).json({
+        error: 'ticket_archived',
+        hint: 'Call unarchive first',
+        message: new TicketArchivedError(ticketForArchive.id).message,
+      });
     }
 
     const comment = await this.commentRepo.findOne({ where: { id: commentId } });

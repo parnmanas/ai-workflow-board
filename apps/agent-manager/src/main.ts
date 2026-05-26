@@ -109,6 +109,8 @@ Usage:
   awb-agent-manager setup [opts]          first-run pairing wizard
   awb-agent-manager service install [..]  register as a background service (auto-detects host)
   awb-agent-manager service uninstall     remove the registered service
+  awb-agent-manager mcp-host              run the host-tools MCP server over stdio
+                                          (spawned by managed agents; not for direct use)
   awb-agent-manager [options]             start with overrides
 
 Options:
@@ -203,6 +205,24 @@ async function main(): Promise<void> {
   const argv = process.argv.slice(2);
 
   // ── Subcommand dispatch ───────────────────────────────────────────
+  // `awb-agent-manager mcp-host` runs the stdio MCP host-tools server and
+  // exits when the parent CLI closes the pipe. Must be FIRST in the
+  // dispatch chain because (a) it's the only path that intentionally
+  // takes over stdio for JSON-RPC, and (b) it must avoid every heavyweight
+  // boot step below (no logging to stdout, no lockfile, no SSE, no config
+  // reads). Spawned per-subagent by claude/gemini via the mcpServers.host
+  // entry the manager writes into each managed agent's mcp-config.json.
+  if (argv[0] === 'mcp-host') {
+    try {
+      const { runHostMcpServerOverStdio } = await import('./lib/host-mcp/server.js');
+      await runHostMcpServerOverStdio();
+      process.exit(0);
+    } catch (err: any) {
+      process.stderr.write(`\n  ✗ mcp-host failed: ${err?.stack ?? err?.message ?? err}\n\n`);
+      process.exit(1);
+    }
+  }
+
   // `awb-agent-manager setup [opts]` runs the pairing wizard and exits;
   // never starts the runtime. Skipping help/version checks for setup
   // because runSetup has its own argv parsing (and no `setup --help` UX
