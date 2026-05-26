@@ -1,13 +1,14 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { api, getActiveWorkspaceId } from '../../api';
 import { tokens } from '../../tokens';
 import PageHeader from '../PageHeader';
-import type { ChatRoomListItem, ChatRoomMessageItem } from '../../types';
+import type { ChatAttachment, ChatRoomListItem, ChatRoomMessageItem } from '../../types';
 import MessageList from './MessageList';
 import NewChatModal from './ParticipantPicker';
 import { type MentionParticipant } from './utils/markdown';
 import { MentionTextarea, MentionCandidate } from '../common/MentionTextarea';
 import { formatAgentDisplayName } from '../../utils/agentName';
+import { formatBytes, isImageMime, readFileAsBase64 } from './utils/attachments';
 
 // ─── Style constants (mirror ChatPage.tsx COLORS) ────────────────────────────
 
@@ -30,26 +31,58 @@ interface ChatMessageInputProps {
   isMobile: boolean;
 }
 
-interface PendingImage {
-  data: string;
-  filename: string;
-  mimetype: string;
-  preview: string; // object URL for thumbnail display only
+// Per-file state for the attachment strip. Once `status === 'done'` we have
+// a server-issued `attachment_id` we can hand to send_chat_room_message.
+// `previewUrl` is only set for images (object URL revoked on remove/unmount).
+interface PendingAttachment {
+  localId: string;
+  fileName: string;
+  fileMimetype: string;
+  fileSize: number;
+  status: 'uploading' | 'done' | 'error';
+  progress: number;
+  attachmentId?: string;
+  previewUrl?: string;
+  errorMsg?: string;
+  abort?: AbortController;
 }
 
-const MAX_CLIENT_IMAGES = 5;
-const MAX_CLIENT_IMAGE_BYTES = 5 * 1024 * 1024;
-const ALLOWED_CLIENT_MIMETYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+const MAX_CLIENT_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+const MAX_CLIENT_ATTACHMENTS = 20;
+
+function makeLocalId(): string {
+  return `att-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
 
 function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessageInputProps) {
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
-  const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
+  const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [uploadError, setUploadError] = useState<string | null>(null);
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const [isDragOver, setIsDragOver] = useState(false);
+  const dragCounterRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [mentionCandidates, setMentionCandidates] = useState<MentionCandidate[]>([]);
+  // Stable ref so async upload callbacks (started from one render) can still
+  // mutate the latest pendingAttachments without stale-closure footguns.
+  const attachmentsRef = useRef<PendingAttachment[]>([]);
+  useEffect(() => { attachmentsRef.current = pendingAttachments; }, [pendingAttachments]);
+
+  // Reset whenever the active room changes — pre-send rows live under the
+  // previous room and would otherwise be orphaned in the strip.
+  useEffect(() => {
+    setPendingAttachments((prev) => {
+      prev.forEach((p) => {
+        if (p.previewUrl) URL.revokeObjectURL(p.previewUrl);
+        p.abort?.abort();
+      });
+      return [];
+    });
+    setUploadError(null);
+    setSendError(null);
+    setText('');
+  }, [roomId]);
 
   // Pull workspace-wide mention candidates once. Role shortcuts require a
   // ticket context we don't have in a free-form chat room, so they're
@@ -74,116 +107,225 @@ function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessageInputProps) {
       .catch(() => setMentionCandidates([]));
   }, []);
 
-  // Auto-resize textarea
-  useEffect(() => {
-    const ta = textareaRef.current;
-    if (!ta) return;
-    ta.style.height = 'auto';
-    ta.style.height = `${Math.min(ta.scrollHeight, 112)}px`;
-  }, [text]);
-
   // Revoke object URLs on unmount to prevent memory leaks
   useEffect(() => {
     return () => {
-      pendingImages.forEach((img) => URL.revokeObjectURL(img.preview));
+      attachmentsRef.current.forEach((p) => {
+        if (p.previewUrl) URL.revokeObjectURL(p.previewUrl);
+        p.abort?.abort();
+      });
     };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
-  async function handleSend() {
-    const content = text.trim();
-    if ((!content && pendingImages.length === 0) || sending) return;
-    setSending(true);
-    setSendError(null);
-    setText('');
-    const imagesToSend = pendingImages.map(({ data, filename, mimetype }) => ({ data, filename, mimetype }));
-    setPendingImages((prev) => {
-      prev.forEach((img) => URL.revokeObjectURL(img.preview));
-      return [];
-    });
+  const updateOne = useCallback((localId: string, patch: Partial<PendingAttachment>) => {
+    setPendingAttachments((prev) =>
+      prev.map((p) => (p.localId === localId ? { ...p, ...patch } : p)),
+    );
+  }, []);
+
+  const startUpload = useCallback(async (file: File) => {
+    const localId = makeLocalId();
+    const isImg = isImageMime(file.type);
+    const previewUrl = isImg ? URL.createObjectURL(file) : undefined;
+    const abort = new AbortController();
+    const entry: PendingAttachment = {
+      localId,
+      fileName: file.name,
+      fileMimetype: file.type || 'application/octet-stream',
+      fileSize: file.size,
+      status: 'uploading',
+      progress: 0,
+      previewUrl,
+      abort,
+    };
+    setPendingAttachments((prev) => [...prev, entry]);
+
     try {
-      const msg = await api.sendChatRoomMessage(roomId, content || ' ', imagesToSend.length > 0 ? imagesToSend : undefined);
-      onSent(msg);
+      const base64 = await readFileAsBase64(file);
+      const meta = await api.uploadChatAttachment(
+        roomId,
+        { file_name: file.name, file_mimetype: file.type, file_data: base64 },
+        (pct) => updateOne(localId, { progress: pct }),
+        abort.signal,
+      );
+      updateOne(localId, {
+        status: 'done',
+        progress: 100,
+        attachmentId: meta.id || meta.attachment_id,
+      });
     } catch (err: any) {
-      setSendError('Message not sent. Check your connection.');
-      setText(content); // restore draft
-    } finally {
-      setSending(false);
-      textareaRef.current?.focus();
+      if (err?.name === 'AbortError') return; // user removed mid-upload
+      updateOne(localId, {
+        status: 'error',
+        errorMsg: err?.message || 'Upload failed',
+      });
     }
-  }
+  }, [roomId, updateOne]);
 
-  function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
+  const acceptFiles = useCallback((files: File[]) => {
+    setUploadError(null);
+    const cur = attachmentsRef.current;
+    const remainingSlots = MAX_CLIENT_ATTACHMENTS - cur.length;
+    const accepted: File[] = [];
+    const rejected: string[] = [];
+    for (const f of files) {
+      if (accepted.length >= remainingSlots) {
+        rejected.push(`${f.name}: too many attachments (max ${MAX_CLIENT_ATTACHMENTS})`);
+        continue;
+      }
+      if (f.size > MAX_CLIENT_ATTACHMENT_BYTES) {
+        rejected.push(`${f.name}: exceeds 10 MB limit`);
+        continue;
+      }
+      accepted.push(f);
     }
-  }
+    if (rejected.length > 0) setUploadError(rejected.join(' · '));
+    for (const f of accepted) startUpload(f);
+  }, [startUpload]);
 
   function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
     const files = Array.from(e.target.files || []);
-    // Reset input so the same file can be re-selected after removal
-    e.target.value = '';
-    setUploadError(null);
+    e.target.value = ''; // allow re-selecting the same file after removal
+    acceptFiles(files);
+  }
 
-    if (pendingImages.length + files.length > MAX_CLIENT_IMAGES) {
-      setUploadError('Maximum 5 images per message');
-      return;
+  async function handleRemove(localId: string) {
+    const entry = attachmentsRef.current.find((p) => p.localId === localId);
+    if (!entry) return;
+    if (entry.previewUrl) URL.revokeObjectURL(entry.previewUrl);
+    if (entry.status === 'uploading') {
+      entry.abort?.abort();
+    } else if (entry.status === 'done' && entry.attachmentId) {
+      // Best-effort discard of the pre-send row on the server. If this fails
+      // (network, race with send), the server's cleanup query GCs orphaned
+      // owner_type='chat_room' rows on its own.
+      api.deletePendingChatAttachment(roomId, entry.attachmentId).catch(() => {});
     }
-
-    const readers: Promise<PendingImage>[] = files.map(
-      (file) =>
-        new Promise((resolve, reject) => {
-          if (!ALLOWED_CLIENT_MIMETYPES.has(file.type)) {
-            reject(new Error('Unsupported format. Use JPEG, PNG, GIF, or WebP.'));
-            return;
-          }
-          if (file.size > MAX_CLIENT_IMAGE_BYTES) {
-            reject(new Error('File too large (max 5 MB)'));
-            return;
-          }
-          const reader = new FileReader();
-          reader.onload = () => {
-            const result = reader.result as string;
-            // Strip data URL prefix to get raw base64
-            const base64 = result.split(',')[1] || result;
-            const preview = URL.createObjectURL(file);
-            resolve({ data: base64, filename: file.name, mimetype: file.type, preview });
-          };
-          reader.onerror = () => reject(new Error('Failed to read file'));
-          reader.readAsDataURL(file);
-        }),
-    );
-
-    Promise.all(readers)
-      .then((newImages) => {
-        setPendingImages((prev) => [...prev, ...newImages]);
-      })
-      .catch((err: Error) => {
-        setUploadError(err.message);
-      });
-  }
-
-  function removeImage(idx: number) {
-    setPendingImages((prev) => {
-      URL.revokeObjectURL(prev[idx].preview);
-      return prev.filter((_, i) => i !== idx);
-    });
+    setPendingAttachments((prev) => prev.filter((p) => p.localId !== localId));
     setUploadError(null);
   }
 
-  const canSend = (text.trim().length > 0 || pendingImages.length > 0) && !sending;
-  const canAttach = pendingImages.length < MAX_CLIENT_IMAGES && !sending;
+  async function handleSend() {
+    const content = text.trim();
+    const cur = attachmentsRef.current;
+    if ((!content && cur.length === 0) || sending) return;
+    // Block send while uploads are in flight — server would 400 on unknown
+    // attachment_ids and the UI should make the wait explicit anyway.
+    if (cur.some((p) => p.status === 'uploading')) return;
+    // Drop any errored entries; they have no attachment_id and would 400.
+    const ready = cur.filter((p) => p.status === 'done' && p.attachmentId);
+    const attachmentIds = ready.map((p) => p.attachmentId!) as string[];
+
+    setSending(true);
+    setSendError(null);
+    setText('');
+    setPendingAttachments((prev) => {
+      prev.forEach((p) => p.previewUrl && URL.revokeObjectURL(p.previewUrl));
+      return [];
+    });
+
+    try {
+      // Server requires non-empty content; placeholder space keeps the row
+      // valid when the message is purely an attachment carrier.
+      const msg = await api.sendChatRoomMessage(
+        roomId,
+        content || ' ',
+        undefined,
+        attachmentIds.length > 0 ? attachmentIds : undefined,
+      );
+      onSent(msg);
+    } catch (err: any) {
+      setSendError(err?.message || 'Message not sent. Check your connection.');
+      setText(content); // restore draft (attachments are gone — re-attach)
+    } finally {
+      setSending(false);
+    }
+  }
+
+  function handleDragEnter(e: React.DragEvent<HTMLDivElement>) {
+    if (!e.dataTransfer?.types?.includes('Files')) return;
+    e.preventDefault();
+    dragCounterRef.current += 1;
+    setIsDragOver(true);
+  }
+  function handleDragLeave(e: React.DragEvent<HTMLDivElement>) {
+    e.preventDefault();
+    dragCounterRef.current = Math.max(0, dragCounterRef.current - 1);
+    if (dragCounterRef.current === 0) setIsDragOver(false);
+  }
+  function handleDragOver(e: React.DragEvent<HTMLDivElement>) {
+    if (e.dataTransfer?.types?.includes('Files')) e.preventDefault();
+  }
+  function handleDrop(e: React.DragEvent<HTMLDivElement>) {
+    e.preventDefault();
+    dragCounterRef.current = 0;
+    setIsDragOver(false);
+    const files = Array.from(e.dataTransfer?.files || []);
+    if (files.length > 0) acceptFiles(files);
+  }
+
+  // Paste handler is attached to the textarea via the wrapper below so we
+  // can grab File items (screenshots, copied files in Finder) and route them
+  // through the same upload pipeline.
+  function handlePaste(e: React.ClipboardEvent<HTMLDivElement>) {
+    const items = e.clipboardData?.items;
+    if (!items || items.length === 0) return;
+    const files: File[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      if (it.kind === 'file') {
+        const f = it.getAsFile();
+        if (f) files.push(f);
+      }
+    }
+    if (files.length > 0) {
+      e.preventDefault();
+      acceptFiles(files);
+    }
+  }
+
+  const hasUploading = pendingAttachments.some((p) => p.status === 'uploading');
+  const hasReady = pendingAttachments.some((p) => p.status === 'done');
+  const canSend = (text.trim().length > 0 || hasReady) && !sending && !hasUploading;
+  const canAttach = pendingAttachments.length < MAX_CLIENT_ATTACHMENTS && !sending;
 
   return (
     <div
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
       style={{
         background: COLORS.secondary,
         borderTop: `1px solid ${COLORS.border}`,
         flexShrink: 0,
+        position: 'relative',
       }}
     >
-      {/* AttachmentStrip */}
-      {pendingImages.length > 0 && (
+      {isDragOver && (
+        <div
+          aria-hidden
+          style={{
+            position: 'absolute',
+            inset: 0,
+            background: `${tokens.colors.accent}1f`,
+            border: `2px dashed ${tokens.colors.accent}`,
+            borderRadius: tokens.radii.md,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: tokens.colors.accent,
+            fontSize: 14,
+            fontWeight: 600,
+            zIndex: 5,
+            pointerEvents: 'none',
+          }}
+        >
+          Drop to attach
+        </div>
+      )}
+
+      {pendingAttachments.length > 0 && (
         <div
           style={{
             background: tokens.colors.surfaceCard,
@@ -195,48 +337,15 @@ function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessageInputProps) {
             alignItems: 'flex-end',
           }}
         >
-          {pendingImages.map((img, idx) => (
-            <div key={idx} style={{ position: 'relative', flexShrink: 0 }}>
-              <img
-                src={img.preview}
-                alt={img.filename}
-                style={{
-                  width: 64,
-                  height: 64,
-                  borderRadius: tokens.radii.sm,
-                  objectFit: 'cover',
-                  border: `1px solid ${COLORS.border}`,
-                  display: 'block',
-                }}
-              />
-              <button
-                onClick={() => removeImage(idx)}
-                aria-label={`Remove ${img.filename}`}
-                style={{
-                  position: 'absolute',
-                  top: -6,
-                  right: -6,
-                  width: 16,
-                  height: 16,
-                  background: 'rgba(0,0,0,0.6)',
-                  color: tokens.colors.textPrimary,
-                  border: 'none',
-                  borderRadius: tokens.radii.lg,
-                  fontSize: 11,
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  lineHeight: 1,
-                  padding: 0,
-                }}
-              >
-                ×
-              </button>
-            </div>
+          {pendingAttachments.map((p) => (
+            <PendingAttachmentChip
+              key={p.localId}
+              entry={p}
+              onRemove={() => handleRemove(p.localId)}
+            />
           ))}
           <div style={{ marginLeft: 'auto', fontSize: 11, color: COLORS.textSecondary, whiteSpace: 'nowrap', alignSelf: 'center' }}>
-            {pendingImages.length} / 5 images
+            {pendingAttachments.length} / {MAX_CLIENT_ATTACHMENTS}
           </div>
         </div>
       )}
@@ -246,32 +355,30 @@ function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessageInputProps) {
         </div>
       )}
 
-      <div style={{ padding: '16px 16px' }}>
+      <div style={{ padding: '16px 16px' }} onPaste={handlePaste}>
         {sendError && (
           <div style={{ fontSize: 13, color: COLORS.destructive, marginBottom: 8 }}>
             {sendError}
           </div>
         )}
         <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
-          {/* Hidden file input */}
           <input
             ref={fileInputRef}
             type="file"
-            accept="image/*"
             multiple
             style={{ display: 'none' }}
             onChange={handleFileSelect}
           />
-          {/* Attach button */}
           <button
             onClick={() => fileInputRef.current?.click()}
             disabled={!canAttach}
-            aria-label="Attach images"
+            aria-label="Attach files"
+            title="Attach files"
             style={{
               background: 'transparent',
               border: 'none',
               color: canAttach ? COLORS.textSecondary : COLORS.textMuted,
-              fontSize: 20,
+              fontSize: 18,
               padding: 8,
               cursor: canAttach ? 'pointer' : 'not-allowed',
               flexShrink: 0,
@@ -282,7 +389,7 @@ function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessageInputProps) {
               alignItems: 'center',
             }}
           >
-            +
+            📎
           </button>
           <MentionTextarea
             value={text}
@@ -292,7 +399,7 @@ function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessageInputProps) {
             rows={1}
             disabled={sending}
             ariaLabel="Message"
-            placeholder="Type a message… (@ to tag)"
+            placeholder="Type a message… (@ to tag · paste / drop files to attach)"
             style={{
               flex: 1,
               background: COLORS.dominant,
@@ -315,6 +422,7 @@ function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessageInputProps) {
             onClick={handleSend}
             disabled={!canSend}
             aria-label={isMobile ? 'Send message' : undefined}
+            title={hasUploading ? 'Wait for uploads to finish' : undefined}
             style={{
               background: COLORS.accent,
               color: 'white',
@@ -335,9 +443,152 @@ function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessageInputProps) {
           </button>
         </div>
         <div style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 4 }}>
-          Enter to send · Shift+Enter for new line
+          Enter to send · Shift+Enter for new line · Drop or paste files to attach
         </div>
       </div>
+    </div>
+  );
+}
+
+// ─── PendingAttachmentChip ────────────────────────────────────────────────────
+
+interface PendingAttachmentChipProps {
+  entry: PendingAttachment;
+  onRemove: () => void;
+}
+
+function PendingAttachmentChip({ entry, onRemove }: PendingAttachmentChipProps) {
+  const isImg = !!entry.previewUrl;
+  return (
+    <div
+      style={{
+        position: 'relative',
+        flexShrink: 0,
+        width: isImg ? 72 : 180,
+        height: isImg ? 72 : 56,
+        borderRadius: tokens.radii.sm,
+        border: `1px solid ${entry.status === 'error' ? tokens.colors.danger : tokens.colors.border}`,
+        background: isImg ? 'transparent' : tokens.colors.surface,
+        display: 'flex',
+        flexDirection: isImg ? 'row' : 'column',
+        alignItems: isImg ? 'stretch' : 'flex-start',
+        justifyContent: isImg ? 'center' : 'center',
+        padding: isImg ? 0 : '6px 10px',
+        overflow: 'hidden',
+      }}
+    >
+      {isImg ? (
+        <img
+          src={entry.previewUrl}
+          alt={entry.fileName}
+          style={{
+            width: '100%',
+            height: '100%',
+            objectFit: 'cover',
+            display: 'block',
+            opacity: entry.status === 'uploading' ? 0.6 : 1,
+          }}
+        />
+      ) : (
+        <>
+          <div
+            title={entry.fileName}
+            style={{
+              fontSize: 12,
+              fontWeight: 500,
+              color: tokens.colors.textPrimary,
+              whiteSpace: 'nowrap',
+              textOverflow: 'ellipsis',
+              overflow: 'hidden',
+              maxWidth: '100%',
+            }}
+          >
+            📄 {entry.fileName}
+          </div>
+          <div style={{ fontSize: 10, color: tokens.colors.textSecondary, marginTop: 2 }}>
+            {entry.status === 'error'
+              ? entry.errorMsg || 'Upload failed'
+              : entry.status === 'uploading'
+                ? `${entry.progress}%`
+                : formatBytes(entry.fileSize)}
+          </div>
+        </>
+      )}
+      {/* Progress bar overlay for uploading state */}
+      {entry.status === 'uploading' && (
+        <div
+          aria-label={`Uploading ${entry.fileName} (${entry.progress}%)`}
+          style={{
+            position: 'absolute',
+            left: 0,
+            bottom: 0,
+            height: 3,
+            width: `${entry.progress}%`,
+            background: tokens.colors.accent,
+            transition: 'width 80ms linear',
+          }}
+        />
+      )}
+      {/* Image overlay caption with progress when image upload is in flight */}
+      {isImg && entry.status === 'uploading' && (
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            background: 'rgba(0,0,0,0.35)',
+            color: '#fff',
+            fontSize: 11,
+            fontWeight: 600,
+          }}
+        >
+          {entry.progress}%
+        </div>
+      )}
+      {isImg && entry.status === 'error' && (
+        <div
+          title={entry.errorMsg || 'Upload failed'}
+          style={{
+            position: 'absolute',
+            inset: 0,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            background: 'rgba(0,0,0,0.45)',
+            color: tokens.colors.danger,
+            fontSize: 11,
+            fontWeight: 600,
+          }}
+        >
+          !
+        </div>
+      )}
+      <button
+        onClick={onRemove}
+        aria-label={`Remove ${entry.fileName}`}
+        style={{
+          position: 'absolute',
+          top: -6,
+          right: -6,
+          width: 18,
+          height: 18,
+          background: 'rgba(0,0,0,0.7)',
+          color: tokens.colors.textPrimary,
+          border: 'none',
+          borderRadius: tokens.radii.lg,
+          fontSize: 12,
+          cursor: 'pointer',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          lineHeight: 1,
+          padding: 0,
+        }}
+      >
+        ×
+      </button>
     </div>
   );
 }

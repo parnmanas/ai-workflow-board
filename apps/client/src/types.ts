@@ -540,6 +540,26 @@ export interface ChatRoomParticipantInfo {
   joined_at: string;
 }
 
+export interface ChatAttachment {
+  id: string;
+  attachment_id?: string;
+  workspace_id?: string;
+  room_id?: string;
+  message_id?: string;
+  filename: string;
+  file_name?: string;
+  mime_type: string;
+  file_mimetype?: string;
+  size_bytes: number;
+  file_size?: number;
+  download_url: string;
+  thumbnail_url?: string;
+  uploaded_by_type?: string;
+  uploaded_by_id?: string;
+  uploaded_by?: string;
+  created_at?: string;
+}
+
 export interface ChatRoomMessageItem {
   id: string;
   room_id: string;
@@ -547,7 +567,8 @@ export interface ChatRoomMessageItem {
   sender_id: string;
   sender_name: string;           // denormalized by server
   content: string;
-  images?: string | Array<{ data: string; filename: string; mimetype: string }>; // JSON string or parsed array
+  images?: string | Array<{ data: string; filename: string; mimetype: string }>; // JSON string or parsed array (legacy inline images)
+  attachments?: ChatAttachment[]; // new uniform attachment surface (any mimetype)
   created_at: string;
 }
 
