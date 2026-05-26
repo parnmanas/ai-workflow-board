@@ -171,6 +171,40 @@ test('ActionsService._deleteRunWithRoom sweeps ticket_attachments for the delete
   );
 });
 
+// ── Agent-key download peer ──────────────────────────────────────────
+
+// Subtask (c) — agent-manager needs to fetch attachment bytes for vision /
+// inline-text delivery to subagent prompts, but the user-session GET
+// endpoint refuses an X-Agent-Key request. The peer at
+// /api/agent/chat-rooms/:roomId/attachments/:id mirrors the same row +
+// projection (with file_data) under AgentAuthGuard + agent participant
+// check so the manager has an audited path that doesn't require a user
+// session.
+test('AgentApiController exposes an agent-key download peer for chat attachments', () => {
+  const code = stripComments(read('modules/agent-api/agent-api.controller.ts'));
+  assert.match(
+    code,
+    /@Get\('chat-rooms\/:roomId\/attachments\/:attachmentId'\)/,
+    'agent-api controller must expose GET chat-rooms/:roomId/attachments/:attachmentId for agent-key download',
+  );
+  // Participant gate via the same shared helper as the user-session route
+  // — strangers (or agents added then removed) must not be able to scrape
+  // attachments by guessing ids.
+  assert.match(
+    code,
+    /requireActiveParticipant\([^)]*'agent'\)/,
+    'agent download endpoint must call requireActiveParticipant(roomId, agentId, agent) before serving bytes',
+  );
+  // Body must include file_data (base64) so the manager can hand the
+  // bytes to the CLI subagent — projectChatAttachment(row, { includeData: true })
+  // is the canonical projector.
+  assert.match(
+    code,
+    /projectChatAttachment\([\s\S]{0,80}includeData:\s*true/,
+    'agent download response must call projectChatAttachment with includeData=true so file_data is returned',
+  );
+});
+
 // ── Stream contract ──────────────────────────────────────────────────
 
 test('ChatRequestHistoryEntry stream type carries the attachments shape', () => {

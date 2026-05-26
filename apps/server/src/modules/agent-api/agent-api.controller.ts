@@ -10,6 +10,8 @@ import { Comment } from '../../entities/Comment';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { Agent } from '../../entities/Agent';
 import { ApiKey } from '../../entities/ApiKey';
+import { TicketAttachment } from '../../entities/TicketAttachment';
+import { projectChatAttachment } from '../mcp/shared/ticket-helpers';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { RoomMembershipService } from '../chat-rooms/room-membership.service';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
@@ -463,5 +465,34 @@ export class AgentApiController {
     const limit = Math.min(parseInt(limitStr || '50', 10) || 50, 200);
     const messages = await this.messaging.getMessages(roomId, '', limit, undefined, { observer: true });
     return res.json(messages);
+  }
+
+  // Mirrors the user-session GET /api/chat-rooms/:roomId/attachments/:id but
+  // gated by AgentAuthGuard + agent participant check so the agent-manager
+  // can fetch attachment bytes for vision / file delivery to subagent prompts.
+  // The user-session route stays the canonical UI path; this is a peer that
+  // exists so an agent-key holder doesn't have to spin up a user session just
+  // to read content from a room it's already a participant of.
+  @Get('chat-rooms/:roomId/attachments/:attachmentId')
+  async getChatRoomAttachment(
+    @Req() req: Request,
+    @Res() res: Response,
+    @Param('roomId') roomId: string,
+    @Param('attachmentId') attachmentId: string,
+  ) {
+    const agentId = (req as any).currentAgentId as string | undefined;
+    if (!agentId) return res.status(403).json({ error: 'Agent identity required' });
+    try {
+      await this.membership.requireActiveParticipant(roomId, agentId, 'agent');
+      const row = await this.dataSource.getRepository(TicketAttachment).findOne({
+        where: { id: attachmentId, room_id: roomId },
+      });
+      if (!row || (row.owner_type !== 'chat_room' && row.owner_type !== 'chat_message')) {
+        return res.status(404).json({ error: 'Attachment not found' });
+      }
+      return res.json(projectChatAttachment(row, { includeData: true }));
+    } catch (err: any) {
+      return res.status(err.status || 403).json({ error: err.message });
+    }
   }
 }

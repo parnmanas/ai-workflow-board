@@ -10,6 +10,7 @@ import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
 import { User } from '../../entities/User';
 import { Agent } from '../../entities/Agent';
 import { UserMention } from '../../entities/UserMention';
+import { TicketAttachment } from '../../entities/TicketAttachment';
 import { AgentApiController } from './agent-api.controller';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
@@ -20,7 +21,7 @@ import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
   // each module re-provided the services, which risked state divergence for
   // any per-instance caches).
   imports: [
-    TypeOrmModule.forFeature([Board, BoardColumn, Ticket, Comment, ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, Agent, UserMention]),
+    TypeOrmModule.forFeature([Board, BoardColumn, Ticket, Comment, ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, Agent, UserMention, TicketAttachment]),
     ChatRoomsModule,
   ],
   controllers: [AgentApiController],
