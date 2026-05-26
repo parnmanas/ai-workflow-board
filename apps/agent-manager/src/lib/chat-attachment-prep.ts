@@ -14,13 +14,21 @@
 //      * 'text_inline' — text-ish mime (text/*, application/json, csv, log,
 //        markdown, xml, yaml) under the inline cap; body is unquoted into
 //        the prompt so the subagent can read it directly.
-//      * 'metadata_only' — anything else (binary, oversize, fetch failed).
-//        The subagent sees filename + mime + size + download_url and decides
-//        whether to ask the user for the file again.
+//      * 'materialized_file' — image we can't inline (non-vision adapter)
+//        or any binary file. Bytes are fetched once and written to a local
+//        path the subagent can pass to its own file/vision tools. This is
+//        the path that makes Codex / Gemini able to actually consume image
+//        and PDF / zip / binary attachments end-to-end.
+//      * 'metadata_only' — fetch/materialize failed, oversize text, or
+//        anything we can't honestly hand the agent. The subagent still
+//        sees filename + mime + size + download_url + note.
 //  - Fetch bytes when needed. Failure to fetch is silent — the attachment
 //    falls through to metadata_only with a `note` so the subagent can tell
 //    the user the file isn't reachable.
 
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import type { AwbConfig } from './rest.js';
 import { fetchChatAttachment } from './rest.js';
 
@@ -56,7 +64,11 @@ export interface RawChatAttachment {
   thumbnail_url?: string;
 }
 
-export type PreparedAttachmentKind = 'image_base64' | 'text_inline' | 'metadata_only';
+export type PreparedAttachmentKind =
+  | 'image_base64'
+  | 'text_inline'
+  | 'materialized_file'
+  | 'metadata_only';
 
 export interface PreparedAttachment {
   id: string;
@@ -69,6 +81,11 @@ export interface PreparedAttachment {
   image_base64?: string;
   /** Inlined UTF-8 text content, set only when kind === 'text_inline'. */
   text_content?: string;
+  /** Absolute on-disk path of the fetched bytes, set only when kind ===
+   *  'materialized_file'. Subagents reference this path via their own
+   *  file-read tools (Codex/Gemini read source files directly; Claude can
+   *  Read it as if the user had attached a local file). */
+  local_path?: string;
   /** Human-readable note appended to the prompt entry when the fetch path
    *  degraded the attachment (oversize, fetch failed). */
   note?: string;
@@ -81,6 +98,68 @@ function isImageMime(mime: string): boolean {
 function isTextishMime(mime: string, filename: string): boolean {
   if (TEXTISH_MIME_RE.test(mime || '')) return true;
   return TEXTISH_NAME_RE.test(filename || '');
+}
+
+/** Sanitize a filename for use as the last path segment of a temp file.
+ *  Strip anything that could escape the per-room scratch dir or confuse a
+ *  shell-style consumer; preserve the extension so the receiving CLI can
+ *  still infer the file type. Filenames that lose every character (e.g. all
+ *  `..`) fall back to the attachment id. */
+function safeFilenameSegment(filename: string, id: string): string {
+  const cleaned = filename
+    .replace(/[/\\]/g, '_')
+    .replace(/^\.+/, '')
+    .replace(/[^A-Za-z0-9._-]/g, '_')
+    .slice(0, 120);
+  return cleaned || id;
+}
+
+/** Returns the absolute on-disk path for a (roomId, id, filename) triple,
+ *  creating the per-room scratch dir if needed. */
+async function reserveMaterializationPath(
+  roomId: string,
+  id: string,
+  filename: string,
+): Promise<string> {
+  const dir = path.join(os.tmpdir(), 'awb-attachments', roomId);
+  await fs.mkdir(dir, { recursive: true });
+  const seg = safeFilenameSegment(filename, id);
+  return path.join(dir, `${id}-${seg}`);
+}
+
+/** Fetch the bytes for `norm` and write them to a local file. On success the
+ *  PreparedAttachment flips to `materialized_file` with `local_path` set.
+ *  On any failure (no bytes, decode failure, disk write failure) it falls
+ *  through to metadata_only with a `note` so the subagent still has a URL
+ *  to surface to the user. Mutates `norm` in place and returns it. */
+async function materialize(
+  config: AwbConfig,
+  roomId: string,
+  norm: PreparedAttachment,
+): Promise<PreparedAttachment> {
+  const body = await fetchChatAttachment(config, roomId, norm.id);
+  if (!body || typeof body.file_data !== 'string' || body.file_data.length === 0) {
+    norm.note = 'attachment fetch failed; only metadata is available';
+    return norm;
+  }
+  let bytes: Buffer;
+  try {
+    bytes = Buffer.from(body.file_data, 'base64');
+  } catch {
+    norm.note = 'attachment payload could not be base64-decoded';
+    return norm;
+  }
+  let outPath: string;
+  try {
+    outPath = await reserveMaterializationPath(roomId, norm.id, norm.filename);
+    await fs.writeFile(outPath, bytes);
+  } catch (err: any) {
+    norm.note = `attachment could not be written to disk: ${err?.message || err}`;
+    return norm;
+  }
+  norm.kind = 'materialized_file';
+  norm.local_path = outPath;
+  return norm;
 }
 
 function normalize(raw: RawChatAttachment): PreparedAttachment | null {
@@ -130,7 +209,11 @@ export async function prepareChatAttachments(
 
     if (isImage) {
       if (!options.fetchImages) {
-        norm.note = 'image attachment — this CLI cannot accept inline vision; ask the user for a textual description if needed';
+        // CLI cannot consume inline vision content blocks, but it can still
+        // read the file off disk via its standard file/read tools. Fetch
+        // the bytes once, drop them on the per-room scratch path, and hand
+        // the agent a real local path instead of asking the user again.
+        await materialize(config, roomId, norm);
         out.push(norm);
         continue;
       }
@@ -180,8 +263,11 @@ export async function prepareChatAttachments(
       continue;
     }
 
-    // Binary / unknown mime — metadata only. Subagent sees the URL and can
-    // decide whether to ask the user for a re-attach in a tool-callable form.
+    // Binary / unknown mime (PDF, zip, exe, …). Fetch + drop on disk so the
+    // subagent can hand the path to its own file/parse tools instead of
+    // bouncing back to the user with a download URL. Failure here falls
+    // through to metadata_only via the `note` set inside materialize().
+    await materialize(config, roomId, norm);
     out.push(norm);
   }
   return out;
@@ -204,6 +290,12 @@ export function renderAttachmentBlock(attachments: PreparedAttachment[]): string
     }
     if (att.kind === 'image_base64') {
       lines.push('  (image content block attached — read it as you would any vision input)');
+    } else if (att.kind === 'materialized_file' && att.local_path) {
+      // Surface the absolute path so the subagent can pass it straight to
+      // its own file-read / vision tool without re-fetching anything from
+      // AWB. Images go through this branch for text-only CLIs (Codex /
+      // Gemini); PDFs and other binaries go through here for everyone.
+      lines.push(`  local_path: ${att.local_path}`);
     } else if (att.kind === 'text_inline' && att.text_content !== undefined) {
       const fence = att.text_content.includes('```') ? '~~~' : '```';
       lines.push(`  ${fence}`);
