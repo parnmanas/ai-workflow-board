@@ -88,9 +88,12 @@ test('RoomMessagingService._validatePendingAttachments enforces room + workspace
 
 test('RoomMessagingService.sendMessage transitions attachment ownership after the message row is saved', () => {
   const code = stripComments(read('modules/chat-rooms/room-messaging.service.ts'));
+  // The transition target — pending attachment rows must be stamped with
+  // owner_type='chat_message' and owner_id = the freshly-saved message id.
+  // CAS update via query builder (preferred shape) sets these via .set({...}).
   assert.match(
     code,
-    /attachmentRepo\.update\([\s\S]{0,160}owner_type:\s*'chat_message',\s*owner_id:\s*savedMsg\.id/,
+    /\.set\(\{\s*owner_type:\s*'chat_message',\s*owner_id:\s*created\.id\s*\}\)/,
     'sendMessage must stamp owner_type+owner_id onto pending attachments after saving the message row, so a crash mid-flight never leaves bound-but-empty rows',
   );
 });
@@ -213,5 +216,46 @@ test('ChatRequestHistoryEntry stream type carries the attachments shape', () => 
     code,
     /ChatRequestHistoryEntry[\s\S]{0,400}attachments\?:[\s\S]{0,200}download_url/,
     'ChatRequestHistoryEntry must declare attachments[] so the agent-manager chat-history payload can carry them downstream',
+  );
+});
+
+// ── Review-bounce regression: ticket 92082b55 reviewer feedback ──────
+
+// P1 (review 2026-05-26): _validatePendingAttachments → save(msg) → update
+// was lossy under concurrent sends. Two callers with the same attachment_ids
+// could both pass validation, both save messages, then "last update wins" on
+// the attachment row — the first sender's POST/SSE response pointed at
+// attachments persisted under the OTHER message id. Fix wraps save+claim in
+// a transaction with a CAS-style UPDATE that re-asserts the pending state
+// (owner_type='chat_room' AND owner_id=:roomId) and verifies result.affected
+// equals ids.length. The guard below pins both halves so a well-meaning
+// refactor doesn't silently weaken the contract back to the race.
+test('RoomMessagingService.sendMessage claims attachments inside a transactional CAS update', () => {
+  const code = stripComments(read('modules/chat-rooms/room-messaging.service.ts'));
+  // The save-message + bind-attachments sequence must be wrapped in a single
+  // transaction so a CAS-update mismatch rolls back the message row too.
+  assert.match(
+    code,
+    /messageRepo\.manager\.transaction\(/,
+    'sendMessage must wrap message save + attachment claim in one transaction so a lost CAS race rolls back the message row',
+  );
+  // CAS WHERE clauses — without these two filters the update reverts to the
+  // pre-fix "update by id only", which is the lossy path.
+  assert.match(
+    code,
+    /\.andWhere\(\s*'owner_type\s*=\s*:pendingType'/,
+    "attachment claim must filter on owner_type='chat_room' so a row already flipped to 'chat_message' by a concurrent send is not re-claimed",
+  );
+  assert.match(
+    code,
+    /\.andWhere\(\s*'owner_id\s*=\s*:roomId'/,
+    'attachment claim must filter on owner_id=:roomId so a pending row anchored to another room is not re-claimed',
+  );
+  // Affected-row check — without this, the WHERE clause can match 0 rows and
+  // the message still goes out claiming attachments that were never bound.
+  assert.match(
+    code,
+    /result\.affected\s*\?\?\s*0\s*\)\s*!==\s*ids\.length/,
+    'sendMessage must verify CAS update affected === ids.length and throw 409 otherwise',
   );
 });

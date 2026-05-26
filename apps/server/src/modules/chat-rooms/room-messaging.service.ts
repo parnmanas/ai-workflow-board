@@ -195,35 +195,64 @@ export class RoomMessagingService {
       if (display) senderName = display;
     }
 
-    const savedMsg = await this.messageRepo.save(
-      this.messageRepo.create({
-        room_id: roomId,
-        workspace_id: workspaceId,
-        sender_type: senderType,
-        sender_id: senderId,
-        content: trimmed,
-        images: images && images.length > 0 ? JSON.stringify(images) : '[]',
-      }),
-    );
+    // CAS-style transactional claim: save the message and bind the
+    // attachments inside one transaction. The UPDATE re-asserts the
+    // pending state (`owner_type='chat_room' AND owner_id=:roomId`) so
+    // two concurrent sends with the same attachment_ids can never both
+    // win — the first one flips the rows to 'chat_message', the second
+    // one sees `affected < ids.length` and rolls back. Without this
+    // CAS guard the validate→save→update sequence was lossy: both
+    // senders could pass validation, both save messages, then last
+    // update wins and the first sender's POST/SSE response references
+    // attachment rows whose persisted owner_id points at the OTHER
+    // message — review finding P1 on ticket 92082b55.
+    const { savedMsg, attachments } = await this.messageRepo.manager.transaction(async (em) => {
+      const messageRepoTx = em.getRepository(ChatRoomMessage);
+      const attachmentRepoTx = em.getRepository(TicketAttachment);
 
-    let attachments: any[] = [];
-    if (attachmentRows.length > 0) {
-      const ids = attachmentRows.map(r => r.id);
-      await this.attachmentRepo.update(
-        { id: In(ids) },
-        { owner_type: 'chat_message', owner_id: savedMsg.id },
+      const created = await messageRepoTx.save(
+        messageRepoTx.create({
+          room_id: roomId,
+          workspace_id: workspaceId,
+          sender_type: senderType,
+          sender_id: senderId,
+          content: trimmed,
+          images: images && images.length > 0 ? JSON.stringify(images) : '[]',
+        }),
       );
-      // Preserve the caller's attachment_ids[] order — multi-file uploads
-      // share a millisecond timestamp, so created_at ASC would scramble
-      // them. attachmentRows is already in attachment_ids[] order from
-      // _validatePendingAttachments.
-      const rows = await this.attachmentRepo.find({ where: { id: In(ids) } });
-      const byId = new Map(rows.map(r => [r.id, r]));
-      attachments = ids
-        .map(id => byId.get(id))
-        .filter((r): r is TicketAttachment => !!r)
-        .map(r => projectChatAttachment(r, { includeData: false }));
-    }
+
+      let projected: any[] = [];
+      if (attachmentRows.length > 0) {
+        const ids = attachmentRows.map(r => r.id);
+        const result = await attachmentRepoTx
+          .createQueryBuilder()
+          .update()
+          .set({ owner_type: 'chat_message', owner_id: created.id })
+          .where('id IN (:...ids)', { ids })
+          .andWhere('owner_type = :pendingType', { pendingType: 'chat_room' })
+          .andWhere('owner_id = :roomId', { roomId })
+          .execute();
+        if ((result.affected ?? 0) !== ids.length) {
+          // Another concurrent send claimed at least one of these
+          // attachments first. Roll back the message save and surface
+          // 409 so the caller knows the attachment_ids are no longer
+          // pending — they should refresh the room state and retry.
+          throw makeError(409, 'attachment_ids were claimed by another concurrent send');
+        }
+        const rows = await attachmentRepoTx.find({ where: { id: In(ids) } });
+        const byId = new Map(rows.map(r => [r.id, r]));
+        // Preserve the caller's attachment_ids[] order — multi-file
+        // uploads share a millisecond timestamp, so created_at ASC
+        // would scramble them. attachmentRows is already in
+        // attachment_ids[] order from _validatePendingAttachments.
+        projected = ids
+          .map(id => byId.get(id))
+          .filter((r): r is TicketAttachment => !!r)
+          .map(r => projectChatAttachment(r, { includeData: false }));
+      }
+
+      return { savedMsg: created, attachments: projected };
+    });
 
     // Update denormalized last_message_at for room list sort
     await this.roomRepo.update(roomId, { last_message_at: new Date() });
