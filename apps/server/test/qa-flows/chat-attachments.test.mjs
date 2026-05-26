@@ -202,5 +202,57 @@ test('chat-room attachment lifecycle: upload → send → history → download a
   });
   assert.equal(reuseRes.status, 400, 'reusing a bound attachment id must be rejected');
 
+  // Regression: review-bounce 2026-05-26 ticket 92082b55. UI sent
+  // `content || ' '` to dodge a server reject, but the controller + service
+  // both still rejected on empty/whitespace, so attachment-only sends 400'd
+  // and the strip cleared the user's uploaded files. Contract: empty content
+  // is valid when attachment_ids carries the payload, and empty+no-attachments
+  // is still rejected.
+  step('11. Attachment-only send: empty content + attachment_ids succeeds');
+  const onlyUpload = await fetch(`http://localhost:${port}/api/chat-rooms/${room.id}/attachments`, {
+    method: 'POST',
+    headers: authHeaders(senderToken, ws.id),
+    body: JSON.stringify({
+      file_name: 'paste.png',
+      file_data: FAKE_PNG,
+    }),
+  });
+  assert.equal(onlyUpload.status, 201);
+  const onlyAtt = await onlyUpload.json();
+
+  const onlySend = await fetch(`http://localhost:${port}/api/chat-rooms/${room.id}/messages`, {
+    method: 'POST',
+    headers: authHeaders(senderToken, ws.id),
+    body: JSON.stringify({
+      content: '',
+      attachment_ids: [onlyAtt.id],
+    }),
+  });
+  const onlySendBody = await onlySend.text();
+  assert.equal(onlySend.status, 201, `attachment-only send must succeed: ${onlySendBody}`);
+  const onlyMsg = JSON.parse(onlySendBody);
+  assert.equal(onlyMsg.content, '', 'attachment-only message must persist empty content (no placeholder space)');
+  assert.equal(onlyMsg.attachments.length, 1);
+  assert.equal(onlyMsg.attachments[0].id, onlyAtt.id);
+
+  // The bound attachment must also show up on a fresh history fetch with the
+  // same empty content — confirms persistence path, not just the live return.
+  const histAfter = await fetch(`http://localhost:${port}/api/chat-rooms/${room.id}/messages?limit=20`, {
+    headers: authHeaders(senderToken, ws.id),
+  });
+  const histAfterBody = await histAfter.json();
+  const persisted = histAfterBody.find(m => m.id === onlyMsg.id);
+  assert.ok(persisted, 'attachment-only message must be in history');
+  assert.equal(persisted.content, '', 'persisted attachment-only message has empty content');
+  assert.equal(persisted.attachments.length, 1);
+
+  step('12. Truly empty payload (no content, no attachments) is still rejected');
+  const emptyRes = await fetch(`http://localhost:${port}/api/chat-rooms/${room.id}/messages`, {
+    method: 'POST',
+    headers: authHeaders(senderToken, ws.id),
+    body: JSON.stringify({ content: '   ' }),
+  });
+  assert.equal(emptyRes.status, 400, 'empty content with no attachments must 400');
+
   exitAfterTests(0);
 });

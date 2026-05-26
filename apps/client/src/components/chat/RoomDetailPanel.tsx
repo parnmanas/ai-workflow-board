@@ -219,24 +219,28 @@ function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessageInputProps) {
     setSending(true);
     setSendError(null);
     setText('');
-    setPendingAttachments((prev) => {
-      prev.forEach((p) => p.previewUrl && URL.revokeObjectURL(p.previewUrl));
-      return [];
-    });
 
     try {
-      // Server requires non-empty content; placeholder space keeps the row
-      // valid when the message is purely an attachment carrier.
+      // Server accepts empty content when attachment_ids carries the payload
+      // (attachment-only screenshot/file share). Drop the previous ' '
+      // placeholder so the rendered bubble doesn't carry a stray space.
       const msg = await api.sendChatRoomMessage(
         roomId,
-        content || ' ',
+        content,
         undefined,
         attachmentIds.length > 0 ? attachmentIds : undefined,
       );
+      // Only release the strip after the server has bound the attachments
+      // to a message id. Clearing optimistically would discard the user's
+      // uploaded files on any send failure (network, 409 race, etc.).
+      setPendingAttachments((prev) => {
+        prev.forEach((p) => p.previewUrl && URL.revokeObjectURL(p.previewUrl));
+        return [];
+      });
       onSent(msg);
     } catch (err: any) {
       setSendError(err?.message || 'Message not sent. Check your connection.');
-      setText(content); // restore draft (attachments are gone — re-attach)
+      setText(content); // restore draft; pendingAttachments are preserved for retry
     } finally {
       setSending(false);
     }

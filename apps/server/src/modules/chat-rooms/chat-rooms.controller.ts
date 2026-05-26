@@ -158,8 +158,16 @@ export class ChatRoomsController {
     const user = (req as any).currentUser;
     const wsId = req.headers['x-workspace-id'] as string;
     const { content } = body;
-    if (!content || typeof content !== 'string') {
-      return res.status(400).json({ error: 'content required' });
+    const attachmentIds = Array.isArray(body.attachment_ids) ? body.attachment_ids : [];
+    // Attachment-only messages (screenshot / file share without a caption) are
+    // a supported workflow — defer the empty-payload check to the service so
+    // it can apply the "content OR attachment_ids" rule consistently across
+    // REST / agent-api / MCP entry points.
+    if (content != null && typeof content !== 'string') {
+      return res.status(400).json({ error: 'content must be a string' });
+    }
+    if ((!content || !content.trim()) && attachmentIds.length === 0) {
+      return res.status(400).json({ error: 'content or attachment_ids required' });
     }
 
     // Image validation (T-08-02-02, T-08-02-03)
@@ -188,9 +196,9 @@ export class ChatRoomsController {
         'user',
         user.id,
         user.name || user.email,
-        content,
+        content ?? '',
         images,
-        Array.isArray(body.attachment_ids) ? body.attachment_ids : [],
+        attachmentIds,
       );
       return res.status(201).json(msg);
     } catch (err: any) {

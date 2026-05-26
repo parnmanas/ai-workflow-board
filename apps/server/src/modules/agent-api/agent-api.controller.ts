@@ -437,7 +437,12 @@ export class AgentApiController {
   async sendChatRoomMessage(@Body() body: any, @Param('roomId') roomId: string, @Res() res: Response) {
     const { agent_id, content } = body;
     if (!agent_id) return res.status(400).json({ error: 'agent_id is required' });
-    if (!content) return res.status(400).json({ error: 'content is required' });
+    const attachmentIds = Array.isArray(body.attachment_ids) ? body.attachment_ids : [];
+    // Empty content is valid when attachments carry the payload — service
+    // enforces the "content OR attachment_ids" rule consistently.
+    if ((!content || (typeof content === 'string' && !content.trim())) && attachmentIds.length === 0) {
+      return res.status(400).json({ error: 'content or attachment_ids required' });
+    }
 
     const room = await this.dataSource.getRepository(ChatRoom).findOne({ where: { id: roomId } });
     if (!room) return res.status(404).json({ error: 'Room not found' });
@@ -453,9 +458,9 @@ export class AgentApiController {
       'agent',
       agent_id,
       agentName,
-      content,
+      content ?? '',
       undefined,
-      Array.isArray(body.attachment_ids) ? body.attachment_ids : [],
+      attachmentIds,
     );
     return res.status(201).json(msg);
   }

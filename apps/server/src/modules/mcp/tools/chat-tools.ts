@@ -58,7 +58,10 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
     'Stick to `@[user:<uuid>|Name]` and `@[agent:<uuid>|Name]` in chat messages.',
     {
       room_id: z.string().describe('Chat room ID to send the message to'),
-      content: z.string().min(1).max(10000).describe('Message content (supports markdown: bold, italic, code span, links)'),
+      // Empty string allowed when attachment_ids carries the payload
+      // (attachment-only screenshot/file share). Service enforces the
+      // "content OR attachment_ids required" invariant.
+      content: z.string().max(10000).describe('Message content (supports markdown: bold, italic, code span, links). May be empty when attachment_ids is provided.'),
       attachment_ids: z.array(z.string()).optional().describe('Pre-uploaded chat attachment IDs from add_chat_message_attachment or POST /api/chat-rooms/:room_id/attachments.'),
     },
     async ({ room_id, content, attachment_ids }, extra: { sessionId?: string }) => {

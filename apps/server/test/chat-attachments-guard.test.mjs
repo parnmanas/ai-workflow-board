@@ -125,10 +125,20 @@ test('ChatRoomsController upload + download require an active participant', () =
 
 test('ChatRoomsController.sendMessage forwards attachment_ids[] into messaging service', () => {
   const code = stripComments(read('modules/chat-rooms/chat-rooms.controller.ts'));
+  // Either inlined (`body.attachment_ids`) or via a local variable extracted
+  // off `body.attachment_ids` — both forms route the same field into the
+  // service. Pin both so a refactor that hoists the parse into a local (for
+  // attachment-only-message branching, ticket 92082b55 review-bounce) doesn't
+  // false-trigger the guard.
   assert.match(
     code,
-    /this\.messaging\.sendMessage\([\s\S]{0,400}body\.attachment_ids/,
-    'POST /api/chat-rooms/:roomId/messages must accept attachment_ids[] in body and forward to RoomMessagingService.sendMessage',
+    /(?:const|let)\s+attachmentIds\s*=\s*Array\.isArray\(body\.attachment_ids\)/,
+    'controller must extract body.attachment_ids into a normalized local so the empty-payload check + the service forward see the same value',
+  );
+  assert.match(
+    code,
+    /this\.messaging\.sendMessage\([\s\S]{0,400}attachmentIds/,
+    'POST /api/chat-rooms/:roomId/messages must forward the normalized attachment_ids[] into RoomMessagingService.sendMessage',
   );
 });
 

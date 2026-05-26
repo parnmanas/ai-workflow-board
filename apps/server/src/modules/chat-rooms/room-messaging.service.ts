@@ -161,13 +161,10 @@ export class RoomMessagingService {
   ): Promise<any> {
     await this.membership.requireActiveParticipant(roomId, senderId, senderType);
 
-    if (!content || typeof content !== 'string') {
-      throw makeError(400, 'content is required');
+    if (content != null && typeof content !== 'string') {
+      throw makeError(400, 'content must be a string');
     }
-    const trimmed = content.trim();
-    if (!trimmed) {
-      throw makeError(400, 'content cannot be empty');
-    }
+    const trimmed = (content ?? '').trim();
     if (trimmed.length > CONTENT_MAX) {
       throw makeError(400, `Message exceeds ${CONTENT_MAX} character limit`);
     }
@@ -175,6 +172,13 @@ export class RoomMessagingService {
     const resolvedAttachmentIds = Array.isArray(attachmentIds)
       ? attachmentIds.filter((id): id is string => typeof id === 'string' && id.length > 0)
       : [];
+    // Attachment-only messages (screenshot / file share without a caption) are
+    // a first-class workflow for chat — persist empty content in that case
+    // rather than forcing a placeholder. Only reject when there's no content
+    // AND no attachment to carry, which would be a truly empty send.
+    if (!trimmed && resolvedAttachmentIds.length === 0) {
+      throw makeError(400, 'content or attachment_ids required');
+    }
     const attachmentRows = await this._validatePendingAttachments(
       roomId,
       workspaceId,
