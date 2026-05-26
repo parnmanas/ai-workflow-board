@@ -224,9 +224,13 @@ export class ChatRoomsController {
       await this.membership.requireActiveParticipant(roomId, user.id, 'user');
       const saved: TicketAttachment[] = [];
       for (const f of incoming) {
+        // Pre-send owner_type='chat_room' (planner-fixed contract). On send,
+        // _validatePendingAttachments transitions to owner_type='chat_message'
+        // and owner_id=message_id. Room-scoped pre-send rows can be GC'd via
+        // the same room_id index without joining against chat_room_messages.
         const row = await this.attachmentRepo.save(this.attachmentRepo.create({
-          owner_type: 'chat_message',
-          owner_id: '',
+          owner_type: 'chat_room',
+          owner_id: roomId,
           ticket_id: null,
           room_id: roomId,
           workspace_id: wsId,
@@ -258,21 +262,27 @@ export class ChatRoomsController {
     const user = (req as any).currentUser;
     try {
       await this.membership.requireActiveParticipant(roomId, user.id, 'user');
+      // Accept both pre-send (owner_type='chat_room') and post-send
+      // (owner_type='chat_message') rows: the room_id anchor enforces
+      // workspace + room scope either way, so the uploader can preview
+      // before send and any room participant can download after send.
       const row = await this.attachmentRepo.findOne({
-        where: { id: attachmentId, room_id: roomId, owner_type: 'chat_message' },
+        where: { id: attachmentId, room_id: roomId },
       });
-      if (!row) return res.status(404).json({ error: 'Attachment not found' });
+      if (!row || (row.owner_type !== 'chat_room' && row.owner_type !== 'chat_message')) {
+        return res.status(404).json({ error: 'Attachment not found' });
+      }
       return res.json(projectChatAttachment(row, { includeData: true }));
     } catch (err: any) {
       return res.status(err.status || 403).json({ error: err.message });
     }
   }
 
-  // Discard a pending upload — only valid before owner_id is bound to a
-  // message. Once attached, the attachment lives and dies with the message
-  // (cleanup on message/room delete, no per-attachment delete after send).
-  // Restricted to the original uploader so a co-participant can't strip a
-  // file from another sender's pending draft.
+  // Discard a pending upload — only valid while owner_type='chat_room'. Once
+  // the message has been sent (owner_type transitions to 'chat_message'),
+  // the attachment lives and dies with the message; per-attachment delete is
+  // no longer accepted. Restricted to the original uploader so a co-participant
+  // can't strip a file from another sender's pending draft.
   @Delete(':roomId/attachments/:attachmentId')
   @RequirePermission(PERMISSIONS.CHAT_SEND)
   async deletePendingAttachment(
@@ -285,10 +295,12 @@ export class ChatRoomsController {
     try {
       await this.membership.requireActiveParticipant(roomId, user.id, 'user');
       const row = await this.attachmentRepo.findOne({
-        where: { id: attachmentId, room_id: roomId, owner_type: 'chat_message' },
+        where: { id: attachmentId, room_id: roomId },
       });
-      if (!row) return res.status(404).json({ error: 'Attachment not found' });
-      if (row.owner_id) {
+      if (!row || (row.owner_type !== 'chat_room' && row.owner_type !== 'chat_message')) {
+        return res.status(404).json({ error: 'Attachment not found' });
+      }
+      if (row.owner_type === 'chat_message') {
         return res.status(409).json({ error: 'Attachment is already sent and cannot be deleted directly' });
       }
       if (row.uploaded_by_type !== 'user' || row.uploaded_by_id !== user.id) {

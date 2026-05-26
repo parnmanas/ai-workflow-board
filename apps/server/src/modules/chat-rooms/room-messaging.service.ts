@@ -213,8 +213,16 @@ export class RoomMessagingService {
         { id: In(ids) },
         { owner_type: 'chat_message', owner_id: savedMsg.id },
       );
-      const rows = await this.attachmentRepo.find({ where: { id: In(ids) }, order: { created_at: 'ASC' } });
-      attachments = rows.map(r => projectChatAttachment(r, { includeData: false }));
+      // Preserve the caller's attachment_ids[] order — multi-file uploads
+      // share a millisecond timestamp, so created_at ASC would scramble
+      // them. attachmentRows is already in attachment_ids[] order from
+      // _validatePendingAttachments.
+      const rows = await this.attachmentRepo.find({ where: { id: In(ids) } });
+      const byId = new Map(rows.map(r => [r.id, r]));
+      attachments = ids
+        .map(id => byId.get(id))
+        .filter((r): r is TicketAttachment => !!r)
+        .map(r => projectChatAttachment(r, { includeData: false }));
     }
 
     // Update denormalized last_message_at for room list sort
@@ -551,9 +559,11 @@ export class RoomMessagingService {
     const out = new Map<string, any[]>();
     if (ids.length === 0) return out;
 
+    // (created_at, id) tiebreak — within a single multi-file upload all rows
+    // share a millisecond, so id-ASC gives a stable order on history replay.
     const rows = await this.attachmentRepo.find({
       where: { owner_type: 'chat_message', owner_id: In(ids) },
-      order: { created_at: 'ASC' },
+      order: { created_at: 'ASC', id: 'ASC' },
     });
     for (const row of rows) {
       const list = out.get(row.owner_id) || [];
@@ -578,7 +588,10 @@ export class RoomMessagingService {
     for (const id of attachmentIds) {
       const row = byId.get(id);
       if (!row) throw makeError(400, `attachment_ids contains unknown id: ${id}`);
-      if (row.owner_type !== 'chat_message' || row.owner_id) {
+      // Pre-send rows have owner_type='chat_room', owner_id=room_id.
+      // owner_type='chat_message' means the row already belongs to another
+      // sent message (or a stale orphan) and cannot be re-attached.
+      if (row.owner_type !== 'chat_room' || row.owner_id !== roomId) {
         throw makeError(400, `attachment ${id} is already attached`);
       }
       if (row.room_id !== roomId) throw makeError(400, `attachment ${id} belongs to a different room`);

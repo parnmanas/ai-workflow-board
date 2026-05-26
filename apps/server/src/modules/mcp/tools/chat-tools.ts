@@ -137,9 +137,12 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
 
       try {
         await roomMembershipService.requireActiveParticipant(room_id, agent.id, 'agent');
+        // Pre-send owner_type='chat_room', owner_id=room_id (planner-fixed
+        // contract). send_chat_room_message → _validatePendingAttachments
+        // transitions to owner_type='chat_message', owner_id=message_id.
         const row = await dataSource.getRepository(TicketAttachment).save(dataSource.getRepository(TicketAttachment).create({
-          owner_type: 'chat_message',
-          owner_id: '',
+          owner_type: 'chat_room',
+          owner_id: room_id,
           ticket_id: null,
           room_id,
           workspace_id: agent.workspace_id,
@@ -154,6 +157,45 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
         return ok(projectChatAttachment(row, { includeData: false }));
       } catch (e: any) {
         return err(e?.message || 'Failed to upload chat attachment');
+      }
+    }
+  );
+
+  server.tool(
+    'delete_chat_message_attachment',
+    'Discard a chat attachment that has NOT been sent yet. Mirrors DELETE ' +
+    '/api/chat-rooms/:room_id/attachments/:id. Once the attachment has been ' +
+    'bound to a sent message (owner_type=chat_message), it lives and dies ' +
+    'with the message — use message/room deletion instead.',
+    {
+      attachment_id: z.string().describe('Pre-send attachment ID returned by add_chat_message_attachment.'),
+    },
+    async ({ attachment_id }, extra: { sessionId?: string }) => {
+      if (!roomMembershipService) return err('Chat membership is unavailable in this MCP context');
+      const caller = getCallerAgent(extra);
+      if (!caller?.agentId) return err('Unauthorized: agent identity required');
+
+      const repo = dataSource.getRepository(TicketAttachment);
+      const row = await repo.findOne({ where: { id: attachment_id } });
+      if (!row || (row.owner_type !== 'chat_room' && row.owner_type !== 'chat_message')) {
+        return err('Attachment not found');
+      }
+      if (row.owner_type === 'chat_message') {
+        return err('Attachment is already sent and cannot be deleted directly');
+      }
+      if (row.uploaded_by_type !== 'agent' || row.uploaded_by_id !== caller.agentId) {
+        return err('Only the uploader can discard a pending attachment');
+      }
+      try {
+        // Re-check membership at delete time too — the room or agent could
+        // have been removed between upload and discard.
+        if (row.room_id) {
+          await roomMembershipService.requireActiveParticipant(row.room_id, caller.agentId, 'agent');
+        }
+        await repo.delete({ id: attachment_id });
+        return ok({ ok: true, attachment_id });
+      } catch (e: any) {
+        return err(e?.message || 'Failed to delete chat attachment');
       }
     }
   );
