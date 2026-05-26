@@ -14,7 +14,11 @@ import { TicketAttachment } from '../../entities/TicketAttachment';
 import { projectChatAttachment } from '../mcp/shared/ticket-helpers';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { RoomMembershipService } from '../chat-rooms/room-membership.service';
-import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
+import {
+  CHAT_MESSAGE_TYPES,
+  ChatMessageType,
+  RoomMessagingService,
+} from '../chat-rooms/room-messaging.service';
 import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
 import {
@@ -443,6 +447,14 @@ export class AgentApiController {
     if ((!content || (typeof content === 'string' && !content.trim())) && attachmentIds.length === 0) {
       return res.status(400).json({ error: 'content or attachment_ids required' });
     }
+    // Optional discriminator — agent-manager passes 'progress' for tool-call
+    // heartbeats so they get filtered out of agent history replays. Default
+    // to 'message' for legacy callers that don't set it.
+    const rawType = typeof body.type === 'string' ? body.type : 'message';
+    if (!CHAT_MESSAGE_TYPES.includes(rawType as ChatMessageType)) {
+      return res.status(400).json({ error: `invalid type: ${rawType}` });
+    }
+    const messageType = rawType as ChatMessageType;
 
     const room = await this.dataSource.getRepository(ChatRoom).findOne({ where: { id: roomId } });
     if (!room) return res.status(404).json({ error: 'Room not found' });
@@ -461,6 +473,7 @@ export class AgentApiController {
       content ?? '',
       undefined,
       attachmentIds,
+      messageType,
     );
     return res.status(201).json(msg);
   }
@@ -468,7 +481,13 @@ export class AgentApiController {
   @Get('chat-rooms/:roomId/messages')
   async getChatRoomMessages(@Param('roomId') roomId: string, @Res() res: Response, @Query('limit') limitStr?: string) {
     const limit = Math.min(parseInt(limitStr || '50', 10) || 50, 200);
-    const messages = await this.messaging.getMessages(roomId, '', limit, undefined, { observer: true });
+    // Chat history feeding back into a spawned CLI must NOT include the
+    // manager's own progress narration — `excludeProgress` drops type='progress'
+    // rows at the SQL level. The web UI calls the user-session controller,
+    // which does not set this flag, so humans still see the heartbeat trail.
+    const messages = await this.messaging.getMessages(
+      roomId, '', limit, undefined, { observer: true, excludeProgress: true },
+    );
     return res.json(messages);
   }
 
