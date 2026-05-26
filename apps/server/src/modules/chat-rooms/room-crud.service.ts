@@ -71,9 +71,12 @@ export class RoomCrudService {
       // keeps the chat sidebar from filling up with one row per Run as the
       // FIFO ring grows.
       .andWhere('r.action_id IS NULL')
-      // Unread count: messages after last_read_at (datetime comparison per CHAT-12)
+      // Unread count: messages after last_read_at (datetime comparison per CHAT-12).
+      // Progress rows are agent-manager tool-call heartbeats — the user
+      // sees them live but they shouldn't pump the unread badge, which is
+      // reserved for messages the user actually needs to act on.
       .addSelect(
-        `(SELECT COUNT(*) FROM chat_room_messages m WHERE ${t('m.room_id')} = ${t('r.id')} AND (p.last_read_at IS NULL OR m.created_at > p.last_read_at))`,
+        `(SELECT COUNT(*) FROM chat_room_messages m WHERE ${t('m.room_id')} = ${t('r.id')} AND m.type <> 'progress' AND (p.last_read_at IS NULL OR m.created_at > p.last_read_at))`,
         'unread_count',
       )
       .orderBy("COALESCE(r.last_message_at, '1970-01-01')", 'DESC')
@@ -95,11 +98,15 @@ export class RoomCrudService {
       : [];
 
     // Batch-fetch last messages (one query with ROW_NUMBER equivalent via subquery-free approach:
-    // fetch all and pick max per room in memory — acceptable since rooms list is bounded)
+    // fetch all and pick max per room in memory — acceptable since rooms list is bounded).
+    // Skip progress rows: the preview line in the sidebar should mirror what a
+    // human would call "the last thing said", and a tool-call narration is
+    // not useful as a room-level summary.
     const lastMsgRows = roomIds.length > 0
       ? await this.messageRepo
           .createQueryBuilder('m')
           .where('m.room_id IN (:...roomIds)', { roomIds })
+          .andWhere("m.type <> 'progress'")
           .orderBy('m.created_at', 'DESC')
           .getMany()
       : [];

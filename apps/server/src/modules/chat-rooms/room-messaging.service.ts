@@ -22,6 +22,12 @@ const CONTENT_MAX = 10000;
 // loop because the plugin caps long before this many turns.
 const AGENT_CHAIN_LOOKBACK = 8;
 
+// Whitelisted message-type discriminators accepted from external callers
+// (REST / MCP). 'system' is intentionally excluded — only the in-process
+// sendSystemMessage path may stamp that value.
+export const CHAT_MESSAGE_TYPES = ['message', 'progress'] as const;
+export type ChatMessageType = (typeof CHAT_MESSAGE_TYPES)[number];
+
 function makeError(status: number, message: string): Error & { status: number } {
   const err = new Error(message) as Error & { status: number };
   err.status = status;
@@ -75,13 +81,18 @@ export class RoomMessagingService {
   /**
    * Paginated message history for a room (cursor-based with `before` message ID).
    * Caller must be an active participant (left_at IS NULL) — else 403.
+   *
+   * `options.excludeProgress` filters out type='progress' rows. The agent-api
+   * GET endpoint sets this so chat history replayed into a spawned CLI never
+   * includes the manager's own tool-call heartbeats (which would teach the
+   * model to talk about its tools instead of using them).
    */
   async getMessages(
     roomId: string,
     userId: string,
     limit: number,
     before?: string,
-    options?: { observer?: boolean },
+    options?: { observer?: boolean; excludeProgress?: boolean },
   ): Promise<any[]> {
     // v0.32: observer mode skips the active-participant gate so admins can
     // read agent-to-agent rooms they're not a member of (workspace-wide chat
@@ -98,6 +109,10 @@ export class RoomMessagingService {
       .where('m.room_id = :roomId', { roomId })
       .orderBy('m.created_at', 'DESC')
       .limit(cappedLimit);
+
+    if (options?.excludeProgress) {
+      qb.andWhere("m.type <> 'progress'");
+    }
 
     if (before) {
       // Cursor pagination: use composite (created_at, id) to avoid skipping messages
@@ -131,6 +146,7 @@ export class RoomMessagingService {
           sender_type: msg.sender_type,
           sender_id: msg.sender_id,
           sender_name: senderName,
+          type: msg.type || 'message',
           content: msg.content,
           attachments: attachmentsByMessage.get(msg.id) || [],
           created_at: msg.created_at,
@@ -158,8 +174,13 @@ export class RoomMessagingService {
     content: string,
     images?: Array<{ data: string; filename: string; mimetype: string }>,
     attachmentIds?: string[],
+    type: ChatMessageType = 'message',
   ): Promise<any> {
     await this.membership.requireActiveParticipant(roomId, senderId, senderType);
+
+    if (!CHAT_MESSAGE_TYPES.includes(type)) {
+      throw makeError(400, `Invalid message type: ${type}`);
+    }
 
     if (content != null && typeof content !== 'string') {
       throw makeError(400, 'content must be a string');
@@ -220,6 +241,7 @@ export class RoomMessagingService {
           workspace_id: workspaceId,
           sender_type: senderType,
           sender_id: senderId,
+          type,
           content: trimmed,
           images: images && images.length > 0 ? JSON.stringify(images) : '[]',
         }),
@@ -258,11 +280,18 @@ export class RoomMessagingService {
       return { savedMsg: created, attachments: projected };
     });
 
+    // Progress messages are ephemeral tool-call heartbeats; they update
+    // last_message_at so the room list sort reflects activity but skip
+    // mention parsing, DM dispatch, chain-depth accounting, and the
+    // sender's read-marker auto-advance — none of those apply to a
+    // narration row that the agent itself shouldn't see in history.
+    const isRealMessage = type === 'message';
+
     // Update denormalized last_message_at for room list sort
     await this.roomRepo.update(roomId, { last_message_at: new Date() });
 
     // CHAT-18: only parse mentions from user messages — prevents agent-to-agent loops
-    if (senderType === 'user') {
+    if (isRealMessage && senderType === 'user') {
       const dispatched = await this._processMentions(roomId, workspaceId, senderId, senderName, trimmed, savedMsg);
       await this._handleDmAgentRequest(roomId, workspaceId, senderId, trimmed, savedMsg, dispatched);
     }
@@ -275,6 +304,8 @@ export class RoomMessagingService {
     // just-saved message. Plugin uses it to short-circuit dispatch once
     // agents have been talking to each other for too many turns. Always
     // computed (cheap query) so the field is consistent on every emit.
+    // Progress rows are excluded from the lookback inside _computeAgentChainDepth
+    // so a chatty tool-narration burst never inflates the chain.
     const agentChainDepth = await this._computeAgentChainDepth(roomId);
 
     activityEvents.emit('chat_room_message', {
@@ -284,6 +315,7 @@ export class RoomMessagingService {
       sender_type: senderType,
       sender_id: senderId,
       sender_name: senderName,
+      type,
       content: trimmed,
       images: savedMsg.images,
       attachments,
@@ -300,13 +332,18 @@ export class RoomMessagingService {
     //
     // Silently tolerate failures: the message is already saved + broadcast;
     // an unadvanced read marker is recoverable on the next explicit markRead.
-    try {
-      await this.markRead(roomId, senderId, senderType);
-    } catch (err: any) {
-      this.logService.warn(
-        'ChatRooms',
-        `Auto-markRead failed for sender ${senderType}:${senderId} in room ${roomId}: ${err?.message || err}`,
-      );
+    // Skip for progress: those don't bump unread on other participants either
+    // (the client filters them out of the unread count), so the sender's marker
+    // doesn't need to advance on a row no one will ever count.
+    if (isRealMessage) {
+      try {
+        await this.markRead(roomId, senderId, senderType);
+      } catch (err: any) {
+        this.logService.warn(
+          'ChatRooms',
+          `Auto-markRead failed for sender ${senderType}:${senderId} in room ${roomId}: ${err?.message || err}`,
+        );
+      }
     }
 
     return {
@@ -316,6 +353,7 @@ export class RoomMessagingService {
       sender_type: savedMsg.sender_type,
       sender_id: savedMsg.sender_id,
       sender_name: senderName,
+      type: savedMsg.type || 'message',
       content: savedMsg.content,
       images: savedMsg.images,
       attachments,
@@ -385,6 +423,10 @@ export class RoomMessagingService {
       sender_type: 'system',
       sender_id: 'system',
       sender_name: 'System',
+      // System alerts are first-class history (stale-WAIT detector etc.):
+      // keep the default 'message' type so agents replaying history still
+      // see them — they're user-visible signals the model should condition on.
+      type: savedMsg.type || 'message',
       content: trimmed,
       images: savedMsg.images,
       attachments: [],
@@ -407,6 +449,7 @@ export class RoomMessagingService {
       sender_type: 'system',
       sender_id: 'system',
       sender_name: 'System',
+      type: savedMsg.type || 'message',
       content: savedMsg.content,
       images: savedMsg.images,
       attachments: [],
@@ -569,6 +612,11 @@ export class RoomMessagingService {
       .createQueryBuilder('m')
       .select(['m.sender_type', 'm.sender_id'])
       .where('m.room_id = :roomId', { roomId })
+      // Progress rows are agent-authored heartbeats — a burst of tool calls
+      // would otherwise look like one agent talking to itself and inflate
+      // the chain depth past the plugin cap, causing the next real reply
+      // to be dropped as "loop detected".
+      .andWhere("m.type <> 'progress'")
       .orderBy('m.created_at', 'DESC')
       .addOrderBy('m.id', 'DESC')
       .limit(AGENT_CHAIN_LOOKBACK)

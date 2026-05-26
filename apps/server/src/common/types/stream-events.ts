@@ -150,9 +150,17 @@ export interface ChatRequestPayload {
 export interface ChatRoomMessagePayload {
   room_id: string;
   message_id: string;
-  sender_type: 'user' | 'agent';
+  sender_type: 'user' | 'agent' | 'system';
   sender_id: string;
   sender_name: string;
+  // Discriminator added in v0.41:
+  //   'message'  — real chat turn (user input or agent's send_chat_room_message reply)
+  //   'progress' — tool-call heartbeat the agent-manager posts while the
+  //                spawned CLI is working. Rendered compactly and stripped
+  //                from agent history replay.
+  // Optional on the wire so legacy clients/agents that omit it default to
+  // 'message' (matches the column default on chat_room_messages).
+  type?: 'message' | 'progress';
   content: string;
   attachments?: Array<{
     id: string;
