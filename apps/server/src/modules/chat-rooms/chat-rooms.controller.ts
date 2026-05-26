@@ -24,7 +24,7 @@ import { RoomMembershipService } from './room-membership.service';
 import { RoomMessagingService } from './room-messaging.service';
 import { TicketAttachment } from '../../entities/TicketAttachment';
 import { MAX_IMAGE_SIZE, MAX_IMAGES_PER_MESSAGE, ALLOWED_IMAGE_MIMETYPES, MAX_TICKET_ATTACHMENT_SIZE } from '../../common/constants/upload';
-import { approxBase64Size, inferTicketAttachmentMimetype, projectChatAttachment } from '../mcp/shared/ticket-helpers';
+import { approxBase64Size, projectChatAttachment, validateAttachmentMimetype } from '../mcp/shared/ticket-helpers';
 
 @ApiBearerAuth('user-session')
 @ApiTags('chat-rooms')
@@ -224,6 +224,11 @@ export class ChatRoomsController {
       await this.membership.requireActiveParticipant(roomId, user.id, 'user');
       const saved: TicketAttachment[] = [];
       for (const f of incoming) {
+        // Sniff the file bytes BEFORE persistence so a forged mime can
+        // never reach disk. validateAttachmentMimetype throws status=400
+        // on a definitive mismatch (e.g. caller claims image/png but the
+        // bytes are PDF) — caught below and surfaced as 400.
+        const verifiedMime = validateAttachmentMimetype(f.file_name, f.file_mimetype, f.file_data);
         // Pre-send owner_type='chat_room' (planner-fixed contract). On send,
         // _validatePendingAttachments transitions to owner_type='chat_message'
         // and owner_id=message_id. Room-scoped pre-send rows can be GC'd via
@@ -235,7 +240,7 @@ export class ChatRoomsController {
           room_id: roomId,
           workspace_id: wsId,
           file_name: f.file_name,
-          file_mimetype: inferTicketAttachmentMimetype(f.file_name, f.file_mimetype),
+          file_mimetype: verifiedMime,
           file_data: f.file_data,
           file_size: approxBase64Size(f.file_data),
           uploaded_by_type: 'user',

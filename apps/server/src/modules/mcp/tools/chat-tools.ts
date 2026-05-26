@@ -16,7 +16,7 @@ import { activityEvents } from '../../../services/activity.service';
 import { MAX_TICKET_ATTACHMENT_SIZE } from '../../../common/constants/upload';
 import { ok, err, MENTION_SYNTAX_DOC, sanitizeHarnessMarkers } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
-import { approxBase64Size, inferTicketAttachmentMimetype, projectChatAttachment } from '../shared/ticket-helpers';
+import { approxBase64Size, projectChatAttachment, validateAttachmentMimetype } from '../shared/ticket-helpers';
 import type { ToolContext } from './context';
 
 export function registerChatTools(server: McpServer, ctx: ToolContext): void {
@@ -137,6 +137,11 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
 
       try {
         await roomMembershipService.requireActiveParticipant(room_id, agent.id, 'agent');
+        // Sniff the file bytes BEFORE persistence so a forged mime can
+        // never reach disk. Mirrors the REST upload path — same helper,
+        // same security guard, surfaced as a tool error here instead of
+        // a 400 response.
+        const verifiedMime = validateAttachmentMimetype(file_name, file_mimetype, file_data);
         // Pre-send owner_type='chat_room', owner_id=room_id (planner-fixed
         // contract). send_chat_room_message → _validatePendingAttachments
         // transitions to owner_type='chat_message', owner_id=message_id.
@@ -147,7 +152,7 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
           room_id,
           workspace_id: agent.workspace_id,
           file_name,
-          file_mimetype: inferTicketAttachmentMimetype(file_name, file_mimetype),
+          file_mimetype: verifiedMime,
           file_data,
           file_size: size,
           uploaded_by_type: 'agent',

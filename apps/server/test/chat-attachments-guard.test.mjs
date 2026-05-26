@@ -259,3 +259,48 @@ test('RoomMessagingService.sendMessage claims attachments inside a transactional
     'sendMessage must verify CAS update affected === ids.length and throw 409 otherwise',
   );
 });
+
+// P2 (review 2026-05-26): chat REST + MCP upload trusted client-claimed
+// mime (via inferTicketAttachmentMimetype which short-circuits on the
+// explicit field). The AC security item required magic-byte sniffing
+// against the bytes so a forged "image/png" header on PDF/EXE bytes can't
+// reach disk + downstream inline-render paths. validateAttachmentMimetype
+// is the canonical sniff-and-verify entry; the guards below pin every
+// upload entry point to it.
+test('ticket-helpers exports validateAttachmentMimetype with a magic-byte sniffer', () => {
+  const code = stripComments(read('modules/mcp/shared/ticket-helpers.ts'));
+  assert.match(
+    code,
+    /export function sniffMimetypeFromBase64\(/,
+    'sniffMimetypeFromBase64 must exist so the chat / ticket upload paths share one sniffer',
+  );
+  assert.match(
+    code,
+    /export function validateAttachmentMimetype\(/,
+    'validateAttachmentMimetype must exist as the canonical verify-and-canonicalize entry for chat / ticket uploads',
+  );
+  // PNG, JPEG, PDF, ZIP, WebP, BMP, GIF are the format families the AC
+  // security item is required to catch (image inline-render + the
+  // common non-image download formats). Static guard ensures the
+  // signature table isn't accidentally pruned to a subset.
+  assert.match(code, /0x89,\s*0x50,\s*0x4E,\s*0x47/, 'PNG magic must be present in the signature table');
+  assert.match(code, /0xFF,\s*0xD8,\s*0xFF/, 'JPEG magic must be present in the signature table');
+  assert.match(code, /0x25,\s*0x50,\s*0x44,\s*0x46/, 'PDF magic must be present in the signature table');
+  assert.match(code, /0x50,\s*0x4B,\s*0x03,\s*0x04/, 'ZIP magic must be present in the signature table');
+  assert.match(code, /'image\/webp'/, 'WebP RIFF check must be present in the sniffer');
+});
+
+test('Chat REST + MCP upload paths verify mime against bytes via validateAttachmentMimetype', () => {
+  const controller = stripComments(read('modules/chat-rooms/chat-rooms.controller.ts'));
+  assert.match(
+    controller,
+    /validateAttachmentMimetype\(\s*f\.file_name,\s*f\.file_mimetype,\s*f\.file_data\s*\)/,
+    'POST /api/chat-rooms/:roomId/attachments must call validateAttachmentMimetype on every incoming file BEFORE persistence',
+  );
+  const mcp = stripComments(read('modules/mcp/tools/chat-tools.ts'));
+  assert.match(
+    mcp,
+    /validateAttachmentMimetype\(\s*file_name,\s*file_mimetype,\s*file_data\s*\)/,
+    'add_chat_message_attachment MCP tool must call validateAttachmentMimetype before persistence',
+  );
+});
