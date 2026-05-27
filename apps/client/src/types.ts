@@ -298,6 +298,12 @@ export interface Comment {
   parent_id: string | null;
   // Type-specific extension bag (e.g., handoff target_agent_id, decision refs).
   metadata: Record<string, unknown>;
+  // Dedupe counters for noisy auto-generated system rows (silent-exit fallback,
+  // usage-limit retries, etc.). The server bumps these in place when the same
+  // fingerprint repeats as the most recent comment on the ticket; NULL means
+  // the row hasn't been deduped yet (treat as 1).
+  repeat_count?: number | null;
+  last_repeated_at?: string | null;
 }
 
 export interface Ticket {

@@ -300,6 +300,31 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
                       >as {slug}</span>
                     );
                   })()}
+                  {/* Dedupe counter — server collapses repeated same-fingerprint
+                     system rows (e.g. silent-exit retry loops) into a single
+                     comment with repeat_count bumped in place. Render an "×N"
+                     pill so the user can tell at a glance that the row stands
+                     in for N occurrences instead of one. NULL/1 hides the pill. */}
+                  {(() => {
+                    const count = typeof c.repeat_count === 'number' ? c.repeat_count : null;
+                    if (count === null || count <= 1) return null;
+                    const lastRepeated = typeof c.last_repeated_at === 'string' ? c.last_repeated_at : null;
+                    const titleParts: string[] = [`Repeated ${count} times`];
+                    if (lastRepeated) {
+                      titleParts.push(`last at ${new Date(lastRepeated).toLocaleString()}`);
+                    }
+                    return (
+                      <span
+                        title={titleParts.join(' · ')}
+                        style={{
+                          fontSize: '10px', fontWeight: 700, padding: '1px 6px', borderRadius: tokens.radii.sm,
+                          background: tokens.colors.warningBg, color: tokens.colors.warningLight,
+                          border: 'none', textTransform: 'none', letterSpacing: 0.2,
+                          fontVariantNumeric: 'tabular-nums',
+                        }}
+                      >{`×${count}`}</span>
+                    );
+                  })()}
                 </div>
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
                   {/* Tier-1 F unread cue — small accent dot beside the timestamp.
@@ -317,6 +342,21 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
                   <span style={{ fontSize: '10px', color: tokens.colors.textMuted }}>
                     {new Date(c.created_at).toLocaleString()}
                   </span>
+                  {/* When the row is a dedupe survivor, show the last-occurrence
+                     time inline so the user doesn't have to hover the ×N pill
+                     to know when it last fired. created_at stays pinned to the
+                     first occurrence so the row keeps its timeline anchor. */}
+                  {(() => {
+                    const count = typeof c.repeat_count === 'number' ? c.repeat_count : null;
+                    const lastRepeated = typeof c.last_repeated_at === 'string' ? c.last_repeated_at : null;
+                    if (!count || count <= 1 || !lastRepeated) return null;
+                    return (
+                      <span
+                        title={`Last repeat: ${new Date(lastRepeated).toLocaleString()}`}
+                        style={{ fontSize: '10px', color: tokens.colors.textMuted, opacity: 0.85 }}
+                      >· last {new Date(lastRepeated).toLocaleTimeString()}</span>
+                    );
+                  })()}
                 </span>
               </div>
               {/* Comment content — renderMarkdown keeps XSS-safe JSX construction (T-05-02-01)

@@ -116,6 +116,63 @@ export class AgentApiController {
     };
 
     const commentRepo = this.dataSource.getRepository(Comment);
+
+    // Dedupe rule: if the most recent comment on this ticket already has the
+    // same fingerprint (type='system' + reason + exit_code + author_role),
+    // bump its repeat_count + last_repeated_at in place instead of inserting
+    // a duplicate row. We only collapse against the LAST comment on the
+    // ticket so a user/agent reply in between starts a fresh occurrence row
+    // and the timeline stays readable.
+    //
+    // We also emit `action='updated'` (not `'created'`) on the bumped path so
+    // the Reviewer cascade in event-registry doesn't keep re-firing on the
+    // same stuck-loop error — the whole point of this dedupe is that the
+    // server already knows "we've been here before, nothing new to react to".
+    const lastComment = await commentRepo.findOne({
+      where: { ticket_id: ticketId },
+      order: { created_at: 'DESC' },
+    });
+    const fingerprint = this.computeSystemFingerprint(metadata);
+    const lastFingerprint = lastComment
+      ? this.computeSystemFingerprint(this.safeParseMetadata(lastComment.metadata), lastComment.type)
+      : null;
+
+    if (lastComment && lastFingerprint && lastFingerprint === fingerprint) {
+      const prevCount = lastComment.repeat_count ?? 1;
+      const nextCount = prevCount + 1;
+      const now = new Date();
+      // Refresh content + metadata so the displayed body reflects the latest
+      // tail / trigger id — older revisions stay implicit in `repeat_count`.
+      // last_repeated_at is the source of truth for "most recent occurrence";
+      // created_at stays pinned so the row doesn't jump in the timeline.
+      await commentRepo.update(lastComment.id, {
+        content,
+        metadata: JSON.stringify(metadata),
+        repeat_count: nextCount,
+        last_repeated_at: now,
+      });
+
+      await this.activityService.logActivity({
+        entity_type: 'comment',
+        entity_id: lastComment.id,
+        action: 'updated',
+        ticket_id: ticketId,
+        actor_id: '',
+        actor_name: actorName,
+        new_value: String(nextCount),
+        field_changed: 'repeat_count',
+      });
+
+      this.logService.info(
+        'AgentApi',
+        `Silent-exit system comment deduped: ticket=${ticketId.slice(0, 8)} exit=${exitCode ?? '-'} count=${nextCount} comment=${lastComment.id.slice(0, 8)}`,
+        { ticket_id: ticketId, comment_id: lastComment.id, exit_code: exitCode, cycle_trigger_id: cycleTriggerId, repeat_count: nextCount },
+      );
+
+      const refreshed = await commentRepo.findOne({ where: { id: lastComment.id } });
+      return res.status(200).json(refreshed);
+    }
+
     const comment = await commentRepo.save(commentRepo.create({
       ticket_id: ticketId,
       author_type: 'system',
@@ -149,6 +206,35 @@ export class AgentApiController {
       { ticket_id: ticketId, comment_id: comment.id, exit_code: exitCode, cycle_trigger_id: cycleTriggerId },
     );
     return res.status(201).json(comment);
+  }
+
+  private safeParseMetadata(raw: string | null | undefined): Record<string, unknown> {
+    if (!raw || typeof raw !== 'string') return {};
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  // Stable JSON key for the (reason, exit_code, author_role) tuple on a
+  // type='system' comment. Returns null for any other comment type so the
+  // dedupe never folds non-system rows together. Only fields that identify
+  // "same kind of error" are included; cycle_trigger_id is intentionally
+  // excluded — it varies per cycle and is the noise we want to collapse.
+  private computeSystemFingerprint(
+    metadata: Record<string, unknown>,
+    commentType: string = 'system',
+  ): string | null {
+    if (commentType !== 'system') return null;
+    const reason = typeof metadata.reason === 'string' ? metadata.reason : '';
+    if (!reason) return null;
+    const exitCode = metadata.exit_code === null || metadata.exit_code === undefined
+      ? null
+      : Number(metadata.exit_code);
+    const authorRole = typeof metadata.author_role === 'string' ? metadata.author_role : '';
+    return JSON.stringify({ reason, exit_code: exitCode, author_role: authorRole });
   }
 
   @Get('board-summary')
