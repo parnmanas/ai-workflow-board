@@ -579,10 +579,15 @@ export default function TicketPanel({
   // user reads — re-marking only happens on unmount / ticket switch.
   const [lastReadAt, setLastReadAt] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'detail' | 'comments' | 'activity' | 'user'>('detail');
-  // Pending-user-action edit drafts (ticket a57517be). The User tab lets the
-  // human update the reason without round-tripping through the JSON detail
-  // form; unpending is a single-button action so no draft state needed.
+  // Pending-user-action edit drafts (ticket a57517be / 861aa636).
+  // - pendingReasonDraft is bound to the "Park reason" textarea shown when
+  //   the ticket is NOT pending; lets the human park it with a reason.
+  // - userResponseDraft is bound to the "Your response" textarea shown when
+  //   the ticket IS pending; Resume posts this as a ticket comment before
+  //   clearing pending_user_action, so the assignee sees the reply on the
+  //   next trigger without the human having to scroll to the comments tab.
   const [pendingReasonDraft, setPendingReasonDraft] = useState<string>('');
+  const [userResponseDraft, setUserResponseDraft] = useState<string>('');
   const [pendingBusy, setPendingBusy] = useState(false);
   const [activities, setActivities] = useState<ActivityLog[]>([]);
   // Modal preview can be an image OR a video — discriminate by mimetype so
@@ -617,6 +622,7 @@ export default function TicketPanel({
     setCommentContent('');
     setCommentAttachments([]);
     setPendingReasonDraft(activeTicket.pending_reason || '');
+    setUserResponseDraft('');
     // Auto-switch to the User tab when opening a pending ticket so the human
     // sees the ask immediately. Skipped when scrollToCommentId is set (a
     // deep-link from a mention notification — that lives in the comments
@@ -712,26 +718,26 @@ export default function TicketPanel({
     }
   }, [activeTicket.id, pendingReasonDraft]);
 
+  // Resume posts the user's response (if any) as a regular ticket comment
+  // BEFORE flipping pending_user_action off, so the comment lands in the
+  // thread before the dispatch loop wakes the assignee on the next trigger.
+  // onAddComment is fire-and-forget per its prop type but Board's wrapper
+  // returns a Promise; Promise.resolve normalises the await target so we
+  // sequence reliably either way.
   const handleUnpendTicket = useCallback(async () => {
+    const response = userResponseDraft.trim();
     setPendingBusy(true);
     try {
+      if (response) {
+        await Promise.resolve(onAddComment(activeTicket.id, response));
+      }
       await api.updateTicket(activeTicket.id, { pending_user_action: false });
+      setUserResponseDraft('');
       setPendingReasonDraft('');
     } finally {
       setPendingBusy(false);
     }
-  }, [activeTicket.id]);
-
-  const handleSavePendingReason = useCallback(async () => {
-    const reason = pendingReasonDraft.trim();
-    if (!activeTicket.pending_user_action) return;
-    setPendingBusy(true);
-    try {
-      await api.updateTicket(activeTicket.id, { pending_reason: reason });
-    } finally {
-      setPendingBusy(false);
-    }
-  }, [activeTicket.id, activeTicket.pending_user_action, pendingReasonDraft]);
+  }, [activeTicket.id, userResponseDraft, onAddComment]);
 
   // Fetch role assignments for the active ticket. Refetched on
   // activeTicket.updated_at so writes through onSetRoleAssignment (which
@@ -2475,12 +2481,12 @@ export default function TicketPanel({
                   )}
                 </div>
 
-                <label style={labelStyle}>Reason</label>
+                <label style={labelStyle}>Your response (optional)</label>
                 <textarea
-                  value={pendingReasonDraft}
-                  onChange={e => setPendingReasonDraft(e.target.value)}
+                  value={userResponseDraft}
+                  onChange={e => setUserResponseDraft(e.target.value)}
                   rows={4}
-                  placeholder="Why is this ticket waiting on a human?"
+                  placeholder="Type your answer, decision, or new context. Posted as a ticket comment when you Resume — leave empty to just unpend."
                   style={{
                     width: '100%',
                     background: tokens.colors.surfaceCard,
@@ -2496,21 +2502,6 @@ export default function TicketPanel({
                 <div style={{ display: 'flex', gap: 8, marginTop: 10, justifyContent: 'flex-end' }}>
                   <button
                     type="button"
-                    onClick={handleSavePendingReason}
-                    disabled={pendingBusy || pendingReasonDraft.trim() === (activeTicket.pending_reason || '').trim()}
-                    style={{
-                      background: tokens.colors.surfaceCard,
-                      border: `1px solid ${tokens.colors.border}`,
-                      borderRadius: tokens.radii.md,
-                      color: tokens.colors.textStrong,
-                      padding: '6px 14px',
-                      fontSize: '12px',
-                      cursor: 'pointer',
-                      opacity: (pendingBusy || pendingReasonDraft.trim() === (activeTicket.pending_reason || '').trim()) ? 0.5 : 1,
-                    }}
-                  >Save reason</button>
-                  <button
-                    type="button"
                     onClick={handleUnpendTicket}
                     disabled={pendingBusy}
                     style={{
@@ -2524,7 +2515,7 @@ export default function TicketPanel({
                       cursor: 'pointer',
                       opacity: pendingBusy ? 0.5 : 1,
                     }}
-                  >▶ Resume (Unpend)</button>
+                  >{userResponseDraft.trim() ? '▶ Post & Resume' : '▶ Resume (Unpend)'}</button>
                 </div>
 
                 <h4 style={{
@@ -2538,10 +2529,10 @@ export default function TicketPanel({
                   fontSize: '12px', color: tokens.colors.textSecondary,
                   lineHeight: 1.6,
                 }}>
-                  <li>Read the reason above and the latest comments to understand what's blocked.</li>
-                  <li>If the answer is a quick decision: leave a comment, then click <strong>Resume</strong> to release the agent.</li>
-                  <li>If the work needs to split: create a follow-up ticket from the board, then Resume.</li>
-                  <li>Resume re-wakes the dispatch loop — the assignee picks the ticket back up on the next trigger.</li>
+                  <li>Read the reason above and the latest comments to see what's blocked.</li>
+                  <li>Type your answer in the response box, then click <strong>Resume</strong> — the text lands as a comment and the assignee picks it up on the next trigger.</li>
+                  <li>Already replied in the Comments tab? Just click <strong>Resume</strong> with the box empty.</li>
+                  <li>Need to split the work? Create a follow-up ticket from the board, then Resume.</li>
                 </ul>
               </>
             ) : (
