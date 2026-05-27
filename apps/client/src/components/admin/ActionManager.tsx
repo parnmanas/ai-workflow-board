@@ -2,9 +2,13 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { api, getActiveWorkspaceId } from '../../api';
 import type { Action, ActionRun, ChatRoomMessageItem } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
+import { useAuth } from '../../contexts/AuthContext';
 import { tokens } from '../../tokens';
 import { Button, Input, Modal, Card, Badge } from '../common';
 import { relativeTime } from '../../utils/time';
+import MessageList from '../chat/MessageList';
+import ChatMessageInput from '../chat/ChatMessageInput';
+import type { MentionParticipant } from '../chat/utils/markdown';
 
 interface AgentOption {
   id: string;
@@ -416,11 +420,13 @@ interface ActionDetailProps {
 }
 
 function ActionDetail({ action, agents, workspaceId, onBack, onEdit, onDelete, onRun, running }: ActionDetailProps) {
+  const { user } = useAuth();
   const [runs, setRuns] = useState<ActionRun[]>([]);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatRoomMessageItem[]>([]);
-  const [reply, setReply] = useState('');
-  const [sending, setSending] = useState(false);
+  const [participants, setParticipants] = useState<MentionParticipant[]>([]);
+  const [participantCount, setParticipantCount] = useState(0);
+  const [loadingMessages, setLoadingMessages] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const loadRuns = useCallback(async () => {
@@ -431,50 +437,80 @@ function ActionDetail({ action, agents, workspaceId, onBack, onEdit, onDelete, o
   }, [action.id, workspaceId]);
 
   const activeRun = runs.find((r) => r.id === activeRunId) || null;
+  const roomId = activeRun?.room_id || null;
+  // Only user-triggered runs include the viewer as a participant. Scheduler/
+  // agent runs require observer=true on read endpoints and disallow sends
+  // entirely (the input is hidden in that case).
+  const canSend = !!activeRun && activeRun.triggered_by_type === 'user';
+  const observerMode = !canSend;
 
   const loadMessages = useCallback(async () => {
-    if (!activeRun?.room_id) {
+    if (!roomId) {
       setMessages([]);
       return;
     }
+    setLoadingMessages(true);
     try {
-      const msgs = await api.getChatRoomMessages(activeRun.room_id, 100, undefined, true);
+      const msgs = await api.getChatRoomMessages(roomId, 100, undefined, observerMode);
       setMessages(msgs);
     } catch {
       setMessages([]);
+    } finally {
+      setLoadingMessages(false);
     }
-  }, [activeRun?.room_id]);
+  }, [roomId, observerMode]);
 
   useEffect(() => { loadRuns(); }, [loadRuns]);
   useEffect(() => { loadMessages(); }, [loadMessages]);
+
+  // Fetch room participants so MessageList can render @mention pills with
+  // proper display names and we know the participant count for the read-by
+  // footer. Scheduler/agent runs need observer=true to bypass the
+  // active-participant gate server-side.
+  useEffect(() => {
+    if (!roomId) {
+      setParticipants([]);
+      setParticipantCount(0);
+      return;
+    }
+    api.getChatRoom(roomId, observerMode)
+      .then((detail: any) => {
+        const ps: MentionParticipant[] = (detail?.participants || []).map((p: any) => ({
+          id: p.participant_id,
+          name: p.participant_name || p.name,
+          type: p.participant_type,
+        }));
+        setParticipants(ps);
+        setParticipantCount(ps.filter((p) => p.type === 'user').length);
+      })
+      .catch(() => {
+        setParticipants([]);
+        setParticipantCount(0);
+      });
+  }, [roomId, observerMode]);
 
   // Light-touch refresh: poll for new messages every 5s while detail is open.
   // SSE wiring would be nicer but adds chat-stream subscription plumbing that
   // isn't needed for a first cut — the user can also click Refresh.
   useEffect(() => {
-    if (!activeRun?.room_id) return;
+    if (!roomId) return;
     const t = setInterval(() => { loadMessages(); }, 5000);
     return () => clearInterval(t);
-  }, [activeRun?.room_id, loadMessages]);
+  }, [roomId, loadMessages]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages.length]);
 
-  const handleReply = async () => {
-    if (!reply.trim() || !activeRun?.room_id) return;
-    setSending(true);
-    try {
-      await api.sendChatRoomMessage(activeRun.room_id, reply.trim());
-      setReply('');
-      await loadMessages();
-    } catch (err: any) {
-      // ignore — the toast on the parent isn't reachable here. Show inline by
-      // re-using the input; user will retry. (Could hoist toast via prop.)
-    } finally {
-      setSending(false);
-    }
-  };
+  // ChatMessageInput posts the message itself and hands the resulting row
+  // back via onSent. Append optimistically (dedup against the SSE/poll path)
+  // so the bubble shows up instantly instead of after the next 5s poll.
+  const handleMessageSent = useCallback((msg: ChatRoomMessageItem) => {
+    setMessages((prev) => {
+      if (prev.some((m) => m.id === msg.id)) return prev;
+      return [...prev, msg];
+    });
+  }, []);
 
   const handleRunNow = async () => {
     await onRun();
@@ -548,7 +584,9 @@ function ActionDetail({ action, agents, workspaceId, onBack, onEdit, onDelete, o
           </div>
         </div>
 
-        {/* Messages */}
+        {/* Messages — uses the shared chat MessageList + ChatMessageInput so
+            the history pane has multi-line input, file attachments, mentions
+            and progress-row rendering for free. */}
         <div style={{
           border: `1px solid ${tokens.colors.border}`,
           borderRadius: tokens.radii.md,
@@ -556,69 +594,52 @@ function ActionDetail({ action, agents, workspaceId, onBack, onEdit, onDelete, o
           display: 'flex',
           flexDirection: 'column',
           minHeight: 0,
+          overflow: 'hidden',
         }}>
-          <div style={{ padding: '8px 12px', borderBottom: `1px solid ${tokens.colors.border}`, fontSize: 12, color: tokens.colors.textMuted, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ padding: '8px 12px', borderBottom: `1px solid ${tokens.colors.border}`, fontSize: 12, color: tokens.colors.textMuted, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0 }}>
             <span>
               Conversation with <strong>{agentName(action.target_agent_id)}</strong>
             </span>
             <Button variant="secondary" size="sm" onClick={() => loadMessages()}>Refresh</Button>
           </div>
 
-          <div style={{ flex: 1, overflow: 'auto', padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
             {!activeRun ? (
               <div style={{ fontSize: 12, color: tokens.colors.textMuted, alignSelf: 'center', marginTop: 24 }}>
                 Pick a run on the left to view its conversation.
+              </div>
+            ) : loadingMessages && messages.length === 0 ? (
+              <div style={{ fontSize: 12, color: tokens.colors.textMuted, alignSelf: 'center', marginTop: 24 }}>
+                Loading…
               </div>
             ) : messages.length === 0 ? (
               <div style={{ fontSize: 12, color: tokens.colors.textMuted, alignSelf: 'center', marginTop: 24 }}>
                 No messages yet — agent is processing the prompt.
               </div>
-            ) : messages.map((m) => (
-              <div key={m.id} style={{
-                padding: '8px 10px',
-                borderRadius: tokens.radii.md,
-                background: m.sender_type === 'agent' ? `${tokens.colors.accent}10` : tokens.colors.surfaceHover,
-                maxWidth: '85%',
-                alignSelf: m.sender_type === 'agent' ? 'flex-start' : 'flex-end',
-              }}>
-                <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginBottom: 2 }}>
-                  {m.sender_name} · {relativeTime(m.created_at)}
-                </div>
-                <div style={{ fontSize: 13, color: tokens.colors.textStrong, whiteSpace: 'pre-wrap', lineHeight: 1.45 }}>
-                  {m.content}
-                </div>
-              </div>
-            ))}
+            ) : (
+              <MessageList
+                messages={messages}
+                participantCount={participantCount}
+                participants={participants}
+                currentUserId={user?.id}
+              />
+            )}
             <div ref={messagesEndRef} />
           </div>
 
           {activeRun && (
-            activeRun.triggered_by_type === 'user' ? (
-              <div style={{ padding: 8, borderTop: `1px solid ${tokens.colors.border}`, display: 'flex', gap: 6 }}>
-                <input
-                  value={reply}
-                  onChange={(e) => setReply(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleReply(); } }}
-                  placeholder="Reply to the agent…"
-                  style={{
-                    flex: 1,
-                    background: tokens.colors.surface,
-                    border: `1px solid ${tokens.colors.border}`,
-                    borderRadius: tokens.radii.md,
-                    padding: '8px 10px',
-                    color: tokens.colors.textStrong,
-                    fontSize: 13,
-                    fontFamily: 'inherit',
-                  }}
-                />
-                <Button variant="primary" size="sm" disabled={sending || !reply.trim()} onClick={handleReply}>Send</Button>
-              </div>
+            canSend && roomId ? (
+              <ChatMessageInput
+                roomId={roomId}
+                onSent={handleMessageSent}
+                isMobile={false}
+              />
             ) : (
               // Non-user-triggered runs (scheduler / agent-dispatched) have no
               // real user as a participant, so a reply would 403 on the
               // participant gate. Surface the read-only state instead of
               // letting the user type into a dead box.
-              <div style={{ padding: 8, borderTop: `1px solid ${tokens.colors.border}`, fontSize: 12, color: tokens.colors.textMuted, textAlign: 'center' }}>
+              <div style={{ padding: 8, borderTop: `1px solid ${tokens.colors.border}`, fontSize: 12, color: tokens.colors.textMuted, textAlign: 'center', flexShrink: 0 }}>
                 {activeRun.triggered_by_type === 'system' ? 'Scheduled run' : 'Agent-triggered run'} · read-only
               </div>
             )

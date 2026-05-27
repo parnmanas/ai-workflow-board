@@ -60,6 +60,17 @@ export class Comment {
   @Column({ type: 'text', default: '{}' })
   metadata: string;
 
+  // Dedupe counters for noisy auto-generated system rows (e.g. silent-exit
+  // fallback fired by a stuck retry loop). When the silent-exit endpoint sees
+  // the same fingerprint as the most recent comment on the ticket, it bumps
+  // these in place instead of stacking another row. NULL on a brand-new
+  // comment is read as "occurred once" by the client.
+  @Column({ type: 'int', nullable: true, default: null })
+  repeat_count: number | null;
+
+  @Column({ type: Date, nullable: true, default: null })
+  last_repeated_at: Date | null;
+
   @CreateDateColumn()
   created_at: Date;
 
