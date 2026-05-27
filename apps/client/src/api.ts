@@ -976,11 +976,20 @@ export const api = {
   listChatRooms: (scope?: 'workspace') =>
     request<ChatRoomListItem[]>(scope === 'workspace' ? '/chat-rooms?scope=workspace' : '/chat-rooms'),
 
-  createChatRoom: (participants: { participant_type: string; participant_id: string }[], name?: string) =>
-    request<ChatRoomDetail>('/chat-rooms', {
+  // Server returns `{ room: ChatRoomDetail, existing: boolean }` — unwrap so
+  // callers can dereference `room.id` directly. (Pre-dedup-removal the
+  // `existing` flag mattered to MCP callers; for the REST/UI flow same-member
+  // rooms are no longer deduped, so the envelope is just legacy noise.)
+  createChatRoom: async (
+    participants: { participant_type: string; participant_id: string }[],
+    name?: string,
+  ): Promise<ChatRoomDetail> => {
+    const result = await request<{ room: ChatRoomDetail; existing: boolean }>('/chat-rooms', {
       method: 'POST',
       body: JSON.stringify({ participants, name }),
-    }),
+    });
+    return result.room;
+  },
 
   getChatRoom: (roomId: string, observer = false) =>
     request<ChatRoomDetail>(`/chat-rooms/${roomId}${observer ? '?observer=true' : ''}`),

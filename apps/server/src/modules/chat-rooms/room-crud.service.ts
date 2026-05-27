@@ -20,7 +20,12 @@ function makeError(status: number, message: string): Error & { status: number } 
 }
 
 /**
- * Owns room-level lifecycle: list / create (with DM dedup) / detail / rename.
+ * Owns room-level lifecycle: list / create / detail / rename.
+ *
+ * Same-member DM rooms are intentionally NOT deduplicated — users want to keep
+ * separate threads per topic (feature discussion / on-call / casual) with the
+ * same person. DM is a participant-count label only (2 = dm, 3+ = group), not
+ * a uniqueness key.
  *
  * Participant bookkeeping (adds, leaves, member lookups, name resolution) is
  * delegated to RoomMembershipService so the 50-cap transaction and the
@@ -87,15 +92,18 @@ export class RoomCrudService {
 
     const roomIds = rooms.map(r => r.id);
 
-    // Batch-fetch DM partner rows (one query for all rooms instead of one per DM room)
-    const dmPartnerRows = roomIds.length > 0
+    // Batch-fetch ALL active participant rows once. Two consumers downstream:
+    //   1. DM partner-name resolution (filter to !== userId per room)
+    //   2. Group member-name projection (filter to participant_type='user'|'agent')
+    // Doing one query saves a round-trip when both group + DM rooms coexist.
+    const allParticipantRows = roomIds.length > 0
       ? await this.participantRepo
           .createQueryBuilder('p')
           .where('p.room_id IN (:...roomIds)', { roomIds })
-          .andWhere('p.participant_id != :userId', { userId })
           .andWhere('p.left_at IS NULL')
           .getMany()
       : [];
+    const dmPartnerRows = allParticipantRows.filter(p => p.participant_id !== userId);
 
     // Batch-fetch last messages (one query with ROW_NUMBER equivalent via subquery-free approach:
     // fetch all and pick max per room in memory — acceptable since rooms list is bounded).
@@ -125,9 +133,12 @@ export class RoomCrudService {
       }
     }
 
-    // Batch-resolve all participant names (users + agents) in two queries
+    // Batch-resolve all participant names (users + agents) in two queries.
+    // Includes every active participant — not just DM partners — so the
+    // light-weight `participants` projection below can carry display names
+    // for group-member filtering on the client.
     const participantIds = new Set<string>();
-    for (const p of dmPartnerRows) participantIds.add(`${p.participant_type}:${p.participant_id}`);
+    for (const p of allParticipantRows) participantIds.add(`${p.participant_type}:${p.participant_id}`);
     for (const m of lastMsgRows) {
       if (lastMsgByRoom.get(m.room_id) === m) {
         participantIds.add(`${m.sender_type}:${m.sender_id}`);
@@ -150,23 +161,27 @@ export class RoomCrudService {
       return 'Unknown';
     };
 
+    // Group active participants by room for the projection.
+    const participantsByRoom = new Map<string, ChatRoomParticipant[]>();
+    for (const p of allParticipantRows) {
+      const arr = participantsByRoom.get(p.room_id) || [];
+      arr.push(p);
+      participantsByRoom.set(p.room_id, arr);
+    }
+
     const results = rooms.map((room, idx) => {
       const raw = raws[idx];
       const unreadCount = parseInt(raw['unread_count'] ?? '0', 10) || 0;
 
-      let displayName: string;
+      // DM partner snapshot for the client-side fallback when the room has no
+      // custom name. We expose it separately from `name` so the client can
+      // pick `name || dm_partner_name || 'Direct Message'` in order — that
+      // way a renamed DM keeps its custom title without losing the partner's
+      // identity (rendered as a subtitle / tooltip if the UI wants).
       let dmPartnerName: string | null = null;
-
       if (room.type === 'dm') {
         const partner = dmPartnerByRoom.get(room.id);
-        if (partner) {
-          dmPartnerName = resolveName(partner.participant_type, partner.participant_id);
-          displayName = dmPartnerName;
-        } else {
-          displayName = 'Direct Message';
-        }
-      } else {
-        displayName = room.name;
+        if (partner) dmPartnerName = resolveName(partner.participant_type, partner.participant_id);
       }
 
       let lastMessagePreview: string | null = null;
@@ -177,15 +192,27 @@ export class RoomCrudService {
         lastMessagePreview = preview.length > 80 ? preview.slice(0, 77) + '...' : preview;
       }
 
+      // Light projection used by the room-list filter input — just
+      // (type, id, name) per active participant. Distinct from
+      // `getRoomDetail` which also carries last_read_at / joined_at.
+      const participantProjection = (participantsByRoom.get(room.id) || []).map(p => ({
+        participant_type: p.participant_type,
+        participant_id: p.participant_id,
+        name: resolveName(p.participant_type, p.participant_id),
+      }));
+
       return {
         id: room.id,
         workspace_id: room.workspace_id,
         type: room.type,
-        name: displayName,
+        // Raw room.name (possibly empty for un-renamed DMs). Client picks
+        // displayName via `name || dm_partner_name || 'Direct Message'`.
+        name: room.name || '',
         dm_partner_name: dmPartnerName,
         last_message_at: room.last_message_at,
         last_message_preview: lastMessagePreview,
         unread_count: unreadCount,
+        participants: participantProjection,
         created_at: room.created_at,
         updated_at: room.updated_at,
       };
@@ -195,8 +222,10 @@ export class RoomCrudService {
   }
 
   /**
-   * Create a new chat room (DM or group). Handles DM dedup (CHAT-03).
+   * Create a new chat room (DM or group).
    * Auto-determines type based on participant count: 2 = dm, 3+ = group.
+   * Always creates a fresh room — same-member DMs are NOT deduped so users
+   * can keep multiple topic-separated threads with the same person.
    */
   async createRoom(
     workspaceId: string,
@@ -231,55 +260,23 @@ export class RoomCrudService {
 
     const roomType = uniqueParticipants.length === 2 ? 'dm' : 'group';
 
-    // DM dedup: if exactly 2 participants, check for existing active DM
-    if (roomType === 'dm') {
-      const t = (col: string) => this.membership.toText(col);
-      const [p1, p2] = uniqueParticipants;
-      const existing = await this.roomRepo
-        .createQueryBuilder('r')
-        .innerJoin(
-          'chat_room_participants',
-          'pa',
-          `${t('pa.room_id')} = ${t('r.id')} AND pa.participant_id = :id1 AND pa.left_at IS NULL`,
-          { id1: p1.participant_id },
-        )
-        .innerJoin(
-          'chat_room_participants',
-          'pb',
-          `${t('pb.room_id')} = ${t('r.id')} AND pb.participant_id = :id2 AND pb.left_at IS NULL`,
-          { id2: p2.participant_id },
-        )
-        .where("r.type = 'dm'")
-        .andWhere('r.workspace_id = :wsId', { wsId: workspaceId })
-        .getOne();
-
-      if (existing) {
-        // getRoomDetail wants a user id for unread-count / last-read math —
-        // when the creator is an agent we pass empty so the detail returns
-        // without per-user badges. UI ignores those for agent callers.
-        const detailViewerUserId = creator.type === 'user' ? creator.id : '';
-        const detail = await this.getRoomDetail(existing.id, detailViewerUserId);
-        return { room: detail, existing: true };
-      }
-    }
-
-    // Determine group room name
+    // Determine room name. DMs may carry a name now (renamable + topic-tagged
+    // multi-rooms with the same partner); when the caller doesn't supply one
+    // we leave it empty and the read path falls back to the partner's name.
     let roomName = '';
-    if (roomType === 'group') {
-      if (name && name.trim()) {
-        roomName = name.trim();
+    if (name && name.trim()) {
+      roomName = name.trim();
+    } else if (roomType === 'group') {
+      // Auto-generated default for groups so the list isn't full of "(unnamed)".
+      const names: string[] = [];
+      for (const p of uniqueParticipants.slice(0, 3)) {
+        const resolved = await this.membership.resolveParticipantName(p.participant_type, p.participant_id);
+        names.push(resolved);
+      }
+      if (uniqueParticipants.length > 3) {
+        roomName = `${names.join(', ')} and ${uniqueParticipants.length - 3} more`;
       } else {
-        // Build default name from first 3 participant names
-        const names: string[] = [];
-        for (const p of uniqueParticipants.slice(0, 3)) {
-          const resolved = await this.membership.resolveParticipantName(p.participant_type, p.participant_id);
-          names.push(resolved);
-        }
-        if (uniqueParticipants.length > 3) {
-          roomName = `${names.join(', ')} and ${uniqueParticipants.length - 3} more`;
-        } else {
-          roomName = names.join(', ');
-        }
+        roomName = names.join(', ');
       }
     }
 
@@ -343,18 +340,17 @@ export class RoomCrudService {
       })),
     );
 
-    let displayName = room.name;
+    // Surface the partner's display name separately for DMs so the client
+    // can fall back to it when the room has no custom name yet. Same
+    // contract as listRooms — `name` is the raw room.name (possibly empty).
     let dmPartnerName: string | null = null;
-
     if (room.type === 'dm') {
       const partner = participants.find(p => p.participant_id !== userId);
       if (partner) {
-        const partnerName = await this.membership.resolveParticipantName(
+        dmPartnerName = await this.membership.resolveParticipantName(
           partner.participant_type,
           partner.participant_id,
         );
-        dmPartnerName = partnerName;
-        displayName = partnerName;
       }
     }
 
@@ -362,7 +358,7 @@ export class RoomCrudService {
       id: room.id,
       workspace_id: room.workspace_id,
       type: room.type,
-      name: displayName,
+      name: room.name || '',
       dm_partner_name: dmPartnerName,
       last_message_at: room.last_message_at,
       created_at: room.created_at,
@@ -372,15 +368,14 @@ export class RoomCrudService {
   }
 
   /**
-   * Rename a group room (DM rooms cannot be renamed — returns 400).
+   * Rename any room (DM or group). DMs may be renamed now that same-member
+   * DM dedup is gone — users keeping multiple topic-tagged threads with the
+   * same person rely on naming to tell them apart.
    */
   async renameRoom(roomId: string, userId: string, newName: string): Promise<void> {
     const room = await this.roomRepo.findOne({ where: { id: roomId } });
     if (!room) {
       throw makeError(404, 'Room not found');
-    }
-    if (room.type === 'dm') {
-      throw makeError(400, 'Cannot rename a direct message');
     }
 
     await this.membership.requireActiveParticipant(roomId, userId);

@@ -310,8 +310,11 @@ export default function ChatPage() {
       // Toast notification for non-active room (CHAT-14)
       setRooms((prevRooms) => {
         const room = prevRooms.find((r) => r.id === msg.room_id);
+        // Custom room name wins for DMs (see ticket 1ae77f55 — DM rename).
         const roomDisplayName = room
-          ? (room.type === 'dm' ? (room.dm_partner_name || room.name || 'Direct Message') : (room.name || 'Chat'))
+          ? (room.type === 'dm'
+              ? (room.name || room.dm_partner_name || 'Direct Message')
+              : (room.name || 'Chat'))
           : 'Chat';
         const senderName = (msg as any).sender_name || 'Someone';
         const preview = msg.content.length > 60 ? msg.content.slice(0, 57) + '...' : msg.content;
@@ -441,17 +444,20 @@ export default function ChatPage() {
       api.listChatRooms().then(setRooms).catch(() => {});
       return;
     }
-    // Immediately add the room to the list and select it (avoids race condition)
+    // Immediately add the room to the list and select it (avoids race condition).
+    // dm_partner_name comes from the create response so a brand-new DM shows
+    // the partner's name as the fallback label even before the background
+    // listChatRooms refresh completes.
     const listItem: ChatRoomListItem = {
       id: room.id,
       type: room.type,
       name: room.name,
-      last_message_at: null,
+      last_message_at: room.last_message_at ?? null,
       created_at: room.created_at,
       unread_count: 0,
       last_message_preview: null,
       last_message_sender: null,
-      dm_partner_name: null,
+      dm_partner_name: room.dm_partner_name ?? null,
       dm_partner_type: null,
     };
     setRooms((prev) => {

@@ -118,16 +118,17 @@ function RoomHeaderActions({
 
   return (
     <div style={{ display: 'flex', gap: 8 }}>
+      {/* Add People stays group-only — DMs are fixed at 2 participants. */}
       {room.type === 'group' && (
-        <>
-          <button onClick={onAddPeople} style={ghostButton}>
-            Add People
-          </button>
-          <button onClick={onRenameStart} style={ghostButton}>
-            Rename
-          </button>
-        </>
+        <button onClick={onAddPeople} style={ghostButton}>
+          Add People
+        </button>
       )}
+      {/* Rename is allowed for DMs too so users can tag multi-rooms with
+          the same partner ("Roadmap" / "Casual" / "On-call"). */}
+      <button onClick={onRenameStart} style={ghostButton}>
+        Rename
+      </button>
       <button
         onClick={onLeave}
         aria-label="Leave room"
@@ -220,9 +221,11 @@ export default function ChatRoomView({
     );
   }
 
+  // Custom room name wins for DMs too — multi-rooms with the same partner
+  // rely on the custom name to disambiguate.
   const roomDisplayName =
     room.type === 'dm'
-      ? (room.dm_partner_name || room.name || 'Direct Message')
+      ? (room.name || room.dm_partner_name || 'Direct Message')
       : (room.name || 'Unnamed Group');
 
   const headerActions = isRenaming ? null : (

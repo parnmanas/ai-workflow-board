@@ -517,7 +517,10 @@ export interface ActivityRow {
 export interface ChatRoomListItem {
   id: string;
   type: 'dm' | 'group';
-  name: string;                    // group name or empty for DM
+  // Raw room.name from the server — possibly empty for un-renamed DMs. Use
+  // `name || dm_partner_name || 'Direct Message'` (DM) or `name || 'Unnamed
+  // Group'` (group) to derive the display label.
+  name: string;
   last_message_at: string | null;  // ISO-8601
   created_at: string;
   // Computed by server in room list query:
@@ -527,13 +530,27 @@ export interface ChatRoomListItem {
   // For DM rooms: the other participant's display name (per-viewer)
   dm_partner_name: string | null;
   dm_partner_type: string | null; // 'user' | 'agent'
+  // Light projection of every active participant — drives the room-list
+  // filter input (matches members by display name without an extra fetch).
+  // Server-side projection added in v0.42; older responses may omit it.
+  participants?: Array<{
+    participant_type: 'user' | 'agent';
+    participant_id: string;
+    name: string;
+  }>;
 }
 
 export interface ChatRoomDetail {
   id: string;
   type: 'dm' | 'group';
+  // Raw room.name — may be empty for un-renamed DMs. See ChatRoomListItem.name
+  // for the display-fallback contract.
   name: string;
+  // Partner display name for DMs (per-viewer); null for group rooms or when
+  // the viewer is the only active participant.
+  dm_partner_name?: string | null;
   workspace_id: string;
+  last_message_at?: string | null;
   created_at: string;
   participants: ChatRoomParticipantInfo[];
 }

@@ -410,8 +410,13 @@ interface RoomListRowProps {
 function RoomListRow({ room, isActive, onClick }: RoomListRowProps) {
   const [hovered, setHovered] = useState(false);
 
+  // Custom room name wins (DMs may be renamed now too — see ticket 1ae77f55);
+  // empty room.name falls back to the partner snapshot for DMs or the
+  // "Unnamed Group" placeholder for groups.
   const displayName =
-    room.type === 'dm' ? (room.dm_partner_name || room.name || 'Direct Message') : (room.name || 'Unnamed Group');
+    room.type === 'dm'
+      ? (room.name || room.dm_partner_name || 'Direct Message')
+      : (room.name || 'Unnamed Group');
 
   const initials = displayName
     .split(' ')
