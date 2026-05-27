@@ -31,6 +31,7 @@ interface RoomHeaderActionsProps {
   onRenameCancel: () => void;
   onRenameConfirm: (name: string) => void;
   onLeave: () => void;
+  onClear: () => void;
   onAddPeople: () => void;
 }
 
@@ -41,6 +42,7 @@ function RoomHeaderActions({
   onRenameCancel,
   onRenameConfirm,
   onLeave,
+  onClear,
   onAddPeople,
 }: RoomHeaderActionsProps) {
   const [renameValue, setRenameValue] = useState(room.name || '');
@@ -130,6 +132,14 @@ function RoomHeaderActions({
         Rename
       </button>
       <button
+        onClick={onClear}
+        aria-label="Clear conversation"
+        title="Clear conversation history from your view only (other participants are unaffected)"
+        style={ghostButton}
+      >
+        Clear
+      </button>
+      <button
         onClick={onLeave}
         aria-label="Leave room"
         style={destructiveButton}
@@ -150,6 +160,9 @@ export interface ChatRoomViewProps {
   onLeaveRoom: (roomId: string) => void;
   onRoomRenamed: (roomId: string, name: string) => void;
   onParticipantsAdded: (roomId: string) => void;
+  // Per-viewer Clear (ticket 1ae77f55) — parent wipes local message state
+  // for the room and zeroes its sidebar metadata.
+  onRoomCleared: (roomId: string) => void;
   isMobile: boolean;
   onBack?: () => void;
   participantCount?: number;
@@ -166,6 +179,7 @@ export default function ChatRoomView({
   onLeaveRoom,
   onRoomRenamed,
   onParticipantsAdded,
+  onRoomCleared,
   isMobile,
   onBack,
   participantCount = 0,
@@ -196,6 +210,22 @@ export default function ChatRoomView({
     setIsRenaming(false);
     await api.renameChatRoom(room.id, name).catch(() => {});
     onRoomRenamed(room.id, name);
+  }
+
+  async function handleClear() {
+    if (!room) return;
+    const confirmed = window.confirm(
+      "Clear this conversation's history from your view? Other participants are unaffected.",
+    );
+    if (!confirmed) return;
+    try {
+      await api.clearChatRoom(room.id);
+      onRoomCleared(room.id);
+    } catch {
+      // best-effort — if the server call fails the next room load will
+      // simply show the unchanged history. We don't show a toast here
+      // because the action is reversible by ignoring the failure.
+    }
   }
 
   if (!room) {
@@ -236,6 +266,7 @@ export default function ChatRoomView({
       onRenameCancel={() => setIsRenaming(false)}
       onRenameConfirm={handleRenameConfirm}
       onLeave={handleLeave}
+      onClear={handleClear}
       onAddPeople={() => setShowAddPeople(true)}
     />
   );
@@ -277,6 +308,7 @@ export default function ChatRoomView({
             onRenameCancel={() => setIsRenaming(false)}
             onRenameConfirm={handleRenameConfirm}
             onLeave={handleLeave}
+            onClear={handleClear}
             onAddPeople={() => setShowAddPeople(true)}
           />
         </div>

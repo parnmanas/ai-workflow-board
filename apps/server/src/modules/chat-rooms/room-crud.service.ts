@@ -80,10 +80,18 @@ export class RoomCrudService {
       // Progress rows are agent-manager tool-call heartbeats — the user
       // sees them live but they shouldn't pump the unread badge, which is
       // reserved for messages the user actually needs to act on.
+      //
+      // cleared_at branch (ticket 1ae77f55): messages older than the user's
+      // per-room Clear cutoff don't count toward unread either, so wiping a
+      // chat takes the badge to zero immediately and keeps it there until a
+      // genuinely new message arrives.
       .addSelect(
-        `(SELECT COUNT(*) FROM chat_room_messages m WHERE ${t('m.room_id')} = ${t('r.id')} AND m.type <> 'progress' AND (p.last_read_at IS NULL OR m.created_at > p.last_read_at))`,
+        `(SELECT COUNT(*) FROM chat_room_messages m WHERE ${t('m.room_id')} = ${t('r.id')} AND m.type <> 'progress' AND (p.last_read_at IS NULL OR m.created_at > p.last_read_at) AND (p.cleared_at IS NULL OR m.created_at > p.cleared_at))`,
         'unread_count',
       )
+      // Surface the caller's cleared_at into the raw projection so the
+      // last_message_preview pick below can skip messages older than the cut.
+      .addSelect('p.cleared_at', 'cleared_at')
       .orderBy("COALESCE(r.last_message_at, '1970-01-01')", 'DESC')
       .getRawAndEntities();
 
@@ -169,6 +177,16 @@ export class RoomCrudService {
       participantsByRoom.set(p.room_id, arr);
     }
 
+    // Per-room map of cleared_at for the calling user (one row per room from
+    // the inner join). Used both to decide whether the cached lastMsgRows
+    // pick survives the cut and to short-circuit the unread badge.
+    const clearedAtByRoom = new Map<string, Date | null>();
+    for (let i = 0; i < rooms.length; i++) {
+      const raw = raws[i];
+      const v = raw['cleared_at'];
+      clearedAtByRoom.set(rooms[i].id, v ? new Date(v) : null);
+    }
+
     const results = rooms.map((room, idx) => {
       const raw = raws[idx];
       const unreadCount = parseInt(raw['unread_count'] ?? '0', 10) || 0;
@@ -184,9 +202,14 @@ export class RoomCrudService {
         if (partner) dmPartnerName = resolveName(partner.participant_type, partner.participant_id);
       }
 
+      // Hide preview text when the cached "last message" predates the user's
+      // own Clear cutoff. We don't refetch a different lastMsg from the
+      // backlog — Clear is meant to wipe the visible history for this viewer,
+      // so an older message surfacing as the preview would defeat the point.
       let lastMessagePreview: string | null = null;
       const lastMsg = lastMsgByRoom.get(room.id);
-      if (lastMsg) {
+      const clearedAt = clearedAtByRoom.get(room.id) || null;
+      if (lastMsg && (!clearedAt || lastMsg.created_at > clearedAt)) {
         const senderName = resolveName(lastMsg.sender_type, lastMsg.sender_id);
         const preview = `${senderName}: ${lastMsg.content}`;
         lastMessagePreview = preview.length > 80 ? preview.slice(0, 77) + '...' : preview;

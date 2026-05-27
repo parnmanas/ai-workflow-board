@@ -432,6 +432,23 @@ export default function ChatPage() {
     );
   }
 
+  function handleRoomCleared(roomId: string) {
+    // Per-viewer Clear (ticket 1ae77f55) — drop the local message buffer and
+    // zero this room's sidebar metadata so the active-room view + room list
+    // line up with what the next listRooms/getMessages would return.
+    if (roomId === activeRoomIdRef.current) {
+      setMessages([]);
+    }
+    setRooms((prev) =>
+      prev.map((r) =>
+        r.id === roomId
+          ? { ...r, unread_count: 0, last_message_preview: null }
+          : r,
+      ),
+    );
+    markBadgeRead('chat', roomId);
+  }
+
   function handleParticipantsAdded(_roomId: string) {
     // Refresh rooms to pick up new participant info
     api.listChatRooms().then(setRooms).catch(() => {});
@@ -505,6 +522,7 @@ export default function ChatPage() {
             onLeaveRoom={handleLeaveRoom}
             onRoomRenamed={handleRoomRenamed}
             onParticipantsAdded={handleParticipantsAdded}
+            onRoomCleared={handleRoomCleared}
             isMobile={true}
             onBack={() => {
               setMobileView('list');
@@ -554,6 +572,7 @@ export default function ChatPage() {
             onLeaveRoom={handleLeaveRoom}
             onRoomRenamed={handleRoomRenamed}
             onParticipantsAdded={handleParticipantsAdded}
+            onRoomCleared={handleRoomCleared}
             isMobile={false}
             participantCount={participantCount}
             participants={roomParticipants}
