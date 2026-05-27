@@ -168,6 +168,11 @@ export class AgentWorkloadService {
       // bound-parameter pattern as `c.is_terminal` so sqlite (0/1) and
       // postgres (true/false) both bind correctly.
       .andWhere('t.pending_user_action = :falseVal')
+      // Blocked-by-ticket exclusion (ticket 48d14fff): a ticket pending on
+      // prerequisites must not anchor focus either — its triggers are dropped
+      // downstream and it auto-resumes when the prereqs land on terminal. Same
+      // bound-parameter pattern as the pending_user_action gate above.
+      .andWhere('t.pending_on_tickets = :falseVal')
       // Archived tickets (ticket 9b44526b) are excluded for the same reason:
       // they're no longer actionable workflow items, so they must not anchor
       // focus or block backlog promotion. Trigger emission is also gated

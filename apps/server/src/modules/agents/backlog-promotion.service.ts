@@ -209,6 +209,11 @@ export class BacklogPromotionService implements OnModuleInit {
     const candidates = await ticketRepo.createQueryBuilder('t')
       .where('t.column_id IN (:...ids)', { ids: intakeColIds })
       .andWhere('t.pending_user_action = :falseVal', { falseVal: false })
+      // Blocked-by-ticket exclusion (ticket 48d14fff): an intake ticket
+      // pending on prerequisites must not consume a promotion slot — the
+      // trigger emit gate would drop every wake-up, leaving the active column
+      // held by a ghost. Same reasoning as the pending_user_action exclusion.
+      .andWhere('t.pending_on_tickets = :falseVal', { falseVal: false })
       // Archived intake tickets (ticket 9b44526b) must not consume a
       // promotion slot — same reasoning as the pending_user_action
       // exclusion: the trigger emit gate downstream would drop every

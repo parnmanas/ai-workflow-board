@@ -16,6 +16,7 @@ import { LogService } from '../../services/log.service';
 import { ActivityService, activityEvents } from '../../services/activity.service';
 import { GitHubConnectorService, parseGitHubUrl } from '../../services/github-connector.service';
 import { AgentWorkloadService } from './agent-workload.service';
+import { TicketPrerequisitesService } from '../tickets/ticket-prerequisites.service';
 import { priorityIndex } from './priority';
 
 // Sentinel actor written onto auto-advance `moved` activities. Deliberately
@@ -62,6 +63,7 @@ export class TriggerLoopService implements OnModuleInit {
     private readonly logService: LogService,
     private readonly agentWorkload: AgentWorkloadService,
     private readonly activityService: ActivityService,
+    private readonly ticketPrerequisites: TicketPrerequisitesService,
   ) {}
 
   onModuleInit() {
@@ -74,6 +76,20 @@ export class TriggerLoopService implements OnModuleInit {
 
   private async _handleActivity(log: ActivityLog): Promise<void> {
     if (!log.ticket_id) return;
+
+    // Prereq cascade (ticket 48d14fff) — a ticket that other tickets depend on
+    // was archived. Drop those links, re-evaluate each dependent, and wake any
+    // that just lost their last open prereq. Runs ahead of the trigger-source
+    // switch ('archived' is neither moved/comment/update so it would return
+    // below) AND ahead of the system-actor gate (the auto-archiver sweep writes
+    // a system-ish actor and we still want the cascade). Delete is handled at
+    // the delete chokepoints themselves — by the time a 'deleted' activity
+    // fires, the row + its FK-cascaded links are already gone, so there is
+    // nothing left here to read.
+    if (log.action === 'archived') {
+      await this._resumePrerequisiteDependents(log.ticket_id, log.actor_id || '', 'prerequisite_archived');
+      return;
+    }
 
     let triggerSource: string;
     if (log.action === 'moved') {
@@ -117,6 +133,14 @@ export class TriggerLoopService implements OnModuleInit {
     if (isTerminal) {
       if (log.action === 'moved' && ticket.next_ticket_id) {
         await this._dispatchNextTicket(ticket, log.actor_id || '');
+      }
+      // Prereq auto-resume (ticket 48d14fff): this ticket just landed on a
+      // terminal column. Wake every dependent whose full prereq set is now
+      // satisfied. The backward M:N pull counterpart to next_ticket's forward
+      // 1:1 push above — both fire on the same terminal-landing event but a
+      // dependent stays blocked until ALL its prereqs are terminal.
+      if (log.action === 'moved') {
+        await this._resumePrerequisiteDependents(ticket.id, log.actor_id || '', 'prerequisite_reached');
       }
       // Self-improvement: when a ticket lands on a terminal column AND the
       // board opts in via `self_improvement_mode != 'off'`, dispatch a
@@ -187,9 +211,11 @@ export class TriggerLoopService implements OnModuleInit {
     // and wait for a human. The trigger-emit gate below also drops events for
     // pending tickets, but `_autoAdvanceUnassigned` is a separate side-channel
     // (it doesn't call `_emitTrigger`) so it needs its own short-circuit here.
-    if (ticket.pending_user_action) {
-      this.logService.info('MCP', 'auto_advance skipped (ticket pending user action)', {
+    if (ticket.pending_user_action || ticket.pending_on_tickets) {
+      this.logService.info('MCP', 'auto_advance skipped (ticket pending)', {
         ticket_id: ticket.id, current_column_id: col.id,
+        pending_user_action: !!ticket.pending_user_action,
+        pending_on_tickets: !!ticket.pending_on_tickets,
       });
       return;
     }
@@ -384,6 +410,74 @@ export class TriggerLoopService implements OnModuleInit {
    * `actorId` is the original mover so the activity log audit trail still
    * points at the human/agent who closed the source ticket.
    */
+  /**
+   * Prereq auto-resume sweep (ticket 48d14fff). A ticket either reached a
+   * terminal column (`prerequisite_reached`) or was archived
+   * (`prerequisite_archived`). Re-evaluate every dependent's full prereq set;
+   * for each dependent that just lost its last open prereq, the service flips
+   * `pending_on_tickets=false`. Here we log the unblock and wake the
+   * dependent's current-column role holders.
+   *
+   *   - `reached` keeps the links (the prereq is satisfied in place and stays
+   *     visible in get_ticket); `archived` drops them.
+   *   - The unblock activity is written with a `system` actor on purpose so it
+   *     does NOT re-enter `_handleActivity` and double-dispatch — this method
+   *     dispatches explicitly via `dispatchCurrentColumn`.
+   *   - `actorId` is the mover/archiver, carried onto the dispatch so the
+   *     audit trail attributes the wake to the action that unblocked it.
+   *
+   * Edge note (moving a prereq back OUT of terminal): deliberately NOT handled
+   * here. Once a dependent has been unblocked, re-blocking it is a human /
+   * agent decision (per spec) — we never auto-re-block.
+   */
+  private async _resumePrerequisiteDependents(
+    prereqTicketId: string,
+    actorId: string,
+    source: 'prerequisite_reached' | 'prerequisite_archived',
+  ): Promise<void> {
+    let unblocked: string[];
+    try {
+      unblocked =
+        source === 'prerequisite_reached'
+          ? await this.ticketPrerequisites.onPrerequisiteReached(prereqTicketId)
+          : await this.ticketPrerequisites.onPrerequisiteRemoved(prereqTicketId);
+    } catch (e) {
+      this.logService.warn('MCP', 'prereq auto-resume evaluation failed (continuing)', {
+        err: String(e), prereq_ticket_id: prereqTicketId, source,
+      });
+      return;
+    }
+    if (unblocked.length === 0) return;
+    this.logService.info('MCP', 'prereq auto-resume unblocked dependents', {
+      prereq_ticket_id: prereqTicketId, source, dependents: unblocked,
+    });
+    for (const dependentId of unblocked) {
+      try {
+        await this.activityService.logActivity({
+          entity_type: 'ticket', entity_id: dependentId, action: 'updated',
+          field_changed: 'pending_on_tickets',
+          old_value: 'true', new_value: 'false',
+          ticket_id: dependentId,
+          // System actor — keeps this row from re-entering _handleActivity and
+          // double-dispatching; we dispatch explicitly below.
+          actor_id: 'system', actor_name: 'Auto-Resume',
+          trigger_source: source,
+        });
+      } catch (e) {
+        this.logService.warn('MCP', 'prereq unblock activity write failed (continuing)', {
+          err: String(e), ticket_id: dependentId,
+        });
+      }
+      try {
+        await this.dispatchCurrentColumn(dependentId, 'prerequisite_resolved', actorId);
+      } catch (e) {
+        this.logService.warn('MCP', 'prereq auto-resume dispatch failed (continuing)', {
+          err: String(e), ticket_id: dependentId,
+        });
+      }
+    }
+  }
+
   private async _dispatchNextTicket(sourceTicket: Ticket, actorId: string): Promise<void> {
     const nextId = sourceTicket.next_ticket_id;
     if (!nextId) return;
@@ -660,9 +754,11 @@ export class TriggerLoopService implements OnModuleInit {
     const ticket = await ticketRepo.findOne({ where: { id: ticketId } });
     if (!ticket || !ticket.column_id) return { emitted: 0 };
 
-    if (ticket.pending_user_action) {
+    if (ticket.pending_user_action || ticket.pending_on_tickets) {
       this.logService.info('MCP', 'dispatchCurrentColumn skipped (ticket still pending)', {
         ticket_id: ticket.id, source: triggerSource,
+        pending_user_action: !!ticket.pending_user_action,
+        pending_on_tickets: !!ticket.pending_on_tickets,
       });
       return { emitted: 0 };
     }
@@ -911,9 +1007,20 @@ Keep follow-up ticket titles tight and outcome-shaped:
       const freshForGate = await this.dataSource
         .getRepository(Ticket)
         .findOne({ where: { id: ticket.id } });
-      if (freshForGate?.pending_user_action) {
-        this.logService.info('MCP', 'agent_trigger dropped (ticket pending user action)', {
+      // Two distinct pending flavors funnel through this one gate (ticket
+      // 48d14fff): `pending_user_action` (waiting on a human) and
+      // `pending_on_tickets` (blocked behind prerequisite tickets). Either
+      // drops the trigger. The audit action is suffixed so a grep can tell the
+      // two apart — `_pending_user` vs `_pending_tickets`.
+      if (freshForGate?.pending_user_action || freshForGate?.pending_on_tickets) {
+        const onTickets = !freshForGate.pending_user_action && !!freshForGate.pending_on_tickets;
+        const dropAction = onTickets
+          ? 'agent_trigger_dropped_pending_tickets'
+          : 'agent_trigger_dropped_pending_user';
+        this.logService.info('MCP', 'agent_trigger dropped (ticket pending)', {
           ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource,
+          pending_user_action: !!freshForGate.pending_user_action,
+          pending_on_tickets: !!freshForGate.pending_on_tickets,
           pending_set_at: freshForGate.pending_set_at
             ? new Date(freshForGate.pending_set_at).toISOString()
             : null,
@@ -927,7 +1034,7 @@ Keep follow-up ticket titles tight and outcome-shaped:
             ticket_id: ticket.id,
             actor_id: 'system',
             actor_name: 'TriggerLoopService',
-            action: 'agent_trigger_dropped_pending_user',
+            action: dropAction,
             new_value: `agent=${agentId} reason=${(freshForGate.pending_reason || '').slice(0, 200)}`,
             role,
             trigger_source: triggerSource,
