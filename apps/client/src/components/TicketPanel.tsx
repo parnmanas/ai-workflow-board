@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Ticket, Agent, Channel, ActivityLog, CommentType, User, TicketAttachmentMeta, Resource, RepoBranch } from '../types';
+import { Ticket, Agent, Channel, ActivityLog, CommentType, User, TicketAttachmentMeta, Resource, RepoBranch, TicketPrerequisiteRow } from '../types';
 import { api, TicketRoleAssignmentRow, getActiveWorkspaceId } from '../api';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
@@ -589,6 +589,16 @@ export default function TicketPanel({
   const [pendingReasonDraft, setPendingReasonDraft] = useState<string>('');
   const [userResponseDraft, setUserResponseDraft] = useState<string>('');
   const [pendingBusy, setPendingBusy] = useState(false);
+  // Prerequisites (ticket 48d14fff) — the "blocked-by another ticket" link
+  // set. Seeded from activeTicket.prerequisites (present only on the
+  // loadTicketFull path), then refreshed via api.listPrerequisites so the
+  // section is authoritative regardless of which load path supplied the prop.
+  // prereqPickId / prereqReason back the inline "add prerequisite" picker.
+  const [prereqRows, setPrereqRows] = useState<TicketPrerequisiteRow[]>(activeTicket.prerequisites || []);
+  const [prereqBusy, setPrereqBusy] = useState(false);
+  const [prereqPickId, setPrereqPickId] = useState<string>('');
+  const [prereqReason, setPrereqReason] = useState<string>('');
+  const [prereqError, setPrereqError] = useState<string | null>(null);
   const [activities, setActivities] = useState<ActivityLog[]>([]);
   // Modal preview can be an image OR a video — discriminate by mimetype so
   // the modal picks the right element. `null` mimetype falls back to <img>
@@ -738,6 +748,57 @@ export default function TicketPanel({
       setPendingBusy(false);
     }
   }, [activeTicket.id, userResponseDraft, onAddComment]);
+
+  // Load the prerequisite link set (ticket 48d14fff). Seeds from the ticket
+  // payload first (loadTicketFull populates it; the board listing doesn't),
+  // then fetches fresh so the section is authoritative. Refetched on
+  // updated_at so an agent adding/clearing a prereq elsewhere converges here.
+  useEffect(() => {
+    setPrereqRows(activeTicket.prerequisites || []);
+    setPrereqError(null);
+    setPrereqPickId('');
+    setPrereqReason('');
+    let cancelled = false;
+    api.listPrerequisites(activeTicket.id)
+      .then(res => { if (!cancelled) setPrereqRows(res?.prerequisites || []); })
+      .catch(() => { /* keep seeded list — non-blocking */ });
+    return () => { cancelled = true; };
+  }, [activeTicket.id, activeTicket.updated_at]);
+
+  // Add a prerequisite from the inline picker. The REST endpoint returns the
+  // full updated ticket (incl. the refreshed `prerequisites` array), so adopt
+  // that directly rather than issuing a follow-up GET. The SSE board_update
+  // (fired by the prerequisite_added activity) keeps pending_on_tickets and
+  // the board card in sync.
+  const handleAddPrerequisite = useCallback(async () => {
+    const pid = prereqPickId.trim();
+    if (!pid) return;
+    setPrereqBusy(true);
+    setPrereqError(null);
+    try {
+      const updated = await api.addPrerequisites(activeTicket.id, [pid], prereqReason.trim() || undefined);
+      setPrereqRows(updated?.prerequisites || []);
+      setPrereqPickId('');
+      setPrereqReason('');
+    } catch (e: any) {
+      setPrereqError(e?.message || 'Failed to add prerequisite');
+    } finally {
+      setPrereqBusy(false);
+    }
+  }, [activeTicket.id, prereqPickId, prereqReason]);
+
+  const handleRemovePrerequisite = useCallback(async (prereqId: string) => {
+    setPrereqBusy(true);
+    setPrereqError(null);
+    try {
+      const updated = await api.removePrerequisite(activeTicket.id, prereqId);
+      setPrereqRows(updated?.prerequisites || []);
+    } catch (e: any) {
+      setPrereqError(e?.message || 'Failed to remove prerequisite');
+    } finally {
+      setPrereqBusy(false);
+    }
+  }, [activeTicket.id]);
 
   // Fetch role assignments for the active ticket. Refetched on
   // activeTicket.updated_at so writes through onSetRoleAssignment (which
@@ -1827,6 +1888,14 @@ export default function TicketPanel({
               {tab === 'user' && activeTicket.pending_user_action && (
                 <span aria-hidden="true" style={{ fontSize: '11px' }}>⏸</span>
               )}
+              {/* Blocked-by-tickets indicator (ticket 48d14fff) — shown only
+                  when the ticket is blocked on prereqs but NOT also pending a
+                  human (the ⏸ above already covers the human case). The chain
+                  link nudges the user toward the Prerequisites section on the
+                  Detail tab. */}
+              {tab === 'user' && activeTicket.pending_on_tickets && !activeTicket.pending_user_action && (
+                <span aria-hidden="true" title="Blocked by prerequisite tickets" style={{ fontSize: '11px', color: tokens.colors.info }}>⛓</span>
+              )}
             </button>
           );
         })}
@@ -2038,6 +2107,139 @@ export default function TicketPanel({
                     <option key={t.id} value={t.id}>{t.title}</option>
                   ))}
               </select>
+            </div>
+
+            {/* Prerequisites (ticket 48d14fff) — the M:N "blocked-by another
+                ticket" set. Distinct from Next Ticket above (forward 1:1 push):
+                this ticket stays parked (pending_on_tickets) until EVERY prereq
+                here reaches a terminal column, at which point the trigger loop
+                auto-resumes it — no human unpend. Each row shows a status pill
+                (satisfied / blocked / removed) so the user can see at a glance
+                what's still holding the ticket. */}
+            <div style={{ marginBottom: 14 }}>
+              <label style={labelStyle}>
+                Prerequisites
+                {prereqRows.length > 0 && (() => {
+                  const open = prereqRows.filter(r => r.prerequisite && !r.prerequisite.archived_at && !r.prerequisite.is_terminal).length;
+                  return open > 0
+                    ? ` · ${open} blocking, auto-resumes when all done`
+                    : ' · all satisfied';
+                })()}
+              </label>
+
+              {prereqRows.length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 8 }}>
+                  {prereqRows.map(row => {
+                    const p = row.prerequisite;
+                    const archived = !!p?.archived_at;
+                    const satisfied = !!p?.is_terminal && !archived;
+                    // Status pill: green=satisfied (terminal), muted=archived
+                    // (link auto-drops), blue=still blocking, red=missing row.
+                    const pill = !p
+                      ? { label: 'MISSING', bg: tokens.colors.warningBg, fg: tokens.colors.warningLight }
+                      : archived
+                        ? { label: 'ARCHIVED', bg: tokens.colors.surface, fg: tokens.colors.textMuted }
+                        : satisfied
+                          ? { label: 'SATISFIED', bg: tokens.colors.successBg, fg: tokens.colors.successLight }
+                          : { label: p.column_name ? p.column_name.toUpperCase() : 'BLOCKING', bg: tokens.colors.surface, fg: tokens.colors.info };
+                    return (
+                      <div
+                        key={row.prerequisite_ticket_id}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: 8,
+                          background: tokens.colors.surfaceCard,
+                          border: `1px solid ${tokens.colors.border}`,
+                          borderRadius: tokens.radii.md,
+                          padding: '6px 8px',
+                        }}
+                      >
+                        <span style={{
+                          flexShrink: 0,
+                          fontSize: '9px', fontWeight: 800, letterSpacing: '0.4px',
+                          padding: '1px 6px', borderRadius: tokens.radii.sm,
+                          textTransform: 'uppercase',
+                          background: pill.bg, color: pill.fg,
+                        }}>{pill.label}</span>
+                        <button
+                          type="button"
+                          onClick={() => onSelectTicket && p && onSelectTicket(p.id)}
+                          title={p ? 'Open prerequisite ticket' : undefined}
+                          disabled={!p || !onSelectTicket}
+                          style={{
+                            flex: 1, minWidth: 0, textAlign: 'left',
+                            background: 'transparent', border: 'none', padding: 0,
+                            color: tokens.colors.textStrong, fontSize: '12px',
+                            cursor: (p && onSelectTicket) ? 'pointer' : 'default',
+                            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                          }}
+                        >{p ? p.title : `(deleted) ${row.prerequisite_ticket_id}`}</button>
+                        <button
+                          type="button"
+                          onClick={() => handleRemovePrerequisite(row.prerequisite_ticket_id)}
+                          disabled={prereqBusy}
+                          title="Remove this prerequisite"
+                          style={{
+                            flexShrink: 0,
+                            background: 'transparent', border: 'none',
+                            color: tokens.colors.textMuted, fontSize: '14px',
+                            cursor: prereqBusy ? 'not-allowed' : 'pointer', lineHeight: 1,
+                            padding: '0 2px',
+                          }}
+                        >×</button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Add picker — same boardTickets source as Next Ticket, minus
+                  self and tickets already linked as prerequisites. */}
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                <select
+                  value={prereqPickId}
+                  onChange={e => setPrereqPickId(e.target.value)}
+                  style={{
+                    flex: 1, minWidth: 0,
+                    background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
+                    padding: '5px 8px', color: tokens.colors.textStrong, fontSize: '12px', cursor: 'pointer',
+                  }}
+                >
+                  <option value="">— Add a prerequisite ticket —</option>
+                  {(boardTickets || [])
+                    .filter(t => t.id !== activeTicket.id && !prereqRows.some(r => r.prerequisite_ticket_id === t.id))
+                    .map(t => (
+                      <option key={t.id} value={t.id}>{t.title}</option>
+                    ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={handleAddPrerequisite}
+                  disabled={prereqBusy || !prereqPickId}
+                  style={{
+                    flexShrink: 0,
+                    background: tokens.colors.accent, color: 'white', border: 'none',
+                    borderRadius: tokens.radii.md, padding: '5px 12px', fontSize: '12px', fontWeight: 600,
+                    cursor: (prereqBusy || !prereqPickId) ? 'not-allowed' : 'pointer',
+                    opacity: (prereqBusy || !prereqPickId) ? 0.5 : 1,
+                  }}
+                >Add</button>
+              </div>
+              {prereqPickId && (
+                <input
+                  type="text"
+                  value={prereqReason}
+                  onChange={e => setPrereqReason(e.target.value)}
+                  placeholder="Optional: why is this a prerequisite?"
+                  style={{
+                    width: '100%', marginTop: 6,
+                    background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
+                    padding: '5px 8px', color: tokens.colors.textStrong, fontSize: '12px', fontFamily: 'inherit',
+                  }}
+                />
+              )}
+              {prereqError && (
+                <div style={{ marginTop: 6, fontSize: '11px', color: tokens.colors.warningLight }}>{prereqError}</div>
+              )}
             </div>
 
             {/* Created By */}
@@ -2432,6 +2634,35 @@ export default function TicketPanel({
              whole thread. When the flag is clear the tab still acts as the
              primary entry point for parking the ticket. */
           <div>
+            {/* Blocked-by-tickets banner (ticket 48d14fff). Shown whenever the
+                ticket is parked on prerequisites — independent of the human
+                pending flag, so a ticket that is BOTH waiting on a human and
+                blocked by tickets shows this banner above the human-action UI.
+                Unlike pending_user_action there's no Resume button: it clears
+                itself automatically when every prerequisite reaches terminal.
+                The list + Add control live on the Detail tab's Prerequisites
+                section. */}
+            {activeTicket.pending_on_tickets && (
+              <div style={{
+                background: tokens.colors.surfaceCard,
+                border: `2px dashed ${tokens.colors.info}`,
+                borderRadius: tokens.radii.lg,
+                padding: '12px 14px',
+                marginBottom: 16,
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                  <span aria-hidden="true" style={{ fontSize: '16px' }}>⛓</span>
+                  <span style={{ fontSize: '13px', fontWeight: 700, color: tokens.colors.info, letterSpacing: '0.4px' }}>
+                    BLOCKED BY TICKETS
+                  </span>
+                </div>
+                <div style={{ fontSize: '12px', color: tokens.colors.textSecondary, lineHeight: 1.5 }}>
+                  Waiting on {prereqRows.filter(r => r.prerequisite && !r.prerequisite.archived_at && !r.prerequisite.is_terminal).length || prereqRows.length} prerequisite ticket(s).
+                  This resumes <strong>automatically</strong> once every prerequisite reaches a terminal column — no action needed.
+                  See the <strong>Prerequisites</strong> section on the Detail tab to view or change them.
+                </div>
+              </div>
+            )}
             {activeTicket.pending_user_action ? (
               <>
                 <div style={{

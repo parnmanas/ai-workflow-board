@@ -147,6 +147,27 @@ export interface TicketBaseRepo {
   type: string;
 }
 
+// One "blocked-by another ticket" link (ticket 48d14fff). The dependent
+// ticket (`ticket_id`) stays parked until `prerequisite_ticket_id` reaches a
+// terminal column. `prerequisite` is the server-hydrated snapshot used by the
+// detail panel to render a status pill without a second round-trip; it is
+// null only for a stale link whose prereq row was deleted.
+export interface TicketPrerequisiteRow {
+  ticket_id: string;
+  prerequisite_ticket_id: string;
+  created_at: string;
+  created_by: string;
+  reason: string;
+  prerequisite?: {
+    id: string;
+    title: string;
+    column_id: string | null;
+    column_name: string;
+    is_terminal: boolean;
+    archived_at: string | null;
+  } | null;
+}
+
 // Result of GET /api/resources/:id/branches — git ls-remote output for a
 // repository resource, with the default branch (if configured) pinned first.
 export interface RepoBranch {
@@ -345,6 +366,16 @@ export interface Ticket {
   pending_reason?: string;
   pending_set_at?: string | null;
   pending_set_by?: string;
+  // "Blocked by another ticket" flag (ticket 48d14fff) — distinct from
+  // pending_user_action so the board/panel render a separate badge and the
+  // trigger loop auto-resumes when every prerequisite lands on a terminal
+  // column (no human unpend). `prerequisites` is the hydrated link set
+  // (loadTicketFull only). `prerequisite_count` is the cheap total-link count
+  // attached to board listings so the card can show a dependency badge
+  // without loading the full set.
+  pending_on_tickets?: boolean;
+  prerequisites?: TicketPrerequisiteRow[];
+  prerequisite_count?: number;
   // Server-hydrated snapshot of next_ticket_id (loadTicketFull only) —
   // title + current column name so the Next Ticket picker can render the
   // link without a second round-trip. null when unset or when the linked

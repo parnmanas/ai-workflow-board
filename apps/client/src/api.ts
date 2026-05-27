@@ -33,6 +33,7 @@ import type {
   ManagedAgentCreateBody,
   Agent,
   TicketAttachmentMeta,
+  TicketPrerequisiteRow,
   UserNotificationChannel,
 } from './types';
 
@@ -336,6 +337,25 @@ export const api = {
 
   deleteTicket: (id: string) =>
     request<any>(`/tickets/${id}`, { method: 'DELETE' }),
+
+  // ─── Ticket prerequisites (ticket 48d14fff) ────────────
+  // The "blocked-by another ticket" M:N surface. add/remove return the full
+  // updated ticket (loadTicketFull shape, incl. the refreshed `prerequisites`
+  // array + pending_on_tickets flag) so the panel can update without a
+  // follow-up GET.
+  listPrerequisites: (ticketId: string) =>
+    request<{ ticket_id: string; prerequisites: TicketPrerequisiteRow[] }>(
+      `/tickets/${ticketId}/prerequisites`,
+    ),
+
+  addPrerequisites: (ticketId: string, prerequisite_ticket_ids: string[], reason?: string) =>
+    request<any>(`/tickets/${ticketId}/prerequisites`, {
+      method: 'POST',
+      body: JSON.stringify({ prerequisite_ticket_ids, ...(reason ? { reason } : {}) }),
+    }),
+
+  removePrerequisite: (ticketId: string, prereqId: string) =>
+    request<any>(`/tickets/${ticketId}/prerequisites/${prereqId}`, { method: 'DELETE' }),
 
   // ─── Child Tickets (Subtasks) ──────────────────────────
   createChildTicket: (parentId: string, data: {

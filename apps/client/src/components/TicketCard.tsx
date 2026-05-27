@@ -31,6 +31,12 @@ export default function TicketCard({ ticket, index, onClick, focusHolders }: Tic
   const totalChildren = (ticket.children || []).length;
   const progress = totalChildren > 0 ? (doneChildren / totalChildren) * 100 : 0;
   const isPending = !!ticket.pending_user_action;
+  // Blocked-by-tickets state (ticket 48d14fff) — distinct from the human
+  // pending flag. Auto-resumes when prereqs finish, so it gets a calmer
+  // info-coloured chain badge rather than the warning outline reserved for
+  // human-blocked tickets.
+  const isBlockedByTickets = !!ticket.pending_on_tickets;
+  const prereqCount = ticket.prerequisite_count || 0;
 
   return (
     <Draggable draggableId={`ticket-${ticket.id}`} index={index}>
@@ -91,6 +97,26 @@ export default function TicketCard({ ticket, index, onClick, focusHolders }: Tic
                   }}
                   aria-label="Pending user action"
                 >⏸ USER</span>
+              )}
+              {/* Blocked-by-tickets badge (ticket 48d14fff). Info-coloured
+                 chain link so it reads as "waiting, auto-resumes" rather than
+                 the warning USER badge that means "a human must act". Count
+                 comes from the board serializer's prerequisite_count. */}
+              {isBlockedByTickets && (
+                <span
+                  title={`Blocked by ${prereqCount || 'prerequisite'} ticket${prereqCount === 1 ? '' : 's'} — resumes automatically when they finish`}
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 2,
+                    padding: '1px 6px',
+                    borderRadius: tokens.radii.sm,
+                    background: tokens.colors.info,
+                    color: '#0b1220',
+                    fontSize: '9px', fontWeight: 800,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.5px',
+                  }}
+                  aria-label="Blocked by prerequisite tickets"
+                >⛓{prereqCount > 0 ? ` ${prereqCount}` : ''}</span>
               )}
               {/* Tier-1 G stale-question badge — surfaces tickets blocked
                  on an answer for >24h so they don't quietly rot. Pure
