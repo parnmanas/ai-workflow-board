@@ -20,6 +20,7 @@ import { LogService } from '../../services/log.service';
 import { MentionService } from '../../services/mention.service';
 import { PresenceService } from '../../services/presence.service';
 import { TriggerLoopService } from '../agents/trigger-loop.service';
+import { TicketPrerequisitesService } from './ticket-prerequisites.service';
 import { TicketRoleAssignmentService } from '../workspace-roles/ticket-role-assignment.service';
 import {
   MAX_COMMENT_ATTACHMENT_SIZE,
@@ -66,6 +67,7 @@ export class TicketsController {
     private readonly triggerLoop: TriggerLoopService,
     private readonly presence: PresenceService,
     private readonly ticketRoleAssignments: TicketRoleAssignmentService,
+    private readonly ticketPrerequisites: TicketPrerequisitesService,
   ) {}
 
   private resolveCreator(req: any, body: any): { created_by: string; created_by_type: string; created_by_id: string } {
@@ -1280,6 +1282,17 @@ export class TicketsController {
     const position = ticket.position;
     const parentId = ticket.parent_id;
 
+    // Prereq cascade (ticket 48d14fff): drop links pointing AT this ticket and
+    // re-evaluate dependents BEFORE remove() — the FK ON DELETE CASCADE would
+    // otherwise wipe the link rows first, leaving nothing to read. Mirrors the
+    // MCP delete_ticket tool.
+    let unblockedDependents: string[] = [];
+    try {
+      unblockedDependents = await this.ticketPrerequisites.onPrerequisiteRemoved(ticket.id);
+    } catch (e) {
+      this.logService.warn('Ticket', 'delete prereq cascade failed (continuing)', { err: String(e), ticket_id: ticket.id });
+    }
+
     // Strip comment_attachment Resources before the ticket cascade removes
     // the comment rows they were tied to — Resource has no FK back to Ticket.
     await deleteCommentAttachmentsForTicket(this.dataSource, ticket.id);
@@ -1292,7 +1305,75 @@ export class TicketsController {
       await shiftTicketPositions(this.ticketRepo, { column_id: columnId }, position, -1);
     }
 
+    // Wake the now-unblocked dependents on their current column.
+    for (const depId of unblockedDependents) {
+      try {
+        await this.triggerLoop.dispatchCurrentColumn(depId, 'prerequisite_resolved', '');
+      } catch (e) {
+        this.logService.warn('Ticket', 'delete unblock dispatch failed (continuing)', { err: String(e), ticket_id: depId });
+      }
+    }
+
     return res.json({ success: true });
+  }
+
+  // ─── Ticket prerequisites (ticket 48d14fff) ─────────────
+  // The "blocked-by another ticket" M:N surface. The detail panel's
+  // Prerequisites section drives these; the link set itself is also folded
+  // into GET /tickets/:id via loadTicketFull, so the panel renders without an
+  // extra call and only hits these endpoints on mutation.
+
+  @Get('tickets/:id/prerequisites')
+  async listPrerequisites(@Param('id') id: string, @Res() res: Response) {
+    await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
+    const rows = await this.ticketPrerequisites.listFull(id);
+    return res.json({ ticket_id: id, prerequisites: rows });
+  }
+
+  @Post('tickets/:id/prerequisites')
+  async addPrerequisites(@Param('id') id: string, @Body() body: any, @Req() req: any, @Res() res: Response) {
+    const ids: string[] = Array.isArray(body?.prerequisite_ticket_ids)
+      ? body.prerequisite_ticket_ids
+      : (body?.prerequisite_ticket_id ? [body.prerequisite_ticket_id] : []);
+    const actor = req.currentUser;
+    try {
+      await this.ticketPrerequisites.addPrerequisites(id, ids, {
+        reason: body?.reason,
+        actorId: actor?.id,
+        actorName: actor?.name,
+      });
+    } catch (e: any) {
+      return res.status(e?.status === 400 ? 400 : 500).json({ error: e?.message || 'Failed to add prerequisites' });
+    }
+    const updated = await loadTicketFull(this.dataSource, id);
+    return res.json(updated);
+  }
+
+  @Delete('tickets/:id/prerequisites/:prereqId')
+  async removePrerequisite(@Param('id') id: string, @Param('prereqId') prereqId: string, @Req() req: any, @Res() res: Response) {
+    const actor = req.currentUser;
+    const before = await this.ticketRepo.findOne({ where: { id } });
+    if (!before) return res.status(404).json({ error: 'Ticket not found' });
+    const wasPending = !!before.pending_on_tickets;
+    let result: { removed: boolean; pending_on_tickets: boolean };
+    try {
+      result = await this.ticketPrerequisites.removePrerequisite(id, prereqId, {
+        actorId: actor?.id,
+        actorName: actor?.name,
+      });
+    } catch (e: any) {
+      return res.status(e?.status === 400 ? 400 : 500).json({ error: e?.message || 'Failed to remove prerequisite' });
+    }
+    // Wake the ticket's current-column holders only on a real true → false flip.
+    if (result.removed && wasPending && !result.pending_on_tickets) {
+      try {
+        await this.triggerLoop.dispatchCurrentColumn(id, 'prerequisite_resolved', actor?.id || '');
+      } catch (e) {
+        this.logService.warn('Ticket', 'remove prerequisite unblock dispatch failed (continuing)', { err: String(e), ticket_id: id });
+      }
+    }
+    const updated = await loadTicketFull(this.dataSource, id);
+    return res.json(updated);
   }
 
   // ─── Ticket-level attachments ───────────────────────────
