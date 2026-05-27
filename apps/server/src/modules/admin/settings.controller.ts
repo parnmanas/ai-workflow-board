@@ -1,9 +1,12 @@
 import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
-import { Controller, Get, Post, Patch, Body, Res, UseGuards } from '@nestjs/common';
-import { Response } from 'express';
+import { Controller, Get, Post, Patch, Body, Req, Res, UseGuards } from '@nestjs/common';
+import { Request, Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { IsNull, Repository } from 'typeorm';
 import { SystemSetting } from '../../entities/SystemSetting';
+import { Workspace } from '../../entities/Workspace';
+import { Board } from '../../entities/Board';
+import { BoardColumn } from '../../entities/BoardColumn';
 import { AdminGuard } from '../../common/guards/admin.guard';
 import { encrypt, decrypt } from '../../services/encryption.service';
 import { maskSecret } from '../../common/mask';
@@ -70,6 +73,9 @@ function applyLiveSettingChange(key: string, rawValue: string): void {
 export class SettingsController {
   constructor(
     @InjectRepository(SystemSetting) private readonly settingRepo: Repository<SystemSetting>,
+    @InjectRepository(Workspace) private readonly wsRepo: Repository<Workspace>,
+    @InjectRepository(Board) private readonly boardRepo: Repository<Board>,
+    @InjectRepository(BoardColumn) private readonly colRepo: Repository<BoardColumn>,
   ) {}
 
   @Get()
@@ -245,6 +251,189 @@ export class SettingsController {
       board: { id: board?.id, name: board?.name, workspace_id: actualWorkspaceId },
       column: { id: column.id, name: column.name },
     });
+  }
+
+  /**
+   * Cascade discovery endpoints powering the admin SettingsManager
+   * workspace/board/column dropdowns. The same handler covers two modes:
+   *
+   *   - `local`:  the configured URL is empty or matches the request's
+   *               own origin → query this server's TypeORM repositories
+   *               directly (no HTTP round-trip, no API key required).
+   *   - `remote`: any other URL → speak MCP to the remote (reusing
+   *               `callRemoteMcpTool` from the existing forwarder path).
+   *               The API key may be a fresh value the admin just typed
+   *               or the stored encrypted value when they kept the
+   *               masked input untouched.
+   *
+   * Response shape is uniform for both modes:
+   *   `{ mode: 'local'|'remote', items: [{ id, name }] }`
+   * so the client renders the same dropdown regardless of target.
+   */
+  @Post('self-improvement/discover/workspaces')
+  async discoverWorkspaces(@Body() body: any, @Req() req: Request, @Res() res: Response) {
+    const target = await this.resolveDiscoveryTarget(body, req);
+    if (target.mode === 'error') return res.status(target.status).json({ error: target.message });
+
+    if (target.mode === 'local') {
+      const workspaces = await this.wsRepo.find({ order: { name: 'ASC' } });
+      return res.json({
+        mode: 'local',
+        items: workspaces.map((w) => ({ id: w.id, name: w.name })),
+      });
+    }
+
+    const result = await callRemoteMcpTool(target.url, target.apiKey, 'list_workspaces', {});
+    if (!result.ok) {
+      return res.status(502).json({
+        error: `Remote ${result.kind || 'tool'} failure: ${result.message || 'unknown'}`,
+      });
+    }
+    const list: any[] = Array.isArray(result.data) ? result.data : [];
+    return res.json({
+      mode: 'remote',
+      items: list.map((w: any) => ({ id: String(w?.id || ''), name: String(w?.name || '') }))
+        .filter((w) => w.id),
+    });
+  }
+
+  @Post('self-improvement/discover/boards')
+  async discoverBoards(@Body() body: any, @Req() req: Request, @Res() res: Response) {
+    const workspaceId = String(body?.workspace_id || '').trim();
+    if (!workspaceId) return res.status(400).json({ error: 'workspace_id is required' });
+
+    const target = await this.resolveDiscoveryTarget(body, req);
+    if (target.mode === 'error') return res.status(target.status).json({ error: target.message });
+
+    if (target.mode === 'local') {
+      const boards = await this.boardRepo.find({
+        where: { workspace_id: workspaceId, archived_at: IsNull() },
+        order: { name: 'ASC' },
+      });
+      return res.json({
+        mode: 'local',
+        items: boards.map((b) => ({ id: b.id, name: b.name })),
+      });
+    }
+
+    const result = await callRemoteMcpTool(target.url, target.apiKey, 'list_boards', { workspace_id: workspaceId });
+    if (!result.ok) {
+      return res.status(502).json({
+        error: `Remote ${result.kind || 'tool'} failure: ${result.message || 'unknown'}`,
+      });
+    }
+    const list: any[] = Array.isArray(result.data) ? result.data : [];
+    // Remote list_boards does not filter archived, but admins only care about
+    // active boards — drop archived rows so the dropdown matches local mode.
+    return res.json({
+      mode: 'remote',
+      items: list
+        .filter((b: any) => !b?.archived_at)
+        .map((b: any) => ({ id: String(b?.id || ''), name: String(b?.name || '') }))
+        .filter((b) => b.id),
+    });
+  }
+
+  @Post('self-improvement/discover/columns')
+  async discoverColumns(@Body() body: any, @Req() req: Request, @Res() res: Response) {
+    const boardId = String(body?.board_id || '').trim();
+    if (!boardId) return res.status(400).json({ error: 'board_id is required' });
+
+    const target = await this.resolveDiscoveryTarget(body, req);
+    if (target.mode === 'error') return res.status(target.status).json({ error: target.message });
+
+    if (target.mode === 'local') {
+      const cols = await this.colRepo.find({
+        where: { board_id: boardId },
+        order: { position: 'ASC' },
+      });
+      return res.json({
+        mode: 'local',
+        items: cols.map((c) => ({ id: c.id, name: c.name })),
+      });
+    }
+
+    const result = await callRemoteMcpTool(target.url, target.apiKey, 'get_board', { board_id: boardId });
+    if (!result.ok) {
+      return res.status(502).json({
+        error: `Remote ${result.kind || 'tool'} failure: ${result.message || 'unknown'}`,
+      });
+    }
+    const cols: any[] = Array.isArray(result.data?.columns) ? result.data.columns : [];
+    // Remote get_board returns columns already sorted by position.
+    return res.json({
+      mode: 'remote',
+      items: cols
+        .map((c: any) => ({ id: String(c?.id || ''), name: String(c?.name || '') }))
+        .filter((c) => c.id),
+    });
+  }
+
+  /**
+   * Normalize a discovery request body into either a local-DB query or a
+   * remote MCP call target. Local mode wins when the user-provided URL is
+   * empty or matches the incoming request's own origin so admins can point
+   * the self-improvement config at *this* instance without standing up a
+   * separate API key. For remote mode, the API key is either taken from
+   * `body.api_key` (when the admin typed a fresh value) or pulled from the
+   * stored encrypted setting (when the input still holds the masked value).
+   */
+  private async resolveDiscoveryTarget(
+    body: any,
+    req: Request,
+  ): Promise<
+    | { mode: 'local' }
+    | { mode: 'remote'; url: string; apiKey: string }
+    | { mode: 'error'; status: number; message: string }
+  > {
+    const rawUrl = String(body?.url || '').trim().replace(/\/$/, '');
+    if (!rawUrl || isSelfUrl(rawUrl, req)) return { mode: 'local' };
+
+    let providedKey = String(body?.api_key || '').trim();
+    if (!providedKey || isMasked(providedKey)) {
+      const stored = await this.settingRepo.findOne({
+        where: { key: 'self_improvement.remote_awb_api_key' },
+      });
+      if (stored?.value) {
+        try {
+          providedKey = decrypt(stored.value);
+        } catch {
+          return { mode: 'error', status: 400, message: 'Stored API key failed to decrypt — re-enter it.' };
+        }
+      } else {
+        providedKey = '';
+      }
+    }
+    if (!providedKey) {
+      return {
+        mode: 'error',
+        status: 400,
+        message: 'API key is required when targeting a remote AWB instance.',
+      };
+    }
+    return { mode: 'remote', url: rawUrl, apiKey: providedKey };
+  }
+}
+
+/**
+ * True when `url` points at the instance currently serving `req`. Used by
+ * the discovery endpoints so an admin can configure self_improvement to
+ * file tickets on *this* server without a second-trip MCP call (and without
+ * needing to mint an API key against itself). Comparison is origin-only
+ * (protocol + host + port) — paths are ignored because the configured URL
+ * is the base, not an endpoint.
+ */
+function isSelfUrl(url: string, req: Request): boolean {
+  try {
+    const parsed = new URL(url);
+    const reqProtocol = String(req.protocol || 'http').toLowerCase();
+    const reqHost = String(req.get('host') || '').toLowerCase();
+    if (!reqHost) return false;
+    const incoming = `${parsed.protocol}//${parsed.host}`.toLowerCase();
+    const here = `${reqProtocol}://${reqHost}`;
+    return incoming === here;
+  } catch {
+    return false;
   }
 }
 
