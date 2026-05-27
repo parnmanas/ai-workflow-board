@@ -31,6 +31,7 @@ interface RoomHeaderActionsProps {
   onRenameCancel: () => void;
   onRenameConfirm: (name: string) => void;
   onLeave: () => void;
+  onClear: () => void;
   onAddPeople: () => void;
 }
 
@@ -41,6 +42,7 @@ function RoomHeaderActions({
   onRenameCancel,
   onRenameConfirm,
   onLeave,
+  onClear,
   onAddPeople,
 }: RoomHeaderActionsProps) {
   const [renameValue, setRenameValue] = useState(room.name || '');
@@ -118,16 +120,25 @@ function RoomHeaderActions({
 
   return (
     <div style={{ display: 'flex', gap: 8 }}>
+      {/* Add People stays group-only — DMs are fixed at 2 participants. */}
       {room.type === 'group' && (
-        <>
-          <button onClick={onAddPeople} style={ghostButton}>
-            Add People
-          </button>
-          <button onClick={onRenameStart} style={ghostButton}>
-            Rename
-          </button>
-        </>
+        <button onClick={onAddPeople} style={ghostButton}>
+          Add People
+        </button>
       )}
+      {/* Rename is allowed for DMs too so users can tag multi-rooms with
+          the same partner ("Roadmap" / "Casual" / "On-call"). */}
+      <button onClick={onRenameStart} style={ghostButton}>
+        Rename
+      </button>
+      <button
+        onClick={onClear}
+        aria-label="Clear conversation"
+        title="Clear conversation history from your view only (other participants are unaffected)"
+        style={ghostButton}
+      >
+        Clear
+      </button>
       <button
         onClick={onLeave}
         aria-label="Leave room"
@@ -149,6 +160,9 @@ export interface ChatRoomViewProps {
   onLeaveRoom: (roomId: string) => void;
   onRoomRenamed: (roomId: string, name: string) => void;
   onParticipantsAdded: (roomId: string) => void;
+  // Per-viewer Clear (ticket 1ae77f55) — parent wipes local message state
+  // for the room and zeroes its sidebar metadata.
+  onRoomCleared: (roomId: string) => void;
   isMobile: boolean;
   onBack?: () => void;
   participantCount?: number;
@@ -165,6 +179,7 @@ export default function ChatRoomView({
   onLeaveRoom,
   onRoomRenamed,
   onParticipantsAdded,
+  onRoomCleared,
   isMobile,
   onBack,
   participantCount = 0,
@@ -197,6 +212,22 @@ export default function ChatRoomView({
     onRoomRenamed(room.id, name);
   }
 
+  async function handleClear() {
+    if (!room) return;
+    const confirmed = window.confirm(
+      "Clear this conversation's history from your view? Other participants are unaffected.",
+    );
+    if (!confirmed) return;
+    try {
+      await api.clearChatRoom(room.id);
+      onRoomCleared(room.id);
+    } catch {
+      // best-effort — if the server call fails the next room load will
+      // simply show the unchanged history. We don't show a toast here
+      // because the action is reversible by ignoring the failure.
+    }
+  }
+
   if (!room) {
     return (
       <div
@@ -220,9 +251,11 @@ export default function ChatRoomView({
     );
   }
 
+  // Custom room name wins for DMs too — multi-rooms with the same partner
+  // rely on the custom name to disambiguate.
   const roomDisplayName =
     room.type === 'dm'
-      ? (room.dm_partner_name || room.name || 'Direct Message')
+      ? (room.name || room.dm_partner_name || 'Direct Message')
       : (room.name || 'Unnamed Group');
 
   const headerActions = isRenaming ? null : (
@@ -233,6 +266,7 @@ export default function ChatRoomView({
       onRenameCancel={() => setIsRenaming(false)}
       onRenameConfirm={handleRenameConfirm}
       onLeave={handleLeave}
+      onClear={handleClear}
       onAddPeople={() => setShowAddPeople(true)}
     />
   );
@@ -274,6 +308,7 @@ export default function ChatRoomView({
             onRenameCancel={() => setIsRenaming(false)}
             onRenameConfirm={handleRenameConfirm}
             onLeave={handleLeave}
+            onClear={handleClear}
             onAddPeople={() => setShowAddPeople(true)}
           />
         </div>

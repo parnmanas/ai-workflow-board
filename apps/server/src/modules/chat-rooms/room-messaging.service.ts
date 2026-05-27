@@ -98,8 +98,17 @@ export class RoomMessagingService {
     // read agent-to-agent rooms they're not a member of (workspace-wide chat
     // monitoring). Caller (controller) must enforce its own permission check
     // before passing observer=true; this service trusts that flag.
+    let clearedAt: Date | null = null;
     if (!options?.observer) {
       await this.membership.requireActiveParticipant(roomId, userId);
+      // Per-viewer Clear cutoff (ticket 1ae77f55). When set, drop messages
+      // older than the cut so the user sees a fresh thread until new
+      // messages arrive. Observer mode bypasses (admins monitoring a room
+      // they're not in have no participant row of their own to honour).
+      const participant = await this.participantRepo.findOne({
+        where: { room_id: roomId, participant_id: userId, participant_type: 'user', left_at: IsNull() },
+      });
+      clearedAt = participant?.cleared_at ?? null;
     }
 
     const cappedLimit = Math.min(limit, 200);
@@ -109,6 +118,10 @@ export class RoomMessagingService {
       .where('m.room_id = :roomId', { roomId })
       .orderBy('m.created_at', 'DESC')
       .limit(cappedLimit);
+
+    if (clearedAt) {
+      qb.andWhere('m.created_at > :clearedAt', { clearedAt });
+    }
 
     if (options?.excludeProgress) {
       qb.andWhere("m.type <> 'progress'");
@@ -543,6 +556,37 @@ export class RoomMessagingService {
       member_ids: memberIds,
       agent_member_ids: agentMemberIds,
     });
+  }
+
+  /**
+   * Per-viewer "Clear conversation" (ticket 1ae77f55) — sets the calling
+   * user's cleared_at on the participant row to NOW(). After this:
+   *   - getMessages filters out anything older than the cut.
+   *   - listRooms' unread_count + last_message_preview honour the same cut.
+   *   - Other participants are unaffected (no rows deleted).
+   *
+   * No SSE event is emitted: the effect is strictly per-user, so peers don't
+   * need to know. (A future enhancement could broadcast a 'cleared'
+   * chat_room_update on member_ids = {userId} so the same user's other tabs
+   * sync immediately, but the in-room markRead path already keeps badges
+   * coherent across tabs after the next visible activity.)
+   */
+  async clearRoomForUser(roomId: string, userId: string): Promise<{ cleared_at: string }> {
+    const participant = await this.participantRepo.findOne({
+      where: {
+        room_id: roomId,
+        participant_id: userId,
+        participant_type: 'user',
+        left_at: IsNull(),
+      },
+    });
+    if (!participant) {
+      throw makeError(403, 'Not an active participant in this room');
+    }
+    const now = new Date();
+    await this.participantRepo.update(participant.id, { cleared_at: now });
+    this.logService.info('ChatRooms', `User ${userId} cleared room ${roomId}`);
+    return { cleared_at: now.toISOString() };
   }
 
   /**

@@ -44,6 +44,7 @@ import { RoomMembershipService } from '../../chat-rooms/room-membership.service'
 import { RoomMessagingService } from '../../chat-rooms/room-messaging.service';
 import type { TicketRoleAssignmentService } from '../../workspace-roles/ticket-role-assignment.service';
 import type { ActionsService } from '../../actions/actions.service';
+import { TicketPrerequisitesService } from '../../tickets/ticket-prerequisites.service';
 
 /**
  * Minimal surface that MCP tools need from the logging subsystem.
@@ -99,6 +100,11 @@ export interface ToolContext {
   // unpend in that mode degrades to a no-op for the dispatch with a warn log,
   // since standalone has no live agent session to push to anyway.
   triggerLoopService?: TriggerLoopService;
+  // Ticket 48d14fff: prerequisite ("blocked-by ticket") mutations. Present in
+  // both modes — the standalone builder constructs a thin instance directly
+  // on the DataSource since the service is stateless over dataSource +
+  // activityService. Used by ticket-prerequisite-tools.
+  ticketPrerequisitesService?: TicketPrerequisitesService;
 }
 
 /**
@@ -150,6 +156,10 @@ export function createStandaloneContext(dataSource: DataSource): ToolContext {
     mentionService,
   );
 
+  // Prerequisite service — stateless over dataSource + activityService, so a
+  // direct instantiation matches the DI singleton's behavior in standalone mode.
+  const ticketPrerequisitesService = new TicketPrerequisitesService(dataSource as any, activityService);
+
   return {
     dataSource,
     activityService,
@@ -160,5 +170,6 @@ export function createStandaloneContext(dataSource: DataSource): ToolContext {
     logger,
     roomMembershipService,
     roomMessagingService,
+    ticketPrerequisitesService,
   };
 }

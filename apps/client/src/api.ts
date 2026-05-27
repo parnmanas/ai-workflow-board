@@ -33,6 +33,7 @@ import type {
   ManagedAgentCreateBody,
   Agent,
   TicketAttachmentMeta,
+  TicketPrerequisiteRow,
   UserNotificationChannel,
 } from './types';
 
@@ -336,6 +337,25 @@ export const api = {
 
   deleteTicket: (id: string) =>
     request<any>(`/tickets/${id}`, { method: 'DELETE' }),
+
+  // ─── Ticket prerequisites (ticket 48d14fff) ────────────
+  // The "blocked-by another ticket" M:N surface. add/remove return the full
+  // updated ticket (loadTicketFull shape, incl. the refreshed `prerequisites`
+  // array + pending_on_tickets flag) so the panel can update without a
+  // follow-up GET.
+  listPrerequisites: (ticketId: string) =>
+    request<{ ticket_id: string; prerequisites: TicketPrerequisiteRow[] }>(
+      `/tickets/${ticketId}/prerequisites`,
+    ),
+
+  addPrerequisites: (ticketId: string, prerequisite_ticket_ids: string[], reason?: string) =>
+    request<any>(`/tickets/${ticketId}/prerequisites`, {
+      method: 'POST',
+      body: JSON.stringify({ prerequisite_ticket_ids, ...(reason ? { reason } : {}) }),
+    }),
+
+  removePrerequisite: (ticketId: string, prereqId: string) =>
+    request<any>(`/tickets/${ticketId}/prerequisites/${prereqId}`, { method: 'DELETE' }),
 
   // ─── Child Tickets (Subtasks) ──────────────────────────
   createChildTicket: (parentId: string, data: {
@@ -928,6 +948,27 @@ export const api = {
       '/admin/settings/self-improvement/test',
       { method: 'POST', body: '{}' },
     ),
+  // Cascade discovery — used by the SettingsManager workspace/board/column
+  // dropdowns. `url` empty (or matching the current origin) routes to local
+  // DB; otherwise the request body is forwarded over MCP to the remote
+  // instance. `api_key` may be omitted/masked when targeting self or when
+  // the admin hasn't edited the saved key (server falls back to the stored
+  // encrypted value in that case).
+  discoverSelfImprovementWorkspaces: (body: { url?: string; api_key?: string }) =>
+    request<{ mode: 'local' | 'remote'; items: { id: string; name: string }[] }>(
+      '/admin/settings/self-improvement/discover/workspaces',
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+  discoverSelfImprovementBoards: (body: { url?: string; api_key?: string; workspace_id: string }) =>
+    request<{ mode: 'local' | 'remote'; items: { id: string; name: string }[] }>(
+      '/admin/settings/self-improvement/discover/boards',
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+  discoverSelfImprovementColumns: (body: { url?: string; api_key?: string; board_id: string }) =>
+    request<{ mode: 'local' | 'remote'; items: { id: string; name: string }[] }>(
+      '/admin/settings/self-improvement/discover/columns',
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
 
   // ─── Admin Column Policies (ticket f886ada7) ───────────
   listColumnPolicies: () =>
@@ -976,11 +1017,20 @@ export const api = {
   listChatRooms: (scope?: 'workspace') =>
     request<ChatRoomListItem[]>(scope === 'workspace' ? '/chat-rooms?scope=workspace' : '/chat-rooms'),
 
-  createChatRoom: (participants: { participant_type: string; participant_id: string }[], name?: string) =>
-    request<ChatRoomDetail>('/chat-rooms', {
+  // Server returns `{ room: ChatRoomDetail, existing: boolean }` — unwrap so
+  // callers can dereference `room.id` directly. (Pre-dedup-removal the
+  // `existing` flag mattered to MCP callers; for the REST/UI flow same-member
+  // rooms are no longer deduped, so the envelope is just legacy noise.)
+  createChatRoom: async (
+    participants: { participant_type: string; participant_id: string }[],
+    name?: string,
+  ): Promise<ChatRoomDetail> => {
+    const result = await request<{ room: ChatRoomDetail; existing: boolean }>('/chat-rooms', {
       method: 'POST',
       body: JSON.stringify({ participants, name }),
-    }),
+    });
+    return result.room;
+  },
 
   getChatRoom: (roomId: string, observer = false) =>
     request<ChatRoomDetail>(`/chat-rooms/${roomId}${observer ? '?observer=true' : ''}`),
@@ -1087,6 +1137,15 @@ export const api = {
 
   leaveChatRoom: (roomId: string) =>
     request<void>(`/chat-rooms/${roomId}/participants/me`, { method: 'DELETE' }),
+
+  // Per-viewer "Clear conversation" (ticket 1ae77f55). Sets the caller's
+  // cleared_at on the participant row — every subsequent listRooms /
+  // getMessages call ignores older history for this user. Other participants
+  // see the room unchanged.
+  clearChatRoom: (roomId: string) =>
+    request<{ ok: boolean; cleared_at: string }>(`/chat-rooms/${roomId}/messages`, {
+      method: 'DELETE',
+    }),
 
   searchChatMessages: (workspaceId: string, query: string): Promise<any[]> =>
     request<any[]>(`/chat-rooms/search?q=${encodeURIComponent(query)}&workspace_id=${encodeURIComponent(workspaceId)}`),

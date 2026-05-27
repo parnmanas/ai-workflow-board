@@ -147,6 +147,27 @@ export interface TicketBaseRepo {
   type: string;
 }
 
+// One "blocked-by another ticket" link (ticket 48d14fff). The dependent
+// ticket (`ticket_id`) stays parked until `prerequisite_ticket_id` reaches a
+// terminal column. `prerequisite` is the server-hydrated snapshot used by the
+// detail panel to render a status pill without a second round-trip; it is
+// null only for a stale link whose prereq row was deleted.
+export interface TicketPrerequisiteRow {
+  ticket_id: string;
+  prerequisite_ticket_id: string;
+  created_at: string;
+  created_by: string;
+  reason: string;
+  prerequisite?: {
+    id: string;
+    title: string;
+    column_id: string | null;
+    column_name: string;
+    is_terminal: boolean;
+    archived_at: string | null;
+  } | null;
+}
+
 // Result of GET /api/resources/:id/branches — git ls-remote output for a
 // repository resource, with the default branch (if configured) pinned first.
 export interface RepoBranch {
@@ -345,6 +366,16 @@ export interface Ticket {
   pending_reason?: string;
   pending_set_at?: string | null;
   pending_set_by?: string;
+  // "Blocked by another ticket" flag (ticket 48d14fff) — distinct from
+  // pending_user_action so the board/panel render a separate badge and the
+  // trigger loop auto-resumes when every prerequisite lands on a terminal
+  // column (no human unpend). `prerequisites` is the hydrated link set
+  // (loadTicketFull only). `prerequisite_count` is the cheap total-link count
+  // attached to board listings so the card can show a dependency badge
+  // without loading the full set.
+  pending_on_tickets?: boolean;
+  prerequisites?: TicketPrerequisiteRow[];
+  prerequisite_count?: number;
   // Server-hydrated snapshot of next_ticket_id (loadTicketFull only) —
   // title + current column name so the Next Ticket picker can render the
   // link without a second round-trip. null when unset or when the linked
@@ -517,7 +548,10 @@ export interface ActivityRow {
 export interface ChatRoomListItem {
   id: string;
   type: 'dm' | 'group';
-  name: string;                    // group name or empty for DM
+  // Raw room.name from the server — possibly empty for un-renamed DMs. Use
+  // `name || dm_partner_name || 'Direct Message'` (DM) or `name || 'Unnamed
+  // Group'` (group) to derive the display label.
+  name: string;
   last_message_at: string | null;  // ISO-8601
   created_at: string;
   // Computed by server in room list query:
@@ -527,13 +561,27 @@ export interface ChatRoomListItem {
   // For DM rooms: the other participant's display name (per-viewer)
   dm_partner_name: string | null;
   dm_partner_type: string | null; // 'user' | 'agent'
+  // Light projection of every active participant — drives the room-list
+  // filter input (matches members by display name without an extra fetch).
+  // Server-side projection added in v0.42; older responses may omit it.
+  participants?: Array<{
+    participant_type: 'user' | 'agent';
+    participant_id: string;
+    name: string;
+  }>;
 }
 
 export interface ChatRoomDetail {
   id: string;
   type: 'dm' | 'group';
+  // Raw room.name — may be empty for un-renamed DMs. See ChatRoomListItem.name
+  // for the display-fallback contract.
   name: string;
+  // Partner display name for DMs (per-viewer); null for group rooms or when
+  // the viewer is the only active participant.
+  dm_partner_name?: string | null;
   workspace_id: string;
+  last_message_at?: string | null;
   created_at: string;
   participants: ChatRoomParticipantInfo[];
 }

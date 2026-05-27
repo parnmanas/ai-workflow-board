@@ -179,7 +179,8 @@ This ticket is in the Plan column and you were triggered as its planner. Your jo
 - **Cite the spec.** When the plan references a behaviour, link or quote the line from the ticket description / parent / referenced doc that drives it. The assignee should be able to challenge the plan against the source, not against your interpretation.
 - **No self-mention.** Planner comments must not use \`@[role:planner|...]\`. Mention only the reporter, assignee, or reviewer. Self-mentions cause recursive triggers.
 - **Re-planning is OK.** If a ticket bounces back from Review or In Progress with a "the plan was wrong" finding, treat it as a fresh plan trigger — load the latest state, refine the plan, re-hand off. Do not re-use a stale plan unchanged.
-- **Park, don't ping-pong.** When a blocking question goes to the reporter or you've decided the work should split into a follow-up ticket, call \`mcp__awb__pend_ticket\` with a one-line \`reason\` instead of leaving the ticket in Plan (or bouncing it). Parking releases the focus so other tickets advance; the User tab on the ticket panel surfaces the ask so a human can intervene without scanning comments.
+- **Park, don't ping-pong.** When a blocking question goes to the reporter, call \`mcp__awb__pend_ticket\` with a one-line \`reason\` instead of leaving the ticket in Plan (or bouncing it). Parking releases the focus so other tickets advance; the User tab on the ticket panel surfaces the ask so a human can intervene without scanning comments.
+- **Blocked on another ticket, not a human?** If the plan can only proceed once some *other* ticket finishes (an upstream refactor, a dependency that has to be built first), call \`mcp__awb__add_ticket_prerequisites(ticket_id, [<prereq id(s)>], reason)\` instead of \`pend_ticket\`. It parks the ticket the same way but **auto-resumes** the moment every prerequisite lands on a terminal column — no human \`unpend\` needed. Rule of thumb: human answer → \`pend_ticket\`; another ticket finishing → \`add_ticket_prerequisites\`.
 - If you are **not** the planner on this ticket, leave a one-line "not the planner — stopping" comment and exit. Do not \`move_ticket\`.
 `,
   },
@@ -223,20 +224,20 @@ This ticket is in the In Progress column. Implement the work on a feature branch
 
 ## When to park instead of bouncing back
 
-Sometimes the work cannot finish in this ticket and bouncing it back to To Do (or Plan) just re-fires the same agent → same column → same blocker loop. Two cases:
+Sometimes the work cannot finish in this ticket and bouncing it back to To Do (or Plan) just re-fires the same agent → same column → same blocker loop. Pick the parking tool by **what** you're waiting on:
 
 1. **Genuine human decision needed** (credentials, architectural choice with cost trade-offs, missing requirement only the reporter can fill in):
    - Leave a comment explaining what you need (mention the reporter or whoever can answer).
    - Call \`mcp__awb__pend_ticket\` with a one-line \`reason\` so the User tab on the ticket panel surfaces the ask without anyone having to read the whole comment thread.
    - Stop. Do **not** \`move_ticket\` back. Pending tickets release the agent's focus, so other tickets get worked on while this one waits.
+   - A human clears it later with \`unpend_ticket\` and the dispatch loop wakes you back up.
 
-2. **Scope overflow** — you discovered the ticket actually requires a separate piece of work that has its own lifecycle (a new entity, a refactor, an unrelated bug to fix first):
-   - File the follow-up with \`mcp__awb__create_ticket\` (same board, sensible column — Backlog or To Do). Reference this ticket's id in the new ticket's description.
-   - Decide whether the current ticket can still finish independently:
-     - **Yes** → continue here; the new ticket runs in parallel.
-     - **No** → \`pend_ticket\` with reason "blocked on <new-ticket-id>" so this ticket stays parked until the prerequisite lands. Optionally set \`next_ticket_id\` on the prerequisite to point back at this one for auto-resume.
+2. **Waiting on another ticket** — the blocker is *not* a human decision but the output of one or more other tickets that just need to finish (the perf-test job lands, the upstream refactor merges, a dependency entity gets built):
+   - File the prerequisite work if it doesn't exist yet (\`mcp__awb__create_ticket\`, referencing this ticket's id).
+   - Call \`mcp__awb__add_ticket_prerequisites(ticket_id, [<prereq id(s)>], reason)\`. This sets \`pending_on_tickets=true\` and **auto-resumes** the moment every prerequisite reaches a terminal column — no human \`unpend\` needed. Use this instead of \`pend_ticket\` whenever the blocker is another ticket.
+   - Stop. Do **not** \`move_ticket\` back. The block releases the focus exactly like a human pend, but the wake-up is automatic.
 
-Once the human answers or the prerequisite lands, the same human (or a follow-up trigger) calls \`unpend_ticket\` and the dispatch loop wakes the assignee back up.
+The rule of thumb: **human answer → \`pend_ticket\`; another ticket finishing → \`add_ticket_prerequisites\`.** If a ticket genuinely needs both, do both — either flag keeps the ticket parked until cleared.
 
 ## Notes
 

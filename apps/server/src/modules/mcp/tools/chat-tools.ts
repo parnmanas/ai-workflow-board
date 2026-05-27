@@ -244,13 +244,13 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
   // creator is auto-included; pass at least one OTHER participant.
   server.tool(
     'create_chat_room',
-    'Create a chat room (DM or group) with the given participants. Caller is auto-included so you only list the OTHER members. Two participants total → DM; three+ → group. If a DM already exists between the same two members, returns the existing room (existing=true).',
+    'Create a chat room (DM or group) with the given participants. Caller is auto-included so you only list the OTHER members. Two participants total → DM; three+ → group. Same-member DMs are not deduped — calling this twice with the same two participants creates two distinct rooms (useful for topic-tagged threads).',
     {
       participants: z.array(z.object({
         type: z.enum(['user', 'agent']).describe("Participant kind"),
         id: z.string().describe("User ID or Agent ID"),
       })).min(1).describe('Other participants to include. Caller (this agent) is added automatically.'),
-      name: z.string().optional().describe('Group room name (ignored for DMs).'),
+      name: z.string().optional().describe('Optional room name. Persisted for DMs too — when set, the client uses it in place of the partner name fallback.'),
     },
     async ({ participants, name }, extra: { sessionId?: string }) => {
       if (!roomCrudService) return err('Chat room creation is unavailable in this MCP context');

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
 import PageHeader from '../PageHeader';
@@ -55,7 +55,16 @@ export default function ChatRoomListPanel({
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Debounced search
+  // Always-visible top filter (separate from the magnifier-overlay search).
+  // Filters the room list by participant / room name client-side, and — when
+  // the text reaches ≥ 2 chars — additionally fires the same workspace
+  // message search so users can find a thread by something said inside it.
+  const [filterQuery, setFilterQuery] = useState('');
+  const [messageHits, setMessageHits] = useState<any[]>([]);
+  const [messageHitsLoading, setMessageHitsLoading] = useState(false);
+  const filterDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Debounced search (magnifier-overlay mode)
   useEffect(() => {
     if (!isSearching) return;
     if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -75,6 +84,51 @@ export default function ChatRoomListPanel({
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
   }, [searchQuery, isSearching, workspaceId]);
+
+  // Debounced message search for the always-visible filter input. Reuses the
+  // 300 ms cadence + searchChatMessages endpoint that powers the overlay.
+  useEffect(() => {
+    if (filterDebounceRef.current) clearTimeout(filterDebounceRef.current);
+    const q = filterQuery.trim();
+    if (q.length < 2) {
+      setMessageHits([]);
+      setMessageHitsLoading(false);
+      return;
+    }
+    setMessageHitsLoading(true);
+    filterDebounceRef.current = setTimeout(() => {
+      api.searchChatMessages(workspaceId, q)
+        .then((results) => setMessageHits(results))
+        .catch(() => setMessageHits([]))
+        .finally(() => setMessageHitsLoading(false));
+    }, 300);
+    return () => {
+      if (filterDebounceRef.current) clearTimeout(filterDebounceRef.current);
+    };
+  }, [filterQuery, workspaceId]);
+
+  // Client-side room filter — matches the trimmed query against the room's
+  // displayName, every active participant name, and the DM partner snapshot.
+  // Skipped when the filter is empty so the natural last-activity order is
+  // preserved.
+  const filteredRooms = useMemo(() => {
+    const q = filterQuery.trim().toLowerCase();
+    if (!q) return rooms;
+    return rooms.filter((room) => {
+      const display =
+        room.type === 'dm'
+          ? (room.name || room.dm_partner_name || '')
+          : (room.name || '');
+      if (display.toLowerCase().includes(q)) return true;
+      if (room.dm_partner_name && room.dm_partner_name.toLowerCase().includes(q)) return true;
+      if (room.participants) {
+        for (const p of room.participants) {
+          if (p.name && p.name.toLowerCase().includes(q)) return true;
+        }
+      }
+      return false;
+    });
+  }, [rooms, filterQuery]);
 
   // Escape key closes search
   useEffect(() => {
@@ -228,6 +282,59 @@ export default function ChatRoomListPanel({
         </div>
       )}
 
+      {/* Always-visible filter input — member name + ≥ 2-char message search.
+          Hidden in magnifier-overlay mode to avoid two competing inputs. */}
+      {!isSearching && (
+        <div
+          style={{
+            padding: '8px 16px',
+            borderBottom: `1px solid ${COLORS.border}`,
+            flexShrink: 0,
+            display: 'flex',
+            gap: 8,
+            alignItems: 'center',
+          }}
+        >
+          <input
+            type="text"
+            placeholder="Filter by member or message…"
+            value={filterQuery}
+            onChange={(e) => setFilterQuery(e.target.value)}
+            aria-label="Filter rooms by member name or message content"
+            style={{
+              flex: 1,
+              background: COLORS.dominant,
+              border: `1px solid ${COLORS.border}`,
+              borderRadius: tokens.radii.md,
+              padding: '6px 12px',
+              fontSize: 13,
+              color: COLORS.textPrimary,
+              outline: 'none',
+            }}
+            onFocus={(e) => (e.target.style.borderColor = COLORS.accent)}
+            onBlur={(e) => (e.target.style.borderColor = COLORS.border)}
+          />
+          {filterQuery && (
+            <button
+              onClick={() => setFilterQuery('')}
+              aria-label="Clear filter"
+              style={{
+                background: 'transparent',
+                border: 'none',
+                color: COLORS.textSecondary,
+                fontSize: 16,
+                cursor: 'pointer',
+                padding: '0 4px',
+                lineHeight: 1,
+                flexShrink: 0,
+              }}
+            >
+              ×
+            </button>
+          )}
+        </div>
+      )}
+
       <div style={{ flex: 1, overflowY: 'auto' }}>
         {isSearching ? (
           searchQuery.length < 2 ? (
@@ -290,16 +397,67 @@ export default function ChatRoomListPanel({
             </div>
           </div>
         ) : (
-          <ul role="list" style={{ listStyle: 'none', margin: 0, padding: 0 }}>
-            {rooms.map((room) => (
-              <RoomListRow
-                key={room.id}
-                room={room}
-                isActive={room.id === activeRoomId}
-                onClick={() => onSelectRoom(room.id)}
-              />
-            ))}
-          </ul>
+          <>
+            {filteredRooms.length === 0 ? (
+              <div style={{ padding: '24px 16px', textAlign: 'center', fontSize: 13, color: COLORS.textSecondary }}>
+                No rooms match this filter.
+              </div>
+            ) : (
+              <ul role="list" style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+                {filteredRooms.map((room) => (
+                  <RoomListRow
+                    key={room.id}
+                    room={room}
+                    isActive={room.id === activeRoomId}
+                    onClick={() => onSelectRoom(room.id)}
+                  />
+                ))}
+              </ul>
+            )}
+
+            {/* Inline message-search section — appears once the filter is
+                ≥ 2 chars. Click jumps to the message in its room, same as
+                the magnifier overlay flow. */}
+            {filterQuery.trim().length >= 2 && (
+              <div style={{ borderTop: `1px solid ${COLORS.border}`, marginTop: 4 }}>
+                <div
+                  style={{
+                    padding: '8px 16px',
+                    fontSize: 11,
+                    fontWeight: 600,
+                    textTransform: 'uppercase',
+                    letterSpacing: 0.5,
+                    color: COLORS.textMuted,
+                  }}
+                >
+                  Messages
+                </div>
+                {messageHitsLoading ? (
+                  <div style={{ padding: '8px 0' }}>
+                    {[1, 2].map((i) => (
+                      <div key={i} style={{ height: 40, margin: '8px 16px', background: COLORS.border, borderRadius: tokens.radii.sm }} />
+                    ))}
+                  </div>
+                ) : messageHits.length === 0 ? (
+                  <div style={{ padding: '8px 16px 16px', fontSize: 13, color: COLORS.textSecondary }}>
+                    No messages match '{filterQuery.trim()}'.
+                  </div>
+                ) : (
+                  <ul role="list" style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+                    {messageHits.map((result) => (
+                      <SearchResultRow
+                        key={result.message_id}
+                        result={result}
+                        query={filterQuery.trim()}
+                        highlightMatch={highlightMatch}
+                        onClick={() => onNavigateToMessage(result.room_id, result.message_id)}
+                      />
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>
@@ -410,8 +568,13 @@ interface RoomListRowProps {
 function RoomListRow({ room, isActive, onClick }: RoomListRowProps) {
   const [hovered, setHovered] = useState(false);
 
+  // Custom room name wins (DMs may be renamed now too — see ticket 1ae77f55);
+  // empty room.name falls back to the partner snapshot for DMs or the
+  // "Unnamed Group" placeholder for groups.
   const displayName =
-    room.type === 'dm' ? (room.dm_partner_name || room.name || 'Direct Message') : (room.name || 'Unnamed Group');
+    room.type === 'dm'
+      ? (room.name || room.dm_partner_name || 'Direct Message')
+      : (room.name || 'Unnamed Group');
 
   const initials = displayName
     .split(' ')

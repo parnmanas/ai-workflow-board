@@ -21,6 +21,7 @@ import { User } from '../../../entities/User';
 import { WorkspaceRole } from '../../../entities/WorkspaceRole';
 import { safeJsonParse } from './helpers';
 import { formatAgentDisplayName, projectTicketAttachment } from './ticket-helpers';
+import { listPrerequisitesFull } from '../../tickets/ticket-prerequisites.service';
 
 type RepoScope = DataSource | EntityManager;
 
@@ -253,6 +254,19 @@ export async function loadTicketFull(scope: RepoScope, id: string) {
     }
   } else {
     out.next_ticket = null;
+  }
+
+  // Prerequisites (ticket 48d14fff) — the M:N "blocked-by" set for the root
+  // ticket. Each row carries the prereq's title + current column + whether
+  // that column is terminal (= satisfied) so the detail panel can render
+  // status pills without a second round-trip. Surfaced on get_ticket (MCP)
+  // and the REST GET the panel uses. Failing the lookup is non-fatal — leaves
+  // an empty array. Only loaded for the root ticket (subtasks can't carry
+  // prerequisites — they have no column to resume on).
+  try {
+    out.prerequisites = await listPrerequisitesFull(scope, out.id);
+  } catch {
+    out.prerequisites = [];
   }
   return out;
 }

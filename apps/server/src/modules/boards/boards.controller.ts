@@ -6,6 +6,7 @@ import { Repository, IsNull, Not, DataSource } from 'typeorm';
 import { Board } from '../../entities/Board';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { Ticket } from '../../entities/Ticket';
+import { TicketPrerequisite } from '../../entities/TicketPrerequisite';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { DEFAULT_COLUMNS } from '../../database/database.module';
 import { DEFAULT_BOARD_ROUTING } from '../../db';
@@ -125,6 +126,30 @@ export class BoardsController {
     const allComments: any[] = [];
     for (const col of columnsWithTickets) for (const t of col.tickets) allComments.push(...t.comments);
     await expandCommentAttachments(this.dataSource, allComments);
+
+    // Prerequisite counts (ticket 48d14fff) — one grouped query for every
+    // root ticket on the board so the card can render a "blocked by N" badge
+    // without N+1 lookups. Only the total link count is attached; the card
+    // gates the badge on `pending_on_tickets` (already on the entity), so a
+    // ticket whose prereqs are all satisfied won't show it regardless.
+    const rootTicketIds: string[] = [];
+    for (const col of columnsWithTickets) for (const t of col.tickets) rootTicketIds.push(t.id);
+    if (rootTicketIds.length > 0) {
+      const counts = await this.dataSource
+        .getRepository(TicketPrerequisite)
+        .createQueryBuilder('p')
+        .select('p.ticket_id', 'ticket_id')
+        .addSelect('COUNT(*)', 'cnt')
+        .where('p.ticket_id IN (:...ids)', { ids: rootTicketIds })
+        .groupBy('p.ticket_id')
+        .getRawMany();
+      const countMap = new Map<string, number>(counts.map((r: any) => [r.ticket_id, Number(r.cnt)]));
+      for (const col of columnsWithTickets) {
+        for (const t of col.tickets) {
+          (t as any).prerequisite_count = countMap.get(t.id) || 0;
+        }
+      }
+    }
 
     return res.json({ ...board, columns: columnsWithTickets });
   }

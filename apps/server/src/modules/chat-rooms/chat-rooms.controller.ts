@@ -381,4 +381,20 @@ export class ChatRoomsController {
       return res.status(err.status || 400).json({ error: err.message });
     }
   }
+
+  // Per-viewer Clear conversation (ticket 1ae77f55). Sets cleared_at on the
+  // caller's participant row so their getMessages / listRooms preview /
+  // unread badge ignore everything before now. Other participants are
+  // unaffected — no rows are deleted.
+  @Delete(':roomId/messages')
+  @RequirePermission(PERMISSIONS.CHAT_VIEW)
+  async clearMessages(@Req() req: Request, @Res() res: Response, @Param('roomId') roomId: string) {
+    const user = (req as any).currentUser;
+    try {
+      const result = await this.messaging.clearRoomForUser(roomId, user.id);
+      return res.json({ ok: true, ...result });
+    } catch (err: any) {
+      return res.status(err.status || 400).json({ error: err.message });
+    }
+  }
 }

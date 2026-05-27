@@ -112,6 +112,10 @@ export class AllocationService {
       // skip them. Mirrors the gates inside TriggerLoopService and
       // AgentWorkloadService.
       if ((ticket as any).pending_user_action) continue;
+      // Blocked-by-ticket exclusion (ticket 48d14fff): same reasoning — a
+      // ticket waiting on prerequisite tickets has its triggers dropped
+      // downstream, so it must not appear in the agent's allocated list.
+      if ((ticket as any).pending_on_tickets) continue;
 
       // v0.41 — read role slugs straight off the column row. Replaces the
       // old `Board.routing_config[col.name.toLowerCase()]` lookup.

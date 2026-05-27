@@ -88,7 +88,7 @@ async function applyRoleAssignments(
 }
 
 export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): void {
-  const { dataSource, activityService, logger, ticketRoleAssignmentService, triggerLoopService } = ctx;
+  const { dataSource, activityService, logger, ticketRoleAssignmentService, triggerLoopService, ticketPrerequisitesService } = ctx;
 
   server.tool(
     'get_ticket',
@@ -508,7 +508,8 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
 
   server.tool(
     'pend_ticket',
-    'Park a ticket for user intervention. Sets `pending_user_action=true` plus a `reason` rendered on the ticket detail panel\'s "User" tab. While pending, the trigger loop drops every agent_trigger for this ticket, the focus selector skips it (so the agent\'s focus moves to another ticket), and BacklogPromotionService refuses to promote into this column slot. Use when a decision genuinely needs a human — typically because the ticket would otherwise loop between System and Agent columns, or because the work has to be split into a follow-up ticket. Pair with `create_ticket` when the right move is to spin up a separate ticket for a scoped follow-up.',
+    'Use ONLY when human input is required. For waiting on another ticket, use `add_ticket_prerequisites` instead (it auto-resumes when the blocker finishes — no human needed). ' +
+    'Parks a ticket for user intervention: sets `pending_user_action=true` plus a `reason` rendered on the ticket detail panel\'s "User" tab. While pending, the trigger loop drops every agent_trigger for this ticket, the focus selector skips it (so the agent\'s focus moves to another ticket), and BacklogPromotionService refuses to promote into this column slot. Use when a decision genuinely needs a human — typically because the ticket would otherwise loop between System and Agent columns, or because the work has to be split into a follow-up ticket. Pair with `create_ticket` when the right move is to spin up a separate ticket for a scoped follow-up.',
     {
       ticket_id: z.string().describe('Ticket ID to park'),
       reason: z.string().describe('Why human intervention is needed. Surfaced verbatim on the User tab so the user can act without reading the comment log. Keep it specific (e.g. "credentials needed for prod DB migration" beats "stuck").'),
@@ -606,6 +607,22 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       const columnId = ticket.column_id;
       const position = ticket.position;
 
+      // Prereq cascade (ticket 48d14fff): drop every link pointing AT this
+      // ticket and re-evaluate the dependents BEFORE the row is removed — once
+      // remove() runs the FK ON DELETE CASCADE wipes the link rows and we'd
+      // have nothing left to read. `onPrerequisiteRemoved` returns the
+      // dependents that just lost their last open prereq so we can wake them.
+      let unblockedDependents: string[] = [];
+      if (ticketPrerequisitesService) {
+        try {
+          unblockedDependents = await ticketPrerequisitesService.onPrerequisiteRemoved(ticket.id);
+        } catch (e) {
+          logger.warn('MCP', 'delete_ticket prereq cascade failed (continuing)', {
+            err: String(e), ticket_id: ticket.id,
+          });
+        }
+      }
+
       await deleteCommentAttachmentsForTicket(dataSource, ticket.id);
       await ticketRepo.remove(ticket);
 
@@ -616,7 +633,20 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
         ticket_id: ticket.id, actor_id: caller?.agentId, actor_name: caller?.agentName,
       });
 
-      return ok({ success: true, deleted_ticket_id: ticket_id });
+      // Wake the now-unblocked dependents on their current column.
+      if (triggerLoopService) {
+        for (const depId of unblockedDependents) {
+          try {
+            await triggerLoopService.dispatchCurrentColumn(depId, 'prerequisite_resolved', caller?.agentId || '');
+          } catch (e) {
+            logger.warn('MCP', 'delete_ticket unblock dispatch failed (continuing)', {
+              err: String(e), ticket_id: depId,
+            });
+          }
+        }
+      }
+
+      return ok({ success: true, deleted_ticket_id: ticket_id, unblocked_dependents: unblockedDependents });
     }
   );
 

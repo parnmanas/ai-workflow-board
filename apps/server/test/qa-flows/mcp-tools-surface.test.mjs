@@ -31,6 +31,10 @@ const EXPECTED_TOOLS = [
   'list_boards',
   'create_column',
   'ping',
+  // Ticket 48d14fff — prerequisite ("blocked-by ticket") surface.
+  'add_ticket_prerequisites',
+  'remove_ticket_prerequisite',
+  'list_ticket_prerequisites',
 ];
 
 test('MCP initialize + tools/list returns expected AWB tool surface', async (t) => {

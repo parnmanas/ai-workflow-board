@@ -118,6 +118,22 @@ export class Ticket {
   @Column({ type: 'varchar', default: '' })
   pending_set_by: string;
 
+  // "Blocked by another ticket" flag (ticket 48d14fff). Distinct from
+  // `pending_user_action` so the UI can render two different badges and the
+  // trigger loop can auto-resume the moment every prereq lands on a terminal
+  // column — no human unpend needed. Maintained by TicketPrerequisitesService:
+  //   - `add_ticket_prerequisites` sets it true (when at least one not-yet-
+  //     terminal prereq is attached) and persists a reason if the caller
+  //     supplied one.
+  //   - The auto-resume sweep flips it false when every attached prereq sits
+  //     on a terminal column, then dispatches the dependent's current-column
+  //     role-routing via `TriggerLoopService.dispatchCurrentColumn`.
+  // Combined gate `is_pending = pending_user_action || pending_on_tickets` —
+  // both flags drop agent_triggers via `_emitTrigger`'s pending check, and
+  // either flag keeps focus selector / backlog promotion off the ticket.
+  @Column({ type: 'boolean', default: false })
+  pending_on_tickets: boolean;
+
   // Soft-archive timestamp for the ticket. When non-null the ticket is
   // considered archived: excluded from board GET / SSE payloads / supervisor
   // re-push / backlog promotion / focus selector by default, mutation paths

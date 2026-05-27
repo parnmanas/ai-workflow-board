@@ -31,6 +31,15 @@ export class ChatRoomParticipant {
   @Column({ type: Date, nullable: true, default: null })
   left_at: Date | null;
 
+  // Per-viewer "Clear conversation" cutoff (ticket 1ae77f55). When set, this
+  // user's own getMessages / listRooms preview / unread query treat messages
+  // with created_at <= cleared_at as if they don't exist. The underlying rows
+  // are NOT deleted — other participants are unaffected, and re-joining
+  // (left_at set then cleared) creates a fresh row whose cleared_at starts
+  // at NULL again.
+  @Column({ type: Date, nullable: true, default: null })
+  cleared_at: Date | null;
+
   @CreateDateColumn()
   joined_at: Date;
 }

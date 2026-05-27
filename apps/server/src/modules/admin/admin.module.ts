@@ -2,6 +2,8 @@ import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { User } from '../../entities/User';
 import { Workspace } from '../../entities/Workspace';
+import { Board } from '../../entities/Board';
+import { BoardColumn } from '../../entities/BoardColumn';
 import { SystemSetting } from '../../entities/SystemSetting';
 import { LogsController } from './logs.controller';
 import { PendingUsersController } from './pending-users.controller';
@@ -14,7 +16,7 @@ import { AgentsModule } from '../agents/agents.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([User, Workspace, SystemSetting]),
+    TypeOrmModule.forFeature([User, Workspace, Board, BoardColumn, SystemSetting]),
     // AgentsModule exports StuckTicketDetectorService, which the new
     // /api/admin/stuck-tickets controller consults for current alert
     // rows / re-alert / dismiss. forwardRef defends against any future
