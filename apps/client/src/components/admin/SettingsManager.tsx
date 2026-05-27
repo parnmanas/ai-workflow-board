@@ -1,8 +1,47 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { api } from '../../api';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 import { Button, Input, Card } from '../common';
+
+interface DiscoveredItem { id: string; name: string }
+interface DiscoveryState {
+  loading: boolean;
+  mode: 'local' | 'remote' | null;
+  items: DiscoveredItem[];
+  error: string | null;
+}
+const EMPTY_DISCOVERY: DiscoveryState = { loading: false, mode: null, items: [], error: null };
+
+function isMaskedValue(v: string): boolean {
+  return typeof v === 'string' && v.includes('••••');
+}
+
+function isSelfUrl(url: string): boolean {
+  const trimmed = (url || '').trim().replace(/\/$/, '');
+  if (!trimmed) return true;
+  try {
+    const parsed = new URL(trimmed);
+    const here = `${window.location.protocol}//${window.location.host}`.toLowerCase();
+    return `${parsed.protocol}//${parsed.host}`.toLowerCase() === here;
+  } catch {
+    return false;
+  }
+}
+
+function shortLabelForUnknown(id: string): string {
+  const head = (id || '').slice(0, 8);
+  return `Unknown (${head}…)`;
+}
+
+function dropdownOptions(currentId: string, discovered: DiscoveryState): DiscoveredItem[] {
+  const out: DiscoveredItem[] = [];
+  for (const it of discovered.items) out.push(it);
+  if (currentId && !out.some((x) => x.id === currentId)) {
+    out.unshift({ id: currentId, name: shortLabelForUnknown(currentId) });
+  }
+  return out;
+}
 
 interface SettingRow {
   key: string;
@@ -28,6 +67,15 @@ export default function SettingsManager() {
   const [dirty, setDirty] = useState(false);
   const [testingRemote, setTestingRemote] = useState(false);
   const [remoteTestResult, setRemoteTestResult] = useState<RemoteTestStatus>(null);
+
+  // ─── Self-Improvement cascade discovery ────────────────────────────
+  // Three independent fetches keyed on (URL, API key) and the upstream
+  // selection. Each populates a dropdown; the user's stored id stays
+  // selected even if it no longer appears in the discovered set
+  // (rendered as an "Unknown (uuid…)" option so they can see + replace).
+  const [wsDiscovery, setWsDiscovery] = useState<DiscoveryState>(EMPTY_DISCOVERY);
+  const [boardDiscovery, setBoardDiscovery] = useState<DiscoveryState>(EMPTY_DISCOVERY);
+  const [colDiscovery, setColDiscovery] = useState<DiscoveryState>(EMPTY_DISCOVERY);
 
   const loadSettings = useCallback(async () => {
     setLoading(true);
@@ -81,6 +129,154 @@ export default function SettingsManager() {
     }
   };
 
+  // Resolve the discovery target from the live form state. The API key is
+  // only meaningful to the server when targeting a remote URL — for self
+  // mode the body field is ignored. We still send the masked value to
+  // keep the body shape uniform; the server detects masked and falls back
+  // to the stored key.
+  const remoteUrl = formValues['self_improvement.remote_awb_url'] || '';
+  const remoteApiKey = formValues['self_improvement.remote_awb_api_key'] || '';
+  const selfImprovementWorkspaceId = formValues['self_improvement.remote_awb_workspace_id'] || '';
+  const selfImprovementBoardId = formValues['self_improvement.remote_awb_board_id'] || '';
+  const selfImprovementColumnId = formValues['self_improvement.remote_awb_column_id'] || '';
+  const isLocalMode = useMemo(() => isSelfUrl(remoteUrl), [remoteUrl]);
+
+  // For remote-mode dropdowns to function before Save, the typed-but-not-yet-
+  // saved API key must reach the discover endpoints. Skip discovery when
+  // remote-mode but the key is empty AND nothing is stored (settings list
+  // returns empty string when no value is saved).
+  const storedApiKeyExists = useMemo(
+    () => !!settings.find((s) => s.key === 'self_improvement.remote_awb_api_key' && s.value),
+    [settings],
+  );
+  const remoteKeyAvailable = !isLocalMode && (
+    (remoteApiKey && !isMaskedValue(remoteApiKey)) ||  // user typed a fresh key
+    isMaskedValue(remoteApiKey) ||                       // masked → server falls back
+    storedApiKeyExists                                    // empty input but key is saved
+  );
+
+  // Debounce URL/key edits so we don't fire a discovery request per
+  // keystroke. 400ms matches the cadence used by other admin probes.
+  const debounceRef = useRef<number | null>(null);
+  const [debouncedUrl, setDebouncedUrl] = useState(remoteUrl);
+  const [debouncedKey, setDebouncedKey] = useState(remoteApiKey);
+  useEffect(() => {
+    if (debounceRef.current) window.clearTimeout(debounceRef.current);
+    debounceRef.current = window.setTimeout(() => {
+      setDebouncedUrl(remoteUrl);
+      setDebouncedKey(remoteApiKey);
+    }, 400);
+    return () => {
+      if (debounceRef.current) window.clearTimeout(debounceRef.current);
+    };
+  }, [remoteUrl, remoteApiKey]);
+
+  // Workspaces — fires whenever URL or key changes (after settings load).
+  // Remote-mode without a usable key short-circuits to a friendly error so
+  // the dropdown shows guidance instead of a stale spinner.
+  useEffect(() => {
+    if (loading) return;
+    let cancelled = false;
+    const localMode = isSelfUrl(debouncedUrl);
+    if (!localMode && !remoteKeyAvailable) {
+      setWsDiscovery({ loading: false, mode: 'remote', items: [], error: 'API key required for remote URL.' });
+      setBoardDiscovery(EMPTY_DISCOVERY);
+      setColDiscovery(EMPTY_DISCOVERY);
+      return;
+    }
+    setWsDiscovery((prev) => ({ ...prev, loading: true, error: null }));
+    api.discoverSelfImprovementWorkspaces({ url: debouncedUrl, api_key: debouncedKey })
+      .then((r) => {
+        if (cancelled) return;
+        setWsDiscovery({ loading: false, mode: r.mode, items: r.items, error: null });
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setWsDiscovery({ loading: false, mode: localMode ? 'local' : 'remote', items: [], error: err?.message || 'Discovery failed' });
+      });
+    return () => { cancelled = true; };
+  }, [loading, debouncedUrl, debouncedKey, remoteKeyAvailable]);
+
+  // Boards — depends on the selected workspace; resets when the workspace
+  // changes so the cascading state stays consistent.
+  useEffect(() => {
+    if (loading) return;
+    if (!selfImprovementWorkspaceId) {
+      setBoardDiscovery(EMPTY_DISCOVERY);
+      return;
+    }
+    let cancelled = false;
+    const localMode = isSelfUrl(debouncedUrl);
+    if (!localMode && !remoteKeyAvailable) {
+      setBoardDiscovery({ loading: false, mode: 'remote', items: [], error: 'API key required for remote URL.' });
+      return;
+    }
+    setBoardDiscovery((prev) => ({ ...prev, loading: true, error: null }));
+    api.discoverSelfImprovementBoards({ url: debouncedUrl, api_key: debouncedKey, workspace_id: selfImprovementWorkspaceId })
+      .then((r) => {
+        if (cancelled) return;
+        setBoardDiscovery({ loading: false, mode: r.mode, items: r.items, error: null });
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setBoardDiscovery({ loading: false, mode: localMode ? 'local' : 'remote', items: [], error: err?.message || 'Discovery failed' });
+      });
+    return () => { cancelled = true; };
+  }, [loading, debouncedUrl, debouncedKey, selfImprovementWorkspaceId, remoteKeyAvailable]);
+
+  // Columns — depends on the selected board.
+  useEffect(() => {
+    if (loading) return;
+    if (!selfImprovementBoardId) {
+      setColDiscovery(EMPTY_DISCOVERY);
+      return;
+    }
+    let cancelled = false;
+    const localMode = isSelfUrl(debouncedUrl);
+    if (!localMode && !remoteKeyAvailable) {
+      setColDiscovery({ loading: false, mode: 'remote', items: [], error: 'API key required for remote URL.' });
+      return;
+    }
+    setColDiscovery((prev) => ({ ...prev, loading: true, error: null }));
+    api.discoverSelfImprovementColumns({ url: debouncedUrl, api_key: debouncedKey, board_id: selfImprovementBoardId })
+      .then((r) => {
+        if (cancelled) return;
+        setColDiscovery({ loading: false, mode: r.mode, items: r.items, error: null });
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setColDiscovery({ loading: false, mode: localMode ? 'local' : 'remote', items: [], error: err?.message || 'Discovery failed' });
+      });
+    return () => { cancelled = true; };
+  }, [loading, debouncedUrl, debouncedKey, selfImprovementBoardId, remoteKeyAvailable]);
+
+  // Cascade reset: clearing a parent selection clears child selections
+  // (and `setDirty(true)` flags the form for save).
+  const handleWorkspacePick = (id: string) => {
+    setFormValues((prev) => ({
+      ...prev,
+      'self_improvement.remote_awb_workspace_id': id,
+      'self_improvement.remote_awb_board_id': '',
+      'self_improvement.remote_awb_column_id': '',
+    }));
+    setDirty(true);
+  };
+  const handleBoardPick = (id: string) => {
+    setFormValues((prev) => ({
+      ...prev,
+      'self_improvement.remote_awb_board_id': id,
+      'self_improvement.remote_awb_column_id': '',
+    }));
+    setDirty(true);
+  };
+  const handleColumnPick = (id: string) => {
+    setFormValues((prev) => ({
+      ...prev,
+      'self_improvement.remote_awb_column_id': id,
+    }));
+    setDirty(true);
+  };
+
   if (loading) {
     return <div style={{ fontSize: '13px', color: tokens.colors.textSecondary, padding: 24 }}>Loading…</div>;
   }
@@ -126,6 +322,51 @@ export default function SettingsManager() {
     boxSizing: 'border-box',
     outline: 'none',
   };
+
+  function DiscoveryDropdown(props: {
+    label: string;
+    hint: string;
+    currentId: string;
+    discovery: DiscoveryState;
+    onPick: (id: string) => void;
+    labelStyle: React.CSSProperties;
+    hintStyle: React.CSSProperties;
+    selectStyle: React.CSSProperties;
+    disabledReason: string | null;
+  }) {
+    const { label, hint, currentId, discovery, onPick, labelStyle: ls, hintStyle: hs, selectStyle: ss, disabledReason } = props;
+    const options = dropdownOptions(currentId, discovery);
+    const disabled = !!disabledReason || (discovery.items.length === 0 && !currentId && !discovery.loading && !!discovery.error);
+    const statusLine =
+      disabledReason ||
+      (discovery.loading ? 'Loading…' : null) ||
+      (discovery.error ? discovery.error : null) ||
+      (discovery.items.length === 0 && currentId
+        ? 'Saved selection no longer appears in the discovered list.'
+        : null);
+    return (
+      <div>
+        <label style={ls}>{label}</label>
+        <div style={hs}>{hint}</div>
+        <select
+          value={currentId}
+          onChange={(e) => onPick(e.target.value)}
+          disabled={disabled}
+          style={{ ...ss, opacity: disabled ? 0.6 : 1, cursor: disabled ? 'not-allowed' : 'pointer' }}
+        >
+          <option value="">{currentId ? '(Clear selection)' : '(Select…)'}</option>
+          {options.map((opt) => (
+            <option key={opt.id} value={opt.id}>{opt.name || opt.id}</option>
+          ))}
+        </select>
+        {statusLine && (
+          <div style={{ ...hs, marginTop: 4, color: discovery.error ? (tokens.colors.danger || tokens.colors.textMuted) : tokens.colors.textMuted }}>
+            {statusLine}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   function StatusDot({ enabled, enabledText, disabledText }: { enabled: boolean; enabledText: string; disabledText: string }) {
     return (
@@ -244,33 +485,27 @@ export default function SettingsManager() {
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          <Input
-            label="Remote AWB URL"
-            value={formValues['self_improvement.remote_awb_url'] || ''}
-            onChange={(e) => handleChange('self_improvement.remote_awb_url', e.target.value)}
-            placeholder="https://awb.example.com"
-          />
-          <Input
-            label="Workspace ID (on remote)"
-            value={formValues['self_improvement.remote_awb_workspace_id'] || ''}
-            onChange={(e) => handleChange('self_improvement.remote_awb_workspace_id', e.target.value)}
-            placeholder="uuid"
-          />
-          <Input
-            label="Board ID (on remote)"
-            value={formValues['self_improvement.remote_awb_board_id'] || ''}
-            onChange={(e) => handleChange('self_improvement.remote_awb_board_id', e.target.value)}
-            placeholder="uuid"
-          />
-          <Input
-            label="Column ID (on remote, typically Backlog/To-Do)"
-            value={formValues['self_improvement.remote_awb_column_id'] || ''}
-            onChange={(e) => handleChange('self_improvement.remote_awb_column_id', e.target.value)}
-            placeholder="uuid"
-          />
+          <div>
+            <Input
+              label="Remote AWB URL"
+              value={formValues['self_improvement.remote_awb_url'] || ''}
+              onChange={(e) => handleChange('self_improvement.remote_awb_url', e.target.value)}
+              placeholder="Leave empty to use this server"
+            />
+            <div style={{ ...hintStyle, marginTop: 4 }}>
+              {isLocalMode
+                ? 'Local (this server) — discovery hits the local DB directly; no API key required.'
+                : 'Remote — discovery forwards through MCP using the API key below.'}
+            </div>
+          </div>
+
           <div>
             <label style={labelStyle}>API Key (X-Agent-Key for remote AWB)</label>
-            <div style={hintStyle}>Stored encrypted. Re-enter to rotate; masked on read.</div>
+            <div style={hintStyle}>
+              {isLocalMode
+                ? 'Optional for local — the admin session authorizes discovery directly.'
+                : 'Stored encrypted. Re-enter to rotate; masked on read.'}
+            </div>
             <input
               type="password"
               value={formValues['self_improvement.remote_awb_api_key'] || ''}
@@ -279,6 +514,42 @@ export default function SettingsManager() {
               style={secretInputStyle}
             />
           </div>
+
+          <DiscoveryDropdown
+            label="Workspace (on target)"
+            hint="Pick the workspace where improvement tickets land."
+            currentId={selfImprovementWorkspaceId}
+            discovery={wsDiscovery}
+            onPick={handleWorkspacePick}
+            labelStyle={labelStyle}
+            hintStyle={hintStyle}
+            selectStyle={selectStyle}
+            disabledReason={null}
+          />
+
+          <DiscoveryDropdown
+            label="Board (on target)"
+            hint="Cascades from the workspace selection."
+            currentId={selfImprovementBoardId}
+            discovery={boardDiscovery}
+            onPick={handleBoardPick}
+            labelStyle={labelStyle}
+            hintStyle={hintStyle}
+            selectStyle={selectStyle}
+            disabledReason={selfImprovementWorkspaceId ? null : 'Pick a workspace first.'}
+          />
+
+          <DiscoveryDropdown
+            label="Column (typically Backlog / To-Do)"
+            hint="Cascades from the board selection."
+            currentId={selfImprovementColumnId}
+            discovery={colDiscovery}
+            onPick={handleColumnPick}
+            labelStyle={labelStyle}
+            hintStyle={hintStyle}
+            selectStyle={selectStyle}
+            disabledReason={selfImprovementBoardId ? null : 'Pick a board first.'}
+          />
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <Button

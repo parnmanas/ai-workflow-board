@@ -928,6 +928,27 @@ export const api = {
       '/admin/settings/self-improvement/test',
       { method: 'POST', body: '{}' },
     ),
+  // Cascade discovery — used by the SettingsManager workspace/board/column
+  // dropdowns. `url` empty (or matching the current origin) routes to local
+  // DB; otherwise the request body is forwarded over MCP to the remote
+  // instance. `api_key` may be omitted/masked when targeting self or when
+  // the admin hasn't edited the saved key (server falls back to the stored
+  // encrypted value in that case).
+  discoverSelfImprovementWorkspaces: (body: { url?: string; api_key?: string }) =>
+    request<{ mode: 'local' | 'remote'; items: { id: string; name: string }[] }>(
+      '/admin/settings/self-improvement/discover/workspaces',
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+  discoverSelfImprovementBoards: (body: { url?: string; api_key?: string; workspace_id: string }) =>
+    request<{ mode: 'local' | 'remote'; items: { id: string; name: string }[] }>(
+      '/admin/settings/self-improvement/discover/boards',
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+  discoverSelfImprovementColumns: (body: { url?: string; api_key?: string; board_id: string }) =>
+    request<{ mode: 'local' | 'remote'; items: { id: string; name: string }[] }>(
+      '/admin/settings/self-improvement/discover/columns',
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
 
   // ─── Admin Column Policies (ticket f886ada7) ───────────
   listColumnPolicies: () =>
