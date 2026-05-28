@@ -28,6 +28,26 @@ const REDACTED_BODY_KEYS = new Set([
 
 const MAX_PAYLOAD_BYTES = 10_000;
 
+// Body capture is the dominant CPU cost in this interceptor: capPayload
+// runs `JSON.stringify(responseBody)` on EVERY HTTP response that lands
+// here, and the 10-KB cap is applied AFTER serialization. A `GET /api/
+// boards/:id` response on a populated board (tens of columns × hundreds
+// of tickets × comments) is single-digit megabytes of JSON — stringifying
+// that on every poll on a NAS ARM CPU pegs node at 100% all by itself.
+// On May 2026 the AWB Synology deployment saw exactly this: node CPU
+// pinned, postgres idle, no disk pressure, every request slow. Disabling
+// body capture instantly returns headroom; the lifecycle metadata
+// (method, url, status, duration, user, headers) still records, which
+// is what 99% of incident triage actually needs.
+//
+// Defaults:
+//   off — only capture method/url/status/duration/headers.
+// Override:
+//   LOG_HTTP_BODIES='true' — restore the pre-fix behavior (full
+//   stringify, capped at MAX_PAYLOAD_BYTES). Use it temporarily for a
+//   debug session and unset afterwards.
+const CAPTURE_BODIES = (process.env.LOG_HTTP_BODIES || '').trim().toLowerCase() === 'true';
+
 function sanitizeHeaders(headers: Record<string, any> | undefined): Record<string, any> {
   if (!headers) return {};
   const out: Record<string, any> = {};
@@ -88,14 +108,17 @@ export class RequestLoggerInterceptor implements NestInterceptor {
     const start = Date.now();
 
     const reqHeaders = sanitizeHeaders(req.headers as any);
-    const reqBody = capPayload(sanitizeBody(req.body));
+    // capPayload runs JSON.stringify on the entire body before truncating —
+    // see the CAPTURE_BODIES comment at the top of this file. Compute the
+    // capped string only when the operator opted in.
+    const reqBody = CAPTURE_BODIES ? capPayload(sanitizeBody(req.body)) : undefined;
 
     return next.handle().pipe(
       tap((responseBody) => {
         const duration = Date.now() - start;
         const status = res.statusCode;
         const resHeaders = sanitizeHeaders(res.getHeaders() as any);
-        const resBody = capPayload(responseBody);
+        const resBody = CAPTURE_BODIES ? capPayload(responseBody) : undefined;
         this.logService.info('HTTP', `${method} ${url} → ${status} (${duration}ms)`, {
           user: userName,
           userId,
