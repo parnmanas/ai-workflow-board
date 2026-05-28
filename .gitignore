@@ -33,3 +33,6 @@ Thumbs.db
 
 # graphify output (run from repo root, sometimes spills here)
 graphify-out/
+
+# Other AI CLI session artifacts (untracked by design — separate from CLAUDE.md)
+AGENTS.md

@@ -649,19 +649,23 @@ async function uninstallLaunchd(options: ServiceUninstallOptions): Promise<void>
 // ─── Windows Task Scheduler ───────────────────────────────────────────
 
 function windowsTaskXml(opts: { execPath: string; nodeBin: string; user: string; isSystem: boolean }): string {
-  const { execPath, nodeBin, isSystem } = opts;
+  const { execPath, nodeBin, user, isSystem } = opts;
   // Boot-time vs logon-time trigger — system mode runs as SYSTEM at boot,
-  // user mode runs as the current user at logon. The `RestartOnFailure`
-  // settings mirror the systemd unit (5s back-off, retry 10x) so behavior
-  // is consistent across platforms.
+  // user mode runs as the current user at logon. Windows Task Scheduler's
+  // RestartOnFailure/Interval has a 1-minute minimum (PT1M) — sub-minute
+  // values like PT5S are rejected by schtasks at import time.
   const trigger = isSystem
     ? `    <BootTrigger>\n      <Enabled>true</Enabled>\n    </BootTrigger>`
     : `    <LogonTrigger>\n      <Enabled>true</Enabled>\n    </LogonTrigger>`;
-  // S-1-5-18 = LocalSystem (boot mode); S-1-5-32-545 = Users (user mode).
+  // S-1-5-18 = LocalSystem (boot mode). For user mode, InteractiveToken
+  // requires a specific user account (DOMAIN\username) — group SIDs like
+  // S-1-5-32-545 (BUILTIN\Users) are rejected by schtasks.
   const principalId = isSystem ? 'LocalSystem' : 'Author';
+  const userDomain = process.env.USERDOMAIN || process.env.COMPUTERNAME || '';
+  const userAccount = userDomain ? `${userDomain}\\${user}` : user;
   const userBlock = isSystem
     ? `      <UserId>S-1-5-18</UserId>\n      <RunLevel>HighestAvailable</RunLevel>`
-    : `      <UserId>S-1-5-32-545</UserId>\n      <LogonType>InteractiveToken</LogonType>\n      <RunLevel>LeastPrivilege</RunLevel>`;
+    : `      <UserId>${userAccount}</UserId>\n      <LogonType>InteractiveToken</LogonType>\n      <RunLevel>LeastPrivilege</RunLevel>`;
   return `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
@@ -676,17 +680,17 @@ ${userBlock}
     </Principal>
   </Principals>
   <Settings>
-    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
-    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
-    <AllowHardTerminate>true</AllowHardTerminate>
-    <StartWhenAvailable>true</StartWhenAvailable>
     <RestartOnFailure>
-      <Interval>PT5S</Interval>
+      <Interval>PT1M</Interval>
       <Count>10</Count>
     </RestartOnFailure>
-    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
     <Hidden>false</Hidden>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
   </Settings>
   <Actions Context="${principalId}">
     <Exec>
