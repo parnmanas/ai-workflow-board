@@ -9,6 +9,64 @@ import { PERMISSIONS } from '../../common/types/permissions';
 import { LogService } from '../../services/log.service';
 
 /**
+ * Public memory diagnostics — intentionally NOT guarded by Auth/Permission.
+ *
+ * Rationale: during an active memory-leak investigation an operator needs
+ * to hit this endpoint from a browser while logged out, from a curl loop
+ * without managing a session token, and from a basic uptime/health probe
+ * that has no notion of AWB sessions. The data exposed (heap counters,
+ * GC stats, per-space sizes) is process-internal but does not leak any
+ * user/agent data, credentials, or ticket content. Operationally that's
+ * the same risk profile as `/api/health`.
+ *
+ * The DESTRUCTIVE side of diagnostics — `POST /api/admin/diagnostics/
+ * heap-snapshot`, which stalls the event loop for seconds and writes a
+ * multi-GB file to disk — is kept behind the admin guard in
+ * `DiagnosticsController` below. Splitting them by HTTP path keeps the
+ * "public read, gated write" contract obvious at the route table.
+ */
+@ApiTags('diagnostics')
+@Controller('api/diagnostics')
+export class PublicDiagnosticsController {
+  @Get('memory')
+  getMemory() {
+    const memUsage = process.memoryUsage();
+    const heapStats = v8.getHeapStatistics();
+    const spaces = v8.getHeapSpaceStatistics();
+    return {
+      timestamp: new Date().toISOString(),
+      uptime_seconds: Math.round(process.uptime()),
+      units: 'bytes',
+      process: {
+        rss: memUsage.rss,
+        heap_used: memUsage.heapUsed,
+        heap_total: memUsage.heapTotal,
+        external: memUsage.external,
+        array_buffers: memUsage.arrayBuffers,
+      },
+      heap: {
+        total: heapStats.total_heap_size,
+        used: heapStats.used_heap_size,
+        executable: heapStats.total_heap_size_executable,
+        physical: heapStats.total_physical_size,
+        available: heapStats.total_available_size,
+        heap_size_limit: heapStats.heap_size_limit,
+        malloced_memory: heapStats.malloced_memory,
+        peak_malloced_memory: heapStats.peak_malloced_memory,
+        external: heapStats.external_memory,
+      },
+      spaces: spaces.map((s) => ({
+        name: s.space_name,
+        size: s.space_size,
+        used: s.space_used_size,
+        available: s.space_available_size,
+        physical: s.physical_space_size,
+      })),
+    };
+  }
+}
+
+/**
  * Runtime diagnostics for the AWB server process itself — heap usage, GC
  * pressure, on-demand heap snapshots. Used to identify the source of the
  * "Reached heap limit / FATAL ERROR" OOM crashes we saw on 2026-05-28
@@ -46,71 +104,11 @@ import { LogService } from '../../services/log.service';
 export class DiagnosticsController {
   constructor(private readonly logService: LogService) {}
 
-  /**
-   * Snapshot of process + V8 memory state. Cheap (< 1 ms), safe to poll
-   * at 30 s — 1 min intervals from an admin dashboard graph. Fields are
-   * the raw numbers V8 reports; the units note tells operators not to
-   * guess.
-   *
-   * Reading the report:
-   *   - `process.rss` is the OS-visible resident set size of the node
-   *     process. Includes code, V8 stacks, native buffers; not just
-   *     the JS heap.
-   *   - `heap.used` / `heap.total` is the V8 JS heap. The
-   *     `heap_size_limit` is the hard ceiling V8 will OOM at — by
-   *     default ~4 GB on 64-bit Linux; raised via
-   *     `--max-old-space-size`.
-   *   - `spaces[*]` breaks the heap down by V8 space. A leak in the
-   *     "old_space" or "old_large_object_space" rising monotonically
-   *     while new_space stays normal is the classic pattern; the
-   *     suspect collection holds long-lived references.
-   *   - `gc.{minor,major}` counters increase monotonically since
-   *     process start. Sampling the rate (delta over 1 min) is the
-   *     real signal — a healthy node does a handful per second under
-   *     load; thousands per minute means GC thrashing.
-   */
-  @Get('memory')
-  getMemory() {
-    const memUsage = process.memoryUsage();
-    const heapStats = v8.getHeapStatistics();
-    const spaces = v8.getHeapSpaceStatistics();
-
-    return {
-      timestamp: new Date().toISOString(),
-      uptime_seconds: Math.round(process.uptime()),
-      units: 'bytes',
-      process: {
-        rss: memUsage.rss,
-        heap_used: memUsage.heapUsed,
-        heap_total: memUsage.heapTotal,
-        external: memUsage.external,
-        array_buffers: memUsage.arrayBuffers,
-      },
-      heap: {
-        total: heapStats.total_heap_size,
-        used: heapStats.used_heap_size,
-        executable: heapStats.total_heap_size_executable,
-        physical: heapStats.total_physical_size,
-        available: heapStats.total_available_size,
-        // Hard ceiling — V8 throws "Reached heap limit" when used > limit.
-        // Raised via --max-old-space-size; default ~4 GB on 64-bit.
-        heap_size_limit: heapStats.heap_size_limit,
-        malloced_memory: heapStats.malloced_memory,
-        peak_malloced_memory: heapStats.peak_malloced_memory,
-        // External memory pressure (Buffers, ArrayBuffer-backed views).
-        // High here while heap stays normal means a native-side leak —
-        // streaming responses not being released, pg driver buffers, …
-        external: heapStats.external_memory,
-      },
-      spaces: spaces.map((s) => ({
-        name: s.space_name,
-        size: s.space_size,
-        used: s.space_used_size,
-        available: s.space_available_size,
-        physical: s.physical_space_size,
-      })),
-    };
-  }
+  // `GET memory` moved to `PublicDiagnosticsController` (route
+  // `/api/diagnostics/memory`) so an operator can hit it from a browser
+  // mid-investigation without juggling a session token. The destructive
+  // POST below stays gated — it stalls the event loop for seconds and
+  // writes a multi-GB file to disk.
 
   /**
    * Manually trigger an on-disk heap snapshot. Writes a file named
