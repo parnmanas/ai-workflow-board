@@ -157,7 +157,18 @@ export class AgentApiController {
         entity_id: lastComment.id,
         action: 'updated',
         ticket_id: ticketId,
-        actor_id: '',
+        // actor_id: 'system' — required so the trigger-loop's system-actor
+        // guard skips this activity. Without it the dedupe row landed with
+        // actor_id='' which slips past `actor_id === 'system'` AND matches
+        // `action === 'updated'` in trigger-loop's _handleActivity, so a
+        // silent-exit on an agent that's hit a hard external limit (e.g.
+        // codex usage cap) re-triggered the SAME agent → another silent-exit
+        // → another dedupe `updated` → ... a tight runaway loop. On
+        // 2026-05-28 a single ticket (ID 672b385d…) accumulated 131,068
+        // silent_exit cycles inside ~6 hours, leaking ~170 MB/min of node
+        // heap (closure + retained MCP response strings) until the server
+        // crashed with "Reached heap limit".
+        actor_id: 'system',
         actor_name: actorName,
         new_value: String(nextCount),
         field_changed: 'repeat_count',
@@ -194,7 +205,12 @@ export class AgentApiController {
       entity_id: comment.id,
       action: 'created',
       ticket_id: ticketId,
-      actor_id: '',
+      // actor_id: 'system' — see the dedupe path above for the runaway-loop
+      // rationale. The created path is rarer (only the first silent-exit
+      // for a fingerprint lands here; subsequent ones dedupe), but it's
+      // exactly as capable of self-triggering an agent that's hit a hard
+      // external limit. Treat it the same way.
+      actor_id: 'system',
       actor_name: actorName,
       new_value: content,
       field_changed: 'system',

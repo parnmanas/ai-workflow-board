@@ -97,13 +97,25 @@ export class TriggerLoopService implements OnModuleInit {
     } else if (log.entity_type === COMMENT_ENTITY && log.action === COMMENT_ACTION) {
       triggerSource = 'comment';
     } else if (log.action === 'updated') {
+      // Comment edits never re-trigger. The runaway loop on 2026-05-28 fired
+      // here: silent_exit dedupe writes a comment.updated activity (field_changed
+      // 'repeat_count'); without this guard the comment.updated landed in the
+      // ticket_update arm, woke the same agent that just silent-exited, fired
+      // another silent-exit, and so on — 131k cycles in a single afternoon. We
+      // sourced the audit row from the SAME runaway in `agent-api.controller.ts`
+      // (now stamps actor_id='system'), but the guard here is defence-in-depth:
+      // any future comment-edit path, no matter how it's stamped, is contained.
+      if (log.entity_type === COMMENT_ENTITY) return;
       triggerSource = 'ticket_update';
     } else {
       return;
     }
 
-    // Skip system-generated activity to prevent loops
-    if (log.actor_id === 'system') return;
+    // Skip system-generated activity to prevent loops. Also covers actor_id===''
+    // (the legacy default for plugin / agent-manager-emitted system events) —
+    // a real human actor always carries a UUID, so an empty string here is
+    // categorically a system emit that mustn't self-trigger.
+    if (log.actor_id === 'system' || log.actor_id === '') return;
 
     const ticketRepo = this.dataSource.getRepository(Ticket);
     const ticket = await ticketRepo.findOne({ where: { id: log.ticket_id } });
