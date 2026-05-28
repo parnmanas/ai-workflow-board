@@ -342,31 +342,36 @@ no separate per-listener leak fix is required beyond Finding-002.
 
 ## Fixes applied
 
-None yet — this PR is the audit draft only. The ticket's "작업 진행 방식"
-guideline explicitly gates code changes on reviewer triage of the findings
-above.
+Atomic, one commit per finding, per the ticket's fix-discipline rule
+("한 finding = 한 commit"). All four match the "Apply in this branch"
+split below. `tsc --noEmit` clean on `apps/server`.
 
-## Deferred (proposed)
+- `5248b22` `fix(activity): stamp actor_id='system' on policy_violation row (Finding-001)`
+- `8e872e2` `fix(mcp): dedup set_typing auto-clear timers per (agent,ticket) (Finding-002)`
+- `8ef1418` `fix(triggers): store + detach TriggerLoop activity listener (Finding-004)`
+- `66fffea` `fix(backlog): store + detach BacklogPromotion agent_idle listener (Finding-005)`
 
-Reviewer to confirm. Suggested split:
-
-**Apply in this branch** (atomic, one commit per finding, per the ticket's
-fix-discipline rules):
-
-- Finding-001 (`'' → 'system'` on policy_violation) — trivial, 1-line.
-- Finding-002 (set_typing dedup map) — medium severity, real leak surface.
-- Finding-004 + 005 (store + removeListener) — small hygiene, two files.
+## Deferred
 
 **Follow-up PR** (per the ticket's "새 invariant 강제는 다음 PR" note):
 
 - Finding-003 read-side hardening — `ActivityService.logActivity` warn
   on missing actor_id. Conceptually an invariant enforcer, not a narrow
-  cascade fix.
+  cascade fix. Per-callsite cleanup of the 13 fall-through sites is
+  separately deferrable.
 
 **Defer indefinitely**:
 
 - Finding-006 (SSE flatten coalesce) — cosmetic.
 - Finding-007 (QA test path) — test-only, no real impact.
+
+**Phase 6 (defensive observability) — separate PR**, per the ticket's
+"Phase 6 의 defensive observability 는 finding 들 fix 다 끝난 뒤 별도
+PR. 새 기능 성격이라" guideline. Scope:
+
+- 6.1 ActivityService emit-rate watcher (same `(ticket_id, action)` ≥ 20× / 10s → warn).
+- 6.2 TriggerLoop `_emitTrigger` dedup window (same `(agent, ticket, role)` ≥ 5× / 60s → warn).
+- 6.3 MemoryWatchdog leak-rate derivation (≥ 50 MB/min → warn, ≥ 100 MB/min → error).
 
 ## Reference
 
