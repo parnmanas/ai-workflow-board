@@ -1,4 +1,4 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { randomUUID } from 'crypto';
@@ -57,7 +57,15 @@ const COMMENT_ACTION = 'created';
 const COMMENT_ENTITY = 'comment';
 
 @Injectable()
-export class TriggerLoopService implements OnModuleInit {
+export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
+  // Stored reference so OnModuleDestroy can detach the listener. In
+  // production this is harmless (single init, process lives until restart),
+  // but integration test rigs build/tear down the Nest module per spec —
+  // without removal the listener count grows by one per spec until the
+  // EventEmitter's MaxListenersExceededWarning fires. Finding-004 in
+  // docs/audit/2026-05-system-cascade-audit.md.
+  private _activityListener?: (log: ActivityLog) => void;
+
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly logService: LogService,
@@ -67,11 +75,19 @@ export class TriggerLoopService implements OnModuleInit {
   ) {}
 
   onModuleInit() {
-    activityEvents.on('activity', (log: ActivityLog) => {
+    this._activityListener = (log: ActivityLog) => {
       this._handleActivity(log).catch((e: unknown) => {
         this.logService.error('MCP', 'TriggerLoop error in _handleActivity', { err: e });
       });
-    });
+    };
+    activityEvents.on('activity', this._activityListener);
+  }
+
+  onModuleDestroy() {
+    if (this._activityListener) {
+      activityEvents.removeListener('activity', this._activityListener);
+      this._activityListener = undefined;
+    }
   }
 
   private async _handleActivity(log: ActivityLog): Promise<void> {
