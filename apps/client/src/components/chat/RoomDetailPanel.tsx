@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useLayoutEffect } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
 import PageHeader from '../PageHeader';
@@ -156,6 +156,12 @@ export interface ChatRoomViewProps {
   room: ChatRoomListItem | null;
   messages: ChatRoomMessageItem[];
   loadingMessages: boolean;
+  // Older-page pagination plumbed in from ChatPage. `hasMoreMessages` gates
+  // the scroll-near-top trigger; `loadingOlderMessages` blocks re-entry while
+  // a fetch is in flight; `onLoadOlderMessages` runs the actual fetch + prepend.
+  loadingOlderMessages?: boolean;
+  hasMoreMessages?: boolean;
+  onLoadOlderMessages?: (beforeMessageId: string) => void | Promise<void>;
   onMessageSent: (msg: ChatRoomMessageItem) => void;
   onLeaveRoom: (roomId: string) => void;
   onRoomRenamed: (roomId: string, name: string) => void;
@@ -171,10 +177,18 @@ export interface ChatRoomViewProps {
   currentUserId?: string;
 }
 
+// Distance from the top (in px) at which we start fetching older history.
+// Small enough that we don't pre-fetch eagerly, large enough to hide the
+// network round-trip behind the user's scroll inertia.
+const LOAD_OLDER_THRESHOLD = 120;
+
 export default function ChatRoomView({
   room,
   messages,
   loadingMessages,
+  loadingOlderMessages = false,
+  hasMoreMessages = false,
+  onLoadOlderMessages,
   onMessageSent,
   onLeaveRoom,
   onRoomRenamed,
@@ -192,10 +206,72 @@ export default function ChatRoomView({
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
-  // Scroll to bottom on new messages
+  // Auto-scroll to bottom *only* when the tail message changes — i.e. a new
+  // message arrived (initial load, send, SSE append). Prepending older history
+  // grows the array at the head but leaves the tail id stable, so this guard
+  // suppresses the disorienting jump-to-bottom on every "load more".
+  const lastMessageIdRef = useRef<string | null>(null);
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages.length]);
+    const lastId = messages.length > 0 ? messages[messages.length - 1].id : null;
+    if (lastId !== lastMessageIdRef.current) {
+      lastMessageIdRef.current = lastId;
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages]);
+
+  // Scroll-position preservation across older-page prepends. Before triggering
+  // a fetch we capture the scroll viewport's pre-prepend scrollHeight and
+  // scrollTop; after React commits the prepended rows, useLayoutEffect runs
+  // synchronously *before* the browser paints and restores the viewer's
+  // visual offset by the height delta. Without this the list snaps to the top.
+  const prependAnchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
+  useLayoutEffect(() => {
+    const anchor = prependAnchorRef.current;
+    if (!anchor || !scrollRef.current) return;
+    const delta = scrollRef.current.scrollHeight - anchor.scrollHeight;
+    if (delta > 0) {
+      scrollRef.current.scrollTop = anchor.scrollTop + delta;
+    }
+    prependAnchorRef.current = null;
+  }, [messages]);
+
+  // Reset scroll-tracking refs whenever the room changes — otherwise a stale
+  // lastMessageIdRef from the previous room can suppress the initial
+  // scroll-to-bottom on the new room when the tail id happens to differ
+  // *after* the messages state has already been replaced.
+  useEffect(() => {
+    lastMessageIdRef.current = null;
+    prependAnchorRef.current = null;
+  }, [room?.id]);
+
+  // Scroll-near-top trigger for older-page pagination. We listen on the
+  // viewport ref rather than IntersectionObserver-on-a-sentinel because
+  // the latter fires once on mount (sentinel visible inside the empty
+  // viewport) and would spuriously kick off a fetch before the user
+  // scrolls. The threshold check + hasMoreMessages gate + loading guard
+  // together make the trigger fire only on genuine upward scroll into
+  // the load zone.
+  useEffect(() => {
+    const el = scrollRef.current;
+    const loadOlder = onLoadOlderMessages;
+    if (!el || !loadOlder) return;
+    function onScroll() {
+      if (!el || !loadOlder) return;
+      if (!hasMoreMessages) return;
+      if (loadingOlderMessages) return;
+      if (messages.length === 0) return;
+      if (el.scrollTop > LOAD_OLDER_THRESHOLD) return;
+      const oldestId = messages[0]?.id;
+      if (!oldestId) return;
+      prependAnchorRef.current = {
+        scrollHeight: el.scrollHeight,
+        scrollTop: el.scrollTop,
+      };
+      void loadOlder(oldestId);
+    }
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onScroll);
+  }, [hasMoreMessages, loadingOlderMessages, messages, onLoadOlderMessages]);
 
   async function handleLeave() {
     if (!room) return;
@@ -331,6 +407,25 @@ export default function ChatRoomView({
             </div>
           }
         />
+      )}
+
+      {/* Older-message loading banner — sits OUTSIDE the scroll viewport so
+          its appearance/disappearance doesn't perturb scrollHeight and break
+          the prepend scroll-anchor math in useLayoutEffect above. */}
+      {loadingOlderMessages && (
+        <div
+          aria-live="polite"
+          style={{
+            padding: '4px 16px',
+            textAlign: 'center',
+            fontSize: 11,
+            color: COLORS.textMuted,
+            fontStyle: 'italic',
+            flexShrink: 0,
+          }}
+        >
+          Loading older messages…
+        </div>
       )}
 
       {/* Message scroll area */}
