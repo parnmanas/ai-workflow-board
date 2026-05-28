@@ -5,7 +5,7 @@ import { Workspace } from '../../entities/Workspace';
 import { Board } from '../../entities/Board';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { SystemSetting } from '../../entities/SystemSetting';
-import { DiagnosticsController } from './diagnostics.controller';
+import { DiagnosticsController, PublicDiagnosticsController } from './diagnostics.controller';
 import { LogsController } from './logs.controller';
 import { PendingUsersController } from './pending-users.controller';
 import { SettingsController } from './settings.controller';
@@ -26,6 +26,7 @@ import { AgentsModule } from '../agents/agents.module';
   ],
   controllers: [
     DiagnosticsController,
+    PublicDiagnosticsController,
     LogsController,
     PendingUsersController,
     SettingsController,
