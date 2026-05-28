@@ -38,6 +38,11 @@ const COLORS = {
   border: tokens.colors.border,
 };
 
+// Page size for both initial load and `before=<id>` history pagination.
+// Server caps at 200 (chat-rooms.controller.ts) — 50 is a comfortable
+// scroll window without dragging the first paint.
+const MESSAGE_PAGE_SIZE = 50;
+
 // ─── ProtocolUpgradeBanner ────────────────────────────────────────────────────
 
 function ProtocolUpgradeBanner() {
@@ -95,6 +100,11 @@ export default function ChatPage() {
   const [activeRoomId, setActiveRoomId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatRoomMessageItem[]>([]);
   const [loadingMessages, setLoadingMessages] = useState(false);
+  // Older-message pagination: true while a `before=<id>` fetch is in flight.
+  const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
+  // Set to false once a fetch returns fewer than MESSAGE_PAGE_SIZE rows so
+  // the scroll listener stops asking for more.
+  const [hasMoreMessages, setHasMoreMessages] = useState(false);
   const [showNewChat, setShowNewChat] = useState(false);
   const [mobileView, setMobileView] = useState<'list' | 'room'>('list');
   const [participantCount, setParticipantCount] = useState(0);
@@ -166,6 +176,12 @@ export default function ChatPage() {
   // Load messages + mark read on room change
   useEffect(() => {
     setTypingAgents({}); // clear stale typing indicators when switching rooms
+    // Reset pagination state on every room switch so the new room starts
+    // with a clean "no older fetched yet" slate. Without this, switching
+    // from a fully-loaded room (hasMoreMessages=false) to a new room
+    // would suppress the first older-page fetch.
+    setHasMoreMessages(false);
+    setLoadingOlderMessages(false);
     if (!activeRoomId) {
       setMessages([]);
       setRoomParticipants([]);
@@ -178,9 +194,18 @@ export default function ChatPage() {
     const initialObserver = showAllRooms;
     setIsObserver(initialObserver);
     setLoadingMessages(true);
-    api.getChatRoomMessages(activeRoomId, 50, undefined, initialObserver)
-      .then((msgs) => setMessages(msgs))
-      .catch(() => setMessages([]))
+    api.getChatRoomMessages(activeRoomId, MESSAGE_PAGE_SIZE, undefined, initialObserver)
+      .then((msgs) => {
+        setMessages(msgs);
+        // A full page back implies there *might* be more older rows.
+        // Server returns in chronological order capped at MESSAGE_PAGE_SIZE,
+        // so a short page means we already hit the start of history.
+        setHasMoreMessages(msgs.length >= MESSAGE_PAGE_SIZE);
+      })
+      .catch(() => {
+        setMessages([]);
+        setHasMoreMessages(false);
+      })
       .finally(() => setLoadingMessages(false));
 
     // Fetch room detail to populate participants for @mention pill rendering
@@ -405,6 +430,45 @@ export default function ChatPage() {
     setScrollToMessageId(messageId);
   }
 
+  // Older-message loader: fetches a page of history strictly older than
+  // `beforeMessageId` and prepends it to the in-memory buffer. Uses a ref
+  // guard *and* a state flag — the ref blocks the re-entrant case where the
+  // scroll listener fires again before React commits the state update.
+  const loadingOlderRef = useRef(false);
+  const handleLoadOlderMessages = useCallback(async (beforeMessageId: string) => {
+    if (!activeRoomId) return;
+    if (loadingOlderRef.current) return;
+    loadingOlderRef.current = true;
+    setLoadingOlderMessages(true);
+    try {
+      const older = await api.getChatRoomMessages(
+        activeRoomId,
+        MESSAGE_PAGE_SIZE,
+        beforeMessageId,
+        isObserverRef.current,
+      );
+      if (older.length === 0) {
+        setHasMoreMessages(false);
+        return;
+      }
+      setMessages((prev) => {
+        // Dedup: an SSE message that arrived in between could already be
+        // present. Keep the existing copy so React diffs stay minimal.
+        const existing = new Set(prev.map((m) => m.id));
+        const fresh = older.filter((m) => !existing.has(m.id));
+        if (fresh.length === 0) return prev;
+        return [...fresh, ...prev];
+      });
+      // Short page means we hit the start of history.
+      setHasMoreMessages(older.length >= MESSAGE_PAGE_SIZE);
+    } catch {
+      // Silent failure — the user can scroll up again to retry.
+    } finally {
+      setLoadingOlderMessages(false);
+      loadingOlderRef.current = false;
+    }
+  }, [activeRoomId]);
+
   function handleMessageSent(msg: ChatRoomMessageItem) {
     // Dedup against the SSE `chat_room_message` broadcast: when the
     // server's SSE fan-out beats the POST response back to us, the
@@ -518,6 +582,9 @@ export default function ChatPage() {
             room={activeRoom}
             messages={messages}
             loadingMessages={loadingMessages}
+            loadingOlderMessages={loadingOlderMessages}
+            hasMoreMessages={hasMoreMessages}
+            onLoadOlderMessages={handleLoadOlderMessages}
             onMessageSent={handleMessageSent}
             onLeaveRoom={handleLeaveRoom}
             onRoomRenamed={handleRoomRenamed}
@@ -568,6 +635,9 @@ export default function ChatPage() {
             room={activeRoom}
             messages={messages}
             loadingMessages={loadingMessages}
+            loadingOlderMessages={loadingOlderMessages}
+            hasMoreMessages={hasMoreMessages}
+            onLoadOlderMessages={handleLoadOlderMessages}
             onMessageSent={handleMessageSent}
             onLeaveRoom={handleLeaveRoom}
             onRoomRenamed={handleRoomRenamed}
