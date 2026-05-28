@@ -29,6 +29,17 @@ services:
     environment:
       NODE_ENV: production
       PORT: 7701
+      # Memory pressure mitigation. Default V8 heap limit on Node 22 is ~4 GB;
+      # on a long-running AWB server it has been observed to crawl to 4 GB,
+      # GC-thrash at mu=0.02 (98% time in GC, pinning node at 100% CPU), then
+      # OOM-crash with "Reached heap limit". `--max-old-space-size=8192` doubles
+      # the headroom; `--heapsnapshot-near-heap-limit=2` writes the first 2
+      # snapshots automatically when V8 detects the limit is about to be hit,
+      # so a post-mortem dominator analysis is possible from `/app/data`
+      # (the awbdata volume below). Adjust 8192 lower if your NAS has tight
+      # RAM — and raise it (with extra retries) if the actual leak source is
+      # going to take a while to identify.
+      NODE_OPTIONS: '--max-old-space-size=8192 --heapsnapshot-near-heap-limit=2 --diagnostic-dir=/app/data'
       DB_TYPE: postgres
       DB_HOST: db
       DB_PORT: 5432

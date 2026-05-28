@@ -1,0 +1,171 @@
+import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
+import { Controller, Get, Post, UseGuards } from '@nestjs/common';
+import { join } from 'node:path';
+import * as v8 from 'node:v8';
+import { AuthGuard } from '../../common/guards/auth.guard';
+import { PermissionGuard } from '../../common/guards/permission.guard';
+import { RequirePermission } from '../../common/decorators/require-permission.decorator';
+import { PERMISSIONS } from '../../common/types/permissions';
+import { LogService } from '../../services/log.service';
+
+/**
+ * Runtime diagnostics for the AWB server process itself — heap usage, GC
+ * pressure, on-demand heap snapshots. Used to identify the source of the
+ * "Reached heap limit / FATAL ERROR" OOM crashes we saw on 2026-05-28
+ * (Synology NAS, node CPU pinned at 100% from GC thrashing while memory
+ * climbed steadily until V8's 4 GB old-space limit was hit).
+ *
+ * Approach: instead of speculating about which in-memory Map / Set is
+ * leaking, ship the numbers themselves. An admin polling `/diagnostics/
+ * memory` every minute sees which heap space is growing, when, and on
+ * what cadence — enough to correlate against admin-UI activity (board
+ * load, agent activity, chat traffic). When the live numbers point at a
+ * specific allocator pressure, `/diagnostics/heap-snapshot` writes a
+ * full V8 heap snapshot to `/app/data` (the awbdata volume) so a
+ * post-mortem dominator analysis in Chrome DevTools can pinpoint the
+ * retained graph.
+ *
+ * Permission: ADMIN_ACCESS only — both endpoints expose process internals
+ * (heap addresses indirectly, GC counters) that aren't useful to other
+ * roles and could in theory leak deployment fingerprints.
+ *
+ * Out of scope:
+ *   - Auto-trigger heap snapshots on threshold. Already covered by the
+ *     `--heapsnapshot-near-heap-limit` flag added in docker-compose.yml;
+ *     V8 fires the first 2 snapshots automatically when it senses an
+ *     imminent OOM. This controller's POST is the manual override.
+ *   - In-memory collection sizes (sessions Map, SSE bucket sizes, etc).
+ *     Adding size getters to each service is a wider refactor; the
+ *     heap snapshot already exposes them as dominators.
+ */
+@ApiBearerAuth('user-session')
+@ApiTags('diagnostics')
+@Controller('api/admin/diagnostics')
+@UseGuards(AuthGuard, PermissionGuard)
+@RequirePermission(PERMISSIONS.ADMIN_ACCESS)
+export class DiagnosticsController {
+  constructor(private readonly logService: LogService) {}
+
+  /**
+   * Snapshot of process + V8 memory state. Cheap (< 1 ms), safe to poll
+   * at 30 s — 1 min intervals from an admin dashboard graph. Fields are
+   * the raw numbers V8 reports; the units note tells operators not to
+   * guess.
+   *
+   * Reading the report:
+   *   - `process.rss` is the OS-visible resident set size of the node
+   *     process. Includes code, V8 stacks, native buffers; not just
+   *     the JS heap.
+   *   - `heap.used` / `heap.total` is the V8 JS heap. The
+   *     `heap_size_limit` is the hard ceiling V8 will OOM at — by
+   *     default ~4 GB on 64-bit Linux; raised via
+   *     `--max-old-space-size`.
+   *   - `spaces[*]` breaks the heap down by V8 space. A leak in the
+   *     "old_space" or "old_large_object_space" rising monotonically
+   *     while new_space stays normal is the classic pattern; the
+   *     suspect collection holds long-lived references.
+   *   - `gc.{minor,major}` counters increase monotonically since
+   *     process start. Sampling the rate (delta over 1 min) is the
+   *     real signal — a healthy node does a handful per second under
+   *     load; thousands per minute means GC thrashing.
+   */
+  @Get('memory')
+  getMemory() {
+    const memUsage = process.memoryUsage();
+    const heapStats = v8.getHeapStatistics();
+    const spaces = v8.getHeapSpaceStatistics();
+
+    return {
+      timestamp: new Date().toISOString(),
+      uptime_seconds: Math.round(process.uptime()),
+      units: 'bytes',
+      process: {
+        rss: memUsage.rss,
+        heap_used: memUsage.heapUsed,
+        heap_total: memUsage.heapTotal,
+        external: memUsage.external,
+        array_buffers: memUsage.arrayBuffers,
+      },
+      heap: {
+        total: heapStats.total_heap_size,
+        used: heapStats.used_heap_size,
+        executable: heapStats.total_heap_size_executable,
+        physical: heapStats.total_physical_size,
+        available: heapStats.total_available_size,
+        // Hard ceiling — V8 throws "Reached heap limit" when used > limit.
+        // Raised via --max-old-space-size; default ~4 GB on 64-bit.
+        heap_size_limit: heapStats.heap_size_limit,
+        malloced_memory: heapStats.malloced_memory,
+        peak_malloced_memory: heapStats.peak_malloced_memory,
+        // External memory pressure (Buffers, ArrayBuffer-backed views).
+        // High here while heap stays normal means a native-side leak —
+        // streaming responses not being released, pg driver buffers, …
+        external: heapStats.external_memory,
+      },
+      spaces: spaces.map((s) => ({
+        name: s.space_name,
+        size: s.space_size,
+        used: s.space_used_size,
+        available: s.space_available_size,
+        physical: s.physical_space_size,
+      })),
+    };
+  }
+
+  /**
+   * Manually trigger an on-disk heap snapshot. Writes a file named
+   * `Heap-<timestamp>-pid<N>-manual.heapsnapshot` to /app/data
+   * (the awbdata volume) so the operator can `docker cp` it out and
+   * load it in Chrome DevTools → Memory → Load. The file can be large
+   * — typically 50-200% of `heap.used` — so the call doubles as a
+   * stress moment. Don't call it from a hot dashboard refresh; one
+   * snapshot every few minutes when investigating is the intended
+   * cadence.
+   *
+   * Implementation note: v8.writeHeapSnapshot is a *synchronous* C++
+   * call that walks the entire heap. On a 4 GB heap it can pause the
+   * event loop for several seconds. The route handler still returns
+   * (snapshot writes before the response) so the operator's polling
+   * UI may see one stalled request — that's the cost of taking the
+   * snapshot, not a bug. The cost is precisely why we want this on
+   * an explicit POST rather than firing it on a schedule.
+   */
+  @Post('heap-snapshot')
+  async takeHeapSnapshot(): Promise<{ ok: boolean; path: string; bytes: number; duration_ms: number }> {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const filename = `Heap-${stamp}-pid${process.pid}-manual.heapsnapshot`;
+    // /app/data matches the awbdata volume mount in docker-compose.yml.
+    // Falls back to process.cwd() if the directory isn't writable (dev
+    // host running outside docker); v8 will throw, the controller's
+    // global filter catches and reports.
+    const dir = process.env.AWB_DATA_DIR || '/app/data';
+    const fullPath = join(dir, filename);
+
+    this.logService.warn(
+      'Diagnostics',
+      `Writing heap snapshot to ${fullPath} (this will pause the event loop briefly)`,
+    );
+
+    const start = Date.now();
+    const writtenPath = v8.writeHeapSnapshot(fullPath);
+    const durationMs = Date.now() - start;
+
+    // Best-effort size report. fs is only needed to stat the file; we
+    // avoid promises here because the synchronous write already paused
+    // the loop and a follow-up async stat is fine.
+    let bytes = 0;
+    try {
+      const fs = await import('node:fs');
+      bytes = fs.statSync(writtenPath).size;
+    } catch {
+      /* stat failure is non-fatal — the snapshot file itself is what matters */
+    }
+
+    this.logService.info('Diagnostics', `Heap snapshot written: ${writtenPath}`, {
+      bytes,
+      duration_ms: durationMs,
+    });
+
+    return { ok: true, path: writtenPath, bytes, duration_ms: durationMs };
+  }
+}
