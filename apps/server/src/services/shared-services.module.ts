@@ -1,6 +1,7 @@
 import { Global, Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ActivityLog } from '../entities/ActivityLog';
+import { AgentErrorLog } from '../entities/AgentErrorLog';
 import { ApiKey } from '../entities/ApiKey';
 import { Channel } from '../entities/Channel';
 import { Comment } from '../entities/Comment';
@@ -15,6 +16,7 @@ import { UserChannel } from '../entities/UserChannel';
 import { ActivityService } from './activity.service';
 import { AuthService } from './auth.service';
 import { ApiKeyService } from './api-key.service';
+import { DbRetentionService } from './db-retention.service';
 import { DiscordService } from './discord.service';
 import { LogService } from './log.service';
 import { NotificationService } from './notification.service';
@@ -48,14 +50,15 @@ import {
 @Module({
   imports: [
     TypeOrmModule.forFeature([
-      ActivityLog, ApiKey, Agent, Channel, Comment, Ticket, User, BoardColumn, RelationTuple,
-      WorkspaceRole, TicketRoleAssignment, UserChannel,
+      ActivityLog, AgentErrorLog, ApiKey, Agent, Channel, Comment, Ticket, User, BoardColumn,
+      RelationTuple, WorkspaceRole, TicketRoleAssignment, UserChannel,
     ]),
   ],
   providers: [
     ActivityService,
     AuthService,
     ApiKeyService,
+    DbRetentionService,
     DiscordService,
     LogService,
     NotificationService,

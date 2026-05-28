@@ -1,5 +1,30 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, Index } from 'typeorm';
 
+// Indices added in migration 1760000000027 to stop full-table scans on a
+// table that grows unbounded — every column move, claim, release, comment,
+// trigger emit, and backlog promotion writes one row, so on a long-running
+// board the table dwarfs every other table by an order of magnitude. The
+// following access patterns drove the index choice (counted via grep across
+// agent-workload, stuck-ticket-detector, claim-verification, trigger-loop,
+// supervisor, backlog-promotion):
+//
+//   - `WHERE ticket_id = ?`                            — single ticket history
+//   - `WHERE ticket_id = ? ORDER BY created_at DESC`   — focus selector,
+//                                                        stuck detector,
+//                                                        latest-by-ticket
+//   - `WHERE workspace_id = ?`                         — admin activity feed
+//   - `WHERE entity_type = ? AND entity_id = ?`        — generic entity audit
+//   - `WHERE actor_id = ? ORDER BY created_at`         — agent action history
+//
+// Each composite index leads with the equality column and trails with
+// `created_at` so range scans (`WHERE ... AND created_at >= ?`) and
+// ORDER-BY-DESC tail reads both walk the index in order. Without these
+// every query above degenerated to a sequential scan that page-faulted
+// against the NAS's spinning disk on each cold ring eviction.
+@Index('idx_activity_logs_ticket_created', ['ticket_id', 'created_at'])
+@Index('idx_activity_logs_workspace_created', ['workspace_id', 'created_at'])
+@Index('idx_activity_logs_entity', ['entity_type', 'entity_id', 'created_at'])
+@Index('idx_activity_logs_actor_created', ['actor_id', 'created_at'])
 @Entity('activity_logs')
 export class ActivityLog {
   @PrimaryGeneratedColumn('uuid')
