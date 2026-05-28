@@ -5,6 +5,7 @@ import { Workspace } from '../../entities/Workspace';
 import { Board } from '../../entities/Board';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { SystemSetting } from '../../entities/SystemSetting';
+import { DiagnosticsController } from './diagnostics.controller';
 import { LogsController } from './logs.controller';
 import { PendingUsersController } from './pending-users.controller';
 import { SettingsController } from './settings.controller';
@@ -23,7 +24,13 @@ import { AgentsModule } from '../agents/agents.module';
     // cycle if AgentsModule starts importing AdminModule symbols.
     forwardRef(() => AgentsModule),
   ],
-  controllers: [LogsController, PendingUsersController, SettingsController, StuckTicketsController],
+  controllers: [
+    DiagnosticsController,
+    LogsController,
+    PendingUsersController,
+    SettingsController,
+    StuckTicketsController,
+  ],
   providers: [AuthGuard, AdminGuard, PermissionGuard],
 })
 export class AdminModule {}
