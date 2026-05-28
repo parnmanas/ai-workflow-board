@@ -113,7 +113,15 @@ export class RequestLoggerInterceptor implements NestInterceptor {
         const status = err.status || err.getStatus?.() || 500;
         const message = err.message || 'Unknown error';
         const resHeaders = sanitizeHeaders(res.getHeaders() as any);
-        this.logService.error('HTTP', `${method} ${url} → ${status} (${duration}ms) — ${message}`, {
+        // Same level split as AllExceptionsFilter — 5xx is a real
+        // server error worth surfacing on stdout, 4xx is a client
+        // outcome the admin log viewer still records (ring) but
+        // shouldn't spam `docker logs`. Without this split every
+        // 401 from an agent with a rotated credential lit up the
+        // console at error level even though the auth guard's
+        // rejection is normal.
+        const level: 'error' | 'debug' = status >= 500 ? 'error' : 'debug';
+        this.logService.log(level, 'HTTP', `${method} ${url} → ${status} (${duration}ms) — ${message}`, {
           user: userName,
           userId,
           wsId,
