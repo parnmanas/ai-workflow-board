@@ -82,6 +82,17 @@ jobs:
             DB_PASS=${{ secrets.DB_PASS }}
             MCP_API_KEYS=${{ secrets.MCP_API_KEYS }}
             AGENT_API_KEY=${{ secrets.AGENT_API_KEY }}
+            # Node runtime tuning for the long-running NAS server. Default V8
+            # heap_size_limit is ~4 GB; on 2026-05-28 we observed a leak rate
+            # of ~170 MB/min, so the server crashed with "Reached heap limit"
+            # within ~25 min of every restart. Doubling to 8 GB buys roughly
+            # 2x that window. The two snapshot flags below mean V8 itself
+            # writes the first 2 heap snapshots automatically when it senses
+            # an imminent OOM — without them the crash leaves no forensic
+            # trail. --diagnostic-dir points at /app/data which is the
+            # awb-data docker volume below, so the snapshot file survives
+            # the inevitable container restart.
+            NODE_OPTIONS=--max-old-space-size=8192 --heapsnapshot-near-heap-limit=2 --diagnostic-dir=/app/data
             EOF
             chmod 600 "$APP_ENV_FILE"
 
