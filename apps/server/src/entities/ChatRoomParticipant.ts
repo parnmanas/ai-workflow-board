@@ -1,7 +1,12 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, ManyToOne, JoinColumn } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, ManyToOne, JoinColumn, Index } from 'typeorm';
 import { ChatRoom } from './ChatRoom';
 
+// Every chat message send/read resolves room membership via
+// (room_id, participant_id) and lists participants via room_id. The leading
+// column of this composite also serves the room_id-only lookups, so one index
+// covers both hot paths — neither was indexed before (perf ticket b3812637).
 @Entity('chat_room_participants')
+@Index('idx_chat_room_participants_room_participant', ['room_id', 'participant_id'])
 export class ChatRoomParticipant {
   @PrimaryGeneratedColumn('uuid')
   id: string;

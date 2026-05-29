@@ -1,8 +1,20 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, VersionColumn, ManyToOne, OneToMany, JoinColumn } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, VersionColumn, ManyToOne, OneToMany, JoinColumn, Index } from 'typeorm';
 import { BoardColumn } from './BoardColumn';
 import { Comment } from './Comment';
 
+// Indexes cover the hottest filter patterns on this table (perf ticket
+// b3812637). The board GET loads root tickets per column via
+// (column_id, parent_id IS NULL); child lookups filter by parent_id alone;
+// the trigger loop / focus selector / archiver filter by workspace_id and
+// archived_at. None of these were indexed, so every such read degraded to a
+// full table scan once the table grew. SQLite (dev) builds these from the
+// decorators on synchronize; Postgres (prod) gets the same shapes via
+// migration 1760000000028-AddHotPathIndices.
 @Entity('tickets')
+@Index('idx_tickets_column_parent', ['column_id', 'parent_id'])
+@Index('idx_tickets_parent', ['parent_id'])
+@Index('idx_tickets_workspace', ['workspace_id'])
+@Index('idx_tickets_archived', ['archived_at'])
 export class Ticket {
   @PrimaryGeneratedColumn('uuid')
   id: string;
