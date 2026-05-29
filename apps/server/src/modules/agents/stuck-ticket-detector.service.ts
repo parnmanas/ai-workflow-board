@@ -572,7 +572,7 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
           cycle_count: cycleCount,
           gate_labels: evaluation.gateLabels,
         }),
-        actor_id: '',
+        actor_id: 'system',
         actor_name: 'StuckTicketDetector',
         ticket_id: ticket.id,
         role: '',

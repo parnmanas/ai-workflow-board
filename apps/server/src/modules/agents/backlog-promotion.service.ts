@@ -57,7 +57,7 @@
  *   records each skip as `backlog_promotion_skipped_focus_held` with
  *   `holder=` and `focus_ticket_id=` in `new_value`.
  */
-import { Injectable, OnModuleInit, forwardRef, Inject } from '@nestjs/common';
+import { Injectable, OnModuleDestroy, OnModuleInit, forwardRef, Inject } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { ActivityLog } from '../../entities/ActivityLog';
@@ -79,7 +79,14 @@ function safeJsonParse<T>(s: string | null | undefined, fallback: T): T {
 }
 
 @Injectable()
-export class BacklogPromotionService implements OnModuleInit {
+export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
+  // Stored listener ref so OnModuleDestroy can detach. Same rationale as
+  // TriggerLoopService — production is single-init, but integration test
+  // rigs rebuild the Nest module per spec and leak listeners without
+  // explicit removal. Finding-005 in
+  // docs/audit/2026-05-system-cascade-audit.md.
+  private _agentIdleListener?: (payload: { agent_id: string }) => void;
+
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly logService: LogService,
@@ -98,7 +105,7 @@ export class BacklogPromotionService implements OnModuleInit {
     // Capacity-event signal — same one TriggerLoopService listens for to
     // dispatch queued items. Promotion only fires for the agent that just
     // freed up; no full board scan and no comment churn.
-    activityEvents.on('agent_idle', (payload: { agent_id: string }) => {
+    this._agentIdleListener = (payload: { agent_id: string }) => {
       const agentId = payload?.agent_id || '';
       if (!agentId) return;
       this._onAgentIdle(agentId).catch((e: unknown) => {
@@ -106,7 +113,15 @@ export class BacklogPromotionService implements OnModuleInit {
           err: String(e), agent_id: agentId,
         });
       });
-    });
+    };
+    activityEvents.on('agent_idle', this._agentIdleListener);
+  }
+
+  onModuleDestroy(): void {
+    if (this._agentIdleListener) {
+      activityEvents.removeListener('agent_idle', this._agentIdleListener);
+      this._agentIdleListener = undefined;
+    }
   }
 
   /**

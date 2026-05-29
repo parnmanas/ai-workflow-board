@@ -297,10 +297,12 @@ function AutoArchiveSetting({ board, onSave }: AutoArchiveSettingProps) {
         Auto-archive Done tickets
       </h3>
       <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, marginBottom: 12 }}>
-        Hourly sweep that soft-archives root tickets sitting in a terminal column
-        for longer than <strong>N</strong> days. Archived tickets are excluded
-        from the board view, SSE updates, agent triggers, and focus selection,
-        but remain restorable from the dedicated Archive page. Disabled by default.
+        Hourly sweep that soft-archives root tickets in a terminal column that
+        have been <strong>idle for N days</strong> — no entry into Done, edit, or
+        comment in that window (a still-discussed ticket keeps resetting the
+        clock). Archived tickets are excluded from the board view, SSE updates,
+        agent triggers, and focus selection, but remain restorable from the
+        dedicated Archive page. Disabled by default.
       </div>
       <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
         <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: tokens.colors.textStrong }}>

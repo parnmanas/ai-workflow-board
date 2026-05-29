@@ -147,10 +147,12 @@ export class Ticket {
   // Timestamp the ticket entered its current terminal column (kind='terminal'
   // or is_terminal=true). Written by move_ticket / REST PATCH-move when the
   // destination column is terminal; nulled on any move out of terminal and on
-  // unarchive. TicketArchiverService uses (now - terminal_entered_at) as the
-  // single age signal — cheaper and more predictable than scanning activity_log
-  // for the last column change. Empty for tickets that haven't touched a
-  // terminal column.
+  // unarchive. TicketArchiverService treats this as one of the ticket's
+  // activity signals: it archives only when the ticket has been idle for the
+  // full window, i.e. GREATEST(terminal_entered_at, updated_at, newest
+  // comment.created_at) <= now - auto_archive_days. A still-commented or
+  // still-edited Done ticket therefore keeps resetting its archive clock.
+  // Empty for tickets that haven't touched a terminal column.
   @Column({ type: Date, nullable: true, default: null })
   terminal_entered_at: Date | null;
 

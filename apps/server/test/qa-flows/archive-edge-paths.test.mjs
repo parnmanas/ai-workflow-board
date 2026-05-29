@@ -271,10 +271,13 @@ test('Archive edge-path regressions (ticket 9b44526b)', async (t) => {
     assert.ok(restFresh.terminal_entered_at,
       'REST create on terminal column must also stamp terminal_entered_at');
 
-    step('Backdate terminal_entered_at past the auto_archive_days cutoff and run the archiver');
+    step('Backdate all activity signals past the cutoff and run the archiver');
     await boardRepo.update({ id: board.id }, { auto_archive_days: 1 });
     const twoDaysAgo = new Date(Date.now() - 2 * 86_400_000);
-    await ticketRepo.update(fresh.id, { terminal_entered_at: twoDaysAgo });
+    // The idle-since gate compares GREATEST(terminal_entered_at, updated_at,
+    // newest comment) against the cutoff, so a fresh ticket needs both its
+    // entry time AND its updated_at backdated before it's archivable.
+    await ticketRepo.update(fresh.id, { terminal_entered_at: twoDaysAgo, updated_at: twoDaysAgo });
 
     const result = await archiver.runOnce();
     assert.ok(result.archived_total >= 1,
@@ -282,6 +285,35 @@ test('Archive edge-path regressions (ticket 9b44526b)', async (t) => {
     const archivedRow = await ticketRepo.findOne({ where: { id: fresh.id } });
     assert.ok(archivedRow.archived_at,
       'archiver must stamp archived_at on the directly-created terminal ticket');
+  });
+
+  // ─── Subtest 4 — last-activity (not just Done-entry) drives the cutoff ───
+  await t.test('A comment newer than the cutoff keeps a Done ticket out of the archiver', async () => {
+    step('Create a Done ticket whose entry + edit are old but carries a recent comment');
+    const tkt = await createTicket(app, getDataSourceToken, {
+      columnId: doneCol.id, workspaceId: ws.id, title: 'idle-but-commented', assigneeId: driverAgent.id,
+    });
+    await boardRepo.update({ id: board.id }, { auto_archive_days: 1 });
+    const twoDaysAgo = new Date(Date.now() - 2 * 86_400_000);
+    // Entry + last edit are both older than the 1-day cutoff — on the old
+    // terminal_entered_at-only logic this would archive immediately.
+    await ticketRepo.update(tkt.id, { terminal_entered_at: twoDaysAgo, updated_at: twoDaysAgo });
+    // …but a comment landed an hour ago, inside the window.
+    await seedAgentComment(commentRepo, tkt.id, ws.id, 'driver', 'still discussing',
+      new Date(Date.now() - HOUR));
+
+    await archiver.runOnce();
+    let row = await ticketRepo.findOne({ where: { id: tkt.id } });
+    assert.ok(!row.archived_at,
+      'a ticket with a comment newer than the cutoff must NOT be archived');
+
+    step('Backdate the comment past the cutoff → genuinely idle → archives');
+    await commentRepo.update({ ticket_id: tkt.id }, { created_at: twoDaysAgo });
+    await ticketRepo.update(tkt.id, { updated_at: twoDaysAgo });
+    await archiver.runOnce();
+    row = await ticketRepo.findOne({ where: { id: tkt.id } });
+    assert.ok(row.archived_at,
+      'once every activity signal predates the cutoff, the ticket archives');
   });
 });
 

@@ -22,6 +22,16 @@ import type { ToolContext } from './context';
 export function registerChatTools(server: McpServer, ctx: ToolContext): void {
   const { dataSource, logger, roomCrudService, roomMembershipService, roomMessagingService } = ctx;
 
+  // Per-(agent_id, ticket_id) auto-clear timers for set_typing. Without this
+  // map, every `is_typing=true` call schedules a fresh 60s setTimeout that
+  // retains a new closure capturing (agent_id, ticket_id, timestamp). A
+  // chatty / buggy / malicious agent could accumulate unbounded pending
+  // timers — Finding-002 in docs/audit/2026-05-system-cascade-audit.md.
+  // The map is closed over the registerChatTools invocation, which runs once
+  // per MCP server instance (one per session), so it is naturally session-
+  // scoped and dies when the session does.
+  const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
   server.tool(
     'set_typing',
     'Signal that this agent is actively processing a ticket (shows typing indicator in the UI). ' +
@@ -34,9 +44,18 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
     async ({ agent_id, ticket_id, is_typing }) => {
       const timestamp = new Date().toISOString();
       activityEvents.emit('agent_typing', { agent_id, ticket_id, is_typing, timestamp });
-      // Auto-clear after 60s if agent crashes without sending stop signal
+      const key = `${agent_id}:${ticket_id}`;
+      const prev = typingTimers.get(key);
+      if (prev) {
+        clearTimeout(prev);
+        typingTimers.delete(key);
+      }
+      // Auto-clear after 60s if agent crashes without sending stop signal.
+      // Only one pending auto-clear per (agent, ticket) at a time — repeated
+      // is_typing=true calls reset the clock instead of stacking timers.
       if (is_typing) {
-        setTimeout(() => {
+        const handle = setTimeout(() => {
+          typingTimers.delete(key);
           activityEvents.emit('agent_typing', {
             agent_id,
             ticket_id,
@@ -44,6 +63,7 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
             timestamp: new Date().toISOString(),
           });
         }, 60_000);
+        typingTimers.set(key, handle);
       }
       return ok({ status: 'ok' });
     }

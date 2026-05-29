@@ -17,7 +17,19 @@
  *        - `archived_at IS NULL`
  *        - `parent_id IS NULL` (subtasks travel with the parent — not
  *          archivable on their own)
- *        - `terminal_entered_at <= now - auto_archive_days*86400s`
+ *        - the ticket has been *idle* for the whole window — i.e. its last
+ *          activity is older than `now - auto_archive_days*86400s`. "Last
+ *          activity" is the most recent of:
+ *            • `terminal_entered_at`  (when it entered Done)
+ *            • `updated_at`           (any edit / field change)
+ *            • the newest comment's `created_at`
+ *          So a Done ticket that's still getting comments or edits keeps
+ *          resetting its archive clock; only genuinely-quiet tickets archive.
+ *          Implemented as three `<= cutoff` predicates (equivalent to
+ *          `GREATEST(...) <= cutoff` but portable across SQLite + Postgres,
+ *          which spell `GREATEST`/`MAX` differently): `terminal_entered_at`
+ *          and `updated_at` compared directly, plus a `NOT EXISTS` over
+ *          `comments` for any row newer than the cutoff.
  *      Capped at ARCHIVER_BATCH_LIMIT per board so the first archiver tick
  *      after enabling auto-archive on a board with 10k Done tickets doesn't
  *      issue 10k writes in a single transaction.
@@ -145,8 +157,15 @@ export class TicketArchiverService implements OnModuleInit, OnModuleDestroy {
       .where('t.column_id IN (:...colIds)', { colIds: terminalColIds })
       .andWhere('t.archived_at IS NULL')
       .andWhere('t.parent_id IS NULL')
+      // Idle-since gate: every activity signal must predate the cutoff. The
+      // three predicates together are GREATEST(terminal_entered_at,
+      // updated_at, max(comment.created_at)) <= cutoff, written portably.
       .andWhere('t.terminal_entered_at IS NOT NULL')
       .andWhere('t.terminal_entered_at <= :cutoff', { cutoff })
+      .andWhere('t.updated_at <= :cutoff')
+      .andWhere(
+        'NOT EXISTS (SELECT 1 FROM comments cm WHERE cm.ticket_id = t.id AND cm.created_at > :cutoff)',
+      )
       .orderBy('t.terminal_entered_at', 'ASC')
       .take(ARCHIVER_BATCH_LIMIT)
       .getMany();
