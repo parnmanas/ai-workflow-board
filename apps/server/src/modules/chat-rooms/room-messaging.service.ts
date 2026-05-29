@@ -590,12 +590,24 @@ export class RoomMessagingService {
   }
 
   /**
-   * Search messages within a workspace, scoped to rooms the user actively participates in.
+   * Search messages within a workspace, scoped to rooms the caller actively participates in.
    * Uses NFC normalization + LOWER LIKE for case-insensitive match (CHAT-15).
    * T-08-03-01/02: participant-scoped subquery; parameterized :pattern prevents injection.
    * T-08-03-03: LIMIT 20; minimum 2-char query enforced in controller.
+   *
+   * `participantType` defaults to 'user' for the REST endpoint. The MCP
+   * search_chat_messages tool passes 'agent' so the participant-scoping
+   * subquery matches the calling agent's room memberships instead of a
+   * user's — without it an agent caller's id never joins (rows are keyed
+   * participant_type='user') and the search silently returns nothing.
    */
-  async searchMessages(workspaceId: string, userId: string, query: string, limit = 20): Promise<any[]> {
+  async searchMessages(
+    workspaceId: string,
+    callerId: string,
+    query: string,
+    limit = 20,
+    participantType: string = 'user',
+  ): Promise<any[]> {
     const normalized = query.normalize('NFC').toLowerCase();
     const pattern = `%${normalized}%`;
 
@@ -604,8 +616,8 @@ export class RoomMessagingService {
       .innerJoin(
         'chat_room_participants',
         'p',
-        "p.room_id = m.room_id AND p.participant_id = :userId AND p.participant_type = 'user' AND p.left_at IS NULL",
-        { userId },
+        'p.room_id = m.room_id AND p.participant_id = :callerId AND p.participant_type = :participantType AND p.left_at IS NULL',
+        { callerId, participantType },
       )
       .where('m.workspace_id = :wsId', { wsId: workspaceId })
       .andWhere('LOWER(m.content) LIKE :pattern', { pattern })
