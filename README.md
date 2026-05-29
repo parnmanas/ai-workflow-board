@@ -329,6 +329,30 @@ npm run mcp              # Start MCP server (stdio mode)
 npm run mcp:http         # Start MCP server (HTTP mode)
 ```
 
+### Troubleshooting
+
+**Boot fails with `dev sql.js database is corrupt` / `database disk image is malformed`**
+
+The dev SQLite file (`database/data.db`, sql.js) can occasionally get corrupted — e.g. by an
+unclean shutdown or two processes writing the same file. On boot AWB runs a fast integrity check
+*before* TypeORM opens the file and aborts in ~1s with an actionable message (instead of hanging
+~25s and getting killed). This data is **local and disposable**. To recover:
+
+```bash
+# Option A — delete it; sql.js recreates an empty DB on next boot
+rm database/data.db
+
+# Option B — let AWB auto-recover on boot: it backs the corrupt file up to
+# database/data.db.corrupt-<timestamp> and recreates an empty DB
+AWB_DB_AUTORECOVER=1 npm run dev
+
+# Option C — point at a different file
+SQLJS_DB_PATH=database/data-fresh.db npm run dev
+```
+
+This guard is **sql.js (dev) only** — Postgres/MySQL boots are never touched, and AWB never
+auto-deletes a non-sqlite database.
+
 ### Tech Stack
 
 | Layer | Technology |
