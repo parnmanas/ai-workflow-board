@@ -35,6 +35,7 @@ import type {
   TicketAttachmentMeta,
   TicketPrerequisiteRow,
   UserNotificationChannel,
+  BoardWithCards,
 } from './types';
 
 const BASE = '/api';
@@ -222,7 +223,10 @@ export const api = {
     ),
 
   // ─── Boards ────────────────────────────────────────────
-  getBoard: (id: string) => request<any>(`/boards/${id}`),
+  // Returns the lightened board payload — each ticket's `comments` is the
+  // narrow BoardCardComment projection, not the full thread (perf ticket
+  // b3812637). The detail panel fetches the full Ticket via getTicket.
+  getBoard: (id: string) => request<BoardWithCards>(`/boards/${id}`),
   getBoardFocusTickets: (boardId: string) =>
     request<{ focus_tickets: Array<{ agent_id: string; agent_name: string; role: string; ticket_id: string }> }>(
       `/boards/${boardId}/focus-tickets`,

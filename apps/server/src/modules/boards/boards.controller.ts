@@ -21,6 +21,18 @@ import { writeRoutingConfigThrough } from './routing-config.helper';
 import { AgentWorkloadService } from '../agents/agent-workload.service';
 import { resolveAgentDisplayMap } from '../../utils/agent-name';
 
+// Narrow projection of a Comment as it ships on a board card. The board GET
+// only needs enough to render the comment count and the stale-open-question
+// badge (type/status/created_at) — never the body/author/threading — so the
+// payload is lightened to these five columns (perf ticket b3812637). Typing
+// the projection as a `Pick` instead of `any[]` means the SQL `.select([...])`
+// below and this declared shape are checked against each other, and any
+// consumer that reads a dropped field fails to compile rather than silently
+// reading `undefined` at runtime (hardening ticket 24bbd0ad). The matching
+// client type lives in apps/client/src/types.ts (BoardCardComment) — keep the
+// two field lists in sync.
+type BoardCardComment = Pick<Comment, 'id' | 'ticket_id' | 'type' | 'status' | 'created_at'>;
+
 @ApiBearerAuth('user-session')
 @ApiTags('boards')
 @Controller('api/boards')
@@ -126,7 +138,10 @@ export class BoardsController {
               channel_ids: JSON.parse(child.channel_ids || '[]'),
               children: (child.children || []).sort((a, b) => a.position - b.position),
             })),
-            comments: [] as any[],
+            // Lightweight comment projection — populated by the grouped query
+            // below. Typed (not `any[]`) so the shape is enforced end-to-end.
+            comments: [] as BoardCardComment[],
+            prerequisite_count: 0,
           })),
         };
       })
@@ -149,10 +164,13 @@ export class BoardsController {
         .where('c.ticket_id IN (:...ids)', { ids: rootTicketIds })
         .orderBy('c.created_at', 'DESC')
         .getMany();
-      const commentsByTicket = new Map<string, any[]>();
+      const commentsByTicket = new Map<string, BoardCardComment[]>();
       for (const c of commentRows) {
         const list = commentsByTicket.get(c.ticket_id) || [];
-        list.push({ id: c.id, ticket_id: c.ticket_id, type: c.type, status: c.status, created_at: c.created_at });
+        const projected: BoardCardComment = {
+          id: c.id, ticket_id: c.ticket_id, type: c.type, status: c.status, created_at: c.created_at,
+        };
+        list.push(projected);
         commentsByTicket.set(c.ticket_id, list);
       }
 
@@ -173,8 +191,8 @@ export class BoardsController {
 
       for (const col of columnsWithTickets) {
         for (const t of col.tickets) {
-          (t as any).comments = commentsByTicket.get(t.id) || [];
-          (t as any).prerequisite_count = countMap.get(t.id) || 0;
+          t.comments = commentsByTicket.get(t.id) || [];
+          t.prerequisite_count = countMap.get(t.id) || 0;
         }
       }
     }

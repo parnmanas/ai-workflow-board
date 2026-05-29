@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { DragDropContext, Droppable, DragStart, DropResult } from '@hello-pangea/dnd';
 import { Group, Panel, Separator } from 'react-resizable-panels';
-import { Ticket } from '../types';
+import { Ticket, BoardCardTicket, BoardWithCards } from '../types';
 import { api } from '../api';
 import { useBoard } from '../hooks/useBoard';
 import { useDragToScroll } from '../hooks/useDragToScroll';
@@ -13,7 +13,7 @@ import Column from './Column';
 import TicketPanel from './TicketPanel';
 import { tokens } from '../tokens';
 
-function findTicketById(board: { columns: { tickets: Ticket[] }[] }, id: string): Ticket | null {
+function findTicketById(board: BoardWithCards, id: string): BoardCardTicket | null {
   for (const col of board.columns) {
     for (const t of col.tickets) {
       if (t.id === id) return t;
@@ -26,6 +26,21 @@ function findTicketById(board: { columns: { tickets: Ticket[] }[] }, id: string)
     }
   }
   return null;
+}
+
+// Widen a board-card ticket back to the full Ticket shape for the detail
+// panel, which is typed against the full Ticket/Comment[]. The card carries
+// only the narrow comment projection, so we drop it to an empty thread here —
+// TicketPanel renders from the getTicket-fetched full thread (panelTicket) and
+// only falls back to this widened card for the brief window before that
+// fetch resolves, where showing no comments is correct (the card never had
+// the bodies). Children are widened recursively for the subtask picker.
+function cardTicketToFull(card: BoardCardTicket): Ticket {
+  return {
+    ...card,
+    comments: [],
+    children: (card.children || []).map(cardTicketToFull),
+  };
 }
 
 export default function Board() {
@@ -123,7 +138,7 @@ export default function Board() {
   // Primitive change signal derived from the board projection so the refetch
   // effect compares by value (not object identity, which churns every render).
   const panelCommentSignal = activePanelTicket
-    ? (activePanelTicket.comments || []).map((c: any) => `${c.id}:${c.status ?? ''}`).join(',')
+    ? (activePanelTicket.comments || []).map(c => `${c.id}:${c.status ?? ''}`).join(',')
       + '|' + activePanelTicket.updated_at
     : '';
 
@@ -324,7 +339,7 @@ export default function Board() {
   // re-render all its cards) every time Board re-renders for unrelated SSE
   // churn (typing/presence). setActivePanelTicketId is a stable state setter,
   // so the empty dep list is safe. Perf ticket b3812637.
-  const handleTicketClick = useCallback((ticket: Ticket) => {
+  const handleTicketClick = useCallback((ticket: BoardCardTicket) => {
     setActivePanelTicketId(ticket.id);
   }, []);
 
@@ -568,13 +583,13 @@ export default function Board() {
                 <Separator style={{ width: 4, background: tokens.colors.border, cursor: 'col-resize', flexShrink: 0 }} />
                 <Panel defaultSize="40" minSize="25" maxSize="70" style={{ overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
                   <TicketPanel
-                    ticket={panelTicket ?? activePanelTicket}
+                    ticket={panelTicket ?? cardTicketToFull(activePanelTicket)}
                     columnName={board.columns.find(c => c.tickets.some(t => t.id === activePanelTicket.id))?.name || ''}
                     agents={agents}
                     users={users}
                     channels={channels}
                     workspaceRoles={workspaceRoles}
-                    boardTickets={board.columns.flatMap(c => c.tickets)}
+                    boardTickets={board.columns.flatMap(c => c.tickets).map(cardTicketToFull)}
                     typingIndicators={typingIndicators}
                     onClose={handleCloseDetail}
                     onUpdate={handleUpdateTicket}

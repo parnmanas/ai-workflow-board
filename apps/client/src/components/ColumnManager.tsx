@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
-import { Column, PromptTemplate } from '../types';
+import { BoardCardColumn, PromptTemplate } from '../types';
 import { tokens } from '../tokens';
 import { Button, Input } from './common';
 
@@ -10,7 +10,10 @@ import { Button, Input } from './common';
 interface RoleOption { slug: string; name: string; position: number }
 
 interface ColumnManagerProps {
-  columns: Column[];
+  // Column metadata only — the manager renders names/colors/flags and a ticket
+  // *count*, never ticket bodies. Accepts the board-card column shape (full
+  // Column is assignable to it) so the board-GET payload flows in directly.
+  columns: BoardCardColumn[];
   boardId: string;
   routingConfig: Record<string, string[]>;
   columnPrompts: Record<string, string>; // columnId → promptTemplateId
@@ -51,7 +54,7 @@ export default function ColumnManager({
     setNewColName('');
   };
 
-  const startEdit = (col: Column) => {
+  const startEdit = (col: BoardCardColumn) => {
     setEditingId(col.id);
     setEditName(col.name);
     setEditColor(col.color);

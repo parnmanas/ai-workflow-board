@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { api } from '../api';
-import { Board, PromptTemplate } from '../types';
+import { Board, BoardWithCards, PromptTemplate } from '../types';
 import { useBoard } from '../hooks/useBoard';
 import { useToast } from '../contexts/ToastContext';
 import { useLoading } from '../contexts/LoadingContext';
@@ -148,7 +148,7 @@ export default function BoardSettingsPage() {
 type SelfImprovementMode = NonNullable<Board['self_improvement_mode']>;
 
 interface SelfImprovementSettingProps {
-  board: Board;
+  board: BoardWithCards;
   onSave(mode: SelfImprovementMode): Promise<void>;
 }
 
@@ -251,7 +251,7 @@ function SelfImprovementSetting({ board, onSave }: SelfImprovementSettingProps) 
 }
 
 interface AutoArchiveSettingProps {
-  board: Board;
+  board: BoardWithCards;
   onSave(days: number | null): Promise<void>;
 }
 
@@ -350,7 +350,7 @@ function AutoArchiveSetting({ board, onSave }: AutoArchiveSettingProps) {
 }
 
 interface ConcurrencySettingProps {
-  board: Board;
+  board: BoardWithCards;
   onSave(n: number): Promise<void>;
 }
 

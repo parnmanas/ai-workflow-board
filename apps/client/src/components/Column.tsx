@@ -1,14 +1,16 @@
 import React, { useState } from 'react';
 import { Droppable } from '@hello-pangea/dnd';
-import { Column as ColumnType, Ticket } from '../types';
+import { BoardCardColumn, BoardCardTicket } from '../types';
 import TicketCard from './TicketCard';
 import CreateTicketForm from './CreateTicketForm';
 import { useDragToScroll } from '../hooks/useDragToScroll';
 import { tokens } from '../tokens';
 
 interface ColumnProps {
-  column: ColumnType;
-  onTicketClick: (ticket: Ticket) => void;
+  // Card-projection column: tickets carry the narrow BoardCardComment shape,
+  // not the full thread (the detail panel fetches that via getTicket).
+  column: BoardCardColumn;
+  onTicketClick: (ticket: BoardCardTicket) => void;
   onCreateTicket: (columnId: string, title: string, description: string, priority: string) => void;
   focusTicketMap?: Record<string, Array<{ agent_name: string; role: string }>>;
 }
