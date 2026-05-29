@@ -1,12 +1,15 @@
 import React from 'react';
 import { Draggable } from '@hello-pangea/dnd';
-import { Ticket } from '../types';
+import { BoardCardTicket } from '../types';
 import { tokens } from '../tokens';
 import { Badge } from './common';
 import { hasStaleOpenQuestion } from './comment-types';
 
 interface TicketCardProps {
-  ticket: Ticket;
+  // Card-projection ticket: `comments` is the narrow BoardCardComment shape.
+  // Reading a dropped comment field (content/author/parent_id/…) here is a
+  // compile error — that's the guard hardening ticket 24bbd0ad installs.
+  ticket: BoardCardTicket;
   index: number;
   onClick: () => void;
   focusHolders?: Array<{ agent_name: string; role: string }>;

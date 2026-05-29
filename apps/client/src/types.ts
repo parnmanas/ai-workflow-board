@@ -440,6 +440,38 @@ export interface Board {
   auto_archive_days?: number | null;
 }
 
+// ─── Board-GET card projections ──────────────────────────────
+// The board GET (GET /api/boards/:id) ships a *lightened* payload for the
+// kanban cards: each ticket's `comments` relation is projected down to only
+// the fields a card renders (count + the stale-open-question badge), and the
+// full thread is fetched separately via getTicket (loadTicketFull) when a card
+// is opened. These types make that projection explicit so the contract is
+// enforced at compile time — a card consumer that reads a dropped field
+// (content / author / author_type / parent_id / metadata / attachments) fails
+// to build instead of silently reading `undefined` at runtime. Mirror of the
+// server projection in apps/server/src/modules/boards/boards.controller.ts
+// (BoardCardComment); keep the two field lists in sync. Perf ticket b3812637
+// introduced the projection; hardening ticket 24bbd0ad typed it.
+export type BoardCardComment = Pick<Comment, 'id' | 'ticket_id' | 'type' | 'status' | 'created_at'>;
+
+// A ticket as it appears on a board card: identical to the full Ticket except
+// its `comments` (and recursively its `children`) carry only the narrow
+// projection. The detail panel re-fetches the full Ticket via getTicket, so
+// only the card pipeline (useBoard → Board → Column → TicketCard) is typed
+// with this.
+export type BoardCardTicket = Omit<Ticket, 'comments' | 'children'> & {
+  comments: BoardCardComment[];
+  children: BoardCardTicket[];
+};
+
+export type BoardCardColumn = Omit<Column, 'tickets'> & {
+  tickets: BoardCardTicket[];
+};
+
+export type BoardWithCards = Omit<Board, 'columns'> & {
+  columns: BoardCardColumn[];
+};
+
 export interface Workspace {
   id: string; // GUID
   name: string;

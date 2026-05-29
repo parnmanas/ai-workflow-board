@@ -1,10 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../api';
-import { Board, Workspace, User, Agent, Channel } from '../types';
+import { BoardWithCards, Workspace, User, Agent, Channel } from '../types';
 import { useBoardStream } from '../contexts/BoardStreamContext';
 
 export function useBoard(boardId: string = '') {
-  const [board, setBoard] = useState<Board | null>(null);
+  const [board, setBoard] = useState<BoardWithCards | null>(null);
   const [users, setUsers] = useState<User[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [channels, setChannels] = useState<Channel[]>([]);
