@@ -393,6 +393,7 @@ export class QaController {
       { file: 'backlog-promotion-chain.test.mjs', category: 'Flow-Lifecycle' },
       { file: 'multi-agent-concurrency.test.mjs', category: 'Flow-Concurrency' },
       { file: 'multi-user-chat.test.mjs', category: 'Flow-Chat' },
+      { file: 'chat-message-read.test.mjs', category: 'Flow-Chat' },
       { file: 'large-data.test.mjs', category: 'Flow-Scale' },
     ];
 

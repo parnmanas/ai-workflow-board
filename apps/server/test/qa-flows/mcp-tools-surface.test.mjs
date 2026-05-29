@@ -35,6 +35,9 @@ const EXPECTED_TOOLS = [
   'add_ticket_prerequisites',
   'remove_ticket_prerequisite',
   'list_ticket_prerequisites',
+  // Ticket 9d892da9 — chat-message read surface.
+  'get_chat_room_messages',
+  'search_chat_messages',
 ];
 
 test('MCP initialize + tools/list returns expected AWB tool surface', async (t) => {
