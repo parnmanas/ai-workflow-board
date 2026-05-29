@@ -110,6 +110,38 @@ export default function Board() {
     }
   }, [activePanelTicketId, board, activePanelTicket]);
 
+  // Full thread for the open ticket. The board GET ships only a lightweight
+  // comment projection (count + stale-question badge — perf ticket b3812637),
+  // so the detail panel's Comments tab / threading / unread badge need the full
+  // bodies + authors, which `GET /api/tickets/:id` (loadTicketFull) provides for
+  // the root ticket and every descendant. We fetch it when a card opens and
+  // re-fetch whenever the board's projection for this ticket changes — a comment
+  // added (new id), a question resolved (status flip) or any updated_at bump,
+  // including the SSE-driven board refresh that carries an agent's live handoff.
+  const [panelTicketFull, setPanelTicketFull] = useState<Ticket | null>(null);
+
+  // Primitive change signal derived from the board projection so the refetch
+  // effect compares by value (not object identity, which churns every render).
+  const panelCommentSignal = activePanelTicket
+    ? (activePanelTicket.comments || []).map((c: any) => `${c.id}:${c.status ?? ''}`).join(',')
+      + '|' + activePanelTicket.updated_at
+    : '';
+
+  useEffect(() => {
+    if (!activePanelTicketId) { setPanelTicketFull(null); return; }
+    let cancelled = false;
+    api.getTicket(activePanelTicketId)
+      .then(full => { if (!cancelled) setPanelTicketFull(full); })
+      .catch(() => { /* keep last good thread; panel falls back to projection */ });
+    return () => { cancelled = true; };
+  }, [activePanelTicketId, panelCommentSignal]);
+
+  // Only adopt the fetched thread when it matches the open ticket — otherwise a
+  // mid-switch stale fetch from the previous ticket would flash into the panel.
+  const panelTicket = panelTicketFull && panelTicketFull.id === activePanelTicketId
+    ? panelTicketFull
+    : null;
+
   // Apply `?ticket=&comment=` deep-link params once the board has loaded.
   // Wait until the ticket actually exists in the loaded board before
   // consuming the params so a refresh while the board is still fetching
@@ -536,7 +568,7 @@ export default function Board() {
                 <Separator style={{ width: 4, background: tokens.colors.border, cursor: 'col-resize', flexShrink: 0 }} />
                 <Panel defaultSize="40" minSize="25" maxSize="70" style={{ overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
                   <TicketPanel
-                    ticket={activePanelTicket}
+                    ticket={panelTicket ?? activePanelTicket}
                     columnName={board.columns.find(c => c.tickets.some(t => t.id === activePanelTicket.id))?.name || ''}
                     agents={agents}
                     users={users}
