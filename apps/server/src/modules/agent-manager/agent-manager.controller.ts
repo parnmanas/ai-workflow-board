@@ -23,7 +23,7 @@ import { PairingService } from './pairing.service';
 import { CommandLedgerService } from './command-ledger.service';
 import type { AgentManagerCommand, AgentManagerCommandPayload } from '../../common/types/stream-events';
 
-const ALLOWED_CLI_TYPES = new Set(['claude', 'codex', 'gemini', 'custom']);
+const ALLOWED_CLI_TYPES = new Set(['claude', 'deepseek', 'codex', 'gemini', 'custom']);
 const ALLOWED_COMMANDS: ReadonlySet<AgentManagerCommand> = new Set([
   'spawn_agent',
   'stop_agent',

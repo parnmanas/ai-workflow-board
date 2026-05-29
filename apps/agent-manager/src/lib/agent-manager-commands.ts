@@ -83,6 +83,7 @@ type CommandKind =
 const REQUIRED_CREDENTIAL_FIELDS: Record<string, string[]> = {
   claude_subscription: ['credentials_json'],
   claude_api_key: ['api_key'],
+  deepseek_api_key: ['api_key'],
   codex_subscription: ['auth_json'],
   codex_api_key: ['api_key'],
   gemini_subscription: ['oauth_creds_json'],

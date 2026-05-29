@@ -25,6 +25,7 @@ const PROVIDERS = [
   { value: 'custom', label: 'Custom', icon: 'C' },
   { value: 'claude_subscription', label: 'Claude · Subscription', icon: 'CS' },
   { value: 'claude_api_key', label: 'Claude · API Key', icon: 'CK' },
+  { value: 'deepseek_api_key', label: 'DeepSeek · API Key', icon: 'DS' },
   { value: 'codex_subscription', label: 'Codex · Subscription', icon: 'OS' },
   { value: 'codex_api_key', label: 'Codex · API Key', icon: 'OK' },
   { value: 'gemini_subscription', label: 'Gemini · Subscription', icon: 'GS' },
@@ -53,6 +54,11 @@ const PROVIDER_FIELD_LABELS: Record<string, Record<string, FieldDef>> = {
   },
   claude_api_key: {
     api_key: { label: 'ANTHROPIC_API_KEY', placeholder: 'sk-ant-...' },
+  },
+  deepseek_api_key: {
+    api_key: { label: 'DeepSeek API Key', placeholder: 'sk-... (from platform.deepseek.com)' },
+    model: { label: 'Model (optional)', placeholder: 'deepseek-chat (default) · or deepseek-reasoner' },
+    base_url: { label: 'Base URL (optional)', placeholder: 'https://api.deepseek.com/anthropic (default)' },
   },
   codex_subscription: {
     auth_json: {
@@ -199,6 +205,7 @@ export default function CredentialManager({ workspaceId }: { workspaceId?: strin
       custom: tokens.colors.textSecondary,
       claude_subscription: '#cc785c',
       claude_api_key: '#cc785c',
+      deepseek_api_key: '#4d6bfe',
       codex_subscription: '#10a37f',
       codex_api_key: '#10a37f',
       gemini_subscription: '#4285f4',

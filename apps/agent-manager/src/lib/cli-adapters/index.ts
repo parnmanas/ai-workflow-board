@@ -1,6 +1,7 @@
 // CLI adapter factory — single entry point: `createAdapter(cliType)`.
 
 import { ClaudeCliAdapter } from './claude.js';
+import { DeepSeekCliAdapter } from './deepseek.js';
 import { GeminiCliAdapter } from './gemini.js';
 import { CodexCliAdapter } from './codex.js';
 import {
@@ -14,6 +15,8 @@ export function createAdapter(cliType: string | null | undefined): CliAdapter {
   switch (t) {
     case 'claude':
       return new ClaudeCliAdapter();
+    case 'deepseek':
+      return new DeepSeekCliAdapter();
     case 'gemini':
       return new GeminiCliAdapter();
     case 'codex':
@@ -25,9 +28,10 @@ export function createAdapter(cliType: string | null | undefined): CliAdapter {
   }
 }
 
-export const KNOWN_ADAPTER_CLI_TYPES = Object.freeze(['claude', 'gemini', 'codex']);
+export const KNOWN_ADAPTER_CLI_TYPES = Object.freeze(['claude', 'deepseek', 'gemini', 'codex']);
 
 export { CliAdapter, ADAPTER_CAPABILITIES, PARSE_STAGE };
 export { ClaudeCliAdapter } from './claude.js';
+export { DeepSeekCliAdapter } from './deepseek.js';
 export { GeminiCliAdapter } from './gemini.js';
 export { CodexCliAdapter } from './codex.js';
