@@ -5,6 +5,8 @@
  *   - set_typing: typing indicator for ticket processing
  *   - send_chat_room_message: agent-authored chat-room message
  *   - list_chat_rooms: rooms the authenticated agent is a participant in
+ *   - get_chat_room_messages: cursor-paginated message history read
+ *   - search_chat_messages: workspace full-text search over participating rooms
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -256,6 +258,90 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
         type: p.room?.type || 'group',
         last_message_at: p.room?.last_message_at || null,
       })));
+    }
+  );
+
+  server.tool(
+    'get_chat_room_messages',
+    'Read the message history of a chat room the agent participates in. ' +
+    'Returns full messages (sender, content, attachments, created_at) in chronological order. ' +
+    'Use the `before` cursor (a message id) to page backwards through older history. ' +
+    'The agent must be an active participant in the room.',
+    {
+      room_id: z.string().describe('Chat room ID to read messages from'),
+      limit: z.number().int().min(1).max(200).optional().describe('Max messages to return (default 50, max 200).'),
+      before: z.string().optional().describe('Message ID cursor — return messages strictly older than this one. Omit for the latest page.'),
+    },
+    async ({ room_id, limit, before }, extra: { sessionId?: string }) => {
+      if (!roomMessagingService || !roomMembershipService) {
+        return err('get_chat_room_messages is unavailable in this MCP context (no chat services)');
+      }
+      const caller = getCallerAgent(extra);
+      if (!caller?.agentId) return err('Unauthorized: agent identity required');
+      const agent = await dataSource.getRepository(Agent).findOne({ where: { id: caller.agentId } });
+      if (!agent) return err('Agent identity not found for this session');
+
+      try {
+        // Mirror the agent-api GET /chat-rooms/:roomId/messages path
+        // (agent-api.controller): enforce the agent participant gate
+        // explicitly, then read in `observer` mode so the service's own
+        // user-scoped gate + per-user cleared_at cut are bypassed (those
+        // are meaningless for an agent caller). `excludeProgress` keeps the
+        // tool's view identical to the history that gets injected into a
+        // chat subagent on wake — manager tool-call heartbeats stay hidden
+        // so the model reads conversation, not its own narration.
+        await roomMembershipService.requireActiveParticipant(room_id, agent.id, 'agent');
+        const messages = await roomMessagingService.getMessages(
+          room_id,
+          agent.id,
+          limit ?? 50,
+          before,
+          { observer: true, excludeProgress: true },
+        );
+        return ok({ room_id, count: messages.length, messages });
+      } catch (e: any) {
+        return err(e?.message || 'Failed to read chat room messages');
+      }
+    }
+  );
+
+  server.tool(
+    'search_chat_messages',
+    'Full-text search chat messages across the workspace, scoped to rooms the agent actively participates in. ' +
+    'Case-insensitive substring match on message content. Returns up to 20 matches, newest first, ' +
+    'each with room_id/room_name, sender, content, and created_at.',
+    {
+      query: z.string().describe('Search text (minimum 2 characters; shorter queries are rejected). Case-insensitive substring match.'),
+      limit: z.number().int().min(1).max(50).optional().describe('Max results to return (default 20, max 50).'),
+    },
+    async ({ query, limit }, extra: { sessionId?: string }) => {
+      if (!roomMessagingService) {
+        return err('search_chat_messages is unavailable in this MCP context (no RoomMessagingService)');
+      }
+      if (!query || query.trim().length < 2) {
+        return err('query must be at least 2 characters');
+      }
+      const caller = getCallerAgent(extra);
+      if (!caller?.agentId) return err('Unauthorized: agent identity required');
+      const agent = await dataSource.getRepository(Agent).findOne({ where: { id: caller.agentId } });
+      if (!agent?.workspace_id) return err('Could not resolve workspace from caller agent');
+
+      try {
+        // participantType='agent' so the participant-scoping subquery matches
+        // THIS agent's room memberships (rows are keyed by participant_type) —
+        // see RoomMessagingService.searchMessages. Results are bounded to the
+        // agent's own workspace, so cross-workspace history never leaks.
+        const results = await roomMessagingService.searchMessages(
+          agent.workspace_id,
+          agent.id,
+          query.trim(),
+          Math.min(limit ?? 20, 50),
+          'agent',
+        );
+        return ok({ query: query.trim(), count: results.length, results });
+      } catch (e: any) {
+        return err(e?.message || 'Failed to search chat messages');
+      }
     }
   );
 
