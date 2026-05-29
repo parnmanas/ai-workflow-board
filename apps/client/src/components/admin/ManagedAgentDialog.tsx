@@ -26,10 +26,11 @@ import DirectoryPicker from './DirectoryPicker';
  * change won't take effect until the agent is restarted.
  */
 
-export type CliKind = 'claude' | 'codex' | 'gemini' | 'custom';
+export type CliKind = 'claude' | 'deepseek' | 'codex' | 'gemini' | 'custom';
 
 export const MANAGED_CLI_OPTIONS: { value: CliKind; label: string }[] = [
   { value: 'claude', label: 'Claude Code' },
+  { value: 'deepseek', label: 'DeepSeek (via Claude Code)' },
   { value: 'codex', label: 'Codex' },
   { value: 'gemini', label: 'Gemini' },
   { value: 'custom', label: 'Custom' },

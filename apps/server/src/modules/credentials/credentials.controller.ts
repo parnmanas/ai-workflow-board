@@ -23,6 +23,10 @@ const PROVIDER_FIELDS: Record<string, { label: string; fields: string[] }> = {
   // / OPENAI_API_KEY / GEMINI_API_KEY when spawning).
   claude_subscription: { label: 'Claude (Subscription)', fields: ['credentials_json'] },
   claude_api_key: { label: 'Claude (API Key)', fields: ['api_key'] },
+  // DeepSeek runs through the Claude Code binary against DeepSeek's
+  // Anthropic-compatible endpoint. api_key is the DeepSeek bearer token
+  // (exported as ANTHROPIC_AUTH_TOKEN); model/base_url are optional overrides.
+  deepseek_api_key: { label: 'DeepSeek (API Key)', fields: ['api_key', 'model', 'base_url'] },
   codex_subscription: { label: 'Codex (Subscription)', fields: ['auth_json', 'config_toml'] },
   codex_api_key: { label: 'Codex (API Key)', fields: ['api_key'] },
   gemini_subscription: { label: 'Gemini (Subscription)', fields: ['oauth_creds_json'] },

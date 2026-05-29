@@ -1,6 +1,10 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, Index } from 'typeorm';
 
+// Resource pickers list by (workspace_id, board_id [or IS NULL]) on every
+// open; the table holds large file_data/content blobs so an unindexed scan is
+// expensive — perf ticket b3812637.
 @Entity('resources')
+@Index('idx_resources_workspace_board', ['workspace_id', 'board_id'])
 export class Resource {
   @PrimaryGeneratedColumn('uuid')
   id: string;

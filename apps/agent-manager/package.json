@@ -1,8 +1,8 @@
 {
   "name": "agent-manager",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "Standalone subagent runner for AWB — drives Claude / Codex / Gemini CLIs without a host editor",
+  "description": "Standalone subagent runner for AWB — drives Claude / DeepSeek / Codex / Gemini CLIs without a host editor",
   "type": "module",
   "main": "dist/main.js",
   "bin": {

@@ -928,7 +928,7 @@ export interface AgentManagerCommandResult {
 
 export interface ManagedAgentCreateBody {
   name: string;
-  cli: 'claude' | 'codex' | 'gemini' | 'custom';
+  cli: 'claude' | 'deepseek' | 'codex' | 'gemini' | 'custom';
   working_dir?: string;
   manager_agent_id?: string | null;
   description?: string;

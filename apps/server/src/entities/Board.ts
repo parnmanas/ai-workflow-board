@@ -1,8 +1,11 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, OneToMany, ManyToOne, JoinColumn } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, OneToMany, ManyToOne, JoinColumn, Index } from 'typeorm';
 import { BoardColumn } from './BoardColumn';
 import { Workspace } from './Workspace';
 
+// workspace_id is filtered on every board listing (workspaces.controller,
+// backlog-promotion, focus selector) but was unindexed — perf ticket b3812637.
 @Entity('boards')
+@Index('idx_boards_workspace', ['workspace_id'])
 export class Board {
   @PrimaryGeneratedColumn('uuid')
   id: string;

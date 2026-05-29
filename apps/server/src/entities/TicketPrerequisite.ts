@@ -11,6 +11,10 @@ import { Ticket } from './Ticket';
 // pointing AT it, then re-evaluates each dependent's full prereq set.
 @Entity('ticket_prerequisites')
 @Index('idx_ticket_prerequisites_prereq', ['prerequisite_ticket_id'])
+// Forward lookup ("what blocks ticket X?") filters by ticket_id on every
+// prereq list + the detail-panel render; only the reverse (prereq) side was
+// indexed — perf ticket b3812637.
+@Index('idx_ticket_prerequisites_ticket', ['ticket_id'])
 export class TicketPrerequisite {
   @PrimaryColumn({ type: 'varchar' })
   ticket_id: string;
