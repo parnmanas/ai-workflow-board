@@ -351,13 +351,27 @@ export class TicketsController {
     const perBoard: Record<string, number> = {};
     const ticketIdsWithUnread = Object.keys(perTicket);
     if (ticketIdsWithUnread.length > 0) {
-      const allTickets = await this.ticketRepo
-        .createQueryBuilder('t')
-        .select(['t.id AS id', 't.column_id AS column_id', 't.parent_id AS parent_id'])
-        .where('t.workspace_id = :wsId', { wsId })
-        .getRawMany();
+      // Load only the unread tickets and their ancestor chain — not every
+      // ticket in the workspace (which on an archive-heavy workspace pulls the
+      // entire ticket graph into memory just to resolve a handful of parent
+      // columns). Subtasks carry no column_id, so we walk parent_id up to the
+      // root; depth is capped at 2 (root→child→grandchild) and the bounded
+      // loop stops as soon as no new parents appear. Perf ticket b3812637.
       const byId = new Map<string, { column_id: string | null; parent_id: string | null }>();
-      for (const t of allTickets) byId.set(t.id, { column_id: t.column_id, parent_id: t.parent_id });
+      let frontier: string[] = ticketIdsWithUnread.slice();
+      for (let hop = 0; frontier.length > 0 && hop < 6; hop++) {
+        const missing = frontier.filter((id) => !byId.has(id));
+        if (missing.length === 0) break;
+        const rows = await this.ticketRepo
+          .createQueryBuilder('t')
+          .select(['t.id AS id', 't.column_id AS column_id', 't.parent_id AS parent_id'])
+          .where('t.id IN (:...ids)', { ids: missing })
+          .getRawMany();
+        for (const t of rows) byId.set(t.id, { column_id: t.column_id, parent_id: t.parent_id });
+        frontier = rows
+          .map((t) => t.parent_id)
+          .filter((pid): pid is string => !!pid && !byId.has(pid));
+      }
       const columnIds = new Set<string>();
       const resolveBoardColumn = (startId: string): string | null => {
         let cursor: { column_id: string | null; parent_id: string | null } | undefined = byId.get(startId);
