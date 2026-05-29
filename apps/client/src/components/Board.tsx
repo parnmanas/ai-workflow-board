@@ -288,9 +288,13 @@ export default function Board() {
     await wrapAction(() => deleteColumn(columnId), 'Column deleted');
   }, [wrapAction, deleteColumn]);
 
-  const handleTicketClick = (ticket: Ticket) => {
+  // Stable identity so a memoized <Column> isn't forced to re-render (and
+  // re-render all its cards) every time Board re-renders for unrelated SSE
+  // churn (typing/presence). setActivePanelTicketId is a stable state setter,
+  // so the empty dep list is safe. Perf ticket b3812637.
+  const handleTicketClick = useCallback((ticket: Ticket) => {
     setActivePanelTicketId(ticket.id);
-  };
+  }, []);
 
   const handleCloseDetail = () => {
     setActivePanelTicketId(null);
