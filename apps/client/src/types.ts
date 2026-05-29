@@ -432,9 +432,11 @@ export interface Board {
   // and choose where the reviewer files follow-up improvement tickets.
   self_improvement_mode?: 'off' | 'same_board' | 'remote_awb' | 'both';
   // Auto-archive policy: null/absent disables, 1..365 archives Done-column
-  // tickets whose terminal_entered_at is older than N days. Server enforces
-  // the range; UI maps a disabled toggle to null and re-introduces the
-  // previous days value when toggled back on.
+  // tickets that have been idle for N days — where "idle" means no Done-entry,
+  // edit, or comment newer than N days (GREATEST(terminal_entered_at,
+  // updated_at, newest comment) older than the cutoff). Server enforces the
+  // range; UI maps a disabled toggle to null and re-introduces the previous
+  // days value when toggled back on.
   auto_archive_days?: number | null;
 }
 
