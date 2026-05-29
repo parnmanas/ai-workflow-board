@@ -15,7 +15,7 @@ import { Agent } from '../../entities/Agent';
 import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { findOrFail } from '../../common/find-or-fail';
-import { parseComments, expandCommentAttachments } from '../mcp/shared/ticket-parsing';
+import { Comment } from '../../entities/Comment';
 import { buildArchiveCursor, parseArchiveCursor } from '../mcp/shared/archive-helpers';
 import { writeRoutingConfigThrough } from './routing-config.helper';
 import { AgentWorkloadService } from '../agents/agent-workload.service';
@@ -102,7 +102,16 @@ export class BoardsController {
         if (!showArchived) whereTickets.archived_at = IsNull();
         const tickets = await this.ticketRepo.find({
           where: whereTickets,
-          relations: ['children', 'children.children', 'comments'],
+          // Board cards don't render comment bodies — they only show a comment
+          // count and a stale-open-question badge (TicketCard reads
+          // comments.length + hasStaleOpenQuestion, which needs only
+          // type/status/created_at). Eager-loading the full `comments` relation
+          // (content + metadata) and expanding attachments for every ticket on
+          // the whole board was the dominant cost of this endpoint. We drop the
+          // relation here and attach a lightweight projection below via one
+          // grouped query. The full thread is served by GET /api/tickets/:id
+          // (loadTicketFull) when a card is opened. Perf ticket b3812637.
+          relations: ['children', 'children.children'],
           order: { position: 'ASC' },
         });
         return {
@@ -117,24 +126,41 @@ export class BoardsController {
               channel_ids: JSON.parse(child.channel_ids || '[]'),
               children: (child.children || []).sort((a, b) => a.position - b.position),
             })),
-            comments: parseComments(t.comments),
+            comments: [] as any[],
           })),
         };
       })
     );
 
-    const allComments: any[] = [];
-    for (const col of columnsWithTickets) for (const t of col.tickets) allComments.push(...t.comments);
-    await expandCommentAttachments(this.dataSource, allComments);
-
-    // Prerequisite counts (ticket 48d14fff) — one grouped query for every
-    // root ticket on the board so the card can render a "blocked by N" badge
-    // without N+1 lookups. Only the total link count is attached; the card
-    // gates the badge on `pending_on_tickets` (already on the entity), so a
-    // ticket whose prereqs are all satisfied won't show it regardless.
+    // Collect root ticket ids once for the two grouped follow-up queries below
+    // (comment projection + prerequisite counts) so neither does N+1 lookups.
     const rootTicketIds: string[] = [];
     for (const col of columnsWithTickets) for (const t of col.tickets) rootTicketIds.push(t.id);
+
     if (rootTicketIds.length > 0) {
+      // Lightweight comment projection for the cards: a single grouped query
+      // that selects only the columns the card needs, instead of loading every
+      // comment's full body + attachments for the whole board. Newest-first to
+      // preserve the historic parseComments ordering. Perf ticket b3812637.
+      const commentRows = await this.dataSource
+        .getRepository(Comment)
+        .createQueryBuilder('c')
+        .select(['c.id', 'c.ticket_id', 'c.type', 'c.status', 'c.created_at'])
+        .where('c.ticket_id IN (:...ids)', { ids: rootTicketIds })
+        .orderBy('c.created_at', 'DESC')
+        .getMany();
+      const commentsByTicket = new Map<string, any[]>();
+      for (const c of commentRows) {
+        const list = commentsByTicket.get(c.ticket_id) || [];
+        list.push({ id: c.id, ticket_id: c.ticket_id, type: c.type, status: c.status, created_at: c.created_at });
+        commentsByTicket.set(c.ticket_id, list);
+      }
+
+      // Prerequisite counts (ticket 48d14fff) — one grouped query so the card
+      // can render a "blocked by N" badge without N+1 lookups. Only the total
+      // link count is attached; the card gates the badge on `pending_on_tickets`
+      // (already on the entity), so a ticket whose prereqs are all satisfied
+      // won't show it regardless.
       const counts = await this.dataSource
         .getRepository(TicketPrerequisite)
         .createQueryBuilder('p')
@@ -144,8 +170,10 @@ export class BoardsController {
         .groupBy('p.ticket_id')
         .getRawMany();
       const countMap = new Map<string, number>(counts.map((r: any) => [r.ticket_id, Number(r.cnt)]));
+
       for (const col of columnsWithTickets) {
         for (const t of col.tickets) {
+          (t as any).comments = commentsByTicket.get(t.id) || [];
           (t as any).prerequisite_count = countMap.get(t.id) || 0;
         }
       }
@@ -214,24 +242,29 @@ export class BoardsController {
       : [];
     const displayNameByAgentId = await resolveAgentDisplayMap(agentRepo, agents);
 
-    // Compute focus for each (agent, role) pair.
-    // TODO: parallelize getFocusTicket calls (Promise.all) once the N+1
-    // queries inside getFocusTicket are batched — sequential for now to
-    // avoid overwhelming DB with concurrent per-ticket queries.
-    const focusTickets: Array<{ agent_id: string; agent_name: string; role: string; ticket_id: string }> = [];
-    for (const { agent_id, role_id } of pairs) {
-      const role = roleById.get(role_id);
-      if (!role) continue;
-      const focusTicketId = await this.agentWorkload.getFocusTicket(agent_id, board.id, role.slug);
-      if (focusTicketId) {
-        focusTickets.push({
+    // Compute focus for each (agent, role) pair. The getFocusTicket calls are
+    // independent reads, so we fan them out with Promise.all instead of
+    // awaiting sequentially — wall-clock drops from sum-of-queries to the
+    // slowest single query (perf ticket b3812637). The per-pair query volume
+    // is bounded by the number of distinct (agent, role) pairs on the board,
+    // which is small; the DB pool caps real concurrency.
+    const resolved = await Promise.all(
+      pairs.map(async ({ agent_id, role_id }) => {
+        const role = roleById.get(role_id);
+        if (!role) return null;
+        const focusTicketId = await this.agentWorkload.getFocusTicket(agent_id, board.id, role.slug);
+        if (!focusTicketId) return null;
+        return {
           agent_id,
           agent_name: displayNameByAgentId.get(agent_id) ?? agent_id,
           role: role.slug,
           ticket_id: focusTicketId,
-        });
-      }
-    }
+        };
+      }),
+    );
+    const focusTickets = resolved.filter(
+      (f): f is { agent_id: string; agent_name: string; role: string; ticket_id: string } => f !== null,
+    );
 
     return res.json({ focus_tickets: focusTickets });
   }
