@@ -16,7 +16,7 @@ import { RoomMembershipService } from '../chat-rooms/room-membership.service';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { LogService } from '../../services/log.service';
 import { findOrFail } from '../../common/find-or-fail';
-import { renderActionPrompt, buildRenderContext } from './action-prompt';
+import { renderActionPrompt, buildRenderContext, ActionTicketContext } from './action-prompt';
 import { parseCron } from './cron';
 
 function makeError(status: number, message: string): Error & { status: number } {
@@ -33,6 +33,10 @@ export interface DispatchActionArgs {
   // a synthetic participant carries the message — see dispatch() for the rationale.
   triggeredByType: 'user' | 'system' | 'agent';
   triggeredById: string;
+  // On-ticket-done hook (ticket 16a6339c): the finished ticket exposed to the
+  // prompt as `{{ticket.*}}`. Only OnTicketDoneActionService sets this; cron /
+  // manual / UI runs leave it undefined so those tokens render empty.
+  ticketContext?: ActionTicketContext;
 }
 
 export interface DispatchActionResult {
@@ -128,6 +132,10 @@ export class ActionsService {
       }
     }
 
+    if (input.trigger !== undefined && !this._isValidTrigger(input.trigger)) {
+      throw makeError(400, "trigger must be '' (cron/manual) or 'on_ticket_done'");
+    }
+
     const created = this.actionRepo.create({
       workspace_id: input.workspace_id,
       board_id: input.board_id || null,
@@ -138,6 +146,8 @@ export class ActionsService {
       schedule_cron: input.schedule_cron ?? '',
       enabled: input.enabled !== false,
       max_runs: typeof input.max_runs === 'number' && input.max_runs > 0 ? input.max_runs : 10,
+      trigger: input.trigger ?? '',
+      trigger_label: input.trigger_label ?? '',
     });
     return this.actionRepo.save(created);
   }
@@ -182,7 +192,20 @@ export class ActionsService {
       const n = Number(patch.max_runs);
       if (Number.isFinite(n) && n > 0) existing.max_runs = Math.floor(n);
     }
+    if (patch.trigger !== undefined) {
+      if (!this._isValidTrigger(patch.trigger)) {
+        throw makeError(400, "trigger must be '' (cron/manual) or 'on_ticket_done'");
+      }
+      existing.trigger = patch.trigger;
+    }
+    if (patch.trigger_label !== undefined) existing.trigger_label = patch.trigger_label ?? '';
     return this.actionRepo.save(existing);
+  }
+
+  // Allowed `Action.trigger` values. Empty = legacy cron/manual; 'on_ticket_done'
+  // opts into the lifecycle hook (OnTicketDoneActionService).
+  private _isValidTrigger(trigger: string): boolean {
+    return trigger === '' || trigger === 'on_ticket_done';
   }
 
   async remove(id: string, workspaceId: string): Promise<void> {
@@ -254,6 +277,7 @@ export class ActionsService {
       agent: { id: agent.id, name: agent.name },
       action: { id: action.id, name: action.name },
       runId,
+      ticket: args.ticketContext ?? null,
     });
     const rendered = renderActionPrompt(action.prompt || '', ctx);
 

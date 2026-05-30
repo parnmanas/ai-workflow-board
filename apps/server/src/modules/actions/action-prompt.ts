@@ -7,6 +7,30 @@
 
 const TOKEN_RE = /\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}/g;
 
+// Finished-ticket context exposed to on-ticket-done hook Actions (ticket
+// 16a6339c). Lets the hook prompt reference the ticket that just completed via
+// `{{ticket.id}}`, `{{ticket.title}}`, `{{ticket.board_id}}`, etc. Only the
+// hook dispatch path populates this; cron / manual runs leave it undefined so
+// those tokens render empty.
+export interface ActionTicketContext {
+  id?: string;
+  title?: string;
+  board_id?: string;
+  column_id?: string;
+  priority?: string;
+  status?: string;
+  description?: string;
+  // Repo / branch the ticket built against — the closest thing to a PR/diff
+  // pointer the server holds without a GitHub round-trip.
+  base_branch?: string;
+  base_repo_id?: string;
+  // Comma-joined labels (the raw column is a JSON string; flattened here so
+  // `{{ticket.labels}}` renders human-readably).
+  labels?: string;
+  assignee?: string;
+  reporter?: string;
+}
+
 export interface ActionRenderContext {
   workspace?: { id?: string; name?: string };
   board?: { id?: string; name?: string } | null;
@@ -14,6 +38,9 @@ export interface ActionRenderContext {
   agent?: { id?: string; name?: string } | null;
   action?: { id?: string; name?: string };
   run?: { id?: string };
+  // Populated only on the on-ticket-done hook path (ticket 16a6339c) — the
+  // finished ticket that triggered the Run.
+  ticket?: ActionTicketContext | null;
   // Convenience tokens — the action user expects `{{date}}` to just work
   // without diving into ISO formatting. Keep the surface tiny.
   date?: string;
@@ -50,6 +77,7 @@ export function buildRenderContext(args: {
   agent?: { id?: string; name?: string } | null;
   action: { id: string; name: string };
   runId: string;
+  ticket?: ActionTicketContext | null;
   now?: Date;
 }): ActionRenderContext {
   const now = args.now ?? new Date();
@@ -61,6 +89,7 @@ export function buildRenderContext(args: {
     agent: args.agent ? { id: args.agent.id, name: args.agent.name } : null,
     action: { id: args.action.id, name: args.action.name },
     run: { id: args.runId },
+    ticket: args.ticket ?? null,
     date: iso.slice(0, 10),
     time: iso.slice(11, 19),
     datetime: iso,
