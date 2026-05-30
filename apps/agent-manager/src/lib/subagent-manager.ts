@@ -834,11 +834,14 @@ export class SubagentManager implements SubagentManagerContract {
    *
    * SIGTERM first, then SIGKILL after STOP_GRACE_MS for any survivor — same
    * escalation as stop() / BaseSessionManager.stopForAgent. Records are
-   * dropped from the map up front so a concurrent dispatch can't reuse them;
-   * the per-child exit handler still runs its own cleanup (config unlink,
-   * silent-exit fallback, onExit) when the process actually dies. Returns the
-   * count plus the in-flight (ticket, role) pairs the victims were holding so
-   * restart_agent can re-push them immediately on the fresh credential.
+   * dropped from the map up front so a concurrent dispatch can't reuse them.
+   * Because the record is gone, the per-child exit handler early-returns and
+   * does NOT run its usual cleanup — so we unlink each victim's temp config
+   * here ourselves (inside the SIGKILL-grace timer). The other exit-handler
+   * side effects are intentionally skipped: the silent-exit "⚠️ exited (143)"
+   * fallback would just spam each reaped ticket, and onExit only logs. Returns
+   * the count plus the in-flight (ticket, role) pairs the victims were holding
+   * so restart_agent can re-push them immediately on the fresh credential.
    */
   async stopForAgent(agentId: string): Promise<SubagentStopForAgentResult> {
     if (!agentId) return { count: 0, inflight: [] };
@@ -872,6 +875,14 @@ export class SubagentManager implements SubagentManagerContract {
           }
         } catch {
           /* already exited */
+        }
+        // The per-child exit handler can't clean up after us: we removed the
+        // record from #map above, so it early-returns (see #wireExitHandler)
+        // and never unlinks the temp config. Unlink it ourselves so reaped
+        // role-pinned trigger subagents don't strand their credential-bearing
+        // cfg-*.json — the exact token hygiene this reap exists to enforce.
+        if (rec.config_path && rec.config_path_is_temp) {
+          fsp.unlink(rec.config_path).catch(() => {});
         }
       }
     }, STOP_GRACE_MS).unref?.();

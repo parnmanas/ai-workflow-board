@@ -18,13 +18,18 @@
 
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 process.env.AWB_AGENT_MANAGER_HOME = mkdtempSync(join(tmpdir(), 'awb-reap-test-'));
 
 const { AgentManagerCommandHandler } = await import('../dist/lib/agent-manager-commands.js');
+const { SubagentManager } = await import('../dist/lib/subagent-manager.js');
+const { SUBAGENTS_BASE_DIR, SUBAGENTS_PERSIST_PATH, STOP_GRACE_MS } = await import(
+  '../dist/lib/constants.js'
+);
 
 function makeConfig() {
   return { url: 'http://127.0.0.1:0', apiKey: 'manager-key', delegation: {} };
@@ -212,4 +217,85 @@ test('restart_agent with no in-flight work skips the resume re-push', async () =
   assert.equal(resume, undefined, 'no resume POST when nothing was in flight');
   const ack = recorded.find((r) => r.url.endsWith('/command/ack'));
   assert.equal(ack.body.status, 'ok');
+});
+
+// Exercises the REAL SubagentManager.stopForAgent kill/map-delete/config-cleanup
+// path (the tests above mock subagentManager, so they never touch it). Regression
+// guard for the leak: stopForAgent removes the record from #map up front, which
+// makes the per-child exit handler early-return — so the temp credential-bearing
+// mcp-config must be unlinked by stopForAgent itself, not by that handler.
+test('stopForAgent reaps the victim and unlinks its temp mcp-config', async () => {
+  // A real long-lived process stands in for a zombie one-shot subagent that
+  // outlived a credential rotation. We seed it through the persist file (the
+  // same reconcile path used on manager restart) because #map is private.
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30)'], {
+    stdio: 'ignore',
+  });
+  child.on('error', () => {});
+  child.unref();
+  const pid = child.pid;
+  assert.ok(pid, 'helper child spawned');
+
+  // A real temp config carrying an Authorization header — exactly what a
+  // role-pinned trigger spawn writes (config_path_is_temp=true).
+  mkdirSync(SUBAGENTS_BASE_DIR, { recursive: true });
+  const cfgPath = join(SUBAGENTS_BASE_DIR, `cfg-reap-${pid}.json`);
+  writeFileSync(
+    cfgPath,
+    JSON.stringify({ mcpServers: { awb: { headers: { Authorization: 'Bearer stale-token' } } } }),
+  );
+
+  // Seed the persist file; init()'s reconcile revives the record since pid is alive.
+  writeFileSync(
+    SUBAGENTS_PERSIST_PATH,
+    JSON.stringify({
+      pids: [
+        {
+          kind: 'trigger',
+          pid,
+          cli_type: 'claude',
+          trigger_id: 'trig-reap',
+          chat_request_id: null,
+          ticket_id: 'tZ',
+          agent_id: 'agent-Z',
+          role: 'assignee',
+          room_id: null,
+          started_at: 1,
+          expected_completion_at: 9_999_999_999_999,
+          config_path: cfgPath,
+          config_path_is_temp: true,
+          captureOutput: false,
+        },
+      ],
+    }),
+  );
+
+  const manager = new SubagentManager({
+    url: 'http://127.0.0.1:0',
+    apiKey: 'manager-key',
+    delegation: {},
+  });
+  await manager.init();
+  assert.ok(existsSync(cfgPath), 'temp config present before reap');
+
+  const res = await manager.stopForAgent('agent-Z');
+  assert.equal(res.count, 1, 'one zombie one-shot reaped');
+  assert.deepEqual(
+    res.inflight,
+    [{ ticket_id: 'tZ', role: 'assignee', room_id: null }],
+    'in-flight (ticket, role) reported for immediate re-push',
+  );
+
+  // SIGKILL escalation + the temp-config unlink both fire inside the
+  // STOP_GRACE_MS grace timer — wait past it before asserting.
+  await new Promise((r) => setTimeout(r, STOP_GRACE_MS + 800));
+
+  assert.ok(!existsSync(cfgPath), 'reaped victim temp config was unlinked (no stranded credential)');
+  let alive = true;
+  try {
+    process.kill(pid, 0);
+  } catch {
+    alive = false;
+  }
+  assert.ok(!alive, 'reaped child process is dead');
 });
