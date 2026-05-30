@@ -736,7 +736,7 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
     role: string,
     triggerSource: string,
     triggeredBy: string,
-    opts?: { forceRespawn?: boolean },
+    opts?: { forceRespawn?: boolean; bypassFocus?: boolean },
   ): Promise<string> {
     return this._emitTrigger(ticket, agentId, role, triggerSource, triggeredBy, opts);
   }
