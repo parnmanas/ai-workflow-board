@@ -35,6 +35,8 @@ function actionToJson(a: Action) {
     prompt: a.prompt,
     target_agent_id: a.target_agent_id,
     schedule_cron: a.schedule_cron,
+    trigger: a.trigger,
+    trigger_label: a.trigger_label,
     enabled: a.enabled,
     max_runs: a.max_runs,
     last_run_at: a.last_run_at,
@@ -83,7 +85,11 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
     'Create or update an action. Provide `id` to update an existing action; omit it to create. ' +
     'The `target_agent_id` must reference an agent in the same workspace (or a global agent). ' +
     '`schedule_cron` accepts a 5-field cron expression with `*` and integer values; leave empty for manual-only. ' +
-    'Prompt supports `{{var.path}}` interpolation against {action,run,workspace,board,user,agent,date,time,datetime}.',
+    "`trigger='on_ticket_done'` opts the action into the lifecycle hook — it runs once when a ticket lands on a " +
+    'terminal column (Done), scoped by board_id (omit/null = any board in the workspace) and trigger_label ' +
+    '(empty = any label). The finished ticket is exposed to the prompt as {{ticket.id}}/{{ticket.title}}/{{ticket.board_id}} etc. ' +
+    'enabled=false skips the hook too (manual run_action only). ' +
+    'Prompt supports `{{var.path}}` interpolation against {action,run,workspace,board,user,agent,ticket,date,time,datetime}.',
     {
       workspace_id: z.string().describe('Workspace ID (required)'),
       id: z.string().optional().describe('Action ID — omit to create, provide to update'),
@@ -93,10 +99,12 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
       prompt: z.string().optional().describe('Prompt template with {{var}} interpolation'),
       target_agent_id: z.string().optional().describe('Target agent ID (required when creating; optional when updating)'),
       schedule_cron: z.string().optional().describe('5-field cron (e.g. "0 9 * * 1" for Mon 9am); empty = manual'),
-      enabled: z.boolean().optional().describe('When false, scheduler skips this action (manual run still works)'),
+      trigger: z.string().optional().describe("Lifecycle trigger: '' (cron/manual, default) or 'on_ticket_done' (run when a ticket reaches a terminal column)"),
+      trigger_label: z.string().optional().describe("For trigger='on_ticket_done': only fire when the finished ticket carries this label. Empty = any label."),
+      enabled: z.boolean().optional().describe('When false, scheduler/hook skips this action (manual run still works)'),
       max_runs: z.number().optional().describe('FIFO prune budget (default 10)'),
     },
-    async ({ workspace_id, id, board_id, name, description, prompt, target_agent_id, schedule_cron, enabled, max_runs }) => {
+    async ({ workspace_id, id, board_id, name, description, prompt, target_agent_id, schedule_cron, trigger, trigger_label, enabled, max_runs }) => {
       if (!actionsService) return err('Actions service unavailable in this MCP context');
       try {
         if (id) {
@@ -107,6 +115,8 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
             target_agent_id,
             board_id: board_id || null,
             schedule_cron,
+            trigger,
+            trigger_label,
             enabled,
             max_runs,
           } as any);
@@ -121,6 +131,8 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
           prompt: prompt ?? '',
           target_agent_id,
           schedule_cron: schedule_cron ?? '',
+          trigger: trigger ?? '',
+          trigger_label: trigger_label ?? '',
           enabled: enabled !== false,
           max_runs: typeof max_runs === 'number' ? max_runs : 10,
         } as any);

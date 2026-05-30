@@ -41,6 +41,9 @@ export function parseTicket(ticket: Ticket) {
     ...ticket,
     labels: safeJsonParse(ticket.labels),
     channel_ids: safeJsonParse(ticket.channel_ids),
+    // On-ticket-done hook binding (ticket 16a6339c) — decode the JSON-string
+    // column to an array, same treatment as labels / channel_ids.
+    on_done_action_ids: safeJsonParse(ticket.on_done_action_ids),
   };
 }
 

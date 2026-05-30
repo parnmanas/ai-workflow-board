@@ -280,10 +280,11 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       base_repo_resource_id: z.string().optional().describe('Resource ID (type=repository) the ticket builds against. Empty string clears.'),
       base_branch: z.string().optional().describe('Branch the agent should treat as the base when starting work. Empty string clears.'),
       next_ticket_id: z.string().optional().describe('Optional pointer to the ticket TriggerLoopService should auto-trigger once this one lands on a terminal column. Must live in the same workspace and cannot self-link. Empty string clears.'),
+      on_done_action_ids: z.array(z.string()).optional().describe('Action ids to dispatch once when this ticket lands on a terminal column (on-ticket-done hook, method "a"). The finished ticket is exposed to each Action prompt as {{ticket.*}}. enabled=false actions are skipped. Empty array clears the per-ticket binding.'),
       pending_user_action: z.boolean().optional().describe('Park the ticket for user intervention. While true, TriggerLoopService drops every agent_trigger for this ticket, AgentWorkloadService.getFocusTicket skips it, and BacklogPromotionService refuses to promote into its column slot. Pair with `pending_reason` so the user can see why. Use this when a decision genuinely needs a human and would otherwise loop the ticket between System and Agent columns. Prefer the dedicated `pend_ticket` / `unpend_ticket` tools when the call is single-purpose.'),
       pending_reason: z.string().optional().describe('Free-text explanation rendered verbatim on the ticket detail panel\'s "User" tab. Cleared automatically when pending_user_action transitions to false.'),
     },
-    async ({ ticket_id, title, description, priority, assignee, reporter, assignee_id, reporter_id, reviewer_id, role_assignments, labels, channel_ids, base_repo_resource_id, base_branch, next_ticket_id, pending_user_action, pending_reason }, extra: { sessionId?: string }) => {
+    async ({ ticket_id, title, description, priority, assignee, reporter, assignee_id, reporter_id, reviewer_id, role_assignments, labels, channel_ids, base_repo_resource_id, base_branch, next_ticket_id, on_done_action_ids, pending_user_action, pending_reason }, extra: { sessionId?: string }) => {
       const ticketRepo = dataSource.getRepository(Ticket);
       const ticket = await ticketRepo.findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Ticket not found');
@@ -388,6 +389,13 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           return err(e?.message || 'next_ticket_id rejected');
         }
         if ((ticket.next_ticket_id || '') !== (oldNextTicketId || '')) changes.push('next_ticket');
+      }
+      if (on_done_action_ids !== undefined) {
+        // On-ticket-done hook binding (method "a"). Stored as a JSON string like
+        // labels / channel_ids. Dedupe + drop blanks so the array stays clean.
+        const cleaned = Array.from(new Set(on_done_action_ids.filter((s) => typeof s === 'string' && s)));
+        ticket.on_done_action_ids = JSON.stringify(cleaned);
+        changes.push('on_done_action_ids');
       }
 
       // Pending-user-action toggle (ticket a57517be). Tracked separately so
