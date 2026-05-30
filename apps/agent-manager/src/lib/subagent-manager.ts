@@ -80,6 +80,12 @@ interface SubagentRecord {
   chat_request_id: string | null;
   ticket_id: string | null;
   agent_id: string | null;
+  /** Workspace role slug the spawn acted as (assignee / reviewer / …). Mirrors
+   *  the role pinned onto the per-spawn mcp-config. Captured so stopForAgent
+   *  can report the in-flight (ticket, role) pair a killed zombie was holding,
+   *  which restart_agent re-pushes for immediate resume. Empty for chat /
+   *  non-role spawns. */
+  role: string | null;
   room_id: string | null;
   started_at: number;
   expected_completion_at: number;
@@ -111,6 +117,22 @@ export interface SubagentExitInfo {
   code: number | null;
   signal: NodeJS.Signals | null;
   durationSec: number;
+}
+
+/** A (ticket, role) pair a killed subagent was mid-flight on. Returned by
+ *  stopForAgent so restart_agent can immediately re-push the trigger on the
+ *  fresh credential instead of waiting for the server supervisor's ~30-min
+ *  stale sweep. `room_id` is carried for diagnostics (chat one-shots have no
+ *  ticket); only entries with a ticket_id are re-pushable. */
+export interface SubagentInflightWork {
+  ticket_id: string | null;
+  role: string | null;
+  room_id: string | null;
+}
+
+export interface SubagentStopForAgentResult {
+  count: number;
+  inflight: SubagentInflightWork[];
 }
 
 export class SubagentManager implements SubagentManagerContract {
@@ -413,6 +435,7 @@ export class SubagentManager implements SubagentManagerContract {
         chat_request_id: spec.chatRequestId || null,
         ticket_id: spec.ticketId || null,
         agent_id: spec.agentId || null,
+        role: spec.role || null,
         room_id: spec.roomId || null,
         started_at: Date.now(),
         expected_completion_at:
@@ -762,6 +785,7 @@ export class SubagentManager implements SubagentManagerContract {
         // missing the field — that matches the pre-ST-6 cleanup behavior.
         this.#map.set(rec.pid, {
           ...rec,
+          role: rec.role ?? null,
           config_path_is_temp: rec.config_path_is_temp ?? true,
           process_handle: null,
           outLines: rec.outLines || [],
@@ -797,6 +821,70 @@ export class SubagentManager implements SubagentManagerContract {
     fsp
       .writeFile(this.#persistPath, JSON.stringify({ pids }, null, 2))
       .catch((err: any) => log(`SubagentManager persist failed: ${err?.message ?? err}`));
+  }
+
+  /**
+   * Force-terminate every live one-shot subagent owned by `agentId`. The
+   * zombie-reaper half of restart_agent: a one-shot trigger / chat / mention
+   * subagent that spawned under an expired OAuth credential keeps running
+   * detached (it captured the apiKey + cli-home env at spawn time), so a
+   * credential rotation never reaches it — it just keeps burning turns
+   * against the dead token until its TTL sweep retires it. stop_agent only
+   * tore down persistent ticket/chat sessions; one-shots were never wired in.
+   *
+   * SIGTERM first, then SIGKILL after STOP_GRACE_MS for any survivor — same
+   * escalation as stop() / BaseSessionManager.stopForAgent. Records are
+   * dropped from the map up front so a concurrent dispatch can't reuse them;
+   * the per-child exit handler still runs its own cleanup (config unlink,
+   * silent-exit fallback, onExit) when the process actually dies. Returns the
+   * count plus the in-flight (ticket, role) pairs the victims were holding so
+   * restart_agent can re-push them immediately on the fresh credential.
+   */
+  async stopForAgent(agentId: string): Promise<SubagentStopForAgentResult> {
+    if (!agentId) return { count: 0, inflight: [] };
+    const victims: SubagentRecord[] = [];
+    for (const [pid, rec] of this.#map.entries()) {
+      if (rec.kind === 'reservation') continue;
+      if (rec.agent_id !== agentId) continue;
+      victims.push(rec);
+      this.#map.delete(pid);
+    }
+    if (victims.length === 0) return { count: 0, inflight: [] };
+
+    for (const rec of victims) {
+      try {
+        process.kill(rec.pid, 'SIGTERM');
+      } catch {
+        /* already dead */
+      }
+    }
+    log(
+      `SubagentManager stopForAgent: agent=${agentId.slice(0, 8)} signalled ${victims.length} one-shot subagent(s) — SIGTERM`,
+    );
+    setTimeout(() => {
+      for (const rec of victims) {
+        try {
+          process.kill(rec.pid, 0);
+          try {
+            process.kill(rec.pid, 'SIGKILL');
+          } catch {
+            /* gone between probe and kill */
+          }
+        } catch {
+          /* already exited */
+        }
+      }
+    }, STOP_GRACE_MS).unref?.();
+
+    this.#persist();
+    return {
+      count: victims.length,
+      inflight: victims.map((rec) => ({
+        ticket_id: rec.ticket_id,
+        role: rec.role,
+        room_id: rec.room_id,
+      })),
+    };
   }
 
   async stop(): Promise<void> {

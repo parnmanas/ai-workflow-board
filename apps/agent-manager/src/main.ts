@@ -482,6 +482,10 @@ async function runRuntime(
     contextRegistry: managedAgentContexts,
     chatSessionManager,
     ticketSessionManager,
+    // Wired so stop_agent / restart_agent also reap the agent's detached
+    // one-shot subagents — without this a restart left zombies running on the
+    // rotated-away credential (ticket 86683d12).
+    subagentManager,
     getInstanceId: () => instanceHeartbeat._real?.instanceId ?? null,
     requestStreamReconnect: () => eventStreamRef?.reconnect(),
     reloadConfig: async () => {

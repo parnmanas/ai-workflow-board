@@ -834,13 +834,18 @@ export class BaseSessionManager {
    * delete) lives in `#wireExit`; we only deliver the signals and let
    * the exit handler do the bookkeeping. SIGTERM first, then SIGKILL
    * after STOP_GRACE_MS for any survivor — same pattern as stop().
-   * Returns the number of sessions that were signalled so the command
-   * ack log can surface it.
+   * Returns the number of sessions that were signalled plus the in-flight
+   * (ticketId, role) pairs they were holding, so restart_agent can re-push
+   * the interrupted work on the fresh credential instead of waiting for the
+   * server supervisor's stale sweep. Chat sessions carry no ticketId and so
+   * contribute nothing to `inflight`.
    */
-  async stopForAgent(agentId: string): Promise<{ count: number }> {
-    if (!agentId) return { count: 0 };
+  async stopForAgent(
+    agentId: string,
+  ): Promise<{ count: number; inflight: Array<{ ticketId: string; role: string }> }> {
+    if (!agentId) return { count: 0, inflight: [] };
     const victims = Array.from(this._sessions.values()).filter((s) => s.agentId === agentId);
-    if (victims.length === 0) return { count: 0 };
+    if (victims.length === 0) return { count: 0, inflight: [] };
     for (const sess of victims) {
       if (sess.idleTimer) {
         clearTimeout(sess.idleTimer);
@@ -875,7 +880,10 @@ export class BaseSessionManager {
         }
       }
     }, STOP_GRACE_MS).unref?.();
-    return { count: victims.length };
+    const inflight = victims
+      .filter((s) => s.ticketId)
+      .map((s) => ({ ticketId: s.ticketId as string, role: (s.role as string) || '' }));
+    return { count: victims.length, inflight };
   }
 
   async stop(): Promise<void> {
