@@ -381,3 +381,45 @@ export async function provisionManagedAgentApiKey(
     return null;
   }
 }
+
+/**
+ * Ask the server to immediately re-push agent_trigger(s) for the given
+ * (ticket, role) work a just-restarted managed agent was interrupted on.
+ * Used by restart_agent right after the fresh spawn so the agent resumes on
+ * the new credential without waiting for TicketSupervisorService's ~30-min
+ * stale sweep. Server validates manager ownership of the agent and emits
+ * each trigger with force_respawn + bypassFocus. Returns the server's
+ * emitted/skipped counts, or null on any transport failure (the supervisor
+ * remains the backstop, so a failed re-push only delays resume — it never
+ * loses the work).
+ */
+export async function requestManagerTriggerRepush(
+  config: AwbConfig,
+  agentId: string,
+  items: Array<{ ticket_id: string; role: string }>,
+): Promise<{ emitted: number; skipped: number } | null> {
+  if (!agentId || !Array.isArray(items) || items.length === 0) {
+    return { emitted: 0, skipped: 0 };
+  }
+  try {
+    const url = `${trimSlash(config.url)}/api/agent-manager/managed-agents/${encodeURIComponent(agentId)}/resume-triggers`;
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'X-Agent-Key': config.apiKey,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({ items }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!resp.ok) {
+      log(`resume-triggers POST failed: ${resp.status} ${resp.statusText} (agent=${agentId})`);
+      return null;
+    }
+    return (await resp.json()) as any;
+  } catch (err: any) {
+    log(`resume-triggers POST error: ${err?.message ?? err} (agent=${agentId})`);
+    return null;
+  }
+}

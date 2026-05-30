@@ -37,11 +37,13 @@ import {
   fetchAgentRecord,
   fetchAgentCredential,
   provisionManagedAgentApiKey,
+  requestManagerTriggerRepush,
   type AwbConfig,
 } from './rest.js';
 import type { ManagedAgentRegistry } from './managed-agents.js';
 import type { ManagedAgentContextRegistry } from './managed-agent-context.js';
 import type { BaseSessionManager } from './base-session-manager.js';
+import type { SubagentManager } from './subagent-manager.js';
 import {
   ensureManagedAgentDir,
   readApiKey,
@@ -131,6 +133,13 @@ export interface CommandHandlerDeps {
    * test harness (deps without session managers) keeps wiring up. */
   chatSessionManager?: Pick<BaseSessionManager, 'stopForAgent'> | null;
   ticketSessionManager?: Pick<BaseSessionManager, 'stopForAgent'> | null;
+  /** SubagentManager — wired so stop_agent / restart_agent also reap the
+   * agent's one-shot trigger / chat / mention subagents. These spawn detached
+   * and captured their apiKey + cli-home env at spawn time, so without this a
+   * credential rotation never reaches them and a zombie keeps burning turns
+   * against the expired OAuth until its TTL sweep retires it. Optional so the
+   * legacy test harness (deps without a subagent manager) keeps wiring up. */
+  subagentManager?: Pick<SubagentManager, 'stopForAgent'> | null;
   /** Optional config-reload hook; resolves with a short summary string. */
   reloadConfig?: () => Promise<string> | string;
   /** Force-drop and re-establish the SSE connection. Called after a successful
@@ -514,8 +523,34 @@ export class AgentManagerCommandHandler {
 
   async #stopAgent(payload: AgentManagerCommandPayload): Promise<string> {
     const agentId = this.#targetAgentId(payload, 'stop_agent');
+    const { summary } = await this.#reapAgent(agentId, 'stop_agent command');
+    return summary;
+  }
+
+  /**
+   * Tear down everything this manager holds for `agentId`: drop the runtime
+   * context, mark the registry stopped, force-kill the agent's live persistent
+   * chat/ticket children AND its detached one-shot subagents, then erase its
+   * on-disk secrets so the next spawn re-provisions. Shared by stop_agent and
+   * restart_agent. Returns a human-readable ack summary plus the de-duplicated
+   * in-flight (ticket, role) set the killed children/subagents were holding —
+   * restart_agent re-pushes those for immediate resume on the new credential.
+   */
+  async #reapAgent(
+    agentId: string,
+    reason: string,
+  ): Promise<{ summary: string; inflight: Array<{ ticket_id: string; role: string }> }> {
     const hadContext = this.#deps.contextRegistry?.delete(agentId) ?? false;
-    const rec = this.#deps.registry.markStopped(agentId, 'stop_agent command');
+    const rec = this.#deps.registry.markStopped(agentId, reason);
+    // De-dup in-flight (ticket, role) work across all three managers so a
+    // single ticket worked by both a persistent session and a one-shot
+    // subagent (or duplicated across them) is only re-pushed once.
+    const inflightByKey = new Map<string, { ticket_id: string; role: string }>();
+    const captureInflight = (ticketId: string | null | undefined, role: string | null | undefined): void => {
+      if (!ticketId) return;
+      const r = role || '';
+      inflightByKey.set(`${ticketId}:${r}`, { ticket_id: ticketId, role: r });
+    };
     // Force-kill the agent's live chat/ticket CLI children FIRST. Each child
     // captured its env (.credentials.json, ANTHROPIC_AUTH_TOKEN, …) at spawn
     // time; without this signal pass, restart_agent + a freshly pasted
@@ -526,39 +561,86 @@ export class AgentManagerCommandHandler {
     // somehow constructed the handler without session managers.
     let chatKilled = 0;
     let ticketKilled = 0;
+    let subagentKilled = 0;
     try {
       const r = await this.#deps.chatSessionManager?.stopForAgent(agentId);
       chatKilled = r?.count ?? 0;
+      for (const w of r?.inflight ?? []) captureInflight(w.ticketId, w.role);
     } catch (err: any) {
-      log(`stop_agent: chatSessionManager.stopForAgent failed: ${err?.message ?? err}`);
+      log(`${reason}: chatSessionManager.stopForAgent failed: ${err?.message ?? err}`);
     }
     try {
       const r = await this.#deps.ticketSessionManager?.stopForAgent(agentId);
       ticketKilled = r?.count ?? 0;
+      for (const w of r?.inflight ?? []) captureInflight(w.ticketId, w.role);
     } catch (err: any) {
-      log(`stop_agent: ticketSessionManager.stopForAgent failed: ${err?.message ?? err}`);
+      log(`${reason}: ticketSessionManager.stopForAgent failed: ${err?.message ?? err}`);
+    }
+    // Reap the detached one-shot subagents (trigger / chat / mention). This is
+    // the direct fix for "기존에 떠있던 subagent 는 계속 안돼" — they were never
+    // wired into stop_agent before, so a restart left them running on the dead
+    // credential.
+    try {
+      const r = await this.#deps.subagentManager?.stopForAgent(agentId);
+      subagentKilled = r?.count ?? 0;
+      for (const w of r?.inflight ?? []) captureInflight(w.ticket_id, w.role);
+    } catch (err: any) {
+      log(`${reason}: subagentManager.stopForAgent failed: ${err?.message ?? err}`);
     }
     // Erase on-disk secrets so the next spawn_agent re-provisions a fresh
     // key. This is the expected security posture: an admin stopping an
     // agent invalidates its credentials on the next start.
     await eraseSecrets(agentId).catch(() => undefined);
-    if (!rec && !hadContext && chatKilled === 0 && ticketKilled === 0) {
+    const inflight = Array.from(inflightByKey.values());
+    if (!rec && !hadContext && chatKilled === 0 && ticketKilled === 0 && subagentKilled === 0) {
       // Unknown to this manager — likely never spawned here. Treat as a
       // no-op success so the operator's ack reflects "nothing to do".
-      return `stop_agent: agent=${agentId.slice(0, 8)} not running on this manager`;
+      return {
+        summary: `stop_agent: agent=${agentId.slice(0, 8)} not running on this manager`,
+        inflight,
+      };
     }
-    return (
-      `stop_agent ok: agent=${agentId.slice(0, 8)} ` +
-      `(context dropped, secrets erased, chat_sessions=${chatKilled} ticket_sessions=${ticketKilled})`
-    );
+    return {
+      summary:
+        `stop_agent ok: agent=${agentId.slice(0, 8)} ` +
+        `(context dropped, secrets erased, chat_sessions=${chatKilled} ` +
+        `ticket_sessions=${ticketKilled} subagents=${subagentKilled})`,
+      inflight,
+    };
   }
 
   async #restartAgent(payload: AgentManagerCommandPayload): Promise<string> {
     // Asserts args.agent_id once up front — both inner calls reuse it via payload.
-    this.#targetAgentId(payload, 'restart_agent');
-    await this.#stopAgent(payload).catch(() => undefined);
+    const agentId = this.#targetAgentId(payload, 'restart_agent');
+    // Capture the in-flight (ticket, role) work BEFORE the teardown so we can
+    // re-push it on the fresh credential. A reap failure must not block the
+    // respawn — fall back to an empty set (the server supervisor still
+    // re-pushes stale work, just on its slower ~30-min cadence).
+    let inflight: Array<{ ticket_id: string; role: string }> = [];
+    try {
+      const reaped = await this.#reapAgent(agentId, 'restart_agent command');
+      inflight = reaped.inflight;
+    } catch (err: any) {
+      log(`restart_agent: reap failed (continuing with respawn): ${err?.message ?? err}`);
+    }
     const detail = await this.#spawnAgent(payload);
-    return `restart_agent → ${detail}`;
+    // Re-push interrupted work AFTER the fresh spawn — #spawnAgent awaits the
+    // SSE reconnect, so by here the server's managedAgentIds snapshot already
+    // includes this agent and the emitted trigger will route to the new child.
+    let resumeNote = '';
+    if (inflight.length > 0) {
+      const res = await requestManagerTriggerRepush(this.#config, agentId, inflight);
+      if (res) {
+        resumeNote = ` · resumed ${res.emitted}/${inflight.length} in-flight ticket(s)`;
+      } else {
+        resumeNote = ` · resume re-push failed for ${inflight.length} ticket(s) (supervisor will retry)`;
+      }
+      log(
+        `restart_agent: agent=${agentId.slice(0, 8)} re-pushed ${inflight.length} in-flight (ticket,role) — ` +
+          (res ? `emitted=${res.emitted} skipped=${res.skipped}` : 'transport failed'),
+      );
+    }
+    return `restart_agent → ${detail}${resumeNote}`;
   }
 
   async #setWorkingDir(payload: AgentManagerCommandPayload): Promise<string> {

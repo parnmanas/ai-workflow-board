@@ -6,7 +6,9 @@ import { In, Repository } from 'typeorm';
 import { randomBytes } from 'crypto';
 import { Agent } from '../../entities/Agent';
 import { Credential } from '../../entities/Credential';
+import { Ticket } from '../../entities/Ticket';
 import { decrypt } from '../../services/encryption.service';
+import { TriggerLoopService } from '../agents/trigger-loop.service';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { WorkspaceGuard } from '../../common/guards/workspace.guard';
@@ -62,8 +64,10 @@ export class AgentManagerController {
     private readonly subagentMonitor: SubagentMonitorService,
     private readonly logService: LogService,
     private readonly commandLedger: CommandLedgerService,
+    private readonly triggerLoop: TriggerLoopService,
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     @InjectRepository(Credential) private readonly credentialRepo: Repository<Credential>,
+    @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
   ) {}
 
   // ─── Plugin / manager → Server ───────────────────────────────────────────
@@ -1029,6 +1033,103 @@ export class AgentManagerController {
       provider: cred.provider,
       fields,
     });
+  }
+
+  // Manager → server: immediately re-push agent_trigger(s) for the in-flight
+  // (ticket, role) work a just-restarted managed agent was interrupted on.
+  //
+  // restart_agent now reaps the agent's zombie one-shot subagents + persistent
+  // sessions (ticket 86683d12). The killed children were mid-flight on real
+  // tickets; without this endpoint the agent wouldn't resume that work until
+  // TicketSupervisorService's ~30-min stale sweep noticed and re-pushed. The
+  // manager calls this right after the fresh spawn so the agent picks the work
+  // back up on the new credential in seconds, not half an hour.
+  //
+  // Auth: AgentAuthGuard validates the manager's apiKey; ownership is enforced
+  // (target.manager_agent_id === caller) exactly like the sibling
+  // managed-agent routes. Each trigger is emitted with force_respawn +
+  // bypassFocus so the precise interrupted ticket resumes regardless of which
+  // ticket the focus selector would otherwise pick.
+  @ApiSecurity('agent-api-key')
+  @Post('api/agent-manager/managed-agents/:id/resume-triggers')
+  @UseGuards(AgentAuthGuard)
+  @ApiOperation({
+    summary: "Manager → server: re-push triggers for a restarted agent's interrupted work",
+  })
+  async resumeManagedAgentTriggers(
+    @Param('id') targetAgentId: string,
+    @Body() body: any,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const callerAgentId = (req as any).currentAgentId as string | null;
+    if (!callerAgentId) return res.status(401).json({ error: 'manager apiKey could not be resolved to an agent_id' });
+
+    const target = await this.agentRepo.findOne({ where: { id: targetAgentId } });
+    if (!target) return res.status(404).json({ error: 'target agent not found' });
+
+    if (target.manager_agent_id !== callerAgentId) {
+      this.logService.warn(
+        'AgentManager',
+        `Refused resume-triggers: caller=${callerAgentId.slice(0, 8)} is not owner of target=${targetAgentId.slice(0, 8)} (owner=${target.manager_agent_id || 'none'})`,
+      );
+      return res.status(403).json({ error: 'caller is not the owning manager for this agent' });
+    }
+
+    // De-dup (ticket_id, role) and drop malformed rows. The manager already
+    // de-dups across its session/subagent managers, but a hostile / buggy
+    // client shouldn't be able to fan out N emits per ticket from here.
+    const rawItems = Array.isArray(body?.items) ? body.items : [];
+    const byKey = new Map<string, { ticket_id: string; role: string }>();
+    for (const item of rawItems) {
+      const ticket_id = typeof item?.ticket_id === 'string' ? item.ticket_id.trim() : '';
+      const role = typeof item?.role === 'string' ? item.role.trim() : '';
+      if (!ticket_id) continue;
+      byKey.set(`${ticket_id}:${role}`, { ticket_id, role });
+    }
+    const items = Array.from(byKey.values());
+
+    let emitted = 0;
+    let skipped = 0;
+    for (const { ticket_id, role } of items) {
+      const ticket = await this.ticketRepo.findOne({ where: { id: ticket_id } });
+      if (!ticket) {
+        skipped++;
+        continue;
+      }
+      try {
+        // bypassFocus: the agent was demonstrably working this exact ticket
+        // before the restart killed its child, so resume THIS ticket rather
+        // than letting the focus selector re-pick. force_respawn so any
+        // racing leftover child is replaced by a fresh one on the new
+        // credential. _emitTrigger still honors board-paused / archived /
+        // pending gates, so a re-push can't reanimate parked work.
+        await this.triggerLoop.emitAgentTrigger(
+          ticket,
+          target.id,
+          role,
+          'manager_restart',
+          'system',
+          { forceRespawn: true, bypassFocus: true },
+        );
+        emitted++;
+      } catch (err: any) {
+        skipped++;
+        this.logService.warn('AgentManager', 'resume-triggers emit failed', {
+          err: err?.message ?? String(err),
+          ticket_id,
+          role,
+          agent_id: target.id,
+        });
+      }
+    }
+
+    this.logService.info(
+      'AgentManager',
+      `resume-triggers agent=${target.id.slice(0, 8)} requested=${items.length} emitted=${emitted} skipped=${skipped}`,
+      { agent_id: target.id, requested: items.length, emitted, skipped },
+    );
+    return res.json({ ok: true, emitted, skipped });
   }
 
   // Admin-side equivalent — useful for operator-driven rotation without a

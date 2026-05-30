@@ -203,6 +203,28 @@ export const BUILTIN_ROLES: Array<{
   },
 ];
 
+/**
+ * Resolve the dev sql.js database directory + on-disk file location.
+ *
+ * Single source of truth for the SQLite path so both buildDataSourceOptions()
+ * and the boot-time corruption guard (ensureSqljsDbHealthy) agree on which
+ * file to open / recover.
+ *
+ * Allow the QA flow-test subprocess to target an isolated db file via env.
+ * Two processes writing sqljs to the same file clobber each other on
+ * autoSave, so the admin "Run Flow Tests" endpoint sets SQLJS_DB_PATH to e.g.
+ * database/qa-flows.db before spawning node --test.
+ */
+export function resolveSqljsLocation(): { dbDir: string; location: string } {
+  const dbDir = path.join(__dirname, '..', '..', '..', 'database');
+  const location = process.env.SQLJS_DB_PATH
+    ? (path.isAbsolute(process.env.SQLJS_DB_PATH)
+        ? process.env.SQLJS_DB_PATH
+        : path.join(dbDir, process.env.SQLJS_DB_PATH))
+    : path.join(dbDir, 'data.db');
+  return { dbDir, location };
+}
+
 export function buildDataSourceOptions(): DataSourceOptions {
   const dbType = (process.env.DB_TYPE || 'sqlite') as 'sqlite' | 'mysql' | 'postgres';
   // Migrations glob — matches both src/.ts (tsx dev mode) and dist/.js (compiled)
@@ -241,17 +263,8 @@ export function buildDataSourceOptions(): DataSourceOptions {
   }
 
   // Default: SQLite (sql.js — pure WASM, no native build required)
-  const dbDir = path.join(__dirname, '..', '..', '..', 'database');
+  const { dbDir, location: sqliteLocation } = resolveSqljsLocation();
   if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
-  // Allow QA flow-test subprocess to target an isolated db file via env.
-  // Two processes writing sqljs to the same file clobber each other on
-  // autoSave, so the admin "Run Flow Tests" endpoint sets this to e.g.
-  // database/qa-flows.db before spawning node --test.
-  const sqliteLocation = process.env.SQLJS_DB_PATH
-    ? (path.isAbsolute(process.env.SQLJS_DB_PATH)
-        ? process.env.SQLJS_DB_PATH
-        : path.join(dbDir, process.env.SQLJS_DB_PATH))
-    : path.join(dbDir, 'data.db');
   return {
     type: 'sqljs',
     location: sqliteLocation,
@@ -266,7 +279,108 @@ export function buildDataSourceOptions(): DataSourceOptions {
 
 export const AppDataSource = new DataSource(buildDataSourceOptions());
 
+// Matches the family of errors sql.js / SQLite raises when the file on disk
+// is not a valid, intact database. Used to distinguish a corrupt-DB failure
+// (recoverable in dev — the data is disposable) from a real bug we must not
+// mask.
+const SQLITE_CORRUPT_RE = /malformed|disk image|file is not a database|not a database|encrypted/i;
+
+/**
+ * Boot-time integrity guard for the dev sql.js database (ticket e9847153).
+ *
+ * Why this exists: a corrupt `data.db` ("database disk image is malformed")
+ * otherwise makes TypeORM's initialize() hang ~25s as synchronize introspects
+ * a broken file before finally erroring — long enough that an agent subagent
+ * gets SIGTERM-killed (exit 143) before it can report anything. We open the
+ * file with sql.js directly here and run PRAGMA integrity_check, so a bad file
+ * is caught in <1s with an actionable message *before* TypeORM touches it.
+ *
+ * Scope: sql.js (dev SQLite) ONLY. Postgres/MySQL return immediately, so
+ * production behavior is unchanged. A fresh/missing/empty file also returns
+ * early — sql.js creates it on initialize().
+ *
+ * Recovery: set AWB_DB_AUTORECOVER=1 (dev convenience) to back the corrupt
+ * file up to `<file>.corrupt-<ts>` and let sql.js recreate an empty DB.
+ * Otherwise we print how to clear it and process.exit(1). Never auto-deletes
+ * for non-sqlite backends.
+ */
+export async function ensureSqljsDbHealthy(): Promise<void> {
+  const dbType = process.env.DB_TYPE || 'sqlite';
+  if (dbType !== 'sqlite') return;
+
+  const { location } = resolveSqljsLocation();
+  // Nothing to validate — sql.js will create a fresh DB on initialize().
+  if (!fs.existsSync(location)) return;
+  if (fs.statSync(location).size === 0) return;
+
+  let SQL: any;
+  try {
+    // Same package TypeORM's sqljs driver uses; loading it here is a one-time
+    // ~100ms WASM init. If sql.js itself can't load, don't block boot — let
+    // TypeORM surface whatever the real problem is.
+    const initSqlJs = require('sql.js');
+    SQL = await initSqlJs();
+  } catch {
+    return;
+  }
+
+  let corruptDetail: string | null = null;
+  try {
+    const buf = fs.readFileSync(location);
+    const db = new SQL.Database(buf);
+    try {
+      const res = db.exec('PRAGMA integrity_check');
+      const first = res?.[0]?.values?.[0]?.[0];
+      if (typeof first === 'string' && first.toLowerCase() !== 'ok') {
+        corruptDetail = `integrity_check: ${first}`;
+      }
+    } finally {
+      db.close();
+    }
+  } catch (e) {
+    const msg = (e as Error)?.message || String(e);
+    if (SQLITE_CORRUPT_RE.test(msg)) {
+      corruptDetail = msg;
+    } else {
+      // Unexpected failure (e.g. permissions) — don't mask it as corruption;
+      // let TypeORM's initialize() produce the canonical error.
+      console.warn(`[DB] sql.js pre-flight check skipped (unexpected error): ${msg}`);
+      return;
+    }
+  }
+
+  if (!corruptDetail) return;
+
+  const autoRecover =
+    process.env.AWB_DB_AUTORECOVER === '1' || process.env.AWB_DB_AUTORECOVER === 'true';
+
+  if (autoRecover) {
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    const backup = `${location}.corrupt-${ts}`;
+    fs.renameSync(location, backup);
+    console.error(
+      `[DB] ⚠️  Dev sql.js database is CORRUPT (${corruptDetail}).\n` +
+      `[DB]     Path: ${location}\n` +
+      `[DB]     AWB_DB_AUTORECOVER is set — backed up to ${backup} and recreating an empty DB.`,
+    );
+    return; // sql.js recreates an empty DB during initialize()
+  }
+
+  console.error(
+    `\n[DB] ✗ FATAL: dev sql.js database is corrupt — ${corruptDetail}\n` +
+    `[DB]     Path: ${location}\n` +
+    `[DB]     This is local dev data and is disposable. To fix, either:\n` +
+    `[DB]       • delete it so sql.js recreates an empty DB:  rm "${location}"\n` +
+    `[DB]       • set AWB_DB_AUTORECOVER=1 to auto-backup + recreate on boot\n` +
+    `[DB]       • or point SQLJS_DB_PATH at a different file\n` +
+    `[DB]     (Aborting now instead of hanging ~25s — ticket e9847153.)\n`,
+  );
+  process.exit(1);
+}
+
 export async function initDb() {
+  // Catch a corrupt dev DB before TypeORM hangs on it (ticket e9847153).
+  await ensureSqljsDbHealthy();
   await AppDataSource.initialize();
   const dbType = process.env.DB_TYPE || 'sqlite';
   console.log(`[DB] Connected using ${dbType}`);

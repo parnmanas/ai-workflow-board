@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { Agent } from '../../entities/Agent';
 import { ApiKey } from '../../entities/ApiKey';
 import { Credential } from '../../entities/Credential';
+import { Ticket } from '../../entities/Ticket';
 import { AgentsModule } from '../agents/agents.module';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { AuthGuard } from '../../common/guards/auth.guard';
@@ -27,7 +28,7 @@ import { CommandLedgerService } from './command-ledger.service';
   // (to inject InstanceRegistryService into AgentsController for live-data
   // enrichment of /api/agents). NestJS resolves the cycle via forwardRef on
   // both sides.
-  imports: [forwardRef(() => AgentsModule), TypeOrmModule.forFeature([Agent, ApiKey, Credential])],
+  imports: [forwardRef(() => AgentsModule), TypeOrmModule.forFeature([Agent, ApiKey, Credential, Ticket])],
   controllers: [AgentManagerController],
   providers: [
     InstanceRegistryService,

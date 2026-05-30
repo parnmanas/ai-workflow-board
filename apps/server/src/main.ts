@@ -10,6 +10,7 @@ import { RequestLoggerInterceptor } from './common/interceptors/request-logger.i
 import { ApiKeyService } from './services/api-key.service';
 import { LogService } from './services/log.service';
 import { preSyncPostgres } from './database/pre-sync-postgres';
+import { ensureSqljsDbHealthy } from './db';
 
 async function bootstrap() {
   // Runs BEFORE NestFactory so TypeORM's auto-synchronize doesn't trip on
@@ -18,6 +19,11 @@ async function bootstrap() {
   // NULL rows on NOT-NULL columns. No-op on sqlite/mysql.
   // See pre-sync-postgres.ts for the rationale.
   await preSyncPostgres();
+
+  // Catch a corrupt dev sql.js data.db here, before NestFactory.create()
+  // triggers DatabaseModule's TypeOrmModule.forRoot() — which would otherwise
+  // hang ~25s on a malformed file (ticket e9847153). No-op on postgres/mysql.
+  await ensureSqljsDbHealthy();
 
   const app = await NestFactory.create(AppModule);
 
