@@ -43,6 +43,28 @@ export class Action {
   @Column({ type: 'varchar', default: '' })
   schedule_cron: string;
 
+  // Lifecycle trigger (ticket 16a6339c). Empty string = the legacy
+  // cron/manual-only Action. `'on_ticket_done'` opts the Action into the
+  // on-ticket-done hook: when a ticket lands on a terminal column (Done),
+  // OnTicketDoneActionService dispatches a Run with the completed ticket as
+  // context. Scope of "which finished tickets fire this Action" is the pair
+  // (board_id, trigger_label):
+  //   - board_id (the existing column) NULL → any board in the workspace;
+  //     <uuid> → only tickets whose terminal column belongs to that board.
+  //   - trigger_label empty → any label; non-empty → the finished ticket must
+  //     carry that label.
+  // `enabled=false` still skips the hook (manual run_action only) — same rule
+  // the scheduler already honours.
+  @Column({ type: 'varchar', default: '' })
+  trigger: string;
+
+  // Label-scope filter for `trigger='on_ticket_done'` (ticket 16a6339c). Empty
+  // = no label requirement (board-wide). Non-empty = the finished ticket's
+  // `labels` JSON array must include this exact string for the hook to fire.
+  // Ignored when `trigger` is not 'on_ticket_done'.
+  @Column({ type: 'varchar', default: '' })
+  trigger_label: string;
+
   // Disable a recurring action without deleting it. Manual `run_action` calls
   // still work even when this is false — disabled only blocks the scheduler.
   @Column({ type: 'boolean', default: true })

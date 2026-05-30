@@ -100,6 +100,28 @@ export class Ticket {
   @Column({ type: 'varchar', nullable: true, default: null })
   next_ticket_id: string | null;
 
+  // On-ticket-done Action hook — explicit per-ticket binding (ticket 16a6339c,
+  // connection method "a"). JSON string array of Action ids to dispatch once
+  // when this ticket lands on a terminal column. Complementary to the
+  // board/label-scoped `Action.trigger='on_ticket_done'` path (method "b") —
+  // OnTicketDoneActionService takes the union of both, deduped by action id.
+  // Empty '[]' disables the per-ticket binding. Stored as a JSON string like
+  // `labels` / `channel_ids` for SQLite/Postgres parity.
+  @Column({ type: 'varchar', default: '[]' })
+  on_done_action_ids: string;
+
+  // Idempotency stamp for the on-ticket-done hook (ticket 16a6339c). Set to the
+  // dispatch time the moment OnTicketDoneActionService fires the hook for this
+  // ticket's CURRENT terminal entry. The service only dispatches when
+  // `terminal_entered_at` is set AND (`on_done_dispatched_at` is null OR
+  // `on_done_dispatched_at < terminal_entered_at`) — so each distinct terminal
+  // entry fires at most once, but a ticket that leaves Done and re-enters
+  // (which re-stamps `terminal_entered_at` to a newer time) fires again. The
+  // claim is an atomic conditional UPDATE so concurrent 'moved' activities for
+  // the same entry can't double-dispatch. Null until the hook first fires.
+  @Column({ type: Date, nullable: true, default: null })
+  on_done_dispatched_at: Date | null;
+
   // User-intervention pending flag. When true the ticket is "parked" awaiting
   // a human decision: TriggerLoopService drops every agent_trigger for it
   // (so the agent's focus moves to another ticket), the auto-advance cascade
