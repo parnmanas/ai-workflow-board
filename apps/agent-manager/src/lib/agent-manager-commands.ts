@@ -44,6 +44,7 @@ import type { ManagedAgentRegistry } from './managed-agents.js';
 import type { ManagedAgentContextRegistry } from './managed-agent-context.js';
 import type { BaseSessionManager } from './base-session-manager.js';
 import type { SubagentManager } from './subagent-manager.js';
+import type { CircuitBreaker } from './circuit-breaker.js';
 import {
   ensureManagedAgentDir,
   readApiKey,
@@ -140,6 +141,9 @@ export interface CommandHandlerDeps {
    * against the expired OAuth until its TTL sweep retires it. Optional so the
    * legacy test harness (deps without a subagent manager) keeps wiring up. */
   subagentManager?: Pick<SubagentManager, 'stopForAgent'> | null;
+  /** Circuit-breaker — reset on restart_agent so re-pushed triggers aren't
+   * blocked by stale failure counts from the previous credential. */
+  circuitBreaker?: CircuitBreaker | null;
   /** Optional config-reload hook; resolves with a short summary string. */
   reloadConfig?: () => Promise<string> | string;
   /** Force-drop and re-establish the SSE connection. Called after a successful
@@ -612,6 +616,10 @@ export class AgentManagerCommandHandler {
   async #restartAgent(payload: AgentManagerCommandPayload): Promise<string> {
     // Asserts args.agent_id once up front — both inner calls reuse it via payload.
     const agentId = this.#targetAgentId(payload, 'restart_agent');
+    // Reset circuit-breaker for this agent — the operator presumably fixed
+    // the config/credential issue that triggered the breaker, so the
+    // re-pushed triggers should be allowed through immediately.
+    this.#deps.circuitBreaker?.resetAgent(agentId);
     // Capture the in-flight (ticket, role) work BEFORE the teardown so we can
     // re-push it on the fresh credential. A reap failure must not block the
     // respawn — fall back to an empty set (the server supervisor still

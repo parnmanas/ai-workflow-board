@@ -12,6 +12,7 @@ import { composeTriggerPrompt } from './prompts.js';
 import { fireAndForgetTool } from './mcp-client.js';
 import { log } from './logging.js';
 import { postSilentExitSystemComment } from './rest.js';
+import { CircuitBreaker } from './circuit-breaker.js';
 import type {
   TicketDispatchResult,
   TicketSessionManager as TicketSessionManagerContract,
@@ -64,6 +65,11 @@ export class TicketSessionManager
   // that map directly — both ticket and chat session managers share the
   // pattern, but each owns its own instance, so the maps don't cross-pollute.
 
+  /** Circuit-breaker: blocks re-dispatch to agents that repeatedly exit with
+   *  non-transient errors (missing auth, config errors). Shared across all
+   *  sessions so the threshold counts total attempts, not per-child. */
+  readonly circuitBreaker = new CircuitBreaker();
+
   /** Per-session state for the "moving cue armed, waiting for move_ticket"
    *  guard. Keyed by pid (unique per child) so a respawn under the same
    *  sessionKey gets a fresh slate and the previous child's stale armed
@@ -101,6 +107,20 @@ export class TicketSessionManager
     if (!spec.ticketId) return { dispatched: false, reason: 'no_ticket' };
     const role = spec.role || '';
     const sessionKey = this.#makeKey(spec.ticketId, role);
+
+    // Circuit-breaker gate: if this (agent, ticket, role) has hit the
+    // non-transient failure threshold, drop the trigger so we don't burn
+    // respawns on a misconfigured agent indefinitely.
+    if (spec.agentId) {
+      const cbKey = CircuitBreaker.key(spec.agentId, spec.ticketId, role);
+      const blockReason = this.circuitBreaker.shouldBlock(cbKey);
+      if (blockReason) {
+        log(
+          `[ticket-session] dispatch blocked by circuit-breaker: ticket=${spec.ticketId.slice(0, 8)} role=${role} agent=${spec.agentId.slice(0, 8)} — ${blockReason}`,
+        );
+        return { dispatched: false, reason: 'circuit_breaker_open' };
+      }
+    }
 
     const dedupKey = spec.triggerId ? `trigger:${spec.triggerId}` : null;
     if (dedupKey && !this._rememberDedup(dedupKey)) {
@@ -416,6 +436,13 @@ export class TicketSessionManager
           //      `_onChildExit` fallback skips this pid.
           if (this.#isCommentTool(block.name)) {
             this.#commentSent.add(sess.pid);
+            // Agent successfully left an audit trail — reset circuit-breaker
+            // so future dispatches aren't blocked by stale failure counts.
+            if (sess.agentId && sess.ticketId) {
+              this.circuitBreaker.reset(
+                CircuitBreaker.key(sess.agentId, sess.ticketId, sess.role || ''),
+              );
+            }
           }
           if (block.name.endsWith('add_comment')) {
             const text = String(block.input?.content || '');
@@ -482,8 +509,40 @@ export class TicketSessionManager
     // If a comment-creating tool DID fire during this cycle and the exit was
     // clean, the subagent has already left a real trace and we skip — the
     // fallback is opt-in noise otherwise.
-    if (commented && code === 0) return;
+    if (commented && code === 0) {
+      // Successful comment → reset circuit-breaker for this key.
+      if (sess.agentId && ticketId) {
+        this.circuitBreaker.reset(
+          CircuitBreaker.key(sess.agentId, ticketId, role),
+        );
+      }
+      return;
+    }
     if (!ticketId) return; // sanity — shouldn't happen for a ticket session
+
+    // Circuit-breaker: record non-transient exits. Transient signals
+    // (143/SIGTERM, 137/SIGKILL) are the zombie-reap / restart path and
+    // must NOT count — the agent will be re-dispatched normally.
+    if (sess.agentId && !CircuitBreaker.isTransientExit(code)) {
+      const cbKey = CircuitBreaker.key(sess.agentId, ticketId, role);
+      const { justOpened, entry } = this.circuitBreaker.record(cbKey, code, tail);
+      if (justOpened) {
+        // Breaker just opened — pend the ticket so it surfaces for operator
+        // attention instead of looping silently.
+        const exitDesc = code === 0
+          ? 'clean exit with no comment'
+          : `exit code ${code}`;
+        const reason =
+          `Agent failed ${entry.consecutiveFailures} consecutive times (${exitDesc}). ` +
+          `Last output: ${entry.lastExitTail || '(none)'}. ` +
+          `Check agent CLI config/credentials and unpend when fixed.`;
+        fireAndForgetTool(this._config, 'pend_ticket', {
+          ticket_id: ticketId,
+          reason,
+        });
+      }
+    }
+
     await this.#postSilentExitFallback(sess, code, triggerId, role, tail);
   }
 

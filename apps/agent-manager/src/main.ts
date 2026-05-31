@@ -486,6 +486,9 @@ async function runRuntime(
     // one-shot subagents — without this a restart left zombies running on the
     // rotated-away credential (ticket 86683d12).
     subagentManager,
+    // Circuit-breaker: restart_agent resets failure counts so re-pushed
+    // triggers aren't blocked by stale breaker state from the old credential.
+    circuitBreaker: ticketSessionManager?.circuitBreaker ?? null,
     getInstanceId: () => instanceHeartbeat._real?.instanceId ?? null,
     requestStreamReconnect: () => eventStreamRef?.reconnect(),
     reloadConfig: async () => {

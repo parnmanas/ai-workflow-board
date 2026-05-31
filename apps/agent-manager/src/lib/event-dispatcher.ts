@@ -468,6 +468,10 @@ export class EventDispatcher {
           log(`Trigger deduped: ticket=${ev.ticket_id} trigger=${ev.field_changed || ''}`);
           return;
         }
+        if (result.reason === 'circuit_breaker_open') {
+          log(`Trigger blocked by circuit-breaker: ticket=${ev.ticket_id} — not falling back to one-shot`);
+          return;
+        }
         log(
           `Ticket session dispatch declined (${result.reason}), falling back to one-shot subagent`,
         );
