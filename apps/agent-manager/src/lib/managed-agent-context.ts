@@ -57,7 +57,7 @@ export interface ManagedAgentContext {
    *  than re-derived per heartbeat) because it's authoritative regardless
    *  of whether the OAuth file currently exists on disk:
    *    - 'subscription' — per-agent OAuth credential ('claude_subscription' /
-   *      'codex_subscription' / 'gemini_subscription'); the cli-home holds
+   *      'codex_subscription' / 'antigravity_subscription'); the cli-home holds
    *      a `.credentials.json` (or equivalent) the CLI rotates in place.
    *    - 'api_key' — env-var auth (ANTHROPIC_API_KEY etc.). No expiry.
    *    - 'operator_home' — no per-agent credential set; the manager copied

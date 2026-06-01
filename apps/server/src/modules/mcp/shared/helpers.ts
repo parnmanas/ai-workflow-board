@@ -30,7 +30,7 @@ export function err(message: string) {
 }
 
 /**
- * Strip ephemeral harness markers that a Claude / Codex / Gemini CLI subagent
+ * Strip ephemeral harness markers that a Claude / Codex / Antigravity CLI subagent
  * sometimes echoes from its own model context into MCP tool arguments
  * (`<system-reminder>…</system-reminder>`, `<command-message>…`,
  * `<command-args>…`, `<local-command-stdout>…`, `<local-command-stderr>…`).

@@ -57,8 +57,8 @@ export interface ManagedAgentCredential {
   /** AWB Credential row id — diagnostic only; the manager doesn't talk back. */
   credential_id: string;
   /** Credential.provider — one of `claude_subscription` / `claude_api_key` /
-   *  `codex_subscription` / `codex_api_key` / `gemini_subscription` /
-   *  `gemini_api_key`. The manager validates that the prefix matches the
+   *  `codex_subscription` / `codex_api_key` / `antigravity_subscription` /
+   *  `antigravity_api_key`. The manager validates that the prefix matches the
    *  agent's CLI before applying — a mismatch silently falls through to
    *  legacy operator-HOME behaviour. */
   provider: string;

@@ -11,7 +11,7 @@
 //     CLI processes the manager owns end-to-end. Different lifecycle,
 //     different observability surface.
 //
-// Lifecycle of CLI child processes (claude/codex/gemini) is intentionally
+// Lifecycle of CLI child processes (claude/codex/antigravity) is intentionally
 // stubbed in this iteration. The contract layer (recognise commands, mark
 // state, ack the server) is what landed in ST-5b; the actual `spawn child
 // process and stream its stdio` work is a follow-up — this file's API is
@@ -24,7 +24,7 @@ export type ManagedAgentStatus = 'idle' | 'spawning' | 'running' | 'stopped' | '
 export interface ManagedAgentRecord {
   agent_id: string;
   name: string;
-  cli: string;             // claude | codex | gemini | custom
+  cli: string;             // claude | codex | antigravity | custom
   working_dir: string;
   status: ManagedAgentStatus;
   pid: number | null;

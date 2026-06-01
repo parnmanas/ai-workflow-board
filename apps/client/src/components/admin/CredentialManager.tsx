@@ -28,8 +28,8 @@ const PROVIDERS = [
   { value: 'deepseek_api_key', label: 'DeepSeek · API Key', icon: 'DS' },
   { value: 'codex_subscription', label: 'Codex · Subscription', icon: 'OS' },
   { value: 'codex_api_key', label: 'Codex · API Key', icon: 'OK' },
-  { value: 'gemini_subscription', label: 'Gemini · Subscription', icon: 'GS' },
-  { value: 'gemini_api_key', label: 'Gemini · API Key', icon: 'GK' },
+  { value: 'antigravity_subscription', label: 'Antigravity · Subscription', icon: 'AS' },
+  { value: 'antigravity_api_key', label: 'Antigravity · API Key', icon: 'AK' },
 ];
 
 interface FieldDef {
@@ -75,14 +75,14 @@ const PROVIDER_FIELD_LABELS: Record<string, Record<string, FieldDef>> = {
   codex_api_key: {
     api_key: { label: 'OPENAI_API_KEY', placeholder: 'sk-...' },
   },
-  gemini_subscription: {
+  antigravity_subscription: {
     oauth_creds_json: {
       label: 'oauth_creds.json',
-      placeholder: 'Paste the contents of the gemini OAuth credential file (produced by `gemini login`).',
+      placeholder: 'Paste the contents of the Antigravity OAuth credential file (from the OAuth flow at antigravity.google).',
       multiline: true,
     },
   },
-  gemini_api_key: {
+  antigravity_api_key: {
     api_key: { label: 'GEMINI_API_KEY', placeholder: 'AI...' },
   },
 };
@@ -208,8 +208,8 @@ export default function CredentialManager({ workspaceId }: { workspaceId?: strin
       deepseek_api_key: '#4d6bfe',
       codex_subscription: '#10a37f',
       codex_api_key: '#10a37f',
-      gemini_subscription: '#4285f4',
-      gemini_api_key: '#4285f4',
+      antigravity_subscription: '#4285f4',
+      antigravity_api_key: '#4285f4',
     };
     return map[p] || tokens.colors.textSecondary;
   };

@@ -1,6 +1,6 @@
 // Resolve the absolute path to this agent-manager build at runtime, used
 // when writing `mcpServers.host` entries into a managed agent's MCP config —
-// the spawned CLI (claude/gemini) needs a concrete `command + args` it can
+// the spawned CLI (claude/antigravity) needs a concrete `command + args` it can
 // fork to bring up the host-mcp stdio server.
 //
 // Why this lives in its own module: `writeMcpConfig` (managed-agent-store)

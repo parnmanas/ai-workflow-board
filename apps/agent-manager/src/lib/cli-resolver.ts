@@ -43,7 +43,7 @@ interface CandidateProvider {
 
 const CANDIDATE_PROVIDERS: Record<string, CandidateProvider> = {
   claude: { unix: claudeUnixCandidates, windows: claudeWindowsCandidates },
-  gemini: { unix: geminiUnixCandidates, windows: geminiWindowsCandidates },
+  agy: { unix: agyUnixCandidates, windows: agyWindowsCandidates },
   codex: { unix: codexUnixCandidates, windows: codexWindowsCandidates },
 };
 
@@ -72,7 +72,7 @@ export function resolveCliBin(cliType: string, configured?: string | null): stri
     // Defense: if `configured` is the literal name of a *different* known
     // CLI (e.g. "claude" passed for codex), it's almost certainly the
     // legacy `delegation.claudeBin` default leaking through. Ignore it
-    // and fall through to normal lookup so codex / gemini spawns find
+    // and fall through to normal lookup so codex / antigravity spawns find
     // their actual binary instead of launching claude with foreign argv.
     if ((KNOWN_CLI_TYPES as readonly string[]).includes(configured)) {
       log(
@@ -167,28 +167,25 @@ function claudeWindowsCandidates(home: string): string[] {
   ];
 }
 
-function geminiUnixCandidates(home: string): string[] {
+function agyUnixCandidates(home: string): string[] {
   return [
-    join(home, '.npm-global/bin/gemini'),
-    join(home, '.bun/bin/gemini'),
-    join(home, '.local/bin/gemini'),
-    join(home, '.volta/bin/gemini'),
-    join(home, '.npm-packages/bin/gemini'),
-    join(home, 'node_modules/.bin/gemini'),
-    '/usr/local/bin/gemini',
-    '/opt/homebrew/bin/gemini',
-    '/usr/bin/gemini',
+    join(home, '.local/bin/agy'),
+    join(home, '.npm-global/bin/agy'),
+    join(home, '.bun/bin/agy'),
+    join(home, '.volta/bin/agy'),
+    join(home, '.npm-packages/bin/agy'),
+    join(home, 'node_modules/.bin/agy'),
+    '/usr/local/bin/agy',
+    '/opt/homebrew/bin/agy',
+    '/usr/bin/agy',
   ];
 }
 
-function geminiWindowsCandidates(home: string): string[] {
-  const appdata = process.env.APPDATA || join(home, 'AppData', 'Roaming');
+function agyWindowsCandidates(home: string): string[] {
   const localAppData = process.env.LOCALAPPDATA || join(home, 'AppData', 'Local');
-  const pkgBin = join(appdata, 'npm', 'node_modules', '@google', 'gemini-cli', 'bin');
   return [
-    join(pkgBin, 'gemini.exe'),
-    join(appdata, 'npm', 'gemini.exe'),
-    join(localAppData, 'Programs', 'google', 'gemini-cli', 'gemini.exe'),
+    join(localAppData, 'Antigravity', 'agy.exe'),
+    join(localAppData, 'Programs', 'google', 'antigravity', 'agy.exe'),
   ];
 }
 

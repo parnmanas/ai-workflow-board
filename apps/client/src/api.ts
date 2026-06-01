@@ -847,7 +847,7 @@ export const api = {
 
   // Create an agent identity that the manager will spawn. Differs from the
   // generic POST /agents in two ways: (1) cli is validated against the
-  // claude/codex/gemini/custom whitelist, (2) manager_agent_id is sanity-
+  // claude/codex/antigravity/custom whitelist, (2) manager_agent_id is sanity-
   // checked (existence + type='manager'); the manager itself can live in a
   // different workspace from the new agent — managers are paired globally
   // by an admin and supervise children across workspaces.

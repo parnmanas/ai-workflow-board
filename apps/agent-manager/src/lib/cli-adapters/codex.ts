@@ -1,5 +1,5 @@
-// Codex CLI adapter — stateless one-shot, mirrors the Gemini path.
-// Like Gemini, codex doesn't speak AWB MCP tools natively, so the
+// Codex CLI adapter — stateless one-shot, mirrors the Antigravity path.
+// Like Antigravity, codex doesn't speak AWB MCP tools natively, so the
 // manager collects codex's stdout via collectOneshotResult() and posts
 // the answer back through its own REST connection.
 //

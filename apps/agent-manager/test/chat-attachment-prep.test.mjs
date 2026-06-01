@@ -74,7 +74,7 @@ test('prep: image with fetchImages=true returns image_base64 with bytes', async 
 
 test('prep: image with fetchImages=false materializes to a local file', async () => {
   // Reviewer bounce 2026-05-26: previously degraded to metadata_only with
-  // "ask the user again". Non-vision CLIs (Codex / Gemini) need a real
+  // "ask the user again". Non-vision CLIs (Codex / Antigravity) need a real
   // file path they can pass to their own file-read tools.
   const PNG_B64 = Buffer.from([
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
@@ -367,7 +367,7 @@ test('renderAttachmentBlock includes filename, mime, size, url, and inline body'
   assert.ok(joined.includes('big.zip'));
   assert.ok(joined.includes('mime=application/zip'));
   // Materialized files must surface the local_path so a non-vision CLI
-  // (Codex / Gemini) can pass it straight to its own file/read tools.
+  // (Codex / Antigravity) can pass it straight to its own file/read tools.
   assert.ok(joined.includes('local_path: /tmp/awb-attachments/r/a-4-screen.png'));
 });
 

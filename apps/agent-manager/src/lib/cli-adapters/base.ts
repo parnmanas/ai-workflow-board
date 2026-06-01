@@ -208,7 +208,7 @@ export interface AdapterCredential {
 
 /** AWB MCP endpoint + per-agent apiKey, threaded into `prepareCliHome` so
  *  adapters whose CLI consumes MCP servers via a static config file (e.g.
- *  gemini's `settings.json` `mcpServers`) can persist the AWB server into
+ *  antigravity's `mcp_config.json` `mcpServers`) can persist the AWB server into
  *  the per-agent cli-home at spawn_agent time. Adapters that pass MCP
  *  config via a per-spawn flag (claude `--mcp-config`) ignore this and
  *  return early — the manager still writes its own `mcp-config.json` for

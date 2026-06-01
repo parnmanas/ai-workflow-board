@@ -30,7 +30,7 @@ const AGENT_CHAIN_DEPTH_CAP = 3;
 // Manager-side multi-tenancy. When an event targets a managed agent the
 // dispatcher resolves that agent's runtime context (cwd, on-disk
 // mcp-config path, raw apiKey) and threads it through to every spawn site
-// so child claude/codex/gemini processes:
+// so child claude/codex/antigravity processes:
 //   - run with cwd = the agent's working_dir (project root)
 //   - authenticate to AWB MCP under the agent's own apiKey (not the
 //     manager's), so tool-call attribution lands on the agent
@@ -46,7 +46,7 @@ export interface AgentExecutionContext {
   cwd: string;
   /** Pre-written `claude --mcp-config` file. Manager writes once per agent. */
   mcp_config_path: string;
-  /** ST-6 follow-up: which CLI to fork (claude / codex / gemini / custom).
+  /** ST-6 follow-up: which CLI to fork (claude / codex / antigravity / custom).
    *  Per-agent rather than manager-wide so one manager host can drive a
    *  mix of agents. SubagentManager / BaseSessionManager memoize the
    *  adapter per cliType so the cost is one createAdapter() per cli over
@@ -93,7 +93,7 @@ export interface SubagentSpawnArgs {
    *  runs from other reviewer wake-ups on the same ticket. */
   triggerSource?: string;
   /** Chat room id for one-shot chat spawns. When set, non-MCP adapters
-   *  (codex, gemini) post their collected result to this room via REST
+   *  (codex, antigravity) post their collected result to this room via REST
    *  instead of as a ticket comment. */
   roomId?: string;
   /** ST-6: per-event managed-agent runtime context. Optional. */
@@ -921,7 +921,7 @@ export class EventDispatcher {
         await this.#setChatRoomTyping(p.room_id, true, 'thinking');
         const history = await fetchChatRoomHistory(this.#config, p.room_id);
         const rolePrompt = p.role_prompt || '';
-        // Oneshot fallback path (Codex / Gemini / non-persistent Claude):
+        // Oneshot fallback path (Codex / Antigravity / non-persistent Claude):
         // prep attachments WITHOUT image fetches — there's no vision
         // content block surface here, so images degrade to metadata_only.
         // Text-ish attachments still get inlined into the prompt.

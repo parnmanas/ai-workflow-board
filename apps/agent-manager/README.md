@@ -1,7 +1,7 @@
 # awb-agent-manager
 
 Standalone subagent runner for [AI Workflow Board](../../README.md). Connects to
-an AWB server over SSE + REST, spawns CLI-driven agents (Claude, Codex, Gemini,
+an AWB server over SSE + REST, spawns CLI-driven agents (Claude, Codex, Antigravity,
 or any custom binary that speaks MCP), and reports liveness back to the AWB
 admin dashboard.
 
@@ -30,7 +30,7 @@ browser, instance heartbeats, and CLI lifecycle management.
 └─────────────────────────────────────────────────────────────────┘
        │ stdio
        ▼
-   claude / codex / gemini / custom CLI
+   claude / codex / antigravity / custom CLI
 ```
 
 ## Install
@@ -78,7 +78,7 @@ After redeeming, the manager stores its API key and agent identity in
    You'll be prompted for:
    - AWB server URL (e.g. `https://awb.example.com:7700`)
    - Pairing token (paste from step 1)
-   - CLI to drive (`claude` / `codex` / `gemini`, default `claude`)
+   - CLI to drive (`claude` / `codex` / `antigravity`, default `claude`)
 
    The wizard calls `/api/agent-manager/pair/redeem`, then writes
    `~/.config/awb-agent-manager/config.json` with mode 0600. Output:
@@ -112,7 +112,7 @@ After redeeming, the manager stores its API key and agent identity in
    events.
 
 4. **Add managed agents** — Back in AWB, _Agent Manager → Managed Agents →
-   Create_. Pick the CLI (`claude` / `codex` / `gemini` / `custom`), point at
+   Create_. Pick the CLI (`claude` / `codex` / `antigravity` / `custom`), point at
    a working directory, and leave _Spawn on this manager after create_ on for
    one-click setup. The manager provisions a per-agent apiKey, writes its
    on-disk config + mcp-config.json, and starts routing matching ticket /

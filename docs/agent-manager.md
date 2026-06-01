@@ -81,7 +81,7 @@ interface AwbConfig {
   apiKey: string;              // bearer issued by /api/agent-manager/pair/redeem
   workspace_id?: string;       // workspace this manager binds to
   agent_id?: string | null;    // manager's Agent identity (auto-resolved if null)
-  cli?: 'claude' | 'codex' | 'gemini' | string;  // default 'claude'
+  cli?: 'claude' | 'codex' | 'antigravity' | string;  // default 'claude'
   delegation?: {
     enabled?: boolean;         // master switch for SubagentManager
     max_concurrent_subagents?: number;
@@ -142,7 +142,7 @@ interface AgentManagerCommand {
     agent_id?: string;     // REQUIRED for *_agent / set_working_dir / maintenance verbs;
                            // identifies the managed-agent target on this manager
     working_dir?: string;
-    cli?: 'claude' | 'codex' | 'gemini' | 'custom';
+    cli?: 'claude' | 'codex' | 'antigravity' | 'custom';
   };
 }
 ```

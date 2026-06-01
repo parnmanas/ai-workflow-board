@@ -860,7 +860,7 @@ export type AgentProxySession = AgentLiveSession;
 // One Agent row can have multiple instances (proxy + daemon, or several
 // machines for the same agent identity); the registry preserves the per-
 // process detail the admin dashboard renders. ST-4 adds the 'manager' mode
-// for the standalone awb-agent-manager process (claude/codex/gemini parent).
+// for the standalone awb-agent-manager process (claude/codex/antigravity parent).
 export interface AgentManagerInstance {
   instance_id: string;
   agent_id: string;
@@ -960,7 +960,7 @@ export interface AgentManagerCommandResult {
 
 export interface ManagedAgentCreateBody {
   name: string;
-  cli: 'claude' | 'deepseek' | 'codex' | 'gemini' | 'custom';
+  cli: 'claude' | 'deepseek' | 'codex' | 'antigravity' | 'custom';
   working_dir?: string;
   manager_agent_id?: string | null;
   description?: string;

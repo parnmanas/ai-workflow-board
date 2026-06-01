@@ -2,7 +2,7 @@
 //
 // Parameterized by a CliAdapter — the adapter contributes argv shape,
 // mcp-config requirement, stream parsing, and one-shot result aggregation.
-// For non-MCP adapters (gemini, …) the manager:
+// For non-MCP adapters (antigravity, …) the manager:
 //   - Skips the per-spawn mcp-config tempfile (adapter.needsMcpConfig=false)
 //   - Captures stdout lines into the record so collectOneshotResult() can
 //     produce a final answer at exit time
@@ -142,7 +142,7 @@ export class SubagentManager implements SubagentManagerContract {
    * ST-7 cli refactor: per-cliType adapter cache. The manager is no longer
    * pinned to a single CLI; spawn() resolves the right adapter from
    * `agentContext.cli` so a single manager host can drive a mix of
-   * claude / codex / gemini agents. createAdapter() runs at most once per
+   * claude / codex / antigravity agents. createAdapter() runs at most once per
    * cli over the manager's lifetime.
    */
   #adapters = new Map<string, CliAdapter>();
@@ -285,7 +285,7 @@ export class SubagentManager implements SubagentManagerContract {
     // (a) reuse the pre-written mcp-config.json instead of a temp one,
     // (b) authenticate as the managed agent (apiKey override),
     // (c) cd into the managed agent's working_dir, and
-    // (d) pick the adapter for the agent's CLI choice (claude/codex/gemini)
+    // (d) pick the adapter for the agent's CLI choice (claude/codex/antigravity)
     //     instead of using a manager-wide default.
     const ctx = spec.agentContext;
     const adapter = this.#adapterFor(ctx?.cli);
@@ -353,7 +353,7 @@ export class SubagentManager implements SubagentManagerContract {
       }
 
       // See base-session-manager: `delegation.claudeBin` is claude-only;
-      // forwarding it to codex / gemini spawned the wrong binary.
+      // forwarding it to codex / antigravity spawned the wrong binary.
       const binOverride =
         adapter.cliType === 'claude' ? this.#config.delegation.claudeBin : null;
       const resolvedBin = adapter.resolveBin(binOverride);
@@ -503,7 +503,7 @@ export class SubagentManager implements SubagentManagerContract {
       if (record.captureOutput && (record.ticket_id || record.room_id)) {
         try {
           // Use the same adapter that spawned this child — picked by
-          // record.cli_type so we don't aggregate gemini's stdout with
+          // record.cli_type so we don't aggregate antigravity's stdout with
           // claude's parser.
           const answer = this.#adapterFor(record.cli_type).collectOneshotResult(record.outLines);
           if (answer) {

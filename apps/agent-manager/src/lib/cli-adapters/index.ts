@@ -2,7 +2,7 @@
 
 import { ClaudeCliAdapter } from './claude.js';
 import { DeepSeekCliAdapter } from './deepseek.js';
-import { GeminiCliAdapter } from './gemini.js';
+import { AntigravityCliAdapter } from './antigravity.js';
 import { CodexCliAdapter } from './codex.js';
 import {
   ADAPTER_CAPABILITIES,
@@ -17,8 +17,8 @@ export function createAdapter(cliType: string | null | undefined): CliAdapter {
       return new ClaudeCliAdapter();
     case 'deepseek':
       return new DeepSeekCliAdapter();
-    case 'gemini':
-      return new GeminiCliAdapter();
+    case 'antigravity':
+      return new AntigravityCliAdapter();
     case 'codex':
       return new CodexCliAdapter();
     default:
@@ -28,10 +28,10 @@ export function createAdapter(cliType: string | null | undefined): CliAdapter {
   }
 }
 
-export const KNOWN_ADAPTER_CLI_TYPES = Object.freeze(['claude', 'deepseek', 'gemini', 'codex']);
+export const KNOWN_ADAPTER_CLI_TYPES = Object.freeze(['claude', 'deepseek', 'antigravity', 'codex']);
 
 export { CliAdapter, ADAPTER_CAPABILITIES, PARSE_STAGE };
 export { ClaudeCliAdapter } from './claude.js';
 export { DeepSeekCliAdapter } from './deepseek.js';
-export { GeminiCliAdapter } from './gemini.js';
+export { AntigravityCliAdapter } from './antigravity.js';
 export { CodexCliAdapter } from './codex.js';

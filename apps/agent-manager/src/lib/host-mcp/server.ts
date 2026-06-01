@@ -1,12 +1,12 @@
 // host-mcp stdio MCP server — exposes cross-OS "host" tools to managed
-// subagents. Spawned by claude/gemini via `awb-agent-manager mcp-host`.
+// subagents. Spawned by claude/antigravity via `awb-agent-manager mcp-host`.
 //
 // Why a separate stdio server (not a tool added to the AWB HTTP /mcp endpoint):
 //   - These tools must run on the agent-manager HOST (the operator's
 //     desktop / laptop / Synology). The AWB server runs centrally,
 //     possibly on a different machine, and has no business taking a
 //     screenshot of the operator's monitor.
-//   - stdio invocation gives the managed agent's CLI (claude / gemini)
+//   - stdio invocation gives the managed agent's CLI (claude / antigravity)
 //     direct access to a process forked from the agent-manager binary,
 //     which is already running with the operator's permissions on the
 //     operator's box.
@@ -60,7 +60,7 @@ function errText(message: string, extra?: Record<string, unknown>): McpResponse 
 
 function imageReply(base64Png: string, meta: Record<string, unknown>): McpResponse {
   // Two-block response: the image (so the model can see it) PLUS a text
-  // block with size / path / backend metadata. Claude / Gemini both
+  // block with size / path / backend metadata. Claude / Antigravity both
   // honour multi-block tool replies.
   return {
     content: [

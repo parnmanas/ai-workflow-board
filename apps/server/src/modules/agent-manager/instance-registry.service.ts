@@ -27,7 +27,7 @@ export interface InstanceRecord {
   workspace_id: string | null;
   // ST-4: 'manager' is the standalone awb-agent-manager process — it is
   // the AWB-side replacement for the plugin's daemon.mjs and supervises
-  // multiple agent identities (claude/codex/gemini).
+  // multiple agent identities (claude/codex/antigravity).
   mode: 'daemon' | 'proxy' | 'manager';
   hostname: string;
   plugin_version: string;

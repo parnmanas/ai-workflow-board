@@ -57,5 +57,5 @@ export const TTL_SWEEP_INTERVAL_MS = 60_000;
 export const SIGTERM_GRACE_MS = 5_000;
 export const STOP_GRACE_MS = 2_000;
 
-export const KNOWN_CLI_TYPES = ['claude', 'deepseek', 'codex', 'gemini'] as const;
+export const KNOWN_CLI_TYPES = ['claude', 'deepseek', 'codex', 'antigravity'] as const;
 export type CliType = (typeof KNOWN_CLI_TYPES)[number];

@@ -8,7 +8,7 @@
 //   - mode             literal 'manager' (was daemon|proxy in claude-plugin)
 //   - hostname         os.hostname()
 //   - plugin_version   read from caller (package.json version)
-//   - cli              the adapter we booted with (claude, gemini, …)
+//   - cli              the adapter we booted with (claude, antigravity, …)
 //   - cli_adapters     all known adapters this binary exposes
 //   - pid              process pid
 //   - started_at       boot time of the process (set once)

@@ -26,13 +26,13 @@ import DirectoryPicker from './DirectoryPicker';
  * change won't take effect until the agent is restarted.
  */
 
-export type CliKind = 'claude' | 'deepseek' | 'codex' | 'gemini' | 'custom';
+export type CliKind = 'claude' | 'deepseek' | 'codex' | 'antigravity' | 'custom';
 
 export const MANAGED_CLI_OPTIONS: { value: CliKind; label: string }[] = [
   { value: 'claude', label: 'Claude Code' },
   { value: 'deepseek', label: 'DeepSeek (via Claude Code)' },
   { value: 'codex', label: 'Codex' },
-  { value: 'gemini', label: 'Gemini' },
+  { value: 'antigravity', label: 'Antigravity' },
   { value: 'custom', label: 'Custom' },
 ];
 
@@ -74,7 +74,7 @@ export default function ManagedAgentDialog({
   // filesystem via the existing fs reverse-RPC. Lets the user click a
   // directory instead of typing an absolute path.
   const [pickerOpen, setPickerOpen] = useState(false);
-  // Per-agent CLI credential. Only claude / codex / gemini have adapters
+  // Per-agent CLI credential. Only claude / codex / antigravity have adapters
   // that consume credentials; custom CLIs leave this null.
   const [credentialId, setCredentialId] = useState<string>('');
   const [credentials, setCredentials] = useState<Credential[]>([]);
@@ -97,7 +97,7 @@ export default function ManagedAgentDialog({
       setAutoSpawn(true);
       setCredentialId('');
       // Default CLI tracks the manager's primary CLI, but the operator can
-      // override it (e.g., spawn a Gemini agent under a Claude-default manager).
+      // override it (e.g., spawn an Antigravity agent under a Claude-default manager).
       const defaulted = MANAGED_CLI_OPTIONS.find((o) => o.value === defaultCli)?.value || 'claude';
       setCli(defaulted);
     }
@@ -143,7 +143,7 @@ export default function ManagedAgentDialog({
         // live agent identity would invalidate its on-disk per-agent CLI
         // home dir and confuse routing, so it stays a create-time decision.
         // Per-agent credential is only meaningful when an adapter consumes it
-        // (claude / codex / gemini); for `custom` we always send null so a
+        // (claude / codex / antigravity); for `custom` we always send null so a
         // stale id doesn't linger after the operator switched CLI.
         const supportsCredential = cli !== 'custom';
         await api.updateAgent(agent.id, {

@@ -56,7 +56,7 @@ export class Agent {
   role_prompt_meta: Record<string, any> | null;
 
   // ST-4: agent-manager-managed working directory on the host running the
-  // agent CLI (claude/codex/gemini). Empty string = unset (manager will
+  // agent CLI (claude/codex/antigravity). Empty string = unset (manager will
   // refuse to spawn until the admin sets one). Plain text rather than JSON
   // because there is exactly one path per agent identity — multi-root
   // agents would need a different abstraction.
@@ -72,7 +72,7 @@ export class Agent {
   manager_agent_id: string | null;
 
   // Optional Credential row that supplies CLI auth for the spawned agent
-  // (claude / codex / gemini). When set, the agent-manager fetches the
+  // (claude / codex / antigravity). When set, the agent-manager fetches the
   // decrypted payload at spawn time and either writes it into the per-agent
   // cli-home (subscription kind: copy of the .credentials.json / auth.json /
   // oauth file) or sets the corresponding env var (api_key kind:

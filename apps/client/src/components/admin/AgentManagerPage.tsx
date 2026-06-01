@@ -778,7 +778,7 @@ export default function AgentManagerPage() {
 //   6. kind === 'operator_home' → always badge (neutral when healthy or
 //      uninspectable, escalated to expiring/expired/no-refresh when the
 //      operator's introspectable expiry is concerning). Surfacing this
-//      consistently is what keeps codex/gemini agents from looking
+//      consistently is what keeps codex/antigravity agents from looking
 //      "broken" (red 'missing') next to claude agents on the same
 //      operator-HOME fallback.
 //   7. subscription kind with >48h refresh-token-present → no badge (healthy)
@@ -834,7 +834,7 @@ function classifyCredential(entry: AgentCredentialEntry | undefined): Credential
     // `auth.json`, etc.) for every spawn. Always show a badge so the
     // operator sees a consistent state across all CLIs — the previous
     // behaviour silently hid healthy claude agents (>48h remaining)
-    // while reporting codex/gemini ones as red 'missing', even though
+    // while reporting codex/antigravity ones as red 'missing', even though
     // both were in the exact same fallback state.
     if (typeof entry.expires_at_ms === 'number') {
       const remaining = entry.expires_at_ms - now;
@@ -870,7 +870,7 @@ function classifyCredential(entry: AgentCredentialEntry | undefined): Credential
       };
     }
     // No expiry metadata. Normal for adapters that don't introspect their
-    // credential file (codex / gemini); also covers claude operator-HOME
+    // credential file (codex / antigravity); also covers claude operator-HOME
     // when the operator hasn't run `claude login` yet — in that case the
     // CLI will surface its own "not authenticated" error on first spawn,
     // which is clearer than anything we could synthesize here.

@@ -89,8 +89,8 @@ const REQUIRED_CREDENTIAL_FIELDS: Record<string, string[]> = {
   deepseek_api_key: ['api_key'],
   codex_subscription: ['auth_json'],
   codex_api_key: ['api_key'],
-  gemini_subscription: ['oauth_creds_json'],
-  gemini_api_key: ['api_key'],
+  antigravity_subscription: ['oauth_creds_json'],
+  antigravity_api_key: ['api_key'],
 };
 
 const KNOWN_COMMANDS: ReadonlySet<CommandKind> = new Set<CommandKind>([
@@ -356,7 +356,7 @@ export class AgentManagerCommandHandler {
     const mcpConfigPath = await writeMcpConfig(agentId, this.#config.url, rawApiKey);
 
     // ST-7 follow-up: per-agent CLI home dir. Created lazily here so the
-    // CLI (claude/codex/gemini) writes its sessions / plugins / settings
+    // CLI (claude/codex/antigravity) writes its sessions / plugins / settings
     // into a dir scoped to this agent rather than ~/.<cli>/ on the
     // shared host.
     await ensureCliHomeDir(agentId);
@@ -392,7 +392,7 @@ export class AgentManagerCommandHandler {
     let extraEnv: Record<string, string> = {};
     try {
       // Pass AWB URL + per-agent apiKey so adapters that consume MCP
-      // servers via a static config file (gemini → settings.json) can
+      // servers via a static config file (antigravity → mcp_config.json) can
       // persist the `awb` server into cli-home at spawn_agent time.
       // Claude / Codex ignore this and keep using `--mcp-config` for
       // per-spawn role-pinning.
@@ -711,7 +711,7 @@ export class AgentManagerCommandHandler {
    *   - For each entry that is a git repo, run `git pull --ff-only`. Failures
    *     are collected per-entry and reported back; a single failed
    *     marketplace doesn't block the others.
-   *   - For non-claude managed agents (codex/gemini), the dir layout doesn't
+   *   - For non-claude managed agents (codex/antigravity), the dir layout doesn't
    *     match — return a "not applicable" success rather than fail loudly.
    */
   async #updatePlugins(payload: AgentManagerCommandPayload): Promise<string> {

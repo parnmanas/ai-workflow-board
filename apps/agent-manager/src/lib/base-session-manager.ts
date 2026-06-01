@@ -5,7 +5,7 @@
 // Parameterized by a CliAdapter — the adapter contributes everything that
 // varies across CLIs (argv shape, stream-json formatting, line parsing).
 // Sessions are only available when the adapter declares PERSISTENT_SESSION;
-// _spawnSession() refuses to spawn for stateless adapters (gemini, …) so
+// _spawnSession() refuses to spawn for stateless adapters (antigravity, …) so
 // the manager can fail fast instead of leaving a half-broken child running.
 
 import { promises as fsp } from 'node:fs';
@@ -71,7 +71,7 @@ export interface SpawnOpts {
    * ST-6: per-call managed-agent runtime context. When provided, the
    * spawned CLI runs with cwd=ctx.cwd, MCP auth = ctx.api_key, reuses
    * ctx.mcp_config_path instead of a freshly-written temp config, and
-   * (ST-7) picks the adapter for ctx.cli — claude / codex / gemini.
+   * (ST-7) picks the adapter for ctx.cli — claude / codex / antigravity.
    * Optional — undefined falls back to manager-config defaults + the
    * default-claude adapter.
    */
@@ -264,7 +264,7 @@ export class BaseSessionManager {
     firstTurnText: string,
     { onProgress, monitorMeta, agentContext, firstTurnImages }: SpawnOpts = {},
   ): Promise<SessionRecord | null> {
-    // ST-7: pick the adapter for this agent's CLI choice (claude/codex/gemini)
+    // ST-7: pick the adapter for this agent's CLI choice (claude/codex/antigravity)
     // and bind it to the session record so future turns formatTurn /
     // parseStdoutLine through the same adapter even if the manager later
     // hosts agents with different CLIs.
@@ -341,7 +341,7 @@ export class BaseSessionManager {
 
       // `delegation.claudeBin` is the legacy operator override for the
       // claude binary path only — passing it to non-claude adapters
-      // caused codex / gemini spawns to launch the literal "claude" bin
+      // caused codex / antigravity spawns to launch the literal "claude" bin
       // (resolver short-circuits on `configured`, returning it verbatim).
       const binOverride =
         adapter.cliType === 'claude' ? this._config.delegation.claudeBin : null;

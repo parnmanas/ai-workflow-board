@@ -29,8 +29,8 @@ const PROVIDER_FIELDS: Record<string, { label: string; fields: string[] }> = {
   deepseek_api_key: { label: 'DeepSeek (API Key)', fields: ['api_key', 'model', 'base_url'] },
   codex_subscription: { label: 'Codex (Subscription)', fields: ['auth_json', 'config_toml'] },
   codex_api_key: { label: 'Codex (API Key)', fields: ['api_key'] },
-  gemini_subscription: { label: 'Gemini (Subscription)', fields: ['oauth_creds_json'] },
-  gemini_api_key: { label: 'Gemini (API Key)', fields: ['api_key'] },
+  antigravity_subscription: { label: 'Antigravity (Subscription)', fields: ['oauth_creds_json'] },
+  antigravity_api_key: { label: 'Antigravity (API Key)', fields: ['api_key'] },
 };
 
 function maskCredentialData(decryptedJson: string): Record<string, string> {

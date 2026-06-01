@@ -210,7 +210,7 @@ async function main(): Promise<void> {
   // dispatch chain because (a) it's the only path that intentionally
   // takes over stdio for JSON-RPC, and (b) it must avoid every heavyweight
   // boot step below (no logging to stdout, no lockfile, no SSE, no config
-  // reads). Spawned per-subagent by claude/gemini via the mcpServers.host
+  // reads). Spawned per-subagent by claude/antigravity via the mcpServers.host
   // entry the manager writes into each managed agent's mcp-config.json.
   if (argv[0] === 'mcp-host') {
     try {
@@ -360,7 +360,7 @@ async function main(): Promise<void> {
   process.stdout.write(`  url:         ${config.url}\n`);
   process.stdout.write(`  workspace:   ${config.workspace_id ?? '(none)'}\n`);
   // ST-7 cli refactor: the manager no longer pins to a single CLI. Each
-  // managed agent picks its own (claude/codex/gemini), set per-row in
+  // managed agent picks its own (claude/codex/antigravity), set per-row in
   // AWB Admin → Agent Manager → Managed Agents. Legacy `cli` field on
   // config.json is now ignored at runtime.
 
@@ -563,7 +563,7 @@ async function runRuntime(
       const credential = await readAgentCredential(id);
       let extraEnv: Record<string, string> = {};
       try {
-        // Same MCP context as spawn_agent so gemini's settings.json gets
+        // Same MCP context as spawn_agent so antigravity's mcp_config.json gets
         // refreshed on rehydrate (operator may have rotated the AWB url
         // between manager runs).
         const prep = await createAdapter(cfg.cli).prepareCliHome(cliHomeDirFor(id), credential, {
@@ -692,7 +692,7 @@ async function runRuntime(
           if (!meta) {
             // No disk metadata. Resolution depends on the spawn-time kind:
             //   - operator_home → expected for adapters that don't implement
-            //     readCredentialMeta (codex/gemini). The agent IS configured;
+            //     readCredentialMeta (codex/antigravity). The agent IS configured;
             //     the manager just can't introspect the file. Report as
             //     'operator_home' with null expiry so the UI stays consistent
             //     across CLIs instead of falsely flagging this as 'missing'.

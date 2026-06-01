@@ -18,12 +18,12 @@ import type {
 
 /** Map agent.type → credential provider prefix used to filter the credential
  *  picker. Mirrors the same map in admin/AgentManager.tsx — keep them in sync.
- *  CLIs whose adapter ships in agent-manager (claude / codex / gemini) show
+ *  CLIs whose adapter ships in agent-manager (claude / codex / antigravity) show
  *  only credentials with a matching provider prefix; `custom` skips it. */
 const CLI_TO_CREDENTIAL_PREFIX: Record<string, string> = {
   claude: 'claude_',
   codex: 'codex_',
-  gemini: 'gemini_',
+  antigravity: 'antigravity_',
 };
 
 /** CLI types the agent-manager spawn pipeline accepts — must match the
@@ -36,7 +36,7 @@ type ManagedCli = ManagedAgentCreateBody['cli'];
 const MANAGED_CLI_OPTIONS: Array<{ value: ManagedCli; label: string }> = [
   { value: 'claude', label: 'Claude' },
   { value: 'codex', label: 'Codex' },
-  { value: 'gemini', label: 'Gemini' },
+  { value: 'antigravity', label: 'Antigravity' },
   { value: 'custom', label: 'Custom' },
 ];
 
@@ -283,7 +283,7 @@ export default function AgentsPage() {
     setCreatingManaged(true);
     try {
       // Drop credential_id when the CLI doesn't support per-agent
-      // credentials (only claude / codex / gemini do); preserves the
+      // credentials (only claude / codex / antigravity do); preserves the
       // server's null contract for `custom` so it doesn't mis-set an FK.
       const supportsCredential = !!CLI_TO_CREDENTIAL_PREFIX[managedForm.cli];
       const credential_id = supportsCredential && managedForm.credential_id

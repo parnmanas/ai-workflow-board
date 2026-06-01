@@ -8,13 +8,13 @@ import { useToast } from '../../contexts/ToastContext';
 import { formatAgentDisplayName } from '../../utils/agentName';
 
 /** Map agent.type → credential provider prefix used to filter the credential
- *  picker. CLIs whose adapter ships in agent-manager (claude / codex / gemini)
+ *  picker. CLIs whose adapter ships in agent-manager (claude / codex / antigravity)
  *  show only credentials with a matching provider prefix; legacy / custom
  *  agent types skip the picker entirely. */
 const CLI_TO_CREDENTIAL_PREFIX: Record<string, string> = {
   claude: 'claude_',
   codex: 'codex_',
-  gemini: 'gemini_',
+  antigravity: 'antigravity_',
 };
 
 /** Stale heartbeat threshold — matches the AgentManagerPage badge logic so the
@@ -158,7 +158,7 @@ function AgentCard({ agent, onEdit, onDelete, onShowSubagents }: AgentCardProps)
     custom: tokens.colors.info,
     manager: tokens.colors.accent,
     codex: tokens.colors.warning,
-    gemini: tokens.colors.successLight,
+    antigravity: tokens.colors.successLight,
   };
   const avatarColor = typeColors[agent.type] || tokens.colors.border;
 
@@ -435,7 +435,7 @@ function SubagentsModal({ agent, onClose }: SubagentsModalProps) {
  *  whitelist. Picking a manager from the optional dropdown switches the form
  *  into "managed agent" mode and constrains Type to one of these. Legacy
  *  types (gpt, etc.) stay available when no manager is picked. */
-const MANAGED_CLI_TYPES = new Set(['claude', 'codex', 'gemini', 'custom']);
+const MANAGED_CLI_TYPES = new Set(['claude', 'codex', 'antigravity', 'custom']);
 
 interface ManagerOption {
   id: string;
@@ -526,7 +526,7 @@ export default function AgentManager() {
     if (!form.name.trim()) return;
     if (managedTypeInvalid) return;
     // Drop credential_id when the CLI type doesn't support per-agent
-    // credentials (only claude / codex / gemini do); preserves the existing
+    // credentials (only claude / codex / antigravity do); preserves the existing
     // null contract for custom / legacy types so the server treats them as
     // "no credential" rather than mis-setting an FK.
     const supportsCredential = !!CLI_TO_CREDENTIAL_PREFIX[form.type];
@@ -655,7 +655,7 @@ export default function AgentManager() {
               options={[
                 { value: 'claude', label: 'Claude' },
                 { value: 'codex', label: 'Codex' },
-                { value: 'gemini', label: 'Gemini' },
+                { value: 'antigravity', label: 'Antigravity' },
                 { value: 'gpt', label: 'GPT (legacy)' },
                 { value: 'custom', label: 'Custom' },
               ]}
@@ -701,7 +701,7 @@ export default function AgentManager() {
           )}
           {managedTypeInvalid && (
             <div style={{ fontSize: '11px', color: tokens.colors.warning, lineHeight: 1.5 }}>
-              ⚠ Type "{form.type}" is not supported by the agent-manager spawn pipeline. Choose Claude, Codex, Gemini, or Custom — or clear the Agent Manager picker to keep the legacy behaviour.
+              ⚠ Type "{form.type}" is not supported by the agent-manager spawn pipeline. Choose Claude, Codex, Antigravity, or Custom — or clear the Agent Manager picker to keep the legacy behaviour.
             </div>
           )}
           {CLI_TO_CREDENTIAL_PREFIX[form.type] && (

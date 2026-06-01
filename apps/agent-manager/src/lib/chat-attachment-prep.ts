@@ -17,7 +17,7 @@
 //      * 'materialized_file' — image we can't inline (non-vision adapter)
 //        or any binary file. Bytes are fetched once and written to a local
 //        path the subagent can pass to its own file/vision tools. This is
-//        the path that makes Codex / Gemini able to actually consume image
+//        the path that makes Codex / Antigravity able to actually consume image
 //        and PDF / zip / binary attachments end-to-end.
 //      * 'metadata_only' — fetch/materialize failed, oversize text, or
 //        anything we can't honestly hand the agent. The subagent still
@@ -83,7 +83,7 @@ export interface PreparedAttachment {
   text_content?: string;
   /** Absolute on-disk path of the fetched bytes, set only when kind ===
    *  'materialized_file'. Subagents reference this path via their own
-   *  file-read tools (Codex/Gemini read source files directly; Claude can
+   *  file-read tools (Codex/Antigravity read source files directly; Claude can
    *  Read it as if the user had attached a local file). */
   local_path?: string;
   /** Human-readable note appended to the prompt entry when the fetch path
@@ -181,7 +181,7 @@ function normalize(raw: RawChatAttachment): PreparedAttachment | null {
 }
 
 export interface PrepareOptions {
-  /** When false (Codex / Gemini persistent baseline), images are not fetched
+  /** When false (Codex / Antigravity persistent baseline), images are not fetched
    *  and degrade to metadata_only so the prompt stays text-only. The legacy
    *  oneshot path also sets this false because there's no vision content
    *  block to push the bytes into. */
@@ -294,7 +294,7 @@ export function renderAttachmentBlock(attachments: PreparedAttachment[]): string
       // Surface the absolute path so the subagent can pass it straight to
       // its own file-read / vision tool without re-fetching anything from
       // AWB. Images go through this branch for text-only CLIs (Codex /
-      // Gemini); PDFs and other binaries go through here for everyone.
+      // Antigravity); PDFs and other binaries go through here for everyone.
       lines.push(`  local_path: ${att.local_path}`);
     } else if (att.kind === 'text_inline' && att.text_content !== undefined) {
       const fence = att.text_content.includes('```') ? '~~~' : '```';
