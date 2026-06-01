@@ -187,6 +187,8 @@ export interface Action {
   prompt: string;
   target_agent_id: string;
   schedule_cron: string;
+  trigger: string;
+  trigger_label: string;
   enabled: boolean;
   max_runs: number;
   last_run_at: string | null;

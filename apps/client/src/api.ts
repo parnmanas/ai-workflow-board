@@ -691,6 +691,8 @@ export const api = {
     prompt?: string;
     target_agent_id: string;
     schedule_cron?: string;
+    trigger?: string;
+    trigger_label?: string;
     enabled?: boolean;
     max_runs?: number;
   }) =>
@@ -705,6 +707,8 @@ export const api = {
       target_agent_id?: string;
       board_id?: string | null;
       schedule_cron?: string;
+      trigger?: string;
+      trigger_label?: string;
       enabled?: boolean;
       max_runs?: number;
     },

@@ -15,6 +15,11 @@ interface AgentOption {
   name: string;
 }
 
+interface BoardOption {
+  id: string;
+  name: string;
+}
+
 interface ActionManagerProps {
   workspaceId?: string;
   boardId?: string | null;
@@ -26,6 +31,7 @@ export default function ActionManager({ workspaceId, boardId }: ActionManagerPro
 
   const [actions, setActions] = useState<Action[]>([]);
   const [agents, setAgents] = useState<AgentOption[]>([]);
+  const [boards, setBoards] = useState<BoardOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<Action | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -42,6 +48,9 @@ export default function ActionManager({ workspaceId, boardId }: ActionManagerPro
   const [formCron, setFormCron] = useState('');
   const [formEnabled, setFormEnabled] = useState(true);
   const [formMaxRuns, setFormMaxRuns] = useState(10);
+  const [formTrigger, setFormTrigger] = useState('');
+  const [formTriggerLabel, setFormTriggerLabel] = useState('');
+  const [formTriggerBoardId, setFormTriggerBoardId] = useState<string | null>(null);
   const [formErrors, setFormErrors] = useState<{ name?: string; agent?: string }>({});
 
   const loadActions = useCallback(async () => {
@@ -52,12 +61,14 @@ export default function ActionManager({ workspaceId, boardId }: ActionManagerPro
     }
     setLoading(true);
     try {
-      const [list, agentList] = await Promise.all([
+      const [list, agentList, boardList] = await Promise.all([
         api.listActions(effectiveWorkspaceId, boardId !== undefined ? (boardId || '') : undefined),
         api.getAgents().catch(() => [] as any[]),
+        api.getBoards(effectiveWorkspaceId).catch(() => [] as any[]),
       ]);
       setActions(list);
       setAgents((agentList as any[]).map((a) => ({ id: a.id, name: a.name })));
+      setBoards((boardList as any[]).map((b: any) => ({ id: b.id, name: b.name })));
     } catch (err: any) {
       showToast(err?.message || 'Failed to load actions', 'error');
     } finally {
@@ -85,6 +96,9 @@ export default function ActionManager({ workspaceId, boardId }: ActionManagerPro
     setFormCron('');
     setFormEnabled(true);
     setFormMaxRuns(10);
+    setFormTrigger('');
+    setFormTriggerLabel('');
+    setFormTriggerBoardId(null);
     setFormErrors({});
     setShowForm(true);
   };
@@ -98,6 +112,9 @@ export default function ActionManager({ workspaceId, boardId }: ActionManagerPro
     setFormCron(a.schedule_cron);
     setFormEnabled(a.enabled);
     setFormMaxRuns(a.max_runs);
+    setFormTrigger(a.trigger || '');
+    setFormTriggerLabel(a.trigger_label || '');
+    setFormTriggerBoardId(a.trigger === 'on_ticket_done' ? (a.board_id || null) : null);
     setFormErrors({});
     setShowForm(true);
   };
@@ -116,6 +133,13 @@ export default function ActionManager({ workspaceId, boardId }: ActionManagerPro
     if (errs.name || errs.agent) return;
     setSaving(true);
     try {
+      const triggerPayload = {
+        trigger: formTrigger,
+        trigger_label: formTrigger === 'on_ticket_done' ? formTriggerLabel : '',
+      };
+      const effectiveBoardId = formTrigger === 'on_ticket_done'
+        ? (formTriggerBoardId || null)
+        : (boardId !== undefined ? (boardId || null) : undefined);
       if (editAction) {
         const updated = await api.updateAction(editAction.id, {
           workspace_id: effectiveWorkspaceId,
@@ -123,8 +147,9 @@ export default function ActionManager({ workspaceId, boardId }: ActionManagerPro
           description: formDescription,
           prompt: formPrompt,
           target_agent_id: formAgentId,
-          board_id: boardId !== undefined ? (boardId || null) : undefined,
-          schedule_cron: formCron,
+          board_id: effectiveBoardId,
+          schedule_cron: formTrigger === 'on_ticket_done' ? '' : formCron,
+          ...triggerPayload,
           enabled: formEnabled,
           max_runs: formMaxRuns,
         });
@@ -133,12 +158,13 @@ export default function ActionManager({ workspaceId, boardId }: ActionManagerPro
       } else {
         await api.createAction({
           workspace_id: effectiveWorkspaceId,
-          board_id: boardId || null,
+          board_id: effectiveBoardId ?? null,
           name: formName.trim(),
           description: formDescription,
           prompt: formPrompt,
           target_agent_id: formAgentId,
-          schedule_cron: formCron,
+          schedule_cron: formTrigger === 'on_ticket_done' ? '' : formCron,
+          ...triggerPayload,
           enabled: formEnabled,
           max_runs: formMaxRuns,
         });
@@ -270,9 +296,13 @@ export default function ActionManager({ workspaceId, boardId }: ActionManagerPro
 
               <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginBottom: 6 }}>
                 Target: <span style={{ color: tokens.colors.textSecondary }}>{agentName(a.target_agent_id)}</span>
-                {a.schedule_cron && (
+                {a.trigger === 'on_ticket_done' ? (
+                  <> · <Badge variant="info">on_ticket_done</Badge>
+                    {a.trigger_label && <> · label: <span style={{ color: tokens.colors.textSecondary }}>{a.trigger_label}</span></>}
+                  </>
+                ) : a.schedule_cron ? (
                   <> · Cron: <code style={{ color: tokens.colors.textSecondary }}>{a.schedule_cron}</code></>
-                )}
+                ) : null}
               </div>
               {a.last_run_at && (
                 <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginBottom: 6 }}>
@@ -334,6 +364,62 @@ export default function ActionManager({ workspaceId, boardId }: ActionManagerPro
           </div>
           <div>
             <label style={{ display: 'block', fontSize: 12, color: tokens.colors.textSecondary, marginBottom: 4 }}>
+              Trigger
+            </label>
+            <select
+              value={formTrigger}
+              onChange={(e) => setFormTrigger(e.target.value)}
+              style={{
+                width: '100%',
+                background: tokens.colors.surface,
+                border: `1px solid ${tokens.colors.border}`,
+                borderRadius: tokens.radii.md,
+                padding: '8px 10px',
+                color: tokens.colors.textStrong,
+                fontSize: 13,
+                fontFamily: 'inherit',
+              }}
+            >
+              <option value="">Manual / Cron</option>
+              <option value="on_ticket_done">On Ticket Done</option>
+            </select>
+          </div>
+          {formTrigger === 'on_ticket_done' && (
+            <>
+              <div>
+                <label style={{ display: 'block', fontSize: 12, color: tokens.colors.textSecondary, marginBottom: 4 }}>
+                  Board scope
+                </label>
+                <select
+                  value={formTriggerBoardId ?? ''}
+                  onChange={(e) => setFormTriggerBoardId(e.target.value || null)}
+                  style={{
+                    width: '100%',
+                    background: tokens.colors.surface,
+                    border: `1px solid ${tokens.colors.border}`,
+                    borderRadius: tokens.radii.md,
+                    padding: '8px 10px',
+                    color: tokens.colors.textStrong,
+                    fontSize: 13,
+                    fontFamily: 'inherit',
+                  }}
+                >
+                  <option value="">Any board in workspace</option>
+                  {boards.map((b) => (
+                    <option key={b.id} value={b.id}>{b.name}</option>
+                  ))}
+                </select>
+              </div>
+              <Input
+                label="Trigger label (optional)"
+                value={formTriggerLabel}
+                onChange={(e) => setFormTriggerLabel(e.target.value)}
+                placeholder="Only fire when the done ticket has this label"
+              />
+            </>
+          )}
+          <div>
+            <label style={{ display: 'block', fontSize: 12, color: tokens.colors.textSecondary, marginBottom: 4 }}>
               Prompt template
             </label>
             <textarea
@@ -359,13 +445,15 @@ export default function ActionManager({ workspaceId, boardId }: ActionManagerPro
             </div>
           </div>
           <div style={{ display: 'flex', gap: 12 }}>
-            <Input
-              label="Schedule (cron)"
-              value={formCron}
-              onChange={(e) => setFormCron(e.target.value)}
-              placeholder="0 9 * * 1   (Mon 9am) — empty = manual"
-              style={{ flex: 2 }}
-            />
+            {formTrigger !== 'on_ticket_done' && (
+              <Input
+                label="Schedule (cron)"
+                value={formCron}
+                onChange={(e) => setFormCron(e.target.value)}
+                placeholder="0 9 * * 1   (Mon 9am) — empty = manual"
+                style={{ flex: 2 }}
+              />
+            )}
             <Input
               label="Max runs"
               type="number"
