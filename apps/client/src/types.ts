@@ -359,6 +359,12 @@ export interface Ticket {
   // Optional pointer to the ticket TriggerLoopService should auto-trigger
   // once this one lands on a terminal column. Cleared/empty → no chain.
   next_ticket_id?: string | null;
+  // Per-ticket on-done action binding (ticket 16a6339c, method "a"). Action
+  // ids dispatched exactly once when THIS ticket lands on a terminal column —
+  // independent of board/label-scoped policy. Server stores it as a JSON
+  // string but decodes to an array on every read path (loadTicketFull /
+  // parseTicket), so the client always sees string[]. Empty array = no binding.
+  on_done_action_ids?: string[];
   // Ticket parked awaiting user intervention (ticket a57517be). When true the
   // server drops every agent_trigger for this ticket, the focus selector
   // skips it, and the board view renders a high-visibility outline + badge.

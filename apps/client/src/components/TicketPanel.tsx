@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Ticket, Agent, Channel, ActivityLog, CommentType, User, TicketAttachmentMeta, Resource, RepoBranch, TicketPrerequisiteRow } from '../types';
+import { Ticket, Agent, Channel, ActivityLog, CommentType, User, TicketAttachmentMeta, Resource, RepoBranch, TicketPrerequisiteRow, Action } from '../types';
 import { api, TicketRoleAssignmentRow, getActiveWorkspaceId } from '../api';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
@@ -550,6 +550,14 @@ export default function TicketPanel({
   // Next ticket picker — empty string = unset. Drafts are committed via the
   // same Save/Discard footer as the rest of the form (dirtyTicketFields).
   const [nextTicketId, setNextTicketId] = useState<string>(activeTicket.next_ticket_id || '');
+  // Per-ticket on-done action binding (ticket 16a6339c). `onDoneActionIds` is
+  // the draft set the picker mutates; committed via the Save/Discard footer
+  // (dirtyTicketFields) as `update_ticket(on_done_action_ids=[...])`. The
+  // candidate list is every Action in the workspace — method (a) dispatch only
+  // checks workspace + enabled, not board scope, so any workspace Action is
+  // validly bindable here.
+  const [onDoneActionIds, setOnDoneActionIds] = useState<string[]>(activeTicket.on_done_action_ids || []);
+  const [actionOptions, setActionOptions] = useState<Action[]>([]);
   const [repoOptions, setRepoOptions] = useState<Resource[]>([]);
   const [branchOptions, setBranchOptions] = useState<RepoBranch[]>([]);
   const [branchesLoading, setBranchesLoading] = useState(false);
@@ -626,6 +634,7 @@ export default function TicketPanel({
     setBaseRepoId(activeTicket.base_repo_resource_id || '');
     setBaseBranch(activeTicket.base_branch || '');
     setNextTicketId(activeTicket.next_ticket_id || '');
+    setOnDoneActionIds(activeTicket.on_done_action_ids || []);
     setBranchOptions([]);
     setBranchesError(null);
     setRoleDrafts({});
@@ -887,12 +896,18 @@ export default function TicketPanel({
       // treat null/'' as "clear next_ticket_id"). Non-empty → the picked id.
       out.next_ticket_id = nextTicketId || null;
     }
+    if (!channelIdsEqual(onDoneActionIds, activeTicket.on_done_action_ids || [])) {
+      // Order-insensitive compare (reuses the channel array helper). An empty
+      // array clears the per-ticket binding server-side.
+      out.on_done_action_ids = onDoneActionIds;
+    }
     return out;
   }, [
     title, description, priority, selectedChannelIds, baseRepoId, baseBranch, nextTicketId,
+    onDoneActionIds,
     activeTicket.title, activeTicket.description, activeTicket.priority,
     activeTicket.channel_ids, activeTicket.base_repo_resource_id, activeTicket.base_branch,
-    activeTicket.next_ticket_id,
+    activeTicket.next_ticket_id, activeTicket.on_done_action_ids,
   ]);
 
   // Role drafts that genuinely change the current holder. A draft equal to
@@ -925,11 +940,12 @@ export default function TicketPanel({
     setBaseRepoId(activeTicket.base_repo_resource_id || '');
     setBaseBranch(activeTicket.base_branch || '');
     setNextTicketId(activeTicket.next_ticket_id || '');
+    setOnDoneActionIds(activeTicket.on_done_action_ids || []);
     setRoleDrafts({});
   }, [
     activeTicket.title, activeTicket.description, activeTicket.priority,
     activeTicket.channel_ids, activeTicket.base_repo_resource_id, activeTicket.base_branch,
-    activeTicket.next_ticket_id,
+    activeTicket.next_ticket_id, activeTicket.on_done_action_ids,
   ]);
 
   const handleSaveDraft = useCallback(async () => {
@@ -1003,6 +1019,23 @@ export default function TicketPanel({
     api.listResources(wsId, undefined, 'repository')
       .then(rows => { if (!cancelled) setRepoOptions(rows || []); })
       .catch(() => { if (!cancelled) setRepoOptions([]); });
+    return () => { cancelled = true; };
+  }, [workspaceId]);
+
+  // Load the Action candidates for the "Run on Done" picker. Omitting board_id
+  // returns every Action in the workspace (board-scoped + workspace-scoped) —
+  // method (a) per-ticket dispatch only checks workspace + enabled, so any of
+  // them is bindable to this ticket regardless of which board it belongs to.
+  useEffect(() => {
+    const wsId = workspaceId || getActiveWorkspaceId() || '';
+    if (!wsId) {
+      setActionOptions([]);
+      return;
+    }
+    let cancelled = false;
+    api.listActions(wsId)
+      .then(rows => { if (!cancelled) setActionOptions(rows || []); })
+      .catch(() => { if (!cancelled) setActionOptions([]); });
     return () => { cancelled = true; };
   }, [workspaceId]);
 
@@ -2107,6 +2140,90 @@ export default function TicketPanel({
                     <option key={t.id} value={t.id}>{t.title}</option>
                   ))}
               </select>
+            </div>
+
+            {/* Run on Done — per-ticket on-done action binding (ticket
+                16a6339c, method "a"). The actions checked here are dispatched
+                exactly ONCE when THIS ticket lands on a terminal column, and
+                only for this ticket — independent of any board/label-scoped
+                policy (method "b"). A bound action fires even if its own
+                `trigger` is blank (manual), and clearing every checkbox clears
+                the binding. enabled=false actions are skipped at dispatch, so
+                they're shown disabled here. */}
+            <div style={{ marginBottom: 14 }}>
+              <label style={{ ...labelStyle, marginBottom: 6 }}>
+                Run on Done
+                {onDoneActionIds.length > 0 ? ` · ${onDoneActionIds.length} bound` : ''}
+              </label>
+              <div style={{
+                background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.lg,
+                padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 5,
+              }}>
+                {actionOptions.length === 0 && onDoneActionIds.length === 0 ? (
+                  <div style={{ fontSize: '11px', color: tokens.colors.textMuted, fontStyle: 'italic', padding: '2px 4px' }}>
+                    No actions in this workspace yet — create one in Admin → Actions to bind it here.
+                  </div>
+                ) : (
+                  <>
+                    {actionOptions.map(act => {
+                      const isSelected = onDoneActionIds.includes(act.id);
+                      const targetAgent = agents.find(a => a.id === act.target_agent_id);
+                      return (
+                        <label key={act.id} style={{
+                          display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer',
+                          padding: '3px 5px', borderRadius: 4,
+                          background: isSelected ? `${tokens.colors.accent}15` : 'transparent',
+                        }}>
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => {
+                              setOnDoneActionIds(prev => isSelected
+                                ? prev.filter(id => id !== act.id)
+                                : [...prev, act.id]);
+                            }}
+                            style={{ accentColor: tokens.colors.accent, cursor: 'pointer' }}
+                          />
+                          <span style={{ fontSize: '12px', color: tokens.colors.textStrong, fontWeight: 500 }}>
+                            {act.name}
+                          </span>
+                          {targetAgent && (
+                            <span style={{ fontSize: '10px', color: tokens.colors.textSecondary }}>
+                              → {formatAgentDisplayName(targetAgent)}
+                            </span>
+                          )}
+                          <span style={{ fontSize: '10px', color: act.enabled ? tokens.colors.textMuted : tokens.colors.warningLight, marginLeft: 'auto' }}>
+                            {act.enabled ? (act.board_id ? 'board' : 'workspace') : 'disabled — won’t fire'}
+                          </span>
+                        </label>
+                      );
+                    })}
+                    {/* Bound ids whose Action row isn't in the candidate list
+                        (deleted, or scoped out of the current fetch). Show them
+                        so the user can see + unbind a stale reference rather
+                        than silently dropping it on the next save. */}
+                    {onDoneActionIds
+                      .filter(id => !actionOptions.some(a => a.id === id))
+                      .map(id => (
+                        <label key={id} style={{
+                          display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer',
+                          padding: '3px 5px', borderRadius: 4,
+                          background: `${tokens.colors.accent}15`,
+                        }}>
+                          <input
+                            type="checkbox"
+                            checked
+                            onChange={() => setOnDoneActionIds(prev => prev.filter(x => x !== id))}
+                            style={{ accentColor: tokens.colors.accent, cursor: 'pointer' }}
+                          />
+                          <span style={{ fontSize: '12px', color: tokens.colors.textMuted, fontStyle: 'italic' }}>
+                            {id.slice(0, 8)}… (removed action)
+                          </span>
+                        </label>
+                      ))}
+                  </>
+                )}
+              </div>
             </div>
 
             {/* Prerequisites (ticket 48d14fff) — the M:N "blocked-by another
