@@ -182,6 +182,12 @@ export interface ChatRoomViewProps {
 // network round-trip behind the user's scroll inertia.
 const LOAD_OLDER_THRESHOLD = 120;
 
+// Distance from the bottom (in px) within which we consider the viewer "at the
+// bottom" — i.e. reading the latest messages. Append-follow and the async
+// re-pin only fire inside this band; outside it the viewer is reading history
+// and we never drag them down.
+const NEAR_BOTTOM_THRESHOLD = 80;
+
 export default function ChatRoomView({
   room,
   messages,
@@ -206,57 +212,118 @@ export default function ChatRoomView({
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
-  // Auto-scroll to bottom *only* when the tail message changes — i.e. a new
-  // message arrived (initial load, send, SSE append). Prepending older history
-  // grows the array at the head but leaves the tail id stable, so this guard
-  // suppresses the disorienting jump-to-bottom on every "load more".
+  // ── Scroll management (ticket abd1ce81) ─────────────────────────────────────
+  // Three deliberately-separated behaviours:
+  //   1. Initial room load  → pin to bottom INSTANTLY in useLayoutEffect (no
+  //      animation). A smooth scrollIntoView here used to stall "in the middle":
+  //      async image attachments grew the list height mid-animation, so the
+  //      smooth scroll landed short of the now-taller bottom.
+  //   2. Live append (send / SSE) → smooth follow, but ONLY when the viewer is
+  //      already near the bottom. If they scrolled up to read history we leave
+  //      their position alone (no forced yank-to-bottom).
+  //   3. Async height growth (images decoding, markdown reflow) → re-pin to the
+  //      bottom while near-bottom; while reading history we do nothing and let
+  //      the browser's native scroll anchoring hold position (no older drift).
   const lastMessageIdRef = useRef<string | null>(null);
-  useEffect(() => {
-    const lastId = messages.length > 0 ? messages[messages.length - 1].id : null;
-    if (lastId !== lastMessageIdRef.current) {
-      lastMessageIdRef.current = lastId;
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [messages]);
+  const didInitialScrollRef = useRef(false);
+  const isNearBottomRef = useRef(true);
 
-  // Scroll-position preservation across older-page prepends. Before triggering
-  // a fetch we capture the scroll viewport's pre-prepend scrollHeight and
-  // scrollTop; after React commits the prepended rows, useLayoutEffect runs
-  // synchronously *before* the browser paints and restores the viewer's
-  // visual offset by the height delta. Without this the list snaps to the top.
+  function scrollToBottom(behavior: ScrollBehavior) {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (behavior === 'smooth') {
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    } else {
+      el.scrollTop = el.scrollHeight;
+    }
+    isNearBottomRef.current = true;
+  }
+
+  // Prepend anchor + initial instant pin + tail-append, in one layout effect so
+  // they all run before paint (no visible jump) with a deterministic priority.
   const prependAnchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   useLayoutEffect(() => {
-    const anchor = prependAnchorRef.current;
-    if (!anchor || !scrollRef.current) return;
-    const delta = scrollRef.current.scrollHeight - anchor.scrollHeight;
-    if (delta > 0) {
-      scrollRef.current.scrollTop = anchor.scrollTop + delta;
-    }
-    prependAnchorRef.current = null;
-  }, [messages]);
+    const el = scrollRef.current;
+    if (!el) return;
 
-  // Reset scroll-tracking refs whenever the room changes — otherwise a stale
-  // lastMessageIdRef from the previous room can suppress the initial
-  // scroll-to-bottom on the new room when the tail id happens to differ
-  // *after* the messages state has already been replaced.
+    // (1) Older-page prepend: restore the viewer's visual offset by the height
+    // delta so the list doesn't snap to the top. Highest priority; never
+    // touches tail tracking or the initial-scroll latch.
+    const anchor = prependAnchorRef.current;
+    if (anchor) {
+      const delta = el.scrollHeight - anchor.scrollHeight;
+      if (delta > 0) el.scrollTop = anchor.scrollTop + delta;
+      prependAnchorRef.current = null;
+      return;
+    }
+
+    if (loadingMessages || messages.length === 0) return;
+    const tailId = messages[messages.length - 1].id;
+
+    // (2) First committed message set for this room → instant bottom pin.
+    if (!didInitialScrollRef.current) {
+      didInitialScrollRef.current = true;
+      lastMessageIdRef.current = tailId;
+      scrollToBottom('auto');
+      return;
+    }
+
+    // (3) Tail id changed = a new message at the bottom (send / SSE append).
+    // Follow it only when the viewer is near the bottom; otherwise respect
+    // their scroll-up and don't drag them down.
+    if (tailId !== lastMessageIdRef.current) {
+      lastMessageIdRef.current = tailId;
+      if (isNearBottomRef.current) scrollToBottom('smooth');
+    }
+  }, [messages, loadingMessages]);
+
+  // Reset all scroll-tracking whenever the room changes — otherwise a stale
+  // lastMessageIdRef / latched initial-scroll from the previous room can
+  // suppress the new room's initial bottom pin.
   useEffect(() => {
     lastMessageIdRef.current = null;
     prependAnchorRef.current = null;
+    didInitialScrollRef.current = false;
+    isNearBottomRef.current = true;
   }, [room?.id]);
 
-  // Scroll-near-top trigger for older-page pagination. We listen on the
-  // viewport ref rather than IntersectionObserver-on-a-sentinel because
-  // the latter fires once on mount (sentinel visible inside the empty
-  // viewport) and would spuriously kick off a fetch before the user
-  // scrolls. The threshold check + hasMoreMessages gate + loading guard
-  // together make the trigger fire only on genuine upward scroll into
-  // the load zone.
+  // Re-pin to the bottom as async content (image attachments decoding, markdown
+  // reflow) grows the list — but ONLY while the viewer is near the bottom. This
+  // is the other half of the "stops in the middle" fix: the instant pin above
+  // runs before images decode, so without this the bottom would creep away as
+  // they load. While reading history (not near bottom) we do nothing and let
+  // native scroll anchoring hold the viewer's spot, so older-image growth above
+  // the viewport doesn't drift the view.
+  const contentRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const content = contentRef.current;
+    const el = scrollRef.current;
+    if (!content || !el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => {
+      // Don't fight an in-flight prepend anchor restore.
+      if (prependAnchorRef.current) return;
+      if (isNearBottomRef.current) el.scrollTop = el.scrollHeight;
+    });
+    ro.observe(content);
+    return () => ro.disconnect();
+  }, [room?.id, loadingMessages]);
+
+  // Scroll listener: keeps `isNearBottomRef` current (gates append-follow and
+  // the ResizeObserver re-pin) and fires the older-page fetch when the viewer
+  // scrolls into the top zone. We listen on the viewport ref rather than an
+  // IntersectionObserver sentinel because the latter fires once on mount
+  // (sentinel visible inside the empty viewport) and would spuriously kick off
+  // a fetch before the user scrolls. The threshold + hasMoreMessages gate +
+  // loading guard together fire only on genuine upward scroll into the load zone.
   useEffect(() => {
     const el = scrollRef.current;
     const loadOlder = onLoadOlderMessages;
-    if (!el || !loadOlder) return;
+    if (!el) return;
     function onScroll() {
-      if (!el || !loadOlder) return;
+      if (!el) return;
+      isNearBottomRef.current =
+        el.scrollHeight - el.scrollTop - el.clientHeight <= NEAR_BOTTOM_THRESHOLD;
+      if (!loadOlder) return;
       if (!hasMoreMessages) return;
       if (loadingOlderMessages) return;
       if (messages.length === 0) return;
@@ -461,7 +528,11 @@ export default function ChatRoomView({
             </div>
           </div>
         ) : (
-          <MessageList messages={messages} participantCount={participantCount} participants={participants} currentUserId={currentUserId} />
+          // contentRef wraps only the rendered messages so the ResizeObserver
+          // above can watch the list's height grow as image attachments decode.
+          <div ref={contentRef}>
+            <MessageList messages={messages} participantCount={participantCount} participants={participants} currentUserId={currentUserId} />
+          </div>
         )}
         <div ref={bottomRef} />
       </div>

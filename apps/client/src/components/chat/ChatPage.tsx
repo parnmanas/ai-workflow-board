@@ -119,6 +119,9 @@ export default function ChatPage() {
   const originalTitleRef = useRef(document.title);
   const activeRoomIdRef = useRef<string | null>(null);
   const isObserverRef = useRef<boolean>(false);
+  // Mirror of `messages` for use inside async callbacks (older-page dedup) that
+  // run between renders and can't rely on the closed-over state snapshot.
+  const messagesRef = useRef<ChatRoomMessageItem[]>([]);
 
   // Keep refs in sync with state for use in SSE callbacks
   useEffect(() => {
@@ -127,6 +130,9 @@ export default function ChatPage() {
   useEffect(() => {
     isObserverRef.current = isObserver;
   }, [isObserver]);
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
   // Workspace-wide observer toggle (v0.32+) — when on, the room list
   // includes every active room in the workspace, including agent-to-agent
@@ -451,16 +457,29 @@ export default function ChatPage() {
         setHasMoreMessages(false);
         return;
       }
-      setMessages((prev) => {
-        // Dedup: an SSE message that arrived in between could already be
-        // present. Keep the existing copy so React diffs stay minimal.
-        const existing = new Set(prev.map((m) => m.id));
-        const fresh = older.filter((m) => !existing.has(m.id));
-        if (fresh.length === 0) return prev;
-        return [...fresh, ...prev];
-      });
-      // Short page means we hit the start of history.
-      setHasMoreMessages(older.length >= MESSAGE_PAGE_SIZE);
+      // Dedup against what's already buffered (an SSE message could have
+      // arrived in between). Capture how many rows were genuinely new so we can
+      // close pagination correctly afterwards — `setMessages` runs async/in a
+      // batch, so we compute `fresh` here against a ref snapshot rather than
+      // reading the post-update state.
+      const existing = new Set(messagesRef.current.map((m) => m.id));
+      const fresh = older.filter((m) => !existing.has(m.id));
+      if (fresh.length > 0) {
+        setMessages((prev) => {
+          // Re-dedup inside the updater against the authoritative prev — a
+          // concurrent SSE append between the snapshot and commit is rare but
+          // possible, and a double-insert would create duplicate React keys.
+          const prevIds = new Set(prev.map((m) => m.id));
+          const stillFresh = fresh.filter((m) => !prevIds.has(m.id));
+          if (stillFresh.length === 0) return prev;
+          return [...stillFresh, ...prev];
+        });
+      }
+      // Close pagination when the page was short (true start of history) OR
+      // yielded no new rows (we've caught up to already-buffered content) —
+      // the latter prevents the same cursor from being re-requested forever
+      // at the boundary (acceptance criterion d).
+      setHasMoreMessages(fresh.length > 0 && older.length >= MESSAGE_PAGE_SIZE);
     } catch {
       // Silent failure — the user can scroll up again to retry.
     } finally {
