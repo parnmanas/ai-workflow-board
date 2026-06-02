@@ -160,6 +160,33 @@ test('on-ticket-done hook dispatches bound Actions exactly once with ticket cont
   const s4Runs = await waitForRuns(ds, a4.id, 1);
   assert.equal(s4Runs.length, 1, 'S4: explicit per-ticket binding dispatched once');
   assert.match(s4Runs[0].prompt_rendered, /S4 ticket/, 'S4: ticket context injected');
+
+  // ── Scenario 5: criteria (c) + (d) — no leak to "every ticket" ──────────
+  // The headline regression for ticket 0d3a085e: a manual (trigger='') Action
+  // that is NOT bound to a ticket and is NOT opted into the on_ticket_done
+  // policy must fire NOTHING when an unrelated ticket reaches Done. This proves
+  //   (c) an empty on_done_action_ids binding dispatches nothing, and
+  //   (d) board-scoped Actions only participate via explicit policy
+  //       (trigger='on_ticket_done') — they don't leak onto every completion.
+  step('S5: manual Action + empty-binding ticket → zero dispatch (no every-ticket leak)');
+  const a5 = await createAction(ds, {
+    workspace_id: ws.id, board_id: board.id, name: 'S5 manual (unbound)', target_agent_id: agent.id,
+    trigger: '', prompt: 'should never run from a Done event',
+  });
+  // Default on_done_action_ids is '[]' (empty binding) and no label, so neither
+  // method (a) nor method (b) can pick this ticket up.
+  const t5 = await newTicket('S5 unrelated ticket', []);
+  assert.equal(
+    (await ds.getRepository('Ticket').findOne({ where: { id: t5.id } })).on_done_action_ids,
+    '[]',
+    'S5: fixture ticket starts with an empty binding',
+  );
+  await moveToDone(ds, activityService, t5.id, done.id);
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal((await runsFor(ds, a5.id)).length, 0, 'S5(d): manual Action did not leak onto a Done event');
+  // Per-ticket isolation: t5 reaching Done must NOT re-fire the action bound
+  // only to t4 (criterion a — a binding is scoped to its own ticket).
+  assert.equal((await runsFor(ds, a4.id)).length, 1, 'S5(a): another ticket\'s Done did not fire t4\'s binding');
 });
 
 exitAfterTests();
