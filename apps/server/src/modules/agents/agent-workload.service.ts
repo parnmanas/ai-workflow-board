@@ -102,6 +102,53 @@ function hasBlockedLabel(labels: string[]): boolean {
   return labels.some(l => l.toLowerCase().startsWith('blocked-'));
 }
 
+/**
+ * Per-candidate-set ranking inputs: the column lookup that backs the
+ * `column.position` key and the head-readiness predicate that backs the
+ * chain key. Built once per set inside `rankFocusCandidates` and handed to
+ * every `compareFocusCandidates` call.
+ */
+interface FocusRankContext {
+  colById: Map<string, BoardColumn>;
+  hasUnresolvedPredecessor: (id: string) => boolean;
+}
+
+/**
+ * The single focus-ranking comparator (descending importance — equal
+ * values fall through to the next key):
+ *
+ *   1. `column.position DESC` — higher columns win.
+ *   2. `hasUnresolvedPredecessor ASC` — chain-head wins the tie.
+ *   3. `priorityIndex(priority) ASC` — critical < high < medium < low.
+ *   4. `created_at ASC` — oldest first; deterministic tiebreaker.
+ *
+ * See the class header for the full rationale of each key. Shared by
+ * `getFocusTicket` (picks the head) and `rankFocusCandidates` (returns
+ * the whole set sorted, for the per-agent top-N collapse on the board
+ * focus-badge endpoint) so both order candidates identically.
+ */
+function compareFocusCandidates(a: Ticket, b: Ticket, ctx: FocusRankContext): number {
+  // 1. Column position DESC. Higher column = closer to done = wins.
+  const pa = ctx.colById.get(a.column_id || '')?.position ?? -Infinity;
+  const pb = ctx.colById.get(b.column_id || '')?.position ?? -Infinity;
+  if (pa !== pb) return pb - pa;
+  // 2. hasUnresolvedPredecessor ASC. 0 = head-ready, 1 = waiting on
+  // a predecessor that's still in the candidate set. Head-ready wins.
+  const ca = ctx.hasUnresolvedPredecessor(a.id) ? 1 : 0;
+  const cb = ctx.hasUnresolvedPredecessor(b.id) ? 1 : 0;
+  if (ca !== cb) return ca - cb;
+  // 3. priority_index ASC. critical(0) < high(1) < medium(2) < low(3).
+  const ia = priorityIndex(a.priority);
+  const ib = priorityIndex(b.priority);
+  if (ia !== ib) return ia - ib;
+  // 4. created_at ASC — oldest first. `?.getTime() ?? 0` guards legacy
+  //    rows that may have null timestamps; sqlite + postgres sort null
+  //    differently, so do the compare in JS.
+  const ta = a.created_at ? new Date(a.created_at).getTime() : 0;
+  const tb = b.created_at ? new Date(b.created_at).getTime() : 0;
+  return ta - tb;
+}
+
 @Injectable()
 export class AgentWorkloadService {
   constructor(
@@ -225,6 +272,65 @@ export class AgentWorkloadService {
     const candidateIds = await this.getWorkflowLoadTicketIds(agent_id, board_id, role_slug);
     if (candidateIds.length === 0) return null;
     if (candidateIds.length === 1) return candidateIds[0];
+    const ranked = await this.rankFocusCandidates(candidateIds);
+    return ranked[0]?.id ?? null;
+  }
+
+  /**
+   * Per-agent FOCUS collapse (ticket 3fb0005d).
+   *
+   * `getFocusTicket` ranks one (agent, board, role) slice and returns the
+   * single head. The board FOCUS-badge endpoint calls it once per
+   * (agent, role) pair, so an agent that holds two roles on a board
+   * (e.g. assignee + reviewer — 겸직) gets one badge per role = up to two
+   * FOCUS tickets, even though `max_concurrent_tickets_per_agent` caps the
+   * agent-manager dispatch at N (default 1) distinct tickets. The badge
+   * count and the dispatch cap then disagree ("focus 2개인데 dispatch 1개").
+   *
+   * This method collapses to the dispatch unit: it ranks the agent's
+   * candidates across ALL roles (no `role_slug` filter — the underlying
+   * `getWorkflowLoadTicketIds` SELECT DISTINCTs by ticket, so a ticket the
+   * agent holds on two roles only appears once) and returns the top `limit`
+   * ticket ids. With `limit = max_concurrent_tickets_per_agent` the FOCUS
+   * surface matches what the manager will actually dispatch.
+   *
+   * Non-겸직 is unchanged by construction: an agent holding a single role
+   * has the same candidate set with or without the role filter, so the
+   * collapsed top-1 equals the old per-role top-1 (verification case b).
+   *
+   * Ranking, BLOCKED filtering, and the 0/1-candidate fast paths mirror
+   * `getFocusTicket` exactly — both delegate to `rankFocusCandidates` —
+   * so the collapse never reorders a single agent's tickets differently
+   * from the dispatch selector.
+   */
+  async getAgentFocusTicketIds(
+    agent_id: string,
+    board_id: string,
+    limit: number,
+  ): Promise<string[]> {
+    if (!Number.isFinite(limit) || limit <= 0) return [];
+    const candidateIds = await this.getWorkflowLoadTicketIds(agent_id, board_id);
+    if (candidateIds.length === 0) return [];
+    // Single candidate: mirror getFocusTicket's fast path (no BLOCKED
+    // filter / sort for a lone ticket) so the two entry points agree.
+    if (candidateIds.length === 1) return candidateIds.slice(0, limit);
+    const ranked = await this.rankFocusCandidates(candidateIds);
+    return ranked.slice(0, limit).map((t) => t.id);
+  }
+
+  /**
+   * Rank a candidate-ticket id set with the focus selector's compound
+   * order, after dropping heartbeat-only BLOCKED tickets. Returns the
+   * sorted `Ticket[]` (head = the agent's top focus). Shared by
+   * `getFocusTicket` (takes the head) and `getAgentFocusTicketIds` (takes
+   * the top-N) so both apply identical ranking + BLOCKED semantics.
+   *
+   * Callers handle the 0/1-candidate fast paths themselves; this method
+   * assumes a multi-candidate set but is still correct (returns [] / the
+   * lone survivor) for smaller inputs.
+   */
+  private async rankFocusCandidates(candidateIds: string[]): Promise<Ticket[]> {
+    if (candidateIds.length === 0) return [];
 
     const ticketRepo = this.dataSource.getRepository(Ticket);
     const colRepo = this.dataSource.getRepository(BoardColumn);
@@ -233,7 +339,7 @@ export class AgentWorkloadService {
       .createQueryBuilder('t')
       .where('t.id IN (:...ids)', { ids: candidateIds })
       .getMany();
-    if (tickets.length === 0) return null;
+    if (tickets.length === 0) return [];
 
     const colIds = Array.from(new Set(tickets.map(t => t.column_id).filter(Boolean) as string[]));
     const columns = colIds.length
@@ -349,31 +455,15 @@ export class AgentWorkloadService {
       }
       // else: heartbeat-only BLOCKED ticket — excluded from focus.
     }
-    if (nonBlockedTickets.length === 0) return null;
-    if (nonBlockedTickets.length === 1) return nonBlockedTickets[0].id;
+    if (nonBlockedTickets.length === 0) return [];
+    if (nonBlockedTickets.length === 1) return nonBlockedTickets;
 
-    nonBlockedTickets.sort((a, b) => {
-      // 1. Column position DESC. Higher column = closer to done = wins.
-      const pa = colById.get(a.column_id || '')?.position ?? -Infinity;
-      const pb = colById.get(b.column_id || '')?.position ?? -Infinity;
-      if (pa !== pb) return pb - pa;
-      // 2. hasUnresolvedPredecessor ASC. 0 = head-ready, 1 = waiting on
-      // a predecessor that's still in the candidate set. Head-ready wins.
-      const ca = hasUnresolvedPredecessor(a.id) ? 1 : 0;
-      const cb = hasUnresolvedPredecessor(b.id) ? 1 : 0;
-      if (ca !== cb) return ca - cb;
-      // 3. priority_index ASC. critical(0) < high(1) < medium(2) < low(3).
-      const ia = priorityIndex(a.priority);
-      const ib = priorityIndex(b.priority);
-      if (ia !== ib) return ia - ib;
-      // 4. created_at ASC — oldest first. `?.getTime() ?? 0` guards
-      //    legacy rows that may have null timestamps; sqlite + postgres
-      //    sort null differently, so do the compare in JS.
-      const ta = a.created_at ? new Date(a.created_at).getTime() : 0;
-      const tb = b.created_at ? new Date(b.created_at).getTime() : 0;
-      return ta - tb;
-    });
+    // Single comparator shared with `getFocusTicket` (via this same method)
+    // so the per-agent top-N collapse orders candidates identically to the
+    // dispatch selector. See `compareFocusCandidates` for the 4-key order.
+    const ctx: FocusRankContext = { colById, hasUnresolvedPredecessor };
+    nonBlockedTickets.sort((a, b) => compareFocusCandidates(a, b, ctx));
 
-    return nonBlockedTickets[0]?.id ?? null;
+    return nonBlockedTickets;
   }
 }

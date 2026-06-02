@@ -260,29 +260,58 @@ export class BoardsController {
       : [];
     const displayNameByAgentId = await resolveAgentDisplayMap(agentRepo, agents);
 
-    // Compute focus for each (agent, role) pair. The getFocusTicket calls are
-    // independent reads, so we fan them out with Promise.all instead of
-    // awaiting sequentially — wall-clock drops from sum-of-queries to the
-    // slowest single query (perf ticket b3812637). The per-pair query volume
-    // is bounded by the number of distinct (agent, role) pairs on the board,
-    // which is small; the DB pool caps real concurrency.
-    const resolved = await Promise.all(
-      pairs.map(async ({ agent_id, role_id }) => {
-        const role = roleById.get(role_id);
-        if (!role) return null;
-        const focusTicketId = await this.agentWorkload.getFocusTicket(agent_id, board.id, role.slug);
-        if (!focusTicketId) return null;
-        return {
-          agent_id,
-          agent_name: displayNameByAgentId.get(agent_id) ?? agent_id,
-          role: role.slug,
-          ticket_id: focusTicketId,
-        };
+    // Per-agent FOCUS collapse (ticket 3fb0005d). Compute focus per AGENT,
+    // not per (agent, role) pair: a single agent holding multiple roles on
+    // this board (assignee + reviewer/reporter — 겸직) would otherwise emit
+    // one FOCUS ticket per role, contradicting the agent-manager dispatch
+    // cap (`max_concurrent_tickets_per_agent`, agent-unit, default 1). We
+    // collapse across roles and take the top-N tickets, where N is that
+    // cap — so the badge count matches what the manager actually dispatches.
+    //
+    // Non-겸직 is a strict no-op: an agent with one role on the board has
+    // the same candidate set with or without the role filter, so top-1
+    // equals the old per-role focus (verification case b — no regression).
+    //
+    // Once the winning ticket(s) are chosen, we label each with the role
+    // slug(s) the agent holds on that ticket (a 겸직 ticket the agent owns
+    // as both assignee and reviewer yields two labels on one badge — the
+    // client keys the FOCUS badge by ticket_id, so it still renders once).
+    const cap = board.max_concurrent_tickets_per_agent ?? 1;
+
+    // (agent_id, ticket_id) → role slugs the agent holds on that ticket.
+    const rolesByAgentTicket = new Map<string, string[]>();
+    for (const a of assignments) {
+      if (!a.agent_id) continue;
+      const role = roleById.get(a.role_id);
+      if (!role) continue;
+      const key = `${a.agent_id}|${a.ticket_id}`;
+      const slugs = rolesByAgentTicket.get(key);
+      if (slugs) {
+        if (!slugs.includes(role.slug)) slugs.push(role.slug);
+      } else {
+        rolesByAgentTicket.set(key, [role.slug]);
+      }
+    }
+
+    // One getAgentFocusTicketIds call per distinct agent (collapsed across
+    // roles). Independent reads, fanned out with Promise.all — same perf
+    // rationale as the prior per-pair fan-out (ticket b3812637); the agent
+    // count on a board is small and the DB pool caps real concurrency.
+    const perAgent = await Promise.all(
+      agentIds.map(async (agent_id) => {
+        const focusIds = await this.agentWorkload.getAgentFocusTicketIds(agent_id, board.id, cap);
+        const agent_name = displayNameByAgentId.get(agent_id) ?? agent_id;
+        const rows: Array<{ agent_id: string; agent_name: string; role: string; ticket_id: string }> = [];
+        for (const ticket_id of focusIds) {
+          const slugs = rolesByAgentTicket.get(`${agent_id}|${ticket_id}`) ?? [];
+          for (const role of slugs) {
+            rows.push({ agent_id, agent_name, role, ticket_id });
+          }
+        }
+        return rows;
       }),
     );
-    const focusTickets = resolved.filter(
-      (f): f is { agent_id: string; agent_name: string; role: string; ticket_id: string } => f !== null,
-    );
+    const focusTickets = perAgent.flat();
 
     return res.json({ focus_tickets: focusTickets });
   }
