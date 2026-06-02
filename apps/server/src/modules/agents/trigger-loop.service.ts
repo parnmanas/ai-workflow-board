@@ -212,27 +212,41 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
       resolved.push({ slug, role, targetAgentId: assignment?.agent_id || null });
     }
 
-    // AUTO-ADVANCE: a non-terminal column with routing entries but zero
-    // resolvable holders has nobody to wake up. Push the ticket forward to the
-    // next non-terminal column by position; the resulting `moved` activity
-    // re-enters this loop and either fires the new column's holder(s) or
-    // cascades the advance again. Terminal columns are unreachable here
-    // (early-returned above).
+    // AUTO-ADVANCE vs HALT (ticket c5951280). A non-terminal column with no
+    // servable holder used to mean a single thing — "push the ticket forward".
+    // That one heuristic conflated two very different situations and produced
+    // two opposite failure modes:
+    //   ① over-advance: a *completely unassigned* ticket (no holder on ANY
+    //      role) registered as "no holder" at every column and cascaded
+    //      silently Backlog → Done. Parn's "skip the no-owner case" exception
+    //      was never in the code.
+    //   ② under-advance / infinite wait: a column whose routed slugs don't
+    //      resolve to a WorkspaceRole at all (`resolved.length === 0`, config
+    //      drift) fell OUT of the old `resolved.length > 0` advance condition
+    //      and stalled forever with nobody to wake.
     //
-    // Gating:
-    //   - `triggerSource === 'column_move'` — only the ticket's own arrival on
-    //     this column should drive the advance. Comments / ticket-field updates
-    //     are local events that shouldn't shove an unrelated ticket downstream
-    //     when its column happens to lack a holder.
-    //   - `resolved.length > 0` — at least one routed slug had to map to a real
-    //     WorkspaceRole row. Empty role_routing already returned above; a
-    //     routing list full of unknown slugs is a config-drift signal, not an
-    //     auto-advance trigger.
-    //   - `every holder null` — auto-advance only when the column is *entirely*
-    //     unheld. A partially-filled column (e.g. Review routes to
-    //     ['reviewer','assignee'] and reviewer is set) still emits for the
-    //     filled role(s); the rest fall through the holder-null `continue`
-    //     below.
+    // Fix: split the judgment into two independent axes —
+    //   1. Is THIS column servable? `columnHasHolder` — does any routed slug
+    //      resolve to a real WorkspaceRole AND have a holder on this ticket.
+    //      An unservable column is one nobody routed here can work: covers both
+    //      `resolved.length === 0` (config drift) and `resolved.length > 0 &&
+    //      every holder null` (routed but unstaffed). A partially-filled column
+    //      (e.g. Review → ['reviewer','assignee'] with assignee set) IS
+    //      servable — `columnHasHolder` is true, we skip the advance/halt
+    //      branch and emit to the filled role(s) in the per-role loop below.
+    //   2. Is the TICKET staffed at all? `_ticketHasAnyHolder` — does ANY role
+    //      on the ticket (not just this column's routed roles) have a holder.
+    //
+    // Decision when the column is unservable (column_move only — comments and
+    // ticket-field updates are local events that must not shove an unrelated
+    // ticket downstream just because its column lacks a holder):
+    //   - ticket staffed elsewhere → this stage is a legitimate skip; advance
+    //     to the next non-terminal column. Cases (b) empty Review with an
+    //     assignee set, and (c) slug→role config-drift column — both fill the
+    //     would-be dead-end and move on.
+    //   - ticket completely unassigned → HALT in place + flag (case a). Never
+    //     cascade a no-owner ticket to Done; a human has to assign someone.
+    //
     // Pending-user-action gate (ticket a57517be):
     // A ticket parked behind pending_user_action does not auto-advance — the
     // whole point of the flag is to stop the System ↔ Agent column ping-pong
@@ -248,12 +262,15 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    if (
-      triggerSource === 'column_move' &&
-      resolved.length > 0 &&
-      resolved.every((r) => !r.targetAgentId)
-    ) {
-      await this._autoAdvanceUnassigned(ticket, col);
+    const columnHasHolder = resolved.some((r) => !!r.targetAgentId);
+    if (triggerSource === 'column_move' && !columnHasHolder) {
+      if (await this._ticketHasAnyHolder(ticket.id)) {
+        // Staffed somewhere else — this empty stage is an intended skip.
+        await this._autoAdvanceUnassigned(ticket, col);
+      } else {
+        // Orphan ticket — halt where it sits and flag; do not cascade to Done.
+        await this._flagUnassignedHalt(ticket, col);
+      }
       return;
     }
 
@@ -419,6 +436,75 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
         to_column_name: nextCol.name,
       },
     );
+  }
+
+  /**
+   * Does this ticket have a holder on ANY role — agent OR user, across every
+   * role on the ticket, not just the current column's routed roles? Drives the
+   * auto-advance-vs-halt split (ticket c5951280): a ticket staffed somewhere
+   * legitimately skips an unservable stage and advances, while a ticket with no
+   * holder anywhere is an orphan that must halt in place and be flagged rather
+   * than cascade silently to Done.
+   *
+   * Both `agent_id` and `user_id` count as a holder. A ticket whose only
+   * holders are humans still has an owner who can act, so the empty agent-routed
+   * stage is a legitimate skip — not the orphan case.
+   */
+  private async _ticketHasAnyHolder(ticketId: string): Promise<boolean> {
+    const count = await this.dataSource
+      .getRepository(TicketRoleAssignment)
+      .createQueryBuilder('a')
+      .where('a.ticket_id = :ticketId', { ticketId })
+      .andWhere(
+        "((a.agent_id IS NOT NULL AND a.agent_id != '') OR (a.user_id IS NOT NULL AND a.user_id != ''))",
+      )
+      .getCount();
+    return count > 0;
+  }
+
+  /**
+   * Halt + flag an ORPHAN ticket (ticket c5951280). The current non-terminal
+   * column can't be served (no holder for any routed role) AND the ticket has
+   * no holder on any role at all. Unlike `_autoAdvanceUnassigned` we must NOT
+   * push it forward — a completely unassigned ticket cascading to Done is the
+   * silent-flow bug (case ①) this ticket fixes. Leave it where it sits and
+   * write a grepable warning flag so the UI activity feed and operator greps
+   * surface "stuck: nobody assigned".
+   *
+   * The flag is an ActivityLog row with action `auto_advance_halted_unassigned`
+   * and a `system` actor — `system` so the row does NOT re-enter
+   * `_handleActivity` (it is not a move and carries no holder to wake; it's a
+   * pure audit flag). Failing the write must not change the halt outcome.
+   */
+  private async _flagUnassignedHalt(
+    ticket: Ticket,
+    col: BoardColumn,
+  ): Promise<void> {
+    this.logService.warn(
+      'MCP',
+      'auto_advance halted (ticket fully unassigned — no holder on any role)',
+      { ticket_id: ticket.id, column_id: col.id, column_name: col.name },
+    );
+    try {
+      const activityLogRepo = this.dataSource.getRepository(ActivityLog);
+      await activityLogRepo.save(
+        activityLogRepo.create({
+          entity_type: 'ticket',
+          entity_id: ticket.id,
+          ticket_id: ticket.id,
+          actor_id: 'system',
+          actor_name: 'TriggerLoopService',
+          action: 'auto_advance_halted_unassigned',
+          new_value: `column=${col.id} reason=no_holder_on_any_role`,
+          role: '',
+          trigger_source: 'auto_advance',
+        }),
+      );
+    } catch (e) {
+      this.logService.warn('MCP', 'auto_advance halt flag write failed (halt still applied)', {
+        err: String(e), ticket_id: ticket.id,
+      });
+    }
   }
 
   /**
