@@ -421,7 +421,7 @@ export class TicketsController {
     const actorId = currentUser?.id || undefined;
     const actorName = currentUser?.name || currentUser?.email || undefined;
 
-    const { title, description, priority, assignee, reporter, reviewer_id, assignee_id, reporter_id, labels, channel_ids, status, prompt_text, base_repo_resource_id, base_branch, role_assignments, next_ticket_id, pending_user_action, pending_reason } = body;
+    const { title, description, priority, assignee, reporter, reviewer_id, assignee_id, reporter_id, labels, channel_ids, status, prompt_text, base_repo_resource_id, base_branch, role_assignments, next_ticket_id, on_done_action_ids, pending_user_action, pending_reason } = body;
     const oldAssignee = ticket.assignee;
     const oldReporter = ticket.reporter;
     const oldReviewerId = ticket.reviewer_id;
@@ -503,6 +503,16 @@ export class TicketsController {
       } catch (e: any) {
         return res.status(400).json({ error: e?.message || 'next_ticket_id rejected' });
       }
+    }
+    // On-ticket-done hook binding (method "a", ticket 16a6339c). Stored as a
+    // JSON string like labels / channel_ids; dedupe + drop blanks so the array
+    // stays clean. An empty array clears the per-ticket binding. Mirrors the
+    // MCP update_ticket path (ticket-crud-tools.ts).
+    const oldOnDoneActionIds = ticket.on_done_action_ids;
+    if (on_done_action_ids !== undefined) {
+      const arr = Array.isArray(on_done_action_ids) ? on_done_action_ids : [];
+      const cleaned = Array.from(new Set(arr.filter((s: any) => typeof s === 'string' && s)));
+      ticket.on_done_action_ids = JSON.stringify(cleaned);
     }
 
     // Pending-user-action toggle (ticket a57517be). Mirrors the MCP
@@ -610,6 +620,7 @@ export class TicketsController {
     if (base_repo_resource_id !== undefined && (base_repo_resource_id || '') !== (oldBaseRepoId || '')) changes.push('base_repo');
     if (base_branch !== undefined && (base_branch || '') !== (oldBaseBranch || '')) changes.push('base_branch');
     if (next_ticket_id !== undefined && (ticket.next_ticket_id || '') !== (oldNextTicketId || '')) changes.push('next_ticket');
+    if (on_done_action_ids !== undefined && ticket.on_done_action_ids !== oldOnDoneActionIds) changes.push('on_done_action_ids');
     if (pendingReasonChanged) changes.push('pending_reason');
     const otherChanges = changes.filter(c => !['assignee', 'reporter', 'status'].includes(c));
     if (otherChanges.length > 0) {

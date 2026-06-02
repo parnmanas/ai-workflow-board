@@ -132,10 +132,12 @@ export class BoardsController {
             ...t,
             labels: JSON.parse(t.labels || '[]'),
             channel_ids: JSON.parse(t.channel_ids || '[]'),
+            on_done_action_ids: JSON.parse(t.on_done_action_ids || '[]'),
             children: (t.children || []).sort((a, b) => a.position - b.position).map(child => ({
               ...child,
               labels: JSON.parse(child.labels || '[]'),
               channel_ids: JSON.parse(child.channel_ids || '[]'),
+              on_done_action_ids: JSON.parse(child.on_done_action_ids || '[]'),
               children: (child.children || []).sort((a, b) => a.position - b.position),
             })),
             // Lightweight comment projection — populated by the grouped query

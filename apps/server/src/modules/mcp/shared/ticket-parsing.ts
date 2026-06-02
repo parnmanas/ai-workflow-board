@@ -140,14 +140,21 @@ export async function loadTicketFull(scope: RepoScope, id: string) {
     ...ticket,
     labels: safeJsonParse(ticket.labels),
     channel_ids: safeJsonParse(ticket.channel_ids),
+    // On-ticket-done hook binding (ticket 16a6339c) — decode to an array, same
+    // treatment as labels / channel_ids, so the REST GET the detail panel uses
+    // returns string[] (the picker binds against it). parseTicket already does
+    // this; loadTicketFull must match or the client sees a raw JSON string.
+    on_done_action_ids: safeJsonParse(ticket.on_done_action_ids),
     children: (ticket.children || []).sort((a, b) => a.position - b.position).map(child => ({
       ...child,
       labels: safeJsonParse(child.labels),
       channel_ids: safeJsonParse(child.channel_ids),
+      on_done_action_ids: safeJsonParse(child.on_done_action_ids),
       children: (child.children || []).sort((a, b) => a.position - b.position).map(gc => ({
         ...gc,
         labels: safeJsonParse(gc.labels),
         channel_ids: safeJsonParse(gc.channel_ids),
+        on_done_action_ids: safeJsonParse(gc.on_done_action_ids),
         children: [],
         comments: parseComments(gc.comments),
         attachments: [] as any[],
