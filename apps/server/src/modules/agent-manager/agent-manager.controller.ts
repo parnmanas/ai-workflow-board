@@ -24,8 +24,8 @@ import { InstanceRegistryService } from './instance-registry.service';
 import { PairingService } from './pairing.service';
 import { CommandLedgerService } from './command-ledger.service';
 import type { AgentManagerCommand, AgentManagerCommandPayload } from '../../common/types/stream-events';
+import { ALLOWED_CLI_TYPES } from '../../common/types/cli-types';
 
-const ALLOWED_CLI_TYPES = new Set(['claude', 'deepseek', 'codex', 'antigravity', 'custom']);
 const ALLOWED_COMMANDS: ReadonlySet<AgentManagerCommand> = new Set([
   'spawn_agent',
   'stop_agent',

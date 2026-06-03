@@ -12,6 +12,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { Agent } from '../../../entities/Agent';
 import { PromptTemplate } from '../../../entities/PromptTemplate';
+import { CLI_TYPES } from '../../../common/types/cli-types';
 import { ok, err } from '../shared/helpers';
 import type { ToolContext } from './context';
 
@@ -51,7 +52,7 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
     {
       name: z.string().describe('Agent name'),
       description: z.string().optional().default('').describe('Agent description'),
-      type: z.enum(['claude', 'gpt', 'custom']).optional().default('custom').describe('Agent type'),
+      type: z.enum(CLI_TYPES).optional().default('custom').describe('Agent type (CLI selector — see ALLOWED_CLI_TYPES)'),
       avatar_url: z.string().optional().default('').describe('Avatar URL'),
       is_active: z.number().optional().default(1).describe('Active (1) or inactive (0)'),
     },
@@ -69,7 +70,7 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
       agent_id: z.string().describe('Agent ID'),
       name: z.string().optional().describe('New name'),
       description: z.string().optional().describe('New description'),
-      type: z.enum(['claude', 'gpt', 'custom']).optional().describe('New type'),
+      type: z.enum(CLI_TYPES).optional().describe('New type (CLI selector — see ALLOWED_CLI_TYPES)'),
       avatar_url: z.string().optional().describe('New avatar URL'),
       is_active: z.number().optional().describe('Active (1) or inactive (0)'),
       role_prompt: z.string().optional().describe('Markdown role instructions delivered to this agent on every trigger'),
