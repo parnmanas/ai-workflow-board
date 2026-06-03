@@ -15,6 +15,7 @@ const CLI_TO_CREDENTIAL_PREFIX: Record<string, string> = {
   claude: 'claude_',
   codex: 'codex_',
   antigravity: 'antigravity_',
+  deepseek: 'deepseek_',
 };
 
 /** Stale heartbeat threshold — matches the AgentManagerPage badge logic so the
@@ -71,7 +72,7 @@ function modeBadgeColor(mode: 'daemon' | 'proxy' | 'manager'): string {
 
 function agentTypeBadgeVariant(type: string): 'info' | 'success' | 'neutral' {
   if (type === 'claude') return 'info';
-  if (type === 'gpt') return 'success';
+  if (type === 'codex' || type === 'antigravity') return 'success';
   return 'neutral';
 }
 
@@ -154,7 +155,7 @@ function AgentCard({ agent, onEdit, onDelete, onShowSubagents }: AgentCardProps)
   // Used for the agent avatar icon color
   const typeColors: Record<string, string> = {
     claude: tokens.colors.accentLight,
-    gpt: tokens.colors.successLight,
+    deepseek: tokens.colors.successLight,
     custom: tokens.colors.info,
     manager: tokens.colors.accent,
     codex: tokens.colors.warning,
@@ -431,11 +432,11 @@ function SubagentsModal({ agent, onClose }: SubagentsModalProps) {
   );
 }
 
-/** CLI types the agent-manager can spawn — the server's createManagedAgent
- *  whitelist. Picking a manager from the optional dropdown switches the form
- *  into "managed agent" mode and constrains Type to one of these. Legacy
- *  types (gpt, etc.) stay available when no manager is picked. */
-const MANAGED_CLI_TYPES = new Set(['claude', 'codex', 'antigravity', 'custom']);
+/** CLI types the agent-manager can spawn — mirrors the server's
+ *  createManagedAgent whitelist (common/types/cli-types.ts CLI_TYPES). Picking
+ *  a manager from the optional dropdown switches the form into "managed agent"
+ *  mode and constrains Type to one of these. */
+const MANAGED_CLI_TYPES = new Set(['claude', 'codex', 'antigravity', 'deepseek', 'custom']);
 
 interface ManagerOption {
   id: string;
@@ -656,7 +657,7 @@ export default function AgentManager() {
                 { value: 'claude', label: 'Claude' },
                 { value: 'codex', label: 'Codex' },
                 { value: 'antigravity', label: 'Antigravity' },
-                { value: 'gpt', label: 'GPT (legacy)' },
+                { value: 'deepseek', label: 'DeepSeek' },
                 { value: 'custom', label: 'Custom' },
               ]}
             />

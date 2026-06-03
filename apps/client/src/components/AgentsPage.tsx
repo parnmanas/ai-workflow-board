@@ -24,6 +24,7 @@ const CLI_TO_CREDENTIAL_PREFIX: Record<string, string> = {
   claude: 'claude_',
   codex: 'codex_',
   antigravity: 'antigravity_',
+  deepseek: 'deepseek_',
 };
 
 /** CLI types the agent-manager spawn pipeline accepts — must match the
@@ -37,6 +38,7 @@ const MANAGED_CLI_OPTIONS: Array<{ value: ManagedCli; label: string }> = [
   { value: 'claude', label: 'Claude' },
   { value: 'codex', label: 'Codex' },
   { value: 'antigravity', label: 'Antigravity' },
+  { value: 'deepseek', label: 'DeepSeek' },
   { value: 'custom', label: 'Custom' },
 ];
 
@@ -526,7 +528,9 @@ export default function AgentsPage() {
                   }}
                 >
                   <option value="claude">Claude</option>
-                  <option value="gpt">GPT</option>
+                  <option value="codex">Codex</option>
+                  <option value="antigravity">Antigravity</option>
+                  <option value="deepseek">DeepSeek</option>
                   <option value="custom">Custom</option>
                 </select>
               </div>
