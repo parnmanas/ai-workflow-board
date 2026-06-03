@@ -872,6 +872,13 @@ export default function TicketPanel({
     return true;
   };
 
+  // Order-SENSITIVE equality. on_done_action_ids is a sequence, not a set —
+  // its array order IS the dispatch order — so a pure reorder (same id set,
+  // different positions) must still register as dirty. channelIdsEqual sorts
+  // before comparing and would mask that, leaving the Save button disabled.
+  const idsEqualOrdered = (a: string[], b: string[]) =>
+    a.length === b.length && a.every((v, i) => v === b[i]);
+
   // Ticket-field drafts that differ from the server-side row. Empty when the
   // form matches the ticket exactly. The Save handler PATCHes whatever lives
   // in this object in a single round trip, which collapses the previous
@@ -896,9 +903,10 @@ export default function TicketPanel({
       // treat null/'' as "clear next_ticket_id"). Non-empty → the picked id.
       out.next_ticket_id = nextTicketId || null;
     }
-    if (!channelIdsEqual(onDoneActionIds, activeTicket.on_done_action_ids || [])) {
-      // Order-insensitive compare (reuses the channel array helper). An empty
-      // array clears the per-ticket binding server-side.
+    if (!idsEqualOrdered(onDoneActionIds, activeTicket.on_done_action_ids || [])) {
+      // Order-SENSITIVE compare: array order is the dispatch order, so a pure
+      // reorder must flag the field dirty. An empty array clears the per-ticket
+      // binding server-side.
       out.on_done_action_ids = onDoneActionIds;
     }
     return out;
