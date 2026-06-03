@@ -2143,13 +2143,20 @@ export default function TicketPanel({
             </div>
 
             {/* Run on Done — per-ticket on-done action binding (ticket
-                16a6339c, method "a"). The actions checked here are dispatched
-                exactly ONCE when THIS ticket lands on a terminal column, and
-                only for this ticket — independent of any board/label-scoped
-                policy (method "b"). A bound action fires even if its own
-                `trigger` is blank (manual), and clearing every checkbox clears
+                16a6339c, method "a"; picker reworked in 59afc55a). The bound
+                actions are dispatched exactly ONCE when THIS ticket lands on a
+                terminal column, and only for this ticket — independent of any
+                board/label-scoped policy (method "b"). A bound action fires even
+                if its own `trigger` is blank (manual); clearing the list clears
                 the binding. enabled=false actions are skipped at dispatch, so
-                they're shown disabled here. */}
+                they're shown disabled.
+
+                Two regions: an ordered "selected" list (the array order is the
+                dispatch order — reorder with ↑/↓) and an "add" candidate list.
+                Candidates are scoped to this board + workspace-scoped actions;
+                other boards' board-scoped actions are hidden (criterion a). An
+                already-bound id that's out-of-scope or deleted still shows in
+                the selected list so it can be unbound (criterion d). */}
             <div style={{ marginBottom: 14 }}>
               <label style={{ ...labelStyle, marginBottom: 6 }}>
                 Run on Done
@@ -2159,70 +2166,154 @@ export default function TicketPanel({
                 background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.lg,
                 padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 5,
               }}>
-                {actionOptions.length === 0 && onDoneActionIds.length === 0 ? (
-                  <div style={{ fontSize: '11px', color: tokens.colors.textMuted, fontStyle: 'italic', padding: '2px 4px' }}>
-                    No actions in this workspace yet — create one in Admin → Actions to bind it here.
-                  </div>
-                ) : (
-                  <>
-                    {actionOptions.map(act => {
-                      const isSelected = onDoneActionIds.includes(act.id);
-                      const targetAgent = agents.find(a => a.id === act.target_agent_id);
-                      return (
-                        <label key={act.id} style={{
-                          display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer',
-                          padding: '3px 5px', borderRadius: 4,
-                          background: isSelected ? `${tokens.colors.accent}15` : 'transparent',
-                        }}>
-                          <input
-                            type="checkbox"
-                            checked={isSelected}
-                            onChange={() => {
-                              setOnDoneActionIds(prev => isSelected
-                                ? prev.filter(id => id !== act.id)
-                                : [...prev, act.id]);
-                            }}
-                            style={{ accentColor: tokens.colors.accent, cursor: 'pointer' }}
-                          />
-                          <span style={{ fontSize: '12px', color: tokens.colors.textStrong, fontWeight: 500 }}>
-                            {act.name}
-                          </span>
-                          {targetAgent && (
-                            <span style={{ fontSize: '10px', color: tokens.colors.textSecondary }}>
-                              → {formatAgentDisplayName(targetAgent)}
-                            </span>
+                {(() => {
+                  // Candidate add-list scope (ticket 59afc55a, criterion a):
+                  // workspace-scoped Actions (board_id null) + Actions on THIS
+                  // ticket's board only. Board-scoped Actions belonging to a
+                  // DIFFERENT board are excluded from the add list. We still
+                  // keep `actionOptions` as the full workspace fetch so names
+                  // resolve for already-bound ids (incl. out-of-scope/cross-board
+                  // ones) in the selected list below (criterion d).
+                  const inScope = (a: Action) => a.board_id == null || a.board_id === currentBoardId;
+                  const actionById = new Map(actionOptions.map(a => [a.id, a]));
+                  const candidates = actionOptions.filter(a => inScope(a) && !onDoneActionIds.includes(a.id));
+
+                  // Reorder helper — moves the id at `from` to `to`, clamped.
+                  // The array order IS the dispatch order, saved verbatim via
+                  // update_ticket(on_done_action_ids=[...]) (criterion b/c).
+                  const moveBound = (from: number, to: number) => {
+                    setOnDoneActionIds(prev => {
+                      if (to < 0 || to >= prev.length || from === to) return prev;
+                      const next = [...prev];
+                      const [moved] = next.splice(from, 1);
+                      next.splice(to, 0, moved);
+                      return next;
+                    });
+                  };
+
+                  const iconBtnStyle = (disabled: boolean) => ({
+                    flexShrink: 0,
+                    background: 'transparent', border: 'none',
+                    color: disabled ? tokens.colors.border : tokens.colors.textMuted,
+                    fontSize: '12px', lineHeight: 1, padding: '0 3px',
+                    cursor: disabled ? 'not-allowed' : 'pointer',
+                  });
+
+                  return (
+                    <>
+                      {/* ── Selected actions (ordered, reorderable) ──────────
+                          One row per bound id in dispatch order. Unknown ids
+                          (deleted, or scoped out of the fetch) still render so
+                          they can be unbound (criterion d). */}
+                      {onDoneActionIds.length > 0 && (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                          {onDoneActionIds.map((id, idx) => {
+                            const act = actionById.get(id);
+                            const targetAgent = act ? agents.find(a => a.id === act.target_agent_id) : undefined;
+                            return (
+                              <div key={id} style={{
+                                display: 'flex', alignItems: 'center', gap: 6,
+                                padding: '3px 5px', borderRadius: 4,
+                                background: `${tokens.colors.accent}15`,
+                              }}>
+                                <span style={{
+                                  flexShrink: 0, fontSize: '10px', fontWeight: 700,
+                                  color: tokens.colors.textMuted, minWidth: 14, textAlign: 'right',
+                                }}>{idx + 1}.</span>
+                                {act ? (
+                                  <>
+                                    <span style={{ fontSize: '12px', color: tokens.colors.textStrong, fontWeight: 500 }}>
+                                      {act.name}
+                                    </span>
+                                    {targetAgent && (
+                                      <span style={{ fontSize: '10px', color: tokens.colors.textSecondary }}>
+                                        → {formatAgentDisplayName(targetAgent)}
+                                      </span>
+                                    )}
+                                    <span style={{ fontSize: '10px', color: act.enabled ? tokens.colors.textMuted : tokens.colors.warningLight, marginLeft: 'auto' }}>
+                                      {act.enabled ? (act.board_id ? 'board' : 'workspace') : 'disabled — won’t fire'}
+                                    </span>
+                                  </>
+                                ) : (
+                                  <span style={{ fontSize: '12px', color: tokens.colors.textMuted, fontStyle: 'italic', marginRight: 'auto' }}>
+                                    {id.slice(0, 8)}… (removed action)
+                                  </span>
+                                )}
+                                <button
+                                  type="button"
+                                  title="Move up (earlier in dispatch order)"
+                                  disabled={idx === 0}
+                                  onClick={() => moveBound(idx, idx - 1)}
+                                  style={iconBtnStyle(idx === 0)}
+                                >↑</button>
+                                <button
+                                  type="button"
+                                  title="Move down (later in dispatch order)"
+                                  disabled={idx === onDoneActionIds.length - 1}
+                                  onClick={() => moveBound(idx, idx + 1)}
+                                  style={iconBtnStyle(idx === onDoneActionIds.length - 1)}
+                                >↓</button>
+                                <button
+                                  type="button"
+                                  title="Unbind this action"
+                                  onClick={() => setOnDoneActionIds(prev => prev.filter(x => x !== id))}
+                                  style={{ ...iconBtnStyle(false), fontSize: '14px' }}
+                                >×</button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {/* ── Add candidates ───────────────────────────────────
+                          Scoped to current board + workspace; clicking appends
+                          to the end of the dispatch order. */}
+                      {candidates.length > 0 && (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: onDoneActionIds.length > 0 ? 6 : 0 }}>
+                          {onDoneActionIds.length > 0 && (
+                            <div style={{ fontSize: '10px', color: tokens.colors.textMuted, fontWeight: 600, padding: '0 4px' }}>
+                              Add an action
+                            </div>
                           )}
-                          <span style={{ fontSize: '10px', color: act.enabled ? tokens.colors.textMuted : tokens.colors.warningLight, marginLeft: 'auto' }}>
-                            {act.enabled ? (act.board_id ? 'board' : 'workspace') : 'disabled — won’t fire'}
-                          </span>
-                        </label>
-                      );
-                    })}
-                    {/* Bound ids whose Action row isn't in the candidate list
-                        (deleted, or scoped out of the current fetch). Show them
-                        so the user can see + unbind a stale reference rather
-                        than silently dropping it on the next save. */}
-                    {onDoneActionIds
-                      .filter(id => !actionOptions.some(a => a.id === id))
-                      .map(id => (
-                        <label key={id} style={{
-                          display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer',
-                          padding: '3px 5px', borderRadius: 4,
-                          background: `${tokens.colors.accent}15`,
-                        }}>
-                          <input
-                            type="checkbox"
-                            checked
-                            onChange={() => setOnDoneActionIds(prev => prev.filter(x => x !== id))}
-                            style={{ accentColor: tokens.colors.accent, cursor: 'pointer' }}
-                          />
-                          <span style={{ fontSize: '12px', color: tokens.colors.textMuted, fontStyle: 'italic' }}>
-                            {id.slice(0, 8)}… (removed action)
-                          </span>
-                        </label>
-                      ))}
-                  </>
-                )}
+                          {candidates.map(act => {
+                            const targetAgent = agents.find(a => a.id === act.target_agent_id);
+                            return (
+                              <button
+                                key={act.id}
+                                type="button"
+                                onClick={() => setOnDoneActionIds(prev => [...prev, act.id])}
+                                style={{
+                                  display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer',
+                                  padding: '3px 5px', borderRadius: 4, textAlign: 'left',
+                                  background: 'transparent', border: 'none', width: '100%',
+                                }}
+                              >
+                                <span style={{ flexShrink: 0, fontSize: '12px', color: tokens.colors.textMuted, lineHeight: 1 }}>+</span>
+                                <span style={{ fontSize: '12px', color: tokens.colors.textStrong, fontWeight: 500 }}>
+                                  {act.name}
+                                </span>
+                                {targetAgent && (
+                                  <span style={{ fontSize: '10px', color: tokens.colors.textSecondary }}>
+                                    → {formatAgentDisplayName(targetAgent)}
+                                  </span>
+                                )}
+                                <span style={{ fontSize: '10px', color: act.enabled ? tokens.colors.textMuted : tokens.colors.warningLight, marginLeft: 'auto' }}>
+                                  {act.enabled ? (act.board_id ? 'board' : 'workspace') : 'disabled — won’t fire'}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {onDoneActionIds.length === 0 && candidates.length === 0 && (
+                        <div style={{ fontSize: '11px', color: tokens.colors.textMuted, fontStyle: 'italic', padding: '2px 4px' }}>
+                          No actions on this board or workspace yet — create one in Admin → Actions to bind it here.
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
               </div>
             </div>
 
