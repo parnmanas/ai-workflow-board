@@ -187,6 +187,35 @@ test('on-ticket-done hook dispatches bound Actions exactly once with ticket cont
   // Per-ticket isolation: t5 reaching Done must NOT re-fire the action bound
   // only to t4 (criterion a — a binding is scoped to its own ticket).
   assert.equal((await runsFor(ds, a4.id)).length, 1, 'S5(a): another ticket\'s Done did not fire t4\'s binding');
+
+  // ── Scenario 6: criterion (c) — per-ticket binding dispatches in array order ─
+  // The on_done_action_ids array order IS the dispatch order (the TicketPanel
+  // picker lets the user reorder it). Bind three manual Actions in a NON-sorted
+  // order and assert the hook dispatches them in exactly that order.
+  step('S6: on_done_action_ids dispatch in saved array order');
+  const mkOrdered = (n) => createAction(ds, {
+    workspace_id: ws.id, board_id: board.id, name: `S6 ordered ${n}`, target_agent_id: agent.id,
+    trigger: '', prompt: `ordered ${n}`,
+  });
+  const o1 = await mkOrdered(1);
+  const o2 = await mkOrdered(2);
+  const o3 = await mkOrdered(3);
+  // Deliberately not the creation order: dispatch must follow THIS array.
+  const order = [o3.id, o1.id, o2.id];
+  const t6 = await newTicket('S6 ordered ticket', []);
+  await ds.getRepository('Ticket').update(t6.id, { on_done_action_ids: JSON.stringify(order) });
+  await moveToDone(ds, activityService, t6.id, done.id);
+  // Wait until all three have a run, then compare dispatch order via created_at.
+  for (const id of order) await waitForRuns(ds, id, 1);
+  const orderedRuns = (await ds.getRepository('ActionRun')
+    .find({ where: order.map((id) => ({ action_id: id })) }))
+    .filter((r) => order.includes(r.action_id))
+    .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+  assert.deepEqual(
+    orderedRuns.map((r) => r.action_id),
+    order,
+    'S6(c): actions dispatched in the saved on_done_action_ids array order',
+  );
 });
 
 exitAfterTests();

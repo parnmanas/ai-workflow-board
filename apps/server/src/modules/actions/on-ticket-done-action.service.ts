@@ -176,6 +176,13 @@ export class OnTicketDoneActionService implements OnModuleInit, OnModuleDestroy 
   /**
    * Union of method (a) explicit per-ticket ids and method (b) board/label
    * policy Actions, deduped by id. enabled=false is filtered out of both.
+   *
+   * ORDER (ticket 59afc55a, criterion c): explicit per-ticket ids dispatch in
+   * their saved `on_done_action_ids` array order — that order is the user's
+   * intended execution sequence (reorderable in the TicketPanel picker). Policy
+   * Actions not already named explicitly are appended after, so the per-ticket
+   * order is always the leading prefix even when a bound Action also happens to
+   * be an on_ticket_done policy Action. `Map` preserves insertion order.
    */
   private async _collectEligibleActions(
     ticket: Ticket,
@@ -185,23 +192,9 @@ export class OnTicketDoneActionService implements OnModuleInit, OnModuleDestroy 
     const actionRepo = this.dataSource.getRepository(Action);
     const byId = new Map<string, Action>();
 
-    // (b) Board/label-scoped policy Actions. Scope board in SQL, label in JS
-    // (labels live as a JSON string — keep the query DB-portable).
-    const qb = actionRepo
-      .createQueryBuilder('a')
-      .where('a.workspace_id = :ws', { ws: ticket.workspace_id })
-      .andWhere('a.trigger = :trig', { trig: ON_TICKET_DONE_TRIGGER })
-      .andWhere('a.enabled = :en', { en: true })
-      .andWhere('(a.board_id IS NULL OR a.board_id = :bid)', { bid: boardId });
-    const policyActions = await qb.getMany();
-    for (const a of policyActions) {
-      const labelOk = !a.trigger_label || (Array.isArray(labels) && labels.includes(a.trigger_label));
-      if (labelOk) byId.set(a.id, a);
-    }
-
-    // (a) Explicit per-ticket ids. These fire regardless of the Action's own
-    // `trigger` field (the binding is the ticket's, not a board policy), but
-    // still honour enabled=false and workspace scope.
+    // (a) Explicit per-ticket ids FIRST, in array order. These fire regardless
+    // of the Action's own `trigger` field (the binding is the ticket's, not a
+    // board policy), but still honour enabled=false and workspace scope.
     const explicitIds = safeJsonParse<string[]>(ticket.on_done_action_ids, []);
     if (Array.isArray(explicitIds)) {
       for (const id of explicitIds) {
@@ -212,6 +205,22 @@ export class OnTicketDoneActionService implements OnModuleInit, OnModuleDestroy 
         if (!a.enabled) continue;
         byId.set(a.id, a);
       }
+    }
+
+    // (b) Board/label-scoped policy Actions, appended after the explicit ones.
+    // Scope board in SQL, label in JS (labels live as a JSON string — keep the
+    // query DB-portable).
+    const qb = actionRepo
+      .createQueryBuilder('a')
+      .where('a.workspace_id = :ws', { ws: ticket.workspace_id })
+      .andWhere('a.trigger = :trig', { trig: ON_TICKET_DONE_TRIGGER })
+      .andWhere('a.enabled = :en', { en: true })
+      .andWhere('(a.board_id IS NULL OR a.board_id = :bid)', { bid: boardId });
+    const policyActions = await qb.getMany();
+    for (const a of policyActions) {
+      if (byId.has(a.id)) continue;
+      const labelOk = !a.trigger_label || (Array.isArray(labels) && labels.includes(a.trigger_label));
+      if (labelOk) byId.set(a.id, a);
     }
 
     return [...byId.values()];
