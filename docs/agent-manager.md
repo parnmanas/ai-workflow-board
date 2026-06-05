@@ -203,6 +203,44 @@ start time. On startup:
 The lockfile is also inspected for the legacy `~/.claude/channels/awb/agent.lock`
 to refuse running concurrently with the old plugin daemon.
 
+## Worktree isolation (per-(ticket,role) cwd)
+
+A managed agent has a single `working_dir`, and historically every
+`(ticket, role)` session it ran shared that cwd. The current git branch is
+global state of that cwd, so a `git checkout` in one ticket's session bled
+into another ticket's session on the same agent whenever focus flipped
+(pend/unpend, preemption, idle-reap → respawn) — commits could land on the
+wrong branch (ticket `9f26f091`).
+
+`WorktreeManager` (`lib/worktree-manager.ts`) gives each `(ticket, role)` its
+own dedicated git worktree:
+
+- `EventDispatcher.handleTrigger` rewrites the managed agent's
+  execution-context `cwd` to `<MANAGER_HOME>/agents/<id>/worktrees/<ticket8>-<role>`
+  via `WorktreeManager.resolveCwd()` before any spawn. Both the persistent
+  ticket-session and the one-shot subagent fallback read `agentContext.cwd`,
+  so the single rewrite covers both. The follow-up *reuse* path doesn't
+  re-spawn, so it stays in the worktree the live child already holds.
+- The worktree dir is deterministic per `(ticket, role)`, so a fresh spawn
+  after an idle-reap / unpend **reattaches** to the same tree — the branch and
+  any uncommitted work survive, and resume continues where it left off.
+- New worktrees are created `--detach`ed at the base repo's current HEAD; the
+  agent's column workflow then creates/attaches its own `ticket/<id>-<slug>`
+  branch inside the isolated worktree (a branch can only be checked out in one
+  worktree, so detached-create avoids the "already checked out" conflict).
+- **Fallback**: when `working_dir` is not a git repo, or `git worktree add`
+  fails (old git, disk error), `resolveCwd` returns the shared base cwd with
+  `isWorktree=false` and the legacy single-cwd behavior applies.
+- **Cleanup**: a 10-minute sweep (`WorktreeManager.sweep`) reclaims worktrees
+  that have no live session **and** a clean working tree. Dirty trees (a
+  pended ticket with unsaved work) and worktrees with a live session are kept.
+  Removing a clean worktree loses nothing recoverable — the branch ref stays
+  in the repo and resume recreates the worktree on demand.
+
+Gated by `delegation.worktreeIsolation` (default `true`); set `false` to keep
+the legacy shared-cwd path. This is an agent-manager-internal change — no SSE
+event contract changed.
+
 ## Security model
 
 - **API key scope** — pairing redeem creates an `ApiKey` bound to the
