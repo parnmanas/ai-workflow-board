@@ -125,6 +125,32 @@ test('(b) resume reattaches to same worktree (branch + dirty tree intact)', asyn
   }
 });
 
+test('(e) documented `git checkout <base>` flow works in worktrees (base HEAD detached)', async () => {
+  const { repo, worktreesRoot, cleanup } = await makeRepo();
+  try {
+    const wm = new WorktreeManager();
+    assert.equal(git(repo, ['rev-parse', '--abbrev-ref', 'HEAD']), 'main', 'base starts on main');
+
+    const a = await wm.resolveCwd({ baseWorkingDir: repo, worktreesRoot, ticketId: TICKET_A, role: 'assignee' });
+    const b = await wm.resolveCwd({ baseWorkingDir: repo, worktreesRoot, ticketId: TICKET_B, role: 'assignee' });
+
+    // Creating worktrees detaches the base HEAD so `main` is no longer
+    // exclusively claimed by the base working tree.
+    assert.notEqual(git(repo, ['rev-parse', '--abbrev-ref', 'HEAD']), 'main', 'base HEAD detached');
+
+    // Both agents can run the documented step: checkout base, then branch.
+    git(a.cwd, ['checkout', '-q', 'main']);
+    git(a.cwd, ['checkout', '-q', '-b', 'ticket/aaaaaaaa-x']);
+    git(b.cwd, ['checkout', '-q', 'main']); // A already left main → free again
+    git(b.cwd, ['checkout', '-q', '-b', 'ticket/bbbbbbbb-y']);
+
+    assert.equal(git(a.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), 'ticket/aaaaaaaa-x');
+    assert.equal(git(b.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), 'ticket/bbbbbbbb-y');
+  } finally {
+    await cleanup();
+  }
+});
+
 test('fallback to base cwd when not a git repo', async () => {
   const root = await fsp.mkdtemp(join(tmpdir(), 'awb-wt-nogit-'));
   try {

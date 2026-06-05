@@ -104,6 +104,31 @@ export class WorktreeManager {
     return this.#enabled;
   }
 
+  /**
+   * Detach the base repo's primary worktree HEAD when it is sitting on a
+   * branch, so ticket worktrees can `git checkout <base-branch>` (a branch is
+   * checkable-out in only one worktree at a time). Idempotent — a no-op when
+   * HEAD is already detached. Detaching points HEAD at the same commit, so it
+   * never touches the working tree or loses the branch ref. Best-effort.
+   */
+  async #freeBaseBranch(baseWorkingDir: string): Promise<void> {
+    // `symbolic-ref -q HEAD` succeeds (and prints refs/heads/<b>) only when on
+    // a branch; it exits non-zero on a detached HEAD.
+    const onBranch = await git(baseWorkingDir, ['symbolic-ref', '-q', 'HEAD']);
+    if (!onBranch.ok) return; // already detached
+    const branch = onBranch.stdout.trim().replace(/^refs\/heads\//, '');
+    const det = await git(baseWorkingDir, ['checkout', '--detach']);
+    if (det.ok) {
+      log(
+        `[worktree] detached base working_dir HEAD (was ${branch}) so ticket worktrees can check out the base branch: ${baseWorkingDir}`,
+      );
+    } else {
+      log(
+        `[worktree] could not detach base HEAD (${det.stderr.trim()}); ticket worktrees should branch off origin/<base> directly`,
+      );
+    }
+  }
+
   /** Is `dir` the top of (or inside) a git work tree we can add worktrees to? */
   async #isGitWorkTree(dir: string): Promise<boolean> {
     const r = await git(dir, ['rev-parse', '--is-inside-work-tree']);
@@ -211,6 +236,16 @@ export class WorktreeManager {
     } catch (err: any) {
       return fallback(`mkdir_failed:${err?.message ?? err}`);
     }
+
+    // Free the base branch: the column workflow guide tells the agent to
+    // `git checkout <base-branch> && git pull` first, but a branch can be
+    // checked out in only ONE worktree. If the base repo's primary tree is
+    // sitting on the base branch, that checkout fails ("already used by
+    // worktree"). Detaching the base HEAD (no file changes — same commit)
+    // frees the branch so every ticket worktree can check it out per the
+    // documented flow. Best-effort; on failure the agent can still branch
+    // off origin/<base> directly.
+    await this.#freeBaseBranch(baseWorkingDir);
 
     const add = await git(baseWorkingDir, ['worktree', 'add', '--detach', wtPath]);
     if (!add.ok) {

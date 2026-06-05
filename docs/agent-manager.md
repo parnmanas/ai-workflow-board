@@ -228,6 +228,16 @@ own dedicated git worktree:
   agent's column workflow then creates/attaches its own `ticket/<id>-<slug>`
   branch inside the isolated worktree (a branch can only be checked out in one
   worktree, so detached-create avoids the "already checked out" conflict).
+- **Base repo becomes a reference**: when the first worktree is created, the
+  manager detaches the base `working_dir`'s HEAD (same commit, no file
+  changes). The column guide's first step is `git checkout <base-branch>` —
+  a branch can be checked out in only one worktree, so if the base tree still
+  sat on the base branch that checkout would fail. Detaching frees the branch
+  so every ticket worktree can check it out per the documented flow. Side
+  effects: the base `working_dir` shows a detached HEAD (expected — agents
+  work in worktrees, not the base), and the `pull_working_dir` maintenance
+  verb is a no-op on a detached HEAD (worktrees fetch `origin/<base>`
+  themselves, so the base no longer needs pulling).
 - **Fallback**: when `working_dir` is not a git repo, or `git worktree add`
   fails (old git, disk error), `resolveCwd` returns the shared base cwd with
   `isWorktree=false` and the legacy single-cwd behavior applies.
