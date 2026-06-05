@@ -8,6 +8,7 @@
 // from claude-plugin's daemon.mjs are intentionally absent. When no delegation
 // path is available, events are simply logged.
 
+import { join } from 'node:path';
 import { log } from './logging.js';
 import { loadAgentInfo } from './config.js';
 import {
@@ -16,8 +17,10 @@ import {
   postFsResponse,
 } from './rest.js';
 import { recordEvent } from './event-log-recorder.js';
+import { MANAGED_AGENTS_DIR } from './constants.js';
 import type { AwbConfig } from './rest.js';
 import type { ManagedAgentContextRegistry } from './managed-agent-context.js';
+import type { WorktreeManager } from './worktree-manager.js';
 import { prepareChatAttachments } from './chat-attachment-prep.js';
 
 // Hard cap on consecutive agent-to-agent turns within a single chat room.
@@ -247,6 +250,11 @@ export interface EventDispatcherDeps {
   // managed agent's apiKey + cwd + mcp-config (instead of the manager's
   // defaults).
   managedAgentContexts?: ManagedAgentContextRegistry | null;
+  // ticket 9f26f091 — per-(ticket,role) git worktree isolation. When set, a
+  // trigger for a managed agent runs under a dedicated worktree cwd instead
+  // of the agent's shared working_dir, so branch switches can't bleed across
+  // tickets on focus transitions. Optional/null reverts to shared-cwd.
+  worktreeManager?: WorktreeManager | null;
 }
 
 export class EventDispatcher {
@@ -258,6 +266,7 @@ export class EventDispatcher {
   #prompts: PromptComposer | null;
   #agentManagerCommandHandler: AgentManagerCommandSink | null;
   #managedAgentContexts: ManagedAgentContextRegistry | null;
+  #worktreeManager: WorktreeManager | null;
 
   constructor(config: AwbConfig, deps: EventDispatcherDeps = {}) {
     this.#config = config;
@@ -268,6 +277,47 @@ export class EventDispatcher {
     this.#prompts = deps.prompts ?? null;
     this.#agentManagerCommandHandler = deps.agentManagerCommandHandler ?? null;
     this.#managedAgentContexts = deps.managedAgentContexts ?? null;
+    this.#worktreeManager = deps.worktreeManager ?? null;
+  }
+
+  /**
+   * ticket 9f26f091: rewrite a managed agent's execution-context cwd to a
+   * dedicated per-(ticket,role) git worktree before a trigger spawn. The
+   * worktree dir is deterministic, so a fresh spawn after an idle-reap / unpend
+   * reattaches to the SAME tree (branch + uncommitted work intact) — the
+   * follow-up reuse path doesn't re-spawn, so it stays in the worktree the live
+   * child already holds. Mutates the passed context object in place (it is a
+   * fresh literal from #resolveAgentContext, never the registry record). No-op
+   * when worktree isolation is disabled, the agent isn't managed, or git
+   * worktree is unavailable (falls back to the shared working_dir).
+   */
+  async #applyWorktreeCwd(
+    agentContext: AgentExecutionContext | undefined,
+    ticketId: string | undefined,
+    role: string | undefined,
+  ): Promise<void> {
+    if (!agentContext || !this.#worktreeManager || !ticketId || !role) return;
+    if ((this.#config as any)?.delegation?.worktreeIsolation === false) return;
+    try {
+      const res = await this.#worktreeManager.resolveCwd({
+        baseWorkingDir: agentContext.cwd,
+        worktreesRoot: join(MANAGED_AGENTS_DIR, agentContext.agent_id, 'worktrees'),
+        ticketId,
+        role,
+      });
+      if (res.isWorktree) {
+        log(
+          `[worktree] ticket=${ticketId.slice(0, 8)} role=${role} agent=${agentContext.agent_id.slice(0, 8)} cwd=${res.cwd}${res.reused ? ' (reused)' : ' (new)'}`,
+        );
+        agentContext.cwd = res.cwd;
+      } else if (res.reason && res.reason !== 'disabled') {
+        log(
+          `[worktree] isolation skipped for ticket=${ticketId.slice(0, 8)} role=${role}: ${res.reason} — using shared cwd ${agentContext.cwd}`,
+        );
+      }
+    } catch (err: any) {
+      log(`[worktree] resolveCwd failed (${err?.message ?? err}); using shared cwd`);
+    }
   }
 
   /**
@@ -428,6 +478,12 @@ export class EventDispatcher {
       log(`Trigger dropped (not for this agent): target=${eventAgentId} self=${selfAgentId}`);
       return;
     }
+
+    // ticket 9f26f091: route this (ticket,role) into its own git worktree so a
+    // branch switch here can't contaminate another ticket sharing the agent's
+    // working_dir. Both the persistent ticket-session and one-shot subagent
+    // fallback below read agentContext.cwd, so one rewrite covers both paths.
+    await this.#applyWorktreeCwd(agentContext, ev.ticket_id, ev.action);
 
     const delegation = (this.#config as any)?.delegation ?? {};
     const delegationEnabled = delegation.enabled !== false;

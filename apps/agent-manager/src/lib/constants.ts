@@ -51,6 +51,11 @@ export const DELEGATION_DEFAULTS = Object.freeze({
   persistentTicketSessions: true,
   idleMinutes: 10,
   maxTurnsPerSession: 30,
+  // ticket 9f26f091: isolate each (ticket,role) session in its own git
+  // worktree so a branch switch in one ticket can't bleed into another that
+  // shares the agent's working_dir. Set false to keep the legacy single-cwd
+  // behavior (e.g. on hosts with an old git that lacks `worktree`).
+  worktreeIsolation: true,
 });
 
 export const TTL_SWEEP_INTERVAL_MS = 60_000;

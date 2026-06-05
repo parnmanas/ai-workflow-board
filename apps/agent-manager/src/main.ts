@@ -2,11 +2,12 @@
 import { parseArgs } from 'node:util';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
+import { dirname, resolve, join as pathJoin } from 'node:path';
 import {
   AGENT_MANAGER_HOME,
   CONFIG_PATH,
   LEGACY_CONFIG_PATH,
+  MANAGED_AGENTS_DIR,
 } from './lib/constants.js';
 import { loadConfig, resolveAgentId } from './lib/config.js';
 import { installCrashHandlers, log } from './lib/logging.js';
@@ -34,6 +35,7 @@ import { KNOWN_ADAPTER_CLI_TYPES, createAdapter } from './lib/cli-adapters/index
 import { promptComposer } from './lib/prompts.js';
 import { ManagedAgentRegistry } from './lib/managed-agents.js';
 import { ManagedAgentContextRegistry } from './lib/managed-agent-context.js';
+import { WorktreeManager, worktreeSlug } from './lib/worktree-manager.js';
 import { AgentManagerCommandHandler } from './lib/agent-manager-commands.js';
 import {
   listManagedAgentDirs,
@@ -464,6 +466,13 @@ async function runRuntime(
   // spawn_agent, drained by stop_agent, read by EventDispatcher to route
   // managed-agent-targeted events under the right identity.
   const managedAgentContexts = new ManagedAgentContextRegistry();
+  // ticket 9f26f091 — per-(ticket,role) git worktree isolation. Gated by
+  // delegation.worktreeIsolation (default true); when a managed agent's
+  // working_dir is a git repo, each (ticket,role) trigger spawns under its own
+  // worktree so focus flips can't cross-contaminate branches.
+  const worktreeManager = new WorktreeManager({
+    enabled: (config as any)?.delegation?.worktreeIsolation !== false,
+  });
   // Construct the session managers BEFORE the command handler so stop_agent /
   // restart_agent can force-kill an agent's live chat / ticket children
   // through them. Without this wiring, a credential rotation only rewrote
@@ -623,6 +632,7 @@ async function runRuntime(
       prompts: promptComposer,
       agentManagerCommandHandler: commandHandler,
       managedAgentContexts,
+      worktreeManager,
     },
     pluginVersion: version,
     onConnect: kickPresencePing,
@@ -632,6 +642,44 @@ async function runRuntime(
   log('SSE event stream started');
 
   let uploadTimer: NodeJS.Timeout | null = null;
+
+  // ticket 9f26f091 — reclaim idle, clean per-(ticket,role) worktrees so a
+  // long-lived manager doesn't accumulate dead trees. Conservative: a worktree
+  // is removed only when it has no live session AND no uncommitted work (a
+  // dirty tree means a pended ticket still has unsaved changes — kept). The
+  // branch ref survives removal, so resume just recreates the worktree.
+  let worktreeSweepTimer: NodeJS.Timeout | null = null;
+  const sweepWorktrees = async (): Promise<void> => {
+    if (!worktreeManager.enabled) return;
+    try {
+      const activeKeys = new Set<string>();
+      for (const s of ticketSessionManager._snapshot()) {
+        if (s.ticketId && s.role) activeKeys.add(worktreeSlug(s.ticketId, s.role));
+      }
+      for (const s of subagentManager._snapshot()) {
+        if (s.ticket_id && s.role) activeKeys.add(worktreeSlug(s.ticket_id, s.role));
+      }
+      let total = 0;
+      const seenRoots = new Set<string>();
+      for (const ctx of managedAgentContexts.list()) {
+        if (!ctx.working_dir) continue;
+        const worktreesRoot = pathJoin(MANAGED_AGENTS_DIR, ctx.agent_id, 'worktrees');
+        const dedupeKey = `${ctx.working_dir} ${worktreesRoot}`;
+        if (seenRoots.has(dedupeKey)) continue;
+        seenRoots.add(dedupeKey);
+        total += await worktreeManager.sweep({
+          baseWorkingDir: ctx.working_dir,
+          worktreesRoot,
+          activeKeys,
+        });
+      }
+      if (total > 0) log(`[worktree] sweep reclaimed ${total} idle clean worktree(s)`);
+    } catch (err: any) {
+      log(`[worktree] sweep failed: ${err?.message ?? err}`);
+    }
+  };
+  worktreeSweepTimer = setInterval(() => void sweepWorktrees(), 10 * 60 * 1000);
+  worktreeSweepTimer.unref?.();
 
   agentIdReady.then((agentId) => {
     if (!agentId) return;
@@ -751,6 +799,10 @@ async function runRuntime(
     if (uploadTimer) {
       clearInterval(uploadTimer);
       uploadTimer = null;
+    }
+    if (worktreeSweepTimer) {
+      clearInterval(worktreeSweepTimer);
+      worktreeSweepTimer = null;
     }
     eventStream.stop();
     try {

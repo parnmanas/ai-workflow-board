@@ -51,6 +51,9 @@ export interface SessionDelegationConfig {
   claudeBin?: string;
   persistentChatSessions?: boolean;
   persistentTicketSessions?: boolean;
+  /** ticket 9f26f091: per-(ticket,role) git worktree isolation. Default true
+   *  (DELEGATION_DEFAULTS); false reverts to the shared single-cwd behavior. */
+  worktreeIsolation?: boolean;
 }
 
 export interface SessionAwareConfig extends AwbConfig {
