@@ -260,21 +260,49 @@ export class WorktreeManager {
     return { cwd: wtPath, isWorktree: true, reused: false };
   }
 
-  /** Remove a specific (ticket,role) worktree. Force-removes even a dirty tree
-   *  — callers should only invoke this for terminal tickets. Returns true when
-   *  the worktree was removed (or already absent). */
-  async remove(args: ResolveCwdArgs): Promise<boolean> {
-    if (!this.#enabled) return false;
-    const { baseWorkingDir, worktreesRoot, ticketId, role } = args;
-    if (!baseWorkingDir || !(await this.#isGitWorkTree(baseWorkingDir))) return false;
-    const wtPath = join(worktreesRoot, worktreeSlug(ticketId, role));
-    const r = await git(baseWorkingDir, ['worktree', 'remove', '--force', wtPath]);
+  /**
+   * Force-remove EVERY per-role worktree belonging to a ticket, regardless of
+   * dirty state. This is the terminal-ticket reclamation path (ticket 9f26f091
+   * acceptance (d)): once a ticket reaches a terminal column (done/merged) its
+   * work is committed to its branch (or already merged), so the checkout is
+   * disposable — the branch ref survives in the repo even after the worktree
+   * is gone. Unlike `sweep()`, this deliberately ignores a dirty tree: in this
+   * repo a worktree goes permanently dirty after any build (untracked
+   * tsbuildinfo / database dir), so a dirty-preserving sweep would never
+   * reclaim a terminal ticket's tree and worktrees would accumulate unbounded.
+   *
+   * We match by the worktree dir's last path segment starting with the
+   * `<ticket8>-` slug prefix, so all roles (assignee/reviewer/reporter) for the
+   * ticket are cleaned in one pass without the caller having to enumerate them.
+   * Confined to `worktreesRoot` so the agent's main worktree is never touched.
+   * Returns the number of worktrees removed. Best-effort; never throws.
+   */
+  async removeTicketWorktrees(opts: {
+    baseWorkingDir: string;
+    worktreesRoot: string;
+    ticketId: string;
+  }): Promise<number> {
+    if (!this.#enabled) return 0;
+    const { baseWorkingDir, worktreesRoot, ticketId } = opts;
+    if (!baseWorkingDir || !ticketId) return 0;
+    if (!(await this.#isGitWorkTree(baseWorkingDir))) return 0;
+    const prefix = `${String(ticketId).slice(0, 8)}-`;
     await this.prune(baseWorkingDir);
-    if (!r.ok && !/is not a working tree|No such file/i.test(r.stderr)) {
-      log(`[worktree] remove failed ${wtPath}: ${r.stderr.trim()}`);
-      return false;
+    const worktrees = await this.listWorktrees(baseWorkingDir);
+    let removed = 0;
+    for (const w of worktrees) {
+      if (!isUnder(w.path, worktreesRoot)) continue; // never the main worktree
+      if (!lastSegment(w.path).startsWith(prefix)) continue;
+      const r = await git(baseWorkingDir, ['worktree', 'remove', '--force', w.path]);
+      if (r.ok || /is not a working tree|No such file/i.test(r.stderr)) {
+        removed++;
+        log(`[worktree] removed terminal-ticket worktree ${w.path}`);
+      } else {
+        log(`[worktree] terminal remove failed ${w.path}: ${r.stderr.trim()}`);
+      }
     }
-    return true;
+    if (removed > 0) await this.prune(baseWorkingDir);
+    return removed;
   }
 
   /**

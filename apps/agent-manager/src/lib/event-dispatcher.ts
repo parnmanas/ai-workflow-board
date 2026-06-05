@@ -321,6 +321,55 @@ export class EventDispatcher {
   }
 
   /**
+   * ticket 9f26f091: when a ticket lands in a terminal column (done/merged),
+   * force-remove its per-(ticket,role) worktrees across every managed agent
+   * this manager owns — regardless of dirty state. Terminal-ness is read from
+   * the server-maintained `Ticket.terminal_entered_at` (stamped on entering a
+   * terminal column, cleared on leaving), so a position reorder inside a
+   * non-terminal column or a bounce back out to In Progress never triggers
+   * cleanup. The work is committed to the ticket's branch (or already merged)
+   * by the time it's terminal, so the checkout is disposable: the branch ref
+   * survives in the base repo even after its worktree is gone. Best-effort and
+   * fire-and-forget; never throws.
+   */
+  async #cleanupTerminalTicketWorktrees(ticketId: string): Promise<void> {
+    if (!this.#worktreeManager || !this.#worktreeManager.enabled) return;
+    if ((this.#config as any)?.delegation?.worktreeIsolation === false) return;
+    if (!this.#managedAgentContexts) return;
+    try {
+      const ticket = await fetchTicketContext(this.#config, ticketId);
+      // terminal_entered_at is null whenever the ticket is NOT currently in a
+      // terminal column — that's our gate. A failed fetch (null ticket) is
+      // treated as "unknown → skip" so a transient REST error can't nuke a
+      // live ticket's worktree.
+      if (!ticket || !ticket.terminal_entered_at) return;
+      let total = 0;
+      const seenRoots = new Set<string>();
+      for (const ctx of this.#managedAgentContexts.list()) {
+        if (!ctx.working_dir) continue;
+        const worktreesRoot = join(MANAGED_AGENTS_DIR, ctx.agent_id, 'worktrees');
+        const dedupeKey = `${ctx.working_dir} ${worktreesRoot}`;
+        if (seenRoots.has(dedupeKey)) continue;
+        seenRoots.add(dedupeKey);
+        total += await this.#worktreeManager.removeTicketWorktrees({
+          baseWorkingDir: ctx.working_dir,
+          worktreesRoot,
+          ticketId,
+        });
+      }
+      if (total > 0) {
+        log(
+          `[worktree] terminal ticket=${ticketId.slice(0, 8)} reclaimed ${total} worktree(s)`,
+        );
+      }
+    } catch (err: any) {
+      log(
+        `[worktree] terminal cleanup failed for ticket=${ticketId.slice(0, 8)}: ${err?.message ?? err}`,
+      );
+    }
+  }
+
+  /**
    * ST-6: resolve a managed-agent context by id (the event's target agent).
    * Returns null when (a) no registry is wired, (b) the id doesn't match
    * any registered managed agent, or (c) the agent is not yet bootstrapped
@@ -792,6 +841,19 @@ export class EventDispatcher {
       const ev = JSON.parse(raw);
       // entity_type: 'ticket' | 'comment' | 'child_ticket' etc.
       // action: 'created' | 'updated' | 'moved' | 'deleted' | 'status_changed'
+
+      // ticket 9f26f091 — terminal-ticket worktree reclamation. A column move
+      // is the only signal that can carry a ticket into a terminal (done/
+      // merged) column; when it does, drop the ticket's per-(ticket,role)
+      // worktrees regardless of dirty state. The 10-min sweep can't do this —
+      // it deliberately preserves dirty trees to protect pended WIP, and in
+      // this repo a worktree goes permanently dirty after any build (untracked
+      // tsbuildinfo / database dir), so a done/merged ticket's tree would never
+      // be reclaimed and worktrees would accumulate unbounded. Fire-and-forget
+      // so the live-session forward below stays synchronous.
+      if (ev.entity_type === 'ticket' && ev.action === 'moved' && ev.ticket_id) {
+        void this.#cleanupTerminalTicketWorktrees(ev.ticket_id);
+      }
 
       if (this.#ticketSessionManager && ev.ticket_id) {
         const forwarded = this.#ticketSessionManager.forwardBoardUpdate(

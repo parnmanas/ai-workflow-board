@@ -208,3 +208,57 @@ test('(d) sweep removes idle clean worktrees, keeps active and dirty ones', asyn
     await cleanup();
   }
 });
+
+test('(d) terminal ticket: removeTicketWorktrees drops ALL roles even when dirty', async () => {
+  const { repo, worktreesRoot, cleanup } = await makeRepo();
+  try {
+    const wm = new WorktreeManager();
+    // Terminal ticket A has two role worktrees: assignee (dirty — the exact
+    // case the dirty-preserving sweep can never reclaim) and reviewer (clean,
+    // on its own committed branch).
+    const aAssignee = await wm.resolveCwd({ baseWorkingDir: repo, worktreesRoot, ticketId: TICKET_A, role: 'assignee' });
+    git(aAssignee.cwd, ['checkout', '-q', '-b', 'ticket/aaaaaaaa-feat']);
+    await fsp.writeFile(join(aAssignee.cwd, 'wip.txt'), 'uncommitted — never reclaimed by sweep\n');
+
+    const aReviewer = await wm.resolveCwd({ baseWorkingDir: repo, worktreesRoot, ticketId: TICKET_A, role: 'reviewer' });
+    git(aReviewer.cwd, ['checkout', '-q', '-b', 'ticket/aaaaaaaa-review']);
+    await fsp.writeFile(join(aReviewer.cwd, 'r.txt'), 'committed\n');
+    git(aReviewer.cwd, ['add', '.']);
+    git(aReviewer.cwd, ['commit', '-q', '-m', 'reviewer commit']);
+
+    // A different, still-active ticket B must be left completely alone.
+    const b = await wm.resolveCwd({ baseWorkingDir: repo, worktreesRoot, ticketId: TICKET_B, role: 'assignee' });
+
+    const removed = await wm.removeTicketWorktrees({ baseWorkingDir: repo, worktreesRoot, ticketId: TICKET_A });
+    assert.equal(removed, 2, 'both A worktrees removed (dirty assignee + clean reviewer)');
+
+    const remaining = (await wm.listWorktrees(repo)).map((w) => w.path);
+    assert.ok(!remaining.some((p) => p.endsWith(worktreeSlug(TICKET_A, 'assignee'))), 'dirty terminal worktree gone');
+    assert.ok(!remaining.some((p) => p.endsWith(worktreeSlug(TICKET_A, 'reviewer'))), 'clean terminal worktree gone');
+    assert.ok(remaining.some((p) => p.endsWith(worktreeSlug(TICKET_B, 'assignee'))), 'unrelated ticket untouched');
+
+    // The branch refs survive removal — terminal work isn't lost, just the
+    // disposable checkout. (A re-trigger would recreate the worktree on demand.)
+    assert.ok(git(repo, ['branch', '--list', 'ticket/aaaaaaaa-feat']).includes('ticket/aaaaaaaa-feat'), 'assignee branch ref survives');
+    assert.ok(git(repo, ['branch', '--list', 'ticket/aaaaaaaa-review']).includes('ticket/aaaaaaaa-review'), 'reviewer branch ref survives');
+    void b;
+  } finally {
+    await cleanup();
+  }
+});
+
+test('removeTicketWorktrees is a no-op when disabled or no match', async () => {
+  const { repo, worktreesRoot, cleanup } = await makeRepo();
+  try {
+    await new WorktreeManager().resolveCwd({ baseWorkingDir: repo, worktreesRoot, ticketId: TICKET_A, role: 'assignee' });
+    // disabled manager touches nothing
+    const off = new WorktreeManager({ enabled: false });
+    assert.equal(await off.removeTicketWorktrees({ baseWorkingDir: repo, worktreesRoot, ticketId: TICKET_A }), 0);
+    // enabled, but ticket has no worktree → 0, and the real one stays put
+    const wm = new WorktreeManager();
+    assert.equal(await wm.removeTicketWorktrees({ baseWorkingDir: repo, worktreesRoot, ticketId: TICKET_B }), 0);
+    assert.ok((await wm.listWorktrees(repo)).some((w) => w.path.endsWith(worktreeSlug(TICKET_A, 'assignee'))), 'A still present');
+  } finally {
+    await cleanup();
+  }
+});
