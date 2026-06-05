@@ -850,8 +850,31 @@ async function runGitPull(
   if (!existsSync(dir)) {
     return { ok: false, detail: `directory does not exist: ${dir}` };
   }
+
+  // ticket 9f26f091 — a managed agent's base working_dir is intentionally left
+  // on a DETACHED HEAD by worktree isolation (so the base branch is free for
+  // ticket worktrees to check out). `git pull --ff-only` can't run on a
+  // detached HEAD (no upstream branch) and would fail with a confusing "not
+  // currently on a branch" error. Detect that and `git fetch` instead: the
+  // ticket worktrees branch off origin/<base>, so refreshing the remote refs
+  // is exactly the useful work here — fast-forwarding the (detached) base tree
+  // is not. Marketplace plugin repos (the other caller) are always on a branch,
+  // so this branch never changes their behavior.
+  const detached = await new Promise<boolean>((resolve) => {
+    try {
+      const probe = spawn('git', ['-C', dir, 'symbolic-ref', '-q', 'HEAD'], {
+        stdio: 'ignore',
+      });
+      probe.on('error', () => resolve(false));
+      probe.on('close', (code) => resolve(code !== 0));
+    } catch {
+      resolve(false);
+    }
+  });
+  const gitArgs = detached ? ['fetch', '--all', '--prune'] : ['pull', '--ff-only'];
+
   return new Promise((resolve) => {
-    const child = spawn('git', ['-C', dir, 'pull', '--ff-only'], {
+    const child = spawn('git', ['-C', dir, ...gitArgs], {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '';
@@ -885,7 +908,10 @@ async function runGitPull(
       clearTimeout(timer);
       const lastLine = (stderr.trim() || stdout.trim()).split('\n').filter(Boolean).pop() || '';
       if (code === 0) {
-        resolve({ ok: true, detail: lastLine.slice(0, 200) || 'up-to-date' });
+        const detail = detached
+          ? `base HEAD detached for worktree isolation — fetched origin refs${lastLine ? ` (${lastLine.slice(0, 160)})` : ''}`
+          : lastLine.slice(0, 200) || 'up-to-date';
+        resolve({ ok: true, detail });
       } else {
         resolve({
           ok: false,
