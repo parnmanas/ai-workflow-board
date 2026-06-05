@@ -96,6 +96,19 @@ test('agent cross-workspace move: credential carry + api-key migrate + cross-ref
   const preview = await mover.previewAgentMove(scene.agent.id, destWs.id, {});
   assert.equal(preview.committed, false, 'preview is not committed');
   assert.ok(preview.blockers.length > 0, 'source-ws assignment surfaces a blocker (default cross_ref_policy=block)');
+
+  // ── (ticket 9efa643b) structured cross-ref blocker + inline remedies ─────
+  step('cross-ref blocker is structured with policy-switch + unassign remedies');
+  const xref = preview.blockers.find((b) => b.code === 'cross_ref_block' || b.code === 'denorm_ref_block');
+  assert.ok(xref, 'a cross_ref_block / denorm_ref_block blocker is present');
+  assert.equal(xref.agent_id, scene.agent.id, 'blocker names the offending agent');
+  assert.ok(Array.isArray(xref.ticket_ids) && xref.ticket_ids.includes(scene.ticket.id), 'blocker lists the foreign ticket');
+  assert.ok(typeof xref.message === 'string' && xref.message.length > 0, 'string fallback message present');
+  const xrefActions = xref.remedies.map((r) => r.action);
+  assert.ok(xrefActions.includes('set_cross_ref_policy'), 'policy-switch remedy offered');
+  assert.ok(xrefActions.includes('unassign_from_tickets'), 'unassign remedy offered');
+  assert.equal(xref.remedies.find((r) => r.action === 'set_cross_ref_policy').kind, 'repreview',
+    'policy switch is a write-free repreview remedy');
   assert.equal((await agentRepo.findOne({ where: { id: scene.agent.id } })).workspace_id, sourceWs.id,
     'agent workspace unchanged after preview');
   assert.equal(await credRepo.findOne({ where: { workspace_id: destWs.id, name: scene.cred.name } }), null,
@@ -143,6 +156,54 @@ test('agent cross-workspace move: credential carry + api-key migrate + cross-ref
     'cross-ws role assignment cleared');
   assert.equal((await ticketRepo.findOne({ where: { id: scene.ticket.id } })).assignee_id, '',
     'denormalized assignee_id blanked on the foreign ticket');
+});
+
+test('agent move remedies: unassign_from_tickets + clear_credential clear blockers (ticket 9efa643b)', async (t) => {
+  const { app, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
+  t.after(() => app.close().catch(() => {}));
+  const { getDataSourceToken } = modules;
+  const { mover, ds } = await loadMover(app, getDataSourceToken);
+
+  const agentRepo = ds.getRepository('Agent');
+  const assignRepo = ds.getRepository('TicketRoleAssignment');
+  const ticketRepo = ds.getRepository('Ticket');
+
+  const sourceWs = await createWorkspace(app, getDataSourceToken, 'rem-src');
+  const destWs = await createWorkspace(app, getDataSourceToken, 'rem-dst');
+  const scene = await buildScene(app, getDataSourceToken, sourceWs, 'rem');
+
+  // ── unassign_from_tickets remedy detaches the agent from the foreign ticket ─
+  step('runMoveRemedy(unassign_from_tickets) clears the cross-ref blocker without policy=clear');
+  const before = await mover.previewAgentMove(scene.agent.id, destWs.id, {});
+  assert.ok(before.blockers.length > 0, 'cross-ref blocker present before remedy');
+
+  const res = await mover.runMoveRemedy('unassign_from_tickets', {
+    agent_id: scene.agent.id, ticket_ids: [scene.ticket.id],
+  });
+  assert.ok(res.ok && res.affected > 0, 'remedy reports rows affected');
+  assert.equal(await assignRepo.findOne({ where: { ticket_id: scene.ticket.id, agent_id: scene.agent.id } }), null,
+    'role assignment cleared');
+  assert.equal((await ticketRepo.findOne({ where: { id: scene.ticket.id } })).assignee_id, '',
+    'denormalized assignee_id blanked');
+  const after = await mover.previewAgentMove(scene.agent.id, destWs.id, {});
+  assert.equal(after.blockers.length, 0, 'cross-ref blocker gone after unassign remedy (default block policy)');
+
+  // ── clear_credential remedy resolves a dangling credential blocker ──────────
+  step('runMoveRemedy(clear_credential) resolves a dangling-credential blocker');
+  // point the agent at a credential id that does not exist → dangling blocker.
+  await agentRepo.update({ id: scene.agent.id }, { credential_id: 'does-not-exist-0000' });
+  const dangling = await mover.previewAgentMove(scene.agent.id, destWs.id, {});
+  const credBlocker = dangling.blockers.find((b) => b.code === 'dangling_credential');
+  assert.ok(credBlocker, 'dangling_credential blocker present');
+  assert.ok(credBlocker.remedies.some((r) => r.action === 'clear_credential' && r.kind === 'mutation'),
+    'clear_credential mutation remedy offered');
+
+  await mover.runMoveRemedy('clear_credential', { agent_id: scene.agent.id });
+  assert.equal((await agentRepo.findOne({ where: { id: scene.agent.id } })).credential_id, null,
+    'agent credential_id nulled by remedy');
+  const afterCred = await mover.previewAgentMove(scene.agent.id, destWs.id, {});
+  assert.ok(!afterCred.blockers.some((b) => b.code === 'dangling_credential'),
+    'dangling_credential blocker gone after clear_credential remedy');
 });
 
 test('agent move: manager-type agents are workspace-less → refused', async (t) => {

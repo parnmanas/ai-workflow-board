@@ -173,7 +173,7 @@ test('board cross-workspace move: re-stamp + carry/remap + atomicity', async (t)
   const otherCol = await createColumn(app, getDataSourceToken, otherBoard.id, {
     name: 'Todo', position: 0, workspaceId: sourceWs.id, kind: 'intake',
   });
-  await createTicket(app, getDataSourceToken, {
+  const otherTicket = await createTicket(app, getDataSourceToken, {
     columnId: otherCol.id, workspaceId: sourceWs.id, title: 'other-ticket', assigneeId: scene2.agent.id,
   });
 
@@ -181,6 +181,19 @@ test('board cross-workspace move: re-stamp + carry/remap + atomicity', async (t)
   // preview surfaces the blocker but never throws.
   const blockedPreview = await mover.previewBoardMove(scene2.board.id, destWs2.id, { carry_agents: true });
   assert.ok(blockedPreview.blockers.length > 0, 'blocker surfaced in preview');
+
+  // ── (ticket 9efa643b) structured blocker: code + refs + remedies ─────────
+  step('companion blocker is structured with inline remedies');
+  const compBlocker = blockedPreview.blockers.find((b) => b.code === 'companion_agent_outside_roles');
+  assert.ok(compBlocker, 'companion_agent_outside_roles blocker present');
+  assert.equal(compBlocker.agent_id, scene2.agent.id, 'blocker names the offending agent');
+  assert.ok(compBlocker.ticket_ids.includes(otherTicket.id), 'blocker lists the outside ticket');
+  assert.ok(typeof compBlocker.message === 'string' && compBlocker.message.length > 0, 'string fallback message present');
+  const remedyActions = compBlocker.remedies.map((r) => r.action);
+  assert.ok(remedyActions.includes('drop_companion_agent'), 'drop_companion_agent remedy offered');
+  assert.ok(remedyActions.includes('unassign_from_tickets'), 'unassign_from_tickets remedy offered');
+  assert.equal(compBlocker.remedies.find((r) => r.action === 'drop_companion_agent').kind, 'repreview',
+    'drop_companion_agent is a write-free repreview remedy');
 
   await assert.rejects(
     () => mover.commitBoardMove(scene2.board.id, destWs2.id, { carry_agents: true }),
@@ -194,6 +207,34 @@ test('board cross-workspace move: re-stamp + carry/remap + atomicity', async (t)
     'blocked commit left the agent in source ws');
   assert.equal(await tplRepo.findOne({ where: { workspace_id: destWs2.id, name: scene2.tpl.name } }), null,
     'blocked commit copied no template (rolled back)');
+
+  // ── (ticket 9efa643b) drop_companion_agent: exclude clears the blocker ────
+  step('exclude_agent_ids drops the agent from carry → blocker gone, no write');
+  const excludedPreview = await mover.previewBoardMove(scene2.board.id, destWs2.id, {
+    carry_agents: true, exclude_agent_ids: [scene2.agent.id],
+  });
+  assert.equal(excludedPreview.blockers.length, 0, 'excluding the agent clears the companion blocker');
+  assert.ok(excludedPreview.items.some((i) => i.entity === 'agent' && i.kind === 'warn'),
+    'excluded agent is reported as a warn (board moves without it)');
+  // preview is still write-free — agent untouched.
+  assert.equal((await ds.getRepository('Agent').findOne({ where: { id: scene2.agent.id } })).workspace_id, sourceWs.id,
+    'exclude preview wrote nothing');
+
+  // ── (ticket 9efa643b) unassign_from_tickets remedy executor ──────────────
+  step('runMoveRemedy(unassign_from_tickets) detaches the agent, clearing the blocker');
+  const assignRepo2 = ds.getRepository('TicketRoleAssignment');
+  const ticketRepo2 = ds.getRepository('Ticket');
+  const res = await mover.runMoveRemedy('unassign_from_tickets', {
+    agent_id: scene2.agent.id, ticket_ids: [otherTicket.id],
+  });
+  assert.ok(res.ok && res.affected > 0, 'remedy reports rows affected');
+  assert.equal(await assignRepo2.findOne({ where: { ticket_id: otherTicket.id, agent_id: scene2.agent.id } }), null,
+    'role assignment on the outside ticket removed');
+  assert.equal((await ticketRepo2.findOne({ where: { id: otherTicket.id } })).assignee_id, '',
+    'denormalized assignee_id blanked on the outside ticket');
+  // now carry is safe — no companion blocker on re-preview.
+  const afterRemedy = await mover.previewBoardMove(scene2.board.id, destWs2.id, { carry_agents: true });
+  assert.equal(afterRemedy.blockers.length, 0, 'blocker gone after the agent no longer holds outside roles');
 });
 
 test.after(() => exitAfterTests(0));
