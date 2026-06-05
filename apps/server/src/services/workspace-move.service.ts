@@ -78,14 +78,65 @@ export interface MovePreviewItem {
   detail: string;
 }
 
+/**
+ * A structured remedy candidate attached to a blocker (ticket 9efa643b). The
+ * client renders one inline control per remedy next to the blocker so the
+ * operator can resolve it without leaving the move preview.
+ *
+ * kind:
+ *   repreview — the remedy only flips a *move option* (a policy or the
+ *               exclude_agent_ids set). The client toggles that option locally
+ *               and re-runs the dry-run preview; NOTHING is written. The
+ *               `params` carry the option value to apply (e.g. { value:'clear' }
+ *               for a policy, { agent_id } for a carry exclusion).
+ *   mutation  — the remedy performs a real DB write via
+ *               `WorkspaceMoveService.runMoveRemedy(action, params)` (exposed at
+ *               POST …/move-to-workspace/remedy). The client confirms, calls the
+ *               endpoint, then re-previews so the blocker disappears if resolved.
+ */
+export interface MoveRemedy {
+  action: string;
+  label: string;
+  kind: 'repreview' | 'mutation';
+  params?: Record<string, any>;
+}
+
+/**
+ * A structured blocker (ticket 9efa643b). Supersedes the old `blockers: string[]`
+ * — `message` preserves the exact human-readable string for back-compat (string
+ * fallback), while `code` + entity refs + `remedies` let the client render an
+ * inline fix. preview and commit run the same traversal, so the structured
+ * blocker set is identical in both (preview=commit invariant).
+ */
+export interface MoveBlocker {
+  /** Stable discriminator: companion_agent_outside_roles | dangling_credential
+   *  | api_keys_foreign_refuse | cross_ref_block | denorm_ref_block. */
+  code: string;
+  /** Human-readable reason — identical to the legacy string blocker. */
+  message: string;
+  /** Offending agent (companion / cross-ref / credential blockers). */
+  agent_id?: string;
+  /** Offending tickets (outside-board roles, cross-ws refs). */
+  ticket_ids?: string[];
+  /** Denormalized fields implicated (assignee_id/reporter_id/reviewer_id). */
+  fields?: string[];
+  /** Dangling credential reference. */
+  credential_id?: string;
+  /** Foreign api keys (api_key_policy=refuse). */
+  api_key_ids?: string[];
+  /** Structured actions that can clear this blocker, rendered inline. */
+  remedies: MoveRemedy[];
+}
+
 export interface BoardMovePreview {
   board: { id: string; name: string };
   source_workspace: { id: string; name: string } | null;
   target_workspace: { id: string; name: string };
   counts: { columns: number; tickets: number; copied: number; remapped: number; restamped: number };
   items: MovePreviewItem[];
-  /** Non-empty → commit is refused. Each string is a human-readable reason. */
-  blockers: string[];
+  /** Non-empty → commit is refused. Structured so the client can render an
+   *  inline remedy per blocker; `message` preserves the legacy string. */
+  blockers: MoveBlocker[];
   carry_agents: boolean;
   /** false for dry-run preview, true once the transaction has committed. */
   committed: boolean;
@@ -94,6 +145,15 @@ export interface BoardMovePreview {
 export interface BoardMoveOptions {
   /** Move companion agents (those holding roles on the board's tickets) too. */
   carry_agents?: boolean;
+  /**
+   * Companion agents to EXCLUDE from the carry even when carry_agents=true —
+   * they stay in the source workspace and the board moves without them (ticket
+   * 9efa643b "drop_companion_agent" remedy). Excluding an agent that would
+   * otherwise block the move (it holds roles outside this board) is the
+   * write-free way to unblock: the board moves, the agent is relocated
+   * separately later. A move option, so preview and commit honour it identically.
+   */
+  exclude_agent_ids?: string[];
   actor_id?: string;
   actor_name?: string;
 }
@@ -133,8 +193,9 @@ export interface AgentMovePreview {
   target_workspace: { id: string; name: string };
   counts: { api_keys: number; copied: number; cleared: number; cross_refs: number };
   items: MovePreviewItem[];
-  /** Non-empty → commit is refused. Each string is a human-readable reason. */
-  blockers: string[];
+  /** Non-empty → commit is refused. Structured so the client can render an
+   *  inline remedy per blocker; `message` preserves the legacy string. */
+  blockers: MoveBlocker[];
   api_key_policy: AgentApiKeyPolicy;
   cross_ref_policy: AgentCrossRefPolicy;
   /** false for dry-run preview, true once the transaction has committed. */
@@ -143,11 +204,22 @@ export interface AgentMovePreview {
 
 /** Internal error type so blockers abort the commit transaction cleanly. */
 export class WorkspaceMoveBlockedError extends Error {
-  constructor(public readonly blockers: string[]) {
-    super(`Cross-workspace move blocked: ${blockers.join('; ')}`);
+  constructor(public readonly blockers: MoveBlocker[]) {
+    super(`Cross-workspace move blocked: ${blockers.map((b) => b.message).join('; ')}`);
     this.name = 'WorkspaceMoveBlockedError';
   }
+
+  /** Convenience for callers that only want the human-readable reasons. */
+  get messages(): string[] {
+    return this.blockers.map((b) => b.message);
+  }
 }
+
+/** Action verbs accepted by runMoveRemedy (ticket 9efa643b). */
+export type MoveRemedyAction =
+  | 'unassign_from_tickets'
+  | 'clear_credential'
+  | 'assign_credential';
 
 @Injectable()
 export class WorkspaceMoveService {
@@ -238,6 +310,101 @@ export class WorkspaceMoveService {
     return result;
   }
 
+  /**
+   * Execute a structured blocker remedy (ticket 9efa643b) — the "mutation"
+   * branch of a MoveRemedy. These are the only writes the inline-remedy flow
+   * performs; "repreview" remedies are pure option toggles handled entirely on
+   * the client (they just re-run the dry-run preview with a different option).
+   *
+   * Runs in one transaction so a partial remedy never lands. After a remedy the
+   * client re-previews the move; the blocker disappears iff the underlying
+   * condition is gone — i.e. the remedy and the move preview share the same
+   * source of truth, no special-cased "assume fixed" UI state.
+   *
+   * Actions:
+   *   unassign_from_tickets — detach `agent_id` from `ticket_ids`: delete every
+   *     TicketRoleAssignment for that (agent, ticket) pair AND blank any
+   *     denormalized assignee/reporter/reviewer id equal to the agent. Clears
+   *     the companion-agent-outside-roles, cross_ref_block and denorm_ref_block
+   *     blockers in one shot.
+   *   clear_credential — null the agent's credential_id (resolves a dangling
+   *     credential reference).
+   *   assign_credential — point the agent at an existing credential_id.
+   */
+  async runMoveRemedy(
+    action: MoveRemedyAction | string,
+    params: Record<string, any>,
+    actor?: { id?: string; name?: string },
+  ): Promise<{ ok: true; action: string; affected: number }> {
+    const affected = await this.dataSource.transaction(async (mgr) => {
+      switch (action) {
+        case 'unassign_from_tickets':
+          return this._remedyUnassignFromTickets(mgr, params);
+        case 'clear_credential':
+          return this._remedyClearCredential(mgr, params);
+        case 'assign_credential':
+          return this._remedyAssignCredential(mgr, params);
+        default:
+          throw new Error(`Unknown move remedy action: ${action}`);
+      }
+    });
+    return { ok: true, action, affected };
+  }
+
+  /** unassign_from_tickets — see runMoveRemedy. Returns rows touched. */
+  private async _remedyUnassignFromTickets(
+    mgr: EntityManager, params: Record<string, any>,
+  ): Promise<number> {
+    const agentId: string = params?.agent_id;
+    const ticketIds: string[] = Array.isArray(params?.ticket_ids) ? params.ticket_ids.filter(Boolean) : [];
+    if (!agentId) throw new Error('agent_id is required');
+    if (ticketIds.length === 0) return 0;
+
+    let affected = 0;
+    const assignRepo = mgr.getRepository(TicketRoleAssignment);
+    const del = await assignRepo.delete({ agent_id: agentId, ticket_id: In(ticketIds) });
+    affected += del.affected || 0;
+
+    // Blank any denormalized id equal to the agent on those tickets.
+    const ticketRepo = mgr.getRepository(Ticket);
+    const tickets = await ticketRepo.find({ where: { id: In(ticketIds) } });
+    for (const t of tickets) {
+      const patch: Record<string, string> = {};
+      for (const f of ['assignee_id', 'reporter_id', 'reviewer_id'] as const) {
+        if ((t as any)[f] === agentId) patch[f] = '';
+      }
+      if (Object.keys(patch).length) {
+        await ticketRepo.update({ id: t.id }, patch);
+        affected += Object.keys(patch).length;
+      }
+    }
+    return affected;
+  }
+
+  /** clear_credential — null the agent's dangling credential reference. */
+  private async _remedyClearCredential(
+    mgr: EntityManager, params: Record<string, any>,
+  ): Promise<number> {
+    const agentId: string = params?.agent_id;
+    if (!agentId) throw new Error('agent_id is required');
+    const res = await mgr.getRepository(Agent).update({ id: agentId }, { credential_id: null });
+    return res.affected || 0;
+  }
+
+  /** assign_credential — point the agent at an existing credential row. */
+  private async _remedyAssignCredential(
+    mgr: EntityManager, params: Record<string, any>,
+  ): Promise<number> {
+    const agentId: string = params?.agent_id;
+    const credentialId: string = params?.credential_id;
+    if (!agentId) throw new Error('agent_id is required');
+    if (!credentialId) throw new Error('credential_id is required');
+    const cred = await mgr.getRepository(Credential).findOne({ where: { id: credentialId } });
+    if (!cred) throw new Error('credential_id does not exist');
+    const res = await mgr.getRepository(Agent).update({ id: agentId }, { credential_id: credentialId });
+    return res.affected || 0;
+  }
+
   // ──────────────────────────────────────────────────────────────────────────
   // Core — single analyze/apply path
   // ──────────────────────────────────────────────────────────────────────────
@@ -250,8 +417,9 @@ export class WorkspaceMoveService {
     apply: boolean,
   ): Promise<BoardMovePreview> {
     const items: MovePreviewItem[] = [];
-    const blockers: string[] = [];
+    const blockers: MoveBlocker[] = [];
     const carryAgents = !!opts.carry_agents;
+    const excludeAgentIds = new Set(opts.exclude_agent_ids || []);
     let copied = 0, remapped = 0, restamped = 0;
 
     const board = await mgr.getRepository(Board).findOne({ where: { id: boardId } });
@@ -314,7 +482,7 @@ export class WorkspaceMoveService {
 
     // (G) companion agents ─────────────────────────────────────────────────
     await this.handleCompanionAgents(
-      mgr, sourceWsId, targetWorkspaceId, ticketIds, carryAgents, items, blockers, apply,
+      mgr, sourceWsId, targetWorkspaceId, ticketIds, carryAgents, excludeAgentIds, items, blockers, apply,
     );
 
     if (apply && blockers.length) {
@@ -674,7 +842,8 @@ export class WorkspaceMoveService {
    */
   private async handleCompanionAgents(
     mgr: RepoScope, sourceWsId: string, targetWsId: string, ticketIds: string[],
-    carryAgents: boolean, items: MovePreviewItem[], blockers: string[], apply: boolean,
+    carryAgents: boolean, excludeAgentIds: Set<string>,
+    items: MovePreviewItem[], blockers: MoveBlocker[], apply: boolean,
   ): Promise<void> {
     if (ticketIds.length === 0) return;
     const assignRepo = mgr.getRepository(TicketRoleAssignment);
@@ -699,9 +868,25 @@ export class WorkspaceMoveService {
         items.push({ kind: 'warn', entity: 'agent', id: agent.id, detail: `agent "${agent.name}" stays in source ws — will be cross-workspace from this board (use carry_agents to move it)` });
         continue;
       }
+      // Operator explicitly dropped this agent from the carry (drop_companion_agent
+      // remedy): the board moves without it, the agent stays put. Write-free unblock.
+      if (excludeAgentIds.has(agent.id)) {
+        items.push({ kind: 'warn', entity: 'agent', id: agent.id, detail: `agent "${agent.name}" excluded from carry — board moves without it; relocate the agent separately later` });
+        continue;
+      }
       if (outsideCount > 0) {
+        const outsideTicketIds = [...new Set(elsewhere.filter((a) => !movedSet.has(a.ticket_id)).map((a) => a.ticket_id))];
         const msg = `agent "${agent.name}" holds roles on ${outsideCount} ticket(s) outside this board — cannot carry without breaking them`;
-        blockers.push(msg);
+        blockers.push({
+          code: 'companion_agent_outside_roles',
+          message: msg,
+          agent_id: agent.id,
+          ticket_ids: outsideTicketIds,
+          remedies: [
+            { action: 'drop_companion_agent', kind: 'repreview', label: `Move board only — leave "${agent.name}" behind`, params: { agent_id: agent.id } },
+            { action: 'unassign_from_tickets', kind: 'mutation', label: `Unassign "${agent.name}" from ${outsideTicketIds.length} outside ticket(s)`, params: { agent_id: agent.id, ticket_ids: outsideTicketIds } },
+          ],
+        });
         items.push({ kind: 'block', entity: 'agent', id: agent.id, detail: msg });
         continue;
       }
@@ -727,7 +912,7 @@ export class WorkspaceMoveService {
     apply: boolean,
   ): Promise<AgentMovePreview> {
     const items: MovePreviewItem[] = [];
-    const blockers: string[] = [];
+    const blockers: MoveBlocker[] = [];
     const apiKeyPolicy: AgentApiKeyPolicy = opts.api_key_policy || 'migrate';
     const crossRefPolicy: AgentCrossRefPolicy = opts.cross_ref_policy || 'block';
 
@@ -797,14 +982,22 @@ export class WorkspaceMoveService {
    */
   private async carryAgentCredential(
     mgr: RepoScope, agent: Agent, targetWsId: string,
-    items: MovePreviewItem[], blockers: string[], apply: boolean,
+    items: MovePreviewItem[], blockers: MoveBlocker[], apply: boolean,
   ): Promise<{ copied: number }> {
     if (!agent.credential_id) return { copied: 0 };
     const credRepo = mgr.getRepository(Credential);
     const cred = await credRepo.findOne({ where: { id: agent.credential_id } });
     if (!cred) {
       const msg = `agent "${agent.name}" references credential ${agent.credential_id} which no longer exists — resolve before moving`;
-      blockers.push(msg);
+      blockers.push({
+        code: 'dangling_credential',
+        message: msg,
+        agent_id: agent.id,
+        credential_id: agent.credential_id,
+        remedies: [
+          { action: 'clear_credential', kind: 'mutation', label: 'Clear the dangling credential reference', params: { agent_id: agent.id } },
+        ],
+      });
       items.push({ kind: 'block', entity: 'credential', id: agent.credential_id, detail: msg });
       return { copied: 0 };
     }
@@ -836,7 +1029,7 @@ export class WorkspaceMoveService {
    */
   private async migrateAgentApiKeys(
     mgr: RepoScope, agent: Agent, targetWsId: string, policy: AgentApiKeyPolicy,
-    items: MovePreviewItem[], blockers: string[], apply: boolean,
+    items: MovePreviewItem[], blockers: MoveBlocker[], apply: boolean,
   ): Promise<{ affected: number }> {
     const keyRepo = mgr.getRepository(ApiKey);
     const keys = await keyRepo.find({ where: { agent_id: agent.id } });
@@ -845,7 +1038,16 @@ export class WorkspaceMoveService {
 
     if (policy === 'refuse') {
       const msg = `agent "${agent.name}" has ${stale.length} api key(s) in another workspace (policy=refuse)`;
-      blockers.push(msg);
+      blockers.push({
+        code: 'api_keys_foreign_refuse',
+        message: msg,
+        agent_id: agent.id,
+        api_key_ids: stale.map((k) => k.id),
+        remedies: [
+          { action: 'set_api_key_policy', kind: 'repreview', label: 'Migrate the keys (re-stamp to dest)', params: { value: 'migrate' } },
+          { action: 'set_api_key_policy', kind: 'repreview', label: 'Clear the keys (detach from agent)', params: { value: 'clear' } },
+        ],
+      });
       items.push({ kind: 'block', entity: 'api_key', id: stale.map((k) => k.id).join(','), detail: msg });
       return { affected: stale.length };
     }
@@ -888,7 +1090,7 @@ export class WorkspaceMoveService {
    */
   private async handleCrossWorkspaceAgentRefs(
     mgr: RepoScope, agent: Agent, targetWsId: string, policy: AgentCrossRefPolicy,
-    items: MovePreviewItem[], blockers: string[], apply: boolean,
+    items: MovePreviewItem[], blockers: MoveBlocker[], apply: boolean,
   ): Promise<{ crossRefs: number; cleared: number }> {
     const assignRepo = mgr.getRepository(TicketRoleAssignment);
     const ticketRepo = mgr.getRepository(Ticket);
@@ -916,6 +1118,12 @@ export class WorkspaceMoveService {
     }
 
     let crossRefs = 0, cleared = 0;
+    // Accumulate offending tickets/fields so the block-policy path can emit ONE
+    // grouped, remediable blocker each (role assignments / denorm refs) the UI
+    // can resolve in a single click, rather than one blocker per row.
+    const blockAssignTicketIds = new Set<string>();
+    const blockDenormTicketIds = new Set<string>();
+    const blockDenormFields = new Set<string>();
 
     // Role assignments on non-dest tickets.
     for (const a of assignments) {
@@ -923,7 +1131,7 @@ export class WorkspaceMoveService {
       crossRefs++;
       if (policy === 'block') {
         const msg = `agent "${agent.name}" holds a role on ticket ${a.ticket_id} (ws ${ticketWs.get(a.ticket_id) || '?'}) outside dest`;
-        blockers.push(msg);
+        blockAssignTicketIds.add(a.ticket_id);
         items.push({ kind: 'block', entity: 'role_assignment', id: a.id, detail: msg });
       } else {
         items.push({ kind: 'warn', entity: 'role_assignment', id: a.id, detail: `role assignment on foreign ticket ${a.ticket_id} cleared (policy=clear)` });
@@ -940,7 +1148,8 @@ export class WorkspaceMoveService {
       crossRefs += fields.length;
       if (policy === 'block') {
         const msg = `agent "${agent.name}" is ${fields.join('/')} on ticket ${t.id} (ws ${t.workspace_id}) outside dest`;
-        blockers.push(msg);
+        blockDenormTicketIds.add(t.id);
+        for (const f of fields) blockDenormFields.add(f);
         items.push({ kind: 'block', entity: 'ticket', id: t.id, detail: msg });
       } else {
         items.push({ kind: 'warn', entity: 'ticket', id: t.id, detail: `${fields.join('/')} on foreign ticket ${t.id} cleared (policy=clear)` });
@@ -951,6 +1160,37 @@ export class WorkspaceMoveService {
           await ticketRepo.update({ id: t.id }, patch);
         }
       }
+    }
+
+    // Emit grouped blockers (block policy only). Both offer the write-free
+    // policy switch (set_cross_ref_policy=clear → re-preview) plus a direct
+    // unassign mutation that detaches the agent from the offending tickets.
+    if (blockAssignTicketIds.size > 0) {
+      const ids = [...blockAssignTicketIds];
+      blockers.push({
+        code: 'cross_ref_block',
+        message: `agent "${agent.name}" holds a role on ${ids.length} ticket(s) outside dest`,
+        agent_id: agent.id,
+        ticket_ids: ids,
+        remedies: [
+          { action: 'set_cross_ref_policy', kind: 'repreview', label: 'Clear the foreign refs on move (policy=clear)', params: { value: 'clear' } },
+          { action: 'unassign_from_tickets', kind: 'mutation', label: `Unassign "${agent.name}" from ${ids.length} foreign ticket(s)`, params: { agent_id: agent.id, ticket_ids: ids } },
+        ],
+      });
+    }
+    if (blockDenormTicketIds.size > 0) {
+      const ids = [...blockDenormTicketIds];
+      blockers.push({
+        code: 'denorm_ref_block',
+        message: `agent "${agent.name}" is ${[...blockDenormFields].join('/')} on ${ids.length} ticket(s) outside dest`,
+        agent_id: agent.id,
+        ticket_ids: ids,
+        fields: [...blockDenormFields],
+        remedies: [
+          { action: 'set_cross_ref_policy', kind: 'repreview', label: 'Clear the foreign refs on move (policy=clear)', params: { value: 'clear' } },
+          { action: 'unassign_from_tickets', kind: 'mutation', label: `Detach "${agent.name}" from ${ids.length} foreign ticket(s)`, params: { agent_id: agent.id, ticket_ids: ids } },
+        ],
+      });
     }
 
     return { crossRefs, cleared };
