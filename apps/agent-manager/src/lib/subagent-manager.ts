@@ -56,6 +56,61 @@ const TICKET_COMMENT_TOOL_SUFFIXES = [
   'handoff_to_agent',
 ];
 
+/** Minimal identity shape the dedup scan reads off both live SubagentRecords
+ *  and in-flight ReservationRecords. */
+interface SpawnIdentityRecord {
+  trigger_id?: string | null;
+  chat_request_id?: string | null;
+  ticket_id?: string | null;
+  role?: string | null;
+}
+
+/**
+ * Decide whether a spawn `spec` duplicates an existing record / reservation.
+ * Pure so it can be unit-tested without forking a CLI child. Three rules,
+ * first match wins:
+ *   1. Exact trigger idempotency — same non-empty triggerId (redelivered
+ *      agent_trigger / SSE replay).
+ *   2. Exact chat idempotency — same non-empty chatRequestId.
+ *   3. (ticket, role) fallback — a `trigger` spawn whose triggerId is EMPTY
+ *      (e.g. a field_changed-empty agent_trigger) collapses onto any existing
+ *      record for the same (ticketId, role). Mirrors the sessionKey fallback
+ *      in the persistent ticket-session path so the one-shot fallback can't
+ *      twin-spawn for the same (ticket, role) either. Restricted to `trigger`
+ *      kind so chat spawns (no role) are never merged on an empty key.
+ * Returns the drop reason or `false` when the spawn is unique.
+ */
+export function findDuplicateSpawn(
+  records: Iterable<SpawnIdentityRecord>,
+  spec: {
+    kind: 'trigger' | 'chat';
+    triggerId?: string;
+    chatRequestId?: string;
+    ticketId?: string;
+    role?: string;
+  },
+): false | 'duplicate_trigger' | 'duplicate_chat' {
+  const specRole = spec.role || '';
+  for (const rec of records) {
+    if (spec.triggerId && rec.trigger_id === spec.triggerId) {
+      return 'duplicate_trigger';
+    }
+    if (spec.chatRequestId && rec.chat_request_id === spec.chatRequestId) {
+      return 'duplicate_chat';
+    }
+    if (
+      spec.kind === 'trigger' &&
+      !spec.triggerId &&
+      spec.ticketId &&
+      rec.ticket_id === spec.ticketId &&
+      (rec.role || '') === specRole
+    ) {
+      return 'duplicate_trigger';
+    }
+  }
+  return false;
+}
+
 export interface SubagentDelegationConfig {
   enabled?: boolean;
   maxConcurrent?: number;
@@ -70,6 +125,15 @@ export interface SubagentAwareConfig extends AwbConfig {
 interface ReservationRecord {
   kind: 'reservation';
   started_at: number;
+  // Identity carried on the reservation so the dedup scan can catch a second
+  // near-simultaneous spawn DURING the spawn window — before the real
+  // SubagentRecord lands in `#map`. Without these, two concurrent spawns for
+  // the same trigger / (ticket,role) both pass the dedup scan (which used to
+  // skip reservations) and twin-spawn.
+  trigger_id?: string | null;
+  chat_request_id?: string | null;
+  ticket_id?: string | null;
+  role?: string | null;
 }
 
 interface SubagentRecord {
@@ -259,27 +323,28 @@ export class SubagentManager implements SubagentManagerContract {
   }
 
   async spawn(spec: SubagentSpawnArgs): Promise<SubagentSpawnResult> {
-    if (spec.triggerId) {
-      for (const rec of this.#map.values()) {
-        if (rec.kind !== 'reservation' && rec.trigger_id === spec.triggerId) {
-          return { spawned: false, reason: 'duplicate_trigger' };
-        }
-      }
-    }
-
-    if (spec.chatRequestId) {
-      for (const rec of this.#map.values()) {
-        if (rec.kind !== 'reservation' && rec.chat_request_id === spec.chatRequestId) {
-          return { spawned: false, reason: 'duplicate_chat' };
-        }
-      }
+    // Single pass over both live records AND in-flight reservations (which now
+    // carry identity) so concurrent dups collapse to the first spawn. Records
+    // clear on child exit, so a later trigger for the same key after the first
+    // child finished spawns fresh — there is no persistent remembered set to
+    // leak (unlike the base-session dedup ring).
+    const dup = findDuplicateSpawn(this.#map.values(), spec);
+    if (dup) {
+      return { spawned: false, reason: dup };
     }
 
     if (!this.canSpawn()) {
       return { spawned: false, reason: 'cap_reached' };
     }
     const reservationId = -(++this.#reservationCounter);
-    this.#map.set(reservationId, { kind: 'reservation', started_at: Date.now() });
+    this.#map.set(reservationId, {
+      kind: 'reservation',
+      started_at: Date.now(),
+      trigger_id: spec.triggerId || null,
+      chat_request_id: spec.chatRequestId || null,
+      ticket_id: spec.ticketId || null,
+      role: spec.role || null,
+    });
 
     // ST-6 / ST-7: per-call managed-agent context. When provided we
     // (a) reuse the pre-written mcp-config.json instead of a temp one,

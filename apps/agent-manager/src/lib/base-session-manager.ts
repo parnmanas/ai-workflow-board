@@ -128,6 +128,19 @@ export interface SessionRecord {
   tap: SubagentTapHandle | null;
   _currentTurn?: TurnState | null;
   onResult?: (raw: any) => void;
+  /** Set when the running subagent emitted the session-split sentinel in its
+   *  output (TicketSessionManager only). The next dispatchTrigger for this
+   *  (ticket, role) force-respawns a fresh session instead of reusing this
+   *  one. The default policy stays "same (ticket,role) → same session"; this
+   *  is the explicit agent-driven escape hatch. */
+  splitRequested?: boolean;
+  /** Human-readable reason captured from the split sentinel line (capped). */
+  splitReason?: string;
+  /** Effective MCP api key the child authenticates with — the managed
+   *  agent's key when running for one, else the manager's. Used to attribute
+   *  manager-posted audit comments (silent-exit, session-split) to the right
+   *  identity instead of always the manager. */
+  _effectiveApiKey?: string;
 }
 
 /** Reservation placed on `_inflight` from the moment a dispatcher commits to
@@ -239,6 +252,25 @@ export class BaseSessionManager {
   protected _getLiveSession(sessionKey: string): SessionRecord | undefined {
     const sess = this._sessions.get(sessionKey);
     if (!sess) return undefined;
+    // A session flagged unhealthy is mid-teardown (SIGTERM delivered, SIGKILL
+    // scheduled) — its child may still be pid-alive during the grace window,
+    // but dispatching a follow-up turn into a dying stdin would stall the AWB
+    // trigger loop. Treat it as not-live and purge so the caller fresh-spawns.
+    // `#killUnhealthy` normally deletes the record itself; this is the
+    // defensive belt for any path that flags-then-defers the delete, and it
+    // satisfies the "stuck session is not reused" acceptance criterion.
+    if (sess.unhealthyKilled) {
+      log(
+        `${this.#logTag} unhealthy ${this.#keyField}=${sessionKey} pid=${sess.pid} — not reusing a session under teardown; purging in-memory record`,
+      );
+      if (sess.idleTimer) {
+        clearTimeout(sess.idleTimer);
+        sess.idleTimer = null;
+      }
+      this.#endTurn(sess);
+      this._sessions.delete(sessionKey);
+      return undefined;
+    }
     if (this._isPidAlive(sess.pid)) return sess;
     log(
       `${this.#logTag} stale ${this.#keyField}=${sessionKey} pid=${sess.pid} — child reaped without exit-handler cleanup; purging in-memory record`,

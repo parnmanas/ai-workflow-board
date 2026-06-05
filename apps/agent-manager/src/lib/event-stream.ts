@@ -53,6 +53,62 @@ export interface EventStreamOptions {
   onConnect?: (() => void) | null;
 }
 
+/** Incremental SSE field-parser state. Carried across `feedSse` calls so a
+ *  field split over two network chunks parses correctly, and so the `id` /
+ *  `event` fields persist with spec semantics. Exported with `feedSse` so the
+ *  pure parsing — including Last-Event-ID tracking — is unit-testable without
+ *  a live socket. */
+export interface SseParseState {
+  buffer: string;
+  eventType: string;
+  /** Current `id` field — persists across events until a new `id:` line
+   *  changes it (empty `id:` resets it), per the SSE spec. */
+  currentId: string;
+  /** Id of the last event actually dispatched (had a non-empty `data:`).
+   *  This is what a reconnect replays via `Last-Event-ID`. */
+  lastEventId: string;
+}
+
+export function newSseParseState(lastEventId = ''): SseParseState {
+  return { buffer: '', eventType: '', currentId: lastEventId, lastEventId };
+}
+
+/**
+ * Feed one decoded chunk of an SSE stream into `state` and return the
+ * complete events that became dispatchable from it. Pure aside from mutating
+ * `state` (the carry-over buffer + field registers). Mirrors the WHATWG SSE
+ * line algorithm for the subset AWB uses: `event:`, `id:`, `data:`, and the
+ * blank-line terminator. `state.lastEventId` is advanced to the dispatched
+ * event's id so the caller can replay it on reconnect.
+ */
+export function feedSse(
+  state: SseParseState,
+  chunk: string,
+): Array<{ eventType: string; data: string }> {
+  state.buffer += chunk;
+  const lines = state.buffer.split('\n');
+  state.buffer = lines.pop() ?? '';
+  const out: Array<{ eventType: string; data: string }> = [];
+  for (const line of lines) {
+    if (line.startsWith('event: ')) {
+      state.eventType = line.slice(7).trim();
+    } else if (line.startsWith('id:')) {
+      // `id:` or `id: <value>` — one optional leading space per spec.
+      state.currentId = line.slice(3).replace(/^ /, '');
+    } else if (line.startsWith('data: ')) {
+      const data = line.slice(6).trim();
+      if (data) {
+        state.lastEventId = state.currentId;
+        out.push({ eventType: state.eventType, data });
+      }
+      state.eventType = '';
+    } else if (line === '') {
+      state.eventType = '';
+    }
+  }
+  return out;
+}
+
 export class EventStream {
   #url: string;
   #retryDelay = RECONNECT_INITIAL_MS;
@@ -62,6 +118,16 @@ export class EventStream {
   #dispatcher: EventDispatcher;
   #onConnect: (() => void) | null;
   #pluginVersion: string;
+  /** Id of the last SSE event we dispatched. Replayed to the server via the
+   *  standard `Last-Event-ID` header on every (re)connect so a server that
+   *  supports resume picks up exactly after it — avoiding the re-delivery of
+   *  events the manager already processed when a flaky network bounces the
+   *  stream. The current AWB server (NestJS `@Sse`, a live rxjs Subject) does
+   *  not emit `id:` lines or honor the header yet, so this is forward-
+   *  compatible plumbing today; it stays a no-op until the server stamps ids,
+   *  and the dispatch-side trigger/inflight dedup remains the live guard
+   *  against duplicate processing in the meantime. */
+  #lastEventId = '';
 
   constructor(opts: EventStreamOptions) {
     const { config, deps = {}, pluginVersion = 'unknown', onConnect = null } = opts;
@@ -137,12 +203,16 @@ export class EventStream {
 
     try {
       this.#abortController = new AbortController();
+      const headers: Record<string, string> = {
+        Accept: 'text/event-stream',
+        'X-Plugin-Ip': detectLocalIp(),
+        'X-Plugin-Version': this.#pluginVersion,
+      };
+      // Resume hint — only sent once we've actually seen an id, so a cold
+      // start doesn't send an empty header.
+      if (this.#lastEventId) headers['Last-Event-ID'] = this.#lastEventId;
       const resp = await fetch(this.#url, {
-        headers: {
-          Accept: 'text/event-stream',
-          'X-Plugin-Ip': detectLocalIp(),
-          'X-Plugin-Version': this.#pluginVersion,
-        },
+        headers,
         signal: this.#abortController.signal,
       });
 
@@ -178,35 +248,27 @@ export class EventStream {
   async #readStream(body: ReadableStream<Uint8Array>): Promise<void> {
     const reader = body.getReader();
     const decoder = new TextDecoder();
-    let buffer = '';
-    let eventType = '';
+    // Seed the parser with the id we carried in so a mid-stream reset is the
+    // only thing that clears it; `state.lastEventId` keeps advancing as events
+    // dispatch and we mirror it back onto `#lastEventId` for the next connect.
+    const state = newSseParseState(this.#lastEventId);
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
-
-      for (const line of lines) {
-        if (line.startsWith('event: ')) {
-          eventType = line.slice(7).trim();
-        } else if (line.startsWith('data: ')) {
-          const data = line.slice(6).trim();
-          if (data) {
-            const result = this.#dispatcher.dispatch(eventType, data);
-            if (result instanceof Promise) {
-              result.catch((err) =>
-                log(`dispatch(${eventType}) rejected: ${err?.message ?? err}`),
-              );
-            }
-          }
-          eventType = '';
-        } else if (line === '') {
-          eventType = '';
+      const events = feedSse(state, decoder.decode(value, { stream: true }));
+      for (const { eventType, data } of events) {
+        const result = this.#dispatcher.dispatch(eventType, data);
+        if (result instanceof Promise) {
+          result.catch((err) =>
+            log(`dispatch(${eventType}) rejected: ${err?.message ?? err}`),
+          );
         }
       }
+      // Mirror the parser's running id back so the next (re)connect replays
+      // after the last event we dispatched.
+      this.#lastEventId = state.lastEventId;
     }
   }
 

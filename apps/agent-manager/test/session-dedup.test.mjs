@@ -236,6 +236,186 @@ test('ticket-session: _isPidAlive returns true for self pid, false for sentinel-
   assert.equal(mgr._isPidAlive(-1), false, 'negative pid treated as not-alive');
 });
 
+// ─── Scope ①: unconditional in-flight guard (ticket a5ab95ea) ────────────
+// Acceptance (b): "field_changed 빈 이벤트" — a trigger with an empty
+// field_changed (→ triggerId='') AND an empty actor_name (→ agentId='') used
+// to skip the in-flight guard entirely (it was gated on spec.agentId) and
+// twin-spawn. The guard is now keyed on the sessionKey reservation regardless
+// of agentId.
+
+test('ticket-session: empty agentId + empty triggerId burst still produces ONE spawn', async () => {
+  const mgr = new FakeTicketMgr(makeConfig(), 40);
+  const base = {
+    ticketId: 'ticket-noagent',
+    role: 'assignee',
+    agentId: '', // empty — the leak case
+    triggerId: '', // empty field_changed → no per-trigger dedup
+    rolePrompt: '',
+    ticketPrompt: '',
+    columnPrompt: null,
+    ticket: { title: 'NoAgent' },
+    forceRespawn: false,
+    maxConcurrentTicketsPerAgent: 5,
+  };
+  const [r1, r2] = await Promise.all([
+    mgr.dispatchTrigger({ ...base }),
+    mgr.dispatchTrigger({ ...base }),
+  ]);
+  assert.equal(mgr.spawnCount, 1, 'exactly one spawn despite empty agentId+triggerId');
+  // Whichever won the race, exactly one is a first-turn spawn and the other
+  // collapses to the in-flight guard.
+  const dispatched = [r1, r2].filter((r) => r.dispatched && r.firstTurn);
+  const dropped = [r1, r2].filter((r) => !r.dispatched && r.reason === 'inflight_spawn');
+  assert.equal(dispatched.length, 1, 'one first-turn spawn');
+  assert.equal(dropped.length, 1, 'one inflight_spawn drop');
+});
+
+// ─── Scope ②: error / stuck (unhealthy) session is never reused ──────────
+// Acceptance (c): an unhealthy-killed session must not be reused — the next
+// trigger fresh-spawns. #killUnhealthy normally deletes the record; this
+// asserts the belt-and-suspenders guard in _getLiveSession that refuses to
+// reuse a record still flagged unhealthyKilled even while its pid lingers in
+// the SIGTERM grace window.
+
+test('ticket-session: unhealthyKilled session is not reused — _getLiveSession purges it', () => {
+  const mgr = new FakeTicketMgr(makeConfig(), 5);
+  const sessionKey = 'ticket-stuck:assignee';
+  const ALIVE_PID = 90555;
+  mgr.__alivePids.add(ALIVE_PID); // pid is "alive" at the OS level…
+  const stuck = makeFakeSession(sessionKey, 'sessionKey', ALIVE_PID);
+  stuck.ticketId = 'ticket-stuck';
+  stuck.role = 'assignee';
+  stuck.agentId = 'agent-1';
+  stuck.unhealthyKilled = true; // …but flagged unhealthy / mid-teardown
+  mgr._sessions.set(sessionKey, stuck);
+
+  const live = mgr._getLiveSession(sessionKey);
+  assert.equal(live, undefined, 'unhealthy session is treated as not-live');
+  assert.equal(mgr._sessions.has(sessionKey), false, 'unhealthy record purged from map');
+});
+
+test('ticket-session: next trigger after an unhealthy session fresh-spawns (no reuse)', async () => {
+  const mgr = new FakeTicketMgr(makeConfig(), 5);
+  const sessionKey = 'ticket-stuck2:assignee';
+  const ALIVE_PID = 90777;
+  mgr.__alivePids.add(ALIVE_PID);
+  const stuck = makeFakeSession(sessionKey, 'sessionKey', ALIVE_PID);
+  stuck.ticketId = 'ticket-stuck2';
+  stuck.role = 'assignee';
+  stuck.agentId = 'agent-1';
+  stuck.unhealthyKilled = true;
+  mgr._sessions.set(sessionKey, stuck);
+
+  const r = await mgr.dispatchTrigger({
+    ticketId: 'ticket-stuck2',
+    role: 'assignee',
+    triggerId: 'trig-after-unhealthy',
+    agentId: 'agent-1',
+    rolePrompt: '',
+    ticketPrompt: '',
+    columnPrompt: null,
+    ticket: { title: 'Stuck2' },
+    forceRespawn: false,
+    maxConcurrentTicketsPerAgent: 5,
+  });
+  assert.equal(r.dispatched, true);
+  assert.equal(r.firstTurn, true, 'fresh spawn, not a reused follow-up');
+  assert.equal(mgr.spawnCount, 1, 'one fresh spawn');
+  assert.equal(mgr.followUps.length, 0, 'no follow-up written into the dead session');
+  assert.notEqual(r.pid, ALIVE_PID, 'new pid, not the stuck one');
+});
+
+// ─── Scope ③: agent-driven session split (escape hatch) ──────────────────
+// Acceptance (d): an explicit split signal from the running subagent makes
+// the NEXT trigger branch into a fresh session; otherwise the default reuse
+// holds.
+
+function assistantTextLine(text) {
+  // Mirror the Claude stream-json `assistant` envelope the manager parses.
+  return {
+    stage: null,
+    isResult: false,
+    raw: { type: 'assistant', message: { content: [{ type: 'text', text }] } },
+  };
+}
+
+test('ticket-session: split sentinel in assistant text arms the split flag', async () => {
+  const mgr = new FakeTicketMgr(makeConfig(), 5);
+  const base = {
+    ticketId: 'ticket-split',
+    role: 'assignee',
+    agentId: 'agent-1',
+    rolePrompt: '',
+    ticketPrompt: '',
+    columnPrompt: null,
+    ticket: { title: 'Split' },
+    forceRespawn: false,
+    maxConcurrentTicketsPerAgent: 5,
+  };
+  await mgr.dispatchTrigger({ ...base, triggerId: 's1' });
+  const sess = mgr._sessions.get('ticket-split:assignee');
+  assert.ok(sess, 'session exists');
+  assert.notEqual(sess.splitRequested, true, 'not split yet');
+
+  mgr._onStdoutParsed(
+    sess,
+    assistantTextLine('Done with this phase. [[AWB:SESSION_SPLIT]] starting unrelated refactor'),
+    '',
+  );
+  assert.equal(sess.splitRequested, true, 'split armed');
+  assert.equal(sess.splitReason, 'starting unrelated refactor', 'reason captured');
+});
+
+test('ticket-session: armed split makes the next trigger force-respawn a fresh session', async () => {
+  const mgr = new FakeTicketMgr(makeConfig(), 5);
+  const base = {
+    ticketId: 'ticket-split2',
+    role: 'assignee',
+    agentId: 'agent-1',
+    rolePrompt: '',
+    ticketPrompt: '',
+    columnPrompt: null,
+    ticket: { title: 'Split2' },
+    forceRespawn: false,
+    maxConcurrentTicketsPerAgent: 5,
+  };
+  const r1 = await mgr.dispatchTrigger({ ...base, triggerId: 's1' });
+  const sess = mgr._sessions.get('ticket-split2:assignee');
+  mgr._onStdoutParsed(sess, assistantTextLine('[[AWB:SESSION_SPLIT]] reason here'), '');
+  assert.equal(sess.splitRequested, true);
+
+  const r2 = await mgr.dispatchTrigger({ ...base, triggerId: 's2' });
+  assert.equal(mgr.spawnCount, 2, 'a second (fresh) session was spawned');
+  assert.equal(r2.firstTurn, true, 'next trigger is a first-turn fresh spawn');
+  assert.notEqual(r2.pid, r1.pid, 'new pid — split, not reuse');
+  assert.equal(mgr.followUps.length, 0, 'no follow-up turn into the old session');
+});
+
+test('ticket-session: WITHOUT a split sentinel the next trigger reuses the session (default policy)', async () => {
+  const mgr = new FakeTicketMgr(makeConfig(), 5);
+  const base = {
+    ticketId: 'ticket-nosplit',
+    role: 'assignee',
+    agentId: 'agent-1',
+    rolePrompt: '',
+    ticketPrompt: '',
+    columnPrompt: null,
+    ticket: { title: 'NoSplit' },
+    forceRespawn: false,
+    maxConcurrentTicketsPerAgent: 5,
+  };
+  const r1 = await mgr.dispatchTrigger({ ...base, triggerId: 'n1' });
+  const sess = mgr._sessions.get('ticket-nosplit:assignee');
+  // A quoted mention of the token must NOT false-arm a split when it isn't the
+  // real sentinel — but our token is literal, so feed unrelated text instead.
+  mgr._onStdoutParsed(sess, assistantTextLine('Continuing work, no split needed.'), '');
+  assert.notEqual(sess.splitRequested, true, 'no split armed');
+  const r2 = await mgr.dispatchTrigger({ ...base, triggerId: 'n2' });
+  assert.equal(mgr.spawnCount, 1, 'reused — no second spawn');
+  assert.equal(r2.pid, r1.pid, 'same pid (reuse)');
+  assert.equal(mgr.followUps.length, 1, 'one follow-up turn');
+});
+
 // ─── Chat-session dedup ─────────────────────────────────────────────────
 
 test('chat-session: burst of two messages on same (room, agent) produces ONE spawn', async () => {

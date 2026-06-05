@@ -56,6 +56,21 @@ const TICKET_COMMENT_TOOL_SUFFIXES = [
   'handoff_to_agent',
 ];
 
+/** Sentinel a running subagent emits in its own output to request that the
+ *  NEXT trigger for this (ticket, role) start in a FRESH session instead of
+ *  resuming the current one. This is the explicit opt-in escape hatch for the
+ *  default "same (ticket,role) → same session" reuse policy — the agent uses
+ *  it when it judges the next unit of work should not inherit this session's
+ *  accumulated context. Everything after the token on the same line (capped)
+ *  is recorded as the human-readable split reason. We match it ONLY against
+ *  the model's own text output (assistant text blocks, or raw stdout for
+ *  non-JSON adapters) — never tool-result echoes — so a quoted mention of the
+ *  token can't false-arm a split. Prompt templates document the token. */
+const SESSION_SPLIT_SENTINEL_RE = /\[\[AWB:SESSION_SPLIT\]\][ \t]*([^\r\n]*)/;
+/** Cap on the recorded split reason so a runaway line can't bloat the log or
+ *  the audit comment. */
+const SESSION_SPLIT_REASON_MAX_CHARS = 280;
+
 export class TicketSessionManager
   extends BaseSessionManager
   implements TicketSessionManagerContract
@@ -151,10 +166,23 @@ export class TicketSessionManager
     // broken stdin and stall the AWB trigger loop). Cap accounting below
     // still walks raw `_sessions.values()` so stale entries don't inflate
     // the count before the next dispatch purges them through this path.
-    if (spec.agentId && !this._getLiveSession(sessionKey)) {
+    if (!this._getLiveSession(sessionKey)) {
       // Same (ticket, role) already spawning — drop as duplicate so the
       // first spawn wins. The next trigger for the same key will arrive
       // after _sessions.set and become a follow-up turn naturally.
+      //
+      // This guard is UNCONDITIONAL on agentId: the `_inflight` map is keyed
+      // by sessionKey (`${ticketId}:${role}`), so it is the (ticket,role)
+      // fallback the spec asks for when triggerId is empty. A trigger that
+      // arrives with an empty field_changed (triggerId='') AND an empty
+      // actor_name (agentId='') used to skip this whole block and race past
+      // the live-session check, twin-spawning a second child that bypassed
+      // the reuse path. Keying the drop on the sessionKey reservation closes
+      // that window regardless of whether the trigger carried an agentId.
+      // (We deliberately do NOT add sessionKey to the persistent dedup *set*:
+      // that set is only forgotten on child exit / drop, never after a
+      // successful spawn, so a sessionKey entry there would wrongly reject
+      // every later follow-up trigger for a live session as a "duplicate".)
       if (this._inflight.has(sessionKey)) {
         log(
           `[ticket-session] dispatch dropped (spawn already in-flight for same key): ticket=${spec.ticketId.slice(0, 8)} role=${role}`,
@@ -162,24 +190,28 @@ export class TicketSessionManager
         if (dedupKey) this._forgetDedup(dedupKey);
         return { dispatched: false, reason: 'inflight_spawn' };
       }
-      const otherTickets = new Set<string>();
-      for (const sess of this._sessions.values()) {
-        if (sess.agentId === spec.agentId && sess.ticketId && sess.ticketId !== spec.ticketId) {
-          otherTickets.add(sess.ticketId);
+      // Per-agent cap accounting only applies when we know which agent owns
+      // the trigger — an empty agentId can't meaningfully be capped per-agent.
+      if (spec.agentId) {
+        const otherTickets = new Set<string>();
+        for (const sess of this._sessions.values()) {
+          if (sess.agentId === spec.agentId && sess.ticketId && sess.ticketId !== spec.ticketId) {
+            otherTickets.add(sess.ticketId);
+          }
         }
-      }
-      for (const [k, info] of this._inflight) {
-        if (k === sessionKey) continue;
-        if (info.agentId === spec.agentId && info.ticketId && info.ticketId !== spec.ticketId) {
-          otherTickets.add(info.ticketId);
+        for (const [k, info] of this._inflight) {
+          if (k === sessionKey) continue;
+          if (info.agentId === spec.agentId && info.ticketId && info.ticketId !== spec.ticketId) {
+            otherTickets.add(info.ticketId);
+          }
         }
-      }
-      if (otherTickets.size >= maxConcurrent) {
-        log(
-          `[ticket-session] dispatch dropped (per-agent cap reached): agent=${spec.agentId.slice(0, 8)} ticket=${spec.ticketId.slice(0, 8)} max=${maxConcurrent} active=${otherTickets.size}`,
-        );
-        if (dedupKey) this._forgetDedup(dedupKey);
-        return { dispatched: false, reason: 'agent_cap_busy' };
+        if (otherTickets.size >= maxConcurrent) {
+          log(
+            `[ticket-session] dispatch dropped (per-agent cap reached): agent=${spec.agentId.slice(0, 8)} ticket=${spec.ticketId.slice(0, 8)} max=${maxConcurrent} active=${otherTickets.size}`,
+          );
+          if (dedupKey) this._forgetDedup(dedupKey);
+          return { dispatched: false, reason: 'agent_cap_busy' };
+        }
       }
     }
 
@@ -188,11 +220,21 @@ export class TicketSessionManager
     // time. Reusing a prior reviewer session would keep the old trigger_source
     // and incorrectly block create_remote_improvement_ticket.
     const needsFreshTriggerSession = spec.triggerSource === 'ticket_done_review';
-    if (spec.forceRespawn === true || needsFreshTriggerSession) {
+    // Scope ③ escape hatch: the running subagent asked (via the session-split
+    // sentinel) for its next trigger to land in a fresh session. Honor it here
+    // exactly like a server-side forceRespawn — kill the prior child so the
+    // live-session check below misses and we spawn clean. The default remains
+    // reuse; this branch only fires when the agent explicitly opted in.
+    const prevForSplit = this._getSession(sessionKey);
+    const agentRequestedSplit = prevForSplit?.splitRequested === true;
+    if (spec.forceRespawn === true || needsFreshTriggerSession || agentRequestedSplit) {
       const prev = this._getSession(sessionKey);
       if (prev) {
+        const respawnSource = agentRequestedSplit
+          ? `agent_session_split${prev.splitReason ? ` (${prev.splitReason})` : ''}`
+          : spec.triggerSource || 'manual';
         log(
-          `Ticket session force-respawn requested: ticket=${spec.ticketId} role=${role} pid=${prev.pid} source=${spec.triggerSource || 'manual'}`,
+          `Ticket session force-respawn requested: ticket=${spec.ticketId} role=${role} pid=${prev.pid} source=${respawnSource}`,
         );
         if (prev.idleTimer) {
           clearTimeout(prev.idleTimer);
@@ -275,6 +317,10 @@ export class TicketSessionManager
         spawned.ticketId = spec.ticketId;
         spawned.role = role;
         spawned.agentId = spec.agentId || '';
+        // Attribute manager-posted audit comments (silent-exit, session-split)
+        // to the managed agent's identity when running for one, else the
+        // manager's own key. Mirrors ChatSessionManager.
+        spawned._effectiveApiKey = spec.agentContext?.api_key || this._config.apiKey;
         // Stamp the trigger that spawned this session so silent-exit
         // fallback can correlate the dead cycle back to its origin in
         // ticket activity / manager logs.
@@ -418,11 +464,17 @@ export class TicketSessionManager
   // and [[C]] prompt rewrite — even with both in place, a model that drops
   // its toolcall stream after step 1 would still stall without this guard.
 
-  protected _onStdoutParsed(sess: SessionRecord, parsed: ParseResult, _rawLine: string): void {
+  protected _onStdoutParsed(sess: SessionRecord, parsed: ParseResult, rawLine: string): void {
     if (parsed.raw?.type === 'assistant') {
       const content = parsed.raw?.message?.content;
       if (Array.isArray(content)) {
         for (const block of content) {
+          // Scope ③: assistant text blocks may carry the session-split
+          // sentinel. Scan them before the tool_use filter below so a split
+          // request emitted as plain text (the common case) is seen.
+          if (block?.type === 'text' && typeof block.text === 'string') {
+            this.#maybeDetectSessionSplit(sess, block.text);
+          }
           if (block?.type !== 'tool_use' || typeof block.name !== 'string') continue;
           // `block.name` is the canonical MCP tool id, e.g.
           // `mcp__awb__add_comment` / `mcp__awb__move_ticket`. Match by
@@ -456,6 +508,14 @@ export class TicketSessionManager
         }
       }
     }
+    // Non-JSON adapters (codex / antigravity / custom) surface the model's
+    // text directly on stdout with no structured envelope — scan the raw line
+    // so the session-split sentinel works there too. Guarded on `!parsed.raw`
+    // so we never double-scan a structured assistant line (already handled
+    // above) or a tool-result echo.
+    if (!parsed.raw && rawLine) {
+      this.#maybeDetectSessionSplit(sess, rawLine);
+    }
     if (parsed.isResult) {
       // Turn ended. If we're still armed and haven't already injected, the
       // model decided this was its final answer without calling
@@ -476,6 +536,47 @@ export class TicketSessionManager
       if (name.endsWith(suffix)) return true;
     }
     return false;
+  }
+
+  /** Scan one chunk of the subagent's own text output for the session-split
+   *  sentinel. First match arms the split for this session; later matches in
+   *  the same session are ignored (idempotent — one split request per live
+   *  child). */
+  #maybeDetectSessionSplit(sess: SessionRecord, text: string): void {
+    if (sess.splitRequested) return;
+    const m = SESSION_SPLIT_SENTINEL_RE.exec(text);
+    if (!m) return;
+    const reason = (m[1] || '').trim().slice(0, SESSION_SPLIT_REASON_MAX_CHARS);
+    this.#requestSessionSplit(sess, reason);
+  }
+
+  /** Arm the agent-driven session split: flag the live session so the next
+   *  dispatchTrigger for this (ticket, role) force-respawns a fresh child
+   *  instead of reusing this one, and leave an audit trail (log + best-effort
+   *  ticket comment) recording the split reason. The current child keeps
+   *  running its turn — the split only changes how the NEXT trigger is
+   *  routed. */
+  #requestSessionSplit(sess: SessionRecord, reason: string): void {
+    sess.splitRequested = true;
+    sess.splitReason = reason || undefined;
+    log(
+      `[ticket-session] session-split armed by agent ticket=${(sess.ticketId || '').slice(0, 8)} role=${sess.role || '_'} pid=${sess.pid} reason=${reason || '(none)'}`,
+    );
+    const ticketId = sess.ticketId || '';
+    if (!ticketId) return;
+    // Best-effort audit comment, attributed to the session's effective agent
+    // identity so the board shows WHO asked to split and WHY. Fire-and-forget:
+    // a failed POST must not affect the running child.
+    const cfg = { ...this._config, apiKey: sess._effectiveApiKey || this._config.apiKey };
+    const body =
+      '🔀 Agent requested a **session split** for this (ticket, role). The next ' +
+      'trigger will start in a fresh subagent session instead of resuming this one.' +
+      (reason ? `\n\n_Reason: ${reason}_` : '');
+    fireAndForgetTool(cfg, 'add_comment', {
+      ticket_id: ticketId,
+      content: body,
+      author_role: sess.role || undefined,
+    });
   }
 
   protected async _onChildExit(
