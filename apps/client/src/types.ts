@@ -975,3 +975,38 @@ export interface ManagedAgentCreateBody {
   /** Optional per-agent CLI credential — see Agent.credential_id. */
   credential_id?: string | null;
 }
+
+// ─── Cross-workspace board move (ticket 8882056b) ───────────────
+// Mirror of the server's WorkspaceMoveService.BoardMovePreview /
+// MovePreviewItem. The dry-run preview and the committed result share the
+// same shape so the UI renders one report type for both.
+export interface BoardMovePreviewItem {
+  /**
+   * restamp — hard UPDATE of workspace_id on a board-owned row
+   * copy     — workspace-shared dep duplicated into dest (non-destructive)
+   * reuse    — workspace-shared dep already present in dest, id remapped
+   * remap    — a referencing id rewritten (role_id, template id, channel id)
+   * carry    — companion agent moved along with the board
+   * warn     — something the operator should know (cleared dangling link, …)
+   * block    — a hard stop; commit is refused while any block item exists
+   */
+  kind: 'restamp' | 'copy' | 'reuse' | 'remap' | 'carry' | 'warn' | 'block';
+  entity:
+    | 'board' | 'column' | 'ticket' | 'prompt_template' | 'action' | 'resource'
+    | 'workspace_role' | 'role_assignment' | 'channel' | 'agent' | 'api_key' | 'credential';
+  id: string;
+  detail: string;
+}
+
+export interface BoardMovePreview {
+  board: { id: string; name: string };
+  source_workspace: { id: string; name: string } | null;
+  target_workspace: { id: string; name: string };
+  counts: { columns: number; tickets: number; copied: number; remapped: number; restamped: number };
+  items: BoardMovePreviewItem[];
+  /** Non-empty → commit is refused. Each string is a human-readable reason. */
+  blockers: string[];
+  carry_agents: boolean;
+  /** false for a dry-run preview, true once the transaction has committed. */
+  committed: boolean;
+}

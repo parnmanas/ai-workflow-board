@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { api } from '../api';
-import { Board, BoardWithCards, PromptTemplate } from '../types';
+import { Board, BoardWithCards, PromptTemplate, BoardMovePreview } from '../types';
 import { useBoard } from '../hooks/useBoard';
 import { useToast } from '../contexts/ToastContext';
 import { useLoading } from '../contexts/LoadingContext';
@@ -140,8 +140,217 @@ export default function BoardSettingsPage() {
             refresh();
           }}
         />
+        <MoveToWorkspaceSetting board={board} sourceWorkspaceId={wsId ?? board.workspace_id} />
       </div>
     </div>
+  );
+}
+
+interface MoveToWorkspaceSettingProps {
+  board: BoardWithCards;
+  sourceWorkspaceId: string;
+}
+
+// Cross-workspace board move (ticket 8882056b). Admin-gated on the server.
+// Flow: pick destination → Preview (dry-run, writes nothing) → review the
+// move/copy/remap plan and any blockers → Move (commits atomically). A
+// preview with blockers disables the commit button. carry_agents brings the
+// board's companion agents along when they hold no roles outside this board.
+function MoveToWorkspaceSetting({ board, sourceWorkspaceId }: MoveToWorkspaceSettingProps) {
+  const { showToast } = useToast();
+  const [workspaces, setWorkspaces] = useState<Array<{ id: string; name: string }>>([]);
+  const [target, setTarget] = useState<string>('');
+  const [carryAgents, setCarryAgents] = useState(false);
+  const [preview, setPreview] = useState<BoardMovePreview | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+
+  // Destination candidates = every workspace except this board's own.
+  useEffect(() => {
+    let cancelled = false;
+    api.getWorkspaces()
+      .then((list) => {
+        if (cancelled) return;
+        setWorkspaces(
+          (list || [])
+            .filter((w: any) => w.id !== sourceWorkspaceId)
+            .map((w: any) => ({ id: w.id, name: w.name })),
+        );
+      })
+      .catch(() => { if (!cancelled) setWorkspaces([]); });
+    return () => { cancelled = true; };
+  }, [sourceWorkspaceId]);
+
+  // Any change to the destination / carry choice invalidates a stale preview —
+  // the operator must re-run Preview before they can commit.
+  const onTargetChange = (id: string) => { setTarget(id); setPreview(null); };
+  const onCarryChange = (v: boolean) => { setCarryAgents(v); setPreview(null); };
+
+  const runPreview = async () => {
+    if (!target) return;
+    setBusy(true);
+    try {
+      const report = await api.moveBoard(board.id, target, { dryRun: true, carryAgents });
+      setPreview(report);
+    } catch (err: any) {
+      showToast(err?.message || 'Preview failed', 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const runCommit = async () => {
+    if (!target || !preview || preview.blockers.length > 0) return;
+    setBusy(true);
+    try {
+      await api.moveBoard(board.id, target, { dryRun: false, carryAgents });
+      const destName = workspaces.find((w) => w.id === target)?.name || target;
+      showToast(`Board moved to “${destName}”. Reloading…`, 'success');
+      // The board now lives in another workspace; this URL's wsId is stale, so
+      // bounce to the destination's board view rather than 404 in place.
+      setConfirming(false);
+      setPreview(null);
+      setTimeout(() => { window.location.href = `/ws/${target}/boards`; }, 600);
+    } catch (err: any) {
+      showToast(err?.message || 'Move failed', 'error');
+      setConfirming(false);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const blocked = !!preview && preview.blockers.length > 0;
+
+  return (
+    <section
+      style={{
+        padding: 16,
+        marginBottom: 16,
+        background: tokens.colors.surfaceCard,
+        border: `1px solid ${tokens.colors.danger}`,
+        borderRadius: tokens.radii.md,
+      }}
+    >
+      <h3 style={{ margin: 0, fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>
+        Move to workspace
+      </h3>
+      <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, marginBottom: 12 }}>
+        Move this board — with <strong>all its columns and tickets</strong> — to a different
+        workspace. A workspace is a scope boundary, so the move re-stamps <code>workspace_id</code>
+        on the board, every column and every ticket, remaps each ticket's role assignment to the
+        destination's same-slug role, and copies referenced prompt templates / ws-level actions /
+        resources / channels into the destination if absent (non-destructive). <strong>Always
+        Preview first</strong> — it writes nothing and shows exactly what will move, copy, remap,
+        or block. Admin-only.
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+        <div style={{ minWidth: 240 }}>
+          <label
+            style={{
+              display: 'block', fontSize: 11, color: tokens.colors.textMuted,
+              marginBottom: 4, textTransform: 'uppercase', fontWeight: 600,
+            }}
+          >
+            Destination workspace
+          </label>
+          <select
+            value={target}
+            onChange={(e) => onTargetChange(e.target.value)}
+            style={{
+              width: '100%', background: tokens.colors.surface,
+              border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
+              padding: '8px 10px', color: tokens.colors.textStrong, fontSize: 13,
+              fontFamily: 'inherit', boxSizing: 'border-box',
+            }}
+          >
+            <option value="">Select a workspace…</option>
+            {workspaces.map((w) => (
+              <option key={w.id} value={w.id}>{w.name}</option>
+            ))}
+          </select>
+        </div>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: tokens.colors.textStrong, paddingBottom: 8 }}>
+          <input type="checkbox" checked={carryAgents} onChange={(e) => onCarryChange(e.target.checked)} />
+          Carry companion agents
+        </label>
+        <Button variant="secondary" size="sm" disabled={!target || busy} onClick={runPreview}>
+          {busy && !confirming ? 'Previewing…' : 'Preview'}
+        </Button>
+      </div>
+
+      {preview && (
+        <div style={{ marginTop: 14 }}>
+          <div style={{ fontSize: 12, color: tokens.colors.textStrong, marginBottom: 8 }}>
+            Plan: <strong>{preview.counts.restamped}</strong> re-stamped ·{' '}
+            <strong>{preview.counts.copied}</strong> copied ·{' '}
+            <strong>{preview.counts.remapped}</strong> remapped ·{' '}
+            {preview.counts.columns} columns, {preview.counts.tickets} tickets
+            {preview.committed ? ' · committed' : ' · dry-run'}
+          </div>
+
+          {blocked && (
+            <div
+              style={{
+                border: `1px solid ${tokens.colors.danger}`, borderRadius: tokens.radii.md,
+                padding: '8px 10px', marginBottom: 8, background: 'rgba(220,40,40,0.06)',
+              }}
+            >
+              <div style={{ fontSize: 11, fontWeight: 600, color: tokens.colors.danger, marginBottom: 4 }}>
+                Move blocked — resolve these first:
+              </div>
+              <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, color: tokens.colors.textStrong }}>
+                {preview.blockers.map((b, i) => <li key={i}>{b}</li>)}
+              </ul>
+            </div>
+          )}
+
+          {preview.items.length > 0 && (
+            <div
+              style={{
+                maxHeight: 220, overflow: 'auto', border: `1px solid ${tokens.colors.border}`,
+                borderRadius: tokens.radii.md, padding: '6px 8px', marginBottom: 10,
+              }}
+            >
+              {preview.items.map((it, i) => (
+                <div key={i} style={{ display: 'flex', gap: 8, fontSize: 11, padding: '2px 0', color: tokens.colors.textStrong }}>
+                  <span
+                    style={{
+                      flex: '0 0 64px', textTransform: 'uppercase', fontWeight: 600,
+                      color: it.kind === 'block' ? tokens.colors.danger
+                        : it.kind === 'warn' ? tokens.colors.textPrimary
+                        : tokens.colors.textMuted,
+                    }}
+                  >
+                    {it.kind}
+                  </span>
+                  <span style={{ flex: '0 0 110px', color: tokens.colors.textMuted }}>{it.entity}</span>
+                  <span style={{ flex: 1 }}>{it.detail}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {!confirming ? (
+            <Button variant="danger" size="sm" disabled={blocked || busy} onClick={() => setConfirming(true)}>
+              Move board to workspace…
+            </Button>
+          ) : (
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <span style={{ fontSize: 12, color: tokens.colors.textStrong }}>
+                Commit this move? This applies atomically and cannot be auto-undone.
+              </span>
+              <Button variant="danger" size="sm" disabled={busy} onClick={runCommit}>
+                {busy ? 'Moving…' : 'Confirm move'}
+              </Button>
+              <Button variant="secondary" size="sm" disabled={busy} onClick={() => setConfirming(false)}>
+                Cancel
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
+    </section>
   );
 }
 

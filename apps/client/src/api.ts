@@ -36,6 +36,7 @@ import type {
   TicketPrerequisiteRow,
   UserNotificationChannel,
   BoardWithCards,
+  BoardMovePreview,
 } from './types';
 
 const BASE = '/api';
@@ -250,6 +251,22 @@ export const api = {
     request<any>(`/boards/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteBoard: (id: string) =>
     request<any>(`/boards/${id}`, { method: 'DELETE' }),
+  // Cross-workspace board move (ticket 8882056b). dry_run=true (default)
+  // returns the BoardMovePreview report without writing; dry_run=false commits
+  // atomically. Admin-only on the server. A blocked commit rejects with 409.
+  moveBoard: (
+    boardId: string,
+    targetWorkspaceId: string,
+    opts?: { dryRun?: boolean; carryAgents?: boolean },
+  ) =>
+    request<BoardMovePreview>(`/boards/${boardId}/move-to-workspace`, {
+      method: 'POST',
+      body: JSON.stringify({
+        target_workspace_id: targetWorkspaceId,
+        dry_run: opts?.dryRun !== false,
+        carry_agents: !!opts?.carryAgents,
+      }),
+    }),
   getArchivedBoards: (workspaceId: string) =>
     request<any[]>(`/boards?workspace_id=${workspaceId}&include_archived=true`),
   archiveBoard: async (boardId: string) =>
