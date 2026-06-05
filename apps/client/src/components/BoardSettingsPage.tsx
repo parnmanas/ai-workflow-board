@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { api } from '../api';
-import { Board, BoardWithCards, PromptTemplate, BoardMovePreview } from '../types';
+import { Board, BoardWithCards, PromptTemplate, BoardMovePreview, MoveBlocker, MoveRemedy } from '../types';
+import MoveBlockerList from './MoveBlockerList';
 import { useBoard } from '../hooks/useBoard';
 import { useToast } from '../contexts/ToastContext';
 import { useLoading } from '../contexts/LoadingContext';
@@ -161,6 +162,9 @@ function MoveToWorkspaceSetting({ board, sourceWorkspaceId }: MoveToWorkspaceSet
   const [workspaces, setWorkspaces] = useState<Array<{ id: string; name: string }>>([]);
   const [target, setTarget] = useState<string>('');
   const [carryAgents, setCarryAgents] = useState(false);
+  // ticket 9efa643b — companion agents dropped from the carry via the inline
+  // drop_companion_agent remedy. A move option, so it feeds every (re)preview.
+  const [excludeAgentIds, setExcludeAgentIds] = useState<string[]>([]);
   const [preview, setPreview] = useState<BoardMovePreview | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirming, setConfirming] = useState(false);
@@ -182,15 +186,23 @@ function MoveToWorkspaceSetting({ board, sourceWorkspaceId }: MoveToWorkspaceSet
   }, [sourceWorkspaceId]);
 
   // Any change to the destination / carry choice invalidates a stale preview —
-  // the operator must re-run Preview before they can commit.
-  const onTargetChange = (id: string) => { setTarget(id); setPreview(null); };
-  const onCarryChange = (v: boolean) => { setCarryAgents(v); setPreview(null); };
+  // the operator must re-run Preview before they can commit. Changing either
+  // also resets the per-agent carry exclusions (they were scoped to that plan).
+  const onTargetChange = (id: string) => { setTarget(id); setPreview(null); setExcludeAgentIds([]); };
+  const onCarryChange = (v: boolean) => { setCarryAgents(v); setPreview(null); setExcludeAgentIds([]); };
 
-  const runPreview = async () => {
+  // Preview honours optional overrides so an inline repreview-remedy can apply a
+  // freshly-computed option (e.g. the just-extended exclude set) without racing
+  // React's async setState.
+  const runPreview = async (overrides?: { carryAgents?: boolean; excludeAgentIds?: string[] }) => {
     if (!target) return;
     setBusy(true);
     try {
-      const report = await api.moveBoard(board.id, target, { dryRun: true, carryAgents });
+      const report = await api.moveBoard(board.id, target, {
+        dryRun: true,
+        carryAgents: overrides?.carryAgents ?? carryAgents,
+        excludeAgentIds: overrides?.excludeAgentIds ?? excludeAgentIds,
+      });
       setPreview(report);
     } catch (err: any) {
       showToast(err?.message || 'Preview failed', 'error');
@@ -199,11 +211,36 @@ function MoveToWorkspaceSetting({ board, sourceWorkspaceId }: MoveToWorkspaceSet
     }
   };
 
+  // Inline blocker remedy. repreview → flip the carry-exclusion option locally
+  // and re-preview (no write). mutation → call the remedy endpoint, then
+  // re-preview so a resolved blocker drops off automatically.
+  const onRemedy = async (_blocker: MoveBlocker, remedy: MoveRemedy) => {
+    if (remedy.kind === 'repreview') {
+      if (remedy.action === 'drop_companion_agent' && remedy.params?.agent_id) {
+        const next = [...new Set([...excludeAgentIds, remedy.params.agent_id as string])];
+        setExcludeAgentIds(next);
+        await runPreview({ excludeAgentIds: next });
+      }
+      return;
+    }
+    // mutation
+    setBusy(true);
+    try {
+      await api.moveBoardRemedy(board.id, remedy.action, remedy.params || {});
+    } catch (err: any) {
+      showToast(err?.message || 'Remedy failed', 'error');
+      setBusy(false);
+      return;
+    }
+    setBusy(false);
+    await runPreview();
+  };
+
   const runCommit = async () => {
     if (!target || !preview || preview.blockers.length > 0) return;
     setBusy(true);
     try {
-      await api.moveBoard(board.id, target, { dryRun: false, carryAgents });
+      await api.moveBoard(board.id, target, { dryRun: false, carryAgents, excludeAgentIds });
       const destName = workspaces.find((w) => w.id === target)?.name || target;
       showToast(`Board moved to “${destName}”. Reloading…`, 'success');
       // The board now lives in another workspace; this URL's wsId is stale, so
@@ -274,7 +311,7 @@ function MoveToWorkspaceSetting({ board, sourceWorkspaceId }: MoveToWorkspaceSet
           <input type="checkbox" checked={carryAgents} onChange={(e) => onCarryChange(e.target.checked)} />
           Carry companion agents
         </label>
-        <Button variant="secondary" size="sm" disabled={!target || busy} onClick={runPreview}>
+        <Button variant="secondary" size="sm" disabled={!target || busy} onClick={() => runPreview()}>
           {busy && !confirming ? 'Previewing…' : 'Preview'}
         </Button>
       </div>
@@ -289,21 +326,7 @@ function MoveToWorkspaceSetting({ board, sourceWorkspaceId }: MoveToWorkspaceSet
             {preview.committed ? ' · committed' : ' · dry-run'}
           </div>
 
-          {blocked && (
-            <div
-              style={{
-                border: `1px solid ${tokens.colors.danger}`, borderRadius: tokens.radii.md,
-                padding: '8px 10px', marginBottom: 8, background: 'rgba(220,40,40,0.06)',
-              }}
-            >
-              <div style={{ fontSize: 11, fontWeight: 600, color: tokens.colors.danger, marginBottom: 4 }}>
-                Move blocked — resolve these first:
-              </div>
-              <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, color: tokens.colors.textStrong }}>
-                {preview.blockers.map((b, i) => <li key={i}>{b}</li>)}
-              </ul>
-            </div>
-          )}
+          <MoveBlockerList blockers={preview.blockers} busy={busy} onRemedy={onRemedy} />
 
           {preview.items.length > 0 && (
             <div

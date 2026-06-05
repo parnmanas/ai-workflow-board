@@ -260,7 +260,7 @@ export const api = {
   moveBoard: (
     boardId: string,
     targetWorkspaceId: string,
-    opts?: { dryRun?: boolean; carryAgents?: boolean },
+    opts?: { dryRun?: boolean; carryAgents?: boolean; excludeAgentIds?: string[] },
   ) =>
     request<BoardMovePreview>(`/boards/${boardId}/move-to-workspace`, {
       method: 'POST',
@@ -268,8 +268,18 @@ export const api = {
         target_workspace_id: targetWorkspaceId,
         dry_run: opts?.dryRun !== false,
         carry_agents: !!opts?.carryAgents,
+        // ticket 9efa643b — per-agent carry exclusion (drop_companion_agent remedy)
+        exclude_agent_ids: opts?.excludeAgentIds ?? [],
       }),
     }),
+  // ticket 9efa643b — execute a structured move-blocker remedy inline from the
+  // board-move preview. Returns { ok, action, affected }; the UI re-previews
+  // afterward so the resolved blocker disappears.
+  moveBoardRemedy: (boardId: string, action: string, params: Record<string, any>) =>
+    request<{ ok: boolean; action: string; affected: number }>(
+      `/boards/${boardId}/move-to-workspace/remedy`,
+      { method: 'POST', body: JSON.stringify({ action, params }) },
+    ),
   getArchivedBoards: (workspaceId: string) =>
     request<any[]>(`/boards?workspace_id=${workspaceId}&include_archived=true`),
   archiveBoard: async (boardId: string) =>
@@ -504,6 +514,14 @@ export const api = {
         cross_ref_policy: opts?.crossRefPolicy ?? 'block',
       }),
     }),
+  // ticket 9efa643b — execute a structured move-blocker remedy inline from the
+  // agent-move preview. Same executor as moveBoardRemedy, scoped to the agent
+  // route. The UI re-previews afterward so the resolved blocker disappears.
+  moveAgentRemedy: (agentId: string, action: string, params: Record<string, any>) =>
+    request<{ ok: boolean; action: string; affected: number }>(
+      `/agents/${encodeURIComponent(agentId)}/move-to-workspace/remedy`,
+      { method: 'POST', body: JSON.stringify({ action, params }) },
+    ),
   // Phase 3 Plan 03-02: actor-scoped activity for the detail modal
   getAgentActivity: (agentId: string, opts?: { limit?: number }): Promise<ActivityRow[]> => {
     const limit = opts?.limit ?? 50;

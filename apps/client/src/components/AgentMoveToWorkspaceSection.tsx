@@ -3,7 +3,8 @@ import { api } from '../api';
 import { useToast } from '../contexts/ToastContext';
 import { tokens } from '../tokens';
 import { Button } from './common';
-import type { AgentDetail, AgentMovePreview, AgentApiKeyPolicy, AgentCrossRefPolicy } from '../types';
+import MoveBlockerList from './MoveBlockerList';
+import type { AgentDetail, AgentMovePreview, AgentApiKeyPolicy, AgentCrossRefPolicy, MoveBlocker, MoveRemedy } from '../types';
 
 interface AgentMoveToWorkspaceSectionProps {
   agent: AgentDetail;
@@ -52,17 +53,52 @@ export default function AgentMoveToWorkspaceSection({ agent, onMoved }: AgentMov
   const onApiKeyPolicyChange = (v: AgentApiKeyPolicy) => { setApiKeyPolicy(v); invalidate(); };
   const onCrossRefPolicyChange = (v: AgentCrossRefPolicy) => { setCrossRefPolicy(v); invalidate(); };
 
-  const runPreview = async () => {
+  // Preview honours optional overrides so an inline repreview-remedy can apply a
+  // freshly-chosen policy without racing React's async setState.
+  const runPreview = async (overrides?: { apiKeyPolicy?: AgentApiKeyPolicy; crossRefPolicy?: AgentCrossRefPolicy }) => {
     if (!target) return;
     setBusy(true);
     try {
-      const report = await api.moveAgent(agent.id, target, { dryRun: true, apiKeyPolicy, crossRefPolicy });
+      const report = await api.moveAgent(agent.id, target, {
+        dryRun: true,
+        apiKeyPolicy: overrides?.apiKeyPolicy ?? apiKeyPolicy,
+        crossRefPolicy: overrides?.crossRefPolicy ?? crossRefPolicy,
+      });
       setPreview(report);
     } catch (err: any) {
       showToast(err?.message || 'Preview failed', 'error');
     } finally {
       setBusy(false);
     }
+  };
+
+  // Inline blocker remedy. repreview → flip a policy locally and re-preview (no
+  // write). mutation → call the remedy endpoint, then re-preview so a resolved
+  // blocker drops off automatically.
+  const onRemedy = async (_blocker: MoveBlocker, remedy: MoveRemedy) => {
+    if (remedy.kind === 'repreview') {
+      if (remedy.action === 'set_api_key_policy' && remedy.params?.value) {
+        const value = remedy.params.value as AgentApiKeyPolicy;
+        setApiKeyPolicy(value);
+        await runPreview({ apiKeyPolicy: value });
+      } else if (remedy.action === 'set_cross_ref_policy' && remedy.params?.value) {
+        const value = remedy.params.value as AgentCrossRefPolicy;
+        setCrossRefPolicy(value);
+        await runPreview({ crossRefPolicy: value });
+      }
+      return;
+    }
+    // mutation
+    setBusy(true);
+    try {
+      await api.moveAgentRemedy(agent.id, remedy.action, remedy.params || {});
+    } catch (err: any) {
+      showToast(err?.message || 'Remedy failed', 'error');
+      setBusy(false);
+      return;
+    }
+    setBusy(false);
+    await runPreview();
   };
 
   const runCommit = async () => {
@@ -143,7 +179,7 @@ export default function AgentMoveToWorkspaceSection({ agent, onMoved }: AgentMov
             <option value="clear">Clear refs</option>
           </select>
         </div>
-        <Button variant="secondary" size="sm" disabled={!target || busy} onClick={runPreview}>
+        <Button variant="secondary" size="sm" disabled={!target || busy} onClick={() => runPreview()}>
           {busy && !confirming ? 'Previewing…' : 'Preview'}
         </Button>
       </div>
@@ -158,21 +194,7 @@ export default function AgentMoveToWorkspaceSection({ agent, onMoved }: AgentMov
             {preview.committed ? ' · committed' : ' · dry-run'}
           </div>
 
-          {blocked && (
-            <div
-              style={{
-                border: `1px solid ${tokens.colors.danger}`, borderRadius: tokens.radii.md,
-                padding: '8px 10px', marginBottom: 8, background: 'rgba(220,40,40,0.06)',
-              }}
-            >
-              <div style={{ fontSize: 11, fontWeight: 600, color: tokens.colors.danger, marginBottom: 4 }}>
-                Move blocked — resolve these first (or switch the policy):
-              </div>
-              <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, color: tokens.colors.textStrong }}>
-                {preview.blockers.map((b, i) => <li key={i}>{b}</li>)}
-              </ul>
-            </div>
-          )}
+          <MoveBlockerList blockers={preview.blockers} busy={busy} onRemedy={onRemedy} />
 
           {preview.items.length > 0 && (
             <div

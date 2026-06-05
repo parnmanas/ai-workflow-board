@@ -998,14 +998,40 @@ export interface BoardMovePreviewItem {
   detail: string;
 }
 
+// ─── Inline blocker remedies (ticket 9efa643b) ──────────────────
+// Mirror of the server's WorkspaceMoveService.MoveRemedy / MoveBlocker. A
+// blocked preview now ships structured blockers (code + entity refs +
+// remedies[]) so each move UI can render an inline fix next to the bullet.
+// `message` preserves the legacy human-readable string.
+export interface MoveRemedy {
+  action: string; // e.g. 'drop_companion_agent', 'unassign_from_tickets', 'set_cross_ref_policy', 'set_api_key_policy', 'clear_credential'
+  label: string;
+  /** repreview — flip a local move option + re-run the dry-run preview (no write).
+   *  mutation  — confirm, POST …/move-to-workspace/remedy, then re-preview. */
+  kind: 'repreview' | 'mutation';
+  params?: Record<string, any>;
+}
+
+export interface MoveBlocker {
+  code: string;
+  message: string;
+  agent_id?: string;
+  ticket_ids?: string[];
+  fields?: string[];
+  credential_id?: string;
+  api_key_ids?: string[];
+  remedies: MoveRemedy[];
+}
+
 export interface BoardMovePreview {
   board: { id: string; name: string };
   source_workspace: { id: string; name: string } | null;
   target_workspace: { id: string; name: string };
   counts: { columns: number; tickets: number; copied: number; remapped: number; restamped: number };
   items: BoardMovePreviewItem[];
-  /** Non-empty → commit is refused. Each string is a human-readable reason. */
-  blockers: string[];
+  /** Non-empty → commit is refused. Structured blockers carry inline remedies;
+   *  `message` is the legacy human-readable reason. */
+  blockers: MoveBlocker[];
   carry_agents: boolean;
   /** false for a dry-run preview, true once the transaction has committed. */
   committed: boolean;
@@ -1023,8 +1049,9 @@ export interface AgentMovePreview {
   target_workspace: { id: string; name: string };
   counts: { api_keys: number; copied: number; cleared: number; cross_refs: number };
   items: BoardMovePreviewItem[];
-  /** Non-empty → commit is refused. Each string is a human-readable reason. */
-  blockers: string[];
+  /** Non-empty → commit is refused. Structured blockers carry inline remedies;
+   *  `message` is the legacy human-readable reason. */
+  blockers: MoveBlocker[];
   api_key_policy: AgentApiKeyPolicy;
   cross_ref_policy: AgentCrossRefPolicy;
   /** false for a dry-run preview, true once the transaction has committed. */
