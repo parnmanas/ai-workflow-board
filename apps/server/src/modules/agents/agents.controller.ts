@@ -1,4 +1,5 @@
 import { Controller, Get, Post, Patch, Delete, Body, Param, Query, Req, Res, UseGuards, Inject, forwardRef } from '@nestjs/common';
+import { randomBytes } from 'crypto';
 import { Request, Response } from 'express';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, Repository, In, IsNull } from 'typeorm';
@@ -7,9 +8,14 @@ import { ActivityLog } from '../../entities/ActivityLog';
 import { Workspace } from '../../entities/Workspace';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { WorkspaceGuard } from '../../common/guards/workspace.guard';
+import { AdminGuard } from '../../common/guards/admin.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { CurrentWorkspaceId } from '../../common/decorators/current-workspace.decorator';
+import { CurrentUser, CurrentUserData } from '../../common/decorators/current-user.decorator';
 import { PERMISSIONS, hasPermission } from '../../common/types/permissions';
+import { WorkspaceMoveService, WorkspaceMoveBlockedError } from '../../services/workspace-move.service';
+import { activityEvents } from '../../services/activity.service';
+import type { AgentManagerCommandPayload } from '../../common/types/stream-events';
 import { AgentStatusService } from './agent-status.service';
 import { AllocationService } from './allocation.service';
 import { SubagentMonitorService } from '../../services/subagent-monitor.service';
@@ -67,6 +73,7 @@ export class AgentsController {
     @Inject(forwardRef(() => InstanceRegistryService))
     private readonly instanceRegistry: InstanceRegistryService,
     private readonly logService: LogService,
+    private readonly workspaceMove: WorkspaceMoveService,
   ) {}
 
   @Get(':id/allocated-tickets')
@@ -525,6 +532,92 @@ export class AgentsController {
       );
     }
     return res.json(updated);
+  }
+
+  /**
+   * POST /api/agents/:id/move-to-workspace  (admin-only)
+   *
+   * Cross-workspace "move house" for an agent + its workspace-scoped auth
+   * (ticket 868ead64 — companion to the board move 8882056b). Body:
+   *   { target_workspace_id: string, dry_run?: boolean (default true),
+   *     api_key_policy?: 'migrate'|'clear'|'refuse' (default 'migrate'),
+   *     cross_ref_policy?: 'block'|'clear' (default 'block') }
+   *
+   * dry_run=true returns the preview report (restamp / copy / remap / block)
+   * without writing. dry_run=false commits atomically in one transaction; a
+   * blocked move returns 409 and applies nothing. On a successful commit we
+   * dispatch reload_config to any agent-manager instance supervising this
+   * agent so its in-memory view of the agent's workspace is refreshed.
+   */
+  @Post(':id/move-to-workspace')
+  @UseGuards(AdminGuard)
+  async moveToWorkspace(
+    @Param('id') id: string,
+    @Body() body: any,
+    @CurrentUser() user: CurrentUserData | undefined,
+    @Res() res: Response,
+  ) {
+    const targetWorkspaceId = body?.target_workspace_id;
+    if (!targetWorkspaceId) return res.status(400).json({ error: 'target_workspace_id is required' });
+    const dryRun = body?.dry_run !== false; // default true — never commit unless explicitly asked
+    const opts = {
+      api_key_policy: body?.api_key_policy,
+      cross_ref_policy: body?.cross_ref_policy,
+      actor_id: user?.id,
+      actor_name: user?.name,
+    };
+    try {
+      const report = dryRun
+        ? await this.workspaceMove.previewAgentMove(id, targetWorkspaceId, opts)
+        : await this.workspaceMove.commitAgentMove(id, targetWorkspaceId, opts);
+      if (!dryRun && report.committed) {
+        // Best-effort: tell the supervising manager(s) to re-read config so the
+        // agent's new workspace takes effect without waiting for a restart.
+        this._dispatchAgentManagerReload(id, user?.id || '');
+      }
+      return res.json(report);
+    } catch (e: any) {
+      if (e instanceof WorkspaceMoveBlockedError) {
+        return res.status(409).json({ error: e.message, blockers: e.blockers });
+      }
+      return res.status(400).json({ error: e?.message || 'Cross-workspace agent move failed' });
+    }
+  }
+
+  /**
+   * (F) After an agent's workspace changes, ask every agent-manager instance
+   * that supervises it to reload its config (the manager caches agent metadata
+   * in memory). Best-effort and fire-and-forget: a manager that is offline
+   * picks up the new workspace on its next spawn/heartbeat anyway. We emit the
+   * existing `agent_manager_command` / `reload_config` verb the manager already
+   * understands — no agent-manager-side change is required.
+   *
+   * No CommandLedger record is written (that service is private to the
+   * AgentManager module): this is an automatic post-move nudge, not an
+   * admin-tracked command, so an un-acked dispatch is acceptable.
+   */
+  private _dispatchAgentManagerReload(agentId: string, issuedBy: string): void {
+    const supervisors = this.instanceRegistry.list().filter(
+      (i) => i.mode === 'manager' && Array.isArray(i.agent_ids) && i.agent_ids.includes(agentId),
+    );
+    for (const inst of supervisors) {
+      const issued_at = new Date().toISOString();
+      const payload: AgentManagerCommandPayload = {
+        command_id: randomBytes(8).toString('hex'),
+        instance_id: inst.instance_id,
+        agent_id: inst.agent_id,
+        command: 'reload_config',
+        args: { reason: 'agent_workspace_moved', agent_id: agentId },
+        issued_by: issuedBy,
+        issued_at,
+      };
+      activityEvents.emit('agent_manager_command', { ...payload, timestamp: issued_at });
+      this.logService.info(
+        'AgentManager',
+        `Dispatched reload_config to instance ${inst.instance_id} after agent ${agentId.slice(0, 8)} workspace move`,
+        { command_id: payload.command_id, agent_id: agentId },
+      );
+    }
   }
 
   @Delete(':id')

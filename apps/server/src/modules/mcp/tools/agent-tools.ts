@@ -14,6 +14,8 @@ import { Agent } from '../../../entities/Agent';
 import { PromptTemplate } from '../../../entities/PromptTemplate';
 import { CLI_TYPES } from '../../../common/types/cli-types';
 import { ok, err } from '../shared/helpers';
+import { getCallerAgent } from '../shared/session-auth';
+import { WorkspaceMoveService, WorkspaceMoveBlockedError } from '../../../services/workspace-move.service';
 import type { ToolContext } from './context';
 
 export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
@@ -126,6 +128,44 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
       if (!agent) return err('Agent not found');
       await agentRepo.delete(agent.id);
       return ok({ success: true });
+    }
+  );
+
+  server.tool(
+    'move_agent_to_workspace',
+    'Move an AI agent to a DIFFERENT workspace, carrying its workspace-scoped auth along and keeping cross-workspace ' +
+    'references consistent. A workspace is a scope boundary, so this re-stamps the agent\'s workspace_id, copies its ' +
+    'referenced Credential into the destination by name if absent (non-destructive; a dangling credential blocks the ' +
+    'move), and re-scopes its ApiKey rows per api_key_policy. Role assignments and denormalized assignee/reporter/' +
+    'reviewer ids that reference this agent on tickets OUTSIDE the destination workspace would become cross-workspace ' +
+    'links — by default (cross_ref_policy=block) the move is refused and each offending ticket is reported; pass ' +
+    'cross_ref_policy=clear to delete those assignments / blank those ids instead. Actions in other workspaces that ' +
+    'target this agent are reported as warnings. ALWAYS dry-run first (dry_run=true, the default) to see exactly what ' +
+    'will move / copy / remap / block, then re-call with dry_run=false to commit atomically (single transaction, ' +
+    'all-or-nothing). Manager-type agents are workspace-less and cannot be moved. Admin-gated.',
+    {
+      agent_id: z.string().describe('Agent ID to move'),
+      target_workspace_id: z.string().describe('Destination workspace ID'),
+      dry_run: z.boolean().optional().default(true)
+        .describe('true (default) returns the preview report without writing; false commits the move atomically'),
+      api_key_policy: z.enum(['migrate', 'clear', 'refuse']).optional().default('migrate')
+        .describe('How to treat the agent\'s api keys in another workspace: migrate (re-stamp, default), clear (detach agent_id), refuse (block)'),
+      cross_ref_policy: z.enum(['block', 'clear']).optional().default('block')
+        .describe('Cross-workspace role/assignee refs on foreign tickets: block (refuse + report, default) or clear (delete assignments / blank ids)'),
+    },
+    async ({ agent_id, target_workspace_id, dry_run, api_key_policy, cross_ref_policy }, extra: { sessionId?: string }) => {
+      const caller = getCallerAgent(extra);
+      const mover = new WorkspaceMoveService(dataSource as any, ctx.activityService);
+      const opts = { api_key_policy, cross_ref_policy, actor_id: caller?.agentId, actor_name: caller?.agentName };
+      try {
+        const report = dry_run
+          ? await mover.previewAgentMove(agent_id, target_workspace_id, opts)
+          : await mover.commitAgentMove(agent_id, target_workspace_id, opts);
+        return ok(report);
+      } catch (e: any) {
+        if (e instanceof WorkspaceMoveBlockedError) return err(`Move blocked: ${e.blockers.join('; ')}`);
+        return err(e?.message || 'Cross-workspace agent move failed');
+      }
     }
   );
 

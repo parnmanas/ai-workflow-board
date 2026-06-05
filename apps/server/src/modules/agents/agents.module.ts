@@ -20,7 +20,9 @@ import { StuckTicketDetectorService } from './stuck-ticket-detector.service';
 import { TicketPrerequisitesService } from '../tickets/ticket-prerequisites.service';
 import { FsBrowserService } from '../../services/fs-browser.service';
 import { SubagentMonitorService } from '../../services/subagent-monitor.service';
+import { WorkspaceMoveService } from '../../services/workspace-move.service';
 import { AuthGuard } from '../../common/guards/auth.guard';
+import { AdminGuard } from '../../common/guards/admin.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { AgentManagerModule } from '../agent-manager/agent-manager.module';
@@ -46,7 +48,7 @@ import { ColumnPoliciesModule } from '../column-policies/column-policies.module'
   ],
   controllers: [AgentsController, FsBrowserController, SubagentMonitorController],
   providers: [
-    AuthGuard, PermissionGuard, AgentAuthGuard,
+    AuthGuard, PermissionGuard, AgentAuthGuard, AdminGuard,
     AgentConnectionService, TriggerLoopService, AgentStatusService, AllocationService,
     TicketSupervisorService,
     BacklogPromotionService,
@@ -55,6 +57,7 @@ import { ColumnPoliciesModule } from '../column-policies/column-policies.module'
     ClaimVerificationService,
     TicketPrerequisitesService,
     FsBrowserService, SubagentMonitorService,
+    WorkspaceMoveService,
   ],
   exports: [
     AgentConnectionService, TriggerLoopService, AgentStatusService, AllocationService,
