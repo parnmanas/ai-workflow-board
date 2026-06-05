@@ -38,6 +38,8 @@ const EXPECTED_TOOLS = [
   // Ticket 9d892da9 — chat-message read surface.
   'get_chat_room_messages',
   'search_chat_messages',
+  // Ticket 8882056b — cross-workspace board move.
+  'move_board_to_workspace',
 ];
 
 test('MCP initialize + tools/list returns expected AWB tool surface', async (t) => {
