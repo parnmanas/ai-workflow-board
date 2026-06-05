@@ -40,6 +40,8 @@ const EXPECTED_TOOLS = [
   'search_chat_messages',
   // Ticket 8882056b — cross-workspace board move.
   'move_board_to_workspace',
+  // Ticket 868ead64 — cross-workspace agent move.
+  'move_agent_to_workspace',
 ];
 
 test('MCP initialize + tools/list returns expected AWB tool surface', async (t) => {
