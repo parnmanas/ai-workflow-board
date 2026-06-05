@@ -37,6 +37,9 @@ import type {
   UserNotificationChannel,
   BoardWithCards,
   BoardMovePreview,
+  AgentMovePreview,
+  AgentApiKeyPolicy,
+  AgentCrossRefPolicy,
 } from './types';
 
 const BASE = '/api';
@@ -484,6 +487,23 @@ export const api = {
   // Phase 3 Plan 03-02: extended :id endpoint (role_prompt + redacted flag per D-44)
   getAgent: (id: string): Promise<AgentDetail> =>
     request<AgentDetail>(`/agents/${encodeURIComponent(id)}`),
+  // Cross-workspace agent move (ticket 868ead64). dry_run=true (default)
+  // returns the AgentMovePreview report without writing; dry_run=false commits
+  // atomically. Admin-only on the server. A blocked commit rejects with 409.
+  moveAgent: (
+    agentId: string,
+    targetWorkspaceId: string,
+    opts?: { dryRun?: boolean; apiKeyPolicy?: AgentApiKeyPolicy; crossRefPolicy?: AgentCrossRefPolicy },
+  ) =>
+    request<AgentMovePreview>(`/agents/${encodeURIComponent(agentId)}/move-to-workspace`, {
+      method: 'POST',
+      body: JSON.stringify({
+        target_workspace_id: targetWorkspaceId,
+        dry_run: opts?.dryRun !== false,
+        api_key_policy: opts?.apiKeyPolicy ?? 'migrate',
+        cross_ref_policy: opts?.crossRefPolicy ?? 'block',
+      }),
+    }),
   // Phase 3 Plan 03-02: actor-scoped activity for the detail modal
   getAgentActivity: (agentId: string, opts?: { limit?: number }): Promise<ActivityRow[]> => {
     const limit = opts?.limit ?? 50;

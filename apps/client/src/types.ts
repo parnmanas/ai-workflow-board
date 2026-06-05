@@ -1010,3 +1010,23 @@ export interface BoardMovePreview {
   /** false for a dry-run preview, true once the transaction has committed. */
   committed: boolean;
 }
+
+// ─── Cross-workspace agent move (ticket 868ead64) ───────────────
+// Mirror of the server's WorkspaceMoveService.AgentMovePreview. Shares the
+// MovePreviewItem shape with the board move (same kinds/entities).
+export type AgentApiKeyPolicy = 'migrate' | 'clear' | 'refuse';
+export type AgentCrossRefPolicy = 'block' | 'clear';
+
+export interface AgentMovePreview {
+  agent: { id: string; name: string };
+  source_workspace: { id: string; name: string } | null;
+  target_workspace: { id: string; name: string };
+  counts: { api_keys: number; copied: number; cleared: number; cross_refs: number };
+  items: BoardMovePreviewItem[];
+  /** Non-empty → commit is refused. Each string is a human-readable reason. */
+  blockers: string[];
+  api_key_policy: AgentApiKeyPolicy;
+  cross_ref_policy: AgentCrossRefPolicy;
+  /** false for a dry-run preview, true once the transaction has committed. */
+  committed: boolean;
+}

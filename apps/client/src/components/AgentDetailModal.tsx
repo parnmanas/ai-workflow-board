@@ -9,6 +9,7 @@ import { tokens } from '../tokens';
 import { formatAgentDisplayName } from '../utils/agentName';
 import AgentFileBrowser from './AgentFileBrowser';
 import AgentSubagentsPanel from './AgentSubagentsPanel';
+import AgentMoveToWorkspaceSection from './AgentMoveToWorkspaceSection';
 import ManagedAgentDialog from './admin/ManagedAgentDialog';
 import { useParams } from 'react-router-dom';
 
@@ -1477,6 +1478,21 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
               </div>
             )}
           </section>
+
+          {/* Cross-workspace agent move (ticket 868ead64). Admin-only and only
+             for workspace-scoped agents — manager-type identities are
+             workspace-less so the move is a category error and the section is
+             hidden for them. The server re-gates with AdminGuard. */}
+          {detail && user?.role === 'admin' && detail.type !== 'manager' && (
+            <AgentMoveToWorkspaceSection
+              agent={detail}
+              onMoved={(targetWs) => {
+                // The agent now lives in another workspace; this page's wsId is
+                // stale, so bounce to the destination's agents list.
+                setTimeout(() => { window.location.href = `/ws/${targetWs}/agents`; }, 600);
+              }}
+            />
+          )}
           </>
           )}
 
