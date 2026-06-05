@@ -8,7 +8,10 @@ import { LogService } from './log.service';
 export const activityEvents = new EventEmitter();
 
 export interface LogActivityParams {
-  entity_type: 'ticket' | 'comment';
+  // 'board' | 'agent' added for cross-workspace move (WorkspaceMoveService):
+  // a board/agent move is not tied to a single ticket, so entity_type widens
+  // beyond the ticket/comment pair and `ticket_id` is passed as '' for them.
+  entity_type: 'ticket' | 'comment' | 'board' | 'agent';
   entity_id: string | number;
   action: 'created' | 'updated' | 'moved' | 'deleted' | 'status_changed' | 'archived' | 'unarchived';
   field_changed?: string;

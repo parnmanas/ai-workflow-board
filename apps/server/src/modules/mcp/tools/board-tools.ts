@@ -16,6 +16,8 @@ import { DEFAULT_PROMPT_TEMPLATES } from '../../../database/default-prompt-templ
 import { PromptTemplate } from '../../../entities/PromptTemplate';
 import { ok, err, safeJsonParse } from '../shared/helpers';
 import { writeRoutingConfigThrough } from '../../boards/routing-config.helper';
+import { getCallerAgent } from '../shared/session-auth';
+import { WorkspaceMoveService, WorkspaceMoveBlockedError } from '../../../services/workspace-move.service';
 import type { ToolContext } from './context';
 
 export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
@@ -271,6 +273,41 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
         await writeRoutingConfigThrough(dataSource, board.id);
       }
       return ok(board);
+    }
+  );
+
+  server.tool(
+    'move_board_to_workspace',
+    'Move a board (with all its columns + tickets) to a DIFFERENT workspace, carrying its workspace-scoped ' +
+    'dependencies along. A workspace is a scope boundary, so this hard re-stamps workspace_id on the board, every ' +
+    'column and every ticket (roots + subtasks), remaps each ticket role assignment to the destination ' +
+    'workspace\'s same-slug role (creating the role there if missing), and copies referenced prompt templates / ' +
+    'ws-level actions / resources / channels into the destination by name if absent (non-destructive). ' +
+    'ALWAYS dry-run first (dry_run=true, the default) to see exactly what will move / copy / remap and what blocks ' +
+    'the move — then re-call with dry_run=false to commit atomically (single transaction, all-or-nothing). ' +
+    'Companion agents (those holding roles on the board\'s tickets) are reported; pass carry_agents=true to move ' +
+    'them too, which is refused for any agent that also holds roles on tickets outside this board. Admin-gated.',
+    {
+      board_id: z.string().describe('Board ID to move'),
+      target_workspace_id: z.string().describe('Destination workspace ID'),
+      dry_run: z.boolean().optional().default(true)
+        .describe('true (default) returns the preview report without writing; false commits the move atomically'),
+      carry_agents: z.boolean().optional().default(false)
+        .describe('Also move companion agents (workspace_id + api keys + credential) when they hold no roles outside this board'),
+    },
+    async ({ board_id, target_workspace_id, dry_run, carry_agents }, extra: { sessionId?: string }) => {
+      const caller = getCallerAgent(extra);
+      const mover = new WorkspaceMoveService(dataSource as any, ctx.activityService);
+      const opts = { carry_agents, actor_id: caller?.agentId, actor_name: caller?.agentName };
+      try {
+        const report = dry_run
+          ? await mover.previewBoardMove(board_id, target_workspace_id, opts)
+          : await mover.commitBoardMove(board_id, target_workspace_id, opts);
+        return ok(report);
+      } catch (e: any) {
+        if (e instanceof WorkspaceMoveBlockedError) return err(`Move blocked: ${e.blockers.join('; ')}`);
+        return err(e?.message || 'Cross-workspace move failed');
+      }
     }
   );
 }

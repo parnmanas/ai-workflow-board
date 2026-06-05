@@ -5,8 +5,10 @@ import { BoardColumn } from '../../entities/BoardColumn';
 import { Ticket } from '../../entities/Ticket';
 import { BoardsController } from './boards.controller';
 import { AuthGuard } from '../../common/guards/auth.guard';
+import { AdminGuard } from '../../common/guards/admin.guard';
 import { PromptTemplatesModule } from '../prompt-templates/prompt-templates.module';
 import { AgentsModule } from '../agents/agents.module';
+import { WorkspaceMoveService } from '../../services/workspace-move.service';
 
 @Module({
   imports: [
@@ -18,6 +20,6 @@ import { AgentsModule } from '../agents/agents.module';
     forwardRef(() => AgentsModule),
   ],
   controllers: [BoardsController],
-  providers: [AuthGuard],
+  providers: [AuthGuard, AdminGuard, WorkspaceMoveService],
 })
 export class BoardsModule {}

@@ -8,6 +8,9 @@ import { BoardColumn } from '../../entities/BoardColumn';
 import { Ticket } from '../../entities/Ticket';
 import { TicketPrerequisite } from '../../entities/TicketPrerequisite';
 import { AuthGuard } from '../../common/guards/auth.guard';
+import { AdminGuard } from '../../common/guards/admin.guard';
+import { CurrentUser, CurrentUserData } from '../../common/decorators/current-user.decorator';
+import { WorkspaceMoveService, WorkspaceMoveBlockedError } from '../../services/workspace-move.service';
 import { DEFAULT_COLUMNS } from '../../database/database.module';
 import { DEFAULT_BOARD_ROUTING } from '../../db';
 import { PromptTemplatesService } from '../prompt-templates/prompt-templates.service';
@@ -45,6 +48,7 @@ export class BoardsController {
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly promptTemplatesService: PromptTemplatesService,
     private readonly agentWorkload: AgentWorkloadService,
+    private readonly workspaceMove: WorkspaceMoveService,
   ) {}
 
   @Get()
@@ -460,6 +464,46 @@ export class BoardsController {
       await writeRoutingConfigThrough(this.dataSource, board.id);
     }
     return res.json(board);
+  }
+
+  /**
+   * POST /api/boards/:id/move-to-workspace  (admin-only)
+   *
+   * Cross-workspace "move house" for a board + all its workspace-scoped
+   * dependencies (ticket 8882056b). Body:
+   *   { target_workspace_id: string, dry_run?: boolean (default true), carry_agents?: boolean }
+   *
+   * dry_run=true returns the preview report (what moves / copies / remaps /
+   * blocks) without writing. dry_run=false commits atomically in one
+   * transaction; a blocked move returns 409 and applies nothing.
+   */
+  @Post(':id/move-to-workspace')
+  @UseGuards(AdminGuard)
+  async moveToWorkspace(
+    @Param('id') id: string,
+    @Body() body: any,
+    @CurrentUser() user: CurrentUserData | undefined,
+    @Res() res: Response,
+  ) {
+    const targetWorkspaceId = body?.target_workspace_id;
+    if (!targetWorkspaceId) return res.status(400).json({ error: 'target_workspace_id is required' });
+    const dryRun = body?.dry_run !== false; // default true — never commit unless explicitly asked
+    const opts = {
+      carry_agents: !!body?.carry_agents,
+      actor_id: user?.id,
+      actor_name: user?.name,
+    };
+    try {
+      const report = dryRun
+        ? await this.workspaceMove.previewBoardMove(id, targetWorkspaceId, opts)
+        : await this.workspaceMove.commitBoardMove(id, targetWorkspaceId, opts);
+      return res.json(report);
+    } catch (e: any) {
+      if (e instanceof WorkspaceMoveBlockedError) {
+        return res.status(409).json({ error: e.message, blockers: e.blockers });
+      }
+      return res.status(400).json({ error: e?.message || 'Cross-workspace move failed' });
+    }
   }
 
   @Post(':id/archive')
