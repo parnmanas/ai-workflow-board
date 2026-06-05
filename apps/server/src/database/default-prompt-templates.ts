@@ -197,16 +197,16 @@ This ticket is in the In Progress column. Implement the work on a feature branch
 
 ## Steps
 
-1. **Create or reuse the feature branch**
-   - \`git fetch origin\`
+1. **Create or reuse the feature branch — always start from the latest tip**
+   - \`git fetch origin\` — **always**, every trigger. Never start work against a stale local ref.
    - Resolve the base branch:
      - If the trigger prompt includes a **Base repository** block, use the \`Base branch\` listed there. Verify your \`working_dir\` is a clone of the listed URL — if it isn't, stop and ask in a comment instead of guessing.
      - Otherwise, fall back to the repository's default branch (\`origin/HEAD\`).
-   - Pull the base branch to the latest tip: \`git checkout <base-branch> && git pull --ff-only origin <base-branch>\`.
-   - From that up-to-date base, \`git checkout -b ticket/{ticket_id_short}-{slug}\` where:
+   - Pull the base branch to the latest tip: \`git checkout <base-branch> && git pull --ff-only origin <base-branch>\`. Do this **every time** — for a brand-new branch *and* before reusing an existing one. Work always begins on the current tip of the base, never on a stale snapshot.
+   - **New branch** — from that up-to-date base, \`git checkout -b ticket/{ticket_id_short}-{slug}\` where:
      - \`ticket_id_short\` — first 8 chars of the ticket id.
      - \`slug\` — lowercase alphanumeric-and-hyphen slug derived from the ticket title (fall back to id only if no usable tokens).
-   - If the branch already exists (ticket bounced back from Review), \`git checkout\` and reuse it. Amend or append commits; do **not** start over with a new name.
+   - **Reused branch** (ticket bounced back from Review) — \`git checkout\` the existing branch and **immediately** \`git rebase origin/<base-branch>\` to lift your commits onto the latest tip *before* writing any new code. Amend or append commits afterwards; do **not** start over with a new name. If the rebase hits a conflict, integrate it the same way Merging does (fold same-meaning / duplicate changes; see \`merging_workflow\`) rather than abandoning the branch.
 
 2. **Do the work** — implement the requirement. Split commits by logical unit (one commit per one change).
 
@@ -242,9 +242,10 @@ The rule of thumb: **human answer → \`pend_ticket\`; another ticket finishing 
 ## Notes
 
 - **Never push directly to master / main / the default branch.** Reviewer and Merging stages gate that.
+- **Never start work from a stale state.** Always \`git fetch\` + pull the base to its latest tip — and \`git rebase origin/<base>\` a reused branch — *before* the first new commit (step 1). Building on an outdated base is what manufactures avoidable merge conflicts downstream.
 - If the plan is unclear or the requirement is ambiguous, leave a comment and stop — do not guess.
 - Out-of-scope bugs or refactor itches are not yours here. Propose a new ticket in a comment (or file it with \`create_ticket\` if it's a hard blocker — see "When to park instead of bouncing back" above).
-- Keep the feature branch rebased onto the latest default before the final push. Merging expects a clean ff.
+- Keep the feature branch rebased onto the latest default before the final push. Merging will rebase and actively integrate the branch onto the default if it has fallen behind, but a clean rebase here keeps that step trivial.
 - \`--force-with-lease\` is OK on the feature branch only. Force-pushing to a shared branch (default, release, …) is forbidden.
 - For PR-gated repos, open the PR with \`gh pr create --draft\` during this stage and include its URL in the comment so Review can inspect the diff remotely.
 `,
@@ -326,32 +327,39 @@ You handed the ticket off to Review. You are triggered here because the reviewer
   },
   {
     name: 'merging_workflow',
-    description: 'Merging column default workflow — assignee fast-forwards the feature branch into default, pushes, deletes the branch (local + remote), bumps parent submodule ref if needed, and moves the ticket to Done.',
+    description: 'Merging column default workflow — assignee rebases the feature branch onto the latest default and actively integrates same-meaning conflicts (escalating only on a genuinely big problem), lands it, deletes the branch (local + remote), bumps parent submodule ref if needed, and moves the ticket to Done.',
     category: 'default_workflow',
     column_match: 'merging',
-    content: `# Merging — Fast-Forward to Default (assignee)
+    content: `# Merging — Integrate into Default (assignee)
 
 This ticket is in the Merging column, which means Review approved the diff. Your job: land the feature branch on the default branch, delete the feature branch (local + remote), and advance the ticket to Done.
 
 > **Environment**: assignee has a full local repo. This stage exists because reviewer / reporter may not — so all real merge work happens here.
 >
-> **Definition of merged**: a local merge is not enough. **(a)** \`origin/<default>\` must point at the merge commit, and **(b)** the feature branch must be deleted from **both** local and remote. Verify with commands at each step.
+> **Integrate, don't bounce on first friction.** Since you branched, similar or overlapping work may already have landed on the default. A clean fast-forward is the happy path — but when it doesn't apply, you are **expected to rebase and actively integrate**: resolve conflicts whose two sides mean the same thing, fold duplicate/overlapping changes together, and carry on. Bouncing the ticket at the first conflict is the wrong default. Escalate (bounce / pend) **only** on a genuinely big problem — see "When to integrate vs. escalate" below.
+>
+> **Definition of merged**: a local merge is not enough. **(a)** \`origin/<default>\` must point at the integrated commit(s), and **(b)** the feature branch must be deleted from **both** local and remote. Verify with commands at each step.
 
 ## Steps
 
 1. **Identify the default branch** — \`git symbolic-ref refs/remotes/origin/HEAD | sed 's@^refs/remotes/origin/@@'\` (typically \`master\` or \`main\`).
 
-2. **Refresh**
+2. **Rebase onto the latest default and integrate**
    - \`git fetch origin --prune\`
    - \`git checkout <feature-branch>\`
-   - If behind the default: \`git rebase origin/<default>\`, then \`git push --force-with-lease\` (feature branch only — never the default).
-   - **On conflict**: do NOT resolve it yourself. \`add_comment\` "rebase conflict — assignee input needed" and \`move_ticket\` back to **In Progress**.
+   - If behind the default: \`git rebase origin/<default>\`.
+   - **On conflict — integrate, don't reflexively bounce.** Inspect each conflicting hunk:
+     - **Similar / duplicate work already on the default** (someone landed the same or an overlapping change first) and the two sides mean the same thing → integrate them: take the default's version (or the merged superset), drop your now-redundant duplicate, and confirm the result still expresses this ticket's intent.
+     - **Mechanical textual conflict** (imports, adjacent edits, moved lines, formatting) with a clear correct resolution → resolve it.
+     - \`git add\` the resolved files and \`git rebase --continue\` until the rebase is clean.
+     - **Escalate only on a genuinely big problem** — see "When to integrate vs. escalate" below. In that case \`git rebase --abort\`, \`add_comment\` naming which boundary you hit, and \`move_ticket\` back to **In Progress** (or \`pend_ticket\` if it needs a human decision).
+   - After a successful rebase: \`git push --force-with-lease\` (feature branch only — never the default).
 
-3. **Merge (ff-only)**
+3. **Merge into default**
    - \`git checkout <default-branch>\`
    - \`git pull --ff-only origin <default-branch>\`
-   - \`git merge --ff-only <feature-branch>\`
-   - If the ff fails, retry step 2 once. If it still fails, bounce to **In Progress**.
+   - \`git merge --ff-only <feature-branch>\` — after step 2's rebase this fast-forwards cleanly.
+   - **If the ff fails** because the default moved again while you were rebasing: re-run step 2 (\`git checkout <feature-branch> && git rebase origin/<default>\`, integrating any fresh conflicts), then retry the ff. This loop is normal under concurrent merges — repeat until it fast-forwards, escalating only if you hit a genuinely big problem per the boundary below.
 
 4. **Push to origin (required)**
    - \`git push origin <default-branch>\`
@@ -376,16 +384,28 @@ This ticket is in the Merging column, which means Review approved the diff. Your
    - Default branch name + \`origin push: OK\`.
    - Feature branch name + \`local/remote delete: OK\`.
    - Parent bump commit SHA (if step 6 applied).
+   - **If you integrated any rebase/merge conflicts in step 2/3**: which hunk(s) conflicted, why each was safe to fold (same meaning / duplicate work already on the default / mechanical), and confirmation that build + relevant tests still pass after the integration. This is the audit trail for the relaxed-ff policy.
    - If any step failed, record the failure mode precisely so Done's sanity check can surface it.
 
 8. **Move to Done** — \`move_ticket\` to the **Done** column. (Leave in Merging only if you recorded a \`manual merge required\` block above.)
+
+## When to integrate vs. escalate
+
+**Default to integrating.** Overlapping or duplicate work landing on the default before you is expected, not exceptional — resolve it in step 2/3 and move on. Bounce back to In Progress (or \`pend_ticket\` for a human) **only** when the conflict is a genuinely big problem, namely any of:
+
+- **Semantic conflict** — the same lines were changed with a *different intent*, so choosing or merging the sides actually changes behaviour. That's a real decision, not a mechanical resolution.
+- **Data / schema loss risk** — integrating would drop or override a migration, column, or persisted field, or otherwise risks corrupting/clobbering data.
+- **Build or tests break after integration** — you rebased/merged but \`build\` or the relevant tests now fail and the fix isn't an obvious mechanical one.
+- **Human judgment required** — the correct resolution depends on product/architecture intent only the reporter or a human can settle.
+
+If none of these apply, integrate and proceed — record what you folded in the step-7 comment. If one does apply, escalate with a precise comment naming which boundary you hit, then bounce or pend; do not guess a resolution through a semantic or data-loss conflict.
 
 ## Notes
 
 - **A local merge is not completion.** Step 4's verification (\`HEAD == origin/<default>\`) is the threshold.
 - **Feature branches must be deleted on BOTH sides.** Deleting only one leaves dangling refs.
 - **Never force-push master / main / the default branch.** Ever. \`--force-with-lease\` is only acceptable on the feature branch during rebase.
-- **PR-gated repos** — replace steps 3–5 with \`gh pr merge <pr> --squash --delete-branch\`. After merging, verify with \`gh pr view <pr> --json state,mergeCommit\` (\`state\` must be \`MERGED\`). If \`--delete-branch\` silently failed, fall back to manual \`git push origin --delete\` + \`git branch -d\`.
+- **PR-gated repos** — replace steps 3–5 with \`gh pr merge <pr> --squash --delete-branch\`. After merging, verify with \`gh pr view <pr> --json state,mergeCommit\` (\`state\` must be \`MERGED\`). If \`--delete-branch\` silently failed, fall back to manual \`git push origin --delete\` + \`git branch -d\`. If the PR reports conflicts, integrate them locally first via step 2 (rebase + fold same-meaning changes, push \`--force-with-lease\` on the feature branch), then re-run the merge — same integrate-vs-escalate boundary applies.
 - **No \`gh\` available and direct push rejected** → stop, record \`"manual merge required"\`, leave the ticket in Merging for a human.
 - **Submodule changes must run through step 6.** Skipping the parent bump leaves every other environment pointing at the old ref.
 - After merge, a quick sanity build on the default branch is cheap insurance. If it's broken, open a follow-up ticket or revert immediately.
