@@ -235,17 +235,44 @@ own dedicated git worktree:
   sat on the base branch that checkout would fail. Detaching frees the branch
   so every ticket worktree can check it out per the documented flow. Side
   effects: the base `working_dir` shows a detached HEAD (expected — agents
-  work in worktrees, not the base), and the `pull_working_dir` maintenance
-  verb is a no-op on a detached HEAD (worktrees fetch `origin/<base>`
-  themselves, so the base no longer needs pulling).
+  work in worktrees, not the base). The `pull_working_dir` maintenance verb
+  detects the detached base and runs `git fetch --all --prune` instead of
+  `git pull --ff-only` (which can't run on a detached HEAD) — refreshing the
+  `origin/<base>` refs the ticket worktrees branch off, which is the useful
+  work there. No base/chat session assumes the base repo is on a branch:
+  base/chat sessions only spawn a CLI with `cwd = working_dir` to answer chat,
+  and self-update operates on the *manager's own* repo, not the agent's
+  `working_dir` — so a detached base is inert for every flow except the now
+  detached-aware `pull_working_dir`.
+- **Concurrent base-branch checkout**: the column guide's first step is
+  `git checkout <base-branch>`, and a branch can be checked out in only one
+  worktree at a time. With `subagentConcurrency` ≥ 2 two tickets can transiently
+  both want the base branch checked out, and the second `checkout <base>` then
+  fails with *"<base> is already used by worktree …"*. The detached base frees
+  the branch for the first taker, and the documented flow leaves the base
+  branch immediately (`checkout -b ticket/…`), so the window is small and
+  cap=1 (the default) never hits it. Agents that hit the collision should
+  branch directly off the remote-tracking ref instead —
+  `git checkout -b ticket/<id>-<slug> origin/<base>` never claims the local
+  base branch and so never collides.
 - **Fallback**: when `working_dir` is not a git repo, or `git worktree add`
   fails (old git, disk error), `resolveCwd` returns the shared base cwd with
   `isWorktree=false` and the legacy single-cwd behavior applies.
-- **Cleanup**: a 10-minute sweep (`WorktreeManager.sweep`) reclaims worktrees
-  that have no live session **and** a clean working tree. Dirty trees (a
-  pended ticket with unsaved work) and worktrees with a live session are kept.
-  Removing a clean worktree loses nothing recoverable — the branch ref stays
-  in the repo and resume recreates the worktree on demand.
+- **Cleanup** happens on two paths:
+  - *Terminal tickets* — when a ticket lands in a terminal column (done/merged),
+    `handleBoardUpdate` reads the freshly-stamped `Ticket.terminal_entered_at`
+    and calls `WorktreeManager.removeTicketWorktrees()` to force-remove **all**
+    of that ticket's per-role worktrees **regardless of dirty state**. This is
+    deliberate: the work is committed to its branch (or already merged), so the
+    checkout is disposable (the branch ref survives). It also can't rely on the
+    sweep below — in this repo a worktree goes permanently dirty after any build
+    (untracked `tsbuildinfo` / `database/`), so a dirty-preserving sweep would
+    never reclaim a done/merged ticket's tree.
+  - *Idle sweep* — a 10-minute sweep (`WorktreeManager.sweep`) reclaims
+    worktrees that have no live session **and** a clean working tree. Dirty
+    trees (a pended ticket with unsaved work) and worktrees with a live session
+    are kept. Removing a clean worktree loses nothing recoverable — the branch
+    ref stays in the repo and resume recreates the worktree on demand.
 
 Gated by `delegation.worktreeIsolation` (default `true`); set `false` to keep
 the legacy shared-cwd path. This is an agent-manager-internal change — no SSE
