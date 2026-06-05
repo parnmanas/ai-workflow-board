@@ -578,9 +578,37 @@ export class AgentsController {
       return res.json(report);
     } catch (e: any) {
       if (e instanceof WorkspaceMoveBlockedError) {
-        return res.status(409).json({ error: e.message, blockers: e.blockers });
+        // Structured blockers travel as-is; `messages` keeps the legacy string
+        // surface for older clients.
+        return res.status(409).json({ error: e.message, blockers: e.blockers, messages: e.messages });
       }
       return res.status(400).json({ error: e?.message || 'Cross-workspace agent move failed' });
+    }
+  }
+
+  /**
+   * POST /api/agents/:id/move-to-workspace/remedy  (admin-only)
+   *
+   * Execute a structured move-blocker remedy (ticket 9efa643b) inline from the
+   * agent-move preview. Body: { action: string, params: object }. Mirrors the
+   * board controller's remedy endpoint — both delegate to the same
+   * WorkspaceMoveService.runMoveRemedy so the two move UIs share one executor.
+   */
+  @Post(':id/move-to-workspace/remedy')
+  @UseGuards(AdminGuard)
+  async moveToWorkspaceRemedy(
+    @Param('id') id: string,
+    @Body() body: any,
+    @CurrentUser() user: CurrentUserData | undefined,
+    @Res() res: Response,
+  ) {
+    const action = body?.action;
+    if (!action) return res.status(400).json({ error: 'action is required' });
+    try {
+      const result = await this.workspaceMove.runMoveRemedy(action, body?.params || {}, { id: user?.id, name: user?.name });
+      return res.json(result);
+    } catch (e: any) {
+      return res.status(400).json({ error: e?.message || 'Move remedy failed' });
     }
   }
 

@@ -490,6 +490,8 @@ export class BoardsController {
     const dryRun = body?.dry_run !== false; // default true — never commit unless explicitly asked
     const opts = {
       carry_agents: !!body?.carry_agents,
+      // ticket 9efa643b: per-agent carry exclusion (drop_companion_agent remedy).
+      exclude_agent_ids: Array.isArray(body?.exclude_agent_ids) ? body.exclude_agent_ids : undefined,
       actor_id: user?.id,
       actor_name: user?.name,
     };
@@ -500,9 +502,38 @@ export class BoardsController {
       return res.json(report);
     } catch (e: any) {
       if (e instanceof WorkspaceMoveBlockedError) {
-        return res.status(409).json({ error: e.message, blockers: e.blockers });
+        // Structured blockers travel as-is; `messages` keeps the legacy string
+        // surface for older clients.
+        return res.status(409).json({ error: e.message, blockers: e.blockers, messages: e.messages });
       }
       return res.status(400).json({ error: e?.message || 'Cross-workspace move failed' });
+    }
+  }
+
+  /**
+   * POST /api/boards/:id/move-to-workspace/remedy  (admin-only)
+   *
+   * Execute a structured move-blocker remedy (ticket 9efa643b) so the operator
+   * can clear a preview blocker inline without leaving the screen. Body:
+   *   { action: string, params: object }
+   * The :id board param scopes the call to the board-move UI; the remedy itself
+   * operates on the agent/ticket refs the blocker reported.
+   */
+  @Post(':id/move-to-workspace/remedy')
+  @UseGuards(AdminGuard)
+  async moveToWorkspaceRemedy(
+    @Param('id') id: string,
+    @Body() body: any,
+    @CurrentUser() user: CurrentUserData | undefined,
+    @Res() res: Response,
+  ) {
+    const action = body?.action;
+    if (!action) return res.status(400).json({ error: 'action is required' });
+    try {
+      const result = await this.workspaceMove.runMoveRemedy(action, body?.params || {}, { id: user?.id, name: user?.name });
+      return res.json(result);
+    } catch (e: any) {
+      return res.status(400).json({ error: e?.message || 'Move remedy failed' });
     }
   }
 

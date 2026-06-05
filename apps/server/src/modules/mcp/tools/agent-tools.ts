@@ -142,7 +142,10 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
     'cross_ref_policy=clear to delete those assignments / blank those ids instead. Actions in other workspaces that ' +
     'target this agent are reported as warnings. ALWAYS dry-run first (dry_run=true, the default) to see exactly what ' +
     'will move / copy / remap / block, then re-call with dry_run=false to commit atomically (single transaction, ' +
-    'all-or-nothing). Manager-type agents are workspace-less and cannot be moved. Admin-gated.',
+    'all-or-nothing). The dry-run report\'s `blockers` are STRUCTURED objects ({ code, message, agent_id?, ' +
+    'ticket_ids?, fields?, credential_id?, api_key_ids?, remedies[] }) — `message` is the human-readable reason and ' +
+    '`remedies` lists the actions (policy switch / unassign / clear-credential) that clear each blocker. ' +
+    'Manager-type agents are workspace-less and cannot be moved. Admin-gated.',
     {
       agent_id: z.string().describe('Agent ID to move'),
       target_workspace_id: z.string().describe('Destination workspace ID'),
@@ -163,7 +166,7 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
           : await mover.commitAgentMove(agent_id, target_workspace_id, opts);
         return ok(report);
       } catch (e: any) {
-        if (e instanceof WorkspaceMoveBlockedError) return err(`Move blocked: ${e.blockers.join('; ')}`);
+        if (e instanceof WorkspaceMoveBlockedError) return err(`Move blocked: ${e.messages.join('; ')}`);
         return err(e?.message || 'Cross-workspace agent move failed');
       }
     }

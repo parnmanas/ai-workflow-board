@@ -286,7 +286,10 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
     'ALWAYS dry-run first (dry_run=true, the default) to see exactly what will move / copy / remap and what blocks ' +
     'the move — then re-call with dry_run=false to commit atomically (single transaction, all-or-nothing). ' +
     'Companion agents (those holding roles on the board\'s tickets) are reported; pass carry_agents=true to move ' +
-    'them too, which is refused for any agent that also holds roles on tickets outside this board. Admin-gated.',
+    'them too, which is refused for any agent that also holds roles on tickets outside this board (pass that agent\'s ' +
+    'id in exclude_agent_ids to move the board without it). The dry-run report\'s `blockers` are STRUCTURED objects ' +
+    '({ code, message, agent_id?, ticket_ids?, remedies[] }) — `message` is the human-readable reason; `remedies` ' +
+    'lists the actions that clear each blocker. Admin-gated.',
     {
       board_id: z.string().describe('Board ID to move'),
       target_workspace_id: z.string().describe('Destination workspace ID'),
@@ -294,18 +297,20 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
         .describe('true (default) returns the preview report without writing; false commits the move atomically'),
       carry_agents: z.boolean().optional().default(false)
         .describe('Also move companion agents (workspace_id + api keys + credential) when they hold no roles outside this board'),
+      exclude_agent_ids: z.array(z.string()).optional()
+        .describe('Companion agent ids to EXCLUDE from the carry even when carry_agents=true — the board moves without them (write-free way to clear a companion_agent_outside_roles blocker)'),
     },
-    async ({ board_id, target_workspace_id, dry_run, carry_agents }, extra: { sessionId?: string }) => {
+    async ({ board_id, target_workspace_id, dry_run, carry_agents, exclude_agent_ids }, extra: { sessionId?: string }) => {
       const caller = getCallerAgent(extra);
       const mover = new WorkspaceMoveService(dataSource as any, ctx.activityService);
-      const opts = { carry_agents, actor_id: caller?.agentId, actor_name: caller?.agentName };
+      const opts = { carry_agents, exclude_agent_ids, actor_id: caller?.agentId, actor_name: caller?.agentName };
       try {
         const report = dry_run
           ? await mover.previewBoardMove(board_id, target_workspace_id, opts)
           : await mover.commitBoardMove(board_id, target_workspace_id, opts);
         return ok(report);
       } catch (e: any) {
-        if (e instanceof WorkspaceMoveBlockedError) return err(`Move blocked: ${e.blockers.join('; ')}`);
+        if (e instanceof WorkspaceMoveBlockedError) return err(`Move blocked: ${e.messages.join('; ')}`);
         return err(e?.message || 'Cross-workspace move failed');
       }
     }
