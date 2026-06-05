@@ -2,7 +2,7 @@
 //
 // Validates:
 //   (a) Non-transient exits (exit 0 w/ no comment, exit 41, etc.) increment
-//       the failure counter and open the breaker after threshold (default 3).
+//       the failure counter and open the breaker after threshold (default 5).
 //   (b) Transient exits (143/SIGTERM, 137/SIGKILL, 130/SIGINT) do NOT count.
 //   (c) An open breaker blocks dispatch (shouldBlock returns reason string).
 //   (d) reset() / resetAgent() clears the breaker.
@@ -50,6 +50,46 @@ test('breaker opens after threshold consecutive failures', () => {
   assert.ok(reason, 'shouldBlock returns a reason string');
   assert.ok(reason.includes('circuit_breaker_open'));
   assert.ok(reason.includes('3 consecutive'));
+});
+
+test('default threshold is 5 consecutive failures before opening', () => {
+  const cb = new CircuitBreaker(); // no opts → DEFAULT_THRESHOLD
+  const key = CircuitBreaker.key('agent-1', 'ticket-1', 'assignee');
+
+  // Four failures — breaker stays closed
+  for (let i = 1; i <= 4; i++) {
+    const r = cb.record(key, 41, 'Please set GEMINI_API_KEY');
+    assert.equal(r.justOpened, false, `failure ${i} should not open the breaker`);
+    assert.equal(r.entry.consecutiveFailures, i);
+    assert.equal(cb.shouldBlock(key), null, `dispatch allowed after ${i} failures`);
+  }
+
+  // Fifth consecutive failure — breaker opens and ticket should pend
+  const r5 = cb.record(key, 41, 'Please set GEMINI_API_KEY');
+  assert.equal(r5.justOpened, true, 'fifth consecutive failure opens the breaker');
+  assert.equal(r5.entry.consecutiveFailures, 5);
+  assert.ok(cb.shouldBlock(key), 'dispatch blocked after 5 failures');
+});
+
+test('a successful response mid-streak resets the count (no pend before 5 consecutive)', () => {
+  const cb = new CircuitBreaker(); // default threshold = 5
+  const key = CircuitBreaker.key('agent-1', 'ticket-1', 'assignee');
+
+  // 4 failures, then a success (agent posts a comment → reset() is called)
+  for (let i = 0; i < 4; i++) cb.record(key, 41, 'boom');
+  cb.reset(key); // success clears the counter
+
+  // 4 more failures — still below threshold because the streak restarted
+  for (let i = 1; i <= 4; i++) {
+    const r = cb.record(key, 41, 'boom');
+    assert.equal(r.justOpened, false, `post-reset failure ${i} should not open the breaker`);
+  }
+  assert.equal(cb.shouldBlock(key), null, 'still not blocked — only 4 consecutive since reset');
+
+  // The 5th consecutive failure since the reset finally opens it
+  const r5 = cb.record(key, 41, 'boom');
+  assert.equal(r5.justOpened, true, '5 consecutive failures after reset opens the breaker');
+  assert.equal(r5.entry.consecutiveFailures, 5);
 });
 
 test('reset clears the breaker', () => {

@@ -24,8 +24,10 @@ const TRANSIENT_EXIT_CODES = new Set([
 ]);
 
 /** Default: open the breaker after this many consecutive non-transient
- *  silent exits for the same (agent, ticket, role). */
-const DEFAULT_THRESHOLD = 3;
+ *  silent exits for the same (agent, ticket, role). A single successful
+ *  response (the agent posts a comment / clean-exits) calls reset() and
+ *  clears the counter — only 5 *consecutive* failures pend the ticket. */
+const DEFAULT_THRESHOLD = 5;
 
 /** After the breaker opens, how long to block re-dispatch before allowing
  *  one "half-open" probe attempt. Set high because non-transient errors
