@@ -31,3 +31,4 @@ export { ActionRun } from './ActionRun';
 export { StuckTicketAlert } from './StuckTicketAlert';
 export { ColumnRolePolicy } from './ColumnRolePolicy';
 export { TicketPrerequisite } from './TicketPrerequisite';
+export { BenchmarkScore } from './BenchmarkScore';
