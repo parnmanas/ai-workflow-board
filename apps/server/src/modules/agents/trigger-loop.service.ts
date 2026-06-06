@@ -182,6 +182,23 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    // Benchmark evaluator dispatch (ticket 684c012b). A candidate child that
+    // lands on a `review`-kind column is scored by the run's evaluator agents
+    // rather than flowing through the normal reviewer routing — evaluators are
+    // recorded on the run as `evaluator:<id>` labels (not reviewer role
+    // assignments, which are unique per (ticket, role)). This branch is gated
+    // strictly on the `benchmark-candidate` label so non-benchmark tickets are
+    // entirely unaffected. We RETURN after dispatching so the candidate parks
+    // in Review for scoring instead of auto-advancing past it (it has an
+    // assignee but no reviewer, which would otherwise trip `_autoAdvanceUnassigned`).
+    if (log.action === 'moved' && (col as any).kind === 'review') {
+      const candidateLabels = safeJsonParse<string[]>((ticket as any).labels, []);
+      if (Array.isArray(candidateLabels) && candidateLabels.includes('benchmark-candidate')) {
+        await this._dispatchBenchmarkEvaluators(ticket, col, log.actor_id || '');
+        return;
+      }
+    }
+
     // v0.41 — read role slugs straight off the column row. Replaces the
     // old `Board.routing_config[col.name.toLowerCase()]` lookup; column
     // name compares are forbidden in the dispatch path.
@@ -743,6 +760,80 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Benchmark evaluator dispatch (ticket 684c012b): when a candidate child
+   * lands on a `review`-kind column, wake every evaluator agent recorded on the
+   * run so they score the candidate and call `submit_benchmark_score`.
+   *
+   * Evaluators are read from the RUN ticket's `evaluator:<agentId>` labels, not
+   * from a reviewer role assignment — `TicketRoleAssignment` is unique on
+   * (ticket, role) so the reviewer slot holds one agent, but a benchmark wants
+   * an arbitrary evaluator pool. The score table + these labels model that.
+   *
+   * Gating (all must hold; first failure = silent skip):
+   *   - the candidate carries the `benchmark-candidate` label (checked by caller)
+   *   - the candidate has a parent run ticket
+   *   - the run's board has `benchmark_mode = 'on'` (belt-and-suspenders so a
+   *     stray label on an ordinary board does nothing)
+   *   - the run carries at least one `evaluator:<id>` label
+   *
+   * Each evaluator trigger bypasses the focus selector (an evaluator may be
+   * focused elsewhere but must still score) and carries an inline column prompt
+   * telling the agent to score via `submit_benchmark_score`, mirroring how
+   * `_dispatchPostDoneReview` injects the self-improvement prompt.
+   */
+  private async _dispatchBenchmarkEvaluators(
+    ticket: Ticket,
+    col: BoardColumn,
+    actorId: string,
+  ): Promise<void> {
+    if (!ticket.parent_id) {
+      this.logService.info('MCP', 'benchmark_eval skipped (candidate has no run parent)', {
+        ticket_id: ticket.id,
+      });
+      return;
+    }
+    const board = await this.dataSource.getRepository(Board).findOne({ where: { id: col.board_id } });
+    if (!board || (board as any).benchmark_mode !== 'on') {
+      this.logService.info('MCP', 'benchmark_eval skipped (board not in benchmark_mode)', {
+        ticket_id: ticket.id, board_id: col.board_id,
+      });
+      return;
+    }
+    const run = await this.dataSource.getRepository(Ticket).findOne({ where: { id: ticket.parent_id } });
+    if (!run) return;
+    const runLabels = safeJsonParse<string[]>((run as any).labels, []);
+    const evaluatorIds = Array.isArray(runLabels)
+      ? runLabels
+          .filter((l) => typeof l === 'string' && l.startsWith('evaluator:'))
+          .map((l) => l.slice('evaluator:'.length))
+          .filter(Boolean)
+      : [];
+    if (evaluatorIds.length === 0) {
+      this.logService.info('MCP', 'benchmark_eval skipped (run has no evaluator:<id> labels)', {
+        ticket_id: ticket.id, run_ticket_id: run.id,
+      });
+      return;
+    }
+
+    for (const evaluatorAgentId of evaluatorIds) {
+      // Self-trigger guard: an evaluator that just moved the candidate into
+      // Review shouldn't immediately re-fire itself.
+      if (evaluatorAgentId === actorId) continue;
+      await this._emitTrigger(
+        ticket, evaluatorAgentId, 'evaluator', 'benchmark_review', actorId,
+        {
+          bypassFocus: true,
+          columnPromptOverride: {
+            template_id: 'benchmark-eval-inline',
+            name: 'Benchmark Evaluation',
+            content: TriggerLoopService.BENCHMARK_EVAL_PROMPT,
+          },
+        },
+      );
+    }
+  }
+
+  /**
    * Manually wake an agent on a ticket — bound to the "Trigger" button on the
    * ticket UI and any other deliberate user-initiated kick. Just emits the SSE
    * event; no DB row beyond the explicit `trigger_dispatched` audit, no
@@ -986,6 +1077,47 @@ you should never have been woken — exit immediately with no action.
 Keep follow-up ticket titles tight and outcome-shaped:
   GOOD: "Add lint rule that bans cross-module entity imports"
   BAD:  "We had some import problems we should look at"
+`;
+
+  /**
+   * Inline column prompt injected when a benchmark candidate lands in Review and
+   * its run's evaluator agents are woken to score it (ticket 684c012b). Mirrors
+   * SELF_IMPROVEMENT_PROMPT — delivered via `columnPromptOverride` so the
+   * evaluator gets scoring instructions without a board column_prompt row.
+   */
+  private static readonly BENCHMARK_EVAL_PROMPT = `# Benchmark Evaluation
+
+You are an EVALUATOR for a benchmark run. A candidate ticket (one agent's
+attempt at the run's task) has reached Review. Score it — do NOT modify the
+candidate's branch or move the ticket.
+
+## What to do
+
+1. Read the candidate ticket (\`mcp__awb__get_ticket\`): its description is the
+   task, and its comments + branch summarise what the candidate's assignee
+   produced. Read the parent run ticket too for the full task prompt and any
+   \`## Rubric\` section that defines the scoring dimensions and range.
+
+2. Inspect the candidate's actual work — the feature branch it pushed and the
+   comment it left in Review (build/test results, caveats). Judge it on the
+   run's rubric. If the run defines no rubric, default to these dimensions on a
+   0..10 scale: \`correctness\`, \`quality\`, \`speed\`.
+
+3. For EACH dimension, call \`mcp__awb__submit_benchmark_score\` with:
+   - \`candidate_ticket_id\` — this candidate ticket's id
+   - \`dimension\` — the dimension name
+   - \`score\` — your numeric score within the rubric's range
+   - \`rationale\` — one or two sentences justifying the score
+   Re-scoring the same dimension overwrites your previous row, so it is safe to
+   correct yourself.
+
+## Rules
+
+- Score only. Do not edit code, push commits, or move the candidate ticket —
+  the candidate parks in Review for scoring by design.
+- Your scores are recorded as your own evaluator identity; other evaluators
+  score the same candidate independently. Do not coordinate or average.
+- Keep rationales concrete and tied to what you actually inspected.
 `;
 
   /**
