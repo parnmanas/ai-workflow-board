@@ -30,6 +30,7 @@ import { WorkspaceRolesModule } from './modules/workspace-roles/workspace-roles.
 import { AgentManagerModule } from './modules/agent-manager/agent-manager.module';
 import { UserChannelsModule } from './modules/user-channels/user-channels.module';
 import { ColumnPoliciesModule } from './modules/column-policies/column-policies.module';
+import { BenchmarksModule } from './modules/benchmarks/benchmarks.module';
 
 @Module({
   imports: [
@@ -86,6 +87,7 @@ import { ColumnPoliciesModule } from './modules/column-policies/column-policies.
     AgentManagerModule,
     UserChannelsModule,
     ColumnPoliciesModule,
+    BenchmarksModule,
   ],
 })
 export class AppModule {}
