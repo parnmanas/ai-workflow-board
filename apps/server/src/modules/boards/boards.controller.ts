@@ -67,13 +67,24 @@ export class BoardsController {
 
   @Post()
   async create(@Body() body: any, @Res() res: Response) {
-    const { name, description = '', workspace_id } = body;
+    const { name, description = '', workspace_id, benchmark_mode } = body;
     if (!name) return res.status(400).json({ error: 'name is required' });
     if (!workspace_id) return res.status(400).json({ error: 'workspace_id is required' });
+    // benchmark_mode may be set at create time (parity with the update handler);
+    // validated against the same allow-list so a board can be born in benchmark mode.
+    if (benchmark_mode !== undefined) {
+      const allowed = ['off', 'on'];
+      if (!allowed.includes(String(benchmark_mode))) {
+        return res.status(400).json({
+          error: `benchmark_mode must be one of: ${allowed.join(', ')}`,
+        });
+      }
+    }
 
     const board = await this.boardRepo.save(this.boardRepo.create({
       name, description, workspace_id,
       routing_config: JSON.stringify(DEFAULT_BOARD_ROUTING),
+      ...(benchmark_mode !== undefined ? { benchmark_mode: String(benchmark_mode) } : {}),
     }));
     const defaultCols = DEFAULT_COLUMNS.map(c => ({ ...c, board_id: board.id }));
     const savedCols = await this.colRepo.save(defaultCols.map(c => this.colRepo.create(c)));
