@@ -384,6 +384,8 @@ export default function Board() {
   const resourcesLink = wsId && boardId ? `/ws/${wsId}/boards/${boardId}/resources` : '#';
   const settingsLink = wsId && boardId ? `/ws/${wsId}/boards/${boardId}/settings` : '#';
   const archiveLink = wsId && boardId ? `/ws/${wsId}/boards/${boardId}/archive` : '#';
+  // Leaderboard link is only meaningful on a benchmark-mode board (ticket 684c012b).
+  const leaderboardLink = wsId && boardId ? `/ws/${wsId}/boards/${boardId}/leaderboard` : '#';
 
   const headerActionStyle: React.CSSProperties = {
     padding: '6px 14px',
@@ -514,6 +516,11 @@ export default function Board() {
                   } : {}),
                 }}
               >{board.paused_at ? '▶ Resume Board' : '⏸ Pause Board'}</button>
+            )}
+            {board?.benchmark_mode === 'on' && (
+              <Link to={leaderboardLink} style={headerActionStyle}>
+                🏆 Leaderboard
+              </Link>
             )}
             <Link to={resourcesLink} style={headerActionStyle}>
               📁 Resources

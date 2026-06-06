@@ -13,6 +13,7 @@ import BoardSettingsPage from './components/BoardSettingsPage';
 import BoardResourcesPage from './components/BoardResourcesPage';
 import BoardArchivePage from './components/BoardArchivePage';
 import BoardActionsPage from './components/BoardActionsPage';
+import BenchmarkLeaderboardPage from './components/BenchmarkLeaderboardPage';
 import BoardsIndexPage from './components/BoardsIndexPage';
 import WorkspaceUsersPage from './components/WorkspaceUsersPage';
 import WorkspaceChannelsPage from './components/WorkspaceChannelsPage';
@@ -157,6 +158,7 @@ function AppContent() {
           <Route path="boards/:boardId/actions" element={<BoardActionsPage />} />
           <Route path="boards/:boardId/settings" element={<BoardSettingsPage />} />
           <Route path="boards/:boardId/archive" element={<BoardArchivePage />} />
+          <Route path="boards/:boardId/leaderboard" element={<BenchmarkLeaderboardPage />} />
           <Route path="chat" element={<ChatPage />} />
           <Route path="users" element={<WorkspaceUsersPage />} />
           <Route path="agents" element={<AgentsPage />} />
