@@ -42,6 +42,10 @@ const EXPECTED_TOOLS = [
   'move_board_to_workspace',
   // Ticket 868ead64 — cross-workspace agent move.
   'move_agent_to_workspace',
+  // Ticket 684c012b — benchmark scoring + leaderboard surface.
+  'submit_benchmark_score',
+  'get_benchmark_leaderboard',
+  'create_benchmark_run',
 ];
 
 test('MCP initialize + tools/list returns expected AWB tool surface', async (t) => {

@@ -7,6 +7,7 @@ import { McpServicesModule } from './mcp-services.module';
 import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
 import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module';
 import { ActionsModule } from '../actions/actions.module';
+import { BenchmarksModule } from '../benchmarks/benchmarks.module';
 
 @Module({
   imports: [
@@ -16,6 +17,8 @@ import { ActionsModule } from '../actions/actions.module';
     ChatRoomsModule,
     WorkspaceRolesModule,
     ActionsModule,
+    // Provides BenchmarkService for the benchmark MCP tools (ticket 684c012b).
+    BenchmarksModule,
   ],
   controllers: [McpController],
 })

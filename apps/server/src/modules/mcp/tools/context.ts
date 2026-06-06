@@ -45,6 +45,7 @@ import { RoomMessagingService } from '../../chat-rooms/room-messaging.service';
 import type { TicketRoleAssignmentService } from '../../workspace-roles/ticket-role-assignment.service';
 import type { ActionsService } from '../../actions/actions.service';
 import { TicketPrerequisitesService } from '../../tickets/ticket-prerequisites.service';
+import { BenchmarkService } from '../../benchmarks/benchmark.service';
 
 /**
  * Minimal surface that MCP tools need from the logging subsystem.
@@ -105,6 +106,11 @@ export interface ToolContext {
   // on the DataSource since the service is stateless over dataSource +
   // activityService. Used by ticket-prerequisite-tools.
   ticketPrerequisitesService?: TicketPrerequisitesService;
+  // Ticket 684c012b: benchmark score persistence + leaderboard aggregation.
+  // Present in both modes — the service is stateless over the DataSource, so the
+  // standalone builder constructs a thin instance directly (same pattern as
+  // ticketPrerequisitesService). Used by benchmark-tools.
+  benchmarkService?: BenchmarkService;
 }
 
 /**
@@ -160,6 +166,11 @@ export function createStandaloneContext(dataSource: DataSource): ToolContext {
   // direct instantiation matches the DI singleton's behavior in standalone mode.
   const ticketPrerequisitesService = new TicketPrerequisitesService(dataSource as any, activityService);
 
+  // BenchmarkService is stateless over the DataSource (the @InjectDataSource
+  // decorator is DI metadata only — calling the constructor directly is the
+  // standalone equivalent of the DI singleton, matching the prereq service above).
+  const benchmarkService = new BenchmarkService(dataSource);
+
   return {
     dataSource,
     activityService,
@@ -171,5 +182,6 @@ export function createStandaloneContext(dataSource: DataSource): ToolContext {
     roomMembershipService,
     roomMessagingService,
     ticketPrerequisitesService,
+    benchmarkService,
   };
 }
