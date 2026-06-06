@@ -439,6 +439,10 @@ export interface Board {
   // post-done reviewer dispatch; 'same_board' / 'remote_awb' / 'both' opt in
   // and choose where the reviewer files follow-up improvement tickets.
   self_improvement_mode?: 'off' | 'same_board' | 'remote_awb' | 'both';
+  // Per-board benchmark mode. 'off' (default) is an ordinary board; 'on' turns
+  // the board into a benchmark host — candidate children get scored by
+  // evaluator agents on review entry and the Leaderboard panel renders.
+  benchmark_mode?: 'off' | 'on';
   // Auto-archive policy: null/absent disables, 1..365 archives Done-column
   // tickets that have been idle for N days — where "idle" means no Done-entry,
   // edit, or comment newer than N days (GREATEST(terminal_entered_at,

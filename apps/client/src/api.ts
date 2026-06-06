@@ -248,10 +248,18 @@ export const api = {
       column_prompts?: Record<string, string> | null;
       max_concurrent_tickets_per_agent?: number;
       self_improvement_mode?: 'off' | 'same_board' | 'remote_awb' | 'both';
+      benchmark_mode?: 'off' | 'on';
       auto_archive_days?: number | null;
     },
   ) =>
     request<any>(`/boards/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  // Benchmark leaderboard reads (ticket 684c012b). Run-scoped aggregation
+  // (per-candidate score table) when runTicketId is given; workspace-wide
+  // agent leaderboard otherwise.
+  getBenchmarkRunLeaderboard: (runTicketId: string) =>
+    request<any>(`/benchmark/runs/${runTicketId}/leaderboard`),
+  getBenchmarkLeaderboard: (workspaceId?: string) =>
+    request<any>(workspaceId ? `/benchmark/leaderboard?workspace_id=${workspaceId}` : '/benchmark/leaderboard'),
   deleteBoard: (id: string) =>
     request<any>(`/boards/${id}`, { method: 'DELETE' }),
   // Cross-workspace board move (ticket 8882056b). dry_run=true (default)

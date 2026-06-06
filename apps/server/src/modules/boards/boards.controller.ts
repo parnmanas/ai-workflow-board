@@ -408,7 +408,7 @@ export class BoardsController {
   async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     const board = await findOrFail(this.boardRepo, { where: { id } }, 'Board not found');
 
-    const { name, description, routing_config, column_prompts, max_concurrent_tickets_per_agent, self_improvement_mode, auto_archive_days } = body;
+    const { name, description, routing_config, column_prompts, max_concurrent_tickets_per_agent, self_improvement_mode, benchmark_mode, auto_archive_days } = body;
     if (name !== undefined) board.name = name;
     if (description !== undefined) board.description = description;
     if (self_improvement_mode !== undefined) {
@@ -419,6 +419,15 @@ export class BoardsController {
         });
       }
       board.self_improvement_mode = String(self_improvement_mode);
+    }
+    if (benchmark_mode !== undefined) {
+      const allowed = ['off', 'on'];
+      if (!allowed.includes(String(benchmark_mode))) {
+        return res.status(400).json({
+          error: `benchmark_mode must be one of: ${allowed.join(', ')}`,
+        });
+      }
+      board.benchmark_mode = String(benchmark_mode);
     }
     const routingChanged = routing_config !== undefined;
     if (routingChanged) board.routing_config = JSON.stringify(routing_config);

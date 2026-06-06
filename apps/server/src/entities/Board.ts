@@ -90,6 +90,18 @@ export class Board {
   @Column({ type: 'varchar', default: 'off' })
   self_improvement_mode: string;
 
+  // Per-board benchmark mode. Kept deliberately lightweight (a flag, not a new
+  // board-type system) — mirrors `self_improvement_mode` above. When 'on', the
+  // board hosts benchmark runs: a run is a parent ticket holding the task, its
+  // candidate children are worked by distinct agents in isolated worktrees, and
+  // when a candidate lands on a `review`-kind column TriggerLoopService wakes
+  // the run's evaluator agents to score it (see _dispatchBenchmarkEvaluators).
+  // The client renders the leaderboard panel only when this is 'on'. Modes:
+  //   - 'off' (default) — ordinary board, no benchmark behavior
+  //   - 'on'            — benchmark board: evaluator dispatch + leaderboard view
+  @Column({ type: 'varchar', default: 'off' })
+  benchmark_mode: string;
+
   @ManyToOne(() => Workspace, ws => ws.boards, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'workspace_id' })
   workspace: Workspace;

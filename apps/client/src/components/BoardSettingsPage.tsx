@@ -109,6 +109,14 @@ export default function BoardSettingsPage() {
             showToast('Self-improvement mode saved', 'success');
           }}
         />
+        <BenchmarkModeSetting
+          board={board}
+          onSave={async (mode) => {
+            await api.updateBoard(board.id, { benchmark_mode: mode });
+            await refresh();
+            showToast(mode === 'on' ? 'Benchmark mode enabled' : 'Benchmark mode disabled', 'success');
+          }}
+        />
         <AutoArchiveSetting
           board={board}
           onSave={async (days) => {
@@ -452,6 +460,109 @@ function SelfImprovementSetting({ board, onSave }: SelfImprovementSettingProps) 
             }}
           >
             {SELF_IMPROVEMENT_MODE_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
+        </div>
+        <Button
+          variant="primary"
+          size="sm"
+          disabled={!dirty || busy}
+          onClick={async () => {
+            if (!dirty) return;
+            setBusy(true);
+            try {
+              await onSave(value);
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          {busy ? 'Saving…' : 'Save'}
+        </Button>
+      </div>
+      {hint && (
+        <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 10 }}>
+          {hint}
+        </div>
+      )}
+    </section>
+  );
+}
+
+type BenchmarkMode = NonNullable<Board['benchmark_mode']>;
+
+interface BenchmarkModeSettingProps {
+  board: BoardWithCards;
+  onSave(mode: BenchmarkMode): Promise<void>;
+}
+
+const BENCHMARK_MODE_OPTIONS: Array<{ value: BenchmarkMode; label: string; hint: string }> = [
+  { value: 'off', label: 'Off',                 hint: 'Ordinary board — no benchmark scoring or leaderboard.' },
+  { value: 'on',  label: 'On (benchmark host)', hint: 'Candidate children are scored by evaluator agents on Review entry; the Leaderboard panel renders on the board.' },
+];
+
+function BenchmarkModeSetting({ board, onSave }: BenchmarkModeSettingProps) {
+  const initial: BenchmarkMode = (board.benchmark_mode || 'off') as BenchmarkMode;
+  const [value, setValue] = useState<BenchmarkMode>(initial);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    setValue((board.benchmark_mode || 'off') as BenchmarkMode);
+  }, [board.benchmark_mode]);
+
+  const dirty = value !== initial;
+  const hint = BENCHMARK_MODE_OPTIONS.find((o) => o.value === value)?.hint;
+
+  return (
+    <section
+      style={{
+        padding: 16,
+        marginBottom: 16,
+        background: tokens.colors.surfaceCard,
+        border: `1px solid ${tokens.colors.border}`,
+        borderRadius: tokens.radii.md,
+      }}
+    >
+      <h3 style={{ margin: 0, fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>
+        Benchmark mode
+      </h3>
+      <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, marginBottom: 12 }}>
+        Turn this board into a benchmark host. A run is a parent ticket holding the task; its
+        candidate children are worked by different agents in isolated worktrees. When a candidate
+        reaches a <code>review</code> column, the run's evaluator agents score it. The Leaderboard
+        panel aggregates per-candidate and per-agent scores.
+      </div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+        <div style={{ minWidth: 220 }}>
+          <label
+            style={{
+              display: 'block',
+              fontSize: 11,
+              color: tokens.colors.textMuted,
+              marginBottom: 4,
+              textTransform: 'uppercase',
+              fontWeight: 600,
+            }}
+          >
+            Mode
+          </label>
+          <select
+            value={value}
+            onChange={(e) => setValue(e.target.value as BenchmarkMode)}
+            style={{
+              width: '100%',
+              background: tokens.colors.surface,
+              border: `1px solid ${tokens.colors.border}`,
+              borderRadius: tokens.radii.md,
+              padding: '8px 10px',
+              color: tokens.colors.textStrong,
+              fontSize: 13,
+              fontFamily: 'inherit',
+              boxSizing: 'border-box',
+            }}
+          >
+            {BENCHMARK_MODE_OPTIONS.map((o) => (
               <option key={o.value} value={o.value}>{o.label}</option>
             ))}
           </select>
