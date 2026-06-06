@@ -33,7 +33,7 @@ import { getCallerAgent } from '../shared/session-auth';
 import type { ToolContext } from './context';
 
 export function registerBenchmarkTools(server: McpServer, ctx: ToolContext): void {
-  const { dataSource, benchmarkService, ticketRoleAssignmentService, activityService, logger } = ctx;
+  const { dataSource, benchmarkService, ticketRoleAssignmentService, triggerLoopService, activityService, logger } = ctx;
 
   server.tool(
     'submit_benchmark_score',
@@ -156,7 +156,7 @@ export function registerBenchmarkTools(server: McpServer, ctx: ToolContext): voi
       }));
 
       // Candidates — one child per agent, each with its own assignee + worktree.
-      const candidates: Array<{ candidate_ticket_id: string; assignee_agent_id: string; title: string }> = [];
+      const candidates: Array<{ candidate_ticket_id: string; assignee_agent_id: string; title: string; dispatched: number }> = [];
       let childPos = 0;
       for (const agentId of candidate_agent_ids) {
         const agent = await agentRepo.findOne({ where: { id: agentId } });
@@ -189,7 +189,24 @@ export function registerBenchmarkTools(server: McpServer, ctx: ToolContext): voi
             logger.warn('MCP', `create_benchmark_run: failed to sync assignee role for candidate ${child.id}: ${String(e)}`);
           }
         }
-        candidates.push({ candidate_ticket_id: child.id, assignee_agent_id: agentId, title: child.title });
+        // Wake the candidate's assignee. Creating the child row alone emits no
+        // trigger — the trigger loop only routes on 'moved'/comment/'updated'
+        // activities, and backlog promotion only touches intake-kind columns,
+        // so a candidate placed directly on an active column would sit idle
+        // forever. dispatchCurrentColumn resolves the column's role_routing →
+        // assignee assignment → emits the trigger, exactly as unpend does.
+        let dispatched = 0;
+        if (triggerLoopService) {
+          try {
+            const res = await triggerLoopService.dispatchCurrentColumn(
+              child.id, 'benchmark_candidate', creatorId,
+            );
+            dispatched = res?.emitted || 0;
+          } catch (e) {
+            logger.warn('MCP', `create_benchmark_run: failed to dispatch candidate ${child.id}: ${String(e)}`);
+          }
+        }
+        candidates.push({ candidate_ticket_id: child.id, assignee_agent_id: agentId, title: child.title, dispatched });
       }
 
       await activityService.logActivity({
