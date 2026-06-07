@@ -19,7 +19,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests } from '../helpers/boot.mjs';
-import { setupKanbanScene, createUser, createTicket } from '../helpers/fixtures.mjs';
+import { setupKanbanScene, createUser, createTicket, createWorkspace } from '../helpers/fixtures.mjs';
 
 process.env.PORT = process.env.QA_COMMENT_MEDIA_PORT || '7834';
 
@@ -118,6 +118,75 @@ test('comment media e2e: large upload, reference-by-id, range stream, clean 413'
   // ── 4e. No token → 401.
   const noAuthRes = await fetch(`${base}/api/resources/${uploaded.id}/raw`);
   assert.equal(noAuthRes.status, 401, 'unauthenticated raw fetch rejected');
+
+  // ── 4f. Workspace authorization (ticket ff3e7337 review blockers 1 & 2).
+  //       The above ran as an ADMIN (createUser defaults role='admin'), which
+  //       bypasses every workspace gate — so it could never have caught the
+  //       two authz holes the reviewer found. Exercise them with real,
+  //       non-admin identities here.
+  const ds = app.get(getDataSourceToken());
+  const tupleRepo = ds.getRepository('RelationTuple');
+  const grantMember = (userId, workspaceId) =>
+    tupleRepo.save(tupleRepo.create({
+      subject_type: 'user', subject_id: userId,
+      relation: 'member',
+      object_type: 'workspace', object_id: workspaceId,
+    }));
+
+  // A non-admin MEMBER of the resource's workspace.
+  const member = await createUser(app, getDataSourceToken, { name: 'media-member', role: 'user' });
+  await grantMember(member.id, ws.id);
+  const memberToken = app.get(AuthService).createSession(member.id);
+  const memberHeaders = { Authorization: `Bearer ${memberToken}` };
+
+  // Blocker 2: a non-admin member must be able to UPLOAD (the old endpoint
+  // inherited admin-only MANAGE_RESOURCES → every non-admin attach 403'd).
+  const small = Buffer.from('a non-admin member uploaded this image', 'utf8');
+  const memberUp = await fetch(`${base}/api/resources/upload?workspace_id=${ws.id}&type=comment_attachment`, {
+    method: 'POST',
+    headers: { ...memberHeaders, 'Content-Type': 'image/png', 'X-File-Name': encodeURIComponent('member.png') },
+    body: small,
+  });
+  assert.equal(memberUp.status, 201, `non-admin member upload should succeed, got ${memberUp.status}`);
+  const memberRes = await memberUp.json();
+  assert.ok(memberRes.id, 'member upload returns a resource id');
+
+  // …and reference it from a comment (WorkspaceGuard needs the workspace id +
+  // membership; the member tuple above satisfies it).
+  const memberComment = await fetch(`${base}/api/tickets/${ticket.id}/comments`, {
+    method: 'POST',
+    headers: { ...memberHeaders, 'Content-Type': 'application/json', 'X-Workspace-Id': ws.id },
+    body: JSON.stringify({ content: 'member attaches', attachment_resource_ids: [memberRes.id] }),
+  });
+  assert.equal(memberComment.status, 201, `non-admin member comment attach should succeed, got ${memberComment.status}`);
+
+  // …and stream it back (authenticated member of the resource's workspace).
+  const memberRaw = await fetch(`${base}/api/resources/${memberRes.id}/raw`, { headers: memberHeaders });
+  assert.equal(memberRaw.status, 200, 'member can stream a resource in their own workspace');
+  await memberRaw.arrayBuffer();
+
+  // Blocker 1: a user who is authenticated but NOT a member of the resource's
+  // workspace must be REFUSED (403, not 401) — no cross-workspace byte access.
+  const outsider = await createUser(app, getDataSourceToken, { name: 'media-outsider', role: 'user' });
+  const otherWs = await createWorkspace(app, getDataSourceToken, 'media-other');
+  await grantMember(outsider.id, otherWs.id); // member of a DIFFERENT workspace
+  const outsiderToken = app.get(AuthService).createSession(outsider.id);
+  const outsiderHeaders = { Authorization: `Bearer ${outsiderToken}` };
+
+  const outsiderRaw = await fetch(`${base}/api/resources/${uploaded.id}/raw`, { headers: outsiderHeaders });
+  assert.equal(outsiderRaw.status, 403, 'non-member cannot stream another workspace resource');
+
+  // ?token form must be gated the same way (media tags can't send headers).
+  const outsiderTok = await fetch(`${base}/api/resources/${uploaded.id}/raw?token=${encodeURIComponent(outsiderToken)}`);
+  assert.equal(outsiderTok.status, 403, 'non-member ?token raw fetch also refused');
+
+  // …and a non-member cannot upload into a workspace they don't belong to.
+  const outsiderUp = await fetch(`${base}/api/resources/upload?workspace_id=${ws.id}&type=comment_attachment`, {
+    method: 'POST',
+    headers: { ...outsiderHeaders, 'Content-Type': 'image/png', 'X-File-Name': 'evil.png' },
+    body: Buffer.from('nope', 'utf8'),
+  });
+  assert.equal(outsiderUp.status, 403, 'non-member cannot upload into another workspace');
 
   // ── 5. Oversize JSON body → CLEAN 413 with a friendly message (not 500).
   const huge = 'x'.repeat(11 * 1024 * 1024); // > the 10MB json() ceiling
