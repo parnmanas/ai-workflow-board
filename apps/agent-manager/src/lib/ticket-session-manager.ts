@@ -82,8 +82,12 @@ export class TicketSessionManager
 
   /** Circuit-breaker: blocks re-dispatch to agents that repeatedly exit with
    *  non-transient errors (missing auth, config errors). Shared across all
-   *  sessions so the threshold counts total attempts, not per-child. */
-  readonly circuitBreaker = new CircuitBreaker();
+   *  sessions so the threshold counts total attempts, not per-child. Injected
+   *  from main.ts so the SAME instance is shared with the one-shot
+   *  SubagentManager (ticket 27806095) — a (ticket,role) failing across both
+   *  paths counts once and restart_agent's resetAgent clears both. Defaults to
+   *  a private instance when constructed without one (unit tests). */
+  readonly circuitBreaker: CircuitBreaker;
 
   /** Per-session state for the "moving cue armed, waiting for move_ticket"
    *  guard. Keyed by pid (unique per child) so a respawn under the same
@@ -105,13 +109,14 @@ export class TicketSessionManager
    *  produced the dead cycle. */
   #lastTriggerId = new Map<number, string>();
 
-  constructor(config: SessionAwareConfig) {
+  constructor(config: SessionAwareConfig, circuitBreaker?: CircuitBreaker) {
     super(config, {
       keyField: 'sessionKey',
       logTag: '[ticket-session]',
       cfgPrefix: 'cfg-ticket-',
       kindLabel: 'ticket_session',
     });
+    this.circuitBreaker = circuitBreaker ?? new CircuitBreaker();
   }
 
   #makeKey(ticketId: string, role: string): string {

@@ -26,6 +26,7 @@ import { EventStream } from './lib/event-stream.js';
 import { SubagentManager } from './lib/subagent-manager.js';
 import { ChatSessionManager } from './lib/chat-session-manager.js';
 import { TicketSessionManager } from './lib/ticket-session-manager.js';
+import { CircuitBreaker } from './lib/circuit-breaker.js';
 import { uploadIfNewErrors } from './lib/error-log-uploader.js';
 import { onFlushThreshold } from './lib/event-log-recorder.js';
 import { cleanupOrphanSubagents } from './lib/orphan-cleanup.js';
@@ -453,7 +454,13 @@ async function runRuntime(
     })
     .catch((err: any) => log(`Orphan subagent cleanup failed: ${err?.message ?? err}`));
 
-  const subagentManager = new SubagentManager(config);
+  // Shared circuit-breaker across the one-shot (SubagentManager) and persistent
+  // (TicketSessionManager) paths (ticket 27806095). A single (agent,ticket,role)
+  // that keeps failing — whichever path spawned it — counts toward one
+  // threshold, and restart_agent's resetAgent clears both at once.
+  const circuitBreaker = new CircuitBreaker();
+
+  const subagentManager = new SubagentManager(config, circuitBreaker);
   subagentManager.init().catch((err: any) =>
     log(`SubagentManager init failed: ${err?.message ?? err}`),
   );
@@ -479,7 +486,7 @@ async function runRuntime(
   // disk and the still-running child kept dispatching turns under the stale
   // OAuth until idle/maxTurns retired it (10+ minutes).
   const chatSessionManager = new ChatSessionManager(config);
-  const ticketSessionManager = new TicketSessionManager(config);
+  const ticketSessionManager = new TicketSessionManager(config, circuitBreaker);
   // Late-bound reference to the SSE stream — the EventStream is constructed
   // after this command handler (it depends on commandHandler for dispatch),
   // so the spawn_agent → reconnect hook captures this slot and resolves it
@@ -497,7 +504,8 @@ async function runRuntime(
     subagentManager,
     // Circuit-breaker: restart_agent resets failure counts so re-pushed
     // triggers aren't blocked by stale breaker state from the old credential.
-    circuitBreaker: ticketSessionManager?.circuitBreaker ?? null,
+    // Shared instance covers both the persistent and one-shot paths.
+    circuitBreaker,
     getInstanceId: () => instanceHeartbeat._real?.instanceId ?? null,
     requestStreamReconnect: () => eventStreamRef?.reconnect(),
     reloadConfig: async () => {

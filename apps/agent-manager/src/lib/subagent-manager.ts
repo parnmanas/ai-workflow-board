@@ -23,6 +23,8 @@ import {
 import { log } from './logging.js';
 import { createAdapter } from './cli-adapters/index.js';
 import { ADAPTER_CAPABILITIES, type CliAdapter } from './cli-adapters/base.js';
+import { CircuitBreaker } from './circuit-breaker.js';
+import { classifyCliError } from './cli-error-signatures.js';
 import { fireAndForgetTool } from './mcp-client.js';
 import {
   postChatRoomMessage,
@@ -217,12 +219,22 @@ export class SubagentManager implements SubagentManagerContract {
   #initialized = false;
   #monitor: SubagentMonitor | null = null;
 
+  /** Circuit-breaker for the one-shot path. Blocks re-spawn to an (agent,
+   *  ticket, role) that repeatedly exits with non-transient errors and pends
+   *  the ticket when it opens — the same protection the persistent
+   *  TicketSessionManager already had. Injected from main.ts so it is SHARED
+   *  with the persistent path: a (ticket,role) that fails N times across both
+   *  paths counts once, and restart_agent's resetAgent() clears both. Falls
+   *  back to a private instance when constructed without one (unit tests). */
+  readonly circuitBreaker: CircuitBreaker;
+
   onExit?: (info: SubagentExitInfo) => void;
 
-  constructor(config: SubagentAwareConfig) {
+  constructor(config: SubagentAwareConfig, circuitBreaker?: CircuitBreaker) {
     this.#config = config;
     this.#persistPath = SUBAGENTS_PERSIST_PATH;
     this.#pidDir = SUBAGENTS_BASE_DIR;
+    this.circuitBreaker = circuitBreaker ?? new CircuitBreaker();
   }
 
   setMonitor(monitor: SubagentMonitor | null): void {
@@ -331,6 +343,24 @@ export class SubagentManager implements SubagentManagerContract {
     const dup = findDuplicateSpawn(this.#map.values(), spec);
     if (dup) {
       return { spawned: false, reason: dup };
+    }
+
+    // Circuit-breaker gate (ticket 27806095): if this (agent, ticket, role)
+    // has tripped the non-transient failure threshold — or hit a non-retryable
+    // signature (codex usage-limit / auth) — drop the spawn so a CLI that dies
+    // in 1–2s can't spin the trigger loop indefinitely. Mirrors the persistent
+    // TicketSessionManager.dispatchTrigger gate. Restricted to ticket triggers
+    // (chat one-shots have no role/loop to break).
+    if (spec.kind === 'trigger' && spec.ticketId && spec.agentId) {
+      const cbKey = CircuitBreaker.key(spec.agentId, spec.ticketId, spec.role || '');
+      const blockReason = this.circuitBreaker.shouldBlock(cbKey);
+      if (blockReason) {
+        log(
+          `[subagent] spawn blocked by circuit-breaker: ticket=${spec.ticketId.slice(0, 8)} ` +
+            `role=${spec.role || '_'} agent=${spec.agentId.slice(0, 8)} — ${blockReason}`,
+        );
+        return { spawned: false, reason: 'circuit_breaker_open' };
+      }
     }
 
     if (!this.canSpawn()) {
@@ -565,46 +595,9 @@ export class SubagentManager implements SubagentManagerContract {
       }
       record.tap?.end({ exit_code: code, signal });
 
-      if (record.captureOutput && (record.ticket_id || record.room_id)) {
-        try {
-          // Use the same adapter that spawned this child — picked by
-          // record.cli_type so we don't aggregate antigravity's stdout with
-          // claude's parser.
-          const answer = this.#adapterFor(record.cli_type).collectOneshotResult(record.outLines);
-          if (answer) {
-            if (record.room_id) {
-              await this.#postOneshotChatAnswer(record, answer);
-            } else {
-              await this.#postOneshotAnswer(record, answer);
-            }
-          } else if (record.room_id && code !== 0) {
-            // CLI exited with an error but produced no parseable output —
-            // surface a generic failure so the user isn't left waiting.
-            await this.#postOneshotChatAnswer(
-              record,
-              `⚠️ Agent가 응답하지 못했습니다 (exit code ${code ?? 'unknown'}).`,
-            );
-          }
-        } catch (err: any) {
-          log(`Subagent post-answer failed pid=${pid}: ${err?.message ?? err}`);
-        }
-      }
-
-      // Silent-exit fallback for ticket subagents. Fires when:
-      //   - exit code != 0 (subagent crashed / was killed), OR
-      //   - exit code == 0 AND no comment-creating tool fired during the
-      //     spawn (the "dead state" the ticket was opened against — trigger
-      //     dispatched but ticket activity has zero trace of work).
-      // Chat-only spawns (room_id but no ticket_id) are already covered by
-      // the room_id branch above and by ChatSessionManager's fallback, so
-      // we skip them here.
-      if (record.ticket_id && (!record.commentSent || code !== 0)) {
-        try {
-          await this.#postSilentExitFallback(record, code);
-        } catch (err: any) {
-          log(`Subagent silent-exit fallback failed pid=${pid}: ${err?.message ?? err}`);
-        }
-      }
+      // Answer-posting, circuit-breaker and silent-exit fallback. Extracted to
+      // a named method so it can be unit-tested without forking a real child.
+      await this._handleOneshotExit(record, code);
 
       // Drop the tail ring now that all post-exit hooks have read it.
       record.tailLines = [];
@@ -623,6 +616,118 @@ export class SubagentManager implements SubagentManagerContract {
     child.once('error', (err: any) => {
       log(`Subagent spawn error pid=${pid}: ${err?.message ?? err}`);
     });
+  }
+
+  /**
+   * Post-exit business logic for a one-shot subagent: answer aggregation,
+   * circuit-breaker accounting, and the silent-exit fallback. Split out of the
+   * `exit` closure so it is unit-testable (the closure keeps the process
+   * lifecycle bits — map cleanup, persist, temp-config unlink, tap.end). Public
+   * (`_`-prefixed) for the test runner; not part of the manager contract.
+   */
+  async _handleOneshotExit(record: SubagentRecord, code: number | null): Promise<void> {
+    const pid = record.pid;
+
+    // Classification of the aggregated one-shot result. Defaults to non-fatal;
+    // only set for non-NATIVE_MCP adapters (codex / antigravity) whose stdout
+    // we collect. Read below by both the answer-posting guard and the
+    // circuit-breaker to decide non-retryable failures.
+    let errClass = classifyCliError(null);
+
+    if (record.captureOutput && (record.ticket_id || record.room_id)) {
+      try {
+        // Use the same adapter that spawned this child — picked by
+        // record.cli_type so we don't aggregate antigravity's stdout with
+        // claude's parser.
+        const answer = this.#adapterFor(record.cli_type).collectOneshotResult(record.outLines);
+        errClass = classifyCliError(answer);
+        if (record.room_id) {
+          // Chat one-shot: post the result (or a generic failure) to the room.
+          // Chat replies don't feed the ticket trigger loop, so the re-trigger
+          // guard below is irrelevant here — keep prior behavior.
+          if (answer) {
+            await this.#postOneshotChatAnswer(record, answer);
+          } else if (code !== 0) {
+            await this.#postOneshotChatAnswer(
+              record,
+              `⚠️ Agent가 응답하지 못했습니다 (exit code ${code ?? 'unknown'}).`,
+            );
+          }
+        } else if (answer) {
+          // Ticket one-shot (defect ①): post under the AGENT identity ONLY for
+          // a clean, non-error result. A non-zero exit or a CLI fatal-error
+          // signature (codex `[codex error]` / usage-limit / auth) is NOT a
+          // real answer — posting it as an agent comment re-fires the trigger
+          // loop (the comment.created passes the server's system-actor guard).
+          // Suppress it and let the system-attributed silent-exit fallback
+          // below post instead, which the server trigger-loop guard drops.
+          if (code === 0 && !errClass.isFatal) {
+            await this.#postOneshotAnswer(record, answer);
+          } else {
+            log(
+              `Subagent one-shot result NOT posted as agent answer: ticket=${(record.ticket_id || '').slice(0, 8)} ` +
+                `cli=${record.cli_type} code=${code} reason=${errClass.reason || (code !== 0 ? `nonzero_exit_${code}` : 'unknown')} ` +
+                `— routing to system silent-exit fallback`,
+            );
+          }
+        }
+      } catch (err: any) {
+        log(`Subagent post-answer failed pid=${pid}: ${err?.message ?? err}`);
+      }
+    }
+
+    // Circuit-breaker (ticket 27806095, defect ②/③). Ticket triggers only —
+    // count non-transient exits per (agent, ticket, role); open + pend when the
+    // threshold is crossed, OR immediately for a non-retryable signature
+    // (usage-limit / auth). A clean exit that left a real agent comment resets
+    // the counter. Mirrors TicketSessionManager._onChildExit.
+    if (record.kind === 'trigger' && record.ticket_id && record.agent_id) {
+      const role = record.role || '';
+      const cbKey = CircuitBreaker.key(record.agent_id, record.ticket_id, role);
+      if (record.commentSent && code === 0) {
+        this.circuitBreaker.reset(cbKey);
+      } else if (!CircuitBreaker.isTransientExit(code) || errClass.nonRetryable) {
+        const tail = this.#collectTail(record);
+        const { justOpened, entry } = this.circuitBreaker.record(cbKey, code, tail, {
+          forceOpen: errClass.nonRetryable,
+        });
+        if (justOpened) {
+          const exitDesc = errClass.reason
+            ? errClass.reason
+            : code === 0
+              ? 'clean exit with no comment'
+              : `exit code ${code}`;
+          const reason =
+            `Agent failed ${entry.consecutiveFailures} consecutive time(s) (${exitDesc}). ` +
+            `Last output: ${entry.lastExitTail || '(none)'}. ` +
+            `Check agent CLI config/credentials and unpend when fixed.`;
+          // Await so the loop-terminating pend completes before the exit
+          // handler returns (deterministic ordering; fireAndForgetTool already
+          // swallows its own errors so a pend failure can't break cleanup).
+          await fireAndForgetTool(this.#config, 'pend_ticket', {
+            ticket_id: record.ticket_id,
+            reason,
+          });
+        }
+      }
+    }
+
+    // Silent-exit fallback for ticket subagents. Fires when:
+    //   - exit code != 0 (subagent crashed / was killed), OR
+    //   - exit code == 0 AND no comment-creating tool fired during the spawn
+    //     (the "dead state" the ticket was opened against — trigger dispatched
+    //     but ticket activity has zero trace of work).
+    // Chat-only spawns (room_id but no ticket_id) are already covered by the
+    // room_id branch above and by ChatSessionManager's fallback, so we skip
+    // them here. This system-attributed comment is what the server trigger-loop
+    // guard drops, so it never re-fires the loop.
+    if (record.ticket_id && (!record.commentSent || code !== 0)) {
+      try {
+        await this.#postSilentExitFallback(record, code);
+      } catch (err: any) {
+        log(`Subagent silent-exit fallback failed pid=${pid}: ${err?.message ?? err}`);
+      }
+    }
   }
 
   #wireStdioCapture(child: ChildProcess, pid: number): void {
