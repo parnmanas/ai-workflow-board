@@ -381,9 +381,14 @@ export class BenchmarkService {
       }
     }
 
-    // A draft prompt edit must propagate to the candidate children (their
-    // description mirrors the run prompt — that's the task each candidate works).
-    if (patch.prompt !== undefined && patch.candidate_agent_ids === undefined) {
+    // A draft prompt edit must propagate to ALL retained candidate children
+    // (their description mirrors the run prompt — that's the task each candidate
+    // works). Runs unconditionally on a prompt change: the UI Edit modal always
+    // sends candidate_agent_ids alongside prompt, so gating on its absence would
+    // skip the real UI path and leave retained candidates with a stale prompt.
+    // The candidate-diff block above already stamped nextPrompt on freshly added
+    // children, so re-setting it here is idempotent.
+    if (patch.prompt !== undefined) {
       const children = await ticketRepo.find({ where: { parent_id: runId } });
       for (const c of children) {
         if (!this._isCandidate(c)) continue;

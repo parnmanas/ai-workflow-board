@@ -104,14 +104,32 @@ test('benchmark lifecycle: draft parks candidates, start dispatches, started run
   );
 
   // ── 2. updateRun (draft): free edit ────────────────────────────────
-  step('updateRun on draft freely edits prompt + evaluators');
+  // Mirror the real UI Edit-modal payload: the modal ALWAYS sends
+  // candidate_agent_ids alongside prompt (and evaluators). A prompt edit on this
+  // path must still propagate to every retained candidate child's description —
+  // that's the regression the reviewer caught (propagation was gated on
+  // candidate_agent_ids being absent, so the UI path silently skipped it).
+  step('updateRun on draft (modal payload) freely edits prompt + evaluators');
   const edited = await svc.updateRun(runId, {
     prompt: 'Implement the widget v2',
+    candidate_agent_ids: [candA.id, candB.id],
     evaluator_agent_ids: [evaluator.id, evaluator2.id],
   });
   assert.equal(edited.state, 'draft', 'still draft after edit');
   assert.equal(edited.prompt, 'Implement the widget v2', 'prompt updated');
   assert.equal(edited.evaluator_agent_ids.length, 2, 'evaluator set updated');
+  assert.equal(edited.candidates.length, 2, 'candidate set unchanged (both retained)');
+
+  step('draft prompt edit propagates to EVERY retained candidate child description');
+  const ticketRepo = ds.getRepository('Ticket');
+  const candChildren = await ticketRepo.find({ where: { parent_id: runId } });
+  const candDescById = new Map(candChildren.map((c) => [c.assignee_id, c.description]));
+  for (const id of [candA.id, candB.id]) {
+    assert.equal(
+      candDescById.get(id), 'Implement the widget v2',
+      `retained candidate ${id} must carry the edited prompt, not a stale one`,
+    );
+  }
 
   // ── 3. startRun: dispatch parked candidates ────────────────────────
   step('startRun flips to started + dispatches parked candidate A');
