@@ -44,25 +44,54 @@ const AUTH_RE =
 // real `agent_message` — i.e. the "answer" is actually an error report.
 const CODEX_ERROR_RE = /\[codex error\]/i;
 
+export interface ClassifyOptions {
+  /**
+   * Process exit code, when known. A non-zero exit is itself an error context.
+   * Pass the subagent's exit code so usage/auth signatures are only treated as
+   * fatal when the turn actually failed — not when they merely appear as words
+   * inside a successful (exit-0) agent answer. `null`/`undefined` = unknown.
+   */
+  exitCode?: number | null;
+}
+
 /**
  * Classify a one-shot CLI result string. Pure + side-effect-free so it can be
  * unit-tested directly. Empty / whitespace input is treated as non-fatal (the
  * exit-code path handles "no output at all").
+ *
+ * Usage-limit / auth signatures (`403`, `429`, `quota`, `unauthorized`, …) are
+ * also common substrings of *legitimate* SWE answers — a clean exit-0 codex
+ * reply about "403 Forbidden handling" or "429/quota rate limiting" must NOT be
+ * suppressed or trip the breaker. So those signatures only count as
+ * fatal/non-retryable when there is an actual **error context**:
+ *   - a non-zero exit code (`opts.exitCode`), OR
+ *   - codex's own `[codex error]` wrapper in the text
+ * (codex emits usage-limit text only inside `[codex error]`, with zero
+ * `agent_message` parts, and exits non-zero — so this fully preserves the
+ * meltdown fix while eliminating the exit-0 false positive).
  */
-export function classifyCliError(text: string | null | undefined): CliErrorClassification {
+export function classifyCliError(
+  text: string | null | undefined,
+  opts?: ClassifyOptions,
+): CliErrorClassification {
   const s = String(text ?? '');
   if (!s.trim()) return OK;
 
-  const usage = USAGE_LIMIT_RE.test(s);
-  if (usage) return { isFatal: true, nonRetryable: true, reason: 'usage_limit' };
+  const isCodexErrorWrapped = CODEX_ERROR_RE.test(s);
+  const nonZeroExit = typeof opts?.exitCode === 'number' && opts.exitCode !== 0;
+  const hasErrorContext = nonZeroExit || isCodexErrorWrapped;
 
-  const auth = AUTH_RE.test(s);
-  if (auth) return { isFatal: true, nonRetryable: true, reason: 'auth_failure' };
+  // Anchor usage/auth classification to a real failure — never to raw answer
+  // text alone — so legit exit-0 answers that mention these terms pass through.
+  if (hasErrorContext) {
+    if (USAGE_LIMIT_RE.test(s)) return { isFatal: true, nonRetryable: true, reason: 'usage_limit' };
+    if (AUTH_RE.test(s)) return { isFatal: true, nonRetryable: true, reason: 'auth_failure' };
+  }
 
   // A bare codex error wrapper (transient model/turn failure with no
   // usage/auth signature) is fatal-as-an-answer but MAY recover on retry, so
   // it counts toward the breaker threshold normally rather than opening now.
-  if (CODEX_ERROR_RE.test(s)) return { isFatal: true, nonRetryable: false, reason: 'codex_error' };
+  if (isCodexErrorWrapped) return { isFatal: true, nonRetryable: false, reason: 'codex_error' };
 
   return OK;
 }

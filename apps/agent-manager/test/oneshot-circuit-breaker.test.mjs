@@ -212,6 +212,28 @@ test('clean codex answer (exit 0): posted as agent add_comment, no silent-exit, 
   assert.equal(silentExit(), undefined, 'no silent-exit fallback on a clean answered exit');
 });
 
+test('FP regression: clean exit-0 answer mentioning 403/quota → agent comment, breaker untouched, no pend', async () => {
+  // Reviewer blocker: classifyCliError runs on the full answer text, so a
+  // legitimate exit-0 codex reply about auth/rate-limit work used to trip the
+  // fatal/non-retryable path → suppressed answer + force-open breaker + pend.
+  // With exit-code anchoring this must behave like any other clean success.
+  const cb = new CircuitBreaker();
+  const mgr = new SubagentManager(makeConfig(), cb);
+  const key = CircuitBreaker.key('agent-rolf', 'ticket-loop', 'assignee');
+  const rec = makeCodexRecord({
+    outLines: codexCleanLines(
+      'Done — added a 403 Forbidden response for unauthorized users and 429/quota handling to the rate limiter.',
+    ),
+  });
+
+  await mgr._handleOneshotExit(rec, 0);
+
+  assert.ok(mcpToolCalls.includes('add_comment'), 'the real answer is posted under the agent identity');
+  assert.equal(mcpToolCalls.includes('pend_ticket'), false, 'breaker must not pend on a clean answer');
+  assert.equal(silentExit(), undefined, 'no system silent-exit fallback — the answer was posted');
+  assert.equal(cb.shouldBlock(key), null, 'breaker untouched by a successful answer');
+});
+
 test('successful answer resets a partially-tripped breaker', async () => {
   const cb = new CircuitBreaker();
   const mgr = new SubagentManager(makeConfig(), cb);

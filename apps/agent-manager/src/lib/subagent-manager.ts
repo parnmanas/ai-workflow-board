@@ -640,7 +640,11 @@ export class SubagentManager implements SubagentManagerContract {
         // record.cli_type so we don't aggregate antigravity's stdout with
         // claude's parser.
         const answer = this.#adapterFor(record.cli_type).collectOneshotResult(record.outLines);
-        errClass = classifyCliError(answer);
+        // Pass the exit code so usage/auth signatures are only fatal in a real
+        // error context — a clean exit-0 answer that merely mentions 403/429/
+        // quota stays a valid agent answer (won't be suppressed or trip the
+        // breaker). codex's own [codex error] wrapper also counts as context.
+        errClass = classifyCliError(answer, { exitCode: code });
         if (record.room_id) {
           // Chat one-shot: post the result (or a generic failure) to the room.
           // Chat replies don't feed the ticket trigger loop, so the re-trigger
