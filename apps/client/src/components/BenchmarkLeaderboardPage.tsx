@@ -5,7 +5,9 @@ import { useBoard } from '../hooks/useBoard';
 import { useToast } from '../contexts/ToastContext';
 import { tokens } from '../tokens';
 import PageHeader from './PageHeader';
-import { Button } from './common';
+import { Button, Badge } from './common';
+import BenchmarkRunModal from './BenchmarkRunModal';
+import type { Agent } from '../types';
 
 /**
  * Benchmark leaderboard view (ticket 684c012b). Two panels:
@@ -57,7 +59,22 @@ interface CandidateRow {
 interface RunOption {
   id: string;
   title: string;
+  state: 'draft' | 'started';
 }
+
+interface BoardColumnOption {
+  id: string;
+  name: string;
+}
+
+// labels may arrive as a string[] (board-card projection) or a raw JSON string.
+const normalizeLabels = (raw: any): string[] => {
+  let labels = raw;
+  if (typeof labels === 'string') {
+    try { labels = JSON.parse(labels); } catch { labels = []; }
+  }
+  return Array.isArray(labels) ? labels.filter((l) => typeof l === 'string') : [];
+};
 
 const fmt = (n: number | null | undefined) =>
   n === null || n === undefined ? '—' : Number(n).toFixed(2);
@@ -77,34 +94,49 @@ export default function BenchmarkLeaderboardPage() {
   const [loading, setLoading] = useState(false);
   const [runLoading, setRunLoading] = useState(false);
 
+  // Run lifecycle UI (ticket 5eb459c4): agent pool + board columns for the
+  // create/edit modal, plus the modal's own open/target state.
+  const [agentPool, setAgentPool] = useState<Agent[]>([]);
+  const [boardColumns, setBoardColumns] = useState<BoardColumnOption[]>([]);
+  const [modalOpen, setModalOpen] = useState(false);
+  const [editRunId, setEditRunId] = useState<string | undefined>(undefined);
+  const [startingId, setStartingId] = useState<string>('');
+
   // Agent-aggregate leaderboard + the run list (board's benchmark-run tickets).
   const loadOverview = useCallback(async () => {
     if (!boardId) return;
     setLoading(true);
     try {
       const wid = board?.workspace_id || wsId || undefined;
-      const [agg, full] = await Promise.all([
+      const [agg, full, pool] = await Promise.all([
         api.getBenchmarkLeaderboard(wid),
         api.getBoard(boardId).catch(() => null),
+        api.getAgents().catch(() => [] as Agent[]),
       ]);
       setAgents(Array.isArray(agg?.agents) ? agg.agents : []);
+      setAgentPool(Array.isArray(pool) ? pool : []);
+
+      // Board columns feed the candidate-column picker in the create/edit modal.
+      setBoardColumns(
+        Array.isArray(full?.columns)
+          ? full.columns.map((c: any) => ({ id: c.id, name: c.name }))
+          : [],
+      );
 
       // Discover runs from the board's root tickets labeled `benchmark-run`.
-      // labels may arrive as a string[] (board-card projection) or a raw JSON
-      // string depending on the path; normalise both.
-      const hasRunLabel = (raw: any): boolean => {
-        let labels = raw;
-        if (typeof labels === 'string') {
-          try { labels = JSON.parse(labels); } catch { labels = []; }
-        }
-        return Array.isArray(labels) && labels.includes('benchmark-run');
-      };
+      // The `benchmark-draft` label distinguishes a draft from a started run
+      // (started runs drop the label), so the list badge needs no extra fetch.
       const tickets: any[] = Array.isArray(full?.columns)
         ? full.columns.flatMap((c: any) => c.tickets || [])
         : [];
       const runOpts: RunOption[] = tickets
-        .filter((t) => hasRunLabel(t.labels))
-        .map((t) => ({ id: t.id, title: t.title || t.id.slice(0, 8) }));
+        .map((t) => ({ t, labels: normalizeLabels(t.labels) }))
+        .filter(({ labels }) => labels.includes('benchmark-run'))
+        .map(({ t, labels }) => ({
+          id: t.id,
+          title: t.title || t.id.slice(0, 8),
+          state: labels.includes('benchmark-draft') ? ('draft' as const) : ('started' as const),
+        }));
       setRuns(runOpts);
       setSelectedRun((cur) => cur || (runOpts[0]?.id ?? ''));
     } catch (err: any) {
@@ -126,6 +158,22 @@ export default function BenchmarkLeaderboardPage() {
       setRunLoading(false);
     }
   }, [showToast]);
+
+  const startRun = useCallback(async (runId: string) => {
+    setStartingId(runId);
+    try {
+      await api.startBenchmarkRun(runId);
+      showToast('Run started — candidates dispatched', 'success');
+      await loadOverview();
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to start run', 'error');
+    } finally {
+      setStartingId('');
+    }
+  }, [showToast, loadOverview]);
+
+  const openCreate = useCallback(() => { setEditRunId(undefined); setModalOpen(true); }, []);
+  const openEdit = useCallback((runId: string) => { setEditRunId(runId); setModalOpen(true); }, []);
 
   useEffect(() => { loadOverview(); }, [loadOverview]);
   useEffect(() => { loadRun(selectedRun); }, [selectedRun, loadRun]);
@@ -167,6 +215,9 @@ export default function BenchmarkLeaderboardPage() {
         description={board?.name}
         actions={
           <div style={{ display: 'flex', gap: 8 }}>
+            <Button variant="primary" size="sm" onClick={openCreate}>
+              + New Benchmark Run
+            </Button>
             <Button variant="secondary" size="sm" onClick={loadOverview} disabled={loading}>
               {loading ? 'Refreshing…' : 'Refresh'}
             </Button>
@@ -208,6 +259,51 @@ export default function BenchmarkLeaderboardPage() {
           )}
         </section>
 
+        {/* Run lifecycle management (ticket 5eb459c4) */}
+        <section>
+          <h2 style={sectionTitle}>Runs</h2>
+          {runs.length === 0 ? (
+            <div style={{ fontSize: 13, color: tokens.colors.textMuted, padding: 16 }}>
+              No benchmark runs on this board yet. Click <strong>+ New Benchmark Run</strong> to
+              create a draft, then <strong>Start</strong> it to dispatch the candidates.
+            </div>
+          ) : (
+            <div style={cardStyle}>
+              {runs.map((r) => (
+                <div
+                  key={r.id}
+                  style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+                    padding: '10px 12px', borderTop: `1px solid ${tokens.colors.border}`, fontSize: 13,
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+                    <Badge variant={r.state === 'draft' ? 'warning' : 'success'}>{r.state}</Badge>
+                    <span style={{ fontWeight: 600, color: tokens.colors.textStrong, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {r.title}
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+                    <Button variant="secondary" size="sm" onClick={() => openEdit(r.id)}>
+                      {r.state === 'draft' ? 'Edit' : 'Add candidate'}
+                    </Button>
+                    {r.state === 'draft' && (
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        onClick={() => startRun(r.id)}
+                        disabled={startingId === r.id}
+                      >
+                        {startingId === r.id ? 'Starting…' : 'Start'}
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
         {/* Per-run candidate breakdown */}
         <section>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 12 }}>
@@ -231,7 +327,7 @@ export default function BenchmarkLeaderboardPage() {
 
           {runs.length === 0 ? (
             <div style={{ fontSize: 13, color: tokens.colors.textMuted, padding: 16 }}>
-              No benchmark runs on this board yet. Create one with the <code>create_benchmark_run</code> MCP tool.
+              No benchmark runs on this board yet. Use <strong>+ New Benchmark Run</strong> above.
             </div>
           ) : runLoading ? (
             <div style={{ fontSize: 13, color: tokens.colors.textMuted, padding: 16 }}>Loading run…</div>
@@ -283,6 +379,19 @@ export default function BenchmarkLeaderboardPage() {
           )}
         </section>
       </div>
+
+      {boardId && (
+        <BenchmarkRunModal
+          isOpen={modalOpen}
+          onClose={() => setModalOpen(false)}
+          boardId={boardId}
+          workspaceId={board?.workspace_id || wsId}
+          columns={boardColumns}
+          agents={agentPool}
+          runId={editRunId}
+          onSaved={loadOverview}
+        />
+      )}
     </div>
   );
 }
