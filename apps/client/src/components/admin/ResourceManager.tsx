@@ -56,7 +56,7 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
   const [formDefaultBranch, setFormDefaultBranch] = useState('');
   const [formErrors, setFormErrors] = useState<{ name?: string }>({});
   const [credentials, setCredentials] = useState<Credential[]>([]);
-  const [lightboxImage, setLightboxImage] = useState<{ src: string; alt: string } | null>(null);
+  const [lightboxImage, setLightboxImage] = useState<{ src: string; alt: string; kind: 'image' | 'video' } | null>(null);
 
   // Branch-test state for the repository form. Lives at the modal level so the
   // success result can drive the Default Branch picker (dropdown of real refs
@@ -118,9 +118,14 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
     // resource as 'image' — some older uploads landed with an empty mimetype
     // and would otherwise fall through to the octet-stream download branch.
     const isImage = mime.startsWith('image/') || (r.type === 'image' && !!r.file_data);
+    const isVideo = mime.startsWith('video/');
     if (r.file_data && isImage) {
       const effectiveMime = mime.startsWith('image/') ? mime : 'image/png';
-      setLightboxImage({ src: `data:${effectiveMime};base64,${r.file_data}`, alt: r.name });
+      setLightboxImage({ src: `data:${effectiveMime};base64,${r.file_data}`, alt: r.name, kind: 'image' });
+      return;
+    }
+    if (r.file_data && isVideo) {
+      setLightboxImage({ src: `data:${mime};base64,${r.file_data}`, alt: r.name, kind: 'video' });
       return;
     }
     if (r.file_data) {
@@ -420,29 +425,69 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
                 </div>
               )}
 
-              {r.type === 'image' && r.file_data && (
-                <div style={{ marginBottom: 6 }}>
-                  <img
-                    src={`data:${r.file_mimetype || 'image/png'};base64,${r.file_data}`}
-                    alt={r.name}
-                    onClick={() => openResourceFile(r)}
-                    title="Click to view full size"
-                    style={{ maxWidth: '100%', maxHeight: 120, borderRadius: tokens.radii.sm, objectFit: 'contain', cursor: 'zoom-in', display: 'block' }}
-                  />
-                </div>
-              )}
-
-              {r.file_name && r.type !== 'image' && (
-                <div
-                  onClick={() => openResourceFile(r)}
-                  title="Click to open"
-                  style={{ fontSize: '11px', color: tokens.colors.accent, marginBottom: 4, cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-                  onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.textDecoration = 'underline'; }}
-                  onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.textDecoration = 'none'; }}
-                >
-                  File: {r.file_name}
-                </div>
-              )}
+              {(() => {
+                const mime = r.file_mimetype || '';
+                const isImage = mime.startsWith('image/') || (r.type === 'image' && !!r.file_data);
+                const isVideo = mime.startsWith('video/');
+                const isAudio = mime.startsWith('audio/');
+                if (r.file_data && isImage) {
+                  return (
+                    <div style={{ marginBottom: 6 }}>
+                      <img
+                        src={`data:${mime || 'image/png'};base64,${r.file_data}`}
+                        alt={r.name}
+                        onClick={() => openResourceFile(r)}
+                        title="Click to view full size"
+                        style={{ maxWidth: '100%', maxHeight: 120, borderRadius: tokens.radii.sm, objectFit: 'contain', cursor: 'zoom-in', display: 'block' }}
+                      />
+                    </div>
+                  );
+                }
+                if (r.file_data && isVideo) {
+                  // Inline <video> with native controls — plays in-card and
+                  // shows the first frame as a preview. Click expands to the
+                  // lightbox for a larger surface (openResourceFile).
+                  return (
+                    <div style={{ marginBottom: 6 }}>
+                      <video
+                        src={`data:${mime};base64,${r.file_data}`}
+                        controls
+                        preload="metadata"
+                        playsInline
+                        title={r.file_name || r.name}
+                        style={{ width: '100%', maxHeight: 160, borderRadius: tokens.radii.sm, background: '#000', display: 'block' }}
+                      />
+                    </div>
+                  );
+                }
+                if (r.file_data && isAudio) {
+                  return (
+                    <div style={{ marginBottom: 6 }}>
+                      <audio
+                        src={`data:${mime};base64,${r.file_data}`}
+                        controls
+                        preload="metadata"
+                        title={r.file_name || r.name}
+                        style={{ width: '100%', display: 'block' }}
+                      />
+                    </div>
+                  );
+                }
+                if (r.file_name) {
+                  return (
+                    <div
+                      onClick={() => openResourceFile(r)}
+                      title="Click to open"
+                      style={{ fontSize: '11px', color: tokens.colors.accent, marginBottom: 4, cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                      onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.textDecoration = 'underline'; }}
+                      onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.textDecoration = 'none'; }}
+                    >
+                      File: {r.file_name}
+                    </div>
+                  );
+                }
+                return null;
+              })()}
 
               {r.tags && r.tags.length > 0 && (
                 <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 6 }}>
@@ -921,12 +966,23 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
           }}
         >
           <div style={{ minHeight: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 40 }}>
-            <img
-              src={lightboxImage.src}
-              alt={lightboxImage.alt}
-              onClick={(e) => e.stopPropagation()}
-              style={{ cursor: 'default', background: '#fff', borderRadius: tokens.radii.sm, boxShadow: '0 10px 40px rgba(0,0,0,0.5)' }}
-            />
+            {lightboxImage.kind === 'video' ? (
+              <video
+                src={lightboxImage.src}
+                controls
+                autoPlay
+                playsInline
+                onClick={(e) => e.stopPropagation()}
+                style={{ cursor: 'default', maxWidth: '90vw', maxHeight: '85vh', background: '#000', borderRadius: tokens.radii.sm, boxShadow: '0 10px 40px rgba(0,0,0,0.5)' }}
+              />
+            ) : (
+              <img
+                src={lightboxImage.src}
+                alt={lightboxImage.alt}
+                onClick={(e) => e.stopPropagation()}
+                style={{ cursor: 'default', background: '#fff', borderRadius: tokens.radii.sm, boxShadow: '0 10px 40px rgba(0,0,0,0.5)' }}
+              />
+            )}
           </div>
           <button
             type="button"
