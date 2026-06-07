@@ -29,7 +29,6 @@ export type CommentAttachment = {
   id: string;
   file_name: string;
   file_mimetype: string;
-  file_data: string;
 };
 
 /**
@@ -99,14 +98,21 @@ export async function expandCommentAttachments(
     for (const c of comments) if (Array.isArray(c?.attachment_resource_ids)) c.attachments = [];
     return;
   }
-  const rows = await scope.getRepository(Resource).find({ where: { id: In([...allIds]) } });
+  // Metadata only — never SELECT file_data here. The bytes can be tens of MB
+  // per attachment (large mp4s), and this hydrator runs on every ticket-detail
+  // and board refetch; pulling the base64 inline used to bloat those responses
+  // and, for big videos, made the panel unusable. The client renders via the
+  // streaming GET /api/resources/:id/raw endpoint instead (ticket ff3e7337).
+  const rows = await scope.getRepository(Resource).find({
+    where: { id: In([...allIds]) },
+    select: { id: true, file_name: true, file_mimetype: true },
+  });
   const map = new Map<string, CommentAttachment>();
   for (const r of rows) {
     map.set(r.id, {
       id: r.id,
       file_name: r.file_name,
       file_mimetype: r.file_mimetype,
-      file_data: r.file_data,
     });
   }
   for (const c of comments) {
