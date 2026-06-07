@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import 'reflect-metadata';
-import { json, urlencoded } from 'express';
+import { json, urlencoded, raw } from 'express';
 import compression from 'compression';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
@@ -34,6 +34,18 @@ async function bootstrap() {
   // catch-all route. Raised to 10MB; ingestEntries already caps entries at
   // 500 per upload so this is the natural ceiling, not a wildly permissive
   // attack surface.
+  // Raw binary upload for media resources — mounted BEFORE the global json
+  // parser and scoped to a single route so it claims that path's body as a
+  // Buffer instead of letting json() try (and fail) to parse it. This is the
+  // escape hatch from the 10MB JSON ceiling: comment/resource media used to be
+  // base64-inlined into a JSON POST body, so a ~7MB+ mp4 (base64 inflates
+  // ~33%) blew past the limit → Express 413 → the comment never saved at all
+  // (ticket ff3e7337). Raw bytes carry no base64 inflation and stream straight
+  // through here, so large video uploads succeed. Cap at 200MB — generous for
+  // real attachments, still a bound, not a wide-open hole. Overflow surfaces a
+  // clear 413 (see AllExceptionsFilter's entity.too.large handling).
+  app.use('/api/resources/upload', raw({ type: () => true, limit: '200mb' }));
+
   app.use(json({ limit: '10mb' }));
   app.use(urlencoded({ limit: '10mb', extended: true }));
 

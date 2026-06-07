@@ -24,7 +24,24 @@ export class AllExceptionsFilter implements ExceptionFilter {
       const res = exception.getResponse();
       message = typeof res === 'string' ? res : (res as any).message || (res as any).error || message;
     } else if (exception instanceof Error) {
-      message = exception.message;
+      // body-parser / raw-body throw plain Errors carrying a numeric `status`
+      // (or `statusCode`) and a machine `type` — most importantly
+      // `entity.too.large` (413) when an upload exceeds the configured limit.
+      // Without this branch those surfaced as a generic 500 "request entity
+      // too large", so the client could not tell an oversize upload apart from
+      // a real server fault. Honor the carried status and give 413 a friendly,
+      // user-facing message (ticket ff3e7337 — clear oversize error).
+      const carried = (exception as any).status ?? (exception as any).statusCode;
+      const bodyType = (exception as any).type;
+      if (typeof carried === 'number' && carried >= 400 && carried < 600) {
+        status = carried;
+      }
+      if (bodyType === 'entity.too.large' || status === HttpStatus.PAYLOAD_TOO_LARGE) {
+        status = HttpStatus.PAYLOAD_TOO_LARGE;
+        message = 'File too large — the upload exceeds the maximum allowed size.';
+      } else {
+        message = exception.message;
+      }
       stack = exception.stack || '';
     }
 
