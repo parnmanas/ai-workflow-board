@@ -13,6 +13,45 @@ export function isImageMime(mime: string | undefined | null): boolean {
   return !!mime && /^image\//i.test(mime);
 }
 
+// Minimal filename-extension → MIME map for the legacy / empty-mime fallback.
+// Older Resource attachment rows were persisted with an empty or generic
+// (application/octet-stream) file_mimetype. When that mime is fed to the inline
+// image/video renderers they fall through to a plain download link instead of
+// showing the media. Re-deriving a usable type from the filename extension lets
+// those rows render inline like freshly-uploaded attachments.
+const EXT_MIME: Record<string, string> = {
+  // images
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+  webp: 'image/webp', bmp: 'image/bmp', svg: 'image/svg+xml', avif: 'image/avif',
+  // video
+  mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', m4v: 'video/x-m4v',
+  ogv: 'video/ogg', mkv: 'video/x-matroska',
+  // audio
+  mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4',
+  aac: 'audio/aac', flac: 'audio/flac', weba: 'audio/webm',
+};
+
+export function mimeFromFilename(filename: string | undefined | null): string {
+  if (!filename) return '';
+  const dot = filename.lastIndexOf('.');
+  if (dot < 0 || dot === filename.length - 1) return '';
+  const ext = filename.slice(dot + 1).toLowerCase();
+  return EXT_MIME[ext] || '';
+}
+
+// Resolve the mime to actually render with. A concrete stored mime always wins;
+// empty or generic application/octet-stream is treated as "missing" and we fall
+// back to the filename extension. Keeps inline rendering working for legacy
+// attachment rows without changing how new uploads behave.
+export function effectiveMime(
+  mime: string | undefined | null,
+  filename: string | undefined | null,
+): string {
+  const m = (mime || '').trim();
+  if (m && m.toLowerCase() !== 'application/octet-stream') return m;
+  return mimeFromFilename(filename);
+}
+
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return '';
   if (bytes < 1024) return `${bytes} B`;
