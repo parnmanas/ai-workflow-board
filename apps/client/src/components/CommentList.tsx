@@ -4,6 +4,7 @@ import { Comment, CommentType } from '../types';
 import { rawResourceUrl } from '../api';
 import { tokens } from '../tokens';
 import { renderMarkdown, handleMentionAwareCopy } from './chat/utils/markdown';
+import { effectiveMime } from './chat/utils/attachments';
 import { COMMENT_TYPE_STYLES, resolveCommentType } from './comment-types';
 
 interface CommentListProps {
@@ -373,7 +374,11 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
               {attachments.length > 0 && (
                 <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
                   {attachments.map((att) => {
-                    const mt = att.file_mimetype || '';
+                    // Legacy Resource rows can carry an empty or generic
+                    // (application/octet-stream) file_mimetype, which would drop
+                    // them to a download link. Re-derive from the filename so
+                    // these render inline like the chat path already does.
+                    const mt = effectiveMime(att.file_mimetype, att.file_name);
                     const isImage = mt.startsWith('image/');
                     const isVideo = mt.startsWith('video/');
                     // Stream from the binary endpoint instead of inlining base64
