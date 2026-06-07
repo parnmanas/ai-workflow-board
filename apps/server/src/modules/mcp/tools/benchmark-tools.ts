@@ -24,16 +24,12 @@
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { Agent } from '../../../entities/Agent';
-import { Board } from '../../../entities/Board';
-import { BoardColumn } from '../../../entities/BoardColumn';
-import { Ticket } from '../../../entities/Ticket';
 import { ok, err } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
 import type { ToolContext } from './context';
 
 export function registerBenchmarkTools(server: McpServer, ctx: ToolContext): void {
-  const { dataSource, benchmarkService, ticketRoleAssignmentService, triggerLoopService, activityService, logger } = ctx;
+  const { benchmarkService } = ctx;
 
   server.tool(
     'submit_benchmark_score',
@@ -97,134 +93,29 @@ export function registerBenchmarkTools(server: McpServer, ctx: ToolContext): voi
       candidate_column_name: z.string().optional().describe('Column to place candidates on (defaults to the board\'s first active column)'),
     },
     async ({ board_id, prompt, candidate_agent_ids, title, rubric, base_repo, evaluator_agent_ids, candidate_column_name }, extra: { sessionId?: string }) => {
+      if (!benchmarkService) return err('benchmark runs require the integrated server (BenchmarkService not wired)');
       const caller = getCallerAgent(extra);
-
-      const board = await dataSource.getRepository(Board).findOne({ where: { id: board_id } });
-      if (!board) return err('Board not found');
-      const workspaceId = board.workspace_id || '';
-
-      const cols = await dataSource.getRepository(BoardColumn).find({
-        where: { board_id },
-        order: { position: 'ASC' },
-      });
-      if (cols.length === 0) return err('Board has no columns');
-
-      const isTerminal = (c: BoardColumn) => (c as any).is_terminal === true || (c as any).kind === 'terminal';
-      // Run sits on the first column (intake) so it renders as a board card.
-      const runColumn = cols[0];
-      // Candidates land on the named column, else the first active-kind column,
-      // else the first non-terminal column — so the normal assignee dispatch fires.
-      const candidateColumn =
-        (candidate_column_name
-          ? cols.find((c) => c.name.toLowerCase() === candidate_column_name.toLowerCase())
-          : undefined) ||
-        cols.find((c) => (c as any).kind === 'active') ||
-        cols.find((c) => !isTerminal(c)) ||
-        runColumn;
-
-      const agentRepo = dataSource.getRepository(Agent);
-      const ticketRepo = dataSource.getRepository(Ticket);
-
-      const descParts = [prompt];
-      if (rubric) descParts.push('\n\n## Rubric\n' + rubric);
-      if (base_repo) descParts.push('\n\n## Base repository\n' + base_repo);
-      const runDescription = descParts.join('');
-
-      const runLabels = ['benchmark', 'benchmark-run', ...evaluator_agent_ids.map((id) => `evaluator:${id}`)];
-
-      const creatorName = caller?.agentName || '';
-      const creatorId = caller?.agentId || '';
-
-      // Run parent.
-      const runPosition = await ticketRepo
-        .createQueryBuilder('t')
-        .where('t.column_id = :colId AND t.parent_id IS NULL', { colId: runColumn.id })
-        .getCount();
-      const run = await ticketRepo.save(ticketRepo.create({
-        column_id: runColumn.id,
-        parent_id: null as any,
-        depth: 0,
-        title: title || 'Benchmark run',
-        description: runDescription,
-        priority: 'high',
-        workspace_id: workspaceId,
-        labels: JSON.stringify(runLabels),
-        position: runPosition,
-        created_by: creatorName,
-        created_by_type: creatorId ? 'agent' : '',
-        created_by_id: creatorId,
-      }));
-
-      // Candidates — one child per agent, each with its own assignee + worktree.
-      const candidates: Array<{ candidate_ticket_id: string; assignee_agent_id: string; title: string; dispatched: number }> = [];
-      let childPos = 0;
-      for (const agentId of candidate_agent_ids) {
-        const agent = await agentRepo.findOne({ where: { id: agentId } });
-        const agentName = agent?.name || agentId;
-        const child = await ticketRepo.save(ticketRepo.create({
-          parent_id: run.id,
-          depth: 1,
-          column_id: candidateColumn.id,
-          title: `Candidate: ${agentName}`,
-          description: prompt,
-          priority: 'medium',
-          status: 'todo',
-          workspace_id: workspaceId,
-          assignee_id: agentId,
-          assignee: agentName,
-          labels: JSON.stringify(['benchmark', 'benchmark-candidate']),
-          position: childPos++,
-          created_by: creatorName,
-          created_by_type: creatorId ? 'agent' : '',
-          created_by_id: creatorId,
-        }));
-        // Sync the assignee role assignment so TriggerLoopService can resolve a
-        // holder for the candidate's active column (assignee dispatch).
-        if (ticketRoleAssignmentService && workspaceId) {
-          try {
-            await ticketRoleAssignmentService.syncBuiltinTrio(child.id, workspaceId, {
-              assignee_id: agentId,
-            });
-          } catch (e) {
-            logger.warn('MCP', `create_benchmark_run: failed to sync assignee role for candidate ${child.id}: ${String(e)}`);
-          }
-        }
-        // Wake the candidate's assignee. Creating the child row alone emits no
-        // trigger — the trigger loop only routes on 'moved'/comment/'updated'
-        // activities, and backlog promotion only touches intake-kind columns,
-        // so a candidate placed directly on an active column would sit idle
-        // forever. dispatchCurrentColumn resolves the column's role_routing →
-        // assignee assignment → emits the trigger, exactly as unpend does.
-        let dispatched = 0;
-        if (triggerLoopService) {
-          try {
-            const res = await triggerLoopService.dispatchCurrentColumn(
-              child.id, 'benchmark_candidate', creatorId,
-            );
-            dispatched = res?.emitted || 0;
-          } catch (e) {
-            logger.warn('MCP', `create_benchmark_run: failed to dispatch candidate ${child.id}: ${String(e)}`);
-          }
-        }
-        candidates.push({ candidate_ticket_id: child.id, assignee_agent_id: agentId, title: child.title, dispatched });
+      // create_benchmark_run keeps its historical create+start-now semantics by
+      // delegating to BenchmarkService.createRunAndStart (createDraftRun +
+      // immediate start). The lifecycle split (draft → start) lives behind the
+      // REST/UI surface; this tool's signature + output are unchanged so the
+      // plugin / agent-manager need no version bump.
+      try {
+        const result = await benchmarkService.createRunAndStart({
+          board_id,
+          prompt,
+          candidate_agent_ids,
+          title,
+          rubric,
+          base_repo,
+          evaluator_agent_ids,
+          candidate_column_name,
+          actor: { id: caller?.agentId || '', name: caller?.agentName || '', type: 'agent' },
+        });
+        return ok(result);
+      } catch (e: any) {
+        return err(e?.message || 'Failed to create benchmark run');
       }
-
-      await activityService.logActivity({
-        entity_type: 'ticket',
-        entity_id: run.id,
-        action: 'created',
-        new_value: run.title,
-        ticket_id: run.id,
-        actor_name: creatorName || 'benchmark',
-      });
-
-      return ok({
-        run_ticket_id: run.id,
-        run_column_id: runColumn.id,
-        candidate_column_id: candidateColumn.id,
-        evaluator_agent_ids,
-        candidates,
-      });
     },
   );
 }
