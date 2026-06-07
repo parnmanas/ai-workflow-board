@@ -1,6 +1,6 @@
 import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
-import { Controller, Get, Post, Patch, Delete, Body, Param, Query, Req, Res, UseGuards } from '@nestjs/common';
-import { Request, Response } from 'express';
+import { Controller, Get, Post, Patch, Delete, Body, Param, Query, Res, UseGuards } from '@nestjs/common';
+import { Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Resource } from '../../entities/Resource';
@@ -23,67 +23,11 @@ export class ResourcesController {
     @InjectRepository(Credential) private readonly credentialRepo: Repository<Credential>,
   ) {}
 
-  // Raw binary upload — the body is a Buffer (express raw() parser mounted in
-  // main.ts for this exact path), NOT JSON. Metadata rides in query params and
-  // the X-File-Name header so no base64 inflation and no 10MB JSON ceiling: a
-  // large mp4 streams straight in. The bytes are stored base64 in file_data
-  // (consistent with the existing Resource model / dual sqlite+pg support),
-  // but the client now references the created Resource by id from a comment
-  // instead of re-inlining the bytes into the comment POST (ticket ff3e7337).
-  @Post('upload')
-  async upload(
-    @Query('workspace_id') workspaceId: string,
-    @Query('board_id') boardId: string | undefined,
-    @Query('type') type: string | undefined,
-    @Req() req: Request,
-    @Res() res: Response,
-  ) {
-    if (!workspaceId) return res.status(400).json({ error: 'workspace_id query parameter is required' });
-    const buf: Buffer | null = Buffer.isBuffer(req.body) ? req.body : null;
-    if (!buf || buf.length === 0) {
-      return res.status(400).json({ error: 'request body is empty — send the file bytes as the raw request body' });
-    }
-    const rawName = req.headers['x-file-name'];
-    let fileName = '';
-    if (typeof rawName === 'string' && rawName) {
-      try { fileName = decodeURIComponent(rawName); } catch { fileName = rawName; }
-    }
-    if (!fileName) fileName = 'upload';
-    const headerMime = (req.headers['x-file-type'] as string) || req.headers['content-type'] || '';
-    const fileData = buf.toString('base64');
-    const effectiveMimetype = headerMime && headerMime !== 'application/octet-stream'
-      ? headerMime
-      : (inferResourceMimetype(fileData, fileName) || headerMime || 'application/octet-stream');
-    const resource = await this.resourceRepo.save(
-      this.resourceRepo.create({
-        workspace_id: workspaceId,
-        board_id: boardId || null,
-        credential_id: null,
-        name: fileName,
-        description: '',
-        type: type || 'comment_attachment',
-        url: '',
-        content: '',
-        file_data: fileData,
-        file_name: fileName,
-        file_mimetype: effectiveMimetype,
-        tags: '[]',
-        default_branch: '',
-      }),
-    );
-    // Return metadata only — never echo file_data back (it would re-inflate the
-    // response by ~33% and defeats the point of the streaming /raw endpoint).
-    return res.status(201).json({
-      id: resource.id,
-      workspace_id: resource.workspace_id,
-      board_id: resource.board_id,
-      name: resource.name,
-      type: resource.type,
-      file_name: resource.file_name,
-      file_mimetype: resource.file_mimetype,
-      size: buf.length,
-    });
-  }
+  // NOTE: raw binary upload (POST /api/resources/upload) lives in
+  // ResourceMediaController, not here. This controller is admin-gated
+  // (MANAGE_RESOURCES); comment-attachment upload must be reachable by any
+  // workspace member, so it authorizes by workspace membership there instead
+  // (ticket ff3e7337 review blocker 2).
 
   @Get()
   async list(
