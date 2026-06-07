@@ -208,19 +208,25 @@ This ticket is in the In Progress column. Implement the work on a feature branch
      - \`slug\` — lowercase alphanumeric-and-hyphen slug derived from the ticket title (fall back to id only if no usable tokens).
    - **Reused branch** (ticket bounced back from Review) — \`git checkout\` the existing branch and **immediately** \`git rebase origin/<base-branch>\` to lift your commits onto the latest tip *before* writing any new code. Amend or append commits afterwards; do **not** start over with a new name. If the rebase hits a conflict, integrate it the same way Merging does (fold same-meaning / duplicate changes; see \`merging_workflow\`) rather than abandoning the branch.
 
-2. **Do the work** — implement the requirement. Split commits by logical unit (one commit per one change).
+2. **Overlap pre-flight — run BEFORE writing any implementation code.** A sibling ticket may already have shipped a fix for this same symptom on the default branch, possibly with a *different, incompatible* design. Building first and discovering the collision afterwards wastes the whole build pass. Check both directions:
+   - **Already on the default?** You already fetched + pulled the base to its tip in step 1. Now confirm the bug/symptom this ticket targets isn't already resolved there: \`git log --oneline -20 origin/<base-branch>\`, and grep the files/symptom you were about to touch (\`git log -p --since=2.weeks -- <path>\`, or search for the error string / function names). If the symptom is already fixed on the default, the build is moot.
+   - **In-flight elsewhere?** Scan for other **open or recently-Done** tickets attacking the same files/symptom: \`mcp__awb__get_board_summary\` / \`mcp__awb__get_my_tickets\`, and skim sibling tickets' titles/labels for the same bug. A sibling mid-build with a conflicting design is the same trap as one already merged.
+   - **If a conflicting sibling already merged or is in-flight → stop and escalate. Do NOT build.** Leave an \`add_comment\` stating which commit(s)/ticket already cover this symptom and why your planned design collides, mention the reporter (\`@[role:reporter|<name>]\`), and **park** rather than bounce — use \`mcp__awb__pend_ticket\` (human must decide: close as superseded, or re-scope this ticket to the residual). This is the cheap gate that the \`7929ef0b\`/\`ff3e7337\` collision skipped: that assignee ran exactly this check *on resume* and parked correctly — the only gap was not running it *before* the first build pass.
+   - **No overlap → proceed to step 3.**
 
-3. **Push** — \`git push -u origin <branch-name>\`.
+3. **Do the work** — implement the requirement. Split commits by logical unit (one commit per one change).
+
+4. **Push** — \`git push -u origin <branch-name>\`.
    - **Submodule projects**: if the change is inside a submodule, push the submodule's feature branch here, but **do NOT bump the parent repo's submodule ref yet**. The parent bump happens in Merging, after the submodule default branch has absorbed the change.
    - Before the final push, rebase onto the latest default so Merging can do a fast-forward: \`git fetch origin && git rebase origin/<default>\`. If this is a re-push after a rebase, use \`git push --force-with-lease\` on the feature branch (never the default branch).
 
-4. **Ticket comment** — \`add_comment\` with:
+5. **Ticket comment** — \`add_comment\` with:
    - Branch name (exactly as pushed).
    - 3–5 line summary of the main changes.
    - Build / test results if you ran them.
    - If a PR already exists, its URL.
 
-5. **Move to Review** — \`move_ticket\` to the **Review** column.
+6. **Move to Review** — \`move_ticket\` to the **Review** column.
 
 ## When to park instead of bouncing back
 
