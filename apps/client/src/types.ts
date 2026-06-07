@@ -484,6 +484,33 @@ export type BoardWithCards = Omit<Board, 'columns'> & {
   columns: BoardCardColumn[];
 };
 
+// Benchmark run lifecycle (ticket 5eb459c4). Mirrors BenchmarkService.RunDetail.
+export interface BenchmarkRunCandidate {
+  candidate_ticket_id: string;
+  assignee_agent_id: string;
+  assignee_name: string;
+  title: string;
+  pending: boolean; // parked (draft, not yet dispatched)
+  column_id: string;
+}
+
+export interface BenchmarkRunDetail {
+  run_ticket_id: string;
+  title: string;
+  state: 'draft' | 'started';
+  started_at: number | null;
+  board_id: string;
+  workspace_id: string;
+  run_column_id: string;
+  candidate_column_id: string;
+  prompt: string;
+  rubric: string;
+  base_repo: string;
+  evaluator_agent_ids: string[];
+  evaluators: Array<{ agent_id: string; name: string }>;
+  candidates: BenchmarkRunCandidate[];
+}
+
 export interface Workspace {
   id: string; // GUID
   name: string;

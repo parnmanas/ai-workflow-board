@@ -40,6 +40,7 @@ import type {
   AgentMovePreview,
   AgentApiKeyPolicy,
   AgentCrossRefPolicy,
+  BenchmarkRunDetail,
 } from './types';
 
 const BASE = '/api';
@@ -260,6 +261,40 @@ export const api = {
     request<any>(`/benchmark/runs/${runTicketId}/leaderboard`),
   getBenchmarkLeaderboard: (workspaceId?: string) =>
     request<any>(workspaceId ? `/benchmark/leaderboard?workspace_id=${workspaceId}` : '/benchmark/leaderboard'),
+  // Benchmark run lifecycle (ticket 5eb459c4). createBenchmarkRun makes a DRAFT
+  // (candidates parked, not dispatched); startBenchmarkRun dispatches them. The
+  // Option-A edit policy is enforced server-side — updateBenchmarkRun on a
+  // started run rejects prompt/rubric/evaluator changes + candidate removal (422).
+  getBenchmarkRun: (runId: string) =>
+    request<BenchmarkRunDetail>(`/benchmark/runs/${runId}`),
+  createBenchmarkRun: (data: {
+    board_id: string;
+    prompt: string;
+    title?: string;
+    rubric?: string;
+    base_repo?: string;
+    candidate_agent_ids?: string[];
+    evaluator_agent_ids?: string[];
+    candidate_column_name?: string;
+  }) =>
+    request<BenchmarkRunDetail>('/benchmark/runs', { method: 'POST', body: JSON.stringify(data) }),
+  updateBenchmarkRun: (runId: string, data: {
+    title?: string;
+    prompt?: string;
+    rubric?: string;
+    base_repo?: string;
+    candidate_agent_ids?: string[];
+    evaluator_agent_ids?: string[];
+    candidate_column_name?: string;
+  }) =>
+    request<BenchmarkRunDetail>(`/benchmark/runs/${runId}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  startBenchmarkRun: (runId: string) =>
+    request<BenchmarkRunDetail>(`/benchmark/runs/${runId}/start`, { method: 'POST' }),
+  addBenchmarkCandidates: (runId: string, candidateAgentIds: string[]) =>
+    request<BenchmarkRunDetail>(`/benchmark/runs/${runId}/candidates`, {
+      method: 'POST',
+      body: JSON.stringify({ candidate_agent_ids: candidateAgentIds }),
+    }),
   deleteBoard: (id: string) =>
     request<any>(`/boards/${id}`, { method: 'DELETE' }),
   // Cross-workspace board move (ticket 8882056b). dry_run=true (default)
