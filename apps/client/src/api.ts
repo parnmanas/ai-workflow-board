@@ -87,6 +87,20 @@ export function getActiveWorkspaceId(): string | null {
   return _activeWorkspaceId;
 }
 
+// Build a URL for the binary streaming endpoint (GET /api/resources/:id/raw).
+// Used directly as an <img>/<video> src — those tags can't send an
+// Authorization header, so the session token rides in the query string
+// (the /raw route accepts header OR ?token=). Pass { download: true } to get
+// an attachment Content-Disposition for download links.
+export function rawResourceUrl(id: string, opts?: { download?: boolean }): string {
+  const token = (() => { try { return localStorage.getItem('auth_token') || ''; } catch { return ''; } })();
+  const params = new URLSearchParams();
+  if (token) params.set('token', token);
+  if (opts?.download) params.set('download', '1');
+  const qs = params.toString();
+  return `${BASE}/resources/${id}/raw${qs ? `?${qs}` : ''}`;
+}
+
 function getAuthHeaders(): Record<string, string> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   const token = localStorage.getItem('auth_token');
@@ -718,6 +732,39 @@ export const api = {
   },
   getResource: (id: string) =>
     request<Resource>(`/resources/${id}`),
+  // Upload a file as a Resource by streaming the raw bytes (NOT base64-in-JSON)
+  // so large media bypasses the 10MB JSON body limit. Returns metadata only —
+  // the bytes are then referenced from a comment via attachment_resource_ids
+  // and rendered through the /raw streaming endpoint (ticket ff3e7337).
+  uploadResourceFile: async (
+    file: File,
+    opts: { workspace_id: string; board_id?: string | null; type?: string },
+  ): Promise<{ id: string; file_name: string; file_mimetype: string; size: number }> => {
+    const params = new URLSearchParams({ workspace_id: opts.workspace_id });
+    if (opts.board_id) params.set('board_id', opts.board_id);
+    params.set('type', opts.type || 'comment_attachment');
+    const token = (() => { try { return localStorage.getItem('auth_token'); } catch { return null; } })();
+    const headers: Record<string, string> = {
+      'Content-Type': file.type || 'application/octet-stream',
+      'X-File-Name': encodeURIComponent(file.name),
+    };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    if (_activeWorkspaceId) headers['X-Workspace-Id'] = _activeWorkspaceId;
+    const res = await fetch(`${BASE}/resources/upload?${params.toString()}`, {
+      method: 'POST',
+      headers,
+      body: file,
+    });
+    if (!res.ok) {
+      if (res.status === 401) {
+        localStorage.removeItem('auth_token');
+        window.dispatchEvent(new Event('auth-expired'));
+      }
+      const err = await res.json().catch(() => ({ error: res.statusText }));
+      throw new Error(err.error || 'Upload failed');
+    }
+    return res.json();
+  },
   createResource: (data: {
     workspace_id: string;
     board_id?: string | null;

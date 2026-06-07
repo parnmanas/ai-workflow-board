@@ -1,6 +1,7 @@
 import React, { useRef, useMemo, useCallback, useEffect } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Comment, CommentType } from '../types';
+import { rawResourceUrl } from '../api';
 import { tokens } from '../tokens';
 import { renderMarkdown, handleMentionAwareCopy } from './chat/utils/markdown';
 import { COMMENT_TYPE_STYLES, resolveCommentType } from './comment-types';
@@ -375,7 +376,10 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
                     const mt = att.file_mimetype || '';
                     const isImage = mt.startsWith('image/');
                     const isVideo = mt.startsWith('video/');
-                    const src = `data:${mt || 'application/octet-stream'};base64,${att.file_data}`;
+                    // Stream from the binary endpoint instead of inlining base64
+                    // — large videos seek via HTTP Range and the comment JSON
+                    // no longer carries the bytes (ticket ff3e7337).
+                    const src = rawResourceUrl(att.id);
                     if (isImage) {
                       return (
                         <img
@@ -432,7 +436,7 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
                     return (
                       <a
                         key={att.id}
-                        href={src}
+                        href={rawResourceUrl(att.id, { download: true })}
                         download={att.file_name}
                         title={att.file_name}
                         style={{

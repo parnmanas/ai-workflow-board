@@ -267,15 +267,17 @@ export interface ActivityLog {
   created_at: string;
 }
 
-// Hydrated Resource metadata returned with a comment. file_data is the
-// raw base64 payload — the server ships it inline so the UI can render
-// image thumbnails (<img src="data:...">) and kick off downloads without
-// a second round-trip per attachment.
+// Hydrated Resource metadata returned with a comment. Metadata only — the
+// server no longer ships the base64 payload inline (it bloated every refetch
+// and made large videos unusable, ticket ff3e7337). The UI renders thumbnails
+// and downloads by pointing media tags at GET /api/resources/:id/raw via
+// rawResourceUrl(). `file_data` is kept optional for backward compatibility
+// but is not populated by the current server.
 export interface CommentAttachment {
   id: string; // Resource.id (type='comment_attachment')
   file_name: string;
   file_mimetype: string;
-  file_data: string;
+  file_data?: string;
 }
 
 // Ticket-level attachment. Distinct from CommentAttachment — the binary lives
