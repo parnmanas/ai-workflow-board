@@ -69,11 +69,18 @@ export class CircuitBreaker {
   /**
    * Record a silent exit. Returns `true` if the breaker just opened (crossed
    * threshold), meaning the caller should pend_ticket.
+   *
+   * `opts.forceOpen` opens the breaker on THIS failure regardless of the
+   * threshold — used for non-retryable signatures (usage-limit / auth) that
+   * cannot self-heal, so burning the full N-failure budget would just spin the
+   * trigger loop N more times. The failure is still counted first so the
+   * reported `consecutiveFailures` reflects reality.
    */
   record(
     key: string,
     exitCode: number | null,
     tailSnippet?: string,
+    opts?: { forceOpen?: boolean },
   ): { justOpened: boolean; entry: CircuitBreakerEntry } {
     const now = Date.now();
     let entry = this.#state.get(key);
@@ -95,13 +102,15 @@ export class CircuitBreaker {
     entry.lastExitTail = (tailSnippet || '').slice(0, 200);
 
     let justOpened = false;
-    if (!entry.open && entry.consecutiveFailures >= this.#threshold) {
+    const crossedThreshold = entry.consecutiveFailures >= this.#threshold;
+    if (!entry.open && (crossedThreshold || opts?.forceOpen)) {
       entry.open = true;
       entry.openedAt = now;
       justOpened = true;
       log(
         `[circuit-breaker] OPEN key=${key} failures=${entry.consecutiveFailures} ` +
-          `exit=${exitCode} — blocking re-dispatch until operator intervenes`,
+          `exit=${exitCode}${opts?.forceOpen ? ' (forced — non-retryable)' : ''} — ` +
+          `blocking re-dispatch until operator intervenes`,
       );
     } else {
       log(
