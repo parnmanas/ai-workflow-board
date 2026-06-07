@@ -293,6 +293,21 @@ event contract changed.
 
 ## Operational runbooks
 
+- **Assignee overlap pre-flight (build only after checking for a sibling fix)** —
+  before writing any implementation code, an assignee must confirm the
+  bug/symptom isn't already resolved on the default branch and isn't being
+  attacked by another open/recently-Done ticket with a conflicting design.
+  Step 2 of the `in_progress_workflow` prompt template encodes this:
+  `git fetch` + scan `origin/<base>` for the symptom, scan the board
+  (`get_board_summary` / sibling ticket titles) for in-flight overlap, and
+  **stop-and-escalate** (comment + `pend_ticket`) instead of building when a
+  conflicting sibling already merged or is in-flight. Rationale: the
+  `7929ef0b` / `ff3e7337` retrospective — two tickets shipped incompatible
+  designs for the same pair of comment-attachment bugs in parallel; one
+  landed 8 commits on main while the other's assignee built substantial WIP
+  before checking `origin/main`. The check was run correctly *on resume* but
+  too late; the gate moves it *before* the first build pass. Refreshed onto
+  existing workspaces by migration `1760000000031`.
 - **Re-login a managed claude CLI** — see
   [`docs/managed-agent-relogin.md`](managed-agent-relogin.md). Covers both
   the direct path (`scripts/relogin-managed-agent.{ps1,sh}` redirecting
