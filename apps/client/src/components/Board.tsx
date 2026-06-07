@@ -314,7 +314,7 @@ export default function Board() {
     ticketId: string,
     content: string,
     attachments?: { file_name: string; file_mimetype: string; file_data: string }[],
-    options?: { type?: string; parent_id?: string | null; metadata?: Record<string, unknown> },
+    options?: { type?: string; parent_id?: string | null; metadata?: Record<string, unknown>; attachment_resource_ids?: string[] },
   ) => {
     await wrapAction(() => addComment(ticketId, content, attachments || [], options), 'Comment added');
   }, [wrapAction, addComment]);

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Ticket, Agent, Channel, ActivityLog, CommentType, User, TicketAttachmentMeta, Resource, RepoBranch, TicketPrerequisiteRow, Action } from '../types';
-import { api, TicketRoleAssignmentRow, getActiveWorkspaceId } from '../api';
+import { api, TicketRoleAssignmentRow, getActiveWorkspaceId, rawResourceUrl } from '../api';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
@@ -63,7 +63,7 @@ interface TicketPanelProps {
     ticketId: string,
     content: string,
     attachments?: { file_name: string; file_mimetype: string; file_data: string }[],
-    options?: { type?: string; parent_id?: string | null; metadata?: Record<string, unknown> },
+    options?: { type?: string; parent_id?: string | null; metadata?: Record<string, unknown>; attachment_resource_ids?: string[] },
   ) => void;
   onSetCommentStatus?: (ticketId: string, commentId: string, status: 'open' | 'resolved') => void;
   onSelectTicket?: (id: string) => void;
@@ -371,6 +371,104 @@ function fileToBase64(file: File): Promise<string> {
   });
 }
 
+// Generous client-side ceiling for comment media — mirrors the server's 200MB
+// raw-upload cap (main.ts). Anything larger gets a clear toast at pick time
+// instead of a silent drop or a server round-trip that 413s (ticket ff3e7337).
+const COMMENT_MEDIA_MAX_BYTES = 200 * 1024 * 1024;
+const MAX_COMMENT_ATTACHMENTS = 5;
+
+// A comment attachment staged in the composer. Exactly one of `file` /
+// `resourceId` is set: `file` is a fresh pick uploaded on Send; `resourceId`
+// references an existing Resource. `previewUrl` is an object URL (for files) or
+// the /raw streaming URL (for resources) used to render the thumbnail.
+type StagedAttachment = {
+  key: string;
+  file_name: string;
+  file_mimetype: string;
+  previewUrl: string;
+  file?: File;
+  resourceId?: string;
+};
+
+// Modal that lists file-backed board/workspace Resources so a comment can
+// reference one instead of re-uploading bytes (ticket ff3e7337 — the
+// design-recommended "reference existing Resource" path).
+function ResourceReferencePicker({
+  loading, error, items, onPick, onClose,
+}: {
+  loading: boolean;
+  error: string | null;
+  items: Resource[];
+  onPick: (r: Resource) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 1000,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: 'min(520px, 92vw)', maxHeight: '70vh', overflow: 'auto',
+          background: tokens.colors.surface, border: `1px solid ${tokens.colors.border}`,
+          borderRadius: tokens.radii.lg, padding: 16, boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+          <strong style={{ color: tokens.colors.textStrong, fontSize: 14 }}>기존 리소스 첨부</strong>
+          <button onClick={onClose} style={{
+            background: 'transparent', border: 'none', color: tokens.colors.textMuted, cursor: 'pointer', fontSize: 16,
+          }}>{'✕'}</button>
+        </div>
+        {loading && <div style={{ color: tokens.colors.textMuted, fontSize: 12, padding: '12px 0' }}>불러오는 중…</div>}
+        {error && <div style={{ color: tokens.colors.danger, fontSize: 12, padding: '12px 0' }}>{error}</div>}
+        {!loading && !error && items.length === 0 && (
+          <div style={{ color: tokens.colors.textMuted, fontSize: 12, padding: '12px 0' }}>첨부할 수 있는 파일 리소스가 없습니다.</div>
+        )}
+        {!loading && !error && items.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {items.map((r) => {
+              const mt = r.file_mimetype || '';
+              const isImage = mt.startsWith('image/');
+              const isVideo = mt.startsWith('video/');
+              return (
+                <button
+                  key={r.id}
+                  onClick={() => onPick(r)}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 10, padding: '6px 8px',
+                    background: 'transparent', border: `1px solid ${tokens.colors.border}`,
+                    borderRadius: tokens.radii.md, cursor: 'pointer', textAlign: 'left', width: '100%',
+                  }}
+                >
+                  <span style={{
+                    width: 40, height: 40, flexShrink: 0, borderRadius: tokens.radii.sm,
+                    border: `1px solid ${tokens.colors.border}`, overflow: 'hidden',
+                    background: isVideo ? '#000' : tokens.colors.surfaceCard,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16,
+                  }}>
+                    {isImage
+                      ? <img src={rawResourceUrl(r.id)} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                      : isVideo ? <span>🎬</span> : <span>📎</span>}
+                  </span>
+                  <span style={{ minWidth: 0, flex: 1 }}>
+                    <span style={{ display: 'block', color: tokens.colors.textStrong, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.file_name || r.name}</span>
+                    <span style={{ display: 'block', color: tokens.colors.textMuted, fontSize: 10 }}>{mt || r.type}</span>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function TicketPanel({
   ticket, columnName, agents, users, channels, workspaceRoles, boardTickets, typingIndicators,
   onClose, onUpdate, onDelete, onCreateChild, onDeleteChild, onReparentChild, onSetRoleAssignment, onSaveDraft, onAddComment, onSetCommentStatus, onSelectTicket,
@@ -563,10 +661,22 @@ export default function TicketPanel({
   const [branchesLoading, setBranchesLoading] = useState(false);
   const [branchesError, setBranchesError] = useState<string | null>(null);
   const [commentContent, setCommentContent] = useState('');
-  // Staged attachments — kept in memory until the user hits Send; server
-  // turns each into a Resource (type='comment_attachment') and attaches the
-  // resulting ids to the comment in one transactional POST.
-  const [commentAttachments, setCommentAttachments] = useState<{ file_name: string; file_mimetype: string; file_data: string }[]>([]);
+  // Staged attachments — kept in memory until the user hits Send. Two kinds:
+  //   • file     — a freshly picked File, uploaded as a Resource on Send (raw
+  //                bytes, no base64-in-JSON, so large videos don't 413).
+  //   • resource — a reference to an already-uploaded board/workspace Resource.
+  // On Send, files upload first; then the comment POST carries only
+  // attachment_resource_ids (never the bytes), which is what fixes the 10MB
+  // body 413 that silently dropped video comments (ticket ff3e7337).
+  const [commentAttachments, setCommentAttachments] = useState<StagedAttachment[]>([]);
+  // True while uploads are in flight on Send — disables the composer so a
+  // double-submit can't fire a second batch of uploads.
+  const [commentSending, setCommentSending] = useState(false);
+  // Existing-Resource picker (the "reference an already-uploaded file" path).
+  const [resourcePickerOpen, setResourcePickerOpen] = useState(false);
+  const [resourcePickerItems, setResourcePickerItems] = useState<Resource[]>([]);
+  const [resourcePickerLoading, setResourcePickerLoading] = useState(false);
+  const [resourcePickerError, setResourcePickerError] = useState<string | null>(null);
   // Compose type selector — restricted to types where COMMENT_TYPE_STYLES.composable=true.
   // 'note' is the default so the previous flow (just type and Send) is unchanged.
   const [composeType, setComposeType] = useState<CommentType>('note');
@@ -1072,26 +1182,106 @@ export default function TicketPanel({
     return () => { cancelled = true; };
   }, [workspaceId, baseRepoId]);
 
+  // Remove a staged attachment and revoke its object URL (files only — resource
+  // /raw URLs aren't object URLs and don't need revoking).
+  const removeStagedAttachment = (key: string) => {
+    setCommentAttachments(prev => {
+      const target = prev.find(a => a.key === key);
+      if (target?.file && target.previewUrl.startsWith('blob:')) {
+        try { URL.revokeObjectURL(target.previewUrl); } catch { /* noop */ }
+      }
+      return prev.filter(a => a.key !== key);
+    });
+  };
+
   const handleAttach = () => {
     const input = document.createElement('input');
     input.type = 'file';
     // No mimetype restriction — comment attachments go through the Resource
     // table the same as any other workspace/board asset, so the picker accepts
-    // PDFs, zips, videos, etc. Matches server cap in MAX_COMMENT_ATTACHMENT_SIZE.
+    // PDFs, zips, videos, etc.
     input.multiple = true;
-    input.onchange = async (e) => {
+    input.onchange = (e) => {
       const files = (e.target as HTMLInputElement).files;
       if (!files) return;
-      const newAttachments: typeof commentAttachments = [];
-      for (let i = 0; i < files.length && commentAttachments.length + newAttachments.length < 5; i++) {
+      const staged: StagedAttachment[] = [];
+      const rejected: string[] = [];
+      let slots = MAX_COMMENT_ATTACHMENTS - commentAttachments.length;
+      for (let i = 0; i < files.length; i++) {
+        if (slots <= 0) { rejected.push(`${files[i].name} (최대 ${MAX_COMMENT_ATTACHMENTS}개)`); continue; }
         const file = files[i];
-        if (file.size > 10 * 1024 * 1024) continue;
-        const data = await fileToBase64(file);
-        newAttachments.push({ file_name: file.name, file_mimetype: file.type || 'application/octet-stream', file_data: data });
+        // Clear error instead of the old silent `continue` that dropped large
+        // files with no feedback (ticket ff3e7337 — silent failure removal).
+        if (file.size > COMMENT_MEDIA_MAX_BYTES) {
+          rejected.push(`${file.name} (${Math.round(file.size / 1024 / 1024)}MB > ${Math.round(COMMENT_MEDIA_MAX_BYTES / 1024 / 1024)}MB)`);
+          continue;
+        }
+        staged.push({
+          key: `f-${Date.now()}-${i}-${file.name}`,
+          file_name: file.name,
+          file_mimetype: file.type || 'application/octet-stream',
+          previewUrl: URL.createObjectURL(file),
+          file,
+        });
+        slots--;
       }
-      setCommentAttachments(prev => [...prev, ...newAttachments].slice(0, 5));
+      if (staged.length > 0) setCommentAttachments(prev => [...prev, ...staged].slice(0, MAX_COMMENT_ATTACHMENTS));
+      if (rejected.length > 0) showToast(`첨부 불가: ${rejected.join(', ')}`, 'error');
     };
     input.click();
+  };
+
+  // ─── Reference an existing board/workspace Resource ──────────────
+  // The design-recommended path: instead of re-uploading bytes, point the
+  // comment at a Resource that already exists. The comment POST then carries
+  // only the id (ticket ff3e7337).
+  const openResourcePicker = useCallback(async () => {
+    setResourcePickerOpen(true);
+    setResourcePickerLoading(true);
+    setResourcePickerError(null);
+    const ws = (activeTicket as any).workspace_id || workspaceId;
+    if (!ws) {
+      setResourcePickerError('워크스페이스를 확인할 수 없습니다.');
+      setResourcePickerLoading(false);
+      return;
+    }
+    try {
+      // Board-scoped files first (most relevant), then workspace-scoped, then
+      // existing comment attachments — de-duped by id, files with bytes only.
+      const [boardRes, wsRes] = await Promise.all([
+        currentBoardId ? api.listResources(ws, currentBoardId).catch(() => [] as Resource[]) : Promise.resolve([] as Resource[]),
+        api.listResources(ws, '').catch(() => [] as Resource[]),
+      ]);
+      const seen = new Set<string>();
+      const merged = [...boardRes, ...wsRes].filter((r) => {
+        if (seen.has(r.id)) return false;
+        seen.add(r.id);
+        return !!r.file_name; // only file-backed resources are attachable
+      });
+      setResourcePickerItems(merged);
+    } catch (err: any) {
+      setResourcePickerError(err?.message || '리소스를 불러오지 못했습니다.');
+    } finally {
+      setResourcePickerLoading(false);
+    }
+  }, [activeTicket, workspaceId, currentBoardId]);
+
+  const addResourceReference = (r: Resource) => {
+    setCommentAttachments(prev => {
+      if (prev.some(a => a.resourceId === r.id)) return prev; // no dupes
+      if (prev.length >= MAX_COMMENT_ATTACHMENTS) {
+        showToast(`최대 ${MAX_COMMENT_ATTACHMENTS}개까지 첨부할 수 있습니다.`, 'error');
+        return prev;
+      }
+      return [...prev, {
+        key: `r-${r.id}`,
+        file_name: r.file_name || r.name,
+        file_mimetype: r.file_mimetype || '',
+        previewUrl: rawResourceUrl(r.id),
+        resourceId: r.id,
+      }];
+    });
+    setResourcePickerOpen(false);
   };
 
   // ─── Ticket-level attachments ────────────────────────────────
@@ -1336,43 +1526,82 @@ export default function TicketPanel({
     return () => clearInterval(interval);
   }, []);
 
-  const handleSubmitComment = () => {
-    if (commentContent.trim()) {
-      // When replying to a question, force type='answer' and link via parent_id.
-      // The server auto-resolves the parent question on receipt (see
-      // tickets.controller.addComment) so the OPEN pill flips to Resolved
-      // without a follow-up call.
-      const isReply = !!replyingTo;
-      const submittedType: CommentType = isReply ? 'answer' : composeType;
-      const options = isReply
-        ? { type: 'answer' as const, parent_id: replyingTo!.id }
-        : (composeType !== 'note' ? { type: composeType } : undefined);
+  const handleSubmitComment = async () => {
+    if (!commentContent.trim() || commentSending) return;
+    // When replying to a question, force type='answer' and link via parent_id.
+    // The server auto-resolves the parent question on receipt (see
+    // tickets.controller.addComment) so the OPEN pill flips to Resolved
+    // without a follow-up call.
+    const isReply = !!replyingTo;
+    const submittedType: CommentType = isReply ? 'answer' : composeType;
+    const baseOptions = isReply
+      ? { type: 'answer' as const, parent_id: replyingTo!.id }
+      : (composeType !== 'note' ? { type: composeType } : undefined);
 
-      onAddComment(
-        activeTicket.id,
-        commentContent.trim(),
-        commentAttachments.length > 0 ? commentAttachments : undefined,
-        options,
-      );
-      setCommentContent('');
-      setCommentAttachments([]);
-      // Reset to the default type after each send so a one-off Question doesn't
-      // sticky-set the compose mode.
-      setComposeType('note');
-      // Drop reply context so the next comment isn't accidentally an answer too.
-      setReplyingTo(null);
-      // Clear typing indicator immediately on submit (otherwise the just-sent
-      // comment would land alongside a "still typing" footer).
-      stopTypingEmit(activeTicket.id);
-      // Auto-enable the chip for the type we just submitted, otherwise the new
-      // row would land in the timeline but be hidden by the active filter.
-      setActiveTypes(prev => {
-        if (prev.has(submittedType)) return prev;
-        const next = new Set(prev);
-        next.add(submittedType);
-        return next;
-      });
+    // Upload-first: turn every staged file into a Resource, then the comment
+    // POST carries only attachment_resource_ids — never the bytes. This is the
+    // fix for the 10MB JSON-body 413 that silently dropped video comments
+    // (ticket ff3e7337). If any upload fails, abort with a clear toast and keep
+    // the staged items so the user can retry instead of losing the comment.
+    let resourceIds: string[] = [];
+    if (commentAttachments.length > 0) {
+      const ws = (activeTicket as any).workspace_id || workspaceId;
+      if (!ws) { showToast('워크스페이스를 확인할 수 없어 첨부를 업로드할 수 없습니다.', 'error'); return; }
+      setCommentSending(true);
+      try {
+        for (const att of commentAttachments) {
+          if (att.resourceId) { resourceIds.push(att.resourceId); continue; }
+          if (att.file) {
+            const uploaded = await api.uploadResourceFile(att.file, {
+              workspace_id: ws,
+              board_id: currentBoardId || null,
+              type: 'comment_attachment',
+            });
+            resourceIds.push(uploaded.id);
+          }
+        }
+      } catch (err: any) {
+        setCommentSending(false);
+        showToast(`첨부 업로드 실패: ${err?.message || 'unknown error'}`, 'error');
+        return; // keep staged attachments + comment text for retry
+      }
+      setCommentSending(false);
     }
+
+    const options = resourceIds.length > 0
+      ? { ...(baseOptions || {}), attachment_resource_ids: resourceIds }
+      : baseOptions;
+
+    onAddComment(
+      activeTicket.id,
+      commentContent.trim(),
+      undefined, // bytes never travel in the comment POST anymore
+      options,
+    );
+    // Revoke any object URLs we created for file previews.
+    for (const att of commentAttachments) {
+      if (att.file && att.previewUrl.startsWith('blob:')) {
+        try { URL.revokeObjectURL(att.previewUrl); } catch { /* noop */ }
+      }
+    }
+    setCommentContent('');
+    setCommentAttachments([]);
+    // Reset to the default type after each send so a one-off Question doesn't
+    // sticky-set the compose mode.
+    setComposeType('note');
+    // Drop reply context so the next comment isn't accidentally an answer too.
+    setReplyingTo(null);
+    // Clear typing indicator immediately on submit (otherwise the just-sent
+    // comment would land alongside a "still typing" footer).
+    stopTypingEmit(activeTicket.id);
+    // Auto-enable the chip for the type we just submitted, otherwise the new
+    // row would land in the timeline but be hidden by the active filter.
+    setActiveTypes(prev => {
+      if (prev.has(submittedType)) return prev;
+      const next = new Set(prev);
+      next.add(submittedType);
+      return next;
+    });
   };
 
   // ─── Tier-1 E: ticket-presence heartbeat + subscription ──────────────
@@ -1633,13 +1862,20 @@ export default function TicketPanel({
       )}
       {commentAttachments.length > 0 && (
         <div style={{ display: 'flex', gap: 4, marginBottom: 6, flexWrap: 'wrap' }}>
-          {commentAttachments.map((att, idx) => {
+          {commentAttachments.map((att) => {
             const mt = att.file_mimetype || '';
             const isImage = mt.startsWith('image/');
             const isVideo = mt.startsWith('video/');
-            const src = `data:${mt};base64,${att.file_data}`;
+            const src = att.previewUrl;
             return (
-              <div key={idx} style={{ position: 'relative' }}>
+              <div key={att.key} style={{ position: 'relative' }} title={att.resourceId ? `${att.file_name} (기존 리소스 참조)` : att.file_name}>
+                {att.resourceId && (
+                  <span aria-hidden="true" style={{
+                    position: 'absolute', bottom: -2, left: -2, zIndex: 1,
+                    background: tokens.colors.info, color: 'white', fontSize: '8px',
+                    fontWeight: 700, padding: '0 3px', borderRadius: tokens.radii.sm,
+                  }}>REF</span>
+                )}
                 {isImage ? (
                   <img
                     src={src}
@@ -1687,7 +1923,7 @@ export default function TicketPanel({
                     <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{att.file_name}</span>
                   </div>
                 )}
-                <button onClick={() => setCommentAttachments(prev => prev.filter((_, i) => i !== idx))}
+                <button onClick={() => removeStagedAttachment(att.key)}
                   style={{ position: 'absolute', top: -4, right: -4, background: tokens.colors.danger, color: 'white', border: 'none', borderRadius: tokens.radii.full, width: 16, height: 16, fontSize: '10px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>x</button>
               </div>
             );
@@ -1695,10 +1931,14 @@ export default function TicketPanel({
         </div>
       )}
       <div style={{ display: 'flex', gap: 5 }}>
-        <button onClick={handleAttach} title="Attach file" style={{
+        <button onClick={handleAttach} disabled={commentSending} title="파일 첨부 (업로드)" style={{
           background: tokens.colors.border, color: tokens.colors.textMuted, border: 'none', borderRadius: tokens.radii.md,
-          padding: '5px 9px', fontSize: '13px', cursor: 'pointer',
+          padding: '5px 9px', fontSize: '13px', cursor: commentSending ? 'not-allowed' : 'pointer',
         }}>&#128206;</button>
+        <button onClick={openResourcePicker} disabled={commentSending} title="기존 리소스 참조 첨부" style={{
+          background: tokens.colors.border, color: tokens.colors.textMuted, border: 'none', borderRadius: tokens.radii.md,
+          padding: '5px 9px', fontSize: '13px', cursor: commentSending ? 'not-allowed' : 'pointer',
+        }}>&#128193;</button>
         <MentionTextarea
           rows={1}
           value={commentContent}
@@ -1713,11 +1953,20 @@ export default function TicketPanel({
             resize: 'none', fontFamily: 'inherit', lineHeight: 1.5, boxSizing: 'border-box',
           }}
         />
-        <button onClick={handleSubmitComment} disabled={!commentContent.trim()} style={{
-          background: commentContent.trim() ? tokens.colors.accent : tokens.colors.border, color: 'white', border: 'none', borderRadius: tokens.radii.md,
-          padding: '5px 12px', fontSize: '12px', fontWeight: 600, cursor: commentContent.trim() ? 'pointer' : 'not-allowed',
-        }}>Send</button>
+        <button onClick={handleSubmitComment} disabled={!commentContent.trim() || commentSending} style={{
+          background: (commentContent.trim() && !commentSending) ? tokens.colors.accent : tokens.colors.border, color: 'white', border: 'none', borderRadius: tokens.radii.md,
+          padding: '5px 12px', fontSize: '12px', fontWeight: 600, cursor: (commentContent.trim() && !commentSending) ? 'pointer' : 'not-allowed',
+        }}>{commentSending ? '업로드…' : 'Send'}</button>
       </div>
+      {resourcePickerOpen && (
+        <ResourceReferencePicker
+          loading={resourcePickerLoading}
+          error={resourcePickerError}
+          items={resourcePickerItems}
+          onPick={addResourceReference}
+          onClose={() => setResourcePickerOpen(false)}
+        />
+      )}
     </div>
   );
 
