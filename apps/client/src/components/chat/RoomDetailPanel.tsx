@@ -5,6 +5,7 @@ import PageHeader from '../PageHeader';
 import type { ChatRoomListItem, ChatRoomMessageItem } from '../../types';
 import MessageList from './MessageList';
 import NewChatModal from './ParticipantPicker';
+import { useConfirm } from '../../contexts/ConfirmContext';
 import { type MentionParticipant } from './utils/markdown';
 import ChatMessageInput from './ChatMessageInput';
 
@@ -207,6 +208,7 @@ export default function ChatRoomView({
   typingAgents = {} as Record<string, { name: string; status?: string }>,
   currentUserId,
 }: ChatRoomViewProps) {
+  const confirm = useConfirm();
   const [isRenaming, setIsRenaming] = useState(false);
   const [showAddPeople, setShowAddPeople] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -342,7 +344,11 @@ export default function ChatRoomView({
 
   async function handleLeave() {
     if (!room) return;
-    const confirmed = window.confirm("Leave this room? You'll need to be re-added to rejoin.");
+    const confirmed = await confirm({
+      title: 'Leave room',
+      message: "Leave this room? You'll need to be re-added to rejoin.",
+      confirmLabel: 'Leave',
+    });
     if (!confirmed) return;
     await api.leaveChatRoom(room.id).catch(() => {});
     onLeaveRoom(room.id);
@@ -357,9 +363,11 @@ export default function ChatRoomView({
 
   async function handleClear() {
     if (!room) return;
-    const confirmed = window.confirm(
-      "Clear this conversation's history from your view? Other participants are unaffected.",
-    );
+    const confirmed = await confirm({
+      title: 'Clear conversation',
+      message: "Clear this conversation's history from your view? Other participants are unaffected.",
+      confirmLabel: 'Clear',
+    });
     if (!confirmed) return;
     try {
       await api.clearChatRoom(room.id);

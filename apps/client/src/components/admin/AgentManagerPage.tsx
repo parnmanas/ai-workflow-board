@@ -13,6 +13,7 @@ import type {
 } from '../../types';
 import { useBoardStreamEvent } from '../../contexts/BoardStreamContext';
 import { useToast } from '../../contexts/ToastContext';
+import { useConfirm } from '../../contexts/ConfirmContext';
 import { Button, Input, Modal, Select } from '../common';
 import { formatAgentDisplayName } from '../../utils/agentName';
 import DirectoryPicker from './DirectoryPicker';
@@ -154,6 +155,7 @@ interface InstanceDetailProps {
 
 function InstanceDetail({ inst }: InstanceDetailProps) {
   const { showToast } = useToast();
+  const confirm = useConfirm();
   const [subagents, setSubagents] = useState<SubagentSummary[] | null>(null);
   const [logs, setLogs] = useState<any[] | null>(null);
   const [restartPending, setRestartPending] = useState(false);
@@ -215,7 +217,12 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
   // same plugin_version (no polling needed here).
   const handleRestart = async () => {
     if (restartPending) return;
-    if (!confirm('Restart this manager? Every in-flight subagent, chat session, and ticket session on this host will be terminated. The manager will re-exec in place and reappear in ~30s.')) return;
+    const ok = await confirm({
+      title: 'Restart manager',
+      message: 'Restart this manager? Every in-flight subagent, chat session, and ticket session on this host will be terminated. The manager will re-exec in place and reappear in ~30s.',
+      confirmLabel: 'Restart',
+    });
+    if (!ok) return;
     setRestartPending(true);
     try {
       const resp: any = await api.restartAgentManagerInstance(inst.instance_id);
@@ -237,7 +244,13 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
   // new plugin_version, so no extra polling is needed here.
   const handleUpdate = async () => {
     if (updatePending) return;
-    if (!confirm('Update this manager? It will pull the latest source, rebuild, and restart.')) return;
+    const ok = await confirm({
+      title: 'Update manager',
+      message: 'Update this manager? It will pull the latest source, rebuild, and restart.',
+      confirmLabel: 'Update',
+      danger: false,
+    });
+    if (!ok) return;
     setUpdatePending(true);
     try {
       const resp = await api.sendAgentManagerCommand(inst.instance_id, { command: 'update_manager' });
@@ -1441,6 +1454,7 @@ interface PairingDialogProps {
 
 function PairingDialog({ isOpen, onClose }: PairingDialogProps) {
   const { showToast } = useToast();
+  const confirm = useConfirm();
   const [pairings, setPairings] = useState<PairingTokenSafe[] | null>(null);
   const [agentName, setAgentName] = useState('');
   const [minted, setMinted] = useState<PairingTokenMint | null>(null);
@@ -1478,7 +1492,12 @@ function PairingDialog({ isOpen, onClose }: PairingDialogProps) {
   };
 
   const handleRevoke = async (id: string) => {
-    if (!confirm('Revoke this pairing token? Any in-flight bootstrap using it will fail.')) return;
+    const ok = await confirm({
+      title: 'Revoke pairing token',
+      message: 'Revoke this pairing token? Any in-flight bootstrap using it will fail.',
+      confirmLabel: 'Revoke',
+    });
+    if (!ok) return;
     try {
       await api.revokeAgentManagerPairing(id);
       refresh();

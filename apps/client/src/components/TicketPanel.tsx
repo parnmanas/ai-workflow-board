@@ -3,6 +3,7 @@ import { Ticket, Agent, Channel, ActivityLog, CommentType, User, TicketAttachmen
 import { api, TicketRoleAssignmentRow, getActiveWorkspaceId, rawResourceUrl } from '../api';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
+import { useConfirm } from '../contexts/ConfirmContext';
 import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
 import { useNotifications } from '../contexts/NotificationContext';
 import ChildTicketList from './SubtaskList';
@@ -491,6 +492,7 @@ export default function TicketPanel({
   const [savingDraft, setSavingDraft] = useState(false);
   const { user } = useAuth();
   const { showToast } = useToast();
+  const confirm = useConfirm();
 
   // Per-role in-flight state for the Re-trigger buttons — prevents
   // double-fires while the network round trip is pending.
@@ -1113,10 +1115,23 @@ export default function TicketPanel({
   // Wrap close so X / Escape prompt before discarding unsaved edits. The
   // post-Delete close path uses raw onClose (the ticket is gone — there's
   // nothing to save).
-  const requestClose = useCallback(() => {
-    if (isDirty && !window.confirm('Discard unsaved ticket edits?')) return;
+  const confirmingCloseRef = useRef(false);
+  const requestClose = useCallback(async () => {
+    if (isDirty) {
+      // Guard against the panel's own Escape listener re-firing while the
+      // confirm dialog (itself an Escape-closable Modal) is already open.
+      if (confirmingCloseRef.current) return;
+      confirmingCloseRef.current = true;
+      const ok = await confirm({
+        title: 'Discard changes',
+        message: 'Discard unsaved ticket edits?',
+        confirmLabel: 'Discard',
+      });
+      confirmingCloseRef.current = false;
+      if (!ok) return;
+    }
     onClose();
-  }, [isDirty, onClose]);
+  }, [isDirty, onClose, confirm]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') requestClose(); };
@@ -1339,7 +1354,8 @@ export default function TicketPanel({
   }, [activeTicket.id, ticketAttachments.length]);
 
   const handleDeleteTicketAttachment = useCallback(async (attachmentId: string, fileName: string) => {
-    if (!window.confirm(`Delete attachment "${fileName}"?`)) return;
+    const ok = await confirm({ title: 'Delete attachment', message: `Delete attachment "${fileName}"?` });
+    if (!ok) return;
     setAttachmentBusy(true);
     setAttachmentError(null);
     const prev = ticketAttachments;
@@ -1352,7 +1368,7 @@ export default function TicketPanel({
     } finally {
       setAttachmentBusy(false);
     }
-  }, [activeTicket.id, ticketAttachments]);
+  }, [activeTicket.id, ticketAttachments, confirm]);
 
   const handleDownloadTicketAttachment = useCallback(async (attachment: TicketAttachmentMeta) => {
     setAttachmentError(null);
