@@ -519,7 +519,7 @@ export default function Board() {
             )}
             {board?.benchmark_mode === 'on' && (
               <Link to={leaderboardLink} style={headerActionStyle}>
-                🏆 Leaderboard
+                🏆 Benchmark
               </Link>
             )}
             <Link to={resourcesLink} style={headerActionStyle}>

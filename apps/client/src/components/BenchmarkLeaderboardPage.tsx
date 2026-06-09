@@ -211,7 +211,7 @@ export default function BenchmarkLeaderboardPage() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <PageHeader
-        title="Leaderboard"
+        title="Benchmark"
         description={board?.name}
         actions={
           <div style={{ display: 'flex', gap: 8 }}>
