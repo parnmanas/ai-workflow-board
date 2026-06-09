@@ -3,7 +3,7 @@ import { api, getActiveWorkspaceId } from '../../api';
 import type { Resource, Credential, RepoBranch } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
-import { Button, Input, Modal, Badge, Card } from '../common';
+import { Button, Input, Modal, Badge, Card, ConfirmDialog } from '../common';
 import { relativeTime } from '../../utils/time';
 
 const RESOURCE_TYPES = [
@@ -933,22 +933,14 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
       </Modal>
 
       {/* Delete confirmation */}
-      <Modal
+      <ConfirmDialog
         isOpen={!!deleteTarget}
-        onClose={() => setDeleteTarget(null)}
         title="Delete resource?"
-        maxWidth={440}
-        footer={
-          <>
-            <Button variant="secondary" onClick={() => setDeleteTarget(null)}>Cancel</Button>
-            <Button variant="danger" onClick={handleConfirmDelete}>Delete Resource</Button>
-          </>
-        }
-      >
-        <div style={{ fontSize: tokens.typography.fontSizeMd, color: tokens.colors.textSecondary, lineHeight: 1.5 }}>
-          {deleteTarget?.name} will be permanently removed.
-        </div>
-      </Modal>
+        confirmLabel="Delete Resource"
+        message={deleteTarget ? `${deleteTarget.name} will be permanently removed.` : undefined}
+        onConfirm={handleConfirmDelete}
+        onCancel={() => setDeleteTarget(null)}
+      />
 
       {lightboxImage && (
         <div

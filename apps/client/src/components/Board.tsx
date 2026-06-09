@@ -8,6 +8,7 @@ import { useBoard } from '../hooks/useBoard';
 import { useDragToScroll } from '../hooks/useDragToScroll';
 import { useToast } from '../contexts/ToastContext';
 import { useLoading } from '../contexts/LoadingContext';
+import { useConfirm } from '../contexts/ConfirmContext';
 import PageHeader from './PageHeader';
 import Column from './Column';
 import TicketPanel from './TicketPanel';
@@ -45,6 +46,7 @@ function cardTicketToFull(card: BoardCardTicket): Ticket {
 
 export default function Board() {
   const { showToast } = useToast();
+  const confirm = useConfirm();
   const { withLoading } = useLoading();
 
   // Board and workspace identity come from the URL — no localStorage reads needed.
@@ -264,16 +266,27 @@ export default function Board() {
   }, [wrapAction, updateTicket]);
 
   const handleDeleteTicket = useCallback(async (ticketId: string) => {
+    const ok = await confirm({
+      title: 'Delete ticket',
+      message: 'Delete this ticket? This also removes its subtasks and comments. This cannot be undone.',
+    });
+    if (!ok) return false;
     await wrapAction(() => deleteTicket(ticketId), 'Ticket deleted');
-  }, [wrapAction, deleteTicket]);
+    return true;
+  }, [confirm, wrapAction, deleteTicket]);
 
   const handleCreateChild = useCallback(async (parentId: string, data: { title: string; description?: string; priority?: string; assignee?: string; reporter?: string }) => {
     await wrapAction(() => createChildTicket(parentId, data), 'Subtask created');
   }, [wrapAction, createChildTicket]);
 
   const handleDeleteChild = useCallback(async (childId: string) => {
+    const ok = await confirm({
+      title: 'Delete subtask',
+      message: 'Delete this subtask? This cannot be undone.',
+    });
+    if (!ok) return;
     await wrapAction(() => deleteTicket(childId), 'Subtask deleted');
-  }, [wrapAction, deleteTicket]);
+  }, [confirm, wrapAction, deleteTicket]);
 
   // Used by the "Link existing" picker in SubtaskList — drag-and-drop already
   // routes through handleDragEnd so this only fires for explicit picker clicks.
@@ -600,7 +613,7 @@ export default function Board() {
                     typingIndicators={typingIndicators}
                     onClose={handleCloseDetail}
                     onUpdate={handleUpdateTicket}
-                    onDelete={(id) => { handleDeleteTicket(id); handleCloseDetail(); }}
+                    onDelete={async (id) => { if (await handleDeleteTicket(id)) handleCloseDetail(); }}
                     onCreateChild={handleCreateChild}
                     onDeleteChild={handleDeleteChild}
                     onReparentChild={handleReparentChild}

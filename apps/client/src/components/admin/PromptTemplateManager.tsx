@@ -3,7 +3,7 @@ import { api, getActiveWorkspaceId } from '../../api';
 import type { PromptTemplate } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
-import { Button, Input, Modal, Badge } from '../common';
+import { Button, Input, Modal, Badge, ConfirmDialog } from '../common';
 import { relativeTime } from '../../utils/time';
 
 const listHeadStyle = (align: 'left' | 'right'): React.CSSProperties => ({
@@ -317,24 +317,17 @@ export default function PromptTemplateManager({ workspaceId }: { workspaceId?: s
         </div>
       </Modal>
 
-      {/* Delete dialog */}
-      <Modal
+      {/* Delete confirmation */}
+      <ConfirmDialog
         isOpen={!!deleteTarget}
-        onClose={() => setDeleteTarget(null)}
         title="Delete template?"
-        maxWidth={440}
-        footer={
-          <>
-            <Button variant="secondary" onClick={() => setDeleteTarget(null)}>Cancel</Button>
-            <Button variant="danger" onClick={handleConfirmDelete}>Delete Template</Button>
-          </>
-        }
-      >
-        <div style={{ fontSize: tokens.typography.fontSizeMd, color: tokens.colors.textSecondary, lineHeight: 1.5 }}>
-          {deleteTarget?.name} will be removed from this workspace. Tickets that already used
-          this template keep their existing prompt text.
-        </div>
-      </Modal>
+        confirmLabel="Delete Template"
+        message={deleteTarget
+          ? `${deleteTarget.name} will be removed from this workspace. Tickets that already used this template keep their existing prompt text.`
+          : undefined}
+        onConfirm={handleConfirmDelete}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   );
 }

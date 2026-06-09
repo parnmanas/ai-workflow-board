@@ -3,7 +3,7 @@ import { api, getActiveWorkspaceId } from '../../api';
 import type { Credential } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
-import { Button, Input, Modal, Badge } from '../common';
+import { Button, Input, Modal, Badge, ConfirmDialog } from '../common';
 import { relativeTime } from '../../utils/time';
 
 const listHeadStyle = (align: 'left' | 'right'): React.CSSProperties => ({
@@ -399,23 +399,15 @@ export default function CredentialManager({ workspaceId }: { workspaceId?: strin
         </div>
       </Modal>
 
-      {/* Delete Modal */}
-      <Modal
+      {/* Delete confirmation */}
+      <ConfirmDialog
         isOpen={!!deleteTarget}
-        onClose={() => setDeleteTarget(null)}
         title="Delete credential?"
-        maxWidth={440}
-        footer={
-          <>
-            <Button variant="secondary" onClick={() => setDeleteTarget(null)}>Cancel</Button>
-            <Button variant="danger" onClick={handleConfirmDelete}>Delete Credential</Button>
-          </>
-        }
-      >
-        <div style={{ fontSize: tokens.typography.fontSizeMd, color: tokens.colors.textSecondary, lineHeight: 1.5 }}>
-          <strong>{deleteTarget?.name}</strong> will be permanently removed. Resources using this credential will lose access.
-        </div>
-      </Modal>
+        confirmLabel="Delete Credential"
+        message={<><strong>{deleteTarget?.name}</strong> will be permanently removed. Resources using this credential will lose access.</>}
+        onConfirm={handleConfirmDelete}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   );
 }

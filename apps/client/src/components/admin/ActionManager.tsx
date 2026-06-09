@@ -4,7 +4,7 @@ import type { Action, ActionRun, ChatRoomMessageItem } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { useAuth } from '../../contexts/AuthContext';
 import { tokens } from '../../tokens';
-import { Button, Input, Modal, Card, Badge } from '../common';
+import { Button, Input, Modal, Card, Badge, ConfirmDialog } from '../common';
 import { relativeTime } from '../../utils/time';
 import MessageList from '../chat/MessageList';
 import ChatMessageInput from '../chat/ChatMessageInput';
@@ -481,15 +481,13 @@ export default function ActionManager({ workspaceId, boardId }: ActionManagerPro
         </div>
       </Modal>
 
-      <Modal isOpen={!!deleteTarget} onClose={() => setDeleteTarget(null)} title="Delete Action?">
-        <div style={{ marginBottom: 16 }}>
-          Delete <strong>{deleteTarget?.name}</strong>? All run history (rooms + messages) for this action will be removed.
-        </div>
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-          <Button variant="secondary" onClick={() => setDeleteTarget(null)}>Cancel</Button>
-          <Button variant="danger" onClick={handleDelete}>Delete</Button>
-        </div>
-      </Modal>
+      <ConfirmDialog
+        isOpen={!!deleteTarget}
+        title="Delete Action?"
+        message={<>Delete <strong>{deleteTarget?.name}</strong>? All run history (rooms + messages) for this action will be removed.</>}
+        onConfirm={handleDelete}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   );
 }
