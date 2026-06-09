@@ -3,6 +3,7 @@ import { Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { ToastProvider, useToast } from './contexts/ToastContext';
 import { LoadingProvider } from './contexts/LoadingContext';
+import { ConfirmProvider } from './contexts/ConfirmContext';
 import Board from './components/Board';
 import LoginPage from './components/LoginPage';
 import AdminPage from './components/admin/AdminPage';
@@ -181,7 +182,9 @@ export default function App() {
     <ToastProvider>
       <AuthProvider>
         <LoadingProvider>
-          <AppContent />
+          <ConfirmProvider>
+            <AppContent />
+          </ConfirmProvider>
         </LoadingProvider>
       </AuthProvider>
     </ToastProvider>
