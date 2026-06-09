@@ -4,6 +4,7 @@ import { api } from '../api';
 import PageHeader from './PageHeader';
 import { tokens } from '../tokens';
 import { Button, Select, Modal, Badge, Card } from './common';
+import { useConfirm } from '../contexts/ConfirmContext';
 
 interface WorkspaceMember {
   id: string;
@@ -17,6 +18,7 @@ interface WorkspaceMember {
 
 export default function WorkspaceUsersPage() {
   const { wsId } = useParams<{ wsId: string }>();
+  const confirm = useConfirm();
   const [members, setMembers] = useState<WorkspaceMember[]>([]);
   const [allUsers, setAllUsers] = useState<any[]>([]);
   const [showAddModal, setShowAddModal] = useState(false);
@@ -42,7 +44,12 @@ export default function WorkspaceUsersPage() {
 
   const handleRemove = async (userId: string, userName: string) => {
     if (!wsId) return;
-    if (!confirm(`Remove ${userName} from this workspace?`)) return;
+    const ok = await confirm({
+      title: 'Remove member',
+      message: `Remove ${userName} from this workspace?`,
+      confirmLabel: 'Remove',
+    });
+    if (!ok) return;
     await api.removeWorkspaceMember(wsId, userId);
     await load();
   };

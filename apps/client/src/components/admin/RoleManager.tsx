@@ -3,6 +3,7 @@ import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea
 import { api } from '../../api';
 import { tokens } from '../../tokens';
 import { Button, Input, Modal, Card } from '../common';
+import { useConfirm } from '../../contexts/ConfirmContext';
 
 interface WorkspaceRoleRow {
   id: string;
@@ -35,6 +36,7 @@ const EMPTY_FORM = {
  * the admin sees *why* a role is locked.
  */
 export default function RoleManager({ workspaceId }: { workspaceId: string }) {
+  const confirm = useConfirm();
   const [roles, setRoles] = useState<WorkspaceRoleRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -129,9 +131,11 @@ export default function RoleManager({ workspaceId }: { workspaceId: string }) {
   };
 
   const handleDelete = async (r: WorkspaceRoleRow) => {
-    if (!confirm(`Delete role "${r.name}" (slug: ${r.slug})?\n\nThis can't be undone, and only succeeds when no ticket assignments still reference it.`)) {
-      return;
-    }
+    const ok = await confirm({
+      title: 'Delete role',
+      message: `Delete role "${r.name}" (slug: ${r.slug})?\n\nThis can't be undone, and only succeeds when no ticket assignments still reference it.`,
+    });
+    if (!ok) return;
     try {
       await api.deleteWorkspaceRole(workspaceId, r.id);
       await load();

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Workspace } from '../types';
 import { tokens } from '../tokens';
+import { useConfirm } from '../contexts/ConfirmContext';
 
 interface WorkspaceSelectorProps {
   workspaces: Workspace[];
@@ -25,6 +26,7 @@ export default function WorkspaceSelector({
   onUpdate,
   onUpdateBoard,
 }: WorkspaceSelectorProps) {
+  const confirm = useConfirm();
   const [showDropdown, setShowDropdown] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [showEdit, setShowEdit] = useState(false);
@@ -57,7 +59,11 @@ export default function WorkspaceSelector({
 
   const handleDelete = async () => {
     if (!currentWorkspaceId) return;
-    if (!confirm('Are you sure you want to delete this workspace? All boards and tickets will be deleted.')) return;
+    const ok = await confirm({
+      title: 'Delete workspace',
+      message: 'Are you sure you want to delete this workspace? All boards and tickets will be deleted.',
+    });
+    if (!ok) return;
     await onDelete(currentWorkspaceId);
   };
 

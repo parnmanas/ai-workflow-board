@@ -3,6 +3,7 @@ import { api } from '../../api';
 import { ApiKey, Agent } from '../../types';
 import { tokens } from '../../tokens';
 import { Button, Input, Select, Badge, Modal, Card } from '../common';
+import { useConfirm } from '../../contexts/ConfirmContext';
 import { formatAgentDisplayName } from '../../utils/agentName';
 
 const apiKeyHeadStyle = (align: 'left' | 'right'): React.CSSProperties => ({
@@ -18,6 +19,7 @@ const apiKeyCellStyle = (align: 'left' | 'right'): React.CSSProperties => ({
 });
 
 export default function ApiKeyManager({ workspaceId }: { workspaceId?: string } = {}) {
+  const confirm = useConfirm();
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [showForm, setShowForm] = useState(false);
@@ -81,13 +83,19 @@ export default function ApiKeyManager({ workspaceId }: { workspaceId?: string } 
   };
 
   const handleRevoke = async (id: string) => {
-    if (!confirm('Revoke this API key? It will no longer be usable.')) return;
+    const ok = await confirm({
+      title: 'Revoke API key',
+      message: 'Revoke this API key? It will no longer be usable.',
+      confirmLabel: 'Revoke',
+    });
+    if (!ok) return;
     await api.revokeApiKey(id);
     await load();
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm('Permanently delete this API key?')) return;
+    const ok = await confirm({ title: 'Delete API key', message: 'Permanently delete this API key?' });
+    if (!ok) return;
     await api.deleteApiKey(id);
     await load();
   };

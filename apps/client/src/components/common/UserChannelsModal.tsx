@@ -3,6 +3,7 @@ import { Modal } from './Modal';
 import { tokens } from '../../tokens';
 import { api } from '../../api';
 import { useToast } from '../../contexts/ToastContext';
+import { useConfirm } from '../../contexts/ConfirmContext';
 import type { UserNotificationChannel } from '../../types';
 
 const PROVIDER_LABELS: Record<string, string> = {
@@ -36,6 +37,7 @@ interface UserChannelsModalProps {
  */
 export function UserChannelsModal({ isOpen, onClose }: UserChannelsModalProps) {
   const { showToast } = useToast();
+  const confirm = useConfirm();
   const [items, setItems] = useState<UserNotificationChannel[]>([]);
   const [providers, setProviders] = useState<{ id: string; required_credentials: string[] }[]>([]);
   const [loading, setLoading] = useState(false);
@@ -104,7 +106,11 @@ export function UserChannelsModal({ isOpen, onClose }: UserChannelsModalProps) {
   };
 
   const handleDelete = async (id: string) => {
-    if (!window.confirm('Delete this notification channel? This cannot be undone.')) return;
+    const ok = await confirm({
+      title: 'Delete notification channel',
+      message: 'Delete this notification channel? This cannot be undone.',
+    });
+    if (!ok) return;
     try {
       await api.deleteMyChannel(id);
       showToast('Channel deleted', 'success');

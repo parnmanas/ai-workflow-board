@@ -4,6 +4,7 @@ import { Channel } from '../../types';
 import { tokens } from '../../tokens';
 import { Button, Input, Select, Badge, Modal } from '../common';
 import { useCrudList } from '../../hooks/useCrudList';
+import { useConfirm } from '../../contexts/ConfirmContext';
 
 const listHeadStyle = (align: 'left' | 'right'): React.CSSProperties => ({
   textAlign: align,
@@ -18,6 +19,7 @@ const listCellStyle = (align: 'left' | 'right'): React.CSSProperties => ({
 });
 
 export default function ChannelManager({ workspaceId }: { workspaceId?: string } = {}) {
+  const confirm = useConfirm();
   const { items: channels, showForm, setShowForm, editingId, setEditingId, refresh: load } =
     useCrudList<Channel>(() => api.getChannels());
   const [testResult, setTestResult] = useState<Record<string, { success: boolean; error?: string }>>({});
@@ -63,7 +65,8 @@ export default function ChannelManager({ workspaceId }: { workspaceId?: string }
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm('Delete this channel?')) return;
+    const ok = await confirm({ title: 'Delete channel', message: 'Delete this channel?' });
+    if (!ok) return;
     await api.deleteChannel(id);
     await load();
   };

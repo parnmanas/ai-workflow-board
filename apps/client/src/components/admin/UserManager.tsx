@@ -4,6 +4,7 @@ import { User, PermissionMeta } from '../../types';
 import { tokens } from '../../tokens';
 import { Button, Input, Select, Badge, Modal, Card } from '../common';
 import { useNotifications } from '../../contexts/NotificationContext';
+import { useConfirm } from '../../contexts/ConfirmContext';
 
 interface PermissionInfo {
   permissions: Record<string, PermissionMeta>;
@@ -20,6 +21,7 @@ interface PendingUser {
 }
 
 export default function UserManager({ workspaceId }: { workspaceId?: string } = {}) {
+  const confirm = useConfirm();
   const [users, setUsers] = useState<User[]>([]);
   const [pendingUsers, setPendingUsers] = useState<PendingUser[]>([]);
   const [workspaces, setWorkspaces] = useState<any[]>([]);
@@ -99,7 +101,8 @@ export default function UserManager({ workspaceId }: { workspaceId?: string } = 
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm('Delete this user?')) return;
+    const ok = await confirm({ title: 'Delete user', message: 'Delete this user?' });
+    if (!ok) return;
     await api.deleteUser(id);
     await load();
   };

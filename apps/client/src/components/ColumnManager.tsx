@@ -3,6 +3,7 @@ import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea
 import { BoardCardColumn, PromptTemplate } from '../types';
 import { tokens } from '../tokens';
 import { Button, Input } from './common';
+import { useConfirm } from '../contexts/ConfirmContext';
 
 // Routing toggles used to be hardcoded to the legacy assignee/reviewer/reporter
 // trio — replaced in v0.34 with the workspace's actual role catalog so the
@@ -37,6 +38,7 @@ export default function ColumnManager({
   columns, boardId, routingConfig, columnPrompts, promptTemplates, workspaceRoles,
   onCreateColumn, onUpdateColumn, onDeleteColumn, onUpdateRoutingConfig, onUpdateColumnPrompts,
 }: ColumnManagerProps) {
+  const confirm = useConfirm();
   const sortedRoles: RoleOption[] = (workspaceRoles || []).slice()
     .sort((a, b) => a.position - b.position);
   const [newColName, setNewColName] = useState('');
@@ -73,7 +75,8 @@ export default function ColumnManager({
     const msg = ticketCount > 0
       ? `This column has ${ticketCount} ticket(s). Delete column and all tickets?`
       : 'Delete this column?';
-    if (!confirm(msg)) return;
+    const ok = await confirm({ title: 'Delete column', message: msg });
+    if (!ok) return;
     await onDeleteColumn(colId);
   };
 

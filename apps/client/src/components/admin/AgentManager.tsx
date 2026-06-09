@@ -5,6 +5,7 @@ import { tokens } from '../../tokens';
 import { Button, Input, Select, Badge, Modal, Card } from '../common';
 import { useCrudList } from '../../hooks/useCrudList';
 import { useToast } from '../../contexts/ToastContext';
+import { useConfirm } from '../../contexts/ConfirmContext';
 import { formatAgentDisplayName } from '../../utils/agentName';
 
 /** Map agent.type → credential provider prefix used to filter the credential
@@ -447,6 +448,7 @@ interface ManagerOption {
 }
 
 export default function AgentManager() {
+  const confirm = useConfirm();
   const { items: agents, showForm, setShowForm, editingId, setEditingId, refresh: load } =
     useCrudList<Agent>(() => api.getAgentsAll());
   const [form, setForm] = useState({
@@ -591,7 +593,8 @@ export default function AgentManager() {
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm('Delete this agent?')) return;
+    const ok = await confirm({ title: 'Delete agent', message: 'Delete this agent?' });
+    if (!ok) return;
     await api.deleteAgent(id);
     await load();
   };
