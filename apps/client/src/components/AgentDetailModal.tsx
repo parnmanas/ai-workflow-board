@@ -4,6 +4,7 @@ import { api } from '../api';
 import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
+import { useConfirm } from '../contexts/ConfirmContext';
 import type { Agent, AgentDetail, ActivityRow, AgentLiveSession, Credential } from '../types';
 import { tokens } from '../tokens';
 import { formatAgentDisplayName } from '../utils/agentName';
@@ -137,10 +138,18 @@ function formatActivityTimestamp(iso: string): string {
 export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentDetailModalProps) {
   const { user } = useAuth();
   const { showToast } = useToast();
+  const confirm = useConfirm();
   const [deleting, setDeleting] = useState(false);
-  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const handleDeleteAgent = async () => {
     if (deleting) return;
+    const ok = await confirm({
+      title: 'Delete agent',
+      message: detail
+        ? `Delete agent "${formatAgentDisplayName(detail)}"? This cannot be undone.`
+        : 'Delete this agent? This cannot be undone.',
+      confirmLabel: 'Delete',
+    });
+    if (!ok) return;
     setDeleting(true);
     try {
       await api.deleteAgent(agentId);
@@ -149,7 +158,6 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
       onClose();
     } catch (err: any) {
       showToast(err?.message || 'Failed to delete agent', 'error');
-      setConfirmingDelete(false);
     } finally {
       setDeleting(false);
     }
@@ -585,12 +593,10 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
               </div>
             )}
           </div>
-          {/* Delete + close — delete is admin-only, and uses a two-click
-              confirmation inline instead of a separate modal so we don't
-              stack overlays. First click arms "Confirm delete", second
-              click commits. Clicking away cancels via onBlur. */}
+          {/* Delete + close — delete is admin-only and gated behind the
+              shared useConfirm() dialog (unified delete-confirm UX). */}
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
-            {canEdit && !editing && !confirmingDelete && (
+            {canEdit && !editing && (
               <button
                 type="button"
                 onClick={beginEdit}
@@ -647,61 +653,24 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
               </>
             )}
             {user?.role === 'admin' && (
-              confirmingDelete ? (
-                <>
-                  <button
-                    type="button"
-                    onClick={handleDeleteAgent}
-                    disabled={deleting}
-                    style={{
-                      background: tokens.colors.dangerMid,
-                      color: '#fff',
-                      border: 'none',
-                      borderRadius: tokens.radii.md,
-                      padding: '4px 12px',
-                      fontSize: 12,
-                      fontWeight: 600,
-                      cursor: deleting ? 'not-allowed' : 'pointer',
-                    }}
-                  >
-                    {deleting ? 'Deleting...' : 'Confirm delete'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setConfirmingDelete(false)}
-                    disabled={deleting}
-                    style={{
-                      background: 'transparent',
-                      color: tokens.colors.textSecondary,
-                      border: `1px solid ${tokens.colors.border}`,
-                      borderRadius: tokens.radii.md,
-                      padding: '4px 10px',
-                      fontSize: 12,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    Cancel
-                  </button>
-                </>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => setConfirmingDelete(true)}
-                  title="Delete this agent"
-                  style={{
-                    background: 'transparent',
-                    color: tokens.colors.dangerLight,
-                    border: `1px solid ${tokens.colors.dangerBg}`,
-                    borderRadius: tokens.radii.md,
-                    padding: '4px 10px',
-                    fontSize: 12,
-                    fontWeight: 500,
-                    cursor: 'pointer',
-                  }}
-                >
-                  Delete
-                </button>
-              )
+              <button
+                type="button"
+                onClick={handleDeleteAgent}
+                disabled={deleting}
+                title="Delete this agent"
+                style={{
+                  background: 'transparent',
+                  color: tokens.colors.dangerLight,
+                  border: `1px solid ${tokens.colors.dangerBg}`,
+                  borderRadius: tokens.radii.md,
+                  padding: '4px 10px',
+                  fontSize: 12,
+                  fontWeight: 500,
+                  cursor: deleting ? 'not-allowed' : 'pointer',
+                }}
+              >
+                {deleting ? 'Deleting...' : 'Delete'}
+              </button>
             )}
             <button
               ref={closeButtonRef}
