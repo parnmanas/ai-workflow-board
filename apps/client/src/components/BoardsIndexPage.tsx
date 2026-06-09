@@ -2,10 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import PageHeader from './PageHeader';
-import ConfirmByNameDialog from './ConfirmByNameDialog';
 import { useAuth } from '../contexts/AuthContext';
 import { tokens } from '../tokens';
-import { Modal, Input, Button, Card } from './common';
+import { Modal, Input, Button, Card, ConfirmDialog } from './common';
 
 export default function BoardsIndexPage() {
   const { wsId } = useParams<{ wsId: string }>();
@@ -279,10 +278,11 @@ export default function BoardsIndexPage() {
 
       {/* Archive confirm dialog */}
       {archiveTarget && (
-        <ConfirmByNameDialog
-          resourceName={archiveTarget.name}
+        <ConfirmDialog
+          isOpen={true}
+          requireName={archiveTarget.name}
           title="Archive this board?"
-          description={`Type ${archiveTarget.name} to confirm`}
+          message={`Type ${archiveTarget.name} to confirm`}
           confirmLabel="Archive Board"
           onConfirm={async () => {
             try {
