@@ -29,6 +29,12 @@ export interface InstanceMeta {
   version: string;
   cli: string;
   cliAdapters: string[];
+  // Per-CLI model enumeration captured once at boot (cliType → model ids),
+  // via each adapter's listModels(). Shipped verbatim on every heartbeat as
+  // `available_models` so AWB can populate a per-agent model selector from the
+  // CLIs actually installed on this host. Optional so callers that don't
+  // gather models still build a valid heartbeat.
+  availableModels?: Record<string, string[]> | null;
   // ST-5b — managed-agent presence reporter. Optional so legacy callers
   // that don't track managed agents still construct a valid heartbeat.
   managedAgents?: ManagedAgentSnapshot | null;
@@ -85,6 +91,9 @@ export interface InstanceHeartbeatPayload {
   cli_adapters: string[];
   pid: number;
   started_at: string;
+  // cliType → model ids each installed CLI accepts. Gathered once at boot.
+  // Older AWB servers ignore it; newer ones expose it for the model selector.
+  available_models?: Record<string, string[]>;
   // ST-4 — populated when InstanceMeta carries a managedAgents snapshot.
   agent_ids?: string[];
   working_dirs?: string[];
@@ -121,6 +130,10 @@ export class InstanceHeartbeat {
       ? meta.cliAdapters.map((s) => String(s)).filter(Boolean)
       : [];
     const managedSnapshot = meta?.managedAgents ?? null;
+    const availableModels =
+      meta?.availableModels && typeof meta.availableModels === 'object'
+        ? meta.availableModels
+        : null;
     const updateChecker = meta?.updateChecker ?? null;
     const credentialMetaProvider = meta?.agentCredentialMetaProvider ?? null;
     this.#payloadFactory = async () => {
@@ -154,6 +167,9 @@ export class InstanceHeartbeat {
         // and non-empty; legacy AWB servers (pre-ST-4) don't expect them.
         ...(agentIds.length ? { agent_ids: agentIds } : {}),
         ...(workingDirs.length ? { working_dirs: workingDirs } : {}),
+        ...(availableModels && Object.keys(availableModels).length
+          ? { available_models: availableModels }
+          : {}),
         ...(agentCredentials.length ? { agent_credentials: agentCredentials } : {}),
         ...(updateStatus
           ? {

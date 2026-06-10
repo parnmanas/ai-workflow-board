@@ -689,10 +689,26 @@ async function runRuntime(
   worktreeSweepTimer = setInterval(() => void sweepWorktrees(), 10 * 60 * 1000);
   worktreeSweepTimer.unref?.();
 
-  agentIdReady.then((agentId) => {
+  agentIdReady.then(async (agentId) => {
     if (!agentId) return;
     presenceHeartbeat._real = new PresenceHeartbeat(config, agentId);
     presenceHeartbeat._real.start();
+    // Enumerate each installed CLI's accepted models once at boot. Best-effort
+    // (every adapter's listModels has its own timeout and never throws); run in
+    // parallel so a slow binary scan doesn't serialize the others. Shipped on
+    // every heartbeat as `available_models` so AWB's per-agent model selector
+    // reflects the CLIs actually installed on this host.
+    const availableModels: Record<string, string[]> = {};
+    await Promise.all(
+      KNOWN_ADAPTER_CLI_TYPES.map(async (cli) => {
+        try {
+          const models = await createAdapter(cli).listModels();
+          if (Array.isArray(models) && models.length) availableModels[cli] = models;
+        } catch (err: any) {
+          log(`listModels failed for cli=${cli}: ${err?.message ?? err}`);
+        }
+      }),
+    );
     instanceHeartbeat._real = new InstanceHeartbeat(config, agentId, {
       mode: 'manager',
       version,
@@ -701,6 +717,8 @@ async function runRuntime(
       // adapter that may not even be in use.
       cli: 'mixed',
       cliAdapters: KNOWN_ADAPTER_CLI_TYPES.slice() as string[],
+      // Per-CLI model lists gathered just above (cliType → model ids).
+      availableModels,
       // ST-5b — pass the registry as a snapshot source so each heartbeat
       // reports the currently-supervised agent_ids and their working dirs.
       managedAgents,
