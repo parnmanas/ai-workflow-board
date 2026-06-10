@@ -70,6 +70,10 @@ export interface AgentExecutionContext {
    *  read this to decide whether to strip operator-inherited auth env vars
    *  (ANTHROPIC_API_KEY etc.) before merging the agent's credential. */
   credential_provider?: string | null;
+  /** Per-agent default model (Agent.model). Passed into the adapter build
+   *  spec so the spawned subagent / session runs under `--model <id>`.
+   *  null/undefined = the CLI's own default (no flag). */
+  model?: string | null;
 }
 
 // ─── Session manager interfaces ──────────────────────────────────────────
@@ -390,6 +394,7 @@ export class EventDispatcher {
       cli_home_dir: ctx.cli_home_dir,
       extra_env: ctx.extra_env,
       credential_provider: ctx.credential_provider ?? null,
+      model: ctx.model ?? null,
     };
   }
 

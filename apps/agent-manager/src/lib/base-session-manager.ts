@@ -90,6 +90,7 @@ export interface SpawnOpts {
     mcp_config_path: string;
     cli: string;
     cli_home_dir: string;
+    model?: string | null;
     extra_env?: Record<string, string>;
     /** Provider string of the per-agent credential. When set, _spawnSession
      *  strips operator-inherited auth env vars (per adapter.authEnvKeys())
@@ -330,6 +331,7 @@ export class BaseSessionManager {
       let descriptor = adapter.buildSessionSpawn({
         rolePrompt: rolePrompt || '',
         mcpConfigPath: null,
+        model: agentContext?.model ?? null,
       });
 
       if (descriptor.needsMcpConfig) {
@@ -376,6 +378,7 @@ export class BaseSessionManager {
         descriptor = adapter.buildSessionSpawn({
           rolePrompt: rolePrompt || '',
           mcpConfigPath: configPath,
+          model: agentContext?.model ?? null,
         });
       }
 

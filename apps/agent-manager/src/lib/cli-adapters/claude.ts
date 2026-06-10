@@ -43,9 +43,12 @@ export class ClaudeCliAdapter extends CliAdapter {
     return resolveCliBin('claude', configured);
   }
 
-  buildOneshotSpawn({ rolePrompt, taskText, mcpConfigPath }: OneshotSpec): SpawnDescriptor {
+  buildOneshotSpawn({ rolePrompt, taskText, mcpConfigPath, model }: OneshotSpec): SpawnDescriptor {
     return {
       args: [
+        // Per-agent default model (Agent.model). Omitted when unset so the
+        // CLI keeps its own default — preserves prior behaviour exactly.
+        ...(model ? ['--model', model] : []),
         '--print',
         '--output-format',
         'json',
@@ -64,9 +67,10 @@ export class ClaudeCliAdapter extends CliAdapter {
     };
   }
 
-  buildSessionSpawn({ rolePrompt, mcpConfigPath }: SessionSpec): SpawnDescriptor {
+  buildSessionSpawn({ rolePrompt, mcpConfigPath, model }: SessionSpec): SpawnDescriptor {
     return {
       args: [
+        ...(model ? ['--model', model] : []),
         '--verbose',
         '--input-format',
         'stream-json',

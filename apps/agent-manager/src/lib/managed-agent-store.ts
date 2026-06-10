@@ -29,6 +29,9 @@ export interface ManagedAgentDiskConfig {
   cli: string;
   working_dir: string;
   workspace_id?: string;
+  /** Per-agent default model (Agent.model). Persisted so a manager restart
+   *  rehydrates the same model without re-fetching from AWB. */
+  model?: string | null;
   /** ISO timestamp of the last successful spawn_agent on this manager. */
   last_spawn_at?: string;
 }

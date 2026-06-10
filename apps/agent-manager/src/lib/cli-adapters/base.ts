@@ -34,11 +34,17 @@ export interface OneshotSpec {
   rolePrompt: string;
   taskText: string;
   mcpConfigPath: string | null;
+  /** Per-agent default model to pass to the CLI (e.g. `--model <id>`). When
+   *  empty/null the adapter omits the flag and the CLI uses its own default
+   *  (current behaviour). Resolved from Agent.model at spawn time. */
+  model?: string | null;
 }
 
 export interface SessionSpec {
   rolePrompt: string;
   mcpConfigPath: string | null;
+  /** Per-agent default model — see OneshotSpec.model. */
+  model?: string | null;
 }
 
 export interface SpawnDescriptor {

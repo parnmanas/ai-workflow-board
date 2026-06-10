@@ -318,6 +318,13 @@ export class AgentManagerCommandHandler {
     const name = remote?.name ?? payload.args?.name ?? agentId.slice(0, 8);
     const cli = remote?.type ?? payload.args?.cli ?? 'claude';
     const workingDir = remote?.working_dir || payload.args?.working_dir || '';
+    // Per-agent default model. Prefer the canonical AWB record (remote.model);
+    // fall back to the spawn payload's args.model. Empty string = unset → the
+    // CLI's own default (no --model flag), preserving prior behaviour.
+    const model =
+      (typeof (remote as any)?.model === 'string' && (remote as any).model.trim()) ||
+      (typeof payload.args?.model === 'string' && payload.args.model.trim()) ||
+      '';
 
     if (!workingDir) {
       throw new Error('spawn_agent: working_dir is empty — set it before spawning');
@@ -334,6 +341,7 @@ export class AgentManagerCommandHandler {
       cli,
       working_dir: workingDir,
       workspace_id: (remote as any)?.workspace_id || '',
+      model: model || null,
       last_spawn_at: new Date().toISOString(),
     });
 
@@ -416,6 +424,7 @@ export class AgentManagerCommandHandler {
         api_key: rawApiKey,
         subagent_log_path: subagentLogPathFor(agentId),
         cli_home_dir: cliHomeDir,
+        model: model || null,
         extra_env: extraEnv,
         // Threaded through so spawn sites can strip operator-inherited auth
         // env vars (ANTHROPIC_API_KEY / OPENAI_API_KEY / …) when an agent

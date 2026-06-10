@@ -37,6 +37,10 @@ export interface ManagedAgentContext {
    *  so each managed agent's CLI sessions / plugins / settings stay
    *  isolated from siblings on the same manager host. */
   cli_home_dir: string;
+  /** Per-agent default model (Agent.model). Threaded into the adapter's
+   *  build spec so spawned subagents / sessions run under this model
+   *  (`--model <id>`). null/undefined = use the CLI's own default. */
+  model?: string | null;
   /** Extra environment variables exported on every spawn for this agent.
    *  Populated by adapter.prepareCliHome() when the agent's per-agent
    *  credential is the api_key kind (e.g. ANTHROPIC_API_KEY,

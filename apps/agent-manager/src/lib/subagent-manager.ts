@@ -393,6 +393,7 @@ export class SubagentManager implements SubagentManagerContract {
         rolePrompt: spec.rolePrompt || '',
         taskText: spec.taskText,
         mcpConfigPath: null,
+        model: ctx?.model ?? null,
       });
 
       if (descriptor.needsMcpConfig) {
@@ -443,6 +444,7 @@ export class SubagentManager implements SubagentManagerContract {
             rolePrompt: spec.rolePrompt || '',
             taskText: spec.taskText,
             mcpConfigPath: configPath,
+            model: ctx?.model ?? null,
           }),
         );
       }

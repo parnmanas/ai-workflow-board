@@ -37,7 +37,7 @@ export class CodexCliAdapter extends CliAdapter {
     return resolveCliBin('codex', configured);
   }
 
-  buildOneshotSpawn({ rolePrompt, taskText }: OneshotSpec): SpawnDescriptor {
+  buildOneshotSpawn({ rolePrompt, taskText, model }: OneshotSpec): SpawnDescriptor {
     const fullPrompt = rolePrompt ? `${rolePrompt}\n\n${taskText}` : taskText || '';
     // `codex` with no subcommand is the interactive TUI and refuses piped
     // stdin ("stdin is not a terminal"). `codex exec` is the non-interactive
@@ -52,6 +52,9 @@ export class CodexCliAdapter extends CliAdapter {
     return {
       args: [
         'exec',
+        // Per-agent default model (Agent.model). Omitted when unset so codex
+        // keeps its configured default — preserves prior behaviour.
+        ...(model ? ['--model', model] : []),
         '--skip-git-repo-check',
         '--json',
         '--dangerously-bypass-approvals-and-sandbox',

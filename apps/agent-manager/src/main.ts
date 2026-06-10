@@ -611,6 +611,10 @@ async function runRuntime(
         api_key: apiKey,
         subagent_log_path: subagentLogPathFor(id),
         cli_home_dir: cliHomeDirFor(id),
+        // Per-agent default model from the on-disk config snapshot (same value
+        // spawn_agent persisted). Restored so post-restart subagents/sessions
+        // keep running under the configured model.
+        model: (cfg as any).model || null,
         extra_env: extraEnv,
         // Pulled from the on-disk credential snapshot — same value spawn_agent
         // wrote at last bootstrap. Lets spawn sites strip operator-inherited
