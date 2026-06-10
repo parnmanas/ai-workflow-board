@@ -60,6 +60,11 @@ export interface Agent {
   /** Optional Credential row that supplies CLI auth (subscription / API key)
    *  for the spawned agent. null = fall back to the operator's main HOME. */
   credential_id?: string | null;
+  /** Per-agent default model the spawned CLI runs under (e.g. 'opus',
+   *  'claude-opus-4-8', 'deepseek-reasoner'). null/empty = the CLI's own
+   *  default (no --model flag). Candidates come from the manager's reported
+   *  available_models; free-text is also accepted. */
+  model?: string | null;
   /** ST-7: name of the manager Agent that supervises this agent. Populated
    *  by the server's agent listing endpoints (one DB lookup per request).
    *  Drives the `<ManagerName>/<AgentName>` display format used everywhere
@@ -927,6 +932,11 @@ export interface AgentManagerInstance {
   // agent the manager could read auth state for. Older managers leave
   // this undefined; the UI degrades to "no credential metadata" then.
   agent_credentials?: AgentCredentialEntry[];
+  // Per-CLI model lists the manager's installed CLIs accept (cliType →
+  // model ids), gathered via each adapter's listModels() at boot. Drives the
+  // per-agent model selector in ManagedAgentDialog. Older managers leave
+  // this undefined; the UI degrades to a free-text model input then.
+  available_models?: Record<string, string[]>;
   // Self-update fields — manager-mode only (managed by the manager's
   // UpdateChecker). Pre-update managers leave these undefined; the UI's
   // version compare degrades to "no info" in that case.
@@ -1007,6 +1017,8 @@ export interface ManagedAgentCreateBody {
   description?: string;
   /** Optional per-agent CLI credential — see Agent.credential_id. */
   credential_id?: string | null;
+  /** Optional per-agent default model — see Agent.model. */
+  model?: string | null;
 }
 
 // ─── Cross-workspace board move (ticket 8882056b) ───────────────

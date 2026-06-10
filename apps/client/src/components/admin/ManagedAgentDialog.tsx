@@ -78,6 +78,12 @@ export default function ManagedAgentDialog({
   // that consume credentials; custom CLIs leave this null.
   const [credentialId, setCredentialId] = useState<string>('');
   const [credentials, setCredentials] = useState<Credential[]>([]);
+  // Per-agent default model + the per-CLI candidate lists the owning manager
+  // reported via its heartbeat (`available_models`). The list is best-effort
+  // and per-install dynamic; when a CLI has no enumeration we fall back to a
+  // free-text input so the operator can still type a model id.
+  const [model, setModel] = useState<string>('');
+  const [availableModelsByCli, setAvailableModelsByCli] = useState<Record<string, string[]>>({});
 
   useEffect(() => {
     if (!isOpen) return;
@@ -90,12 +96,14 @@ export default function ManagedAgentDialog({
       setDescription(agent.description || '');
       setAutoSpawn(false);
       setCredentialId(agent.credential_id || '');
+      setModel(agent.model || '');
     } else {
       setName('');
       setWorkingDir('');
       setDescription('');
       setAutoSpawn(true);
       setCredentialId('');
+      setModel('');
       // Default CLI tracks the manager's primary CLI, but the operator can
       // override it (e.g., spawn an Antigravity agent under a Claude-default manager).
       const defaulted = MANAGED_CLI_OPTIONS.find((o) => o.value === defaultCli)?.value || 'claude';
@@ -121,7 +129,39 @@ export default function ManagedAgentDialog({
     return () => { alive = false; };
   }, [isOpen, mode, agent?.workspace_id]);
 
+  // Pull the owning manager's reported model lists. The manager publishes one
+  // `available_models` map (cliType → ids) per instance heartbeat; we locate
+  // this dialog's manager by instance id (preferred) or by its agent id and
+  // cache the map. Best-effort: any failure leaves the map empty and every CLI
+  // falls back to the free-text model input.
+  useEffect(() => {
+    if (!isOpen) return;
+    let alive = true;
+    api.listAgentManagerInstances()
+      .then((instances) => {
+        if (!alive) return;
+        const match =
+          (managerInstanceId && instances.find((i) => i.instance_id === managerInstanceId)) ||
+          instances.find((i) => i.agent_id === managerAgentId) ||
+          null;
+        setAvailableModelsByCli(match?.available_models || {});
+      })
+      .catch(() => { if (alive) setAvailableModelsByCli({}); });
+    return () => { alive = false; };
+  }, [isOpen, managerInstanceId, managerAgentId]);
+
   const eligibleCredentials = credentials.filter((c) => c.provider.startsWith(`${cli}_`));
+  // Candidate models for the selected CLI. When the manager reported a list we
+  // render a dropdown (prepending the saved value if it's not in the list, so
+  // editing never silently drops a hand-typed model); otherwise a free-text
+  // input. `custom` CLIs have no adapter, so no model concept.
+  const modelCandidates = availableModelsByCli[cli] || [];
+  const hasModelList = modelCandidates.length > 0;
+  const modelSelectOptions = [
+    { value: '', label: 'Default — let the CLI decide (no --model)' },
+    ...modelCandidates.map((m) => ({ value: m, label: m })),
+    ...(model && !modelCandidates.includes(model) ? [{ value: model, label: `${model} (custom)` }] : []),
+  ];
 
   const submit = async () => {
     const trimmedName = name.trim();
@@ -151,6 +191,8 @@ export default function ManagedAgentDialog({
           description,
           working_dir: trimmedWorkingDir,
           credential_id: supportsCredential && credentialId ? credentialId : null,
+          // null clears (CLI default); custom CLIs have no model concept.
+          model: cli !== 'custom' && model.trim() ? model.trim() : null,
         });
         showToast(`Agent "${trimmedName}" updated`, 'success');
 
@@ -194,6 +236,7 @@ export default function ManagedAgentDialog({
           manager_agent_id: managerAgentId,
           description: description.trim() || undefined,
           credential_id: supportsCredential && credentialId ? credentialId : undefined,
+          model: cli !== 'custom' && model.trim() ? model.trim() : undefined,
         });
         showToast(`Agent "${trimmedName}" created`, 'success');
 
@@ -263,7 +306,12 @@ export default function ManagedAgentDialog({
           <Select
             value={cli}
             options={MANAGED_CLI_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
-            onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setCli(e.target.value as any)}
+            onChange={(e: React.ChangeEvent<HTMLSelectElement>) => {
+              setCli(e.target.value as any);
+              // Model candidates are per-CLI; a value valid for the old CLI is
+              // usually meaningless for the new one, so clear it.
+              setModel('');
+            }}
             disabled={isEdit}
           />
           {isEdit && (
@@ -287,6 +335,33 @@ export default function ManagedAgentDialog({
             />
             <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2, lineHeight: 1.5 }}>
               Subscription credentials drop the OAuth file into this agent's cli-home; API-key credentials export the matching env var on every spawn. Add or rotate values in the Credentials page.
+            </div>
+          </div>
+        )}
+        {cli !== 'custom' && (
+          <div>
+            <label style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 4 }}>
+              Default model
+            </label>
+            {hasModelList ? (
+              <Select
+                value={model}
+                options={modelSelectOptions}
+                onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setModel(e.target.value)}
+              />
+            ) : (
+              <Input
+                type="text"
+                value={model}
+                placeholder="e.g. opus, claude-opus-4-8 (blank = CLI default)"
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setModel(e.target.value)}
+              />
+            )}
+            <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2, lineHeight: 1.5 }}>
+              {hasModelList
+                ? 'Candidates are read live from the CLI installed on the manager host. The list reflects what that CLI build accepts — not necessarily what this account can access.'
+                : 'This manager reported no model list for this CLI — type a model id the CLI accepts, or leave blank for its default.'}
+              {' '}A running agent must be restarted (restart_agent) to pick up a model change.
             </div>
           </div>
         )}
