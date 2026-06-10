@@ -213,6 +213,12 @@ export abstract class CliAdapter {
     _cliHomeDir: string,
     _credential?: AdapterCredential | null,
     _mcp?: AdapterMcpContext | null,
+    // Per-agent default model (Agent.model). Most adapters pass the model via
+    // the `--model` argv flag (see buildOneshotSpawn) and ignore this. The
+    // deepseek adapter — which drives the claude binary against DeepSeek's
+    // backend — uses it to set ANTHROPIC_MODEL so the env and the inherited
+    // `--model` flag always carry the SAME value (precedence-independent).
+    _model?: string | null,
   ): Promise<{ extraEnv: Record<string, string> }> {
     return { extraEnv: {} };
   }

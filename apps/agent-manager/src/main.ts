@@ -583,10 +583,15 @@ async function runRuntime(
         // Same MCP context as spawn_agent so antigravity's mcp_config.json gets
         // refreshed on rehydrate (operator may have rotated the AWB url
         // between manager runs).
-        const prep = await createAdapter(cfg.cli).prepareCliHome(cliHomeDirFor(id), credential, {
-          url: config.url,
-          apiKey,
-        });
+        const prep = await createAdapter(cfg.cli).prepareCliHome(
+          cliHomeDirFor(id),
+          credential,
+          { url: config.url, apiKey },
+          // Re-thread the persisted model so deepseek's ANTHROPIC_MODEL is
+          // restored on restart (this path recomputes extraEnv rather than
+          // reusing the spawn-time snapshot). Other adapters ignore it.
+          (cfg as any).model || null,
+        );
         extraEnv = prep?.extraEnv ?? {};
       } catch (err: any) {
         log(`rehydrate: cli-home prep failed for agent=${id.slice(0, 8)} cli=${cfg.cli}: ${err?.message ?? err}`);

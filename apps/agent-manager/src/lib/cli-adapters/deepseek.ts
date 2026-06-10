@@ -58,8 +58,11 @@ export class DeepSeekCliAdapter extends ClaudeCliAdapter {
   /**
    * DeepSeek runs through the claude binary but talks to DeepSeek's backend,
    * so the claude model list is meaningless here. DeepSeek publishes exactly
-   * two Anthropic-compatible models; offer those instead. (Selected value is
-   * injected via ANTHROPIC_MODEL, not `--model` — see prepareCliHome.)
+   * two Anthropic-compatible models; offer those instead. The selected value
+   * reaches the backend through BOTH the inherited `--model` flag (from
+   * ClaudeCliAdapter.buildOneshotSpawn) AND ANTHROPIC_MODEL (set in
+   * prepareCliHome below to the same value) — so it applies regardless of
+   * which one the claude binary prioritises.
    */
   async listModels(): Promise<string[]> {
     return [DEEPSEEK_DEFAULT_MODEL, 'deepseek-reasoner'];
@@ -69,6 +72,7 @@ export class DeepSeekCliAdapter extends ClaudeCliAdapter {
     cliHomeDir: string,
     credential?: AdapterCredential | null,
     _mcp?: AdapterMcpContext | null,
+    model?: string | null,
   ): Promise<{ extraEnv: Record<string, string> }> {
     // Drop any stale Claude OAuth file a previous claude-mode spawn (or a
     // CLI switch) may have left in this cli-home — otherwise Claude Code
@@ -106,6 +110,15 @@ export class DeepSeekCliAdapter extends ClaudeCliAdapter {
       const envModel = process.env.DEEPSEEK_MODEL?.trim();
       if (envModel) extraEnv.ANTHROPIC_MODEL = envModel;
     }
+
+    // Per-agent default model (Agent.model) wins over both the credential's
+    // `model` field and the operator's DEEPSEEK_MODEL — matching the documented
+    // priority `agent.model > credential.fields.model > adapter default`. The
+    // inherited buildOneshotSpawn also adds `--model <model>`; setting the env
+    // to the same value means deepseek runs under the chosen model no matter
+    // how the claude binary ranks flag-vs-env.
+    const agentModel = typeof model === 'string' ? model.trim() : '';
+    if (agentModel) extraEnv.ANTHROPIC_MODEL = agentModel;
 
     return { extraEnv };
   }

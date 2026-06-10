@@ -404,10 +404,14 @@ export class AgentManagerCommandHandler {
       // persist the `awb` server into cli-home at spawn_agent time.
       // Claude / Codex ignore this and keep using `--mcp-config` for
       // per-spawn role-pinning.
-      const prep = await createAdapter(cli).prepareCliHome(cliHomeDir, credential, {
-        url: this.#config.url,
-        apiKey: rawApiKey,
-      });
+      const prep = await createAdapter(cli).prepareCliHome(
+        cliHomeDir,
+        credential,
+        { url: this.#config.url, apiKey: rawApiKey },
+        // Per-agent model — deepseek folds this into ANTHROPIC_MODEL so its env
+        // and the inherited `--model` flag agree; other adapters ignore it.
+        model || null,
+      );
       extraEnv = prep?.extraEnv ?? {};
     } catch (err: any) {
       log(`spawn_agent: cli-home prep failed for agent=${agentId.slice(0, 8)} cli=${cli}: ${err?.message ?? err}`);
