@@ -55,6 +55,16 @@ export class DeepSeekCliAdapter extends ClaudeCliAdapter {
     return { kind: 'api_key', expires_at_ms: null, refresh_token_present: false };
   }
 
+  /**
+   * DeepSeek runs through the claude binary but talks to DeepSeek's backend,
+   * so the claude model list is meaningless here. DeepSeek publishes exactly
+   * two Anthropic-compatible models; offer those instead. (Selected value is
+   * injected via ANTHROPIC_MODEL, not `--model` — see prepareCliHome.)
+   */
+  async listModels(): Promise<string[]> {
+    return [DEEPSEEK_DEFAULT_MODEL, 'deepseek-reasoner'];
+  }
+
   async prepareCliHome(
     cliHomeDir: string,
     credential?: AdapterCredential | null,

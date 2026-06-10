@@ -5,6 +5,7 @@ import { promises as fsp } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { resolveCliBin } from '../cli-resolver.js';
+import { scanBinaryStrings, latestPerFamily, dedupe } from './model-introspect.js';
 import {
   ADAPTER_CAPABILITIES,
   type AdapterCredential,
@@ -19,6 +20,16 @@ import {
 } from './base.js';
 
 const { PERSISTENT_SESSION, NATIVE_MCP } = ADAPTER_CAPABILITIES;
+
+// Fallback ids used only when binary introspection can't read the installed
+// claude executable. Kept minimal (one current id per family); the live
+// per-install list from scanBinaryStrings() supersedes this whenever available.
+const CLAUDE_CURATED_MODELS = [
+  'claude-opus-4-8',
+  'claude-sonnet-4-6',
+  'claude-haiku-4-5',
+  'claude-fable-5',
+];
 
 export class ClaudeCliAdapter extends CliAdapter {
   static cliType = 'claude';
@@ -117,6 +128,33 @@ export class ClaudeCliAdapter extends CliAdapter {
 
   collectOneshotResult(_lines: string[]): string | null {
     return null;
+  }
+
+  /**
+   * Enumerate the models this claude install accepts for `--model`. Two parts:
+   *   - aliases (opus/sonnet/haiku/fable) — stable, friendly, auto-track the
+   *     latest of each family; always offered.
+   *   - concrete ids — extracted from the installed binary's embedded model
+   *     list (per-install dynamic), reduced to the newest of each family.
+   * If binary introspection yields nothing (resolution failed / unusual
+   * build), fall back to a curated id set so the dropdown is still useful.
+   * The returned ids are accepted by `--model` but may exceed what the
+   * agent's *account* can access — the UI keeps a free-text escape hatch.
+   */
+  async listModels(): Promise<string[]> {
+    const aliases = ['opus', 'sonnet', 'haiku', 'fable'];
+    let dynamic: string[] = [];
+    try {
+      const bin = this.resolveBin();
+      // Clean `family-major-minor` (opus/sonnet/haiku) or `fable-major` forms
+      // only — the trailing lookahead rejects dated/-v1/-fast variants.
+      const pattern = /claude-(?:(?:opus|sonnet|haiku)-\d+-\d+|fable-\d+)(?![\w-])/g;
+      dynamic = latestPerFamily(await scanBinaryStrings(bin, pattern));
+    } catch {
+      dynamic = [];
+    }
+    const fullNames = dynamic.length ? dynamic : CLAUDE_CURATED_MODELS;
+    return dedupe([...aliases, ...fullNames]);
   }
 
   configDirEnv(): string {

@@ -107,6 +107,21 @@ export abstract class CliAdapter {
   }
 
   /**
+   * Best-effort enumeration of the model ids this CLI build accepts for its
+   * `--model` flag (or model env). The manager calls this once at boot and
+   * ships the result to AWB via the instance heartbeat (`available_models`)
+   * so the admin UI can populate a per-agent model selector from the CLI
+   * actually installed on this host — not a value hardcoded in AWB.
+   *
+   * Contract: MUST be best-effort and MUST NOT throw. Return [] when the CLI
+   * can't be enumerated; the AWB client falls back to a free-text model
+   * input in that case. Default [] = "no enumeration for this CLI".
+   */
+  async listModels(_credential?: AdapterCredential | null): Promise<string[]> {
+    return [];
+  }
+
+  /**
    * Env-var name the underlying CLI consults to override its config home
    * directory. Manager uses this to point each managed agent at its own
    * `<MANAGER_HOME>/agents/<id>/cli-home/` so per-agent CLI state
