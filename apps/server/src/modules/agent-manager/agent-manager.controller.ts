@@ -108,6 +108,21 @@ export class AgentManagerController {
       : undefined;
     const paired_at = typeof body?.paired_at === 'string' && body.paired_at ? body.paired_at : undefined;
 
+    // Per-CLI model lists the manager's installed CLIs accept (cliType →
+    // string[]), gathered via each adapter's listModels(). Validated leniently
+    // — drop non-string entries and non-array values — and stored on the
+    // instance record so the admin UI can offer a per-agent model dropdown.
+    let available_models: Record<string, string[]> | undefined;
+    if (body?.available_models && typeof body.available_models === 'object' && !Array.isArray(body.available_models)) {
+      const out: Record<string, string[]> = {};
+      for (const [cli, list] of Object.entries(body.available_models)) {
+        if (!Array.isArray(list)) continue;
+        const models = list.filter((s: unknown): s is string => typeof s === 'string' && !!s);
+        if (models.length) out[cli] = models;
+      }
+      if (Object.keys(out).length) available_models = out;
+    }
+
     // Per-managed-agent credential metadata (manager-mode only). Each row
     // is opportunistically validated — bad shapes are dropped silently
     // because the heartbeat is best-effort and a rolling-out manager
@@ -220,6 +235,7 @@ export class AgentManagerController {
       working_dirs,
       paired_at,
       agent_credentials,
+      available_models,
       latest_version,
       update_available,
       repo_root,
@@ -655,6 +671,11 @@ export class AgentManagerController {
         if (args.credential_id === undefined && target.credential_id) {
           args.credential_id = target.credential_id;
         }
+        // Per-agent default model — same pattern as working_dir/credential_id.
+        // The manager injects it as `--model` (claude/codex) at spawn time.
+        if (args.model === undefined && target.model) {
+          args.model = target.model;
+        }
       }
     }
 
@@ -727,6 +748,11 @@ export class AgentManagerController {
       ? body.credential_id
       : null;
     const description = typeof body?.description === 'string' ? body.description : '';
+    // Per-agent default model — free-form (validated only as a string). The
+    // admin UI fills it from the manager's reported available_models, but a
+    // free-text value is allowed too (the list may not cover every model the
+    // account can access). Empty = unset.
+    const model = typeof body?.model === 'string' && body.model.trim() ? body.model.trim() : null;
 
     // If a manager_agent_id is supplied, sanity-check the row exists and is
     // actually a manager identity (type='manager', minted by pair/redeem). The
@@ -761,6 +787,7 @@ export class AgentManagerController {
         working_dir,
         manager_agent_id,
         credential_id,
+        model,
         roles: '[]',
       }),
     );
@@ -927,6 +954,9 @@ export class AgentManagerController {
       manager_agent_id: target.manager_agent_id,
       workspace_id: target.workspace_id,
       credential_id: target.credential_id,
+      // Per-agent default model — the manager's fetchAgentRecord reads this as
+      // remote.model and prefers it over the spawn payload's args.model.
+      model: target.model,
     });
   }
 

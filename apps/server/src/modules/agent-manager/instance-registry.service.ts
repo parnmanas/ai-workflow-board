@@ -45,6 +45,10 @@ export interface InstanceRecord {
   // Older managers (pre credential-expiry telemetry) leave undefined; the
   // dashboard collapses to "no credential metadata" in that case.
   agent_credentials?: AgentCredentialEntry[];
+  // Per-CLI model lists this manager's installed CLIs accept (cliType →
+  // model ids), gathered via each adapter's listModels() at boot. Powers the
+  // per-agent model selector in the admin UI. Older managers leave undefined.
+  available_models?: Record<string, string[]>;
   // Self-update fields — manager-mode only. Daemons/proxies leave undefined.
   // The manager's UpdateChecker fills these from `git fetch` + remote
   // package.json on a slow timer; older managers leave them undefined.

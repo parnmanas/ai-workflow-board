@@ -448,7 +448,7 @@ export class AgentsController {
       (req as any).currentUser?.id || (req as any).currentAgentId || (req as any).apiKey?.agent_id || null;
     const actorRole = (req as any).currentUser?.role || null;
 
-    const { name, description, type, avatar_url, is_active, role_prompt, role_prompt_meta, working_dir, manager_agent_id, credential_id } = body;
+    const { name, description, type, avatar_url, is_active, role_prompt, role_prompt_meta, working_dir, manager_agent_id, credential_id, model } = body;
     if (name !== undefined) {
       const trimmed = typeof name === 'string' ? name.trim() : '';
       if (!trimmed) return res.status(400).json({ error: 'name cannot be empty' });
@@ -487,6 +487,13 @@ export class AgentsController {
       // agent from its credential is a one-line UI affordance, so accept null
       // and '' the same way working_dir / manager_agent_id do.
       agent.credential_id = typeof credential_id === 'string' && credential_id ? credential_id : null;
+    }
+    // Per-agent default model. Empty string / falsy = clear (CLI default);
+    // non-empty string = set. Same set/clear affordance as working_dir.
+    // Takes effect on the next spawn — a currently-running agent must be
+    // restarted (restart_agent) for the new --model to apply.
+    if (model !== undefined) {
+      agent.model = typeof model === 'string' && model.trim() ? model.trim() : null;
     }
 
     // Operator invariant: manager-type agents are workspace-less. Catches

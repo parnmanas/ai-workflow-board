@@ -86,6 +86,16 @@ export class Agent {
   @Column({ type: 'varchar', nullable: true, default: null })
   credential_id: string | null;
 
+  // Per-agent default model the spawned CLI runs under (e.g. 'opus',
+  // 'claude-opus-4-8', 'deepseek-reasoner'). Candidates come from the
+  // manager's dynamic per-CLI enumeration (instance heartbeat
+  // `available_models`); the admin UI offers them as a dropdown with a
+  // free-text fallback. null/'' = use the CLI's own default (no --model flag).
+  // Nullable so dev (sqlite synchronize) and prod (postgres) both add it as a
+  // harmless additive column.
+  @Column({ type: 'varchar', nullable: true, default: null })
+  model: string | null;
+
   @CreateDateColumn()
   created_at: Date;
 
