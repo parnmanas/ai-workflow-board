@@ -43,7 +43,7 @@ export class AntigravityCliAdapter extends CliAdapter {
     return resolveCliBin('agy', configured);
   }
 
-  buildOneshotSpawn({ rolePrompt, taskText }: OneshotSpec): SpawnDescriptor {
+  buildOneshotSpawn({ rolePrompt, taskText, model }: OneshotSpec): SpawnDescriptor {
     const fullPrompt = rolePrompt ? `${rolePrompt}\n\n${taskText}` : taskText || '';
     // `agy -p "<prompt>"` runs in non-interactive print mode; the prompt
     // is passed as a positional arg after `-p`. For long prompts we pipe
@@ -51,8 +51,14 @@ export class AntigravityCliAdapter extends CliAdapter {
     // `--dangerously-skip-permissions` auto-approves every tool call
     // (the spawn already runs in a per-agent sandbox so external
     // approvals are redundant).
+    // Per-agent default model (Agent.model). `agy` gained `--model` in v1.0.5
+    // (alongside an `agy models` subcommand); inject it when set so a model
+    // chosen in the admin UI actually reaches the CLI. Omitted when unset so
+    // antigravity keeps its own default — preserves prior behaviour, and
+    // matches the claude/codex injection pattern. Antigravity is oneshot-only
+    // (no persistent session), so there is no session-spawn path to mirror.
     return {
-      args: ['-p', fullPrompt, '--dangerously-skip-permissions'],
+      args: ['-p', fullPrompt, ...(model ? ['--model', model] : []), '--dangerously-skip-permissions'],
       stdio: ['pipe', 'pipe', 'pipe'],
       needsMcpConfig: false,
       writePrompt: undefined,
