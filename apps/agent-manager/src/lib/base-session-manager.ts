@@ -22,12 +22,17 @@ import type { SubagentMonitor, SubagentTapHandle } from './subagent-monitor.js';
 
 const { PERSISTENT_SESSION } = ADAPTER_CAPABILITIES;
 
-// Health watchdog. A session is "responding" when the adapter reports a
-// `result` line for each turn we wrote. If the LLM goes silent, turns stack
-// on stdin without acks and the AWB server keeps re-firing the same trigger
-// forever. Two thresholds, OR'd together:
-//   - 5 turns dispatched without seeing a single `result` line back
-//   - 30 minutes elapsed since the first unresponded turn was written
+// Health watchdog. A session is "responding" as long as its CLI keeps
+// emitting output — ANY assistant/thinking line, not just a final `result`,
+// clears the unresponded counters (see #wireStdio). Only a genuinely silent
+// child (no output at all) lets turns stack on stdin without acks while the
+// AWB server re-fires the same trigger forever. Two thresholds, OR'd:
+//   - 5 turns dispatched with zero output lines seen back
+//   - 30 minutes elapsed since the first unanswered turn, still silent
+// NOTE: an earlier version reset only on `result`. A worker mid-long-turn
+// (which never emits `result` until done) whose own board-update echoes
+// stacked extra turns onto stdin raced this counter to 5 in ~85s and got
+// SIGTERM'd before writing a line of code. Reset-on-any-output fixes that.
 const UNHEALTHY_TURN_THRESHOLD = 5;
 const UNHEALTHY_DURATION_MS = 30 * 60 * 1000;
 const HEALTH_SWEEP_INTERVAL_MS = 60 * 1000;
@@ -625,6 +630,18 @@ export class BaseSessionManager {
       rlOut.on('line', (line) => {
         sess.tap?.outLine(line);
         const parsed = sess.adapter.parseStdoutLine(line);
+        // Health-watchdog liveness: any model output (thinking/composing
+        // stage, or a final result) proves the LLM is responding, so clear
+        // the unresponded counters here — not only on `result`. A worker
+        // mid-long-turn emits assistant/tool/system lines constantly; if its
+        // own board-update echoes stack extra turns onto stdin, a result-only
+        // reset let unrespondedTurnCount race to the kill threshold (~85s)
+        // while the agent was actively working. A truly silent CLI emits
+        // nothing → stage stays null → the watchdog still fires as intended.
+        if (parsed.stage || parsed.isResult) {
+          sess.unrespondedTurnCount = 0;
+          sess.unrespondedSince = null;
+        }
         this.#advanceTurn(sess, parsed);
         // Buffer plain-text stdout (non-JSON parser misses) into the tail
         // ring so subclasses can surface "what went wrong" on silent exit.
