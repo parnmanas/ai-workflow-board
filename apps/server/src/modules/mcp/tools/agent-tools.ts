@@ -57,10 +57,15 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
       type: z.enum(CLI_TYPES).optional().default('custom').describe('Agent type (CLI selector — see ALLOWED_CLI_TYPES)'),
       avatar_url: z.string().optional().default('').describe('Avatar URL'),
       is_active: z.number().optional().default(1).describe('Active (1) or inactive (0)'),
+      model: z.string().optional().describe(
+        "Per-agent default model the spawned CLI runs under (e.g. 'opus', 'claude-opus-4-8', 'deepseek-reasoner'). Omit / empty = the CLI's own default (no --model flag)."
+      ),
     },
-    async ({ name, description, type, avatar_url, is_active }) => {
+    async ({ name, description, type, avatar_url, is_active, model }) => {
       const agentRepo = dataSource.getRepository(Agent);
-      const agent = await agentRepo.save(agentRepo.create({ name, description, type, avatar_url, is_active }));
+      const agent = await agentRepo.save(
+        agentRepo.create({ name, description, type, avatar_url, is_active, model: model && model.trim() ? model.trim() : null }),
+      );
       return ok(agent);
     }
   );
@@ -79,8 +84,11 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
       role_prompt_meta: z.record(z.string(), z.unknown()).optional().describe(
         'Optional metadata sidecar: { version?, updated_by?, template_id?, ... } — forward-compat hook, safe to omit'
       ),
+      model: z.string().optional().describe(
+        "Per-agent default model the spawned CLI runs under (e.g. 'opus', 'claude-opus-4-8'). Empty string clears it (CLI default). Takes effect on the next spawn — restart a running agent to apply."
+      ),
     },
-    async ({ agent_id, name, description, type, avatar_url, is_active, role_prompt, role_prompt_meta }) => {
+    async ({ agent_id, name, description, type, avatar_url, is_active, role_prompt, role_prompt_meta, model }) => {
       const agentRepo = dataSource.getRepository(Agent);
       const agent = await agentRepo.findOne({ where: { id: agent_id } });
       if (!agent) return err('Agent not found');
@@ -97,6 +105,7 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
       if (is_active !== undefined) agent.is_active = is_active;
       if (role_prompt !== undefined) agent.role_prompt = role_prompt;              // D-18
       if (role_prompt_meta !== undefined) agent.role_prompt_meta = role_prompt_meta as Record<string, any>; // D-18
+      if (model !== undefined) agent.model = model && model.trim() ? model.trim() : null;
 
       const updated = await agentRepo.save(agent);
 
