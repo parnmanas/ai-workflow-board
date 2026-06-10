@@ -151,8 +151,11 @@ export class ClaudeCliAdapter extends CliAdapter {
     try {
       const bin = this.resolveBin();
       // Clean `family-major-minor` (opus/sonnet/haiku) or `fable-major` forms
-      // only — the trailing lookahead rejects dated/-v1/-fast variants.
-      const pattern = /claude-(?:(?:opus|sonnet|haiku)-\d+-\d+|fable-\d+)(?![\w-])/g;
+      // only. Versions are capped at 1-2 digits so a dated build id like
+      // `claude-opus-4-20250514` is rejected outright (its 8-digit "minor"
+      // would otherwise sort as the newest and beat `claude-opus-4-8`). The
+      // trailing lookahead also drops -v1/-fast variants.
+      const pattern = /claude-(?:(?:opus|sonnet|haiku)-\d{1,2}-\d{1,2}|fable-\d{1,2})(?![\w-])/g;
       dynamic = latestPerFamily(await scanBinaryStrings(bin, pattern));
     } catch {
       dynamic = [];
