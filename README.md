@@ -277,6 +277,19 @@ Any client supporting the [Model Context Protocol](https://modelcontextprotocol.
 - **Channels** — Discord notification channels
 - **API Keys** — MCP API key management
 
+### Agent Harness (board settings)
+
+Board and Workspace settings carry an optional **Agent Harness** (`harness_config`)
+that shapes how subagent CLIs are launched for tickets on that board:
+extra system prompt (`system_prompt_append`), tool allow/deny lists, a `model`
+override, and a `permission_mode`. The workspace value is the default; a board
+overrides it key-by-key. The resolved config rides on every `agent_trigger`
+event and is mapped onto CLI flags by the agent-manager at subagent spawn —
+boards without a harness keep the exact pre-harness behavior. Also settable via
+REST `PATCH /api/boards/:id` / `PATCH /api/workspaces/:id` and the MCP
+`update_board` / `update_workspace` tools. Field-by-field CLI mapping and
+constraints: [docs/agent-manager.md → Harness config](docs/agent-manager.md#harness-config-per-board-cli-flags).
+
 ### Admin Section
 - **Users** — Global user management and approval
 - **QA Tests** — Quality assurance test runner
