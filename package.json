@@ -19,5 +19,16 @@
   },
   "devDependencies": {
     "turbo": "^2.4.0"
+  },
+  "overrides": {
+    "@angular-devkit/core": {
+      "picomatch": "^4.0.4"
+    },
+    "fdir": {
+      "picomatch": "^4.0.4"
+    },
+    "vite": {
+      "picomatch": "^4.0.4"
+    }
   }
 }
