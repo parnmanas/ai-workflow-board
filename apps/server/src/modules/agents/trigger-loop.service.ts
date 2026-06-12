@@ -18,6 +18,7 @@ import { GitHubConnectorService, parseGitHubUrl } from '../../services/github-co
 import { AgentWorkloadService } from './agent-workload.service';
 import { TicketPrerequisitesService } from '../tickets/ticket-prerequisites.service';
 import { priorityIndex } from './priority';
+import { resolveHarnessConfig, HarnessConfig } from '../../common/harness-config';
 
 // Sentinel actor written onto auto-advance `moved` activities. Deliberately
 // non-'system' so the trigger loop re-enters and processes the destination
@@ -1412,6 +1413,33 @@ candidate's branch or move the ticket.
       }
     }
 
+    // Resolved harness config (ticket e9c7a896): workspace default merged
+    // with the board override, key-level, via the shared helper — the same
+    // resolve every REST/MCP reader uses, so dispatch can't disagree with
+    // the admin UI about what applies. Shipped on the trigger payload so
+    // agent-manager maps the keys onto CLI flags at spawn time. Null when
+    // neither layer sets anything OR the lookup fails — the manager treats
+    // null as "no harness" and spawns exactly as before. Deliberately a
+    // separate Board findOne from the legacy maxConcurrent block above
+    // (that one is slated for deletion after manager bumps).
+    let harnessConfig: HarnessConfig | null = null;
+    try {
+      const boardForHarness = boardId
+        ? await this.dataSource.getRepository(Board).findOne({ where: { id: boardId } })
+        : null;
+      const workspaceForHarness = ticket.workspace_id
+        ? await this.dataSource.getRepository(Workspace).findOne({ where: { id: ticket.workspace_id } })
+        : null;
+      harnessConfig = resolveHarnessConfig(
+        workspaceForHarness?.harness_config,
+        boardForHarness?.harness_config,
+      );
+    } catch (e) {
+      this.logService.warn('MCP', 'harness_config resolve failed (continuing without)', {
+        err: String(e), ticket_id: ticket.id, board_id: boardId,
+      });
+    }
+
     // Chain-target flag for the audit row — one IN query scoped to this
     // single ticket id. Trivial cost; surfaces the selector's ranking
     // input on every emit so post-mortems can reconstruct "why did the
@@ -1447,6 +1475,9 @@ candidate's branch or move the ticket.
       column_prompt: columnPrompt,
       base_repo: baseRepo,
       base_branch: baseBranch,
+      // Resolved workspace+board harness — agent-manager applies it as CLI
+      // flags at subagent spawn (ticket e9c7a896). Null = no harness.
+      harness_config: harnessConfig,
       triggered_by: triggeredBy,
       timestamp: now.toISOString(),
       force_respawn: forceRespawn,

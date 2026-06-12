@@ -152,6 +152,7 @@ export const EVENT_TYPES: EventDefinition[] = [
         column_prompt: event.column_prompt ?? null,
         base_repo: event.base_repo ?? null,
         base_branch: event.base_branch || '',
+        harness_config: event.harness_config ?? null,
         max_concurrent_tickets_per_agent:
           typeof event.max_concurrent_tickets_per_agent === 'number'
             ? event.max_concurrent_tickets_per_agent
@@ -191,6 +192,12 @@ export const EVENT_TYPES: EventDefinition[] = [
         // this, ev.column_prompt stays undefined on the proxy side and the
         // column workflow guide never reaches the agent.
         column_prompt: p.column_prompt,
+        // e9c7a896: resolved workspace+board harness — agent-manager's
+        // handleTrigger reads ev.harness_config off the flattened event and
+        // maps the keys onto subagent CLI flags at spawn. Same flatten rule
+        // as column_prompt: without this line the field never leaves the
+        // envelope and the manager sees undefined.
+        harness_config: p.harness_config ?? null,
         // Per-board cap forwarded so the manager can keep a defensive drop
         // alongside the server-side gate.
         max_concurrent_tickets_per_agent: p.max_concurrent_tickets_per_agent,

@@ -3,6 +3,8 @@
 // chat_message (Phase 2) and agent_status (Phase 3) are skeleton-only — type declared,
 // filter branch exists, NO emit producer. This is the explicit D-08 scope.
 
+import type { HarnessConfig } from '../harness-config';
+
 export type StreamEventType =
   | 'board_update'
   | 'agent_typing'
@@ -84,6 +86,13 @@ export interface AgentTriggerPayload {
   // the server gate (set_current_task lags the trigger by the spawn
   // round-trip). Defaults to 1 in the manager when absent.
   max_concurrent_tickets_per_agent?: number;
+  // Resolved harness config (ticket e9c7a896): workspace default merged with
+  // the board override via resolveHarnessConfig(). agent-manager maps the
+  // keys onto subagent CLI flags at spawn time (--append-system-prompt /
+  // --allowedTools / --disallowedTools / --model / --permission-mode).
+  // Null when neither layer configures a harness — the manager must treat
+  // null as "spawn exactly as before".
+  harness_config?: HarnessConfig | null;
 }
 
 // Phase 2 D-26 — finalized payload shape emitted by chat producers.
