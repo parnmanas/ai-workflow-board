@@ -71,6 +71,13 @@ export class Workspace {
   @Column({ type: 'varchar', nullable: true, default: null })
   alerts_chat_room_id: string | null;
 
+  // Workspace-wide default agent harness (ticket 7122600c). Same JSON shape
+  // as Board.harness_config; boards override it per key via
+  // resolveHarnessConfig (common/harness-config.ts). null = no default —
+  // boards without their own harness keep the current dispatch behaviour.
+  @Column({ type: 'text', nullable: true, default: null })
+  harness_config: string | null;
+
   // ─────────────────────────────────────────────────────────────────────
   // Claim-verification (ticket dcb9d661): detect assignees who post an
   // "I'm done" comment in an active column without actually pushing a

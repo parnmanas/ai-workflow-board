@@ -28,6 +28,15 @@ export class Board {
                                   // Keyed by BoardColumn.id. Template content is attached to agent_trigger SSE events
                                   // when a ticket moves into the mapped column.
 
+  // Per-board agent harness override (ticket 7122600c). JSON text of
+  // HarnessConfig (see common/harness-config.ts): { system_prompt_append?,
+  // allowed_tools?, disallowed_tools?, model?, permission_mode? }. Resolved
+  // against the workspace-level default via resolveHarnessConfig — board
+  // keys override per key, unset keys inherit. null = no override (and with
+  // the workspace also null, dispatch behaves exactly as before).
+  @Column({ type: 'text', nullable: true, default: null })
+  harness_config: string | null;
+
   // Per-board cap on how many distinct tickets a single agent can be
   // actively working on at once. Default 1 — same agent assigned to
   // multiple tickets would otherwise have parallel subagents stomping on
