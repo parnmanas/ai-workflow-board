@@ -17,6 +17,7 @@ import { DEFAULT_COLUMNS, BUILTIN_ROLES, DEFAULT_BOARD_ROUTING } from '../../../
 import { DEFAULT_PROMPT_TEMPLATES } from '../../../database/default-prompt-templates';
 import { PromptTemplate } from '../../../entities/PromptTemplate';
 import { ok, err } from '../shared/helpers';
+import { HarnessConfigSchema, serializeHarnessConfig } from '../../../common/harness-config';
 import { writeRoutingConfigThrough } from '../../boards/routing-config.helper';
 import type { ToolContext } from './context';
 
@@ -143,7 +144,7 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
 
   server.tool(
     'update_workspace',
-    'Update a workspace name, description, trigger-loop cadence settings (supervisor_stale_ms / supervisor_resend_ms / dispatch_queue_depth), or claim-verification settings (claim_verification_enabled / claim_verification_grace_ms)',
+    'Update a workspace name, description, trigger-loop cadence settings (supervisor_stale_ms / supervisor_resend_ms / dispatch_queue_depth), claim-verification settings (claim_verification_enabled / claim_verification_grace_ms), or the default agent harness (harness_config)',
     {
       workspace_id: z.string().describe('Workspace ID'),
       name: z.string().optional().describe('New name'),
@@ -158,8 +159,10 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
         .describe('Enable the claim-verification sweep (ticket dcb9d661): when an assignee comments in an active column without committing or moving the ticket within the grace window, auto-park it for human review. Default false.'),
       claim_verification_grace_ms: z.number().positive().optional()
         .describe('Grace window in ms before the claim-verification sweep auto-pends an idle assignee claim. Default 600000 (10 min).'),
+      harness_config: HarnessConfigSchema.nullable().optional()
+        .describe('Workspace-wide default agent harness: { system_prompt_append?, allowed_tools?, disallowed_tools?, model?, permission_mode? }. Boards override it per key via their own harness_config. Pass null to clear.'),
     },
-    async ({ workspace_id, name, description, supervisor_stale_ms, supervisor_resend_ms, dispatch_queue_depth, claim_verification_enabled, claim_verification_grace_ms }) => {
+    async ({ workspace_id, name, description, supervisor_stale_ms, supervisor_resend_ms, dispatch_queue_depth, claim_verification_enabled, claim_verification_grace_ms, harness_config }) => {
       const wsRepo = dataSource.getRepository(Workspace);
       const ws = await wsRepo.findOne({ where: { id: workspace_id } });
       if (!ws) return err('Workspace not found');
@@ -174,6 +177,9 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
       if (dispatch_queue_depth !== undefined) ws.dispatch_queue_depth = Math.floor(dispatch_queue_depth);
       if (claim_verification_enabled !== undefined) ws.claim_verification_enabled = claim_verification_enabled ? 1 : 0;
       if (claim_verification_grace_ms !== undefined) ws.claim_verification_grace_ms = Math.floor(claim_verification_grace_ms);
+      // Default harness (ticket 7122600c) — strict-validated by the arg
+      // schema; empty objects collapse to null via the serializer.
+      if (harness_config !== undefined) ws.harness_config = serializeHarnessConfig(harness_config);
 
       await wsRepo.save(ws);
       return ok(ws);

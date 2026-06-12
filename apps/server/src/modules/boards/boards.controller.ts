@@ -23,6 +23,7 @@ import { buildArchiveCursor, parseArchiveCursor } from '../mcp/shared/archive-he
 import { writeRoutingConfigThrough } from './routing-config.helper';
 import { AgentWorkloadService } from '../agents/agent-workload.service';
 import { resolveAgentDisplayMap } from '../../utils/agent-name';
+import { validateHarnessConfigInput, serializeHarnessConfig } from '../../common/harness-config';
 
 // Narrow projection of a Comment as it ships on a board card. The board GET
 // only needs enough to render the comment count and the stale-open-question
@@ -419,7 +420,7 @@ export class BoardsController {
   async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     const board = await findOrFail(this.boardRepo, { where: { id } }, 'Board not found');
 
-    const { name, description, routing_config, column_prompts, max_concurrent_tickets_per_agent, self_improvement_mode, benchmark_mode, auto_archive_days } = body;
+    const { name, description, routing_config, column_prompts, max_concurrent_tickets_per_agent, self_improvement_mode, benchmark_mode, auto_archive_days, harness_config } = body;
     if (name !== undefined) board.name = name;
     if (description !== undefined) board.description = description;
     if (self_improvement_mode !== undefined) {
@@ -461,6 +462,19 @@ export class BoardsController {
         });
       }
       board.max_concurrent_tickets_per_agent = n;
+    }
+
+    // Agent harness override (ticket 7122600c). null clears; an object is
+    // zod-validated (strict keys) so a typo'd field 400s instead of being
+    // silently stored. Empty objects collapse to null via the serializer.
+    if (harness_config !== undefined) {
+      if (harness_config === null) {
+        board.harness_config = null;
+      } else {
+        const checked = validateHarnessConfigInput(harness_config);
+        if (!checked.ok) return res.status(400).json({ error: checked.error });
+        board.harness_config = serializeHarnessConfig(checked.value);
+      }
     }
 
     if (auto_archive_days !== undefined) {

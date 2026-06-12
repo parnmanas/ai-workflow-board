@@ -20,6 +20,7 @@ import { ReBACService } from '../../services/rebac.service';
 import { findOrFail } from '../../common/find-or-fail';
 import { parseComments, expandCommentAttachments } from '../mcp/shared/ticket-parsing';
 import { writeRoutingConfigThrough } from '../boards/routing-config.helper';
+import { validateHarnessConfigInput, serializeHarnessConfig } from '../../common/harness-config';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 
@@ -138,6 +139,7 @@ export class WorkspacesController {
       name, description,
       supervisor_stale_ms, supervisor_resend_ms, dispatch_queue_depth,
       claim_verification_enabled, claim_verification_grace_ms,
+      harness_config,
     } = body;
     if (name !== undefined) ws.name = name;
     if (description !== undefined) ws.description = description;
@@ -176,6 +178,18 @@ export class WorkspacesController {
       const v = Number(claim_verification_grace_ms);
       if (Number.isFinite(v) && v > 0) ws.claim_verification_grace_ms = Math.floor(v);
       else return res.status(400).json({ error: 'claim_verification_grace_ms must be a positive number' });
+    }
+
+    // Workspace-wide default agent harness (ticket 7122600c). Same contract
+    // as the board PATCH: null clears, objects are strict-zod-validated → 400.
+    if (harness_config !== undefined) {
+      if (harness_config === null) {
+        ws.harness_config = null;
+      } else {
+        const checked = validateHarnessConfigInput(harness_config);
+        if (!checked.ok) return res.status(400).json({ error: checked.error });
+        ws.harness_config = serializeHarnessConfig(checked.value);
+      }
     }
 
     await this.wsRepo.save(ws);

@@ -15,6 +15,7 @@ import { DEFAULT_COLUMNS, DEFAULT_BOARD_ROUTING } from '../../../db';
 import { DEFAULT_PROMPT_TEMPLATES } from '../../../database/default-prompt-templates';
 import { PromptTemplate } from '../../../entities/PromptTemplate';
 import { ok, err, safeJsonParse } from '../shared/helpers';
+import { HarnessConfigSchema, serializeHarnessConfig } from '../../../common/harness-config';
 import { writeRoutingConfigThrough } from '../../boards/routing-config.helper';
 import { getCallerAgent } from '../shared/session-auth';
 import { WorkspaceMoveService, WorkspaceMoveBlockedError } from '../../../services/workspace-move.service';
@@ -222,7 +223,7 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'update_board',
-    'Update a board name, description, routing_config, column→prompt-template mapping, or auto-archive policy',
+    'Update a board name, description, routing_config, column→prompt-template mapping, auto-archive policy, or agent harness override',
     {
       board_id: z.string().describe('Board ID'),
       name: z.string().optional().describe('New name'),
@@ -233,8 +234,10 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
         .describe('Column→PromptTemplate mapping: { [column_id]: prompt_template_id }. Pass null or {} to clear all.'),
       auto_archive_days: z.number().int().min(1).max(365).nullable().optional()
         .describe('Auto-archive policy: null disables, 1..365 archives Done-column tickets older than N days. The TicketArchiverService background job consumes this setting; changes take effect on the next archiver tick (no restart needed).'),
+      harness_config: HarnessConfigSchema.nullable().optional()
+        .describe('Per-board agent harness override: { system_prompt_append?, allowed_tools?, disallowed_tools?, model?, permission_mode? }. Keys set here override the workspace default per key at dispatch; unset keys inherit. Pass null to clear the board override.'),
     },
-    async ({ board_id, name, description, routing_config, column_prompts, auto_archive_days }) => {
+    async ({ board_id, name, description, routing_config, column_prompts, auto_archive_days, harness_config }) => {
       const boardRepo = dataSource.getRepository(Board);
       const board = await boardRepo.findOne({ where: { id: board_id } });
       if (!board) return err('Board not found');
@@ -263,6 +266,13 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
       }
       if (auto_archive_days !== undefined) {
         board.auto_archive_days = auto_archive_days;
+      }
+      // Harness override (ticket 7122600c). Args already passed the strict
+      // HarnessConfigSchema, so storage is a straight serialize; empty
+      // objects collapse to null (same null = "no override" contract as
+      // column_prompts).
+      if (harness_config !== undefined) {
+        board.harness_config = serializeHarnessConfig(harness_config);
       }
 
       await boardRepo.save(board);
