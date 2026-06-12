@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git fetch *)",
+      "Bash(npm audit)",
+      "Bash(npm audit --json)",
+      "Bash(npm ls *)",
+      "Bash(npm view *)",
+      "Bash(npm run build)",
+      "Bash(npm run build *)",
+      "mcp__awb__ping",
+      "mcp__awb__whoami",
+      "mcp__awb__get_ticket",
+      "mcp__awb__get_ticket_activity",
+      "mcp__awb__get_my_tickets",
+      "mcp__awb__get_board",
+      "mcp__awb__get_board_summary",
+      "mcp__awb__list_boards",
+      "mcp__awb__get_workspace",
+      "mcp__awb__list_workspaces",
+      "mcp__awb__list_agents",
+      "mcp__awb__list_users",
+      "mcp__awb__get_recent_activity",
+      "mcp__awb__list_actions",
+      "mcp__awb__search_actions"
+    ]
+  }
+}
