@@ -117,6 +117,11 @@ export default function Sidebar({ isMobile, isOpen, onClose, wsId, boards }: Sid
     { key: 'api-keys',         path: `/ws/${wsId}/api-keys`,         label: 'API Keys',         icon: 'K' },
     { key: 'roles',            path: `/ws/${wsId}/roles`,            label: 'Roles',            icon: 'O' },
   ];
+  // Workspace Settings hosts the workspace-default agent harness — operator
+  // surface, so it only renders for admins (the page itself also gates).
+  if (hasPermission('admin.access')) {
+    workspaceNavItems.push({ key: 'settings', path: `/ws/${wsId}/settings`, label: 'Settings', icon: 'S' });
+  }
 
   const adminNavItems: { key: string; path: string; label: string; icon: string; badge?: number }[] = [
     { key: 'admin-users',    path: '/admin/users',    label: 'Users',       icon: 'U', badge: counts.pendingUsers },

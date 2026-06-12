@@ -24,6 +24,7 @@ import WorkspaceResourcesPage from './components/WorkspaceResourcesPage';
 import WorkspaceActionsPage from './components/WorkspaceActionsPage';
 import WorkspaceCredentialsPage from './components/WorkspaceCredentialsPage';
 import WorkspaceRolesPage from './components/WorkspaceRolesPage';
+import WorkspaceSettingsPage from './components/WorkspaceSettingsPage';
 import AgentDetailPage from './components/AgentDetailPage';
 import { tokens } from './tokens';
 
@@ -171,6 +172,7 @@ function AppContent() {
           <Route path="actions" element={<WorkspaceActionsPage />} />
           <Route path="credentials" element={<WorkspaceCredentialsPage />} />
           <Route path="roles" element={<WorkspaceRolesPage />} />
+          <Route path="settings" element={<WorkspaceSettingsPage />} />
         </Route>
       </Route>
     </Routes>

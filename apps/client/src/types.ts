@@ -457,6 +457,24 @@ export interface Board {
   // range; UI maps a disabled toggle to null and re-introduces the previous
   // days value when toggled back on.
   auto_archive_days?: number | null;
+  // Per-board agent harness override. Raw JSON string of HarnessConfig (same
+  // wire convention as routing_config / column_prompts — the client parses).
+  // Keys set here override the workspace default per key at dispatch; null/
+  // absent = no override.
+  harness_config?: string | null;
+}
+
+// Agent harness configuration (ticket 7122600c). Mirror of the server-side
+// zod schema in apps/server/src/common/harness-config.ts — keep in sync.
+// Stored JSON-encoded in Board.harness_config (per-board override) and
+// Workspace.harness_config (workspace default); resolution is key-level
+// (board wins per key it sets).
+export interface HarnessConfig {
+  system_prompt_append?: string; // merged into subagent --append-system-prompt
+  allowed_tools?: string[];      // claude CLI --allowedTools
+  disallowed_tools?: string[];   // claude CLI --disallowedTools
+  model?: string;                // --model override
+  permission_mode?: string;      // --permission-mode
 }
 
 // ─── Board-GET card projections ──────────────────────────────
@@ -524,6 +542,9 @@ export interface Workspace {
   description: string;
   boards: Board[];
   board_count?: number;
+  // Workspace-wide default agent harness. Raw JSON string of HarnessConfig;
+  // boards override it per key via Board.harness_config.
+  harness_config?: string | null;
   created_at: string;
   updated_at: string;
 }

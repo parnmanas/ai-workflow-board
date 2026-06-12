@@ -41,6 +41,7 @@ import type {
   AgentApiKeyPolicy,
   AgentCrossRefPolicy,
   BenchmarkRunDetail,
+  HarnessConfig,
 } from './types';
 
 const BASE = '/api';
@@ -182,7 +183,7 @@ export const api = {
   getWorkspace: (id: string) => request<any>(`/workspaces/${id}`),
   createWorkspace: (data: { name: string; description?: string; board_name?: string }) =>
     request<any>('/workspaces', { method: 'POST', body: JSON.stringify(data) }),
-  updateWorkspace: (id: string, data: { name?: string; description?: string }) =>
+  updateWorkspace: (id: string, data: { name?: string; description?: string; harness_config?: HarnessConfig | null }) =>
     request<any>(`/workspaces/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteWorkspace: (id: string) =>
     request<any>(`/workspaces/${id}`, { method: 'DELETE' }),
@@ -265,6 +266,7 @@ export const api = {
       self_improvement_mode?: 'off' | 'same_board' | 'remote_awb' | 'both';
       benchmark_mode?: 'off' | 'on';
       auto_archive_days?: number | null;
+      harness_config?: HarnessConfig | null;
     },
   ) =>
     request<any>(`/boards/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),

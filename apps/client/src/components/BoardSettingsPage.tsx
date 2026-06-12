@@ -8,6 +8,7 @@ import { useToast } from '../contexts/ToastContext';
 import { useLoading } from '../contexts/LoadingContext';
 import PageHeader from './PageHeader';
 import ColumnManager from './ColumnManager';
+import HarnessConfigEditor from './HarnessConfigEditor';
 import { tokens } from '../tokens';
 import { Button, Input } from './common';
 
@@ -126,6 +127,28 @@ export default function BoardSettingsPage() {
               days === null ? 'Auto-archive disabled' : `Auto-archive set to ${days} days`,
               'success',
             );
+          }}
+        />
+        <HarnessConfigEditor
+          raw={board.harness_config}
+          title="Agent Harness (board override)"
+          description={
+            <>
+              Per-board harness for subagents working tickets on this board: extra system prompt,
+              tool allow/deny lists, model and permission mode. Keys set here override the
+              workspace default <em>per key</em> at dispatch; unset keys inherit. Leave everything
+              empty to fully inherit the workspace default (current behaviour).
+            </>
+          }
+          onSave={async (config) => {
+            try {
+              await api.updateBoard(board.id, { harness_config: config });
+              await refresh();
+              showToast(config === null ? 'Board harness override cleared' : 'Board harness saved', 'success');
+            } catch (err: any) {
+              // Server zod rejection (400) surfaces its message here.
+              showToast(err?.message || 'Failed to save harness', 'error');
+            }
           }}
         />
         <ColumnManager
