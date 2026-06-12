@@ -11,6 +11,8 @@ import {
   type AdapterCredential,
   type AgentCredentialMeta,
   CliAdapter,
+  HARNESS_SPEC_KEYS,
+  type HarnessSpec,
   PARSE_STAGE,
   type OneshotSpec,
   type ParseResult,
@@ -20,6 +22,43 @@ import {
 } from './base.js';
 
 const { PERSISTENT_SESSION, NATIVE_MCP } = ADAPTER_CAPABILITIES;
+
+/** Baseline --allowedTools every AWB subagent needs to talk to the board.
+ *  Harness allowed_tools entries are APPENDED — replacing the baseline would
+ *  cut the spawned CLI off from the AWB MCP surface it reports through. */
+const BASE_ALLOWED_TOOLS = 'mcp__awb__*,mcp__host__*';
+
+/** Role prompt + harness system_prompt_append, joined for
+ *  --append-system-prompt. Append-only: the role prompt always survives. */
+function composeSystemPrompt(rolePrompt: string, harness?: HarnessSpec | null): string {
+  return [rolePrompt || '', harness?.system_prompt_append || '']
+    .filter((s) => s.trim().length > 0)
+    .join('\n\n');
+}
+
+function composeAllowedTools(harness?: HarnessSpec | null): string {
+  const extra = (harness?.allowed_tools ?? []).filter(
+    (t) => typeof t === 'string' && t.trim().length > 0,
+  );
+  return [BASE_ALLOWED_TOOLS, ...extra].join(',');
+}
+
+function disallowedToolsArgs(harness?: HarnessSpec | null): string[] {
+  const list = (harness?.disallowed_tools ?? []).filter(
+    (t) => typeof t === 'string' && t.trim().length > 0,
+  );
+  return list.length > 0 ? ['--disallowedTools', list.join(',')] : [];
+}
+
+/** A harness permission_mode REPLACES --dangerously-skip-permissions: the
+ *  skip flag pins bypassPermissions, so passing both would make the
+ *  configured mode a no-op. No permission_mode → the skip flag, exactly as
+ *  before. */
+function permissionArgs(harness?: HarnessSpec | null): string[] {
+  return harness?.permission_mode
+    ? ['--permission-mode', harness.permission_mode]
+    : ['--dangerously-skip-permissions'];
+}
 
 // Fallback ids used only when binary introspection can't read the installed
 // claude executable. Kept minimal (one current id per family); the live
@@ -43,11 +82,17 @@ export class ClaudeCliAdapter extends CliAdapter {
     return resolveCliBin('claude', configured);
   }
 
-  buildOneshotSpawn({ rolePrompt, taskText, mcpConfigPath, model }: OneshotSpec): SpawnDescriptor {
+  /** Claude maps the full harness surface onto CLI flags. */
+  harnessKeys(): ReadonlyArray<keyof HarnessSpec> {
+    return HARNESS_SPEC_KEYS;
+  }
+
+  buildOneshotSpawn({ rolePrompt, taskText, mcpConfigPath, model, harness }: OneshotSpec): SpawnDescriptor {
     return {
       args: [
-        // Per-agent default model (Agent.model). Omitted when unset so the
-        // CLI keeps its own default — preserves prior behaviour exactly.
+        // Per-agent default model (Agent.model) or harness override —
+        // spawn sites fold harness.model into `model`. Omitted when unset
+        // so the CLI keeps its own default — preserves prior behaviour.
         ...(model ? ['--model', model] : []),
         '--print',
         '--output-format',
@@ -56,10 +101,11 @@ export class ClaudeCliAdapter extends CliAdapter {
         mcpConfigPath ?? '',
         '--strict-mcp-config',
         '--allowedTools',
-        'mcp__awb__*,mcp__host__*',
+        composeAllowedTools(harness),
         '--append-system-prompt',
-        rolePrompt || '',
-        '--dangerously-skip-permissions',
+        composeSystemPrompt(rolePrompt, harness),
+        ...disallowedToolsArgs(harness),
+        ...permissionArgs(harness),
         taskText,
       ],
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -67,7 +113,7 @@ export class ClaudeCliAdapter extends CliAdapter {
     };
   }
 
-  buildSessionSpawn({ rolePrompt, mcpConfigPath, model }: SessionSpec): SpawnDescriptor {
+  buildSessionSpawn({ rolePrompt, mcpConfigPath, model, harness }: SessionSpec): SpawnDescriptor {
     return {
       args: [
         ...(model ? ['--model', model] : []),
@@ -80,10 +126,11 @@ export class ClaudeCliAdapter extends CliAdapter {
         mcpConfigPath ?? '',
         '--strict-mcp-config',
         '--allowedTools',
-        'mcp__awb__*,mcp__host__*',
+        composeAllowedTools(harness),
         '--append-system-prompt',
-        rolePrompt || '',
-        '--dangerously-skip-permissions',
+        composeSystemPrompt(rolePrompt, harness),
+        ...disallowedToolsArgs(harness),
+        ...permissionArgs(harness),
       ],
       stdio: ['pipe', 'pipe', 'pipe'],
       needsMcpConfig: true,

@@ -22,6 +22,42 @@ import type { AwbConfig } from './rest.js';
 import type { ManagedAgentContextRegistry } from './managed-agent-context.js';
 import type { WorktreeManager } from './worktree-manager.js';
 import { prepareChatAttachments } from './chat-attachment-prep.js';
+import type { HarnessSpec } from './cli-adapters/base.js';
+
+/**
+ * Defensive parse of the `harness_config` field on a flattened agent_trigger
+ * event (ticket e9c7a896). The server ships the resolved board/workspace
+ * harness as a JSON object (or omits it — older servers / unconfigured
+ * boards). Accepts an object or a JSON string, keeps only the known keys
+ * with the right runtime types, and degrades to null on anything else —
+ * a malformed harness must never block the dispatch it rides on.
+ */
+export function parseHarnessConfig(raw: unknown): HarnessSpec | null {
+  let obj: any = raw;
+  if (typeof obj === 'string') {
+    if (!obj.trim()) return null;
+    try {
+      obj = JSON.parse(obj);
+    } catch {
+      return null;
+    }
+  }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
+  const out: HarnessSpec = {};
+  if (typeof obj.system_prompt_append === 'string' && obj.system_prompt_append.trim()) {
+    out.system_prompt_append = obj.system_prompt_append;
+  }
+  for (const key of ['allowed_tools', 'disallowed_tools'] as const) {
+    if (Array.isArray(obj[key])) {
+      const list = obj[key].filter((t: unknown) => typeof t === 'string' && (t as string).trim());
+      if (list.length > 0) out[key] = list;
+    }
+  }
+  for (const key of ['model', 'permission_mode'] as const) {
+    if (typeof obj[key] === 'string' && obj[key].trim()) out[key] = obj[key].trim();
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
 
 // Hard cap on consecutive agent-to-agent turns within a single chat room.
 // Server stamps `agent_chain_depth` on every chat_room_message; when the depth
@@ -105,6 +141,9 @@ export interface SubagentSpawnArgs {
   roomId?: string;
   /** ST-6: per-event managed-agent runtime context. Optional. */
   agentContext?: AgentExecutionContext;
+  /** Resolved board/workspace harness from the trigger event (e9c7a896).
+   *  Null/absent → spawn exactly as before. */
+  harness?: HarnessSpec | null;
 }
 
 export interface SubagentSpawnResult {
@@ -180,6 +219,11 @@ export interface TicketTriggerArgs {
    *  before the first set_current_task arrived. Defaults to 1 when the
    *  server didn't include it (older server). */
   maxConcurrentTicketsPerAgent?: number;
+  /** Resolved board/workspace harness from the trigger event (e9c7a896).
+   *  Applied at SESSION CREATION only — a live session's CLI flags are
+   *  fixed at spawn; follow-up turns into an existing pid keep the
+   *  harness the session was born with. Null/absent → spawn as before. */
+  harness?: HarnessSpec | null;
 }
 
 export interface TicketDispatchResult {
@@ -539,6 +583,16 @@ export class EventDispatcher {
     // fallback below read agentContext.cwd, so one rewrite covers both paths.
     await this.#applyWorktreeCwd(agentContext, ev.ticket_id, ev.action);
 
+    // Board/workspace harness resolved server-side and flattened onto the
+    // event (e9c7a896). Parsed once here; both the persistent-session and
+    // one-shot paths below ship it to their spawn site.
+    const harness = parseHarnessConfig(ev.harness_config);
+    if (harness) {
+      log(
+        `Trigger carries harness_config: ticket=${ev.ticket_id} keys=${Object.keys(harness).join(',')}`,
+      );
+    }
+
     const delegation = (this.#config as any)?.delegation ?? {};
     const delegationEnabled = delegation.enabled !== false;
     const persistentTicket = delegation.persistentTicketSessions !== false;
@@ -562,6 +616,7 @@ export class EventDispatcher {
           forceRespawn: ev.force_respawn === true,
           triggerSource: ev.trigger_source || '',
           agentContext,
+          harness,
           maxConcurrentTicketsPerAgent:
             typeof ev.max_concurrent_tickets_per_agent === 'number'
               ? ev.max_concurrent_tickets_per_agent
@@ -624,6 +679,7 @@ export class EventDispatcher {
           role: ev.action || '',
           triggerSource: ev.trigger_source || '',
           agentContext,
+          harness,
         });
 
         if (result.spawned) {

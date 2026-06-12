@@ -17,7 +17,12 @@
 import { promises as fsp } from 'node:fs';
 import { join } from 'node:path';
 import { ClaudeCliAdapter } from './claude.js';
-import type { AdapterCredential, AdapterMcpContext, AgentCredentialMeta } from './base.js';
+import type {
+  AdapterCredential,
+  AdapterMcpContext,
+  AgentCredentialMeta,
+  HarnessSpec,
+} from './base.js';
 
 /** DeepSeek's Anthropic-compatible base URL (override per-credential). */
 export const DEEPSEEK_BASE_URL = 'https://api.deepseek.com/anthropic';
@@ -66,6 +71,19 @@ export class DeepSeekCliAdapter extends ClaudeCliAdapter {
    */
   async listModels(): Promise<string[]> {
     return [DEEPSEEK_DEFAULT_MODEL, 'deepseek-reasoner'];
+  }
+
+  /**
+   * A harness `model` must reach the backend through BOTH the inherited
+   * `--model` flag AND ANTHROPIC_MODEL — same flag/env-agreement rule as the
+   * per-agent model above (5380544). prepareCliHome baked the per-agent
+   * model into ManagedAgentContext.extra_env at spawn_agent time; without
+   * this override that stale env value would beat a per-dispatch harness
+   * flag. Spawn sites merge harnessEnv() last, after extra_env.
+   */
+  harnessEnv(harness: HarnessSpec | null | undefined): Record<string, string> {
+    const model = harness?.model?.trim();
+    return model ? { ANTHROPIC_MODEL: model } : {};
   }
 
   async prepareCliHome(

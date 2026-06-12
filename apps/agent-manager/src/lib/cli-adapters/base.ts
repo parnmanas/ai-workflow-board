@@ -30,14 +30,84 @@ export const PARSE_STAGE = Object.freeze({
 
 export type ParseStage = (typeof PARSE_STAGE)[keyof typeof PARSE_STAGE];
 
+/** Board/workspace harness override shipped on `agent_trigger` (the server's
+ *  resolved `harness_config`, ticket e9c7a896). Every key is optional; a
+ *  null/absent harness means "spawn exactly as before". `model` is folded
+ *  into the spec's `model` field by spawn sites (harness wins over the
+ *  per-agent Agent.model default) so adapters that only support a model
+ *  flag get it for free; the remaining keys are applied by adapters that
+ *  declare them in `harnessKeys()` and warn-skipped everywhere else. */
+export interface HarnessSpec {
+  /** Appended after the role prompt in --append-system-prompt (never replaces it). */
+  system_prompt_append?: string;
+  /** Extra --allowedTools entries, appended to the adapter's base allowlist. */
+  allowed_tools?: string[];
+  /** --disallowedTools entries. */
+  disallowed_tools?: string[];
+  /** --model override; beats the per-agent Agent.model default. */
+  model?: string;
+  /** --permission-mode override (claude-family only). */
+  permission_mode?: string;
+}
+
+export const HARNESS_SPEC_KEYS = [
+  'system_prompt_append',
+  'allowed_tools',
+  'disallowed_tools',
+  'model',
+  'permission_mode',
+] as const;
+
+/**
+ * Split a harness into the subset `adapter` can apply (per its
+ * `harnessKeys()`) and the key names it can't. Spawn sites log the skipped
+ * keys and proceed — a harness key the CLI can't express is a graceful skip,
+ * never a refusal to spawn. Returns `applied: null` when nothing survives so
+ * downstream `if (harness)` guards keep their null-safe shape.
+ */
+export function partitionHarness(
+  adapter: CliAdapter,
+  harness: HarnessSpec | null | undefined,
+): { applied: HarnessSpec | null; skipped: string[] } {
+  if (!harness) return { applied: null, skipped: [] };
+  const supported = new Set<string>(adapter.harnessKeys());
+  const applied: HarnessSpec = {};
+  const skipped: string[] = [];
+  for (const key of HARNESS_SPEC_KEYS) {
+    if (harness[key] === undefined) continue;
+    if (supported.has(key)) (applied as any)[key] = harness[key];
+    else skipped.push(key);
+  }
+  return { applied: Object.keys(applied).length > 0 ? applied : null, skipped };
+}
+
+/** One-line summary of an applied harness for spawn-site logs — the
+ *  operator-visible proof (acceptance criterion of e9c7a896) that a board's
+ *  harness actually reached the CLI flags. */
+export function describeHarness(harness: HarnessSpec): string {
+  const parts: string[] = [];
+  if (harness.model) parts.push(`model=${harness.model}`);
+  if (harness.permission_mode) parts.push(`permission_mode=${harness.permission_mode}`);
+  if (harness.allowed_tools?.length) parts.push(`allowed_tools=+${harness.allowed_tools.length}`);
+  if (harness.disallowed_tools?.length) parts.push(`disallowed_tools=${harness.disallowed_tools.length}`);
+  if (harness.system_prompt_append) {
+    parts.push(`system_prompt_append=${harness.system_prompt_append.length}ch`);
+  }
+  return parts.join(' ');
+}
+
 export interface OneshotSpec {
   rolePrompt: string;
   taskText: string;
   mcpConfigPath: string | null;
   /** Per-agent default model to pass to the CLI (e.g. `--model <id>`). When
    *  empty/null the adapter omits the flag and the CLI uses its own default
-   *  (current behaviour). Resolved from Agent.model at spawn time. */
+   *  (current behaviour). Resolved from Agent.model at spawn time; a
+   *  harness `model` override is folded in here by the spawn site. */
   model?: string | null;
+  /** Board/workspace harness, pre-filtered to this adapter's supported keys
+   *  via partitionHarness(). Null/absent → spawn exactly as before. */
+  harness?: HarnessSpec | null;
 }
 
 export interface SessionSpec {
@@ -45,6 +115,8 @@ export interface SessionSpec {
   mcpConfigPath: string | null;
   /** Per-agent default model — see OneshotSpec.model. */
   model?: string | null;
+  /** Board/workspace harness — see OneshotSpec.harness. */
+  harness?: HarnessSpec | null;
 }
 
 export interface SpawnDescriptor {
@@ -110,6 +182,29 @@ export abstract class CliAdapter {
 
   collectOneshotResult(_lines: string[]): string | null {
     return null;
+  }
+
+  /**
+   * Harness keys this adapter can express at spawn time. Base = `model`
+   * only — every adapter already threads `spec.model` into its argv (codex /
+   * antigravity gained `--model` in a52114b). Claude-family adapters
+   * override with the full HARNESS_SPEC_KEYS set. Spawn sites use this via
+   * partitionHarness() to warn + skip keys the CLI can't map.
+   */
+  harnessKeys(): ReadonlyArray<keyof HarnessSpec> {
+    return ['model'];
+  }
+
+  /**
+   * Per-spawn env overrides derived from the applied harness. Default none.
+   * DeepSeek overrides this to mirror a harness `model` into ANTHROPIC_MODEL
+   * so the flag and the env always agree (same flag/env-agreement rule as
+   * 5380544 — prepareCliHome bakes the per-agent model into extra_env at
+   * spawn_agent time, which would otherwise override a per-dispatch flag).
+   * Merged LAST into the child env by spawn sites.
+   */
+  harnessEnv(_harness: HarnessSpec | null | undefined): Record<string, string> {
+    return {};
   }
 
   /**

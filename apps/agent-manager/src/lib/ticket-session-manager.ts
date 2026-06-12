@@ -312,7 +312,13 @@ export class TicketSessionManager
         sessionKey,
         spec.rolePrompt || '',
         firstTurnText,
-        { monitorMeta, agentContext: spec.agentContext },
+        // Harness applies at session creation only: the CLI flags are fixed
+        // at spawn, so the reuse branch above intentionally does NOT
+        // re-apply a changed board harness onto a live pid. Changing a
+        // board's harness_config takes effect on the next fresh session
+        // (new ticket, forceRespawn, or session split). Documented in
+        // docs/agent-manager.md.
+        { monitorMeta, agentContext: spec.agentContext, harness: spec.harness ?? null },
       );
       // Stamp identity fields BEFORE releasing the inflight reservation, so
       // a concurrent dispatch never observes a session with empty

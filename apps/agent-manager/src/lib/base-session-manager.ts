@@ -16,7 +16,16 @@ import type { Readable, Writable } from 'node:stream';
 import { SUBAGENTS_BASE_DIR, STOP_GRACE_MS } from './constants.js';
 import { log } from './logging.js';
 import { createAdapter } from './cli-adapters/index.js';
-import { ADAPTER_CAPABILITIES, PARSE_STAGE, type CliAdapter, type ParseResult, type TurnImage } from './cli-adapters/base.js';
+import {
+  ADAPTER_CAPABILITIES,
+  PARSE_STAGE,
+  type CliAdapter,
+  type HarnessSpec,
+  type ParseResult,
+  type TurnImage,
+  describeHarness,
+  partitionHarness,
+} from './cli-adapters/base.js';
 import type { AwbConfig } from './rest.js';
 import type { SubagentMonitor, SubagentTapHandle } from './subagent-monitor.js';
 
@@ -102,6 +111,10 @@ export interface SpawnOpts {
    *  that support inline image content blocks (Claude); other adapters
    *  ignore the list (metadata already in the prompt text). */
   firstTurnImages?: TurnImage[];
+  /** Board/workspace harness from the dispatching trigger (e9c7a896).
+   *  Applied at session CREATION only — CLI flags are fixed at spawn, so
+   *  follow-up turns keep the harness the session was born with. */
+  harness?: HarnessSpec | null;
 }
 
 interface TurnState {
@@ -303,7 +316,7 @@ export class BaseSessionManager {
     sessionKey: string,
     rolePrompt: string,
     firstTurnText: string,
-    { onProgress, monitorMeta, agentContext, firstTurnImages }: SpawnOpts = {},
+    { onProgress, monitorMeta, agentContext, firstTurnImages, harness: rawHarness }: SpawnOpts = {},
   ): Promise<SessionRecord | null> {
     // ST-7: pick the adapter for this agent's CLI choice (claude/codex/antigravity)
     // and bind it to the session record so future turns formatTurn /
@@ -324,6 +337,23 @@ export class BaseSessionManager {
     const effectiveApiKey = agentContext?.api_key || this._config.apiKey;
     const effectiveCwd = agentContext?.cwd || undefined;
 
+    // Board/workspace harness (e9c7a896) — same partition/precedence rules
+    // as SubagentManager.spawn: keep adapter-expressible keys, warn + skip
+    // the rest, harness.model beats the per-agent Agent.model default.
+    // Session flags are fixed at spawn; follow-up turns can't re-apply.
+    const { applied: harness, skipped: harnessSkipped } = partitionHarness(adapter, rawHarness);
+    if (harnessSkipped.length > 0) {
+      log(
+        `${this.#logTag} harness keys skipped (cli=${adapter.cliType} can't express them): ${harnessSkipped.join(', ')}`,
+      );
+    }
+    if (harness) {
+      log(
+        `${this.#logTag} harness applied: ${this.#keyField}=${sessionKey} cli=${adapter.cliType} ${describeHarness(harness)}`,
+      );
+    }
+    const effectiveModel = harness?.model ?? agentContext?.model ?? null;
+
     let configPath: string | null = null;
     let configPathIsTemp = false;
     let pidPath: string | null = null;
@@ -331,7 +361,8 @@ export class BaseSessionManager {
       let descriptor = adapter.buildSessionSpawn({
         rolePrompt: rolePrompt || '',
         mcpConfigPath: null,
-        model: agentContext?.model ?? null,
+        model: effectiveModel,
+        harness,
       });
 
       if (descriptor.needsMcpConfig) {
@@ -378,7 +409,8 @@ export class BaseSessionManager {
         descriptor = adapter.buildSessionSpawn({
           rolePrompt: rolePrompt || '',
           mcpConfigPath: configPath,
-          model: agentContext?.model ?? null,
+          model: effectiveModel,
+          harness,
         });
       }
 
@@ -427,7 +459,15 @@ export class BaseSessionManager {
         detached: process.platform !== 'win32',
         windowsHide: true,
         cwd: effectiveCwd,
-        env: { ...baseEnv, AWB_API_KEY: effectiveApiKey, ...cliHomeEnv, ...credentialEnv },
+        // harnessEnv merges LAST — see SubagentManager.spawn for why a
+        // per-dispatch harness model must beat the per-agent extra_env.
+        env: {
+          ...baseEnv,
+          AWB_API_KEY: effectiveApiKey,
+          ...cliHomeEnv,
+          ...credentialEnv,
+          ...adapter.harnessEnv(harness),
+        },
         shell: descriptor.shell ?? /\.(cmd|bat|ps1)$/i.test(resolvedBin),
       }) as ChildProcessByStdio<Writable, Readable, Readable>;
       child.once('error', (err: any) => {

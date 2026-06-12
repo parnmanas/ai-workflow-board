@@ -22,7 +22,12 @@ import {
 } from './constants.js';
 import { log } from './logging.js';
 import { createAdapter } from './cli-adapters/index.js';
-import { ADAPTER_CAPABILITIES, type CliAdapter } from './cli-adapters/base.js';
+import {
+  ADAPTER_CAPABILITIES,
+  type CliAdapter,
+  describeHarness,
+  partitionHarness,
+} from './cli-adapters/base.js';
 import { CircuitBreaker } from './circuit-breaker.js';
 import { classifyCliError } from './cli-error-signatures.js';
 import { fireAndForgetTool } from './mcp-client.js';
@@ -386,6 +391,22 @@ export class SubagentManager implements SubagentManagerContract {
     const adapter = this.#adapterFor(ctx?.cli);
     const effectiveApiKey = ctx?.api_key || this.#config.apiKey;
     const effectiveCwd = ctx?.cwd || undefined;
+    // Board/workspace harness (e9c7a896): keep the keys this adapter can
+    // express, warn + skip the rest — a key the CLI can't map is a graceful
+    // skip, never a refusal to spawn. harness.model (board-level intent)
+    // beats the per-agent Agent.model default.
+    const { applied: harness, skipped: harnessSkipped } = partitionHarness(adapter, spec.harness);
+    if (harnessSkipped.length > 0) {
+      log(
+        `[subagent] harness keys skipped (cli=${adapter.cliType} can't express them): ${harnessSkipped.join(', ')}`,
+      );
+    }
+    if (harness) {
+      log(
+        `[subagent] harness applied: ticket=${spec.ticketId.slice(0, 8) || '-'} cli=${adapter.cliType} ${describeHarness(harness)}`,
+      );
+    }
+    const effectiveModel = harness?.model ?? ctx?.model ?? null;
     let configPath: string | null = null;
     let configPathIsTemp = false;
     try {
@@ -393,7 +414,8 @@ export class SubagentManager implements SubagentManagerContract {
         rolePrompt: spec.rolePrompt || '',
         taskText: spec.taskText,
         mcpConfigPath: null,
-        model: ctx?.model ?? null,
+        model: effectiveModel,
+        harness,
       });
 
       if (descriptor.needsMcpConfig) {
@@ -444,7 +466,8 @@ export class SubagentManager implements SubagentManagerContract {
             rolePrompt: spec.rolePrompt || '',
             taskText: spec.taskText,
             mcpConfigPath: configPath,
-            model: ctx?.model ?? null,
+            model: effectiveModel,
+            harness,
           }),
         );
       }
@@ -499,7 +522,16 @@ export class SubagentManager implements SubagentManagerContract {
         detached: process.platform !== 'win32',
         windowsHide: true,
         cwd: effectiveCwd,
-        env: { ...baseEnv, AWB_API_KEY: effectiveApiKey, ...cliHomeEnv, ...credentialEnv },
+        // harnessEnv merges LAST: a per-dispatch harness model must beat the
+        // per-agent extra_env baked at spawn_agent time (deepseek's
+        // ANTHROPIC_MODEL — flag/env agreement, see DeepSeekCliAdapter).
+        env: {
+          ...baseEnv,
+          AWB_API_KEY: effectiveApiKey,
+          ...cliHomeEnv,
+          ...credentialEnv,
+          ...adapter.harnessEnv(harness),
+        },
         shell: descriptor.shell ?? /\.(cmd|bat|ps1)$/i.test(resolvedBin),
       });
       child.once('error', (err: any) => {
