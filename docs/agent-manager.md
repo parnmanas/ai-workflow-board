@@ -175,6 +175,42 @@ The server-side ack endpoint enforces:
 | `update_manager`     | Real — `git pull` + `npm install` + build, then detached re-exec       |
 | `restart_manager`    | Real — re-exec in place (no pull/install/build); takes over the lockfile |
 
+## Harness config (per-board CLI flags)
+
+Boards and workspaces can carry a `harness_config` JSON (workspace = default,
+board = key-level override; resolved server-side by
+`apps/server/src/common/harness-config.ts`). The resolved object rides on
+every `agent_trigger` event as `harness_config` and is applied at subagent
+spawn time (ticket e9c7a896):
+
+| Key                    | Claude-family flag                                | Other CLIs |
+|------------------------|---------------------------------------------------|------------|
+| `system_prompt_append` | appended to the role prompt in `--append-system-prompt` (never replaces it) | warn + skip |
+| `allowed_tools`        | appended to the AWB baseline in `--allowedTools` (baseline `mcp__awb__*,mcp__host__*` always survives) | warn + skip |
+| `disallowed_tools`     | `--disallowedTools`                               | warn + skip |
+| `model`                | `--model` — beats the per-agent `Agent.model` default | `--model` (codex / antigravity support it; deepseek also mirrors it into `ANTHROPIC_MODEL` so flag and env agree) |
+| `permission_mode`      | `--permission-mode`, REPLACING `--dangerously-skip-permissions` (the skip flag pins bypassPermissions, so passing both would no-op the mode) | warn + skip |
+
+Rules and constraints:
+
+- **Null-safe**: a missing/empty/malformed `harness_config` produces exactly
+  the pre-harness argv — boards without a harness see zero behavior change.
+- **Graceful skip**: keys a CLI can't express are logged
+  (`harness keys skipped (cli=… can't express them)`) and dropped; the spawn
+  itself never fails because of a harness.
+- **Session-creation only**: persistent ticket sessions get the harness when
+  the CLI process is spawned. Follow-up turns into a live pid keep the
+  harness the session was born with — CLI flags can't change mid-process.
+  An edited board harness takes effect on the next fresh session (new
+  ticket, server `force_respawn`, or an agent-requested session split).
+- **Operator visibility**: every applied harness logs one line at spawn —
+  `harness applied: … model=… permission_mode=… allowed_tools=+N …` — which
+  is the acceptance check for "did my board harness reach the CLI".
+- `permission_mode` values are free text on the wire; the claude CLI
+  validates them itself. A mode that blocks tool prompts in non-interactive
+  runs (`default`, `plan`) is an operator choice, not something the manager
+  second-guesses.
+
 ## Heartbeats
 
 Two heartbeats run on independent timers:
