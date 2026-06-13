@@ -13,6 +13,7 @@ import { fireAndForgetTool } from './mcp-client.js';
 import { log } from './logging.js';
 import { postSilentExitSystemComment } from './rest.js';
 import { CircuitBreaker } from './circuit-breaker.js';
+import { classifyCliError } from './cli-error-signatures.js';
 import type {
   TicketDispatchResult,
   TicketSessionManager as TicketSessionManagerContract,
@@ -677,6 +678,11 @@ export class TicketSessionManager
     const meta: string[] = [];
     meta.push(`role=${role || '_'}`);
     meta.push(`exit_code=${exitLabel}`);
+    // Structured failure reason (usage_limit / auth_failure / codex_error) when
+    // the buffered tail matches a known fatal signature — the "structured
+    // failure reason" half of the acceptance criteria (ticket ac958c06).
+    const classified = classifyCliError(tail, { exitCode: code });
+    if (classified.isFatal && classified.reason) meta.push(`reason=${classified.reason}`);
     if (triggerId) meta.push(`trigger=${triggerId}`);
     const metaLine = `_${meta.join(' · ')}_`;
     const body = tail

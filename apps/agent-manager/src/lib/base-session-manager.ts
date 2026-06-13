@@ -15,6 +15,7 @@ import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
 import { SUBAGENTS_BASE_DIR, STOP_GRACE_MS } from './constants.js';
 import { log } from './logging.js';
+import { summarizeCliJsonLine } from './cli-output-summary.js';
 import { createAdapter } from './cli-adapters/index.js';
 import {
   ADAPTER_CAPABILITIES,
@@ -686,12 +687,21 @@ export class BaseSessionManager {
           sess.unrespondedSince = null;
         }
         this.#advanceTurn(sess, parsed);
-        // Buffer plain-text stdout (non-JSON parser misses) into the tail
-        // ring so subclasses can surface "what went wrong" on silent exit.
-        // Stream-json events are excluded — they're machine-readable noise.
+        // Buffer stdout into the tail ring so subclasses can surface "what
+        // went wrong" on silent exit. Plain-text lines (non-JSON parser
+        // misses) land verbatim; stream-json events are condensed to a short
+        // prose summary (assistant text / tool_use / result subtype+error)
+        // instead of being dropped — in stream-json session mode EVERY stdout
+        // line is JSON, so dropping them all left the silent-exit fallback
+        // with an empty tail ("no buffered CLI output captured"), ticket
+        // ac958c06. Noise events (init, normal tool_result) summarize to null
+        // and are skipped, keeping the ring meaningful.
         if (!parsed.raw) {
           const trimmed = line.trim();
           if (trimmed) this.#pushOutputLine(sess.pid, trimmed);
+        } else {
+          const summary = summarizeCliJsonLine(line);
+          if (summary) this.#pushOutputLine(sess.pid, summary);
         }
         this._onStdoutParsed(sess, parsed, line);
         if (parsed.isResult) {

@@ -30,6 +30,7 @@ import {
 } from './cli-adapters/base.js';
 import { CircuitBreaker } from './circuit-breaker.js';
 import { classifyCliError } from './cli-error-signatures.js';
+import { summarizeCliJsonLine } from './cli-output-summary.js';
 import { fireAndForgetTool } from './mcp-client.js';
 import {
   postChatRoomMessage,
@@ -809,18 +810,23 @@ export class SubagentManager implements SubagentManagerContract {
     }
   }
 
-  /** Append a stdout/stderr line to the silent-exit tail ring. Only
-   *  plain-text lines are kept — JSON stream-protocol events are skipped
-   *  so the buffer is human-readable. Bounded to TAIL_RING_MAX_LINES. */
+  /** Append a stdout/stderr line to the silent-exit tail ring. Plain-text
+   *  lines are kept verbatim; stream-json events are condensed to a short
+   *  prose summary (assistant text / tool_use / result subtype+error) rather
+   *  than dropped — the one-shot path runs `--output-format json`, so on a
+   *  failed turn the only output is a single JSON result line; dropping it
+   *  left the silent-exit fallback with an empty tail (ticket ac958c06).
+   *  Noise events summarize to null and are skipped. Bounded to
+   *  TAIL_RING_MAX_LINES. */
   #bufferTail(record: SubagentRecord, line: string): void {
     const trimmed = line.trim();
     if (!trimmed) return;
-    // Skip stream-json lines (Claude / Codex emit assistant turn structure
-    // here; an operator reading the silent-exit fallback wants prose, not
-    // JSON). The cheapest filter: lines starting with `{` are almost
-    // certainly JSON for our adapters.
-    if (trimmed.startsWith('{')) return;
-    record.tailLines.push(trimmed);
+    let entry: string | null = trimmed;
+    if (trimmed.startsWith('{')) {
+      entry = summarizeCliJsonLine(trimmed);
+      if (!entry) return; // JSON noise (init / normal tool_result) — skip.
+    }
+    record.tailLines.push(entry);
     while (record.tailLines.length > TAIL_RING_MAX_LINES) record.tailLines.shift();
   }
 
@@ -889,6 +895,12 @@ export class SubagentManager implements SubagentManagerContract {
     const metaParts: string[] = [];
     metaParts.push(`cli=${record.cli_type}`);
     metaParts.push(`exit_code=${exitLabel}`);
+    // Structured failure reason (usage_limit / auth_failure / codex_error) when
+    // the buffered tail matches a known fatal signature — the "structured
+    // failure reason" half of the acceptance criteria (ticket ac958c06), even
+    // when the prose tail itself is terse.
+    const classified = classifyCliError(tail, { exitCode: code });
+    if (classified.isFatal && classified.reason) metaParts.push(`reason=${classified.reason}`);
     if (triggerId) metaParts.push(`trigger=${triggerId}`);
     const metaLine = `_${metaParts.join(' · ')}_`;
     const body = tail

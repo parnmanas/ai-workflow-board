@@ -178,6 +178,30 @@ test('silent-exit: metadata carries exit_code, role, cycle_trigger_id', async ()
   assert.equal(fallback.body.role, 'assignee');
 });
 
+test('silent-exit: a stream-json result-error tail yields a non-empty body + structured reason', async () => {
+  // Regression for ticket ac958c06: a session that died with only a
+  // stream-json `result` error event on stdout used to leave an empty tail
+  // ("no buffered CLI output captured"). The summarizer now condenses that
+  // event into the ring, and classifyCliError tags the meta with reason=.
+  const mgr = new TicketSessionManager(makeConfig());
+  const sess = makeFakeSession(11006);
+  // What `#wireStdio` → summarizeCliJsonLine now writes into the ring for a
+  // usage-limit result error.
+  mgr._outputRings.set(sess.pid, [
+    'result: subtype=error_during_execution is_error=true — API Error: 429 usage limit reached',
+  ]);
+
+  await mgr._onChildExit(sess, 1, null);
+
+  const fallback = recordedRequests.find((r) => r.url.endsWith('/silent-exit-comment'));
+  assert.ok(fallback, 'silent-exit endpoint was hit');
+  assert.equal(fallback.body.exit_code, 1);
+  assert.doesNotMatch(fallback.body.content, /no buffered CLI output captured/);
+  assert.match(fallback.body.content, /Last CLI output/);
+  assert.match(fallback.body.content, /429 usage limit reached/);
+  assert.match(fallback.body.content, /reason=usage_limit/, 'structured failure reason in meta');
+});
+
 test('silent-exit: empty buffer still posts a placeholder note', async () => {
   const mgr = new TicketSessionManager(makeConfig());
   const sess = makeFakeSession(11005);
