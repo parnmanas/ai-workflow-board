@@ -71,11 +71,35 @@ function summarizeContentBlocks(content: unknown): string {
 }
 
 /**
- * Summarize a single CLI stdout line for the silent-exit tail.
+ * Summarize a single CLI stdout line (raw string) for the silent-exit tail.
  *
- * Returns a short prose line for diagnostic stream-json events, or `null` when
- * the line carries no useful signal (init banners, normal tool_result echoes,
- * unparseable/empty input) so callers can skip it and keep the tail meaningful.
+ * Thin wrapper over {@link summarizeCliEvent} for callers that only have the
+ * raw line text (the one-shot `subagent-manager` path). The persistent
+ * `base-session-manager` path already parses the line via
+ * `adapter.parseStdoutLine`, so it should call `summarizeCliEvent(parsed.raw)`
+ * directly to avoid re-parsing the same JSON.
+ *
+ * Returns `null` for non-JSON / unparseable / empty input so callers can fall
+ * back to their plain-text handling.
+ */
+export function summarizeCliJsonLine(line: string): string | null {
+  const trimmed = String(line ?? '').trim();
+  if (!trimmed || trimmed[0] !== '{') return null;
+  let obj: any;
+  try {
+    obj = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  return summarizeCliEvent(obj);
+}
+
+/**
+ * Summarize an already-parsed CLI stream-json event for the silent-exit tail.
+ *
+ * Returns a short prose line for diagnostic events, or `null` when the event
+ * carries no useful signal (init banners, normal tool_result echoes,
+ * null/non-object input) so callers can skip it and keep the tail meaningful.
  *
  * Recognized claude/deepseek stream-json shapes (`obj.type`):
  *   - `assistant`  → the model's last text + tool_use names (what it was doing)
@@ -88,16 +112,7 @@ function summarizeContentBlocks(content: unknown): string {
  * Unknown shapes that still carry an obvious error field (`error`/`message`
  * with `is_error`) get a generic fallback so non-claude CLIs aren't silent.
  */
-export function summarizeCliJsonLine(line: string): string | null {
-  const trimmed = String(line ?? '').trim();
-  if (!trimmed || trimmed[0] !== '{') return null;
-
-  let obj: any;
-  try {
-    obj = JSON.parse(trimmed);
-  } catch {
-    return null;
-  }
+export function summarizeCliEvent(obj: any): string | null {
   if (!obj || typeof obj !== 'object') return null;
 
   switch (obj.type) {

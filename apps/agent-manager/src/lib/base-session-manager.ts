@@ -15,7 +15,7 @@ import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
 import { SUBAGENTS_BASE_DIR, STOP_GRACE_MS } from './constants.js';
 import { log } from './logging.js';
-import { summarizeCliJsonLine } from './cli-output-summary.js';
+import { summarizeCliEvent } from './cli-output-summary.js';
 import { createAdapter } from './cli-adapters/index.js';
 import {
   ADAPTER_CAPABILITIES,
@@ -700,7 +700,9 @@ export class BaseSessionManager {
           const trimmed = line.trim();
           if (trimmed) this.#pushOutputLine(sess.pid, trimmed);
         } else {
-          const summary = summarizeCliJsonLine(line);
+          // `parsed.raw` is the already-parsed event — summarize it directly
+          // rather than re-parsing the line string.
+          const summary = summarizeCliEvent(parsed.raw);
           if (summary) this.#pushOutputLine(sess.pid, summary);
         }
         this._onStdoutParsed(sess, parsed, line);

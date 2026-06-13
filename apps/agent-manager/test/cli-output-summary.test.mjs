@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { summarizeCliJsonLine } from '../dist/lib/cli-output-summary.js';
+import { summarizeCliJsonLine, summarizeCliEvent } from '../dist/lib/cli-output-summary.js';
 
 test('non-JSON / empty / unparseable input → null (caller keeps plain text)', () => {
   assert.equal(summarizeCliJsonLine(''), null);
@@ -105,6 +105,17 @@ test('unknown event type is kept only when it reports a failure', () => {
     summarizeCliJsonLine(JSON.stringify({ type: 'weird', is_error: true, error: 'boom' })) ?? '',
     /error: boom/,
   );
+});
+
+test('summarizeCliEvent (parsed-object path, used by base-session-manager) matches the line path', () => {
+  // base-session-manager passes the already-parsed `parsed.raw` to avoid a
+  // second JSON.parse on the hot persistent stdout path.
+  assert.equal(summarizeCliEvent(null), null);
+  assert.equal(summarizeCliEvent('not an object'), null);
+  assert.equal(summarizeCliEvent({ type: 'system', subtype: 'init' }), null);
+  const ev = { type: 'result', subtype: 'error', is_error: true, result: 'boom' };
+  assert.equal(summarizeCliJsonLine(JSON.stringify(ev)), summarizeCliEvent(ev));
+  assert.match(summarizeCliEvent(ev), /result: subtype=error is_error=true — boom/);
 });
 
 test('a long result blob is clipped, not unbounded', () => {
