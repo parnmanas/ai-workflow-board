@@ -32,6 +32,8 @@ import {
   applyTerminalEnteredAtForMove,
   getRootArchivedAt,
   isTerminalColumn,
+  isTerminalReopen,
+  TerminalReopenError,
   TicketArchivedError,
 } from '../mcp/shared/archive-helpers';
 import { findOrFail } from '../../common/find-or-fail';
@@ -332,7 +334,7 @@ export class AgentApiController {
 
   @Post('move-ticket')
   async moveTicket(@Body() body: any, @Res() res: Response) {
-    const { boardId, ticketId, toColumn, position } = body;
+    const { boardId, ticketId, toColumn, position, force } = body;
     if (!ticketId || !toColumn) return res.status(400).json({ error: 'ticketId and toColumn are required' });
 
     const ticket = await findOrFail(this.ticketRepo, { where: { id: ticketId } }, 'Ticket not found');
@@ -346,6 +348,17 @@ export class AgentApiController {
 
     const col = await findColumnByName(this.dataSource, boardId, toColumn);
     if (!col) return res.status(404).json({ error: `Column "${toColumn}" not found` });
+
+    // Terminal-reopen guard (ticket ad0eb567) — same protection as the MCP
+    // move_ticket tool: a stale automated caller must not drag an already-
+    // terminal ticket back into a non-terminal column without force=true.
+    const sourceColForGuard = ticket.column_id
+      ? await this.colRepo.findOne({ where: { id: ticket.column_id } })
+      : null;
+    if (!force && isTerminalReopen(sourceColForGuard, col)) {
+      const e = new TerminalReopenError(ticket.id, sourceColForGuard?.name ?? String(ticket.column_id), col.name);
+      return res.status(e.status).json({ error: e.code, hint: e.hint, message: e.message });
+    }
 
     await this.dataSource.transaction(async (manager) => {
       const tRepo = manager.getRepository(Ticket);
@@ -425,6 +438,19 @@ export class AgentApiController {
               if (t.archived_at) { results.push(archivedRejection(t.id)); continue; }
 
               const sourceColumnId = t.column_id;
+
+              // Terminal-reopen guard (ticket ad0eb567) — the batch surface is
+              // an automated caller too, so it must not become a backdoor that
+              // drags an already-terminal ticket back out without op.force.
+              const sourceColForGuard = sourceColumnId
+                ? await colRepoTx.findOne({ where: { id: sourceColumnId } })
+                : null;
+              if (!op.force && isTerminalReopen(sourceColForGuard, col)) {
+                const e = new TerminalReopenError(t.id, sourceColForGuard?.name ?? String(sourceColumnId), col.name);
+                results.push({ error: e.code, hint: e.hint, message: e.message, ticketId: t.id });
+                continue;
+              }
+
               await shiftTicketPositions(tRepo, { column_id: sourceColumnId }, t.position, -1);
 
               const cnt = await tRepo.createQueryBuilder('t')

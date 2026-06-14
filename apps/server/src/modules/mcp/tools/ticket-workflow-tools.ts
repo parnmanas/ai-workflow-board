@@ -16,7 +16,7 @@ import { Ticket } from '../../../entities/Ticket';
 import { ok, err } from '../shared/helpers';
 import { loadTicketFull } from '../shared/ticket-parsing';
 import { findColumnByName, maxTicketPosition, shiftTicketPositions } from '../shared/ticket-helpers';
-import { applyTerminalEnteredAtForMove, TicketArchivedError } from '../shared/archive-helpers';
+import { applyTerminalEnteredAtForMove, isTerminalReopen, TerminalReopenError, TicketArchivedError } from '../shared/archive-helpers';
 import { getCallerAgent } from '../shared/session-auth';
 import { resolveAgentDisplayName } from '../../../utils/agent-name';
 import type { ToolContext } from './context';
@@ -37,15 +37,20 @@ export function registerTicketWorkflowTools(server: McpServer, ctx: ToolContext)
     'column is marked is_terminal=true. Inspect children via get_ticket first; if any child is still open, either ' +
     'finish it (assignee should call update_child_ticket(status="done") on the subtask once their work is in) or ' +
     'leave the parent where it is. This rule is a convention (not enforced by the server), but agents must respect ' +
-    'it — moving a parent past unfinished children invalidates reviewer context.',
+    'it — moving a parent past unfinished children invalidates reviewer context.\n\n' +
+    'TERMINAL-REOPEN GUARD — a move OUT of a terminal column (e.g. Done) back into a non-terminal one ' +
+    'is rejected by default. On a single-agent-multi-role board, a stale concurrent strand can call ' +
+    'move_ticket against an out-of-date snapshot and re-open an already-merged ticket. Pass force=true ' +
+    'only if you genuinely intend to reopen completed work.',
     {
       ticket_id: z.string().describe('Ticket ID'),
       target_column_id: z.string().optional().describe('Target column ID (use this OR target_column_name)'),
       target_column_name: z.string().optional().describe('Target column name (case-insensitive)'),
       board_id: z.string().optional().describe('Board ID (used with target_column_name)'),
       position: z.number().optional().describe('Target position in the column (default: end)'),
+      force: z.boolean().optional().describe('Override the terminal-reopen guard: allow moving a ticket OUT of a terminal column (e.g. Done) into a non-terminal one. Default false — leave unset unless you truly mean to reopen completed work.'),
     },
-    async ({ ticket_id, target_column_id, target_column_name, board_id, position }, extra: { sessionId?: string }) => {
+    async ({ ticket_id, target_column_id, target_column_name, board_id, position, force }, extra: { sessionId?: string }) => {
       const ticketRepo = dataSource.getRepository(Ticket);
       const ticket = await ticketRepo.findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Ticket not found');
@@ -62,6 +67,20 @@ export function registerTicketWorkflowTools(server: McpServer, ctx: ToolContext)
       if (!destColumnId) return err('Either target_column_id or target_column_name is required');
 
       const oldColumnId = ticket.column_id;
+
+      // Terminal-reopen guard (ticket ad0eb567). Resolve source + dest columns
+      // up front so a stale strand cannot silently drag an already-merged
+      // ticket out of a terminal column. Forward moves into terminal and
+      // reorders within terminal are unaffected; only OUT-of-terminal is gated.
+      const colRepo = dataSource.getRepository(BoardColumn);
+      const [sourceColForGuard, destColForGuard] = await Promise.all([
+        oldColumnId ? colRepo.findOne({ where: { id: oldColumnId } }) : Promise.resolve(null),
+        colRepo.findOne({ where: { id: destColumnId } }),
+      ]);
+      if (!destColForGuard) return err('Target column not found');
+      if (!force && isTerminalReopen(sourceColForGuard, destColForGuard)) {
+        return err(new TerminalReopenError(ticket.id, sourceColForGuard?.name ?? String(oldColumnId), destColForGuard.name).message);
+      }
 
       await dataSource.transaction(async (manager) => {
         const tRepo = manager.getRepository(Ticket);
