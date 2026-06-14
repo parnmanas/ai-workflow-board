@@ -66,6 +66,46 @@ export class TicketArchivedError extends Error {
 }
 
 /**
+ * True when a move would drag a ticket OUT of a terminal column back into a
+ * non-terminal one (ticket ad0eb567).
+ *
+ * On a board where one agent holds assignee+reviewer+reporter, every column
+ * transition fires a fresh role-trigger to the same agent, so multiple strands
+ * run concurrently. A strand spawned while the ticket was still in
+ * Review/Merging reads that stale snapshot; by the time its `move_ticket`
+ * lands, a sibling strand may have already merged the ticket into Done. The
+ * stale call then re-opens the completed merge (observed on tickets e163c952
+ * and 9f507f5c). This is the exact transition to refuse by default — forward
+ * moves into terminal and reorders within terminal are unaffected.
+ */
+export function isTerminalReopen(
+  sourceColumn: BoardColumn | null | undefined,
+  destColumn: BoardColumn | null | undefined,
+): boolean {
+  return isTerminalColumn(sourceColumn) && !isTerminalColumn(destColumn);
+}
+
+/**
+ * Thrown / surfaced when a move is rejected because it would reopen a ticket
+ * out of a terminal column without an explicit override. Callers that genuinely
+ * mean to reopen (a human dragging a Done card, or an automated caller passing
+ * `force`) bypass the guard; everyone else gets a stable, greppable rejection.
+ */
+export class TerminalReopenError extends Error {
+  status = 409;
+  code = 'terminal_reopen_blocked';
+  hint = 'Pass force=true to intentionally reopen a ticket out of a terminal column';
+  constructor(ticketId: string, sourceName: string, destName: string) {
+    super(
+      `Ticket ${ticketId} is in terminal column "${sourceName}" — refusing to move it back to non-terminal "${destName}". ` +
+      `This is almost always a stale concurrent strand acting on an out-of-date snapshot of an already-completed ticket. ` +
+      `Pass force=true if you really mean to reopen it.`,
+    );
+    this.name = 'TerminalReopenError';
+  }
+}
+
+/**
  * Throws `TicketArchivedError` when the ticket has a non-null `archived_at`.
  * Returns the ticket otherwise so callers can chain it.
  *
