@@ -80,19 +80,27 @@ interface SpawnIdentityRecord {
  *   1. Exact trigger idempotency — same non-empty triggerId (redelivered
  *      agent_trigger / SSE replay).
  *   2. Exact chat idempotency — same non-empty chatRequestId.
- *   3. (ticket, role) single-flight — a `trigger` spawn whose (ticketId, role)
- *      matches any live record / in-flight reservation collapses onto it,
- *      REGARDLESS of triggerId. The one-shot path can't deliver a follow-up
- *      turn the way the persistent ticket-session path does (which reuses the
- *      live pid), so the closest single-flight analog is to drop the second
- *      spawn while a strand for the same key is alive. This is the fix for the
- *      VEG-R2-5 duplicate-strand race: two DISTINCT non-empty trigger ids for
- *      the same (ticket, role) seconds apart used to each pass rule 1 (ids
- *      differ) and the old empty-triggerId-only fallback, twin-spawning two
- *      live strands. A genuine sequential re-trigger still spawns: once the
- *      prior strand exits its record leaves `#map`, so nothing matches.
- *      Restricted to `trigger` kind so chat spawns (no role) are never merged
- *      on a blank role.
+ *   3. (ticket, role) single-flight — a column `trigger` spawn whose
+ *      (ticketId, role) matches any live record / in-flight reservation
+ *      collapses onto it, REGARDLESS of triggerId. The one-shot path can't
+ *      deliver a follow-up turn the way the persistent ticket-session path does
+ *      (which reuses the live pid), so the closest single-flight analog is to
+ *      drop the second spawn while a strand for the same key is alive. This is
+ *      the fix for the VEG-R2-5 duplicate-strand race: two DISTINCT non-empty
+ *      trigger ids for the same (ticket, role) seconds apart used to each pass
+ *      rule 1 (ids differ) and the old empty-triggerId-only fallback,
+ *      twin-spawning two live strands. A genuine sequential re-trigger still
+ *      spawns: once the prior strand exits its record leaves `#map`, so nothing
+ *      matches. Restricted to `trigger` kind so chat spawns (no role) are never
+ *      merged on a blank role.
+ *
+ *      EXCEPTION — comment-mention spawns (`triggerId` of the form
+ *      `mention:<commentId>`) are NOT coalesced here. A distinct @-mention is
+ *      NEW work (a reviewer's question to the assignee, etc.), not a duplicate
+ *      re-trigger: the one-shot strand can't receive a follow-up turn and its
+ *      prompt is frozen at spawn, so dropping the mention would silently lose
+ *      the comment. Rule 1 still dedupes an exact redelivery of the same
+ *      `commentId`; only genuinely-new mentions are allowed past this gate.
  * Returns the drop reason or `false` when the spawn is unique.
  */
 export function findDuplicateSpawn(
@@ -115,6 +123,7 @@ export function findDuplicateSpawn(
     }
     if (
       spec.kind === 'trigger' &&
+      !(spec.triggerId || '').startsWith('mention:') &&
       spec.ticketId &&
       rec.ticket_id === spec.ticketId &&
       (rec.role || '') === specRole

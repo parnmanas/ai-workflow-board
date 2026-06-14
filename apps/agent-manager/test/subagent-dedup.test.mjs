@@ -84,6 +84,51 @@ test('subagent dedup: DISTINCT triggerId, DIFFERENT role still spawns (no false 
   assert.equal(res, false, 'distinct role is a separate strand');
 });
 
+test('subagent dedup: DISTINCT mention triggerId still spawns on a live (ticket, role) strand', () => {
+  // Ticket 66bddd2e review fix: a comment-mention spawn (triggerId
+  // `mention:<commentId>`) is NEW work, not a duplicate re-trigger. A reviewer
+  // asking the assignee a question while an assignee one-shot strand is still
+  // alive must NOT be coalesced away (the strand can't take a follow-up turn,
+  // so the comment would be silently lost). The single-flight (ticket, role)
+  // rule is scoped to column triggers and must skip `mention:`-prefixed ids.
+  const records = [{ trigger_id: 'mention:c1', ticket_id: 'ticket-a', role: 'assignee' }];
+  const res = findDuplicateSpawn(records, {
+    kind: 'trigger',
+    triggerId: 'mention:c2', // a DIFFERENT comment mention for the same (ticket, role)
+    ticketId: 'ticket-a',
+    role: 'assignee',
+  });
+  assert.equal(res, false, 'distinct comment-mention is new work, not a single-flight duplicate');
+});
+
+test('subagent dedup: EXACT same mention triggerId is still deduped by rule 1', () => {
+  // Idempotency for an exact redelivery of the SAME comment mention is still
+  // handled by rule 1 (exact triggerId match) — only genuinely-new mentions
+  // get past the single-flight gate.
+  const records = [{ trigger_id: 'mention:c1', ticket_id: 'ticket-a', role: 'assignee' }];
+  const res = findDuplicateSpawn(records, {
+    kind: 'trigger',
+    triggerId: 'mention:c1',
+    ticketId: 'ticket-a',
+    role: 'assignee',
+  });
+  assert.equal(res, 'duplicate_trigger', 'exact same comment mention is an idempotent redelivery');
+});
+
+test('subagent dedup: a mention spawn does NOT collapse onto a live COLUMN-trigger strand', () => {
+  // The Review-loop case: an assignee column-trigger strand is alive (record
+  // carries a real field_changed id), and the reviewer @-mentions the assignee.
+  // The mention must still spawn so the question is read.
+  const records = [{ trigger_id: 'field-xyz', ticket_id: 'ticket-a', role: 'assignee' }];
+  const res = findDuplicateSpawn(records, {
+    kind: 'trigger',
+    triggerId: 'mention:c9',
+    ticketId: 'ticket-a',
+    role: 'assignee',
+  });
+  assert.equal(res, false, 'mention is new work even against a live column-trigger strand');
+});
+
 test('subagent dedup: EMPTY triggerId collapses on matching (ticket, role)', () => {
   const records = [{ trigger_id: null, ticket_id: 'ticket-a', role: 'assignee' }];
   const res = findDuplicateSpawn(records, {
