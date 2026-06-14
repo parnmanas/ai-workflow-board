@@ -6,6 +6,11 @@
 // trigger carried an empty triggerId (field_changed-empty agent_trigger), so
 // the one-shot fallback can't twin-spawn either. The pure helper is exercised
 // directly so no CLI child is forked.
+//
+// Ticket 66bddd2e (VEG-R2-5 race) widened the (ticket, role) rule into a true
+// single-flight guard: it now collapses a second spawn onto a live strand
+// REGARDLESS of triggerId — two DISTINCT non-empty trigger ids for the same
+// (ticket, role) seconds apart no longer twin-spawn.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -48,6 +53,35 @@ test('subagent dedup: catches an in-flight RESERVATION (identity-bearing) for sa
     role: 'reviewer',
   });
   assert.equal(res, 'duplicate_trigger');
+});
+
+test('subagent dedup: DISTINCT non-empty triggerId collapses on a live (ticket, role) strand', () => {
+  // Ticket 66bddd2e (VEG-R2-5 race): two DIFFERENT non-empty trigger ids for
+  // the same (ticket, role) arriving seconds apart must NOT twin-spawn while a
+  // strand is alive. The live one-shot record carries trigger_id 't-old'; a
+  // fresh trigger 't-new' for the same (ticket, role) is a single-flight
+  // duplicate even though the ids differ (rule 1 would miss it).
+  const records = [{ trigger_id: 't-old', ticket_id: 'ticket-a', role: 'assignee' }];
+  const res = findDuplicateSpawn(records, {
+    kind: 'trigger',
+    triggerId: 't-new',
+    ticketId: 'ticket-a',
+    role: 'assignee',
+  });
+  assert.equal(res, 'duplicate_trigger', 'single-flight collapses distinct trigger id on live (ticket, role)');
+});
+
+test('subagent dedup: DISTINCT triggerId, DIFFERENT role still spawns (no false single-flight)', () => {
+  // Single-flight is per (ticket, role): a reviewer trigger must still spawn
+  // even while an assignee strand for the same ticket is alive.
+  const records = [{ trigger_id: 't-old', ticket_id: 'ticket-a', role: 'assignee' }];
+  const res = findDuplicateSpawn(records, {
+    kind: 'trigger',
+    triggerId: 't-new',
+    ticketId: 'ticket-a',
+    role: 'reviewer',
+  });
+  assert.equal(res, false, 'distinct role is a separate strand');
 });
 
 test('subagent dedup: EMPTY triggerId collapses on matching (ticket, role)', () => {

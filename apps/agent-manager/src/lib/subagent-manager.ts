@@ -80,12 +80,19 @@ interface SpawnIdentityRecord {
  *   1. Exact trigger idempotency — same non-empty triggerId (redelivered
  *      agent_trigger / SSE replay).
  *   2. Exact chat idempotency — same non-empty chatRequestId.
- *   3. (ticket, role) fallback — a `trigger` spawn whose triggerId is EMPTY
- *      (e.g. a field_changed-empty agent_trigger) collapses onto any existing
- *      record for the same (ticketId, role). Mirrors the sessionKey fallback
- *      in the persistent ticket-session path so the one-shot fallback can't
- *      twin-spawn for the same (ticket, role) either. Restricted to `trigger`
- *      kind so chat spawns (no role) are never merged on an empty key.
+ *   3. (ticket, role) single-flight — a `trigger` spawn whose (ticketId, role)
+ *      matches any live record / in-flight reservation collapses onto it,
+ *      REGARDLESS of triggerId. The one-shot path can't deliver a follow-up
+ *      turn the way the persistent ticket-session path does (which reuses the
+ *      live pid), so the closest single-flight analog is to drop the second
+ *      spawn while a strand for the same key is alive. This is the fix for the
+ *      VEG-R2-5 duplicate-strand race: two DISTINCT non-empty trigger ids for
+ *      the same (ticket, role) seconds apart used to each pass rule 1 (ids
+ *      differ) and the old empty-triggerId-only fallback, twin-spawning two
+ *      live strands. A genuine sequential re-trigger still spawns: once the
+ *      prior strand exits its record leaves `#map`, so nothing matches.
+ *      Restricted to `trigger` kind so chat spawns (no role) are never merged
+ *      on a blank role.
  * Returns the drop reason or `false` when the spawn is unique.
  */
 export function findDuplicateSpawn(
@@ -108,7 +115,6 @@ export function findDuplicateSpawn(
     }
     if (
       spec.kind === 'trigger' &&
-      !spec.triggerId &&
       spec.ticketId &&
       rec.ticket_id === spec.ticketId &&
       (rec.role || '') === specRole
