@@ -7,6 +7,7 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { PERMISSIONS } from '../../common/types/permissions';
 import { LogService } from '../../services/log.service';
+import { MemoryMetricsRegistry } from '../../services/memory-metrics.registry';
 
 /**
  * Public memory diagnostics — intentionally NOT guarded by Auth/Permission.
@@ -28,6 +29,8 @@ import { LogService } from '../../services/log.service';
 @ApiTags('diagnostics')
 @Controller('api/diagnostics')
 export class PublicDiagnosticsController {
+  constructor(private readonly metricsRegistry: MemoryMetricsRegistry) {}
+
   @Get('memory')
   getMemory() {
     const memUsage = process.memoryUsage();
@@ -44,6 +47,13 @@ export class PublicDiagnosticsController {
         external: memUsage.external,
         array_buffers: memUsage.arrayBuffers,
       },
+      // Live sizes of the long-lived in-memory collections (sessions, SSE
+      // maps, registries, log ring). Counts only — no entry content — so
+      // exposing them on the unguarded route carries the same risk profile
+      // as the heap counters above (see class header). This is the section
+      // an operator watches under reconnect/session churn to see whether a
+      // map (e.g. `mcp.sessions`) is trending up instead of draining.
+      collections: this.metricsRegistry.collect(),
       heap: {
         total: heapStats.total_heap_size,
         used: heapStats.used_heap_size,
@@ -92,9 +102,11 @@ export class PublicDiagnosticsController {
  *     `--heapsnapshot-near-heap-limit` flag added in docker-compose.yml;
  *     V8 fires the first 2 snapshots automatically when it senses an
  *     imminent OOM. This controller's POST is the manual override.
- *   - In-memory collection sizes (sessions Map, SSE bucket sizes, etc).
- *     Adding size getters to each service is a wider refactor; the
- *     heap snapshot already exposes them as dominators.
+ *   - In-memory collection sizes (sessions Map, SSE bucket sizes, etc) are
+ *     now reported under `collections` on the public `GET /api/diagnostics/
+ *     memory` route, fed by MemoryMetricsRegistry (each holder self-registers
+ *     a size gauge). The heap snapshot still shows them as retained-graph
+ *     dominators; the gauges add the cheap, pollable trend view.
  */
 @ApiBearerAuth('user-session')
 @ApiTags('diagnostics')

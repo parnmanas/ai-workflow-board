@@ -1,6 +1,7 @@
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import * as v8 from 'node:v8';
 import { LogService } from './log.service';
+import { MemoryMetricsRegistry } from './memory-metrics.registry';
 
 /**
  * Self-monitoring heartbeat that records the server's own heap stats
@@ -45,12 +46,40 @@ function clampTickMs(): number {
   return Math.min(MAX_TICK_MS, Math.max(MIN_TICK_MS, raw));
 }
 
+// Any registered in-memory collection whose size reaches this many entries
+// trips a one-shot warn (see the debounce in snapshot()). Default 1000 is
+// comfortably above normal steady-state for every gauge we register (MCP
+// sessions are capped at 200, presence/SSE track live viewers, the log ring
+// caps at 2000) — so a breach means a collection is growing unbounded, i.e.
+// a leak. 0 / invalid disables the collection warn entirely.
+const DEFAULT_COLLECTION_WARN = 1000;
+
+function collectionWarnThreshold(): number {
+  const raw = Number.parseInt(process.env.MEMORY_WATCHDOG_COLLECTION_WARN || '', 10);
+  if (!Number.isFinite(raw) || raw < 0) return DEFAULT_COLLECTION_WARN;
+  return raw;
+}
+
 @Injectable()
 export class MemoryWatchdogService implements OnModuleInit, OnModuleDestroy {
   private readonly tickMs = clampTickMs();
+  private readonly collectionWarnAt = collectionWarnThreshold();
   private tickHandle: NodeJS.Timeout | null = null;
+  // Names of collections currently above the warn threshold. Edge-triggered
+  // debounce: we warn only when a name newly ENTERS this set, and re-arm
+  // (allow a future warn) only after it drops back below threshold. Keeps a
+  // persistently-large collection from spamming a warn every tick.
+  private breachingCollections = new Set<string>();
 
-  constructor(private readonly logService: LogService) {}
+  constructor(
+    private readonly logService: LogService,
+    private readonly metrics: MemoryMetricsRegistry,
+  ) {
+    // LogService can't self-register (it's manually `new`'d in the standalone
+    // MCP context, where the registry isn't wired), so the watchdog — which
+    // already holds a LogService ref — registers the log-ring gauge here.
+    this.metrics.register('log.entries', () => this.logService.count);
+  }
 
   onModuleInit(): void {
     // Tick once on boot so the very first sample (before anyone has
@@ -82,6 +111,11 @@ export class MemoryWatchdogService implements OnModuleInit, OnModuleDestroy {
     const heap = v8.getHeapStatistics();
     const limit = heap.heap_size_limit || 1; // avoid div by 0
     const usedPct = (heap.used_heap_size / limit) * 100;
+    // Live in-memory collection sizes — same data the diagnostics endpoint
+    // serves, folded into the log row so the trend is visible in the admin
+    // log viewer without a separate curl loop, and so the rows immediately
+    // before an OOM show which map was growing.
+    const collections = this.metrics.collect();
     const meta = {
       rss_mb: Math.round(mem.rss / 1_048_576),
       heap_used_mb: Math.round(heap.used_heap_size / 1_048_576),
@@ -91,7 +125,10 @@ export class MemoryWatchdogService implements OnModuleInit, OnModuleDestroy {
       array_buffers_mb: Math.round(mem.arrayBuffers / 1_048_576),
       heap_used_pct: Math.round(usedPct * 10) / 10,
       uptime_min: Math.round(process.uptime() / 60),
+      collections,
     };
+
+    this.checkCollectionThresholds(collections);
 
     // Threshold-aware level: bumps as we approach the OOM cliff so
     // an admin scanning recent warn/error rows in the log viewer
@@ -107,5 +144,33 @@ export class MemoryWatchdogService implements OnModuleInit, OnModuleDestroy {
           : `Heap: ${meta.heap_used_mb}/${meta.heap_limit_mb} MB (${meta.heap_used_pct}%)`;
 
     this.logService.log(level, 'Memory', message, meta);
+  }
+
+  /**
+   * Emit a single warn the first time any collection crosses the configured
+   * size threshold, and re-arm it only once the collection drains back below.
+   * This is the "임계치 초과 시 warn 로그 1회 (스팸 방지 디바운스)" the ticket asks
+   * for — without it a genuinely-leaking map would log a warn on every tick
+   * (e.g. every 30s during an incident), drowning the signal it carries.
+   */
+  private checkCollectionThresholds(collections: Record<string, number>): void {
+    if (this.collectionWarnAt <= 0) return; // threshold disabled
+
+    for (const [name, size] of Object.entries(collections)) {
+      const wasBreaching = this.breachingCollections.has(name);
+      const isBreaching = size >= this.collectionWarnAt;
+
+      if (isBreaching && !wasBreaching) {
+        this.breachingCollections.add(name);
+        this.logService.warn(
+          'Memory',
+          `Collection '${name}' size ${size} crossed warn threshold ${this.collectionWarnAt} — possible leak`,
+          { collection: name, size, threshold: this.collectionWarnAt },
+        );
+      } else if (!isBreaching && wasBreaching) {
+        // Drained back below threshold — re-arm so a future breach warns again.
+        this.breachingCollections.delete(name);
+      }
+    }
   }
 }
