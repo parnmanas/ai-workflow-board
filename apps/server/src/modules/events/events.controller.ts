@@ -14,6 +14,7 @@ import { activityEvents } from '../../services/activity.service';
 import { AuthService } from '../../services/auth.service';
 import { ApiKeyService } from '../../services/api-key.service';
 import { LogService } from '../../services/log.service';
+import { MemoryMetricsRegistry } from '../../services/memory-metrics.registry';
 import { StreamEvent } from '../../common/types/stream-events';
 import { EVENT_TYPES } from './event-registry';
 import { EventDefinition, EventMapContext, SubscriberIdentity } from './types';
@@ -112,7 +113,17 @@ export class EventsController implements OnModuleDestroy {
     private readonly apiKeyService: ApiKeyService,
     private readonly logService: LogService,
     private readonly instanceRegistry: InstanceRegistryService,
+    metrics: MemoryMetricsRegistry,
   ) {
+    // Memory observability gauges for the SSE maps. `sse.connections` is the
+    // raw live-stream count; `sse.agents` is distinct agents holding at least
+    // one stream (a single agent can hold several — see agentSseSessions);
+    // `sse.mainPins` tracks the pinned-session map, which is the most
+    // leak-prone of the three (entries must be cleared on disconnect/DELETE).
+    metrics.register('sse.connections', () => this.clientCount);
+    metrics.register('sse.agents', () => this.agentSseSessions.size);
+    metrics.register('sse.mainPins', () => this.agentMainSession.size);
+
     // Table-driven listener registration: EVENT_TYPES drives everything.
     // One loop replaces the 9 hand-written listener blocks that previously lived here.
     const mapCtx: EventMapContext = {

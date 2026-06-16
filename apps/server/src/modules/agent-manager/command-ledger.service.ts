@@ -1,4 +1,5 @@
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
+import { MemoryMetricsRegistry } from '../../services/memory-metrics.registry';
 
 /**
  * In-memory record of dispatched `agent_manager_command` events, used to
@@ -33,7 +34,8 @@ export class CommandLedgerService implements OnModuleDestroy {
   private readonly records = new Map<string, CommandRecord>();
   private timer: ReturnType<typeof setInterval> | null = null;
 
-  constructor() {
+  constructor(metrics: MemoryMetricsRegistry) {
+    metrics.register('agentManager.commandRecords', () => this.records.size);
     this.timer = setInterval(() => this.sweep(), SWEEP_INTERVAL_MS);
     if (this.timer && typeof (this.timer as any).unref === 'function') {
       (this.timer as any).unref();

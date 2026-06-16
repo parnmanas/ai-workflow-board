@@ -1,6 +1,7 @@
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { randomBytes } from 'crypto';
 import { LogService } from '../../services/log.service';
+import { MemoryMetricsRegistry } from '../../services/memory-metrics.registry';
 
 /**
  * ST-4 — short-lived pairing tokens that an admin mints from the AWB UI and
@@ -35,7 +36,11 @@ export class PairingService implements OnModuleDestroy {
   private readonly tokens = new Map<string, PairingToken>(); // keyed by raw token
   private timer: ReturnType<typeof setInterval> | null = null;
 
-  constructor(private readonly logService: LogService) {
+  constructor(
+    private readonly logService: LogService,
+    metrics: MemoryMetricsRegistry,
+  ) {
+    metrics.register('agentManager.pairingTokens', () => this.tokens.size);
     this.timer = setInterval(() => this.sweep(), SWEEP_INTERVAL_MS);
     if (this.timer && typeof (this.timer as any).unref === 'function') {
       (this.timer as any).unref();

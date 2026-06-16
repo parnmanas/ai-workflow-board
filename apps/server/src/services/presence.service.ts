@@ -1,6 +1,7 @@
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { activityEvents } from './activity.service';
 import { LogService } from './log.service';
+import { MemoryMetricsRegistry } from './memory-metrics.registry';
 
 /**
  * In-memory ticket-presence tracker.
@@ -39,7 +40,20 @@ export class PresenceService implements OnModuleDestroy {
   private readonly viewers = new Map<string, Map<string, ViewerEntry>>();
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
 
-  constructor(private readonly logService: LogService) {
+  constructor(
+    private readonly logService: LogService,
+    metrics: MemoryMetricsRegistry,
+  ) {
+    // Two gauges: outer = tickets currently being viewed, inner-sum = total
+    // tracked viewer entries. The nested-map structure means a leak could
+    // hide in either dimension (orphaned ticket buckets, or per-ticket viewer
+    // sets that never drain), so report both.
+    metrics.register('presence.tickets', () => this.viewers.size);
+    metrics.register('presence.viewers', () => {
+      let total = 0;
+      for (const viewers of this.viewers.values()) total += viewers.size;
+      return total;
+    });
     this.sweepTimer = setInterval(() => this.sweep(), SWEEP_INTERVAL_MS);
     // Don't keep the Node event loop alive for a presence-only sweep; the
     // server lifecycle owns process exit.

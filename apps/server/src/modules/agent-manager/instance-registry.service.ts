@@ -1,6 +1,7 @@
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { activityEvents } from '../../services/activity.service';
 import { LogService } from '../../services/log.service';
+import { MemoryMetricsRegistry } from '../../services/memory-metrics.registry';
 
 /**
  * In-memory registry of plugin instances (daemon / proxy processes) currently
@@ -91,7 +92,11 @@ export class InstanceRegistryService implements OnModuleDestroy {
   private readonly instances = new Map<string, InstanceRecord>();
   private timer: ReturnType<typeof setInterval> | null = null;
 
-  constructor(private readonly logService: LogService) {
+  constructor(
+    private readonly logService: LogService,
+    metrics: MemoryMetricsRegistry,
+  ) {
+    metrics.register('agentManager.instances', () => this.instances.size);
     this.timer = setInterval(() => this.sweep(), SWEEP_INTERVAL_MS);
     if (this.timer && typeof (this.timer as any).unref === 'function') {
       (this.timer as any).unref();

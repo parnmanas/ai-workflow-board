@@ -70,6 +70,16 @@ export class LogService {
   private nextId = 1;
   private maxSize = 2000;
 
+  /**
+   * Live count of buffered log entries. Bounded by `maxSize` (the ring cap),
+   * so this is really a "are we at the cap" signal for memory observability
+   * rather than an unbounded leak indicator — but exposing it keeps the
+   * diagnostics surface complete and confirms the ring isn't mis-sized.
+   */
+  get count(): number {
+    return this.logs.length;
+  }
+
   log(level: LogEntry['level'], category: string, message: string, meta?: Record<string, any>) {
     const entry: LogEntry = {
       id: this.nextId++,

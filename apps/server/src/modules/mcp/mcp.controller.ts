@@ -13,6 +13,7 @@ import { sessionStore } from './internal/session-store';
 import { SystemSetting } from '../../entities/SystemSetting';
 import { ApiKeyService } from '../../services/api-key.service';
 import { LogService } from '../../services/log.service';
+import { MemoryMetricsRegistry } from '../../services/memory-metrics.registry';
 import { AgentConnectionService } from '../agents/agent-connection.service';
 import { TriggerLoopService } from '../agents/trigger-loop.service';
 import { AgentStatusService } from '../agents/agent-status.service';
@@ -151,10 +152,21 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     private readonly actionsService: ActionsService,
     private readonly ticketPrerequisitesService: TicketPrerequisitesService,
     private readonly benchmarkService: BenchmarkService,
+    private readonly metricsRegistry: MemoryMetricsRegistry,
   ) {}
 
   onModuleInit() {
     logService = this._logService;
+
+    // Memory observability: expose the MCP session store's live size. Since
+    // the leaking agentId→McpServer map was removed (see class header),
+    // sessionStore is the single source of truth for MCP connection state —
+    // `mcp.sessions` is raw transport count, `mcp.connectedAgents` collapses
+    // reconnect-overlap duplicates to distinct agents. A climbing
+    // sessions-vs-agents gap under reconnect churn is exactly the #1-leak
+    // signature this ticket exists to make visible.
+    this.metricsRegistry.register('mcp.sessions', () => sessionStore.size);
+    this.metricsRegistry.register('mcp.connectedAgents', () => sessionStore.distinctAgentCount());
 
     // Listen for agent_trigger events and push MCP notifications to connected agents
     this.triggerListener = (event: any) => {

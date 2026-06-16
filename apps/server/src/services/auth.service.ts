@@ -4,6 +4,7 @@ import { Repository } from 'typeorm';
 import { randomBytes } from 'crypto';
 import * as bcrypt from 'bcryptjs';
 import { User } from '../entities/User';
+import { MemoryMetricsRegistry } from './memory-metrics.registry';
 
 interface Session {
   userId: string;
@@ -19,7 +20,10 @@ export class AuthService {
 
   constructor(
     @InjectRepository(User) private readonly userRepo: Repository<User>,
+    metrics: MemoryMetricsRegistry,
   ) {
+    // Expose the live login-session count for memory observability.
+    metrics.register('auth.sessions', () => this.sessions.size);
     // Clean expired sessions every 5 minutes
     setInterval(() => {
       const now = new Date();
