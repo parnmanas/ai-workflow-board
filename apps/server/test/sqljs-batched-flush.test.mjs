@@ -160,6 +160,69 @@ describe('sql.js batched flush (ticket d5a8594a)', () => {
       'the forced shutdown-style flush persists the previously-unflushed write',
     );
   });
+
+  // Ticket 84a6d207 — graceful-shutdown forced flush must SUPERSEDE an in-flight
+  // periodic flush, not early-return on the in-flight guard.
+  //
+  // Race window: a periodic flush clears the dirty flag and takes its snapshot at
+  // its own start. A write that lands in that flush's async window re-marks dirty
+  // but is NOT in the snapshot. If the graceful-shutdown forced flush then bailed
+  // out because a flush was in flight, that last write would never reach disk —
+  // there is no "next tick" on shutdown. The fix: force=true awaits the in-flight
+  // flush and re-exports.
+  it('forced flush supersedes an in-flight periodic flush (no lost last batch on shutdown)', async () => {
+    const repo = AppDataSource.getRepository(Workspace);
+    await flushSqljs(AppDataSource, true);
+    const beforeCount = await countAfterReboot();
+
+    const mgr = AppDataSource.sqljsManager;
+    const spySave = mgr.saveDatabase.bind(mgr); // spy-wrapped real save from before()
+    let release;
+    const gate = new Promise((res) => { release = res; });
+    let gated = true;        // only the FIRST (periodic) flush is held
+    let snapshotDone = false; // flips once the periodic flush's real export+write finished
+    mgr.saveDatabase = async (...args) => {
+      const out = await spySave(...args); // real export/snapshot + file write completes here
+      if (gated) {
+        gated = false;
+        snapshotDone = true;
+        await gate;                       // hold the periodic flush's promise open
+      }
+      return out;
+    };
+
+    try {
+      // write #1: lands before the periodic flush → included in its snapshot.
+      await repo.save(repo.create({ name: 'shutdown-pre', description: 'before periodic' }));
+
+      // Periodic (non-forced) flush. Clears dirty, exports its snapshot, then blocks
+      // on the gate — leaving sqljsFlushInFlight set.
+      const periodic = flushSqljs(AppDataSource);
+      // Wait until that flush's real export+write has fully completed (snapshot taken).
+      while (!snapshotDone) await new Promise((r) => setImmediate(r));
+
+      // write #2: lands DURING the in-flight flush, strictly AFTER its snapshot →
+      // re-marks dirty but is absent from the periodic export. With the old guard
+      // (`if (sqljsFlushInFlight) return false`) the forced flush below would
+      // early-return and this write would be lost on shutdown.
+      await repo.save(repo.create({ name: 'shutdown-last', description: 'during periodic' }));
+      assert.equal(isSqljsDirty(), true, 'the post-snapshot write re-marks the DB dirty');
+
+      // Forced shutdown flush while the periodic flush is still in flight.
+      const forced = flushSqljs(AppDataSource, true);
+      release();                          // unblock the periodic flush so forced can await it
+      const [, forcedSaved] = await Promise.all([periodic, forced]);
+      assert.equal(forcedSaved, true, 'the forced flush performs a real export, not an early-return');
+    } finally {
+      mgr.saveDatabase = spySave;         // restore the plain spy for any later tests
+    }
+
+    assert.equal(
+      await countAfterReboot(),
+      beforeCount + 2,
+      'both the pre-flush write AND the write that landed during the in-flight flush survive a reboot',
+    );
+  });
 });
 
 // Mirror the leak-test pattern: TypeORM/sql.js leave handles that keep the

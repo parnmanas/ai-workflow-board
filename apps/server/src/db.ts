@@ -54,7 +54,11 @@ export function isSqljsBackend(): boolean {
 // image per process and exactly one DataSource is initialized per entry point
 // (NestJS server → injected DataSource; standalone MCP server → AppDataSource).
 let sqljsDirty = false;
-let sqljsFlushInFlight = false;
+// Holds the currently-running flush so an overlapping call can coalesce into it
+// (periodic tick) or AWAIT it (forced shutdown flush) instead of skipping. null
+// when no flush is in flight. See flushSqljs() for the supersede/await contract
+// (ticket 84a6d207).
+let sqljsFlushInFlight: Promise<boolean> | null = null;
 
 export function markSqljsDirty(): void {
   sqljsDirty = true;
@@ -380,22 +384,61 @@ export function resolveSqljsFlushIntervalMs(): number {
  * - No-op for non-sqljs backends and for an uninitialized DataSource.
  * - Skips the expensive full-DB export when nothing is dirty (unless `force`,
  *   used by the shutdown flush to guarantee a final write).
- * - Single-flighted: overlapping ticks coalesce instead of double-exporting.
+ * - Overlap handling depends on `force`:
+ *     • periodic tick (force=false) — coalesces: if a flush is already running it
+ *       returns immediately rather than double-exporting; the running flush (or
+ *       the next tick) covers the pending writes.
+ *     • shutdown flush (force=true) — supersedes: it AWAITS the in-flight flush,
+ *       then exports again. This matters because the in-flight flush cleared the
+ *       dirty flag and took its snapshot at its own start; a write that lands in
+ *       its async window re-marks dirty but is NOT in that snapshot. On graceful
+ *       shutdown there is no "next tick" to catch it, so the forced flush must
+ *       re-export to guarantee the last sub-interval batch reaches disk
+ *       (ticket 84a6d207).
  *
  * Ordering note: the dirty flag is cleared BEFORE the (synchronous) export so a
  * write that lands during the async file write re-marks dirty and is caught on
- * the next tick — it is never silently dropped. A failed save re-marks dirty so
- * the batch is retried.
+ * the next tick / by the forced re-export — it is never silently dropped. A
+ * failed save re-marks dirty so the batch is retried.
  *
  * @returns true if a save was actually performed.
  */
 export async function flushSqljs(dataSource: DataSource, force = false): Promise<boolean> {
   if (!isSqljsBackend()) return false;
   if (!dataSource?.isInitialized) return false;
-  if (sqljsFlushInFlight) return false;
+
+  if (sqljsFlushInFlight) {
+    // A periodic tick coalesces into the running flush; only a forced flush
+    // (shutdown) waits it out and then re-exports below.
+    if (!force) return false;
+    try {
+      await sqljsFlushInFlight;
+    } catch {
+      // The in-flight flush's error is surfaced to ITS own caller; we proceed to
+      // a fresh forced export regardless so the final batch still gets a shot.
+    }
+  }
+
   if (!force && !sqljsDirty) return false;
 
-  sqljsFlushInFlight = true;
+  const run = doSqljsExport(dataSource);
+  sqljsFlushInFlight = run;
+  try {
+    return await run;
+  } finally {
+    // Only clear if we're still the current in-flight flush — a forced flush that
+    // superseded us may have installed its own promise after awaiting this one.
+    if (sqljsFlushInFlight === run) sqljsFlushInFlight = null;
+  }
+}
+
+/**
+ * Perform a single full-DB export. Clears the dirty flag BEFORE the export (so a
+ * write during the async file write re-marks dirty) and re-marks dirty on
+ * failure so the batch is retried. Internal — callers go through flushSqljs(),
+ * which owns the in-flight coalesce/supersede contract.
+ */
+async function doSqljsExport(dataSource: DataSource): Promise<boolean> {
   sqljsDirty = false;
   try {
     await dataSource.sqljsManager.saveDatabase();
@@ -403,8 +446,6 @@ export async function flushSqljs(dataSource: DataSource, force = false): Promise
   } catch (e) {
     sqljsDirty = true; // surface for retry on the next tick / shutdown
     throw e;
-  } finally {
-    sqljsFlushInFlight = false;
   }
 }
 
