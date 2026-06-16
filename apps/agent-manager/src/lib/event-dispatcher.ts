@@ -23,6 +23,7 @@ import type { ManagedAgentContextRegistry } from './managed-agent-context.js';
 import type { WorktreeManager } from './worktree-manager.js';
 import { prepareChatAttachments } from './chat-attachment-prep.js';
 import type { HarnessSpec } from './cli-adapters/base.js';
+import { createAdapter, ADAPTER_CAPABILITIES } from './cli-adapters/index.js';
 
 /**
  * Defensive parse of the `harness_config` field on a flattened agent_trigger
@@ -264,12 +265,19 @@ export interface PromptComposer {
     ticketId: string,
     columnPrompt: ColumnPrompt | null,
   ): string;
-  composeChatPrompt(rolePrompt: string, history: any[], newMessage: string): string;
+  composeChatPrompt(
+    rolePrompt: string,
+    history: any[],
+    newMessage: string,
+    roomId?: string,
+    usesNativeMcp?: boolean,
+  ): string;
   composeChatRoomPrompt(
     roomId: string,
     history: any[],
     msg: { content: string; sender_name: string; sender_id: string },
     attachments?: any[],
+    usesNativeMcp?: boolean,
   ): string;
   composeCommentMentionPrompt(
     ticket: any,
@@ -765,9 +773,20 @@ export class EventDispatcher {
       const rolePrompt = payload.role_prompt || '';
       const history = Array.isArray(payload.history) ? payload.history : [];
       const newMessage = payload.new_message || '';
+      // Non-NATIVE_MCP CLIs (codex / antigravity) can't call
+      // send_chat_room_message themselves — the manager harvests their stdout
+      // and posts the reply. Compose the channel instruction to match so the
+      // subagent isn't told to use a tool it lacks (or to suppress the stdout
+      // the manager reads).
+      const usesNativeMcp = createAdapter(agentContext?.cli).has(ADAPTER_CAPABILITIES.NATIVE_MCP);
       const taskText =
-        this.#prompts?.composeChatPrompt(rolePrompt, history, newMessage) ??
-        `[chat] ${newMessage}`;
+        this.#prompts?.composeChatPrompt(
+          rolePrompt,
+          history,
+          newMessage,
+          payload.room_id || '',
+          usesNativeMcp,
+        ) ?? `[chat] ${newMessage}`;
 
       try {
         const result = await this.#subagentManager.spawn({
@@ -1110,6 +1129,10 @@ export class EventDispatcher {
           Array.isArray(p.attachments) ? p.attachments : [],
           { fetchImages: false },
         );
+        // Oneshot fallback CLIs are typically codex / antigravity (claude takes
+        // the persistent path above). Match the reply-channel instruction to
+        // whether this CLI can call the AWB MCP tool itself.
+        const usesNativeMcp = createAdapter(agentContext?.cli).has(ADAPTER_CAPABILITIES.NATIVE_MCP);
         const taskText =
           this.#prompts?.composeChatRoomPrompt(
             p.room_id,
@@ -1120,6 +1143,7 @@ export class EventDispatcher {
               sender_id: p.sender_id || '',
             },
             prepared,
+            usesNativeMcp,
           ) ?? `[chat_room] ${p.content || ''}`;
 
         const result = await this.#subagentManager.spawn({

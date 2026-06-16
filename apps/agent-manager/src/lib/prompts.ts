@@ -147,14 +147,45 @@ export function composeTriggerPrompt(
   return lines.join('\n');
 }
 
+/** The delivery instruction for a chat reply depends on whether the responding
+ *  CLI can call AWB MCP tools itself (NATIVE_MCP — claude) or whether the agent
+ *  manager harvests its stdout and posts the reply on its behalf (non-NATIVE_MCP
+ *  — codex / antigravity, where `captureOutput` is on). Telling a codex subagent
+ *  to "reply via mcp__awb__send_chat_room_message" is doubly wrong: it has no
+ *  such tool, and the "do NOT print to stdout" line starves the exact channel
+ *  the manager reads. So the channel instruction has to track adapter capability.
+ *
+ *  When `usesNativeMcp` is true (default — preserves prior claude behavior) the
+ *  subagent is told to call the MCP tool with the explicit room id. When false
+ *  it is told to emit the reply as its final plain-text answer; the manager
+ *  captures that and posts it to the room. */
+function chatReplyInstructions(usesNativeMcp: boolean, roomId: string): string[] {
+  if (usesNativeMcp) {
+    return [
+      `- Reply ONLY via the mcp__awb__send_chat_room_message MCP tool (room_id: "${roomId}").`,
+      '- Do NOT print your reply to stdout — it must go through send_chat_room_message so the user sees it in the web UI.',
+    ];
+  }
+  return [
+    '- Reply with plain text as your final message. The agent manager captures your output and posts it to the chat room for you.',
+    '- Do NOT try to call any MCP tool to send the reply — this runtime has no chat-send tool. Just write the reply text as your final answer.',
+  ];
+}
+
 export function composeChatPrompt(
   _rolePrompt: string,
   history: ChatHistoryEntry[],
   newMessage: string,
+  roomId = '',
+  usesNativeMcp = true,
 ): string {
   const lines: string[] = [];
   lines.push('You are an AWB chat subagent responding to a user message in a live conversation.');
   lines.push('');
+  if (roomId) {
+    lines.push(`Room ID: ${roomId}`);
+    lines.push('');
+  }
   if (Array.isArray(history) && history.length > 0) {
     lines.push('Conversation history (oldest first):');
     for (const h of history.slice(-20)) {
@@ -170,8 +201,7 @@ export function composeChatPrompt(
   lines.push('');
   lines.push('Instructions:');
   lines.push('- Compose a helpful reply using your knowledge and the conversation context.');
-  lines.push('- Reply ONLY via the mcp__awb__send_chat_room_message MCP tool (pass the room_id from the chat request context).');
-  lines.push('- Do NOT print your reply to stdout — it must go through send_chat_room_message so the user sees it in the web UI.');
+  for (const ln of chatReplyInstructions(usesNativeMcp, roomId)) lines.push(ln);
   return lines.join('\n');
 }
 
@@ -220,6 +250,7 @@ export function composeChatRoomPrompt(
   history: ChatHistoryEntry[],
   newMessage: ChatRoomNewMessage,
   attachments?: PreparedAttachment[],
+  usesNativeMcp = true,
 ): string {
   const lines: string[] = [];
   lines.push('You are an AWB chat subagent responding to a user message in a chat room.');
@@ -252,8 +283,7 @@ export function composeChatRoomPrompt(
   lines.push('');
   lines.push('Instructions:');
   lines.push('- Compose a helpful reply using your knowledge and the conversation context.');
-  lines.push(`- Reply ONLY via the mcp__awb__send_chat_room_message MCP tool (room_id: "${roomId}").`);
-  lines.push('- Do NOT print your reply to stdout — it must go through send_chat_room_message so the user sees it in the web UI.');
+  for (const ln of chatReplyInstructions(usesNativeMcp, roomId)) lines.push(ln);
   return lines.join('\n');
 }
 
