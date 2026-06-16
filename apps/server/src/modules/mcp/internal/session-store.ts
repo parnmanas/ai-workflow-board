@@ -190,6 +190,31 @@ class SessionStore {
     return false;
   }
 
+  /**
+   * Return the McpServer of the most-recently-active LIVE session for the given
+   * agent, or undefined if the agent has no live session.
+   *
+   * This replaces the controller's old standalone `agentId → McpServer` map,
+   * which leaked: that map was keyed by the stable agentId and overwritten on
+   * every reconnect, then only `delete`d on close when no other session for the
+   * agent remained. An out-of-order close (a reconnect's session closing before
+   * the session it replaced) left the map pinning an already-closed McpServer —
+   * an orphan that could never be GC'd, plus a dead push target. Deriving the
+   * server from the live session set on demand removes that duplicate source of
+   * truth entirely, so the only McpServer references are the per-session
+   * entries this store already frees unconditionally on close/eviction/cleanup.
+   * Picking the most-recently-active session matches the intent of "push to the
+   * agent's current connection" when a reconnect briefly overlaps the old one.
+   */
+  getLatestServerForAgent(agentId: string): McpServer | undefined {
+    let latest: SessionEntry | undefined;
+    for (const entry of this.sessions.values()) {
+      if (entry.auth?.agentId !== agentId) continue;
+      if (!latest || entry.lastActivity >= latest.lastActivity) latest = entry;
+    }
+    return latest?.server;
+  }
+
   /** Register a hook to run after each idle-cleanup eviction. */
   onEviction(hook: SessionEvictionHook): void {
     this.evictionHooks.push(hook);

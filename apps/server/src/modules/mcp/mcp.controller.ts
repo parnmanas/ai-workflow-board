@@ -126,8 +126,10 @@ function captureToolsListBodyIfFirst(bodyStr: string): void {
 @ApiTags('mcp')
 @Controller()
 export class McpController implements OnModuleInit, OnModuleDestroy {
-  // agentId → McpServer mapping for push notifications
-  private agentServers = new Map<string, McpServer>();
+  // The push-target McpServer is derived on demand from `sessionStore`
+  // (getLatestServerForAgent) rather than kept in a separate agentId-keyed
+  // map. The old map leaked McpServer instances on out-of-order reconnect
+  // close — see SessionStore.getLatestServerForAgent for the full rationale.
   private triggerListener: ((event: any) => void) | null = null;
 
   constructor(
@@ -158,7 +160,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     this.triggerListener = (event: any) => {
       const agentId = event.agent_id;
       if (!agentId) return;
-      const mcpServer = this.agentServers.get(agentId);
+      const mcpServer = sessionStore.getLatestServerForAgent(agentId);
       if (!mcpServer) {
         mcpLog('Trigger push skipped: agent not connected via MCP', { agent_id: agentId });
         return;
@@ -200,7 +202,6 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
         // Still connected on another session — do nothing.
         return;
       }
-      this.agentServers.delete(agentId);
       this.agentConnectionService.markOffline(agentId).catch((e) => {
         mcpLogError(`Failed to mark agent offline on idle eviction: ${e}`);
       });
@@ -474,10 +475,9 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
               subagentTicketId: subagentTicketIdHeader,
               subagentTriggerSource: subagentTriggerSourceHeader,
             });
-            // Register agentId → server mapping for push notifications
-            if (mcpAuthInfo.agentId) {
-              this.agentServers.set(mcpAuthInfo.agentId, mcpServer);
-            }
+            // No separate agentId → server map: the push path derives the
+            // live server from sessionStore on demand (getLatestServerForAgent),
+            // so the McpServer is referenced only by this session's store entry.
             const who = mcpAuthInfo?.agentName || mcpAuthInfo?.keyHint || 'anonymous';
             mcpLog(`New session: ${id} by [${who}]  (active: ${sessionStore.size})`);
           },
@@ -497,11 +497,12 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
             sessionStore.remove(sid);
             mcpLog(`Session closed: ${sid}  (active: ${sessionStore.size})`);
           }
-          // Clean up agent → server mapping and mark offline, BUT only if no
-          // other live session for this agent remains (reconnect guard — see
-          // the eviction-hook comment above).
+          // Mark the agent offline, BUT only if no other live session for this
+          // agent remains (reconnect guard — see the eviction-hook comment
+          // above). The McpServer needs no explicit cleanup here: removing the
+          // session entry above drops the store's only reference to it, and the
+          // SDK's transport close already severs the transport↔server link.
           if (mcpAuthInfo?.agentId && !sessionStore.hasAgentSession(mcpAuthInfo.agentId)) {
-            this.agentServers.delete(mcpAuthInfo.agentId);
             this.agentConnectionService.markOffline(mcpAuthInfo.agentId).catch((e) => {
               mcpLogError(`Failed to mark agent offline: ${e}`);
             });
