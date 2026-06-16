@@ -19,6 +19,7 @@ import { ApiKeyService } from './api-key.service';
 import { DbRetentionService } from './db-retention.service';
 import { DiscordService } from './discord.service';
 import { LogService } from './log.service';
+import { MemoryMetricsRegistry } from './memory-metrics.registry';
 import { MemoryWatchdogService } from './memory-watchdog.service';
 import { NotificationService } from './notification.service';
 import { SystemCommentService } from './system-comment.service';
@@ -63,6 +64,7 @@ import {
     DbRetentionService,
     DiscordService,
     LogService,
+    MemoryMetricsRegistry,
     MemoryWatchdogService,
     SqljsFlushService,
     NotificationService,
@@ -82,6 +84,7 @@ import {
     ApiKeyService,
     DiscordService,
     LogService,
+    MemoryMetricsRegistry,
     ReBACService,
     MentionService,
     PresenceService,

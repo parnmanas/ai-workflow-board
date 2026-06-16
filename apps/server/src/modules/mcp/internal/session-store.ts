@@ -172,6 +172,22 @@ class SessionStore {
     return this.sessions.size;
   }
 
+  /**
+   * Count of DISTINCT agentIds with at least one live session. Memory
+   * observability uses this as the successor to the old controller-side
+   * `agentId → McpServer` map's entry count (that map was removed when its
+   * leak was fixed — see getLatestServerForAgent). `size` counts raw
+   * transport sessions (a single agent can hold several during a reconnect
+   * overlap); this counts unique connected agents.
+   */
+  distinctAgentCount(): number {
+    const agents = new Set<string>();
+    for (const entry of this.sessions.values()) {
+      if (entry.auth?.agentId) agents.add(entry.auth.agentId);
+    }
+    return agents.size;
+  }
+
   /** Remove a session entirely (transport + server + auth). Does NOT close transport. */
   remove(sessionId: string): boolean {
     return this.sessions.delete(sessionId);
