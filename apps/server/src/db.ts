@@ -15,12 +15,86 @@
  * - D-05: This file is the single source of truth for DataSource options.
  */
 import 'reflect-metadata';
-import { DataSource, DataSourceOptions } from 'typeorm';
+import { DataSource, DataSourceOptions, EntitySubscriberInterface, EventSubscriber } from 'typeorm';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as entitiesBarrel from './entities';
 
 const entities = Object.values(entitiesBarrel);
+
+/**
+ * True when the active backend is the dev sql.js (in-memory WASM) database.
+ * `DB_TYPE` unset or 'sqlite' both map to the sqljs driver (see
+ * buildDataSourceOptions). Postgres/MySQL (prod) return false — the batched
+ * flush machinery below is a no-op for them, they persist per-commit natively.
+ */
+export function isSqljsBackend(): boolean {
+  return (process.env.DB_TYPE || 'sqlite') === 'sqlite';
+}
+
+// ── dev sql.js batched-flush state (ticket d5a8594a) ─────────────────────────
+// Background: with `autoSave: true` the TypeORM sqljs driver re-serialized the
+// ENTIRE in-memory DB to a fresh Uint8Array and rewrote data.db on EVERY
+// non-SELECT query. Under the system's high-frequency audit writes — ActivityLog
+// (trigger_emitted/dispatched, backlog_promotion_* every few ms), AgentErrorLog,
+// Subagent / SubagentLogLine — that is large-allocation churn + sustained GC
+// pressure that accumulates over a long-lived dev session and contributes to the
+// memory-pressure stalls this ticket targets.
+//
+// Fix: `autoSave` is now OFF for sqljs (see buildDataSourceOptions). Writes are
+// coalesced and persisted by a single periodic flush (default 30s) plus a final
+// flush on graceful shutdown — at most one full-DB export/write per interval
+// instead of one per write, and ZERO work while the server is idle (the dirty
+// flag below gates the export). Trade-off: a HARD crash (SIGKILL / OOM kill /
+// power loss) can lose up to one flush-interval of the most recent writes;
+// graceful SIGTERM/SIGINT flush via the shutdown hook. Acceptable for DEV sql.js
+// — it is local, disposable data. Postgres/MySQL (prod) are untouched.
+//
+// `sqljsDirty` is process-global because the sql.js DB is a single in-memory
+// image per process and exactly one DataSource is initialized per entry point
+// (NestJS server → injected DataSource; standalone MCP server → AppDataSource).
+let sqljsDirty = false;
+let sqljsFlushInFlight = false;
+
+export function markSqljsDirty(): void {
+  sqljsDirty = true;
+}
+
+export function isSqljsDirty(): boolean {
+  return sqljsDirty;
+}
+
+/**
+ * TypeORM subscriber that flips the dirty flag whenever a write hits the sql.js
+ * DB. Registered only for the sqljs backend (see buildDataSourceOptions).
+ *
+ * `afterQuery` fires for EVERY statement the query runner executes — repository
+ * save/insert/update/remove, QueryBuilder .delete()/.update(), AND raw
+ * dataSource.query() calls — so unlike an entity-level afterInsert/afterUpdate
+ * subscriber it can't miss bulk/raw writes (e.g. the retention DELETEs or the
+ * boot-time manager-workspace strip). It mirrors the driver's own isDirty
+ * heuristic: anything that isn't a SELECT/PRAGMA is treated as a mutation.
+ * Marking dirty too eagerly only ever costs a redundant flush — never data loss.
+ *
+ * The `@EventSubscriber()` decorator is REQUIRED: TypeORM's buildSubscribers
+ * filters the `subscribers` option against the global metadata-args storage, so
+ * an undecorated class passed in `subscribers` is silently dropped and never
+ * receives events. The decorator registers it globally; the buildDataSourceOptions
+ * `subscribers: [SqljsWriteSubscriber]` entry scopes it to the sqljs connection
+ * only (the prod backends never list it, so it never attaches there).
+ */
+@EventSubscriber()
+export class SqljsWriteSubscriber implements EntitySubscriberInterface {
+  // Typed structurally rather than against TypeORM's AfterQueryEvent (which the
+  // package index does not re-export) — we only read `query` / `success`.
+  afterQuery(event: { query?: string; success?: boolean }): void {
+    if (event.success === false) return;
+    const command = (event.query || '').trimStart().split(/\s/, 1)[0].toUpperCase();
+    if (command && command !== 'SELECT' && command !== 'PRAGMA') {
+      markSqljsDirty();
+    }
+  }
+}
 
 // PRESET — not enforced. New boards seed with these starter columns so the
 // first-run UX isn't an empty page; the user can rename, reorder, delete,
@@ -268,7 +342,14 @@ export function buildDataSourceOptions(): DataSourceOptions {
   return {
     type: 'sqljs',
     location: sqliteLocation,
-    autoSave: true,
+    // autoSave OFF (ticket d5a8594a): the driver would otherwise re-serialize
+    // and rewrite the WHOLE DB on every write. Persistence is now batched by
+    // SqljsFlushService (NestJS server) / startSqljsAutoFlush (standalone MCP
+    // server) — periodic + on graceful shutdown. See the flush block below.
+    autoSave: false,
+    // SqljsWriteSubscriber flips the dirty flag on writes so an idle server
+    // flushes nothing. sqljs-only — the prod backends never construct it.
+    subscribers: [SqljsWriteSubscriber],
     entities,
     migrations: migrationsGlob,
     synchronize: true,   // D-01
@@ -278,6 +359,91 @@ export function buildDataSourceOptions(): DataSourceOptions {
 }
 
 export const AppDataSource = new DataSource(buildDataSourceOptions());
+
+// ── dev sql.js batched flush (ticket d5a8594a) ───────────────────────────────
+// Default cadence for the periodic flush. Tunable via SQLJS_FLUSH_INTERVAL_MS;
+// the resolver clamps to a sane window so a typo can't disable persistence
+// (too-low → per-write churn returns) or strand writes for minutes.
+export const DEFAULT_SQLJS_FLUSH_INTERVAL_MS = 30_000;
+const MIN_SQLJS_FLUSH_INTERVAL_MS = 1_000;       // 1s — floor; tighter defeats batching
+const MAX_SQLJS_FLUSH_INTERVAL_MS = 5 * 60_000;  // 5m — ceiling on the crash-loss window
+
+export function resolveSqljsFlushIntervalMs(): number {
+  const raw = Number.parseInt(process.env.SQLJS_FLUSH_INTERVAL_MS || '', 10);
+  if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_SQLJS_FLUSH_INTERVAL_MS;
+  return Math.min(MAX_SQLJS_FLUSH_INTERVAL_MS, Math.max(MIN_SQLJS_FLUSH_INTERVAL_MS, raw));
+}
+
+/**
+ * Persist the in-memory sql.js DB to disk if there are pending writes.
+ *
+ * - No-op for non-sqljs backends and for an uninitialized DataSource.
+ * - Skips the expensive full-DB export when nothing is dirty (unless `force`,
+ *   used by the shutdown flush to guarantee a final write).
+ * - Single-flighted: overlapping ticks coalesce instead of double-exporting.
+ *
+ * Ordering note: the dirty flag is cleared BEFORE the (synchronous) export so a
+ * write that lands during the async file write re-marks dirty and is caught on
+ * the next tick — it is never silently dropped. A failed save re-marks dirty so
+ * the batch is retried.
+ *
+ * @returns true if a save was actually performed.
+ */
+export async function flushSqljs(dataSource: DataSource, force = false): Promise<boolean> {
+  if (!isSqljsBackend()) return false;
+  if (!dataSource?.isInitialized) return false;
+  if (sqljsFlushInFlight) return false;
+  if (!force && !sqljsDirty) return false;
+
+  sqljsFlushInFlight = true;
+  sqljsDirty = false;
+  try {
+    await dataSource.sqljsManager.saveDatabase();
+    return true;
+  } catch (e) {
+    sqljsDirty = true; // surface for retry on the next tick / shutdown
+    throw e;
+  } finally {
+    sqljsFlushInFlight = false;
+  }
+}
+
+/**
+ * Start a periodic flush loop for a raw (non-NestJS) entry point — the
+ * standalone MCP server (mcp-server.ts) owns its DataSource (AppDataSource)
+ * directly and has no DI lifecycle, so it wires the timer + shutdown flush here.
+ * The NestJS server uses SqljsFlushService instead (DI-managed lifecycle).
+ *
+ * Returns a `stop()` that clears the timer and performs a final forced flush —
+ * call it from the process's SIGINT/SIGTERM handler. No-op (returns an
+ * idempotent stop) on non-sqljs backends.
+ */
+export function startSqljsAutoFlush(
+  dataSource: DataSource,
+  opts: { onError?: (e: unknown) => void } = {},
+): () => Promise<void> {
+  if (!isSqljsBackend()) {
+    return async () => {};
+  }
+  const intervalMs = resolveSqljsFlushIntervalMs();
+  const handle = setInterval(() => {
+    flushSqljs(dataSource).catch((e) => opts.onError?.(e));
+  }, intervalMs);
+  // Don't let the flush timer alone keep the process alive.
+  if (typeof handle.unref === 'function') handle.unref();
+
+  let stopped = false;
+  return async () => {
+    if (stopped) return;
+    stopped = true;
+    clearInterval(handle);
+    try {
+      await flushSqljs(dataSource, true);
+    } catch (e) {
+      opts.onError?.(e);
+    }
+  };
+}
 
 // Matches the family of errors sql.js / SQLite raises when the file on disk
 // is not a valid, intact database. Used to distinguish a corrupt-DB failure

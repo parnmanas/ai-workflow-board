@@ -27,6 +27,12 @@ async function bootstrap() {
 
   const app = await NestFactory.create(AppModule);
 
+  // Listen for SIGTERM/SIGINT and await NestJS lifecycle hooks (onModuleDestroy)
+  // before the process exits. Needed so SqljsFlushService gets its final flush
+  // on a graceful stop (ticket d5a8594a — dev sql.js autoSave is off); also lets
+  // every sweep service clear its timers cleanly. No-op effect on prod backends.
+  app.enableShutdownHooks();
+
   // Raise Express body-parser limit from its 100KB default. Agent plugins
   // ship proxy.log error + event batches (up to 500 entries, each can carry
   // ~200 bytes of raw_line) — a routine batch crosses 100KB, which made the

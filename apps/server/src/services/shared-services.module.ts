@@ -25,6 +25,7 @@ import { SystemCommentService } from './system-comment.service';
 import { ReBACService } from './rebac.service';
 import { MentionService } from './mention.service';
 import { PresenceService } from './presence.service';
+import { SqljsFlushService } from './sqljs-flush.service';
 import {
   DiscordUserProvider,
   SlackUserProvider,
@@ -63,6 +64,7 @@ import {
     DiscordService,
     LogService,
     MemoryWatchdogService,
+    SqljsFlushService,
     NotificationService,
     SystemCommentService,
     ReBACService,

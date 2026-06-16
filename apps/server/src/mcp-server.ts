@@ -27,7 +27,7 @@ import { randomUUID } from 'crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
-import { initDb, AppDataSource } from './db';
+import { initDb, AppDataSource, startSqljsAutoFlush } from './db';
 import { preSyncPostgres } from './database/pre-sync-postgres';
 import { createStandaloneContext } from './modules/mcp/tools';
 import { createMcpServerForContext } from './modules/mcp/internal/create-mcp-server';
@@ -201,6 +201,25 @@ async function main() {
   // See pre-sync-postgres.ts — must run before TypeORM initializes.
   await preSyncPostgres();
   await initDb();
+
+  // Dev sql.js autoSave is off (ticket d5a8594a) — this standalone entry owns
+  // AppDataSource directly (no NestJS lifecycle), so it drives the batched flush
+  // timer here and forces a final flush on graceful shutdown. No-op on Postgres.
+  const stopSqljsFlush = startSqljsAutoFlush(AppDataSource, {
+    onError: (e) => console.error('[MCP] sql.js flush failed:', e),
+  });
+  let shuttingDown = false;
+  for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+    process.once(sig, async () => {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      try {
+        await stopSqljsFlush();
+      } finally {
+        process.exit(0);
+      }
+    });
+  }
 
   const transport = (process.env.MCP_TRANSPORT || 'stdio').toLowerCase();
 
