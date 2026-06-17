@@ -124,6 +124,9 @@ test('static: every ticket-named collection holder registers a gauge', () => {
     [['modules', 'agent-manager', 'instance-registry.service.ts'], "register('agentManager.instances'"],
     [['modules', 'agent-manager', 'pairing.service.ts'], "register('agentManager.pairingTokens'"],
     [['modules', 'agent-manager', 'command-ledger.service.ts'], "register('agentManager.commandRecords'"],
+    // Added for ticket 59090d37 — the appendLocks map was the dead-guard leak;
+    // its size gauge is how prod confirms the eviction fix holds.
+    [['services', 'subagent-monitor.service.ts'], "register('subagent.appendLocks'"],
   ];
   for (const [relParts, needle] of cases) {
     assert.ok(
