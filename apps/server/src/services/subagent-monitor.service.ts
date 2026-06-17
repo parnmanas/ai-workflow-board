@@ -5,6 +5,7 @@ import { Subagent } from '../entities/Subagent';
 import { SubagentLogLine } from '../entities/SubagentLogLine';
 import { activityEvents } from './activity.service';
 import { LogService } from './log.service';
+import { MemoryMetricsRegistry } from './memory-metrics.registry';
 
 /**
  * Persistent registry + live transcript bus for plugin-spawned subagents.
@@ -79,7 +80,15 @@ export class SubagentMonitorService {
     @InjectRepository(Subagent) private readonly subagents: Repository<Subagent>,
     @InjectRepository(SubagentLogLine) private readonly lines: Repository<SubagentLogLine>,
     private readonly logService: LogService,
+    metrics: MemoryMetricsRegistry,
   ) {
+    // appendLocks is the highest-churn in-memory map in this service: one
+    // transient entry per (concurrently-appending) subagentId. With the
+    // _serialize self-eviction working it should sit at ~0 at rest; a
+    // non-zero steady-state reading on /api/diagnostics/memory is the early
+    // warning that the eviction guard regressed again (see the dead-guard
+    // leak fixed for ticket 59090d37).
+    metrics.register('subagent.appendLocks', () => this.appendLocks.size);
     setInterval(() => {
       this._sweepEnded().catch((err) =>
         this.logService.warn('SubagentMonitor', `sweep failed: ${err.message}`),
@@ -330,15 +339,25 @@ export class SubagentMonitorService {
     const prior = this.appendLocks.get(key) ?? Promise.resolve();
     let release: () => void = () => {};
     const next = new Promise<void>((resolve) => { release = resolve; });
-    this.appendLocks.set(key, prior.then(() => next));
+    // The value stored under `key` is the CHAINED promise (prior → next), not
+    // `next` itself — the next caller awaits this chain so its run starts only
+    // after ours releases, preserving per-subagent serialization. Cleanup must
+    // therefore compare against `chained`: the previous code compared the map
+    // head against `next`, which is never the stored value, so the guard was
+    // dead and every subagentId left a permanent entry (prod OOM, ticket
+    // 59090d37). Keep both bindings identical.
+    const chained = prior.then(() => next);
+    this.appendLocks.set(key, chained);
     try {
       await prior;
       return await fn();
     } finally {
       release();
       // Best-effort cleanup so the map doesn't grow unboundedly with finished
-      // subagents. Only delete if the head is still ours.
-      if (this.appendLocks.get(key) === next) this.appendLocks.delete(key);
+      // subagents. Only delete if the head is still ours — a later overlapping
+      // append for the same key will have replaced it, and that caller owns
+      // the eviction.
+      if (this.appendLocks.get(key) === chained) this.appendLocks.delete(key);
     }
   }
 
