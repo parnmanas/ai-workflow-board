@@ -42,6 +42,9 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
   const [deleteTarget, setDeleteTarget] = useState<Resource | null>(null);
   const [saving, setSaving] = useState(false);
   const [filterType, setFilterType] = useState<string>('');
+  // Default = 업로드(created_at) 최신순: 가장 최근에 올린 리소스가 맨 위.
+  const [sortBy, setSortBy] = useState<'created_at' | 'updated_at' | 'name' | 'type'>('created_at');
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
 
   const [formName, setFormName] = useState('');
   const [formDescription, setFormDescription] = useState('');
@@ -87,6 +90,7 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
           effectiveWorkspaceId,
           boardId !== undefined ? (boardId || '') : undefined,
           filterType || undefined,
+          { by: sortBy, order: sortOrder },
         ),
         api.listCredentials(effectiveWorkspaceId).catch(() => [] as Credential[]),
       ]);
@@ -97,7 +101,7 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
     } finally {
       setLoading(false);
     }
-  }, [effectiveWorkspaceId, boardId, filterType, showToast]);
+  }, [effectiveWorkspaceId, boardId, filterType, sortBy, sortOrder, showToast]);
 
   useEffect(() => {
     loadResources();
@@ -331,6 +335,18 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
     );
   }
 
+  // Shared style for the toolbar filter/sort selects — keeps type filter and
+  // the new sort controls visually uniform (티켓 통일감 요구).
+  const filterSelectStyle: React.CSSProperties = {
+    background: tokens.colors.surface,
+    border: `1px solid ${tokens.colors.border}`,
+    borderRadius: tokens.radii.md,
+    padding: '4px 8px',
+    color: tokens.colors.textStrong,
+    fontSize: '12px',
+    fontFamily: 'inherit',
+  };
+
   const iconBadgeStyle = (type: string): React.CSSProperties => {
     const colorMap: Record<string, string> = {
       repository: tokens.colors.accent,
@@ -356,25 +372,38 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <span style={{ fontSize: 13, color: tokens.colors.textMuted }}>{resources.length} resources</span>
           <select
             value={filterType}
             onChange={(e) => setFilterType(e.target.value)}
-            style={{
-              background: tokens.colors.surface,
-              border: `1px solid ${tokens.colors.border}`,
-              borderRadius: tokens.radii.md,
-              padding: '4px 8px',
-              color: tokens.colors.textStrong,
-              fontSize: '12px',
-              fontFamily: 'inherit',
-            }}
+            style={filterSelectStyle}
+            aria-label="Filter by type"
           >
             <option value="">All types</option>
             {RESOURCE_TYPES.map((t) => (
               <option key={t.value} value={t.value}>{t.label}</option>
             ))}
+          </select>
+          <select
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
+            style={filterSelectStyle}
+            aria-label="Sort by"
+          >
+            <option value="created_at">Sort: Uploaded</option>
+            <option value="updated_at">Sort: Updated</option>
+            <option value="name">Sort: Name</option>
+            <option value="type">Sort: Type</option>
+          </select>
+          <select
+            value={sortOrder}
+            onChange={(e) => setSortOrder(e.target.value as typeof sortOrder)}
+            style={filterSelectStyle}
+            aria-label="Sort order"
+          >
+            <option value="desc">{sortBy === 'name' || sortBy === 'type' ? 'Z → A' : 'Newest first'}</option>
+            <option value="asc">{sortBy === 'name' || sortBy === 'type' ? 'A → Z' : 'Oldest first'}</option>
           </select>
         </div>
         <Button variant="primary" size="md" onClick={startCreate}>+ New Resource</Button>

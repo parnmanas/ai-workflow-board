@@ -34,6 +34,8 @@ export class ResourcesController {
     @Query('workspace_id') workspaceId: string,
     @Query('board_id') boardId: string | undefined,
     @Query('type') type: string | undefined,
+    @Query('sort_by') sortBy: string | undefined,
+    @Query('sort_order') sortOrder: string | undefined,
     @Res() res: Response,
   ) {
     if (!workspaceId) {
@@ -56,7 +58,25 @@ export class ResourcesController {
     // comment attachments alongside user-created resources so files uploaded
     // through ticket comments are discoverable. MCP `list_resources` keeps
     // its own default that hides comment_attachment from agents to cut noise.
-    const resources = await qb.orderBy('r.name', 'ASC').getMany();
+
+    // Sort whitelist — only known entity columns are interpolated into the
+    // ORDER BY clause, so a hostile sort_by/sort_order can never inject SQL.
+    // Default = created_at DESC (most recently uploaded first); the column
+    // names below match Resource entity fields and resolve the same way on
+    // SQLite and Postgres.
+    const SORT_COLUMNS: Record<string, string> = {
+      name: 'r.name',
+      created_at: 'r.created_at',
+      updated_at: 'r.updated_at',
+      type: 'r.type',
+    };
+    const sortColumn = SORT_COLUMNS[sortBy ?? ''] || 'r.created_at';
+    const sortDir: 'ASC' | 'DESC' = (sortOrder ?? '').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+    qb.orderBy(sortColumn, sortDir);
+    // Stable tie-breaker so equal sort keys keep a deterministic order across
+    // requests (e.g. two resources created in the same second).
+    if (sortColumn !== 'r.name') qb.addOrderBy('r.name', 'ASC');
+    const resources = await qb.getMany();
     const parsed = resources.map((r) => ({
       ...r,
       tags: (() => { try { return JSON.parse(r.tags || '[]'); } catch { return []; } })(),

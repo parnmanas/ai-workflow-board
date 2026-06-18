@@ -752,10 +752,17 @@ export const api = {
   },
 
   // ─── Resources ─────────────────────────────────────────
-  listResources: (workspaceId: string, boardId?: string | null, type?: string) => {
+  listResources: (
+    workspaceId: string,
+    boardId?: string | null,
+    type?: string,
+    sort?: { by?: string; order?: 'asc' | 'desc' },
+  ) => {
     const params = new URLSearchParams({ workspace_id: workspaceId });
     if (boardId !== undefined) params.set('board_id', boardId || '');
     if (type) params.set('type', type);
+    if (sort?.by) params.set('sort_by', sort.by);
+    if (sort?.order) params.set('sort_order', sort.order);
     return request<Resource[]>(`/resources?${params.toString()}`);
   },
   getResource: (id: string) =>
