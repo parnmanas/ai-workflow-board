@@ -127,6 +127,10 @@ test('static: every ticket-named collection holder registers a gauge', () => {
     // Added for ticket 59090d37 — the appendLocks map was the dead-guard leak;
     // its size gauge is how prod confirms the eviction fix holds.
     [['services', 'subagent-monitor.service.ts'], "register('subagent.appendLocks'"],
+    // Added for ticket d1fc18ac — secondary server-side stale-key leaks; the
+    // size gauges are how prod confirms the eviction/prune fixes hold.
+    [['modules', 'agents', 'agent-status.service.ts'], "register('agentStatus.state'"],
+    [['modules', 'agents', 'ticket-supervisor.service.ts'], "register('ticketSupervisor.state'"],
   ];
   for (const [relParts, needle] of cases) {
     assert.ok(
