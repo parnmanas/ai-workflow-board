@@ -4,6 +4,7 @@ import type {
   Action,
   ActionRun,
   QaScenario,
+  QaScenarioListItem,
   QaRun,
   Credential,
   ChatMessage,
@@ -905,7 +906,7 @@ export const api = {
   listQaScenarios: (workspaceId: string, boardId?: string | null) => {
     const params = new URLSearchParams({ workspace_id: workspaceId });
     if (boardId !== undefined) params.set('board_id', boardId || '');
-    return request<QaScenario[]>(`/qa/scenarios?${params.toString()}`);
+    return request<QaScenarioListItem[]>(`/qa/scenarios?${params.toString()}`);
   },
   getQaScenario: (id: string) => request<QaScenario>(`/qa/scenarios/${id}`),
   createQaScenario: (data: {

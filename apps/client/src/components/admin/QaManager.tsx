@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { api, getActiveWorkspaceId, rawResourceUrl } from '../../api';
-import type { QaScenario, QaRun, QaStepResult } from '../../types';
+import type { QaScenario, QaScenarioListItem, QaRun, QaStepResult } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 import { Button, Input, Select, Modal, Card, Badge, ConfirmDialog } from '../common';
@@ -33,7 +33,7 @@ export default function QaManager({ workspaceId, boardId }: QaManagerProps) {
   const { showToast } = useToast();
   const effectiveWorkspaceId = workspaceId || (getActiveWorkspaceId() || '');
 
-  const [scenarios, setScenarios] = useState<QaScenario[]>([]);
+  const [scenarios, setScenarios] = useState<QaScenarioListItem[]>([]);
   const [agents, setAgents] = useState<Array<{ id: string; name: string }>>([]);
   const [selected, setSelected] = useState<QaScenario | null>(null);
   const [running, setRunning] = useState<string | null>(null);
@@ -153,38 +153,138 @@ export default function QaManager({ workspaceId, boardId }: QaManagerProps) {
           </div>
         </Card>
       ) : (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: tokens.spacing.md }}>
-          {scenarios.map((s) => (
-            <Card key={s.id} padding="14px 16px">
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
-                <div style={{ cursor: 'pointer', flex: 1 }} onClick={() => setSelected(s)}>
-                  <div style={{ fontWeight: 600, color: tokens.colors.textPrimary, marginBottom: 4 }}>{s.name}</div>
-                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 6 }}>
-                    {s.qa_driver && <Badge variant="info" size="sm">{s.qa_driver}</Badge>}
-                    <Badge variant="neutral" size="sm">{(s.steps?.length ?? 0)} steps</Badge>
-                    {!s.enabled && <Badge variant="warning" size="sm">disabled</Badge>}
-                  </div>
-                  {s.description && (
-                    <div style={{ fontSize: 12, color: tokens.colors.textSecondary, marginBottom: 6 }}>{s.description}</div>
-                  )}
-                  <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>agent: {agentName(s.target_agent_id)}</div>
-                </div>
-              </div>
-              <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-                <Button variant="primary" size="sm" onClick={() => handleRun(s)} disabled={running === s.id}>
-                  {running === s.id ? 'Starting…' : '▶ Run'}
-                </Button>
-                <Button variant="ghost" size="sm" onClick={() => setSelected(s)}>Open</Button>
-                <Button variant="ghost" size="sm" onClick={() => setEditing(s)}>Edit</Button>
-                <Button variant="danger" size="sm" onClick={() => setConfirmDelete(s)}>Delete</Button>
-              </div>
-            </Card>
-          ))}
-        </div>
+        <ScenarioTable
+          scenarios={scenarios}
+          agentName={agentName}
+          running={running}
+          onOpen={(s) => setSelected(s)}
+          onRun={handleRun}
+          onEdit={(s) => setEditing(s)}
+          onDelete={(s) => setConfirmDelete(s)}
+        />
       )}
 
       {modals}
     </div>
+  );
+}
+
+// ── Scenario list table (status-dashboard view) ──────────────────────────────
+
+interface ScenarioTableProps {
+  scenarios: QaScenarioListItem[];
+  agentName: (id: string) => string;
+  running: string | null;
+  onOpen: (s: QaScenarioListItem) => void;
+  onRun: (s: QaScenarioListItem) => void;
+  onEdit: (s: QaScenarioListItem) => void;
+  onDelete: (s: QaScenarioListItem) => void;
+}
+
+const TH: React.CSSProperties = {
+  textAlign: 'left', padding: '8px 12px', fontSize: 11, fontWeight: 700,
+  textTransform: 'uppercase', letterSpacing: 0.5, color: tokens.colors.textMuted,
+  borderBottom: `1px solid ${tokens.colors.border}`, whiteSpace: 'nowrap',
+};
+const TD: React.CSSProperties = {
+  padding: '10px 12px', fontSize: 13, color: tokens.colors.textPrimary,
+  borderBottom: `1px solid ${tokens.colors.border}`, verticalAlign: 'middle',
+};
+
+/**
+ * QA scenarios rendered as a CI/test-runner-style status table — one row per
+ * scenario, last-run time + result scannable down a column. Replaces the old
+ * card grid (prompt/description bodies live in the detail view, not here).
+ */
+function ScenarioTable({ scenarios, agentName, running, onOpen, onRun, onEdit, onDelete }: ScenarioTableProps) {
+  return (
+    <div style={{ overflowX: 'auto', border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 760 }}>
+        <thead>
+          <tr>
+            <th style={TH}>Name</th>
+            <th style={TH}>Driver</th>
+            <th style={TH}>Agent</th>
+            <th style={TH}>Last run</th>
+            <th style={TH}>Result</th>
+            <th style={{ ...TH, textAlign: 'right' }}>Pass</th>
+            <th style={{ ...TH, textAlign: 'right' }}>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {scenarios.map((s) => (
+            <ScenarioRow
+              key={s.id}
+              s={s}
+              agentName={agentName}
+              running={running === s.id}
+              onOpen={() => onOpen(s)}
+              onRun={() => onRun(s)}
+              onEdit={() => onEdit(s)}
+              onDelete={() => onDelete(s)}
+            />
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+interface ScenarioRowProps {
+  s: QaScenarioListItem;
+  agentName: (id: string) => string;
+  running: boolean;
+  onOpen: () => void;
+  onRun: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
+}
+
+function ScenarioRow({ s, agentName, running, onOpen, onRun, onEdit, onDelete }: ScenarioRowProps) {
+  const [hover, setHover] = useState(false);
+  // Buttons must not bubble to the row's open handler.
+  const stop = (fn: () => void) => (e: React.MouseEvent) => { e.stopPropagation(); fn(); };
+
+  return (
+    <tr
+      onClick={onOpen}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{ cursor: 'pointer', background: hover ? tokens.colors.surfaceHover : 'transparent' }}
+    >
+      <td style={TD}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontWeight: 600, color: tokens.colors.textPrimary }}>{s.name}</span>
+          {!s.enabled && <Badge variant="warning" size="sm">disabled</Badge>}
+        </div>
+      </td>
+      <td style={TD}>
+        {s.qa_driver ? <Badge variant="info" size="sm">{s.qa_driver}</Badge> : <span style={{ color: tokens.colors.textMuted }}>—</span>}
+      </td>
+      <td style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap' }}>{agentName(s.target_agent_id)}</td>
+      <td style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap' }}>
+        {s.last_run_at ? relativeTime(s.last_run_at) : <span style={{ color: tokens.colors.textMuted }}>never run</span>}
+      </td>
+      <td style={TD}>
+        {s.last_run_status
+          ? <Badge variant={statusVariant(s.last_run_status)} size="sm">{s.last_run_status}</Badge>
+          : <span style={{ color: tokens.colors.textMuted }}>—</span>}
+      </td>
+      <td style={{ ...TD, textAlign: 'right', whiteSpace: 'nowrap' }}>
+        {s.pass_rate !== null
+          ? <span title={`${s.run_count} run${s.run_count === 1 ? '' : 's'}`} style={{ color: s.pass_rate === 100 ? tokens.colors.success : tokens.colors.textSecondary, fontVariantNumeric: 'tabular-nums' }}>{s.pass_rate}%</span>
+          : <span style={{ color: tokens.colors.textMuted }}>—</span>}
+      </td>
+      <td style={{ ...TD, textAlign: 'right', whiteSpace: 'nowrap' }}>
+        <div style={{ display: 'inline-flex', gap: 6 }} onClick={(e) => e.stopPropagation()}>
+          <Button variant="primary" size="sm" onClick={stop(onRun)} disabled={running}>
+            {running ? 'Starting…' : '▶ Run'}
+          </Button>
+          <Button variant="ghost" size="sm" onClick={stop(onEdit)}>Edit</Button>
+          <Button variant="danger" size="sm" onClick={stop(onDelete)}>Delete</Button>
+        </div>
+      </td>
+    </tr>
   );
 }
 
