@@ -35,9 +35,15 @@ interface CommentListProps {
   // subsequent virtual rerender doesn't re-fire the highlight.
   scrollToCommentId?: string | null;
   onScrollToCommentConsumed?: () => void;
+  // 동적 로딩: 코멘트는 최신이 위(DESC)라 더 오래된 코멘트는 목록 아래쪽에 있다.
+  // 사용자가 하단에 근접하면 onLoadOlder 를 호출해 다음 페이지를 받는다. 아래로
+  // append 되므로 스크롤 위치는 자동 유지된다(prepend 복원 hack 불필요).
+  onLoadOlder?: () => void;
+  hasMoreOlder?: boolean;
+  loadingOlder?: boolean;
 }
 
-export default function CommentList({ comments, onImagePreview, onSetCommentStatus, onReply, replyingToCommentId, lastReadAt, mutedTypes, scrollToCommentId, onScrollToCommentConsumed }: CommentListProps) {
+export default function CommentList({ comments, onImagePreview, onSetCommentStatus, onReply, replyingToCommentId, lastReadAt, mutedTypes, scrollToCommentId, onScrollToCommentConsumed, onLoadOlder, hasMoreOlder, loadingOlder }: CommentListProps) {
   const lastReadMs = lastReadAt ? new Date(lastReadAt).getTime() : null;
   const parentRef = useRef<HTMLDivElement>(null);
 
@@ -104,6 +110,24 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
     getItemKey: (index) => flatRows[index].comment.id,
     overscan: 5,
   });
+
+  // 하단 근접 시 older-page 로드. onScroll 과, 페이지가 뷰포트를 못 채워 스크롤이
+  // 안 생기는 경우(짧은 코멘트뿐)를 대비해 목록 변화 시점에도 한 번 점검한다.
+  const onLoadOlderRef = useRef(onLoadOlder);
+  onLoadOlderRef.current = onLoadOlder;
+  const maybeLoadOlder = useCallback(() => {
+    const el = parentRef.current;
+    if (!el || !hasMoreOlder || loadingOlder) return;
+    const NEAR_BOTTOM = 200;
+    if (el.scrollHeight - el.scrollTop - el.clientHeight <= NEAR_BOTTOM) {
+      onLoadOlderRef.current?.();
+    }
+  }, [hasMoreOlder, loadingOlder]);
+  useEffect(() => {
+    // 레이아웃 확정 후 점검(auto-fill).
+    const raf = requestAnimationFrame(maybeLoadOlder);
+    return () => cancelAnimationFrame(raf);
+  }, [maybeLoadOlder, flatRows.length]);
 
   // Internal jump-to-comment for decision reference chips. Lives on the
   // virtualizer so we don't have to plumb scroll state out to TicketPanel —
@@ -172,7 +196,7 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
   }
 
   return (
-    <div ref={parentRef} style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+    <div ref={parentRef} onScroll={maybeLoadOlder} style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
       <div style={{ height: `${virtualizer.getTotalSize()}px`, position: 'relative' }}>
         {virtualizer.getVirtualItems().map(virtualItem => {
           const row = flatRows[virtualItem.index];
@@ -509,6 +533,16 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
           );
         })}
       </div>
+      {/* older-page 로딩 표시. 가상 목록(절대배치) 아래에 일반 흐름으로 붙어
+         스크롤 컨테이너 높이를 늘리므로 위치 점프 없이 추가된다. */}
+      {loadingOlder && (
+        <div style={{
+          textAlign: 'center', padding: '8px 0', fontSize: '11px',
+          color: tokens.colors.textMuted,
+        }}>
+          Loading older comments…
+        </div>
+      )}
     </div>
   );
 }

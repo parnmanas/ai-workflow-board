@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Ticket, Agent, Channel, ActivityLog, CommentType, User, TicketAttachmentMeta, Resource, RepoBranch, TicketPrerequisiteRow, Action, EffortPreset, EffortPresetsConfig, BUILTIN_EFFORT_PRESETS } from '../types';
+import { Ticket, Agent, Channel, ActivityLog, Comment, CommentType, User, TicketAttachmentMeta, Resource, RepoBranch, TicketPrerequisiteRow, Action, EffortPreset, EffortPresetsConfig, BUILTIN_EFFORT_PRESETS } from '../types';
 import { api, TicketRoleAssignmentRow, getActiveWorkspaceId, rawResourceUrl } from '../api';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
@@ -543,6 +543,94 @@ export default function TicketPanel({
 
   // Derive active ticket from the root ticket tree
   const activeTicket = findInTree(ticket, activePanelId) || ticket;
+
+  // ─── 코멘트 동적 로딩 (커서 페이지네이션) ────────────────────────
+  // 서버 detail GET 은 노드별 최신 N개 코멘트만 싣는다(OOM 방지). 더 오래된
+  // 코멘트는 사용자가 목록 하단으로 스크롤할 때 GET /tickets/:id/comments 로
+  // 페이지 단위 로드한다. 코멘트는 최신이 위(DESC)라 옛 코멘트는 아래쪽에
+  // 쌓이므로, 하단 append 만으로 스크롤 위치가 자동 유지된다(prepend 복원 불필요).
+  // 패널은 root/child 를 오가므로(navStack) 패널 티켓 id 별로 상태를 분리한다.
+  //
+  // 누적(accumulator) 방식: older-page 를 한 번이라도 받은 패널은 "그때까지 보던
+  // 전체 목록 + 새 older-page" 를 loadedByPanel 에 쌓는다. 서버 detail 윈도우는
+  // 새 코멘트가 들어오면 최신 N개로 슬라이드하므로, 단순히 (윈도우 + older) 만
+  // 합치면 윈도우에서 밀려난 경계 코멘트가 둘 사이로 빠진다 — accumulator 가 한 번
+  // 본 코멘트를 계속 보관해 그 누락을 막는다.
+  const COMMENT_PAGE = 50;
+  const [loadedByPanel, setLoadedByPanel] = useState<Record<string, Comment[]>>({});
+  const [hasMoreByPanel, setHasMoreByPanel] = useState<Record<string, boolean>>({});
+  const [loadingOlderPanel, setLoadingOlderPanel] = useState<string | null>(null);
+
+  // root 티켓이 바뀌면 이전 트리의 누적 캐시를 비운다(navStack 리셋과 동일 시점).
+  useEffect(() => {
+    setLoadedByPanel({});
+    setHasMoreByPanel({});
+    setLoadingOlderPanel(null);
+  }, [ticket.id]);
+
+  const sortByCreatedDesc = (arr: Comment[]) => arr.sort((a, b) => {
+    const d = new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+    if (d !== 0) return d;
+    return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
+  });
+
+  // 서버 윈도우(activeTicket.comments, SSE 라이브 갱신 경로 그대로) + 누적분을
+  // id dedupe 병합. 윈도우 버전이 최신(상태 변경/편집/repeat_count)이라 덮어쓴다.
+  const mergedComments = useMemo(() => {
+    const acc = loadedByPanel[activePanelId];
+    const fresh = activeTicket.comments || [];
+    if (!acc || acc.length === 0) return fresh; // older 미로드: 윈도우 그대로
+    const map = new Map<string, Comment>();
+    for (const c of acc) map.set(c.id, c);
+    for (const c of fresh) map.set(c.id, c as Comment);
+    return sortByCreatedDesc(Array.from(map.values()));
+  }, [loadedByPanel, activePanelId, activeTicket.comments]);
+
+  // older 를 받은 패널은 라이브 refetch 가 올 때마다 윈도우를 accumulator 로
+  // 흡수해, 윈도우가 슬라이드해도 경계 코멘트를 잃지 않게 한다(미로드 패널은
+  // 메모리 절약 위해 accumulator 를 만들지 않는다).
+  useEffect(() => {
+    const fresh = activeTicket.comments || [];
+    if (fresh.length === 0) return;
+    setLoadedByPanel(prev => {
+      const existing = prev[activePanelId];
+      if (!existing) return prev;
+      const map = new Map(existing.map(c => [c.id, c]));
+      for (const c of fresh) map.set(c.id, c as Comment);
+      return { ...prev, [activePanelId]: Array.from(map.values()) };
+    });
+  }, [activeTicket.comments, activePanelId]);
+
+  // 아직 older-page 를 한 번도 안 받았으면 서버의 comments_has_more 로 초기값을
+  // 잡고, 이후엔 패널별 상태가 우선한다(라이브 refetch 가 덮어쓰지 못하게).
+  const activeHasMore = hasMoreByPanel[activePanelId] ?? (activeTicket.comments_has_more ?? false);
+
+  // 하단 근접 시 CommentList 가 호출. 현재 보던 전체 목록의 가장 오래된 항목을
+  // 커서(before)로 다음 페이지를 받아 누적한다. 첫 호출 시 accumulator 를 현재
+  // 목록으로 seed 해 윈도우 경계 코멘트를 포착한다.
+  const handleLoadOlder = useCallback(async () => {
+    const panelId = activePanelId;
+    if (loadingOlderPanel) return;
+    const current = mergedComments;
+    const oldest = current[current.length - 1];
+    if (!oldest) return;
+    setLoadingOlderPanel(panelId);
+    try {
+      const page = await api.getTicketComments(panelId, { limit: COMMENT_PAGE, before: oldest.id });
+      setLoadedByPanel(prev => {
+        const existing = prev[panelId] || current; // seed: 현재 목록(윈도우+경계 포함)
+        const map = new Map(existing.map(c => [c.id, c]));
+        for (const c of page) if (!map.has(c.id)) map.set(c.id, c as Comment);
+        return { ...prev, [panelId]: Array.from(map.values()) };
+      });
+      // 페이지가 limit 보다 적게 오면 더 이상 없음.
+      setHasMoreByPanel(prev => ({ ...prev, [panelId]: page.length >= COMMENT_PAGE }));
+    } catch {
+      /* 실패해도 기존 목록 유지 — 다음 스크롤에서 재시도 가능 */
+    } finally {
+      setLoadingOlderPanel(cur => (cur === panelId ? null : cur));
+    }
+  }, [activePanelId, loadingOlderPanel, mergedComments]);
 
   const handleSelectChild = useCallback((child: Ticket) => {
     setNavStack(prev => [...prev, child.id]);
@@ -1736,14 +1824,14 @@ export default function TicketPanel({
   }, [activeTicket.id]);
 
   const handleStartReply = useCallback((commentId: string) => {
-    const target = (activeTicket.comments || []).find(c => c.id === commentId);
+    const target = mergedComments.find(c => c.id === commentId);
     if (!target) return;
     setReplyingTo({
       id: target.id,
       preview: (target.content || '').slice(0, 120),
       author: target.author || 'Someone',
     });
-  }, [activeTicket.comments]);
+  }, [mergedComments]);
 
   // Drop reply context when the user navigates to a different ticket so the
   // banner can't outlive the question it points at.
@@ -1790,7 +1878,7 @@ export default function TicketPanel({
   // Replies whose parent is missing from the dataset entirely (true orphans,
   // e.g. parent deleted) still pass — CommentList renders them at top level.
   const filteredComments = useMemo(() => {
-    const all = activeTicket.comments || [];
+    const all = mergedComments;
     const byId = new Map<string, typeof all[number]>();
     for (const c of all) byId.set(c.id, c);
     const visibleByOwnType = (c: typeof all[number]): boolean => {
@@ -1807,7 +1895,7 @@ export default function TicketPanel({
       }
       return true;
     });
-  }, [activeTicket.comments, activeTypes]);
+  }, [mergedComments, activeTypes]);
 
   // Counts per type — drives chip badge ("3" beside Question, etc.) so the
   // user can see at a glance which buckets have content.
@@ -1815,7 +1903,10 @@ export default function TicketPanel({
     const counts: Record<CommentType, number> = {
       note: 0, question: 0, answer: 0, decision: 0, chat: 0, system: 0, handoff: 0,
     };
-    for (const c of activeTicket.comments || []) {
+    // 페이지네이션 이후 칩 카운트는 "현재 로드된" 코멘트 기준이다. 더 오래된
+    // 코멘트를 스크롤 로드하면 값이 올라간다(전체 카운트를 위해 트리 전체를
+    // 메모리에 올리는 건 이 티켓의 목적과 정면충돌하므로 의도적 선택).
+    for (const c of mergedComments) {
       if (c.author_type === 'system') {
         counts.system += 1;
       } else {
@@ -1823,12 +1914,13 @@ export default function TicketPanel({
       }
     }
     return counts;
-  }, [activeTicket.comments]);
+  }, [mergedComments]);
 
   // Tab badge stays filter-independent — toggling chips shouldn't change "how
   // many comments this ticket has". System rows still excluded so the badge
-  // reflects user-relevant volume.
-  const userCommentCount = (activeTicket.comments || []).filter(c => c.author_type !== 'system').length;
+  // reflects user-relevant volume. 페이지네이션으로 "로드된" 수만 세므로, 더
+  // 오래된 코멘트가 남아 있으면 `+` 를 붙여(activeHasMore) 부분 카운트임을 표시.
+  const userCommentCount = mergedComments.filter(c => c.author_type !== 'system').length;
 
   const toggleType = useCallback((t: CommentType) => {
     setActiveTypes(prev => {
@@ -2046,7 +2138,7 @@ export default function TicketPanel({
           {/* Tier-1 G stale-question badge in the panel header. Same threshold
              as the board card so a ticket marked stale on the board stays
              marked once you open it — no surprise mismatch. */}
-          {hasStaleOpenQuestion(activeTicket.comments) && (
+          {(activeTicket.has_stale_open_question ?? hasStaleOpenQuestion(mergedComments)) && (
             <span
               title="An open question on this ticket has been waiting >24h"
               style={{
@@ -2220,7 +2312,7 @@ export default function TicketPanel({
                 <span style={{
                   fontSize: '10px', background: tokens.colors.border, color: tokens.colors.textMuted,
                   borderRadius: 8, padding: '1px 5px', fontWeight: 700,
-                }}>{userCommentCount}</span>
+                }}>{userCommentCount}{activeHasMore ? '+' : ''}</span>
               )}
               {tab === 'user' && activeTicket.pending_user_action && (
                 <span aria-hidden="true" style={{ fontSize: '11px' }}>⏸</span>
@@ -3099,6 +3191,9 @@ export default function TicketPanel({
               mutedTypes={mutedTypes}
               scrollToCommentId={scrollToCommentId ?? null}
               onScrollToCommentConsumed={onScrollToCommentConsumed}
+              onLoadOlder={handleLoadOlder}
+              hasMoreOlder={activeHasMore}
+              loadingOlder={loadingOlderPanel === activePanelId}
             />
 
             <TypingIndicator agentName={typingIndicators[navStack[navStack.length - 1]] ?? null} />

@@ -45,6 +45,7 @@ import type {
   BenchmarkRunDetail,
   HarnessConfig,
   EffortPresetsConfig,
+  Comment,
 } from './types';
 
 const BASE = '/api';
@@ -382,6 +383,17 @@ export const api = {
     request<any>(`/tickets/${ticketId}/unarchive`, { method: 'POST' }),
   getTicket: async (ticketId: string) =>
     request<any>(`/tickets/${ticketId}`),
+  // 티켓(root/하위)의 커서 페이지네이션 코멘트. `before` 는 코멘트 id 이고, 서버는
+  // (created_at, id) 커서를 따라가 그보다 오래된 코멘트를 최신순으로 최대 `limit`개
+  // 반환한다. detail 패널이 getTicket 의 첫 페이지 너머 더 오래된 코멘트를
+  // scroll-load 할 때 쓴다.
+  getTicketComments: async (ticketId: string, opts?: { limit?: number; before?: string }) => {
+    const qs = new URLSearchParams();
+    if (opts?.limit) qs.set('limit', String(opts.limit));
+    if (opts?.before) qs.set('before', opts.before);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return request<Comment[]>(`/tickets/${ticketId}/comments${suffix}`);
+  },
 
   // ─── Columns ──────────────────────────────────────────
   createColumn: (boardId: string, data: { name: string; color?: string; description?: string }) =>

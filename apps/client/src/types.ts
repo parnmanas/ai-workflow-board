@@ -459,6 +459,15 @@ export interface Ticket {
   position: number;
   children: Ticket[];
   comments: Comment[];
+  // bounded 코멘트 로드 신호: detail GET(loadTicketFull commentLimit)은 `comments`
+  // 의 최신 페이지만 싣고, 더 오래된 코멘트가 있으면 이 값을 true 로 세팅한다.
+  // 패널은 probe fetch 없이 scroll-load-older 를 켤 수 있다. 전체 eager-load
+  // 경로(MCP get_ticket, agent-api)에는 없음(이미 전체 코멘트가 있음).
+  comments_has_more?: boolean;
+  // 서버 계산 stale-open-question 플래그(bounded detail 로드). 오래된 미답변
+  // 질문이 로드된 코멘트 윈도우 밖에 있어도 패널 헤더 배지가 보드 카드와
+  // 일치하도록 한다. 전체 eager-load 경로에는 없음.
+  has_stale_open_question?: boolean;
   // File attachments stored directly on the ticket (NOT via Resources).
   // Populated as metadata only by `loadTicketFull` — `file_data` is fetched
   // on demand via getTicketAttachment.
