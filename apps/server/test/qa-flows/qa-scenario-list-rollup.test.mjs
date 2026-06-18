@@ -21,14 +21,25 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
+import { bootApp, step } from '../helpers/boot.mjs';
+import { writeTrace } from '../helpers/trace.mjs';
 
 process.env.PORT = process.env.QA_LIST_ROLLUP_PORT || '7843';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST = path.join(__dirname, '..', '..', 'dist');
 
-test('QA scenario list attaches last-run rollup', async (t) => {
+// NOTE on exit handling: the shared `exitAfterTests()` helper does
+// `setImmediate(() => process.exit(0))`, which races `node --test`'s async
+// completion and force-exits 0 *before* an assertion failure is recorded — so
+// a broken test still reports green. This file instead captures the test
+// outcome in a `failed` flag and exits with the real code, so the gate
+// actually catches regressions. (The systemic boot.mjs race that affects every
+// qa-flows file is tracked as a separate self-improvement ticket.)
+let failed = false;
+
+const done = test('QA scenario list attaches last-run rollup', async (t) => {
+ try {
   const { app } = await bootApp({ port: parseInt(process.env.PORT, 10) });
   t.after(() => app.close().catch(() => {}));
 
@@ -101,6 +112,12 @@ test('QA scenario list attaches last-run rollup', async (t) => {
 
   step('last_run_at is a valid ISO string');
   assert.ok(!Number.isNaN(Date.parse(b.last_run_at)), 'ISO-parseable last_run_at');
+ } catch (e) {
+  failed = true; // surface the real outcome past the boot.mjs exit-0 race
+  throw e;       // rethrow so node --test's reporter still marks the failure
+ }
 });
 
-exitAfterTests();
+await done;
+try { writeTrace(); } catch { /* best-effort trace flush, mirrors exitAfterTests */ }
+process.exit(failed ? 1 : 0);
