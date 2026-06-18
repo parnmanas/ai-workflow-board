@@ -1,4 +1,4 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Agent } from '../../entities/Agent';
@@ -11,7 +11,10 @@ const LOCK_TTL_MS = 30 * 60 * 1000;     // 30 min — matches claim_ticket defau
 const LOCK_SWEEP_INTERVAL_MS = 60_000;  // every 60s
 
 @Injectable()
-export class AgentConnectionService implements OnModuleInit {
+export class AgentConnectionService implements OnModuleInit, OnModuleDestroy {
+  private offlineSweepHandle: NodeJS.Timeout | null = null;
+  private lockSweepHandle: NodeJS.Timeout | null = null;
+
   constructor(
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
@@ -19,7 +22,7 @@ export class AgentConnectionService implements OnModuleInit {
   ) {}
 
   onModuleInit() {
-    setInterval(async () => {
+    this.offlineSweepHandle = setInterval(async () => {
       const count = await this.sweepOfflineAgents(OFFLINE_THRESHOLD_MS);
       if (count > 0) {
         this.logService.info('MCP', `Swept ${count} agent(s) offline (heartbeat timeout)`);
@@ -29,12 +32,28 @@ export class AgentConnectionService implements OnModuleInit {
     // NOTE: This lock sweep runs only in NestJS mode (onModuleInit is a NestJS lifecycle hook).
     // In standalone mcp-server.ts mode, the in-request TTL check inside claim_ticket
     // provides the gap-fill for expired lock enforcement.
-    setInterval(async () => {
+    this.lockSweepHandle = setInterval(async () => {
       const count = await this.sweepExpiredLocks(LOCK_TTL_MS);
       if (count > 0) {
         this.logService.info('MCP', `Swept ${count} expired ticket lock(s)`);
       }
     }, LOCK_SWEEP_INTERVAL_MS);
+
+    // Don't let these housekeeping sweeps keep the Node event loop alive; the
+    // server lifecycle owns process exit. (Guarded for fake timers in tests.)
+    this.offlineSweepHandle.unref?.();
+    this.lockSweepHandle.unref?.();
+  }
+
+  onModuleDestroy() {
+    if (this.offlineSweepHandle) {
+      clearInterval(this.offlineSweepHandle);
+      this.offlineSweepHandle = null;
+    }
+    if (this.lockSweepHandle) {
+      clearInterval(this.lockSweepHandle);
+      this.lockSweepHandle = null;
+    }
   }
 
   /**

@@ -18,6 +18,7 @@ import { Agent } from '../../entities/Agent';
 import { Ticket } from '../../entities/Ticket';
 import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
+import { MemoryMetricsRegistry } from '../../services/memory-metrics.registry';
 
 // Internal shape — held in memory with Date objects for precision. The wire
 // shape (AgentStatusPayload in common/types/stream-events.ts) carries ISO-8601
@@ -67,7 +68,15 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly logService: LogService,
-  ) {}
+    metrics: MemoryMetricsRegistry,
+  ) {
+    // Size gauge for /api/diagnostics/memory + the [Memory] watchdog row.
+    // Pre-fix the `state` Map only ever grew (sweep set, never deleted), so a
+    // non-zero-and-climbing reading here is the early warning that the
+    // deleted-agent eviction in _sweep regressed. At rest it should equal the
+    // live agent-row count.
+    metrics.register('agentStatus.state', () => this.state.size);
+  }
 
   async onModuleInit(): Promise<void> {
     // Seed the in-memory map from the current DB snapshot so that the first
@@ -241,7 +250,9 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
     const threshold = new Date(Date.now() - OFFLINE_THRESHOLD_MS);
     const staleTaskCutoff = new Date(Date.now() - CURRENT_TASK_STALE_MS);
     const agents = await this.agentRepo.find();
+    const seen = new Set<string>();
     for (const a of agents) {
+      seen.add(a.id);
       const prev = this.state.get(a.id);
       const is_online = !!(a.last_seen_at && a.last_seen_at > threshold);
 
@@ -301,6 +312,17 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
       if (!is_online && a.is_online === 1) {
         await this.agentRepo.update(a.id, { is_online: 0 });
       }
+    }
+
+    // Evict in-memory entries for agents whose DB row no longer exists (agent
+    // deleted / moved out of this single-workspace scope). Without this the
+    // sweep only ever `set`s, so a deleted agent's AgentStatus lingered for the
+    // life of the process — a slow unbounded grower over months of churn.
+    // active_tasks for a vanished agent goes with the entry; nothing else holds
+    // a reference. (setCurrentTask can transiently re-add an id the next time
+    // that agent signals; only ids absent from the DB snapshot are dropped.)
+    for (const id of this.state.keys()) {
+      if (!seen.has(id)) this.state.delete(id);
     }
   }
 }

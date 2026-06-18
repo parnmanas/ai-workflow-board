@@ -25,6 +25,7 @@ import { StuckTicketAlert } from '../../entities/StuckTicketAlert';
 import { Ticket } from '../../entities/Ticket';
 import { Workspace } from '../../entities/Workspace';
 import { LogService } from '../../services/log.service';
+import { MemoryMetricsRegistry } from '../../services/memory-metrics.registry';
 import { AllocationService, AllocatedTicketRow } from './allocation.service';
 import { TriggerLoopService } from './trigger-loop.service';
 
@@ -61,7 +62,15 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
     private readonly allocationService: AllocationService,
     private readonly triggerLoop: TriggerLoopService,
     private readonly logService: LogService,
-  ) {}
+    metrics: MemoryMetricsRegistry,
+  ) {
+    // Size gauge for /api/diagnostics/memory + the [Memory] watchdog row.
+    // At rest this tracks the count of live (agent, ticket, role) supervisor
+    // pairs; a persistent climb is the signal that key eviction regressed
+    // (e.g. sustained per-agent allocation errors orphaning entries — the leak
+    // this ticket closes).
+    metrics.register('ticketSupervisor.state', () => this.state.size);
+  }
 
   onModuleInit(): void {
     this.tickHandle = setInterval(() => {
@@ -86,6 +95,22 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
 
   private _key(agentId: string, ticketId: string, role: string): string {
     return `${agentId}:${ticketId}:${role}`;
+  }
+
+  /**
+   * Drop every state entry belonging to one agent (keys are
+   * `${agentId}:${ticketId}:${role}`; agentId is a colon-free UUID so the
+   * prefix match is unambiguous). Called when an agent's allocation lookup
+   * fails this tick: such an agent contributes nothing to `liveKeys`, but the
+   * end-of-tick reap only runs if the tick completes. Under sustained
+   * per-agent allocation errors that agent's stale keys would otherwise never
+   * be reaped — pruning here keeps the Map bounded regardless.
+   */
+  private _pruneAgentKeys(agentId: string): void {
+    const prefix = `${agentId}:`;
+    for (const key of this.state.keys()) {
+      if (key.startsWith(prefix)) this.state.delete(key);
+    }
   }
 
   private async _tick(): Promise<void> {
@@ -129,8 +154,25 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
       if (!agent.last_seen_at || agent.last_seen_at < onlineCutoff) continue;
       if (!agent.workspace_id) continue;
 
-      const result = await this.allocationService.getAllocatedTickets(agent.id, agent.workspace_id);
-      if (!Array.isArray(result)) continue;
+      // On allocation lookup failure (throw or a non-array result) this agent
+      // contributes no live keys this tick. Prune its existing keys here so a
+      // persistent per-agent error can't strand them — and so a throw can't
+      // abort the whole tick and skip the end-of-tick reap for every agent.
+      let result: AllocatedTicketRow[];
+      try {
+        const raw = await this.allocationService.getAllocatedTickets(agent.id, agent.workspace_id);
+        if (!Array.isArray(raw)) {
+          this._pruneAgentKeys(agent.id);
+          continue;
+        }
+        result = raw;
+      } catch (e) {
+        this.logService.warn('TicketSupervisor', 'getAllocatedTickets failed — pruning agent keys', {
+          err: String(e), agent_id: agent.id,
+        });
+        this._pruneAgentKeys(agent.id);
+        continue;
+      }
 
       const { staleMs, resendMs } = await resolveCadence(agent.workspace_id);
 
