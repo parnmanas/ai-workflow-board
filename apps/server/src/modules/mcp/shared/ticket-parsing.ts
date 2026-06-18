@@ -13,6 +13,7 @@ import type { DataSource, EntityManager } from 'typeorm';
 import { In } from 'typeorm';
 import { Agent } from '../../../entities/Agent';
 import { BoardColumn } from '../../../entities/BoardColumn';
+import { Comment } from '../../../entities/Comment';
 import { Ticket } from '../../../entities/Ticket';
 import { TicketRoleAssignment } from '../../../entities/TicketRoleAssignment';
 import { Resource } from '../../../entities/Resource';
@@ -124,6 +125,61 @@ export async function expandCommentAttachments(
 }
 
 /**
+ * 코멘트 페이지네이션 상수. bounded `loadTicketFull` 의 첫 페이지와 전용 커서
+ * 엔드포인트 `GET /api/tickets/:id/comments` 의 scroll-load-older 페이지가 같은
+ * 페이지 크기를 쓰도록 공유한다. chat 메시지 페이지네이션 기본값(room-messaging.
+ * service.ts)과 동일하게 맞췄다.
+ */
+export const DETAIL_COMMENT_PAGE = 50;
+export const MAX_COMMENT_PAGE = 200;
+// 클라 `comment-types.ts` 의 STALE_QUESTION_THRESHOLD_MS 와 동일(24h). 보드 카드는
+// 전체 코멘트 메타로 stale-question 배지를 계산하지만, bounded detail 은 최신 N개만
+// 싣으므로 배지가 윈도우 밖 오래된 질문을 놓치지 않도록 서버가 노드별 플래그를 계산해
+// 같이 내려준다(보드 카드와 헤더 배지 일치 유지).
+const STALE_QUESTION_THRESHOLD_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * 단일 티켓(root 또는 하위)의 커서 페이지네이션 코멘트 로더. 최신순(DESC)으로
+ * 반환해 newest-at-top 으로 그리는 `CommentList` 에 그대로 들어간다 — 한 페이지는
+ * 현재 화면 아래에 쌓이는 "더 오래된" 코멘트다.
+ *
+ * 커서는 `before` 코멘트 id 의 복합 `(created_at, id)` 라서 같은 millisecond
+ * timestamp 를 공유하는 행(버스트성 에이전트 출력)도 건너뛰지 않는다 — chat
+ * `getMessages` 커서와 동일한 보장. 최대 `limit` 행을 parse(`attachment_resource_ids`/
+ * `metadata` 디코드) + `attachments` 하이드레이션까지 마쳐 `loadTicketFull` 의 코멘트와
+ * 동일 shape 으로 반환한다.
+ */
+export async function loadTicketComments(
+  scope: RepoScope,
+  ticketId: string,
+  opts?: { limit?: number; before?: string | null },
+): Promise<any[]> {
+  const limit = Math.min(Math.max(1, Math.floor(opts?.limit ?? DETAIL_COMMENT_PAGE)), MAX_COMMENT_PAGE);
+  const commentRepo = scope.getRepository(Comment);
+  const qb = commentRepo
+    .createQueryBuilder('c')
+    .where('c.ticket_id = :ticketId', { ticketId })
+    .orderBy('c.created_at', 'DESC')
+    .addOrderBy('c.id', 'DESC')
+    .limit(limit);
+  if (opts?.before) {
+    const cursor = await commentRepo.findOne({ where: { id: opts.before } });
+    // 알 수 없는 커서(삭제된 행 / 잘못된 id)면 500 대신 최신 페이지를 반환한다.
+    // chat 커서의 방어적 동작과 동일.
+    if (cursor && cursor.ticket_id === ticketId) {
+      qb.andWhere(
+        '(c.created_at < :cAt OR (c.created_at = :cAt AND c.id < :cId))',
+        { cAt: cursor.created_at, cId: cursor.id },
+      );
+    }
+  }
+  const rows = await qb.getMany();
+  const parsed = parseComments(rows);
+  await expandCommentAttachments(scope, parsed);
+  return parsed;
+}
+
+/**
  * Load a ticket with its full children-of-children tree and comments,
  * returning a decoded/sorted plain-JSON shape.
  *
@@ -134,12 +190,29 @@ export async function expandCommentAttachments(
  * descendant) are hydrated as metadata only — `file_data` is omitted so the
  * payload stays small. Callers that need the bytes hit the dedicated
  * `GET /api/tickets/:id/attachments/:attachmentId` endpoint.
+ *
+ * `opts.commentLimit` 는 코멘트 페이로드를 제한해, 코멘트가 수천 개인 티켓에서
+ * 코멘트 트리(root + child + grandchild) 전체를 메모리에 올리는 것을 막는다 —
+ * detail 패널이 열릴 때 타는 OOM 경로. 숫자를 주면 각 노드는 최신 N개 코멘트와
+ * `comments_has_more` 플래그만 싣고, 패널은 `GET /api/tickets/:id/comments` 로
+ * 더 오래된 페이지를 scroll-load 한다. 기본값(`null`/생략)은 기존의 전체
+ * eager-load 를 유지해, 전체 코멘트를 약속하는 MCP `get_ticket` · agent-api
+ * 계약을 건드리지 않는다.
  */
-export async function loadTicketFull(scope: RepoScope, id: string) {
+export async function loadTicketFull(
+  scope: RepoScope,
+  id: string,
+  opts?: { commentLimit?: number | null },
+) {
+  const commentLimit = opts?.commentLimit ?? null;
   const ticketRepo = scope.getRepository(Ticket);
   const ticket = await ticketRepo.findOne({
     where: { id },
-    relations: ['children', 'children.children', 'children.children.comments', 'children.comments', 'comments'],
+    // bounded 모드는 comment 관계를 아예 로드하지 않고 아래에서 노드별 최신 N개
+    // 페이지를 가져온다; full 모드는 기존처럼 코멘트 트리 전체를 eager-load 한다.
+    relations: commentLimit === null
+      ? ['children', 'children.children', 'children.children.comments', 'children.comments', 'comments']
+      : ['children', 'children.children'],
   });
   if (!ticket) return null;
   const out: any = {
@@ -171,6 +244,59 @@ export async function loadTicketFull(scope: RepoScope, id: string) {
     comments: parseComments(ticket.comments),
     attachments: [] as any[],
   };
+
+  // bounded 모드: 위 구성에서 각 노드의 `comments` 는 빈 배열로 남았다(관계를
+  // 로드 안 했으므로). load-older 엔드포인트와 같은 복합 커서 쿼리로 각 노드를
+  // 최신 N개 페이지로 채우고, 클라가 불필요한 probe fetch 없이 scroll-load-older
+  // 를 켤지 판단하도록 `comments_has_more` 를 찍는다. 추가 1행(`limit + 1`)이
+  // 곧 has-more probe 다. 노드별 순차 쿼리는 2단계 트리 깊이(root → child →
+  // grandchild)로 제한되며 각각 `limit + 1` 행으로 캡된다.
+  if (commentLimit !== null) {
+    const limit = Math.min(Math.max(1, Math.floor(commentLimit)), MAX_COMMENT_PAGE);
+    const commentRepo = scope.getRepository(Comment);
+    const fetchNewestPage = async (node: any) => {
+      const rows = await commentRepo
+        .createQueryBuilder('c')
+        .where('c.ticket_id = :ticketId', { ticketId: node.id })
+        .orderBy('c.created_at', 'DESC')
+        .addOrderBy('c.id', 'DESC')
+        .limit(limit + 1)
+        .getMany();
+      node.comments_has_more = rows.length > limit;
+      node.comments = parseComments(rows.slice(0, limit));
+    };
+    await fetchNewestPage(out);
+    for (const child of out.children) {
+      await fetchNewestPage(child);
+      for (const gc of child.children) await fetchNewestPage(gc);
+    }
+
+    // stale-open-question 배지: bounded 페이지 밖에 오래된 미답변 질문이 있어도
+    // 헤더 배지가 보드 카드와 일치하도록 노드별 플래그를 한 번의 grouped 쿼리로
+    // 계산한다(메타 컬럼만, body 로드 없음).
+    const nodeIds: string[] = [
+      out.id,
+      ...out.children.map((c: any) => c.id),
+      ...out.children.flatMap((c: any) => (c.children || []).map((gc: any) => gc.id)),
+    ];
+    const cutoff = new Date(Date.now() - STALE_QUESTION_THRESHOLD_MS);
+    const staleRows = await commentRepo
+      .createQueryBuilder('c')
+      .select('c.ticket_id', 'ticket_id')
+      .where('c.ticket_id IN (:...ids)', { ids: nodeIds })
+      .andWhere("c.type = 'question'")
+      .andWhere("c.status = 'open'")
+      .andWhere('c.created_at <= :cutoff', { cutoff })
+      .groupBy('c.ticket_id')
+      .getRawMany();
+    const staleSet = new Set(staleRows.map(r => r.ticket_id));
+    out.has_stale_open_question = staleSet.has(out.id);
+    for (const child of out.children) {
+      child.has_stale_open_question = staleSet.has(child.id);
+      for (const gc of child.children) gc.has_stale_open_question = staleSet.has(gc.id);
+    }
+  }
+
   // One batched lookup for every attachment across the whole tree so we don't
   // fan out per-comment Resource queries.
   const allComments: any[] = [

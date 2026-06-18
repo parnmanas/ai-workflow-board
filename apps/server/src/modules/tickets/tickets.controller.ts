@@ -30,7 +30,7 @@ import {
 } from '../../common/constants/upload';
 import { Resource } from '../../entities/Resource';
 import { TicketAttachment } from '../../entities/TicketAttachment';
-import { loadTicketFull, parseComments, expandCommentAttachments } from '../mcp/shared/ticket-parsing';
+import { loadTicketFull, parseComments, expandCommentAttachments, loadTicketComments, DETAIL_COMMENT_PAGE } from '../mcp/shared/ticket-parsing';
 import { applyTerminalEnteredAtForMove, getRootArchivedAt, isTerminalColumn, TicketArchivedError } from '../mcp/shared/archive-helpers';
 import {
   maxTicketPosition,
@@ -409,9 +409,29 @@ export class TicketsController {
 
   @Get('tickets/:id')
   async get(@Param('id') id: string, @Res() res: Response) {
-    const ticket = await loadTicketFull(this.dataSource, id);
+    // bounded 코멘트 로드: detail 패널은 처음엔 최신 페이지만 필요하고 더 오래된
+    // 코멘트는 GET /tickets/:id/comments 로 scroll-load 한다. 여기가 OOM 경로 —
+    // 코멘트 수천 개 티켓은 패널을 열 때마다(+보드 갱신 refetch) 트리 전체 코멘트를
+    // 직렬화하고 있었다.
+    const ticket = await loadTicketFull(this.dataSource, id, { commentLimit: DETAIL_COMMENT_PAGE });
     if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
     return res.json(ticket);
+  }
+
+  // 단일 티켓(root/하위)의 커서 페이지네이션 코멘트. chat 메시지 엔드포인트
+  // (GET /chat-rooms/:roomId/messages)와 동일한 모양: `limit`(기본 50, 최대 200)
+  // + `before`(코멘트 id)로 복합 (created_at, id) 커서를 따라가 같은 timestamp
+  // 버스트도 안 건너뛴다. 최신순으로 반환해 클라가 현재 화면 아래에 페이지를
+  // append 한다(코멘트는 newest-at-top). 패널은 사용자가 하단으로 스크롤할 때
+  // 이걸로 더 오래된 코멘트를 로드한다.
+  @Get('tickets/:id/comments')
+  async getComments(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
+    const ticket = await this.ticketRepo.findOne({ where: { id } });
+    if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+    const limit = parseInt(req.query.limit as string, 10) || DETAIL_COMMENT_PAGE;
+    const before = (req.query.before as string) || undefined;
+    const comments = await loadTicketComments(this.dataSource, id, { limit, before });
+    return res.json(comments);
   }
 
   @Patch('tickets/:id')
