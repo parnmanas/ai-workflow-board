@@ -8,6 +8,7 @@ import AgentLogViewer from './AgentLogViewer';
 import AgentManagerPage from './AgentManagerPage';
 import SettingsManager from './SettingsManager';
 import ColumnPoliciesManager from './ColumnPoliciesManager';
+import CredentialManager from './CredentialManager';
 import { tokens } from '../../tokens';
 
 const pageTitles: Record<string, { title: string; description?: string }> = {
@@ -17,6 +18,7 @@ const pageTitles: Record<string, { title: string; description?: string }> = {
   'agent-logs': { title: 'Agent Logs', description: 'Per-agent plugin error reports' },
   'agent-manager': { title: 'Agent Manager', description: 'Live daemon/proxy instances heartbeating against this server' },
   'column-policies': { title: 'Column Policies', description: 'Declarative column×role enforcement that catches stuck tickets' },
+  'global-credentials': { title: 'Global Credentials', description: 'Instance-level credentials shared across all workspaces' },
   settings: { title: 'Settings', description: 'System configuration' },
 };
 
@@ -42,6 +44,7 @@ export default function AdminPage() {
       <Route path="agent-logs" element={<AdminRoute page="agent-logs"><AgentLogViewer /></AdminRoute>} />
       <Route path="agent-manager" element={<AdminRoute page="agent-manager"><AgentManagerPage /></AdminRoute>} />
       <Route path="column-policies" element={<AdminRoute page="column-policies"><ColumnPoliciesManager /></AdminRoute>} />
+      <Route path="global-credentials" element={<AdminRoute page="global-credentials"><CredentialManager globalMode /></AdminRoute>} />
       <Route path="settings" element={<AdminRoute page="settings"><SettingsManager /></AdminRoute>} />
       <Route path="*" element={<Navigate to="/admin/users" replace />} />
     </Routes>

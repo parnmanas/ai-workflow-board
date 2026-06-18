@@ -5,8 +5,12 @@ export class Credential {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'varchar' })
-  workspace_id: string;
+  // Nullable: a NULL workspace_id marks a GLOBAL (instance-level) credential
+  // shared across every workspace. Non-NULL pins the credential to one
+  // workspace (the original behaviour). Mirrors the Agent.workspace_id
+  // nullable pattern used for manager rows (migrations 018/019).
+  @Column({ type: 'varchar', nullable: true, default: null })
+  workspace_id: string | null;
 
   @Column({ type: 'varchar' })
   name: string;

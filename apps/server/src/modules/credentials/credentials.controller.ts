@@ -1,12 +1,12 @@
 import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
-import { Controller, Get, Post, Patch, Delete, Body, Param, Query, Res, UseGuards } from '@nestjs/common';
-import { Response } from 'express';
+import { Controller, Get, Post, Patch, Delete, Body, Param, Query, Req, Res, UseGuards } from '@nestjs/common';
+import { Request, Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, IsNull } from 'typeorm';
 import { Credential } from '../../entities/Credential';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
-import { PERMISSIONS } from '../../common/types/permissions';
+import { PERMISSIONS, hasPermission } from '../../common/types/permissions';
 import { encrypt, decrypt } from '../../services/encryption.service';
 import { maskSecret } from '../../common/mask';
 import { findOrFail } from '../../common/find-or-fail';
@@ -56,6 +56,23 @@ function isMaskedValue(value: string): boolean {
   return value.includes('••••');
 }
 
+// Shared response shape. `scope` lets the client tell workspace credentials
+// apart from inherited global ones (global = read-only in a workspace view,
+// editable only from the Admin global page).
+function serializeCred(c: Credential) {
+  return {
+    id: c.id,
+    workspace_id: c.workspace_id,
+    scope: (c.workspace_id ? 'workspace' : 'global') as 'workspace' | 'global',
+    name: c.name,
+    description: c.description,
+    provider: c.provider,
+    credential_fields: maskCredentialData(decrypt(c.encrypted_data)),
+    created_at: c.created_at,
+    updated_at: c.updated_at,
+  };
+}
+
 @ApiBearerAuth('user-session')
 @ApiTags('credentials')
 @Controller('api/credentials')
@@ -66,27 +83,37 @@ export class CredentialsController {
     @InjectRepository(Credential) private readonly credRepo: Repository<Credential>,
   ) {}
 
+  /**
+   * Writing a GLOBAL (instance-level) credential is gated behind the dedicated
+   * MANAGE_GLOBAL_CREDENTIALS permission (admins hold it via ALL_PERMISSIONS).
+   * Workspace members who can manage their own workspace credentials can still
+   * only READ globals (list/bind), never create/edit/delete them.
+   */
+  private canManageGlobal(req: Request): boolean {
+    const user = (req as any).currentUser;
+    if (!user) return false;
+    return hasPermission(user.role, user.permissions || [], PERMISSIONS.MANAGE_GLOBAL_CREDENTIALS);
+  }
+
   @Get()
   async list(
     @Query('workspace_id') workspaceId: string,
     @Query('provider') provider: string | undefined,
+    @Query('scope') scope: string | undefined,
     @Res() res: Response,
   ) {
-    if (!workspaceId) return res.status(400).json({ error: 'workspace_id is required' });
-    const where: any = { workspace_id: workspaceId };
-    if (provider) where.provider = provider;
+    // scope=global → globals only (Admin global-credentials page). Otherwise a
+    // workspace view returns its own credentials PLUS inherited globals.
+    let where: any[];
+    if (scope === 'global') {
+      where = [{ workspace_id: IsNull() }];
+    } else {
+      if (!workspaceId) return res.status(400).json({ error: 'workspace_id is required' });
+      where = [{ workspace_id: workspaceId }, { workspace_id: IsNull() }];
+    }
+    if (provider) where = where.map((w) => ({ ...w, provider }));
     const creds = await this.credRepo.find({ where, order: { name: 'ASC' } });
-    const result = creds.map((c) => ({
-      id: c.id,
-      workspace_id: c.workspace_id,
-      name: c.name,
-      description: c.description,
-      provider: c.provider,
-      credential_fields: maskCredentialData(decrypt(c.encrypted_data)),
-      created_at: c.created_at,
-      updated_at: c.updated_at,
-    }));
-    return res.json(result);
+    return res.json(creds.map(serializeCred));
   }
 
   @Get('providers')
@@ -100,54 +127,52 @@ export class CredentialsController {
     @Query('workspace_id') workspaceId: string,
     @Res() res: Response,
   ) {
-    if (!workspaceId) return res.status(400).json({ error: 'workspace_id is required' });
-    const cred = await findOrFail(this.credRepo, { where: { id, workspace_id: workspaceId } }, 'Credential not found');
-    return res.json({
-      id: cred.id,
-      workspace_id: cred.workspace_id,
-      name: cred.name,
-      description: cred.description,
-      provider: cred.provider,
-      credential_fields: maskCredentialData(decrypt(cred.encrypted_data)),
-      created_at: cred.created_at,
-      updated_at: cred.updated_at,
-    });
+    const cred = await findOrFail(this.credRepo, { where: { id } }, 'Credential not found');
+    // A global credential (workspace_id=NULL) is readable from any workspace.
+    // A workspace credential is only readable from its own workspace.
+    if (cred.workspace_id !== null && cred.workspace_id !== workspaceId) {
+      return res.status(404).json({ error: 'Credential not found' });
+    }
+    return res.json(serializeCred(cred));
   }
 
   @Post()
-  async create(@Body() body: any, @Res() res: Response) {
-    const { workspace_id, name, description = '', provider, credentials: credData } = body;
-    if (!workspace_id) return res.status(400).json({ error: 'workspace_id is required' });
+  async create(@Body() body: any, @Req() req: Request, @Res() res: Response) {
+    const { workspace_id, name, description = '', provider, credentials: credData, scope } = body;
+    const isGlobal = scope === 'global' || !workspace_id;
+    if (isGlobal && !this.canManageGlobal(req)) {
+      return res.status(403).json({ error: 'Permission required: admin.global_credentials' });
+    }
     if (!name || !name.trim()) return res.status(400).json({ error: 'name is required' });
     if (!provider) return res.status(400).json({ error: 'provider is required' });
     if (!credData || typeof credData !== 'object') return res.status(400).json({ error: 'credentials object is required' });
 
     const encrypted = encrypt(JSON.stringify(credData));
     const cred = await this.credRepo.save(this.credRepo.create({
-      workspace_id,
+      workspace_id: isGlobal ? null : workspace_id,
       name: name.trim(),
       description,
       provider,
       encrypted_data: encrypted,
     }));
 
-    return res.status(201).json({
-      id: cred.id,
-      workspace_id: cred.workspace_id,
-      name: cred.name,
-      description: cred.description,
-      provider: cred.provider,
-      credential_fields: maskCredentialData(decrypt(cred.encrypted_data)),
-      created_at: cred.created_at,
-      updated_at: cred.updated_at,
-    });
+    return res.status(201).json(serializeCred(cred));
   }
 
   @Patch(':id')
-  async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
+  async update(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     const { workspace_id } = body;
-    if (!workspace_id) return res.status(400).json({ error: 'workspace_id is required' });
-    const cred = await findOrFail(this.credRepo, { where: { id, workspace_id } }, 'Credential not found');
+    const cred = await findOrFail(this.credRepo, { where: { id } }, 'Credential not found');
+    if (cred.workspace_id === null) {
+      // Global credential — instance-admin only.
+      if (!this.canManageGlobal(req)) {
+        return res.status(403).json({ error: 'Permission required: admin.global_credentials' });
+      }
+    } else {
+      // Workspace credential — body workspace_id must match the owning one.
+      if (!workspace_id) return res.status(400).json({ error: 'workspace_id is required' });
+      if (cred.workspace_id !== workspace_id) return res.status(404).json({ error: 'Credential not found' });
+    }
 
     if (body.name !== undefined) {
       if (!body.name?.trim()) return res.status(400).json({ error: 'name cannot be empty' });
@@ -166,27 +191,27 @@ export class CredentialsController {
     }
 
     const saved = await this.credRepo.save(cred);
-    return res.json({
-      id: saved.id,
-      workspace_id: saved.workspace_id,
-      name: saved.name,
-      description: saved.description,
-      provider: saved.provider,
-      credential_fields: maskCredentialData(decrypt(saved.encrypted_data)),
-      created_at: saved.created_at,
-      updated_at: saved.updated_at,
-    });
+    return res.json(serializeCred(saved));
   }
 
   @Delete(':id')
   async remove(
     @Param('id') id: string,
     @Query('workspace_id') workspaceId: string,
+    @Req() req: Request,
     @Res() res: Response,
   ) {
-    if (!workspaceId) return res.status(400).json({ error: 'workspace_id is required' });
-    await findOrFail(this.credRepo, { where: { id, workspace_id: workspaceId } }, 'Credential not found');
-    await this.credRepo.delete({ id, workspace_id: workspaceId });
+    const cred = await findOrFail(this.credRepo, { where: { id } }, 'Credential not found');
+    if (cred.workspace_id === null) {
+      // Global credential — instance-admin only.
+      if (!this.canManageGlobal(req)) {
+        return res.status(403).json({ error: 'Permission required: admin.global_credentials' });
+      }
+    } else {
+      if (!workspaceId) return res.status(400).json({ error: 'workspace_id is required' });
+      if (cred.workspace_id !== workspaceId) return res.status(404).json({ error: 'Credential not found' });
+    }
+    await this.credRepo.delete({ id });
     return res.json({ success: true, id });
   }
 }

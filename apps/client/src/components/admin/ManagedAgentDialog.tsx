@@ -329,7 +329,7 @@ export default function ManagedAgentDialog({
               value={credentialId}
               options={[
                 { value: '', label: 'None — fall back to operator HOME' },
-                ...eligibleCredentials.map((c) => ({ value: c.id, label: `${c.name} · ${c.provider}` })),
+                ...eligibleCredentials.map((c) => ({ value: c.id, label: `${c.name} · ${c.provider}${c.scope === 'global' ? ' · Global' : ''}` })),
               ]}
               onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setCredentialId(e.target.value)}
             />
