@@ -138,6 +138,73 @@ test('half-open probe allowed after cooldown', () => {
   assert.equal(cb.shouldBlock(key), null, 'probe allowed after cooldown');
 });
 
+// ---------------------------------------------------------------------------
+// mem-leak v2 (f500ee56): #state must stay bounded over uptime. A key that
+// fails below threshold then is abandoned, or an open breaker whose ticket is
+// gone, used to persist forever. sweep()/the on-insert sweep + LRU cap fix it.
+// ---------------------------------------------------------------------------
+
+test('sweep() drops keys with no failure within the stale window', () => {
+  const cb = new CircuitBreaker({ cooldownMs: 1000, staleMs: 1000 });
+  cb.record(CircuitBreaker.key('a', 't1', 'assignee'), 41);
+  cb.record(CircuitBreaker.key('a', 't2', 'assignee'), 41);
+  assert.equal(cb.size, 2);
+
+  // No time has passed — nothing is stale yet.
+  assert.equal(cb.sweep(Date.now()), 0);
+  assert.equal(cb.size, 2);
+
+  // Far enough in the future that both are past the stale window.
+  const removed = cb.sweep(Date.now() + 5000);
+  assert.equal(removed, 2, 'both abandoned keys swept');
+  assert.equal(cb.size, 0);
+});
+
+test('an abandoned OPEN breaker is collapsed once past the stale window', () => {
+  const cb = new CircuitBreaker({ threshold: 2, cooldownMs: 1000, staleMs: 1000 });
+  const key = CircuitBreaker.key('a', 't1', 'assignee');
+  cb.record(key, 0);
+  cb.record(key, 0); // opens
+  assert.equal(cb.getOpenBreakers().length, 1);
+
+  cb.sweep(Date.now() + 5000);
+  assert.equal(cb.size, 0, 'open-but-abandoned breaker does not persist forever');
+});
+
+test('the on-insert sweep keeps the map from accumulating stale keys', () => {
+  // staleMs tiny so any prior key is immediately stale on the next insert.
+  const cb = new CircuitBreaker({ threshold: 100, cooldownMs: 1, staleMs: 1 });
+  cb.record(CircuitBreaker.key('a', 't1', 'assignee'), 41); // size 1
+  // Busy-wait past the 1ms stale window without a fake clock.
+  const until = Date.now() + 5;
+  while (Date.now() < until) { /* spin */ }
+  cb.record(CircuitBreaker.key('a', 't2', 'assignee'), 41);
+  // t1 was swept by the insert of t2 — only the fresh key remains.
+  assert.equal(cb.size, 1, 'on-insert sweep collapsed the abandoned key');
+});
+
+test('#state is bounded by maxKeys — oldest closed key evicted on overflow', () => {
+  const cb = new CircuitBreaker({ threshold: 100, maxKeys: 10, cooldownMs: 60_000 });
+  // 50 distinct sub-threshold (closed) keys; nothing is stale (60s cooldown).
+  for (let i = 0; i < 50; i++) {
+    cb.record(CircuitBreaker.key('a', 't' + i, 'assignee'), 41);
+  }
+  assert.equal(cb.size, 10, 'map capped at maxKeys');
+});
+
+test('cap eviction preserves live open breakers over closed ones', () => {
+  const cb = new CircuitBreaker({ threshold: 2, maxKeys: 3, cooldownMs: 60_000 });
+  const open1 = CircuitBreaker.key('a', 'open1', 'r');
+  cb.record(open1, 0);
+  cb.record(open1, 0); // open, and the oldest entry by lastFailureAt
+  cb.record(CircuitBreaker.key('a', 'c1', 'r'), 41); // closed
+  cb.record(CircuitBreaker.key('a', 'c2', 'r'), 41); // closed; size now 3 (full)
+  cb.record(CircuitBreaker.key('a', 'c3', 'r'), 41); // overflow → evicts a closed key
+
+  assert.equal(cb.size, 3);
+  assert.ok(cb.shouldBlock(open1), 'open breaker preserved despite being oldest');
+});
+
 test('getOpenBreakers returns only open entries', () => {
   const cb = new CircuitBreaker({ threshold: 2, cooldownMs: 60_000 });
   const key1 = CircuitBreaker.key('agent-1', 'ticket-1', 'reviewer');

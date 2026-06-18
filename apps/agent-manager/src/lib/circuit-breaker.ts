@@ -34,6 +34,15 @@ const DEFAULT_THRESHOLD = 5;
  *  (missing API key) cannot self-heal — the operator must intervene. */
 const BREAKER_COOLDOWN_MS = 60 * 60_000; // 1 hour
 
+/** Hard cap on the number of tracked keys. Each entry is tiny, but
+ *  `#state` only shed entries via reset()/resetAgent() — a key that fails
+ *  1-4 times (below threshold) then is abandoned (ticket archived / role
+ *  reassigned / never retried), and an open breaker whose ticket is gone,
+ *  both persist forever. Over months of uptime that is unbounded growth.
+ *  When the map is full a new insert evicts the oldest entry, preferring
+ *  closed/stale keys over live open breakers (see #enforceCap). */
+const DEFAULT_MAX_KEYS = 2000;
+
 export interface CircuitBreakerEntry {
   consecutiveFailures: number;
   lastFailureAt: number;
@@ -48,10 +57,24 @@ export class CircuitBreaker {
   readonly #state = new Map<string, CircuitBreakerEntry>();
   readonly #threshold: number;
   readonly #cooldownMs: number;
+  readonly #maxKeys: number;
+  /** A key with no recorded failure within this window is treated as
+   *  abandoned and swept on the next insert. Defaults to the cooldown: once
+   *  an open breaker has sat untouched for a full cooldown (its half-open
+   *  probe never came) or a sub-threshold streak has gone quiet that long,
+   *  the ticket is gone — a fresh failure simply recreates the entry. */
+  readonly #staleMs: number;
 
-  constructor(opts?: { threshold?: number; cooldownMs?: number }) {
+  constructor(opts?: {
+    threshold?: number;
+    cooldownMs?: number;
+    maxKeys?: number;
+    staleMs?: number;
+  }) {
     this.#threshold = opts?.threshold ?? DEFAULT_THRESHOLD;
     this.#cooldownMs = opts?.cooldownMs ?? BREAKER_COOLDOWN_MS;
+    this.#maxKeys = opts?.maxKeys ?? DEFAULT_MAX_KEYS;
+    this.#staleMs = opts?.staleMs ?? this.#cooldownMs;
   }
 
   static key(agentId: string, ticketId: string, role: string): string {
@@ -85,6 +108,12 @@ export class CircuitBreaker {
     const now = Date.now();
     let entry = this.#state.get(key);
     if (!entry) {
+      // Bound the map before adding a new key: first collapse abandoned keys
+      // (no failure within the stale window), then enforce the hard cap. Both
+      // run only on the new-key path — existing-key updates don't grow `#state`
+      // — so the cost is amortized and the map stays bounded over uptime.
+      this.#sweepStale(now);
+      this.#enforceCap();
       entry = {
         consecutiveFailures: 0,
         lastFailureAt: 0,
@@ -166,6 +195,61 @@ export class CircuitBreaker {
         log(`[circuit-breaker] RESET (agent restart) key=${key}`);
         this.#state.delete(key);
       }
+    }
+  }
+
+  /**
+   * Collapse abandoned keys — entries with no recorded failure within the
+   * stale window. A sub-threshold streak that went quiet, or an open breaker
+   * whose ticket was archived / role reassigned and never retried, both stop
+   * refreshing `lastFailureAt` and get dropped here. Runs automatically on
+   * each new-key insert; also exposed so an external interval sweep can call
+   * it. `now` is injectable for tests. Returns the number of entries removed.
+   */
+  sweep(now: number = Date.now()): number {
+    return this.#sweepStale(now);
+  }
+
+  #sweepStale(now: number): number {
+    let removed = 0;
+    for (const [key, entry] of this.#state) {
+      if (now - entry.lastFailureAt > this.#staleMs) {
+        this.#state.delete(key);
+        removed++;
+      }
+    }
+    if (removed > 0) {
+      log(`[circuit-breaker] swept ${removed} stale key(s) — ${this.#state.size} remaining`);
+    }
+    return removed;
+  }
+
+  /** Evict one entry when the map is at capacity, making room for the new key
+   *  the caller is about to insert. Prefers the oldest CLOSED breaker (a
+   *  live open breaker is still gating dispatch and is the more valuable
+   *  signal); only when every tracked key is open does it evict the oldest
+   *  open one. Keyed off `lastFailureAt` so eviction is least-recently-active
+   *  first. */
+  #enforceCap(): void {
+    if (this.#state.size < this.#maxKeys) return;
+    let oldestClosed: string | null = null;
+    let oldestClosedAt = Infinity;
+    let oldestAny: string | null = null;
+    let oldestAnyAt = Infinity;
+    for (const [key, entry] of this.#state) {
+      if (entry.lastFailureAt < oldestAnyAt) {
+        oldestAnyAt = entry.lastFailureAt;
+        oldestAny = key;
+      }
+      if (!entry.open && entry.lastFailureAt < oldestClosedAt) {
+        oldestClosedAt = entry.lastFailureAt;
+        oldestClosed = key;
+      }
+    }
+    const victim = oldestClosed ?? oldestAny;
+    if (victim !== null) {
+      this.#state.delete(victim);
+      log(`[circuit-breaker] cap reached (${this.#maxKeys}) — evicted key=${victim}`);
     }
   }
 
