@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom';
 import { useBoard } from '../hooks/useBoard';
 import ResourceManager from './admin/ResourceManager';
 import PageHeader from './PageHeader';
+import { HeaderAction } from './common';
 
 export default function BoardResourcesPage() {
   const { wsId, boardId } = useParams<{ wsId: string; boardId: string }>();
@@ -13,6 +14,11 @@ export default function BoardResourcesPage() {
       <PageHeader
         title="Resources"
         description={board?.name}
+        actions={
+          wsId && boardId ? (
+            <HeaderAction icon="←" label="Back to Board" to={`/ws/${wsId}/boards/${boardId}`} />
+          ) : undefined
+        }
       />
       <div style={{ flex: 1, overflow: 'auto', minHeight: 0, padding: '24px' }}>
         <ResourceManager workspaceId={wsId} boardId={boardId} />

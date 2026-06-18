@@ -1,11 +1,11 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { api } from '../api';
 import { useBoard } from '../hooks/useBoard';
 import { useToast } from '../contexts/ToastContext';
 import { tokens } from '../tokens';
 import PageHeader from './PageHeader';
-import { Button, Input } from './common';
+import { Button, Input, HeaderAction } from './common';
 
 /**
  * Board-scoped archive view. Lists tickets where `archived_at IS NOT NULL`
@@ -100,16 +100,6 @@ export default function BoardArchivePage() {
     try { return new Date(iso).toLocaleString(); } catch { return iso; }
   };
 
-  const headerActionStyle: React.CSSProperties = useMemo(() => ({
-    padding: '6px 12px',
-    background: tokens.colors.surface,
-    border: `1px solid ${tokens.colors.border}`,
-    borderRadius: tokens.radii.md,
-    color: tokens.colors.textStrong,
-    fontSize: 12,
-    textDecoration: 'none',
-  }), []);
-
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <PageHeader
@@ -117,7 +107,7 @@ export default function BoardArchivePage() {
         description={board?.name}
         actions={
           wsId && boardId ? (
-            <a href={`/ws/${wsId}/boards/${boardId}`} style={headerActionStyle}>← Back to Board</a>
+            <HeaderAction icon="←" label="Back to Board" to={`/ws/${wsId}/boards/${boardId}`} />
           ) : null
         }
       />

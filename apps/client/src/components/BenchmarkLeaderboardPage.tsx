@@ -1,11 +1,11 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { api } from '../api';
 import { useBoard } from '../hooks/useBoard';
 import { useToast } from '../contexts/ToastContext';
 import { tokens } from '../tokens';
 import PageHeader from './PageHeader';
-import { Button, Badge } from './common';
+import { Button, Badge, HeaderAction } from './common';
 import BenchmarkRunModal from './BenchmarkRunModal';
 import type { Agent } from '../types';
 
@@ -178,16 +178,6 @@ export default function BenchmarkLeaderboardPage() {
   useEffect(() => { loadOverview(); }, [loadOverview]);
   useEffect(() => { loadRun(selectedRun); }, [selectedRun, loadRun]);
 
-  const headerActionStyle: React.CSSProperties = useMemo(() => ({
-    padding: '6px 12px',
-    background: tokens.colors.surface,
-    border: `1px solid ${tokens.colors.border}`,
-    borderRadius: tokens.radii.md,
-    color: tokens.colors.textStrong,
-    fontSize: 12,
-    textDecoration: 'none',
-  }), []);
-
   const cardStyle: React.CSSProperties = {
     border: `1px solid ${tokens.colors.border}`,
     borderRadius: tokens.radii.md,
@@ -222,7 +212,7 @@ export default function BenchmarkLeaderboardPage() {
               {loading ? 'Refreshing…' : 'Refresh'}
             </Button>
             {wsId && boardId ? (
-              <a href={`/ws/${wsId}/boards/${boardId}`} style={headerActionStyle}>← Back to Board</a>
+              <HeaderAction icon="←" label="Back to Board" to={`/ws/${wsId}/boards/${boardId}`} />
             ) : null}
           </div>
         }

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { Link, useParams, useSearchParams } from 'react-router-dom';
+import { useParams, useSearchParams } from 'react-router-dom';
 import { DragDropContext, Droppable, DragStart, DropResult } from '@hello-pangea/dnd';
 import { Group, Panel, Separator } from 'react-resizable-panels';
 import { Ticket, BoardCardTicket, BoardWithCards } from '../types';
@@ -10,6 +10,7 @@ import { useToast } from '../contexts/ToastContext';
 import { useLoading } from '../contexts/LoadingContext';
 import { useConfirm } from '../contexts/ConfirmContext';
 import PageHeader from './PageHeader';
+import BoardSubMenu from './BoardSubMenu';
 import Column from './Column';
 import TicketPanel from './TicketPanel';
 import { tokens } from '../tokens';
@@ -393,23 +394,25 @@ export default function Board() {
     );
   }
 
-  // Board-scoped action links (workspace-scoped URLs)
-  const resourcesLink = wsId && boardId ? `/ws/${wsId}/boards/${boardId}/resources` : '#';
-  const qaLink = wsId && boardId ? `/ws/${wsId}/boards/${boardId}/qa` : '#';
-  const settingsLink = wsId && boardId ? `/ws/${wsId}/boards/${boardId}/settings` : '#';
-  const archiveLink = wsId && boardId ? `/ws/${wsId}/boards/${boardId}/archive` : '#';
-  // Leaderboard link is only meaningful on a benchmark-mode board (ticket 684c012b).
-  const leaderboardLink = wsId && boardId ? `/ws/${wsId}/boards/${boardId}/leaderboard` : '#';
-
-  const headerActionStyle: React.CSSProperties = {
-    padding: '6px 14px',
-    borderRadius: 8,
-    background: tokens.colors.surfaceCard,
-    border: `1px solid ${tokens.colors.border}`,
-    fontSize: '13px',
-    color: tokens.colors.textSecondary,
-    textDecoration: 'none',
-    fontWeight: 500,
+  // Board 헤더의 Pause/Resume 토글. 섹션 nav 진입점과 함께 BoardSubMenu(§1)가
+  // 렌더하지만, 상태 변경 로직(api + refresh + toast)은 board 스코프에 둔다.
+  const togglePause = async () => {
+    if (!board) return;
+    const willPause = !board.paused_at;
+    try {
+      if (willPause) {
+        await api.pauseBoard(board.id);
+      } else {
+        await api.resumeBoard(board.id);
+      }
+      await refresh();
+      showToast(willPause ? 'Board paused' : 'Board resumed', 'success');
+    } catch (err: any) {
+      showToast(
+        err?.message || (willPause ? 'Failed to pause board' : 'Failed to resume board'),
+        'error'
+      );
+    }
   };
 
   // Cross-board drop strip. Each board entry is a Droppable; handleDragEnd
@@ -498,57 +501,15 @@ export default function Board() {
         title={board?.name || 'Board'}
         description={board?.description}
         actions={
-          <>
-            {board && (
-              <button
-                type="button"
-                onClick={async () => {
-                  const willPause = !board.paused_at;
-                  try {
-                    if (willPause) {
-                      await api.pauseBoard(board.id);
-                    } else {
-                      await api.resumeBoard(board.id);
-                    }
-                    await refresh();
-                    showToast(willPause ? 'Board paused' : 'Board resumed', 'success');
-                  } catch (err: any) {
-                    showToast(
-                      err?.message || (willPause ? 'Failed to pause board' : 'Failed to resume board'),
-                      'error'
-                    );
-                  }
-                }}
-                style={{
-                  ...headerActionStyle,
-                  cursor: 'pointer',
-                  ...(board.paused_at ? {
-                    background: tokens.colors.warning,
-                    color: '#fff',
-                    border: 'none',
-                    fontWeight: 600,
-                  } : {}),
-                }}
-              >{board.paused_at ? '▶ Resume Board' : '⏸ Pause Board'}</button>
-            )}
-            {board?.benchmark_mode === 'on' && (
-              <Link to={leaderboardLink} style={headerActionStyle}>
-                🏆 Benchmark
-              </Link>
-            )}
-            <Link to={resourcesLink} style={headerActionStyle}>
-              📁 Resources
-            </Link>
-            <Link to={qaLink} style={headerActionStyle}>
-              🔬 QA
-            </Link>
-            <Link to={archiveLink} style={headerActionStyle}>
-              🗄 Archive
-            </Link>
-            <Link to={settingsLink} style={headerActionStyle}>
-              ⚙ Settings
-            </Link>
-          </>
+          board ? (
+            <BoardSubMenu
+              wsId={wsId}
+              boardId={boardId}
+              paused={!!board.paused_at}
+              benchmarkMode={board.benchmark_mode === 'on'}
+              onTogglePause={togglePause}
+            />
+          ) : undefined
         }
       />
 

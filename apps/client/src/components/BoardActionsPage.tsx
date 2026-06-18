@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom';
 import { useBoard } from '../hooks/useBoard';
 import ActionManager from './admin/ActionManager';
 import PageHeader from './PageHeader';
+import { HeaderAction } from './common';
 
 export default function BoardActionsPage() {
   const { wsId, boardId } = useParams<{ wsId: string; boardId: string }>();
@@ -10,7 +11,15 @@ export default function BoardActionsPage() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
-      <PageHeader title="Actions" description={board?.name} />
+      <PageHeader
+        title="Actions"
+        description={board?.name}
+        actions={
+          wsId && boardId ? (
+            <HeaderAction icon="←" label="Back to Board" to={`/ws/${wsId}/boards/${boardId}`} />
+          ) : undefined
+        }
+      />
       <div style={{ flex: 1, overflow: 'auto', minHeight: 0, padding: '24px' }}>
         <ActionManager workspaceId={wsId} boardId={boardId} />
       </div>

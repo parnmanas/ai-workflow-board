@@ -13,7 +13,7 @@ import PageHeader from './PageHeader';
 import ColumnManager from './ColumnManager';
 import HarnessConfigEditor from './HarnessConfigEditor';
 import { tokens } from '../tokens';
-import { Button, Input } from './common';
+import { Button, Input, HeaderAction } from './common';
 
 export default function BoardSettingsPage() {
   const { showToast } = useToast();
@@ -95,6 +95,11 @@ export default function BoardSettingsPage() {
       <PageHeader
         title="Board Settings"
         description={board.name}
+        actions={
+          wsId && boardId ? (
+            <HeaderAction icon="←" label="Back to Board" to={`/ws/${wsId}/boards/${boardId}`} />
+          ) : undefined
+        }
       />
       <div style={{ ...pageStyle, flex: 1, overflow: 'auto', minHeight: 0 }}>
         <ConcurrencySetting

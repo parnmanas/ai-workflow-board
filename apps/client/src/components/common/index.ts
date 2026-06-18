@@ -5,3 +5,6 @@ export { Modal } from './Modal';
 export { default as ConfirmDialog } from './ConfirmDialog';
 export { Card } from './Card';
 export { Badge } from './Badge';
+export { HeaderAction } from './HeaderAction';
+export type { HeaderActionProps, HeaderActionVariant } from './HeaderAction';
+export { HeaderOverflowMenu } from './HeaderOverflowMenu';
