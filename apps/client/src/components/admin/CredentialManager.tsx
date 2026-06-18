@@ -25,6 +25,7 @@ const PROVIDERS = [
   { value: 'custom', label: 'Custom', icon: 'C' },
   { value: 'claude_subscription', label: 'Claude · Subscription', icon: 'CS' },
   { value: 'claude_api_key', label: 'Claude · API Key', icon: 'CK' },
+  { value: 'claude_oauth_token', label: 'Claude · OAuth Token', icon: 'CO' },
   { value: 'deepseek_api_key', label: 'DeepSeek · API Key', icon: 'DS' },
   { value: 'codex_subscription', label: 'Codex · Subscription', icon: 'OS' },
   { value: 'codex_api_key', label: 'Codex · API Key', icon: 'OK' },
@@ -54,6 +55,13 @@ const PROVIDER_FIELD_LABELS: Record<string, Record<string, FieldDef>> = {
   },
   claude_api_key: {
     api_key: { label: 'ANTHROPIC_API_KEY', placeholder: 'sk-ant-...' },
+  },
+  claude_oauth_token: {
+    oauth_token: {
+      label: 'CLAUDE_CODE_OAUTH_TOKEN',
+      placeholder: 'Run `claude setup-token` on one machine and paste the output (sk-ant-oat...). Valid ~1 year, does NOT rotate, shared by every agent — no per-machine daily re-login.',
+      multiline: true,
+    },
   },
   deepseek_api_key: {
     api_key: { label: 'DeepSeek API Key', placeholder: 'sk-... (from platform.deepseek.com)' },
@@ -205,6 +213,7 @@ export default function CredentialManager({ workspaceId }: { workspaceId?: strin
       custom: tokens.colors.textSecondary,
       claude_subscription: '#cc785c',
       claude_api_key: '#cc785c',
+      claude_oauth_token: '#cc785c',
       deepseek_api_key: '#4d6bfe',
       codex_subscription: '#10a37f',
       codex_api_key: '#10a37f',
