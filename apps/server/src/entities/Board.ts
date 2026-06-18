@@ -50,6 +50,17 @@ export class Board {
   @Column({ type: 'text', nullable: true, default: null })
   effort_presets: string | null;
 
+  // Per-board output language (i18n, ticket ae28dcaf). A human-readable
+  // language name (e.g. "Korean", "English", "日本語") that rides the existing
+  // harness plumbing: at dispatch TriggerLoopService appends a "Respond in
+  // <language>…" instruction onto harness_config.system_prompt_append, which
+  // flows server→SSE→agent-manager→CLI --append-system-prompt. So every role's
+  // subagent writes comments / chat / commit messages / code comments in this
+  // language. null/empty = no override → agent default (English), behaviour
+  // unchanged. A single varchar suffices (unlike harness/effort which are JSON).
+  @Column({ type: 'varchar', nullable: true, default: null })
+  language: string | null;
+
   // Per-board cap on how many distinct tickets a single agent can be
   // actively working on at once. Default 1 — same agent assigned to
   // multiple tickets would otherwise have parallel subagents stomping on

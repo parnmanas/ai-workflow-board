@@ -1446,6 +1446,23 @@ candidate's branch or move the ticket.
         boardForHarness?.harness_config,
       );
       effortPreset = resolveEffortPreset(boardForHarness?.effort_presets, ticket.effort_preset);
+
+      // Board output language (i18n, ticket ae28dcaf). When the board sets a
+      // language, append a "Respond in <language>…" instruction onto the
+      // resolved harness_config.system_prompt_append — riding the existing
+      // harness plumbing (server→SSE→agent-manager→CLI --append-system-prompt)
+      // so no new SSE field / agent-manager change is needed. APPEND, never
+      // overwrite, so a board harness's own system_prompt_append is preserved.
+      // Single emit point ⇒ applies to every role (planner/assignee/reviewer).
+      // null/empty language = no override → agent default (English), unchanged.
+      const boardLanguage = boardForHarness?.language?.trim();
+      if (boardLanguage) {
+        const langInstr = `Respond in ${boardLanguage}. Write all ticket comments, chat messages, commit messages, PR descriptions, and code comments in ${boardLanguage}.`;
+        harnessConfig = harnessConfig ?? {};
+        harnessConfig.system_prompt_append = [harnessConfig.system_prompt_append, langInstr]
+          .filter((s) => s && s.trim())
+          .join('\n\n');
+      }
     } catch (e) {
       this.logService.warn('MCP', 'harness_config / effort_preset resolve failed (continuing without)', {
         err: String(e), ticket_id: ticket.id, board_id: boardId,
