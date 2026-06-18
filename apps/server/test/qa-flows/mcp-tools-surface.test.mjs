@@ -46,6 +46,18 @@ const EXPECTED_TOOLS = [
   'submit_benchmark_score',
   'get_benchmark_leaderboard',
   'create_benchmark_run',
+  // Ticket 3c655d20 — scenario-based QA surface (QaScenario/QaRun).
+  'list_qa_scenarios',
+  'get_qa_scenario',
+  'create_qa_scenario',
+  'update_qa_scenario',
+  'delete_qa_scenario',
+  'start_qa_run',
+  'record_qa_step',
+  'attach_qa_artifact',
+  'complete_qa_run',
+  'list_qa_runs',
+  'get_qa_run',
 ];
 
 test('MCP initialize + tools/list returns expected AWB tool surface', async (t) => {

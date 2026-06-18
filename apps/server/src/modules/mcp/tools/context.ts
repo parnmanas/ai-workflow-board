@@ -44,6 +44,8 @@ import { RoomMembershipService } from '../../chat-rooms/room-membership.service'
 import { RoomMessagingService } from '../../chat-rooms/room-messaging.service';
 import type { TicketRoleAssignmentService } from '../../workspace-roles/ticket-role-assignment.service';
 import type { ActionsService } from '../../actions/actions.service';
+import type { QaService } from '../../qa/qa.service';
+import type { QaRunService } from '../../qa/qa-run.service';
 import { TicketPrerequisitesService } from '../../tickets/ticket-prerequisites.service';
 import { BenchmarkService } from '../../benchmarks/benchmark.service';
 
@@ -94,6 +96,13 @@ export interface ToolContext {
   // a Run (create room, add participants, send first message). The CRUD tools
   // operate directly on repositories and don't need this.
   actionsService?: ActionsService;
+  // Scenario-based QA feature. Required by the qa-tools MCP tools.
+  // `qaService` handles scenario CRUD (also doable over repos, but the service
+  // centralizes validation); `qaRunService` is required for start_qa_run +
+  // record/complete since those touch the chat-room dispatch + run lifecycle.
+  // Standalone context omits both — the tools degrade to an explicit error.
+  qaService?: QaService;
+  qaRunService?: QaRunService;
   // Ticket a57517be: `unpend_ticket` tool needs to wake the ticket's current
   // column's role-holders right after clearing `pending_user_action` (the
   // `field_changed='pending_user_action'` activity row by itself does not
