@@ -46,7 +46,8 @@ AWB applies the same principle that solved human collaboration: **give agents a 
 - **Resources & Credentials** — Manage reference materials (repos, docs, images, links) with optional vector search
 - **GitHub Connector** — Sync repository metadata, README, and file trees; search GitHub repos/code/issues via MCP
 - **Prompt Templates** — Reusable prompt templates attached to board columns for agent instructions
-- **MCP Tools (65+)** — Full CRUD for boards, tickets, comments, agents, resources, and more
+- **Scenario-based QA** — First-class QA scenarios (QaScenario/QaRun) run by an agent through a pluggable **QA driver** (browser / game-client / http-api). Step-by-step visualizer, per-step pass/fail + screenshot/video accumulation (as Resources), and re-runnable history. See [`docs/qa-driver-guide.md`](docs/qa-driver-guide.md).
+- **MCP Tools (75+)** — Full CRUD for boards, tickets, comments, agents, resources, QA scenarios, and more
 - **API Documentation** — Swagger/OpenAPI available at `/api-docs`
 
 ---
@@ -249,6 +250,7 @@ Any client supporting the [Model Context Protocol](https://modelcontextprotocol.
 | **GitHub** | 3 | Fetch repo info, sync repos, search GitHub |
 | **API Keys** | 5 | Key management |
 | **Prompt Templates** | 3 | Template CRUD |
+| **QA** | 11 | QA scenario CRUD + run dispatch, per-step result/artifact recording, run history |
 | **Channels** | 4 | Notification channel management |
 | **Batch** | 1 | Execute multiple operations atomically |
 | **Events** | 1 | Poll for board events (cursor-based) |
