@@ -23,6 +23,12 @@ const PROVIDER_FIELDS: Record<string, { label: string; fields: string[] }> = {
   // / OPENAI_API_KEY / GEMINI_API_KEY when spawning).
   claude_subscription: { label: 'Claude (Subscription)', fields: ['credentials_json'] },
   claude_api_key: { label: 'Claude (API Key)', fields: ['api_key'] },
+  // `claude setup-token` output (sk-ant-oat..., 1-year long-lived OAuth token
+  // that does NOT rotate). Injected as CLAUDE_CODE_OAUTH_TOKEN — unlike the
+  // rotating claude_subscription .credentials.json, a single shared token can
+  // be registered once and fetched by every agent-manager without the daily
+  // re-login that per-machine refresh rotation causes.
+  claude_oauth_token: { label: 'Claude (OAuth Token)', fields: ['oauth_token'] },
   // DeepSeek runs through the Claude Code binary against DeepSeek's
   // Anthropic-compatible endpoint. api_key is the DeepSeek bearer token
   // (exported as ANTHROPIC_AUTH_TOKEN); model/base_url are optional overrides.
