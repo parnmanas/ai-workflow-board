@@ -273,6 +273,9 @@ export const api = {
       // Abstract effort presets (per-CLI option mapping). null clears the
       // board override; the server falls back to BUILTIN_EFFORT_PRESETS.
       effort_presets?: EffortPresetsConfig | null;
+      // Per-board output language (i18n). Empty string / null clears the
+      // override (agents fall back to their default, English).
+      language?: string | null;
     },
   ) =>
     request<any>(`/boards/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),

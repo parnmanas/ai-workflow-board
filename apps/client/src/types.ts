@@ -524,6 +524,11 @@ export interface Board {
   // to BUILTIN_EFFORT_PRESETS for display. A ticket's `effort_preset` (a preset
   // id) is resolved against this at dispatch into per-CLI options.
   effort_presets?: EffortPresetsConfig | string | null;
+  // Per-board output language (i18n). Human-readable language name (e.g.
+  // "Korean") folded into the agent's system prompt at dispatch so its
+  // comments / chat / commit messages are written in that language. null/
+  // absent = no override (agent default, English).
+  language?: string | null;
 }
 
 // ─── Effort presets (abstract effort → per-CLI options) ─────────

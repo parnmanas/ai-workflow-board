@@ -105,6 +105,17 @@ export default function BoardSettingsPage() {
             showToast('Concurrency limit saved', 'success');
           }}
         />
+        <LanguageSetting
+          board={board}
+          onSave={async (language) => {
+            await api.updateBoard(board.id, { language });
+            await refresh();
+            showToast(
+              language ? `Output language set to ${language}` : 'Output language cleared (default)',
+              'success',
+            );
+          }}
+        />
         <SelfImprovementSetting
           board={board}
           onSave={async (mode) => {
@@ -420,6 +431,155 @@ function MoveToWorkspaceSetting({ board, sourceWorkspaceId }: MoveToWorkspaceSet
 }
 
 type SelfImprovementMode = NonNullable<Board['self_improvement_mode']>;
+
+// ─── Output language (i18n) ─────────────────────────────────────
+// Per-board language for agent output. The stored value is the human-readable
+// language NAME that drops straight into the agent's system prompt at dispatch
+// (e.g. "Korean"), so the dropdown values are English language names; the
+// labels show the native form for the operator. "" = unset (agent default,
+// English). "__custom__" reveals a free-text box for any language not listed.
+interface LanguageSettingProps {
+  board: BoardWithCards;
+  onSave(language: string | null): Promise<void>;
+}
+
+const LANGUAGE_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: '',         label: '미지정 (기본 — English)' },
+  { value: 'Korean',   label: '한국어 (Korean)' },
+  { value: 'English',  label: 'English' },
+  { value: 'Japanese', label: '日本語 (Japanese)' },
+  { value: 'Chinese',  label: '中文 (Chinese)' },
+  { value: 'Spanish',  label: 'Español (Spanish)' },
+  { value: 'French',   label: 'Français (French)' },
+  { value: 'German',   label: 'Deutsch (German)' },
+];
+
+const LANGUAGE_CUSTOM = '__custom__';
+
+function LanguageSetting({ board, onSave }: LanguageSettingProps) {
+  const initial = (board.language || '').trim();
+  const isPreset = (v: string) => LANGUAGE_OPTIONS.some((o) => o.value === v);
+  // When the stored language isn't one of the presets, start in custom mode.
+  const [selection, setSelection] = useState<string>(isPreset(initial) ? initial : LANGUAGE_CUSTOM);
+  const [custom, setCustom] = useState<string>(isPreset(initial) ? '' : initial);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    const next = (board.language || '').trim();
+    setSelection(isPreset(next) ? next : LANGUAGE_CUSTOM);
+    setCustom(isPreset(next) ? '' : next);
+  }, [board.language]);
+
+  const resolved = (selection === LANGUAGE_CUSTOM ? custom : selection).trim();
+  const dirty = resolved !== initial;
+
+  return (
+    <section
+      style={{
+        padding: 16,
+        marginBottom: 16,
+        background: tokens.colors.surfaceCard,
+        border: `1px solid ${tokens.colors.border}`,
+        borderRadius: tokens.radii.md,
+      }}
+    >
+      <h3 style={{ margin: 0, fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>
+        Output language
+      </h3>
+      <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, marginBottom: 12 }}>
+        Agents dispatched on this board write their ticket comments, chat messages, commit messages,
+        and code comments in this language. Leave unset to keep the agent default (English). Applies
+        to every role on the board. Best-effort on the Claude harness (rides
+        <code>--append-system-prompt</code>); other CLIs may not honour it.
+      </div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+        <div style={{ minWidth: 220 }}>
+          <label
+            style={{
+              display: 'block',
+              fontSize: 11,
+              color: tokens.colors.textMuted,
+              marginBottom: 4,
+              textTransform: 'uppercase',
+              fontWeight: 600,
+            }}
+          >
+            Language
+          </label>
+          <select
+            value={selection}
+            onChange={(e) => setSelection(e.target.value)}
+            style={{
+              width: '100%',
+              background: tokens.colors.surface,
+              border: `1px solid ${tokens.colors.border}`,
+              borderRadius: tokens.radii.md,
+              padding: '8px 10px',
+              color: tokens.colors.textStrong,
+              fontSize: 13,
+              fontFamily: 'inherit',
+              boxSizing: 'border-box',
+            }}
+          >
+            {LANGUAGE_OPTIONS.map((o) => (
+              <option key={o.value || '__unset__'} value={o.value}>{o.label}</option>
+            ))}
+            <option value={LANGUAGE_CUSTOM}>기타 (직접입력)…</option>
+          </select>
+        </div>
+        {selection === LANGUAGE_CUSTOM && (
+          <div style={{ minWidth: 220 }}>
+            <label
+              style={{
+                display: 'block',
+                fontSize: 11,
+                color: tokens.colors.textMuted,
+                marginBottom: 4,
+                textTransform: 'uppercase',
+                fontWeight: 600,
+              }}
+            >
+              Custom language name
+            </label>
+            <input
+              type="text"
+              value={custom}
+              placeholder="e.g. Italian"
+              onChange={(e) => setCustom(e.target.value)}
+              style={{
+                width: '100%',
+                background: tokens.colors.surface,
+                border: `1px solid ${tokens.colors.border}`,
+                borderRadius: tokens.radii.md,
+                padding: '8px 10px',
+                color: tokens.colors.textStrong,
+                fontSize: 13,
+                fontFamily: 'inherit',
+                boxSizing: 'border-box',
+              }}
+            />
+          </div>
+        )}
+        <Button
+          variant="primary"
+          size="sm"
+          disabled={!dirty || busy}
+          onClick={async () => {
+            if (!dirty) return;
+            setBusy(true);
+            try {
+              await onSave(resolved ? resolved : null);
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          {busy ? 'Saving…' : 'Save'}
+        </Button>
+      </div>
+    </section>
+  );
+}
 
 interface SelfImprovementSettingProps {
   board: BoardWithCards;
