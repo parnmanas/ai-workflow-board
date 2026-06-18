@@ -1,7 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { QaScenario, QaScenarioStep } from '../../entities/QaScenario';
+import { QaRun, QaRunStatus } from '../../entities/QaRun';
 import { Agent } from '../../entities/Agent';
 import { Board } from '../../entities/Board';
 import { findOrFail } from '../../common/find-or-fail';
@@ -30,6 +31,21 @@ function normalizeTags(tags: any): string[] {
   return tags.map((t) => String(t)).filter(Boolean);
 }
 
+/**
+ * List view-model: a QaScenario row enriched with a last-run rollup so the QA
+ * dashboard can render a status table (last-run time + result + pass-rate)
+ * without an N+1 fetch-runs-per-scenario. Computed in QaService.list via a
+ * single qa_runs query keyed on the listed scenario ids.
+ */
+export interface QaScenarioListItem extends QaScenario {
+  last_run_at: string | null;
+  last_run_status: QaRunStatus | null;
+  /** Pass ratio (0–100) over finished runs (passed/failed/error); null if none finished. */
+  pass_rate: number | null;
+  /** Total retained runs for the scenario (bounded by max_runs). */
+  run_count: number;
+}
+
 export interface CreateScenarioInput {
   workspace_id: string;
   board_id?: string | null;
@@ -54,12 +70,13 @@ export interface CreateScenarioInput {
 export class QaService {
   constructor(
     @InjectRepository(QaScenario) private readonly scenarioRepo: Repository<QaScenario>,
+    @InjectRepository(QaRun) private readonly runRepo: Repository<QaRun>,
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     @InjectRepository(Board) private readonly boardRepo: Repository<Board>,
     private readonly runService: QaRunService,
   ) {}
 
-  async list(workspaceId: string, boardId: string | undefined): Promise<QaScenario[]> {
+  async list(workspaceId: string, boardId: string | undefined): Promise<QaScenarioListItem[]> {
     if (!workspaceId) throw makeError(400, 'workspace_id is required');
     const qb = this.scenarioRepo.createQueryBuilder('s').where('s.workspace_id = :ws', { ws: workspaceId });
     if (boardId !== undefined) {
@@ -68,7 +85,53 @@ export class QaService {
       if (boardId) qb.andWhere('s.board_id = :bid', { bid: boardId });
       else qb.andWhere('s.board_id IS NULL');
     }
-    return qb.orderBy('s.name', 'ASC').getMany();
+    const scenarios = await qb.orderBy('s.name', 'ASC').getMany();
+    return this._attachLastRun(scenarios);
+  }
+
+  /**
+   * Fold each scenario's last-run summary in with ONE qa_runs query (no N+1).
+   * We pull the retained runs (already FIFO-capped at max_runs) for the listed
+   * scenario ids ordered created_at DESC, then reduce per scenario in JS — the
+   * first row seen per scenario is its latest run. Using the entity `find`
+   * (not raw SQL) keeps Date hydration + the result DB-agnostic across
+   * SQLite(dev) and Postgres(prod); no DISTINCT ON / window-function syntax that
+   * diverges between the two engines.
+   */
+  private async _attachLastRun(scenarios: QaScenario[]): Promise<QaScenarioListItem[]> {
+    if (scenarios.length === 0) return [];
+    const ids = scenarios.map((s) => s.id);
+    const runs = await this.runRepo.find({
+      where: { scenario_id: In(ids) },
+      select: ['scenario_id', 'status', 'started_at', 'finished_at', 'created_at'],
+      order: { created_at: 'DESC' },
+    });
+
+    type Agg = { latest: QaRun | null; passed: number; finished: number; count: number };
+    const byScenario = new Map<string, Agg>();
+    for (const r of runs) {
+      let agg = byScenario.get(r.scenario_id);
+      if (!agg) { agg = { latest: null, passed: 0, finished: 0, count: 0 }; byScenario.set(r.scenario_id, agg); }
+      if (!agg.latest) agg.latest = r; // DESC order → first row per scenario is the latest.
+      agg.count++;
+      if (r.status === 'passed' || r.status === 'failed' || r.status === 'error') {
+        agg.finished++;
+        if (r.status === 'passed') agg.passed++;
+      }
+    }
+
+    return scenarios.map((s) => {
+      const agg = byScenario.get(s.id);
+      const latest = agg?.latest ?? null;
+      const lastRunAt = latest ? (latest.finished_at ?? latest.started_at ?? latest.created_at) : null;
+      return {
+        ...s,
+        last_run_at: lastRunAt ? new Date(lastRunAt).toISOString() : null,
+        last_run_status: latest ? latest.status : null,
+        pass_rate: agg && agg.finished > 0 ? Math.round((agg.passed / agg.finished) * 100) : null,
+        run_count: agg ? agg.count : 0,
+      };
+    });
   }
 
   async get(id: string): Promise<QaScenario> {
