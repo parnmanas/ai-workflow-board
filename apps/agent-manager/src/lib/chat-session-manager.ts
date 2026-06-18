@@ -55,6 +55,14 @@ export class ChatSessionManager
 {
   #historyRing = new Map<string, ChatHistoryEntry[]>();
   #HISTORY_MAX = 30;
+  /** Hard cap on the number of distinct rooms held in `#historyRing`. The
+   *  per-room array is capped by #HISTORY_MAX, but the map itself used to
+   *  grow one bucket per distinct room ever seen, forever (a room's bucket
+   *  survived session respawn / idle-reap / stopForAgent). Two mechanisms
+   *  bound it now: `_onChildExit` evicts a room's bucket once no live session
+   *  references it, and this LRU cap collapses the long tail of rooms the
+   *  manager merely observed messages for without ever spawning a session. */
+  #ROOMS_MAX = 200;
 
   // Per-session tracking for fallback detection.
   // Keyed by session pid (unique per child) to avoid leaking across sessions
@@ -84,6 +92,25 @@ export class ChatSessionManager
     return `${roomId}|${agentId || '_'}`;
   }
 
+  /** Drop oldest (least-recently-touched) room buckets until the map is back
+   *  under #ROOMS_MAX. Map iteration order is insertion order, and
+   *  recordRoomMessage re-inserts a room on every message, so the first key
+   *  is the least-recently-active room — the right LRU eviction victim. */
+  #evictRoomsBeyondCap(): void {
+    while (this.#historyRing.size > this.#ROOMS_MAX) {
+      const oldest = this.#historyRing.keys().next().value;
+      if (oldest === undefined) break;
+      this.#historyRing.delete(oldest);
+    }
+  }
+
+  /** Test/diagnostics seam: room ids currently buffered, oldest-first. The
+   *  `#historyRing` map itself is private; regression tests assert on its
+   *  size + LRU ordering through this snapshot. */
+  _historyRooms(): string[] {
+    return Array.from(this.#historyRing.keys());
+  }
+
   recordRoomMessage(payload: any): void {
     const rid = payload?.room_id;
     if (!rid) return;
@@ -96,9 +123,15 @@ export class ChatSessionManager
     const msgType = typeof payload?.type === 'string' ? payload.type : 'message';
     if (msgType !== 'message') return;
     let buf = this.#historyRing.get(rid);
-    if (!buf) {
+    if (buf) {
+      // LRU touch: re-insert so the most recently active room sorts last in
+      // Map iteration order, making the oldest bucket the eviction victim.
+      this.#historyRing.delete(rid);
+      this.#historyRing.set(rid, buf);
+    } else {
       buf = [];
       this.#historyRing.set(rid, buf);
+      this.#evictRoomsBeyondCap();
     }
     buf.push({
       sender_type: payload.sender_type,
@@ -303,6 +336,23 @@ export class ChatSessionManager
     // Cleanup tracking state regardless of outcome.
     this.#chatSent.delete(sess.pid);
     this.#progressMeta.delete(sess.pid);
+
+    // Evict this room's in-memory history bucket once no other live session
+    // still references it. Without this the map accrued one bucket per
+    // distinct room ever seen, forever. Keep the bucket while another agent's
+    // session in the same room is still running (the historyRing is keyed by
+    // roomId but sessions are keyed by `roomId|agentId`, so two managed agents
+    // can share a room) — that sibling re-seeds from REST anyway, but dropping
+    // it here would discard warm history mid-conversation. The exiting session
+    // is still in `_sessions` at this point (the base class deletes it after
+    // this hook returns), so exclude it by identity.
+    const exitRoomId: string | undefined = sess.roomId;
+    if (exitRoomId) {
+      const stillUsed = Array.from(this._sessions.values()).some(
+        (s) => s !== sess && s.roomId === exitRoomId,
+      );
+      if (!stillUsed) this.#historyRing.delete(exitRoomId);
+    }
 
     if (sent) return; // Agent replied normally — nothing to do.
 
