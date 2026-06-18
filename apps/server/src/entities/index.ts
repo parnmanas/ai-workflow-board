@@ -32,3 +32,5 @@ export { StuckTicketAlert } from './StuckTicketAlert';
 export { ColumnRolePolicy } from './ColumnRolePolicy';
 export { TicketPrerequisite } from './TicketPrerequisite';
 export { BenchmarkScore } from './BenchmarkScore';
+export { QaScenario } from './QaScenario';
+export { QaRun } from './QaRun';
