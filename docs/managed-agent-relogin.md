@@ -121,6 +121,58 @@ For renewals, repeat steps 1+2 (paste a fresh JSON into the existing
 credential record's `credentials_json` field and Save) then step 4. No
 shell access needed.
 
+## Method C — Long-lived OAuth token (recommended for shared accounts)
+
+Use when **multiple machines / agents share one Claude account** and the
+rotating subscription token (Method B) logs everyone out daily — see
+"Don't share one Claude account" below for why that happens. This is the
+no-rotation fix: `claude setup-token` mints a **~1-year, non-rotating**
+OAuth token (`sk-ant-oat...`, billed to the Pro/Max/Team/Enterprise
+subscription, inference-only scope). AWB injects it as
+`CLAUDE_CODE_OAUTH_TOKEN`, which the CLI honors directly (auth precedence
+**#5**) and which **never touches the rotating `.credentials.json`** — so
+one token registered once feeds every agent-manager with no daily
+re-login.
+
+Steps:
+
+1. **Mint the token (once).** On any machine with a browser:
+
+   ```bash
+   claude setup-token
+   ```
+
+   It runs an OAuth flow and prints the token (`sk-ant-oat...`). It only
+   prints — nothing is persisted to disk. Copy it.
+
+2. **Save it as a Credential in AWB.**
+   `Admin → Credentials → New`
+   - Workspace: the agents' workspace
+   - Provider: `Claude (OAuth Token)`
+   - Name: e.g. `claude-shared-oauth-2026`
+   - `oauth_token`: paste the `sk-ant-oat...` value
+   - Save.
+
+3. **Attach to each agent.**
+   `Admin → Agent Manager → <agent> → Edit → CLI credential` → pick the
+   credential from step 2 → Save. The same credential can back any number
+   of agents.
+
+4. **Propagate.** `Admin → Agent Manager → Restart all agents` — agents
+   re-fetch the credential on the next spawn and inject
+   `CLAUDE_CODE_OAUTH_TOKEN`. No `.credentials.json` is written, so there
+   is nothing to rotate and no daily logout.
+
+**Renewal** (once a ~year): re-run `claude setup-token`, paste the new
+value into the existing credential record's `oauth_token` field and Save,
+then **Restart all agents**. UI-only, no shell, all machines at once.
+
+> Quick host-only workaround (no AWB record): set
+> `CLAUDE_CODE_OAUTH_TOKEN=<setup-token>` in the agent-manager process
+> environment (systemd unit / shell profile). The adapter never strips
+> this key, so it just works — but it's per-machine and not centrally
+> renewable, which is what Method C formalizes.
+
 ## When the OAuth has no `refreshToken`
 
 Some `claude /login` runs return a credential with an empty
@@ -141,8 +193,10 @@ Two mitigations:
 Anthropic's OAuth flow can rotate or invalidate the access token when
 the same account is logged in from another device. If two agents use
 the same account, the next login on either side may kill the other.
-Mint a separate Anthropic account per agent, or use API-key
-credentials, which are per-key and don't have this contention.
+Mint a separate Anthropic account per agent, use API-key credentials
+(per-key, no contention), or — to keep one shared subscription account —
+use **Method C's long-lived `setup-token`**, which doesn't rotate and so
+never triggers the cross-device invalidation in the first place.
 
 ## Failure modes table
 
@@ -151,7 +205,8 @@ credentials, which are per-key and don't have this contention.
 | `result subtype=success is_error=true` in 1–2s every turn      | OAuth token expired                   | Method A or B                            |
 | `tap … marked dead — server doesn't recognize it`              | downstream of the auth failure        | resolves once auth is fixed              |
 | Token had `refreshToken: ""` from the start                    | Anthropic returned no refresh token   | Track expiry, or switch to API key       |
-| Many agents on one Anthropic account stop responding together  | account-level token rotation          | Per-agent accounts, or API-key auth      |
+| Many agents on one Anthropic account stop responding together  | account-level token rotation          | Per-agent accounts, API-key auth, or Method C `setup-token` |
+| All machines log out ~once a day on a shared account           | per-machine `.credentials.json` refresh rotates the shared upstream token | Method C — `claude setup-token` (non-rotating) |
 | `prepareCliHome` log: cannot symlink (`EPERM`/`EACCES`)        | Windows without Developer Mode        | Harmless — the manager falls back to `copyFile`; next spawn picks it up |
 
 ## See also
@@ -160,6 +215,6 @@ credentials, which are per-key and don't have this contention.
   is what consumes the per-agent `.credentials.json` / API-key
   credential on every spawn.
 - `apps/server/src/modules/credentials/credentials.controller.ts` —
-  `claude_subscription` / `claude_api_key` provider field shapes used
-  by Method B.
+  `claude_subscription` / `claude_api_key` / `claude_oauth_token`
+  provider field shapes used by Methods B and C.
 - `docs/agent-manager.md` — overall internals.
