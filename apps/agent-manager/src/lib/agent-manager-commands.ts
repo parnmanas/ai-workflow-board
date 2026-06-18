@@ -88,6 +88,7 @@ type CommandKind =
 const REQUIRED_CREDENTIAL_FIELDS: Record<string, string[]> = {
   claude_subscription: ['credentials_json'],
   claude_api_key: ['api_key'],
+  claude_oauth_token: ['oauth_token'],
   deepseek_api_key: ['api_key'],
   codex_subscription: ['auth_json'],
   codex_api_key: ['api_key'],
@@ -844,6 +845,12 @@ function credentialKind(
   if (!credential) return 'operator_home';
   if (credential.provider.endsWith('_subscription')) return 'subscription';
   if (credential.provider.endsWith('_api_key')) return 'api_key';
+  // claude_oauth_token is env-only (CLAUDE_CODE_OAUTH_TOKEN), writes no
+  // .credentials.json, and the long-lived setup-token has no per-spawn expiry
+  // file to monitor — so it's the same 'api_key' heartbeat kind (no rotation
+  // tracking) rather than the 'subscription' default below, which would chase
+  // a .credentials.json that never exists.
+  if (credential.provider.endsWith('_oauth_token')) return 'api_key';
   // Unknown shape — assume subscription so the heartbeat still tries to
   // read .credentials.json. Worse case the adapter returns null and the
   // UI shows "no credential metadata" rather than mis-labeling api_key.

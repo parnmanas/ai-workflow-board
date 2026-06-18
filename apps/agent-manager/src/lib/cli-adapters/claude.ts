@@ -333,6 +333,21 @@ export class ClaudeCliAdapter extends CliAdapter {
       return { extraEnv: {} };
     }
 
+    if (credential && credential.provider === 'claude_oauth_token') {
+      // `claude setup-token` output — a non-rotating, ~1-year OAuth token
+      // (sk-ant-oat...). Injected as CLAUDE_CODE_OAUTH_TOKEN, which the CLI
+      // honors directly (auth precedence #5) WITHOUT touching the rotating
+      // .credentials.json (#6) — so a single shared token registered once in
+      // AWB feeds every agent-manager with no per-machine daily re-login. The
+      // stale-file unlink above guarantees no .credentials.json lingers, and
+      // the operator-auth strip (authEnvKeys: ANTHROPIC_API_KEY/_AUTH_TOKEN,
+      // both higher precedence) runs whenever a credential is set, so the
+      // OAuth token is never shadowed. Don't add CLAUDE_CODE_OAUTH_TOKEN to
+      // authEnvKeys — it's the key we inject, not an operator override.
+      const token = credential.fields?.oauth_token ?? '';
+      return { extraEnv: token ? { CLAUDE_CODE_OAUTH_TOKEN: token } : {} };
+    }
+
     if (credential && credential.provider === 'claude_api_key') {
       // ANTHROPIC_API_KEY overrides the credentials.json path inside the
       // claude CLI; skipping the operator-HOME symlink keeps the env-var
