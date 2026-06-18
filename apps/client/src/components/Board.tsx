@@ -395,6 +395,7 @@ export default function Board() {
 
   // Board-scoped action links (workspace-scoped URLs)
   const resourcesLink = wsId && boardId ? `/ws/${wsId}/boards/${boardId}/resources` : '#';
+  const qaLink = wsId && boardId ? `/ws/${wsId}/boards/${boardId}/qa` : '#';
   const settingsLink = wsId && boardId ? `/ws/${wsId}/boards/${boardId}/settings` : '#';
   const archiveLink = wsId && boardId ? `/ws/${wsId}/boards/${boardId}/archive` : '#';
   // Leaderboard link is only meaningful on a benchmark-mode board (ticket 684c012b).
@@ -537,6 +538,9 @@ export default function Board() {
             )}
             <Link to={resourcesLink} style={headerActionStyle}>
               📁 Resources
+            </Link>
+            <Link to={qaLink} style={headerActionStyle}>
+              🔬 QA
             </Link>
             <Link to={archiveLink} style={headerActionStyle}>
               🗄 Archive

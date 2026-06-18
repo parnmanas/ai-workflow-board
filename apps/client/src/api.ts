@@ -3,6 +3,8 @@ import type {
   Resource,
   Action,
   ActionRun,
+  QaScenario,
+  QaRun,
   Credential,
   ChatMessage,
   ChatThread,
@@ -882,6 +884,57 @@ export const api = {
   getActionRun: (runId: string, workspaceId: string) => {
     const params = new URLSearchParams({ workspace_id: workspaceId });
     return request<ActionRun>(`/actions/runs/${runId}?${params.toString()}`);
+  },
+
+  // ─── Scenario-based QA (ticket 3c655d20) ──────────────
+  listQaScenarios: (workspaceId: string, boardId?: string | null) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    if (boardId !== undefined) params.set('board_id', boardId || '');
+    return request<QaScenario[]>(`/qa/scenarios?${params.toString()}`);
+  },
+  getQaScenario: (id: string) => request<QaScenario>(`/qa/scenarios/${id}`),
+  createQaScenario: (data: {
+    workspace_id: string;
+    board_id?: string | null;
+    name: string;
+    description?: string;
+    steps?: QaScenario['steps'];
+    target_agent_id: string;
+    qa_driver?: string;
+    qa_driver_config?: Record<string, any> | null;
+    enabled?: boolean;
+    tags?: string[];
+    max_runs?: number;
+  }) => request<QaScenario>('/qa/scenarios', { method: 'POST', body: JSON.stringify(data) }),
+  updateQaScenario: (
+    id: string,
+    data: {
+      workspace_id: string;
+      name?: string;
+      description?: string;
+      steps?: QaScenario['steps'];
+      target_agent_id?: string;
+      board_id?: string | null;
+      qa_driver?: string;
+      qa_driver_config?: Record<string, any> | null;
+      enabled?: boolean;
+      tags?: string[];
+      max_runs?: number;
+    },
+  ) => request<QaScenario>(`/qa/scenarios/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteQaScenario: (id: string, workspaceId: string) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    return request<{ success: true; id: string }>(`/qa/scenarios/${id}?${params.toString()}`, { method: 'DELETE' });
+  },
+  runQaScenario: (id: string) =>
+    request<{ run_id: string; room_id: string; prompt: string }>(`/qa/scenarios/${id}/run`, { method: 'POST', body: '{}' }),
+  listQaRuns: (id: string, workspaceId: string, limit = 20) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId, limit: String(limit) });
+    return request<QaRun[]>(`/qa/scenarios/${id}/runs?${params.toString()}`);
+  },
+  getQaRun: (runId: string, workspaceId: string) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    return request<QaRun>(`/qa/runs/${runId}?${params.toString()}`);
   },
 
   // ─── Credentials ──────────────────────────────────────

@@ -212,6 +212,59 @@ export interface ActionRun {
   created_at: string;
 }
 
+// ─── Scenario-based QA (ticket 3c655d20) ───────────────────────────────────
+export interface QaScenarioStep {
+  idx: number;
+  action: string;
+  expect?: string;
+  mcp_tool?: string;
+  params?: Record<string, any>;
+}
+
+export interface QaScenario {
+  id: string;
+  workspace_id: string;
+  board_id: string | null;
+  name: string;
+  description: string;
+  steps: QaScenarioStep[];
+  target_agent_id: string;
+  qa_driver: string;
+  qa_driver_config: Record<string, any> | null;
+  enabled: boolean;
+  tags: string[];
+  created_by: string;
+  max_runs: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export type QaRunStatus = 'pending' | 'running' | 'passed' | 'failed' | 'error';
+
+export interface QaStepResult {
+  idx: number;
+  status: 'pending' | 'passed' | 'failed' | 'skipped';
+  log?: string;
+  artifact_resource_ids?: string[];
+}
+
+export interface QaRun {
+  id: string;
+  scenario_id: string;
+  workspace_id: string;
+  board_id: string | null;
+  status: QaRunStatus;
+  room_id: string;
+  step_results: QaStepResult[];
+  artifact_resource_ids: string[];
+  summary: string;
+  triggered_by_type: string;
+  triggered_by_id: string;
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string;
+}
+
 export interface Credential {
   id: string;
   workspace_id: string;
