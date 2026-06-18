@@ -7,6 +7,7 @@
 //     agent_id:     string,            // server fills with the MANAGER'S identity
 //                                      // (NOT the target managed agent — see below)
 //     command:      'spawn_agent' | 'stop_agent' | 'restart_agent'
+//                 | 'restart_all_agents'
 //                 | 'set_working_dir' | 'reload_config'
 //                 | 'update_plugins' | 'refresh_mcp_config' | 'pull_working_dir'
 //                 | 'update_manager' | 'restart_manager',
@@ -68,6 +69,7 @@ type CommandKind =
   | 'spawn_agent'
   | 'stop_agent'
   | 'restart_agent'
+  | 'restart_all_agents'
   | 'set_working_dir'
   | 'reload_config'
   | 'update_plugins'
@@ -97,6 +99,7 @@ const KNOWN_COMMANDS: ReadonlySet<CommandKind> = new Set<CommandKind>([
   'spawn_agent',
   'stop_agent',
   'restart_agent',
+  'restart_all_agents',
   'set_working_dir',
   'reload_config',
   'update_plugins',
@@ -217,6 +220,8 @@ export class AgentManagerCommandHandler {
         return this.#stopAgent(payload);
       case 'restart_agent':
         return this.#restartAgent(payload);
+      case 'restart_all_agents':
+        return this.#restartAllAgents(payload);
       case 'set_working_dir':
         return this.#setWorkingDir(payload);
       case 'reload_config':
@@ -662,6 +667,56 @@ export class AgentManagerCommandHandler {
       );
     }
     return `restart_agent → ${detail}${resumeNote}`;
+  }
+
+  /**
+   * Reap + respawn EVERY agent this manager currently supervises — the
+   * instance-wide counterpart to restart_agent. The manager process itself
+   * stays up (no re-exec): heartbeat + lockfile are untouched, so this is a
+   * zero-downtime, lightweight way to apply rotated credentials / models /
+   * working-dirs to all agents at once.
+   *
+   * Why this is NOT restart_manager: re-exec'ing the process rehydrates each
+   * agent from the on-disk credential snapshot (no AWB re-fetch) and only
+   * resumes in-flight work on the server supervisor's slow ~30-min cadence.
+   * Fanning out per-agent #restartAgent instead preserves the three things
+   * that matter: (1) fresh credential fetch from AWB (#spawnAgent →
+   * #resolveAgentCredential after #reapAgent's eraseSecrets), (2) immediate
+   * per-agent in-flight (ticket,role) re-push, (3) no process downtime.
+   *
+   * Targets are the *live* agents (running | spawning) — operator-stopped
+   * agents stay stopped (we don't resurrect what an admin deliberately
+   * stopped). Iteration is SEQUENTIAL: concurrent restarts would race on the
+   * shared ~/.claude/.credentials.json the CLI rewrites on credential refresh.
+   * One agent's failure is isolated via per-agent try/catch and does not block
+   * the rest. Zero managed agents → clean no-op ack.
+   */
+  async #restartAllAgents(payload: AgentManagerCommandPayload): Promise<string> {
+    const agentIds = this.#deps.registry.liveAgentIds();
+    if (agentIds.length === 0) {
+      return 'restart_all_agents → no managed agents (no-op)';
+    }
+    let restarted = 0;
+    const failed: string[] = [];
+    for (const agentId of agentIds) {
+      // Synthesize a per-agent payload so #restartAgent's args.agent_id
+      // extractor (#targetAgentId) targets each agent in turn — the inbound
+      // restart_all_agents payload carries no agent_id of its own.
+      const perAgent: AgentManagerCommandPayload = {
+        ...payload,
+        args: { ...(payload.args || {}), agent_id: agentId },
+      };
+      try {
+        const detail = await this.#restartAgent(perAgent);
+        restarted++;
+        log(`restart_all_agents: agent=${agentId.slice(0, 8)} ok — ${detail}`);
+      } catch (err: any) {
+        failed.push(agentId.slice(0, 8));
+        log(`restart_all_agents: agent=${agentId.slice(0, 8)} FAILED: ${err?.message ?? err}`);
+      }
+    }
+    const failNote = failed.length > 0 ? ` (failed: ${failed.join(', ')})` : '';
+    return `restart_all_agents → ${restarted} restarted, ${failed.length} failed${failNote}`;
   }
 
   async #setWorkingDir(payload: AgentManagerCommandPayload): Promise<string> {
