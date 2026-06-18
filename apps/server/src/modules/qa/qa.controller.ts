@@ -396,6 +396,7 @@ export class QaController {
       { file: 'chat-message-read.test.mjs', category: 'Flow-Chat' },
       { file: 'large-data.test.mjs', category: 'Flow-Scale' },
       { file: 'qa-run-lifecycle.test.mjs', category: 'Flow-QA' },
+      { file: 'qa-scenario-list-rollup.test.mjs', category: 'Flow-QA' },
     ];
 
     // Resolve the apps/server root from wherever this compiled file lives
