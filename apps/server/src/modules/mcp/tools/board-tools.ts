@@ -224,7 +224,7 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'update_board',
-    'Update a board name, description, routing_config, column→prompt-template mapping, auto-archive policy, or agent harness override',
+    'Update a board name, description, routing_config, column→prompt-template mapping, auto-archive policy, agent harness override, or output language',
     {
       board_id: z.string().describe('Board ID'),
       name: z.string().optional().describe('New name'),
@@ -239,8 +239,10 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
         .describe('Per-board agent harness override: { system_prompt_append?, allowed_tools?, disallowed_tools?, model?, permission_mode? }. Keys set here override the workspace default per key at dispatch; unset keys inherit. Pass null to clear the board override.'),
       effort_presets: EffortPresetsConfigSchema.nullable().optional()
         .describe('Per-board abstract effort preset catalog: { default: <preset id>, presets: [{ id, label, claude?: { effort?, ultracode?, model? }, codex?: { model? }, antigravity?: { model? } }] }. A ticket carries an abstract preset id (effort_preset); dispatch resolves it against this catalog and agent-manager maps the matched preset onto per-CLI options. Pass null to clear (board falls back to the built-in catalog).'),
+      language: z.string().nullable().optional()
+        .describe('Per-board output language: a human-readable language name (e.g. "Korean", "English", "日本語"). Agents dispatched on this board write comments, chat, commit messages, and code comments in this language. Empty string or null clears the override (agents fall back to their default, English).'),
     },
-    async ({ board_id, name, description, routing_config, column_prompts, auto_archive_days, harness_config, effort_presets }) => {
+    async ({ board_id, name, description, routing_config, column_prompts, auto_archive_days, harness_config, effort_presets, language }) => {
       const boardRepo = dataSource.getRepository(Board);
       const board = await boardRepo.findOne({ where: { id: board_id } });
       if (!board) return err('Board not found');
@@ -269,6 +271,12 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
       }
       if (auto_archive_days !== undefined) {
         board.auto_archive_days = auto_archive_days;
+      }
+      // Board output language (i18n, ticket ae28dcaf). Empty/whitespace → null
+      // so the override clears back to the agent default (English).
+      if (language !== undefined) {
+        const trimmed = language == null ? null : String(language).trim();
+        board.language = trimmed ? trimmed : null;
       }
       // Harness override (ticket 7122600c). Args already passed the strict
       // HarnessConfigSchema, so storage is a straight serialize; empty

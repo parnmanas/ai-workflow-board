@@ -421,9 +421,16 @@ export class BoardsController {
   async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     const board = await findOrFail(this.boardRepo, { where: { id } }, 'Board not found');
 
-    const { name, description, routing_config, column_prompts, max_concurrent_tickets_per_agent, self_improvement_mode, benchmark_mode, auto_archive_days, harness_config, effort_presets } = body;
+    const { name, description, routing_config, column_prompts, max_concurrent_tickets_per_agent, self_improvement_mode, benchmark_mode, auto_archive_days, harness_config, effort_presets, language } = body;
     if (name !== undefined) board.name = name;
     if (description !== undefined) board.description = description;
+    // Board output language (i18n, ticket ae28dcaf). Human-readable name that
+    // dispatch folds into system_prompt_append. Normalise empty/whitespace to
+    // null so an empty form field clears the override (back to agent default).
+    if (language !== undefined) {
+      const trimmed = language == null ? null : String(language).trim();
+      board.language = trimmed ? trimmed : null;
+    }
     if (self_improvement_mode !== undefined) {
       const allowed = ['off', 'same_board', 'remote_awb', 'both'];
       if (!allowed.includes(String(self_improvement_mode))) {
