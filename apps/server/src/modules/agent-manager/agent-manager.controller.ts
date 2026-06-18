@@ -30,6 +30,7 @@ const ALLOWED_COMMANDS: ReadonlySet<AgentManagerCommand> = new Set([
   'spawn_agent',
   'stop_agent',
   'restart_agent',
+  'restart_all_agents',
   'set_working_dir',
   'reload_config',
   'update_plugins',
