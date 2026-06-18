@@ -93,7 +93,7 @@ export class TicketsController {
 
   @Post('columns/:columnId/tickets')
   async create(@Param('columnId') columnId: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
-    const { title, description = '', priority = 'medium', assignee = '', reporter = '', assignee_id = '', reporter_id = '', labels = [], channel_ids = [], role_assignments, next_ticket_id } = body;
+    const { title, description = '', priority = 'medium', assignee = '', reporter = '', assignee_id = '', reporter_id = '', labels = [], channel_ids = [], role_assignments, next_ticket_id, effort_preset } = body;
     if (!title) return res.status(400).json({ error: 'title is required' });
 
     await findOrFail(this.colRepo, { where: { id: columnId } }, 'Column not found');
@@ -154,6 +154,9 @@ export class TicketsController {
       labels: JSON.stringify(labels), channel_ids: JSON.stringify(channel_ids),
       position, parent_id: null, depth: 0, status: 'todo',
       next_ticket_id: resolvedNextTicketId,
+      // Abstract effort preset id (trim → empty becomes null). Resolved
+      // against the board catalog at dispatch; null = board default.
+      effort_preset: typeof effort_preset === 'string' && effort_preset.trim() ? effort_preset.trim() : null,
       terminal_entered_at: terminalEnteredAt,
       created_by: creator.created_by, created_by_type: creator.created_by_type, created_by_id: creator.created_by_id,
     }));
@@ -421,7 +424,7 @@ export class TicketsController {
     const actorId = currentUser?.id || undefined;
     const actorName = currentUser?.name || currentUser?.email || undefined;
 
-    const { title, description, priority, assignee, reporter, reviewer_id, assignee_id, reporter_id, labels, channel_ids, status, prompt_text, base_repo_resource_id, base_branch, role_assignments, next_ticket_id, on_done_action_ids, pending_user_action, pending_reason } = body;
+    const { title, description, priority, assignee, reporter, reviewer_id, assignee_id, reporter_id, labels, channel_ids, status, prompt_text, base_repo_resource_id, base_branch, role_assignments, next_ticket_id, on_done_action_ids, pending_user_action, pending_reason, effort_preset } = body;
     const oldAssignee = ticket.assignee;
     const oldReporter = ticket.reporter;
     const oldReviewerId = ticket.reviewer_id;
@@ -513,6 +516,14 @@ export class TicketsController {
       const arr = Array.isArray(on_done_action_ids) ? on_done_action_ids : [];
       const cleaned = Array.from(new Set(arr.filter((s: any) => typeof s === 'string' && s)));
       ticket.on_done_action_ids = JSON.stringify(cleaned);
+    }
+
+    // Abstract effort preset id — stored as-is (trim; empty → null). Resolved
+    // against the board catalog at dispatch; null = board default. Mirrors the
+    // MCP update_ticket path (ticket-crud-tools.ts).
+    const oldEffortPreset = ticket.effort_preset;
+    if (effort_preset !== undefined) {
+      ticket.effort_preset = typeof effort_preset === 'string' && effort_preset.trim() ? effort_preset.trim() : null;
     }
 
     // Pending-user-action toggle (ticket a57517be). Mirrors the MCP
@@ -621,6 +632,7 @@ export class TicketsController {
     if (base_branch !== undefined && (base_branch || '') !== (oldBaseBranch || '')) changes.push('base_branch');
     if (next_ticket_id !== undefined && (ticket.next_ticket_id || '') !== (oldNextTicketId || '')) changes.push('next_ticket');
     if (on_done_action_ids !== undefined && ticket.on_done_action_ids !== oldOnDoneActionIds) changes.push('on_done_action_ids');
+    if (effort_preset !== undefined && (ticket.effort_preset || '') !== (oldEffortPreset || '')) changes.push('effort_preset');
     if (pendingReasonChanged) changes.push('pending_reason');
     const otherChanges = changes.filter(c => !['assignee', 'reporter', 'status'].includes(c));
     if (otherChanges.length > 0) {

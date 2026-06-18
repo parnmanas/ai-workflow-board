@@ -372,6 +372,10 @@ export interface Ticket {
   // string but decodes to an array on every read path (loadTicketFull /
   // parseTicket), so the client always sees string[]. Empty array = no binding.
   on_done_action_ids?: string[];
+  // Abstract effort preset id (resolved against the board's effort_presets at
+  // dispatch into per-CLI options). null/empty = "no effort override", spawn
+  // exactly as before. Not a CLI flag — the server maps it per CLI.
+  effort_preset?: string | null;
   // Ticket parked awaiting user intervention (ticket a57517be). When true the
   // server drops every agent_trigger for this ticket, the focus selector
   // skips it, and the board view renders a high-visibility outline + badge.
@@ -462,7 +466,52 @@ export interface Board {
   // Keys set here override the workspace default per key at dispatch; null/
   // absent = no override.
   harness_config?: string | null;
+  // Per-board abstract effort presets. Stored JSON-encoded (same wire
+  // convention as harness_config — the client parses); null/absent falls back
+  // to BUILTIN_EFFORT_PRESETS for display. A ticket's `effort_preset` (a preset
+  // id) is resolved against this at dispatch into per-CLI options.
+  effort_presets?: EffortPresetsConfig | string | null;
 }
+
+// ─── Effort presets (abstract effort → per-CLI options) ─────────
+// A Ticket carries an ABSTRACT effort option (a preset id), NOT CLI-specific
+// flags. The board defines the presets; each preset maps to per-CLI options.
+// Mirror of the server-side contract — both sides must agree byte-for-byte on
+// these JSON keys. Claude gets rich options (effort + ultracode + model);
+// codex/antigravity get model-only (other keys gracefully skipped at dispatch).
+export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+export interface EffortPreset {
+  id: string;    // stable slug, e.g. 'standard'
+  label: string; // human label shown in UI
+  // claude: real `--effort` flag (session-level) + `ultracode` PROMPT keyword
+  // (appended to the task text, NOT a flag) + optional `--model`.
+  claude?: { effort?: EffortLevel; ultracode?: boolean; model?: string };
+  // codex / antigravity: model-only (`-m`/`--model`).
+  codex?: { model?: string };
+  antigravity?: { model?: string };
+}
+
+export interface EffortPresetsConfig {
+  default: string;           // preset id
+  presets: EffortPreset[];
+}
+
+// Resolved object the server ships on the SSE agent_trigger payload as
+// `effort_preset` — the single matched preset (or board default), or null.
+export type ResolvedEffortPreset = EffortPreset;
+
+// Builtin presets used for display when a board has none stored. Identical to
+// the server-side BUILTIN_EFFORT_PRESETS — keep in sync.
+export const BUILTIN_EFFORT_PRESETS: EffortPresetsConfig = {
+  default: 'standard',
+  presets: [
+    { id: 'light',    label: 'Light',    claude: { effort: 'low' } },
+    { id: 'standard', label: 'Standard', claude: { effort: 'medium' } },
+    { id: 'deep',     label: 'Deep',     claude: { effort: 'high' } },
+    { id: 'max',      label: 'Max',      claude: { effort: 'xhigh', ultracode: true } },
+  ],
+};
 
 // Agent harness configuration (ticket 7122600c). Mirror of the server-side
 // zod schema in apps/server/src/common/harness-config.ts — keep in sync.

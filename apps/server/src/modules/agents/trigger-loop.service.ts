@@ -19,6 +19,7 @@ import { AgentWorkloadService } from './agent-workload.service';
 import { TicketPrerequisitesService } from '../tickets/ticket-prerequisites.service';
 import { priorityIndex } from './priority';
 import { resolveHarnessConfig, HarnessConfig } from '../../common/harness-config';
+import { resolveEffortPreset, ResolvedEffortPreset } from '../../common/effort-presets';
 
 // Sentinel actor written onto auto-advance `moved` activities. Deliberately
 // non-'system' so the trigger loop re-enters and processes the destination
@@ -1423,6 +1424,16 @@ candidate's branch or move the ticket.
     // separate Board findOne from the legacy maxConcurrent block above
     // (that one is slated for deletion after manager bumps).
     let harnessConfig: HarnessConfig | null = null;
+    // Resolved effort preset (abstract ticket effort option). Picked from the
+    // board's effort_presets catalog using the ticket's effort_preset id (or
+    // the catalog default when unset) via the shared resolveEffortPreset — the
+    // same resolve every REST/MCP reader uses. Shipped on the trigger payload
+    // so agent-manager maps it onto per-CLI options at spawn (claude --effort +
+    // the "ultracode" prompt keyword + --model; codex/antigravity model-only).
+    // Null when the board has no presets OR the lookup fails — the manager
+    // treats null as "no effort override" and spawns exactly as before. Reuses
+    // the same Board row loaded for harness so there's no extra round-trip.
+    let effortPreset: ResolvedEffortPreset | null = null;
     try {
       const boardForHarness = boardId
         ? await this.dataSource.getRepository(Board).findOne({ where: { id: boardId } })
@@ -1434,8 +1445,9 @@ candidate's branch or move the ticket.
         workspaceForHarness?.harness_config,
         boardForHarness?.harness_config,
       );
+      effortPreset = resolveEffortPreset(boardForHarness?.effort_presets, ticket.effort_preset);
     } catch (e) {
-      this.logService.warn('MCP', 'harness_config resolve failed (continuing without)', {
+      this.logService.warn('MCP', 'harness_config / effort_preset resolve failed (continuing without)', {
         err: String(e), ticket_id: ticket.id, board_id: boardId,
       });
     }
@@ -1478,6 +1490,11 @@ candidate's branch or move the ticket.
       // Resolved workspace+board harness — agent-manager applies it as CLI
       // flags at subagent spawn (ticket e9c7a896). Null = no harness.
       harness_config: harnessConfig,
+      // Resolved abstract effort preset (board catalog × ticket effort_preset).
+      // agent-manager maps it onto per-CLI options at spawn (claude --effort +
+      // "ultracode" prompt keyword + --model; codex/antigravity model-only).
+      // Null = no effort override.
+      effort_preset: effortPreset,
       triggered_by: triggeredBy,
       timestamp: now.toISOString(),
       force_respawn: forceRespawn,

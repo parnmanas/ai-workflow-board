@@ -24,6 +24,7 @@ import { writeRoutingConfigThrough } from './routing-config.helper';
 import { AgentWorkloadService } from '../agents/agent-workload.service';
 import { resolveAgentDisplayMap } from '../../utils/agent-name';
 import { validateHarnessConfigInput, serializeHarnessConfig } from '../../common/harness-config';
+import { validateEffortPresetsInput, serializeEffortPresets } from '../../common/effort-presets';
 
 // Narrow projection of a Comment as it ships on a board card. The board GET
 // only needs enough to render the comment count and the stale-open-question
@@ -420,7 +421,7 @@ export class BoardsController {
   async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     const board = await findOrFail(this.boardRepo, { where: { id } }, 'Board not found');
 
-    const { name, description, routing_config, column_prompts, max_concurrent_tickets_per_agent, self_improvement_mode, benchmark_mode, auto_archive_days, harness_config } = body;
+    const { name, description, routing_config, column_prompts, max_concurrent_tickets_per_agent, self_improvement_mode, benchmark_mode, auto_archive_days, harness_config, effort_presets } = body;
     if (name !== undefined) board.name = name;
     if (description !== undefined) board.description = description;
     if (self_improvement_mode !== undefined) {
@@ -474,6 +475,21 @@ export class BoardsController {
         const checked = validateHarnessConfigInput(harness_config);
         if (!checked.ok) return res.status(400).json({ error: checked.error });
         board.harness_config = serializeHarnessConfig(checked.value);
+      }
+    }
+
+    // Per-board effort preset catalog (abstract ticket effort option). null
+    // clears (board falls back to the built-in catalog); an object is
+    // zod-validated (strict keys + default-matches-an-id) so a typo'd field
+    // 400s instead of being silently stored. Empty / equal-to-builtin
+    // catalogs collapse to null via the serializer.
+    if (effort_presets !== undefined) {
+      if (effort_presets === null) {
+        board.effort_presets = null;
+      } else {
+        const checked = validateEffortPresetsInput(effort_presets);
+        if (!checked.ok) return res.status(400).json({ error: checked.error });
+        board.effort_presets = serializeEffortPresets(checked.value);
       }
     }
 

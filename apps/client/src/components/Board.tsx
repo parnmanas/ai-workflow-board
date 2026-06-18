@@ -624,6 +624,7 @@ export default function Board() {
                     onSelectTicket={setActivePanelTicketId}
                     currentBoardId={boardId}
                     workspaceId={wsId}
+                    effortPresets={board.effort_presets}
                     onMoveToBoard={handleMoveTicketToBoard}
                     scrollToCommentId={scrollToCommentId}
                     onScrollToCommentConsumed={() => setScrollToCommentId(null)}

@@ -319,7 +319,15 @@ export class TicketSessionManager
         // board's harness_config takes effect on the next fresh session
         // (new ticket, forceRespawn, or session split). Documented in
         // docs/agent-manager.md.
-        { monitorMeta, agentContext: spec.agentContext, harness: spec.harness ?? null },
+        {
+          monitorMeta,
+          agentContext: spec.agentContext,
+          harness: spec.harness ?? null,
+          // Ticket-level effort preset reaches buildSessionSpawn the same way
+          // harness does, so persistent ticket sessions get --effort + the
+          // ultracode first-turn keyword at session creation.
+          effortPreset: spec.effortPreset ?? null,
+        },
       );
       // Stamp identity fields BEFORE releasing the inflight reservation, so
       // a concurrent dispatch never observes a session with empty

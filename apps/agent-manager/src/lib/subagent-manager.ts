@@ -27,6 +27,7 @@ import {
   type CliAdapter,
   describeHarness,
   partitionHarness,
+  selectEffortSlice,
 } from './cli-adapters/base.js';
 import { CircuitBreaker } from './circuit-breaker.js';
 import { classifyCliError } from './cli-error-signatures.js';
@@ -422,7 +423,24 @@ export class SubagentManager implements SubagentManagerContract {
         `[subagent] harness applied: ticket=${spec.ticketId.slice(0, 8) || '-'} cli=${adapter.cliType} ${describeHarness(harness)}`,
       );
     }
-    const effectiveModel = harness?.model ?? ctx?.model ?? null;
+    // Ticket-level effort preset (parallel channel to harness). Pick this
+    // adapter's slice: claude → { model?, effort?, ultracode? }; codex /
+    // antigravity → { model? }; everything else → null. slice.model is the
+    // board-level effort intent and WINS the model precedence over both the
+    // harness model and the per-agent Agent.model default. effort / ultracode
+    // only ever survive for claude (the codex/antigravity slices never carry
+    // them); they ride into buildOneshotSpawn and are ignored by adapters that
+    // don't destructure them.
+    const slice = selectEffortSlice(adapter.cliType, spec.effortPreset);
+    const effectiveModel = slice?.model ?? harness?.model ?? ctx?.model ?? null;
+    const effortFlag = slice?.effort ?? null;
+    const ultracode = !!slice?.ultracode;
+    if (slice && (effortFlag || ultracode || slice.model)) {
+      log(
+        `[subagent] effort applied: ticket=${spec.ticketId.slice(0, 8) || '-'} cli=${adapter.cliType} ` +
+          `effort=${effortFlag ?? '-'} ultracode=${ultracode} model=${slice.model ?? '-'}`,
+      );
+    }
     let configPath: string | null = null;
     let configPathIsTemp = false;
     try {
@@ -432,6 +450,8 @@ export class SubagentManager implements SubagentManagerContract {
         mcpConfigPath: null,
         model: effectiveModel,
         harness,
+        effort: effortFlag,
+        ultracode,
       });
 
       if (descriptor.needsMcpConfig) {
@@ -484,6 +504,8 @@ export class SubagentManager implements SubagentManagerContract {
             mcpConfigPath: configPath,
             model: effectiveModel,
             harness,
+            effort: effortFlag,
+            ultracode,
           }),
         );
       }

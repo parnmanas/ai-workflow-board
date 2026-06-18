@@ -4,6 +4,7 @@
 // filter branch exists, NO emit producer. This is the explicit D-08 scope.
 
 import type { HarnessConfig } from '../harness-config';
+import type { ResolvedEffortPreset } from '../effort-presets';
 
 export type StreamEventType =
   | 'board_update'
@@ -93,6 +94,15 @@ export interface AgentTriggerPayload {
   // Null when neither layer configures a harness — the manager must treat
   // null as "spawn exactly as before".
   harness_config?: HarnessConfig | null;
+  // Resolved abstract effort preset: the board's effort_presets catalog
+  // matched against the ticket's effort_preset id (or the catalog default).
+  // agent-manager maps this onto per-CLI options at spawn — for claude the
+  // `claude.effort` block becomes the `--effort` flag and `claude.ultracode`
+  // appends the literal "ultracode" PROMPT KEYWORD to the task turn (not a
+  // flag); codex/antigravity take model-only and gracefully skip the rest.
+  // Null when the board has no presets or resolution fails — treat as "no
+  // effort override, spawn exactly as before".
+  effort_preset?: ResolvedEffortPreset | null;
 }
 
 // Phase 2 D-26 — finalized payload shape emitted by chat producers.

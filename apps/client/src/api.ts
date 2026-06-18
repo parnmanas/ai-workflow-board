@@ -42,6 +42,7 @@ import type {
   AgentCrossRefPolicy,
   BenchmarkRunDetail,
   HarnessConfig,
+  EffortPresetsConfig,
 } from './types';
 
 const BASE = '/api';
@@ -267,6 +268,9 @@ export const api = {
       benchmark_mode?: 'off' | 'on';
       auto_archive_days?: number | null;
       harness_config?: HarnessConfig | null;
+      // Abstract effort presets (per-CLI option mapping). null clears the
+      // board override; the server falls back to BUILTIN_EFFORT_PRESETS.
+      effort_presets?: EffortPresetsConfig | null;
     },
   ) =>
     request<any>(`/boards/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
@@ -386,9 +390,13 @@ export const api = {
   createTicket: (columnId: string, data: {
     title: string; description?: string; priority?: string;
     assignee?: string; reporter?: string; assignee_id?: string; reporter_id?: string;
+    // Abstract effort preset id (resolved per-CLI at dispatch). null/omit = none.
+    effort_preset?: string | null;
   }) =>
     request<any>(`/columns/${columnId}/tickets`, { method: 'POST', body: JSON.stringify(data) }),
 
+  // data accepts any ticket field, incl. `effort_preset?: string | null`
+  // (abstract effort preset id; null/'' clears the override).
   updateTicket: (id: string, data: Record<string, any>) =>
     request<any>(`/tickets/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
 

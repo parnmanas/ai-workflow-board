@@ -81,6 +81,74 @@ export function partitionHarness(
   return { applied: Object.keys(applied).length > 0 ? applied : null, skipped };
 }
 
+/**
+ * Ticket-level "effort preset" channel — a PARALLEL surface to HarnessSpec,
+ * deliberately NOT folded into HARNESS_SPEC_KEYS. A Ticket carries an abstract
+ * preset id; Board settings map that id to per-CLI options. The server resolves
+ * the matched preset and ships it on the SSE `agent_trigger` payload (field
+ * `effort_preset`). Claude expresses the rich surface (--effort flag +
+ * `ultracode` prompt keyword); codex / antigravity get model-only and the rest
+ * is gracefully skipped. Shapes must agree byte-for-byte with the server's
+ * effort-preset config (JSON keys identical on both sides).
+ */
+export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+/** The claude-family slice of a preset — the only CLI that maps the full
+ *  surface. `effort` → claude `--effort`; `ultracode` → the prompt keyword
+ *  appended to the task text / first session turn (NOT a flag); `model` →
+ *  `--model` (folded into the model precedence at the spawn site). */
+export interface EffortSlice {
+  model?: string;
+  effort?: EffortLevel;
+  ultracode?: boolean;
+}
+
+/** The single matched/board-default preset shipped on the trigger event. Null
+ *  on the wire (or after a defensive parse) means "no effort override — spawn
+ *  exactly as before", mirroring the harness null-safe contract. */
+export interface ResolvedEffortPreset {
+  id: string;
+  label?: string;
+  claude?: EffortSlice;
+  codex?: { model?: string };
+  antigravity?: { model?: string };
+}
+
+/**
+ * Pick the per-CLI slice of a resolved effort preset for `cliType`:
+ *   - claude / deepseek → the rich `claude` slice (model + effort + ultracode)
+ *   - codex             → the codex slice (model only)
+ *   - antigravity       → the antigravity slice (model only)
+ *   - anything else / a null preset → null
+ * The return shape is normalized to `{ model?, effort?, ultracode? }` so the
+ * spawn site can fold `model` into the model precedence and pass `effort` /
+ * `ultracode` straight through (codex / antigravity slices never carry the
+ * latter two, so they degrade to model-only automatically).
+ */
+export function selectEffortSlice(
+  cliType: string,
+  preset: ResolvedEffortPreset | null | undefined,
+): { model?: string; effort?: string; ultracode?: boolean } | null {
+  if (!preset) return null;
+  const t = String(cliType || '').toLowerCase();
+  if (t === 'claude' || t === 'deepseek') {
+    const s = preset.claude;
+    if (!s) return null;
+    return { model: s.model, effort: s.effort, ultracode: s.ultracode };
+  }
+  if (t === 'codex') {
+    const s = preset.codex;
+    if (!s) return null;
+    return { model: s.model };
+  }
+  if (t === 'antigravity') {
+    const s = preset.antigravity;
+    if (!s) return null;
+    return { model: s.model };
+  }
+  return null;
+}
+
 /** One-line summary of an applied harness for spawn-site logs — the
  *  operator-visible proof (acceptance criterion of e9c7a896) that a board's
  *  harness actually reached the CLI flags. */
@@ -108,6 +176,14 @@ export interface OneshotSpec {
   /** Board/workspace harness, pre-filtered to this adapter's supported keys
    *  via partitionHarness(). Null/absent → spawn exactly as before. */
   harness?: HarnessSpec | null;
+  /** Ticket-level effort preset, resolved to this CLI's slice at the spawn
+   *  site (selectEffortSlice). claude maps it to `--effort`; null/absent →
+   *  no flag. SEPARATE from harness — codex / antigravity never receive it. */
+  effort?: string | null;
+  /** Ticket-level "ultracode" opt-in — appends the `ultracode` keyword to the
+   *  task text so the spawned Claude Code subagent enters multi-agent
+   *  orchestration. NOT a flag. Ignored by non-claude adapters. */
+  ultracode?: boolean;
 }
 
 export interface SessionSpec {
@@ -117,6 +193,13 @@ export interface SessionSpec {
   model?: string | null;
   /** Board/workspace harness — see OneshotSpec.harness. */
   harness?: HarnessSpec | null;
+  /** Ticket-level effort preset slice — see OneshotSpec.effort. Applied at
+   *  session creation only. */
+  effort?: string | null;
+  /** Ticket-level "ultracode" opt-in — see OneshotSpec.ultracode. For a
+   *  session the keyword is folded into the composed system prompt at session
+   *  creation only. */
+  ultracode?: boolean;
 }
 
 export interface SpawnDescriptor {

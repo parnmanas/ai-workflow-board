@@ -43,6 +43,16 @@ export class Ticket {
   @Column({ type: 'varchar', default: 'medium' })
   priority: string;
 
+  // Abstract "effort preset" id (NOT a CLI flag). References one of the
+  // board's EffortPresetsConfig.presets[].id (see common/effort-presets.ts).
+  // Empty/null = use the board catalog's default preset. Dispatch resolves
+  // this against the board's `effort_presets` via resolveEffortPreset and
+  // ships the matched preset on the agent_trigger payload; agent-manager maps
+  // it onto per-CLI options at spawn (claude --effort + ultracode keyword +
+  // --model; codex/antigravity model-only).
+  @Column({ type: 'varchar', nullable: true, default: null })
+  effort_preset: string | null;
+
   @Column({ type: 'varchar', default: '' })
   assignee: string;
 

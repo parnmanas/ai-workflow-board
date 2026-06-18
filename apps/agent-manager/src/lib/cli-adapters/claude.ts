@@ -87,13 +87,20 @@ export class ClaudeCliAdapter extends CliAdapter {
     return HARNESS_SPEC_KEYS;
   }
 
-  buildOneshotSpawn({ rolePrompt, taskText, mcpConfigPath, model, harness }: OneshotSpec): SpawnDescriptor {
+  buildOneshotSpawn({ rolePrompt, taskText, mcpConfigPath, model, harness, effort, ultracode }: OneshotSpec): SpawnDescriptor {
+    // Ticket-level effort preset → claude `--effort` (session-level flag).
+    // Omitted when unset so the CLI keeps its default. `ultracode` is NOT a
+    // flag — it's a prompt keyword: appending the literal word opts the
+    // spawned Claude Code subagent into multi-agent orchestration, so it goes
+    // onto the task text rather than argv.
+    const finalTaskText = ultracode ? `${taskText}\n\nultracode` : taskText;
     return {
       args: [
-        // Per-agent default model (Agent.model) or harness override —
-        // spawn sites fold harness.model into `model`. Omitted when unset
+        // Per-agent default model (Agent.model) or harness/effort override —
+        // spawn sites fold the precedence into `model`. Omitted when unset
         // so the CLI keeps its own default — preserves prior behaviour.
         ...(model ? ['--model', model] : []),
+        ...(effort ? ['--effort', effort] : []),
         '--print',
         '--output-format',
         'json',
@@ -106,17 +113,27 @@ export class ClaudeCliAdapter extends CliAdapter {
         composeSystemPrompt(rolePrompt, harness),
         ...disallowedToolsArgs(harness),
         ...permissionArgs(harness),
-        taskText,
+        finalTaskText,
       ],
       stdio: ['ignore', 'pipe', 'pipe'],
       needsMcpConfig: true,
     };
   }
 
-  buildSessionSpawn({ rolePrompt, mcpConfigPath, model, harness }: SessionSpec): SpawnDescriptor {
+  buildSessionSpawn({ rolePrompt, mcpConfigPath, model, harness, effort, ultracode }: SessionSpec): SpawnDescriptor {
+    // Session ultracode is best-effort and applied at SESSION CREATION only:
+    // a persistent session has no single "task text" arg, so we fold the
+    // `ultracode` keyword into the composed system prompt here. Follow-up
+    // turns into the live child can't re-arm it (the flag/keyword are fixed at
+    // spawn, same as harness).
+    const systemPrompt = composeSystemPrompt(rolePrompt, harness);
+    const finalSystemPrompt = ultracode
+      ? `${systemPrompt}${systemPrompt ? '\n\n' : ''}ultracode`
+      : systemPrompt;
     return {
       args: [
         ...(model ? ['--model', model] : []),
+        ...(effort ? ['--effort', effort] : []),
         '--verbose',
         '--input-format',
         'stream-json',
@@ -128,7 +145,7 @@ export class ClaudeCliAdapter extends CliAdapter {
         '--allowedTools',
         composeAllowedTools(harness),
         '--append-system-prompt',
-        composeSystemPrompt(rolePrompt, harness),
+        finalSystemPrompt,
         ...disallowedToolsArgs(harness),
         ...permissionArgs(harness),
       ],

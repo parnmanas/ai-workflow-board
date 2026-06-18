@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Ticket, Agent, Channel, ActivityLog, CommentType, User, TicketAttachmentMeta, Resource, RepoBranch, TicketPrerequisiteRow, Action } from '../types';
+import { Ticket, Agent, Channel, ActivityLog, CommentType, User, TicketAttachmentMeta, Resource, RepoBranch, TicketPrerequisiteRow, Action, EffortPreset, EffortPresetsConfig, BUILTIN_EFFORT_PRESETS } from '../types';
 import { api, TicketRoleAssignmentRow, getActiveWorkspaceId, rawResourceUrl } from '../api';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
@@ -76,6 +76,10 @@ interface TicketPanelProps {
   // we list boards in the same workspace only (the server rejects
   // cross-workspace moves anyway).
   workspaceId?: string;
+  // The board's abstract effort presets (raw JSON string or parsed config, or
+  // null). Drives the per-ticket effort-preset picker. null/empty falls back
+  // to BUILTIN_EFFORT_PRESETS for display.
+  effortPresets?: EffortPresetsConfig | string | null;
   // Move a root ticket to another board. Optional column id picks a specific
   // column on the target board; omit for the destination's first column.
   onMoveToBoard?: (ticketId: string, targetBoardId: string, opts?: { target_column_id?: string }) => void;
@@ -103,6 +107,23 @@ const priorityColors: Record<string, string> = {
   high: '#fbbf24',
   critical: '#ef4444',
 };
+
+// Read path for the board's effort presets — degrade malformed/empty input to
+// the builtins, never throw (mirrors the server READ contract). Accepts the
+// raw JSON string the board ships or an already-parsed config.
+function parseEffortPresetList(raw: EffortPresetsConfig | string | null | undefined): EffortPreset[] {
+  if (!raw) return BUILTIN_EFFORT_PRESETS.presets;
+  let cfg: any = raw;
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (!trimmed) return BUILTIN_EFFORT_PRESETS.presets;
+    try { cfg = JSON.parse(trimmed); } catch { return BUILTIN_EFFORT_PRESETS.presets; }
+  }
+  if (!cfg || !Array.isArray(cfg.presets) || cfg.presets.length === 0) {
+    return BUILTIN_EFFORT_PRESETS.presets;
+  }
+  return cfg.presets.filter((p: any) => p && typeof p.id === 'string');
+}
 
 interface TriggerRoleTarget { slug: string; label: string; holderName: string; hasAgent: boolean }
 
@@ -473,7 +494,7 @@ function ResourceReferencePicker({
 export default function TicketPanel({
   ticket, columnName, agents, users, channels, workspaceRoles, boardTickets, typingIndicators,
   onClose, onUpdate, onDelete, onCreateChild, onDeleteChild, onReparentChild, onSetRoleAssignment, onSaveDraft, onAddComment, onSetCommentStatus, onSelectTicket,
-  currentBoardId, workspaceId, onMoveToBoard,
+  currentBoardId, workspaceId, effortPresets, onMoveToBoard,
   scrollToCommentId, onScrollToCommentConsumed,
 }: TicketPanelProps) {
   // ─── Ticket role assignments ────────────────────────────
@@ -638,6 +659,9 @@ export default function TicketPanel({
     return Math.max(10, Math.min(20, visualLines));
   }, [description]);
   const [priority, setPriority] = useState(activeTicket.priority);
+  // Abstract effort preset id ('' = board default / no override). Resolved
+  // per-CLI on the server at dispatch; here it's just the preset slug.
+  const [effortPreset, setEffortPreset] = useState<string>(activeTicket.effort_preset || '');
   const [assignee, setAssignee] = useState(resolveAgentName(activeTicket.assignee_id, activeTicket.assignee));
   const [reporter, setReporter] = useState(resolveAgentName(activeTicket.reporter_id, activeTicket.reporter));
   const [reviewerId, setReviewerId] = useState(activeTicket.reviewer_id || '');
@@ -742,6 +766,7 @@ export default function TicketPanel({
     setTitle(activeTicket.title);
     setDescription(activeTicket.description);
     setPriority(activeTicket.priority);
+    setEffortPreset(activeTicket.effort_preset || '');
     setSelectedChannelIds(activeTicket.channel_ids || []);
     setBaseRepoId(activeTicket.base_repo_resource_id || '');
     setBaseBranch(activeTicket.base_branch || '');
@@ -1001,6 +1026,11 @@ export default function TicketPanel({
     if (title !== activeTicket.title) out.title = title;
     if ((description || '') !== (activeTicket.description || '')) out.description = description;
     if (priority !== activeTicket.priority) out.priority = priority;
+    if ((effortPreset || '') !== (activeTicket.effort_preset || '')) {
+      // Empty draft → null clears the per-ticket override (server treats
+      // null/'' as "use the board default at dispatch").
+      out.effort_preset = effortPreset || null;
+    }
     if (!channelIdsEqual(selectedChannelIds, activeTicket.channel_ids || [])) {
       out.channel_ids = selectedChannelIds;
     }
@@ -1023,9 +1053,9 @@ export default function TicketPanel({
     }
     return out;
   }, [
-    title, description, priority, selectedChannelIds, baseRepoId, baseBranch, nextTicketId,
+    title, description, priority, effortPreset, selectedChannelIds, baseRepoId, baseBranch, nextTicketId,
     onDoneActionIds,
-    activeTicket.title, activeTicket.description, activeTicket.priority,
+    activeTicket.title, activeTicket.description, activeTicket.priority, activeTicket.effort_preset,
     activeTicket.channel_ids, activeTicket.base_repo_resource_id, activeTicket.base_branch,
     activeTicket.next_ticket_id, activeTicket.on_done_action_ids,
   ]);
@@ -1056,6 +1086,7 @@ export default function TicketPanel({
     setTitle(activeTicket.title);
     setDescription(activeTicket.description);
     setPriority(activeTicket.priority);
+    setEffortPreset(activeTicket.effort_preset || '');
     setSelectedChannelIds(activeTicket.channel_ids || []);
     setBaseRepoId(activeTicket.base_repo_resource_id || '');
     setBaseBranch(activeTicket.base_branch || '');
@@ -1063,7 +1094,7 @@ export default function TicketPanel({
     setOnDoneActionIds(activeTicket.on_done_action_ids || []);
     setRoleDrafts({});
   }, [
-    activeTicket.title, activeTicket.description, activeTicket.priority,
+    activeTicket.title, activeTicket.description, activeTicket.priority, activeTicket.effort_preset,
     activeTicket.channel_ids, activeTicket.base_repo_resource_id, activeTicket.base_branch,
     activeTicket.next_ticket_id, activeTicket.on_done_action_ids,
   ]);
@@ -2238,6 +2269,26 @@ export default function TicketPanel({
                   <option value="medium">Medium</option>
                   <option value="high">High</option>
                   <option value="critical">Critical</option>
+                </select>
+              </div>
+
+              {/* Effort preset — abstract effort option the board resolves
+                  per-CLI at dispatch. '' maps to null = board default. */}
+              <div>
+                <label style={labelStyle}>Effort preset</label>
+                <select
+                  value={effortPreset}
+                  onChange={e => setEffortPreset(e.target.value)}
+                  style={{
+                    background: tokens.colors.surfaceCard, border: `2px solid ${tokens.colors.border}`,
+                    borderRadius: tokens.radii.md, padding: '5px 8px',
+                    color: tokens.colors.textStrong, fontSize: '12px', fontWeight: 600, width: '100%',
+                  }}
+                >
+                  <option value="">(board default)</option>
+                  {parseEffortPresetList(effortPresets).map(p => (
+                    <option key={p.id} value={p.id}>{p.label || p.id}</option>
+                  ))}
                 </select>
               </div>
 

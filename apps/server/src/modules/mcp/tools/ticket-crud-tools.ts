@@ -122,11 +122,12 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       board_id: z.string().optional().describe('Board ID (used with column_name)'),
       subtasks: z.array(z.string()).optional().default([]).describe('List of subtask titles to create inline'),
       next_ticket_id: z.string().optional().describe('Optional pointer to the ticket TriggerLoopService should auto-trigger once this one lands on a terminal column. Must live in the same workspace; cleared when omitted or empty.'),
+      effort_preset: z.string().optional().describe('Abstract effort preset id (NOT a CLI flag) referencing one of the board\'s effort_presets[].id. Empty/omitted = board default preset. Resolved against the board catalog at dispatch; agent-manager maps the matched preset onto per-CLI options.'),
       created_by: z.string().optional().default('').describe('Creator name (user or agent)'),
       created_by_type: z.enum(['user', 'agent']).optional().default('agent').describe('Creator type'),
       created_by_id: z.string().optional().default('').describe('Creator ID'),
     },
-    async ({ title, description, priority, assignee, reporter, assignee_id, reporter_id, reviewer_id, role_assignments, labels, channel_ids, column_id, column_name, board_id, subtasks, next_ticket_id, created_by, created_by_type, created_by_id }, extra: { sessionId?: string }) => {
+    async ({ title, description, priority, assignee, reporter, assignee_id, reporter_id, reviewer_id, role_assignments, labels, channel_ids, column_id, column_name, board_id, subtasks, next_ticket_id, effort_preset, created_by, created_by_type, created_by_id }, extra: { sessionId?: string }) => {
       const __createSanitizeCaller = getCallerAgent(extra);
       description = sanitizeHarnessMarkers(description, { logger, toolName: 'create_ticket', fieldName: 'description', agentId: __createSanitizeCaller?.agentId });
       let resolvedColumnId = column_id;
@@ -201,6 +202,9 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           assignee_id: resolvedAssigneeId, reporter_id: resolvedReporterId, reviewer_id,
           labels: JSON.stringify(labels), channel_ids: JSON.stringify(channel_ids), position,
           next_ticket_id: resolvedNextTicketId,
+          // Abstract effort preset id (trim → empty becomes null). Resolved
+          // against the board catalog at dispatch; null = board default.
+          effort_preset: typeof effort_preset === 'string' && effort_preset.trim() ? effort_preset.trim() : null,
           terminal_entered_at: terminalEnteredAt,
           created_by: creatorName, created_by_type: creatorType, created_by_id: creatorId,
         }));
@@ -281,10 +285,11 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       base_branch: z.string().optional().describe('Branch the agent should treat as the base when starting work. Empty string clears.'),
       next_ticket_id: z.string().optional().describe('Optional pointer to the ticket TriggerLoopService should auto-trigger once this one lands on a terminal column. Must live in the same workspace and cannot self-link. Empty string clears.'),
       on_done_action_ids: z.array(z.string()).optional().describe('Action ids to dispatch once when this ticket lands on a terminal column (on-ticket-done hook, method "a"). The finished ticket is exposed to each Action prompt as {{ticket.*}}. enabled=false actions are skipped. Empty array clears the per-ticket binding.'),
+      effort_preset: z.string().optional().describe('Abstract effort preset id (NOT a CLI flag) referencing one of the board\'s effort_presets[].id. Empty string clears (board default preset applies). Resolved against the board catalog at dispatch; agent-manager maps the matched preset onto per-CLI options.'),
       pending_user_action: z.boolean().optional().describe('Park the ticket for user intervention. While true, TriggerLoopService drops every agent_trigger for this ticket, AgentWorkloadService.getFocusTicket skips it, and BacklogPromotionService refuses to promote into its column slot. Pair with `pending_reason` so the user can see why. Use this when a decision genuinely needs a human and would otherwise loop the ticket between System and Agent columns. Prefer the dedicated `pend_ticket` / `unpend_ticket` tools when the call is single-purpose.'),
       pending_reason: z.string().optional().describe('Free-text explanation rendered verbatim on the ticket detail panel\'s "User" tab. Cleared automatically when pending_user_action transitions to false.'),
     },
-    async ({ ticket_id, title, description, priority, assignee, reporter, assignee_id, reporter_id, reviewer_id, role_assignments, labels, channel_ids, base_repo_resource_id, base_branch, next_ticket_id, on_done_action_ids, pending_user_action, pending_reason }, extra: { sessionId?: string }) => {
+    async ({ ticket_id, title, description, priority, assignee, reporter, assignee_id, reporter_id, reviewer_id, role_assignments, labels, channel_ids, base_repo_resource_id, base_branch, next_ticket_id, on_done_action_ids, effort_preset, pending_user_action, pending_reason }, extra: { sessionId?: string }) => {
       const ticketRepo = dataSource.getRepository(Ticket);
       const ticket = await ticketRepo.findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Ticket not found');
@@ -396,6 +401,15 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
         const cleaned = Array.from(new Set(on_done_action_ids.filter((s) => typeof s === 'string' && s)));
         ticket.on_done_action_ids = JSON.stringify(cleaned);
         changes.push('on_done_action_ids');
+      }
+      if (effort_preset !== undefined) {
+        // Abstract effort preset id — stored as-is (trim; empty → null).
+        // Resolved against the board catalog at dispatch; null = board default.
+        const next = typeof effort_preset === 'string' && effort_preset.trim() ? effort_preset.trim() : null;
+        if ((ticket.effort_preset || '') !== (next || '')) {
+          ticket.effort_preset = next;
+          changes.push('effort_preset');
+        }
       }
 
       // Pending-user-action toggle (ticket a57517be). Tracked separately so

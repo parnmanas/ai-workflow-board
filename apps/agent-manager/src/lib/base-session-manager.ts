@@ -23,9 +23,11 @@ import {
   type CliAdapter,
   type HarnessSpec,
   type ParseResult,
+  type ResolvedEffortPreset,
   type TurnImage,
   describeHarness,
   partitionHarness,
+  selectEffortSlice,
 } from './cli-adapters/base.js';
 import type { AwbConfig } from './rest.js';
 import type { SubagentMonitor, SubagentTapHandle } from './subagent-monitor.js';
@@ -116,6 +118,11 @@ export interface SpawnOpts {
    *  Applied at session CREATION only — CLI flags are fixed at spawn, so
    *  follow-up turns keep the harness the session was born with. */
   harness?: HarnessSpec | null;
+  /** Ticket-level abstract effort preset from the trigger (separate channel
+   *  from harness). The spawn site picks this CLI's slice via
+   *  selectEffortSlice; claude maps it to `--effort` + the ultracode keyword
+   *  in the first turn. Applied at session CREATION only. */
+  effortPreset?: ResolvedEffortPreset | null;
 }
 
 interface TurnState {
@@ -317,7 +324,7 @@ export class BaseSessionManager {
     sessionKey: string,
     rolePrompt: string,
     firstTurnText: string,
-    { onProgress, monitorMeta, agentContext, firstTurnImages, harness: rawHarness }: SpawnOpts = {},
+    { onProgress, monitorMeta, agentContext, firstTurnImages, harness: rawHarness, effortPreset }: SpawnOpts = {},
   ): Promise<SessionRecord | null> {
     // ST-7: pick the adapter for this agent's CLI choice (claude/codex/antigravity)
     // and bind it to the session record so future turns formatTurn /
@@ -353,7 +360,23 @@ export class BaseSessionManager {
         `${this.#logTag} harness applied: ${this.#keyField}=${sessionKey} cli=${adapter.cliType} ${describeHarness(harness)}`,
       );
     }
-    const effectiveModel = harness?.model ?? agentContext?.model ?? null;
+    // Ticket-level effort preset (parallel channel to harness) — pick this
+    // CLI's slice. slice.model is the board-level effort intent and WINS the
+    // model precedence over the harness model and the per-agent Agent.model
+    // default. effort / ultracode only survive for claude and ride into
+    // buildSessionSpawn (other adapters ignore them). Like harness, this is
+    // applied at session CREATION only — a live session's --effort flag and
+    // the ultracode first-turn keyword are fixed at spawn.
+    const slice = selectEffortSlice(adapter.cliType, effortPreset);
+    const effectiveModel = slice?.model ?? harness?.model ?? agentContext?.model ?? null;
+    const effortFlag = slice?.effort ?? null;
+    const ultracode = !!slice?.ultracode;
+    if (slice && (effortFlag || ultracode || slice.model)) {
+      log(
+        `${this.#logTag} effort applied: ${this.#keyField}=${sessionKey} cli=${adapter.cliType} ` +
+          `effort=${effortFlag ?? '-'} ultracode=${ultracode} model=${slice.model ?? '-'}`,
+      );
+    }
 
     let configPath: string | null = null;
     let configPathIsTemp = false;
@@ -364,6 +387,8 @@ export class BaseSessionManager {
         mcpConfigPath: null,
         model: effectiveModel,
         harness,
+        effort: effortFlag,
+        ultracode,
       });
 
       if (descriptor.needsMcpConfig) {
@@ -412,6 +437,8 @@ export class BaseSessionManager {
           mcpConfigPath: configPath,
           model: effectiveModel,
           harness,
+          effort: effortFlag,
+          ultracode,
         });
       }
 

@@ -22,7 +22,7 @@ import type { AwbConfig } from './rest.js';
 import type { ManagedAgentContextRegistry } from './managed-agent-context.js';
 import type { WorktreeManager } from './worktree-manager.js';
 import { prepareChatAttachments } from './chat-attachment-prep.js';
-import type { HarnessSpec } from './cli-adapters/base.js';
+import type { HarnessSpec, ResolvedEffortPreset, EffortLevel } from './cli-adapters/base.js';
 import { createAdapter, ADAPTER_CAPABILITIES } from './cli-adapters/index.js';
 
 /**
@@ -58,6 +58,57 @@ export function parseHarnessConfig(raw: unknown): HarnessSpec | null {
     if (typeof obj[key] === 'string' && obj[key].trim()) out[key] = obj[key].trim();
   }
   return Object.keys(out).length > 0 ? out : null;
+}
+
+/** Valid claude `--effort` levels. A preset slice carrying anything else has
+ *  its `effort` dropped (the rest of the slice survives) so a malformed level
+ *  can never reach the CLI flag. */
+const EFFORT_LEVELS = new Set<EffortLevel>(['low', 'medium', 'high', 'xhigh', 'max']);
+
+/**
+ * Defensive parse of the `effort_preset` field on a flattened agent_trigger
+ * event (ticket-level abstract effort preset). The server ships the resolved,
+ * matched preset object (or omits it — older servers / boards with no preset).
+ * Accepts an object or a JSON string, keeps only the known per-CLI slices with
+ * the right runtime types, and degrades to null on anything else — a malformed
+ * preset must never block the dispatch it rides on (mirror parseHarnessConfig).
+ *
+ * A preset with no usable `id` is dropped (the id is the stable slug every
+ * downstream consumer keys on). Unknown effort levels are stripped rather than
+ * rejecting the whole preset, so a board can still ship `model` / `ultracode`.
+ */
+export function parseEffortPreset(raw: unknown): ResolvedEffortPreset | null {
+  let obj: any = raw;
+  if (typeof obj === 'string') {
+    if (!obj.trim()) return null;
+    try {
+      obj = JSON.parse(obj);
+    } catch {
+      return null;
+    }
+  }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
+  if (typeof obj.id !== 'string' || !obj.id.trim()) return null;
+  const out: ResolvedEffortPreset = { id: obj.id.trim() };
+  if (typeof obj.label === 'string' && obj.label.trim()) out.label = obj.label;
+  if (obj.claude && typeof obj.claude === 'object' && !Array.isArray(obj.claude)) {
+    const c: { model?: string; effort?: EffortLevel; ultracode?: boolean } = {};
+    if (typeof obj.claude.model === 'string' && obj.claude.model.trim()) c.model = obj.claude.model.trim();
+    if (typeof obj.claude.effort === 'string' && EFFORT_LEVELS.has(obj.claude.effort as EffortLevel)) {
+      c.effort = obj.claude.effort as EffortLevel;
+    }
+    if (typeof obj.claude.ultracode === 'boolean') c.ultracode = obj.claude.ultracode;
+    if (Object.keys(c).length > 0) out.claude = c;
+  }
+  for (const key of ['codex', 'antigravity'] as const) {
+    const slice = obj[key];
+    if (slice && typeof slice === 'object' && !Array.isArray(slice)) {
+      if (typeof slice.model === 'string' && slice.model.trim()) {
+        out[key] = { model: slice.model.trim() };
+      }
+    }
+  }
+  return out;
 }
 
 // Hard cap on consecutive agent-to-agent turns within a single chat room.
@@ -145,6 +196,11 @@ export interface SubagentSpawnArgs {
   /** Resolved board/workspace harness from the trigger event (e9c7a896).
    *  Null/absent → spawn exactly as before. */
   harness?: HarnessSpec | null;
+  /** Ticket-level abstract effort preset, resolved server-side and shipped on
+   *  the trigger event (`effort_preset`). SEPARATE channel from `harness`; the
+   *  spawn site picks the per-CLI slice via selectEffortSlice. Null/absent →
+   *  no effort override. */
+  effortPreset?: ResolvedEffortPreset | null;
 }
 
 export interface SubagentSpawnResult {
@@ -225,6 +281,10 @@ export interface TicketTriggerArgs {
    *  fixed at spawn; follow-up turns into an existing pid keep the
    *  harness the session was born with. Null/absent → spawn as before. */
   harness?: HarnessSpec | null;
+  /** Ticket-level abstract effort preset (`effort_preset`). Like harness it is
+   *  applied at SESSION CREATION only — a live session's `--effort` flag is
+   *  fixed at spawn. Null/absent → no effort override. */
+  effortPreset?: ResolvedEffortPreset | null;
 }
 
 export interface TicketDispatchResult {
@@ -601,6 +661,18 @@ export class EventDispatcher {
       );
     }
 
+    // Ticket-level abstract effort preset (separate channel from harness). The
+    // server resolves the matched preset and flattens it onto the event as
+    // `effort_preset`; both spawn paths below pick the per-CLI slice at their
+    // spawn site (claude → --effort + ultracode keyword; codex/antigravity →
+    // model-only).
+    const effortPreset = parseEffortPreset(ev.effort_preset);
+    if (effortPreset) {
+      log(
+        `Trigger carries effort_preset: id=${effortPreset.id}${effortPreset.label ? ` (${effortPreset.label})` : ''} ticket=${ev.ticket_id}`,
+      );
+    }
+
     const delegation = (this.#config as any)?.delegation ?? {};
     const delegationEnabled = delegation.enabled !== false;
     const persistentTicket = delegation.persistentTicketSessions !== false;
@@ -625,6 +697,7 @@ export class EventDispatcher {
           triggerSource: ev.trigger_source || '',
           agentContext,
           harness,
+          effortPreset,
           maxConcurrentTicketsPerAgent:
             typeof ev.max_concurrent_tickets_per_agent === 'number'
               ? ev.max_concurrent_tickets_per_agent
@@ -688,6 +761,7 @@ export class EventDispatcher {
           triggerSource: ev.trigger_source || '',
           agentContext,
           harness,
+          effortPreset,
         });
 
         if (result.spawned) {

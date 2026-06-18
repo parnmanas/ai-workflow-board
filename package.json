@@ -21,6 +21,9 @@
     "turbo": "^2.4.0"
   },
   "overrides": {
+    "@nestjs/swagger": {
+      "js-yaml": "^4.2.0"
+    },
     "@angular-devkit/core": {
       "picomatch": "^4.0.4"
     },

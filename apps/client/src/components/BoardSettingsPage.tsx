@@ -1,7 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { api } from '../api';
-import { Board, BoardWithCards, PromptTemplate, BoardMovePreview, MoveBlocker, MoveRemedy } from '../types';
+import {
+  Board, BoardWithCards, PromptTemplate, BoardMovePreview, MoveBlocker, MoveRemedy,
+  EffortPreset, EffortPresetsConfig, EffortLevel, BUILTIN_EFFORT_PRESETS,
+} from '../types';
 import MoveBlockerList from './MoveBlockerList';
 import { useBoard } from '../hooks/useBoard';
 import { useToast } from '../contexts/ToastContext';
@@ -149,6 +152,14 @@ export default function BoardSettingsPage() {
               // Server zod rejection (400) surfaces its message here.
               showToast(err?.message || 'Failed to save harness', 'error');
             }
+          }}
+        />
+        <EffortPresetsSetting
+          board={board}
+          onSave={async (config) => {
+            await api.updateBoard(board.id, { effort_presets: config });
+            await refresh();
+            showToast(config === null ? 'Effort presets cleared' : 'Effort presets saved', 'success');
           }}
         />
         <ColumnManager
@@ -509,6 +520,293 @@ function SelfImprovementSetting({ board, onSave }: SelfImprovementSettingProps) 
           {hint}
         </div>
       )}
+    </section>
+  );
+}
+
+// ─── Effort presets ─────────────────────────────────────────────
+// Abstract per-board effort presets → per-CLI option mapping. The ticket
+// carries only the abstract preset id; the server resolves it into per-CLI
+// options at dispatch. Claude gets effort + ultracode + model; codex /
+// antigravity get model-only. Starts from the board's stored presets, else
+// BUILTIN_EFFORT_PRESETS. Save writes the whole config (or null to clear the
+// override and fall back to the builtins on the server).
+const EFFORT_LEVELS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+// Read path — degrade malformed / empty input to the builtins, never throw
+// (mirror the server READ contract). Accepts either the parsed config or the
+// raw JSON string the board ships.
+function parseEffortPresets(raw: Board['effort_presets']): EffortPresetsConfig {
+  if (!raw) return cloneEffortConfig(BUILTIN_EFFORT_PRESETS);
+  let cfg: any = raw;
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (!trimmed) return cloneEffortConfig(BUILTIN_EFFORT_PRESETS);
+    try { cfg = JSON.parse(trimmed); } catch { return cloneEffortConfig(BUILTIN_EFFORT_PRESETS); }
+  }
+  if (!cfg || !Array.isArray(cfg.presets) || cfg.presets.length === 0) {
+    return cloneEffortConfig(BUILTIN_EFFORT_PRESETS);
+  }
+  const presets: EffortPreset[] = cfg.presets
+    .filter((p: any) => p && typeof p.id === 'string')
+    .map((p: any) => ({
+      id: String(p.id),
+      label: typeof p.label === 'string' && p.label ? p.label : String(p.id),
+      ...(p.claude ? { claude: { ...p.claude } } : {}),
+      ...(p.codex ? { codex: { ...p.codex } } : {}),
+      ...(p.antigravity ? { antigravity: { ...p.antigravity } } : {}),
+    }));
+  if (presets.length === 0) return cloneEffortConfig(BUILTIN_EFFORT_PRESETS);
+  const def = typeof cfg.default === 'string' && presets.some((p) => p.id === cfg.default)
+    ? cfg.default
+    : presets[0].id;
+  return { default: def, presets };
+}
+
+function cloneEffortConfig(cfg: EffortPresetsConfig): EffortPresetsConfig {
+  return JSON.parse(JSON.stringify(cfg));
+}
+
+interface EffortPresetsSettingProps {
+  board: BoardWithCards;
+  onSave(config: EffortPresetsConfig | null): Promise<void>;
+}
+
+function EffortPresetsSetting({ board, onSave }: EffortPresetsSettingProps) {
+  const initial = parseEffortPresets(board.effort_presets);
+  const [config, setConfig] = useState<EffortPresetsConfig>(initial);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    setConfig(parseEffortPresets(board.effort_presets));
+  }, [board.effort_presets]);
+
+  const dirty = JSON.stringify(config) !== JSON.stringify(initial);
+
+  // Mutate a single preset by index, returning a fresh config so React re-renders.
+  const updatePreset = (idx: number, patch: Partial<EffortPreset>) => {
+    setConfig((prev) => {
+      const presets = prev.presets.map((p, i) => (i === idx ? { ...p, ...patch } : p));
+      return { ...prev, presets };
+    });
+  };
+
+  // Patch a CLI sub-object (claude/codex/antigravity), pruning empty objects so
+  // the saved config stays clean (mirror the server WRITE-side normalization).
+  const updateCli = (
+    idx: number,
+    cli: 'claude' | 'codex' | 'antigravity',
+    patch: Record<string, any>,
+  ) => {
+    setConfig((prev) => {
+      const presets = prev.presets.map((p, i) => {
+        if (i !== idx) return p;
+        const next: any = { ...(p as any)[cli], ...patch };
+        // Drop keys whose value is empty so we don't persist noise.
+        for (const k of Object.keys(next)) {
+          if (next[k] === '' || next[k] === undefined || next[k] === false) delete next[k];
+        }
+        const merged: any = { ...p };
+        if (Object.keys(next).length === 0) delete merged[cli];
+        else merged[cli] = next;
+        return merged;
+      });
+      return { ...prev, presets };
+    });
+  };
+
+  const addPreset = () => {
+    setConfig((prev) => {
+      // Generate a unique slug.
+      let n = prev.presets.length + 1;
+      let id = `preset-${n}`;
+      const ids = new Set(prev.presets.map((p) => p.id));
+      while (ids.has(id)) { n += 1; id = `preset-${n}`; }
+      return {
+        ...prev,
+        presets: [...prev.presets, { id, label: `Preset ${n}`, claude: { effort: 'medium' } }],
+      };
+    });
+  };
+
+  const removePreset = (idx: number) => {
+    setConfig((prev) => {
+      const presets = prev.presets.filter((_, i) => i !== idx);
+      // Keep `default` valid — if it pointed at the removed row, fall back to
+      // the first remaining preset (or '' when the list is now empty).
+      const removedId = prev.presets[idx]?.id;
+      const def = prev.default === removedId ? (presets[0]?.id || '') : prev.default;
+      return { default: def, presets };
+    });
+  };
+
+  const sectionStyle: React.CSSProperties = {
+    padding: 16,
+    marginBottom: 16,
+    background: tokens.colors.surfaceCard,
+    border: `1px solid ${tokens.colors.border}`,
+    borderRadius: tokens.radii.md,
+  };
+  const fieldLabel: React.CSSProperties = {
+    display: 'block', fontSize: 10, color: tokens.colors.textMuted,
+    marginBottom: 3, textTransform: 'uppercase', fontWeight: 600,
+  };
+  const inputStyle: React.CSSProperties = {
+    width: '100%', background: tokens.colors.surface,
+    border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
+    padding: '6px 8px', color: tokens.colors.textStrong, fontSize: 12,
+    fontFamily: 'inherit', boxSizing: 'border-box',
+  };
+
+  return (
+    <section style={sectionStyle}>
+      <h3 style={{ margin: 0, fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>
+        Effort presets
+      </h3>
+      <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, marginBottom: 12 }}>
+        Abstract effort options a ticket can carry. Each preset maps to per-CLI options at dispatch:
+        Claude gets <code>--effort</code>, the <code>ultracode</code> orchestration keyword, and an
+        optional model; Codex and Antigravity get model-only (other keys are gracefully skipped).
+        Tickets reference a preset by name; clearing falls back to the built-in presets.
+      </div>
+
+      {/* Default preset picker */}
+      <div style={{ marginBottom: 14, maxWidth: 260 }}>
+        <label style={fieldLabel}>Default preset</label>
+        <select
+          value={config.default}
+          onChange={(e) => setConfig((prev) => ({ ...prev, default: e.target.value }))}
+          style={inputStyle}
+          disabled={config.presets.length === 0}
+        >
+          {config.presets.map((p) => (
+            <option key={p.id} value={p.id}>{p.label || p.id}</option>
+          ))}
+        </select>
+      </div>
+
+      {/* Preset rows */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {config.presets.map((p, idx) => (
+          <div
+            key={idx}
+            style={{
+              border: `1px solid ${tokens.colors.border}`,
+              borderRadius: tokens.radii.md,
+              padding: 12,
+              background: tokens.colors.surface,
+            }}
+          >
+            <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', marginBottom: 8 }}>
+              <div style={{ flex: 1 }}>
+                <label style={fieldLabel}>Label</label>
+                <input
+                  value={p.label}
+                  onChange={(e) => updatePreset(idx, { label: e.target.value })}
+                  style={inputStyle}
+                />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={fieldLabel}>Id (slug)</label>
+                <input
+                  value={p.id}
+                  onChange={(e) => updatePreset(idx, { id: e.target.value })}
+                  style={inputStyle}
+                />
+              </div>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => removePreset(idx)}
+              >
+                Remove
+              </Button>
+            </div>
+
+            {/* Claude options */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginBottom: 8 }}>
+              <div>
+                <label style={fieldLabel}>Claude effort</label>
+                <select
+                  value={p.claude?.effort || ''}
+                  onChange={(e) => updateCli(idx, 'claude', { effort: e.target.value })}
+                  style={inputStyle}
+                >
+                  <option value="">(none)</option>
+                  {EFFORT_LEVELS.map((lvl) => (
+                    <option key={lvl} value={lvl}>{lvl}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label style={fieldLabel}>Claude model</label>
+                <input
+                  value={p.claude?.model || ''}
+                  placeholder="(CLI default)"
+                  onChange={(e) => updateCli(idx, 'claude', { model: e.target.value })}
+                  style={inputStyle}
+                />
+              </div>
+              <div style={{ display: 'flex', alignItems: 'flex-end', paddingBottom: 6 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: tokens.colors.textStrong, cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={!!p.claude?.ultracode}
+                    onChange={(e) => updateCli(idx, 'claude', { ultracode: e.target.checked })}
+                  />
+                  ultracode
+                </label>
+              </div>
+            </div>
+
+            {/* Codex / Antigravity model-only */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              <div>
+                <label style={fieldLabel}>Codex model</label>
+                <input
+                  value={p.codex?.model || ''}
+                  placeholder="(CLI default)"
+                  onChange={(e) => updateCli(idx, 'codex', { model: e.target.value })}
+                  style={inputStyle}
+                />
+              </div>
+              <div>
+                <label style={fieldLabel}>Antigravity model</label>
+                <input
+                  value={p.antigravity?.model || ''}
+                  placeholder="(CLI default)"
+                  onChange={(e) => updateCli(idx, 'antigravity', { model: e.target.value })}
+                  style={inputStyle}
+                />
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+        <Button variant="secondary" size="sm" onClick={addPreset}>
+          Add preset
+        </Button>
+        <Button
+          variant="primary"
+          size="sm"
+          disabled={!dirty || busy}
+          onClick={async () => {
+            if (!dirty) return;
+            setBusy(true);
+            try {
+              // Empty preset list → clear the board override (null), so the
+              // server serializes an empty column and falls back to builtins.
+              await onSave(config.presets.length === 0 ? null : config);
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          {busy ? 'Saving…' : 'Save'}
+        </Button>
+      </div>
     </section>
   );
 }
