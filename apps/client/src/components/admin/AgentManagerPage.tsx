@@ -159,6 +159,7 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
   const [subagents, setSubagents] = useState<SubagentSummary[] | null>(null);
   const [logs, setLogs] = useState<any[] | null>(null);
   const [restartPending, setRestartPending] = useState(false);
+  const [restartAllPending, setRestartAllPending] = useState(false);
   const [updatePending, setUpdatePending] = useState(false);
   // Manager Agent.name + description live in the agents table, separate
   // from inst.hostname (OS hostname). The header shows hostname; this
@@ -235,6 +236,37 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
       showToast(`Restart failed: ${err?.message || err}`, 'error');
     } finally {
       setRestartPending(false);
+    }
+  };
+
+  // Dispatch restart_all_agents SSE command. Unlike restart_manager, the
+  // manager process stays up — it just reaps+respawns each managed agent in
+  // place (fresh credential + immediate in-flight resume per agent). The 202
+  // only carries command_id; the exact restarted count lands in the async ack
+  // (server-logged), so we surface the *target* count from agent_ids instead.
+  const handleRestartAllAgents = async () => {
+    if (restartAllPending) return;
+    const targetCount = inst.agent_ids?.length ?? 0;
+    const ok = await confirm({
+      title: 'Restart all agents',
+      message:
+        '이 매니저가 관리하는 모든 agent 를 재시작합니다. 각 agent 의 진행 중 작업은 재시작 후 자동 재개됩니다. (매니저 프로세스는 유지)',
+      confirmLabel: 'Restart all',
+    });
+    if (!ok) return;
+    setRestartAllPending(true);
+    try {
+      const resp = await api.restartAllAgents(inst.instance_id);
+      const idTail = resp?.command_id ? ` (id=${resp.command_id.slice(0, 8)})` : '';
+      showToast(
+        `restart_all_agents dispatched${idTail} — ${targetCount} agent(s) will restart, ` +
+          `resuming in-flight work.`,
+        'success',
+      );
+    } catch (err: any) {
+      showToast(`restart_all_agents failed: ${err?.message || err}`, 'error');
+    } finally {
+      setRestartAllPending(false);
     }
   };
 
@@ -472,6 +504,26 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
           >
             Restart instance
           </button>
+          {inst.mode === 'manager' && (
+            <button
+              onClick={handleRestartAllAgents}
+              disabled={restartAllPending}
+              style={{
+                padding: '6px 14px',
+                fontSize: 12,
+                fontWeight: 600,
+                background: restartAllPending ? tokens.colors.surfaceHover : tokens.colors.warning,
+                color: restartAllPending ? tokens.colors.textMuted : tokens.colors.surface,
+                border: 'none',
+                borderRadius: tokens.radii.md,
+                cursor: restartAllPending ? 'wait' : 'pointer',
+                fontFamily: 'inherit',
+              }}
+              title="Dispatch restart_all_agents: reap+respawn every managed agent in place (fresh credential + immediate in-flight resume per agent). Manager process stays up — no downtime."
+            >
+              {restartAllPending ? 'Restarting agents…' : 'Restart all agents'}
+            </button>
+          )}
           <button
             onClick={() => { loadSubagents(); loadLogs(); loadManagerInfo(); }}
             style={{

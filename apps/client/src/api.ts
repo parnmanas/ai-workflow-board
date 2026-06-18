@@ -1035,6 +1035,15 @@ export const api = {
     request<any[]>(`/admin/agent-manager/instances/${encodeURIComponent(instanceId)}/logs?limit=${limit}`),
   restartAgentManagerInstance: (instanceId: string) =>
     request<any>(`/admin/agent-manager/instances/${encodeURIComponent(instanceId)}/restart`, { method: 'POST' }),
+  // Reap+respawn every agent the manager supervises, in place (no process
+  // re-exec). Flows through the generic command endpoint — the verb takes no
+  // args. Returns the 202 dispatch ack only; the per-agent restart count lands
+  // in the async ack (server-logged), so the UI shows the target count instead.
+  restartAllAgents: (instanceId: string) =>
+    request<AgentManagerCommandResult>(
+      `/admin/agent-manager/instances/${encodeURIComponent(instanceId)}/command`,
+      { method: 'POST', body: JSON.stringify({ command: 'restart_all_agents' }) },
+    ),
 
   // ─── ST-4/5 Agent-manager pairing & control ───────────
   // Pairing token lifecycle. mintAgentManagerPairing returns the raw token
