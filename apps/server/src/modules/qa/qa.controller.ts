@@ -395,6 +395,7 @@ export class QaController {
       { file: 'multi-user-chat.test.mjs', category: 'Flow-Chat' },
       { file: 'chat-message-read.test.mjs', category: 'Flow-Chat' },
       { file: 'large-data.test.mjs', category: 'Flow-Scale' },
+      { file: 'qa-run-lifecycle.test.mjs', category: 'Flow-QA' },
     ];
 
     // Resolve the apps/server root from wherever this compiled file lives
