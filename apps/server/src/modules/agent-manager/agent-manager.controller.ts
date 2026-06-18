@@ -771,8 +771,13 @@ export class AgentManagerController {
     // Same sanity check for credential_id — fail fast with a clear error rather
     // than letting spawn time discover the broken FK on the agent-manager side.
     if (credential_id) {
-      const c = await this.credentialRepo.findOne({ where: { id: credential_id, workspace_id: workspaceId } });
-      if (!c) return res.status(400).json({ error: 'credential_id does not exist in this workspace' });
+      // Accept a credential that is GLOBAL (workspace_id=NULL, shared
+      // instance-wide) or scoped to this agent's workspace. Reject other
+      // workspaces' credentials so a binding can't leak secrets.
+      const c = await this.credentialRepo.findOne({ where: { id: credential_id } });
+      if (!c || (c.workspace_id !== null && c.workspace_id !== workspaceId)) {
+        return res.status(400).json({ error: 'credential_id does not exist in this workspace or globally' });
+      }
     }
 
     const agent = await this.agentRepo.save(
@@ -995,22 +1000,25 @@ export class AgentManagerController {
 
     if (!target.credential_id) return res.status(204).send();
 
-    const cred = await this.credentialRepo.findOne({
-      where: {
-        id: target.credential_id,
-        // target.workspace_id is nullable now (manager rows store NULL); a
-        // managed agent fetching its credential should never have NULL here,
-        // but the filter is omitted defensively so the lookup keys only on
-        // id when the workspace pointer is missing.
-        ...(target.workspace_id ? { workspace_id: target.workspace_id } : {}),
-      },
-    });
+    // Look up by id first, then authorize. A credential is fetchable when it is
+    // GLOBAL (workspace_id=NULL, shared instance-wide) OR scoped to this
+    // agent's own workspace. Other-workspace credentials are refused so a
+    // cross-workspace binding can't leak secrets.
+    const cred = await this.credentialRepo.findOne({ where: { id: target.credential_id } });
     if (!cred) {
       this.logService.warn(
         'AgentManager',
         `Managed agent credential ${target.credential_id.slice(0, 8)} not found for agent=${target.id.slice(0, 8)} — falling back to none`,
       );
       return res.status(404).json({ error: 'credential not found' });
+    }
+    if (cred.workspace_id !== null && cred.workspace_id !== target.workspace_id) {
+      this.logService.warn(
+        'AgentManager',
+        `Refused credential fetch: cred=${cred.id.slice(0, 8)} (workspace=${(cred.workspace_id || '').slice(0, 8)}) ` +
+          `is neither global nor owned by agent=${target.id.slice(0, 8)} (workspace=${(target.workspace_id || 'none')})`,
+      );
+      return res.status(403).json({ error: 'credential belongs to another workspace' });
     }
 
     // Disambiguate "stored fields legitimately empty" from "decrypt silently

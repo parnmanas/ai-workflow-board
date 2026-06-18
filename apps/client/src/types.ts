@@ -267,7 +267,12 @@ export interface QaRun {
 
 export interface Credential {
   id: string;
-  workspace_id: string;
+  // null = global (instance-level) credential shared across all workspaces.
+  workspace_id: string | null;
+  // 'global' credentials are read-only inside a workspace view (editable only
+  // from the Admin global-credentials page); 'workspace' credentials are owned
+  // by the active workspace.
+  scope?: 'workspace' | 'global';
   name: string;
   description: string;
   provider: string;

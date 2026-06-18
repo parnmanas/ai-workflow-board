@@ -716,7 +716,7 @@ export default function AgentManager() {
                 onChange={e => setForm({ ...form, credential_id: (e.target as HTMLSelectElement).value })}
                 options={[
                   { value: '', label: 'None — fall back to operator HOME' },
-                  ...eligibleCredentials.map(c => ({ value: c.id, label: `${c.name} · ${c.provider}` })),
+                  ...eligibleCredentials.map(c => ({ value: c.id, label: `${c.name} · ${c.provider}${c.scope === 'global' ? ' · Global' : ''}` })),
                 ]}
               />
               <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginTop: 4, lineHeight: 1.5 }}>

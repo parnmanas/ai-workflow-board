@@ -87,7 +87,7 @@ const PROVIDER_FIELD_LABELS: Record<string, Record<string, FieldDef>> = {
   },
 };
 
-export default function CredentialManager({ workspaceId }: { workspaceId?: string }) {
+export default function CredentialManager({ workspaceId, globalMode = false }: { workspaceId?: string; globalMode?: boolean }) {
   const { showToast } = useToast();
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [loading, setLoading] = useState(true);
@@ -102,20 +102,22 @@ export default function CredentialManager({ workspaceId }: { workspaceId?: strin
   const [formFields, setFormFields] = useState<Record<string, string>>({});
   const [formErrors, setFormErrors] = useState<{ name?: string }>({});
 
-  const effectiveWsId = workspaceId || (getActiveWorkspaceId() || '');
+  const effectiveWsId = globalMode ? '' : (workspaceId || (getActiveWorkspaceId() || ''));
 
   const loadCredentials = useCallback(async () => {
-    if (!effectiveWsId) { setCredentials([]); setLoading(false); return; }
+    if (!globalMode && !effectiveWsId) { setCredentials([]); setLoading(false); return; }
     setLoading(true);
     try {
-      const list = await api.listCredentials(effectiveWsId);
+      const list = globalMode
+        ? await api.listCredentials(undefined, { scope: 'global' })
+        : await api.listCredentials(effectiveWsId);
       setCredentials(list);
     } catch (err: any) {
       showToast(err?.message || 'Failed to load credentials', 'error');
     } finally {
       setLoading(false);
     }
-  }, [effectiveWsId, showToast]);
+  }, [globalMode, effectiveWsId, showToast]);
 
   useEffect(() => { loadCredentials(); }, [loadCredentials]);
 
@@ -148,13 +150,13 @@ export default function CredentialManager({ workspaceId }: { workspaceId?: strin
     const errors: { name?: string } = {};
     if (!formName.trim()) errors.name = 'Name is required.';
     if (Object.keys(errors).length > 0) { setFormErrors(errors); return; }
-    if (!effectiveWsId) { showToast('Select a workspace first.', 'error'); return; }
+    if (!globalMode && !effectiveWsId) { showToast('Select a workspace first.', 'error'); return; }
 
     setSaving(true);
     try {
       if (editCred) {
         await api.updateCredential(editCred.id, {
-          workspace_id: effectiveWsId,
+          ...(globalMode ? {} : { workspace_id: effectiveWsId }),
           name: formName.trim(),
           description: formDescription,
           provider: formProvider,
@@ -163,7 +165,7 @@ export default function CredentialManager({ workspaceId }: { workspaceId?: strin
         showToast('Credential updated.', 'success');
       } else {
         await api.createCredential({
-          workspace_id: effectiveWsId,
+          ...(globalMode ? { scope: 'global' as const } : { workspace_id: effectiveWsId }),
           name: formName.trim(),
           description: formDescription,
           provider: formProvider,
@@ -184,7 +186,7 @@ export default function CredentialManager({ workspaceId }: { workspaceId?: strin
   const handleConfirmDelete = async () => {
     if (!deleteTarget) return;
     try {
-      await api.deleteCredential(deleteTarget.id, effectiveWsId);
+      await api.deleteCredential(deleteTarget.id, globalMode ? undefined : effectiveWsId);
       showToast('Credential deleted.', 'success');
       setDeleteTarget(null);
       await loadCredentials();
@@ -193,7 +195,7 @@ export default function CredentialManager({ workspaceId }: { workspaceId?: strin
     }
   };
 
-  if (!effectiveWsId) {
+  if (!globalMode && !effectiveWsId) {
     return <div style={{ fontSize: '13px', color: tokens.colors.textSecondary }}>Select a workspace first.</div>;
   }
 
@@ -300,6 +302,9 @@ export default function CredentialManager({ workspaceId }: { workspaceId?: strin
                     </td>
                     <td style={listCellStyle('left')}>
                       <Badge variant="neutral">{c.provider}</Badge>
+                      {!globalMode && c.scope === 'global' && (
+                        <span style={{ marginLeft: 6 }}><Badge variant="info">Global</Badge></span>
+                      )}
                     </td>
                     <td
                       style={{
@@ -329,10 +334,19 @@ export default function CredentialManager({ workspaceId }: { workspaceId?: strin
                       {relativeTime(c.updated_at || c.created_at)}
                     </td>
                     <td style={{ ...listCellStyle('right'), whiteSpace: 'nowrap' }}>
-                      <div style={{ display: 'inline-flex', gap: 6 }}>
-                        <Button variant="secondary" size="sm" onClick={() => startEdit(c)}>Edit</Button>
-                        <Button variant="danger" size="sm" onClick={() => setDeleteTarget(c)}>Delete</Button>
-                      </div>
+                      {!globalMode && c.scope === 'global' ? (
+                        <span
+                          style={{ fontSize: 11, color: tokens.colors.textMuted }}
+                          title="Global credentials are managed in Admin → Global Credentials"
+                        >
+                          Inherited (read-only)
+                        </span>
+                      ) : (
+                        <div style={{ display: 'inline-flex', gap: 6 }}>
+                          <Button variant="secondary" size="sm" onClick={() => startEdit(c)}>Edit</Button>
+                          <Button variant="danger" size="sm" onClick={() => setDeleteTarget(c)}>Delete</Button>
+                        </div>
+                      )}
                     </td>
                   </tr>
                 );

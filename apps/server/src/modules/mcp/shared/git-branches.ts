@@ -22,18 +22,20 @@ export interface RepoBranch {
 }
 
 /** Decrypt a workspace Credential row into the `{username, token}` shape
- *  `applyCredential` expects. Returns null if the credential row is missing,
- *  out-of-workspace, or fails to decrypt — callers should treat that as
- *  "no auth available" and let `git ls-remote` decide whether the repo is
- *  reachable anonymously. */
+ *  `applyCredential` expects. Accepts a GLOBAL credential (workspace_id=NULL,
+ *  shared instance-wide) or one scoped to `workspaceId`; an out-of-workspace
+ *  credential resolves to null. Also returns null if the row is missing or
+ *  fails to decrypt — callers should treat that as "no auth available" and let
+ *  `git ls-remote` decide whether the repo is reachable anonymously. */
 export async function resolveGitCredential(
   credRepo: Repository<Credential>,
   credentialId: string | null | undefined,
   workspaceId: string,
 ): Promise<{ username?: string; token?: string } | null> {
   if (!credentialId) return null;
-  const cred = await credRepo.findOne({ where: { id: credentialId, workspace_id: workspaceId } });
+  const cred = await credRepo.findOne({ where: { id: credentialId } });
   if (!cred) return null;
+  if (cred.workspace_id !== null && cred.workspace_id !== workspaceId) return null;
   try {
     const data = JSON.parse(decrypt(cred.encrypted_data));
     const token = data.token || data.api_key || '';

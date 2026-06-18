@@ -941,15 +941,22 @@ export const api = {
   },
 
   // ─── Credentials ──────────────────────────────────────
-  listCredentials: (workspaceId: string, provider?: string) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
-    if (provider) params.set('provider', provider);
+  // A workspace list also returns inherited global credentials (scope:'global').
+  // Pass scope:'global' (no workspace_id) for the Admin global-credentials page.
+  listCredentials: (workspaceId?: string, opts?: { provider?: string; scope?: 'global' }) => {
+    const params = new URLSearchParams();
+    if (workspaceId) params.set('workspace_id', workspaceId);
+    if (opts?.provider) params.set('provider', opts.provider);
+    if (opts?.scope) params.set('scope', opts.scope);
     return request<Credential[]>(`/credentials?${params.toString()}`);
   },
   getCredentialProviders: () =>
     request<Record<string, { label: string; fields: string[] }>>('/credentials/providers'),
   createCredential: (data: {
-    workspace_id: string;
+    // Omit workspace_id and pass scope:'global' to create an instance-level
+    // credential (requires the MANAGE_GLOBAL_CREDENTIALS permission).
+    workspace_id?: string;
+    scope?: 'global';
     name: string;
     description?: string;
     provider: string;
@@ -959,7 +966,7 @@ export const api = {
   updateCredential: (
     id: string,
     data: {
-      workspace_id: string;
+      workspace_id?: string;
       name?: string;
       description?: string;
       provider?: string;
@@ -967,9 +974,11 @@ export const api = {
     },
   ) =>
     request<Credential>(`/credentials/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  deleteCredential: (id: string, workspaceId: string) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
-    return request<{ success: true; id: string }>(`/credentials/${id}?${params.toString()}`, { method: 'DELETE' });
+  deleteCredential: (id: string, workspaceId?: string) => {
+    const params = new URLSearchParams();
+    if (workspaceId) params.set('workspace_id', workspaceId);
+    const qs = params.toString();
+    return request<{ success: true; id: string }>(`/credentials/${id}${qs ? `?${qs}` : ''}`, { method: 'DELETE' });
   },
 
   // ─── Chat (Phase 2) ────────────────────────────────────
