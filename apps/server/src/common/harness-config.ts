@@ -110,6 +110,34 @@ export function resolveHarnessConfig(
   return isEmptyHarness(merged) ? null : merged;
 }
 
+export function buildBoardLanguageInstruction(language: string | null | undefined): string | null {
+  const trimmed = language?.trim();
+  if (!trimmed) return null;
+  return `Respond in ${trimmed}. Write all ticket comments, chat messages, commit messages, PR descriptions, and code comments in ${trimmed}.`;
+}
+
+export function appendBoardLanguageInstruction(
+  harnessConfig: HarnessConfig | null,
+  language: string | null | undefined,
+): HarnessConfig | null {
+  const instruction = buildBoardLanguageInstruction(language);
+  if (!instruction) return harnessConfig;
+  const next: HarnessConfig = { ...(harnessConfig ?? {}) };
+  next.system_prompt_append = [next.system_prompt_append, instruction]
+    .filter((s) => s && s.trim())
+    .join('\n\n');
+  return next;
+}
+
+export function prependBoardLanguageInstruction(
+  content: string,
+  language: string | null | undefined,
+): string {
+  const instruction = buildBoardLanguageInstruction(language);
+  if (!instruction) return content;
+  return [instruction, content].filter((s) => s && s.trim()).join('\n\n');
+}
+
 function isEmptyHarness(value: HarnessConfig): boolean {
   return HARNESS_CONFIG_KEYS.every(k => value[k] === undefined);
 }

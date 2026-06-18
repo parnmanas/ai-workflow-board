@@ -16,6 +16,7 @@ import { RoomMembershipService } from '../chat-rooms/room-membership.service';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { LogService } from '../../services/log.service';
 import { findOrFail } from '../../common/find-or-fail';
+import { prependBoardLanguageInstruction } from '../../common/harness-config';
 import { renderActionPrompt, buildRenderContext, ActionTicketContext } from './action-prompt';
 import { parseCron } from './cron';
 
@@ -279,7 +280,8 @@ export class ActionsService {
       runId,
       ticket: args.ticketContext ?? null,
     });
-    const rendered = renderActionPrompt(action.prompt || '', ctx);
+    const renderedPrompt = renderActionPrompt(action.prompt || '', ctx);
+    const rendered = prependBoardLanguageInstruction(renderedPrompt, board?.language);
 
     // Create the room. We use 'group' as the underlying type so the chat
     // controller's existing rules (rename, multi-participant, etc.) apply.

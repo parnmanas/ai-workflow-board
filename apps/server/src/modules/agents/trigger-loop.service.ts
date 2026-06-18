@@ -18,7 +18,7 @@ import { GitHubConnectorService, parseGitHubUrl } from '../../services/github-co
 import { AgentWorkloadService } from './agent-workload.service';
 import { TicketPrerequisitesService } from '../tickets/ticket-prerequisites.service';
 import { priorityIndex } from './priority';
-import { resolveHarnessConfig, HarnessConfig } from '../../common/harness-config';
+import { appendBoardLanguageInstruction, resolveHarnessConfig, HarnessConfig } from '../../common/harness-config';
 import { resolveEffortPreset, ResolvedEffortPreset } from '../../common/effort-presets';
 
 // Sentinel actor written onto auto-advance `moved` activities. Deliberately
@@ -1455,14 +1455,7 @@ candidate's branch or move the ticket.
       // overwrite, so a board harness's own system_prompt_append is preserved.
       // Single emit point ⇒ applies to every role (planner/assignee/reviewer).
       // null/empty language = no override → agent default (English), unchanged.
-      const boardLanguage = boardForHarness?.language?.trim();
-      if (boardLanguage) {
-        const langInstr = `Respond in ${boardLanguage}. Write all ticket comments, chat messages, commit messages, PR descriptions, and code comments in ${boardLanguage}.`;
-        harnessConfig = harnessConfig ?? {};
-        harnessConfig.system_prompt_append = [harnessConfig.system_prompt_append, langInstr]
-          .filter((s) => s && s.trim())
-          .join('\n\n');
-      }
+      harnessConfig = appendBoardLanguageInstruction(harnessConfig, boardForHarness?.language);
     } catch (e) {
       this.logService.warn('MCP', 'harness_config / effort_preset resolve failed (continuing without)', {
         err: String(e), ticket_id: ticket.id, board_id: boardId,
