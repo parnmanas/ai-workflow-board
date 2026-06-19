@@ -978,6 +978,8 @@ export class WorkspaceMoveService {
    * copy-if-absent by name (non-destructive, mirrors the board move). A
    * credential_id that points at a now-missing row is a hard blocker — moving
    * the agent would leave it pointing at auth that doesn't exist in dest.
+   * Global (workspace_id = NULL) credentials are shared instance-wide, so they
+   * are kept as-is on move — never copied into the destination workspace.
    * Returns { copied } so callers can roll the count up.
    */
   private async carryAgentCredential(
@@ -999,6 +1001,13 @@ export class WorkspaceMoveService {
         ],
       });
       items.push({ kind: 'block', entity: 'credential', id: agent.credential_id, detail: msg });
+      return { copied: 0 };
+    }
+    if (cred.workspace_id === null) {
+      // 전역(instance-level) 자격은 모든 워크스페이스가 공유 — move 후에도 동일 자격을
+      // 그대로 유지한다. 사본을 만들면 전역 공유가 워크스페이스-로컬 사본으로 분화되어
+      // "한 번 등록 → 전 워크스페이스 공유" 가치가 silently 되돌려진다. agent.credential_id 불변.
+      items.push({ kind: 'reuse', entity: 'credential', id: cred.id, detail: `global credential "${cred.name}" shared across workspaces — kept as-is` });
       return { copied: 0 };
     }
     if (cred.workspace_id === targetWsId) {
