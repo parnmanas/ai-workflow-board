@@ -55,6 +55,25 @@ export async function bootApp({ port = 7800, logger = false } = {}) {
   const t0 = Date.now();
   const modules = await loadServerModules();
   const app = await modules.NestFactory.create(modules.AppModule, { logger });
+  // Mount the SAME body parsers main.ts wires (raw media-upload route + 10MB
+  // json/urlencoded). NestFactory.create alone leaves only Express's stock
+  // 100KB parser and NO raw route for /api/resources/upload, so raw-byte upload
+  // tests saw an empty req.body and 400'd while production was fine. Must run
+  // before app.listen (ticket 5e5959ef, comment-media-e2e).
+  const { applyHttpBodyParsers } = await import(
+    'file://' + path.join(DIST_ROOT, 'common', 'http-body-parsers.js')
+  );
+  applyHttpBodyParsers(app);
+  // Mirror main.ts's global exception filter so error-path contracts (e.g. an
+  // oversize body → clean 413 via entity.too.large, not an opaque 404/500) are
+  // exercised against the same mapping production uses (ticket 5e5959ef).
+  const { AllExceptionsFilter } = await import(
+    'file://' + path.join(DIST_ROOT, 'common', 'filters', 'http-exception.filter.js')
+  );
+  const { LogService } = await import('file://' + path.join(DIST_ROOT, 'services', 'log.service.js'));
+  const exceptionFilter = new AllExceptionsFilter();
+  exceptionFilter.setLogService(app.get(LogService));
+  app.useGlobalFilters(exceptionFilter);
   await app.listen(port, '0.0.0.0');
   traceEvent('boot-ok', { port, duration_ms: Date.now() - t0 });
   return { app, port, modules };

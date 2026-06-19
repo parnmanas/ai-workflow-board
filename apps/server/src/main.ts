@@ -1,6 +1,5 @@
 import 'dotenv/config';
 import 'reflect-metadata';
-import { json, urlencoded, raw } from 'express';
 import compression from 'compression';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
@@ -11,6 +10,7 @@ import { ApiKeyService } from './services/api-key.service';
 import { LogService } from './services/log.service';
 import { preSyncPostgres } from './database/pre-sync-postgres';
 import { ensureSqljsDbHealthy } from './db';
+import { applyHttpBodyParsers } from './common/http-body-parsers';
 
 async function bootstrap() {
   // Runs BEFORE NestFactory so TypeORM's auto-synchronize doesn't trip on
@@ -33,27 +33,11 @@ async function bootstrap() {
   // every sweep service clear its timers cleanly. No-op effect on prod backends.
   app.enableShutdownHooks();
 
-  // Raise Express body-parser limit from its 100KB default. Agent plugins
-  // ship proxy.log error + event batches (up to 500 entries, each can carry
-  // ~200 bytes of raw_line) — a routine batch crosses 100KB, which made the
-  // default limit silently bounce uploads as 404 "Cannot POST" via Express's
-  // catch-all route. Raised to 10MB; ingestEntries already caps entries at
-  // 500 per upload so this is the natural ceiling, not a wildly permissive
-  // attack surface.
-  // Raw binary upload for media resources — mounted BEFORE the global json
-  // parser and scoped to a single route so it claims that path's body as a
-  // Buffer instead of letting json() try (and fail) to parse it. This is the
-  // escape hatch from the 10MB JSON ceiling: comment/resource media used to be
-  // base64-inlined into a JSON POST body, so a ~7MB+ mp4 (base64 inflates
-  // ~33%) blew past the limit → Express 413 → the comment never saved at all
-  // (ticket ff3e7337). Raw bytes carry no base64 inflation and stream straight
-  // through here, so large video uploads succeed. Cap at 200MB — generous for
-  // real attachments, still a bound, not a wide-open hole. Overflow surfaces a
-  // clear 413 (see AllExceptionsFilter's entity.too.large handling).
-  app.use('/api/resources/upload', raw({ type: () => true, limit: '200mb' }));
-
-  app.use(json({ limit: '10mb' }));
-  app.use(urlencoded({ limit: '10mb', extended: true }));
+  // Body parsers (raw media-upload route + 10MB json/urlencoded). Shared with
+  // the QA test harness (test/helpers/boot.mjs) via applyHttpBodyParsers so the
+  // in-process test app parses bodies exactly like production. See ff3e7337
+  // (base64→raw media upload) and 5e5959ef (test harness missing these parsers).
+  applyHttpBodyParsers(app);
 
   // Gzip everything over 1KB. The MCP tools/list response alone is ~59KB
   // uncompressed; compression cuts it ~10x and stacks on top of the
