@@ -56,7 +56,7 @@ test('Focus selector chain-head tiebreak — predecessor-aware step 2 (ticket ee
   try {
     step('Boot NestJS app on test port');
     const { app, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-    t.after(() => app.close().catch(() => {}));
+    t.after(() => { void app.close().catch(() => {}); });
     const { getDataSourceToken } = modules;
 
     const agentWorkloadServiceModule = await import(

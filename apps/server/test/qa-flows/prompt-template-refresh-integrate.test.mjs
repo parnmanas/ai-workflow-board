@@ -46,7 +46,7 @@ pre-change default. The migration MUST leave this row alone.
 test('integrate-policy prompt template refresh migration updates stale defaults, preserves customizations, idempotent', async (t) => {
   step('Boot NestJS app on test port');
   const { app, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => app.close().catch(() => {}));
+  t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());
   const tplRepo = ds.getRepository('PromptTemplate');

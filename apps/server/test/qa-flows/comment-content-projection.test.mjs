@@ -35,7 +35,7 @@ const HEAVY_KEYS = ['content', 'author', 'author_type', 'parent_id', 'metadata']
 
 test('comment payload contract: board GET light, ticket GET full thread', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => app.close().catch(() => {}));
+  t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken, AuthService } = modules;
   const ds = app.get(getDataSourceToken());
 

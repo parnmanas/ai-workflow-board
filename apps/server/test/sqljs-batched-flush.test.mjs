@@ -225,6 +225,7 @@ describe('sql.js batched flush (ticket d5a8594a)', () => {
   });
 });
 
-// Mirror the leak-test pattern: TypeORM/sql.js leave handles that keep the
-// event loop alive, so force exit once tests complete.
-process.on('beforeExit', () => process.exit(0));
+// TypeORM/sql.js leave handles that keep the event loop alive. The suite is
+// launched with `--test-force-exit`, which tears those down and exits with the
+// real code node:test computed — no manual process.exit, which would have
+// overridden the exit code and masked a failed assertion.

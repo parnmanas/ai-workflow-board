@@ -94,7 +94,7 @@ test('StuckTicketDetectorService — acceptance bullets 1..5', async (t) => {
   process.env.STUCK_DETECTOR_REALERT_MS  = String(24 * 60 * 60_000);
 
   const { app, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => app.close().catch(() => {}));
+  t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());
 

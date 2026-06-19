@@ -29,7 +29,7 @@ process.env.PORT = process.env.QA_AUTO_ADVANCE_PORT || '7811';
 
 test('Unheld routed column auto-advances ticket to next non-terminal column', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => app.close().catch(() => {}));
+  t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken, ActivityService } = modules;
 
   const ws = await createWorkspace(app, getDataSourceToken, 'auto-advance');

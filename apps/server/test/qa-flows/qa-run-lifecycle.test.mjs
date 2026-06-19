@@ -45,7 +45,7 @@ async function loadQaModules() {
 
 test('QA scenario run lifecycle: create → start → record → complete', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => app.close().catch(() => {}));
+  t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
   const { seed, prompt } = await loadQaModules();
 
@@ -54,7 +54,7 @@ test('QA scenario run lifecycle: create → start → record → complete', asyn
   const qaKey = await createApiKey(app, getDataSourceToken, qaAgent.id, { workspaceId: ws.id, label: 'qa' });
 
   const mcp = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: qaKey.raw_key });
-  t.after(() => mcp.close().catch(() => {}));
+  t.after(() => { void mcp.close().catch(() => {}); });
 
   // ── Catalogue sanity ──────────────────────────────────────────────────────
   step('Build a scenario payload from the seed catalogue');

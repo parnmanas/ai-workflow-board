@@ -33,7 +33,7 @@ process.env.PORT = process.env.QA_TERMINAL_REOPEN_PORT || '7842';
 test('move_ticket rejects a backward move out of a terminal column unless force=true', async (t) => {
   step('Boot NestJS app on test port');
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => app.close().catch(() => {}));
+  t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
   step('Seed kanban scene (Done is is_terminal=true)');

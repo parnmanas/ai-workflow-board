@@ -112,7 +112,7 @@ function parseToolErrorMessage(callResp) {
 
 test('create_remote_improvement_ticket rejects spoofed-header non-reviewer', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => app.close().catch(() => {}));
+  t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
   const baseUrl = `http://localhost:${port}`;
   const ds = app.get(getDataSourceToken());

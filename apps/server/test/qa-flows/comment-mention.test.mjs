@@ -21,7 +21,7 @@ process.env.PORT = process.env.QA_MENTION_PORT || '7808';
 
 test('comment_mention is delivered only to the mentioned agent (workspace-scoped)', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => app.close().catch(() => {}));
+  t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken, activityEvents } = modules;
 
   const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, {

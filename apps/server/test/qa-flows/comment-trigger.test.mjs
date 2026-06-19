@@ -20,7 +20,7 @@ process.env.PORT = process.env.QA_COMMENT_PORT || '7802';
 
 test('Comment on In Progress ticket triggers assignee (trigger_source=comment)', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => app.close().catch(() => {}));
+  t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken, ActivityService } = modules;
 
   const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, {

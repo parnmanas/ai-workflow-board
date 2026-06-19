@@ -18,7 +18,7 @@ process.env.PORT = process.env.QA_MCP_SCHEMA_PORT || '7809';
 
 test('MCP initialize without experimental.awb/schemaVersion is rejected with code -32000', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => app.close().catch(() => {}));
+  t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
   const { ws } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'schema' });

@@ -76,7 +76,7 @@ test('Archive edge-path regressions (ticket 9b44526b)', async (t) => {
 
   const port = parseInt(process.env.PORT, 10);
   const { app, modules } = await bootApp({ port });
-  t.after(() => app.close().catch(() => {}));
+  t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken, AuthService } = modules;
   const ds = app.get(getDataSourceToken());
 
@@ -220,7 +220,7 @@ test('Archive edge-path regressions (ticket 9b44526b)', async (t) => {
       clientInfo: { name: 'qa-archive-edges', version: '1.0.0' },
     });
     await mcp.initialize();
-    t.after(() => mcp.close().catch(() => {}));
+    t.after(() => { void mcp.close().catch(() => {}); });
     const mcpRes = await mcp.callTool('get_workspace', { workspace_id: ws.id });
     assert.ok(mcpRes && !mcpRes.isError, `get_workspace failed: ${JSON.stringify(mcpRes)}`);
     const mcpBoard = mcpRes.boards.find((b) => b.id === board.id);
@@ -244,7 +244,7 @@ test('Archive edge-path regressions (ticket 9b44526b)', async (t) => {
       clientInfo: { name: 'qa-archive-edges-2', version: '1.0.0' },
     });
     await mcp.initialize();
-    t.after(() => mcp.close().catch(() => {}));
+    t.after(() => { void mcp.close().catch(() => {}); });
     const created = await mcp.callTool('create_ticket', {
       title: 'born-in-done',
       column_id: doneCol.id,

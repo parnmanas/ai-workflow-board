@@ -59,7 +59,7 @@ async function settle(ms = 600) {
 
 test('auto-advance halts fully-unassigned tickets and advances staffed ones', async (t) => {
   const { app, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => app.close().catch(() => {}));
+  t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken, ActivityService } = modules;
   const ds = app.get(getDataSourceToken());
   const activity = app.get(ActivityService);

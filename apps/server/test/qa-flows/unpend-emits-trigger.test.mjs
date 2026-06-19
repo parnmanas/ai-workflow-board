@@ -51,7 +51,7 @@ process.env.PORT = process.env.QA_UNPEND_TRIGGER_PORT || '7836';
 test('Unpending a ticket emits an agent_trigger to the current column role holder (MCP + REST)', async (t) => {
   step('Boot NestJS app on test port');
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => app.close().catch(() => {}));
+  t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken, AuthService } = modules;
 
   step('Seed workspace + assignee-routed kanban + ticket parked on In Progress');

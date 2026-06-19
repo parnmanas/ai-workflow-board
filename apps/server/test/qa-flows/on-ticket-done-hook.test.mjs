@@ -80,7 +80,7 @@ async function waitForRuns(ds, actionId, expected, timeoutMs = 3000) {
 test('on-ticket-done hook dispatches bound Actions exactly once with ticket context', async (t) => {
   step('Boot NestJS app');
   const { app, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => app.close().catch(() => {}));
+  t.after(() => { void app.close().catch(() => {}); });
   const ds = app.get(modules.getDataSourceToken());
   const activityService = app.get(modules.ActivityService);
 

@@ -60,7 +60,7 @@ process.env.PORT = process.env.QA_WORKFLOW_STATE_PORT || '7822';
 test('BacklogPromotion workflow-state cap: parked tickets count, WAIT-only turns no-op, cross-board independent', async (t) => {
   step('Boot NestJS app on test port');
   const { app, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => app.close().catch(() => {}));
+  t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
   const backlogPromotionServiceModule = await import(

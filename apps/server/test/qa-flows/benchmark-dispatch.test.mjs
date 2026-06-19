@@ -45,7 +45,7 @@ process.env.PORT = process.env.QA_BENCHMARK_DISPATCH_PORT || '7825';
 test('benchmark dispatch: create_benchmark_run wakes candidates; review landing wakes evaluators', async (t) => {
   step('Boot NestJS app + benchmark_mode kanban');
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => app.close().catch(() => {}));
+  t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken, ActivityService } = modules;
 
   const { ws, board, columns } = await setupKanbanScene(app, getDataSourceToken, {

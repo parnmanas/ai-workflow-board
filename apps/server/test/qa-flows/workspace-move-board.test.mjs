@@ -96,7 +96,7 @@ async function buildScene(app, getDataSourceToken, sourceWs, label) {
 
 test('board cross-workspace move: re-stamp + carry/remap + atomicity', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => app.close().catch(() => {}));
+  t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
   const { mover, WorkspaceMoveBlockedError, ds } = await loadMover(app, getDataSourceToken);
 

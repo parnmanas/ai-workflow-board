@@ -46,7 +46,7 @@ process.env.PORT = process.env.QA_BACKLOG_PENDING_PORT || '7834';
 test('BacklogPromotion skips pending_user_action tickets and promotes the next eligible candidate', async (t) => {
   step('Boot NestJS app on test port');
   const { app, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => app.close().catch(() => {}));
+  t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
   const backlogPromotionServiceModule = await import(

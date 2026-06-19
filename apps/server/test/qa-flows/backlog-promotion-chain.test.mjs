@@ -56,7 +56,7 @@ process.env.PORT = process.env.QA_BACKLOG_CHAIN_PORT || '7821';
 test('BacklogPromotion chain prefix: chain target beats higher-priority outsider, audit row tagged, no-chain regression intact', async (t) => {
   step('Boot NestJS app on test port');
   const { app, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => app.close().catch(() => {}));
+  t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
   const backlogPromotionServiceModule = await import(

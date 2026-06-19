@@ -39,7 +39,7 @@ async function postSilentExit(port, ticketId, body) {
 
 test('silent-exit dedupe collapses identical retries into one row', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => app.close().catch(() => {}));
+  t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
   const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, {

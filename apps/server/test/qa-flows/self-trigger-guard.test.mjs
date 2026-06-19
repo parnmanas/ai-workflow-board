@@ -20,7 +20,7 @@ process.env.PORT = process.env.QA_SELF_TRIGGER_PORT || '7807';
 
 test('Agent acting on its own ticket does not receive a self-trigger', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => app.close().catch(() => {}));
+  t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
   const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'self' });

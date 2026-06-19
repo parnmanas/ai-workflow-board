@@ -77,7 +77,7 @@ function authHeaders(token, wsId) {
 
 test('chat-attachment security regressions: atomic claim + mime sniffing', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => app.close().catch(() => {}));
+  t.after(() => { void app.close().catch(() => {}); });
   const { AuthService, getDataSourceToken } = modules;
 
   const ws = await createWorkspace(app, getDataSourceToken, 'chat-attach-sec');
@@ -245,7 +245,7 @@ test('chat-attachment security regressions: atomic claim + mime sniffing', async
     clientInfo: { name: 'qa-chat-attach-sec-mcp', version: '1.0.0' },
   });
   await mcp.initialize();
-  t.after(() => mcp.close().catch(() => {}));
+  t.after(() => { void mcp.close().catch(() => {}); });
 
   step('P3.2 get_ticket_attachment on a chat attachment id returns "not found"');
   // attA was bound to a chat message in P1 (owner_type='chat_message');

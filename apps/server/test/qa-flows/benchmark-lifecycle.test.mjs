@@ -46,7 +46,7 @@ async function expectStatus(fn, status, label) {
 test('benchmark lifecycle: draft parks candidates, start dispatches, started run is fairness-locked', async (t) => {
   step('Boot NestJS app + benchmark_mode kanban');
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => app.close().catch(() => {}));
+  t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
   const { ws, board, columns } = await setupKanbanScene(app, getDataSourceToken, {

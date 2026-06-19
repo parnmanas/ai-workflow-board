@@ -24,7 +24,7 @@ process.env.PORT = process.env.QA_CHAT_PORT || '7806';
 
 test('chat_room_message is delivered only to the room participants', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => app.close().catch(() => {}));
+  t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken, AuthService, activityEvents } = modules;
 
   const { ws } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'chat-room' });

@@ -28,7 +28,7 @@ process.env.PORT = process.env.QA_BOARD_PAUSE_PORT || '7820';
 
 test('Paused board drops agent triggers; resume restores them', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => app.close().catch(() => {}));
+  t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken, ActivityService } = modules;
 
   const { ws, board, columns } = await setupKanbanScene(app, getDataSourceToken, {

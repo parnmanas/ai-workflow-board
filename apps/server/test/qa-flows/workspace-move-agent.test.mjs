@@ -77,7 +77,7 @@ async function buildScene(app, getDataSourceToken, sourceWs, label) {
 
 test('agent cross-workspace move: credential carry + api-key migrate + cross-ref block/clear', async (t) => {
   const { app, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => app.close().catch(() => {}));
+  t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
   const { mover, WorkspaceMoveBlockedError, ds } = await loadMover(app, getDataSourceToken);
 
@@ -160,7 +160,7 @@ test('agent cross-workspace move: credential carry + api-key migrate + cross-ref
 
 test('agent move remedies: unassign_from_tickets + clear_credential clear blockers (ticket 9efa643b)', async (t) => {
   const { app, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => app.close().catch(() => {}));
+  t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
   const { mover, ds } = await loadMover(app, getDataSourceToken);
 
@@ -208,7 +208,7 @@ test('agent move remedies: unassign_from_tickets + clear_credential clear blocke
 
 test('agent move: manager-type agents are workspace-less → refused', async (t) => {
   const { app, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => app.close().catch(() => {}));
+  t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
   const { mover, ds } = await loadMover(app, getDataSourceToken);
 

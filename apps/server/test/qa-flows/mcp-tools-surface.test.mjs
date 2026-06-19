@@ -62,7 +62,7 @@ const EXPECTED_TOOLS = [
 
 test('MCP initialize + tools/list returns expected AWB tool surface', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => app.close().catch(() => {}));
+  t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
   const { ws } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'mcp-surface' });

@@ -25,7 +25,7 @@ process.env.PORT = process.env.QA_BENCHMARK_PORT || '7824';
 
 test('benchmark: create_benchmark_run → submit_benchmark_score → leaderboards', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => app.close().catch(() => {}));
+  t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
   const { ws, board, columns } = await setupKanbanScene(app, getDataSourceToken, {
@@ -46,7 +46,7 @@ test('benchmark: create_benchmark_run → submit_benchmark_score → leaderboard
 
   const callerMcp = new McpClient({ baseUrl: `http://localhost:${port}`, apiKey: callerKey.raw_key });
   await callerMcp.initialize();
-  t.after(() => callerMcp.close());
+  t.after(() => { void callerMcp.close(); });
 
   step('create_benchmark_run fans out a run + 2 candidate children');
   const run = await callerMcp.callTool('create_benchmark_run', {
@@ -76,7 +76,7 @@ test('benchmark: create_benchmark_run → submit_benchmark_score → leaderboard
   step('Evaluator submits scores for both candidates (A stronger than B)');
   const evalMcp = new McpClient({ baseUrl: `http://localhost:${port}`, apiKey: evalKey.raw_key });
   await evalMcp.initialize();
-  t.after(() => evalMcp.close());
+  t.after(() => { void evalMcp.close(); });
 
   const score = (candidate_ticket_id, dimension, s, rationale) =>
     evalMcp.callTool('submit_benchmark_score', { candidate_ticket_id, dimension, score: s, rationale });
