@@ -70,7 +70,7 @@ function authHeaders(token, wsId) {
   };
 }
 
-test('chat-room attachment lifecycle: upload → send → history → download auth → discard', { skip: 'quarantined: flaky — history attachments[] order depends on a created_at tiebreak (png/txt created same ms); see ticket 5e5959ef' }, async (t) => {
+test('chat-room attachment lifecycle: upload → send → history → download auth → discard', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
   t.after(() => { void app.close().catch(() => {}); });
   const { AuthService, getDataSourceToken } = modules;
@@ -149,7 +149,17 @@ test('chat-room attachment lifecycle: upload → send → history → download a
   const histMsg = history.find(m => m.id === message.id);
   assert.ok(histMsg, 'sent message should appear in history');
   assert.equal(histMsg.attachments.length, 2);
-  assert.equal(histMsg.attachments[0].mime_type, 'image/png');
+  // Match by id, not array position. The send RESPONSE preserves attachment_ids[]
+  // order, but history replay loads the rows ordered by (created_at, id) — and
+  // a multi-file upload shares one millisecond while the PK is a random UUID, so
+  // the relative order of same-ms rows in history is not guaranteed. Assert the
+  // png row is present with the right mime type rather than that it lands first.
+  const histPng = histMsg.attachments.find(a => a.id === pngAtt.id);
+  const histTxt = histMsg.attachments.find(a => a.id === txtAtt.id);
+  assert.ok(histPng, 'png attachment present in history');
+  assert.ok(histTxt, 'txt attachment present in history');
+  assert.equal(histPng.mime_type, 'image/png');
+  assert.equal(histTxt.mime_type, 'text/plain');
 
   step('6. Non-participant download is forbidden');
   const outsiderRes = await fetch(`http://localhost:${port}/api/chat-rooms/${room.id}/attachments/${pngAtt.id}`, {

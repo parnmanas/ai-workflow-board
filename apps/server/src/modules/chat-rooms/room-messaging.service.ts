@@ -696,8 +696,12 @@ export class RoomMessagingService {
     const out = new Map<string, any[]>();
     if (ids.length === 0) return out;
 
-    // (created_at, id) tiebreak — within a single multi-file upload all rows
-    // share a millisecond, so id-ASC gives a stable order on history replay.
+    // (created_at, id) ordering — best-effort. Within a single multi-file upload
+    // all rows share a millisecond and the PK is a random UUID, so the id tiebreak
+    // does NOT reconstruct upload order for same-ms rows. The send RESPONSE returns
+    // attachments in attachment_ids[] order (see _persistMessage), which is what
+    // clients render live; history replay carries no per-message ordering column,
+    // so consumers that care about exact order should match by id, not position.
     const rows = await this.attachmentRepo.find({
       where: { owner_type: 'chat_message', owner_id: In(ids) },
       order: { created_at: 'ASC', id: 'ASC' },
