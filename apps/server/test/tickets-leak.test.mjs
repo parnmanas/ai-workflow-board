@@ -23,6 +23,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { apiRequest, makeBaseUrl } from './test-helpers.mjs';
@@ -30,6 +31,13 @@ import { apiRequest, makeBaseUrl } from './test-helpers.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 process.env.DB_TYPE = process.env.DB_TYPE || 'sqlite';
+// Hermetic sql.js DB per file. This test boots NestJS inline (not via bootApp,
+// which supplies the pid+port default), so without this it falls back to the
+// shared database/data.db — and the npm `test` chain runs the four leak files
+// back-to-back, so a later file (agents-leak) sees rows the earlier ones left
+// behind and its "scoped to ws_a sees only ws_a" assertions fail. Isolate.
+process.env.SQLJS_DB_PATH =
+  process.env.SQLJS_DB_PATH || path.join(os.tmpdir(), `awb-leak-tickets-${process.pid}.db`);
 process.env.PORT = process.env.TICKETS_LEAK_PORT || '7793';
 process.env.NODE_ENV = 'test';
 process.env.MCP_DEV_MODE = 'true';

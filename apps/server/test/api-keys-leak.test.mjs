@@ -20,6 +20,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { apiRequest, makeBaseUrl } from './test-helpers.mjs';
@@ -27,6 +28,10 @@ import { apiRequest, makeBaseUrl } from './test-helpers.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 process.env.DB_TYPE = process.env.DB_TYPE || 'sqlite';
+// Hermetic sql.js DB per file — see tickets-leak for the rationale (inline boot
+// + back-to-back npm `test` chain would otherwise share database/data.db).
+process.env.SQLJS_DB_PATH =
+  process.env.SQLJS_DB_PATH || path.join(os.tmpdir(), `awb-leak-apikeys-${process.pid}.db`);
 process.env.PORT = process.env.API_KEYS_LEAK_PORT || '7795';
 process.env.NODE_ENV = 'test';
 process.env.MCP_DEV_MODE = 'true';
