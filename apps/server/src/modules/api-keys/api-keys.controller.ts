@@ -87,7 +87,9 @@ export class ApiKeysController {
 
     const ok = await this.apiKeyService.revokeApiKey(id);
     if (!ok) return res.status(404).json({ error: 'API key not found' });
-    return res.json({ success: true, message: 'Key revoked' });
+    // Revoke mutates an existing key — it does not create a resource, so the
+    // correct status is 200, not the NestJS @Post() default of 201.
+    return res.status(200).json({ success: true, message: 'Key revoked' });
   }
 
   @Delete(':id')

@@ -51,7 +51,7 @@ async function loadServerModules() {
   }
 }
 
-describe('api-keys-leak: cross-workspace API key isolation', { skip: 'quarantined: pre-existing failure unmasked by harness fix fc84ec30 — repair tracked in ticket 5e5959ef' }, async () => {
+describe('api-keys-leak: cross-workspace API key isolation', async () => {
   let app;
   let adminToken;
   let wsA;
@@ -102,11 +102,13 @@ describe('api-keys-leak: cross-workspace API key isolation', { skip: 'quarantine
     }));
 
     // ─── Create an API key in workspace A via HTTP ─────────────────────────────
-    // Note: ApiKeysController does not currently accept workspace_id — it's global.
-    // Phase 6 will add workspace_id to ApiKey entity and apply workspace scoping.
+    // Phase 6+: ApiKeysController.create persists workspace_id from the
+    // X-Workspace-Id header, and list/get/revoke are workspace-scoped. Create
+    // key A scoped to ws_a so the scoped controls below can find it.
     const keyRes = await apiRequest(BASE_URL, '/keys', {
       token: adminToken,
       method: 'POST',
+      workspaceId: wsA.id,
       body: {
         name: `Leak API Key WS-A ${randomUUID()}`,
         scope: 'full',
@@ -143,8 +145,11 @@ describe('api-keys-leak: cross-workspace API key isolation', { skip: 'quarantine
   });
 
   it('admin can list API keys and sees the created key (control)', async () => {
+    // API keys are workspace-scoped — the admin must supply the ws_a header to
+    // see ws_a's keys (an admin with no workspace context gets an empty list).
     const res = await apiRequest(BASE_URL, '/keys', {
       token: adminToken,
+      workspaceId: wsA.id,
     });
     assert.equal(res.status, 200);
     const keys = Array.isArray(res.data) ? res.data : [];

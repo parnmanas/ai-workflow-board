@@ -43,10 +43,12 @@ async function loadServerModules() {
     const { NestFactory } = await import('@nestjs/core');
     const appModuleUrl = 'file://' + path.join(distRoot, 'app.module.js');
     const authServiceUrl = 'file://' + path.join(distRoot, 'services', 'auth.service.js');
+    const rebacServiceUrl = 'file://' + path.join(distRoot, 'services', 'rebac.service.js');
     const { AppModule } = await import(appModuleUrl);
     const { AuthService } = await import(authServiceUrl);
+    const { ReBACService } = await import(rebacServiceUrl);
     const { getDataSourceToken } = await import('@nestjs/typeorm');
-    return { NestFactory, AppModule, AuthService, getDataSourceToken };
+    return { NestFactory, AppModule, AuthService, ReBACService, getDataSourceToken };
   } catch (err) {
     throw new Error(
       'Leak test requires the server to be built first. Run `npm run --workspace=apps/server build`. Original error: ' + err.message
@@ -54,7 +56,7 @@ async function loadServerModules() {
   }
 }
 
-describe('tickets-leak: cross-workspace ticket isolation', { skip: 'quarantined: pre-existing failure unmasked by harness fix fc84ec30 — repair tracked in ticket 5e5959ef' }, async () => {
+describe('tickets-leak: cross-workspace ticket isolation', async () => {
   let app;
   let adminToken;
   let wsA;
@@ -73,12 +75,13 @@ describe('tickets-leak: cross-workspace ticket isolation', { skip: 'quarantined:
   const PASSWORD = 'TestPass123!';
 
   before(async () => {
-    const { NestFactory, AppModule, AuthService, getDataSourceToken } = await loadServerModules();
+    const { NestFactory, AppModule, AuthService, ReBACService, getDataSourceToken } = await loadServerModules();
 
     app = await NestFactory.create(AppModule, { logger: false });
     await app.listen(parseInt(process.env.PORT, 10), '0.0.0.0');
 
     const authService = app.get(AuthService);
+    const rebacService = app.get(ReBACService);
     const dataSource = app.get(getDataSourceToken());
     const userRepo = dataSource.getRepository('User');
     const wsRepo = dataSource.getRepository('Workspace');
@@ -118,6 +121,13 @@ describe('tickets-leak: cross-workspace ticket isolation', { skip: 'quarantined:
     // Login to get tokens for each user.
     tokenA = authService.createSession(userA.id);
     tokenB = authService.createSession(userB.id);
+
+    // Phase 6+: WorkspaceGuard requires an explicit ReBAC membership tuple plus
+    // an X-Workspace-Id header for non-admin callers. Grant user A membership
+    // in workspace A so the positive control (a member reading a ticket in their
+    // own workspace) actually exercises the allow path. User B is deliberately
+    // left without any membership so the negative controls below still reject.
+    await rebacService.grant({ type: 'user', id: userA.id }, 'member', { type: 'workspace', id: wsA.id });
 
     // ─── Create a board in workspace A with a column ───────────────────────────
     boardA = await boardRepo.save(boardRepo.create({
@@ -167,9 +177,11 @@ describe('tickets-leak: cross-workspace ticket isolation', { skip: 'quarantined:
   });
 
   it('user A (ws_a member) can retrieve ticket from workspace A board', async () => {
-    // tokenA is a valid session — should be able to read the ticket with AuthGuard
+    // tokenA is a valid session AND user A holds a member tuple on ws_a, so the
+    // WorkspaceGuard allow path is satisfied once X-Workspace-Id is supplied.
     const res = await apiRequest(BASE_URL, `/tickets/${ticketA.id}`, {
       token: tokenA,
+      workspaceId: wsA.id,
     });
     assert.equal(res.status, 200, 'User A should be able to fetch ticket from their workspace');
     assert.equal(res.data.id, ticketA.id);

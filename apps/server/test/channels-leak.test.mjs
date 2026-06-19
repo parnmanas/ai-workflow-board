@@ -51,7 +51,7 @@ async function loadServerModules() {
   }
 }
 
-describe('channels-leak: cross-workspace channel isolation', { skip: 'quarantined: pre-existing failure unmasked by harness fix fc84ec30 — repair tracked in ticket 5e5959ef' }, async () => {
+describe('channels-leak: cross-workspace channel isolation', async () => {
   let app;
   let adminToken;
   let wsA;
@@ -103,11 +103,14 @@ describe('channels-leak: cross-workspace channel isolation', { skip: 'quarantine
     }));
 
     // ─── Create a channel in workspace A via HTTP ──────────────────────────────
-    // Note: channels controller does not currently accept workspace_id — it's global.
-    // The channel name encodes the workspace so we can identify it in assertions.
+    // Phase 6+: the channels controller persists workspace_id from the
+    // X-Workspace-Id header (ChannelsController.create → workspace_id: workspaceId).
+    // Create channel A scoped to ws_a so the workspace-scoped list/get paths
+    // below can find (or correctly exclude) it.
     const channelRes = await apiRequest(BASE_URL, '/channels', {
       token: adminToken,
       method: 'POST',
+      workspaceId: wsA.id,
       body: {
         name: `Leak Channel WS-A ${randomUUID()}`,
         type: 'discord',
@@ -136,8 +139,11 @@ describe('channels-leak: cross-workspace channel isolation', { skip: 'quarantine
   });
 
   it('admin can list channels and sees the created channel (control)', async () => {
+    // Channels are workspace-scoped — the admin must supply the ws_a header to
+    // see ws_a's channels (an admin with no workspace context gets an empty list).
     const res = await apiRequest(BASE_URL, '/channels', {
       token: adminToken,
+      workspaceId: wsA.id,
     });
     assert.equal(res.status, 200);
     const channels = Array.isArray(res.data) ? res.data : [];
