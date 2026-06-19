@@ -24,8 +24,11 @@ export async function loadServerModules() {
     'file://' + path.join(DIST_ROOT, 'services', 'activity.service.js')
   );
   const { AuthService } = await import('file://' + path.join(DIST_ROOT, 'services', 'auth.service.js'));
+  const { ActionsService } = await import(
+    'file://' + path.join(DIST_ROOT, 'modules', 'actions', 'actions.service.js')
+  );
   const mcpTools = await import('file://' + path.join(DIST_ROOT, 'modules', 'mcp', 'mcp-tools.js'));
-  return { NestFactory, AppModule, activityEvents, ActivityService, AuthService, getDataSourceToken, mcpTools };
+  return { NestFactory, AppModule, activityEvents, ActivityService, AuthService, ActionsService, getDataSourceToken, mcpTools };
 }
 
 export async function bootApp({ port = 7800, logger = false } = {}) {

@@ -192,6 +192,14 @@ test('on-ticket-done hook dispatches bound Actions exactly once with ticket cont
   // The on_done_action_ids array order IS the dispatch order (the TicketPanel
   // picker lets the user reorder it). Bind three manual Actions in a NON-sorted
   // order and assert the hook dispatches them in exactly that order.
+  //
+  // We observe order at the ActionsService.dispatch() boundary — the authoritative
+  // source of dispatch sequence — rather than reconstructing it from ActionRun
+  // created_at. The hook dispatches in one sequential `for...of` + `await` loop,
+  // so all three runs share a millisecond (and sql.js timestamps are even coarser);
+  // sorting runs by created_at then breaks ties via the DB/index row order, which
+  // is non-deterministic and made this assertion flaky (ticket 909a30a6). The
+  // product was already correct — only the test's order-recovery was lossy.
   step('S6: on_done_action_ids dispatch in saved array order');
   const mkOrdered = (n) => createAction(ds, {
     workspace_id: ws.id, board_id: board.id, name: `S6 ordered ${n}`, target_agent_id: agent.id,
@@ -204,15 +212,24 @@ test('on-ticket-done hook dispatches bound Actions exactly once with ticket cont
   const order = [o3.id, o1.id, o2.id];
   const t6 = await newTicket('S6 ordered ticket', []);
   await ds.getRepository('Ticket').update(t6.id, { on_done_action_ids: JSON.stringify(order) });
+
+  // Record the exact order dispatch() is called in. Wrap (not replace) so the
+  // real dispatch still runs — we only tap the call sequence. Restored after S6.
+  const actionsService = app.get(modules.ActionsService);
+  const dispatchOrder = [];
+  const realDispatch = actionsService.dispatch.bind(actionsService);
+  actionsService.dispatch = (dispatchArgs) => {
+    if (order.includes(dispatchArgs.actionId)) dispatchOrder.push(dispatchArgs.actionId);
+    return realDispatch(dispatchArgs);
+  };
+  t.after(() => { actionsService.dispatch = realDispatch; });
+
   await moveToDone(ds, activityService, t6.id, done.id);
-  // Wait until all three have a run, then compare dispatch order via created_at.
+  // Wait until all three runs have landed, which means dispatch() returned for all
+  // three — by then dispatchOrder holds the full sequence.
   for (const id of order) await waitForRuns(ds, id, 1);
-  const orderedRuns = (await ds.getRepository('ActionRun')
-    .find({ where: order.map((id) => ({ action_id: id })) }))
-    .filter((r) => order.includes(r.action_id))
-    .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
   assert.deepEqual(
-    orderedRuns.map((r) => r.action_id),
+    dispatchOrder,
     order,
     'S6(c): actions dispatched in the saved on_done_action_ids array order',
   );
