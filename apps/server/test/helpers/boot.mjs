@@ -7,6 +7,8 @@
 // Pattern: `const { app, port, modules } = await bootApp({ port: 7800 });`
 // then `t.after(() => app.close())` + `exitAfterTests()` at file end.
 
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startTrace, traceEvent, writeTrace } from './trace.mjs';
@@ -32,6 +34,20 @@ export async function bootApp({ port = 7800, logger = false } = {}) {
   process.env.MCP_DEV_MODE = process.env.MCP_DEV_MODE || 'true';
   process.env.AGENT_DEV_MODE = process.env.AGENT_DEV_MODE || 'true';
   process.env.PORT = String(port);
+  // Hermetic sql.js DB per test process. The `test`/`test:qa` npm scripts chain
+  // every flow file through ONE process each, but all default to `database/data.db`
+  // — so two files in the run share a single on-disk DB and contaminate each
+  // other (e.g. a later file reads an attachment a former file left behind).
+  // resolveSqljsLocation() (db.ts) honors SQLJS_DB_PATH and the admin self-test
+  // runner already sets it; here we give the npm-script path the same isolation
+  // by defaulting to a unique temp DB keyed on pid+port. Callers that set
+  // SQLJS_DB_PATH explicitly (qa.controller) keep their value. Start fresh so a
+  // reused pid doesn't inherit a stale file.
+  if (!process.env.SQLJS_DB_PATH) {
+    const isolated = path.join(os.tmpdir(), `awb-qa-${process.pid}-${port}.db`);
+    try { fs.rmSync(isolated, { force: true }); } catch { /* best-effort */ }
+    process.env.SQLJS_DB_PATH = isolated;
+  }
   // Auto-start the trace buffer so every helper below records into it
   // without the test author having to wire anything.
   startTrace({ testFile: process.env.QA_TEST_FILE });
@@ -44,18 +60,26 @@ export async function bootApp({ port = 7800, logger = false } = {}) {
   return { app, port, modules };
 }
 
-// NestJS leaves unreffed intervals (AuthService session cleanup) and TypeORM
-// pool handles that keep the event loop alive. Existing leak tests solve this
-// by forcing process.exit after all tests complete. Mirror that pattern.
-// Also flushes the trace buffer to QA_TRACE_PATH so the parent qa.controller
-// can attach it to the test result.
-export function exitAfterTests(code = 0) {
+// Flushes the trace buffer to QA_TRACE_PATH so the parent qa.controller can
+// attach it to the test result. Call at the END of a test's success path.
+//
+// IMPORTANT — this helper must NOT call process.exit. NestJS leaves unreffed
+// intervals (AuthService session cleanup) and TypeORM pool handles that keep
+// the event loop alive, so these tests are launched with `--test-force-exit`
+// (see package.json + qa.controller). That flag tears the handles down AND
+// exits with the real code node:test computed — 0 when every assertion held,
+// non-zero when one failed. The previous `setImmediate(() => process.exit(0))`
+// raced node:test's async completion and force-exited 0 BEFORE a failed
+// assertion was recorded, so a deliberately broken test still reported green.
+// Removing the exit hands the exit code back to node:test, restoring the gate.
+//
+// The legacy `code` argument is accepted-and-ignored (43 call sites pass `0`).
+export function exitAfterTests() {
   try {
     writeTrace();
   } catch {
     /* best-effort */
   }
-  setImmediate(() => process.exit(code));
 }
 
 // Re-export so tests can import step() from boot.mjs without a separate

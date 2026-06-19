@@ -17,8 +17,8 @@ npm run test:qa
 # Fast subset (skips the 200-ticket load test and 5-agent concurrency)
 npm run test:qa:fast
 
-# Single file
-node --test test/qa-flows/ticket-lifecycle.test.mjs
+# Single file (always pass --test-force-exit, see below)
+node --test --test-force-exit test/qa-flows/ticket-lifecycle.test.mjs
 ```
 
 Tests are intentionally sequential: each file spins up its own NestJS app and
@@ -40,18 +40,29 @@ allocates a dedicated port (7801–7806) to avoid interference.
 | `large-data.test.mjs`              | 7805 | 200 tickets, 200 moves: stream keeps pace, no drops, no duplicates     |
 
 Each file boots its own NestJS app on its own port and runs exactly one
-`test()` block that ends with `exitAfterTests(0)` — this is the only shape
+`test()` block that ends with `exitAfterTests()` — this is the only shape
 that plays nicely with the unreffed NestJS timers + TypeORM pool handles
 (mixing multiple `test()` blocks in one file can hang the `node --test`
 transition between tests).
+
+**Always run flow files with `--test-force-exit`** (the `test:qa` scripts and
+`qa.controller` already do). NestJS's unreffed intervals keep the event loop
+alive, so node:test needs the flag to exit at all — and crucially it then
+exits with the *real* code (non-zero when an assertion fails). `exitAfterTests()`
+only flushes the trace buffer; it must **never** call `process.exit`. A
+hardcoded `process.exit(0)` there raced node:test's async completion and
+reported green even when assertions failed — the whole suite was silently
+non-gating until ticket `fc84ec30` removed it. The `test-harness-gate.test.mjs`
+meta-test guards against that regression returning.
 
 ## Helpers (`../helpers/`)
 
 - **`boot.mjs`** — `bootApp({ port })` returns `{ app, port, modules }`
   where `modules` already exposes `activityEvents`, `ActivityService`,
   `AuthService`, `getDataSourceToken`, `mcpTools`. Also exports
-  `exitAfterTests()` — NestJS leaves unreffed intervals + pool handles, so
-  every file must call this after the last test.
+  `exitAfterTests()` — flushes the trace buffer after the last test. It does
+  **not** call `process.exit`; handle teardown + the real exit code come from
+  the `--test-force-exit` flag the runners pass.
 - **`fixtures.mjs`** — TypeORM-repo-direct factories:
   `createWorkspace`, `createUser`, `createAgent`, `createApiKey`,
   `createBoard`, `createColumn`, `createTicket`, plus composites
@@ -97,7 +108,10 @@ process.env.PORT = process.env.QA_MY_PORT || '7810';
 
 test('my scenario', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => app.close().catch(() => {}));
+  // Fire-and-forget: do NOT return app.close()'s promise from an after-hook.
+  // NestJS's HTTP server won't close while SSE streams are open, so a returned
+  // promise hangs the hook forever and node:test never reaches exit (see Gotchas).
+  t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken, ActivityService } = modules;
 
   const { ws, columns } = await setupKanbanScene(app, getDataSourceToken);
@@ -138,15 +152,26 @@ test('my scenario', async (t) => {
   const trig = await agent.waitForTrigger(t => t.ticket_id === ticket.id);
   assert.equal(trig.role, 'assignee');
 
-  exitAfterTests(0); // Only in the LAST test() of the file.
+  exitAfterTests(); // Only in the LAST test() of the file. Flushes the trace;
+                    // never call process.exit (it would mask failures).
 });
 ```
 
 ### Gotchas
 
-- **`exitAfterTests()` is per-file.** NestJS leaves timers open, so each
-  file must call it once after the final `test()` completes. If you forget,
-  `node --test` hangs.
+- **`exitAfterTests()` is per-file and must NOT call `process.exit`.** It only
+  flushes the trace; the `--test-force-exit` flag handles the unreffed NestJS
+  timers + TypeORM pool handles AND yields the real exit code. If you forget the
+  flag, `node --test` hangs; if you add a `process.exit(0)` anywhere in a flow
+  file, a failed assertion gets masked and the gate silently dies (ticket
+  `fc84ec30`).
+- **Never return `app.close()` from a `t.after` hook.** node:test *awaits* a
+  hook's returned promise, and NestJS's HTTP server never finishes closing while
+  SSE streams are open — so `t.after(() => app.close())` hangs the hook forever
+  and the process never exits (it was the old `process.exit(0)` that hid this).
+  Always fire-and-forget: `t.after(() => { void app.close().catch(() => {}); });`.
+  Awaiting client-side teardown (`VirtualAgent.stop()`, `mcp.close()`) is fine —
+  those resolve.
 - **Port collisions.** Pick a port in the 7800–7899 range and update the
   `PORT` env fallback at the top of your file. The `test:qa` npm script
   runs files sequentially, but other locally-running dev servers can steal

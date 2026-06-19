@@ -367,7 +367,7 @@ export class QaController {
 
   // ─── Flow test runner ───────────────────────────────────────────────
   //
-  // Spawns `node --test --test-reporter=spec test/qa-flows/<file>` per
+  // Spawns `node --test --test-force-exit --test-reporter=spec test/qa-flows/<file>` per
   // flow file and collects PASS/FAIL + error text. Each flow file boots
   // its own NestJS app on its own port; they never collide with the main
   // server on 7701, but they DO share the sqljs database file unless we
@@ -664,7 +664,12 @@ function runFlowFile(absTestPath: string): Promise<FlowOutcome> {
     };
     const proc = spawn(
       process.execPath,
-      ['--test', '--test-reporter=spec', absTestPath],
+      // --test-force-exit: the booted NestJS app leaves unreffed intervals
+      // (AuthService session cleanup) + TypeORM pool handles that keep the
+      // event loop alive, so node:test would otherwise hang. force-exit tears
+      // them down AND exits with the REAL code (non-zero on a failed assertion)
+      // — without it the flow files used to self-exit 0 and mask regressions.
+      ['--test', '--test-force-exit', '--test-reporter=spec', absTestPath],
       {
         cwd: path.resolve(absTestPath, '..', '..', '..'),
         env,
