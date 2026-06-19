@@ -252,7 +252,7 @@ async function openUserSseStream(port, token) {
 
 // ─── Tests ──────────────────────────────────────────────────────────
 
-test('Test 1: Chat round-trip â user POST â SSE chat_message â send_chat_message MCP tool â SSE chat_message', { skip: 'quarantined: pre-existing failure unmasked by harness fix fc84ec30 — repair tracked in ticket 5e5959ef' }, async (t) => {
+test('Test 1: Chat round-trip — user POST → SSE chat_message → send_chat_message MCP tool → SSE chat_message', { skip: 'quarantined: pre-existing failure unmasked by harness fix fc84ec30 — repair tracked in ticket 5e5959ef' }, async (t) => {
   const modules = await loadServerModules();
   const { activityEvents, AuthService, getDataSourceToken } = modules;
   const { app, port } = await bootApp(modules);
@@ -357,7 +357,7 @@ test('Test 1: Chat round-trip â user POST â SSE chat_message â se
   await closeApp();
 });
 
-test('Test 2: Cross-user privacy â user B does NOT receive user A chat_message (sanity: user A does)', { skip: 'quarantined: pre-existing failure unmasked by harness fix fc84ec30 — repair tracked in ticket 5e5959ef' }, async (t) => {
+test('Test 2: Cross-user privacy — user B does NOT receive user A chat_message (sanity: user A does)', { skip: 'quarantined: pre-existing failure unmasked by harness fix fc84ec30 — repair tracked in ticket 5e5959ef' }, async (t) => {
   const modules = await loadServerModules();
   const { AuthService, getDataSourceToken } = modules;
   const { app, port } = await bootApp(modules);
@@ -424,7 +424,7 @@ test('Test 2: Cross-user privacy â user B does NOT receive user A chat_mess
   await closeApp();
 });
 
-test('Test 3: Agent impersonation â agentA API key cannot call send_chat_message with agent_id=agentB', { skip: 'quarantined: pre-existing failure unmasked by harness fix fc84ec30 — repair tracked in ticket 5e5959ef' }, async (t) => {
+test('Test 3: Agent impersonation — agentA API key cannot call send_chat_message with agent_id=agentB', { skip: 'quarantined: pre-existing failure unmasked by harness fix fc84ec30 — repair tracked in ticket 5e5959ef' }, async (t) => {
   const modules = await loadServerModules();
   const { getDataSourceToken, mcpTools } = modules;
   const { app, port: _port } = await bootApp(modules);
@@ -515,7 +515,7 @@ test('Test 3: Agent impersonation â agentA API key cannot call send_chat_me
   await closeApp();
 });
 
-test('Test 4: Workspace boundary â user in workspace B cannot see workspace A chat content', { skip: 'quarantined: pre-existing failure unmasked by harness fix fc84ec30 — repair tracked in ticket 5e5959ef' }, async (t) => {
+test('Test 4: Workspace boundary — user in workspace B cannot see workspace A chat content', { skip: 'quarantined: pre-existing failure unmasked by harness fix fc84ec30 — repair tracked in ticket 5e5959ef' }, async (t) => {
   const modules = await loadServerModules();
   const { AuthService, getDataSourceToken } = modules;
   const { app, port } = await bootApp(modules);
