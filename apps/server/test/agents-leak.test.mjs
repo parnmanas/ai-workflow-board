@@ -34,7 +34,7 @@ process.env.DB_TYPE = process.env.DB_TYPE || 'sqlite';
 // file's "scoped to ws_a sees only ws_a" assertions are exactly what break when
 // earlier leak files leave agents/workspaces behind in a shared db).
 process.env.SQLJS_DB_PATH =
-  process.env.SQLJS_DB_PATH || path.join(os.tmpdir(), `awb-leak-agents-${process.pid}.db`);
+  process.env.SQLJS_DB_PATH || path.join(os.tmpdir(), `awb-leak-agents-${Date.now()}-${process.pid}.db`);
 process.env.PORT = process.env.AGENTS_LEAK_PORT || '7796';
 process.env.NODE_ENV = 'test';
 process.env.MCP_DEV_MODE = 'true';
@@ -110,9 +110,16 @@ describe('agents-leak: cross-workspace agent isolation', async () => {
     }));
 
     // ─── Create an agent in workspace A via HTTP ───────────────────────────────
+    // The create endpoint IGNORES body.workspace_id (anti cross-workspace
+    // creation) and uses the WorkspaceGuard-resolved workspace from the
+    // X-Workspace-Id header; with no header it falls back to the lexicographically
+    // smallest workspace id (order: id ASC), which is wsA-or-wsB by UUID lottery —
+    // the non-determinism behind the original "Agent should be assigned to
+    // workspace A" drift. Send the header so the agent lands in ws_a every time.
     const agentRes = await apiRequest(BASE_URL, '/agents', {
       token: adminToken,
       method: 'POST',
+      workspaceId: wsA.id,
       body: {
         name: `Leak Agent WS-A ${randomUUID()}`,
         description: 'Cross-workspace leak test agent',
