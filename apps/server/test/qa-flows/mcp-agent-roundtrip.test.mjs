@@ -16,7 +16,7 @@ import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
 process.env.PORT = process.env.QA_MCP_ROUNDTRIP_PORT || '7810';
 
-test('Virtual agent reacts to agent_trigger by calling MCP move_ticket + add_comment', { skip: 'quarantined: pre-existing failure unmasked by harness fix fc84ec30 — repair tracked in ticket 5e5959ef' }, async (t) => {
+test('Virtual agent reacts to agent_trigger by calling MCP move_ticket + add_comment', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken, ActivityService } = modules;
@@ -29,6 +29,13 @@ test('Virtual agent reacts to agent_trigger by calling MCP move_ticket + add_com
     workspaceId: ws.id,
     label: 'worker',
   });
+  // The Review column routes to the reviewer slug only. A ticket moved into a
+  // routed column that has NO holder for that role auto-advances past it (the
+  // auto-advance-vs-halt rule), so without a reviewer the ticket would skip
+  // Review → Blocked and this test's "moved to Review" assertion would fail.
+  // Assign a reviewer so Review is servable and the ticket parks there. The
+  // reviewer never has to react — only a holder must exist.
+  const reviewer = await createAgent(app, getDataSourceToken, ws.id, { name: 'reviewer' });
   const user = await createUser(app, getDataSourceToken, { name: 'manager' });
   const ticket = await createTicket(app, getDataSourceToken, {
     columnId: columns.todo.id,
@@ -36,6 +43,7 @@ test('Virtual agent reacts to agent_trigger by calling MCP move_ticket + add_com
     title: 'Roundtrip ticket',
     promptText: 'Move me to review and leave a note.',
     assigneeId: worker.id,
+    reviewerId: reviewer.id,
   });
 
   const va = new VirtualAgent({

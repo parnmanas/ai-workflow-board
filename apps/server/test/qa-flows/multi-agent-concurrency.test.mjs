@@ -1,18 +1,24 @@
 // QA load/concurrency: many agents + many tickets + rapid column moves.
 //
 // Scale: 5 assignees, 20 tickets (one per assignee × 4), ~40 column moves
-// fired in parallel. Asserts three invariants:
+// fired in parallel.
 //
-//   1. Delivery completeness: every expected (ticket, assignee) trigger is
-//      received exactly once by its owning assignee within the deadline.
-//   2. Scope isolation: no assignee receives an agent_trigger for a ticket
-//      they don't own (cross-agent leak check).
-//   3. Envelope integrity: trigger_source, role, agent_id, ticket_id match
-//      what the emitting activity described (no field corruption under load).
+// SINGLE-FOCUS DISPATCH MODEL (ticket 4a6cdfd7): the trigger loop delivers at
+// most ONE trigger per (agent, board, role) — the agent's current focus ticket.
+// Non-focus triggers are silently dropped so a board with N parked tickets
+// doesn't thrash the agent. So firing 4 moves per agent yields exactly 1
+// delivered trigger per agent (its focus), not 4. The earlier "every parked
+// ticket triggers" expectation predated the focus model (quarantined → 5e5959ef).
 //
-// This is the hardest guarantee AWB makes — if it breaks, the whole
-// "agents operate autonomously without blocking the user" model breaks —
-// so a failure here is always a bug.
+// Invariants asserted here (the ones that still matter under the focus model):
+//   1. Liveness: every assignee is woken — each receives exactly one focus trigger.
+//   2. Scope isolation: no assignee receives an agent_trigger for a ticket they
+//      don't own (cross-agent leak check) — the security-critical guarantee.
+//   3. Envelope integrity: trigger_source, role, agent_id, ticket_id match what
+//      the emitting activity described (no field corruption under load).
+//
+// Scope isolation breaking is always a bug — it means the whole "agents operate
+// autonomously without blocking the user" model leaks across tenants.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -31,7 +37,7 @@ process.env.PORT = process.env.QA_CONCURRENCY_PORT || '7804';
 const NUM_ASSIGNEES = 5;
 const TICKETS_PER_ASSIGNEE = 4;
 
-test('5 assignees × 4 tickets each: every trigger lands at the owning agent, no leakage', { skip: 'quarantined: pre-existing failure unmasked by harness fix fc84ec30 — repair tracked in ticket 5e5959ef' }, async (t) => {
+test('5 assignees × 4 tickets each: every trigger lands at the owning agent, no leakage', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken, ActivityService } = modules;
@@ -105,30 +111,35 @@ test('5 assignees × 4 tickets each: every trigger lands at the owning agent, no
   );
   await Promise.all(moveAll);
 
-  // Give the bus time to drain. Budget ~40ms per trigger ceiling.
+  // Give the bus time to drain. Under the single-focus model each agent gets
+  // exactly one delivered trigger, so the completion target is NUM_ASSIGNEES,
+  // not tickets.length. Wait a beat past first delivery so any (buggy) extra /
+  // leaked trigger would also have landed and be caught below.
   const overallDeadline = Date.now() + Math.max(3000, tickets.length * 40);
   while (Date.now() < overallDeadline) {
-    const total = pool.reduce((n, p) => n + p.va.triggers.length, 0);
-    if (total >= tickets.length) break;
+    const woken = pool.filter((p) => p.va.triggers.length >= 1).length;
+    if (woken >= NUM_ASSIGNEES) break;
     await new Promise((r) => setTimeout(r, 80));
   }
+  // Small settle window so a stray non-focus / cross-agent trigger (the bug this
+  // test guards against) has time to arrive and fail the assertions.
+  await new Promise((r) => setTimeout(r, 300));
 
-  // Completeness + scope isolation checks.
+  // Liveness + scope isolation + envelope integrity under the focus model.
   for (const p of pool) {
     const ownerTicketIds = new Set(
       tickets.filter((t) => t.owner === p).map((t) => t.ticket.id),
     );
     const received = p.va.triggers;
+    // Liveness: exactly one focus trigger per agent — not 0 (agent never woken)
+    // and not >1 (non-focus triggers must be dropped, not thrash the agent).
     assert.equal(
       received.length,
-      TICKETS_PER_ASSIGNEE,
-      `${p.agent.name}: expected ${TICKETS_PER_ASSIGNEE} triggers, got ${received.length}`,
+      1,
+      `${p.agent.name}: expected exactly 1 focus trigger, got ${received.length}`,
     );
-    const receivedSet = new Set(received.map((r) => r.ticket_id));
-    for (const id of ownerTicketIds) {
-      assert.ok(receivedSet.has(id), `${p.agent.name}: missing trigger for ${id}`);
-    }
-    // No leakage: every trigger must point at an owned ticket.
+    // The delivered trigger must be one of this agent's own tickets, and every
+    // field must be intact — no cross-agent leak, no envelope corruption.
     for (const tr of received) {
       assert.ok(ownerTicketIds.has(tr.ticket_id), `${p.agent.name} leak: ${tr.ticket_id}`);
       assert.equal(tr.role, 'assignee');
