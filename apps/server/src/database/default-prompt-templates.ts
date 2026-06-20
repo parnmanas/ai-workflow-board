@@ -217,6 +217,7 @@ This ticket is in the In Progress column. Implement the work on a feature branch
 3. **Do the work** — implement the requirement. Split commits by logical unit (one commit per one change).
 
 4. **Push** — \`git push -u origin <branch-name>\`.
+   - **Record the exact pushed ref.** After pushing, confirm the remote ref name matches your local branch: \`git ls-remote --heads origin <branch-name>\` must return a row. If a push hook / PR automation renamed it on the remote (e.g. to \`awb-<id>...\`), note the **actual remote ref name** in your step-5 comment — that is the name Merging must delete. A local/remote name mismatch is what makes branch cleanup silently no-op later, leaving the ref orphaned on origin.
    - **Submodule projects**: if the change is inside a submodule, push the submodule's feature branch here, but **do NOT bump the parent repo's submodule ref yet**. The parent bump happens in Merging, after the submodule default branch has absorbed the change.
    - Before the final push, rebase onto the latest default so Merging can do a fast-forward: \`git fetch origin && git rebase origin/<default>\`. If this is a re-push after a rebase, use \`git push --force-with-lease\` on the feature branch (never the default branch).
 
@@ -344,7 +345,7 @@ This ticket is in the Merging column, which means Review approved the diff. Your
 >
 > **Integrate, don't bounce on first friction.** Since you branched, similar or overlapping work may already have landed on the default. A clean fast-forward is the happy path — but when it doesn't apply, you are **expected to rebase and actively integrate**: resolve conflicts whose two sides mean the same thing, fold duplicate/overlapping changes together, and carry on. Bouncing the ticket at the first conflict is the wrong default. Escalate (bounce / pend) **only** on a genuinely big problem — see "When to integrate vs. escalate" below.
 >
-> **Definition of merged**: a local merge is not enough. **(a)** \`origin/<default>\` must point at the integrated commit(s), and **(b)** the feature branch must be deleted from **both** local and remote. Verify with commands at each step.
+> **Definition of merged**: a local merge is not enough, and a \`"Merged"\` comment is not evidence. **(a)** \`origin/<default>\` must point at the integrated commit(s); **(b)** *every* feature-branch commit must be reachable from \`origin/<default>\` — no partial / squash-dropped change (verify in step 4); and **(c)** the feature branch must be deleted from **both** local and remote, under the name it was *actually pushed as* (step 5). Verify each with a git command whose output you paste into the step-7 comment.
 
 ## Steps
 
@@ -369,15 +370,20 @@ This ticket is in the Merging column, which means Review approved the diff. Your
 
 4. **Push to origin (required)**
    - \`git push origin <default-branch>\`
-   - **Verify**: \`git rev-parse HEAD\` == \`git rev-parse origin/<default-branch>\`. If they differ, the push did not land — read the error and retry.
+   - **Verify the push landed**: \`git rev-parse HEAD\` == \`git rev-parse origin/<default-branch>\`. If they differ, the push did not land — read the error and retry.
+   - **Verify completeness (no partial merge)**: \`git fetch origin\`, then \`git merge-base --is-ancestor <feature-branch> origin/<default-branch>\` must exit 0 **and** \`git diff --name-only origin/<default-branch>...<feature-branch>\` must be **empty**. Together they prove *every* feature commit is reachable from the pushed default — not just the tip. If anything still shows as unmerged, the merge is partial: re-integrate the missing commits, or escalate per the boundary below. (For the PR-gated squash path, use the stronger file-list comparison in the Notes.)
    - If the push is rejected (branch protection, CI gate, …) → **never force-push the default branch**. Skip step 5, go to step 7, record \`"manual merge required — <default> push rejected: <reason>"\`, and stop.
 
-5. **Delete the feature branch (both sides)**
-   - Remote: \`git push origin --delete <feature-branch>\`
+5. **Delete the feature branch (both sides) — by the name it was *actually pushed as***
+   - Local name and remote ref can diverge: push hooks / PR automation sometimes rename \`ticket/<id>-<slug>\` to e.g. \`awb-<id>...\` on the remote. Deleting the *local* name against origin then silently **no-ops** (git happily "succeeds" deleting a ref that was never there) and the real branch leaks forever. So **resolve the real remote ref first**:
+     - \`git ls-remote --heads origin | grep <ticket-id-short>\` — lists every remote head carrying this ticket id (catches a renamed \`awb-<id>\` ref as well as \`ticket/...\`).
+     - Cross-check the upstream the branch actually tracks: \`git rev-parse --abbrev-ref --symbolic-full-name @{u}\` (strip the \`origin/\` prefix) — that is the ref your pushes landed on.
+   - Remote: \`git push origin --delete <actual-remote-ref>\` for **every** ref the grep returned — not the local name on faith.
    - Local: \`git branch -d <feature-branch>\` (default must already be checked out; \`-D\` is unnecessary if the ff merge succeeded).
-   - **Verify**:
-     - \`git ls-remote --heads origin <feature-branch>\` → must be empty.
-     - \`git branch --list <feature-branch>\` → must be empty.
+   - **Verify — both must come back empty:**
+     - \`git ls-remote --heads origin | grep <ticket-id-short>\` → **no rows** (no \`ticket/...\` *and* no \`awb-...\` leftover).
+     - \`git branch --list <feature-branch>\` → empty.
+   - **If any ref still shows after the delete** (the delete hit the wrong name, or was rejected) → cleanup is *not* done; follow "Cleanup failure recovery" below before going anywhere near Done.
 
 6. **Submodule handling** (only if the feature branch lived inside a submodule)
    - Move into the parent repo; \`git status\` should show the submodule ref changed.
@@ -385,15 +391,16 @@ This ticket is in the Merging column, which means Review approved the diff. Your
    - **Verify**: parent's \`git rev-parse HEAD\` == \`git rev-parse origin/<parent-default-branch>\`.
    - Multiple submodules? Finish steps 3–5 in each, then make a single bump commit in the parent.
 
-7. **Ticket comment** — \`add_comment\` with all of:
+7. **Ticket comment** — \`add_comment\` with all of, **pasting the actual command output** (not a bare "OK" — Done independently re-checks these, and a no-repo reporter can only audit what you paste):
    - Merge commit SHA (\`git rev-parse origin/<default-branch>\`).
-   - Default branch name + \`origin push: OK\`.
-   - Feature branch name + \`local/remote delete: OK\`.
+   - **Completeness proof**: the step-4 output showing \`git diff --name-only origin/<default>...<feature-branch>\` empty (or, for the PR-gated squash path, the file-list comparison below) — i.e. every feature commit is reachable from \`origin/<default>\`, no partial merge.
+   - Default branch name + the \`HEAD == origin/<default>\` rev-parse check (\`origin push: OK\`).
+   - Feature branch name **exactly as it was pushed** + the step-5 \`git ls-remote --heads origin | grep <ticket-id-short>\` empty output (remote delete verified) + \`git branch --list\` empty (local delete verified).
    - Parent bump commit SHA (if step 6 applied).
    - **If you integrated any rebase/merge conflicts in step 2/3**: which hunk(s) conflicted, why each was safe to fold (same meaning / duplicate work already on the default / mechanical), and confirmation that build + relevant tests still pass after the integration. This is the audit trail for the relaxed-ff policy.
    - If any step failed, record the failure mode precisely so Done's sanity check can surface it.
 
-8. **Move to Done** — \`move_ticket\` to the **Done** column. (Leave in Merging only if you recorded a \`manual merge required\` block above.)
+8. **Move to Done — only when (a) the completeness proof is clean *and* (b) both-side branch deletion verified empty** — \`move_ticket\` to the **Done** column. Leave the ticket in Merging if you recorded a \`manual merge required\` block, a partial-merge gap, or an unfinished cleanup per the recovery section — never advance a half-merged or half-cleaned ticket into the terminal column, because bouncing it back *out* of Done is expensive.
 
 ## When to integrate vs. escalate
 
@@ -406,12 +413,25 @@ This ticket is in the Merging column, which means Review approved the diff. Your
 
 If none of these apply, integrate and proceed — record what you folded in the step-7 comment. If one does apply, escalate with a precise comment naming which boundary you hit, then bounce or pend; do not guess a resolution through a semantic or data-loss conflict.
 
+## Cleanup failure recovery
+
+Cleanup — remote branch delete, local branch delete, ticket worktree removal — is part of "merged", not an afterthought. The server's terminal-cleanup (\`#cleanupTerminalTicketWorktrees\`) is fire-and-forget and **never throws**, so if you skip cleanup or die before finishing it, nobody reconciles it later — the ref/worktree leaks permanently. Handle failures here, before Done:
+
+- **Remote delete failed or was a silent no-op** (a ref still shows in \`git ls-remote --heads origin | grep <ticket-id-short>\` after step 5) → re-resolve the real ref name (it was almost certainly renamed, e.g. \`awb-<id>\`) and retry the delete against *that* name. If the ref is protected / the delete is rejected, \`add_comment\` \`"cleanup incomplete — remote ref <name> still present: <reason>"\` and **do not move to Done** — leave the ticket in Merging for a human.
+- **Local branch delete failed** → record the exact error in the comment, resolve it (e.g. \`git checkout <default>\` first), and retry. Never advance to Done with the local \`ticket/<id>\` branch still listed.
+- **Ticket worktree** → you are typically *running inside* it, so you cannot remove your own worktree mid-run; that removal is the server's terminal-cleanup job once the ticket lands in Done. Your responsibility is (a) leave no new uncommitted junk in it and (b) state in the step-7 comment that no stray worktree work remains, so Done's audit can trust the state. If you created an *extra* worktree yourself (\`git worktree add\`), remove it with \`git worktree remove\` and confirm via \`git worktree list\`.
+- **Bottom line**: advance to Done only when remote+local branch deletion verifies empty — or you have explicitly recorded in a comment why a human must finish cleanup and left the ticket in Merging. A leaked branch/worktree reaching Done is exactly what this prompt exists to stop.
+
 ## Notes
 
 - **A local merge is not completion.** Step 4's verification (\`HEAD == origin/<default>\`) is the threshold.
 - **Feature branches must be deleted on BOTH sides.** Deleting only one leaves dangling refs.
 - **Never force-push master / main / the default branch.** Ever. \`--force-with-lease\` is only acceptable on the feature branch during rebase.
-- **PR-gated repos** — replace steps 3–5 with \`gh pr merge <pr> --squash --delete-branch\`. After merging, verify with \`gh pr view <pr> --json state,mergeCommit\` (\`state\` must be \`MERGED\`). If \`--delete-branch\` silently failed, fall back to manual \`git push origin --delete\` + \`git branch -d\`. If the PR reports conflicts, integrate them locally first via step 2 (rebase + fold same-meaning changes, push \`--force-with-lease\` on the feature branch), then re-run the merge — same integrate-vs-escalate boundary applies.
+- **PR-gated repos** — replace steps 3–5 with \`gh pr merge <pr> --squash --delete-branch\`. **\`--squash\` collapses N commits into one — before you call it complete, prove no change was dropped.** This is the \`9b8f338f\` partial-merge failure mode: a 6-commit branch squashed so only a 1-line \`.asset\` change landed and the other 5 commits (guard tests, shader variant, …) were silently lost, yet the ticket reached Done.
+  - *Before* merging, capture the full reviewed change set: \`git diff --name-only origin/<default>...<feature-branch>\` (every file the branch touches) and \`git log --oneline origin/<default>..<feature-branch>\` (the DoD commits).
+  - *After* the squash lands, \`git fetch origin\` and diff the merge commit against its parent: \`git show --name-only <merge-commit>\` (or \`git diff --name-only <merge-commit>^ <merge-commit>\`). **Every file from the pre-merge list must appear**, and \`git diff --name-only origin/<default>...<feature-branch>\` must now be **empty** (net patch fully landed). For rewritten commits, cross-check with \`git range-diff origin/<default>...<feature-branch> <merge-commit>^...<merge-commit>\` or compare \`git patch-id\`.
+  - **If any reviewed file or DoD commit is missing from the merge commit → the squash was partial. Do NOT proceed to Done.** \`add_comment\` naming exactly which files/commits dropped (paste the file-list comparison as evidence) and bounce to **In Progress**, or re-do the merge non-squashed (\`--merge\`/ff) so all commits land.
+  - Then verify with \`gh pr view <pr> --json state,mergeCommit\` (\`state\` must be \`MERGED\`). If \`--delete-branch\` silently failed, fall back to manual \`git push origin --delete\` + \`git branch -d\` — and re-resolve the real remote ref name per step 5 (the PR head ref may differ from your local name). If the PR reports conflicts, integrate them locally first via step 2 (rebase + fold same-meaning changes, push \`--force-with-lease\` on the feature branch), then re-run the merge — same integrate-vs-escalate boundary applies.
 - **No \`gh\` available and direct push rejected** → stop, record \`"manual merge required"\`, leave the ticket in Merging for a human.
 - **Submodule changes must run through step 6.** Skipping the parent bump leaves every other environment pointing at the old ref.
 - After merge, a quick sanity build on the default branch is cheap insurance. If it's broken, open a follow-up ticket or revert immediately.
@@ -422,28 +442,33 @@ If none of these apply, integrate and proceed — record what you folded in the 
     description: 'Done column default workflow — reporter verifies the merge trail and records completion. Backlog scheduling is server-owned (BacklogPromotionService).',
     category: 'default_workflow',
     column_match: 'done',
-    content: `# Done — Completion (reporter)
+    content: `# Done — Completion + Merge Audit (reporter)
 
-This ticket is in the Done column. Merging already landed the code and deleted the feature branch. Your job is administrative: record the completion on the reporter side. **Backlog scheduling is no longer your responsibility** — \`BacklogPromotionService\` runs server-side on the same capacity event the supervisor watches, so a freed agent triggers the next promotion automatically.
+This ticket is in the Done column. Merging *claims* it landed the code and deleted the feature branch — your job is to **independently re-verify that the merge is real and complete before you bless it**, then record completion. A \`"Merged"\` comment is **not** evidence (CLAUDE.md: "'Merged' comment ≠ evidence — always check \`git rev-parse origin/<default>\`"). **Backlog scheduling is no longer your responsibility** — \`BacklogPromotionService\` runs server-side on the same capacity event the supervisor watches, so a freed agent triggers the next promotion automatically.
 
-> **Environment**: reporter may have no local repo. MCP-only. No git, gh, or shell commands.
+> **Environment**: reporter may have no local repo. The git-state checks below run when you have a clone (single-agent / same-agent boards always do); when you don't, audit the verification *output* that Merging is now required to paste into its comment instead — and treat a missing or failed proof exactly like a failed check.
 
 ## Steps
 
-1. **Sanity-check the merge trail**
-   - \`mcp__awb__get_ticket\` on this ticket — confirm the Merging-stage comment exists and includes a merge commit SHA plus branch-deletion confirmation.
-   - If the confirmation is **missing** or says \`"manual merge required"\`, \`add_comment\` \`"done reached without merge confirmation — please verify"\` and stop.
+1. **Re-verify the merge trail — git state, not prose.** \`mcp__awb__get_ticket\`, read the Merging-stage comment, then confirm all three:
+   - **Merge present + complete** — the merge SHA exists on \`origin/<default>\` and *every* feature commit is reachable from it (no partial / squash-dropped change):
+     - *With a repo*: \`git fetch origin\`, then \`git merge-base --is-ancestor <merge-sha> origin/<default>\` (exit 0). If the feature branch still exists, also confirm \`git diff --name-only origin/<default>...<recorded-feature-ref>\` is empty; if it was already deleted, rely on Merging's pasted completeness proof.
+     - *No repo*: the Merging comment must contain the completeness proof (empty \`git diff --name-only\` / file-list match) **and** the \`HEAD == origin/<default>\` output.
+   - **Remote feature branch deleted** — \`git ls-remote --heads origin | grep <ticket-id-short>\` is **empty** (no \`ticket/...\` *and* no renamed \`awb-...\` ref). No repo → the Merging comment must show this output.
+   - **No ticket worktree leftover** — Merging's comment confirms cleanup, or (with a repo) \`git worktree list\` shows no \`ticket/<id>\` entry.
 
-2. **Completion comment** — \`add_comment\` with:
-   - One line acknowledging the ticket is fully complete from the reporter's side.
-   - Reference the merge commit SHA from the Merging comment (copy it, do not re-compute).
+2. **If any check fails or the proof is missing** → do **not** rubber-stamp. \`add_comment\` naming exactly which check failed (e.g. \`"awb-<id> still on origin — remote branch leaked"\`, or \`"5 of 6 DoD commits not reachable from merge SHA — partial squash"\`), mention the **assignee** (\`@[role:assignee|<name>]\`), and bounce the ticket back to **In Progress** (or **Merging**) so landing/cleanup is finished. Done is terminal, so the move needs \`mcp__awb__move_ticket(..., force=true)\`. A leaked branch/worktree or partial merge sitting in Done is precisely the failure this audit exists to catch.
+
+3. **Completion comment** (only when all three checks pass) — \`add_comment\` with:
+   - One line acknowledging the ticket is fully complete and the merge independently verified.
+   - The merge commit SHA (copy from the Merging comment, confirmed reachable above).
 
 That's it. The terminal landing eventually fires \`agent_idle\` for the merging agent (when its subagent exits), which drains that agent's dispatch queue and gives \`BacklogPromotionService\` a chance to pull the next intake ticket forward. No manual scheduling pass is needed or wanted.
 
 ## Notes
 
-- **No local git, no \`gh\`, no branch operations here.** Merge / push / delete already happened in Merging.
-- **No self-mention.** Reporter comments must not use \`@[role:reporter|...]\`.
+- **The git checks are a re-verification, not the merge itself.** Merge / push / delete already happened in Merging; you are auditing that they actually stuck. If you have no local repo, the audit reduces to checking Merging's pasted command output — which is why Merging is required to paste it.
+- **No self-mention.** Reporter comments must not use \`@[role:reporter|...]\`. When bouncing, mention the assignee.
 - **Do not run a backlog scan.** Scanning is forbidden — the server owns it. Manual scans were the v0.40 starvation source.
 - If you suspect the server-side promotion is stuck (e.g. backlog has critical work but the freed agent didn't pick anything up), comment with the suspicion and stop. Humans investigate; you don't override.
 `,
