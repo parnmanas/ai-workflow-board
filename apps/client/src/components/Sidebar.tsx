@@ -317,6 +317,7 @@ export default function Sidebar({ isMobile, isOpen, onClose, wsId, boards }: Sid
                     {active && (
                       <>
                         {[
+                          { label: 'QA',              path: `/ws/${wsId}/boards/${b.id}/qa`        },
                           { label: 'Board Resources', path: `/ws/${wsId}/boards/${b.id}/resources` },
                           { label: 'Board Actions',   path: `/ws/${wsId}/boards/${b.id}/actions`   },
                           { label: 'Board Settings',  path: `/ws/${wsId}/boards/${b.id}/settings`  },
