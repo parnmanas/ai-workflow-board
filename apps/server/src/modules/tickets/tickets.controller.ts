@@ -32,6 +32,7 @@ import { Resource } from '../../entities/Resource';
 import { TicketAttachment } from '../../entities/TicketAttachment';
 import { loadTicketFull, parseComments, expandCommentAttachments, loadTicketComments, DETAIL_COMMENT_PAGE } from '../mcp/shared/ticket-parsing';
 import { applyTerminalEnteredAtForMove, getRootArchivedAt, isTerminalColumn, TicketArchivedError } from '../mcp/shared/archive-helpers';
+import { isReviewToMerging, hasReviewerApproval, ReviewApprovalRequiredError } from '../mcp/shared/review-approval-guard';
 import {
   maxTicketPosition,
   maxChildPosition,
@@ -703,11 +704,27 @@ export class TicketsController {
 
   @Patch('tickets/:id/move')
   async move(@Param('id') id: string, @Body() body: any, @Req() req: any, @Res() res: Response) {
-    const { targetColumnId, targetPosition } = body;
+    const { targetColumnId, targetPosition, force } = body;
     const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
 
     if (ticket.archived_at) return res.status(409).json({ error: 'ticket_archived', hint: 'Call unarchive first', message: new TicketArchivedError(ticket.id).message });
     if (ticket.depth > 0) return res.status(400).json({ error: 'Only root tickets can be moved on the board' });
+
+    // Review→Merging approval gate (ticket a3d25202 — proposal 2 of 86bfb8af).
+    // Unlike the terminal-reopen guard (which deliberately exempts this human
+    // drag path), proposal 2 *targets* the manual path: a person dragging a card
+    // Review→Merging must not cross the review gate unless a reviewer-authored
+    // comment exists. body.force is the explicit human override.
+    if (targetColumnId) {
+      const [sourceColForGuard, destColForGuard] = await Promise.all([
+        ticket.column_id ? this.colRepo.findOne({ where: { id: ticket.column_id } }) : Promise.resolve(null),
+        this.colRepo.findOne({ where: { id: targetColumnId } }),
+      ]);
+      if (!force && isReviewToMerging(sourceColForGuard, destColForGuard) && !(await hasReviewerApproval(this.dataSource, ticket.id))) {
+        const e = new ReviewApprovalRequiredError(ticket.id, sourceColForGuard?.name ?? String(ticket.column_id), destColForGuard?.name ?? String(targetColumnId));
+        return res.status(e.status).json({ error: e.code, hint: e.hint, message: e.message });
+      }
+    }
 
     await this.dataSource.transaction(async (manager) => {
       const tRepo = manager.getRepository(Ticket);
