@@ -5,6 +5,11 @@ import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 import { Button, Input, Select, Modal, Card, Badge, ConfirmDialog } from '../common';
 import { relativeTime } from '../../utils/time';
+import { formatAgentDisplayName } from '../../utils/agentName';
+
+// QaManager 내부에서 다루는 agent 표시용 최소 형태. 서버 GET /api/agents 가
+// _enrichManagerNames 로 채워주는 manager_name 을 보존해 full name 렌더에 사용한다.
+type QaAgent = { id: string; name: string; manager_name?: string };
 
 interface QaManagerProps {
   workspaceId?: string;
@@ -34,7 +39,7 @@ export default function QaManager({ workspaceId, boardId }: QaManagerProps) {
   const effectiveWorkspaceId = workspaceId || (getActiveWorkspaceId() || '');
 
   const [scenarios, setScenarios] = useState<QaScenarioListItem[]>([]);
-  const [agents, setAgents] = useState<Array<{ id: string; name: string }>>([]);
+  const [agents, setAgents] = useState<QaAgent[]>([]);
   const [selected, setSelected] = useState<QaScenario | null>(null);
   const [running, setRunning] = useState<string | null>(null);
   const [editing, setEditing] = useState<QaScenario | 'new' | null>(null);
@@ -48,7 +53,7 @@ export default function QaManager({ workspaceId, boardId }: QaManagerProps) {
         api.getAgents().catch(() => []),
       ]);
       setScenarios(list);
-      setAgents((agentList || []).map((a: any) => ({ id: a.id, name: a.name })));
+      setAgents((agentList || []).map((a: any) => ({ id: a.id, name: a.name, manager_name: a.manager_name })));
     } catch (err: any) {
       showToast(err?.message || 'Failed to load QA scenarios', 'error');
     }
@@ -56,7 +61,12 @@ export default function QaManager({ workspaceId, boardId }: QaManagerProps) {
 
   useEffect(() => { load(); }, [load]);
 
-  const agentName = useCallback((id: string) => agents.find((a) => a.id === id)?.name || id.slice(0, 8), [agents]);
+  // manager_name 을 포함한 full name(Manager/Agent)으로 표시. 목록에 없는
+  // agent(삭제됨 등)는 id 앞 8자리 fallback 으로 둔다.
+  const agentName = useCallback((id: string) => {
+    const a = agents.find((x) => x.id === id);
+    return a ? formatAgentDisplayName(a) : id.slice(0, 8);
+  }, [agents]);
 
   const handleRun = async (s: QaScenario) => {
     setRunning(s.id);
@@ -523,7 +533,7 @@ interface ScenarioEditorProps {
   scenario: QaScenario | null;
   workspaceId: string;
   boardId?: string;
-  agents: Array<{ id: string; name: string }>;
+  agents: QaAgent[];
   onClose: () => void;
   onSaved: (s: QaScenario) => void;
 }
@@ -597,7 +607,7 @@ function ScenarioEditor({ scenario, workspaceId, boardId, agents, onClose, onSav
           label="Target QA agent"
           placeholder="— select —"
           value={targetAgentId}
-          options={agents.map((a) => ({ value: a.id, label: a.name }))}
+          options={agents.map((a) => ({ value: a.id, label: formatAgentDisplayName(a) }))}
           onChange={(e) => setTargetAgentId((e.target as HTMLSelectElement).value)}
         />
         <Input label="QA driver (browser / game-client / http-api)" value={qaDriver} onChange={(e) => setQaDriver((e.target as HTMLInputElement).value)} />
