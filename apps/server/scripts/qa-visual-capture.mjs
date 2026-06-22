@@ -159,6 +159,20 @@ async function navigate(cdp, sid, url, settleMs = 2600) {
   await sleep(settleMs); // let the SPA render after load
 }
 
+// Client-side navigation inside the already-loaded SPA: pushState + popstate so
+// React Router swaps routes without a full reload. This is what makes capture work
+// regardless of whether the server does history-mode SPA fallback for deep routes.
+async function spaNavigate(cdp, sid, pathWithQuery, settleMs = 2600) {
+  const expr = `(() => { history.pushState({}, '', ${JSON.stringify(pathWithQuery)});`
+    + ` window.dispatchEvent(new PopStateEvent('popstate')); })()`;
+  await cdp.send('Runtime.evaluate', { expression: expr }, sid);
+  await sleep(settleMs);
+}
+
+function toPath(baseUrl, url) {
+  return url.startsWith(baseUrl) ? (url.slice(baseUrl.length) || '/') : url;
+}
+
 async function screenshot(cdp, sid, outPath) {
   const { data } = await cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false }, sid);
   await writeFile(outPath, Buffer.from(data, 'base64'));
@@ -198,16 +212,23 @@ async function main() {
     { width: a.width, height: a.height, deviceScaleFactor: 1, mobile: false }, sid);
 
   try {
-    // Load the SPA origin once, then inject the session token into localStorage so
-    // subsequent navigations boot authenticated.
-    await navigate(cdp, sid, `${a.baseUrl}/`, 1200);
+    // 1. Capture the unauthenticated screens (login) with a real page load first.
+    for (const s of shots.filter((x) => !x.auth)) {
+      await navigate(cdp, sid, s.url, 2000);
+      const p = await screenshot(cdp, sid, join(a.out, s.name));
+      manifest.screenshots.push({ name: s.name, path: p, url: s.url });
+      process.stderr.write(`captured ${s.name}\n`);
+    }
+
+    // 2. Inject the session token, then reload '/' so the SPA boots authenticated.
     if (token) {
       const expr = `localStorage.setItem('auth_token', ${JSON.stringify(token)});`
         + (ws ? `localStorage.setItem('currentWorkspaceId', ${JSON.stringify(ws)});` : '');
       await cdp.send('Runtime.evaluate', { expression: expr }, sid);
+      await navigate(cdp, sid, `${a.baseUrl}/`, 2600);
     }
 
-    // optional journey video
+    // optional journey video (recorded across the authenticated client-side nav)
     let frames = [];
     if (a.recordVideo) {
       cdp.on('Page.screencastFrame', async (p) => {
@@ -217,8 +238,10 @@ async function main() {
       await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 80, everyNthFrame: 1 }, sid);
     }
 
-    for (const s of shots) {
-      await navigate(cdp, sid, s.url);
+    // 3. Authenticated screens via in-SPA navigation (no full reload → no 404 even
+    //    when the server lacks history-mode fallback for deep routes).
+    for (const s of shots.filter((x) => x.auth)) {
+      await spaNavigate(cdp, sid, toPath(a.baseUrl, s.url));
       const p = await screenshot(cdp, sid, join(a.out, s.name));
       manifest.screenshots.push({ name: s.name, path: p, url: s.url });
       process.stderr.write(`captured ${s.name}\n`);

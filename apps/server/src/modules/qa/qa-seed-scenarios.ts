@@ -102,8 +102,10 @@ function browserDriverConfig(extra: Record<string, any> = {}): Record<string, an
     note: 'Drive the AWB client UI with headless Chrome (browser driver contract, '
       + 'docs/qa-driver-guide.md §4). Save each screenshot as a Resource (type=image, '
       + 'file_mimetype=image/png) and the journey clip as (type=image, file_mimetype=video/mp4 — '
-      + 'there is no `video` Resource enum; the viewer keys off mimetype, not type), then '
-      + 'record_qa_step / attach_qa_artifact with the Resource ids.',
+      + 'there is no `video` Resource enum; the viewer keys off mimetype, not type). Attach each '
+      + 'artifact via record_qa_step (PER-STEP): the QA RunDetail viewer only renders per-step '
+      + 'galleries, so a run-level attach_qa_artifact shows as a count but NOT as a thumbnail — '
+      + 'the video must be a step artifact to render its inline-video tile.',
     ...extra,
   };
 }
@@ -384,7 +386,7 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
       step(1, 'Log in and land on the board view', 'Board renders within the recording', 'browser_navigate', { route: '{{awb_base_url}}/ws/{{workspace_id}}/boards/{{board_id}}' }),
       step(2, 'Open a ticket and scroll through its comments', 'Ticket panel + comment thread captured in the recording', 'browser_navigate', { route: '{{awb_base_url}}/ws/{{workspace_id}}/boards/{{board_id}}?ticket={{ticket_id}}' }),
       step(3, 'Visit the board QA manager', 'QA table captured in the recording', 'browser_navigate', { route: '{{awb_base_url}}/ws/{{workspace_id}}/boards/{{board_id}}/qa' }),
-      step(4, 'Stop recording, encode mp4, and attach it', 'Journey saved as a Resource (file_mimetype=video/mp4) and attached to the run', 'browser_stop_video', { name: 'ticket-journey.mp4', mimetype: 'video/mp4' }),
+      step(4, 'Stop recording, encode mp4, and record it as THIS step\'s artifact', 'Journey saved as a Resource (file_mimetype=video/mp4) and recorded via record_qa_step on this step so the inline-video tile renders (per-step, not run-level)', 'browser_stop_video', { name: 'ticket-journey.mp4', mimetype: 'video/mp4', record_on_step: 4 }),
     ],
   },
 ];
