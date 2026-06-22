@@ -283,7 +283,17 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
 
     const columnHasHolder = resolved.some((r) => !!r.targetAgentId);
     if (triggerSource === 'column_move' && !columnHasHolder) {
-      if (await this._ticketHasAnyHolder(ticket.id)) {
+      if (this._isGateColumn(col)) {
+        // GATE COLUMN (review / merging) with no holder — never auto-advance a
+        // gate, in OR out (ticket cc48f06f). The benchmark short-circuit at the
+        // top of this method already parks a `benchmark-candidate` on a review
+        // column rather than letting it auto-advance past; this generalizes that
+        // to every review/merging gate and every ticket. A reviewer/merger seat
+        // must be staffed by a human — silently skipping it produces a
+        // "ready to merge" ticket with zero review (a3d25202 live repro). Halt
+        // in place + flag regardless of whether the ticket is staffed elsewhere.
+        await this._flagGateHalt(ticket, col, col);
+      } else if (await this._ticketHasAnyHolder(ticket.id)) {
         // Staffed somewhere else — this empty stage is an intended skip.
         await this._autoAdvanceUnassigned(ticket, col);
       } else {
@@ -389,6 +399,19 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    // GATE GUARD (ticket cc48f06f): never auto-advance an unstaffed ticket INTO
+    // a review/merging gate column. Cascading through active stages (Plan, In
+    // Progress) is fine, but a gate must be staffed by a human — auto-passing it
+    // silently produces a "ready to merge" ticket with zero work/review
+    // (a3d25202 live repro). Halt at the current (last active) column + flag,
+    // leaving the ticket one short of the gate for a human to staff. NOTE this
+    // checks the IMMEDIATE next non-terminal column only — we never skip OVER a
+    // gate to land on a later active column, which would bypass the gate entirely.
+    if (this._isGateColumn(nextCol)) {
+      await this._flagGateHalt(ticket, currentCol, nextCol);
+      return;
+    }
+
     const fromPosition = ticket.position;
     const fromColumnId = currentCol.id;
 
@@ -479,6 +502,72 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
       )
       .getCount();
     return count > 0;
+  }
+
+  /**
+   * Is this a review/merging GATE column? Gate columns require a human-staffed
+   * holder (reviewer / merger) and must never be crossed by the auto-advance
+   * cascade — neither entered nor exited while unstaffed (ticket cc48f06f).
+   * Distinct from active columns, where an empty seat is a legitimate skip:
+   * a gate's empty seat means "a human still has to staff this review", not
+   * "nobody routed here, move along". Kept in one place so the caller-side
+   * (cascade-OUT) and `_autoAdvanceUnassigned`-side (cascade-IN) guards agree.
+   */
+  private _isGateColumn(col: BoardColumn): boolean {
+    const kind = (col as any).kind;
+    return kind === 'review' || kind === 'merging';
+  }
+
+  /**
+   * Halt + flag an unstaffed GATE-column crossing (ticket cc48f06f). The
+   * auto-advance cascade reached a review/merging gate with no holder — either
+   * the ticket sits ON the gate (`col === gateCol`, cascade-OUT, e.g. an empty
+   * Review with only the assignee set) or the next forward column IS the gate
+   * (`col` is the last active column before it, cascade-IN). Unlike
+   * `_autoAdvanceUnassigned` we must NOT push through: a gate has to be staffed
+   * by a human (assign a reviewer / merger), so the ticket halts in place and we
+   * write a grepable `auto_advance_halted_gate` flag so the UI activity feed and
+   * operator greps surface "stuck: gate needs staffing". `system` actor so the
+   * row does NOT re-enter `_handleActivity` (it is not a move and carries no
+   * holder to wake). Failing the write must not change the halt outcome.
+   */
+  private async _flagGateHalt(
+    ticket: Ticket,
+    col: BoardColumn,
+    gateCol: BoardColumn,
+  ): Promise<void> {
+    this.logService.warn(
+      'MCP',
+      'auto_advance halted at gate (review/merging requires a staffed holder)',
+      {
+        ticket_id: ticket.id,
+        column_id: col.id,
+        column_name: col.name,
+        gate_column_id: gateCol.id,
+        gate_column_name: gateCol.name,
+        gate_kind: (gateCol as any).kind,
+      },
+    );
+    try {
+      const activityLogRepo = this.dataSource.getRepository(ActivityLog);
+      await activityLogRepo.save(
+        activityLogRepo.create({
+          entity_type: 'ticket',
+          entity_id: ticket.id,
+          ticket_id: ticket.id,
+          actor_id: 'system',
+          actor_name: 'TriggerLoopService',
+          action: 'auto_advance_halted_gate',
+          new_value: `column=${col.id} gate=${gateCol.id} gate_kind=${(gateCol as any).kind} reason=gate_requires_staffing`,
+          role: '',
+          trigger_source: 'auto_advance',
+        }),
+      );
+    } catch (e) {
+      this.logService.warn('MCP', 'auto_advance gate-halt flag write failed (halt still applied)', {
+        err: String(e), ticket_id: ticket.id,
+      });
+    }
   }
 
   /**
