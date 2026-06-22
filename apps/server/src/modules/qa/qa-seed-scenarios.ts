@@ -10,12 +10,28 @@ import type { CreateScenarioInput } from './qa.service';
  * admin self-test harness (`test/qa-flows/*.test.mjs` + `qa.controller.ts`).
  *
  * Each entry is **driver-agnostic data**: it carries the `steps[]` the visualizer
- * renders and the run prompt is built from. Every scenario here uses the
- * `awb-mcp` driver — the QA agent drives AWB's own MCP/REST surface (see
- * docs/qa-driver-guide.md §6 "http-api driver") and records evidence with
- * save_resource + record_qa_step. The step `mcp_tool` values are real AWB MCP
- * tool names so the agent can execute them verbatim; `params` use `{{placeholder}}`
- * tokens the agent fills from the run context.
+ * renders and the run prompt is built from. The catalogue ships two driver flavours:
+ *
+ *   - `awb-mcp` (scenarios 1–12) — the QA agent drives AWB's own MCP/REST surface
+ *     (see docs/qa-driver-guide.md §6 "http-api driver") and records evidence with
+ *     save_resource + record_qa_step. The step `mcp_tool` values are real AWB MCP
+ *     tool names so the agent can execute them verbatim; `params` use `{{placeholder}}`
+ *     tokens the agent fills from the run context. Evidence is tool-result JSON
+ *     (type=document) — backend validation, no pixels.
+ *
+ *   - `browser` (scenarios 13+) — the QA agent drives the real AWB **client UI** with
+ *     a headless-Chrome driver (CDP; see docs/qa-driver-guide.md §4 "Browser driver"
+ *     and the reference helper apps/server/scripts/qa-visual-capture.mjs). Evidence is
+ *     actual **screenshots (image/png) and a journey video (video/mp4)** so the QA
+ *     detail Gallery/Lightbox/inline-video viewer has real pixels to show. The
+ *     `mcp_tool` values are browser-driver verbs (browser_navigate / browser_screenshot
+ *     / browser_start_video / browser_stop_video) — NOT AWB MCP tools.
+ *
+ * Mimetype matters: the /api/resources/:id/raw endpoint streams Content-Type from the
+ * Resource's file_mimetype, and the viewer's MediaThumb renders <img> first then falls
+ * back to <video> on load error — so a video with an empty/wrong mimetype won't decode.
+ * The browser scenarios therefore record image/png for screenshots and video/mp4 for
+ * the journey clip explicitly.
  *
  * Consumed by:
  *   - scripts/seed-qa-scenarios.mjs (idempotent upsert into a live workspace)
@@ -57,6 +73,39 @@ function driverConfig(extra: Record<string, any> = {}): Record<string, any> {
 
 function step(idx: number, action: string, expect: string, mcp_tool?: string, params?: Record<string, any>): QaScenarioStep {
   return { idx, action, expect, mcp_tool, params };
+}
+
+/** The visual driver: a headless-Chrome (CDP) browser driver over AWB's client UI. */
+const BROWSER_DRIVER = 'browser';
+
+/**
+ * Browser-driver config. Captures real AWB client screens with headless Chrome.
+ * `start_url` is env-specific (placeholder). `auth` documents how the driver gets a
+ * session before navigating to authenticated routes — the reference helper logs in via
+ * POST /api/auth/login and injects the returned token into localStorage (`auth_token`
+ * + `currentWorkspaceId`) so the SPA boots authenticated. Routes use `{{placeholder}}`
+ * tokens the agent fills from the run context. See apps/server/scripts/qa-visual-capture.mjs.
+ */
+function browserDriverConfig(extra: Record<string, any> = {}): Record<string, any> {
+  return {
+    transport: 'chrome-cdp-headless',
+    start_url: '{{awb_base_url}}',
+    viewport: { width: 1440, height: 900 },
+    record_video: false,
+    auth: {
+      method: 'token-inject',
+      login_endpoint: '/api/auth/login',
+      local_storage_keys: ['auth_token', 'currentWorkspaceId'],
+    },
+    capture_helper: 'apps/server/scripts/qa-visual-capture.mjs',
+    mimetypes: { screenshot: 'image/png', video: 'video/mp4' },
+    note: 'Drive the AWB client UI with headless Chrome (browser driver contract, '
+      + 'docs/qa-driver-guide.md §4). Save each screenshot as a Resource (type=image, '
+      + 'file_mimetype=image/png) and the journey clip as (type=image, file_mimetype=video/mp4 — '
+      + 'there is no `video` Resource enum; the viewer keys off mimetype, not type), then '
+      + 'record_qa_step / attach_qa_artifact with the Resource ids.',
+    ...extra,
+  };
 }
 
 export const QA_SEED_SCENARIOS: SeedScenario[] = [
@@ -291,6 +340,51 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
       step(1, 'Read the resource back', 'get_resource returns metadata (id, mimetype, size)', 'get_resource', { resource_id: '{{resource_id}}' }),
       step(2, 'Attach it to a comment', 'add_comment with attachment_resource_ids succeeds', 'add_comment', { ticket_id: '{{ticket_id}}', content: 'QA: evidence attached', attachment_resource_ids: ['{{resource_id}}'] }),
       step(3, 'Reload the ticket', 'get_ticket shows the comment with its attachment hydrated', 'get_ticket', { ticket_id: '{{ticket_id}}' }),
+    ],
+  },
+
+  // 13 ───────────────────────────────────────────────────────────────────────
+  {
+    key: 'visual-core-screens',
+    name: 'Visual — core UI screens (login → board → ticket → chat → QA → resources)',
+    description:
+      'Drive the real AWB client UI with a headless-Chrome (browser) driver and capture a '
+      + 'screenshot of each core screen as image/png evidence: the login page, the board view, '
+      + 'a ticket detail panel with comments, a chat room, the board QA manager (table view), the '
+      + 'Resources page, and the board sub-menu. Unlike the awb-mcp scenarios this leaves real '
+      + 'pixels in the QA detail Gallery/Lightbox. Capture recipe: apps/server/scripts/qa-visual-capture.mjs.',
+    qa_driver: BROWSER_DRIVER,
+    qa_driver_config: browserDriverConfig(),
+    tags: ['visual', 'ui', 'screenshots', 'gallery'],
+    steps: [
+      step(0, 'Navigate to the AWB login page and screenshot it', 'Login card ("Welcome Back" / email + password) renders; save as image/png', 'browser_screenshot', { route: '{{awb_base_url}}/', name: 'login.png', mimetype: 'image/png' }),
+      step(1, 'Log in, then screenshot the board (kanban columns + ticket cards)', 'Board view shows columns (Backlog…Done) and ticket cards', 'browser_screenshot', { route: '{{awb_base_url}}/ws/{{workspace_id}}/boards/{{board_id}}', name: 'board.png', mimetype: 'image/png' }),
+      step(2, 'Open a ticket detail panel (deep-link ?ticket=) and screenshot it', 'Ticket panel shows title, description, and comment thread', 'browser_screenshot', { route: '{{awb_base_url}}/ws/{{workspace_id}}/boards/{{board_id}}?ticket={{ticket_id}}', name: 'ticket-detail.png', mimetype: 'image/png' }),
+      step(3, 'Open the chat room view and screenshot it', 'Chat room list + message thread render', 'browser_screenshot', { route: '{{awb_base_url}}/ws/{{workspace_id}}/chat', name: 'chat.png', mimetype: 'image/png' }),
+      step(4, 'Open the board QA manager (scenario table) and screenshot it', 'QA scenario table shows scenarios with last-run / pass-rate columns', 'browser_screenshot', { route: '{{awb_base_url}}/ws/{{workspace_id}}/boards/{{board_id}}/qa', name: 'qa-manager.png', mimetype: 'image/png' }),
+      step(5, 'Open the Resources page and screenshot it', 'Resources grid renders (media + documents)', 'browser_screenshot', { route: '{{awb_base_url}}/ws/{{workspace_id}}/resources', name: 'resources.png', mimetype: 'image/png' }),
+      step(6, 'Open the board sub-menu (resources/actions/qa/settings/archive) and screenshot it', 'Board sub-menu navigation is visible', 'browser_screenshot', { route: '{{awb_base_url}}/ws/{{workspace_id}}/boards/{{board_id}}/settings', name: 'board-submenu.png', mimetype: 'image/png' }),
+    ],
+  },
+
+  // 14 ───────────────────────────────────────────────────────────────────────
+  {
+    key: 'visual-ticket-journey-video',
+    name: 'Visual — ticket journey screen recording (video evidence)',
+    description:
+      'Record one continuous journey through the AWB client UI as an mp4 (login → board → open a '
+      + 'ticket → scroll its comments → QA manager) so the QA detail inline-video player and Lightbox '
+      + 'have a real video/mp4 artifact to play. Validates the /api/resources/:id/raw Range-streaming '
+      + 'path end-to-end. Capture recipe: apps/server/scripts/qa-visual-capture.mjs --record-video.',
+    qa_driver: BROWSER_DRIVER,
+    qa_driver_config: browserDriverConfig({ record_video: true }),
+    tags: ['visual', 'ui', 'video', 'screencast'],
+    steps: [
+      step(0, 'Launch headless Chrome and start screencast recording', 'CDP screencast started; frames accumulating', 'browser_start_video', { fps: 8 }),
+      step(1, 'Log in and land on the board view', 'Board renders within the recording', 'browser_navigate', { route: '{{awb_base_url}}/ws/{{workspace_id}}/boards/{{board_id}}' }),
+      step(2, 'Open a ticket and scroll through its comments', 'Ticket panel + comment thread captured in the recording', 'browser_navigate', { route: '{{awb_base_url}}/ws/{{workspace_id}}/boards/{{board_id}}?ticket={{ticket_id}}' }),
+      step(3, 'Visit the board QA manager', 'QA table captured in the recording', 'browser_navigate', { route: '{{awb_base_url}}/ws/{{workspace_id}}/boards/{{board_id}}/qa' }),
+      step(4, 'Stop recording, encode mp4, and attach it', 'Journey saved as a Resource (file_mimetype=video/mp4) and attached to the run', 'browser_stop_video', { name: 'ticket-journey.mp4', mimetype: 'video/mp4' }),
     ],
   },
 ];
