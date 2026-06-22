@@ -1,6 +1,6 @@
 {
   "name": "agent-manager",
-  "version": "0.7.7",
+  "version": "0.7.8",
   "private": true,
   "description": "Standalone subagent runner for AWB — drives Claude / DeepSeek / Codex / Antigravity CLIs without a host editor",
   "type": "module",
