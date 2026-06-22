@@ -6,7 +6,11 @@
 // --append-system-prompt (claude) at spawn time.
 
 import type { ColumnPrompt, PromptComposer } from './event-dispatcher.js';
-import { renderAttachmentBlock, type PreparedAttachment } from './chat-attachment-prep.js';
+import {
+  renderAttachmentBlock,
+  type PreparedAttachment,
+  type RawChatAttachment,
+} from './chat-attachment-prep.js';
 
 interface CommentLike {
   author_name?: string;
@@ -30,6 +34,11 @@ interface ChatHistoryEntry {
   sender_id?: string;
   content?: string;
   created_at?: string;
+  /** Attachment metadata carried alongside the history message (server
+   *  projects this on both the REST history endpoint and the SSE wire). The
+   *  composer fetches/renders these so an image attached on a past turn
+   *  survives a session respawn instead of being silently dropped. */
+  attachments?: RawChatAttachment[];
   // 'progress' rows are agent-manager tool-call heartbeats. Defensive
   // belt-and-suspenders — both the SSE ring and the REST history endpoint
   // already strip them, but the composer also filters so any future caller
@@ -251,6 +260,12 @@ export function composeChatRoomPrompt(
   newMessage: ChatRoomNewMessage,
   attachments?: PreparedAttachment[],
   usesNativeMcp = true,
+  // Prepared attachments for past messages, keyed by the history entry object
+  // reference. Slicing/filtering the history array below preserves those
+  // references, so a Map keyed by identity stays aligned with the rendered
+  // rows. Absent on the legacy oneshot path (text-only history is still
+  // correct there — only the inline-vision affordance is missing).
+  historyAttachments?: Map<ChatHistoryEntry, PreparedAttachment[]>,
 ): string {
   const lines: string[] = [];
   lines.push('You are an AWB chat subagent responding to a user message in a chat room.');
@@ -268,6 +283,14 @@ export function composeChatRoomPrompt(
       const when = h.created_at || '';
       const content = (h.content || '').slice(0, 2000);
       lines.push(`- [${when}] ${who} (${name}): ${content}`);
+      const atts = historyAttachments?.get(h);
+      if (atts && atts.length > 0) {
+        // Indent the per-message attachment block under its history line so
+        // the model can tell which past turn each file belongs to.
+        for (const ln of renderAttachmentBlock(atts, 'Attachments:')) {
+          lines.push(`  ${ln}`);
+        }
+      }
     }
     lines.push('');
   }
