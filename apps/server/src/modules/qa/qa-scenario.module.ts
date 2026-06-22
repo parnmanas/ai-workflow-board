@@ -11,6 +11,7 @@ import { Board } from '../../entities/Board';
 import { QaScenarioController } from './qa-scenario.controller';
 import { QaService } from './qa.service';
 import { QaRunService } from './qa-run.service';
+import { QaRunReaperService } from './qa-run-reaper.service';
 import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
 import { SharedServicesModule } from '../../services/shared-services.module';
 import { AuthGuard } from '../../common/guards/auth.guard';
@@ -28,7 +29,7 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
     SharedServicesModule,
   ],
   controllers: [QaScenarioController],
-  providers: [QaService, QaRunService, AuthGuard, PermissionGuard],
-  exports: [QaService, QaRunService],
+  providers: [QaService, QaRunService, QaRunReaperService, AuthGuard, PermissionGuard],
+  exports: [QaService, QaRunService, QaRunReaperService],
 })
 export class QaScenarioModule {}
