@@ -16,6 +16,7 @@ import { LogService } from '../../services/log.service';
 import { ActivityService, activityEvents } from '../../services/activity.service';
 import { GitHubConnectorService, parseGitHubUrl } from '../../services/github-connector.service';
 import { AgentWorkloadService } from './agent-workload.service';
+import { AgentStatusService } from './agent-status.service';
 import { TicketPrerequisitesService } from '../tickets/ticket-prerequisites.service';
 import { priorityIndex } from './priority';
 import { appendBoardLanguageInstruction, resolveHarnessConfig, HarnessConfig } from '../../common/harness-config';
@@ -72,6 +73,7 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly logService: LogService,
     private readonly agentWorkload: AgentWorkloadService,
+    private readonly agentStatus: AgentStatusService,
     private readonly activityService: ActivityService,
     private readonly ticketPrerequisites: TicketPrerequisitesService,
   ) {}
@@ -1403,6 +1405,58 @@ candidate's branch or move the ticket.
         });
         return '';
       }
+    }
+
+    // In-flight strand serialization gate (ticket c9622a40). The focus gate
+    // above caps the agent to ONE focus ticket per (board, role); it does NOT
+    // stop a SECOND trigger for the SAME (ticket, role) — fired from a distinct
+    // event (column_move + comment_mention + supervisor / unpend / ticket_update
+    // tick) — from spawning a redundant racing strand (both pass focus with the
+    // same ticket id). On a review gate that is the reviewer-vs-reviewer
+    // self-LGTM race: a fast reviewer strand LGTMs → Merging → Done before the
+    // slow strand's independent BLOCKER review lands, discarding the careful
+    // verdict as a post-merge no-op (ticket 86bfb8af live repro). proposal 2's
+    // review-approval-guard (a3d25202) only inspects author_role, so it waves
+    // both reviewer strands through — serializing the strands is the residual
+    // fix (this ticket = same-role strand axis; proposal 2 = self-merge axis).
+    //
+    // The lock is the existing current_task lifecycle (no new store): acquired
+    // on the plugin's set_current_task when the subagent starts work, released
+    // on clear_current_task / agent_idle (exit or crash), and TTL-swept after
+    // CURRENT_TASK_STALE_MS so a crashed strand can't wedge the seat forever —
+    // exactly the claim_ticket-style advisory lock the ticket proposes (#1).
+    // forceRespawn bypasses: the supervisor's wedged-session re-push and the
+    // self-improvement remote dispatch deliberately want to replace a live
+    // strand, and they carry their own audit actor. The known set_current_task
+    // lag (trigger emits before the subagent registers its task) is backstopped
+    // manager-side by the same defensive cap that guards the per-ticket limit
+    // (stream-events.ts AgentTriggerPayload.max_concurrent_tickets_per_agent).
+    if (opts?.forceRespawn !== true && this.agentStatus.hasLiveRoleStrand(agentId, ticket.id, role)) {
+      this.logService.info('MCP', 'agent_trigger dropped (live same-role strand in flight)', {
+        ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource,
+      });
+      try {
+        const activityLogRepo = this.dataSource.getRepository(ActivityLog);
+        await activityLogRepo.save(activityLogRepo.create({
+          entity_type: 'ticket',
+          entity_id: ticket.id,
+          ticket_id: ticket.id,
+          actor_id: 'system',
+          actor_name: 'TriggerLoopService',
+          action: 'agent_trigger_dropped_inflight_strand',
+          new_value: `agent=${agentId} role=${role} source=${triggerSource}`,
+          role,
+          trigger_source: triggerSource,
+        }));
+      } catch (e) {
+        // Audit write must not gate the drop — the serialization already
+        // applied; a missed row is the only collateral (mirrors the
+        // pause / pending / archived drop audit error handling above).
+        this.logService.warn('MCP', 'inflight-strand-drop audit write failed (drop still applied)', {
+          err: String(e), ticket_id: ticket.id, agent_id: agentId,
+        });
+      }
+      return '';
     }
 
     // Compose role_prompt = workspace role's prompt + agent's own prompt.
