@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
-import { QaScenario, QaScenarioStep } from '../../entities/QaScenario';
+import { QaScenario, QaScenarioStep, QaOnFailureTicketConfig } from '../../entities/QaScenario';
 import { QaRun, QaRunStatus } from '../../entities/QaRun';
 import { Agent } from '../../entities/Agent';
 import { Board } from '../../entities/Board';
@@ -32,6 +32,29 @@ function normalizeTags(tags: any): string[] {
 }
 
 /**
+ * Normalize the loose `on_failure_ticket` input into a clean config (or null).
+ * `null` / `{ enabled:false }` both disable the side-effect; every other field
+ * is optional and defaulted at dispatch time in QaFailureTicketService.
+ */
+function normalizeOnFailureTicket(input: any): QaOnFailureTicketConfig | null {
+  if (input == null) return null;
+  if (typeof input !== 'object') return null;
+  const priority = ['low', 'medium', 'high', 'critical'].includes(input.priority) ? input.priority : undefined;
+  const dedupe = input.dedupe === 'per_open_ticket' ? 'per_open_ticket' : (input.dedupe === 'per_run' ? 'per_run' : undefined);
+  const labels = Array.isArray(input.labels) ? input.labels.map((l: any) => String(l)).filter(Boolean) : undefined;
+  return {
+    enabled: !!input.enabled,
+    board_id: input.board_id ? String(input.board_id) : undefined,
+    column_name: input.column_name ? String(input.column_name) : undefined,
+    priority,
+    assignee_id: input.assignee_id ? String(input.assignee_id) : undefined,
+    labels,
+    dedupe,
+    title_template: input.title_template ? String(input.title_template) : undefined,
+  };
+}
+
+/**
  * List view-model: a QaScenario row enriched with a last-run rollup so the QA
  * dashboard can render a status table (last-run time + result + pass-rate)
  * without an N+1 fetch-runs-per-scenario. Computed in QaService.list via a
@@ -57,6 +80,7 @@ export interface CreateScenarioInput {
   qa_driver_config?: Record<string, any> | null;
   enabled?: boolean;
   tags?: any;
+  on_failure_ticket?: any;
   created_by?: string;
   max_runs?: number;
 }
@@ -168,6 +192,7 @@ export class QaService {
       qa_driver_config: input.qa_driver_config ?? null,
       enabled: input.enabled !== false,
       tags: normalizeTags(input.tags),
+      on_failure_ticket: normalizeOnFailureTicket(input.on_failure_ticket),
       created_by: input.created_by ?? '',
       max_runs: typeof input.max_runs === 'number' && input.max_runs > 0 ? Math.floor(input.max_runs) : 20,
     });
@@ -206,6 +231,7 @@ export class QaService {
     if (patch.qa_driver_config !== undefined) existing.qa_driver_config = patch.qa_driver_config ?? null;
     if (patch.enabled !== undefined) existing.enabled = !!patch.enabled;
     if (patch.tags !== undefined) existing.tags = normalizeTags(patch.tags);
+    if (patch.on_failure_ticket !== undefined) existing.on_failure_ticket = normalizeOnFailureTicket(patch.on_failure_ticket);
     if (patch.max_runs !== undefined) {
       const n = Number(patch.max_runs);
       if (Number.isFinite(n) && n > 0) existing.max_runs = Math.floor(n);
