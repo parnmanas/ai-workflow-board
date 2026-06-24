@@ -44,6 +44,10 @@ function makeRepo(rows) {
 }
 
 const noopLog = { info() {}, warn() {}, error() {} };
+// Reaper now advances any sequential batch a reaped run belonged to. These
+// fixture runs have no batch_id, so onRunFinalized early-returns — a no-op stub
+// matches the real (DI-injected) QaRunService surface the reaper depends on.
+const noopQaRunService = { onRunFinalized: async () => {} };
 
 const NOW = new Date('2026-06-22T21:00:00Z');
 
@@ -72,7 +76,7 @@ test('zero-progress fuse: 0-step runs past the 40m window are reaped; fresh / pr
     makeRun('done-failed', 'failed', 50 * MIN),               // terminal           -> never selected
   ];
   const repo = makeRepo(rows);
-  const svc = new QaRunReaperService(repo, noopLog);
+  const svc = new QaRunReaperService(repo, noopLog, noopQaRunService);
 
   const { reaped, details } = await svc.runOnce(NOW);
 
@@ -104,7 +108,7 @@ test('6h-TTL fuse: a progressing run that stalls past 6h is reaped via the absol
     makeRun('progressing-5h', 'running', 5 * HOUR, { steps: 5 }),   // has steps, 5h < 6h -> spare
   ];
   const repo = makeRepo(rows);
-  const svc = new QaRunReaperService(repo, noopLog);
+  const svc = new QaRunReaperService(repo, noopLog, noopQaRunService);
 
   const { reaped, details } = await svc.runOnce(NOW);
 
