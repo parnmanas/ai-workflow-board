@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { api, getActiveWorkspaceId, rawResourceUrl } from '../../api';
-import type { QaScenario, QaScenarioListItem, QaRun, QaStepResult } from '../../types';
+import type { QaScenario, QaScenarioListItem, QaRun, QaStepResult, QaOnFailureTicketConfig } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 import { Button, Input, Select, Modal, Card, Badge, ConfirmDialog } from '../common';
@@ -443,11 +443,22 @@ function ScenarioDetail({ scenario, workspaceId, agentName, onBack, onRun, runni
 function RunDetail({ run, onPreview }: { run: QaRun; onPreview: (src: string, kind: 'image' | 'video') => void }) {
   return (
     <div>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' }}>
         <Badge variant={statusVariant(run.status)} size="md">{run.status}</Badge>
         <span style={{ fontSize: 12, color: tokens.colors.textMuted }}>
           {(run.step_results?.length ?? 0)} step results · {(run.artifact_resource_ids?.length ?? 0)} artifacts
         </span>
+        {run.auto_ticket_id && (
+          <a
+            href={run.board_id
+              ? `/ws/${run.workspace_id}/boards/${run.board_id}?ticket=${encodeURIComponent(run.auto_ticket_id)}`
+              : `/?ticket=${encodeURIComponent(run.auto_ticket_id)}`}
+            style={{ fontSize: 12, fontWeight: 600, color: tokens.colors.danger, textDecoration: 'none', border: `1px solid ${tokens.colors.danger}`, borderRadius: tokens.radii.sm, padding: '2px 8px' }}
+            title="이 실패 run 이 자동 생성한 수정 티켓으로 이동"
+          >
+            → 생성된 티켓 #{run.auto_ticket_id.slice(0, 8)}
+          </a>
+        )}
       </div>
       {run.summary && (
         <div style={{ fontSize: 13, color: tokens.colors.textSecondary, marginBottom: 12, whiteSpace: 'pre-wrap' }}>{run.summary}</div>
@@ -550,6 +561,16 @@ function ScenarioEditor({ scenario, workspaceId, boardId, agents, onClose, onSav
   const [tagsText, setTagsText] = useState((scenario?.tags ?? []).join(', '));
   const [saving, setSaving] = useState(false);
 
+  // On-failure auto-ticket policy (실패 시 → 티켓 생성).
+  const oft = scenario?.on_failure_ticket ?? null;
+  const [oftEnabled, setOftEnabled] = useState(!!oft?.enabled);
+  const [oftPriority, setOftPriority] = useState<QaOnFailureTicketConfig['priority']>(oft?.priority ?? 'high');
+  const [oftAssigneeId, setOftAssigneeId] = useState(oft?.assignee_id ?? '');
+  const [oftColumn, setOftColumn] = useState(oft?.column_name ?? '');
+  const [oftDedupe, setOftDedupe] = useState<QaOnFailureTicketConfig['dedupe']>(oft?.dedupe ?? 'per_run');
+  const [oftBoardId, setOftBoardId] = useState(oft?.board_id ?? '');
+  const [oftLabels, setOftLabels] = useState((oft?.labels ?? []).join(', '));
+
   const handleSave = async () => {
     if (!name.trim()) { showToast('Name is required', 'error'); return; }
     if (!targetAgentId) { showToast('Target agent is required', 'error'); return; }
@@ -557,6 +578,19 @@ function ScenarioEditor({ scenario, workspaceId, boardId, agents, onClose, onSav
     try { steps = stepsText.trim() ? JSON.parse(stepsText) : []; } catch { showToast('Steps must be valid JSON array', 'error'); return; }
     try { config = configText.trim() ? JSON.parse(configText) : {}; } catch { showToast('Driver config must be valid JSON', 'error'); return; }
     const tags = tagsText.split(',').map((t) => t.trim()).filter(Boolean);
+    // Build the on-failure policy. Disabled → send an explicit { enabled:false }
+    // so an existing policy is turned off (rather than left untouched).
+    const onFailureTicket: QaOnFailureTicketConfig = oftEnabled
+      ? {
+          enabled: true,
+          priority: oftPriority,
+          dedupe: oftDedupe,
+          ...(oftAssigneeId ? { assignee_id: oftAssigneeId } : {}),
+          ...(oftColumn.trim() ? { column_name: oftColumn.trim() } : {}),
+          ...(oftBoardId.trim() ? { board_id: oftBoardId.trim() } : {}),
+          ...(oftLabels.trim() ? { labels: oftLabels.split(',').map((l) => l.trim()).filter(Boolean) } : {}),
+        }
+      : { enabled: false };
     setSaving(true);
     try {
       let saved: QaScenario;
@@ -564,11 +598,13 @@ function ScenarioEditor({ scenario, workspaceId, boardId, agents, onClose, onSav
         saved = await api.updateQaScenario(scenario.id, {
           workspace_id: workspaceId, name, description, target_agent_id: targetAgentId,
           qa_driver: qaDriver, qa_driver_config: config, steps, tags, enabled,
+          on_failure_ticket: onFailureTicket,
         });
       } else {
         saved = await api.createQaScenario({
           workspace_id: workspaceId, board_id: boardId || null, name, description,
           target_agent_id: targetAgentId, qa_driver: qaDriver, qa_driver_config: config, steps, tags, enabled,
+          on_failure_ticket: onFailureTicket,
         });
       }
       showToast(`Scenario ${scenario ? 'updated' : 'created'}`, 'success');
@@ -623,6 +659,57 @@ function ScenarioEditor({ scenario, workspaceId, boardId, agents, onClose, onSav
         <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary }}>
           <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} /> Enabled
         </label>
+
+        {/* 실패 시 → 티켓 생성 (on-failure auto-ticket) */}
+        <div style={{ borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 12, marginTop: 4 }}>
+          <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>
+            <input type="checkbox" checked={oftEnabled} onChange={(e) => setOftEnabled(e.target.checked)} />
+            실패 시 → 수정 티켓 자동 생성
+          </label>
+          <div style={{ fontSize: 12, color: tokens.colors.textMuted, margin: '4px 0 0 24px' }}>
+            run 이 failed/error 로 끝나면 실패 증거(스텝 로그 + 스크린샷 링크)를 담은 수정 티켓을 자동 생성합니다.
+          </div>
+          {oftEnabled && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10, paddingLeft: 24 }}>
+              <div style={{ display: 'flex', gap: 10 }}>
+                <div style={{ flex: 1 }}>
+                  <Select
+                    label="Priority"
+                    value={oftPriority}
+                    options={[
+                      { value: 'low', label: 'low' },
+                      { value: 'medium', label: 'medium' },
+                      { value: 'high', label: 'high' },
+                      { value: 'critical', label: 'critical' },
+                    ]}
+                    onChange={(e) => setOftPriority((e.target as HTMLSelectElement).value as QaOnFailureTicketConfig['priority'])}
+                  />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <Select
+                    label="중복 방지 (dedupe)"
+                    value={oftDedupe}
+                    options={[
+                      { value: 'per_run', label: 'per_run (run당 1개)' },
+                      { value: 'per_open_ticket', label: 'per_open_ticket (열린 티켓에 코멘트)' },
+                    ]}
+                    onChange={(e) => setOftDedupe((e.target as HTMLSelectElement).value as QaOnFailureTicketConfig['dedupe'])}
+                  />
+                </div>
+              </div>
+              <Select
+                label="담당자 (assignee — 비우면 시나리오 타깃 에이전트)"
+                placeholder="— 시나리오 타깃 에이전트 사용 —"
+                value={oftAssigneeId}
+                options={agents.map((a) => ({ value: a.id, label: formatAgentDisplayName(a) }))}
+                onChange={(e) => setOftAssigneeId((e.target as HTMLSelectElement).value)}
+              />
+              <Input label='컬럼 (비우면 "To Do")' value={oftColumn} onChange={(e) => setOftColumn((e.target as HTMLInputElement).value)} />
+              <Input label="Board ID (비우면 run/시나리오 보드)" value={oftBoardId} onChange={(e) => setOftBoardId((e.target as HTMLInputElement).value)} />
+              <Input label="Labels (comma — 비우면 qa-failure, auto)" value={oftLabels} onChange={(e) => setOftLabels((e.target as HTMLInputElement).value)} />
+            </div>
+          )}
+        </div>
       </div>
     </Modal>
   );

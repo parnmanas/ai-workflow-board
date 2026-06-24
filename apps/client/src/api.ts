@@ -927,6 +927,7 @@ export const api = {
     qa_driver_config?: Record<string, any> | null;
     enabled?: boolean;
     tags?: string[];
+    on_failure_ticket?: QaScenario['on_failure_ticket'];
     max_runs?: number;
   }) => request<QaScenario>('/qa/scenarios', { method: 'POST', body: JSON.stringify(data) }),
   updateQaScenario: (
@@ -942,6 +943,7 @@ export const api = {
       qa_driver_config?: Record<string, any> | null;
       enabled?: boolean;
       tags?: string[];
+      on_failure_ticket?: QaScenario['on_failure_ticket'];
       max_runs?: number;
     },
   ) => request<QaScenario>(`/qa/scenarios/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),

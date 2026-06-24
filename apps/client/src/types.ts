@@ -221,6 +221,17 @@ export interface QaScenarioStep {
   params?: Record<string, any>;
 }
 
+export interface QaOnFailureTicketConfig {
+  enabled: boolean;
+  board_id?: string;
+  column_name?: string;
+  priority?: 'low' | 'medium' | 'high' | 'critical';
+  assignee_id?: string;
+  labels?: string[];
+  dedupe?: 'per_run' | 'per_open_ticket';
+  title_template?: string;
+}
+
 export interface QaScenario {
   id: string;
   workspace_id: string;
@@ -233,6 +244,7 @@ export interface QaScenario {
   qa_driver_config: Record<string, any> | null;
   enabled: boolean;
   tags: string[];
+  on_failure_ticket: QaOnFailureTicketConfig | null;
   created_by: string;
   max_runs: number;
   created_at: string;
@@ -270,6 +282,7 @@ export interface QaRun {
   step_results: QaStepResult[];
   artifact_resource_ids: string[];
   summary: string;
+  auto_ticket_id: string | null;
   triggered_by_type: string;
   triggered_by_id: string;
   started_at: string | null;
