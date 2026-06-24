@@ -66,6 +66,16 @@ export default function QaManager({ workspaceId, boardId }: QaManagerProps) {
 
   useEffect(() => { load(); }, [load]);
 
+  // Live refresh: while any scenario has an in-flight run, re-poll the list so
+  // the Last-run / Result / Pass columns update without a manual refresh. QA
+  // has no SSE channel, so the list view polls; it idles when nothing is running.
+  const anyScenarioRunning = scenarios.some((s) => s.last_run_status === 'running');
+  useEffect(() => {
+    if (!anyScenarioRunning) return;
+    const t = setInterval(() => { load(); }, 3000);
+    return () => clearInterval(t);
+  }, [anyScenarioRunning, load]);
+
   // manager_name 을 포함한 full name(Manager/Agent)으로 표시. 목록에 없는
   // agent(삭제됨 등)는 id 앞 8자리 fallback 으로 둔다.
   const agentName = useCallback((id: string) => {
@@ -494,6 +504,18 @@ function ScenarioDetail({ scenario, workspaceId, agentName, onBack, onRun, runni
   }, [scenario.id, workspaceId, showToast]);
 
   useEffect(() => { loadRuns(); }, [loadRuns]);
+
+  // Live refresh: poll while a run is still in flight so step badges,
+  // screenshots and run status fill in without leaving/re-entering the view.
+  // `running` (the Run button just clicked) covers the brief window before the
+  // freshly-started run shows up in the list; once it lands as `running`/`pending`
+  // the run-status check keeps polling. Idles the moment everything is terminal.
+  const anyRunActive = running || runs.some((r) => r.status === 'running' || r.status === 'pending');
+  useEffect(() => {
+    if (!anyRunActive) return;
+    const t = setInterval(() => { loadRuns(); }, 2500);
+    return () => clearInterval(t);
+  }, [anyRunActive, loadRuns]);
 
   const activeRun = runs.find((r) => r.id === activeRunId) || null;
   // Latest run drives the per-step badges in the visualizer.
