@@ -15,6 +15,16 @@ import { RERUN_LABEL_PREFIX } from './qa-failure-ticket.service';
 // The marker labels QaFailureTicketService stamps on every fix ticket it files.
 // A ticket must carry ALL of these to be eligible for an automatic rerun — this
 // is the scope guard that stops a human-labelled ticket from firing a run.
+//
+// ⚠️ Coupling: these mirror QaFailureTicketService.DEFAULT_LABELS, but that
+// service only applies the defaults when `on_failure_ticket.labels` is unset —
+// a scenario that customises `cfg.labels` and drops 'auto' would file fix
+// tickets that this guard silently REJECTS (no rerun, no error). The two
+// anchors that are ALWAYS present regardless of cfg.labels are the
+// `qa-scenario:<id>` marker (added unconditionally) and the `rerun_on_fix`
+// opt-in gate (checked below) — those are the real scope. Treat the label
+// match as belt-and-suspenders: if you customise cfg.labels, keep 'qa-failure'
+// + 'auto' in the list, or relax this constant to the scenario marker alone.
 const REQUIRED_LABELS = ['qa-failure', 'auto'];
 const SCENARIO_LABEL_PREFIX = 'qa-scenario:';
 
