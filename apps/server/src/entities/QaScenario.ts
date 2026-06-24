@@ -116,4 +116,26 @@ export interface QaOnFailureTicketConfig {
   // Optional title override. `{{scenario.name}}` is substituted. Default
   // 'QA 실패: {{scenario.name}}'.
   title_template?: string;
+
+  // ── QA → fix → QA closed-loop (ticket 467dbc7a) ──────────────────────────
+  // Opt-in: when true, a fix ticket auto-filed by this policy that later reaches
+  // a terminal (Done) column triggers QaRerunOnFixService to deterministically
+  // re-run the SAME scenario (server-side startQaRun — no agent prompt parsing).
+  // Default false (historic behaviour: filing the ticket is the end of the
+  // loop). The rerun is strictly scoped to tickets carrying this policy's
+  // markers (`qa-failure` + `auto` + `qa-scenario:<id>`), so a human accidentally
+  // labelling a ticket can't trigger a run.
+  rerun_on_fix?: boolean;
+  // Convergence guard: the maximum number of automatic reruns before the loop
+  // halts and posts a "human intervention needed" comment instead of re-running.
+  // Counted via a `qa-rerun:<n>` generation label threaded fix-ticket → run →
+  // next fix-ticket. Default 3. <= 0 disables reruns (treated like opt-out).
+  max_rerun_attempts?: number;
+  // Deployment-timing gate (see docs/qa-rerun-on-fix.md "Deployment timing").
+  // QA scenarios hit the RUNNING AWB server, which auto-deploys from
+  // `production.private` AFTER main merges — so an instant rerun can validate the
+  // pre-fix code. This delays the rerun by N seconds (best-effort, in-process;
+  // not durable across a server restart) so a deploy can land first. Default 0
+  // (immediate). Set to your typical main→prod deploy lag to make Done≈deployed.
+  rerun_delay_seconds?: number;
 }

@@ -56,6 +56,15 @@ export class QaRun {
   @Column({ type: 'varchar', nullable: true, default: null })
   auto_ticket_id: string | null;
 
+  // Rerun generation (ticket 467dbc7a). 0 = a first-time run (manual, seeded, or
+  // the original failure run). When QaRerunOnFixService re-runs a scenario after
+  // its fix ticket reaches Done, it stamps generation = (fix-ticket generation
+  // + 1) here. If this run also fails, QaFailureTicketService carries the value
+  // onto the new fix ticket as a `qa-rerun:<n>` label, so the next Done→rerun
+  // edge reads it back and the QA↔fix loop converges at max_rerun_attempts.
+  @Column({ type: 'int', default: 0 })
+  rerun_generation: number;
+
   @Column({ type: Date, nullable: true, default: null })
   started_at: Date | null;
 

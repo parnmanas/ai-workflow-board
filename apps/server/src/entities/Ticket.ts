@@ -132,6 +132,17 @@ export class Ticket {
   @Column({ type: Date, nullable: true, default: null })
   on_done_dispatched_at: Date | null;
 
+  // Idempotency stamp for the QA rerun-on-fix hook (ticket 467dbc7a). A SEPARATE
+  // stamp from `on_done_dispatched_at` on purpose: both the OnTicketDoneAction
+  // hook and QaRerunOnFixService subscribe to the same terminal-entry stream, so
+  // sharing one claim column would let whichever fires first starve the other.
+  // QaRerunOnFixService claims this the moment it re-runs the failed scenario for
+  // a fix ticket's CURRENT terminal entry, with the same edge-claim predicate the
+  // on-done hook uses (`terminal_entered_at` set AND (stamp IS NULL OR
+  // stamp < terminal_entered_at)). Null until the QA rerun hook first fires.
+  @Column({ type: Date, nullable: true, default: null })
+  qa_rerun_dispatched_at: Date | null;
+
   // User-intervention pending flag. When true the ticket is "parked" awaiting
   // a human decision: TriggerLoopService drops every agent_trigger for it
   // (so the agent's focus moves to another ticket), the auto-advance cascade
