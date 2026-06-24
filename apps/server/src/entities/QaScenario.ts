@@ -56,6 +56,14 @@ export class QaScenario {
   @Column({ type: 'simple-json', nullable: true, default: null })
   tags: string[] | null;
 
+  // On-failure auto-ticket policy. When `enabled`, a failed/errored QaRun of
+  // this scenario auto-files a fix ticket (see QaFailureTicketService). null /
+  // enabled=false = no side-effect (the historic behaviour). simple-json so it
+  // serializes automatically; the MCP/REST create+update paths and
+  // qaScenarioToJson must still pass it through explicitly.
+  @Column({ type: 'simple-json', nullable: true, default: null })
+  on_failure_ticket: QaOnFailureTicketConfig | null;
+
   @Column({ type: 'varchar', default: '' })
   created_by: string;
 
@@ -76,4 +84,36 @@ export interface QaScenarioStep {
   expect?: string;
   mcp_tool?: string;
   params?: Record<string, any>;
+}
+
+/**
+ * On-failure auto-ticket config for a QaScenario.
+ *
+ * When `enabled`, a QaRun that finalizes as `failed` or `error` files a fix
+ * ticket carrying the failure evidence (failed steps + logs + artifact links).
+ * Every field except `enabled` is optional and resolved with a fallback chain
+ * in QaFailureTicketService:
+ *   - board_id    → run.board_id → scenario.board_id
+ *   - column_name → "To Do" → the board's first non-terminal column
+ *   - priority    → "high"
+ *   - assignee_id → scenario.target_agent_id (also reporter/reviewer)
+ *   - labels      → ['qa-failure','auto']
+ *   - dedupe      → 'per_run'
+ */
+export interface QaOnFailureTicketConfig {
+  enabled: boolean;
+  board_id?: string;
+  column_name?: string;
+  priority?: 'low' | 'medium' | 'high' | 'critical';
+  assignee_id?: string;
+  labels?: string[];
+  // 'per_run'        — one ticket per failed run (default; the run_id idempotency
+  //                    guard already prevents a re-finalize from double-filing).
+  // 'per_open_ticket'— if an open qa-failure ticket for this scenario already
+  //                    exists, append a recurrence comment instead of filing a
+  //                    new one.
+  dedupe?: 'per_run' | 'per_open_ticket';
+  // Optional title override. `{{scenario.name}}` is substituted. Default
+  // 'QA 실패: {{scenario.name}}'.
+  title_template?: string;
 }
