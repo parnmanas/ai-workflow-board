@@ -230,6 +230,13 @@ export interface QaOnFailureTicketConfig {
   labels?: string[];
   dedupe?: 'per_run' | 'per_open_ticket';
   title_template?: string;
+  // QA → fix → QA closed loop (ticket 467dbc7a). When rerun_on_fix is on, the
+  // server re-runs this scenario once its auto-filed fix ticket reaches Done,
+  // capped at max_rerun_attempts (default 3) reruns. rerun_delay_seconds defers
+  // each rerun so a main→prod deploy can land first (deploy-timing gate).
+  rerun_on_fix?: boolean;
+  max_rerun_attempts?: number;
+  rerun_delay_seconds?: number;
 }
 
 export interface QaScenario {
@@ -283,6 +290,7 @@ export interface QaRun {
   artifact_resource_ids: string[];
   summary: string;
   auto_ticket_id: string | null;
+  rerun_generation: number;
   triggered_by_type: string;
   triggered_by_id: string;
   started_at: string | null;
