@@ -13,6 +13,7 @@ import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { LogService } from '../../services/log.service';
 import { findOrFail } from '../../common/find-or-fail';
 import { renderQaRunPrompt } from './qa-prompt';
+import { QaFailureTicketService } from './qa-failure-ticket.service';
 
 function makeError(status: number, message: string): Error & { status: number } {
   const err = new Error(message) as Error & { status: number };
@@ -68,6 +69,7 @@ export class QaRunService {
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     private readonly messaging: RoomMessagingService,
     private readonly logService: LogService,
+    private readonly failureTicketService: QaFailureTicketService,
   ) {}
 
   // ── Reads ─────────────────────────────────────────────────────────────────
@@ -210,7 +212,22 @@ export class QaRunService {
     run.status = status;
     if (summary !== undefined) run.summary = summary;
     run.finished_at = new Date();
-    return this.runRepo.save(run);
+    const saved = await this.runRepo.save(run);
+
+    // On-failure auto-ticket hook. completeRun is the single QaRun finalization
+    // choke point, so the side-effect is called here directly (synchronous,
+    // deterministic) rather than via the activity-event indirection. The
+    // service is a no-op unless the scenario opts in AND the run failed/errored,
+    // and it self-guards against double-filing via run.auto_ticket_id. It never
+    // throws, so a side-effect failure can't abort the finalization above.
+    if (saved.status === 'failed' || saved.status === 'error') {
+      const scenario = await this.scenarioRepo.findOne({ where: { id: saved.scenario_id } });
+      if (scenario) {
+        const ticketId = await this.failureTicketService.maybeCreateOnFailure(saved, scenario);
+        if (ticketId) saved.auto_ticket_id = ticketId;
+      }
+    }
+    return saved;
   }
 
   /** Cascade helper for QaService.remove — tear down every run + its room. */
