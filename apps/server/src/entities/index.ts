@@ -34,3 +34,4 @@ export { TicketPrerequisite } from './TicketPrerequisite';
 export { BenchmarkScore } from './BenchmarkScore';
 export { QaScenario } from './QaScenario';
 export { QaRun } from './QaRun';
+export { QaRunBatch } from './QaRunBatch';

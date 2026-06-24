@@ -52,6 +52,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { QaRun } from '../../entities/QaRun';
 import { LogService } from '../../services/log.service';
+import { QaRunService } from './qa-run.service';
 
 const DEFAULT_SWEEP_MS = 30 * 60_000; // 30 minutes
 const MIN_SWEEP_MS = 60_000;          // 1 minute
@@ -86,6 +87,7 @@ export class QaRunReaperService implements OnModuleInit, OnModuleDestroy {
   constructor(
     @InjectRepository(QaRun) private readonly runRepo: Repository<QaRun>,
     private readonly logService: LogService,
+    private readonly qaRunService: QaRunService,
   ) {}
 
   onModuleInit(): void {
@@ -169,6 +171,12 @@ export class QaRunReaperService implements OnModuleInit, OnModuleDestroy {
         await this.runRepo.save(run);
         reaped.push(run.id);
         details.push({ id: run.id, reason, age_min: ageMin });
+        // If this dead run belonged to a sequential batch, advance the batch
+        // from here too (terminal-status reached, just not via complete_qa_run).
+        // Never let a batch hiccup abort the sweep.
+        await this.qaRunService.onRunFinalized(run).catch((e) =>
+          this.logService.warn('QaReaper', 'batch advance after reap failed (continuing)', { err: String(e), run_id: run.id }),
+        );
       } catch (e) {
         this.logService.warn('QaReaper', 'per-run reap failed (continuing)', { err: String(e), run_id: run.id });
       }

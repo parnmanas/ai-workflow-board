@@ -399,6 +399,7 @@ export class QaController {
       { file: 'qa-scenario-list-rollup.test.mjs', category: 'Flow-QA' },
       { file: 'qa-on-failure-ticket.test.mjs', category: 'Flow-QA' },
       { file: 'qa-rerun-on-fix.test.mjs', category: 'Flow-QA' },
+      { file: 'qa-batch-sequencing.test.mjs', category: 'Flow-QA' },
     ];
 
     // Resolve the apps/server root from wherever this compiled file lives

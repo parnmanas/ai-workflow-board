@@ -13,6 +13,8 @@
  *              get_qa_scenario / delete_qa_scenario
  *   Runs:      start_qa_run / record_qa_step / attach_qa_artifact /
  *              complete_qa_run
+ *   Batches:   start_qa_batch / get_qa_batch (sequential multi-scenario runs —
+ *              scenario N+1 dispatches only after run N terminates)
  *   Reads:     list_qa_runs / get_qa_run
  */
 
@@ -20,6 +22,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { QaScenario } from '../../../entities/QaScenario';
 import { QaRun } from '../../../entities/QaRun';
+import { QaRunBatch } from '../../../entities/QaRunBatch';
 import { ok, err } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
 import type { ToolContext } from './context';
@@ -60,9 +63,34 @@ function runToJson(r: QaRun) {
     rerun_generation: r.rerun_generation ?? 0,
     triggered_by_type: r.triggered_by_type,
     triggered_by_id: r.triggered_by_id,
+    batch_id: r.batch_id ?? null,
+    batch_index: r.batch_index ?? null,
     started_at: r.started_at,
     finished_at: r.finished_at,
     created_at: r.created_at,
+  };
+}
+
+function batchToJson(b: QaRunBatch) {
+  const ids = b.scenario_ids ?? [];
+  return {
+    id: b.id,
+    workspace_id: b.workspace_id,
+    board_id: b.board_id,
+    scenario_ids: ids,
+    run_ids: b.run_ids ?? [],
+    current_index: b.current_index,
+    total: ids.length,
+    status: b.status,
+    stop_on_fail: b.stop_on_fail,
+    passed: b.passed,
+    failed: b.failed,
+    errored: b.errored,
+    triggered_by_type: b.triggered_by_type,
+    triggered_by_id: b.triggered_by_id,
+    finished_at: b.finished_at,
+    created_at: b.created_at,
+    updated_at: b.updated_at,
   };
 }
 
@@ -354,6 +382,62 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
         return ok(runToJson(row));
       } catch (e: any) {
         return err(e?.message || 'QA run not found');
+      }
+    },
+  );
+
+  // ── Batches (sequential multi-scenario runs) ────────────────────────────────
+
+  server.tool(
+    'start_qa_batch',
+    'Start a SEQUENTIAL batch run of several QA scenarios — scenario N+1 only dispatches after ' +
+    'scenario N reaches a terminal status (passed/failed/error), never all at once. Pass an ordered ' +
+    '`scenario_ids` list, OR `all: true` to expand to every enabled scenario in scope (board_id "" = ' +
+    'workspace-scope, <uuid> = that board, omit = all). `stop_on_fail` (default false) halts the batch ' +
+    'on the first non-passed run. Returns the batch with current_index/total + pass/fail rollup; poll ' +
+    'get_qa_batch for progress.',
+    {
+      workspace_id: z.string().describe('Workspace ID (required)'),
+      board_id: z.string().optional().describe('Scope for `all`: "" → workspace-scope, <uuid> → board, omit → all'),
+      scenario_ids: z.array(z.string()).optional().describe('Ordered scenario ids to run (takes precedence over `all`)'),
+      all: z.boolean().optional().describe('Run every enabled scenario in scope, in name order'),
+      stop_on_fail: z.boolean().optional().describe('Halt on first non-passed run (default false → continue)'),
+    },
+    async ({ workspace_id, board_id, scenario_ids, all, stop_on_fail }, extra: { sessionId?: string }) => {
+      if (!qaRunService) return err('QA run service unavailable in this MCP context');
+      const caller = getCallerAgent(extra);
+      try {
+        const batch = await qaRunService.startBatch({
+          workspaceId: workspace_id,
+          boardId: board_id,
+          scenarioIds: scenario_ids,
+          all: !!all,
+          stopOnFail: !!stop_on_fail,
+          triggeredByType: caller?.agentId ? 'agent' : 'system',
+          triggeredById: caller?.agentId ?? '',
+        });
+        return ok(batchToJson(batch));
+      } catch (e: any) {
+        return err(e?.message || 'Failed to start QA batch');
+      }
+    },
+  );
+
+  server.tool(
+    'get_qa_batch',
+    'Get a sequential QA batch: ordered scenario_ids + run_ids, current_index/total progress, status ' +
+    '(running/done/aborted), and the passed/failed/errored rollup.',
+    {
+      batch_id: z.string().describe('QaRunBatch ID'),
+      workspace_id: z.string().describe('Workspace ID (required)'),
+    },
+    async ({ batch_id, workspace_id }) => {
+      if (!qaRunService) return err('QA run service unavailable in this MCP context');
+      try {
+        const batch = await qaRunService.getBatch(batch_id, workspace_id);
+        return ok(batchToJson(batch));
+      } catch (e: any) {
+        return err(e?.message || 'QA batch not found');
       }
     },
   );

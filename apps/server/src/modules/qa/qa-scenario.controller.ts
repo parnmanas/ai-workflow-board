@@ -7,6 +7,35 @@ import { PERMISSIONS } from '../../common/types/permissions';
 import { QaService } from './qa.service';
 import { QaRunService } from './qa-run.service';
 import { QaRunReaperService } from './qa-run-reaper.service';
+import { QaRunBatch } from '../../entities/QaRunBatch';
+
+/**
+ * Normalize a QaRunBatch row for the client: coalesce the nullable simple-json
+ * columns to [] and surface `total` (= scenario count) so the progress UI has a
+ * stable shape. Mirrors batchToJson in the MCP qa-tools.
+ */
+function batchToJson(b: QaRunBatch) {
+  const ids = b.scenario_ids ?? [];
+  return {
+    id: b.id,
+    workspace_id: b.workspace_id,
+    board_id: b.board_id,
+    scenario_ids: ids,
+    run_ids: b.run_ids ?? [],
+    current_index: b.current_index,
+    total: ids.length,
+    status: b.status,
+    stop_on_fail: b.stop_on_fail,
+    passed: b.passed,
+    failed: b.failed,
+    errored: b.errored,
+    triggered_by_type: b.triggered_by_type,
+    triggered_by_id: b.triggered_by_id,
+    finished_at: b.finished_at,
+    created_at: b.created_at,
+    updated_at: b.updated_at,
+  };
+}
 
 /**
  * REST surface for the scenario-based QA feature (QaScenario/QaRun).
@@ -140,6 +169,39 @@ export class QaScenarioController {
       return res.json(await this.qaRunService.getRun(runId, workspaceId));
     } catch (e: any) {
       return res.status(e?.status || 404).json({ error: e?.message || 'QA run not found' });
+    }
+  }
+
+  // ── Batches (sequential multi-scenario runs) ────────────────────────────────
+
+  // Start a sequential batch. Body: { workspace_id, board_id?, scenario_ids?[],
+  // all?, stop_on_fail? }. Only index 0 dispatches now; the rest are dispatched
+  // one-at-a-time as each run finalizes (see QaRunService.onRunFinalized).
+  @Post('batches')
+  async startBatch(@Body() body: any, @Req() req: Request, @Res() res: Response) {
+    try {
+      const user = (req as any).currentUser as { id: string } | undefined;
+      const batch = await this.qaRunService.startBatch({
+        workspaceId: body?.workspace_id,
+        boardId: body?.board_id ?? undefined,
+        scenarioIds: Array.isArray(body?.scenario_ids) ? body.scenario_ids : undefined,
+        all: !!body?.all,
+        stopOnFail: !!body?.stop_on_fail,
+        triggeredByType: 'user',
+        triggeredById: user?.id || '',
+      });
+      return res.status(201).json(batchToJson(batch));
+    } catch (e: any) {
+      return res.status(e?.status || 400).json({ error: e?.message || 'Failed to start QA batch' });
+    }
+  }
+
+  @Get('batches/:id')
+  async getBatch(@Param('id') id: string, @Query('workspace_id') workspaceId: string, @Res() res: Response) {
+    try {
+      return res.json(batchToJson(await this.qaRunService.getBatch(id, workspaceId)));
+    } catch (e: any) {
+      return res.status(e?.status || 404).json({ error: e?.message || 'QA batch not found' });
     }
   }
 }

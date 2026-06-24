@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { QaScenario } from '../../entities/QaScenario';
 import { QaRun } from '../../entities/QaRun';
+import { QaRunBatch } from '../../entities/QaRunBatch';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
@@ -31,7 +32,7 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([QaScenario, QaRun, ChatRoom, ChatRoomParticipant, ChatRoomMessage, TicketAttachment, Agent, Board, BoardColumn, Ticket, Comment, Resource]),
+    TypeOrmModule.forFeature([QaScenario, QaRun, QaRunBatch, ChatRoom, ChatRoomParticipant, ChatRoomMessage, TicketAttachment, Agent, Board, BoardColumn, Ticket, Comment, Resource]),
     ChatRoomsModule,
     WorkspaceRolesModule,
     SharedServicesModule,
