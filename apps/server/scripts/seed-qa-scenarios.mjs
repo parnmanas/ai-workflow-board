@@ -71,6 +71,9 @@ async function main() {
     board_id: boardId,
     created_by: 'seed-qa-scenarios',
     only,
+    // `--no-on-failure-ticket` seeds with the failure→ticket side-effect OFF;
+    // default (flag absent) stamps the suite default (enabled, per_open_ticket).
+    ...(args['no-on-failure-ticket'] ? { on_failure_ticket: null } : {}),
   });
 
   console.log(`Seeding ${payloads.length} QA scenario(s) → workspace ${workspaceId}`

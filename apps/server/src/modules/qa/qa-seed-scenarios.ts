@@ -1,4 +1,4 @@
-import type { QaScenarioStep } from '../../entities/QaScenario';
+import type { QaScenarioStep, QaOnFailureTicketConfig } from '../../entities/QaScenario';
 import type { CreateScenarioInput } from './qa.service';
 
 /**
@@ -399,7 +399,30 @@ export interface BuildScenarioOptions {
   created_by?: string;
   /** Only seed scenarios whose `key` is in this list (default: all). */
   only?: string[];
+  /**
+   * On-failure auto-ticket policy stamped onto every seeded scenario. Default
+   * = the suite default (DEFAULT_SEED_ON_FAILURE_TICKET below): enabled, high
+   * priority, per_open_ticket dedupe so a recurring failure appends a
+   * recurrence comment rather than flooding a new ticket each run. Pass `null`
+   * to seed with the side-effect OFF.
+   */
+  on_failure_ticket?: QaOnFailureTicketConfig | null;
 }
+
+/**
+ * Default on-failure policy for seeded scenarios (ticket 52a93654). The seed
+ * suite re-runs the same scenarios repeatedly, so `per_open_ticket` is the
+ * right dedupe: the first failure files a fix ticket; subsequent failures of
+ * the same scenario append a recurrence comment to that still-open ticket
+ * instead of spawning a fresh one. board/column/assignee are left unset so they
+ * fall back to run.board_id → scenario.board_id and the scenario's target agent.
+ */
+export const DEFAULT_SEED_ON_FAILURE_TICKET: QaOnFailureTicketConfig = {
+  enabled: true,
+  priority: 'high',
+  dedupe: 'per_open_ticket',
+  labels: ['qa-failure', 'auto'],
+};
 
 /** Tag a scenario carries so re-seeds can find their prior row by stable key. */
 export function keyTag(key: string): string {
@@ -414,6 +437,10 @@ export function keyTag(key: string): string {
  */
 export function buildScenarioCreatePayloads(opts: BuildScenarioOptions): Array<CreateScenarioInput & { _key: string }> {
   const wanted = opts.only && opts.only.length ? new Set(opts.only) : null;
+  // `undefined` (key not passed) → suite default; explicit `null` → OFF.
+  const onFailureTicket = opts.on_failure_ticket === undefined
+    ? DEFAULT_SEED_ON_FAILURE_TICKET
+    : opts.on_failure_ticket;
   return QA_SEED_SCENARIOS.filter((s) => !wanted || wanted.has(s.key)).map((s) => ({
     _key: s.key,
     workspace_id: opts.workspace_id,
@@ -426,6 +453,7 @@ export function buildScenarioCreatePayloads(opts: BuildScenarioOptions): Array<C
     qa_driver_config: s.qa_driver_config,
     enabled: true,
     tags: [keyTag(s.key), ...s.tags],
+    on_failure_ticket: onFailureTicket,
     created_by: opts.created_by ?? '',
     max_runs: 20,
   }));
