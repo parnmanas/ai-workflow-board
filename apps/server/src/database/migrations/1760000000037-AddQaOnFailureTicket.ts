@@ -10,8 +10,8 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * definitions, so this migration is a Postgres-only no-op there. All statements
  * are IF NOT EXISTS / idempotent and harmless if synchronize already added them.
  */
-export class AddQaOnFailureTicket1760000000034 implements MigrationInterface {
-  name = 'AddQaOnFailureTicket1760000000034';
+export class AddQaOnFailureTicket1760000000037 implements MigrationInterface {
+  name = 'AddQaOnFailureTicket1760000000037';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     const isPostgres = queryRunner.connection.options.type === 'postgres';
