@@ -448,6 +448,11 @@ function RunDetail({ run, onPreview }: { run: QaRun; onPreview: (src: string, ki
         <span style={{ fontSize: 12, color: tokens.colors.textMuted }}>
           {(run.step_results?.length ?? 0)} step results · {(run.artifact_resource_ids?.length ?? 0)} artifacts
         </span>
+        {run.rerun_generation > 0 && (
+          <span title="QA→fix→QA 자동 재실행 세대 (수정 티켓 Done 시 트리거)" style={{ display: 'inline-flex' }}>
+            <Badge variant="info" size="md">🔁 재실행 #{run.rerun_generation}</Badge>
+          </span>
+        )}
         {run.auto_ticket_id && (
           <a
             href={run.board_id
@@ -570,6 +575,10 @@ function ScenarioEditor({ scenario, workspaceId, boardId, agents, onClose, onSav
   const [oftDedupe, setOftDedupe] = useState<QaOnFailureTicketConfig['dedupe']>(oft?.dedupe ?? 'per_run');
   const [oftBoardId, setOftBoardId] = useState(oft?.board_id ?? '');
   const [oftLabels, setOftLabels] = useState((oft?.labels ?? []).join(', '));
+  // QA → fix → QA closed loop (ticket 467dbc7a).
+  const [oftRerunOnFix, setOftRerunOnFix] = useState(!!oft?.rerun_on_fix);
+  const [oftMaxRerun, setOftMaxRerun] = useState(String(oft?.max_rerun_attempts ?? 3));
+  const [oftRerunDelay, setOftRerunDelay] = useState(String(oft?.rerun_delay_seconds ?? 0));
 
   const handleSave = async () => {
     if (!name.trim()) { showToast('Name is required', 'error'); return; }
@@ -589,6 +598,11 @@ function ScenarioEditor({ scenario, workspaceId, boardId, agents, onClose, onSav
           ...(oftColumn.trim() ? { column_name: oftColumn.trim() } : {}),
           ...(oftBoardId.trim() ? { board_id: oftBoardId.trim() } : {}),
           ...(oftLabels.trim() ? { labels: oftLabels.split(',').map((l) => l.trim()).filter(Boolean) } : {}),
+          rerun_on_fix: oftRerunOnFix,
+          ...(oftRerunOnFix ? {
+            max_rerun_attempts: Math.max(0, parseInt(oftMaxRerun, 10) || 0),
+            rerun_delay_seconds: Math.max(0, parseInt(oftRerunDelay, 10) || 0),
+          } : {}),
         }
       : { enabled: false };
     setSaving(true);
@@ -707,6 +721,39 @@ function ScenarioEditor({ scenario, workspaceId, boardId, agents, onClose, onSav
               <Input label='컬럼 (비우면 "To Do")' value={oftColumn} onChange={(e) => setOftColumn((e.target as HTMLInputElement).value)} />
               <Input label="Board ID (비우면 run/시나리오 보드)" value={oftBoardId} onChange={(e) => setOftBoardId((e.target as HTMLInputElement).value)} />
               <Input label="Labels (comma — 비우면 qa-failure, auto)" value={oftLabels} onChange={(e) => setOftLabels((e.target as HTMLInputElement).value)} />
+
+              {/* QA → fix → QA 닫힌 루프 (재실행) */}
+              <div style={{ borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 10, marginTop: 2 }}>
+                <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>
+                  <input type="checkbox" checked={oftRerunOnFix} onChange={(e) => setOftRerunOnFix(e.target.checked)} />
+                  수정 티켓 Done 시 → 시나리오 자동 재실행
+                </label>
+                <div style={{ fontSize: 12, color: tokens.colors.textMuted, margin: '4px 0 0 24px' }}>
+                  자동 생성된 수정 티켓이 Done 컬럼에 들어가면 서버가 같은 시나리오를 결정적으로 재실행합니다.
+                  pass 면 종료(새 티켓 없음), 재실패면 새 수정 티켓 + 세대 카운터 증가, max 도달 시 중단 코멘트.
+                  {' '}⚠️ QA 는 <b>돌고 있는 서버</b>를 검증합니다 — main→prod auto-deploy 지연이 있으면 재실행 지연(초)을 배포 시간만큼 주세요.
+                </div>
+                {oftRerunOnFix && (
+                  <div style={{ display: 'flex', gap: 10, marginTop: 10 }}>
+                    <div style={{ flex: 1 }}>
+                      <Input
+                        label="최대 재실행 횟수 (max_rerun_attempts)"
+                        type="number"
+                        value={oftMaxRerun}
+                        onChange={(e) => setOftMaxRerun((e.target as HTMLInputElement).value)}
+                      />
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <Input
+                        label="재실행 지연 (초 — 배포 게이트)"
+                        type="number"
+                        value={oftRerunDelay}
+                        onChange={(e) => setOftRerunDelay((e.target as HTMLInputElement).value)}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </div>

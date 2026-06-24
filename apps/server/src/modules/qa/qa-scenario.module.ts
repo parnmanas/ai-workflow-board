@@ -17,6 +17,7 @@ import { QaService } from './qa.service';
 import { QaRunService } from './qa-run.service';
 import { QaRunReaperService } from './qa-run-reaper.service';
 import { QaFailureTicketService } from './qa-failure-ticket.service';
+import { QaRerunOnFixService } from './qa-rerun-on-fix.service';
 import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
 import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module';
 import { SharedServicesModule } from '../../services/shared-services.module';
@@ -36,7 +37,7 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
     SharedServicesModule,
   ],
   controllers: [QaScenarioController],
-  providers: [QaService, QaRunService, QaRunReaperService, QaFailureTicketService, AuthGuard, PermissionGuard],
+  providers: [QaService, QaRunService, QaRunReaperService, QaFailureTicketService, QaRerunOnFixService, AuthGuard, PermissionGuard],
   exports: [QaService, QaRunService, QaRunReaperService, QaFailureTicketService],
 })
 export class QaScenarioModule {}

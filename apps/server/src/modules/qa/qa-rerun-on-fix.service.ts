@@ -1,0 +1,261 @@
+import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { InjectDataSource } from '@nestjs/typeorm';
+import { DataSource } from 'typeorm';
+import { ActivityLog } from '../../entities/ActivityLog';
+import { Ticket } from '../../entities/Ticket';
+import { BoardColumn } from '../../entities/BoardColumn';
+import { Comment } from '../../entities/Comment';
+import { QaScenario } from '../../entities/QaScenario';
+import { LogService } from '../../services/log.service';
+import { activityEvents } from '../../services/activity.service';
+import { isTerminalColumn } from '../mcp/shared/archive-helpers';
+import { QaRunService } from './qa-run.service';
+import { RERUN_LABEL_PREFIX } from './qa-failure-ticket.service';
+
+// The marker labels QaFailureTicketService stamps on every fix ticket it files.
+// A ticket must carry ALL of these to be eligible for an automatic rerun — this
+// is the scope guard that stops a human-labelled ticket from firing a run.
+//
+// ⚠️ Coupling: these mirror QaFailureTicketService.DEFAULT_LABELS, but that
+// service only applies the defaults when `on_failure_ticket.labels` is unset —
+// a scenario that customises `cfg.labels` and drops 'auto' would file fix
+// tickets that this guard silently REJECTS (no rerun, no error). The two
+// anchors that are ALWAYS present regardless of cfg.labels are the
+// `qa-scenario:<id>` marker (added unconditionally) and the `rerun_on_fix`
+// opt-in gate (checked below) — those are the real scope. Treat the label
+// match as belt-and-suspenders: if you customise cfg.labels, keep 'qa-failure'
+// + 'auto' in the list, or relax this constant to the scenario marker alone.
+const REQUIRED_LABELS = ['qa-failure', 'auto'];
+const SCENARIO_LABEL_PREFIX = 'qa-scenario:';
+
+// Default convergence cap when the scenario doesn't set max_rerun_attempts.
+const DEFAULT_MAX_RERUN_ATTEMPTS = 3;
+
+function safeJsonParse<T = any>(val: string | null | undefined, fallback: T): T {
+  try {
+    return JSON.parse(val || JSON.stringify(fallback)) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+/**
+ * QaRerunOnFixService — closes the QA → fix → QA loop (ticket 467dbc7a).
+ *
+ * Subscribes to the same `activityEvents` 'activity' stream OnTicketDoneActionService
+ * uses — deliberately a SEPARATE listener inside the QA module rather than a hook
+ * inside the actions module, so neither module takes a dependency on the other.
+ *
+ * When a QA-failure fix ticket (filed by QaFailureTicketService, so it carries
+ * `qa-failure` + `auto` + `qa-scenario:<id>`) lands on a terminal (Done) column
+ * AND its scenario opted into `on_failure_ticket.rerun_on_fix`, this service
+ * re-runs the SAME scenario by calling QaRunService.startQaRun directly — no
+ * agent prompt parsing, fully server-side and deterministic.
+ *
+ * Idempotency: an atomic conditional claim on `Ticket.qa_rerun_dispatched_at` vs
+ * `terminal_entered_at` (the SAME edge-claim pattern as the on-done hook, but a
+ * dedicated stamp column so the two hooks don't starve each other). At most one
+ * rerun per terminal ENTRY; a leave-and-return re-stamps terminal_entered_at and
+ * fires again, a reorder within Done does not.
+ *
+ * Convergence: each rerun carries a generation (read from the Done ticket's
+ * `qa-rerun:<n>` label; absent = 0). When the generation reaches
+ * `max_rerun_attempts` (default 3) the loop HALTS — it posts a "human
+ * intervention needed" comment instead of re-running. Otherwise it starts the
+ * run at generation + 1; if that run also fails, QaFailureTicketService files a
+ * new fix ticket stamped `qa-rerun:<gen+1>`, and the cycle continues until the
+ * run passes (natural stop — no new ticket) or the cap is hit.
+ *
+ * Deployment timing: the rerun hits the RUNNING server, which auto-deploys from
+ * `production.private` only AFTER main merges. An instant rerun can therefore
+ * validate the pre-fix code. `on_failure_ticket.rerun_delay_seconds` defers the
+ * rerun (best-effort, in-process — not durable across a restart) so a deploy can
+ * land first. See docs/qa-rerun-on-fix.md.
+ */
+@Injectable()
+export class QaRerunOnFixService implements OnModuleInit, OnModuleDestroy {
+  private _activityListener?: (log: ActivityLog) => void;
+  // Pending delayed reruns so onModuleDestroy can cancel them (test rigs that
+  // build/tear down the Nest module per spec would otherwise leak timers).
+  private readonly _timers = new Set<ReturnType<typeof setTimeout>>();
+
+  constructor(
+    @InjectDataSource() private readonly dataSource: DataSource,
+    private readonly qaRunService: QaRunService,
+    private readonly logService: LogService,
+  ) {}
+
+  onModuleInit() {
+    this._activityListener = (log: ActivityLog) => {
+      this._handleActivity(log).catch((e: unknown) => {
+        this.logService.error('QA', 'QaRerunOnFixService _handleActivity error', { err: e });
+      });
+    };
+    activityEvents.on('activity', this._activityListener);
+  }
+
+  onModuleDestroy() {
+    if (this._activityListener) {
+      activityEvents.removeListener('activity', this._activityListener);
+      this._activityListener = undefined;
+    }
+    for (const t of this._timers) clearTimeout(t);
+    this._timers.clear();
+  }
+
+  private async _handleActivity(log: ActivityLog): Promise<void> {
+    // Only column moves can land a ticket on a terminal column.
+    if (log.action !== 'moved' || !log.ticket_id) return;
+
+    const ticketRepo = this.dataSource.getRepository(Ticket);
+    const ticket = await ticketRepo.findOne({ where: { id: log.ticket_id } });
+    if (!ticket || !ticket.column_id) return;
+
+    const col = await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } });
+    if (!isTerminalColumn(col)) return;
+    // Without a terminal-entry anchor the edge-claim predicate has nothing to
+    // compare against — bail (matches the on-done hook's "same entry" semantics).
+    if (!ticket.terminal_entered_at) return;
+
+    // ── Scope guard (cheap, pre-claim) ──────────────────────────────────────
+    // Only a QA-failure fix ticket carrying ALL marker labels is eligible.
+    const labels = safeJsonParse<string[]>(ticket.labels, []);
+    if (!Array.isArray(labels)) return;
+    if (!REQUIRED_LABELS.every((l) => labels.includes(l))) return;
+    const scenarioId = this._parseScenarioId(labels);
+    if (!scenarioId) return;
+
+    const scenario = await this.dataSource.getRepository(QaScenario).findOne({ where: { id: scenarioId } });
+    // Opt-in gate: scenario must exist, still carry the policy, and have
+    // rerun_on_fix enabled. (Negative case: opt-out → never fires.)
+    const cfg = scenario?.on_failure_ticket;
+    if (!scenario || !cfg?.enabled || !cfg.rerun_on_fix) return;
+
+    const maxAttempts = this._resolveMaxAttempts(cfg.max_rerun_attempts);
+    if (maxAttempts <= 0) return; // reruns explicitly disabled.
+
+    const currentGen = this._parseGeneration(labels);
+
+    // ── Atomic once-per-terminal-entry claim ────────────────────────────────
+    // Claim BEFORE acting in BOTH branches (rerun and halt) so a duplicate
+    // 'moved' for the same entry can neither double-run nor double-comment.
+    const claimAt = new Date();
+    const claim = await ticketRepo
+      .createQueryBuilder()
+      .update(Ticket)
+      .set({ qa_rerun_dispatched_at: claimAt })
+      .where('id = :id', { id: ticket.id })
+      .andWhere('terminal_entered_at IS NOT NULL')
+      .andWhere('(qa_rerun_dispatched_at IS NULL OR qa_rerun_dispatched_at < terminal_entered_at)')
+      .execute();
+    const claimed = claim.affected === undefined || claim.affected === null || claim.affected > 0;
+    if (!claimed) {
+      this.logService.info('QA', 'rerun-on-fix skipped (already dispatched this terminal entry)', {
+        ticket_id: ticket.id,
+      });
+      return;
+    }
+
+    // ── Convergence cap ─────────────────────────────────────────────────────
+    if (currentGen >= maxAttempts) {
+      await this._postHaltComment(ticket.id, scenario.name, currentGen, maxAttempts);
+      this.logService.warn('QA', 'rerun-on-fix loop hit max attempts — halting', {
+        ticket_id: ticket.id, scenario_id: scenarioId, generation: currentGen, max: maxAttempts,
+      });
+      return;
+    }
+
+    // ── Re-run the scenario (server-side, deterministic) ────────────────────
+    const nextGen = currentGen + 1;
+    const delayMs = this._resolveDelayMs(cfg.rerun_delay_seconds);
+    this.logService.info('QA', 'rerun-on-fix firing', {
+      ticket_id: ticket.id, scenario_id: scenarioId, next_generation: nextGen, delay_ms: delayMs,
+    });
+    if (delayMs > 0) {
+      const timer = setTimeout(() => {
+        this._timers.delete(timer);
+        this._startRerun(scenarioId, nextGen, ticket.id).catch((e) => {
+          this.logService.error('QA', 'rerun-on-fix delayed start failed', { err: String(e), ticket_id: ticket.id });
+        });
+      }, delayMs);
+      // Don't keep the event loop alive purely for a pending rerun timer.
+      if (typeof (timer as any).unref === 'function') (timer as any).unref();
+      this._timers.add(timer);
+    } else {
+      await this._startRerun(scenarioId, nextGen, ticket.id);
+    }
+  }
+
+  // ── Internals ──────────────────────────────────────────────────────────────
+
+  private async _startRerun(scenarioId: string, generation: number, fixTicketId: string): Promise<void> {
+    try {
+      const result = await this.qaRunService.startQaRun({
+        scenarioId,
+        triggeredByType: 'system',
+        triggeredById: 'qa-rerun-on-fix',
+        rerunGeneration: generation,
+      });
+      this.logService.info('QA', 'rerun-on-fix started run', {
+        scenario_id: scenarioId, run_id: result.run.id, generation, fix_ticket_id: fixTicketId,
+      });
+    } catch (e: any) {
+      // A disabled scenario / missing agent throws from startQaRun — log, don't
+      // crash the event listener.
+      this.logService.warn('QA', `rerun-on-fix startQaRun failed for scenario ${scenarioId}: ${e?.message || e}`);
+    }
+  }
+
+  /** First `qa-scenario:<uuid>` label → the scenario id, or null. */
+  private _parseScenarioId(labels: string[]): string | null {
+    const marker = labels.find((l) => typeof l === 'string' && l.startsWith(SCENARIO_LABEL_PREFIX));
+    if (!marker) return null;
+    const id = marker.slice(SCENARIO_LABEL_PREFIX.length).trim();
+    return id || null;
+  }
+
+  /** Highest `qa-rerun:<n>` label value (absent = generation 0). */
+  private _parseGeneration(labels: string[]): number {
+    let gen = 0;
+    for (const l of labels) {
+      if (typeof l !== 'string' || !l.startsWith(RERUN_LABEL_PREFIX)) continue;
+      const n = parseInt(l.slice(RERUN_LABEL_PREFIX.length), 10);
+      if (Number.isFinite(n) && n > gen) gen = n;
+    }
+    return gen;
+  }
+
+  private _resolveMaxAttempts(raw: number | undefined): number {
+    if (typeof raw !== 'number' || !Number.isFinite(raw)) return DEFAULT_MAX_RERUN_ATTEMPTS;
+    return Math.floor(raw);
+  }
+
+  private _resolveDelayMs(rawSeconds: number | undefined): number {
+    if (typeof rawSeconds !== 'number' || !Number.isFinite(rawSeconds) || rawSeconds <= 0) return 0;
+    return Math.floor(rawSeconds * 1000);
+  }
+
+  private async _postHaltComment(ticketId: string, scenarioName: string, generation: number, max: number): Promise<void> {
+    const body = [
+      `🛑 **QA 자동 재실행 루프 한계 도달 — 사람 개입 필요**`,
+      ``,
+      `시나리오 \`${scenarioName}\` 가 자동 수정 ↔ 재실행을 ${generation}회 반복했지만 여전히 통과하지 못했습니다 ` +
+        `(max_rerun_attempts = ${max}).`,
+      ``,
+      `자동 재실행을 중단합니다. 근본 원인을 사람이 직접 확인해 주세요:`,
+      `- 수정이 실제로 배포됐는지 (server 는 main→production.private auto-deploy — 배포 지연이면 옛 코드를 검증했을 수 있음)`,
+      `- 시나리오 스텝/기대값 자체가 틀렸는지 (테스트 결함 vs 제품 결함)`,
+      ``,
+      `_이 티켓을 다시 Done 으로 옮겨도 더는 자동 재실행되지 않습니다 (세대 카운터가 한계에 도달)._`,
+    ].join('\n');
+    const commentRepo = this.dataSource.getRepository(Comment);
+    await commentRepo.save(commentRepo.create({
+      ticket_id: ticketId,
+      author_type: 'system',
+      author_id: '',
+      author: 'QA',
+      content: body,
+      type: 'note',
+    }));
+  }
+}

@@ -25,6 +25,11 @@ export interface StartQaRunArgs {
   scenarioId: string;
   triggeredByType: 'user' | 'system' | 'agent';
   triggeredById: string;
+  // Rerun generation to stamp on the new QaRun (ticket 467dbc7a). Defaults to 0
+  // (a first-time / manual / seeded run). QaRerunOnFixService passes the fix
+  // ticket's generation + 1 so a re-failure files the next-generation fix ticket
+  // and the QA↔fix loop can converge at max_rerun_attempts.
+  rerunGeneration?: number;
 }
 
 export interface StartQaRunResult {
@@ -124,6 +129,7 @@ export class QaRunService {
       summary: '',
       triggered_by_type: args.triggeredByType,
       triggered_by_id: args.triggeredById || '',
+      rerun_generation: args.rerunGeneration && args.rerunGeneration > 0 ? Math.floor(args.rerunGeneration) : 0,
       started_at: now,
       finished_at: null,
     }));

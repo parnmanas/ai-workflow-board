@@ -57,6 +57,7 @@ function runToJson(r: QaRun) {
     artifact_resource_ids: r.artifact_resource_ids ?? [],
     summary: r.summary,
     auto_ticket_id: r.auto_ticket_id ?? null,
+    rerun_generation: r.rerun_generation ?? 0,
     triggered_by_type: r.triggered_by_type,
     triggered_by_id: r.triggered_by_id,
     started_at: r.started_at,
@@ -87,6 +88,9 @@ const onFailureTicketSchema = z.object({
   labels: z.array(z.string()).optional().describe("Ticket labels (default ['qa-failure','auto'])"),
   dedupe: z.enum(['per_run', 'per_open_ticket']).optional().describe('per_run = 1 ticket per failed run (default); per_open_ticket = comment on the scenario\'s existing open ticket instead'),
   title_template: z.string().optional().describe('Title override; {{scenario.name}} is substituted (default "QA 실패: {{scenario.name}}")'),
+  rerun_on_fix: z.boolean().optional().describe('Opt-in: when the auto-filed fix ticket reaches Done, the server re-runs THIS scenario (QA→fix→QA closed loop). Default false. Scoped to tickets carrying the qa-failure/auto/qa-scenario markers.'),
+  max_rerun_attempts: z.number().optional().describe('Convergence cap: max automatic reruns before the loop halts with a "human intervention needed" comment (default 3; 0 disables reruns)'),
+  rerun_delay_seconds: z.number().optional().describe('Deploy-timing gate: delay each rerun by N seconds (best-effort, in-process) so a main→prod auto-deploy can land before re-validating. Default 0 (immediate). See docs/qa-rerun-on-fix.md.'),
 }).nullable();
 
 export function registerQaTools(server: McpServer, ctx: ToolContext): void {

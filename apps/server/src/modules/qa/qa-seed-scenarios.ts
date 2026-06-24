@@ -416,12 +416,24 @@ export interface BuildScenarioOptions {
  * the same scenario append a recurrence comment to that still-open ticket
  * instead of spawning a fresh one. board/column/assignee are left unset so they
  * fall back to run.board_id → scenario.board_id and the scenario's target agent.
+ *
+ * QA→fix→QA closed loop (ticket 467dbc7a): `rerun_on_fix` is ON so a seeded
+ * scenario's fix ticket reaching Done deterministically re-runs the scenario,
+ * capped at `max_rerun_attempts` reruns before it halts for human review.
+ * `rerun_delay_seconds` defaults to 0 (immediate) — ⚠️ the seed scenarios hit
+ * the RUNNING server, which auto-deploys main→production.private only AFTER the
+ * fix merges, so an immediate rerun can validate the pre-fix code. Operators on
+ * a "Done = merged but not-yet-deployed" flow should raise rerun_delay_seconds
+ * to their typical deploy lag (re-seed to apply). See docs/qa-rerun-on-fix.md.
  */
 export const DEFAULT_SEED_ON_FAILURE_TICKET: QaOnFailureTicketConfig = {
   enabled: true,
   priority: 'high',
   dedupe: 'per_open_ticket',
   labels: ['qa-failure', 'auto'],
+  rerun_on_fix: true,
+  max_rerun_attempts: 3,
+  rerun_delay_seconds: 0,
 };
 
 /** Tag a scenario carries so re-seeds can find their prior row by stable key. */

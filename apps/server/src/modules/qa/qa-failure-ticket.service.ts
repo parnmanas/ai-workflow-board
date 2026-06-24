@@ -16,6 +16,11 @@ import { isTerminalColumn } from '../mcp/shared/archive-helpers';
 // Internal traceability label so per_open_ticket dedupe can find the scenario's
 // own open qa-failure ticket without a metadata column on Ticket.
 const SCENARIO_LABEL_PREFIX = 'qa-scenario:';
+// Generation marker for the QA→fix→QA loop (ticket 467dbc7a). A fix ticket born
+// from a rerun of generation N carries `qa-rerun:N`; QaRerunOnFixService reads it
+// back off the Done ticket to know how many reruns have happened (and to stop at
+// max_rerun_attempts). Exported so the rerun hook parses the same prefix.
+export const RERUN_LABEL_PREFIX = 'qa-rerun:';
 const DEFAULT_LABELS = ['qa-failure', 'auto'];
 const DEFAULT_COLUMN = 'To Do';
 const DEFAULT_PRIORITY = 'high';
@@ -141,7 +146,7 @@ export class QaFailureTicketService {
     const assigneeId = cfg.assignee_id || scenario.target_agent_id || '';
     const resolved = await resolveAgentIdAndName(this.dataSource, assigneeId, '', this.logService);
 
-    const labels = this._buildLabels(cfg, scenario.id);
+    const labels = this._buildLabels(cfg, scenario.id, run.rerun_generation);
     const title = this._buildTitle(cfg, scenario);
     const description = await this._buildBody(run, scenario, column.board_id);
     const priority = cfg.priority || DEFAULT_PRIORITY;
@@ -218,10 +223,23 @@ export class QaFailureTicketService {
     await this.dataSource.getRepository(QaRun).update({ id: runId }, { auto_ticket_id: ticketId });
   }
 
-  private _buildLabels(cfg: QaOnFailureTicketConfig, scenarioId: string): string[] {
+  private _buildLabels(cfg: QaOnFailureTicketConfig, scenarioId: string, rerunGeneration?: number): string[] {
     const base = cfg.labels && cfg.labels.length ? cfg.labels.slice() : DEFAULT_LABELS.slice();
     const marker = `${SCENARIO_LABEL_PREFIX}${scenarioId}`;
     if (!base.includes(marker)) base.push(marker);
+    // Carry the generation so QaRerunOnFixService can read it back off this
+    // ticket when it reaches Done and decide whether the loop has hit its cap.
+    // Generation 0 (the original failure) carries no marker — its absence reads
+    // as gen 0, and the first rerun stamps `qa-rerun:1` on its child ticket.
+    const gen = rerunGeneration && rerunGeneration > 0 ? Math.floor(rerunGeneration) : 0;
+    if (gen > 0) {
+      const rerunMarker = `${RERUN_LABEL_PREFIX}${gen}`;
+      // Replace any stray rerun marker (e.g. from a custom cfg.labels) so exactly
+      // one generation marker is present.
+      const cleaned = base.filter((l) => !l.startsWith(RERUN_LABEL_PREFIX));
+      cleaned.push(rerunMarker);
+      return cleaned;
+    }
     return base;
   }
 
