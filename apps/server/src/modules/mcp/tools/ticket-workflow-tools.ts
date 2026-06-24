@@ -17,6 +17,7 @@ import { ok, err } from '../shared/helpers';
 import { loadTicketFull } from '../shared/ticket-parsing';
 import { findColumnByName, maxTicketPosition, shiftTicketPositions } from '../shared/ticket-helpers';
 import { applyTerminalEnteredAtForMove, isTerminalReopen, TerminalReopenError, TicketArchivedError } from '../shared/archive-helpers';
+import { isReviewToMerging, hasReviewerApproval, ReviewApprovalRequiredError } from '../shared/review-approval-guard';
 import { getCallerAgent } from '../shared/session-auth';
 import { resolveAgentDisplayName } from '../../../utils/agent-name';
 import type { ToolContext } from './context';
@@ -48,7 +49,7 @@ export function registerTicketWorkflowTools(server: McpServer, ctx: ToolContext)
       target_column_name: z.string().optional().describe('Target column name (case-insensitive)'),
       board_id: z.string().optional().describe('Board ID (used with target_column_name)'),
       position: z.number().optional().describe('Target position in the column (default: end)'),
-      force: z.boolean().optional().describe('Override the terminal-reopen guard: allow moving a ticket OUT of a terminal column (e.g. Done) into a non-terminal one. Default false — leave unset unless you truly mean to reopen completed work.'),
+      force: z.boolean().optional().describe('Override move guards: (1) terminal-reopen — moving a ticket OUT of a terminal column (e.g. Done) into a non-terminal one; (2) review-approval — moving Review→Merging without a reviewer-authored comment. Default false — leave unset unless you truly mean to reopen completed work or deliberately bypass review independence.'),
     },
     async ({ ticket_id, target_column_id, target_column_name, board_id, position, force }, extra: { sessionId?: string }) => {
       const ticketRepo = dataSource.getRepository(Ticket);
@@ -80,6 +81,14 @@ export function registerTicketWorkflowTools(server: McpServer, ctx: ToolContext)
       if (!destColForGuard) return err('Target column not found');
       if (!force && isTerminalReopen(sourceColForGuard, destColForGuard)) {
         return err(new TerminalReopenError(ticket.id, sourceColForGuard?.name ?? String(oldColumnId), destColForGuard.name).message);
+      }
+
+      // Review→Merging approval gate (ticket a3d25202 — proposal 2 of 86bfb8af).
+      // The review gate may only be crossed when a reviewer-authored comment
+      // exists; an assignee self-LGTM does not count. force=true is a deliberate
+      // human override, same escape hatch as the terminal-reopen guard above.
+      if (!force && isReviewToMerging(sourceColForGuard, destColForGuard) && !(await hasReviewerApproval(dataSource, ticket.id))) {
+        return err(new ReviewApprovalRequiredError(ticket.id, sourceColForGuard?.name ?? String(oldColumnId), destColForGuard.name).message);
       }
 
       await dataSource.transaction(async (manager) => {

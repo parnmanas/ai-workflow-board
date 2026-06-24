@@ -146,6 +146,48 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Is there a LIVE (non-stale) subagent strand for this exact (agent,
+   * ticket, role) right now? Used by TriggerLoopService's in-flight gate
+   * (ticket c9622a40) to serialize same-(ticket, role) strands: the focus
+   * selector already caps the agent to ONE focus ticket per (board, role),
+   * but two distinct events (column_move + comment_mention + supervisor
+   * tick) for the SAME (ticket, role) both pass the focus gate (same ticket
+   * id) and spawn racing strands. On a review gate that produces the
+   * reviewer-vs-reviewer self-LGTM race — a fast strand LGTMs + advances
+   * before the slow strand's BLOCKER review lands, discarding the careful
+   * verdict as a post-merge no-op (ticket 86bfb8af live repro). proposal 2's
+   * review-approval-guard only checks author_role, so it can't tell the two
+   * reviewer strands apart; serializing the strands is the residual fix.
+   *
+   * The "lock" is the existing current_task lifecycle, no new store:
+   *   - acquired  → plugin's set_current_task when the subagent starts work
+   *   - released  → clear_current_task / agent_idle on exit or crash
+   *   - TTL       → CURRENT_TASK_STALE_MS auto-clears a crashed strand's
+   *                 entry so the gate can't wedge a ticket forever.
+   *
+   * active_tasks is keyed by ticket_id only, so it holds at most one entry
+   * per (agent, ticket). We additionally require the live entry's role to
+   * match: a live ASSIGNEE strand must NOT block a REVIEWER trigger (those
+   * are legitimately distinct strands on a single-agent multi-role board).
+   * Same-role match → there's already a live strand serving this seat → the
+   * caller drops the redundant emit.
+   */
+  hasLiveRoleStrand(agent_id: string, ticket_id: string, role: string): boolean {
+    if (!agent_id || !ticket_id) return false;
+    const status = this.state.get(agent_id);
+    const task = status?.active_tasks?.get(ticket_id);
+    if (!task) return false;
+    // Stale entry (plugin crashed before clearing) — treat as no live strand
+    // so a re-trigger can recover, mirroring getActiveTicketIds' cutoff.
+    const cutoff = new Date(Date.now() - CURRENT_TASK_STALE_MS);
+    if (task.claimed_at < cutoff) return false;
+    // Role must match the live strand's seat. An undefined role on the live
+    // task (pre-v0.34 plugin that didn't pin a role) is treated as matching
+    // any role — conservative: better to serialize than to race.
+    return !task.role || task.role === role;
+  }
+
+  /**
    * Emit the internal (Date-containing) shape on the activityEvents bus.
    * EventsController.agentStatusListener converts Date → ISO string at the
    * envelope construction boundary.

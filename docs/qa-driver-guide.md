@@ -113,6 +113,44 @@ Example scenario step:
   "expect": "email field shows qa@example.com" }
 ```
 
+### 4.1 Reference capture helper (headless Chrome / CDP)
+
+`apps/server/scripts/qa-visual-capture.mjs` is a zero-dependency reference implementation
+of the browser driver against AWB's own client UI. It talks the Chrome DevTools Protocol
+using Node's built-in `WebSocket` (Node ≥ 21) and a system `google-chrome`; video encoding
+shells out to `ffmpeg` (or `$QA_FFMPEG`). It maps onto the contract as:
+
+| Verb | Implementation |
+| --- | --- |
+| `setup` | launch headless Chrome (`--remote-debugging-port=0`), attach to a page target |
+| `do` (auth) | `POST /api/auth/login` → inject `auth_token` + `currentWorkspaceId` into `localStorage` |
+| `do` (navigate) | **in-SPA** `history.pushState` + `popstate` (see note below) |
+| `observe` | `Page.captureScreenshot` → PNG; `Page.startScreencast` frames → `ffmpeg` → MP4 |
+| `teardown` | kill the browser process |
+
+Two gotchas this helper encodes, learned from running it end-to-end (ticket 91cee9f7):
+
+- **Navigate inside the SPA, not by full page load.** AWB uses BrowserRouter (history mode).
+  A direct `Page.navigate` to a deep route (`/ws/:ws/boards/:board/qa`) can hit the server
+  before the SPA fallback and return a JSON 404 — depending on the static-serving setup
+  (observed under Express 5). Load `/` once (authenticated), then drive route changes with
+  `history.pushState(...); dispatchEvent(new PopStateEvent('popstate'))` so React Router swaps
+  views client-side with no reload. This works on any deployment.
+- **Evidence must be a PER-STEP artifact to render.** The QA RunDetail viewer renders
+  `step_results[].artifact_resource_ids` as galleries; the run-level `artifact_resource_ids`
+  (what `attach_qa_artifact` writes) shows only as a count. So upload via `save_resource`
+  then pass the id to `record_qa_step(artifact_resource_ids)` — including the video, or its
+  inline-video tile never appears. Set `file_mimetype` exactly (`image/png` / `video/mp4`):
+  `/api/resources/:id/raw` streams `Content-Type` from it (with `Accept-Ranges: bytes` so the
+  inline `<video>` can seek), and the viewer's `MediaThumb` falls back `<img>`→`<video>`.
+
+```
+node apps/server/scripts/qa-visual-capture.mjs \
+  --base-url https://awb.example:7700 --email qa@awb.local --password … \
+  --workspace <ws> --board <board> --ticket <ticket> \
+  --out /tmp/qa-shots --record-video --ffmpeg /path/to/ffmpeg
+```
+
 ---
 
 ## 5. Reference driver: Game client (Unity `host` MCP)

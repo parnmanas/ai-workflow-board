@@ -36,6 +36,7 @@ import {
   TerminalReopenError,
   TicketArchivedError,
 } from '../mcp/shared/archive-helpers';
+import { isReviewToMerging, hasReviewerApproval, ReviewApprovalRequiredError } from '../mcp/shared/review-approval-guard';
 import { findOrFail } from '../../common/find-or-fail';
 import { resolveAgentDisplayName } from '../../utils/agent-name';
 
@@ -360,6 +361,14 @@ export class AgentApiController {
       return res.status(e.status).json({ error: e.code, hint: e.hint, message: e.message });
     }
 
+    // Review→Merging approval gate (ticket a3d25202) — the legacy move surface
+    // is an automated caller too, so it must not become a backdoor that crosses
+    // the review gate without a reviewer-authored comment. force=true overrides.
+    if (!force && isReviewToMerging(sourceColForGuard, col) && !(await hasReviewerApproval(this.dataSource, ticket.id))) {
+      const e = new ReviewApprovalRequiredError(ticket.id, sourceColForGuard?.name ?? String(ticket.column_id), col.name);
+      return res.status(e.status).json({ error: e.code, hint: e.hint, message: e.message });
+    }
+
     await this.dataSource.transaction(async (manager) => {
       const tRepo = manager.getRepository(Ticket);
       const sourceColumnId = ticket.column_id;
@@ -447,6 +456,16 @@ export class AgentApiController {
                 : null;
               if (!op.force && isTerminalReopen(sourceColForGuard, col)) {
                 const e = new TerminalReopenError(t.id, sourceColForGuard?.name ?? String(sourceColumnId), col.name);
+                results.push({ error: e.code, hint: e.hint, message: e.message, ticketId: t.id });
+                continue;
+              }
+
+              // Review→Merging approval gate (ticket a3d25202) — the batch loop
+              // is another automated move surface; keep it from bypassing review
+              // independence. Uses the transaction manager as scope. op.force
+              // overrides, mirroring the terminal-reopen guard above.
+              if (!op.force && isReviewToMerging(sourceColForGuard, col) && !(await hasReviewerApproval(manager, t.id))) {
+                const e = new ReviewApprovalRequiredError(t.id, sourceColForGuard?.name ?? String(sourceColumnId), col.name);
                 results.push({ error: e.code, hint: e.hint, message: e.message, ticketId: t.id });
                 continue;
               }

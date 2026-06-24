@@ -180,7 +180,12 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=${nodeBin} ${execPath}
-Restart=on-failure
+# always (not on-failure): an external SIGTERM makes the manager exit 0
+# (clean shutdown), which on-failure treats as "done" and leaves the unit
+# inactive(dead) until a manual start. always respawns on any exit; a
+# deliberate stop is still honored because systemctl stop/restart suppresses
+# the restart. Self-update's exit-1 re-exec keeps working unchanged.
+Restart=always
 RestartSec=5
 TimeoutStopSec=30
 ${userDirective}${envLines}KillSignal=SIGTERM

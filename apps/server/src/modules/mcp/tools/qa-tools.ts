@@ -37,6 +37,7 @@ function scenarioToJson(s: QaScenario) {
     qa_driver_config: s.qa_driver_config ?? null,
     enabled: s.enabled,
     tags: s.tags ?? [],
+    on_failure_ticket: s.on_failure_ticket ?? null,
     created_by: s.created_by,
     max_runs: s.max_runs,
     created_at: s.created_at,
@@ -55,6 +56,7 @@ function runToJson(r: QaRun) {
     step_results: r.step_results ?? [],
     artifact_resource_ids: r.artifact_resource_ids ?? [],
     summary: r.summary,
+    auto_ticket_id: r.auto_ticket_id ?? null,
     triggered_by_type: r.triggered_by_type,
     triggered_by_id: r.triggered_by_id,
     started_at: r.started_at,
@@ -70,6 +72,22 @@ const stepSchema = z.object({
   mcp_tool: z.string().optional().describe('Optional driver MCP tool name to invoke for this step'),
   params: z.record(z.string(), z.any()).optional().describe('Optional params passed to the driver action'),
 });
+
+// On-failure auto-ticket policy. When enabled, a failed/errored QaRun of the
+// scenario auto-files a fix ticket carrying the failure evidence. Pass null to
+// clear. Optional fields fall back at dispatch (board → run/scenario board,
+// column → "To Do", priority → "high", assignee → scenario.target_agent_id,
+// labels → ['qa-failure','auto'], dedupe → 'per_run').
+const onFailureTicketSchema = z.object({
+  enabled: z.boolean().describe('Master switch — when false (or the whole object null) no ticket is filed'),
+  board_id: z.string().optional().describe('Board to file on; default run.board_id → scenario.board_id'),
+  column_name: z.string().optional().describe('Target column (default "To Do" — an active assignee-routed column)'),
+  priority: z.enum(['low', 'medium', 'high', 'critical']).optional().describe('Ticket priority (default high)'),
+  assignee_id: z.string().optional().describe('Agent for all 3 roles (default scenario.target_agent_id)'),
+  labels: z.array(z.string()).optional().describe("Ticket labels (default ['qa-failure','auto'])"),
+  dedupe: z.enum(['per_run', 'per_open_ticket']).optional().describe('per_run = 1 ticket per failed run (default); per_open_ticket = comment on the scenario\'s existing open ticket instead'),
+  title_template: z.string().optional().describe('Title override; {{scenario.name}} is substituted (default "QA 실패: {{scenario.name}}")'),
+}).nullable();
 
 export function registerQaTools(server: McpServer, ctx: ToolContext): void {
   const { dataSource, qaService, qaRunService } = ctx;
@@ -126,6 +144,7 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
       qa_driver_config: z.record(z.string(), z.any()).optional().describe('Driver-specific config object'),
       enabled: z.boolean().optional(),
       tags: z.array(z.string()).optional(),
+      on_failure_ticket: onFailureTicketSchema.optional().describe('On-failure auto-ticket policy (see schema). Omit/null to disable.'),
       max_runs: z.number().optional().describe('FIFO run-history budget per scenario (default 20)'),
     },
     async (args, extra: { sessionId?: string }) => {
@@ -143,6 +162,7 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
           qa_driver_config: args.qa_driver_config ?? null,
           enabled: args.enabled,
           tags: args.tags,
+          on_failure_ticket: args.on_failure_ticket,
           created_by: caller?.agentId ?? '',
           max_runs: args.max_runs,
         });
@@ -168,6 +188,7 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
       qa_driver_config: z.record(z.string(), z.any()).optional(),
       enabled: z.boolean().optional(),
       tags: z.array(z.string()).optional(),
+      on_failure_ticket: onFailureTicketSchema.optional().describe('On-failure auto-ticket policy (see create_qa_scenario). Pass null to clear, omit to leave unchanged.'),
       max_runs: z.number().optional(),
     },
     async ({ scenario_id, workspace_id, ...patch }) => {

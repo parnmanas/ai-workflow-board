@@ -16,9 +16,11 @@ import { fetchChatRoomHistory, postChatRoomMessage } from './rest.js';
 import { log } from './logging.js';
 import { composeChatRoomPrompt } from './prompts.js';
 import {
+  approxBase64Bytes,
   prepareChatAttachments,
   renderAttachmentBlock,
   type PreparedAttachment,
+  type RawChatAttachment,
 } from './chat-attachment-prep.js';
 
 const { PERSISTENT_SESSION } = ADAPTER_CAPABILITIES;
@@ -34,7 +36,25 @@ interface ChatHistoryEntry {
   sender_name?: string;
   content?: string;
   created_at?: string;
+  type?: string;
+  /** Attachment metadata for this message. Stored on the in-memory ring (so
+   *  respawn-from-ring keeps it) and carried straight through from the REST
+   *  history endpoint. Composed into the spawn prompt by
+   *  #prepareHistoryAttachments + composeChatRoomPrompt. */
+  attachments?: RawChatAttachment[];
 }
+
+/** Max number of history messages (newest-first) whose attachments we even
+ *  look at when rebuilding a respawned session's context. Bounds the work and
+ *  the prompt size; older attachments fall away with their messages. */
+const HISTORY_ATTACHMENT_SCAN = 20;
+/** Max number of past images we'll fetch + inline as Claude vision blocks on
+ *  a respawn. Beyond this, history images degrade to a metadata note so the
+ *  prompt doesn't balloon. */
+const HISTORY_IMAGE_MAX_COUNT = 4;
+/** Total decoded-byte budget for inlined history images. Roughly two 5 MB
+ *  photos; once exhausted, remaining history images degrade to metadata. */
+const HISTORY_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 
 /** Max characters sent in the fallback chat message body. */
 const FALLBACK_MAX_CHARS = 1500;
@@ -111,6 +131,14 @@ export class ChatSessionManager
     return Array.from(this.#historyRing.keys());
   }
 
+  /** Test/diagnostics seam: the buffered history entries for one room
+   *  (oldest-first), or [] when the room has no bucket. Regression tests
+   *  assert that `recordRoomMessage` threads `attachments` onto the ring so a
+   *  respawn-from-ring can re-render past images. */
+  _historyEntries(roomId: string): ChatHistoryEntry[] {
+    return (this.#historyRing.get(roomId) || []).slice();
+  }
+
   recordRoomMessage(payload: any): void {
     const rid = payload?.room_id;
     if (!rid) return;
@@ -139,6 +167,12 @@ export class ChatSessionManager
       sender_name: payload.sender_name,
       content: payload.content,
       created_at: payload.created_at,
+      // Keep attachment metadata on the ring so a respawn that rebuilds from
+      // here (dispatch's primary history source) can still re-render / re-inline
+      // images the user attached on earlier turns. Bytes are NOT stored — only
+      // the lightweight projection; the spawn path re-fetches bytes lazily and
+      // capped via #prepareHistoryAttachments.
+      attachments: Array.isArray(payload.attachments) ? payload.attachments : undefined,
     });
     while (buf.length > this.#HISTORY_MAX) buf.shift();
   }
@@ -235,6 +269,16 @@ export class ChatSessionManager
       spec.attachments,
       { fetchImages: canEmitImages },
     );
+    // Re-hydrate attachments from the replayed history so an image the user
+    // sent on an earlier turn survives this respawn. For Claude the recent
+    // ones are fetched + inlined as vision blocks (capped); everything else is
+    // rendered as metadata. This is the actual fix for the dropped-attachment
+    // bug — without it the model only ever saw the current turn's image.
+    const historyAttachments = await this.#prepareHistoryAttachments(
+      spec.roomId,
+      history,
+      canEmitImages,
+    );
     const firstTurnText = composeChatRoomPrompt(
       spec.roomId,
       history,
@@ -244,8 +288,17 @@ export class ChatSessionManager
         sender_id: spec.senderId || '',
       },
       preparedFirstTurn,
+      true,
+      historyAttachments,
     );
-    const firstTurnImages = canEmitImages ? this.#extractTurnImages(preparedFirstTurn) : undefined;
+    // Vision blocks: history images first (chronological), current turn last
+    // so the freshest image is the most salient.
+    const firstTurnImages = canEmitImages
+      ? this.#mergeImages(
+          this.#extractHistoryImages(history, historyAttachments),
+          this.#extractTurnImages(preparedFirstTurn),
+        )
+      : undefined;
 
     const monitorMeta: MonitorMeta = {};
     let spawned: SessionRecord | null = null;
@@ -510,6 +563,87 @@ export class ChatSessionManager
       lines.push(ln);
     }
     return lines.join('\n');
+  }
+
+  /** Fetch + classify attachments for the replayed history messages so a
+   *  respawned session re-sees images the user attached on earlier turns.
+   *  Returns a map keyed by the history-entry object reference (stable across
+   *  the slicing composeChatRoomPrompt does). For Claude (`canEmitImages`)
+   *  the most recent images are fetched and inlined as vision blocks, capped
+   *  by count + total bytes; over-budget and non-Claude images degrade to a
+   *  metadata note. `materialize:false` keeps us from re-writing every past
+   *  file to disk on each respawn. */
+  async #prepareHistoryAttachments(
+    roomId: string,
+    history: ChatHistoryEntry[],
+    canEmitImages: boolean,
+  ): Promise<Map<ChatHistoryEntry, PreparedAttachment[]>> {
+    const out = new Map<ChatHistoryEntry, PreparedAttachment[]>();
+    const real = (Array.isArray(history) ? history : []).filter(
+      (h) => h && (!h.type || h.type === 'message'),
+    );
+    // Only the messages composeChatRoomPrompt actually renders are worth prep.
+    const recent = real.slice(-HISTORY_ATTACHMENT_SCAN);
+    let imageCountBudget = canEmitImages ? HISTORY_IMAGE_MAX_COUNT : 0;
+    let imageByteBudget = HISTORY_IMAGE_MAX_BYTES;
+    // Newest-first so the freshest history images win the inline budget.
+    for (let i = recent.length - 1; i >= 0; i--) {
+      const entry = recent[i];
+      const raws = Array.isArray(entry.attachments) ? entry.attachments : [];
+      if (raws.length === 0) continue;
+      const wantImages = canEmitImages && imageCountBudget > 0;
+      const prepared = await prepareChatAttachments(this._config, roomId, raws, {
+        fetchImages: wantImages,
+        materialize: false,
+      });
+      for (const att of prepared) {
+        if (att.kind !== 'image_base64') continue;
+        const sz = approxBase64Bytes(att.image_base64);
+        if (imageCountBudget <= 0 || sz > imageByteBudget) {
+          // Over budget — drop the bytes but keep the metadata reference so
+          // the agent still knows the image was part of the conversation.
+          att.kind = 'metadata_only';
+          att.image_base64 = undefined;
+          att.note = att.note || 'history image not inlined (vision budget exceeded)';
+          continue;
+        }
+        imageCountBudget -= 1;
+        imageByteBudget -= sz;
+      }
+      out.set(entry, prepared);
+    }
+    return out;
+  }
+
+  /** Collect inlined history images in chronological (oldest-first) order so
+   *  the vision blocks line up with the rendered history text. */
+  #extractHistoryImages(
+    history: ChatHistoryEntry[],
+    prepared: Map<ChatHistoryEntry, PreparedAttachment[]>,
+  ): TurnImage[] {
+    const images: TurnImage[] = [];
+    const real = (Array.isArray(history) ? history : []).filter(
+      (h) => h && (!h.type || h.type === 'message'),
+    );
+    for (const entry of real.slice(-HISTORY_ATTACHMENT_SCAN)) {
+      const atts = prepared.get(entry);
+      if (!atts) continue;
+      for (const att of atts) {
+        if (att.kind === 'image_base64' && att.image_base64) {
+          images.push({ media_type: att.mime_type || 'image/png', data: att.image_base64 });
+        }
+      }
+    }
+    return images;
+  }
+
+  /** Concatenate image lists, dropping empties, returning undefined when the
+   *  result is empty (the adapter treats undefined and [] the same, but
+   *  undefined keeps the spawn-opts shape unchanged on the no-image path). */
+  #mergeImages(...lists: Array<TurnImage[] | undefined>): TurnImage[] | undefined {
+    const merged: TurnImage[] = [];
+    for (const l of lists) if (l && l.length) merged.push(...l);
+    return merged.length > 0 ? merged : undefined;
   }
 
   /** Pull base64 image payloads out of the prepared attachment list. Only

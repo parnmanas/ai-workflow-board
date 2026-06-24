@@ -50,6 +50,12 @@ export class QaRun {
   @Column({ type: 'varchar', default: '' })
   triggered_by_id: string;
 
+  // Set once when this run auto-files (or reuses, for per_open_ticket dedupe) a
+  // fix ticket on failure — the run-level idempotency guard so a re-finalize of
+  // the same run never double-files. null = no auto-ticket created for this run.
+  @Column({ type: 'varchar', nullable: true, default: null })
+  auto_ticket_id: string | null;
+
   @Column({ type: Date, nullable: true, default: null })
   started_at: Date | null;
 

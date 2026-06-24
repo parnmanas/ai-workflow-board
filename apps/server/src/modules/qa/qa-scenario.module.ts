@@ -8,10 +8,17 @@ import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
 import { TicketAttachment } from '../../entities/TicketAttachment';
 import { Agent } from '../../entities/Agent';
 import { Board } from '../../entities/Board';
+import { BoardColumn } from '../../entities/BoardColumn';
+import { Ticket } from '../../entities/Ticket';
+import { Comment } from '../../entities/Comment';
+import { Resource } from '../../entities/Resource';
 import { QaScenarioController } from './qa-scenario.controller';
 import { QaService } from './qa.service';
 import { QaRunService } from './qa-run.service';
+import { QaRunReaperService } from './qa-run-reaper.service';
+import { QaFailureTicketService } from './qa-failure-ticket.service';
 import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
+import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module';
 import { SharedServicesModule } from '../../services/shared-services.module';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
@@ -23,12 +30,13 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([QaScenario, QaRun, ChatRoom, ChatRoomParticipant, ChatRoomMessage, TicketAttachment, Agent, Board]),
+    TypeOrmModule.forFeature([QaScenario, QaRun, ChatRoom, ChatRoomParticipant, ChatRoomMessage, TicketAttachment, Agent, Board, BoardColumn, Ticket, Comment, Resource]),
     ChatRoomsModule,
+    WorkspaceRolesModule,
     SharedServicesModule,
   ],
   controllers: [QaScenarioController],
-  providers: [QaService, QaRunService, AuthGuard, PermissionGuard],
-  exports: [QaService, QaRunService],
+  providers: [QaService, QaRunService, QaRunReaperService, QaFailureTicketService, AuthGuard, PermissionGuard],
+  exports: [QaService, QaRunService, QaRunReaperService, QaFailureTicketService],
 })
 export class QaScenarioModule {}

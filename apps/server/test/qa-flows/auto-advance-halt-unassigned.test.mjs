@@ -123,11 +123,15 @@ test('auto-advance halts fully-unassigned tickets and advances staffed ones', as
   assert.ok(!orphanAutoMove, 'orphan must not produce an auto-advance moved row');
 
   // ---------------------------------------------------------------------------
-  // (b) Staffed ticket, empty Review stage → advance past Review to a servable
-  //     column (assignee-routed Merge), then stop there.
+  // (b) Staffed ticket, empty GATE stage → HALT on the gate, never auto-advance
+  //     OUT past it (ticket cc48f06f). A review/merging gate with an empty seat
+  //     means "a human still has to staff this review", NOT "nobody routed here,
+  //     move along". Pre-cc48f06f this advanced past Review to Merge — that was
+  //     itself a silent review-gate bypass (the reviewer never reviewed). The
+  //     gate now halts in place and leaves an `auto_advance_halted_gate` flag.
   // ---------------------------------------------------------------------------
   step('(b) build board where Review routes to reviewer but only assignee is set');
-  const boardB = await createBoard(app, getDataSourceToken, ws.id, { name: 'review-skip-board' });
+  const boardB = await createBoard(app, getDataSourceToken, ws.id, { name: 'review-gate-halt-board' });
   await createColumn(app, getDataSourceToken, boardB.id, {
     name: 'Todo', position: 0, workspaceId: ws.id, kind: 'intake', roleRouting: ['assignee'],
   });
@@ -145,27 +149,39 @@ test('auto-advance halts fully-unassigned tickets and advances staffed ones', as
   const reviewTicket = await createTicket(app, getDataSourceToken, {
     columnId: bReview.id,
     workspaceId: ws.id,
-    title: 'Staffed ticket, empty Review stage',
+    title: 'Staffed ticket, empty Review gate',
     assigneeId: trio.assignee.agent.id, // reviewer deliberately unset
   });
 
-  step('(b) emit "moved" onto the unheld Review column');
+  step('(b) emit "moved" onto the unheld Review gate column');
   await activity.logActivity({
     entity_type: 'ticket', entity_id: reviewTicket.id, action: 'moved',
     field_changed: 'column', old_value: 'Todo', new_value: 'Review',
     ticket_id: reviewTicket.id, actor_id: 'test-user', actor_name: 'tester',
   });
 
-  step('(b) ticket advanced past Review to the assignee-served Merge column');
-  const reviewRow = await waitForTicket(ds, reviewTicket.id, (r) => r.column_id === bMerge.id);
-  assert.equal(reviewRow.column_id, bMerge.id);
+  await settle();
+
+  step('(b) ticket HALTED on Review — never auto-advanced OUT past the gate');
+  const reviewRow = await ds.getRepository('Ticket').findOne({ where: { id: reviewTicket.id } });
+  assert.equal(
+    reviewRow.column_id, bReview.id,
+    `staffed-but-unreviewed ticket must halt on the Review gate (${bReview.id}); got ${reviewRow.column_id}`,
+  );
+  assert.notEqual(reviewRow.column_id, bMerge.id, 'ticket must not skip the Review gate to Merge');
   const reviewLogs = await ds
     .getRepository('ActivityLog')
-    .find({ where: { ticket_id: reviewTicket.id, action: 'moved' } });
+    .find({ where: { ticket_id: reviewTicket.id } });
   assert.ok(
-    reviewLogs.some((l) => l.actor_id === 'auto-advance'),
-    'expected an auto-advance moved row past the empty Review stage',
+    !reviewLogs.some((l) => l.action === 'moved' && l.actor_id === 'auto-advance'),
+    'gate must NOT produce an auto-advance moved row',
   );
+  const gateHalt = reviewLogs.find((l) => l.action === 'auto_advance_halted_gate');
+  assert.ok(
+    gateHalt,
+    `expected an auto_advance_halted_gate row; got actions ${JSON.stringify(reviewLogs.map((l) => l.action))}`,
+  );
+  assert.equal(gateHalt.trigger_source, 'auto_advance');
 
   // ---------------------------------------------------------------------------
   // (c) Staffed ticket on a config-drift column (slug resolves to no role) →

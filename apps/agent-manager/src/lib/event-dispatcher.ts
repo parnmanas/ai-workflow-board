@@ -338,6 +338,7 @@ export interface PromptComposer {
     msg: { content: string; sender_name: string; sender_id: string },
     attachments?: any[],
     usesNativeMcp?: boolean,
+    historyAttachments?: Map<any, any[]>,
   ): string;
   composeCommentMentionPrompt(
     ticket: any,

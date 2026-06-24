@@ -537,15 +537,14 @@ let _lastReExecScheduled = false;
 /**
  * Set by reExecManager (systemd branch) just before it sends SIGTERM to self.
  * Read by main.ts's shutdown handler so the final `process.exit(...)` can pick
- * the right code: 1 when we're tearing down to let systemd's
- * `Restart=on-failure` respawn us into the just-built dist, 0 for a normal
- * operator-driven stop.
+ * the right code: 1 when we're tearing down to re-exec into the just-built
+ * dist, 0 for a normal operator-driven stop.
  *
- * Without this flag the shutdown handler always exits 0 → systemd sees
- * "success" → no restart → service goes inactive(dead) and the operator has to
- * `systemctl --user start awb-agent-manager` by hand. The SIGTERM-then-exit(1)
- * tail in reExecManager can't compensate because shutdown's own exit(0) fires
- * first and terminates the process synchronously.
+ * The unit now runs `Restart=always`, so restart no longer hinges on the exit
+ * code — systemd respawns on any exit (a deliberate `systemctl stop` is the
+ * one case it leaves down). We keep the exit-1 signal anyway: it's correct
+ * under any restart policy and keeps the exit code semantically honest
+ * (1 = abnormal/re-exec, 0 = clean stop) for logs and journald.
  */
 let _systemdReExecPending = false;
 
@@ -846,7 +845,7 @@ function isManagedBySystemd(): boolean {
  * Two strategies depending on the supervisor:
  *
  * 1. **systemd** (Linux + a `.service` unit): the parent exits 1 and lets the
- *    unit's `Restart=on-failure` bring up a fresh process. We MUST NOT spawn
+ *    unit's `Restart=always` bring up a fresh process. We MUST NOT spawn
  *    a detached child here — systemd's default `KillMode=control-group` would
  *    sweep the new child into the same cgroup teardown when the parent dies,
  *    killing the very process we just launched. Symptom: `update_manager` SSE
@@ -861,14 +860,13 @@ function isManagedBySystemd(): boolean {
  */
 function reExecManager(out: (msg: string) => void): void {
   if (isManagedBySystemd()) {
-    out('Self-update: re-exec via systemd (Restart=on-failure → exit 1)');
+    out('Self-update: re-exec via systemd (Restart=always → exit 1)');
     // We trigger the SIGTERM shutdown handler so chat / ticket sessions get
     // cleaned up, but we MUST set _systemdReExecPending first so the handler's
-    // final `process.exit(...)` picks exit code 1 instead of 0. Without the
-    // flag the handler's exit(0) fires synchronously the moment cleanup
-    // finishes; any setTimeout backup we schedule here is dead — the process
-    // is already gone — and systemd sees a clean exit code, marks the unit
-    // success, and refuses to honor Restart=on-failure.
+    // final `process.exit(...)` picks exit code 1 instead of 0. Under
+    // Restart=always a clean exit(0) would respawn too, but exit 1 keeps the
+    // journald record honest about why the unit restarted (re-exec, not a
+    // crash or operator stop).
     _systemdReExecPending = true;
     setTimeout(() => {
       try {

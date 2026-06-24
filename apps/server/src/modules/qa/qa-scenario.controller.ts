@@ -6,6 +6,7 @@ import { RequirePermission } from '../../common/decorators/require-permission.de
 import { PERMISSIONS } from '../../common/types/permissions';
 import { QaService } from './qa.service';
 import { QaRunService } from './qa-run.service';
+import { QaRunReaperService } from './qa-run-reaper.service';
 
 /**
  * REST surface for the scenario-based QA feature (QaScenario/QaRun).
@@ -27,6 +28,7 @@ export class QaScenarioController {
   constructor(
     private readonly qaService: QaService,
     private readonly qaRunService: QaRunService,
+    private readonly qaRunReaperService: QaRunReaperService,
   ) {}
 
   // ── Scenarios ─────────────────────────────────────────────────────────────
@@ -116,6 +118,19 @@ export class QaScenarioController {
       return res.json(runs);
     } catch (e: any) {
       return res.status(e?.status || 400).json({ error: e?.message || 'Failed to list QA runs' });
+    }
+  }
+
+  // Operator lever: fire one reaper sweep on demand (no server restart needed
+  // once the code is live). Closes any QaRun stuck non-terminal whose driver
+  // died — see QaRunReaperService for the two fuses (zero-progress / 6h-TTL).
+  @Post('runs/reap')
+  async reap(@Res() res: Response) {
+    try {
+      const { reaped, details } = await this.qaRunReaperService.runOnce();
+      return res.json({ reaped_count: reaped.length, reaped, details });
+    } catch (e: any) {
+      return res.status(e?.status || 500).json({ error: e?.message || 'Failed to run QA reaper sweep' });
     }
   }
 

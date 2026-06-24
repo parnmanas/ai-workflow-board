@@ -186,6 +186,15 @@ export interface PrepareOptions {
    *  oneshot path also sets this false because there's no vision content
    *  block to push the bytes into. */
   fetchImages: boolean;
+  /** When false, attachments that would otherwise be written to a local
+   *  scratch file (non-inlined images on text-only CLIs, plus any binary)
+   *  degrade to metadata_only instead. History replay sets this false:
+   *  re-fetching + re-writing every past image / binary to disk on every
+   *  session respawn is wasteful, and a history attachment is referenced by
+   *  its inlined vision block (Claude) or by its metadata note. Text-ish
+   *  attachments are still inlined (cheap + the actual content the agent
+   *  needs). Defaults to true so the current-turn path is unchanged. */
+  materialize?: boolean;
 }
 
 export async function prepareChatAttachments(
@@ -198,6 +207,7 @@ export async function prepareChatAttachments(
   if (!roomId) return [];
 
   const limited = rawList.slice(0, MAX_ATTACHMENTS_PER_TURN);
+  const allowMaterialize = options.materialize !== false;
 
   const out: PreparedAttachment[] = [];
   for (const raw of limited) {
@@ -209,6 +219,13 @@ export async function prepareChatAttachments(
 
     if (isImage) {
       if (!options.fetchImages) {
+        if (!allowMaterialize) {
+          // History replay on a text-only CLI: don't re-write old images to
+          // disk every respawn. The metadata block (filename/mime/url) still
+          // tells the agent the image exists.
+          out.push(norm);
+          continue;
+        }
         // CLI cannot consume inline vision content blocks, but it can still
         // read the file off disk via its standard file/read tools. Fetch
         // the bytes once, drop them on the per-room scratch path, and hand
@@ -267,20 +284,34 @@ export async function prepareChatAttachments(
     // subagent can hand the path to its own file/parse tools instead of
     // bouncing back to the user with a download URL. Failure here falls
     // through to metadata_only via the `note` set inside materialize().
-    await materialize(config, roomId, norm);
+    // History replay (materialize=false) skips the disk write — metadata only.
+    if (allowMaterialize) {
+      await materialize(config, roomId, norm);
+    }
     out.push(norm);
   }
   return out;
 }
 
+/** Approximate decoded byte count for a base64 string (length * 3 / 4).
+ *  Used to budget how many history image bytes get inlined as vision blocks
+ *  before the prompt blows past the CLI context window. */
+export function approxBase64Bytes(base64: string | undefined): number {
+  return Math.floor(((base64?.length || 0) * 3) / 4);
+}
+
 /** Render a Markdown-ish block listing the prepared attachments for the
  *  prompt body. Used by the chat-room prompt composer so the same text
  *  surface works for every CLI; image content blocks are an additive layer
- *  on top of this (Claude only). */
-export function renderAttachmentBlock(attachments: PreparedAttachment[]): string[] {
+ *  on top of this (Claude only). `heading` defaults to the current-turn
+ *  label; history rendering passes a per-message heading instead. */
+export function renderAttachmentBlock(
+  attachments: PreparedAttachment[],
+  heading = 'Attachments (this turn):',
+): string[] {
   if (attachments.length === 0) return [];
   const lines: string[] = [];
-  lines.push('Attachments (this turn):');
+  lines.push(heading);
   for (const att of attachments) {
     const head = `- [${att.filename}] mime=${att.mime_type} size=${att.size_bytes}B id=${att.id}`;
     const trail = att.download_url ? ` url=${att.download_url}` : '';
