@@ -42,6 +42,8 @@ function normalizeOnFailureTicket(input: any): QaOnFailureTicketConfig | null {
   const priority = ['low', 'medium', 'high', 'critical'].includes(input.priority) ? input.priority : undefined;
   const dedupe = input.dedupe === 'per_open_ticket' ? 'per_open_ticket' : (input.dedupe === 'per_run' ? 'per_run' : undefined);
   const labels = Array.isArray(input.labels) ? input.labels.map((l: any) => String(l)).filter(Boolean) : undefined;
+  const maxRerun = Number(input.max_rerun_attempts);
+  const rerunDelay = Number(input.rerun_delay_seconds);
   return {
     enabled: !!input.enabled,
     board_id: input.board_id ? String(input.board_id) : undefined,
@@ -51,6 +53,9 @@ function normalizeOnFailureTicket(input: any): QaOnFailureTicketConfig | null {
     labels,
     dedupe,
     title_template: input.title_template ? String(input.title_template) : undefined,
+    rerun_on_fix: input.rerun_on_fix === undefined ? undefined : !!input.rerun_on_fix,
+    max_rerun_attempts: Number.isFinite(maxRerun) && maxRerun >= 0 ? Math.floor(maxRerun) : undefined,
+    rerun_delay_seconds: Number.isFinite(rerunDelay) && rerunDelay >= 0 ? Math.floor(rerunDelay) : undefined,
   };
 }
 
