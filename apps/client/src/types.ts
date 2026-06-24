@@ -293,9 +293,39 @@ export interface QaRun {
   rerun_generation: number;
   triggered_by_type: string;
   triggered_by_id: string;
+  batch_id?: string | null;
+  batch_index?: number | null;
   started_at: string | null;
   finished_at: string | null;
   created_at: string;
+}
+
+export type QaRunBatchStatus = 'running' | 'done' | 'aborted';
+
+/**
+ * QaRunBatch — a manual sequential run of several scenarios (ticket daf06262).
+ * Only one scenario runs at a time: index N+1 dispatches when run N terminates.
+ * `current_index`/`total` drive the progress display; run_ids[i] is the QaRun
+ * dispatched for scenario_ids[i] ('' = that index's dispatch was skipped).
+ */
+export interface QaRunBatch {
+  id: string;
+  workspace_id: string;
+  board_id: string | null;
+  scenario_ids: string[];
+  run_ids: string[];
+  current_index: number;
+  total: number;
+  status: QaRunBatchStatus;
+  stop_on_fail: boolean;
+  passed: number;
+  failed: number;
+  errored: number;
+  triggered_by_type: string;
+  triggered_by_id: string;
+  finished_at: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface Credential {

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { api, getActiveWorkspaceId, rawResourceUrl } from '../../api';
-import type { QaScenario, QaScenarioListItem, QaRun, QaStepResult, QaOnFailureTicketConfig } from '../../types';
+import type { QaScenario, QaScenarioListItem, QaRun, QaStepResult, QaOnFailureTicketConfig, QaRunBatch } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 import { Button, Input, Select, Modal, Card, Badge, ConfirmDialog } from '../common';
@@ -44,6 +44,11 @@ export default function QaManager({ workspaceId, boardId }: QaManagerProps) {
   const [running, setRunning] = useState<string | null>(null);
   const [editing, setEditing] = useState<QaScenario | 'new' | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<QaScenario | null>(null);
+  // Sequential-batch state: which scenarios are checked for "선택 순차 실행",
+  // the active batch being polled, and a starting guard.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [activeBatch, setActiveBatch] = useState<QaRunBatch | null>(null);
+  const [batchStarting, setBatchStarting] = useState(false);
 
   const load = useCallback(async () => {
     if (!effectiveWorkspaceId) { setScenarios([]); return; }
@@ -81,6 +86,52 @@ export default function QaManager({ workspaceId, boardId }: QaManagerProps) {
       setRunning(null);
     }
   };
+
+  const toggleSelect = useCallback((id: string) => {
+    setSelectedIds((cur) => {
+      const next = new Set(cur);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
+  // Scenarios in display order whose id is checked — preserves the table order
+  // so the sequential batch runs top-to-bottom.
+  const orderedSelected = scenarios.filter((s) => selectedIds.has(s.id));
+
+  const startBatch = useCallback(async (payload: { all?: boolean; scenario_ids?: string[] }) => {
+    setBatchStarting(true);
+    try {
+      const batch = await api.startQaBatch({
+        workspace_id: effectiveWorkspaceId,
+        board_id: boardId !== undefined ? (boardId || '') : undefined,
+        ...payload,
+      });
+      setActiveBatch(batch);
+      showToast(`QA batch started — ${batch.total} scenario(s) in sequence`, 'success');
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to start QA batch', 'error');
+    } finally {
+      setBatchStarting(false);
+    }
+  }, [effectiveWorkspaceId, boardId, showToast]);
+
+  // Poll the active batch while it's running so the progress banner advances as
+  // each scenario finalizes (dispatch is server-driven, one run at a time).
+  useEffect(() => {
+    if (!activeBatch || activeBatch.status !== 'running') return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const fresh = await api.getQaBatch(activeBatch.id, effectiveWorkspaceId);
+        if (cancelled) return;
+        setActiveBatch(fresh);
+        if (fresh.status !== 'running') load(); // refresh last-run rollups when done
+      } catch { /* transient — keep polling */ }
+    };
+    const h = setInterval(tick, 4000);
+    return () => { cancelled = true; clearInterval(h); };
+  }, [activeBatch, effectiveWorkspaceId, load]);
 
   const handleDelete = async (s: QaScenario) => {
     try {
@@ -146,14 +197,45 @@ export default function QaManager({ workspaceId, boardId }: QaManagerProps) {
     );
   }
 
+  const batchRunning = activeBatch?.status === 'running';
+
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: tokens.spacing.md }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: tokens.spacing.md, gap: 12, flexWrap: 'wrap' }}>
         <div style={{ color: tokens.colors.textSecondary, fontSize: 13 }}>
           Scenario-based QA — run a scenario, accumulate step pass/fail + screenshots, re-run to compare.
         </div>
-        <Button variant="primary" size="md" onClick={() => setEditing('new')}>+ New Scenario</Button>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          {/* 순차 batch 실행: 한 번에 하나씩, 끝나야 다음. */}
+          <Button
+            variant="secondary"
+            size="md"
+            disabled={scenarios.length === 0 || batchStarting || batchRunning}
+            onClick={() => startBatch({ all: true })}
+            title="현재 scope 의 enabled 시나리오를 이름순으로 순차 실행"
+          >
+            ▶ 전체 순차 실행
+          </Button>
+          <Button
+            variant="secondary"
+            size="md"
+            disabled={orderedSelected.length === 0 || batchStarting || batchRunning}
+            onClick={() => startBatch({ scenario_ids: orderedSelected.map((s) => s.id) })}
+            title="체크한 시나리오를 위→아래 순서대로 순차 실행"
+          >
+            ▶ 선택 순차 실행{orderedSelected.length ? ` (${orderedSelected.length})` : ''}
+          </Button>
+          <Button variant="primary" size="md" onClick={() => setEditing('new')}>+ New Scenario</Button>
+        </div>
       </div>
+
+      {activeBatch && (
+        <BatchProgressBanner
+          batch={activeBatch}
+          scenarioName={(id) => scenarios.find((s) => s.id === id)?.name ?? id.slice(0, 8)}
+          onDismiss={() => setActiveBatch(null)}
+        />
+      )}
 
       {scenarios.length === 0 ? (
         <Card padding="20px">
@@ -167,6 +249,8 @@ export default function QaManager({ workspaceId, boardId }: QaManagerProps) {
           scenarios={scenarios}
           agentName={agentName}
           running={running}
+          selectedIds={selectedIds}
+          onToggleSelect={toggleSelect}
           onOpen={(s) => setSelected(s)}
           onRun={handleRun}
           onEdit={(s) => setEditing(s)}
@@ -179,12 +263,77 @@ export default function QaManager({ workspaceId, boardId }: QaManagerProps) {
   );
 }
 
+// ── Sequential batch progress banner ─────────────────────────────────────────
+
+const BATCH_STATUS_VARIANT: Record<string, 'success' | 'danger' | 'info'> = {
+  running: 'info',
+  done: 'success',
+  aborted: 'danger',
+};
+
+function BatchProgressBanner({ batch, scenarioName, onDismiss }: {
+  batch: QaRunBatch;
+  scenarioName: (id: string) => string;
+  onDismiss: () => void;
+}) {
+  const done = batch.status !== 'running';
+  // While running, current_index points at the in-flight scenario; once done it
+  // points at the last one touched, so the "N / total" reads as completed count.
+  const position = done ? batch.total : Math.min(batch.current_index + 1, batch.total);
+  const currentId = batch.scenario_ids[batch.current_index];
+  return (
+    <Card padding="14px">
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
+        <Badge variant={BATCH_STATUS_VARIANT[batch.status] ?? 'neutral'} size="md">batch {batch.status}</Badge>
+        <span style={{ fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary, fontVariantNumeric: 'tabular-nums' }}>
+          {position} / {batch.total}
+        </span>
+        {!done && currentId && (
+          <span style={{ fontSize: 13, color: tokens.colors.textSecondary }}>
+            현재: <strong style={{ color: tokens.colors.textPrimary }}>{scenarioName(currentId)}</strong>
+          </span>
+        )}
+        <span style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+          <Badge variant="success" size="sm">pass {batch.passed}</Badge>
+          <Badge variant="danger" size="sm">fail {batch.failed}</Badge>
+          {batch.errored > 0 && <Badge variant="warning" size="sm">err {batch.errored}</Badge>}
+        </span>
+        {done && (
+          <button
+            onClick={onDismiss}
+            style={{ background: 'none', border: 'none', color: tokens.colors.textMuted, cursor: 'pointer', fontSize: 13, padding: '2px 6px' }}
+            title="배너 닫기"
+          >
+            ✕
+          </button>
+        )}
+      </div>
+      {/* progress bar */}
+      <div style={{ height: 6, borderRadius: 3, background: tokens.colors.surfaceHover, overflow: 'hidden' }}>
+        <div style={{
+          width: `${batch.total ? Math.round((position / batch.total) * 100) : 0}%`,
+          height: '100%',
+          background: batch.status === 'aborted' ? tokens.colors.danger : tokens.colors.success,
+          transition: 'width 0.4s ease',
+        }} />
+      </div>
+      {!done && (
+        <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 6 }}>
+          한 시나리오가 끝나야(passed/failed/error) 다음이 시작됩니다 — 동시에 뜨지 않습니다.
+        </div>
+      )}
+    </Card>
+  );
+}
+
 // ── Scenario list table (status-dashboard view) ──────────────────────────────
 
 interface ScenarioTableProps {
   scenarios: QaScenarioListItem[];
   agentName: (id: string) => string;
   running: string | null;
+  selectedIds: Set<string>;
+  onToggleSelect: (id: string) => void;
   onOpen: (s: QaScenarioListItem) => void;
   onRun: (s: QaScenarioListItem) => void;
   onEdit: (s: QaScenarioListItem) => void;
@@ -206,12 +355,23 @@ const TD: React.CSSProperties = {
  * scenario, last-run time + result scannable down a column. Replaces the old
  * card grid (prompt/description bodies live in the detail view, not here).
  */
-function ScenarioTable({ scenarios, agentName, running, onOpen, onRun, onEdit, onDelete }: ScenarioTableProps) {
+function ScenarioTable({ scenarios, agentName, running, selectedIds, onToggleSelect, onOpen, onRun, onEdit, onDelete }: ScenarioTableProps) {
+  // Header checkbox = select/clear all currently listed scenarios.
+  const allSelected = scenarios.length > 0 && scenarios.every((s) => selectedIds.has(s.id));
+  const toggleAll = () => {
+    const target = !allSelected;
+    scenarios.forEach((s) => {
+      if (selectedIds.has(s.id) !== target) onToggleSelect(s.id);
+    });
+  };
   return (
     <div style={{ overflowX: 'auto', border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md }}>
       <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 760 }}>
         <thead>
           <tr>
+            <th style={{ ...TH, width: 36, textAlign: 'center' }}>
+              <input type="checkbox" checked={allSelected} onChange={toggleAll} title="전체 선택/해제" />
+            </th>
             <th style={TH}>Name</th>
             <th style={TH}>Driver</th>
             <th style={TH}>Agent</th>
@@ -228,6 +388,8 @@ function ScenarioTable({ scenarios, agentName, running, onOpen, onRun, onEdit, o
               s={s}
               agentName={agentName}
               running={running === s.id}
+              selected={selectedIds.has(s.id)}
+              onToggleSelect={() => onToggleSelect(s.id)}
               onOpen={() => onOpen(s)}
               onRun={() => onRun(s)}
               onEdit={() => onEdit(s)}
@@ -244,13 +406,15 @@ interface ScenarioRowProps {
   s: QaScenarioListItem;
   agentName: (id: string) => string;
   running: boolean;
+  selected: boolean;
+  onToggleSelect: () => void;
   onOpen: () => void;
   onRun: () => void;
   onEdit: () => void;
   onDelete: () => void;
 }
 
-function ScenarioRow({ s, agentName, running, onOpen, onRun, onEdit, onDelete }: ScenarioRowProps) {
+function ScenarioRow({ s, agentName, running, selected, onToggleSelect, onOpen, onRun, onEdit, onDelete }: ScenarioRowProps) {
   const [hover, setHover] = useState(false);
   // Buttons must not bubble to the row's open handler.
   const stop = (fn: () => void) => (e: React.MouseEvent) => { e.stopPropagation(); fn(); };
@@ -262,6 +426,9 @@ function ScenarioRow({ s, agentName, running, onOpen, onRun, onEdit, onDelete }:
       onMouseLeave={() => setHover(false)}
       style={{ cursor: 'pointer', background: hover ? tokens.colors.surfaceHover : 'transparent' }}
     >
+      <td style={{ ...TD, textAlign: 'center' }} onClick={(e) => e.stopPropagation()}>
+        <input type="checkbox" checked={selected} onChange={onToggleSelect} title="순차 실행에 포함" />
+      </td>
       <td style={TD}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{ fontWeight: 600, color: tokens.colors.textPrimary }}>{s.name}</span>

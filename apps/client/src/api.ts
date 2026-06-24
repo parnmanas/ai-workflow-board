@@ -6,6 +6,7 @@ import type {
   QaScenario,
   QaScenarioListItem,
   QaRun,
+  QaRunBatch,
   Credential,
   ChatMessage,
   ChatThread,
@@ -960,6 +961,20 @@ export const api = {
   getQaRun: (runId: string, workspaceId: string) => {
     const params = new URLSearchParams({ workspace_id: workspaceId });
     return request<QaRun>(`/qa/runs/${runId}?${params.toString()}`);
+  },
+  // ─── Sequential QA batches (ticket daf06262) ──────────
+  // scenario_ids[] OR all (→ enabled scenarios in scope). Only the first
+  // scenario dispatches now; the rest run one-at-a-time as each finalizes.
+  startQaBatch: (data: {
+    workspace_id: string;
+    board_id?: string | null;
+    scenario_ids?: string[];
+    all?: boolean;
+    stop_on_fail?: boolean;
+  }) => request<QaRunBatch>('/qa/batches', { method: 'POST', body: JSON.stringify(data) }),
+  getQaBatch: (batchId: string, workspaceId: string) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    return request<QaRunBatch>(`/qa/batches/${batchId}?${params.toString()}`);
   },
 
   // ─── Credentials ──────────────────────────────────────
