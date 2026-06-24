@@ -11,8 +11,8 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * JSON columns (scenario_ids / run_ids) are TEXT (TypeORM `simple-json`).
  */
-export class CreateQaRunBatches1760000000034 implements MigrationInterface {
-  name = 'CreateQaRunBatches1760000000034';
+export class CreateQaRunBatches1760000000039 implements MigrationInterface {
+  name = 'CreateQaRunBatches1760000000039';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     const isPostgres = queryRunner.connection.options.type === 'postgres';
