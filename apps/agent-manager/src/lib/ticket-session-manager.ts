@@ -327,6 +327,9 @@ export class TicketSessionManager
           // harness does, so persistent ticket sessions get --effort + the
           // ultracode first-turn keyword at session creation.
           effortPreset: spec.effortPreset ?? null,
+          // Board env_vars (ticket 354d336b) — injected into the session's env
+          // at creation (live sessions keep the env they were born with).
+          envVars: spec.envVars,
         },
       );
       // Stamp identity fields BEFORE releasing the inflight reservation, so

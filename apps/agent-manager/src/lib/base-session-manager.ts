@@ -123,6 +123,11 @@ export interface SpawnOpts {
    *  selectEffortSlice; claude maps it to `--effort` + the ultracode keyword
    *  in the first turn. Applied at session CREATION only. */
   effortPreset?: ResolvedEffortPreset | null;
+  /** Non-secret env vars from the board environment_config (ticket 354d336b).
+   *  Merged into the spawned CLI's environment after process.env but BEFORE
+   *  auth / cli-home / credential / harness env so those always win. Applied
+   *  at session CREATION only. */
+  envVars?: Record<string, string>;
 }
 
 interface TurnState {
@@ -324,7 +329,7 @@ export class BaseSessionManager {
     sessionKey: string,
     rolePrompt: string,
     firstTurnText: string,
-    { onProgress, monitorMeta, agentContext, firstTurnImages, harness: rawHarness, effortPreset }: SpawnOpts = {},
+    { onProgress, monitorMeta, agentContext, firstTurnImages, harness: rawHarness, effortPreset, envVars }: SpawnOpts = {},
   ): Promise<SessionRecord | null> {
     // ST-7: pick the adapter for this agent's CLI choice (claude/codex/antigravity)
     // and bind it to the session record so future turns formatTurn /
@@ -489,8 +494,12 @@ export class BaseSessionManager {
         cwd: effectiveCwd,
         // harnessEnv merges LAST — see SubagentManager.spawn for why a
         // per-dispatch harness model must beat the per-agent extra_env.
+        // Board env_vars (ticket 354d336b) merge right after baseEnv so they
+        // can set non-secret config (NODE_ENV, …) but never shadow AWB_API_KEY
+        // / cli-home / per-agent credential / harness env layered on top.
         env: {
           ...baseEnv,
+          ...(envVars ?? {}),
           AWB_API_KEY: effectiveApiKey,
           ...cliHomeEnv,
           ...credentialEnv,

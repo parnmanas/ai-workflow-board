@@ -37,6 +37,7 @@ import { promptComposer } from './lib/prompts.js';
 import { ManagedAgentRegistry } from './lib/managed-agents.js';
 import { ManagedAgentContextRegistry } from './lib/managed-agent-context.js';
 import { WorktreeManager, worktreeSlug } from './lib/worktree-manager.js';
+import { EnvironmentProvisioner } from './lib/environment-provisioner.js';
 import { AgentManagerCommandHandler } from './lib/agent-manager-commands.js';
 import {
   listManagedAgentDirs,
@@ -480,6 +481,10 @@ async function runRuntime(
   const worktreeManager = new WorktreeManager({
     enabled: (config as any)?.delegation?.worktreeIsolation !== false,
   });
+  // ticket 354d336b — board environment provisioner. Clones/updates the repos
+  // a board's environment_config declares under the agent home and runs its
+  // setup commands once per (agent, config-fingerprint) before the spawn.
+  const environmentProvisioner = new EnvironmentProvisioner();
   // Construct the session managers BEFORE the command handler so stop_agent /
   // restart_agent can force-kill an agent's live chat / ticket children
   // through them. Without this wiring, a credential rotation only rewrote
@@ -650,6 +655,7 @@ async function runRuntime(
       agentManagerCommandHandler: commandHandler,
       managedAgentContexts,
       worktreeManager,
+      environmentProvisioner,
     },
     pluginVersion: version,
     onConnect: kickPresencePing,

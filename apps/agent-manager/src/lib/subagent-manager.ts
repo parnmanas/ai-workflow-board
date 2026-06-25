@@ -565,6 +565,10 @@ export class SubagentManager implements SubagentManagerContract {
         // ANTHROPIC_MODEL — flag/env agreement, see DeepSeekCliAdapter).
         env: {
           ...baseEnv,
+          // Board env_vars (ticket 354d336b) merge right after baseEnv so they
+          // set non-secret config but never shadow AWB_API_KEY / cli-home /
+          // per-agent credential / harness env layered on top.
+          ...(spec.envVars ?? {}),
           AWB_API_KEY: effectiveApiKey,
           ...cliHomeEnv,
           ...credentialEnv,
