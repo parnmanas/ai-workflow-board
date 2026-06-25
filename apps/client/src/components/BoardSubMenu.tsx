@@ -67,6 +67,7 @@ export default function BoardSubMenu({
   // 섹션 nav 항목 정의 (emoji 매핑 §2.3 기준).
   const primaryNav = [
     { key: 'qa', icon: '🔬', label: 'QA', to: link('qa') },
+    { key: 'security', icon: '🛡', label: 'Security', to: link('security') },
     { key: 'resources', icon: '📁', label: 'Resources', to: link('resources') },
   ];
   const overflowNav = [
