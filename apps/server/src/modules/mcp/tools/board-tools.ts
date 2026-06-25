@@ -244,8 +244,10 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
         .describe('Per-board output language: a human-readable language name (e.g. "Korean", "English", "日本語"). Agents dispatched on this board write comments, chat, commit messages, and code comments in this language. Empty string or null clears the override (agents fall back to their default, English).'),
       environment_config: EnvironmentConfigSchema.nullable().optional()
         .describe('Per-board environment setup: { repositories?: [{ resource_id? | url?, target_dir?, branch?, post_clone_commands?: [] }], env_vars?: { KEY: value }, setup_commands?: [], setup_timeout_seconds?, version? }. When set, agent-manager provisions the working environment (clone/update repos under the agent home, run setup commands, inject non-secret env_vars) once per (agent,board) before the first dispatch, re-running only when the config fingerprint changes. Keys set here override the workspace default per top-level key. Pass null to clear the board override.'),
+      paused: z.boolean().optional()
+        .describe('Board-wide soft pause. true sets paused_at=now — every agent_trigger for tickets on this board is dropped (TriggerLoopService gate) and backlog promotion short-circuits; humans can still read/comment/drag. false clears paused_at to resume dispatch. Mirrors REST POST /api/boards/:id/pause|resume so the awb-mcp agent driver can engage the gate. Omit to leave the pause state untouched.'),
     },
-    async ({ board_id, name, description, routing_config, column_prompts, auto_archive_days, harness_config, effort_presets, language, environment_config }) => {
+    async ({ board_id, name, description, routing_config, column_prompts, auto_archive_days, harness_config, effort_presets, language, environment_config, paused }) => {
       const boardRepo = dataSource.getRepository(Board);
       const board = await boardRepo.findOne({ where: { id: board_id } });
       if (!board) return err('Board not found');
@@ -280,6 +282,13 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
       if (language !== undefined) {
         const trimmed = language == null ? null : String(language).trim();
         board.language = trimmed ? trimmed : null;
+      }
+      // Board-wide soft pause (mirrors REST /pause|/resume). true stamps
+      // paused_at=now so the TriggerLoopService gate drops every emission;
+      // false clears it back to null. Idempotent on repeat-true (refreshes
+      // the timestamp) just like the REST endpoint.
+      if (paused !== undefined) {
+        board.paused_at = paused ? new Date() : null;
       }
       // Harness override (ticket 7122600c). Args already passed the strict
       // HarnessConfigSchema, so storage is a straight serialize; empty

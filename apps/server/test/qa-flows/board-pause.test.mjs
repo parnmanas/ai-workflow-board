@@ -23,6 +23,7 @@ import {
   createUser,
 } from '../helpers/fixtures.mjs';
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
+import { McpClient } from '../helpers/mcp-client.mjs';
 
 process.env.PORT = process.env.QA_BOARD_PAUSE_PORT || '7820';
 
@@ -56,10 +57,26 @@ test('Paused board drops agent triggers; resume restores them', async (t) => {
   t.after(async () => { await assigneeAgent.stop(); });
   await new Promise((r) => setTimeout(r, 200));
 
-  step('Pause the board (set paused_at)');
+  // Drive pause/resume through the MCP `update_board {paused}` tool — the
+  // exact path the awb-mcp QA driver (qa-seed-scenarios board-pause-resume)
+  // uses. Earlier this tool had no `paused` param, so the scenario's pause
+  // calls were silent no-ops and the gate could never be engaged from an
+  // agent driver (ticket 3fbbd069). This proves the agent-facing path now
+  // sets/clears paused_at, not just a direct DB write.
+  const mcp = new McpClient({
+    baseUrl: `http://127.0.0.1:${port}`,
+    apiKey: trio.assignee.key.raw_key,
+    clientInfo: { name: 'pause-driver', version: '1.0.0' },
+  });
+  t.after(() => { void mcp.close().catch(() => {}); });
+
+  step('Pause the board via MCP update_board {paused:true}');
   const ds = app.get(getDataSourceToken());
   const boardRepo = ds.getRepository('Board');
-  await boardRepo.update({ id: board.id }, { paused_at: new Date() });
+  const pauseResult = await mcp.callTool('update_board', { board_id: board.id, paused: true });
+  assert.ok(!pauseResult?.isError, `update_board paused:true should succeed, got ${JSON.stringify(pauseResult)}`);
+  const pausedBoard = await boardRepo.findOne({ where: { id: board.id } });
+  assert.ok(pausedBoard?.paused_at != null, 'update_board {paused:true} must stamp paused_at');
 
   step('Emit comment.created — should be silently dropped');
   await app.get(ActivityService).logActivity({
@@ -91,8 +108,11 @@ test('Paused board drops agent triggers; resume restores them', async (t) => {
   });
   assert.ok(auditRows.length >= 1, 'expected at least one agent_trigger_dropped_board_paused audit row');
 
-  step('Resume the board (clear paused_at)');
-  await boardRepo.update({ id: board.id }, { paused_at: null });
+  step('Resume the board via MCP update_board {paused:false}');
+  const resumeResult = await mcp.callTool('update_board', { board_id: board.id, paused: false });
+  assert.ok(!resumeResult?.isError, `update_board paused:false should succeed, got ${JSON.stringify(resumeResult)}`);
+  const resumedBoard = await boardRepo.findOne({ where: { id: board.id } });
+  assert.equal(resumedBoard?.paused_at, null, 'update_board {paused:false} must clear paused_at');
 
   step('Re-emit comment.created — should now wake the assignee');
   await app.get(ActivityService).logActivity({
