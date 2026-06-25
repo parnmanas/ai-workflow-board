@@ -138,6 +138,17 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
     return () => document.removeEventListener('keydown', onKey);
   }, [lightboxImage]);
 
+  // 좁은 폭 detail 오버레이는 Esc 로 닫는다(lightbox 와 동일 패턴). 라이트박스가
+  // 떠 있으면 그쪽 Esc 가 우선이므로 오버레이 닫기는 건너뛴다.
+  useEffect(() => {
+    if (!isNarrow || !selectedId || lightboxImage) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setSelectedId(null);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [isNarrow, selectedId, lightboxImage]);
+
   const openResourceFile = (r: Resource) => {
     const mime = r.file_mimetype || '';
     // Treat as image when the mime says so, or when the user classified the
@@ -485,6 +496,10 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
 
   const detailPanel = selectedResource ? (
     <ResourceDetailPanel
+      // key=리소스 id: 선택이 바뀌면 패널을 remount 시켜 이전 리소스의 in-flight
+      // 브랜치 조회(git ls-remote 1~3s)가 늦게 resolve 되며 새 리소스 위에 stale
+      // 브랜치를 덮어쓰는 경쟁을 구조적으로 제거한다(unmount 후 setState 는 no-op).
+      key={selectedResource.id}
       resource={selectedResource}
       credentials={credentials}
       workspaceId={effectiveWorkspaceId}

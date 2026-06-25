@@ -100,16 +100,13 @@ export default function ResourceDetailPanel({
     }
   }, [isRepo, resource.id, workspaceId]);
 
-  // 선택이 바뀌면 탭/검색/브랜치 상태를 초기화하고 repository 면 재조회.
+  // 패널은 호출 측에서 resource.id 를 key 로 받아 선택 변경 시 remount 된다
+  // (ResourceManager). 따라서 탭/검색/브랜치 상태 초기화는 useState 초깃값으로
+  // 충분하고, 이전 리소스의 늦은 브랜치 조회가 새 리소스 위에 stale 데이터를
+  // 덮어쓰는 경쟁도 구조적으로 사라진다 — 여기선 마운트 시 1회만 조회한다.
   useEffect(() => {
-    setRepoTab('branches');
-    setBranchQuery('');
-    setBranches(null);
-    setBranchError(null);
-    if (resource.type === 'repository') {
-      loadBranches();
-    }
-  }, [resource.id, resource.type, loadBranches]);
+    if (isRepo) loadBranches();
+  }, [isRepo, loadBranches]);
 
   const copyUrl = async () => {
     if (!resource.url) return;
