@@ -56,6 +56,7 @@ import type {
   BenchmarkRunDetail,
   HarnessConfig,
   EffortPresetsConfig,
+  EnvironmentConfig,
   Comment,
   RepoRefs,
   RepoCommitSummary,
@@ -299,6 +300,9 @@ export const api = {
       // Per-board output language (i18n). Empty string / null clears the
       // override (agents fall back to their default, English).
       language?: string | null;
+      // Per-board environment setup (ticket 354d336b). null clears the board
+      // override. The server validates it (strict zod) and 400s a typo.
+      environment_config?: EnvironmentConfig | null;
     },
   ) =>
     request<any>(`/boards/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
