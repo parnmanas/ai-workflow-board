@@ -47,6 +47,8 @@ import type { ActionsService } from '../../actions/actions.service';
 import type { QaService } from '../../qa/qa.service';
 import type { QaRunService } from '../../qa/qa-run.service';
 import type { QaScheduleService } from '../../qa/qa-schedule.service';
+import type { SecurityProfileService } from '../../security/security-profile.service';
+import type { SecurityRunService } from '../../security/security-run.service';
 import { TicketPrerequisitesService } from '../../tickets/ticket-prerequisites.service';
 import { BenchmarkService } from '../../benchmarks/benchmark.service';
 
@@ -108,6 +110,13 @@ export interface ToolContext {
   // the qa-schedule MCP tools (CRUD + run-now). Standalone context omits it; the
   // tools degrade to an explicit error (no background tick in standalone mode).
   qaScheduleService?: QaScheduleService;
+  // Security-inspection feature (SecurityProfile/SecurityRun). Required by the
+  // security-tools MCP tools. `securityProfileService` handles profile CRUD;
+  // `securityRunService` is required for start_security_run + record/complete
+  // since those touch the chat-room dispatch + run lifecycle. Standalone context
+  // omits both — the tools degrade to an explicit error.
+  securityProfileService?: SecurityProfileService;
+  securityRunService?: SecurityRunService;
   // Ticket a57517be: `unpend_ticket` tool needs to wake the ticket's current
   // column's role-holders right after clearing `pending_user_action` (the
   // `field_changed='pending_user_action'` activity row by itself does not

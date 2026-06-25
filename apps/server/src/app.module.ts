@@ -16,6 +16,7 @@ import { ActivityModule } from './modules/activity/activity.module';
 import { AgentApiModule } from './modules/agent-api/agent-api.module';
 import { QaModule } from './modules/qa/qa.module';
 import { QaScenarioModule } from './modules/qa/qa-scenario.module';
+import { SecurityProfileModule } from './modules/security/security-profile.module';
 import { HealthModule } from './modules/health/health.module';
 import { McpModule } from './modules/mcp/mcp.module';
 import { AdminModule } from './modules/admin/admin.module';
@@ -75,6 +76,7 @@ import { BenchmarksModule } from './modules/benchmarks/benchmarks.module';
     AgentApiModule,
     QaModule,
     QaScenarioModule,
+    SecurityProfileModule,
     HealthModule,
     McpModule,
     AdminModule,
