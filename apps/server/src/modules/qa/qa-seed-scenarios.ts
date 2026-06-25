@@ -234,17 +234,29 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
     name: 'Board pause / resume gate',
     description:
       'A paused board (paused_at set) silently drops every agent_trigger; clearing paused_at restores '
-      + 'dispatch. Mirrors board-pause.test.mjs.',
+      + 'dispatch. The probe is assigned to a freshly-created INERT sink agent (created in step 0, no '
+      + 'manager attached) — NOT the QA driver agent itself. Two trigger-loop guards sit BEFORE the '
+      + 'pause gate and would otherwise confound the differential: (1) the self-trigger guard skips a '
+      + 'comment trigger when commenter == assignee, and the QA driver IS the scenario target agent, so '
+      + 'a self-assigned probe never emits a comment trigger regardless of pause; (2) a routed-column '
+      + 'self-assignee probe gets create-dispatched, claimed and pended, which independently suppresses '
+      + 'later comment triggers. A fresh inert sink dodges both: the comment targets a non-self holder '
+      + '(self-guard passes) and nothing consumes the emit (no claim/pend), and because the sink owns '
+      + 'exactly one ticket the focus selector always picks the probe. Pause is engaged BEFORE the probe '
+      + 'is created so create-dispatch is gated too. Asserted via ActivityLog: '
+      + 'agent_trigger_dropped_board_paused while paused vs trigger_emitted (trigger_source=comment) '
+      + 'after resume. Mirrors board-pause.test.mjs.',
     qa_driver: AWB_MCP_DRIVER,
     qa_driver_config: driverConfig(),
     tags: ['boards', 'pause', 'triggers'],
     steps: [
-      step(0, 'Create an In-Progress ticket assigned to the QA agent', 'Ticket exists in In Progress', 'create_ticket', { workspace_id: '{{workspace_id}}', column_id: '{{in_progress_column_id}}', title: 'QA pause probe', assignee_id: '{{assignee_agent_id}}' }),
-      step(1, 'Pause the board', 'update_board sets paused_at', 'update_board', { board_id: '{{board_id}}', paused: true }),
-      step(2, 'Post a comment while paused', 'NO agent_trigger emitted (gate drops it) — verify via recent activity', 'add_comment', { ticket_id: '{{ticket_id}}', content: 'QA: comment while paused', type: 'note' }),
-      step(3, 'Resume the board', 'update_board clears paused_at', 'update_board', { board_id: '{{board_id}}', paused: false }),
-      step(4, 'Post another comment', 'Assignee now receives the trigger again', 'add_comment', { ticket_id: '{{ticket_id}}', content: 'QA: comment after resume', type: 'note' }),
-      step(5, 'Inspect recent activity', 'Trigger present after resume, absent while paused', 'get_recent_activity', { workspace_id: '{{workspace_id}}' }),
+      step(0, 'Create a fresh INERT sink agent (no manager → its triggers emit as ActivityLog rows but are never consumed by a subagent) and capture its id as {{sink_agent_id}}', 'Agent created; its id is used as the probe assignee so the comment trigger targets a non-self holder (clears the self-trigger guard) and nothing claims/pends the probe', 'create_agent', { name: 'QA pause sink (inert)', type: 'custom', description: 'Throwaway inert assignee for the board pause/resume QA probe. No manager attached, so emitted triggers leave an ActivityLog row but spawn no subagent.' }),
+      step(1, 'Pause the board', 'update_board sets paused_at; re-read with get_board and confirm paused_at != null', 'update_board', { board_id: '{{board_id}}', paused: true }),
+      step(2, 'Create the probe ticket in In Progress assigned to the inert sink, and capture its id as {{ticket_id}}', 'Ticket exists in In Progress assigned to {{sink_agent_id}}; because the board is paused, create-dispatch is gated so NO trigger_emitted appears for this ticket', 'create_ticket', { workspace_id: '{{workspace_id}}', column_id: '{{in_progress_column_id}}', title: 'QA pause probe', assignee_id: '{{sink_agent_id}}' }),
+      step(3, 'Post a comment while paused', 'Gate drops it: NO trigger_emitted for the probe; an agent_trigger_dropped_board_paused ActivityLog row is written instead (commenter != assignee, so only the pause gate suppresses the trigger)', 'add_comment', { ticket_id: '{{ticket_id}}', content: 'QA: comment while paused', type: 'note' }),
+      step(4, 'Resume the board', 'update_board clears paused_at; re-read with get_board and confirm paused_at == null', 'update_board', { board_id: '{{board_id}}', paused: false }),
+      step(5, 'Post another comment after resume', 'Assignee (the inert sink) now receives a comment trigger: a trigger_emitted ActivityLog row with trigger_source=comment is written for the probe', 'add_comment', { ticket_id: '{{ticket_id}}', content: 'QA: comment after resume', type: 'note' }),
+      step(6, 'Inspect recent activity', 'Differential holds for the probe ticket: a comment-sourced trigger_emitted row exists AFTER resume but NONE while paused; the while-paused comment produced an agent_trigger_dropped_board_paused row', 'get_recent_activity', { limit: 200 }),
     ],
   },
 
@@ -420,11 +432,17 @@ export interface BuildScenarioOptions {
  * QA→fix→QA closed loop (ticket 467dbc7a): `rerun_on_fix` is ON so a seeded
  * scenario's fix ticket reaching Done deterministically re-runs the scenario,
  * capped at `max_rerun_attempts` reruns before it halts for human review.
- * `rerun_delay_seconds` defaults to 0 (immediate) — ⚠️ the seed scenarios hit
- * the RUNNING server, which auto-deploys main→production.private only AFTER the
- * fix merges, so an immediate rerun can validate the pre-fix code. Operators on
- * a "Done = merged but not-yet-deployed" flow should raise rerun_delay_seconds
- * to their typical deploy lag (re-seed to apply). See docs/qa-rerun-on-fix.md.
+ * `rerun_delay_seconds` is a deploy-lag buffer — ⚠️ the seed scenarios hit the
+ * RUNNING server, which auto-deploys main→production.private only AFTER the fix
+ * merges, so an immediate (0s) rerun can validate the pre-fix code. This is a
+ * real, repeated failure mode: e.g. the board-pause scenario filed a fix ticket
+ * whose rerun fired the instant the fix merged but seconds before the deploy
+ * propagated, re-failing against the pre-fix build (a false negative). We default
+ * to a non-zero buffer so the common case (deploy lands within a few minutes)
+ * heals on its own; operators with a slower pipeline should raise it further to
+ * their typical deploy lag (re-seed to apply). Note the timer is best-effort and
+ * in-process (setTimeout), so a server restart cancels a pending rerun — keep
+ * the buffer modest. See docs/qa-rerun-on-fix.md.
  */
 export const DEFAULT_SEED_ON_FAILURE_TICKET: QaOnFailureTicketConfig = {
   enabled: true,
@@ -433,7 +451,10 @@ export const DEFAULT_SEED_ON_FAILURE_TICKET: QaOnFailureTicketConfig = {
   labels: ['qa-failure', 'auto'],
   rerun_on_fix: true,
   max_rerun_attempts: 3,
-  rerun_delay_seconds: 0,
+  // 10-minute deploy-lag buffer (was 0). Covers the common main→prod auto-deploy
+  // window so a fix-ticket→Done rerun validates the deployed build, not the
+  // pre-fix one. See the deploy-lag note above.
+  rerun_delay_seconds: 600,
 };
 
 /** Tag a scenario carries so re-seeds can find their prior row by stable key. */
