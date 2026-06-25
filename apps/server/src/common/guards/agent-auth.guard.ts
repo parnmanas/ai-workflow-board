@@ -8,8 +8,15 @@ export class AgentAuthGuard implements CanActivate {
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest();
 
-    // Dev mode: skip validation entirely, no workspace scoping
-    if (!process.env.AGENT_API_KEY && process.env.AGENT_DEV_MODE === 'true') {
+    // Dev mode: skip validation entirely, no workspace scoping.
+    // HARD-gated behind NODE_ENV !== 'production' — a stray AGENT_DEV_MODE flag
+    // on a prod deploy must never open every /api/agent/* endpoint
+    // unauthenticated (security finding: authz).
+    if (
+      process.env.NODE_ENV !== 'production' &&
+      !process.env.AGENT_API_KEY &&
+      process.env.AGENT_DEV_MODE === 'true'
+    ) {
       request.currentWorkspaceId = null;
       return true;
     }
