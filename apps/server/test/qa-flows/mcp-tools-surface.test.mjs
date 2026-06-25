@@ -61,6 +61,13 @@ const EXPECTED_TOOLS = [
   // Ticket daf06262 — sequential multi-scenario batch runs.
   'start_qa_batch',
   'get_qa_batch',
+  // Ticket b6bb7efd — QA scheduler (automatic batch trigger layer).
+  'list_qa_schedules',
+  'get_qa_schedule',
+  'create_qa_schedule',
+  'update_qa_schedule',
+  'delete_qa_schedule',
+  'run_qa_schedule_now',
 ];
 
 test('MCP initialize + tools/list returns expected AWB tool surface', async (t) => {
