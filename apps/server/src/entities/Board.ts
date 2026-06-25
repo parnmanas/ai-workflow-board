@@ -50,6 +50,20 @@ export class Board {
   @Column({ type: 'text', nullable: true, default: null })
   effort_presets: string | null;
 
+  // Per-board environment setup override (ticket 354d336b). JSON text of
+  // EnvironmentConfig (see common/environment-config.ts): { repositories?,
+  // env_vars?, setup_commands?, setup_timeout_seconds?, version? }. Resolved
+  // against the workspace-level default via mergeEnvironmentConfig — board
+  // keys override per top-level key, unset keys inherit. At dispatch
+  // TriggerLoopService expands each repository's resource_id into a concrete
+  // url/branch and ships the resolved config on the agent_trigger SSE payload;
+  // agent-manager provisions the environment (clone/update repos, run setup
+  // commands, inject env_vars, fingerprint marker) just before spawning the
+  // subagent. null = no override (and with the workspace also null, dispatch
+  // behaves exactly as before — no provisioning step).
+  @Column({ type: 'text', nullable: true, default: null })
+  environment_config: string | null;
+
   // Per-board output language (i18n, ticket ae28dcaf). A human-readable
   // language name (e.g. "Korean", "English", "日本語") that rides the existing
   // harness plumbing: at dispatch TriggerLoopService appends a "Respond in

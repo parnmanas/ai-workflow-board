@@ -78,6 +78,14 @@ export class Workspace {
   @Column({ type: 'text', nullable: true, default: null })
   harness_config: string | null;
 
+  // Workspace-wide default environment setup (ticket 354d336b). Same JSON shape
+  // as Board.environment_config; boards override it per top-level key via
+  // mergeEnvironmentConfig (common/environment-config.ts). null = no default —
+  // boards without their own environment_config keep the current dispatch
+  // behaviour (no provisioning step).
+  @Column({ type: 'text', nullable: true, default: null })
+  environment_config: string | null;
+
   // ─────────────────────────────────────────────────────────────────────
   // Claim-verification (ticket dcb9d661): detect assignees who post an
   // "I'm done" comment in an active column without actually pushing a

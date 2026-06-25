@@ -21,6 +21,7 @@ import { TicketPrerequisitesService } from '../tickets/ticket-prerequisites.serv
 import { priorityIndex } from './priority';
 import { appendBoardLanguageInstruction, resolveHarnessConfig, HarnessConfig } from '../../common/harness-config';
 import { resolveEffortPreset, ResolvedEffortPreset } from '../../common/effort-presets';
+import { mergeEnvironmentConfig, resolveEnvironmentConfig, ResolvedEnvironmentConfig } from '../../common/environment-config';
 
 // Sentinel actor written onto auto-advance `moved` activities. Deliberately
 // non-'system' so the trigger loop re-enters and processes the destination
@@ -1577,6 +1578,16 @@ candidate's branch or move the ticket.
     // treats null as "no effort override" and spawns exactly as before. Reuses
     // the same Board row loaded for harness so there's no extra round-trip.
     let effortPreset: ResolvedEffortPreset | null = null;
+    // Resolved environment setup (ticket 354d336b): workspace default merged
+    // with the board override (key-level), then each repository's resource_id
+    // expanded to a concrete url/branch via a workspace-scoped Resource lookup.
+    // Shipped on the trigger payload so agent-manager provisions the working
+    // environment (clone/update repos, run setup commands, inject env_vars)
+    // just before spawning the subagent. Null when neither layer configures an
+    // environment OR the lookup fails — the manager treats null as "no
+    // provisioning" and spawns exactly as before. Reuses the same board/
+    // workspace rows loaded for harness so there's no extra round-trip.
+    let environmentConfig: ResolvedEnvironmentConfig | null = null;
     try {
       const boardForHarness = boardId
         ? await this.dataSource.getRepository(Board).findOne({ where: { id: boardId } })
@@ -1590,6 +1601,35 @@ candidate's branch or move the ticket.
       );
       effortPreset = resolveEffortPreset(boardForHarness?.effort_presets, ticket.effort_preset);
 
+      // Merge workspace default ⊕ board override, then expand repository
+      // resource_ids into concrete url/default_branch. Batch-fetch the
+      // referenced repository Resources once (workspace-scoped — a stale id
+      // pointing at another workspace's Resource never gets its url shipped),
+      // build a lookup map, and resolve. A repository whose id can't be
+      // resolved AND has no direct url is dropped inside resolveEnvironmentConfig.
+      const mergedEnv = mergeEnvironmentConfig(
+        workspaceForHarness?.environment_config,
+        boardForHarness?.environment_config,
+      );
+      if (mergedEnv) {
+        const resourceIds = (mergedEnv.repositories || [])
+          .map((r) => (r.resource_id || '').trim())
+          .filter((id) => id.length > 0);
+        const repoMap = new Map<string, { url: string; default_branch: string }>();
+        if (resourceIds.length > 0 && ticket.workspace_id) {
+          const rows = await this.dataSource.getRepository(Resource).find({
+            where: resourceIds.map((rid) => ({ id: rid, workspace_id: ticket.workspace_id })),
+          });
+          for (const r of rows) {
+            repoMap.set(r.id, { url: r.url || '', default_branch: r.default_branch || '' });
+          }
+        }
+        environmentConfig = resolveEnvironmentConfig(
+          mergedEnv,
+          (rid) => repoMap.get(rid) || null,
+        );
+      }
+
       // Board output language (i18n, ticket ae28dcaf). When the board sets a
       // language, append a "Respond in <language>…" instruction onto the
       // resolved harness_config.system_prompt_append — riding the existing
@@ -1600,7 +1640,7 @@ candidate's branch or move the ticket.
       // null/empty language = no override → agent default (English), unchanged.
       harnessConfig = appendBoardLanguageInstruction(harnessConfig, boardForHarness?.language);
     } catch (e) {
-      this.logService.warn('MCP', 'harness_config / effort_preset resolve failed (continuing without)', {
+      this.logService.warn('MCP', 'harness_config / effort_preset / environment_config resolve failed (continuing without)', {
         err: String(e), ticket_id: ticket.id, board_id: boardId,
       });
     }
@@ -1648,6 +1688,12 @@ candidate's branch or move the ticket.
       // "ultracode" prompt keyword + --model; codex/antigravity model-only).
       // Null = no effort override.
       effort_preset: effortPreset,
+      // Resolved environment setup (ticket 354d336b): merged workspace+board
+      // config with repository resource_ids expanded to concrete url/branch.
+      // agent-manager provisions the working environment before spawn (clone/
+      // update repos, run setup commands, inject env_vars), guarded by a
+      // per-(agent,board) fingerprint marker. Null = no provisioning.
+      environment_config: environmentConfig,
       triggered_by: triggeredBy,
       timestamp: now.toISOString(),
       force_respawn: forceRespawn,

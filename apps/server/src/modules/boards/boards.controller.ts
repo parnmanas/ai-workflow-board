@@ -25,6 +25,7 @@ import { AgentWorkloadService } from '../agents/agent-workload.service';
 import { resolveAgentDisplayMap } from '../../utils/agent-name';
 import { validateHarnessConfigInput, serializeHarnessConfig } from '../../common/harness-config';
 import { validateEffortPresetsInput, serializeEffortPresets } from '../../common/effort-presets';
+import { validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../../common/environment-config';
 
 // Narrow projection of a Comment as it ships on a board card. The board GET
 // only needs enough to render the comment count and the stale-open-question
@@ -421,7 +422,7 @@ export class BoardsController {
   async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     const board = await findOrFail(this.boardRepo, { where: { id } }, 'Board not found');
 
-    const { name, description, routing_config, column_prompts, max_concurrent_tickets_per_agent, self_improvement_mode, benchmark_mode, auto_archive_days, harness_config, effort_presets, language } = body;
+    const { name, description, routing_config, column_prompts, max_concurrent_tickets_per_agent, self_improvement_mode, benchmark_mode, auto_archive_days, harness_config, effort_presets, language, environment_config } = body;
     if (name !== undefined) board.name = name;
     if (description !== undefined) board.description = description;
     // Board output language (i18n, ticket ae28dcaf). Human-readable name that
@@ -511,6 +512,20 @@ export class BoardsController {
           });
         }
         board.auto_archive_days = n;
+      }
+    }
+
+    // Per-board environment setup override (ticket 354d336b). null clears the
+    // board override; an object is zod-validated (strict keys + each repository
+    // needs a resource_id or url) so a typo'd field 400s instead of being
+    // silently stored. Empty configs collapse to null via the serializer.
+    if (environment_config !== undefined) {
+      if (environment_config === null) {
+        board.environment_config = null;
+      } else {
+        const checked = validateEnvironmentConfigInput(environment_config);
+        if (!checked.ok) return res.status(400).json({ error: checked.error });
+        board.environment_config = serializeEnvironmentConfig(checked.value);
       }
     }
 
