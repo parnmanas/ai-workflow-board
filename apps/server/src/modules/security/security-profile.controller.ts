@@ -79,6 +79,28 @@ export class SecurityProfileController {
     }
   }
 
+  // Dispatch a "refresh the checklist with the latest security info" task to the
+  // profile's target agent. The agent WebSearches current OWASP/stack-CVE/Node
+  // guidance and writes it back via update_security_profile. No SecurityRun row.
+  @Post('profiles/:id/refresh-checklist')
+  async refreshChecklist(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
+    try {
+      const user = (req as any).currentUser as { id: string } | undefined;
+      const result = await this.runService.startChecklistRefresh({
+        profileId: id,
+        triggeredByType: 'user',
+        triggeredById: user?.id || '',
+      });
+      return res.status(201).json({
+        profile_id: result.profile_id,
+        room_id: result.room_id,
+        prompt: result.prompt,
+      });
+    } catch (e: any) {
+      return res.status(e?.status || 400).json({ error: e?.message || 'Failed to start checklist refresh' });
+    }
+  }
+
   // ── Runs ──────────────────────────────────────────────────────────────────
 
   // Start (or re-run) a profile. Re-run is the same call → a fresh SecurityRun.

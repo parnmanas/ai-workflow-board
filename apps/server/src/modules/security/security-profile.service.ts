@@ -16,9 +16,16 @@ function makeError(status: number, message: string): Error & { status: number } 
 
 const VALID_SEVERITY_HINTS = ['critical', 'high', 'medium', 'low', 'info'];
 
-/** Normalize the loose `checklist` input into a clean array. */
+/**
+ * Normalize the loose `checklist` input into a clean array. `source` (evidence
+ * link / CVE-GHSA id) and `added_at` (freshness stamp) are carried through —
+ * `added_at` is preserved when the caller supplies it (so re-saving an existing
+ * checklist doesn't reset the freshness of older items) and stamped to "now"
+ * when missing (newly refreshed / seeded items get a real entry time).
+ */
 function normalizeChecklist(checklist: any): SecurityChecklistItem[] {
   if (!Array.isArray(checklist)) return [];
+  const now = new Date().toISOString();
   return checklist.map((c, i) => {
     const item: SecurityChecklistItem = {
       id: c?.id ? String(c.id) : `item-${i}`,
@@ -27,6 +34,8 @@ function normalizeChecklist(checklist: any): SecurityChecklistItem[] {
     if (c?.category != null) item.category = String(c.category);
     if (VALID_SEVERITY_HINTS.includes(c?.severity_hint)) item.severity_hint = c.severity_hint;
     if (c?.guidance != null) item.guidance = String(c.guidance);
+    if (c?.source != null && String(c.source).trim()) item.source = String(c.source).trim();
+    item.added_at = c?.added_at != null && String(c.added_at).trim() ? String(c.added_at).trim() : now;
     return item;
   });
 }

@@ -12,7 +12,7 @@
  * Tools:
  *   Profiles: create_security_profile / update_security_profile /
  *             list_security_profiles / get_security_profile /
- *             delete_security_profile
+ *             delete_security_profile / refresh_security_checklist
  *   Runs:     start_security_run / record_security_finding /
  *             attach_security_artifact / complete_security_run
  *   Reads:    list_security_runs / get_security_run
@@ -79,6 +79,8 @@ const checklistItemSchema = z.object({
   category: z.string().optional().describe('Grouping label, e.g. authz / input-validation / secrets / crypto'),
   severity_hint: severityEnum.optional().describe('Advisory worst-case severity for this item'),
   guidance: z.string().optional().describe('How to check this item'),
+  source: z.string().optional().describe('Evidence link backing the item — an OWASP/CWE URL, a CVE/GHSA id, or an advisory URL'),
+  added_at: z.string().optional().describe('ISO-8601 time the item entered the checklist (server stamps it when omitted)'),
 });
 
 const findingSchema = z.object({
@@ -253,6 +255,31 @@ export function registerSecurityTools(server: McpServer, ctx: ToolContext): void
         return ok({ run_id: result.run.id, room_id: result.room_id, prompt: result.prompt });
       } catch (e: any) {
         return err(e?.message || 'Failed to start security run');
+      }
+    },
+  );
+
+  server.tool(
+    'refresh_security_checklist',
+    'Refresh a security profile\'s checklist with the LATEST security knowledge. Dispatches a task ' +
+    'to the profile\'s target agent (in a fresh ChatRoom) instructing it to WebSearch/WebFetch the ' +
+    'current OWASP Top 10, recent CVE/GHSA advisories for this stack (read from package.json), and ' +
+    'Node/Express security guidance, then fold the result back into the checklist via ' +
+    'update_security_profile — each item carrying a `source` link. This is NOT a SecurityRun (it ' +
+    'updates the checklist, not findings). Returns room_id + the dispatched prompt.',
+    { profile_id: z.string().describe('SecurityProfile ID whose checklist to refresh') },
+    async ({ profile_id }, extra: { sessionId?: string }) => {
+      if (!securityRunService) return err('security run service unavailable in this MCP context');
+      const caller = getCallerAgent(extra);
+      try {
+        const result = await securityRunService.startChecklistRefresh({
+          profileId: profile_id,
+          triggeredByType: caller?.agentId ? 'agent' : 'system',
+          triggeredById: caller?.agentId ?? '',
+        });
+        return ok({ profile_id: result.profile_id, room_id: result.room_id, prompt: result.prompt });
+      } catch (e: any) {
+        return err(e?.message || 'Failed to refresh security checklist');
       }
     },
   );

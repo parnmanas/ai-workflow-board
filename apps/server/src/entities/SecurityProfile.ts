@@ -113,6 +113,22 @@ export interface SecurityChecklistItem {
   severity_hint?: SecuritySeverity;
   /** Free-text guidance on how to check this item. */
   guidance?: string;
+  /**
+   * Evidence link backing the item — an OWASP/CWE reference URL, a CVE/GHSA id,
+   * or an advisory URL. Populated by the `refresh_security_checklist` flow (the
+   * agent WebSearches current guidance and stamps the source it pulled the item
+   * from) and by the curated baseline seed. Free-text so either a bare id
+   * (`CVE-2024-1234`, `GHSA-xxxx`) or a full URL is acceptable.
+   */
+  source?: string;
+  /**
+   * ISO-8601 timestamp of when this item entered the checklist. Stamped server
+   * side at normalize time when omitted (preserved if the caller supplied one),
+   * so the freshness of a security checklist is always answerable — newly
+   * refreshed items carry a recent `added_at`, curated baseline items their seed
+   * time.
+   */
+  added_at?: string;
 }
 
 export type SecuritySeverity = 'critical' | 'high' | 'medium' | 'low' | 'info';

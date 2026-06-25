@@ -12,7 +12,7 @@ import { Agent } from '../../entities/Agent';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { LogService } from '../../services/log.service';
 import { findOrFail } from '../../common/find-or-fail';
-import { renderSecurityRunPrompt } from './security-prompt';
+import { renderSecurityRunPrompt, renderChecklistRefreshPrompt } from './security-prompt';
 
 function makeError(status: number, message: string): Error & { status: number } {
   const err = new Error(message) as Error & { status: number };
@@ -46,6 +46,18 @@ export interface StartSecurityRunArgs {
 
 export interface StartSecurityRunResult {
   run: SecurityRun;
+  room_id: string;
+  prompt: string;
+}
+
+export interface RefreshChecklistArgs {
+  profileId: string;
+  triggeredByType: 'user' | 'system' | 'agent';
+  triggeredById: string;
+}
+
+export interface RefreshChecklistResult {
+  profile_id: string;
   room_id: string;
   prompt: string;
 }
@@ -193,6 +205,69 @@ export class SecurityRunService {
 
     this.logService.info('Security', `started security run ${runId} profile ${profile.id} scope=${scopeUsed} baseline=${baselineCommit ?? '(none)'} → agent ${agent.id} room ${room.id}`);
     return { run, room_id: room.id, prompt };
+  }
+
+  // ── Checklist refresh ───────────────────────────────────────────────────────
+
+  /**
+   * Dispatch a "refresh the checklist with the latest security info" task to the
+   * profile's target agent. Deliberately NOT a SecurityRun: a refresh produces an
+   * updated `checklist`, not `findings`, so stacking it as a run would pollute the
+   * pass/fail run history (and confuse the incremental baseline). It reuses only
+   * the ChatRoom dispatch half of startRun — create a room, add the agent (+ a
+   * synthetic 'system' sender), post the refresh prompt. The agent then folds the
+   * WebSearched guidance back in via the existing `update_security_profile` tool.
+   */
+  async startChecklistRefresh(args: RefreshChecklistArgs): Promise<RefreshChecklistResult> {
+    const profile = await findOrFail(this.profileRepo, { where: { id: args.profileId } }, 'security profile not found');
+    if (!profile.target_agent_id) throw makeError(400, 'security profile has no target agent set');
+    if (profile.enabled === false) throw makeError(400, 'security profile is disabled');
+
+    const agent = await this.agentRepo.findOne({ where: { id: profile.target_agent_id } });
+    if (!agent) throw makeError(400, 'target agent not found');
+
+    const room = await this.roomRepo.save(this.roomRepo.create({
+      workspace_id: profile.workspace_id,
+      type: 'group',
+      name: `Security checklist refresh: ${profile.name}`,
+      last_message_at: null,
+    }));
+
+    const prompt = renderChecklistRefreshPrompt(profile);
+
+    const joinedAt = new Date();
+    await this.participantRepo.save([
+      this.participantRepo.create({
+        room_id: room.id,
+        participant_type: 'agent',
+        participant_id: agent.id,
+        last_read_at: joinedAt,
+        left_at: null,
+      }),
+      this.participantRepo.create({
+        room_id: room.id,
+        participant_type: 'user',
+        participant_id: 'system',
+        last_read_at: joinedAt,
+        left_at: null,
+      }),
+    ]);
+
+    try {
+      await this.messaging.sendMessage(
+        room.id,
+        profile.workspace_id,
+        'user',
+        'system',
+        'Security',
+        prompt,
+      );
+    } catch (e: any) {
+      this.logService.warn('Security', `sendMessage failed for checklist refresh of profile ${profile.id}: ${e?.message || e}`);
+    }
+
+    this.logService.info('Security', `dispatched checklist refresh for profile ${profile.id} → agent ${agent.id} room ${room.id}`);
+    return { profile_id: profile.id, room_id: room.id, prompt };
   }
 
   // ── Finding accumulation ────────────────────────────────────────────────────

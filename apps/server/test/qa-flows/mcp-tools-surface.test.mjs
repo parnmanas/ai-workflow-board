@@ -74,6 +74,7 @@ const EXPECTED_TOOLS = [
   'create_security_profile',
   'update_security_profile',
   'delete_security_profile',
+  'refresh_security_checklist',
   'start_security_run',
   'record_security_finding',
   'attach_security_artifact',
