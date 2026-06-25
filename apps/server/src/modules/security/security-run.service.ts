@@ -294,6 +294,41 @@ export class SecurityRunService {
     return { profile_id: profile.id, room_id: room.id, prompt };
   }
 
+  /**
+   * Dispatch a checklist refresh to EVERY profile resolved from the given scope —
+   * the checklist-refresh analogue of startBatch. Profile resolution is identical
+   * to startBatch (`_resolveBatchProfileIds`): an explicit `profileIds` list
+   * filtered to enabled profiles, or every enabled profile in scope when
+   * `all:true` (resolved at dispatch time, so profile add/remove is reflected
+   * automatically — no id snapshot).
+   *
+   * Unlike a scan batch this needs NO sequential orchestration: a refresh creates
+   * no SecurityRun, so there is nothing to overlap — every profile's refresh is
+   * dispatched independently in one pass. A single profile failing (deleted /
+   * disabled / no target agent at dispatch) is logged and skipped so it can't
+   * abort the rest. Used by the checklist_refresh schedule kind (tick + run-now).
+   */
+  async refreshChecklistsForScope(args: StartSecurityBatchArgs): Promise<RefreshChecklistResult[]> {
+    if (!args.workspaceId) throw makeError(400, 'workspace_id is required');
+    const profileIds = await this._resolveBatchProfileIds(args);
+    if (profileIds.length === 0) {
+      throw makeError(400, 'no runnable profiles for this checklist refresh (none selected, or none enabled in scope)');
+    }
+    const results: RefreshChecklistResult[] = [];
+    for (const id of profileIds) {
+      try {
+        results.push(await this.startChecklistRefresh({
+          profileId: id,
+          triggeredByType: args.triggeredByType,
+          triggeredById: args.triggeredById,
+        }));
+      } catch (e: any) {
+        this.logService.warn('Security', `checklist refresh dispatch for profile ${id} failed (continuing): ${e?.message || e}`);
+      }
+    }
+    return results;
+  }
+
   // ── Finding accumulation ────────────────────────────────────────────────────
 
   /** Record (upsert by finding id) one or more findings on a running run. */

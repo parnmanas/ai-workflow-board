@@ -18,6 +18,7 @@ import { DEFAULT_PROMPT_TEMPLATES } from '../../../database/default-prompt-templ
 import { PromptTemplate } from '../../../entities/PromptTemplate';
 import { ok, err } from '../shared/helpers';
 import { HarnessConfigSchema, serializeHarnessConfig } from '../../../common/harness-config';
+import { EnvironmentConfigSchema, validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../../../common/environment-config';
 import { writeRoutingConfigThrough } from '../../boards/routing-config.helper';
 import type { ToolContext } from './context';
 
@@ -161,8 +162,10 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
         .describe('Grace window in ms before the claim-verification sweep auto-pends an idle assignee claim. Default 600000 (10 min).'),
       harness_config: HarnessConfigSchema.nullable().optional()
         .describe('Workspace-wide default agent harness: { system_prompt_append?, allowed_tools?, disallowed_tools?, model?, permission_mode? }. Boards override it per key via their own harness_config. Pass null to clear.'),
+      environment_config: EnvironmentConfigSchema.nullable().optional()
+        .describe('Workspace-wide default environment setup: { repositories?, env_vars?, setup_commands?, setup_timeout_seconds?, version? }. Boards override it per top-level key via their own environment_config. Pass null to clear.'),
     },
-    async ({ workspace_id, name, description, supervisor_stale_ms, supervisor_resend_ms, dispatch_queue_depth, claim_verification_enabled, claim_verification_grace_ms, harness_config }) => {
+    async ({ workspace_id, name, description, supervisor_stale_ms, supervisor_resend_ms, dispatch_queue_depth, claim_verification_enabled, claim_verification_grace_ms, harness_config, environment_config }) => {
       const wsRepo = dataSource.getRepository(Workspace);
       const ws = await wsRepo.findOne({ where: { id: workspace_id } });
       if (!ws) return err('Workspace not found');
@@ -180,6 +183,18 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
       // Default harness (ticket 7122600c) — strict-validated by the arg
       // schema; empty objects collapse to null via the serializer.
       if (harness_config !== undefined) ws.harness_config = serializeHarnessConfig(harness_config);
+      // Default environment setup (ticket 354d336b) — strict-validated by the
+      // arg schema; re-run the validator for the cross-field repository
+      // invariant, then serialize (empty configs collapse to null).
+      if (environment_config !== undefined) {
+        if (environment_config === null) {
+          ws.environment_config = null;
+        } else {
+          const checked = validateEnvironmentConfigInput(environment_config);
+          if (!checked.ok) return err(checked.error);
+          ws.environment_config = serializeEnvironmentConfig(checked.value);
+        }
+      }
 
       await wsRepo.save(ws);
       return ok(ws);

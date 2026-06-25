@@ -1,11 +1,11 @@
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, LessThanOrEqual, Repository } from 'typeorm';
-import { SecuritySchedule, SecurityScheduleScope } from '../../entities/SecuritySchedule';
+import { SecuritySchedule, SecurityScheduleScope, SecurityScheduleKind, normalizeScheduleKind } from '../../entities/SecuritySchedule';
 import { SecurityRunBatch } from '../../entities/SecurityRunBatch';
 import { LogService } from '../../services/log.service';
 import { findOrFail } from '../../common/find-or-fail';
-import { SecurityRunService } from './security-run.service';
+import { SecurityRunService, RefreshChecklistResult } from './security-run.service';
 // qa-cron is a generic, feature-agnostic 5-field cron evaluator (UTC). Reused
 // here verbatim rather than duplicated — adding a dependency would mean a full
 // package-lock regen (known footgun), and a second copy would just drift.
@@ -33,6 +33,7 @@ export interface CreateSecurityScheduleInput {
   workspaceId: string;
   boardId?: string | null;
   name: string;
+  kind?: SecurityScheduleKind;
   scope?: SecurityScheduleScope;
   profileIds?: string[] | null;
   cron?: string | null;
@@ -44,6 +45,18 @@ export interface CreateSecurityScheduleInput {
 }
 
 export type UpdateSecurityScheduleInput = Partial<Omit<CreateSecurityScheduleInput, 'workspaceId' | 'createdBy'>>;
+
+/**
+ * Result of a manual run-now. Discriminated by `kind`: a 'scan' schedule kicks a
+ * SecurityRunBatch (`batch` set, `refreshes` null); a 'checklist_refresh' schedule
+ * dispatches a refresh per in-scope profile (`refreshes` set, `batch` null).
+ */
+export interface RunSecurityScheduleNowResult {
+  schedule: SecuritySchedule;
+  kind: SecurityScheduleKind;
+  batch: SecurityRunBatch | null;
+  refreshes: RefreshChecklistResult[] | null;
+}
 
 /**
  * SecurityScheduleService — automatic trigger layer over the sequential security
@@ -140,6 +153,7 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
     if (!input.workspaceId) throw makeError(400, 'workspace_id is required');
     if (!input.name || !input.name.trim()) throw makeError(400, 'name is required');
 
+    const kind = normalizeScheduleKind(input.kind);
     const scope: SecurityScheduleScope = input.scope === 'selected' ? 'selected' : 'all';
     const profileIds = this._validateScope(scope, input.profileIds);
     const { cron, intervalMs } = this._validateCadence(input.cron, input.intervalMs);
@@ -149,6 +163,7 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
       workspace_id: input.workspaceId,
       board_id: input.boardId ?? null,
       name: input.name.trim(),
+      kind,
       scope,
       profile_ids: profileIds,
       cron,
@@ -173,6 +188,7 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
       schedule.name = patch.name.trim();
     }
     if (patch.boardId !== undefined) schedule.board_id = patch.boardId ?? null;
+    if (patch.kind !== undefined) schedule.kind = normalizeScheduleKind(patch.kind);
     if (patch.stopOnFail !== undefined) schedule.stop_on_fail = !!patch.stopOnFail;
     if (patch.triggeredByType !== undefined) schedule.triggered_by_type = patch.triggeredByType || 'user';
 
@@ -211,19 +227,30 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
   // ── Dispatch ────────────────────────────────────────────────────────────────
 
   /**
-   * Manual immediate trigger (REST/MCP run-now). Dispatches the schedule's batch
-   * right now regardless of `enabled` (explicit user intent) and stamps
-   * last_run_at / last_batch_id, but does NOT touch next_run_at — a manual run
-   * must not disturb the automatic cadence.
+   * Manual immediate trigger (REST/MCP run-now). Fires the schedule right now
+   * regardless of `enabled` (explicit user intent) and stamps last_run_at, but
+   * does NOT touch next_run_at — a manual run must not disturb the automatic
+   * cadence. Branches on kind: 'scan' kicks a batch (stamps last_batch_id);
+   * 'checklist_refresh' dispatches a refresh per in-scope profile (no batch, so
+   * last_batch_id is left untouched).
    */
-  async runNow(id: string, workspaceId: string, triggeredById: string): Promise<{ schedule: SecuritySchedule; batch: SecurityRunBatch }> {
+  async runNow(id: string, workspaceId: string, triggeredById: string): Promise<RunSecurityScheduleNowResult> {
     const schedule = await this.get(id, workspaceId);
+
+    if (normalizeScheduleKind(schedule.kind) === 'checklist_refresh') {
+      const refreshes = await this._dispatchChecklistRefresh(schedule, triggeredById);
+      schedule.last_run_at = new Date();
+      const saved = await this.scheduleRepo.save(schedule);
+      this.logService.info('SecurityScheduler', 'run-now checklist refresh dispatched', { schedule_id: id, refreshed: refreshes.length });
+      return { schedule: saved, kind: 'checklist_refresh', batch: null, refreshes };
+    }
+
     const batch = await this._dispatchBatch(schedule, triggeredById);
     schedule.last_run_at = new Date();
     schedule.last_batch_id = batch.id;
     const saved = await this.scheduleRepo.save(schedule);
     this.logService.info('SecurityScheduler', 'run-now dispatched', { schedule_id: id, batch_id: batch.id });
-    return { schedule: saved, batch };
+    return { schedule: saved, kind: 'scan', batch, refreshes: null };
   }
 
   /**
@@ -257,6 +284,20 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
         // the same idempotency ordering SecurityRunService.onRunFinalized uses.
         schedule.next_run_at = this.computeNextRun(schedule, now);
         await this.scheduleRepo.save(schedule);
+
+        // checklist_refresh kind: dispatch a refresh per in-scope profile. A
+        // refresh creates no run/batch, so there is no SKIP-if-running guard
+        // (independent of any scan batch) and last_batch_id is left untouched.
+        if (normalizeScheduleKind(schedule.kind) === 'checklist_refresh') {
+          const refreshes = await this._dispatchChecklistRefresh(schedule, schedule.triggered_by_type || 'security-scheduler');
+          schedule.last_run_at = now;
+          await this.scheduleRepo.save(schedule);
+          dispatched.push(schedule.id);
+          this.logService.info('SecurityScheduler', 'dispatched checklist refresh for schedule', {
+            schedule_id: schedule.id, refreshed: refreshes.length, next_run_at: schedule.next_run_at,
+          });
+          continue;
+        }
 
         // SKIP-if-running: never let a slow previous batch overlap.
         if (schedule.last_batch_id) {
@@ -326,6 +367,36 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
       boardId: schedule.board_id ?? undefined,
       all: true,
       stopOnFail: schedule.stop_on_fail,
+      triggeredByType: 'system',
+      triggeredById,
+    });
+  }
+
+  /**
+   * Dispatch a checklist refresh for a checklist_refresh-kind schedule, reusing
+   * the SAME scope resolution as scan batches: scope='selected' refreshes exactly
+   * the listed ids; scope='all' refreshes every enabled profile in scope at
+   * dispatch time (no id snapshot). Delegates to
+   * SecurityRunService.refreshChecklistsForScope — a refresh creates no run/batch,
+   * so there is no sequential orchestration to thread.
+   */
+  private async _dispatchChecklistRefresh(schedule: SecuritySchedule, triggeredById: string): Promise<RefreshChecklistResult[]> {
+    if (schedule.scope === 'selected') {
+      const ids = Array.isArray(schedule.profile_ids) ? schedule.profile_ids : [];
+      if (ids.length === 0) throw makeError(400, 'selected schedule has no profile_ids');
+      return this.runService.refreshChecklistsForScope({
+        workspaceId: schedule.workspace_id,
+        profileIds: ids,
+        triggeredByType: 'system',
+        triggeredById,
+      });
+    }
+    // scope='all' → resolve enabled profiles in scope AT DISPATCH TIME (no id
+    // snapshot). board_id null → whole workspace (boardId undefined); <uuid> → that board.
+    return this.runService.refreshChecklistsForScope({
+      workspaceId: schedule.workspace_id,
+      boardId: schedule.board_id ?? undefined,
+      all: true,
       triggeredByType: 'system',
       triggeredById,
     });

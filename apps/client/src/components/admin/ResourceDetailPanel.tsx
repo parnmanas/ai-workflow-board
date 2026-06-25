@@ -89,6 +89,10 @@ export default function ResourceDetailPanel({
   const [refs, setRefs] = useState<RepoRefs | null>(null);
   const [refsLoading, setRefsLoading] = useState(false);
   const [refsError, setRefsError] = useState<string | null>(null);
+  // ref 조회 실패가 'SSH 전용 URL 미지원'(code 'ssh_unsupported') 때문인지 구분.
+  // 그래야 그 안내 문구를 실제 SSH-only 에러일 때만 띄우고, 그 외(예: 시놀로지
+  // getrandom/ENOSYS) 는 git stderr 원문만 보여줘 진짜 원인을 가리지 않는다.
+  const [refsErrorSshOnly, setRefsErrorSshOnly] = useState(false);
   const [selectedRef, setSelectedRef] = useState('');
 
   const linkedCredential = useMemo(
@@ -123,6 +127,7 @@ export default function ResourceDetailPanel({
     if (!isRepo) return;
     setRefsLoading(true);
     setRefsError(null);
+    setRefsErrorSshOnly(false);
     try {
       const result = await api.getRepoRefs(resource.id, workspaceId, refresh);
       setRefs(result);
@@ -130,6 +135,7 @@ export default function ResourceDetailPanel({
       setSelectedRef((prev) => prev || result.head || result.branches[0] || '');
     } catch (err: any) {
       setRefsError(err?.message || 'ref 목록을 불러오지 못했습니다.');
+      setRefsErrorSshOnly(err?.code === 'ssh_unsupported');
       setRefs(null);
     } finally {
       setRefsLoading(false);
@@ -529,10 +535,14 @@ export default function ResourceDetailPanel({
       return (
         <div>
           <ErrorBox message={refsError} />
-          <div style={{ fontSize: 12, color: tokens.colors.textMuted, marginTop: 8, lineHeight: 1.5 }}>
-            SSH 전용 URL 은 서버에 인증 키가 없어 지원되지 않습니다. HTTPS URL + credential 로
-            연결된 저장소만 히스토리/파일 조회가 가능합니다.
-          </div>
+          {/* SSH-only 안내는 실제 code 가 'ssh_unsupported' 일 때만. 그 외(타임아웃,
+              ENOSYS 등 git stderr)는 ErrorBox 의 원문만으로 진짜 원인을 보여준다. */}
+          {refsErrorSshOnly && (
+            <div style={{ fontSize: 12, color: tokens.colors.textMuted, marginTop: 8, lineHeight: 1.5 }}>
+              SSH 전용 URL 은 서버에 인증 키가 없어 지원되지 않습니다. HTTPS URL + credential 로
+              연결된 저장소만 히스토리/파일 조회가 가능합니다.
+            </div>
+          )}
           <div style={{ marginTop: 10 }}>
             <Button variant="secondary" size="sm" onClick={() => loadRefs(true)} loading={refsLoading}>
               다시 시도

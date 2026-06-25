@@ -5,6 +5,7 @@
 
 import type { HarnessConfig } from '../harness-config';
 import type { ResolvedEffortPreset } from '../effort-presets';
+import type { ResolvedEnvironmentConfig } from '../environment-config';
 
 export type StreamEventType =
   | 'board_update'
@@ -103,6 +104,16 @@ export interface AgentTriggerPayload {
   // Null when the board has no presets or resolution fails — treat as "no
   // effort override, spawn exactly as before".
   effort_preset?: ResolvedEffortPreset | null;
+  // Resolved environment setup (ticket 354d336b): workspace default merged
+  // with the board override via mergeEnvironmentConfig(), then each repository's
+  // resource_id expanded to a concrete url/branch. agent-manager provisions
+  // the working environment just before spawning the subagent — clone/update
+  // repos under the agent home, run setup commands, inject env_vars — guarded
+  // by a per-(agent,board) fingerprint marker so a prepared environment is not
+  // re-provisioned. Null when neither layer configures an environment (or
+  // nothing resolves to a cloneable/runnable step) — the manager must treat
+  // null as "no provisioning, spawn exactly as before".
+  environment_config?: ResolvedEnvironmentConfig | null;
 }
 
 // Phase 2 D-26 — finalized payload shape emitted by chat producers.

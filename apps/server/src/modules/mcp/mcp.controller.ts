@@ -309,7 +309,9 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
         if (dbResult.valid && dbResult.apiKey) {
           const ak = dbResult.apiKey;
           return {
-            keyHint: maskKey(ak.key),
+            // ak.key is now a SHA-256 hash, not the raw key — use the stored
+            // display prefix for the hint.
+            keyHint: ak.key_prefix || 'awb_***',
             agentName: ak.agent?.name,
             agentId: ak.agent_id ?? undefined,
             keyId: ak.id,
@@ -347,7 +349,11 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     }
 
     if (envKeys.length === 0 && dbKeyCount === 0) {
-      if (process.env.MCP_DEV_MODE === 'true') {
+      // HARD-gate the dev-mode fallback behind NODE_ENV !== 'production'. A
+      // fresh prod deploy with no keys yet must not expose full-scope MCP
+      // tooling unauthenticated just because MCP_DEV_MODE leaked into the
+      // environment (security finding: authz).
+      if (process.env.MCP_DEV_MODE === 'true' && process.env.NODE_ENV !== 'production') {
         return { keyHint: 'dev-mode', scope: 'full', source: 'dev-mode' };
       }
       res.status(401).json({

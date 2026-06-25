@@ -211,6 +211,53 @@ Rules and constraints:
   runs (`default`, `plan`) is an operator choice, not something the manager
   second-guesses.
 
+## Environment provisioning (per-board working environment)
+
+Boards and workspaces can carry an `environment_config` JSON (workspace =
+default, board = key-level override; resolved server-side by
+`apps/server/src/common/environment-config.ts`). At dispatch the server merges
+the two layers, expands each repository's `resource_id` into a concrete
+url/branch (workspace-scoped `Resource` lookup), and ships the resolved object
+on every `agent_trigger` event as `environment_config` (ticket 354d336b).
+
+`EventDispatcher.handleTrigger` runs `EnvironmentProvisioner.provision(...)`
+**before either spawn path** (persistent ticket-session or one-shot subagent),
+so the agent never starts work in an unprepared environment:
+
+1. **Repositories** — each entry is cloned into `<agent home>/<target_dir>`
+   (agent home = `<AWB_AGENT_MANAGER_HOME>/agents/<agent_id>/`). An existing
+   clone is updated non-destructively (`git fetch --all --prune`, optional
+   `git checkout <branch>`, then `git pull --ff-only` — a diverged tree is left
+   as-is, never clobbered). `post_clone_commands` run once, only on a fresh
+   clone, inside the repo dir.
+2. **setup_commands** — run once in the agent home, with `env_vars` injected.
+3. **env_vars** — non-secret `KEY=VALUE` pairs. Injected into the spawned CLI's
+   process environment on **every** dispatch (they are process env, not
+   persisted on disk), merged right after `process.env` but before
+   `AWB_API_KEY` / cli-home / per-agent credential / harness env so those
+   always win. Secrets stay on the per-agent credential path, not here.
+
+Idempotency, concurrency, failure:
+
+- **Fingerprint marker** — the resolved config is hashed (sha256, folding in
+  `version`); a success marker lands at `<agent home>/env/<fingerprint>.json`.
+  A matching marker → skip (environment already prepared). A changed config (or
+  a bumped `version`) → new fingerprint → re-provision. An agent serving two
+  boards with different configs keeps two markers.
+- **Concurrency** — an in-flight `(agent, fingerprint)` provision is shared, so
+  two near-simultaneous triggers never clone into the same dir twice.
+- **Failure aborts the dispatch** — a clone / fetch / setup-command failure
+  returns `ok=false` with **no** success marker; the dispatch is dropped (the
+  subagent is never spawned) and the error is posted as a ticket comment
+  (`⚠️ 환경 프로비저닝 실패 …`) so it surfaces in the activity feed. A
+  `<fingerprint>.failed.json` cooldown marker (~5 min) suppresses re-clone /
+  re-comment churn against the supervisor's re-push cadence; it is cleared on
+  the next success.
+- **Null-safe**: a missing/empty/malformed `environment_config` produces
+  exactly the pre-provisioning behaviour — boards without one spawn as before.
+- **Additive to working_dir** — provisioning does NOT repurpose the operator's
+  `working_dir` / worktree flow; repos land under the agent home alongside it.
+
 ## Heartbeats
 
 Two heartbeats run on independent timers:

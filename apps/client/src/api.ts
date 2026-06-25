@@ -15,6 +15,7 @@ import type {
   SecurityRunBatch,
   SecuritySchedule,
   SecurityScheduleScope,
+  SecurityScheduleKind,
   Credential,
   ChatMessage,
   ChatThread,
@@ -55,6 +56,7 @@ import type {
   BenchmarkRunDetail,
   HarnessConfig,
   EffortPresetsConfig,
+  EnvironmentConfig,
   Comment,
   RepoRefs,
   RepoCommitSummary,
@@ -144,7 +146,13 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
       window.dispatchEvent(new Event('auth-expired'));
     }
     const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(err.error || 'Request failed');
+    // Preserve the server's machine-readable `code` (e.g. 'ssh_unsupported' vs
+    // 'git_read_failed') and HTTP status on the thrown error so callers can
+    // branch on the *kind* of failure instead of pattern-matching the message.
+    const error = new Error(err.error || 'Request failed') as Error & { code?: string; status?: number };
+    if (err.code) error.code = err.code;
+    error.status = res.status;
+    throw error;
   }
   return res.json();
 }
@@ -292,6 +300,9 @@ export const api = {
       // Per-board output language (i18n). Empty string / null clears the
       // override (agents fall back to their default, English).
       language?: string | null;
+      // Per-board environment setup (ticket 354d336b). null clears the board
+      // override. The server validates it (strict zod) and 400s a typo.
+      environment_config?: EnvironmentConfig | null;
     },
   ) =>
     request<any>(`/boards/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
@@ -1158,6 +1169,7 @@ export const api = {
     workspace_id: string;
     board_id?: string | null;
     name: string;
+    kind?: SecurityScheduleKind;
     scope?: SecurityScheduleScope;
     profile_ids?: string[];
     cron?: string | null;
@@ -1171,6 +1183,7 @@ export const api = {
       workspace_id: string;
       board_id?: string | null;
       name?: string;
+      kind?: SecurityScheduleKind;
       scope?: SecurityScheduleScope;
       profile_ids?: string[];
       cron?: string | null;
@@ -1183,8 +1196,15 @@ export const api = {
     const params = new URLSearchParams({ workspace_id: workspaceId });
     return request<{ success: true; id: string }>(`/security/schedules/${id}?${params.toString()}`, { method: 'DELETE' });
   },
+  // run-now is kind-discriminated: kind='scan' → `batch` set / `refreshes` null;
+  // kind='checklist_refresh' → `batch` null / `refreshes` the per-profile dispatches.
   runSecurityScheduleNow: (id: string, workspaceId: string) =>
-    request<{ schedule: SecuritySchedule; batch: SecurityRunBatch }>(`/security/schedules/${id}/run-now`, {
+    request<{
+      schedule: SecuritySchedule;
+      kind: SecurityScheduleKind;
+      batch: SecurityRunBatch | null;
+      refreshes: { profile_id: string; room_id: string }[] | null;
+    }>(`/security/schedules/${id}/run-now`, {
       method: 'POST',
       body: JSON.stringify({ workspace_id: workspaceId }),
     }),

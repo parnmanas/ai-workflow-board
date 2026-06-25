@@ -21,6 +21,7 @@ import { findOrFail } from '../../common/find-or-fail';
 import { parseComments, expandCommentAttachments } from '../mcp/shared/ticket-parsing';
 import { writeRoutingConfigThrough } from '../boards/routing-config.helper';
 import { validateHarnessConfigInput, serializeHarnessConfig } from '../../common/harness-config';
+import { validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../../common/environment-config';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 
@@ -139,7 +140,7 @@ export class WorkspacesController {
       name, description,
       supervisor_stale_ms, supervisor_resend_ms, dispatch_queue_depth,
       claim_verification_enabled, claim_verification_grace_ms,
-      harness_config,
+      harness_config, environment_config,
     } = body;
     if (name !== undefined) ws.name = name;
     if (description !== undefined) ws.description = description;
@@ -189,6 +190,18 @@ export class WorkspacesController {
         const checked = validateHarnessConfigInput(harness_config);
         if (!checked.ok) return res.status(400).json({ error: checked.error });
         ws.harness_config = serializeHarnessConfig(checked.value);
+      }
+    }
+
+    // Workspace-wide default environment setup (ticket 354d336b). Same contract
+    // as the board PATCH: null clears, objects are strict-zod-validated → 400.
+    if (environment_config !== undefined) {
+      if (environment_config === null) {
+        ws.environment_config = null;
+      } else {
+        const checked = validateEnvironmentConfigInput(environment_config);
+        if (!checked.ok) return res.status(400).json({ error: checked.error });
+        ws.environment_config = serializeEnvironmentConfig(checked.value);
       }
     }
 

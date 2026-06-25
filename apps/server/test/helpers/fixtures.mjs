@@ -5,7 +5,7 @@
 // Every factory accepts (app, getDataSourceToken, ...) so tests can reuse a
 // single booted app across many fixtures.
 
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { traceEvent } from './trace.mjs';
 
 const stamp = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -102,10 +102,17 @@ export async function createApiKey(
   const ds = app.get(getDataSourceToken());
   const repo = ds.getRepository('ApiKey');
   const rawKey = `qa-${label}-${randomUUID()}`;
+  // Mirror ApiKeyService: persist the SHA-256 hash + a display prefix, never
+  // the raw key (the prod storage model the hashing change enforces).
+  const keyHash = createHash('sha256').update(rawKey, 'utf8').digest('hex');
+  const keyPrefix = rawKey.length <= 12
+    ? rawKey.slice(0, 4) + '***'
+    : rawKey.slice(0, 8) + '***' + rawKey.slice(-4);
   const row = await repo.save(
     repo.create({
       name: `qa-${label}`,
-      key: rawKey,
+      key: keyHash,
+      key_prefix: keyPrefix,
       agent_id: agentId,
       scope,
       is_active: 1,

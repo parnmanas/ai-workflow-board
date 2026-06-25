@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { randomBytes } from 'crypto';
+import { randomBytes, createHash } from 'crypto';
 import { ApiKey } from '../entities/ApiKey';
 
 @Injectable()
@@ -12,6 +12,15 @@ export class ApiKeyService {
 
   generateApiKey(): string {
     return 'awb_' + randomBytes(20).toString('hex');
+  }
+
+  // SHA-256 (hex) of the raw key. This is what we persist and look up by — the
+  // raw key is never stored (security finding: secrets). The keys are 160 bits
+  // of CSPRNG output, so a plain (unsalted) hash is appropriate: there is no
+  // low-entropy/dictionary surface to defend against, and a per-key salt would
+  // make constant-time hash lookup impossible.
+  hashKey(rawKey: string): string {
+    return createHash('sha256').update(rawKey, 'utf8').digest('hex');
   }
 
   maskKey(key: string): string {
@@ -29,7 +38,10 @@ export class ApiKeyService {
     const rawKey = this.generateApiKey();
     const entity = this.repo.create({
       name: params.name,
-      key: rawKey,
+      // Persist ONLY the hash + a display hint. The raw key leaves this method
+      // once (raw_key below) and is never recoverable from the DB afterwards.
+      key: this.hashKey(rawKey),
+      key_prefix: this.maskKey(rawKey),
       agent_id: params.agent_id ?? null,
       scope: params.scope || 'full',
       expires_at: params.expires_at ?? null,
@@ -38,7 +50,7 @@ export class ApiKeyService {
     const saved = await this.repo.save(entity);
     const { key, ...rest } = saved;
     return {
-      apiKey: { ...rest, key_masked: this.maskKey(key) },
+      apiKey: { ...rest, key_masked: saved.key_prefix || '' },
       raw_key: rawKey,
     };
   }
@@ -52,7 +64,7 @@ export class ApiKeyService {
     });
     return keys.map(({ key, ...rest }) => ({
       ...rest,
-      key_masked: this.maskKey(key),
+      key_masked: rest.key_prefix || '',
     }));
   }
 
@@ -60,7 +72,7 @@ export class ApiKeyService {
     const found = await this.repo.findOne({ where: { id }, relations: ['agent'] });
     if (!found) return null;
     const { key, ...rest } = found;
-    return { ...rest, key_masked: this.maskKey(key) };
+    return { ...rest, key_masked: rest.key_prefix || '' };
   }
 
   async revokeApiKey(id: string): Promise<boolean> {
@@ -141,12 +153,13 @@ export class ApiKeyService {
 
     const saved = await this.repo.save(found);
     const { key, ...rest } = saved;
-    return { ...rest, key_masked: this.maskKey(key) };
+    return { ...rest, key_masked: rest.key_prefix || '' };
   }
 
   async validateApiKey(rawKey: string): Promise<{ valid: boolean; reason?: string; apiKey?: ApiKey }> {
+    // Look up by hash of the presented key — the raw key is never stored.
     const found = await this.repo.findOne({
-      where: { key: rawKey },
+      where: { key: this.hashKey(rawKey) },
       relations: ['agent'],
     });
 

@@ -183,9 +183,18 @@ export class ResourceMediaController {
     const fileName = resource.file_name || resource.name || 'file';
     // ASCII-safe Content-Disposition (RFC 5987 filename* for unicode names).
     const asciiName = fileName.replace(/[^\x20-\x7e]/g, '_').replace(/"/g, '');
-    const disposition = download !== undefined ? 'attachment' : 'inline';
+    // Stored-XSS hardening (security finding: xss). /raw is same-origin, so an
+    // attacker-controlled Content-Type served `inline` (e.g. text/html or
+    // image/svg+xml, both reachable via inferResourceMimetype) would execute
+    // scripts in the app origin. Only render genuine, non-scriptable media
+    // (image except SVG, audio, video) inline; force every other type to
+    // download. nosniff additionally stops the browser from MIME-sniffing a
+    // mislabeled payload back into an executable type.
+    const inlineSafe = /^(image\/(?!svg\b|svg\+xml)|audio\/|video\/)/i.test(mimetype);
+    const disposition = download !== undefined || !inlineSafe ? 'attachment' : 'inline';
 
     res.setHeader('Content-Type', mimetype);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Accept-Ranges', 'bytes');
     res.setHeader('Cache-Control', 'private, max-age=86400');
     res.setHeader(

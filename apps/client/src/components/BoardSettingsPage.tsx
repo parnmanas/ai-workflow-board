@@ -3,7 +3,7 @@ import { useParams } from 'react-router-dom';
 import { api } from '../api';
 import {
   Board, BoardWithCards, PromptTemplate, BoardMovePreview, MoveBlocker, MoveRemedy,
-  EffortPreset, EffortPresetsConfig, EffortLevel, BUILTIN_EFFORT_PRESETS,
+  EffortPreset, EffortPresetsConfig, EffortLevel, BUILTIN_EFFORT_PRESETS, Resource,
 } from '../types';
 import MoveBlockerList from './MoveBlockerList';
 import { useBoard } from '../hooks/useBoard';
@@ -12,6 +12,7 @@ import { useLoading } from '../contexts/LoadingContext';
 import PageHeader from './PageHeader';
 import ColumnManager from './ColumnManager';
 import HarnessConfigEditor from './HarnessConfigEditor';
+import EnvironmentConfigEditor from './EnvironmentConfigEditor';
 import { tokens } from '../tokens';
 import { Button, Input, HeaderAction } from './common';
 
@@ -39,6 +40,19 @@ export default function BoardSettingsPage() {
     api.listPromptTemplates(wsId)
       .then((list) => { if (!cancelled) setPromptTemplates(list); })
       .catch(() => { if (!cancelled) setPromptTemplates([]); });
+    return () => { cancelled = true; };
+  }, [wsId]);
+
+  // Repository resources for the Environment Setup repo dropdown (ticket
+  // 354d336b). Workspace-scoped, type='repository'. Silent fall-back to []
+  // so a non-privileged user can still view settings.
+  const [repoResources, setRepoResources] = useState<Resource[]>([]);
+  useEffect(() => {
+    if (!wsId) return;
+    let cancelled = false;
+    api.listResources(wsId, undefined, 'repository')
+      .then((rows) => { if (!cancelled) setRepoResources(rows || []); })
+      .catch(() => { if (!cancelled) setRepoResources([]); });
     return () => { cancelled = true; };
   }, [wsId]);
 
@@ -176,6 +190,21 @@ export default function BoardSettingsPage() {
             await api.updateBoard(board.id, { effort_presets: config });
             await refresh();
             showToast(config === null ? 'Effort presets cleared' : 'Effort presets saved', 'success');
+          }}
+        />
+        <EnvironmentConfigEditor
+          raw={board.environment_config}
+          repoOptions={repoResources}
+          onSave={async (config) => {
+            try {
+              await api.updateBoard(board.id, { environment_config: config });
+              await refresh();
+              showToast(config === null ? 'Environment setup cleared' : 'Environment setup saved', 'success');
+            } catch (e: any) {
+              // Server zod rejection (400) surfaces its message here.
+              showToast(e?.message || 'Failed to save environment setup', 'error');
+              throw e;
+            }
           }}
         />
         <ColumnManager

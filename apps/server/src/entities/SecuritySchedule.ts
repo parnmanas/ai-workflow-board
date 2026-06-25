@@ -55,6 +55,20 @@ export class SecuritySchedule {
   @Column({ type: 'varchar' })
   name: string;
 
+  // What the schedule does when it fires:
+  //   'scan'             → kick a sequential SecurityRunBatch (the default, the
+  //                        original schedule behaviour; existing/NULL rows = scan).
+  //   'checklist_refresh'→ dispatch a checklist-refresh task to each in-scope
+  //                        profile's target agent (the `refresh_security_checklist`
+  //                        path). NO SecurityRun / batch row is created — a refresh
+  //                        updates the profile's `checklist`, not findings, so it
+  //                        never pollutes scan history or the incremental baseline,
+  //                        and is independent of the scan-batch concurrency guard.
+  // Stored as varchar (not a DB enum) so SQLite(dev)/Postgres(prod) stay identical
+  // and adding a future kind needs no migration. Reads coalesce NULL/unknown → 'scan'.
+  @Column({ type: 'varchar', default: 'scan' })
+  kind: SecurityScheduleKind;
+
   // 'all' = resolve enabled profiles in scope at dispatch time.
   // 'selected' = run the explicit `profile_ids` list.
   @Column({ type: 'varchar', default: 'all' })
@@ -107,3 +121,9 @@ export class SecuritySchedule {
 }
 
 export type SecurityScheduleScope = 'all' | 'selected';
+export type SecurityScheduleKind = 'scan' | 'checklist_refresh';
+
+/** Coalesce a possibly-NULL/legacy/unknown kind to a valid one (NULL rows = 'scan'). */
+export function normalizeScheduleKind(kind: unknown): SecurityScheduleKind {
+  return kind === 'checklist_refresh' ? 'checklist_refresh' : 'scan';
+}

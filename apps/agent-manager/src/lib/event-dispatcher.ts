@@ -24,6 +24,9 @@ import type { WorktreeManager } from './worktree-manager.js';
 import { prepareChatAttachments } from './chat-attachment-prep.js';
 import type { HarnessSpec, ResolvedEffortPreset, EffortLevel } from './cli-adapters/base.js';
 import { createAdapter, ADAPTER_CAPABILITIES } from './cli-adapters/index.js';
+import { EnvironmentProvisioner } from './environment-provisioner.js';
+import type { ResolvedEnvironmentConfig } from './environment-provisioner.js';
+import { fireAndForgetTool } from './mcp-client.js';
 
 /**
  * Defensive parse of the `harness_config` field on a flattened agent_trigger
@@ -109,6 +112,72 @@ export function parseEffortPreset(raw: unknown): ResolvedEffortPreset | null {
     }
   }
   return out;
+}
+
+/**
+ * Defensive parse of the `environment_config` field on a flattened agent_trigger
+ * event (ticket 354d336b). The server ships the resolved environment setup —
+ * repositories with concrete urls, env_vars, setup_commands — as a JSON object
+ * (or omits it for older servers / unconfigured boards). Accepts an object or a
+ * JSON string, keeps only the known keys with the right runtime types, and
+ * degrades to null on anything else — a malformed environment_config must never
+ * block the dispatch it rides on (mirror parseHarnessConfig). A repository
+ * without a usable url is dropped (it can't be cloned).
+ */
+export function parseEnvironmentConfig(raw: unknown): ResolvedEnvironmentConfig | null {
+  let obj: any = raw;
+  if (typeof obj === 'string') {
+    if (!obj.trim()) return null;
+    try {
+      obj = JSON.parse(obj);
+    } catch {
+      return null;
+    }
+  }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
+
+  const repositories: ResolvedEnvironmentConfig['repositories'] = [];
+  if (Array.isArray(obj.repositories)) {
+    for (const r of obj.repositories) {
+      if (!r || typeof r !== 'object') continue;
+      const url = typeof r.url === 'string' ? r.url.trim() : '';
+      if (!url) continue;
+      const target_dir = typeof r.target_dir === 'string' && r.target_dir.trim() ? r.target_dir.trim() : '';
+      if (!target_dir) continue;
+      repositories.push({
+        url,
+        target_dir,
+        branch: typeof r.branch === 'string' ? r.branch.trim() : '',
+        post_clone_commands: Array.isArray(r.post_clone_commands)
+          ? r.post_clone_commands.filter((c: unknown) => typeof c === 'string' && (c as string).trim())
+          : [],
+      });
+    }
+  }
+
+  const env_vars: Record<string, string> = {};
+  if (obj.env_vars && typeof obj.env_vars === 'object' && !Array.isArray(obj.env_vars)) {
+    for (const [k, v] of Object.entries(obj.env_vars)) {
+      if (typeof k === 'string' && k.trim() && typeof v === 'string') env_vars[k] = v;
+    }
+  }
+
+  const setup_commands = Array.isArray(obj.setup_commands)
+    ? obj.setup_commands.filter((c: unknown) => typeof c === 'string' && (c as string).trim())
+    : [];
+
+  if (repositories.length === 0 && Object.keys(env_vars).length === 0 && setup_commands.length === 0) {
+    return null;
+  }
+
+  const timeout = Number(obj.setup_timeout_seconds);
+  return {
+    repositories,
+    env_vars,
+    setup_commands,
+    setup_timeout_seconds: Number.isFinite(timeout) && timeout > 0 ? Math.floor(timeout) : 600,
+    version: Number.isFinite(Number(obj.version)) ? Math.floor(Number(obj.version)) : 0,
+  };
 }
 
 // Hard cap on consecutive agent-to-agent turns within a single chat room.
@@ -201,6 +270,10 @@ export interface SubagentSpawnArgs {
    *  spawn site picks the per-CLI slice via selectEffortSlice. Null/absent →
    *  no effort override. */
   effortPreset?: ResolvedEffortPreset | null;
+  /** Non-secret env vars from the board environment_config (ticket 354d336b),
+   *  injected into the spawned CLI's environment. Applied on every spawn (not
+   *  persisted on disk like the cloned repos). Absent → none. */
+  envVars?: Record<string, string>;
 }
 
 export interface SubagentSpawnResult {
@@ -285,6 +358,10 @@ export interface TicketTriggerArgs {
    *  applied at SESSION CREATION only — a live session's `--effort` flag is
    *  fixed at spawn. Null/absent → no effort override. */
   effortPreset?: ResolvedEffortPreset | null;
+  /** Non-secret env vars from the board environment_config (ticket 354d336b),
+   *  injected into the spawned CLI's environment at SESSION CREATION. A live
+   *  session keeps the env it was born with. Absent → none. */
+  envVars?: Record<string, string>;
 }
 
 export interface TicketDispatchResult {
@@ -372,6 +449,11 @@ export interface EventDispatcherDeps {
   // of the agent's shared working_dir, so branch switches can't bleed across
   // tickets on focus transitions. Optional/null reverts to shared-cwd.
   worktreeManager?: WorktreeManager | null;
+  // ticket 354d336b — board environment provisioner. When set, a trigger that
+  // carries a resolved environment_config provisions the agent's working
+  // environment (clone/update repos, run setup commands) before the spawn.
+  // Optional/null reverts to no provisioning (current behaviour).
+  environmentProvisioner?: EnvironmentProvisioner | null;
 }
 
 export class EventDispatcher {
@@ -384,6 +466,7 @@ export class EventDispatcher {
   #agentManagerCommandHandler: AgentManagerCommandSink | null;
   #managedAgentContexts: ManagedAgentContextRegistry | null;
   #worktreeManager: WorktreeManager | null;
+  #environmentProvisioner: EnvironmentProvisioner | null;
 
   constructor(config: AwbConfig, deps: EventDispatcherDeps = {}) {
     this.#config = config;
@@ -395,6 +478,7 @@ export class EventDispatcher {
     this.#agentManagerCommandHandler = deps.agentManagerCommandHandler ?? null;
     this.#managedAgentContexts = deps.managedAgentContexts ?? null;
     this.#worktreeManager = deps.worktreeManager ?? null;
+    this.#environmentProvisioner = deps.environmentProvisioner ?? null;
   }
 
   /**
@@ -674,6 +758,55 @@ export class EventDispatcher {
       );
     }
 
+    // Board environment setup (ticket 354d336b). The server ships the resolved
+    // environment_config (repos with concrete urls, env_vars, setup_commands).
+    // Provision the agent's working environment BEFORE either spawn path runs —
+    // clone/update repos under the agent home and run setup commands, once per
+    // (agent, config-fingerprint). env_vars apply on EVERY dispatch (process
+    // env, not persisted on disk) so they're threaded to the spawn regardless
+    // of whether provisioning ran or was skipped. A provisioning FAILURE aborts
+    // the dispatch (never start work in a broken environment) and surfaces the
+    // error as a ticket comment.
+    const envConfig = parseEnvironmentConfig(ev.environment_config);
+    const envVars = envConfig?.env_vars && Object.keys(envConfig.env_vars).length > 0
+      ? envConfig.env_vars
+      : undefined;
+    if (envConfig && this.#environmentProvisioner) {
+      const provisionAgentId = agentContext?.agent_id || selfAgentId;
+      if (!provisionAgentId) {
+        log(`[env-provision] no agent id resolvable for ticket=${ev.ticket_id} — skipping provisioning`);
+      } else {
+        log(
+          `Trigger carries environment_config: ticket=${ev.ticket_id} repos=${envConfig.repositories.length} setup=${envConfig.setup_commands.length} env_vars=${Object.keys(envConfig.env_vars).length}`,
+        );
+        const result = await this.#environmentProvisioner.provision({
+          agentId: provisionAgentId,
+          config: envConfig,
+          ticketId: ev.ticket_id,
+        });
+        if (!result.ok) {
+          if (!result.reported && ev.ticket_id) {
+            const detail = (result.steps.length > 0 ? `\n\n실행 단계:\n${result.steps.map((s) => `- ${s}`).join('\n')}` : '');
+            await fireAndForgetTool(this.#config, 'add_comment', {
+              ticket_id: ev.ticket_id,
+              content:
+                `⚠️ **환경 프로비저닝 실패** — 작업을 시작하지 않고 디스패치를 중단했습니다.\n\n` +
+                `\`\`\`\n${result.error || 'unknown error'}\n\`\`\`${detail}\n\n` +
+                `Board 환경설정(repositories / setup_commands)을 확인한 뒤 다시 트리거하세요. ` +
+                `(fingerprint=\`${result.fingerprint.slice(0, 12)}\`, 약 5분 동안 재시도/재알림을 억제합니다.)`,
+            });
+          }
+          log(
+            `Trigger aborted — environment provisioning failed: ticket=${ev.ticket_id} fp=${result.fingerprint.slice(0, 8)} reported=${result.reported === true}`,
+          );
+          return;
+        }
+        if (!result.skipped) {
+          log(`Environment provisioned for ticket=${ev.ticket_id} fp=${result.fingerprint.slice(0, 8)}`);
+        }
+      }
+    }
+
     const delegation = (this.#config as any)?.delegation ?? {};
     const delegationEnabled = delegation.enabled !== false;
     const persistentTicket = delegation.persistentTicketSessions !== false;
@@ -699,6 +832,7 @@ export class EventDispatcher {
           agentContext,
           harness,
           effortPreset,
+          envVars,
           maxConcurrentTicketsPerAgent:
             typeof ev.max_concurrent_tickets_per_agent === 'number'
               ? ev.max_concurrent_tickets_per_agent
@@ -763,6 +897,7 @@ export class EventDispatcher {
           agentContext,
           harness,
           effortPreset,
+          envVars,
         });
 
         if (result.spawned) {

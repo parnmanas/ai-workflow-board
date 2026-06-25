@@ -572,18 +572,27 @@ export interface SecurityRunBatch {
 }
 
 export type SecurityScheduleScope = 'all' | 'selected';
+/**
+ * What a schedule does when it fires:
+ *   'scan'              → kick a sequential SecurityRunBatch (default; legacy rows).
+ *   'checklist_refresh' → dispatch a checklist refresh to each in-scope profile's
+ *                         target agent — updates the checklist, creates no run row.
+ */
+export type SecurityScheduleKind = 'scan' | 'checklist_refresh';
 
 /**
- * SecuritySchedule — automatic trigger layer over the sequential security batch.
- * When due, the server kicks a SecurityRunBatch via the SAME orchestrator the
- * manual "순차 실행" buttons use. Cadence is exactly one of `cron` (5-field UTC)
- * or `interval_ms`.
+ * SecuritySchedule — automatic trigger layer over the security feature. When due,
+ * a 'scan' schedule kicks a SecurityRunBatch via the SAME orchestrator the manual
+ * "순차 실행" buttons use; a 'checklist_refresh' schedule instead dispatches a
+ * checklist refresh per in-scope profile (no run row). Cadence is exactly one of
+ * `cron` (5-field UTC) or `interval_ms`.
  */
 export interface SecuritySchedule {
   id: string;
   workspace_id: string;
   board_id: string | null;
   name: string;
+  kind: SecurityScheduleKind;
   scope: SecurityScheduleScope;
   profile_ids: string[];
   cron: string | null;
@@ -877,6 +886,41 @@ export interface Board {
   // comments / chat / commit messages are written in that language. null/
   // absent = no override (agent default, English).
   language?: string | null;
+  // Per-board environment setup (ticket 354d336b). Stored JSON-encoded (same
+  // wire convention as harness_config — the client parses); null/absent = no
+  // override. At dispatch the agent-manager provisions the environment
+  // (clone/update repos under the agent home, run setup commands, inject
+  // env_vars) before spawning the subagent.
+  environment_config?: string | null;
+}
+
+// Stored JSON-encoded in Board.environment_config (per-board override) and
+// Workspace.environment_config (workspace default); resolution is key-level
+// (board overrides workspace per top-level key) at dispatch.
+export interface EnvironmentRepository {
+  // Repository Resource id (type='repository'); the server expands it to a
+  // concrete url/default_branch at dispatch. Either resource_id or url required.
+  resource_id?: string;
+  // Direct clone url (used when no resource_id, or to override the resource).
+  url?: string;
+  // Clone destination RELATIVE to the agent home (e.g. "repos/my-app").
+  target_dir?: string;
+  // Branch to checkout; falls back to the resource's default_branch.
+  branch?: string;
+  // Commands run once inside this repo's dir right after a fresh clone.
+  post_clone_commands?: string[];
+}
+export interface EnvironmentConfig {
+  repositories?: EnvironmentRepository[];
+  // Non-secret env vars injected into the subagent process. string→string.
+  env_vars?: Record<string, string>;
+  // Bootstrap commands run once (in the agent home) after repos are placed.
+  setup_commands?: string[];
+  // Per-command timeout for clone + setup steps (1..3600s, default 600).
+  setup_timeout_seconds?: number;
+  // Operator-bumped marker to force re-provisioning even when nothing else
+  // changed (folded into the fingerprint).
+  version?: number;
 }
 
 // ─── Effort presets (abstract effort → per-CLI options) ─────────
