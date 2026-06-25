@@ -1,7 +1,12 @@
 # ============================================
 # Stage 1: Install dependencies
 # ============================================
-FROM node:22-alpine AS deps
+# Base는 debian-slim(glibc). musl(alpine)은 시놀로지처럼 오래된 libseccomp 가
+# getrandom(2) 을 ENOSYS 로 막으면 /dev/urandom 폴백이 약해 git bare clone 이
+# 죽는다(Resource History 실패). glibc 는 ENOSYS 시 /dev/urandom 으로 자동
+# 폴백하므로 seccomp 를 건드리지 않고 풀린다. (티켓 b2ea5876)
+# musl↔glibc ABI 가 갈리면 native 모듈이 깨지므로 세 스테이지 모두 slim 으로 통일.
+FROM node:22-slim AS deps
 
 WORKDIR /app
 
@@ -18,7 +23,7 @@ RUN npm install --frozen-lockfile || npm install
 # ============================================
 # Stage 2: Build with Turborepo
 # ============================================
-FROM node:22-alpine AS builder
+FROM node:22-slim AS builder
 
 WORKDIR /app
 
@@ -35,7 +40,7 @@ RUN npx turbo run build
 # ============================================
 # Stage 3: Production image
 # ============================================
-FROM node:22-alpine AS runner
+FROM node:22-slim AS runner
 
 WORKDIR /app
 
@@ -43,10 +48,11 @@ ENV NODE_ENV=production
 ENV PORT=7701
 
 # `git` is needed at runtime for `git ls-remote --heads` against repository
-# Resources (branch picker in the Ticket panel + Resource manager test).
-# node:22-alpine omits it, so without this the branches endpoint fails with
-# `spawn git ENOENT`.
-RUN apk add --no-cache git
+# Resources (branch picker in the Ticket panel + Resource manager test) and the
+# bare cache clone behind Resource History. `wget` backs the HEALTHCHECK below.
+# node:22-slim(Debian bookworm) ships neither, so install both via apt.
+RUN apt-get update && apt-get install -y --no-install-recommends git wget \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy root package files for workspace resolution
 COPY package.json package-lock.json* turbo.json ./
@@ -69,7 +75,7 @@ RUN npm install --omit=dev --workspace=server
 RUN mkdir -p /app/data && chown node:node /app/data
 ENV AWB_DATA_DIR=/app/data
 
-# Drop to the `node` user baked into node:22-alpine. The server only
+# Drop to the `node` user baked into node:22-slim. The server only
 # writes to AWB_DATA_DIR at runtime (logs are in-memory, DB is external
 # Postgres, SQLite code path is dev-only), so world-readable files from
 # the root-owned install stages are fine for execution.

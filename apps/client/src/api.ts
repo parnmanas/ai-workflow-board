@@ -145,7 +145,13 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
       window.dispatchEvent(new Event('auth-expired'));
     }
     const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(err.error || 'Request failed');
+    // Preserve the server's machine-readable `code` (e.g. 'ssh_unsupported' vs
+    // 'git_read_failed') and HTTP status on the thrown error so callers can
+    // branch on the *kind* of failure instead of pattern-matching the message.
+    const error = new Error(err.error || 'Request failed') as Error & { code?: string; status?: number };
+    if (err.code) error.code = err.code;
+    error.status = res.status;
+    throw error;
   }
   return res.json();
 }
