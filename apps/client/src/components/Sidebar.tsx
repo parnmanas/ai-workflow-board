@@ -313,14 +313,15 @@ export default function Sidebar({ isMobile, isOpen, onClose, wsId, boards }: Sid
                         <NavBadge count={counts.tickets.perBoard[b.id]} />
                       )}
                     </button>
-                    {/* Board sub-entries (Resources, Settings) when board is active */}
+                    {/* Board sub-entries (QA, Security, Resources, Actions, Settings) when board is active */}
                     {active && (
                       <>
                         {[
-                          { label: 'QA',              path: `/ws/${wsId}/boards/${b.id}/qa`        },
-                          { label: 'Board Resources', path: `/ws/${wsId}/boards/${b.id}/resources` },
-                          { label: 'Board Actions',   path: `/ws/${wsId}/boards/${b.id}/actions`   },
-                          { label: 'Board Settings',  path: `/ws/${wsId}/boards/${b.id}/settings`  },
+                          { label: 'QA',         path: `/ws/${wsId}/boards/${b.id}/qa`        },
+                          { label: 'Security',   path: `/ws/${wsId}/boards/${b.id}/security`  },
+                          { label: 'Resources',  path: `/ws/${wsId}/boards/${b.id}/resources` },
+                          { label: 'Actions',    path: `/ws/${wsId}/boards/${b.id}/actions`   },
+                          { label: 'Settings',   path: `/ws/${wsId}/boards/${b.id}/settings`  },
                         ].map((sub) => {
                           const subActive = location.pathname === sub.path;
                           return (
