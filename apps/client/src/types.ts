@@ -425,6 +425,180 @@ export interface QaSchedule {
   updated_at: string;
 }
 
+// ─── Security inspection (보안 점검 — sibling of scenario QA) ────────────────
+// Mirrors the QA scenario/run model but swaps the step flow for a checklist +
+// severity-graded findings model, plus incremental git-diff scoping. Server
+// contract: apps/server/src/entities/Security*.ts + modules/security.
+
+export type SecuritySeverity = 'critical' | 'high' | 'medium' | 'low' | 'info';
+export type SecurityScopeMode = 'incremental' | 'full';
+export type SecurityRunStatus = 'pending' | 'running' | 'passed' | 'failed' | 'error';
+
+export interface SecurityChecklistItem {
+  id: string;
+  title: string;
+  /** Grouping label, e.g. 'authz', 'input-validation', 'secrets', 'crypto'. */
+  category?: string;
+  severity_hint?: SecuritySeverity;
+  guidance?: string;
+  /** OWASP/CWE reference URL, CVE/GHSA id, or advisory URL backing the item. */
+  source?: string;
+  /** ISO-8601 timestamp of when this item entered the checklist. */
+  added_at?: string;
+}
+
+/**
+ * On-failure auto-ticket policy for a SecurityProfile. Sibling of
+ * QaOnFailureTicketConfig with one extra knob: `min_severity` — the severity
+ * gate. A failed/errored run only files a ticket when it carries a finding at or
+ * above this severity (default 'high').
+ */
+export interface SecurityOnFailureTicketConfig {
+  enabled: boolean;
+  board_id?: string;
+  column_name?: string;
+  priority?: 'low' | 'medium' | 'high' | 'critical';
+  assignee_id?: string;
+  labels?: string[];
+  /** Severity gate (default 'high'). critical > high > medium > low > info. */
+  min_severity?: SecuritySeverity;
+  dedupe?: 'per_run' | 'per_open_ticket';
+  title_template?: string;
+}
+
+export interface SecurityProfile {
+  id: string;
+  workspace_id: string;
+  board_id: string | null;
+  name: string;
+  description: string;
+  checklist: SecurityChecklistItem[] | null;
+  target_agent_id: string;
+  /** null = AWB's own codebase (self); <uuid> = a checked-out repo Resource. */
+  target_resource_id: string | null;
+  scan_driver: string;
+  scan_driver_config: Record<string, any> | null;
+  scope_mode: SecurityScopeMode;
+  /** HEAD SHA of the most recent PASS run — baseline for the next incremental run. */
+  last_passed_commit: string | null;
+  enabled: boolean;
+  tags: string[] | null;
+  max_runs: number;
+  on_failure_ticket: SecurityOnFailureTicketConfig | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * List view-model returned by GET /api/security/profiles — a SecurityProfile
+ * plus the last-run rollup the dashboard table renders. The server computes the
+ * rollup fields; pass_rate and highest_severity are enriched client-side from
+ * each profile's run history (the list projection does not carry them).
+ */
+export interface SecurityProfileListItem extends SecurityProfile {
+  last_run_at: string | null;
+  last_run_status: SecurityRunStatus | null;
+  last_scope_used: SecurityScopeMode | null;
+  run_count: number;
+}
+
+export interface SecurityFinding {
+  id: string;
+  severity: SecuritySeverity;
+  title: string;
+  category?: string;
+  /** Source file the finding is in, relative to the repo root. */
+  file?: string;
+  line?: number;
+  /** Evidence: the offending snippet / a short proof note. */
+  evidence?: string;
+  remediation?: string;
+  /** The checklist item this finding maps back to (SecurityChecklistItem.id). */
+  checklist_item_id?: string;
+}
+
+export interface SecurityRun {
+  id: string;
+  profile_id: string;
+  workspace_id: string;
+  board_id: string | null;
+  status: SecurityRunStatus;
+  room_id: string;
+  findings: SecurityFinding[] | null;
+  /** The worktree HEAD SHA this run inspected (reported by the agent). */
+  scanned_commit: string;
+  /** The baseline SHA this run diffed against; null for a full scan. */
+  baseline_commit: string | null;
+  scope_used: SecurityScopeMode;
+  batch_id: string | null;
+  batch_index: number | null;
+  artifact_resource_ids: string[] | null;
+  summary: string;
+  triggered_by_type: string;
+  triggered_by_id: string;
+  /** Set once when this run auto-files a severity-gated fix ticket. */
+  auto_ticket_id: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string;
+}
+
+export type SecurityRunBatchStatus = 'running' | 'done' | 'aborted';
+
+/**
+ * SecurityRunBatch — a manual sequential run of several profiles ("수동 전체
+ * 점검"). Only one profile runs at a time: index N+1 dispatches when run N
+ * finalizes. `current_index`/`total` drive the progress display.
+ */
+export interface SecurityRunBatch {
+  id: string;
+  workspace_id: string;
+  board_id: string | null;
+  profile_ids: string[];
+  run_ids: string[];
+  current_index: number;
+  total: number;
+  status: SecurityRunBatchStatus;
+  stop_on_fail: boolean;
+  passed: number;
+  failed: number;
+  errored: number;
+  triggered_by_type: string;
+  triggered_by_id: string;
+  finished_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type SecurityScheduleScope = 'all' | 'selected';
+
+/**
+ * SecuritySchedule — automatic trigger layer over the sequential security batch.
+ * When due, the server kicks a SecurityRunBatch via the SAME orchestrator the
+ * manual "순차 실행" buttons use. Cadence is exactly one of `cron` (5-field UTC)
+ * or `interval_ms`.
+ */
+export interface SecuritySchedule {
+  id: string;
+  workspace_id: string;
+  board_id: string | null;
+  name: string;
+  scope: SecurityScheduleScope;
+  profile_ids: string[];
+  cron: string | null;
+  interval_ms: number | null;
+  enabled: boolean;
+  stop_on_fail: boolean;
+  next_run_at: string | null;
+  last_run_at: string | null;
+  last_batch_id: string | null;
+  triggered_by_type: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Credential {
   id: string;
   // null = global (instance-level) credential shared across all workspaces.
