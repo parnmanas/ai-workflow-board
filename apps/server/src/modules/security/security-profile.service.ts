@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
-import { SecurityProfile, SecurityChecklistItem, SecurityScopeMode } from '../../entities/SecurityProfile';
+import { SecurityProfile, SecurityChecklistItem, SecurityScopeMode, SecurityOnFailureTicketConfig, SecuritySeverity } from '../../entities/SecurityProfile';
 import { SecurityRun, SecurityRunStatus } from '../../entities/SecurityRun';
 import { Agent } from '../../entities/Agent';
 import { Board } from '../../entities/Board';
@@ -49,6 +49,30 @@ function normalizeScopeMode(mode: any): SecurityScopeMode {
   return mode === 'full' ? 'full' : 'incremental';
 }
 
+const VALID_SEVERITIES: SecuritySeverity[] = ['critical', 'high', 'medium', 'low', 'info'];
+const VALID_PRIORITIES = ['low', 'medium', 'high', 'critical'];
+
+/**
+ * Normalize the loose `on_failure_ticket` input into a clean config (or null).
+ * `undefined` means "don't touch" upstream; an explicit `null` clears it. A
+ * value without `enabled:true` is stored disabled. `min_severity` defaults to
+ * 'high' (the severity gate), `dedupe` to 'per_run'.
+ */
+function normalizeOnFailureTicket(cfg: any): SecurityOnFailureTicketConfig | null {
+  if (cfg === null) return null;
+  if (cfg === undefined || typeof cfg !== 'object') return null;
+  const out: SecurityOnFailureTicketConfig = { enabled: !!cfg.enabled };
+  if (cfg.board_id != null && String(cfg.board_id).trim()) out.board_id = String(cfg.board_id).trim();
+  if (cfg.column_name != null && String(cfg.column_name).trim()) out.column_name = String(cfg.column_name).trim();
+  if (VALID_PRIORITIES.includes(cfg.priority)) out.priority = cfg.priority;
+  if (cfg.assignee_id != null && String(cfg.assignee_id).trim()) out.assignee_id = String(cfg.assignee_id).trim();
+  if (Array.isArray(cfg.labels)) out.labels = cfg.labels.map((l: any) => String(l)).filter(Boolean);
+  out.min_severity = VALID_SEVERITIES.includes(cfg.min_severity) ? cfg.min_severity : 'high';
+  out.dedupe = cfg.dedupe === 'per_open_ticket' ? 'per_open_ticket' : 'per_run';
+  if (cfg.title_template != null && String(cfg.title_template).trim()) out.title_template = String(cfg.title_template);
+  return out;
+}
+
 /**
  * List view-model: a SecurityProfile row enriched with a last-run rollup so the
  * security dashboard can render a status table (last-run time + result + open
@@ -77,6 +101,7 @@ export interface CreateProfileInput {
   enabled?: boolean;
   tags?: any;
   max_runs?: number;
+  on_failure_ticket?: any;
   created_by?: string;
 }
 
@@ -187,6 +212,7 @@ export class SecurityProfileService {
       enabled: input.enabled !== false,
       tags: normalizeTags(input.tags),
       max_runs: typeof input.max_runs === 'number' && input.max_runs > 0 ? Math.floor(input.max_runs) : 20,
+      on_failure_ticket: normalizeOnFailureTicket(input.on_failure_ticket),
       created_by: input.created_by ?? '',
     });
     return this.profileRepo.save(created);
@@ -233,6 +259,7 @@ export class SecurityProfileService {
       const n = Number(patch.max_runs);
       if (Number.isFinite(n) && n > 0) existing.max_runs = Math.floor(n);
     }
+    if (patch.on_failure_ticket !== undefined) existing.on_failure_ticket = normalizeOnFailureTicket(patch.on_failure_ticket);
     return this.profileRepo.save(existing);
   }
 

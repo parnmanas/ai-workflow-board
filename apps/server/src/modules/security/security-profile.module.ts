@@ -8,11 +8,17 @@ import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
 import { TicketAttachment } from '../../entities/TicketAttachment';
 import { Agent } from '../../entities/Agent';
 import { Board } from '../../entities/Board';
+import { BoardColumn } from '../../entities/BoardColumn';
+import { Ticket } from '../../entities/Ticket';
+import { Comment } from '../../entities/Comment';
+import { Resource } from '../../entities/Resource';
 import { SecurityProfileController } from './security-profile.controller';
 import { SecurityProfileService } from './security-profile.service';
 import { SecurityRunService } from './security-run.service';
 import { SecurityRunReaperService } from './security-run-reaper.service';
+import { SecurityFailureTicketService } from './security-failure-ticket.service';
 import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
+import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module';
 import { SharedServicesModule } from '../../services/shared-services.module';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
@@ -25,12 +31,13 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([SecurityProfile, SecurityRun, ChatRoom, ChatRoomParticipant, ChatRoomMessage, TicketAttachment, Agent, Board]),
+    TypeOrmModule.forFeature([SecurityProfile, SecurityRun, ChatRoom, ChatRoomParticipant, ChatRoomMessage, TicketAttachment, Agent, Board, BoardColumn, Ticket, Comment, Resource]),
     ChatRoomsModule,
+    WorkspaceRolesModule,
     SharedServicesModule,
   ],
   controllers: [SecurityProfileController],
-  providers: [SecurityProfileService, SecurityRunService, SecurityRunReaperService, AuthGuard, PermissionGuard],
-  exports: [SecurityProfileService, SecurityRunService, SecurityRunReaperService],
+  providers: [SecurityProfileService, SecurityRunService, SecurityRunReaperService, SecurityFailureTicketService, AuthGuard, PermissionGuard],
+  exports: [SecurityProfileService, SecurityRunService, SecurityRunReaperService, SecurityFailureTicketService],
 })
 export class SecurityProfileModule {}

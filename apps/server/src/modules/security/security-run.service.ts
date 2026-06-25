@@ -13,6 +13,7 @@ import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { LogService } from '../../services/log.service';
 import { findOrFail } from '../../common/find-or-fail';
 import { renderSecurityRunPrompt, renderChecklistRefreshPrompt } from './security-prompt';
+import { SecurityFailureTicketService } from './security-failure-ticket.service';
 
 function makeError(status: number, message: string): Error & { status: number } {
   const err = new Error(message) as Error & { status: number };
@@ -99,6 +100,7 @@ export class SecurityRunService {
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     private readonly messaging: RoomMessagingService,
     private readonly logService: LogService,
+    private readonly failureTicketService: SecurityFailureTicketService,
   ) {}
 
   // ── Reads ─────────────────────────────────────────────────────────────────
@@ -316,6 +318,21 @@ export class SecurityRunService {
         { last_passed_commit: saved.scanned_commit },
       );
       this.logService.info('Security', `run ${runId} passed → profile ${saved.profile_id} last_passed_commit advanced to ${saved.scanned_commit}`);
+    }
+
+    // On-failure auto-ticket hook. completeRun is the single agent-driven
+    // SecurityRun finalization choke point, so the side-effect is called here
+    // directly (synchronous, deterministic) rather than via activity-event
+    // indirection. The service is a no-op unless the profile opts in AND the run
+    // failed/errored AND a finding meets the severity gate; it self-guards
+    // against double-filing via run.auto_ticket_id and never throws, so a
+    // side-effect failure can't abort the finalization above.
+    if (saved.status === 'failed' || saved.status === 'error') {
+      const profile = await this.profileRepo.findOne({ where: { id: saved.profile_id } });
+      if (profile) {
+        const ticketId = await this.failureTicketService.maybeCreateOnFailure(saved, profile);
+        if (ticketId) saved.auto_ticket_id = ticketId;
+      }
     }
     return saved;
   }
