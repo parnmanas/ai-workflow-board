@@ -29,6 +29,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { SecurityRun } from '../../entities/SecurityRun';
 import { LogService } from '../../services/log.service';
+import { SecurityRunService } from './security-run.service';
 
 const DEFAULT_SWEEP_MS = 30 * 60_000; // 30 minutes
 const MIN_SWEEP_MS = 60_000;          // 1 minute
@@ -55,6 +56,7 @@ export class SecurityRunReaperService implements OnModuleInit, OnModuleDestroy {
   constructor(
     @InjectRepository(SecurityRun) private readonly runRepo: Repository<SecurityRun>,
     private readonly logService: LogService,
+    private readonly runService: SecurityRunService,
   ) {}
 
   onModuleInit(): void {
@@ -109,6 +111,12 @@ export class SecurityRunReaperService implements OnModuleInit, OnModuleDestroy {
         run.summary = run.summary ? `${marker}\n\n${run.summary}` : marker;
         await this.runRepo.save(run);
         reaped.push(run.id);
+        // If this dead run belonged to a sequential batch, advance the batch from
+        // here too (terminal-status reached, just not via complete_security_run).
+        // Never let a batch hiccup abort the sweep.
+        await this.runService.onRunFinalized(run).catch((e) =>
+          this.logService.warn('SecurityReaper', 'batch advance after reap failed (continuing)', { err: String(e), run_id: run.id }),
+        );
       } catch (e) {
         this.logService.warn('SecurityReaper', 'per-run reap failed (continuing)', { err: String(e), run_id: run.id });
       }

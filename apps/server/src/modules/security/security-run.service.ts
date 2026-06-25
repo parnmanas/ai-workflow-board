@@ -1,9 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { SecurityProfile } from '../../entities/SecurityProfile';
 import { SecurityRun, SecurityRunStatus, SecurityFinding } from '../../entities/SecurityRun';
+import { SecurityRunBatch } from '../../entities/SecurityRunBatch';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
@@ -43,12 +44,30 @@ export interface StartSecurityRunArgs {
   profileId: string;
   triggeredByType: 'user' | 'system' | 'agent';
   triggeredById: string;
+  // Sequential-batch wiring. When present, the dispatched SecurityRun is stamped
+  // with its batch membership so completeRun()/the reaper can advance the batch
+  // when this run finalizes. Standalone runs omit both.
+  batchId?: string;
+  batchIndex?: number;
 }
 
 export interface StartSecurityRunResult {
   run: SecurityRun;
   room_id: string;
   prompt: string;
+}
+
+export interface StartSecurityBatchArgs {
+  workspaceId: string;
+  boardId?: string | null;
+  // Explicit ordered profile ids, OR `all: true` to expand to every enabled
+  // profile in scope (workspace + optional board). Exactly one is used —
+  // profileIds wins if both are given.
+  profileIds?: string[];
+  all?: boolean;
+  stopOnFail?: boolean;
+  triggeredByType: 'user' | 'system' | 'agent';
+  triggeredById: string;
 }
 
 export interface RefreshChecklistArgs {
@@ -93,6 +112,7 @@ export class SecurityRunService {
   constructor(
     @InjectRepository(SecurityProfile) private readonly profileRepo: Repository<SecurityProfile>,
     @InjectRepository(SecurityRun) private readonly runRepo: Repository<SecurityRun>,
+    @InjectRepository(SecurityRunBatch) private readonly batchRepo: Repository<SecurityRunBatch>,
     @InjectRepository(ChatRoom) private readonly roomRepo: Repository<ChatRoom>,
     @InjectRepository(ChatRoomParticipant) private readonly participantRepo: Repository<ChatRoomParticipant>,
     @InjectRepository(ChatRoomMessage) private readonly messageRepo: Repository<ChatRoomMessage>,
@@ -164,6 +184,8 @@ export class SecurityRunService {
       summary: '',
       triggered_by_type: args.triggeredByType,
       triggered_by_id: args.triggeredById || '',
+      batch_id: args.batchId ?? null,
+      batch_index: args.batchIndex ?? null,
       started_at: now,
       finished_at: null,
     }));
@@ -334,7 +356,180 @@ export class SecurityRunService {
         if (ticketId) saved.auto_ticket_id = ticketId;
       }
     }
+
+    // Single terminal point for agent-driven completion → advance the sequential
+    // batch (if any) from here. Never let a batch hiccup fail the complete call.
+    await this.onRunFinalized(saved).catch((e) =>
+      this.logService.warn('Security', `batch advance after completeRun ${runId} failed: ${e?.message || e}`),
+    );
     return saved;
+  }
+
+  // ── Sequential batches (수동 전체 점검) ───────────────────────────────────────
+
+  async getBatch(batchId: string, workspaceId: string): Promise<SecurityRunBatch> {
+    if (!workspaceId) throw makeError(400, 'workspace_id is required');
+    return findOrFail(this.batchRepo, { where: { id: batchId, workspace_id: workspaceId } }, 'security batch not found in workspace');
+  }
+
+  /**
+   * Start a sequential batch: resolve the ordered profile list, persist the
+   * batch row, and dispatch ONLY the first profile. Subsequent profiles are
+   * dispatched one-at-a-time from onRunFinalized() as each run terminates — so
+   * runs never overlap (the "동시 금지" constraint). A naive for-loop over startRun
+   * would fire them all at once, since startRun returns before the run completes.
+   */
+  async startBatch(args: StartSecurityBatchArgs): Promise<SecurityRunBatch> {
+    if (!args.workspaceId) throw makeError(400, 'workspace_id is required');
+    const profileIds = await this._resolveBatchProfileIds(args);
+    if (profileIds.length === 0) {
+      throw makeError(400, 'no runnable profiles for this batch (none selected, or none enabled in scope)');
+    }
+
+    const batch = await this.batchRepo.save(this.batchRepo.create({
+      workspace_id: args.workspaceId,
+      board_id: args.boardId ?? null,
+      profile_ids: profileIds,
+      run_ids: [],
+      current_index: 0,
+      status: 'running',
+      stop_on_fail: !!args.stopOnFail,
+      passed: 0,
+      failed: 0,
+      errored: 0,
+      triggered_by_type: args.triggeredByType,
+      triggered_by_id: args.triggeredById || '',
+      finished_at: null,
+    }));
+
+    // Dispatch index 0. _dispatchBatchIndex walks forward past any profile whose
+    // dispatch throws (deleted/disabled), so a bad first profile can't wedge the
+    // whole batch.
+    await this._dispatchBatchIndex(batch, 0);
+    return this.getBatch(batch.id, args.workspaceId);
+  }
+
+  /**
+   * Called when a run reaches a terminal status — from completeRun (agent-driven)
+   * or the reaper (dead run). If the run belongs to a still-running batch AND is
+   * the batch's current index, tally the result and dispatch the next profile (or
+   * finalize the batch). The `batch_index === current_index` check is the
+   * idempotency guard: a re-finalized or stale run whose index has already been
+   * advanced past is a no-op, so the next profile is never double-dispatched.
+   */
+  async onRunFinalized(run: SecurityRun): Promise<void> {
+    if (!run.batch_id || run.batch_index == null) return;
+    const batch = await this.batchRepo.findOne({ where: { id: run.batch_id } });
+    if (!batch || batch.status !== 'running') return;
+    if (run.batch_index !== batch.current_index) return; // already advanced past — idempotent no-op
+
+    // Tally this run into the rollup. Anything not 'passed'/'failed' (i.e.
+    // 'error', or a non-terminal value slipping through) counts as errored.
+    if (run.status === 'passed') batch.passed += 1;
+    else if (run.status === 'failed') batch.failed += 1;
+    else batch.errored += 1;
+
+    const ids = Array.isArray(batch.profile_ids) ? batch.profile_ids : [];
+
+    // stop-on-fail: halt on the first non-passed run.
+    if (batch.stop_on_fail && run.status !== 'passed') {
+      batch.status = 'aborted';
+      batch.finished_at = new Date();
+      await this.batchRepo.save(batch);
+      this.logService.info('Security', `batch ${batch.id} aborted at index ${batch.current_index} (stop_on_fail, run ${run.status})`);
+      return;
+    }
+
+    const nextIndex = batch.current_index + 1;
+    if (nextIndex >= ids.length) {
+      batch.status = 'done';
+      batch.finished_at = new Date();
+      await this.batchRepo.save(batch);
+      this.logService.info('Security', `batch ${batch.id} done (${batch.passed}P/${batch.failed}F/${batch.errored}E of ${ids.length})`);
+      return;
+    }
+
+    // Advance the cursor + persist BEFORE the (slow, async) dispatch so a
+    // duplicate finalize of this same run sees current_index already moved and
+    // no-ops — closing the idempotency window around startRun.
+    batch.current_index = nextIndex;
+    await this.batchRepo.save(batch);
+    await this._dispatchBatchIndex(batch, nextIndex);
+  }
+
+  /** Resolve the ordered profile id list for a new batch (explicit list, else all-in-scope). */
+  private async _resolveBatchProfileIds(args: StartSecurityBatchArgs): Promise<string[]> {
+    // Explicit list wins. Preserve caller order; drop ids that aren't enabled
+    // profiles in this workspace so a stale/foreign id can't wedge the batch.
+    if (Array.isArray(args.profileIds) && args.profileIds.length > 0) {
+      const found = await this.profileRepo.find({
+        where: { id: In(args.profileIds), workspace_id: args.workspaceId },
+      });
+      const byId = new Map(found.map((p) => [p.id, p]));
+      return args.profileIds.filter((id) => {
+        const p = byId.get(id);
+        return !!p && p.enabled !== false;
+      });
+    }
+    if (args.all) {
+      // Expand to every enabled profile in scope, mirroring SecurityProfileService.list:
+      // boardId '' = workspace-scope only (board_id IS NULL), <uuid> = that board,
+      // omit/null = all rows in the workspace. Resolved AT DISPATCH TIME so profile
+      // add/remove is reflected automatically (the schedule keeps no id snapshot).
+      const qb = this.profileRepo.createQueryBuilder('p')
+        .where('p.workspace_id = :ws', { ws: args.workspaceId })
+        .andWhere('p.enabled = :en', { en: true });
+      if (args.boardId !== undefined && args.boardId !== null) {
+        if (args.boardId) qb.andWhere('p.board_id = :bid', { bid: args.boardId });
+        else qb.andWhere('p.board_id IS NULL');
+      }
+      const rows = await qb.orderBy('p.name', 'ASC').getMany();
+      return rows.map((p) => p.id);
+    }
+    return [];
+  }
+
+  /**
+   * Dispatch the profile at `index` for this batch, walking forward past any
+   * index whose dispatch throws (profile deleted/disabled since the batch was
+   * built) so one bad profile can't stall the rest. If every remaining index
+   * fails, the batch is finalized as done.
+   */
+  private async _dispatchBatchIndex(batch: SecurityRunBatch, index: number): Promise<void> {
+    const ids = Array.isArray(batch.profile_ids) ? batch.profile_ids : [];
+    let i = index;
+    while (i < ids.length) {
+      batch.current_index = i;
+      try {
+        const result = await this.startRun({
+          profileId: ids[i],
+          triggeredByType: batch.triggered_by_type as StartSecurityRunArgs['triggeredByType'],
+          triggeredById: batch.triggered_by_id,
+          batchId: batch.id,
+          batchIndex: i,
+        });
+        const runIds = Array.isArray(batch.run_ids) ? [...batch.run_ids] : [];
+        runIds[i] = result.run.id;
+        batch.run_ids = runIds;
+        await this.batchRepo.save(batch);
+        return;
+      } catch (e: any) {
+        // Profile gone/disabled at dispatch time — record the skip, count it as
+        // errored, and try the next index.
+        this.logService.warn('Security', `batch ${batch.id} dispatch index ${i} failed: ${e?.message || e}`);
+        const runIds = Array.isArray(batch.run_ids) ? [...batch.run_ids] : [];
+        runIds[i] = '';
+        batch.run_ids = runIds;
+        batch.errored += 1;
+        i += 1;
+      }
+    }
+    // Walked off the end — every remaining index failed to dispatch.
+    batch.current_index = Math.max(0, ids.length - 1);
+    batch.status = 'done';
+    batch.finished_at = new Date();
+    await this.batchRepo.save(batch);
+    this.logService.info('Security', `batch ${batch.id} done — no further runnable profiles from index ${index}`);
   }
 
   /** Cascade helper for SecurityProfileService.remove — tear down every run + its room. */
