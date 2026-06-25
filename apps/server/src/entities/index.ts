@@ -36,3 +36,5 @@ export { QaScenario } from './QaScenario';
 export { QaRun } from './QaRun';
 export { QaRunBatch } from './QaRunBatch';
 export { QaSchedule } from './QaSchedule';
+export { SecurityProfile } from './SecurityProfile';
+export { SecurityRun } from './SecurityRun';
