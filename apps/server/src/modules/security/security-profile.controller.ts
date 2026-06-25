@@ -49,6 +49,7 @@ function scheduleToJson(s: SecuritySchedule) {
     workspace_id: s.workspace_id,
     board_id: s.board_id,
     name: s.name,
+    kind: s.kind ?? 'scan',
     scope: s.scope,
     profile_ids: s.profile_ids ?? [],
     cron: s.cron,
@@ -274,6 +275,7 @@ export class SecurityProfileController {
         workspaceId: body?.workspace_id,
         boardId: body?.board_id ?? undefined,
         name: body?.name,
+        kind: body?.kind,
         scope: body?.scope,
         profileIds: body?.profile_ids,
         cron: body?.cron,
@@ -294,6 +296,7 @@ export class SecurityProfileController {
       const row = await this.scheduleService.update(id, body?.workspace_id, {
         boardId: body?.board_id,
         name: body?.name,
+        kind: body?.kind,
         scope: body?.scope,
         profileIds: body?.profile_ids,
         cron: body?.cron,
@@ -317,14 +320,21 @@ export class SecurityProfileController {
     }
   }
 
-  // Manual immediate trigger — dispatch the schedule's batch now (ignores
-  // enabled; does not disturb next_run_at). Returns the schedule + started batch.
+  // Manual immediate trigger — fire the schedule now (ignores enabled; does not
+  // disturb next_run_at). For kind='scan' returns the started `batch`; for
+  // kind='checklist_refresh' `batch` is null and `refreshes` lists the per-profile
+  // refresh dispatches. `kind` discriminates the two.
   @Post('schedules/:id/run-now')
   async runScheduleNow(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     try {
       const user = (req as any).currentUser as { id: string } | undefined;
-      const { schedule, batch } = await this.scheduleService.runNow(id, body?.workspace_id, user?.id || '');
-      return res.status(201).json({ schedule: scheduleToJson(schedule), batch: batchToJson(batch) });
+      const { schedule, kind, batch, refreshes } = await this.scheduleService.runNow(id, body?.workspace_id, user?.id || '');
+      return res.status(201).json({
+        schedule: scheduleToJson(schedule),
+        kind,
+        batch: batch ? batchToJson(batch) : null,
+        refreshes: refreshes ? refreshes.map((r) => ({ profile_id: r.profile_id, room_id: r.room_id })) : null,
+      });
     } catch (e: any) {
       return res.status(e?.status || 400).json({ error: e?.message || 'Failed to run security schedule' });
     }

@@ -37,6 +37,7 @@ function scheduleToJson(s: SecuritySchedule) {
     workspace_id: s.workspace_id,
     board_id: s.board_id,
     name: s.name,
+    kind: s.kind ?? 'scan',
     scope: s.scope,
     profile_ids: s.profile_ids ?? [],
     cron: s.cron,
@@ -113,18 +114,23 @@ export function registerSecurityScheduleTools(server: McpServer, ctx: ToolContex
 
   server.tool(
     'create_security_schedule',
-    'Create a security schedule — an automatic trigger that kicks a SEQUENTIAL batch ' +
-    '(start_security_batch) when due. `scope="all"` runs every enabled profile in scope at dispatch ' +
-    'time (board_id <uuid> = that board, board_id omitted/null = whole workspace) — no id snapshot, so ' +
-    'profile add/remove is reflected automatically. `scope="selected"` runs the ordered `profile_ids`. ' +
-    'Set EXACTLY ONE of `cron` (5 UTC fields, e.g. "0 3 * * *") or `interval_ms`. `enabled` defaults ' +
-    'true. NOTE: a scheduled run inspects the RUNNING server\'s code — keep the cadence coarser than ' +
-    'your main→prod deploy lag so a run lands after the deploy (the inspected commit is recorded on ' +
-    'each run\'s scanned_commit regardless).',
+    'Create a security schedule — an automatic trigger that fires when due. `kind="scan"` (default) ' +
+    'kicks a SEQUENTIAL inspection batch (start_security_batch). `kind="checklist_refresh"` instead ' +
+    'dispatches a checklist refresh (refresh_security_checklist) to each in-scope profile — it updates ' +
+    'the profiles\' checklists with the latest security knowledge and creates NO run/batch row (so it ' +
+    'never pollutes scan history; safe to run frequently). For BOTH kinds: `scope="all"` targets every ' +
+    'enabled profile in scope at dispatch time (board_id <uuid> = that board, board_id omitted/null = ' +
+    'whole workspace) — no id snapshot, so profile add/remove is reflected automatically; ' +
+    '`scope="selected"` targets the ordered `profile_ids`. Set EXACTLY ONE of `cron` (5 UTC fields, ' +
+    'e.g. "0 3 * * *") or `interval_ms`. `enabled` defaults true. NOTE: a scan run inspects the ' +
+    'RUNNING server\'s code — keep the cadence coarser than your main→prod deploy lag so a run lands ' +
+    'after the deploy (each run records its scanned_commit regardless). A checklist_refresh has no ' +
+    'such deploy-timing concern.',
     {
       workspace_id: z.string().describe('Workspace ID (required)'),
       board_id: z.string().optional().describe('Board to pin to, or omit/"" for workspace scope'),
       name: z.string().describe('Schedule name (required)'),
+      kind: z.enum(['scan', 'checklist_refresh']).optional().describe("'scan' (default, runs an inspection batch) or 'checklist_refresh' (updates profile checklists, no run row)"),
       scope: z.enum(['all', 'selected']).optional().describe("'all' (default) or 'selected'"),
       profile_ids: z.array(z.string()).optional().describe("Ordered profile ids — required when scope='selected'"),
       cron: z.string().optional().describe('5-field UTC cron (e.g. "0 3 * * *"). Mutually exclusive with interval_ms'),
@@ -140,6 +146,7 @@ export function registerSecurityScheduleTools(server: McpServer, ctx: ToolContex
           workspaceId: args.workspace_id,
           boardId: args.board_id ?? undefined,
           name: args.name,
+          kind: args.kind,
           scope: args.scope,
           profileIds: args.profile_ids,
           cron: args.cron,
@@ -164,6 +171,7 @@ export function registerSecurityScheduleTools(server: McpServer, ctx: ToolContex
       workspace_id: z.string().describe('Workspace ID (required, scope guard)'),
       board_id: z.string().optional(),
       name: z.string().optional(),
+      kind: z.enum(['scan', 'checklist_refresh']).optional(),
       scope: z.enum(['all', 'selected']).optional(),
       profile_ids: z.array(z.string()).optional(),
       cron: z.string().optional(),
@@ -177,6 +185,7 @@ export function registerSecurityScheduleTools(server: McpServer, ctx: ToolContex
         const row = await securityScheduleService.update(schedule_id, workspace_id, {
           boardId: patch.board_id,
           name: patch.name,
+          kind: patch.kind,
           scope: patch.scope,
           profileIds: patch.profile_ids,
           cron: patch.cron,
@@ -211,8 +220,10 @@ export function registerSecurityScheduleTools(server: McpServer, ctx: ToolContex
 
   server.tool(
     'run_security_schedule_now',
-    "Manually dispatch a security schedule's batch right now (ignores enabled; does NOT disturb the " +
-    'automatic next_run_at). Returns the schedule + the started batch — poll get_security_batch for progress.',
+    'Manually fire a security schedule right now (ignores enabled; does NOT disturb the automatic ' +
+    "next_run_at). For a 'scan' schedule, returns the started `batch` (poll get_security_batch for " +
+    "progress). For a 'checklist_refresh' schedule, `batch` is null and `refreshes` lists the " +
+    'per-profile refresh dispatches ({ profile_id, room_id }). The `kind` field tells you which.',
     {
       schedule_id: z.string().describe('SecuritySchedule ID'),
       workspace_id: z.string().describe('Workspace ID (required, scope guard)'),
@@ -221,8 +232,15 @@ export function registerSecurityScheduleTools(server: McpServer, ctx: ToolContex
       if (!securityScheduleService) return err('security schedule service unavailable in this MCP context');
       const caller = getCallerAgent(extra);
       try {
-        const { schedule, batch } = await securityScheduleService.runNow(schedule_id, workspace_id, caller?.agentId ?? '');
-        return ok({ schedule: scheduleToJson(schedule), batch: batchToJson(batch) });
+        const { schedule, kind, batch, refreshes } = await securityScheduleService.runNow(schedule_id, workspace_id, caller?.agentId ?? '');
+        return ok({
+          schedule: scheduleToJson(schedule),
+          kind,
+          batch: batch ? batchToJson(batch) : null,
+          refreshes: refreshes
+            ? refreshes.map((r) => ({ profile_id: r.profile_id, room_id: r.room_id }))
+            : null,
+        });
       } catch (e: any) {
         return err(e?.message || 'Failed to run security schedule');
       }
