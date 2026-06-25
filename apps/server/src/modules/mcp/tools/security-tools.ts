@@ -43,6 +43,7 @@ function profileToJson(p: SecurityProfile) {
     enabled: p.enabled,
     tags: p.tags ?? [],
     max_runs: p.max_runs,
+    on_failure_ticket: p.on_failure_ticket ?? null,
     created_by: p.created_by,
     created_at: p.created_at,
     updated_at: p.updated_at,
@@ -65,6 +66,7 @@ function runToJson(r: SecurityRun) {
     summary: r.summary,
     triggered_by_type: r.triggered_by_type,
     triggered_by_id: r.triggered_by_id,
+    auto_ticket_id: r.auto_ticket_id ?? null,
     started_at: r.started_at,
     finished_at: r.finished_at,
     created_at: r.created_at,
@@ -82,6 +84,18 @@ const checklistItemSchema = z.object({
   source: z.string().optional().describe('Evidence link backing the item — an OWASP/CWE URL, a CVE/GHSA id, or an advisory URL'),
   added_at: z.string().optional().describe('ISO-8601 time the item entered the checklist (server stamps it when omitted)'),
 });
+
+const onFailureTicketSchema = z.object({
+  enabled: z.boolean().describe('Master switch for the on-failure auto-ticket policy'),
+  board_id: z.string().optional().describe('Board to file the fix ticket on (falls back to run.board_id → profile.board_id)'),
+  column_name: z.string().optional().describe('Target column (default "To Do" → first non-terminal → first column)'),
+  priority: z.enum(['low', 'medium', 'high', 'critical']).optional().describe('Fix ticket priority (default high)'),
+  assignee_id: z.string().optional().describe('Assignee for the fix ticket (falls back to the profile target agent)'),
+  labels: z.array(z.string()).optional().describe('Extra labels (security-profile:<id> back-ref is always added)'),
+  min_severity: severityEnum.optional().describe('Severity gate (default "high"): a ticket is filed only when the run has a finding at or above this. critical>high>medium>low>info'),
+  dedupe: z.enum(['per_run', 'per_open_ticket']).optional().describe('per_run (default) files one ticket per failed run; per_open_ticket appends a recurrence comment to an existing open security ticket for this profile instead'),
+  title_template: z.string().optional().describe('Title override; {{profile.name}} is substituted. Default "보안 점검 실패: {{profile.name}}"'),
+}).describe('On-failure auto-ticket policy (severity-gated). Pass null to clear.');
 
 const findingSchema = z.object({
   id: z.string().optional().describe('Stable id for the finding (re-recording the same id overwrites it; auto-generated if omitted)'),
@@ -155,6 +169,7 @@ export function registerSecurityTools(server: McpServer, ctx: ToolContext): void
       enabled: z.boolean().optional(),
       tags: z.array(z.string()).optional(),
       max_runs: z.number().optional().describe('FIFO run-history budget per profile (default 20)'),
+      on_failure_ticket: onFailureTicketSchema.optional().describe('Severity-gated on-failure auto-ticket policy — file a fix ticket when a run fails with a finding at or above min_severity'),
     },
     async (args, extra: { sessionId?: string }) => {
       if (!securityProfileService) return err('security profile service unavailable in this MCP context');
@@ -174,6 +189,7 @@ export function registerSecurityTools(server: McpServer, ctx: ToolContext): void
           enabled: args.enabled,
           tags: args.tags,
           max_runs: args.max_runs,
+          on_failure_ticket: args.on_failure_ticket,
           created_by: caller?.agentId ?? '',
         });
         return ok(profileToJson(row));
@@ -204,6 +220,7 @@ export function registerSecurityTools(server: McpServer, ctx: ToolContext): void
       enabled: z.boolean().optional(),
       tags: z.array(z.string()).optional(),
       max_runs: z.number().optional(),
+      on_failure_ticket: onFailureTicketSchema.nullable().optional().describe('Severity-gated on-failure auto-ticket policy; pass null to clear it'),
     },
     async ({ profile_id, workspace_id, ...patch }) => {
       if (!securityProfileService) return err('security profile service unavailable in this MCP context');
