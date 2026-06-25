@@ -79,17 +79,26 @@ function makeBatchRepo(batches = []) {
   };
 }
 
-// startBatch spy — records every call and returns a fake running batch.
+// startBatch + refreshChecklistsForScope spies — record every call. startBatch
+// returns a fake running batch; refreshChecklistsForScope returns a fake
+// per-profile refresh dispatch list (no run/batch row).
 function makeRunService() {
   const calls = [];
+  const refreshCalls = [];
   let seq = 0;
   return {
     calls,
+    refreshCalls,
     async startBatch(args) {
       seq += 1;
       const id = `batch-${seq}`;
       calls.push({ id, args });
       return { id, profile_ids: args.profileIds || ['a', 'b'], status: 'running' };
+    },
+    async refreshChecklistsForScope(args) {
+      refreshCalls.push({ args });
+      const ids = args.profileIds || ['ra', 'rb'];
+      return ids.map((id) => ({ profile_id: id, room_id: `room-${id}`, prompt: 'refresh' }));
     },
   };
 }
@@ -221,6 +230,80 @@ test('runNow fires regardless of enabled and does NOT disturb next_run_at', asyn
   assert.equal(schedule.last_batch_id, 'batch-1', 'last_batch_id stamped');
   assert.ok(schedule.last_run_at instanceof Date, 'last_run_at stamped');
   assert.equal(new Date(schedule.next_run_at).getTime(), futureCursor.getTime(), 'next_run_at NOT moved by a manual run');
+});
+
+// ── kind='checklist_refresh' (ticket e07ea821) ───────────────────────────────
+
+test("checklist_refresh kind: scope='all' due schedule dispatches refresh (NOT a batch) and advances next_run_at", async () => {
+  const sch = makeSchedule({ kind: 'checklist_refresh', scope: 'all', board_id: 'board-9' });
+  const { svc, runService } = svcWith([sch]);
+
+  const { dispatched, skipped } = await svc.runOnce(NOW);
+
+  assert.deepEqual(dispatched, ['sch-1'], 'the due refresh schedule is dispatched');
+  assert.deepEqual(skipped, [], 'nothing skipped');
+  assert.equal(runService.calls.length, 0, 'startBatch NEVER called for a checklist_refresh schedule (no scan run row)');
+  assert.equal(runService.refreshCalls.length, 1, 'refreshChecklistsForScope called once');
+  const { args } = runService.refreshCalls[0];
+  assert.equal(args.all, true, 'scope=all → all:true');
+  assert.equal(args.boardId, 'board-9', 'board scope passed through');
+  assert.equal(args.profileIds, undefined, 'no explicit id list for scope=all');
+  assert.equal(args.triggeredByType, 'system');
+  assert.equal(sch.last_batch_id, null, 'last_batch_id stays null — a refresh creates no batch');
+  assert.ok(sch.last_run_at instanceof Date, 'last_run_at stamped');
+  assert.equal(new Date(sch.next_run_at).getTime(), NOW.getTime() + 30 * MIN, 'next_run_at = now + interval');
+});
+
+test("checklist_refresh kind: scope='selected' refreshes exactly the listed profile ids", async () => {
+  const sch = makeSchedule({ kind: 'checklist_refresh', scope: 'selected', profile_ids: ['p-a', 'p-b'], interval_ms: 10 * MIN });
+  const { svc, runService } = svcWith([sch]);
+
+  await svc.runOnce(NOW);
+  assert.equal(runService.calls.length, 0, 'no scan batch');
+  assert.equal(runService.refreshCalls.length, 1);
+  const { args } = runService.refreshCalls[0];
+  assert.deepEqual(args.profileIds, ['p-a', 'p-b'], 'only the selected ids refresh');
+  assert.notEqual(args.all, true, 'not an all-scope dispatch');
+});
+
+test('checklist_refresh kind: NOT blocked by a still-running scan batch (no SKIP-if-running guard)', async () => {
+  // A refresh is independent of any scan batch concurrency — even with a
+  // last_batch_id still 'running', the refresh must fire (it creates no run).
+  const sch = makeSchedule({ kind: 'checklist_refresh', last_batch_id: 'prev-batch' });
+  const { svc, runService } = svcWith([sch], [{ id: 'prev-batch', status: 'running' }]);
+
+  const { dispatched, skipped } = await svc.runOnce(NOW);
+  assert.deepEqual(dispatched, ['sch-1'], 'refresh fires regardless of a running scan batch');
+  assert.deepEqual(skipped, [], 'never skipped on batch-running');
+  assert.equal(runService.refreshCalls.length, 1, 'refresh dispatched');
+});
+
+test('checklist_refresh kind: runNow returns kind + refreshes (batch null) and does not disturb next_run_at', async () => {
+  const futureCursor = new Date(NOW.getTime() + 30 * MIN);
+  const sch = makeSchedule({ id: 'sch-rn-cr', kind: 'checklist_refresh', scope: 'selected', profile_ids: ['p-x'], enabled: false, next_run_at: futureCursor });
+  const { svc, runService } = svcWith([sch]);
+
+  const result = await svc.runNow('sch-rn-cr', 'ws-1', 'tester');
+  assert.equal(result.kind, 'checklist_refresh');
+  assert.equal(result.batch, null, 'no batch for a refresh run-now');
+  assert.ok(Array.isArray(result.refreshes), 'refreshes list returned');
+  assert.equal(result.refreshes.length, 1, 'one profile refreshed');
+  assert.equal(runService.calls.length, 0, 'startBatch not called');
+  assert.equal(runService.refreshCalls.length, 1, 'refreshChecklistsForScope called by run-now even though disabled');
+  assert.equal(result.schedule.last_batch_id, null, 'last_batch_id untouched');
+  assert.ok(result.schedule.last_run_at instanceof Date, 'last_run_at stamped');
+  assert.equal(new Date(result.schedule.next_run_at).getTime(), futureCursor.getTime(), 'next_run_at NOT moved by a manual run');
+});
+
+test('backward-compat: a schedule with undefined kind is treated as scan (kicks a batch)', async () => {
+  const sch = makeSchedule(); // no kind field at all → legacy/NULL row
+  delete sch.kind;
+  const { svc, runService } = svcWith([sch]);
+
+  const { dispatched } = await svc.runOnce(NOW);
+  assert.deepEqual(dispatched, ['sch-1']);
+  assert.equal(runService.calls.length, 1, 'undefined kind → scan → startBatch');
+  assert.equal(runService.refreshCalls.length, 0, 'no refresh path for a legacy row');
 });
 
 test('computeNextRun: cron vs interval vs disabled', () => {
