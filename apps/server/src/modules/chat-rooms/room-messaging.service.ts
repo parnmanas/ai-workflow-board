@@ -327,8 +327,14 @@ export class RoomMessagingService {
     // so a chatty tool-narration burst never inflates the chain.
     const agentChainDepth = await this._computeAgentChainDepth(roomId);
 
+    // Room title for auto-naming: the agent-manager injects a "generate a
+    // title" instruction into the first chat-subagent turn only when this is
+    // empty, so an untitled room gets named from its opening conversation.
+    const roomForName = await this.roomRepo.findOne({ where: { id: roomId } });
+
     activityEvents.emit('chat_room_message', {
       room_id: roomId,
+      room_name: roomForName?.name ?? '',
       workspace_id: workspaceId,
       message_id: savedMsg.id,
       sender_type: senderType,

@@ -312,6 +312,10 @@ export interface ChatDispatchArgs {
   createdAt: string;
   content: string;
   rolePrompt: string;
+  /** Current room title (server SSE `room_name`). Empty string for an
+   *  untitled room — the first-turn prompt then asks the subagent to generate
+   *  a title and persist it via the set_chat_room_name MCP tool. */
+  roomName?: string;
   onProgress?: (stage: string) => void;
   /** ST-6: per-event managed-agent runtime context. When set, the chat
    *  session spawns under this agent's identity (apiKey + cwd + cli) so the
@@ -1474,6 +1478,7 @@ export class EventDispatcher {
           createdAt: p.created_at || '',
           content: p.content || '',
           rolePrompt: p.role_prompt || '',
+          roomName: typeof p.room_name === 'string' ? p.room_name : '',
           onProgress,
           agentContext: runContext,
           attachments: Array.isArray(p.attachments) ? p.attachments : [],

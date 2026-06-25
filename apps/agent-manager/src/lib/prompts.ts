@@ -293,6 +293,10 @@ export function composeChatRoomPrompt(
   // rows. Absent on the legacy oneshot path (text-only history is still
   // correct there — only the inline-vision affordance is missing).
   historyAttachments?: Map<ChatHistoryEntry, PreparedAttachment[]>,
+  // Current room title. Empty string → untitled room: we ask the subagent to
+  // generate and persist a title on this first turn. Once set, later turns
+  // see a non-empty name and the instruction is omitted (one-time naming).
+  roomName = '',
 ): string {
   const lines: string[] = [];
   lines.push('You are an AWB chat subagent responding to a user message in a chat room.');
@@ -334,6 +338,17 @@ export function composeChatRoomPrompt(
   lines.push('Instructions:');
   lines.push('- Compose a helpful reply using your knowledge and the conversation context.');
   for (const ln of chatReplyInstructions(usesNativeMcp, roomId)) lines.push(ln);
+  // Auto-title an untitled room (native MCP only — non-native runtimes have no
+  // tool to persist the name). Fired only when roomName is empty, which is true
+  // just on the opening turn; once set, subsequent turns omit this.
+  if (usesNativeMcp && !roomName.trim()) {
+    lines.push(
+      '- This chat room has no title yet. Derive a concise title (3-6 words) ' +
+        'capturing the conversation topic and set it ONCE via the ' +
+        `mcp__awb__set_chat_room_name MCP tool (room_id: "${roomId}"), then send your reply. ` +
+        'Do not mention the titling in your reply.',
+    );
+  }
   return lines.join('\n');
 }
 

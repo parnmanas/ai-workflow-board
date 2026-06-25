@@ -399,13 +399,15 @@ export class RoomCrudService {
    * DM dedup is gone — users keeping multiple topic-tagged threads with the
    * same person rely on naming to tell them apart.
    */
-  async renameRoom(roomId: string, userId: string, newName: string): Promise<void> {
+  async renameRoom(roomId: string, actorId: string, newName: string, actorType: string = 'user'): Promise<void> {
     const room = await this.roomRepo.findOne({ where: { id: roomId } });
     if (!room) {
       throw makeError(404, 'Room not found');
     }
 
-    await this.membership.requireActiveParticipant(roomId, userId);
+    // actorType lets an agent (set_chat_room_name MCP tool) rename a room it
+    // participates in; the REST endpoint still passes the default 'user'.
+    await this.membership.requireActiveParticipant(roomId, actorId, actorType);
 
     const trimmedName = newName.trim();
     if (!trimmedName || trimmedName.length > 100) {
