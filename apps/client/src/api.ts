@@ -7,6 +7,8 @@ import type {
   QaScenarioListItem,
   QaRun,
   QaRunBatch,
+  QaSchedule,
+  QaScheduleScope,
   Credential,
   ChatMessage,
   ChatThread,
@@ -976,6 +978,49 @@ export const api = {
     const params = new URLSearchParams({ workspace_id: workspaceId });
     return request<QaRunBatch>(`/qa/batches/${batchId}?${params.toString()}`);
   },
+
+  // ─── QA schedules (ticket b6bb7efd) ──────────────────
+  // Automatic trigger layer: when due, the server kicks a sequential batch via
+  // the same orchestrator as startQaBatch. Exactly one of cron / interval_ms.
+  listQaSchedules: (workspaceId: string, boardId?: string | null) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    if (boardId !== undefined && boardId !== null) params.set('board_id', boardId);
+    return request<QaSchedule[]>(`/qa/schedules?${params.toString()}`);
+  },
+  createQaSchedule: (data: {
+    workspace_id: string;
+    board_id?: string | null;
+    name: string;
+    scope?: QaScheduleScope;
+    scenario_ids?: string[];
+    cron?: string | null;
+    interval_ms?: number | null;
+    enabled?: boolean;
+    stop_on_fail?: boolean;
+  }) => request<QaSchedule>('/qa/schedules', { method: 'POST', body: JSON.stringify(data) }),
+  updateQaSchedule: (
+    id: string,
+    data: {
+      workspace_id: string;
+      board_id?: string | null;
+      name?: string;
+      scope?: QaScheduleScope;
+      scenario_ids?: string[];
+      cron?: string | null;
+      interval_ms?: number | null;
+      enabled?: boolean;
+      stop_on_fail?: boolean;
+    },
+  ) => request<QaSchedule>(`/qa/schedules/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteQaSchedule: (id: string, workspaceId: string) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    return request<{ success: true; id: string }>(`/qa/schedules/${id}?${params.toString()}`, { method: 'DELETE' });
+  },
+  runQaScheduleNow: (id: string, workspaceId: string) =>
+    request<{ schedule: QaSchedule; batch: QaRunBatch }>(`/qa/schedules/${id}/run-now`, {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: workspaceId }),
+    }),
 
   // ─── Credentials ──────────────────────────────────────
   // A workspace list also returns inherited global credentials (scope:'global').

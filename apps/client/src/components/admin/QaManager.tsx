@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { api, getActiveWorkspaceId, rawResourceUrl } from '../../api';
-import type { QaScenario, QaScenarioListItem, QaRun, QaStepResult, QaOnFailureTicketConfig, QaRunBatch } from '../../types';
+import type { QaScenario, QaScenarioListItem, QaRun, QaStepResult, QaOnFailureTicketConfig, QaRunBatch, QaSchedule, QaScheduleScope } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 import { Button, Input, Select, Modal, Card, Badge, ConfirmDialog } from '../common';
@@ -49,16 +49,22 @@ export default function QaManager({ workspaceId, boardId }: QaManagerProps) {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [activeBatch, setActiveBatch] = useState<QaRunBatch | null>(null);
   const [batchStarting, setBatchStarting] = useState(false);
+  // Schedule (자동 트리거 레이어 — ticket b6bb7efd) state.
+  const [schedules, setSchedules] = useState<QaSchedule[]>([]);
+  const [editingSchedule, setEditingSchedule] = useState<QaSchedule | 'new' | null>(null);
+  const [confirmDeleteSchedule, setConfirmDeleteSchedule] = useState<QaSchedule | null>(null);
 
   const load = useCallback(async () => {
-    if (!effectiveWorkspaceId) { setScenarios([]); return; }
+    if (!effectiveWorkspaceId) { setScenarios([]); setSchedules([]); return; }
     try {
-      const [list, agentList] = await Promise.all([
+      const [list, agentList, scheduleList] = await Promise.all([
         api.listQaScenarios(effectiveWorkspaceId, boardId !== undefined ? (boardId || '') : undefined),
         api.getAgents().catch(() => []),
+        api.listQaSchedules(effectiveWorkspaceId, boardId !== undefined ? (boardId || '') : undefined).catch(() => []),
       ]);
       setScenarios(list);
       setAgents((agentList || []).map((a: any) => ({ id: a.id, name: a.name, manager_name: a.manager_name })));
+      setSchedules(scheduleList || []);
     } catch (err: any) {
       showToast(err?.message || 'Failed to load QA scenarios', 'error');
     }
@@ -155,6 +161,37 @@ export default function QaManager({ workspaceId, boardId }: QaManagerProps) {
     }
   };
 
+  const handleScheduleRunNow = async (s: QaSchedule) => {
+    try {
+      const { batch } = await api.runQaScheduleNow(s.id, effectiveWorkspaceId);
+      setActiveBatch(batch);
+      showToast(`스케줄 "${s.name}" 즉시 실행 — ${batch.total} 시나리오`, 'success');
+      await load();
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to run schedule', 'error');
+    }
+  };
+
+  const handleScheduleToggle = async (s: QaSchedule) => {
+    try {
+      await api.updateQaSchedule(s.id, { workspace_id: effectiveWorkspaceId, enabled: !s.enabled });
+      await load();
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to toggle schedule', 'error');
+    }
+  };
+
+  const handleScheduleDelete = async (s: QaSchedule) => {
+    try {
+      await api.deleteQaSchedule(s.id, effectiveWorkspaceId);
+      showToast('스케줄 삭제됨', 'success');
+      setConfirmDeleteSchedule(null);
+      await load();
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to delete schedule', 'error');
+    }
+  };
+
   if (!effectiveWorkspaceId) {
     return <div style={{ color: tokens.colors.textSecondary }}>No workspace selected.</div>;
   }
@@ -185,6 +222,26 @@ export default function QaManager({ workspaceId, boardId }: QaManagerProps) {
           confirmLabel="Delete"
           onConfirm={() => handleDelete(confirmDelete)}
           onCancel={() => setConfirmDelete(null)}
+        />
+      )}
+      {editingSchedule && (
+        <ScheduleEditor
+          schedule={editingSchedule === 'new' ? null : editingSchedule}
+          workspaceId={effectiveWorkspaceId}
+          boardId={boardId}
+          scenarios={scenarios}
+          onClose={() => setEditingSchedule(null)}
+          onSaved={async () => { setEditingSchedule(null); await load(); }}
+        />
+      )}
+      {confirmDeleteSchedule && (
+        <ConfirmDialog
+          isOpen={true}
+          title="스케줄 삭제"
+          message={`스케줄 "${confirmDeleteSchedule.name}" 을 삭제할까요? 이미 시작된 batch 는 영향받지 않습니다.`}
+          confirmLabel="Delete"
+          onConfirm={() => handleScheduleDelete(confirmDeleteSchedule)}
+          onCancel={() => setConfirmDeleteSchedule(null)}
         />
       )}
     </>
@@ -268,6 +325,17 @@ export default function QaManager({ workspaceId, boardId }: QaManagerProps) {
         />
       )}
 
+      <SchedulesSection
+        schedules={schedules}
+        scenarios={scenarios}
+        disabled={scenarios.length === 0}
+        onNew={() => setEditingSchedule('new')}
+        onEdit={(s) => setEditingSchedule(s)}
+        onToggle={handleScheduleToggle}
+        onRunNow={handleScheduleRunNow}
+        onDelete={(s) => setConfirmDeleteSchedule(s)}
+      />
+
       {modals}
     </div>
   );
@@ -333,6 +401,141 @@ function BatchProgressBanner({ batch, scenarioName, onDismiss }: {
         </div>
       )}
     </Card>
+  );
+}
+
+// ── QA schedules (자동 트리거 레이어 — ticket b6bb7efd) ───────────────────────
+
+/** Human-readable cadence string for a schedule (cron expr or interval). */
+function formatCadence(s: Pick<QaSchedule, 'cron' | 'interval_ms'>): string {
+  if (s.cron) return `cron: ${s.cron} (UTC)`;
+  if (s.interval_ms && s.interval_ms > 0) {
+    const ms = s.interval_ms;
+    if (ms % 3_600_000 === 0) return `매 ${ms / 3_600_000}시간`;
+    if (ms % 60_000 === 0) return `매 ${ms / 60_000}분`;
+    if (ms % 1_000 === 0) return `매 ${ms / 1_000}초`;
+    return `매 ${ms}ms`;
+  }
+  return '—';
+}
+
+interface SchedulesSectionProps {
+  schedules: QaSchedule[];
+  scenarios: QaScenarioListItem[];
+  disabled: boolean;
+  onNew: () => void;
+  onEdit: (s: QaSchedule) => void;
+  onToggle: (s: QaSchedule) => void;
+  onRunNow: (s: QaSchedule) => void;
+  onDelete: (s: QaSchedule) => void;
+}
+
+/**
+ * Schedule list — visually unified with the scenario table above. Each row shows
+ * scope (전체/선택 N), cadence, enabled toggle, next/last run, and the last
+ * batch result, plus run-now / edit / delete. Scheduling reuses the sequential
+ * batch orchestrator, so a fired schedule surfaces in the same progress banner.
+ */
+function SchedulesSection({ schedules, scenarios, disabled, onNew, onEdit, onToggle, onRunNow, onDelete }: SchedulesSectionProps) {
+  return (
+    <div style={{ marginTop: 28 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: tokens.spacing.md, gap: 12, flexWrap: 'wrap' }}>
+        <div>
+          <SectionLabel>스케줄 — 자동 순차 실행</SectionLabel>
+          <div style={{ color: tokens.colors.textSecondary, fontSize: 12 }}>
+            예약된 시각이 되면 순차 batch 를 자동으로 시작합니다 (전체 또는 선택 시나리오). 순차-batch 와 같은 오케스트레이터를 재사용 — 진행 상황은 위 배너에 표시됩니다.
+          </div>
+        </div>
+        <Button variant="primary" size="md" disabled={disabled} onClick={onNew} title={disabled ? '먼저 시나리오를 만드세요' : undefined}>
+          + 새 스케줄
+        </Button>
+      </div>
+
+      {schedules.length === 0 ? (
+        <Card padding="16px">
+          <div style={{ color: tokens.colors.textSecondary, fontSize: 13 }}>
+            스케줄이 없습니다. "+ 새 스케줄" 로 cron/주기 기반 자동 실행을 추가하세요.
+          </div>
+        </Card>
+      ) : (
+        <div style={{ overflowX: 'auto', border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 760 }}>
+            <thead>
+              <tr>
+                <th style={TH}>Name</th>
+                <th style={TH}>Scope</th>
+                <th style={TH}>Cadence</th>
+                <th style={TH}>Enabled</th>
+                <th style={TH}>Next run (UTC)</th>
+                <th style={TH}>Last run</th>
+                <th style={{ ...TH, textAlign: 'right' }}>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {schedules.map((s) => (
+                <ScheduleRow
+                  key={s.id}
+                  s={s}
+                  scenarioCount={scenarios.length}
+                  onEdit={() => onEdit(s)}
+                  onToggle={() => onToggle(s)}
+                  onRunNow={() => onRunNow(s)}
+                  onDelete={() => onDelete(s)}
+                />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ScheduleRow({ s, scenarioCount, onEdit, onToggle, onRunNow, onDelete }: {
+  s: QaSchedule;
+  scenarioCount: number;
+  onEdit: () => void;
+  onToggle: () => void;
+  onRunNow: () => void;
+  onDelete: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+  const scopeLabel = s.scope === 'all' ? `전체 (${scenarioCount})` : `선택 ${s.scenario_ids.length}`;
+  // next_run_at as a compact UTC wall-clock (cron is interpreted in UTC).
+  const nextUtc = s.next_run_at ? new Date(s.next_run_at).toISOString().replace('T', ' ').slice(0, 16) : '—';
+  return (
+    <tr
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{ background: hover ? tokens.colors.surfaceHover : 'transparent' }}
+    >
+      <td style={TD}>
+        <span style={{ fontWeight: 600, color: tokens.colors.textPrimary }}>{s.name}</span>
+      </td>
+      <td style={TD}>
+        <Badge variant={s.scope === 'all' ? 'info' : 'neutral'} size="sm">{scopeLabel}</Badge>
+      </td>
+      <td style={{ ...TD, color: tokens.colors.textSecondary, fontFamily: 'monospace', fontSize: 12 }}>{formatCadence(s)}</td>
+      <td style={TD}>
+        <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', cursor: 'pointer' }}>
+          <input type="checkbox" checked={s.enabled} onChange={onToggle} title="enable/disable" />
+          {!s.enabled && <Badge variant="warning" size="sm">disabled</Badge>}
+        </label>
+      </td>
+      <td style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
+        {s.enabled ? nextUtc : <span style={{ color: tokens.colors.textMuted }}>—</span>}
+      </td>
+      <td style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap' }}>
+        {s.last_run_at ? relativeTime(s.last_run_at) : <span style={{ color: tokens.colors.textMuted }}>never</span>}
+      </td>
+      <td style={{ ...TD, textAlign: 'right', whiteSpace: 'nowrap' }}>
+        <div style={{ display: 'inline-flex', gap: 6 }}>
+          <Button variant="primary" size="sm" onClick={onRunNow} title="지금 즉시 실행 (enabled 무시, next_run_at 안 건드림)">▶ Run now</Button>
+          <Button variant="ghost" size="sm" onClick={onEdit}>Edit</Button>
+          <Button variant="danger" size="sm" onClick={onDelete}>Delete</Button>
+        </div>
+      </td>
+    </tr>
   );
 }
 
@@ -945,6 +1148,191 @@ function ScenarioEditor({ scenario, workspaceId, boardId, agents, onClose, onSav
               </div>
             </div>
           )}
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// ── Schedule create / edit modal (ticket b6bb7efd) ───────────────────────────
+
+interface ScheduleEditorProps {
+  schedule: QaSchedule | null;
+  workspaceId: string;
+  boardId?: string;
+  scenarios: QaScenarioListItem[];
+  onClose: () => void;
+  onSaved: () => void;
+}
+
+function ScheduleEditor({ schedule, workspaceId, boardId, scenarios, onClose, onSaved }: ScheduleEditorProps) {
+  const { showToast } = useToast();
+  const [name, setName] = useState(schedule?.name ?? '');
+  const [scope, setScope] = useState<QaScheduleScope>(schedule?.scope ?? 'all');
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set(schedule?.scenario_ids ?? []));
+  // Cadence: edit either as an interval (value + unit) or a cron expr.
+  const [cadenceKind, setCadenceKind] = useState<'interval' | 'cron'>(schedule?.cron ? 'cron' : 'interval');
+  const [cron, setCron] = useState(schedule?.cron ?? '0 3 * * *');
+  const initInterval = (() => {
+    const ms = schedule?.interval_ms ?? 3_600_000;
+    if (ms % 3_600_000 === 0) return { value: String(ms / 3_600_000), unit: 'hours' as const };
+    if (ms % 60_000 === 0) return { value: String(ms / 60_000), unit: 'minutes' as const };
+    return { value: String(Math.max(1, Math.round(ms / 1_000))), unit: 'seconds' as const };
+  })();
+  const [intervalValue, setIntervalValue] = useState(initInterval.value);
+  const [intervalUnit, setIntervalUnit] = useState<'seconds' | 'minutes' | 'hours'>(initInterval.unit);
+  const [enabled, setEnabled] = useState(schedule?.enabled ?? true);
+  const [stopOnFail, setStopOnFail] = useState(schedule?.stop_on_fail ?? false);
+  const [saving, setSaving] = useState(false);
+
+  const toggleScenario = (id: string) => {
+    setSelectedIds((cur) => {
+      const next = new Set(cur);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const intervalMs = (() => {
+    const n = parseInt(intervalValue, 10);
+    if (!Number.isFinite(n) || n <= 0) return NaN;
+    const factor = intervalUnit === 'hours' ? 3_600_000 : intervalUnit === 'minutes' ? 60_000 : 1_000;
+    return n * factor;
+  })();
+
+  const handleSave = async () => {
+    if (!name.trim()) { showToast('이름을 입력하세요', 'error'); return; }
+    // scope='selected' 는 시나리오 순서를 화면 목록 순서로 보존.
+    const orderedIds = scenarios.filter((s) => selectedIds.has(s.id)).map((s) => s.id);
+    if (scope === 'selected' && orderedIds.length === 0) {
+      showToast("scope='selected' 는 시나리오를 1개 이상 선택해야 합니다", 'error'); return;
+    }
+    if (cadenceKind === 'cron') {
+      if (cron.trim().split(/\s+/).length !== 5) { showToast('cron 은 5개 필드여야 합니다 (예: "0 3 * * *")', 'error'); return; }
+    } else if (!Number.isFinite(intervalMs) || intervalMs < 1000) {
+      showToast('주기는 1초 이상이어야 합니다', 'error'); return;
+    }
+
+    const base = {
+      workspace_id: workspaceId,
+      name: name.trim(),
+      scope,
+      scenario_ids: scope === 'selected' ? orderedIds : [],
+      enabled,
+      stop_on_fail: stopOnFail,
+      // Send exactly one cadence; null the other so a kind-switch clears it.
+      cron: cadenceKind === 'cron' ? cron.trim() : null,
+      interval_ms: cadenceKind === 'interval' ? intervalMs : null,
+    };
+
+    setSaving(true);
+    try {
+      if (schedule) {
+        await api.updateQaSchedule(schedule.id, base);
+      } else {
+        await api.createQaSchedule({ ...base, board_id: boardId !== undefined ? (boardId || null) : null });
+      }
+      showToast(`스케줄 ${schedule ? '수정' : '생성'}됨`, 'success');
+      onSaved();
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to save schedule', 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const fieldLabel: React.CSSProperties = { fontSize: 12, fontWeight: 600, color: tokens.colors.textSecondary, marginBottom: 4, display: 'block' };
+
+  return (
+    <Modal
+      isOpen={true}
+      onClose={onClose}
+      title={schedule ? 'QA 스케줄 수정' : '새 QA 스케줄'}
+      maxWidth={620}
+      footer={
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          <Button variant="ghost" onClick={onClose}>Cancel</Button>
+          <Button variant="primary" onClick={handleSave} disabled={saving}>{saving ? 'Saving…' : 'Save'}</Button>
+        </div>
+      }
+    >
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <Input label="이름" value={name} onChange={(e) => setName((e.target as HTMLInputElement).value)} />
+
+        {/* Scope: 전체 vs 선택 시나리오 토글 */}
+        <div>
+          <label style={fieldLabel}>대상 시나리오</label>
+          <div style={{ display: 'flex', gap: 16, marginBottom: scope === 'selected' ? 8 : 0 }}>
+            <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
+              <input type="radio" name="qa-sched-scope" checked={scope === 'all'} onChange={() => setScope('all')} />
+              전체 (실행 시점 enabled 시나리오로 자동 확장)
+            </label>
+            <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
+              <input type="radio" name="qa-sched-scope" checked={scope === 'selected'} onChange={() => setScope('selected')} />
+              선택
+            </label>
+          </div>
+          {scope === 'selected' && (
+            <div style={{ maxHeight: 180, overflowY: 'auto', border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.sm, padding: 8, display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {scenarios.length === 0 && <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>시나리오가 없습니다.</div>}
+              {scenarios.map((s) => (
+                <label key={s.id} style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, color: tokens.colors.textPrimary, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={selectedIds.has(s.id)} onChange={() => toggleScenario(s.id)} />
+                  {s.name}
+                  {!s.enabled && <Badge variant="warning" size="sm">disabled</Badge>}
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Cadence: interval vs cron */}
+        <div>
+          <label style={fieldLabel}>실행 주기</label>
+          <div style={{ display: 'flex', gap: 16, marginBottom: 8 }}>
+            <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
+              <input type="radio" name="qa-sched-cadence" checked={cadenceKind === 'interval'} onChange={() => setCadenceKind('interval')} />
+              주기 (interval)
+            </label>
+            <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
+              <input type="radio" name="qa-sched-cadence" checked={cadenceKind === 'cron'} onChange={() => setCadenceKind('cron')} />
+              cron
+            </label>
+          </div>
+          {cadenceKind === 'interval' ? (
+            <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+              <div style={{ width: 120 }}>
+                <Input label="값" type="number" value={intervalValue} onChange={(e) => setIntervalValue((e.target as HTMLInputElement).value)} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <Select
+                  label="단위"
+                  value={intervalUnit}
+                  options={[
+                    { value: 'seconds', label: '초' },
+                    { value: 'minutes', label: '분' },
+                    { value: 'hours', label: '시간' },
+                  ]}
+                  onChange={(e) => setIntervalUnit((e.target as HTMLSelectElement).value as 'seconds' | 'minutes' | 'hours')}
+                />
+              </div>
+            </div>
+          ) : (
+            <Input label='cron (5필드, UTC — 예: "0 3 * * *" = 매일 03:00 UTC)' value={cron} onChange={(e) => setCron((e.target as HTMLInputElement).value)} />
+          )}
+        </div>
+
+        <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary }}>
+          <input type="checkbox" checked={stopOnFail} onChange={(e) => setStopOnFail(e.target.checked)} />
+          첫 실패에서 batch 중단 (stop on fail)
+        </label>
+        <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary }}>
+          <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+          Enabled
+        </label>
+
+        <div style={{ fontSize: 12, color: tokens.colors.textMuted, borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 10 }}>
+          ⚠️ 자동 실행은 <b>돌고 있는 서버</b>를 검증합니다. main→prod auto-deploy 지연이 있으면, 주기를 배포 지연보다 넉넉히 잡거나(혹은 고정 시각 cron) 옛 코드를 검증하지 않도록 운영상 주의하세요. cron 은 모두 <b>UTC</b> 기준입니다.
         </div>
       </div>
     </Modal>

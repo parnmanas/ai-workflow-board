@@ -328,6 +328,36 @@ export interface QaRunBatch {
   updated_at: string;
 }
 
+export type QaScheduleScope = 'all' | 'selected';
+
+/**
+ * QaSchedule — automatic trigger layer over the sequential QA batch (ticket
+ * b6bb7efd, on top of daf06262). When due, the server kicks a QaRunBatch via the
+ * SAME orchestrator the manual "순차 실행" buttons use. scope='all' resolves
+ * enabled scenarios in scope at dispatch time (no id snapshot); scope='selected'
+ * runs the ordered `scenario_ids`. Cadence is exactly one of `cron` (5-field UTC)
+ * or `interval_ms`. `next_run_at`/`last_run_at`/`last_batch_id` track firing.
+ */
+export interface QaSchedule {
+  id: string;
+  workspace_id: string;
+  board_id: string | null;
+  name: string;
+  scope: QaScheduleScope;
+  scenario_ids: string[];
+  cron: string | null;
+  interval_ms: number | null;
+  enabled: boolean;
+  stop_on_fail: boolean;
+  next_run_at: string | null;
+  last_run_at: string | null;
+  last_batch_id: string | null;
+  triggered_by_type: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Credential {
   id: string;
   // null = global (instance-level) credential shared across all workspaces.
