@@ -58,6 +58,38 @@ const EXPECTED_TOOLS = [
   'complete_qa_run',
   'list_qa_runs',
   'get_qa_run',
+  // Ticket daf06262 — sequential multi-scenario batch runs.
+  'start_qa_batch',
+  'get_qa_batch',
+  // Ticket b6bb7efd — QA scheduler (automatic batch trigger layer).
+  'list_qa_schedules',
+  'get_qa_schedule',
+  'create_qa_schedule',
+  'update_qa_schedule',
+  'delete_qa_schedule',
+  'run_qa_schedule_now',
+  // Ticket cfd74638 — security-inspection surface (SecurityProfile/SecurityRun).
+  'list_security_profiles',
+  'get_security_profile',
+  'create_security_profile',
+  'update_security_profile',
+  'delete_security_profile',
+  'refresh_security_checklist',
+  'start_security_run',
+  'record_security_finding',
+  'attach_security_artifact',
+  'complete_security_run',
+  'list_security_runs',
+  'get_security_run',
+  // Ticket 7c07c19d — security scheduler + manual full inspection (batch).
+  'start_security_batch',
+  'get_security_batch',
+  'list_security_schedules',
+  'get_security_schedule',
+  'create_security_schedule',
+  'update_security_schedule',
+  'delete_security_schedule',
+  'run_security_schedule_now',
 ];
 
 test('MCP initialize + tools/list returns expected AWB tool surface', async (t) => {

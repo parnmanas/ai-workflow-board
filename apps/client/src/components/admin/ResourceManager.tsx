@@ -1,10 +1,16 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { api, getActiveWorkspaceId } from '../../api';
 import type { Resource, Credential, RepoBranch } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
-import { Button, Input, Modal, Badge, Card, ConfirmDialog } from '../common';
+import { Button, Input, Modal, ConfirmDialog } from '../common';
 import { relativeTime } from '../../utils/time';
+import ResourceDetailPanel from './ResourceDetailPanel';
+
+// master/detail 레이아웃: 이 폭 미만이면 리스트만 보여주고 detail 은
+// 풀폭 오버레이로 전환한다(반응형). 24px 패딩 컨테이너 안에서 리스트(좌)와
+// detail(우)이 둘 다 쓸만하게 보이는 최소 폭.
+const NARROW_BREAKPOINT = 720;
 
 const RESOURCE_TYPES = [
   { value: 'repository', label: 'Repository', icon: 'R' },
@@ -61,6 +67,22 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [lightboxImage, setLightboxImage] = useState<{ src: string; alt: string; kind: 'image' | 'video' } | null>(null);
 
+  // master/detail 선택 상태 + 컨테이너 폭 기반 반응형.
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [isNarrow, setIsNarrow] = useState(false);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width ?? 0;
+      setIsNarrow(w > 0 && w < NARROW_BREAKPOINT);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   // Branch-test state for the repository form. Lives at the modal level so the
   // success result can drive the Default Branch picker (dropdown of real refs
   // when we have them, free-text input otherwise — a not-yet-pushed branch
@@ -115,6 +137,17 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
   }, [lightboxImage]);
+
+  // 좁은 폭 detail 오버레이는 Esc 로 닫는다(lightbox 와 동일 패턴). 라이트박스가
+  // 떠 있으면 그쪽 Esc 가 우선이므로 오버레이 닫기는 건너뛴다.
+  useEffect(() => {
+    if (!isNarrow || !selectedId || lightboxImage) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setSelectedId(null);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [isNarrow, selectedId, lightboxImage]);
 
   const openResourceFile = (r: Resource) => {
     const mime = r.file_mimetype || '';
@@ -322,6 +355,7 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
     try {
       await api.deleteResource(deleteTarget.id, effectiveWorkspaceId);
       showToast('Resource deleted.', 'success');
+      if (selectedId === deleteTarget.id) setSelectedId(null);
       setDeleteTarget(null);
       await loadResources();
     } catch (err: any) {
@@ -369,8 +403,118 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
     };
   };
 
+  // 현재 선택된 리소스 — 필터/삭제로 목록에서 빠지면 null 로 떨어져 우측이
+  // 빈 상태로 돌아간다.
+  const selectedResource = selectedId ? resources.find((r) => r.id === selectedId) || null : null;
+
+  const renderListRow = (r: Resource) => {
+    const selected = r.id === selectedId;
+    return (
+      <div
+        key={r.id}
+        role="button"
+        tabIndex={0}
+        aria-pressed={selected}
+        data-testid={`resource-row-${r.id}`}
+        onClick={() => setSelectedId(r.id)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            setSelectedId(r.id);
+          }
+        }}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          padding: '10px 12px',
+          cursor: 'pointer',
+          borderLeft: `3px solid ${selected ? tokens.colors.accent : 'transparent'}`,
+          background: selected ? tokens.colors.surfaceCard : 'transparent',
+          borderBottom: `1px solid ${tokens.colors.border}`,
+          outline: 'none',
+        }}
+        onMouseEnter={(e) => {
+          if (!selected) (e.currentTarget as HTMLDivElement).style.background = `${tokens.colors.surfaceCard}80`;
+        }}
+        onMouseLeave={(e) => {
+          if (!selected) (e.currentTarget as HTMLDivElement).style.background = 'transparent';
+        }}
+      >
+        <div style={iconBadgeStyle(r.type)}>{typeIcon(r.type)}</div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div
+            style={{
+              fontSize: 13,
+              fontWeight: 600,
+              color: tokens.colors.textStrong,
+              lineHeight: 1.3,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {r.name}
+          </div>
+          <div
+            style={{
+              fontSize: 11,
+              color: tokens.colors.textMuted,
+              marginTop: 2,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {typeLabel(r.type)} · {relativeTime(r.updated_at || r.created_at)}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const emptyDetail = (
+    <div
+      style={{
+        height: '100%',
+        minHeight: 240,
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        textAlign: 'center',
+        color: tokens.colors.textMuted,
+        padding: 24,
+      }}
+    >
+      <div style={{ fontSize: 15, fontWeight: 700, color: tokens.colors.textSecondary, marginBottom: 6 }}>
+        리소스를 선택하세요
+      </div>
+      <div style={{ fontSize: 12 }}>왼쪽 목록에서 리소스를 클릭하면 상세 정보가 여기에 표시됩니다.</div>
+    </div>
+  );
+
+  const detailPanel = selectedResource ? (
+    <ResourceDetailPanel
+      // key=리소스 id: 선택이 바뀌면 패널을 remount 시켜 이전 리소스의 in-flight
+      // 브랜치 조회(git ls-remote 1~3s)가 늦게 resolve 되며 새 리소스 위에 stale
+      // 브랜치를 덮어쓰는 경쟁을 구조적으로 제거한다(unmount 후 setState 는 no-op).
+      key={selectedResource.id}
+      resource={selectedResource}
+      credentials={credentials}
+      workspaceId={effectiveWorkspaceId}
+      onEdit={startEdit}
+      onDelete={setDeleteTarget}
+      onPreview={openResourceFile}
+      onClose={isNarrow ? () => setSelectedId(null) : undefined}
+      showToast={showToast}
+    />
+  ) : (
+    emptyDetail
+  );
+
   return (
-    <div>
+    <div ref={containerRef}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <span style={{ fontSize: 13, color: tokens.colors.textMuted }}>{resources.length} resources</span>
@@ -419,133 +563,55 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
           </div>
         </div>
       ) : (
-        <div style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))',
-          gap: tokens.spacing.md,
-        }}>
-          {resources.map((r) => (
-            <Card key={r.id} padding="12px 14px">
-              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 6 }}>
-                <div style={iconBadgeStyle(r.type)}>{typeIcon(r.type)}</div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-                    <div style={{ fontSize: '13px', fontWeight: 600, color: tokens.colors.textStrong, lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {r.name}
-                    </div>
-                    <Badge variant="neutral">{typeLabel(r.type)}</Badge>
-                  </div>
-                  {r.description && (
-                    <div style={{ fontSize: '12px', color: tokens.colors.textSecondary, marginTop: 2, lineHeight: 1.4 }}>
-                      {r.description}
-                    </div>
-                  )}
-                </div>
-              </div>
+        // master/detail 2-pane. 좁은 폭에서는 detail 을 풀폭 오버레이로 띄우고
+        // 리스트는 단독 풀폭으로 보여 회귀 없이 동작한다.
+        <div style={{ display: 'flex', gap: tokens.spacing.md, alignItems: 'flex-start' }}>
+          <div
+            style={{
+              width: isNarrow ? '100%' : 320,
+              flexShrink: 0,
+              border: `1px solid ${tokens.colors.border}`,
+              borderRadius: tokens.radii.md,
+              overflow: 'hidden',
+              background: tokens.colors.surface,
+            }}
+          >
+            {resources.map(renderListRow)}
+          </div>
 
-              {r.url && (
-                <div style={{ fontSize: '11px', color: tokens.colors.accent, marginBottom: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  <a href={r.url} target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none' }}
-                    onMouseEnter={(e) => { (e.currentTarget as HTMLAnchorElement).style.textDecoration = 'underline'; }}
-                    onMouseLeave={(e) => { (e.currentTarget as HTMLAnchorElement).style.textDecoration = 'none'; }}
-                  >
-                    {r.url}
-                  </a>
-                </div>
-              )}
+          {!isNarrow && (
+            <div
+              style={{
+                flex: 1,
+                minWidth: 0,
+                border: `1px solid ${tokens.colors.border}`,
+                borderRadius: tokens.radii.md,
+                background: tokens.colors.surfaceCard,
+                padding: 20,
+              }}
+            >
+              {detailPanel}
+            </div>
+          )}
+        </div>
+      )}
 
-              {(() => {
-                const mime = r.file_mimetype || '';
-                const isImage = mime.startsWith('image/') || (r.type === 'image' && !!r.file_data);
-                const isVideo = mime.startsWith('video/');
-                const isAudio = mime.startsWith('audio/');
-                if (r.file_data && isImage) {
-                  return (
-                    <div style={{ marginBottom: 6 }}>
-                      <img
-                        src={`data:${mime || 'image/png'};base64,${r.file_data}`}
-                        alt={r.name}
-                        onClick={() => openResourceFile(r)}
-                        title="Click to view full size"
-                        style={{ maxWidth: '100%', maxHeight: 120, borderRadius: tokens.radii.sm, objectFit: 'contain', cursor: 'zoom-in', display: 'block' }}
-                      />
-                    </div>
-                  );
-                }
-                if (r.file_data && isVideo) {
-                  // Inline <video> with native controls — plays in-card and
-                  // shows the first frame as a preview. Click expands to the
-                  // lightbox for a larger surface (openResourceFile).
-                  return (
-                    <div style={{ marginBottom: 6 }}>
-                      <video
-                        src={`data:${mime};base64,${r.file_data}`}
-                        controls
-                        preload="metadata"
-                        playsInline
-                        title={r.file_name || r.name}
-                        style={{ width: '100%', maxHeight: 160, borderRadius: tokens.radii.sm, background: '#000', display: 'block' }}
-                      />
-                    </div>
-                  );
-                }
-                if (r.file_data && isAudio) {
-                  return (
-                    <div style={{ marginBottom: 6 }}>
-                      <audio
-                        src={`data:${mime};base64,${r.file_data}`}
-                        controls
-                        preload="metadata"
-                        title={r.file_name || r.name}
-                        style={{ width: '100%', display: 'block' }}
-                      />
-                    </div>
-                  );
-                }
-                if (r.file_name) {
-                  return (
-                    <div
-                      onClick={() => openResourceFile(r)}
-                      title="Click to open"
-                      style={{ fontSize: '11px', color: tokens.colors.accent, marginBottom: 4, cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-                      onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.textDecoration = 'underline'; }}
-                      onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.textDecoration = 'none'; }}
-                    >
-                      File: {r.file_name}
-                    </div>
-                  );
-                }
-                return null;
-              })()}
-
-              {r.tags && r.tags.length > 0 && (
-                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 6 }}>
-                  {r.tags.map((tag, i) => (
-                    <span key={i} style={{
-                      fontSize: '10px',
-                      padding: '2px 6px',
-                      borderRadius: tokens.radii.sm,
-                      background: `${tokens.colors.border}80`,
-                      color: tokens.colors.textSecondary,
-                    }}>
-                      {tag}
-                    </span>
-                  ))}
-                </div>
-              )}
-
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginTop: 6 }}>
-                <div style={{ fontSize: '11px', color: tokens.colors.textMuted }}>
-                  {relativeTime(r.updated_at || r.created_at)}
-                </div>
-                <div style={{ display: 'flex', gap: 6 }}>
-                  {r.file_data && <Button variant="secondary" size="sm" onClick={() => openResourceFile(r)}>View</Button>}
-                  <Button variant="secondary" size="sm" onClick={() => startEdit(r)}>Edit</Button>
-                  <Button variant="danger" size="sm" onClick={() => setDeleteTarget(r)}>Delete</Button>
-                </div>
-              </div>
-            </Card>
-          ))}
+      {/* 좁은 폭: detail 풀폭 오버레이 */}
+      {isNarrow && selectedResource && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label={selectedResource.name}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: tokens.colors.surface,
+            zIndex: 9000,
+            overflow: 'auto',
+            padding: 20,
+          }}
+        >
+          {detailPanel}
         </div>
       )}
 

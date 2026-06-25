@@ -2,6 +2,8 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { QaScenario } from '../../entities/QaScenario';
 import { QaRun } from '../../entities/QaRun';
+import { QaRunBatch } from '../../entities/QaRunBatch';
+import { QaSchedule } from '../../entities/QaSchedule';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
@@ -18,6 +20,7 @@ import { QaRunService } from './qa-run.service';
 import { QaRunReaperService } from './qa-run-reaper.service';
 import { QaFailureTicketService } from './qa-failure-ticket.service';
 import { QaRerunOnFixService } from './qa-rerun-on-fix.service';
+import { QaScheduleService } from './qa-schedule.service';
 import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
 import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module';
 import { SharedServicesModule } from '../../services/shared-services.module';
@@ -31,13 +34,13 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([QaScenario, QaRun, ChatRoom, ChatRoomParticipant, ChatRoomMessage, TicketAttachment, Agent, Board, BoardColumn, Ticket, Comment, Resource]),
+    TypeOrmModule.forFeature([QaScenario, QaRun, QaRunBatch, QaSchedule, ChatRoom, ChatRoomParticipant, ChatRoomMessage, TicketAttachment, Agent, Board, BoardColumn, Ticket, Comment, Resource]),
     ChatRoomsModule,
     WorkspaceRolesModule,
     SharedServicesModule,
   ],
   controllers: [QaScenarioController],
-  providers: [QaService, QaRunService, QaRunReaperService, QaFailureTicketService, QaRerunOnFixService, AuthGuard, PermissionGuard],
-  exports: [QaService, QaRunService, QaRunReaperService, QaFailureTicketService],
+  providers: [QaService, QaRunService, QaRunReaperService, QaFailureTicketService, QaRerunOnFixService, QaScheduleService, AuthGuard, PermissionGuard],
+  exports: [QaService, QaRunService, QaRunReaperService, QaFailureTicketService, QaScheduleService],
 })
 export class QaScenarioModule {}

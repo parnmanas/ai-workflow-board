@@ -6,6 +6,15 @@ import type {
   QaScenario,
   QaScenarioListItem,
   QaRun,
+  QaRunBatch,
+  QaSchedule,
+  QaScheduleScope,
+  SecurityProfile,
+  SecurityProfileListItem,
+  SecurityRun,
+  SecurityRunBatch,
+  SecuritySchedule,
+  SecurityScheduleScope,
   Credential,
   ChatMessage,
   ChatThread,
@@ -47,6 +56,11 @@ import type {
   HarnessConfig,
   EffortPresetsConfig,
   Comment,
+  RepoRefs,
+  RepoCommitSummary,
+  RepoCommitDetail,
+  RepoTreeEntry,
+  RepoFileContent,
 } from './types';
 
 const BASE = '/api';
@@ -856,6 +870,46 @@ export const api = {
       { method: 'POST', body: JSON.stringify(data) },
     ),
 
+  // ─── repository git reading (history / diff / file tree) ──────────────
+  // All read from the server's per-Resource bare blobless cache clone. SSH-only
+  // URLs come back as HTTP 422 (code 'ssh_unsupported') — `request` throws the
+  // error message, which the panel renders as a degrade notice.
+  getRepoRefs: (id: string, workspaceId: string, refresh = false) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    if (refresh) params.set('refresh', 'true');
+    return request<RepoRefs>(`/resources/${id}/refs?${params.toString()}`);
+  },
+  // Cursor pagination: pass the last shown sha as `before` to load older commits.
+  listRepoCommits: (
+    id: string,
+    workspaceId: string,
+    opts?: { ref?: string; limit?: number; before?: string; refresh?: boolean },
+  ) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    if (opts?.ref) params.set('ref', opts.ref);
+    if (opts?.limit) params.set('limit', String(opts.limit));
+    if (opts?.before) params.set('before', opts.before);
+    if (opts?.refresh) params.set('refresh', 'true');
+    return request<{ commits: RepoCommitSummary[] }>(`/resources/${id}/commits?${params.toString()}`);
+  },
+  getRepoCommit: (id: string, workspaceId: string, sha: string) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    return request<RepoCommitDetail>(`/resources/${id}/commits/${encodeURIComponent(sha)}?${params.toString()}`);
+  },
+  getRepoTree: (id: string, workspaceId: string, opts?: { ref?: string; path?: string }) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    if (opts?.ref) params.set('ref', opts.ref);
+    if (opts?.path) params.set('path', opts.path);
+    return request<{ ref: string; path: string; entries: RepoTreeEntry[] }>(
+      `/resources/${id}/tree?${params.toString()}`,
+    );
+  },
+  getRepoFile: (id: string, workspaceId: string, filePath: string, ref?: string) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId, path: filePath });
+    if (ref) params.set('ref', ref);
+    return request<RepoFileContent>(`/resources/${id}/file?${params.toString()}`);
+  },
+
   // ─── Actions ──────────────────────────────────────────
   listActions: (workspaceId: string, boardId?: string | null) => {
     const params = new URLSearchParams({ workspace_id: workspaceId });
@@ -961,6 +1015,179 @@ export const api = {
     const params = new URLSearchParams({ workspace_id: workspaceId });
     return request<QaRun>(`/qa/runs/${runId}?${params.toString()}`);
   },
+  // ─── Sequential QA batches (ticket daf06262) ──────────
+  // scenario_ids[] OR all (→ enabled scenarios in scope). Only the first
+  // scenario dispatches now; the rest run one-at-a-time as each finalizes.
+  startQaBatch: (data: {
+    workspace_id: string;
+    board_id?: string | null;
+    scenario_ids?: string[];
+    all?: boolean;
+    stop_on_fail?: boolean;
+  }) => request<QaRunBatch>('/qa/batches', { method: 'POST', body: JSON.stringify(data) }),
+  getQaBatch: (batchId: string, workspaceId: string) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    return request<QaRunBatch>(`/qa/batches/${batchId}?${params.toString()}`);
+  },
+
+  // ─── QA schedules (ticket b6bb7efd) ──────────────────
+  // Automatic trigger layer: when due, the server kicks a sequential batch via
+  // the same orchestrator as startQaBatch. Exactly one of cron / interval_ms.
+  listQaSchedules: (workspaceId: string, boardId?: string | null) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    if (boardId !== undefined && boardId !== null) params.set('board_id', boardId);
+    return request<QaSchedule[]>(`/qa/schedules?${params.toString()}`);
+  },
+  createQaSchedule: (data: {
+    workspace_id: string;
+    board_id?: string | null;
+    name: string;
+    scope?: QaScheduleScope;
+    scenario_ids?: string[];
+    cron?: string | null;
+    interval_ms?: number | null;
+    enabled?: boolean;
+    stop_on_fail?: boolean;
+  }) => request<QaSchedule>('/qa/schedules', { method: 'POST', body: JSON.stringify(data) }),
+  updateQaSchedule: (
+    id: string,
+    data: {
+      workspace_id: string;
+      board_id?: string | null;
+      name?: string;
+      scope?: QaScheduleScope;
+      scenario_ids?: string[];
+      cron?: string | null;
+      interval_ms?: number | null;
+      enabled?: boolean;
+      stop_on_fail?: boolean;
+    },
+  ) => request<QaSchedule>(`/qa/schedules/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteQaSchedule: (id: string, workspaceId: string) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    return request<{ success: true; id: string }>(`/qa/schedules/${id}?${params.toString()}`, { method: 'DELETE' });
+  },
+  runQaScheduleNow: (id: string, workspaceId: string) =>
+    request<{ schedule: QaSchedule; batch: QaRunBatch }>(`/qa/schedules/${id}/run-now`, {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: workspaceId }),
+    }),
+
+  // ─── Security inspection (보안 점검 — ticket cfd74638 foundation) ──────────
+  // Sibling of scenario QA: profile CRUD + run dispatch + history + sequential
+  // batches + schedules. Run-result recording (findings, complete) is agent-only
+  // via MCP, so it is intentionally not exposed over REST.
+  listSecurityProfiles: (workspaceId: string, boardId?: string | null) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    if (boardId !== undefined) params.set('board_id', boardId || '');
+    return request<SecurityProfileListItem[]>(`/security/profiles?${params.toString()}`);
+  },
+  getSecurityProfile: (id: string) => request<SecurityProfile>(`/security/profiles/${id}`),
+  createSecurityProfile: (data: {
+    workspace_id: string;
+    board_id?: string | null;
+    name: string;
+    description?: string;
+    checklist?: SecurityProfile['checklist'];
+    target_agent_id: string;
+    target_resource_id?: string | null;
+    scan_driver?: string;
+    scan_driver_config?: Record<string, any> | null;
+    scope_mode?: SecurityProfile['scope_mode'];
+    enabled?: boolean;
+    tags?: string[];
+    on_failure_ticket?: SecurityProfile['on_failure_ticket'];
+    max_runs?: number;
+  }) => request<SecurityProfile>('/security/profiles', { method: 'POST', body: JSON.stringify(data) }),
+  updateSecurityProfile: (
+    id: string,
+    data: {
+      workspace_id: string;
+      name?: string;
+      description?: string;
+      checklist?: SecurityProfile['checklist'];
+      target_agent_id?: string;
+      target_resource_id?: string | null;
+      board_id?: string | null;
+      scan_driver?: string;
+      scan_driver_config?: Record<string, any> | null;
+      scope_mode?: SecurityProfile['scope_mode'];
+      enabled?: boolean;
+      tags?: string[];
+      on_failure_ticket?: SecurityProfile['on_failure_ticket'];
+      max_runs?: number;
+    },
+  ) => request<SecurityProfile>(`/security/profiles/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteSecurityProfile: (id: string, workspaceId: string) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    return request<{ success: true; id: string }>(`/security/profiles/${id}?${params.toString()}`, { method: 'DELETE' });
+  },
+  // Dispatch a "refresh the checklist with the latest security info" task — no
+  // SecurityRun row, the agent WebSearches and writes the checklist back.
+  refreshSecurityChecklist: (id: string) =>
+    request<{ profile_id: string; room_id: string; prompt: string }>(`/security/profiles/${id}/refresh-checklist`, { method: 'POST', body: '{}' }),
+  runSecurityProfile: (id: string) =>
+    request<{ run_id: string; room_id: string; prompt: string }>(`/security/profiles/${id}/run`, { method: 'POST', body: '{}' }),
+  listSecurityRuns: (id: string, workspaceId: string, limit = 20) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId, limit: String(limit) });
+    return request<SecurityRun[]>(`/security/profiles/${id}/runs?${params.toString()}`);
+  },
+  getSecurityRun: (runId: string, workspaceId: string) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    return request<SecurityRun>(`/security/runs/${runId}?${params.toString()}`);
+  },
+  // ─── Sequential security batches ──────────────────────
+  startSecurityBatch: (data: {
+    workspace_id: string;
+    board_id?: string | null;
+    profile_ids?: string[];
+    all?: boolean;
+    stop_on_fail?: boolean;
+  }) => request<SecurityRunBatch>('/security/batches', { method: 'POST', body: JSON.stringify(data) }),
+  getSecurityBatch: (batchId: string, workspaceId: string) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    return request<SecurityRunBatch>(`/security/batches/${batchId}?${params.toString()}`);
+  },
+  // ─── Security schedules ───────────────────────────────
+  listSecuritySchedules: (workspaceId: string, boardId?: string | null) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    if (boardId !== undefined && boardId !== null) params.set('board_id', boardId);
+    return request<SecuritySchedule[]>(`/security/schedules?${params.toString()}`);
+  },
+  createSecuritySchedule: (data: {
+    workspace_id: string;
+    board_id?: string | null;
+    name: string;
+    scope?: SecurityScheduleScope;
+    profile_ids?: string[];
+    cron?: string | null;
+    interval_ms?: number | null;
+    enabled?: boolean;
+    stop_on_fail?: boolean;
+  }) => request<SecuritySchedule>('/security/schedules', { method: 'POST', body: JSON.stringify(data) }),
+  updateSecuritySchedule: (
+    id: string,
+    data: {
+      workspace_id: string;
+      board_id?: string | null;
+      name?: string;
+      scope?: SecurityScheduleScope;
+      profile_ids?: string[];
+      cron?: string | null;
+      interval_ms?: number | null;
+      enabled?: boolean;
+      stop_on_fail?: boolean;
+    },
+  ) => request<SecuritySchedule>(`/security/schedules/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteSecuritySchedule: (id: string, workspaceId: string) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    return request<{ success: true; id: string }>(`/security/schedules/${id}?${params.toString()}`, { method: 'DELETE' });
+  },
+  runSecurityScheduleNow: (id: string, workspaceId: string) =>
+    request<{ schedule: SecuritySchedule; batch: SecurityRunBatch }>(`/security/schedules/${id}/run-now`, {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: workspaceId }),
+    }),
 
   // ─── Credentials ──────────────────────────────────────
   // A workspace list also returns inherited global credentials (scope:'global').

@@ -65,6 +65,18 @@ export class QaRun {
   @Column({ type: 'int', default: 0 })
   rerun_generation: number;
 
+  // Sequential-batch membership (QaRunBatch). null = standalone run. When set,
+  // completeRun()/the reaper consult the batch to dispatch the NEXT scenario
+  // once THIS run reaches a terminal status. `batch_index` is this run's slot
+  // in the batch's ordered scenario_ids — the advance guard compares it against
+  // the batch's current_index for idempotency (a re-finalized run won't match
+  // once the batch has already moved on).
+  @Column({ type: 'varchar', nullable: true, default: null })
+  batch_id: string | null;
+
+  @Column({ type: 'int', nullable: true, default: null })
+  batch_index: number | null;
+
   @Column({ type: Date, nullable: true, default: null })
   started_at: Date | null;
 

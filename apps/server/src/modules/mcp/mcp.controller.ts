@@ -25,6 +25,10 @@ import { TicketRoleAssignmentService } from '../workspace-roles/ticket-role-assi
 import { ActionsService } from '../actions/actions.service';
 import { QaService } from '../qa/qa.service';
 import { QaRunService } from '../qa/qa-run.service';
+import { QaScheduleService } from '../qa/qa-schedule.service';
+import { SecurityProfileService } from '../security/security-profile.service';
+import { SecurityRunService } from '../security/security-run.service';
+import { SecurityScheduleService } from '../security/security-schedule.service';
 import { TicketPrerequisitesService } from '../tickets/ticket-prerequisites.service';
 import { BenchmarkService } from '../benchmarks/benchmark.service';
 import { MentionService } from '../../services/mention.service';
@@ -154,6 +158,10 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     private readonly actionsService: ActionsService,
     private readonly qaService: QaService,
     private readonly qaRunService: QaRunService,
+    private readonly qaScheduleService: QaScheduleService,
+    private readonly securityProfileService: SecurityProfileService,
+    private readonly securityRunService: SecurityRunService,
+    private readonly securityScheduleService: SecurityScheduleService,
     private readonly ticketPrerequisitesService: TicketPrerequisitesService,
     private readonly benchmarkService: BenchmarkService,
     private readonly metricsRegistry: MemoryMetricsRegistry,
@@ -272,6 +280,10 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       actionsService: this.actionsService,
       qaService: this.qaService,
       qaRunService: this.qaRunService,
+      qaScheduleService: this.qaScheduleService,
+      securityProfileService: this.securityProfileService,
+      securityRunService: this.securityRunService,
+      securityScheduleService: this.securityScheduleService,
       triggerLoopService: this.triggerLoopService,
       ticketPrerequisitesService: this.ticketPrerequisitesService,
       benchmarkService: this.benchmarkService,

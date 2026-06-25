@@ -1,5 +1,5 @@
 import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
-import { Controller, Get, Post, Patch, Delete, Body, Param, Query, Res, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Delete, Body, Param, Query, Res, UseGuards, BadRequestException } from '@nestjs/common';
 import { Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -11,6 +11,16 @@ import { PERMISSIONS } from '../../common/types/permissions';
 import { findOrFail } from '../../common/find-or-fail';
 import { inferResourceMimetype } from '../mcp/shared/resource-helpers';
 import { listRepoBranches, resolveGitCredential } from '../mcp/shared/git-branches';
+import {
+  ensureRepoCache,
+  listCommits,
+  getCommitDetail,
+  listTree,
+  getFileContent,
+  listRefs,
+  SshUnsupportedError,
+  GitReadError,
+} from '../mcp/shared/git-repo-cache';
 
 @ApiBearerAuth('user-session')
 @ApiTags('resources')
@@ -214,6 +224,163 @@ export class ResourcesController {
       return res.json({ branches, default_branch: defaultBranch });
     } catch (err: any) {
       return res.status(502).json({ error: 'failed to list branches', detail: String(err?.message || err) });
+    }
+  }
+
+  // ─── server-side git reading (history / diff / file tree) ──────────────
+  // These run against a per-Resource bare blobless cache clone maintained by
+  // git-repo-cache. SSH-only URLs degrade with HTTP 422 + code 'ssh_unsupported'
+  // so the panel can show a clear "원격 인증 미지원" message instead of a raw
+  // git auth error.
+
+  /** Resolve a repository Resource, validate it, and ensure its cache clone is
+   *  ready — returns the on-disk repo path. Centralises the workspace/type/url
+   *  checks shared by every git-read endpoint. Throws via `_gitError` mapping
+   *  in the caller's catch. */
+  private async _prepRepo(
+    id: string,
+    workspaceId: string,
+    forceFetch = false,
+  ): Promise<{ repoPath: string }> {
+    const resource = await findOrFail(
+      this.resourceRepo,
+      { where: { id, workspace_id: workspaceId } },
+      'Resource not found in workspace',
+    );
+    if (resource.type !== 'repository') {
+      throw new BadRequestException(`resource type must be 'repository' (got '${resource.type}')`);
+    }
+    if (!resource.url) {
+      throw new BadRequestException("resource has no URL — set the repository's URL before reading git history");
+    }
+    const credential = await resolveGitCredential(this.credentialRepo, resource.credential_id, workspaceId);
+    const repoPath = await ensureRepoCache({ resourceId: id, url: resource.url, credential, forceFetch });
+    return { repoPath };
+  }
+
+  /** Map a git-read failure to an HTTP response. SSH-only → 422 (degrade);
+   *  everything else → 502 with a credential-masked detail. */
+  private _gitError(res: Response, err: any): Response {
+    if (err instanceof BadRequestException) {
+      return res.status(400).json({ error: (err.getResponse() as any)?.message || err.message });
+    }
+    if (err instanceof SshUnsupportedError) {
+      return res.status(422).json({ error: err.message, code: err.code });
+    }
+    if (err instanceof GitReadError) {
+      // err.message is already credential-masked; inline it into `error` so the
+      // client (which only surfaces the `error` field) shows the real cause.
+      return res.status(502).json({ error: err.message, detail: err.message, code: err.code });
+    }
+    // findOrFail throws NotFoundException — let Nest's filter handle it.
+    if (err?.status === 404) throw err;
+    return res.status(502).json({ error: String(err?.message || err) });
+  }
+
+  // Branch + tag list resolved from the cache clone, for the ref picker that
+  // drives both History and Files. Separate from `/branches` (ls-remote) because
+  // it also returns tags + the resolved HEAD and reuses the already-fetched cache.
+  @Get(':id/refs')
+  async refs(
+    @Param('id') id: string,
+    @Query('workspace_id') workspaceId: string,
+    @Query('refresh') refresh: string | undefined,
+    @Res() res: Response,
+  ) {
+    if (!workspaceId) return res.status(400).json({ error: 'workspace_id query parameter is required' });
+    try {
+      const { repoPath } = await this._prepRepo(id, workspaceId, refresh === 'true' || refresh === '1');
+      const refs = await listRefs(repoPath);
+      return res.json(refs);
+    } catch (err: any) {
+      return this._gitError(res, err);
+    }
+  }
+
+  // Commit history with cursor pagination (mirrors the comment/chat `before`
+  // pattern): `before` is a commit sha and the server returns commits strictly
+  // older than it along the same history.
+  @Get(':id/commits')
+  async commits(
+    @Param('id') id: string,
+    @Query('workspace_id') workspaceId: string,
+    @Query('ref') ref: string | undefined,
+    @Query('limit') limit: string | undefined,
+    @Query('before') before: string | undefined,
+    @Query('refresh') refresh: string | undefined,
+    @Res() res: Response,
+  ) {
+    if (!workspaceId) return res.status(400).json({ error: 'workspace_id query parameter is required' });
+    try {
+      const { repoPath } = await this._prepRepo(id, workspaceId, refresh === 'true' || refresh === '1');
+      const parsedLimit = parseInt(limit ?? '', 10);
+      const commits = await listCommits({
+        repoPath,
+        ref: ref || '',
+        limit: Number.isFinite(parsedLimit) ? parsedLimit : 30,
+        before: before || undefined,
+      });
+      return res.json({ commits });
+    } catch (err: any) {
+      return this._gitError(res, err);
+    }
+  }
+
+  // Single-commit detail: metadata + per-file numstat + a byte-bounded patch.
+  @Get(':id/commits/:sha')
+  async commitDetail(
+    @Param('id') id: string,
+    @Param('sha') sha: string,
+    @Query('workspace_id') workspaceId: string,
+    @Res() res: Response,
+  ) {
+    if (!workspaceId) return res.status(400).json({ error: 'workspace_id query parameter is required' });
+    try {
+      const { repoPath } = await this._prepRepo(id, workspaceId);
+      const detail = await getCommitDetail(repoPath, sha);
+      return res.json(detail);
+    } catch (err: any) {
+      return this._gitError(res, err);
+    }
+  }
+
+  // Directory tree at a ref/path (immediate children, dirs first).
+  @Get(':id/tree')
+  async tree(
+    @Param('id') id: string,
+    @Query('workspace_id') workspaceId: string,
+    @Query('ref') ref: string | undefined,
+    @Query('path') treePath: string | undefined,
+    @Res() res: Response,
+  ) {
+    if (!workspaceId) return res.status(400).json({ error: 'workspace_id query parameter is required' });
+    try {
+      const { repoPath } = await this._prepRepo(id, workspaceId);
+      const entries = await listTree(repoPath, ref || '', treePath || '');
+      return res.json({ ref: ref || '', path: treePath || '', entries });
+    } catch (err: any) {
+      return this._gitError(res, err);
+    }
+  }
+
+  // Single-file preview at a ref. Text returns inline; binary/over-cap files
+  // return a flag so the panel shows a notice instead of garbage.
+  @Get(':id/file')
+  async file(
+    @Param('id') id: string,
+    @Query('workspace_id') workspaceId: string,
+    @Query('ref') ref: string | undefined,
+    @Query('path') filePath: string | undefined,
+    @Res() res: Response,
+  ) {
+    if (!workspaceId) return res.status(400).json({ error: 'workspace_id query parameter is required' });
+    if (!filePath) return res.status(400).json({ error: 'path query parameter is required' });
+    try {
+      const { repoPath } = await this._prepRepo(id, workspaceId);
+      const content = await getFileContent(repoPath, ref || '', filePath);
+      return res.json(content);
+    } catch (err: any) {
+      return this._gitError(res, err);
     }
   }
 
