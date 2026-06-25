@@ -15,6 +15,8 @@
  *             delete_security_profile / refresh_security_checklist
  *   Runs:     start_security_run / record_security_finding /
  *             attach_security_artifact / complete_security_run
+ *   Batches:  start_security_batch / get_security_batch (수동 전체 점검 —
+ *             sequential multi-profile runs, one-at-a-time)
  *   Reads:    list_security_runs / get_security_run
  */
 
@@ -22,6 +24,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { SecurityProfile } from '../../../entities/SecurityProfile';
 import { SecurityRun } from '../../../entities/SecurityRun';
+import { SecurityRunBatch } from '../../../entities/SecurityRunBatch';
 import { ok, err } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
 import type { ToolContext } from './context';
@@ -70,6 +73,29 @@ function runToJson(r: SecurityRun) {
     started_at: r.started_at,
     finished_at: r.finished_at,
     created_at: r.created_at,
+  };
+}
+
+function batchToJson(b: SecurityRunBatch) {
+  const ids = b.profile_ids ?? [];
+  return {
+    id: b.id,
+    workspace_id: b.workspace_id,
+    board_id: b.board_id,
+    profile_ids: ids,
+    run_ids: b.run_ids ?? [],
+    current_index: b.current_index,
+    total: ids.length,
+    status: b.status,
+    stop_on_fail: b.stop_on_fail,
+    passed: b.passed,
+    failed: b.failed,
+    errored: b.errored,
+    triggered_by_type: b.triggered_by_type,
+    triggered_by_id: b.triggered_by_id,
+    finished_at: b.finished_at,
+    created_at: b.created_at,
+    updated_at: b.updated_at,
   };
 }
 
@@ -405,6 +431,63 @@ export function registerSecurityTools(server: McpServer, ctx: ToolContext): void
         return ok(runToJson(row));
       } catch (e: any) {
         return err(e?.message || 'security run not found');
+      }
+    },
+  );
+
+  // ── Batches (수동 전체 점검 — sequential multi-profile runs) ───────────────────
+
+  server.tool(
+    'start_security_batch',
+    'Start a SEQUENTIAL batch of several security inspections ("수동 전체 점검") — profile N+1 only ' +
+    'dispatches after profile N reaches a terminal status (passed/failed/error), never all at once. ' +
+    'Pass an ordered `profile_ids` list, OR `all: true` to expand to every enabled profile in scope ' +
+    '(board_id "" = workspace-scope, <uuid> = that board, omit = all) RESOLVED AT DISPATCH TIME (so ' +
+    'profile add/remove is reflected automatically). `stop_on_fail` (default false) halts the batch on ' +
+    'the first non-passed run. Returns the batch with current_index/total + pass/fail rollup; poll ' +
+    'get_security_batch for progress.',
+    {
+      workspace_id: z.string().describe('Workspace ID (required)'),
+      board_id: z.string().optional().describe('Scope for `all`: "" → workspace-scope, <uuid> → board, omit → all'),
+      profile_ids: z.array(z.string()).optional().describe('Ordered profile ids to run (takes precedence over `all`)'),
+      all: z.boolean().optional().describe('Run every enabled profile in scope, in name order'),
+      stop_on_fail: z.boolean().optional().describe('Halt on first non-passed run (default false → continue)'),
+    },
+    async ({ workspace_id, board_id, profile_ids, all, stop_on_fail }, extra: { sessionId?: string }) => {
+      if (!securityRunService) return err('security run service unavailable in this MCP context');
+      const caller = getCallerAgent(extra);
+      try {
+        const batch = await securityRunService.startBatch({
+          workspaceId: workspace_id,
+          boardId: board_id,
+          profileIds: profile_ids,
+          all: !!all,
+          stopOnFail: !!stop_on_fail,
+          triggeredByType: caller?.agentId ? 'agent' : 'system',
+          triggeredById: caller?.agentId ?? '',
+        });
+        return ok(batchToJson(batch));
+      } catch (e: any) {
+        return err(e?.message || 'Failed to start security batch');
+      }
+    },
+  );
+
+  server.tool(
+    'get_security_batch',
+    'Get a sequential security batch: ordered profile_ids + run_ids, current_index/total progress, ' +
+    'status (running/done/aborted), and the passed/failed/errored rollup.',
+    {
+      batch_id: z.string().describe('SecurityRunBatch ID'),
+      workspace_id: z.string().describe('Workspace ID (required)'),
+    },
+    async ({ batch_id, workspace_id }) => {
+      if (!securityRunService) return err('security run service unavailable in this MCP context');
+      try {
+        const batch = await securityRunService.getBatch(batch_id, workspace_id);
+        return ok(batchToJson(batch));
+      } catch (e: any) {
+        return err(e?.message || 'security batch not found');
       }
     },
   );

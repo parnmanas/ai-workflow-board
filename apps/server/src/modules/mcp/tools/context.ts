@@ -49,6 +49,7 @@ import type { QaRunService } from '../../qa/qa-run.service';
 import type { QaScheduleService } from '../../qa/qa-schedule.service';
 import type { SecurityProfileService } from '../../security/security-profile.service';
 import type { SecurityRunService } from '../../security/security-run.service';
+import type { SecurityScheduleService } from '../../security/security-schedule.service';
 import { TicketPrerequisitesService } from '../../tickets/ticket-prerequisites.service';
 import { BenchmarkService } from '../../benchmarks/benchmark.service';
 
@@ -117,6 +118,10 @@ export interface ToolContext {
   // omits both — the tools degrade to an explicit error.
   securityProfileService?: SecurityProfileService;
   securityRunService?: SecurityRunService;
+  // Security scheduler — automatic batch trigger layer. Required by the
+  // security-schedule MCP tools (CRUD + run-now). Standalone context omits it;
+  // the tools degrade to an explicit error (no background tick in standalone mode).
+  securityScheduleService?: SecurityScheduleService;
   // Ticket a57517be: `unpend_ticket` tool needs to wake the ticket's current
   // column's role-holders right after clearing `pending_user_action` (the
   // `field_changed='pending_user_action'` activity row by itself does not

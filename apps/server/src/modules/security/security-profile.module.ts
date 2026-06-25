@@ -2,6 +2,8 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { SecurityProfile } from '../../entities/SecurityProfile';
 import { SecurityRun } from '../../entities/SecurityRun';
+import { SecurityRunBatch } from '../../entities/SecurityRunBatch';
+import { SecuritySchedule } from '../../entities/SecuritySchedule';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
@@ -17,6 +19,7 @@ import { SecurityProfileService } from './security-profile.service';
 import { SecurityRunService } from './security-run.service';
 import { SecurityRunReaperService } from './security-run-reaper.service';
 import { SecurityFailureTicketService } from './security-failure-ticket.service';
+import { SecurityScheduleService } from './security-schedule.service';
 import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
 import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module';
 import { SharedServicesModule } from '../../services/shared-services.module';
@@ -31,13 +34,13 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([SecurityProfile, SecurityRun, ChatRoom, ChatRoomParticipant, ChatRoomMessage, TicketAttachment, Agent, Board, BoardColumn, Ticket, Comment, Resource]),
+    TypeOrmModule.forFeature([SecurityProfile, SecurityRun, SecurityRunBatch, SecuritySchedule, ChatRoom, ChatRoomParticipant, ChatRoomMessage, TicketAttachment, Agent, Board, BoardColumn, Ticket, Comment, Resource]),
     ChatRoomsModule,
     WorkspaceRolesModule,
     SharedServicesModule,
   ],
   controllers: [SecurityProfileController],
-  providers: [SecurityProfileService, SecurityRunService, SecurityRunReaperService, SecurityFailureTicketService, AuthGuard, PermissionGuard],
-  exports: [SecurityProfileService, SecurityRunService, SecurityRunReaperService, SecurityFailureTicketService],
+  providers: [SecurityProfileService, SecurityRunService, SecurityRunReaperService, SecurityFailureTicketService, SecurityScheduleService, AuthGuard, PermissionGuard],
+  exports: [SecurityProfileService, SecurityRunService, SecurityRunReaperService, SecurityFailureTicketService, SecurityScheduleService],
 })
 export class SecurityProfileModule {}
