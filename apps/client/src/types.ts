@@ -572,18 +572,27 @@ export interface SecurityRunBatch {
 }
 
 export type SecurityScheduleScope = 'all' | 'selected';
+/**
+ * What a schedule does when it fires:
+ *   'scan'              → kick a sequential SecurityRunBatch (default; legacy rows).
+ *   'checklist_refresh' → dispatch a checklist refresh to each in-scope profile's
+ *                         target agent — updates the checklist, creates no run row.
+ */
+export type SecurityScheduleKind = 'scan' | 'checklist_refresh';
 
 /**
- * SecuritySchedule — automatic trigger layer over the sequential security batch.
- * When due, the server kicks a SecurityRunBatch via the SAME orchestrator the
- * manual "순차 실행" buttons use. Cadence is exactly one of `cron` (5-field UTC)
- * or `interval_ms`.
+ * SecuritySchedule — automatic trigger layer over the security feature. When due,
+ * a 'scan' schedule kicks a SecurityRunBatch via the SAME orchestrator the manual
+ * "순차 실행" buttons use; a 'checklist_refresh' schedule instead dispatches a
+ * checklist refresh per in-scope profile (no run row). Cadence is exactly one of
+ * `cron` (5-field UTC) or `interval_ms`.
  */
 export interface SecuritySchedule {
   id: string;
   workspace_id: string;
   board_id: string | null;
   name: string;
+  kind: SecurityScheduleKind;
   scope: SecurityScheduleScope;
   profile_ids: string[];
   cron: string | null;

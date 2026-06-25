@@ -3,7 +3,7 @@ import { api, getActiveWorkspaceId, rawResourceUrl } from '../../api';
 import type {
   SecurityProfile, SecurityProfileListItem, SecurityRun, SecurityFinding,
   SecurityChecklistItem, SecurityOnFailureTicketConfig, SecurityRunBatch,
-  SecuritySchedule, SecurityScheduleScope, SecuritySeverity, SecurityScopeMode,
+  SecuritySchedule, SecurityScheduleScope, SecurityScheduleKind, SecuritySeverity, SecurityScopeMode,
 } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
@@ -269,9 +269,16 @@ export default function SecurityManager({ workspaceId, boardId }: SecurityManage
 
   const handleScheduleRunNow = async (s: SecuritySchedule) => {
     try {
-      const { batch } = await api.runSecurityScheduleNow(s.id, effectiveWorkspaceId);
-      setActiveBatch(batch);
-      showToast(`스케줄 "${s.name}" 즉시 실행 — ${batch.total}개 프로파일`, 'success');
+      const { kind, batch, refreshes } = await api.runSecurityScheduleNow(s.id, effectiveWorkspaceId);
+      if (kind === 'checklist_refresh') {
+        // No batch — a refresh updates checklists, not findings. Surface how many
+        // profiles got a refresh dispatched.
+        const n = refreshes?.length ?? 0;
+        showToast(`스케줄 "${s.name}" 즉시 실행 — 체크리스트 갱신 ${n}개 프로파일에 디스패치`, 'success');
+      } else if (batch) {
+        setActiveBatch(batch);
+        showToast(`스케줄 "${s.name}" 즉시 실행 — ${batch.total}개 프로파일`, 'success');
+      }
       await load();
     } catch (err: any) {
       showToast(err?.message || 'Failed to run schedule', 'error');
@@ -561,6 +568,7 @@ function SchedulesSection({ schedules, profiles, disabled, onNew, onEdit, onTogg
             <thead>
               <tr>
                 <th style={TH}>Name</th>
+                <th style={TH}>Kind</th>
                 <th style={TH}>Scope</th>
                 <th style={TH}>Cadence</th>
                 <th style={TH}>Enabled</th>
@@ -600,6 +608,7 @@ function ScheduleRow({ s, profileCount, onEdit, onToggle, onRunNow, onDelete }: 
   const [hover, setHover] = useState(false);
   const scopeLabel = s.scope === 'all' ? `전체 (${profileCount})` : `선택 ${s.profile_ids.length}`;
   const nextUtc = s.next_run_at ? new Date(s.next_run_at).toISOString().replace('T', ' ').slice(0, 16) : '—';
+  const isRefresh = s.kind === 'checklist_refresh';
   return (
     <tr
       onMouseEnter={() => setHover(true)}
@@ -608,6 +617,13 @@ function ScheduleRow({ s, profileCount, onEdit, onToggle, onRunNow, onDelete }: 
     >
       <td style={TD}>
         <span style={{ fontWeight: 600, color: tokens.colors.textPrimary }}>{s.name}</span>
+      </td>
+      <td style={TD}>
+        <span title={isRefresh ? '체크리스트 갱신 (run 미생성)' : '보안 점검 batch'}>
+          <Pill variant={isRefresh ? 'warning' : 'success'}>
+            {isRefresh ? 'checklist refresh' : 'scan'}
+          </Pill>
+        </span>
       </td>
       <td style={TD}>
         <Pill variant={s.scope === 'all' ? 'info' : 'neutral'}>{scopeLabel}</Pill>
@@ -1343,6 +1359,7 @@ interface ScheduleEditorProps {
 function ScheduleEditor({ schedule, workspaceId, boardId, profiles, onClose, onSaved }: ScheduleEditorProps) {
   const { showToast } = useToast();
   const [name, setName] = useState(schedule?.name ?? '');
+  const [kind, setKind] = useState<SecurityScheduleKind>(schedule?.kind ?? 'scan');
   const [scope, setScope] = useState<SecurityScheduleScope>(schedule?.scope ?? 'all');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set(schedule?.profile_ids ?? []));
   const [cadenceKind, setCadenceKind] = useState<'interval' | 'cron'>(schedule?.cron ? 'cron' : 'interval');
@@ -1389,10 +1406,13 @@ function ScheduleEditor({ schedule, workspaceId, boardId, profiles, onClose, onS
     const base = {
       workspace_id: workspaceId,
       name: name.trim(),
+      kind,
       scope,
       profile_ids: scope === 'selected' ? orderedIds : [],
       enabled,
-      stop_on_fail: stopOnFail,
+      // stop_on_fail is a scan-batch concept; a checklist refresh has no batch, so
+      // store false for that kind (harmless, ignored by the server's refresh path).
+      stop_on_fail: kind === 'scan' ? stopOnFail : false,
       cron: cadenceKind === 'cron' ? cron.trim() : null,
       interval_ms: cadenceKind === 'interval' ? intervalMs : null,
     };
@@ -1430,6 +1450,24 @@ function ScheduleEditor({ schedule, workspaceId, boardId, profiles, onClose, onS
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
         <Input label="이름" value={name} onChange={(e) => setName((e.target as HTMLInputElement).value)} />
+
+        {/* Kind: 점검(scan) vs 체크리스트 갱신(checklist refresh) */}
+        <div>
+          <Select
+            label="종류"
+            value={kind}
+            options={[
+              { value: 'scan', label: '점검 (scan — 순차 batch 실행)' },
+              { value: 'checklist_refresh', label: '체크리스트 갱신 (checklist refresh — 항목 update, run 미생성)' },
+            ]}
+            onChange={(e) => setKind((e.target as HTMLSelectElement).value as SecurityScheduleKind)}
+          />
+          <div style={{ fontSize: 12, color: tokens.colors.textMuted, marginTop: 4 }}>
+            {kind === 'checklist_refresh'
+              ? '대상 프로파일의 체크리스트를 최신 보안 지식(OWASP/CVE 등)으로 갱신합니다. 점검 run/배치를 만들지 않으므로 점검 히스토리를 더럽히지 않고 자주 돌려도 안전합니다.'
+              : '대상 프로파일을 순차 점검하는 batch 를 실행합니다 (수동 "순차 실행" 과 동일).'}
+          </div>
+        </div>
 
         {/* Scope: 전체 vs 선택 프로파일 토글 */}
         <div>
@@ -1494,17 +1532,24 @@ function ScheduleEditor({ schedule, workspaceId, boardId, profiles, onClose, onS
           )}
         </div>
 
-        <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary }}>
-          <input type="checkbox" checked={stopOnFail} onChange={(e) => setStopOnFail(e.target.checked)} />
-          첫 실패에서 batch 중단 (stop on fail)
-        </label>
+        {/* stop_on_fail 은 scan batch 전용 개념 — checklist refresh 에는 batch 가 없어 숨김 */}
+        {kind === 'scan' && (
+          <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary }}>
+            <input type="checkbox" checked={stopOnFail} onChange={(e) => setStopOnFail(e.target.checked)} />
+            첫 실패에서 batch 중단 (stop on fail)
+          </label>
+        )}
         <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary }}>
           <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
           Enabled
         </label>
 
         <div style={{ fontSize: 12, color: tokens.colors.textMuted, borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 10 }}>
-          ⚠️ 자동 실행은 <b>돌고 있는 서버/코드</b>를 검사합니다. main→prod auto-deploy 지연이 있으면, 주기를 배포 지연보다 넉넉히 잡거나 고정 시각 cron 으로 배포 후에 실행되게 하세요. 각 run 은 <b>scanned_commit</b> 을 기록하므로 어떤 커밋을 검사했는지는 항상 추적 가능합니다. cron 은 모두 <b>UTC</b> 기준입니다.
+          {kind === 'checklist_refresh' ? (
+            <>체크리스트 갱신은 코드를 점검하지 않고 <b>항목만 update</b> 하므로 배포 타이밍 함정(옛 코드 통과)이 없어 자유롭게 자주 돌려도 됩니다. 갱신은 WebSearch 외부 의존이라 실패/레이트리밋 시 기존 체크리스트는 <b>비파괴적으로 유지</b>됩니다. cron 은 모두 <b>UTC</b> 기준입니다.</>
+          ) : (
+            <>⚠️ 자동 실행은 <b>돌고 있는 서버/코드</b>를 검사합니다. main→prod auto-deploy 지연이 있으면, 주기를 배포 지연보다 넉넉히 잡거나 고정 시각 cron 으로 배포 후에 실행되게 하세요. 각 run 은 <b>scanned_commit</b> 을 기록하므로 어떤 커밋을 검사했는지는 항상 추적 가능합니다. cron 은 모두 <b>UTC</b> 기준입니다.</>
+          )}
         </div>
       </div>
     </Modal>

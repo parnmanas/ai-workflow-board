@@ -15,6 +15,7 @@ import type {
   SecurityRunBatch,
   SecuritySchedule,
   SecurityScheduleScope,
+  SecurityScheduleKind,
   Credential,
   ChatMessage,
   ChatThread,
@@ -1158,6 +1159,7 @@ export const api = {
     workspace_id: string;
     board_id?: string | null;
     name: string;
+    kind?: SecurityScheduleKind;
     scope?: SecurityScheduleScope;
     profile_ids?: string[];
     cron?: string | null;
@@ -1171,6 +1173,7 @@ export const api = {
       workspace_id: string;
       board_id?: string | null;
       name?: string;
+      kind?: SecurityScheduleKind;
       scope?: SecurityScheduleScope;
       profile_ids?: string[];
       cron?: string | null;
@@ -1183,8 +1186,15 @@ export const api = {
     const params = new URLSearchParams({ workspace_id: workspaceId });
     return request<{ success: true; id: string }>(`/security/schedules/${id}?${params.toString()}`, { method: 'DELETE' });
   },
+  // run-now is kind-discriminated: kind='scan' → `batch` set / `refreshes` null;
+  // kind='checklist_refresh' → `batch` null / `refreshes` the per-profile dispatches.
   runSecurityScheduleNow: (id: string, workspaceId: string) =>
-    request<{ schedule: SecuritySchedule; batch: SecurityRunBatch }>(`/security/schedules/${id}/run-now`, {
+    request<{
+      schedule: SecuritySchedule;
+      kind: SecurityScheduleKind;
+      batch: SecurityRunBatch | null;
+      refreshes: { profile_id: string; room_id: string }[] | null;
+    }>(`/security/schedules/${id}/run-now`, {
       method: 'POST',
       body: JSON.stringify({ workspace_id: workspaceId }),
     }),
