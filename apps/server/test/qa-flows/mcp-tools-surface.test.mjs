@@ -68,6 +68,18 @@ const EXPECTED_TOOLS = [
   'update_qa_schedule',
   'delete_qa_schedule',
   'run_qa_schedule_now',
+  // Ticket cfd74638 — security-inspection surface (SecurityProfile/SecurityRun).
+  'list_security_profiles',
+  'get_security_profile',
+  'create_security_profile',
+  'update_security_profile',
+  'delete_security_profile',
+  'start_security_run',
+  'record_security_finding',
+  'attach_security_artifact',
+  'complete_security_run',
+  'list_security_runs',
+  'get_security_run',
 ];
 
 test('MCP initialize + tools/list returns expected AWB tool surface', async (t) => {
