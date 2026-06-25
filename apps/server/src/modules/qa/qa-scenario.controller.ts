@@ -7,7 +7,9 @@ import { PERMISSIONS } from '../../common/types/permissions';
 import { QaService } from './qa.service';
 import { QaRunService } from './qa-run.service';
 import { QaRunReaperService } from './qa-run-reaper.service';
+import { QaScheduleService } from './qa-schedule.service';
 import { QaRunBatch } from '../../entities/QaRunBatch';
+import { QaSchedule } from '../../entities/QaSchedule';
 
 /**
  * Normalize a QaRunBatch row for the client: coalesce the nullable simple-json
@@ -38,6 +40,33 @@ function batchToJson(b: QaRunBatch) {
 }
 
 /**
+ * Normalize a QaSchedule row for the client: coalesce the nullable simple-json
+ * column to [] so the editor has a stable shape. Mirrors scheduleToJson in the
+ * MCP qa-schedule tools.
+ */
+function scheduleToJson(s: QaSchedule) {
+  return {
+    id: s.id,
+    workspace_id: s.workspace_id,
+    board_id: s.board_id,
+    name: s.name,
+    scope: s.scope,
+    scenario_ids: s.scenario_ids ?? [],
+    cron: s.cron,
+    interval_ms: s.interval_ms,
+    enabled: s.enabled,
+    stop_on_fail: s.stop_on_fail,
+    next_run_at: s.next_run_at,
+    last_run_at: s.last_run_at,
+    last_batch_id: s.last_batch_id,
+    triggered_by_type: s.triggered_by_type,
+    created_by: s.created_by,
+    created_at: s.created_at,
+    updated_at: s.updated_at,
+  };
+}
+
+/**
  * REST surface for the scenario-based QA feature (QaScenario/QaRun).
  *
  * NOTE: distinct from the existing self-test harness at `api/admin/qa`
@@ -58,6 +87,7 @@ export class QaScenarioController {
     private readonly qaService: QaService,
     private readonly qaRunService: QaRunService,
     private readonly qaRunReaperService: QaRunReaperService,
+    private readonly qaScheduleService: QaScheduleService,
   ) {}
 
   // ── Scenarios ─────────────────────────────────────────────────────────────
@@ -202,6 +232,96 @@ export class QaScenarioController {
       return res.json(batchToJson(await this.qaRunService.getBatch(id, workspaceId)));
     } catch (e: any) {
       return res.status(e?.status || 404).json({ error: e?.message || 'QA batch not found' });
+    }
+  }
+
+  // ── Schedules (automatic batch trigger layer — ticket b6bb7efd) ──────────────
+
+  @Get('schedules')
+  async listSchedules(
+    @Query('workspace_id') workspaceId: string,
+    @Query('board_id') boardId: string | undefined,
+    @Res() res: Response,
+  ) {
+    if (!workspaceId) return res.status(400).json({ error: 'workspace_id query parameter is required' });
+    try {
+      const rows = await this.qaScheduleService.list(workspaceId, boardId);
+      return res.json(rows.map(scheduleToJson));
+    } catch (e: any) {
+      return res.status(e?.status || 400).json({ error: e?.message || 'Failed to list QA schedules' });
+    }
+  }
+
+  @Get('schedules/:id')
+  async getSchedule(@Param('id') id: string, @Query('workspace_id') workspaceId: string, @Res() res: Response) {
+    try {
+      return res.json(scheduleToJson(await this.qaScheduleService.get(id, workspaceId)));
+    } catch (e: any) {
+      return res.status(e?.status || 404).json({ error: e?.message || 'QA schedule not found' });
+    }
+  }
+
+  @Post('schedules')
+  async createSchedule(@Body() body: any, @Req() req: Request, @Res() res: Response) {
+    try {
+      const user = (req as any).currentUser as { id: string } | undefined;
+      const row = await this.qaScheduleService.create({
+        workspaceId: body?.workspace_id,
+        boardId: body?.board_id ?? undefined,
+        name: body?.name,
+        scope: body?.scope,
+        scenarioIds: body?.scenario_ids,
+        cron: body?.cron,
+        intervalMs: body?.interval_ms,
+        enabled: body?.enabled,
+        stopOnFail: body?.stop_on_fail,
+        createdBy: body?.created_by || user?.id || '',
+      });
+      return res.status(201).json(scheduleToJson(row));
+    } catch (e: any) {
+      return res.status(e?.status || 400).json({ error: e?.message || 'Failed to create QA schedule' });
+    }
+  }
+
+  @Patch('schedules/:id')
+  async updateSchedule(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
+    try {
+      const row = await this.qaScheduleService.update(id, body?.workspace_id, {
+        boardId: body?.board_id,
+        name: body?.name,
+        scope: body?.scope,
+        scenarioIds: body?.scenario_ids,
+        cron: body?.cron,
+        intervalMs: body?.interval_ms,
+        enabled: body?.enabled,
+        stopOnFail: body?.stop_on_fail,
+      });
+      return res.json(scheduleToJson(row));
+    } catch (e: any) {
+      return res.status(e?.status || 400).json({ error: e?.message || 'Failed to update QA schedule' });
+    }
+  }
+
+  @Delete('schedules/:id')
+  async removeSchedule(@Param('id') id: string, @Query('workspace_id') workspaceId: string, @Res() res: Response) {
+    try {
+      await this.qaScheduleService.remove(id, workspaceId);
+      return res.json({ success: true, id });
+    } catch (e: any) {
+      return res.status(e?.status || 400).json({ error: e?.message || 'Failed to delete QA schedule' });
+    }
+  }
+
+  // Manual immediate trigger — dispatch the schedule's batch now (ignores
+  // enabled; does not disturb next_run_at). Returns the schedule + started batch.
+  @Post('schedules/:id/run-now')
+  async runScheduleNow(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
+    try {
+      const user = (req as any).currentUser as { id: string } | undefined;
+      const { schedule, batch } = await this.qaScheduleService.runNow(id, body?.workspace_id, user?.id || '');
+      return res.status(201).json({ schedule: scheduleToJson(schedule), batch: batchToJson(batch) });
+    } catch (e: any) {
+      return res.status(e?.status || 400).json({ error: e?.message || 'Failed to run QA schedule' });
     }
   }
 }
