@@ -38,3 +38,5 @@ export { QaRunBatch } from './QaRunBatch';
 export { QaSchedule } from './QaSchedule';
 export { SecurityProfile } from './SecurityProfile';
 export { SecurityRun } from './SecurityRun';
+export { SecurityRunBatch } from './SecurityRunBatch';
+export { SecuritySchedule } from './SecuritySchedule';

@@ -66,6 +66,16 @@ export class SecurityRun {
   @Column({ type: 'varchar', default: 'full' })
   scope_used: SecurityScopeMode;
 
+  // Sequential-batch membership (SecurityRunBatch). When this run was dispatched
+  // as part of a batch, batch_id/batch_index point back at the cursor row so
+  // completeRun()/the reaper can advance the batch when this run finalizes.
+  // null for standalone (single-profile) runs. Mirrors QaRun.batch_id/batch_index.
+  @Column({ type: 'varchar', nullable: true, default: null })
+  batch_id: string | null;
+
+  @Column({ type: 'int', nullable: true, default: null })
+  batch_index: number | null;
+
   // Flat accumulation of artifact Resource ids (reports/SBOM/dumps) for this run.
   @Column({ type: 'simple-json', nullable: true, default: null })
   artifact_resource_ids: string[] | null;
