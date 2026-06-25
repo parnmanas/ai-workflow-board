@@ -180,6 +180,73 @@ export interface RepoBranch {
   sha: string;
 }
 
+// ─── server-side git reading (history / diff / file tree) ───────────────────
+// Backed by a per-Resource bare blobless cache clone (git-repo-cache.ts). All
+// of these come from GET /api/resources/:id/{refs,commits,commits/:sha,tree,file}.
+
+// Branches + tags + resolved HEAD for the ref picker shared by History/Files.
+export interface RepoRefs {
+  branches: string[];
+  tags: string[];
+  head: string;
+}
+
+// One row in the commit list.
+export interface RepoCommitSummary {
+  sha: string;
+  short_sha: string;
+  subject: string;
+  author_name: string;
+  author_email: string;
+  authored_at: string;
+  committed_at: string;
+}
+
+// One changed file inside a commit detail. `additions`/`deletions` are null for
+// binary files (numstat reports `-`).
+export interface RepoCommitFileChange {
+  path: string;
+  old_path?: string;
+  additions: number | null;
+  deletions: number | null;
+  binary: boolean;
+}
+
+// Full commit detail: metadata + changed files + a byte-bounded unified diff.
+export interface RepoCommitDetail {
+  sha: string;
+  short_sha: string;
+  subject: string;
+  body: string;
+  author_name: string;
+  author_email: string;
+  authored_at: string;
+  committed_at: string;
+  parents: string[];
+  files: RepoCommitFileChange[];
+  diff: string;
+  diff_truncated: boolean;
+}
+
+// One entry in a directory listing. `size` is null for trees/submodules.
+export interface RepoTreeEntry {
+  name: string;
+  path: string;
+  type: 'tree' | 'blob' | 'commit';
+  sha: string;
+  size: number | null;
+}
+
+// A single-file preview. `content` is empty when `binary` or `too_large`.
+export interface RepoFileContent {
+  path: string;
+  size: number;
+  binary: boolean;
+  too_large: boolean;
+  truncated: boolean;
+  content: string;
+}
+
 // User-defined Action: a saved prompt addressed to a target Agent. Each Run
 // creates a new ChatRoom and posts the rendered prompt as the first message;
 // the agent's reply (and any follow-ups) live in that room.

@@ -1,14 +1,18 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { api } from '../../api';
-import type { Resource, Credential, RepoBranch } from '../../types';
+import type { Resource, Credential, RepoBranch, RepoRefs } from '../../types';
 import { tokens } from '../../tokens';
 import { Button, Badge, Input } from '../common';
 import { relativeTime } from '../../utils/time';
+import RepoHistoryTab from './RepoHistoryTab';
+import RepoFilesTab from './RepoFilesTab';
+import { ErrorBox } from './repoTabCommon';
 
 // 우측 detail 패널. master/detail 레이아웃에서 리스트의 선택 항목을 받아
-// repository(브랜치 탭 포함)와 그 외 타입(미리보기/메타)을 통일된 UI 로 보여준다.
-// branches 외의 무거운 git 읽기(history/diff/file tree)는 서버에 로컬 클론이
-// 없어 불가 → #2 로 분리. 여기서는 placeholder("준비중")만 잡아둔다.
+// repository(브랜치/히스토리/파일 탭 포함)와 그 외 타입(미리보기/메타)을 통일된
+// UI 로 보여준다. History/Files 탭의 무거운 git 읽기(log/diff/tree)는 서버의
+// per-resource 캐시 클론(git-repo-cache)에서 온다. ref 선택기는 History·Files 가
+// 같은 ref 를 따라가도록 두 탭이 공유한다.
 
 interface ResourceDetailPanelProps {
   resource: Resource;
@@ -80,6 +84,13 @@ export default function ResourceDetailPanel({
   const [branches, setBranches] = useState<RepoBranch[] | null>(null);
   const [branchQuery, setBranchQuery] = useState('');
 
+  // History/Files 공유 ref 선택기 상태. 캐시 클론을 처음 만드는 비용이 있어
+  // (clone) 마운트가 아니라 History/Files 탭을 처음 열 때 lazy 로 조회한다.
+  const [refs, setRefs] = useState<RepoRefs | null>(null);
+  const [refsLoading, setRefsLoading] = useState(false);
+  const [refsError, setRefsError] = useState<string | null>(null);
+  const [selectedRef, setSelectedRef] = useState('');
+
   const linkedCredential = useMemo(
     () => credentials.find((c) => c.id === resource.credential_id) || null,
     [credentials, resource.credential_id],
@@ -107,6 +118,31 @@ export default function ResourceDetailPanel({
   useEffect(() => {
     if (isRepo) loadBranches();
   }, [isRepo, loadBranches]);
+
+  const loadRefs = useCallback(async (refresh = false) => {
+    if (!isRepo) return;
+    setRefsLoading(true);
+    setRefsError(null);
+    try {
+      const result = await api.getRepoRefs(resource.id, workspaceId, refresh);
+      setRefs(result);
+      // 기본 선택 = 원격 HEAD, 없으면 첫 브랜치, 그것도 없으면 빈 값(서버가 HEAD).
+      setSelectedRef((prev) => prev || result.head || result.branches[0] || '');
+    } catch (err: any) {
+      setRefsError(err?.message || 'ref 목록을 불러오지 못했습니다.');
+      setRefs(null);
+    } finally {
+      setRefsLoading(false);
+    }
+  }, [isRepo, resource.id, workspaceId]);
+
+  // History/Files 탭을 처음 열 때만 캐시 클론을 만들고 ref 를 조회한다.
+  useEffect(() => {
+    if (!isRepo) return;
+    if ((repoTab === 'history' || repoTab === 'files') && !refs && !refsLoading && !refsError) {
+      loadRefs();
+    }
+  }, [isRepo, repoTab, refs, refsLoading, refsError, loadRefs]);
 
   const copyUrl = async () => {
     if (!resource.url) return;
@@ -426,21 +462,92 @@ export default function ResourceDetailPanel({
     </div>
   );
 
-  const placeholderTab = (label: string, hint: string) => (
-    <div
-      style={{
-        textAlign: 'center',
-        padding: '40px 24px',
-        border: `1px dashed ${tokens.colors.border}`,
-        borderRadius: tokens.radii.md,
-      }}
-    >
-      <div style={{ fontSize: 15, fontWeight: 700, color: tokens.colors.textSecondary, marginBottom: 6 }}>
-        {label} — 준비중
-      </div>
-      <div style={{ fontSize: 12, color: tokens.colors.textMuted, lineHeight: 1.5 }}>{hint}</div>
+  // History/Files 가 공유하는 ref 선택기 + 새로고침. 선택이 바뀌면 두 탭이 같은
+  // ref 를 따라가도록 selectedRef 한 곳만 갱신한다. (이전의 placeholderTab 은
+  // 실제 탭 구현으로 대체되어 제거됨.)
+  const refSelectorBar = (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+      <select
+        data-testid="repo-ref-select"
+        value={selectedRef}
+        onChange={(e) => setSelectedRef(e.target.value)}
+        disabled={refsLoading || !refs}
+        style={{
+          flex: 1,
+          minWidth: 0,
+          fontSize: 13,
+          fontFamily: 'inherit',
+          padding: '7px 10px',
+          borderRadius: tokens.radii.md,
+          border: `1px solid ${tokens.colors.border}`,
+          background: tokens.colors.surface,
+          color: tokens.colors.textStrong,
+        }}
+      >
+        {refs && refs.branches.length > 0 && (
+          <optgroup label="Branches">
+            {refs.branches.map((b) => (
+              <option key={`b/${b}`} value={b}>{b}</option>
+            ))}
+          </optgroup>
+        )}
+        {refs && refs.tags.length > 0 && (
+          <optgroup label="Tags">
+            {refs.tags.map((t) => (
+              <option key={`t/${t}`} value={t}>{t}</option>
+            ))}
+          </optgroup>
+        )}
+        {(!refs || (refs.branches.length === 0 && refs.tags.length === 0)) && (
+          <option value="">{refsLoading ? '불러오는 중…' : 'HEAD'}</option>
+        )}
+      </select>
+      <Button
+        variant="secondary"
+        size="md"
+        onClick={() => loadRefs(true)}
+        disabled={refsLoading}
+        loading={refsLoading}
+      >
+        새로고침
+      </Button>
     </div>
   );
+
+  // History/Files 탭 공통 래퍼 — ref 로딩/에러를 먼저 처리하고, 준비되면 본문 탭을
+  // 렌더한다. ref 조회는 캐시 클론 생성을 트리거하므로 에러(예: SSH-only)도 여기서
+  // 한 번에 노출된다.
+  const gitReadTab = (body: React.ReactNode) => {
+    if (refsLoading && !refs) {
+      return (
+        <div style={{ fontSize: 13, color: tokens.colors.textSecondary, padding: '16px 4px' }}>
+          저장소 캐시 준비 중… (최초 1회 클론이 필요해 시간이 걸릴 수 있습니다)
+        </div>
+      );
+    }
+    if (refsError) {
+      return (
+        <div>
+          <ErrorBox message={refsError} />
+          <div style={{ fontSize: 12, color: tokens.colors.textMuted, marginTop: 8, lineHeight: 1.5 }}>
+            SSH 전용 URL 은 서버에 인증 키가 없어 지원되지 않습니다. HTTPS URL + credential 로
+            연결된 저장소만 히스토리/파일 조회가 가능합니다.
+          </div>
+          <div style={{ marginTop: 10 }}>
+            <Button variant="secondary" size="sm" onClick={() => loadRefs(true)} loading={refsLoading}>
+              다시 시도
+            </Button>
+          </div>
+        </div>
+      );
+    }
+    return (
+      <div>
+        {refSelectorBar}
+        {body}
+      </div>
+    );
+  };
 
   // ── non-repository: 미리보기/다운로드 ─────────────────────
   const nonRepoBody = (() => {
@@ -565,13 +672,11 @@ export default function ResourceDetailPanel({
         <>
           {tabBar}
           {repoTab === 'branches' && branchesTab}
-          {repoTab === 'history' && placeholderTab(
-            'History',
-            '커밋 히스토리/diff 는 서버에 git 읽기 능력이 추가되는 후속 작업에서 제공됩니다.',
+          {repoTab === 'history' && gitReadTab(
+            <RepoHistoryTab resourceId={resource.id} workspaceId={workspaceId} refKey={selectedRef} />,
           )}
-          {repoTab === 'files' && placeholderTab(
-            'Files',
-            '파일 트리 탐색은 서버 git 읽기 능력이 추가되는 후속 작업에서 제공됩니다.',
+          {repoTab === 'files' && gitReadTab(
+            <RepoFilesTab resourceId={resource.id} workspaceId={workspaceId} refKey={selectedRef} />,
           )}
         </>
       ) : (

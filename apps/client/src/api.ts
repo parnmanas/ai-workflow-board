@@ -50,6 +50,11 @@ import type {
   HarnessConfig,
   EffortPresetsConfig,
   Comment,
+  RepoRefs,
+  RepoCommitSummary,
+  RepoCommitDetail,
+  RepoTreeEntry,
+  RepoFileContent,
 } from './types';
 
 const BASE = '/api';
@@ -858,6 +863,46 @@ export const api = {
       '/resources/branches/test',
       { method: 'POST', body: JSON.stringify(data) },
     ),
+
+  // ─── repository git reading (history / diff / file tree) ──────────────
+  // All read from the server's per-Resource bare blobless cache clone. SSH-only
+  // URLs come back as HTTP 422 (code 'ssh_unsupported') — `request` throws the
+  // error message, which the panel renders as a degrade notice.
+  getRepoRefs: (id: string, workspaceId: string, refresh = false) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    if (refresh) params.set('refresh', 'true');
+    return request<RepoRefs>(`/resources/${id}/refs?${params.toString()}`);
+  },
+  // Cursor pagination: pass the last shown sha as `before` to load older commits.
+  listRepoCommits: (
+    id: string,
+    workspaceId: string,
+    opts?: { ref?: string; limit?: number; before?: string; refresh?: boolean },
+  ) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    if (opts?.ref) params.set('ref', opts.ref);
+    if (opts?.limit) params.set('limit', String(opts.limit));
+    if (opts?.before) params.set('before', opts.before);
+    if (opts?.refresh) params.set('refresh', 'true');
+    return request<{ commits: RepoCommitSummary[] }>(`/resources/${id}/commits?${params.toString()}`);
+  },
+  getRepoCommit: (id: string, workspaceId: string, sha: string) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    return request<RepoCommitDetail>(`/resources/${id}/commits/${encodeURIComponent(sha)}?${params.toString()}`);
+  },
+  getRepoTree: (id: string, workspaceId: string, opts?: { ref?: string; path?: string }) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    if (opts?.ref) params.set('ref', opts.ref);
+    if (opts?.path) params.set('path', opts.path);
+    return request<{ ref: string; path: string; entries: RepoTreeEntry[] }>(
+      `/resources/${id}/tree?${params.toString()}`,
+    );
+  },
+  getRepoFile: (id: string, workspaceId: string, filePath: string, ref?: string) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId, path: filePath });
+    if (ref) params.set('ref', ref);
+    return request<RepoFileContent>(`/resources/${id}/file?${params.toString()}`);
+  },
 
   // ─── Actions ──────────────────────────────────────────
   listActions: (workspaceId: string, boardId?: string | null) => {
