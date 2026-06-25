@@ -8,12 +8,18 @@
 //   • started_at=null falls back to created_at for the age gate
 //   • finished_at is stamped and the summary carries the reaped marker
 //   • idempotency: a second sweep reaps nothing
+//
+// The reaper also advances a sequential batch when it reaps a run that belonged
+// to one (terminal-status reached, just not via complete_security_run). The
+// fixture runs have no batch_id, so onRunFinalized early-returns — a no-op stub
+// matches the real (DI-injected) SecurityRunService surface the reaper depends on.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { SecurityRunReaperService } from '../dist/modules/security/security-run-reaper.service.js';
 
 const HOUR = 60 * 60_000;
+const noopRunService = { onRunFinalized: async () => {} };
 
 function makeRepo(rows) {
   return {
@@ -56,7 +62,7 @@ test('runOnce reaps stale running/pending runs and spares fresh + terminal runs'
     makeRun('stale-startednull', 'running', 9, { startedNull: true }), // created_at fallback -> reap
   ];
   const repo = makeRepo(rows);
-  const svc = new SecurityRunReaperService(repo, noopLog);
+  const svc = new SecurityRunReaperService(repo, noopLog, noopRunService);
 
   const { reaped } = await svc.runOnce(now);
 
@@ -82,7 +88,7 @@ test('runOnce is idempotent — a second sweep reaps nothing', async () => {
   const now = new Date('2026-06-25T12:00:00Z');
   const rows = [makeRun('stale-running', 'running', 10)];
   const repo = makeRepo(rows);
-  const svc = new SecurityRunReaperService(repo, noopLog);
+  const svc = new SecurityRunReaperService(repo, noopLog, noopRunService);
 
   const first = await svc.runOnce(now);
   assert.deepEqual(first.reaped, ['stale-running'], 'first sweep reaps the stale run');

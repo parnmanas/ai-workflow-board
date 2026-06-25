@@ -81,6 +81,15 @@ const EXPECTED_TOOLS = [
   'complete_security_run',
   'list_security_runs',
   'get_security_run',
+  // Ticket 7c07c19d — security scheduler + manual full inspection (batch).
+  'start_security_batch',
+  'get_security_batch',
+  'list_security_schedules',
+  'get_security_schedule',
+  'create_security_schedule',
+  'update_security_schedule',
+  'delete_security_schedule',
+  'run_security_schedule_now',
 ];
 
 test('MCP initialize + tools/list returns expected AWB tool surface', async (t) => {
