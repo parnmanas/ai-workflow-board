@@ -85,6 +85,13 @@ export class SecurityRun {
   @Column({ type: Date, nullable: true, default: null })
   finished_at: Date | null;
 
+  // Set once when this run auto-files (or reuses, for per_open_ticket dedupe) a
+  // fix ticket on a severity-gated failure — the run-level idempotency guard so a
+  // re-finalize of the same run never double-files. null = no auto-ticket created
+  // for this run. Mirrors QaRun.auto_ticket_id.
+  @Column({ type: 'varchar', nullable: true, default: null })
+  auto_ticket_id: string | null;
+
   @CreateDateColumn()
   created_at: Date;
 }

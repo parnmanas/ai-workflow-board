@@ -91,6 +91,14 @@ export class SecurityProfile {
   @Column({ type: 'int', default: 20 })
   max_runs: number;
 
+  // On-failure auto-ticket policy (severity-gated). null/omitted = disabled.
+  // When a run finishes failed/error AND carries a finding at or above
+  // `min_severity` (default 'high'), completeRun files a fix ticket. Sibling of
+  // QaScenario.on_failure_ticket, plus the severity gate. See
+  // SecurityFailureTicketService.
+  @Column({ type: 'simple-json', nullable: true, default: null })
+  on_failure_ticket: SecurityOnFailureTicketConfig | null;
+
   @Column({ type: 'varchar', default: '' })
   created_by: string;
 
@@ -132,3 +140,39 @@ export interface SecurityChecklistItem {
 }
 
 export type SecuritySeverity = 'critical' | 'high' | 'medium' | 'low' | 'info';
+
+/**
+ * On-failure auto-ticket policy for a SecurityProfile. Sibling of
+ * QaOnFailureTicketConfig with one extra knob: `min_severity` — the severity
+ * gate. A failed/errored run only files a ticket when it carries at least one
+ * finding at or above this severity; runs whose worst finding is below it are
+ * left as a run summary only (no ticket). Default 'high' → only critical/high
+ * findings escalate to a ticket.
+ */
+export interface SecurityOnFailureTicketConfig {
+  enabled: boolean;
+  /** Board to file on. Falls back to run.board_id → profile.board_id. */
+  board_id?: string;
+  /** Target column (default 'To Do' → first non-terminal → first column). */
+  column_name?: string;
+  priority?: 'low' | 'medium' | 'high' | 'critical';
+  /** Assignee for the fix ticket; falls back to the profile's target agent. */
+  assignee_id?: string;
+  labels?: string[];
+  /**
+   * Severity gate. A ticket is filed only if the run has a finding whose
+   * severity is >= this. Default 'high' (critical/high escalate; medium/low/info
+   * do not). Severity order: critical > high > medium > low > info.
+   */
+  min_severity?: SecuritySeverity;
+  // 'per_run'         — one ticket per failed run (default; the run-level
+  //                     auto_ticket_id guard already stops a re-finalize from
+  //                     double-filing).
+  // 'per_open_ticket' — if an open security ticket for this profile already
+  //                     exists, append a recurrence comment instead of filing
+  //                     a new one.
+  dedupe?: 'per_run' | 'per_open_ticket';
+  // Optional title override. `{{profile.name}}` is substituted. Default
+  // '보안 점검 실패: {{profile.name}}'.
+  title_template?: string;
+}
