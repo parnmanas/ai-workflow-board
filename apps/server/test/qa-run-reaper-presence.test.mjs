@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SRC_DIR = path.resolve(__dirname, '..', 'src');
 const REAPER = path.join(SRC_DIR, 'modules', 'qa', 'qa-run-reaper.service.ts');
+const POLICY = path.join(SRC_DIR, 'modules', 'qa', 'qa-liveness-policy.ts');
 const QA_MODULE = path.join(SRC_DIR, 'modules', 'qa', 'qa-scenario.module.ts');
 const QA_CONTROLLER = path.join(SRC_DIR, 'modules', 'qa', 'qa-scenario.controller.ts');
 
@@ -37,17 +38,19 @@ test('QaRunReaperService source defines the sweep loop, TTL gate, and env config
   assert.match(code, /QA_RUN_REAPER_SWEEP_MS/, 'must read QA_RUN_REAPER_SWEEP_MS env var');
   assert.match(code, /QA_RUN_TTL_MS/, 'must read QA_RUN_TTL_MS env var (6h absolute backstop)');
   assert.match(code, /QA_RUN_ZERO_PROGRESS_MS/, 'must read QA_RUN_ZERO_PROGRESS_MS env var (fast zero-progress fuse)');
-  // The zero-progress fuse must key off the recorded step count — a run with no
-  // steps past the window is reaped; a run with ≥1 step waits for the absolute TTL.
-  assert.match(code, /step_results/, 'zero-progress fuse must inspect step_results to detect 0-step runs');
   // Only non-terminal runs may be reaped, and they must be closed to a terminal
   // status with finished_at stamped — never reopen or touch a passed/failed run.
   assert.match(code, /['"]running['"]/, 'must scope the sweep to running runs');
   assert.match(code, /['"]pending['"]/, 'must scope the sweep to pending runs');
   assert.match(code, /status\s*=\s*['"]error['"]/, "reaped runs must be closed with status='error'");
   assert.match(code, /finished_at\s*=/, 'reaped runs must stamp finished_at');
-  // started_at ?? created_at age gate (the freshness check, shared by both fuses).
+  // started_at ?? created_at age gate (used for the reap age / details age_min).
   assert.match(code, /started_at\s*\?\?\s*[\w.]*created_at/, 'age must be measured from started_at falling back to created_at');
+  // The reap decision is now delegated to a registered liveness detector
+  // (ticket 40010b25) — the reaper must dispatch on the resolved policy rather
+  // than hardcode a single rule, so a board can register its own death signal.
+  assert.match(code, /getLivenessDetector/, 'reaper must dispatch through the liveness detector registry');
+  assert.match(code, /resolveLivenessPolicy/, 'reaper must resolve each run\'s scenario/board liveness policy');
   // No-restart activation: an immediate boot sweep runs runOnce() from onModuleInit
   // so a deploy clears standing phantoms without waiting a full sweep interval.
   const init = code.slice(code.indexOf('onModuleInit'));
@@ -59,6 +62,22 @@ test('qa-scenario.controller exposes the operator reaper sweep endpoint', () => 
   assert.match(code, /QaRunReaperService/, 'controller must inject QaRunReaperService for the manual sweep');
   assert.match(code, /@Post\(\s*['"]runs\/reap['"]\s*\)/, 'must expose POST runs/reap as the operator lever (no-restart on-demand sweep)');
   assert.match(code, /runOnce\(/, 'reap endpoint must drive the reaper via runOnce()');
+});
+
+test('qa-liveness-policy registers zero_progress + heartbeat_deadline detectors and the age gate', () => {
+  assert.ok(fs.existsSync(POLICY), `expected ${POLICY} to exist`);
+  const code = stripComments(fs.readFileSync(POLICY, 'utf8'));
+  // The pluggable registry — the extension point the ticket requires.
+  assert.match(code, /registerLivenessDetector/, 'must expose a detector registry (registerLivenessDetector)');
+  assert.match(code, /['"]zero_progress['"]/, 'must register the zero_progress (default) detector');
+  assert.match(code, /['"]heartbeat_deadline['"]/, 'must register the heartbeat_deadline detector');
+  // The zero_progress detector keeps the legacy two fuses so a board with no
+  // policy is regression-safe: the started_at ?? created_at age gate (6h-TTL
+  // absolute backstop) AND the 0-step fast fuse keyed off step_results.
+  assert.match(code, /started_at\s*\?\?\s*[\w.]*created_at/, 'zero_progress must measure age from started_at falling back to created_at');
+  assert.match(code, /step_results/, 'zero_progress fast fuse must inspect step_results to detect 0-step runs');
+  // The heartbeat detector must reset its deadline from the last token advance.
+  assert.match(code, /liveness_token_at/, 'heartbeat_deadline must key off liveness_token_at (strict-advance timestamp)');
 });
 
 test('qa-scenario.module wires QaRunReaperService into providers AND exports', () => {

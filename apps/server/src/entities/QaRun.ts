@@ -83,6 +83,22 @@ export class QaRun {
   @Column({ type: Date, nullable: true, default: null })
   finished_at: Date | null;
 
+  // ── Liveness heartbeat (board-pluggable reaper policy, ticket 40010b25) ──────
+  // A run under the `heartbeat_deadline` liveness_policy must keep a monotonic
+  // progress token advancing. `qa_run_heartbeat` ingestion records the latest
+  // token here (high-water mark) and stamps `liveness_token_at` ONLY when the
+  // token STRICTLY increases. The reaper measures staleness from
+  // liveness_token_at — so a repeated/stale token (same value) does not extend
+  // the deadline (false-immortal guard) while a strictly-advancing token keeps
+  // resetting it (false-reap guard). Both null on legacy runs / runs that never
+  // heartbeat — those fall back to started_at for the deadline baseline, and the
+  // default `zero_progress` policy ignores these fields entirely (regression-safe).
+  @Column({ type: 'float', nullable: true, default: null })
+  liveness_token: number | null;
+
+  @Column({ type: Date, nullable: true, default: null })
+  liveness_token_at: Date | null;
+
   @CreateDateColumn()
   created_at: Date;
 }

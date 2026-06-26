@@ -66,6 +66,14 @@ export interface RecordStepArgs {
   artifactResourceIds?: string[];
 }
 
+export interface RecordHeartbeatArgs {
+  runId: string;
+  workspaceId: string;
+  /** Monotonic progress token; only a STRICT increase resets the liveness deadline. */
+  progressToken: number;
+  note?: string;
+}
+
 /**
  * Owns QaRun lifecycle: dispatch (startQaRun) + result accumulation
  * (recordStep / attachArtifact / completeRun) + history reads.
@@ -220,6 +228,39 @@ export class QaRunService {
       const all = new Set([...(run.artifact_resource_ids || []), ...artifacts]);
       run.artifact_resource_ids = Array.from(all);
     }
+    return this.runRepo.save(run);
+  }
+
+  /**
+   * Ingest a liveness heartbeat (ticket 40010b25) — SEPARATE from recordStep so
+   * "alive" is decoupled from "recorded a graded step". Records the monotonic
+   * progress token as a high-water mark and stamps `liveness_token_at` ONLY on a
+   * STRICT increase:
+   *   - strict increase  → advance token + reset the deadline clock (the live run
+   *                         keeps resetting even with empty step_results — the
+   *                         false-reap guard).
+   *   - same/lower token → still accepted (a no-progress heartbeat) but does NOT
+   *                         touch liveness_token_at, so a dead drive replaying the
+   *                         same token cannot keep the run immortal (the
+   *                         false-immortal guard).
+   * Rejected once the run is terminal — there is nothing left to keep alive.
+   */
+  async recordHeartbeat(args: RecordHeartbeatArgs): Promise<QaRun> {
+    const run = await this.getRun(args.runId, args.workspaceId);
+    const terminal: QaRunStatus[] = ['passed', 'failed', 'error'];
+    if (terminal.includes(run.status)) {
+      throw makeError(409, `QA run is already '${run.status}'; heartbeats are only accepted while running/pending`);
+    }
+    const token = Number(args.progressToken);
+    if (!Number.isFinite(token)) throw makeError(400, 'progress_token must be a finite number');
+
+    const prev = run.liveness_token;
+    if (prev == null || token > prev) {
+      run.liveness_token = token;
+      run.liveness_token_at = new Date();
+    }
+    // else: a repeat/stale token — keep the high-water mark and its advance time
+    // untouched so the deadline is NOT extended.
     return this.runRepo.save(run);
   }
 
