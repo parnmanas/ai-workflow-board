@@ -99,6 +99,20 @@ export class Board {
   @Column({ type: 'int', nullable: true, default: null })
   auto_archive_days: number | null;
 
+  // Per-board QaRun liveness policy (board-pluggable reaper, ticket 40010b25).
+  // JSON text of a LivenessPolicy descriptor (see modules/qa/qa-liveness-policy.ts):
+  //   { "type": "zero_progress", "deadline_sec"?: number }   (the default behavior)
+  //   { "type": "heartbeat_deadline", "deadline_sec": number } (monotonic token must
+  //                                                             advance within deadline)
+  // The QaRunReaperService resolves this per run (scenario-level liveness_policy
+  // overrides board-level, which overrides the built-in `zero_progress` default).
+  // null = no override → every existing board keeps the exact pre-existing
+  // zero_progress reap behavior (TTL age gate), so this is opt-in / regression-safe.
+  // A new board "death signal" is added by registering a detector type in the
+  // policy registry — the reaper core never changes.
+  @Column({ type: 'text', nullable: true, default: null })
+  liveness_policy: string | null;
+
   @CreateDateColumn()
   created_at: Date;
 

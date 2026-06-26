@@ -9,6 +9,7 @@ import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
 import { TicketAttachment } from '../../entities/TicketAttachment';
+import { Resource } from '../../entities/Resource';
 import { Agent } from '../../entities/Agent';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { LogService } from '../../services/log.service';
@@ -20,6 +21,20 @@ function makeError(status: number, message: string): Error & { status: number } 
   const err = new Error(message) as Error & { status: number };
   err.status = status;
   return err;
+}
+
+/**
+ * Drivers whose "PASSED" must be backed by visual evidence. A browser /
+ * game-client run that an agent self-reports as passed but produced zero
+ * image/video artifacts is treated as unproven — completeRun downgrades it to
+ * `failed`. MCP/http drivers have no screen to capture, so they're exempt.
+ */
+const VISUAL_DRIVERS = new Set(['browser', 'game-client']);
+
+/** True when a Resource's mimetype is an image or video (evidence of a screen). */
+function isVisualEvidence(mimetype: string | null | undefined): boolean {
+  const m = (mimetype || '').toLowerCase();
+  return m.startsWith('image/') || m.startsWith('video/');
 }
 
 export interface StartQaRunArgs {
@@ -66,6 +81,14 @@ export interface RecordStepArgs {
   artifactResourceIds?: string[];
 }
 
+export interface RecordHeartbeatArgs {
+  runId: string;
+  workspaceId: string;
+  /** Monotonic progress token; only a STRICT increase resets the liveness deadline. */
+  progressToken: number;
+  note?: string;
+}
+
 /**
  * Owns QaRun lifecycle: dispatch (startQaRun) + result accumulation
  * (recordStep / attachArtifact / completeRun) + history reads.
@@ -91,6 +114,7 @@ export class QaRunService {
     @InjectRepository(ChatRoomParticipant) private readonly participantRepo: Repository<ChatRoomParticipant>,
     @InjectRepository(ChatRoomMessage) private readonly messageRepo: Repository<ChatRoomMessage>,
     @InjectRepository(TicketAttachment) private readonly attachmentRepo: Repository<TicketAttachment>,
+    @InjectRepository(Resource) private readonly resourceRepo: Repository<Resource>,
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     private readonly messaging: RoomMessagingService,
     private readonly logService: LogService,
@@ -223,6 +247,39 @@ export class QaRunService {
     return this.runRepo.save(run);
   }
 
+  /**
+   * Ingest a liveness heartbeat (ticket 40010b25) — SEPARATE from recordStep so
+   * "alive" is decoupled from "recorded a graded step". Records the monotonic
+   * progress token as a high-water mark and stamps `liveness_token_at` ONLY on a
+   * STRICT increase:
+   *   - strict increase  → advance token + reset the deadline clock (the live run
+   *                         keeps resetting even with empty step_results — the
+   *                         false-reap guard).
+   *   - same/lower token → still accepted (a no-progress heartbeat) but does NOT
+   *                         touch liveness_token_at, so a dead drive replaying the
+   *                         same token cannot keep the run immortal (the
+   *                         false-immortal guard).
+   * Rejected once the run is terminal — there is nothing left to keep alive.
+   */
+  async recordHeartbeat(args: RecordHeartbeatArgs): Promise<QaRun> {
+    const run = await this.getRun(args.runId, args.workspaceId);
+    const terminal: QaRunStatus[] = ['passed', 'failed', 'error'];
+    if (terminal.includes(run.status)) {
+      throw makeError(409, `QA run is already '${run.status}'; heartbeats are only accepted while running/pending`);
+    }
+    const token = Number(args.progressToken);
+    if (!Number.isFinite(token)) throw makeError(400, 'progress_token must be a finite number');
+
+    const prev = run.liveness_token;
+    if (prev == null || token > prev) {
+      run.liveness_token = token;
+      run.liveness_token_at = new Date();
+    }
+    // else: a repeat/stale token — keep the high-water mark and its advance time
+    // untouched so the deadline is NOT extended.
+    return this.runRepo.save(run);
+  }
+
   async attachArtifact(runId: string, workspaceId: string, resourceIds: string[]): Promise<QaRun> {
     const run = await this.getRun(runId, workspaceId);
     const add = (resourceIds || []).filter(Boolean);
@@ -237,8 +294,27 @@ export class QaRunService {
     const run = await this.getRun(runId, workspaceId);
     const valid: QaRunStatus[] = ['pending', 'running', 'passed', 'failed', 'error'];
     if (!valid.includes(status)) throw makeError(400, `status must be one of ${valid.join(', ')}`);
-    run.status = status;
-    if (summary !== undefined) run.summary = summary;
+
+    let finalStatus = status;
+    let finalSummary = summary;
+
+    // Evidence gate — a visual-driver run can't be PASSED on the agent's word
+    // alone. If it self-reports `passed` but produced zero image/video
+    // artifacts, downgrade to `failed` so "증거 없는 PASSED" never lands.
+    if (status === 'passed') {
+      const gate = await this._evidenceGate(run);
+      if (!gate.ok) {
+        finalStatus = 'failed';
+        finalSummary = [gate.reason, summary].filter(Boolean).join('\n\n');
+        this.logService.warn(
+          'QA',
+          `run ${run.id} self-reported passed but ${gate.reason} — downgraded to failed`,
+        );
+      }
+    }
+
+    run.status = finalStatus;
+    if (finalSummary !== undefined) run.summary = finalSummary;
     run.finished_at = new Date();
     const saved = await this.runRepo.save(run);
 
@@ -262,6 +338,33 @@ export class QaRunService {
       this.logService.warn('QA', `batch advance after completeRun ${runId} failed: ${e?.message || e}`),
     );
     return saved;
+  }
+
+  /**
+   * Decide whether a run earned its `passed`. Visual drivers (browser /
+   * game-client) require at least one image/video artifact among the run's
+   * accumulated resources; non-visual drivers always pass the gate (nothing to
+   * capture). Returns a downgrade reason when the gate fails.
+   */
+  private async _evidenceGate(run: QaRun): Promise<{ ok: true } | { ok: false; reason: string }> {
+    const scenario = await this.scenarioRepo.findOne({ where: { id: run.scenario_id } });
+    const driver = (scenario?.qa_driver || '').toLowerCase();
+    if (!VISUAL_DRIVERS.has(driver)) return { ok: true };
+
+    const ids = (run.artifact_resource_ids || []).filter(Boolean);
+    if (ids.length) {
+      const resources = await this.resourceRepo.find({ where: { id: In(ids) } });
+      if (resources.some((r) => isVisualEvidence(r.file_mimetype))) return { ok: true };
+    }
+
+    return {
+      ok: false,
+      reason:
+        `⚠️ 증거 누락 (evidence gate): \`${driver}\` visual driver QA run 인데 ` +
+        `image/video 아티팩트가 0개라 PASSED 를 거부하고 failed 로 강등함. ` +
+        `각 step 의 스크린샷/비디오를 Resource 로 업로드한 뒤 record_qa_step 의 ` +
+        `artifact_resource_ids 로 첨부하세요.`,
+    };
   }
 
   /** Cascade helper for QaService.remove — tear down every run + its room. */

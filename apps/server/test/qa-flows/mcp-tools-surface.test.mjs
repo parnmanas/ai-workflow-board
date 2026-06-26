@@ -54,6 +54,7 @@ const EXPECTED_TOOLS = [
   'delete_qa_scenario',
   'start_qa_run',
   'record_qa_step',
+  'qa_run_heartbeat',
   'attach_qa_artifact',
   'complete_qa_run',
   'list_qa_runs',

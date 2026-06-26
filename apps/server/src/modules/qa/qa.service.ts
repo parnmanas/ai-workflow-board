@@ -88,6 +88,9 @@ export interface CreateScenarioInput {
   on_failure_ticket?: any;
   created_by?: string;
   max_runs?: number;
+  /** Pre-serialized LivenessPolicy JSON string (or null to clear). The MCP/REST
+   *  layer validates + serializes via qa-liveness-policy before calling in. */
+  liveness_policy?: string | null;
 }
 
 /**
@@ -200,6 +203,7 @@ export class QaService {
       on_failure_ticket: normalizeOnFailureTicket(input.on_failure_ticket),
       created_by: input.created_by ?? '',
       max_runs: typeof input.max_runs === 'number' && input.max_runs > 0 ? Math.floor(input.max_runs) : 20,
+      liveness_policy: input.liveness_policy ?? null,
     });
     return this.scenarioRepo.save(created);
   }
@@ -241,6 +245,8 @@ export class QaService {
       const n = Number(patch.max_runs);
       if (Number.isFinite(n) && n > 0) existing.max_runs = Math.floor(n);
     }
+    // liveness_policy arrives pre-validated + serialized (string) or null to clear.
+    if (patch.liveness_policy !== undefined) existing.liveness_policy = patch.liveness_policy ?? null;
     return this.scenarioRepo.save(existing);
   }
 

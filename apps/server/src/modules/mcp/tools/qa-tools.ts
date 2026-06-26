@@ -25,6 +25,11 @@ import { QaRun } from '../../../entities/QaRun';
 import { QaRunBatch } from '../../../entities/QaRunBatch';
 import { ok, err } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
+import {
+  LivenessPolicySchema,
+  serializeLivenessPolicy,
+  parseLivenessPolicy,
+} from '../../qa/qa-liveness-policy';
 import type { ToolContext } from './context';
 
 function scenarioToJson(s: QaScenario) {
@@ -43,6 +48,8 @@ function scenarioToJson(s: QaScenario) {
     on_failure_ticket: s.on_failure_ticket ?? null,
     created_by: s.created_by,
     max_runs: s.max_runs,
+    // Normalized policy object (or null) so the client never sees raw JSON text.
+    liveness_policy: parseLivenessPolicy(s.liveness_policy),
     created_at: s.created_at,
     updated_at: s.updated_at,
   };
@@ -67,6 +74,10 @@ function runToJson(r: QaRun) {
     batch_index: r.batch_index ?? null,
     started_at: r.started_at,
     finished_at: r.finished_at,
+    // Liveness heartbeat state (ticket 40010b25): the high-water progress token
+    // and the time it last STRICTLY advanced (the deadline baseline).
+    liveness_token: r.liveness_token ?? null,
+    liveness_token_at: r.liveness_token_at ?? null,
     created_at: r.created_at,
   };
 }
@@ -178,6 +189,11 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
       tags: z.array(z.string()).optional(),
       on_failure_ticket: onFailureTicketSchema.optional().describe('On-failure auto-ticket policy (see schema). Omit/null to disable.'),
       max_runs: z.number().optional().describe('FIFO run-history budget per scenario (default 20)'),
+      liveness_policy: LivenessPolicySchema.nullable().optional()
+        .describe('Reaper liveness policy override for this scenario\'s runs. ' +
+          '{ "type": "zero_progress", "deadline_sec"?: N } (default: reap when run age > deadline, default the global TTL) or ' +
+          '{ "type": "heartbeat_deadline", "deadline_sec": N } (reap only when the monotonic qa_run_heartbeat token has not strictly advanced within N seconds). ' +
+          'Overrides the board policy; omit/null to inherit the board (then the built-in zero_progress default).'),
     },
     async (args, extra: { sessionId?: string }) => {
       if (!qaService) return err('QA service unavailable in this MCP context');
@@ -197,6 +213,7 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
           on_failure_ticket: args.on_failure_ticket,
           created_by: caller?.agentId ?? '',
           max_runs: args.max_runs,
+          liveness_policy: args.liveness_policy === undefined ? undefined : serializeLivenessPolicy(args.liveness_policy),
         });
         return ok(scenarioToJson(row));
       } catch (e: any) {
@@ -222,11 +239,17 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
       tags: z.array(z.string()).optional(),
       on_failure_ticket: onFailureTicketSchema.optional().describe('On-failure auto-ticket policy (see create_qa_scenario). Pass null to clear, omit to leave unchanged.'),
       max_runs: z.number().optional(),
+      liveness_policy: LivenessPolicySchema.nullable().optional()
+        .describe('Reaper liveness policy override (see create_qa_scenario). Pass null to clear and inherit the board policy.'),
     },
-    async ({ scenario_id, workspace_id, ...patch }) => {
+    async ({ scenario_id, workspace_id, liveness_policy, ...patch }) => {
       if (!qaService) return err('QA service unavailable in this MCP context');
       try {
-        const row = await qaService.update(scenario_id, workspace_id, patch as any);
+        const row = await qaService.update(scenario_id, workspace_id, {
+          ...(patch as any),
+          // Serialize only when the key was provided; undefined leaves it untouched.
+          ...(liveness_policy === undefined ? {} : { liveness_policy: serializeLivenessPolicy(liveness_policy) }),
+        });
         return ok(scenarioToJson(row));
       } catch (e: any) {
         return err(e?.message || 'Failed to update QA scenario');
@@ -303,6 +326,37 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
         return ok(runToJson(row));
       } catch (e: any) {
         return err(e?.message || 'Failed to record QA step');
+      }
+    },
+  );
+
+  server.tool(
+    'qa_run_heartbeat',
+    'Emit a lightweight liveness heartbeat for a running QaRun — SEPARATE from record_qa_step. ' +
+    'Liveness ≠ "recorded a step": under the heartbeat_deadline policy a run stays alive only while ' +
+    'its monotonic progress_token keeps STRICTLY increasing within the board/scenario deadline. ' +
+    'Re-sending the same token (or a lower one) is accepted but does NOT extend the deadline — so a ' +
+    'dead drive that keeps replaying the same token (e.g. artifact_count frozen at 141) is still reaped. ' +
+    'What the token counts (disk artifact count, frame counter, request count…) is the client\'s ' +
+    'choice; AWB only enforces that it advances in time. Rejected once the run is terminal.',
+    {
+      run_id: z.string().describe('QaRun ID'),
+      workspace_id: z.string().describe('Workspace ID (required, scope guard)'),
+      progress_token: z.number().describe('Monotonic progress token. STRICTLY increase to reset the liveness deadline; a same/lower value is a no-progress heartbeat that does not.'),
+      note: z.string().optional().describe('Optional human-readable note (what advanced, e.g. "artifact_count 141→152")'),
+    },
+    async ({ run_id, workspace_id, progress_token, note }) => {
+      if (!qaRunService) return err('QA run service unavailable in this MCP context');
+      try {
+        const row = await qaRunService.recordHeartbeat({
+          runId: run_id,
+          workspaceId: workspace_id,
+          progressToken: progress_token,
+          note,
+        });
+        return ok(runToJson(row));
+      } catch (e: any) {
+        return err(e?.message || 'Failed to record QA heartbeat');
       }
     },
   );

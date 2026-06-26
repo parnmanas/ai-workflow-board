@@ -284,20 +284,27 @@ This ticket is in the Review column. Both the reviewer **and** the assignee are 
 
 1. **Identify the branch / PR** — find the branch name (and PR URL if present) the assignee posted in the ticket comments. If missing, \`add_comment\` asking for the branch name (mention the assignee with \`@[role:assignee|<name>]\`) and stop.
 
-2. **Inspect the diff remotely**
+2. **Base-freshness gate — review against the current integration target, not the stale fork point.** A \`<default>...<branch>\` comparison is a 3-dot diff computed from the *merge base* (where the branch forked). If the default has moved since — especially when the same area is evolving fast — that diff hides what already landed, so "no regression / existing behaviour unchanged" claims become **unverifiable against what will actually be integrated**. Gate on base freshness *before* reading the diff:
+   - Capture the current integration tip: \`gh api repos/<owner>/<repo>/git/refs/heads/<default> --jq .object.sha\` (or \`gh pr view <pr> --json baseRefOid -q .baseRefOid\`). This SHA is the base you review **against** — it goes in your decision comment.
+   - Check whether the branch is behind it: \`gh pr view <pr> --json mergeStateStatus,baseRefName,headRefOid\`. A \`mergeStateStatus\` of \`BEHIND\` (or \`DIRTY\` for a conflicting branch) means the branch forked from an older base and the diff is stale.
+   - **BEHIND / DIRTY** → do **not** approve backward-compat / "no regression" claims from this diff. \`add_comment\` asking the assignee to \`git rebase origin/<default>\` and re-push (mention \`@[role:assignee|<name>]\`), \`move_ticket\` back to **In Progress**, and stop. Re-review once the branch is current.
+   - **Current** (\`CLEAN\` / \`HAS_HOOKS\` / \`UNSTABLE\` — anything not behind) → proceed; the diff reflects the real integration target.
+
+3. **Inspect the diff remotely**
    - Preferred: \`gh pr diff <pr-number-or-branch>\` — works with only a \`gh\` auth token, no local clone.
    - Fallback: open \`https://github.com/<owner>/<repo>/compare/<default>...<branch>\` and read the diff in the browser / via MCP fetch.
    - If neither is available, \`add_comment\` "review blocked: no remote diff access — please attach the diff or a PR URL" (mention the assignee) and stop.
 
-3. **Review dimensions**
+4. **Review dimensions**
    - **Requirement fit** — does the diff solve what the ticket asked for?
    - **Code quality** — style / structure consistent with the rest of the repo, meaningful names, no unrelated changes, no dead code.
    - **Obvious bugs / security** — null handling, SQL injection, XSS, missing permission checks, log-forward-on-polling loops, etc.
+   - **Backward-compat / regression** — only mark a "no regression" / "existing behaviour unchanged" claim ✅ when the base-freshness gate (step 2) passed **and** the diff against the *current* base actually preserves the prior path. If the base lagged, or you can't confirm against the current integration target, **hold** that verdict and say so — never rubber-stamp backward-compat against a stale base.
    - **CI signal** — \`gh pr checks <pr>\` / \`gh run list --branch <branch>\`. A red CI is a blocker.
    - **Do not attempt local build or test.** You may not have a repo. If coverage looks thin, say so in the bounce comment.
 
-4. **Decision**
-   - **LGTM** → \`add_comment\` "LGTM — approved for merge." with 1–2 lines of rationale → \`move_ticket\` to **Merging**. (Do not move to Done — Merging handles the actual merge.)
+5. **Decision**
+   - **LGTM** → \`add_comment\` "LGTM — approved for merge." with 1–2 lines of rationale **and the reviewed base SHA** (\`reviewed against origin/<default>@<sha>\` from step 2) so "no regression vs. what?" is auditable → \`move_ticket\` to **Merging**. (Do not move to Done — Merging handles the actual merge.)
    - **Changes requested** → \`add_comment\` with concrete findings (\`file:line\` citations, "X instead of Y" suggestions), mention the assignee (\`@[role:assignee|<name>]\`) → \`move_ticket\` back to **In Progress**.
    - **Question for the assignee** → \`add_comment\` with a specific question, mention the assignee (\`@[role:assignee|<name>]\`), and stop. Do **not** \`move_ticket\` — the ticket stays in Review so the assignee can answer without a round-trip to In Progress.
    - **Cannot decide on your own** → \`add_comment\` with a specific question to the **reporter** (use \`@[role:reporter|<name>]\`) and stop. Do not \`move_ticket\`.
@@ -307,6 +314,7 @@ This ticket is in the Review column. Both the reviewer **and** the assignee are 
 - The reviewer **judges and comments** — never edits code. If changes are needed, bounce to In Progress so the assignee fixes it.
 - If in doubt, bounce (or stay in Review with a question) rather than rubber-stamp to Merging.
 - Review comments must be concrete (\`file:line\`, "X instead of Y"). No vague "looks off" / "seems fine".
+- **Record the reviewed base SHA.** Every LGTM states \`reviewed against origin/<default>@<sha>\` (step 2's captured tip). "No regression" is meaningless without naming the base it's measured against — and it makes a later stale-base merge visible.
 - **Never @-mention the reviewer role from a reviewer comment.** Self-mentions cause recursive triggers. Mention only the assignee or the reporter.
 - Approving to Merging is a statement that the *diff* is acceptable; the Merging stage handles rebase / conflict / push outcomes.
 

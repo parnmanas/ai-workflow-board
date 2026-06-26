@@ -19,6 +19,7 @@ import { ok, err, safeJsonParse } from '../shared/helpers';
 import { HarnessConfigSchema, serializeHarnessConfig } from '../../../common/harness-config';
 import { EffortPresetsConfigSchema, validateEffortPresetsInput, serializeEffortPresets } from '../../../common/effort-presets';
 import { EnvironmentConfigSchema, validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../../../common/environment-config';
+import { LivenessPolicySchema, serializeLivenessPolicy } from '../../qa/qa-liveness-policy';
 import { writeRoutingConfigThrough } from '../../boards/routing-config.helper';
 import { getCallerAgent } from '../shared/session-auth';
 import { WorkspaceMoveService, WorkspaceMoveBlockedError } from '../../../services/workspace-move.service';
@@ -247,8 +248,10 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
         .describe('Per-board environment setup: { repositories?: [{ resource_id? | url?, target_dir?, branch?, post_clone_commands?: [] }], env_vars?: { KEY: value }, setup_commands?: [], setup_timeout_seconds?, version? }. When set, agent-manager provisions the working environment (clone/update repos under the agent home, run setup commands, inject non-secret env_vars) once per (agent,board) before the first dispatch, re-running only when the config fingerprint changes. Keys set here override the workspace default per top-level key. Pass null to clear the board override.'),
       paused: z.boolean().optional()
         .describe('Board-wide soft pause. true sets paused_at=now — every agent_trigger for tickets on this board is dropped (TriggerLoopService gate) and backlog promotion short-circuits; humans can still read/comment/drag. false clears paused_at to resume dispatch. Mirrors REST POST /api/boards/:id/pause|resume so the awb-mcp agent driver can engage the gate. Omit to leave the pause state untouched.'),
+      liveness_policy: LivenessPolicySchema.nullable().optional()
+        .describe('Per-board QaRun liveness policy for the reaper: { "type": "zero_progress", "deadline_sec"?: N } (default — reap when a run\'s age exceeds the deadline, defaulting to the global QA_RUN_TTL_MS) or { "type": "heartbeat_deadline", "deadline_sec": N } (reap only when the run\'s monotonic qa_run_heartbeat token has not strictly advanced within N seconds). Scenario-level liveness_policy overrides this. Pass null to clear (board falls back to the zero_progress default — the pre-existing behavior).'),
     },
-    async ({ board_id, name, description, routing_config, column_prompts, auto_archive_days, harness_config, effort_presets, language, environment_config, paused }) => {
+    async ({ board_id, name, description, routing_config, column_prompts, auto_archive_days, harness_config, effort_presets, language, environment_config, paused, liveness_policy }) => {
       const boardRepo = dataSource.getRepository(Board);
       const board = await boardRepo.findOne({ where: { id: board_id } });
       if (!board) return err('Board not found');
@@ -325,6 +328,12 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
           if (!checked.ok) return err(checked.error);
           board.environment_config = serializeEnvironmentConfig(checked.value);
         }
+      }
+      // QaRun liveness policy (ticket 40010b25). Args already passed the strict
+      // LivenessPolicySchema, so storage is a straight serialize; null clears the
+      // override back to the built-in zero_progress default.
+      if (liveness_policy !== undefined) {
+        board.liveness_policy = serializeLivenessPolicy(liveness_policy);
       }
 
       await boardRepo.save(board);

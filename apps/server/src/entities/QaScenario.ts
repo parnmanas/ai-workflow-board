@@ -71,6 +71,15 @@ export class QaScenario {
   @Column({ type: 'int', default: 20 })
   max_runs: number;
 
+  // Per-scenario QaRun liveness policy override (ticket 40010b25). Same JSON
+  // shape as Board.liveness_policy (a LivenessPolicy descriptor). When set, the
+  // reaper uses this in preference to the scenario's board-level policy; null =
+  // inherit the board policy (and if that is also null, the built-in
+  // `zero_progress` default). Lets a single scenario opt into
+  // `heartbeat_deadline` without flipping the whole board.
+  @Column({ type: 'text', nullable: true, default: null })
+  liveness_policy: string | null;
+
   @CreateDateColumn()
   created_at: Date;
 
