@@ -1,7 +1,8 @@
 /**
  * Board MCP tools.
  *
- * Tools: list_boards, get_board, get_board_summary, create_board, update_board
+ * Tools: list_boards, get_board, get_board_summary, create_board, update_board,
+ *        delete_board, move_board_to_workspace
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -334,6 +335,24 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
         await writeRoutingConfigThrough(dataSource, board.id);
       }
       return ok(board);
+    }
+  );
+
+  server.tool(
+    'delete_board',
+    'Delete a board and all its columns, tickets (with subtasks) and comments. The delete cascades ' +
+    'through the column → ticket → child-ticket / comment FK chain (same behaviour as DELETE /api/boards/:id). ' +
+    'Unlike delete_workspace there is no "cannot delete the last board" guard — a workspace is allowed to hold ' +
+    'zero boards. Irreversible: there is no archive/restore here (use update_board / the Archive page for soft ' +
+    'archival instead).',
+    { board_id: z.string().describe('Board ID to delete') },
+    async ({ board_id }) => {
+      const boardRepo = dataSource.getRepository(Board);
+      const board = await boardRepo.findOne({ where: { id: board_id } });
+      if (!board) return err('Board not found');
+
+      await boardRepo.delete(board.id);
+      return ok({ success: true });
     }
   );
 

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import {
   Board, BoardWithCards, PromptTemplate, BoardMovePreview, MoveBlocker, MoveRemedy,
@@ -9,6 +9,7 @@ import MoveBlockerList from './MoveBlockerList';
 import { useBoard } from '../hooks/useBoard';
 import { useToast } from '../contexts/ToastContext';
 import { useLoading } from '../contexts/LoadingContext';
+import { useConfirm } from '../contexts/ConfirmContext';
 import PageHeader from './PageHeader';
 import ColumnManager from './ColumnManager';
 import HarnessConfigEditor from './HarnessConfigEditor';
@@ -229,8 +230,70 @@ export default function BoardSettingsPage() {
           }}
         />
         <MoveToWorkspaceSetting board={board} sourceWorkspaceId={wsId ?? board.workspace_id} />
+        <DeleteBoardSetting board={board} workspaceId={wsId ?? board.workspace_id} />
       </div>
     </div>
+  );
+}
+
+interface DeleteBoardSettingProps {
+  board: BoardWithCards;
+  workspaceId: string;
+}
+
+// Hard board delete (ticket 2d6780a5). Mirrors the WorkspaceSelector delete
+// pattern: confirm → DELETE /api/boards/:id (cascades to columns / tickets /
+// subtasks / comments) → toast → navigate back to the workspace board list and
+// fire `boards-changed` so AppLayout refreshes the sidebar. Irreversible — there
+// is no archive/restore here (use the Archive page for soft archival instead).
+function DeleteBoardSetting({ board, workspaceId }: DeleteBoardSettingProps) {
+  const confirm = useConfirm();
+  const navigate = useNavigate();
+  const { showToast } = useToast();
+  const [busy, setBusy] = useState(false);
+
+  const handleDelete = async () => {
+    const ok = await confirm({
+      title: 'Delete board',
+      message: `Delete “${board.name}”? The board and all its tickets will be permanently deleted. This cannot be undone.`,
+    });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      await api.deleteBoard(board.id);
+      showToast('Board deleted', 'success');
+      // Tell AppLayout to refetch the sidebar board list, then leave this now
+      // stale board-scoped route for the workspace's board index.
+      window.dispatchEvent(new Event('boards-changed'));
+      navigate(`/ws/${workspaceId}/boards`);
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to delete board', 'error');
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section
+      style={{
+        padding: 16,
+        marginBottom: 16,
+        background: tokens.colors.surfaceCard,
+        border: `1px solid ${tokens.colors.danger}`,
+        borderRadius: tokens.radii.md,
+      }}
+    >
+      <h3 style={{ margin: 0, fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>
+        Delete board
+      </h3>
+      <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, marginBottom: 12 }}>
+        Permanently delete this board along with <strong>all of its columns, tickets, subtasks and
+        comments</strong>. This cannot be undone — to hide a board without losing its tickets, archive
+        it instead.
+      </div>
+      <Button variant="danger" size="sm" disabled={busy} onClick={handleDelete}>
+        {busy ? 'Deleting…' : 'Delete board…'}
+      </Button>
+    </section>
   );
 }
 
