@@ -833,6 +833,14 @@ function ScenarioDetail({ scenario, workspaceId, agentName, onBack, onRun, runni
 }
 
 function RunDetail({ run, onPreview }: { run: QaRun; onPreview: (src: string, kind: 'image' | 'video') => void }) {
+  // Run-level artifacts (attach_qa_artifact) that aren't already shown in a
+  // per-step gallery. recordStep folds step artifacts into artifact_resource_ids,
+  // so subtract them here to render only the run-level extras (and avoid dupes).
+  const stepArtifactIds = new Set(
+    (run.step_results ?? []).flatMap((sr) => sr.artifact_resource_ids ?? []),
+  );
+  const runLevelArtifactIds = (run.artifact_resource_ids ?? []).filter((id) => !stepArtifactIds.has(id));
+
   return (
     <div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' }}>
@@ -859,6 +867,14 @@ function RunDetail({ run, onPreview }: { run: QaRun; onPreview: (src: string, ki
       </div>
       {run.summary && (
         <div style={{ fontSize: 13, color: tokens.colors.textSecondary, marginBottom: 12, whiteSpace: 'pre-wrap' }}>{run.summary}</div>
+      )}
+      {runLevelArtifactIds.length > 0 && (
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, color: tokens.colors.textMuted, marginBottom: 6 }}>
+            Run artifacts
+          </div>
+          <Gallery ids={runLevelArtifactIds} onPreview={onPreview} />
+        </div>
       )}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         {(run.step_results ?? []).map((sr) => (
