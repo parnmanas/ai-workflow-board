@@ -23,7 +23,7 @@
 // one fetch+ff-pull per run, which is the whole point.
 
 import { promises as fsp } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve, sep } from 'node:path';
 import { execFile } from 'node:child_process';
 import { AGENT_MANAGER_HOME } from './constants.js';
 import { log } from './logging.js';
@@ -137,6 +137,20 @@ export async function provisionRunWorkspace(p: RunProvision): Promise<RunProvisi
   const rel = p.workspace_folder.replace(/^[/\\]+/, '');
   const dir = join(AGENT_MANAGER_HOME, rel);
   const gitDir = join(dir, '.git');
+
+  // Defense-in-depth path-traversal guard: this provisioner runs `rm -rf` on
+  // `dir` for a fresh checkout (and to clear a non-git reuse folder), and it
+  // trusts a wire value the server already normalized. Re-assert here that the
+  // resolved folder stays STRICTLY under AGENT_MANAGER_HOME before any
+  // destructive op — a `..` that slipped past the server guard must abort via
+  // the standard "dispatch 중단 + 코멘트" path, never wipe outside the sandbox.
+  const home = resolve(AGENT_MANAGER_HOME);
+  const resolvedDir = resolve(dir);
+  if (!resolvedDir.startsWith(home + sep)) {
+    const error = `run workspace_folder escapes the agent home (path traversal): ${p.workspace_folder}`;
+    log(`[run-provision] ${p.kind} run=${p.run_id.slice(0, 8)} REJECTED: ${error}`);
+    return { ok: false, dir: resolvedDir, steps: [`reject ${rel}: path traversal`], error };
+  }
 
   try {
     if (p.checkout_mode === 'fresh') {

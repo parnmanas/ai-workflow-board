@@ -137,6 +137,28 @@ test('no repo: ensures the folder exists without cloning', async () => {
   assert.ok(r.steps.some((s) => s.includes('no repo to clone')));
 });
 
+test('path traversal: a ../ workspace_folder is rejected and does NOT rm outside the home', async () => {
+  // Stand up a victim dir OUTSIDE the agent home; a fresh checkout (rm -rf) must
+  // never wipe it. The workspace_folder climbs out of HOME via ../ then targets
+  // the victim — enough `..` to escape any depth of HOME under /tmp.
+  const victimRoot = mkdtempSync(join(tmpdir(), 'awb-runprov-victim-'));
+  const victim = join(victimRoot, 'precious');
+  writeFileSync(victim, 'do not delete\n');
+  assert.ok(existsSync(victim));
+
+  const r = await provisionRunWorkspace({
+    kind: 'qa',
+    run_id: 'r5',
+    workspace_id: 'w1',
+    workspace_folder: `../../../../../../../../../..${victimRoot}`,
+    checkout_mode: 'fresh',
+    repo: null,
+  });
+  assert.equal(r.ok, false, 'traversal rejected');
+  assert.ok(/traversal/i.test(r.error || ''), 'error names the traversal');
+  assert.ok(existsSync(victim), 'victim file untouched — no rm outside the home');
+});
+
 test('clone failure (bad url): ok=false with an error, no throw', async () => {
   const r = await provisionRunWorkspace({
     kind: 'qa',

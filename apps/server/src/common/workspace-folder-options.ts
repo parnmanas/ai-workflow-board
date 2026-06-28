@@ -50,10 +50,22 @@ export const DEFAULT_BUILD_MODE: BuildMode = 'cold_then_warm';
  * Leading slashes are stripped so the value stays under the agent's home — it is
  * never allowed to be absolute. '' means "unset" → the deterministic default is
  * resolved at prompt-render time via `resolveWorkspaceFolder`.
+ *
+ * Path-traversal guard (source of truth): any `.`/`..`/empty segment is dropped,
+ * so the value can never climb out of the agent home. The run provisioner
+ * (ticket 4) runs `rm -rf` on this path for a `fresh` checkout, so a stray `../`
+ * from a mis-typed scenario/profile config must not escape the sandbox. The
+ * provisioner re-asserts containment as defense-in-depth, but neutralizing it
+ * here at the only write surface keeps the persisted value clean too.
  */
 export function normalizeWorkspaceFolder(input: any): string {
   if (input == null) return '';
-  return String(input).trim().replace(/^[/\\]+/, '');
+  const raw = String(input).trim().replace(/^[/\\]+/, '');
+  if (!raw) return '';
+  return raw
+    .split(/[/\\]+/)
+    .filter((seg) => seg && seg !== '.' && seg !== '..')
+    .join('/');
 }
 
 export function normalizeCheckoutMode(input: any): CheckoutMode {
