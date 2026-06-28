@@ -117,6 +117,109 @@ export function decideRunFreshness(input: RunFreshnessInput): RunFreshness {
   return input.last_built_commit ? 'warm' : 'cold';
 }
 
+// ── Run-prompt block (reused by qa-prompt.ts + security-prompt.ts) ────────────
+
+export interface WorkspaceFolderPromptInput {
+  workspace_folder: string | null | undefined;
+  repo_ref: WorkspaceFolderRepoRef | null | undefined;
+  checkout_mode: CheckoutMode;
+  build_mode: BuildMode;
+  /** Server state — the last successfully-built commit (null until first build). */
+  last_built_commit: string | null | undefined;
+  kind: 'qa' | 'security';
+  /** Scenario / profile id — feeds the deterministic default folder. */
+  id: string;
+}
+
+/**
+ * Render the imperative "where + how do I build" block injected into a QA /
+ * security run prompt. This is the heart of ticket (3): the server resolves the
+ * absolute-ish folder (relative to `$AWB_AGENT_MANAGER_HOME`, since the server
+ * never knows the agent's real home path) and the COLD/WARM decision, then
+ * states them as commands so the agent has **no inference to do** — it does not
+ * guess a folder, does not re-clone on a warm run, and does not probe markers to
+ * decide cold vs warm.
+ *
+ * Responsibility boundary with ticket (4): the prompt is written self-contained
+ * (it tells the agent to clone/pull itself). When the agent-manager provisioner
+ * lands and guarantees the checkout, the agent can skip the clone/pull and go
+ * straight to the build — the block says so explicitly so no edit is needed here.
+ */
+export function renderWorkspaceFolderBlock(input: WorkspaceFolderPromptInput): string {
+  const folder = resolveWorkspaceFolder(input.workspace_folder, input.kind, input.id);
+  const checkout = normalizeCheckoutMode(input.checkout_mode);
+  const build = normalizeBuildMode(input.build_mode);
+  const freshness = decideRunFreshness({
+    build_mode: build,
+    checkout_mode: checkout,
+    last_built_commit: input.last_built_commit ?? null,
+  });
+
+  // Path is stated relative to $AWB_AGENT_MANAGER_HOME — the server has no clone
+  // and cannot know the absolute home, so the agent resolves the env var itself.
+  const path = `"$AWB_AGENT_MANAGER_HOME/${folder}"`;
+
+  const ref = normalizeRepoRef(input.repo_ref);
+  const branchSuffix = ref?.branch ? ` (branch \`${ref.branch}\`)` : '';
+  const branchCheckout = ref?.branch ? ` && git -C ${path} checkout ${ref.branch}` : '';
+  // For the reuse `cd … && git pull` command the cwd is already the folder, so a
+  // bare `git checkout <branch>` keeps the whole thing in one code span.
+  const branchCheckoutInline = ref?.branch ? ` && git checkout ${ref.branch}` : '';
+  let cloneCmd: string;
+  let repoLine: string;
+  if (ref?.url) {
+    repoLine = `Clone from \`${ref.url}\`${branchSuffix}.`;
+    cloneCmd = `git clone ${ref.url} ${path}${branchCheckout}`;
+  } else if (ref?.resource_id) {
+    repoLine = `Use repo Resource \`${ref.resource_id}\`${branchSuffix} — resolve its git URL / credentials from AWB, then clone it.`;
+    cloneCmd = `git clone <resource ${ref.resource_id} url> ${path}${branchCheckout}`;
+  } else {
+    repoLine = `Use the repo configured for this board / workspace (\`environment_config\`)${branchSuffix}.`;
+    cloneCmd = `git clone <board environment_config repo url> ${path}${branchCheckout}`;
+  }
+
+  const buildLabel =
+    freshness === 'cold'
+      ? 'a **COLD build** (clean checkout artifacts + full build from scratch)'
+      : 'a **WARM build** (incremental — reuse the existing build artifacts; do NOT clean)';
+
+  let steps: string[];
+  if (checkout === 'fresh') {
+    // fresh always wipes → always COLD (decideRunFreshness guarantees freshness==='cold' here).
+    steps = [
+      `1. **Wipe** the working folder: \`rm -rf ${path}\`.`,
+      `2. Clone fresh: \`${cloneCmd}\`.`,
+      `3. Run ${buildLabel}.`,
+    ];
+  } else if (freshness === 'cold') {
+    steps = [
+      `1. If ${path} does **not** exist, clone into it: \`${cloneCmd}\`. If it already exists, \`cd ${path} && git pull --ff-only${branchCheckoutInline}\`. Do NOT create a new/arbitrary folder.`,
+      `2. Run ${buildLabel}.`,
+    ];
+  } else {
+    steps = [
+      `1. \`cd ${path} && git pull --ff-only${branchCheckoutInline}\`. Do **NOT** re-clone and do **NOT** create a new folder — reuse this exact checkout.`,
+      `2. Run ${buildLabel}.`,
+    ];
+  }
+
+  return [
+    `## Working folder & build (server-decided — do NOT improvise)`,
+    ``,
+    `**Working folder:** \`$AWB_AGENT_MANAGER_HOME/${folder}\` — resolve \`$AWB_AGENT_MANAGER_HOME\` yourself`,
+    `(the server does not know your absolute home path). Work **only** inside this folder; do not`,
+    `clone into or build from any other location. Every run of this ${input.kind === 'qa' ? 'scenario' : 'profile'} reuses this exact path.`,
+    ``,
+    `**Repo:** ${repoLine}`,
+    ``,
+    `**This run is ${freshness.toUpperCase()}** — decided by the server (build_mode=\`${build}\`, checkout_mode=\`${checkout}\`${freshness === 'warm' || build === 'cold_then_warm' ? `, last_built_commit=${input.last_built_commit ? `\`${input.last_built_commit}\`` : 'none'}` : ''}). Do not second-guess this.`,
+    ``,
+    ...steps,
+    ``,
+    `> If the working folder was already prepared for you (checkout done by the provisioner), skip the clone/pull above and go straight to the build step.`,
+  ].join('\n');
+}
+
 // ── Zod schema (reused by the QA + security MCP create/update tools) ──────────
 
 export const repoRefSchema = z
