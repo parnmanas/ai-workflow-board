@@ -7,10 +7,11 @@
 //
 //   - latest run wins (runs ordered created_at DESC; a later `running` run
 //     supersedes an earlier finished one as last_run_status);
-//   - pass_rate counts ONLY finished runs (passed/failed/error) — a `running`
-//     run is excluded from the denominator;
-//   - a scenario with zero runs reports null last_run_*/pass_rate + run_count 0;
+//   - a scenario with zero runs reports null last_run_* + run_count 0;
 //   - name-ASC ordering and the disabled flag survive the enrichment.
+//
+// (The cumulative pass_rate field was removed — the UI no longer surfaces a
+// pass-rate %, so the rollup only carries last_run_* + run_count now.)
 //
 // Setup writes QaScenario/QaRun rows directly via the data source (no dispatch
 // machinery) and backdates created_at so "latest" is deterministic, then calls
@@ -81,22 +82,20 @@ test('QA scenario list attaches last-run rollup', async (t) => {
 
   const [a, b, c] = list;
 
-  step('A: single error run → status error, pass_rate 0, run_count 1');
+  step('A: single error run → status error, run_count 1');
   assert.equal(a.enabled, false, 'disabled flag survives enrichment');
   assert.equal(a.last_run_status, 'error');
   assert.ok(a.last_run_at, 'last_run_at present');
-  assert.equal(a.pass_rate, 0, '0 passed / 1 finished');
+  assert.equal(a.pass_rate, undefined, 'pass_rate field removed from the rollup');
   assert.equal(a.run_count, 1);
 
-  step('B: latest is the running run; pass_rate excludes it (1 passed / 2 finished)');
+  step('B: latest is the running run; run_count counts all retained runs');
   assert.equal(b.last_run_status, 'running', 'newest run wins as last_run_status');
-  assert.equal(b.pass_rate, 50, 'running run excluded from pass_rate denominator');
   assert.equal(b.run_count, 3, 'all retained runs counted');
 
   step('C: no runs → null rollup, run_count 0');
   assert.equal(c.last_run_status, null);
   assert.equal(c.last_run_at, null);
-  assert.equal(c.pass_rate, null);
   assert.equal(c.run_count, 0);
 
   step('last_run_at is a valid ISO string');

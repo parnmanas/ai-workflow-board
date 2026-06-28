@@ -329,13 +329,12 @@ export type QaRunStatus = 'pending' | 'running' | 'passed' | 'failed' | 'error';
 
 /**
  * List view-model returned by GET /api/qa/scenarios — a QaScenario plus the
- * last-run rollup the QA dashboard table renders (last-run time + result +
- * pass-rate). Server computes it in a single query (see QaService.list).
+ * last-run rollup the QA dashboard table renders (last-run time + result).
+ * Server computes it in a single query (see QaService.list).
  */
 export interface QaScenarioListItem extends QaScenario {
   last_run_at: string | null;
   last_run_status: QaRunStatus | null;
-  pass_rate: number | null;
   run_count: number;
 }
 

@@ -68,8 +68,6 @@ function normalizeOnFailureTicket(input: any): QaOnFailureTicketConfig | null {
 export interface QaScenarioListItem extends QaScenario {
   last_run_at: string | null;
   last_run_status: QaRunStatus | null;
-  /** Pass ratio (0–100) over finished runs (passed/failed/error); null if none finished. */
-  pass_rate: number | null;
   /** Total retained runs for the scenario (bounded by max_runs). */
   run_count: number;
 }
@@ -139,17 +137,13 @@ export class QaService {
       order: { created_at: 'DESC' },
     });
 
-    type Agg = { latest: QaRun | null; passed: number; finished: number; count: number };
+    type Agg = { latest: QaRun | null; count: number };
     const byScenario = new Map<string, Agg>();
     for (const r of runs) {
       let agg = byScenario.get(r.scenario_id);
-      if (!agg) { agg = { latest: null, passed: 0, finished: 0, count: 0 }; byScenario.set(r.scenario_id, agg); }
+      if (!agg) { agg = { latest: null, count: 0 }; byScenario.set(r.scenario_id, agg); }
       if (!agg.latest) agg.latest = r; // DESC order → first row per scenario is the latest.
       agg.count++;
-      if (r.status === 'passed' || r.status === 'failed' || r.status === 'error') {
-        agg.finished++;
-        if (r.status === 'passed') agg.passed++;
-      }
     }
 
     return scenarios.map((s) => {
@@ -160,7 +154,6 @@ export class QaService {
         ...s,
         last_run_at: lastRunAt ? new Date(lastRunAt).toISOString() : null,
         last_run_status: latest ? latest.status : null,
-        pass_rate: agg && agg.finished > 0 ? Math.round((agg.passed / agg.finished) * 100) : null,
         run_count: agg ? agg.count : 0,
       };
     });

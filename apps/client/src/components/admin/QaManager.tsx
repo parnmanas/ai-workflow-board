@@ -590,7 +590,6 @@ function ScenarioTable({ scenarios, agentName, running, selectedIds, onToggleSel
             <th style={TH}>Agent</th>
             <th style={TH}>Last run</th>
             <th style={TH}>Result</th>
-            <th style={{ ...TH, textAlign: 'right' }}>Pass</th>
             <th style={{ ...TH, textAlign: 'right' }}>Actions</th>
           </tr>
         </thead>
@@ -661,11 +660,6 @@ function ScenarioRow({ s, agentName, running, selected, onToggleSelect, onOpen, 
           : <span style={{ color: tokens.colors.textMuted }}>—</span>}
       </td>
       <td style={{ ...TD, textAlign: 'right', whiteSpace: 'nowrap' }}>
-        {s.pass_rate !== null
-          ? <span title={`${s.run_count} run${s.run_count === 1 ? '' : 's'}`} style={{ color: s.pass_rate === 100 ? tokens.colors.success : tokens.colors.textSecondary, fontVariantNumeric: 'tabular-nums' }}>{s.pass_rate}%</span>
-          : <span style={{ color: tokens.colors.textMuted }}>—</span>}
-      </td>
-      <td style={{ ...TD, textAlign: 'right', whiteSpace: 'nowrap' }}>
         <div style={{ display: 'inline-flex', gap: 6 }} onClick={(e) => e.stopPropagation()}>
           <Button variant="primary" size="sm" onClick={stop(onRun)} disabled={running}>
             {running ? 'Starting…' : '▶ Run'}
@@ -726,13 +720,6 @@ function ScenarioDetail({ scenario, workspaceId, agentName, onBack, onRun, runni
   const stepResultFor = (run: QaRun | null, idx: number): QaStepResult | undefined =>
     run?.step_results?.find((sr) => sr.idx === idx);
 
-  const passRate = (() => {
-    const finished = runs.filter((r) => r.status === 'passed' || r.status === 'failed' || r.status === 'error');
-    if (!finished.length) return null;
-    const passed = finished.filter((r) => r.status === 'passed').length;
-    return Math.round((passed / finished.length) * 100);
-  })();
-
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
@@ -742,7 +729,6 @@ function ScenarioDetail({ scenario, workspaceId, agentName, onBack, onRun, runni
           <div style={{ display: 'flex', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
             {scenario.qa_driver && <Badge variant="info" size="sm">{scenario.qa_driver}</Badge>}
             <Badge variant="neutral" size="sm">agent: {agentName(scenario.target_agent_id)}</Badge>
-            {passRate !== null && <Badge variant={passRate === 100 ? 'success' : 'warning'} size="sm">{passRate}% pass</Badge>}
           </div>
         </div>
         <Button variant="ghost" size="sm" onClick={onEdit}>Edit</Button>
