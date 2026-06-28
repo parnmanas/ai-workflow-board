@@ -3,7 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { QaScenario } from '../../entities/QaScenario';
-import { QaRun, QaRunStatus, QaStepResult } from '../../entities/QaRun';
+import { QaRun, QaRunStatus, QaStepResult, QaPhaseHistoryEntry } from '../../entities/QaRun';
 import { QaRunBatch } from '../../entities/QaRunBatch';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
@@ -277,6 +277,42 @@ export class QaRunService {
     }
     // else: a repeat/stale token — keep the high-water mark and its advance time
     // untouched so the deadline is NOT extended.
+    return this.runRepo.save(run);
+  }
+
+  /**
+   * Transition a run to a new phase (multi-phase QA, ticket 90cc22f7). Stamps
+   * `current_phase` + `current_phase_at` (the deadline baseline the
+   * `phase_timeouts` detector measures from — so entering a phase RESETS its
+   * timeout clock) and appends a phase_history entry, closing the previous
+   * entry's `left_at`. Rejected once the run is terminal (no phase to enter on a
+   * finished run). The phase id is stored verbatim — it need not exist in the
+   * resolved qa_phases model; an unmatched phase simply falls back in the reaper.
+   *
+   * workspaceId is required (scopes the read, like recordStep/completeRun). The
+   * MCP/REST surface that exposes this is a follow-up ticket; this is the service
+   * entry point so callers (and tests) can drive transitions now.
+   */
+  async setPhase(runId: string, workspaceId: string, phase: string): Promise<QaRun> {
+    const phaseId = (phase || '').trim();
+    if (!phaseId) throw makeError(400, 'phase is required');
+    const run = await this.getRun(runId, workspaceId);
+    const terminal: QaRunStatus[] = ['passed', 'failed', 'error'];
+    if (terminal.includes(run.status)) {
+      throw makeError(409, `QA run is already '${run.status}'; phase transitions are only accepted while running/pending`);
+    }
+
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const history: QaPhaseHistoryEntry[] = Array.isArray(run.phase_history) ? [...run.phase_history] : [];
+    // Close the currently-open phase (if any) before opening the new one.
+    const last = history[history.length - 1];
+    if (last && last.left_at == null) last.left_at = nowIso;
+    history.push({ phase: phaseId, entered_at: nowIso, left_at: null });
+
+    run.current_phase = phaseId;
+    run.current_phase_at = now;
+    run.phase_history = history;
     return this.runRepo.save(run);
   }
 

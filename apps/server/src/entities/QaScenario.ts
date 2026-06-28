@@ -80,6 +80,15 @@ export class QaScenario {
   @Column({ type: 'text', nullable: true, default: null })
   liveness_policy: string | null;
 
+  // Per-scenario QA phase model override (multi-phase QA, ticket 90cc22f7). Same
+  // JSON shape as Board.qa_phases (a QaPhasesConfig). precedence: this scenario
+  // value wins over the board's qa_phases, which wins over null (legacy single-
+  // running). Lets one scenario define its own import→build→run stages with their
+  // own timeouts without touching the whole board. null = inherit the board model.
+  // See resolveQaPhases in modules/qa/qa-phases.ts (mirrors resolveLivenessPolicy).
+  @Column({ type: 'text', nullable: true, default: null })
+  qa_phases: string | null;
+
   @CreateDateColumn()
   created_at: Date;
 

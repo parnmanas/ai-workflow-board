@@ -39,10 +39,16 @@
 
 import { z } from 'zod';
 import type { QaRun } from '../../entities/QaRun';
+import { type QaPhasesConfig, findPhase } from './qa-phases';
 
 export type LivenessPolicy =
   | { type: 'zero_progress'; deadline_sec?: number }
-  | { type: 'heartbeat_deadline'; deadline_sec: number };
+  | { type: 'heartbeat_deadline'; deadline_sec: number }
+  // Multi-phase model (ticket 90cc22f7): judge the run against the timeout of its
+  // CURRENT phase (resolved qa_phases, supplied via ctx.phases) measured from
+  // current_phase_at. `fallback_sec` is used when the run has no/unmatched
+  // current_phase (else the first phase's timeout, else the global TTL).
+  | { type: 'phase_timeouts'; fallback_sec?: number };
 
 export interface LivenessEvalContext {
   now: Date;
@@ -50,6 +56,12 @@ export interface LivenessEvalContext {
   defaultTtlMs: number;
   /** Global QA_RUN_ZERO_PROGRESS_MS — the fast fuse window for `zero_progress` (0-step runs only). */
   defaultZeroProgressMs: number;
+  /**
+   * Resolved per-run QA phase model (scenario ?? board, see resolveQaPhases).
+   * Only the `phase_timeouts` detector reads it; built once per run by the reaper.
+   * null/undefined when the run's scope defines no phases.
+   */
+  phases?: QaPhasesConfig | null;
 }
 
 export interface LivenessDetector {
@@ -121,6 +133,49 @@ const heartbeatDeadlineDetector: LivenessDetector = {
   },
 };
 
+const phaseTimeoutsDetector: LivenessDetector = {
+  type: 'phase_timeouts',
+  evaluate(run, policy, ctx) {
+    if (policy.type !== 'phase_timeouts') return null;
+    const config = ctx.phases ?? null;
+    const activePhase = findPhase(config, run.current_phase);
+
+    if (activePhase) {
+      // Active phase matched: judge it against its own timeout from the phase
+      // entry instant (current_phase_at), falling back to run start for a phase
+      // stamped without a timestamp (legacy-safety).
+      const baselineRaw = run.current_phase_at ?? run.started_at ?? run.created_at;
+      if (!baselineRaw) return null;
+      const elapsed = ctx.now.getTime() - new Date(baselineRaw).getTime();
+      const limitMs = activePhase.timeout_sec * 1000;
+      if (elapsed <= limitMs) return null;
+      const label = activePhase.label || activePhase.id;
+      return (
+        `phase timeout — phase '${label}' has run ~${toSec(elapsed)}s ` +
+        `(timeout ${activePhase.timeout_sec}s); the backing build/drive job for this phase is presumed dead. ` +
+        `This is infra death (phase overran its timeout), NOT a tested failure — re-run the scenario.`
+      );
+    }
+
+    // No current_phase, or it doesn't match the resolved model (stale/renamed
+    // phase). Fall back to a single deadline measured from run start: the explicit
+    // fallback_sec, else the FIRST phase's timeout (a sane "still in the opening
+    // phase" guess), else the global TTL backstop so the run is never immortal.
+    const baselineRaw = run.current_phase_at ?? run.started_at ?? run.created_at;
+    if (!baselineRaw) return null;
+    const elapsed = ctx.now.getTime() - new Date(baselineRaw).getTime();
+    const fallbackSec = policy.fallback_sec ?? config?.phases[0]?.timeout_sec;
+    const limitMs = fallbackSec ? fallbackSec * 1000 : ctx.defaultTtlMs;
+    if (elapsed <= limitMs) return null;
+    const where = run.current_phase ? `unmatched phase '${run.current_phase}'` : 'no phase set';
+    return (
+      `phase timeout (fallback) — ${where}, ran ~${toMin(elapsed)} min past the ` +
+      `${Math.round(limitMs / 1000)}s fallback deadline; the QA agent or its backing job is presumed dead. ` +
+      `This is NOT a tested failure — re-run the scenario.`
+    );
+  },
+};
+
 /**
  * The detector registry — the extension point. Register a new board's death
  * signal here (or via registerLivenessDetector) and the reaper picks it up by
@@ -142,6 +197,7 @@ export function livenessDetectorTypes(): string[] {
 
 registerLivenessDetector(zeroProgressDetector);
 registerLivenessDetector(heartbeatDeadlineDetector);
+registerLivenessDetector(phaseTimeoutsDetector);
 
 export const DEFAULT_LIVENESS_POLICY: LivenessPolicy = { type: 'zero_progress' };
 
@@ -159,6 +215,10 @@ export const LivenessPolicySchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('heartbeat_deadline'),
     deadline_sec: z.number().int().positive(),
+  }),
+  z.object({
+    type: z.literal('phase_timeouts'),
+    fallback_sec: z.number().int().positive().optional(),
   }),
 ]);
 
@@ -198,18 +258,30 @@ export function parseLivenessPolicy(raw: string | null | undefined): LivenessPol
     if (!d) return null; // heartbeat_deadline REQUIRES a positive deadline
     return { type: 'heartbeat_deadline', deadline_sec: Math.floor(d) };
   }
+  if (obj.type === 'phase_timeouts') {
+    const f = numOrUndef(obj.fallback_sec);
+    return f ? { type: 'phase_timeouts', fallback_sec: Math.floor(f) } : { type: 'phase_timeouts' };
+  }
   return null;
 }
 
 /**
- * Resolve the effective policy for a run: scenario-level override wins over the
- * board-level policy, which wins over the built-in `zero_progress` default. Each
- * scope's raw JSON is parsed independently so a malformed scenario policy falls
- * through to the board, then to the default.
+ * Resolve the effective policy for a run. An EXPLICIT liveness_policy always
+ * wins (scenario-level over board-level) — an operator who set heartbeat_deadline
+ * keeps it even if phases are defined. When neither scope sets an explicit policy
+ * BUT a QA phase model is resolved for the run, auto-select `phase_timeouts` so
+ * defining phases is enough to get per-phase timeouts (no separate policy write).
+ * Otherwise fall back to the built-in `zero_progress` default. Each scope's raw
+ * JSON is parsed independently so a malformed scenario policy falls through to the
+ * board, then to the phase/default tiers.
  */
 export function resolveLivenessPolicy(
   scenarioRaw: string | null | undefined,
   boardRaw: string | null | undefined,
+  phases?: QaPhasesConfig | null,
 ): LivenessPolicy {
-  return parseLivenessPolicy(scenarioRaw) ?? parseLivenessPolicy(boardRaw) ?? DEFAULT_LIVENESS_POLICY;
+  const explicit = parseLivenessPolicy(scenarioRaw) ?? parseLivenessPolicy(boardRaw);
+  if (explicit) return explicit;
+  if (phases && phases.phases.length > 0) return { type: 'phase_timeouts' };
+  return DEFAULT_LIVENESS_POLICY;
 }
