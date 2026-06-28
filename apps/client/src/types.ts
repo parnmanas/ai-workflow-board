@@ -321,6 +321,31 @@ export interface QaOnFailureTicketConfig {
   rerun_delay_seconds?: number;
 }
 
+/**
+ * QA multi-phase model (ticket 90cc22f7). A run can move through ordered phases
+ * (e.g. Unity import → build → run), each with its own timeout, so the reaper
+ * judges "is THIS phase overdue" instead of "is the whole run overdue". Mirrors
+ * the server qa-phases.ts data model. null/absent qa_phases = no phase model →
+ * legacy single-running behavior.
+ */
+export interface QaPhase {
+  id: string;          // stable phase id the run stamps as current_phase (e.g. 'import')
+  label?: string;      // human label for the timeline UI (defaults to id when omitted)
+  timeout_sec: number; // seconds this phase may run before the reaper treats it as hung
+}
+
+export interface QaPhasesConfig {
+  phases: QaPhase[];   // ordered — array order IS the phase order
+}
+
+/** One phase-transition record for a QaRun's timeline (ISO timestamps). */
+export interface QaPhaseHistoryEntry {
+  phase: string;
+  entered_at: string;
+  // null while the phase is active; set to the next phase's entry instant on transition.
+  left_at: string | null;
+}
+
 export interface QaScenario {
   id: string;
   workspace_id: string;
@@ -344,6 +369,11 @@ export interface QaScenario {
   build_mode: BuildMode;
   last_built_commit: string | null;
   built_at: string | null;
+  // Per-scenario QA phases override (ticket 90cc22f7). Same JSON wire convention
+  // as Board.qa_phases (the server may ship the parsed object or the raw string);
+  // when set, scenario-level config wins over the board's qa_phases. null/absent
+  // = inherit the board default (or fall back to legacy single-timeout).
+  qa_phases?: QaPhasesConfig | string | null;
   created_at: string;
   updated_at: string;
 }
@@ -386,6 +416,14 @@ export interface QaRun {
   batch_index?: number | null;
   started_at: string | null;
   finished_at: string | null;
+  // Multi-phase QA run tracking (ticket 90cc22f7). Populated once the resolved
+  // qa_phases config (scenario ?? board) is non-null and the run sets a phase.
+  // current_phase = active phase id (null = legacy single-timeout run);
+  // current_phase_at = phase entry instant (the active phase's deadline baseline);
+  // phase_history = ordered transition log driving the RunDetail timeline.
+  current_phase?: string | null;
+  current_phase_at?: string | null;
+  phase_history?: QaPhaseHistoryEntry[] | null;
   created_at: string;
 }
 
@@ -923,6 +961,11 @@ export interface Board {
   // (clone/update repos under the agent home, run setup commands, inject
   // env_vars) before spawning the subagent.
   environment_config?: string | null;
+  // Per-board QA phases model (ticket 90cc22f7). Stored JSON-encoded (same wire
+  // convention as harness_config / effort_presets — the client parses); null/
+  // absent = no phase model → legacy single-timeout QA runs. A scenario's
+  // qa_phases overrides this per-scenario (see QaScenario.qa_phases).
+  qa_phases?: QaPhasesConfig | string | null;
 }
 
 // Stored JSON-encoded in Board.environment_config (per-board override) and

@@ -57,6 +57,7 @@ import type {
   HarnessConfig,
   EffortPresetsConfig,
   EnvironmentConfig,
+  QaPhasesConfig,
   Comment,
   RepoRefs,
   RepoCommitSummary,
@@ -303,6 +304,9 @@ export const api = {
       // Per-board environment setup (ticket 354d336b). null clears the board
       // override. The server validates it (strict zod) and 400s a typo.
       environment_config?: EnvironmentConfig | null;
+      // Per-board QA phases model (ticket 90cc22f7). null clears the override
+      // (legacy single-timeout); the server validates it (zod) and 400s a typo.
+      qa_phases?: QaPhasesConfig | null;
     },
   ) =>
     request<any>(`/boards/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
@@ -998,6 +1002,8 @@ export const api = {
     repo_ref?: QaScenario['repo_ref'];
     checkout_mode?: QaScenario['checkout_mode'];
     build_mode?: QaScenario['build_mode'];
+    // Per-scenario QA phases override (object to set, null to clear/inherit board).
+    qa_phases?: QaPhasesConfig | null;
   }) => request<QaScenario>('/qa/scenarios', { method: 'POST', body: JSON.stringify(data) }),
   updateQaScenario: (
     id: string,
@@ -1018,6 +1024,8 @@ export const api = {
       repo_ref?: QaScenario['repo_ref'];
       checkout_mode?: QaScenario['checkout_mode'];
       build_mode?: QaScenario['build_mode'];
+      // Per-scenario QA phases override (object to set, null to clear/inherit board).
+      qa_phases?: QaPhasesConfig | null;
     },
   ) => request<QaScenario>(`/qa/scenarios/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteQaScenario: (id: string, workspaceId: string) => {
