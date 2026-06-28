@@ -35,6 +35,11 @@ import {
   serializeQaPhases,
   parseQaPhases,
 } from '../../qa/qa-phases';
+import {
+  repoRefSchema,
+  checkoutModeSchema,
+  buildModeSchema,
+} from '../../../common/workspace-folder-options';
 import type { ToolContext } from './context';
 
 function scenarioToJson(s: QaScenario) {
@@ -53,6 +58,13 @@ function scenarioToJson(s: QaScenario) {
     on_failure_ticket: s.on_failure_ticket ?? null,
     created_by: s.created_by,
     max_runs: s.max_runs,
+    // Working-folder options (shared with security profiles, ticket 4c49f567).
+    workspace_folder: s.workspace_folder ?? '',
+    repo_ref: s.repo_ref ?? null,
+    checkout_mode: s.checkout_mode,
+    build_mode: s.build_mode,
+    last_built_commit: s.last_built_commit ?? null,
+    built_at: s.built_at ?? null,
     // Normalized policy object (or null) so the client never sees raw JSON text.
     liveness_policy: parseLivenessPolicy(s.liveness_policy),
     // Normalized phase model object (or null) — scenario override of the board's
@@ -203,6 +215,10 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
       tags: z.array(z.string()).optional(),
       on_failure_ticket: onFailureTicketSchema.optional().describe('On-failure auto-ticket policy (see schema). Omit/null to disable.'),
       max_runs: z.number().optional().describe('FIFO run-history budget per scenario (default 20)'),
+      workspace_folder: z.string().optional().describe('agent-home-relative working folder. Omit/"" → deterministic default qa/<scenario_id>.'),
+      repo_ref: repoRefSchema.nullable().optional(),
+      checkout_mode: checkoutModeSchema.optional(),
+      build_mode: buildModeSchema.optional(),
       liveness_policy: LivenessPolicySchema.nullable().optional()
         .describe('Reaper liveness policy override for this scenario\'s runs. ' +
           '{ "type": "zero_progress", "deadline_sec"?: N } (default: reap when run age > deadline, default the global TTL) or ' +
@@ -231,6 +247,10 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
           on_failure_ticket: args.on_failure_ticket,
           created_by: caller?.agentId ?? '',
           max_runs: args.max_runs,
+          workspace_folder: args.workspace_folder,
+          repo_ref: args.repo_ref ?? null,
+          checkout_mode: args.checkout_mode,
+          build_mode: args.build_mode,
           liveness_policy: args.liveness_policy === undefined ? undefined : serializeLivenessPolicy(args.liveness_policy),
           qa_phases: args.qa_phases === undefined ? undefined : serializeQaPhases(args.qa_phases),
         });
@@ -258,6 +278,10 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
       tags: z.array(z.string()).optional(),
       on_failure_ticket: onFailureTicketSchema.optional().describe('On-failure auto-ticket policy (see create_qa_scenario). Pass null to clear, omit to leave unchanged.'),
       max_runs: z.number().optional(),
+      workspace_folder: z.string().optional().describe('agent-home-relative working folder (see create_qa_scenario). "" resets to the qa/<scenario_id> default.'),
+      repo_ref: repoRefSchema.nullable().optional().describe('Repo to run against (see create_qa_scenario). Pass null to clear and inherit the board/workspace env repo.'),
+      checkout_mode: checkoutModeSchema.optional(),
+      build_mode: buildModeSchema.optional(),
       liveness_policy: LivenessPolicySchema.nullable().optional()
         .describe('Reaper liveness policy override (see create_qa_scenario). Pass null to clear and inherit the board policy.'),
       qa_phases: QaPhasesSchema.nullable().optional()

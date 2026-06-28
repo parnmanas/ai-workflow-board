@@ -27,6 +27,11 @@ import { SecurityRun } from '../../../entities/SecurityRun';
 import { SecurityRunBatch } from '../../../entities/SecurityRunBatch';
 import { ok, err } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
+import {
+  repoRefSchema,
+  checkoutModeSchema,
+  buildModeSchema,
+} from '../../../common/workspace-folder-options';
 import type { ToolContext } from './context';
 
 function profileToJson(p: SecurityProfile) {
@@ -48,6 +53,13 @@ function profileToJson(p: SecurityProfile) {
     max_runs: p.max_runs,
     on_failure_ticket: p.on_failure_ticket ?? null,
     created_by: p.created_by,
+    // Working-folder options (shared with QA scenarios, ticket 4c49f567).
+    workspace_folder: p.workspace_folder ?? '',
+    repo_ref: p.repo_ref ?? null,
+    checkout_mode: p.checkout_mode,
+    build_mode: p.build_mode,
+    last_built_commit: p.last_built_commit ?? null,
+    built_at: p.built_at ?? null,
     created_at: p.created_at,
     updated_at: p.updated_at,
   };
@@ -196,6 +208,10 @@ export function registerSecurityTools(server: McpServer, ctx: ToolContext): void
       tags: z.array(z.string()).optional(),
       max_runs: z.number().optional().describe('FIFO run-history budget per profile (default 20)'),
       on_failure_ticket: onFailureTicketSchema.optional().describe('Severity-gated on-failure auto-ticket policy — file a fix ticket when a run fails with a finding at or above min_severity'),
+      workspace_folder: z.string().optional().describe('agent-home-relative working folder. Omit/"" → deterministic default security/<profile_id>.'),
+      repo_ref: repoRefSchema.nullable().optional(),
+      checkout_mode: checkoutModeSchema.optional(),
+      build_mode: buildModeSchema.optional(),
     },
     async (args, extra: { sessionId?: string }) => {
       if (!securityProfileService) return err('security profile service unavailable in this MCP context');
@@ -217,6 +233,10 @@ export function registerSecurityTools(server: McpServer, ctx: ToolContext): void
           max_runs: args.max_runs,
           on_failure_ticket: args.on_failure_ticket,
           created_by: caller?.agentId ?? '',
+          workspace_folder: args.workspace_folder,
+          repo_ref: args.repo_ref ?? null,
+          checkout_mode: args.checkout_mode,
+          build_mode: args.build_mode,
         });
         return ok(profileToJson(row));
       } catch (e: any) {
@@ -247,6 +267,10 @@ export function registerSecurityTools(server: McpServer, ctx: ToolContext): void
       tags: z.array(z.string()).optional(),
       max_runs: z.number().optional(),
       on_failure_ticket: onFailureTicketSchema.nullable().optional().describe('Severity-gated on-failure auto-ticket policy; pass null to clear it'),
+      workspace_folder: z.string().optional().describe('agent-home-relative working folder (see create_security_profile). "" resets to the security/<profile_id> default.'),
+      repo_ref: repoRefSchema.nullable().optional().describe('Repo to run against (see create_security_profile). Pass null to clear and inherit the board/workspace env repo.'),
+      checkout_mode: checkoutModeSchema.optional(),
+      build_mode: buildModeSchema.optional(),
     },
     async ({ profile_id, workspace_id, ...patch }) => {
       if (!securityProfileService) return err('security profile service unavailable in this MCP context');

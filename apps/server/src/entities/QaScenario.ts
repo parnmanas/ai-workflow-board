@@ -1,4 +1,5 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
+import { CheckoutMode, BuildMode, WorkspaceFolderRepoRef } from '../common/workspace-folder-options';
 
 /**
  * QaScenario — a reusable, step-based QA scenario definition.
@@ -66,6 +67,42 @@ export class QaScenario {
 
   @Column({ type: 'varchar', default: '' })
   created_by: string;
+
+  // ── Working-folder options (QA/security workspace-folder feature, ticket 4c49f567) ──
+  // Shared, identical field set with SecurityProfile. See
+  // common/workspace-folder-options.ts for the types + the cold/warm decision.
+
+  // agent-home-relative working folder. '' = unset → deterministic default
+  // `qa/<scenario_id>` resolved at prompt render (resolveWorkspaceFolder).
+  @Column({ type: 'varchar', default: '' })
+  workspace_folder: string;
+
+  // Repo to run against. null = reuse the board/workspace environment_config
+  // repo. simple-json (serializes automatically); the create/update/projection
+  // paths still pass it through explicitly.
+  @Column({ type: 'simple-json', nullable: true, default: null })
+  repo_ref: WorkspaceFolderRepoRef | null;
+
+  // How the working folder is prepared before a run. 'fresh' → wipe + re-checkout
+  // (always cold). default 'reuse'.
+  @Column({ type: 'varchar', default: 'reuse' })
+  checkout_mode: CheckoutMode;
+
+  // Build strategy across runs. default 'cold_then_warm' (cold until the first
+  // recorded successful build, then warm).
+  @Column({ type: 'varchar', default: 'cold_then_warm' })
+  build_mode: BuildMode;
+
+  // cold/warm state — the server is the authority (no agent-side marker). The
+  // HEAD SHA of the most recent successful build; null until first built.
+  // Advanced by the provisioner (ticket 4). Read by decideRunFreshness.
+  @Column({ type: 'varchar', nullable: true, default: null })
+  last_built_commit: string | null;
+
+  // Timestamp of the most recent successful build (companion to
+  // last_built_commit). null until first built.
+  @Column({ type: Date, nullable: true, default: null })
+  built_at: Date | null;
 
   // FIFO Run budget — keep at most this many QaRun rooms per scenario.
   @Column({ type: 'int', default: 20 })

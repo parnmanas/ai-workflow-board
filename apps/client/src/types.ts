@@ -288,6 +288,21 @@ export interface QaScenarioStep {
   params?: Record<string, any>;
 }
 
+/**
+ * Working-folder options shared by QaScenario and SecurityProfile (ticket
+ * 4c49f567). Mirrors apps/server/src/common/workspace-folder-options.ts. The
+ * server decides cold/warm from build_mode + checkout_mode + last_built_commit;
+ * the client only edits the knobs (ticket 5 UI).
+ */
+export type CheckoutMode = 'reuse' | 'fresh';
+export type BuildMode = 'cold_then_warm' | 'always_cold' | 'always_warm';
+
+export interface WorkspaceFolderRepoRef {
+  resource_id?: string;
+  url?: string;
+  branch?: string;
+}
+
 export interface QaOnFailureTicketConfig {
   enabled: boolean;
   board_id?: string;
@@ -321,6 +336,14 @@ export interface QaScenario {
   on_failure_ticket: QaOnFailureTicketConfig | null;
   created_by: string;
   max_runs: number;
+  // Working-folder options (ticket 4c49f567). '' workspace_folder = unset →
+  // server default qa/<id>. built_at is an ISO-8601 string (or null).
+  workspace_folder: string;
+  repo_ref: WorkspaceFolderRepoRef | null;
+  checkout_mode: CheckoutMode;
+  build_mode: BuildMode;
+  last_built_commit: string | null;
+  built_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -485,6 +508,15 @@ export interface SecurityProfile {
   max_runs: number;
   on_failure_ticket: SecurityOnFailureTicketConfig | null;
   created_by: string;
+  // Working-folder options (ticket 4c49f567), shared field set with QaScenario.
+  // Distinct from target_resource_id (which repo to *inspect*). '' workspace_folder
+  // = unset → server default security/<id>. built_at is ISO-8601 (or null).
+  workspace_folder: string;
+  repo_ref: WorkspaceFolderRepoRef | null;
+  checkout_mode: CheckoutMode;
+  build_mode: BuildMode;
+  last_built_commit: string | null;
+  built_at: string | null;
   created_at: string;
   updated_at: string;
 }
