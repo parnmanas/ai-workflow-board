@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { DataSource, In, Repository } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { QaScenario } from '../../entities/QaScenario';
 import { QaRun, QaRunStatus, QaStepResult, QaPhaseHistoryEntry } from '../../entities/QaRun';
@@ -16,6 +16,7 @@ import { LogService } from '../../services/log.service';
 import { findOrFail } from '../../common/find-or-fail';
 import { renderQaRunPrompt } from './qa-prompt';
 import { QaFailureTicketService } from './qa-failure-ticket.service';
+import { buildRunProvision } from '../../common/run-workspace-resolver';
 
 function makeError(status: number, message: string): Error & { status: number } {
   const err = new Error(message) as Error & { status: number };
@@ -121,6 +122,7 @@ export class QaRunService {
     @InjectRepository(TicketAttachment) private readonly attachmentRepo: Repository<TicketAttachment>,
     @InjectRepository(Resource) private readonly resourceRepo: Repository<Resource>,
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
+    @InjectDataSource() private readonly dataSource: DataSource,
     private readonly messaging: RoomMessagingService,
     private readonly logService: LogService,
     private readonly failureTicketService: QaFailureTicketService,
@@ -214,6 +216,22 @@ export class QaRunService {
 
     await this._pruneOldRuns(scenario.id, scenario.max_runs);
 
+    // Run-workspace provisioning hint (ticket 25db3cc6 4/5). Resolve the
+    // scenario's workspace_folder + repo_ref + checkout_mode into a concrete
+    // RunProvision and ship it on the dispatch message so the agent-manager
+    // prepares the working folder (clone / fetch+ff-pull, reuse vs fresh) BEFORE
+    // the run subagent spawns. Never throws (degrades repo→null on a bad ref).
+    const runProvision = await buildRunProvision(this.dataSource, {
+      kind: 'qa',
+      id: scenario.id,
+      runId,
+      workspaceId: scenario.workspace_id,
+      boardId: scenario.board_id ?? null,
+      workspaceFolder: scenario.workspace_folder,
+      repoRef: scenario.repo_ref,
+      checkoutMode: scenario.checkout_mode,
+    });
+
     try {
       await this.messaging.sendMessage(
         room.id,
@@ -222,6 +240,10 @@ export class QaRunService {
         'system',
         'QA',
         prompt,
+        undefined,
+        undefined,
+        'message',
+        { runProvision },
       );
     } catch (e: any) {
       this.logService.warn('QA', `sendMessage failed for run ${runId}: ${e?.message || e}`);
