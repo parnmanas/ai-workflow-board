@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { api, getActiveWorkspaceId, rawResourceUrl } from '../../api';
-import type { QaScenario, QaScenarioListItem, QaRun, QaStepResult, QaOnFailureTicketConfig, QaRunBatch, QaSchedule, QaScheduleScope } from '../../types';
+import type { QaScenario, QaScenarioListItem, QaRun, QaStepResult, QaOnFailureTicketConfig, QaRunBatch, QaSchedule, QaScheduleScope, QaPhase, QaPhasesConfig } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 import { Button, Input, Select, Modal, Card, Badge, ConfirmDialog } from '../common';
 import { relativeTime } from '../../utils/time';
+import { QaPhaseRowsEditor, parseQaPhasesValue, qaPhasesError, formatDuration } from '../QaPhasesEditor';
 import { formatAgentDisplayName } from '../../utils/agentName';
 import {
   WorkspaceFolderOptions,
@@ -696,6 +697,22 @@ function ScenarioDetail({ scenario, workspaceId, agentName, onBack, onRun, runni
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [lightbox, setLightbox] = useState<{ src: string; kind: 'image' | 'video' } | null>(null);
 
+  // Resolve the effective phase config for the run timeline: scenario override
+  // wins over the board default (mirrors the server resolveQaPhases precedence).
+  // The board default is fetched lazily; the timeline degrades gracefully (no
+  // progress bar) when a phase has no matching timeout in the resolved config.
+  const scenarioPhases = parseQaPhasesValue(scenario.qa_phases);
+  const [boardPhases, setBoardPhases] = useState<QaPhasesConfig | null>(null);
+  useEffect(() => {
+    if (scenarioPhases || !scenario.board_id) { setBoardPhases(null); return; }
+    let cancelled = false;
+    api.getBoard(scenario.board_id)
+      .then((b) => { if (!cancelled) setBoardPhases(parseQaPhasesValue((b as any)?.qa_phases)); })
+      .catch(() => { if (!cancelled) setBoardPhases(null); });
+    return () => { cancelled = true; };
+  }, [scenario.board_id, !!scenarioPhases]);
+  const resolvedPhases = scenarioPhases ?? boardPhases;
+
   const loadRuns = useCallback(async () => {
     try {
       const list = await api.listQaRuns(scenario.id, workspaceId, 30);
@@ -814,7 +831,7 @@ function ScenarioDetail({ scenario, workspaceId, agentName, onBack, onRun, runni
           {!activeRun ? (
             <div style={{ color: tokens.colors.textSecondary, fontSize: 13 }}>Select a run.</div>
           ) : (
-            <RunDetail run={activeRun} onPreview={(src, kind) => setLightbox({ src, kind })} />
+            <RunDetail run={activeRun} phases={resolvedPhases} onPreview={(src, kind) => setLightbox({ src, kind })} />
           )}
         </div>
       </div>
@@ -824,7 +841,7 @@ function ScenarioDetail({ scenario, workspaceId, agentName, onBack, onRun, runni
   );
 }
 
-function RunDetail({ run, onPreview }: { run: QaRun; onPreview: (src: string, kind: 'image' | 'video') => void }) {
+function RunDetail({ run, phases, onPreview }: { run: QaRun; phases: QaPhasesConfig | null; onPreview: (src: string, kind: 'image' | 'video') => void }) {
   // Run-level artifacts (attach_qa_artifact) that aren't already shown in a
   // per-step gallery. recordStep folds step artifacts into artifact_resource_ids,
   // so subtract them here to render only the run-level extras (and avoid dupes).
@@ -837,6 +854,13 @@ function RunDetail({ run, onPreview }: { run: QaRun; onPreview: (src: string, ki
     <div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' }}>
         <Badge variant={statusVariant(run.status)} size="md">{run.status}</Badge>
+        {run.current_phase && (
+          <span title="현재 진행 중인 QA phase" style={{ display: 'inline-flex' }}>
+            <Badge variant={run.status === 'running' || run.status === 'pending' ? 'warning' : 'info'} size="md">
+              phase: {phases?.phases.find((p) => p.id === run.current_phase)?.label || run.current_phase}
+            </Badge>
+          </span>
+        )}
         <span style={{ fontSize: 12, color: tokens.colors.textMuted }}>
           {(run.step_results?.length ?? 0)} step results · {(run.artifact_resource_ids?.length ?? 0)} artifacts
         </span>
@@ -857,6 +881,7 @@ function RunDetail({ run, onPreview }: { run: QaRun; onPreview: (src: string, ki
           </a>
         )}
       </div>
+      <PhaseTimeline run={run} phases={phases} />
       {run.summary && (
         <div style={{ fontSize: 13, color: tokens.colors.textSecondary, marginBottom: 12, whiteSpace: 'pre-wrap' }}>{run.summary}</div>
       )}
@@ -881,6 +906,80 @@ function RunDetail({ run, onPreview }: { run: QaRun; onPreview: (src: string, ki
             )}
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Phase timeline for a QA run (ticket 90cc22f7). Renders run.phase_history: one
+ * row per phase the run entered, with entered→left, elapsed, and a progress bar
+ * vs that phase's timeout (resolved from the scenario ?? board qa_phases config).
+ * The active phase of an in-flight run shows a live elapsed-vs-timeout gauge that
+ * turns amber as it nears the limit and red once over — the same threshold the
+ * reaper uses to error-close a hung phase. If the reaper error-closed the run on a
+ * phase timeout, the server prepends the reason to run.summary (shown below this).
+ */
+function PhaseTimeline({ run, phases }: { run: QaRun; phases: QaPhasesConfig | null }) {
+  const history = run.phase_history ?? [];
+  if (history.length === 0) return null;
+
+  const runActive = run.status === 'running' || run.status === 'pending';
+  const now = Date.now();
+  const findPhase = (id: string) => phases?.phases.find((p) => p.id === id) ?? null;
+
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, color: tokens.colors.textMuted, marginBottom: 6 }}>
+        Phase timeline
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {history.map((h, idx) => {
+          const def = findPhase(h.phase);
+          const timeout = def?.timeout_sec ?? null;
+          const enteredMs = Date.parse(h.entered_at);
+          const leftMs = h.left_at ? Date.parse(h.left_at) : null;
+          const active = !h.left_at;
+          // Active phase of a live run measures elapsed to "now"; a closed phase
+          // measures to left_at. An active phase on a terminal run (e.g. reaper
+          // error-close) measures to the run's finish so the bar freezes.
+          const endMs = leftMs ?? (active && runActive ? now : Date.parse(run.finished_at ?? '') || now);
+          const elapsedSec = Number.isFinite(enteredMs) ? Math.max(0, (endMs - enteredMs) / 1000) : 0;
+          const pct = timeout ? Math.min(100, (elapsedSec / timeout) * 100) : null;
+          const over = timeout != null && elapsedSec > timeout;
+          const imminent = active && runActive && timeout != null && !over && elapsedSec >= timeout * 0.8;
+          const barColor = over
+            ? tokens.colors.danger
+            : imminent
+              ? tokens.colors.warning
+              : active && runActive
+                ? tokens.colors.info
+                : tokens.colors.success;
+          return (
+            <div key={idx} style={{ border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.sm, padding: '8px 10px', background: tokens.colors.surfaceCard }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: timeout != null ? 6 : 0, flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 12, fontWeight: 700, color: tokens.colors.textMuted }}>#{idx + 1}</span>
+                <span style={{ fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>{def?.label || h.phase}</span>
+                {active && (
+                  <Badge variant={runActive ? 'warning' : 'neutral'} size="sm">{runActive ? 'active' : 'open'}</Badge>
+                )}
+                <span style={{ marginLeft: 'auto', fontSize: 11, color: tokens.colors.textMuted }}>
+                  {formatDuration(elapsedSec)}{timeout != null && ` / ${formatDuration(timeout)}`}
+                  {over && timeout != null && <span style={{ color: tokens.colors.danger, fontWeight: 600 }}> · over</span>}
+                </span>
+              </div>
+              {timeout != null ? (
+                <div style={{ height: 6, borderRadius: 3, background: tokens.colors.surface, overflow: 'hidden' }}>
+                  <div style={{ width: `${pct ?? 0}%`, height: '100%', background: barColor, transition: 'width 0.3s' }} />
+                </div>
+              ) : (
+                <div style={{ fontSize: 11, color: tokens.colors.textMuted, fontStyle: 'italic' }}>
+                  no timeout defined for this phase (not in the resolved config)
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -984,6 +1083,23 @@ function ScenarioEditor({ scenario, workspaceId, boardId, agents, onClose, onSav
   const [oftMaxRerun, setOftMaxRerun] = useState(String(oft?.max_rerun_attempts ?? 3));
   const [oftRerunDelay, setOftRerunDelay] = useState(String(oft?.rerun_delay_seconds ?? 0));
 
+  // Per-scenario QA phases override (ticket 90cc22f7). Off = inherit the board's
+  // qa_phases (or legacy single-timeout). On = these phases win for this scenario.
+  const initialPhases = parseQaPhasesValue(scenario?.qa_phases);
+  const [phasesOverride, setPhasesOverride] = useState(!!initialPhases);
+  const [qaPhases, setQaPhases] = useState<QaPhase[]>(initialPhases?.phases ?? []);
+  // Board default for the inherit preview. Fetched lazily; null = none/unknown.
+  const [boardPhases, setBoardPhases] = useState<QaPhase[] | null>(null);
+  useEffect(() => {
+    const bid = scenario?.board_id ?? boardId ?? null;
+    if (!bid) { setBoardPhases(null); return; }
+    let cancelled = false;
+    api.getBoard(bid)
+      .then((b) => { if (!cancelled) setBoardPhases(parseQaPhasesValue((b as any)?.qa_phases)?.phases ?? null); })
+      .catch(() => { if (!cancelled) setBoardPhases(null); });
+    return () => { cancelled = true; };
+  }, [scenario?.board_id, boardId]);
+
   const handleSave = async () => {
     if (!name.trim()) { showToast('Name is required', 'error'); return; }
     if (!targetAgentId) { showToast('Target agent is required', 'error'); return; }
@@ -1010,6 +1126,14 @@ function ScenarioEditor({ scenario, workspaceId, boardId, agents, onClose, onSav
         }
       : { enabled: false };
     const wfPayload = buildWorkspaceFolderPayload(wf);
+    // QA phases override: off OR empty → null (inherit board / legacy); on with
+    // rows → validate against the WRITE contract before sending.
+    let qaPhasesPayload: QaPhasesConfig | null = null;
+    if (phasesOverride && qaPhases.length > 0) {
+      const phaseErr = qaPhasesError(qaPhases);
+      if (phaseErr) { showToast(phaseErr, 'error'); return; }
+      qaPhasesPayload = { phases: qaPhases };
+    }
     setSaving(true);
     try {
       let saved: QaScenario;
@@ -1017,13 +1141,13 @@ function ScenarioEditor({ scenario, workspaceId, boardId, agents, onClose, onSav
         saved = await api.updateQaScenario(scenario.id, {
           workspace_id: workspaceId, name, description, target_agent_id: targetAgentId,
           qa_driver: qaDriver, qa_driver_config: config, steps, tags, enabled,
-          on_failure_ticket: onFailureTicket, ...wfPayload,
+          on_failure_ticket: onFailureTicket, qa_phases: qaPhasesPayload, ...wfPayload,
         });
       } else {
         saved = await api.createQaScenario({
           workspace_id: workspaceId, board_id: boardId || null, name, description,
           target_agent_id: targetAgentId, qa_driver: qaDriver, qa_driver_config: config, steps, tags, enabled,
-          on_failure_ticket: onFailureTicket, ...wfPayload,
+          on_failure_ticket: onFailureTicket, qa_phases: qaPhasesPayload, ...wfPayload,
         });
       }
       showToast(`Scenario ${scenario ? 'updated' : 'created'}`, 'success');
@@ -1081,6 +1205,68 @@ function ScenarioEditor({ scenario, workspaceId, boardId, agents, onClose, onSav
 
         {/* 작업폴더 옵션 (workspace_folder / repo_ref / checkout_mode / build_mode) */}
         <WorkspaceFolderOptions kind="qa" state={wf} onChange={patchWf} />
+
+        {/* QA phases override (ticket 90cc22f7) */}
+        <div style={{ borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 12, marginTop: 4 }}>
+          <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>
+            <input
+              type="checkbox"
+              checked={phasesOverride}
+              onChange={(e) => {
+                setPhasesOverride(e.target.checked);
+                // Seed the editor from the board default when first enabling an
+                // override so the operator edits a copy rather than an empty list.
+                if (e.target.checked && qaPhases.length === 0 && boardPhases?.length) {
+                  setQaPhases(boardPhases.map((p) => ({ ...p })));
+                }
+              }}
+            />
+            QA phases 시나리오 override
+          </label>
+          <div style={{ fontSize: 12, color: tokens.colors.textMuted, margin: '4px 0 0 24px' }}>
+            {phasesOverride
+              ? '이 시나리오 전용 phase 정의입니다 — board 기본값을 덮어씁니다.'
+              : 'board 기본값을 상속합니다. 체크하면 이 시나리오만의 phase 를 정의할 수 있습니다.'}
+          </div>
+
+          {/* board 기본값 미리보기 (inherit 상태일 때) */}
+          {!phasesOverride && (
+            <div style={{ fontSize: 12, color: tokens.colors.textSecondary, margin: '8px 0 0 24px' }}>
+              {boardPhases && boardPhases.length > 0 ? (
+                <>
+                  <span style={{ color: tokens.colors.textMuted }}>상속되는 board phases: </span>
+                  {boardPhases.map((p, i) => (
+                    <span key={p.id}>
+                      {i > 0 && ' → '}
+                      <span style={{ fontWeight: 600 }}>{p.label || p.id}</span>
+                      <span style={{ color: tokens.colors.textMuted }}> ({formatDuration(p.timeout_sec)})</span>
+                    </span>
+                  ))}
+                </>
+              ) : (
+                <span style={{ color: tokens.colors.textMuted, fontStyle: 'italic' }}>
+                  board 에 phase 정의 없음 → 단일 timeout(legacy) 사용.
+                </span>
+              )}
+            </div>
+          )}
+
+          {phasesOverride && (
+            <div style={{ marginTop: 10, paddingLeft: 24 }}>
+              <QaPhaseRowsEditor phases={qaPhases} onChange={setQaPhases} />
+              {qaPhases.length === 0 && (
+                <div style={{ fontSize: 12, color: tokens.colors.textMuted, marginTop: 8, fontStyle: 'italic' }}>
+                  phase 가 없으면 override 가 비워져 저장 시 board 기본값을 상속합니다.
+                </div>
+              )}
+              {qaPhases.length > 0 && qaPhasesError(qaPhases) && (
+                <div style={{ fontSize: 12, color: tokens.colors.danger, marginTop: 8 }}>
+                  {qaPhasesError(qaPhases)}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
 
         {/* 실패 시 → 티켓 생성 (on-failure auto-ticket) */}
         <div style={{ borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 12, marginTop: 4 }}>
