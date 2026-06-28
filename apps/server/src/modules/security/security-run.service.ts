@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { DataSource, In, Repository } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { SecurityProfile } from '../../entities/SecurityProfile';
 import { SecurityRun, SecurityRunStatus, SecurityFinding } from '../../entities/SecurityRun';
@@ -15,6 +15,7 @@ import { LogService } from '../../services/log.service';
 import { findOrFail } from '../../common/find-or-fail';
 import { renderSecurityRunPrompt, renderChecklistRefreshPrompt } from './security-prompt';
 import { SecurityFailureTicketService } from './security-failure-ticket.service';
+import { buildRunProvision } from '../../common/run-workspace-resolver';
 
 function makeError(status: number, message: string): Error & { status: number } {
   const err = new Error(message) as Error & { status: number };
@@ -118,6 +119,7 @@ export class SecurityRunService {
     @InjectRepository(ChatRoomMessage) private readonly messageRepo: Repository<ChatRoomMessage>,
     @InjectRepository(TicketAttachment) private readonly attachmentRepo: Repository<TicketAttachment>,
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
+    @InjectDataSource() private readonly dataSource: DataSource,
     private readonly messaging: RoomMessagingService,
     private readonly logService: LogService,
     private readonly failureTicketService: SecurityFailureTicketService,
@@ -214,6 +216,20 @@ export class SecurityRunService {
 
     await this._pruneOldRuns(profile.id, profile.max_runs);
 
+    // Run-workspace provisioning hint (ticket 25db3cc6 4/5) — same as QA: resolve
+    // the profile's workspace_folder + repo_ref + checkout_mode into a concrete
+    // RunProvision so the agent-manager prepares the checkout before spawning.
+    const runProvision = await buildRunProvision(this.dataSource, {
+      kind: 'security',
+      id: profile.id,
+      runId,
+      workspaceId: profile.workspace_id,
+      boardId: profile.board_id ?? null,
+      workspaceFolder: profile.workspace_folder,
+      repoRef: profile.repo_ref,
+      checkoutMode: profile.checkout_mode,
+    });
+
     try {
       await this.messaging.sendMessage(
         room.id,
@@ -222,6 +238,10 @@ export class SecurityRunService {
         'system',
         'Security',
         prompt,
+        undefined,
+        undefined,
+        'message',
+        { runProvision },
       );
     } catch (e: any) {
       this.logService.warn('Security', `sendMessage failed for run ${runId}: ${e?.message || e}`);

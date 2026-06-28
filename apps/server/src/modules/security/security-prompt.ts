@@ -1,5 +1,6 @@
 import { SecurityProfile } from '../../entities/SecurityProfile';
 import { SecurityRun } from '../../entities/SecurityRun';
+import { renderWorkspaceFolderBlock } from '../../common/workspace-folder-options';
 
 /**
  * Render the instruction prompt sent to the inspection agent when a
@@ -83,6 +84,16 @@ export function renderSecurityRunPrompt(profile: SecurityProfile, run: SecurityR
     '```',
     ``,
     `**Run id:** \`${run.id}\``,
+    ``,
+    renderWorkspaceFolderBlock({
+      workspace_folder: profile.workspace_folder,
+      repo_ref: profile.repo_ref,
+      checkout_mode: profile.checkout_mode,
+      build_mode: profile.build_mode,
+      last_built_commit: profile.last_built_commit,
+      kind: 'security',
+      id: profile.id,
+    }),
     ``,
     `## Scope`,
     scopeBlock,

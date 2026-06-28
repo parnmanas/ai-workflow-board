@@ -1,9 +1,9 @@
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { DataSource, In, Repository } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { QaScenario } from '../../entities/QaScenario';
-import { QaRun, QaRunStatus, QaStepResult } from '../../entities/QaRun';
+import { QaRun, QaRunStatus, QaStepResult, QaPhaseHistoryEntry } from '../../entities/QaRun';
 import { QaRunBatch } from '../../entities/QaRunBatch';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
@@ -16,6 +16,7 @@ import { LogService } from '../../services/log.service';
 import { findOrFail } from '../../common/find-or-fail';
 import { renderQaRunPrompt } from './qa-prompt';
 import { QaFailureTicketService } from './qa-failure-ticket.service';
+import { buildRunProvision } from '../../common/run-workspace-resolver';
 
 function makeError(status: number, message: string): Error & { status: number } {
   const err = new Error(message) as Error & { status: number };
@@ -51,6 +52,11 @@ export interface StartQaRunArgs {
   // this run finalizes. Standalone runs omit both.
   batchId?: string;
   batchIndex?: number;
+  // Optional opening phase (multi-phase QA, ticket 90cc22f7). When set, the new
+  // run is stamped current_phase/current_phase_at + a first phase_history entry
+  // at dispatch, so the phase_timeouts reaper measures the opening phase from run
+  // start (rather than waiting for the first set_qa_phase). Omit = legacy null.
+  initialPhase?: string;
 }
 
 export interface StartQaRunResult {
@@ -116,6 +122,7 @@ export class QaRunService {
     @InjectRepository(TicketAttachment) private readonly attachmentRepo: Repository<TicketAttachment>,
     @InjectRepository(Resource) private readonly resourceRepo: Repository<Resource>,
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
+    @InjectDataSource() private readonly dataSource: DataSource,
     private readonly messaging: RoomMessagingService,
     private readonly logService: LogService,
     private readonly failureTicketService: QaFailureTicketService,
@@ -161,6 +168,10 @@ export class QaRunService {
     }));
 
     const now = new Date();
+    // Optional opening phase (multi-phase QA). Seed current_phase + the deadline
+    // baseline + the first (still-open) phase_history entry so the phase_timeouts
+    // reaper measures from run start. Empty/whitespace → treated as unset (null).
+    const initialPhase = (args.initialPhase || '').trim();
     const run = await this.runRepo.save(this.runRepo.create({
       id: runId,
       scenario_id: scenario.id,
@@ -176,6 +187,9 @@ export class QaRunService {
       rerun_generation: args.rerunGeneration && args.rerunGeneration > 0 ? Math.floor(args.rerunGeneration) : 0,
       batch_id: args.batchId ?? null,
       batch_index: args.batchIndex ?? null,
+      current_phase: initialPhase || null,
+      current_phase_at: initialPhase ? now : null,
+      phase_history: initialPhase ? [{ phase: initialPhase, entered_at: now.toISOString(), left_at: null }] : null,
       started_at: now,
       finished_at: null,
     }));
@@ -202,6 +216,22 @@ export class QaRunService {
 
     await this._pruneOldRuns(scenario.id, scenario.max_runs);
 
+    // Run-workspace provisioning hint (ticket 25db3cc6 4/5). Resolve the
+    // scenario's workspace_folder + repo_ref + checkout_mode into a concrete
+    // RunProvision and ship it on the dispatch message so the agent-manager
+    // prepares the working folder (clone / fetch+ff-pull, reuse vs fresh) BEFORE
+    // the run subagent spawns. Never throws (degrades repo→null on a bad ref).
+    const runProvision = await buildRunProvision(this.dataSource, {
+      kind: 'qa',
+      id: scenario.id,
+      runId,
+      workspaceId: scenario.workspace_id,
+      boardId: scenario.board_id ?? null,
+      workspaceFolder: scenario.workspace_folder,
+      repoRef: scenario.repo_ref,
+      checkoutMode: scenario.checkout_mode,
+    });
+
     try {
       await this.messaging.sendMessage(
         room.id,
@@ -210,6 +240,10 @@ export class QaRunService {
         'system',
         'QA',
         prompt,
+        undefined,
+        undefined,
+        'message',
+        { runProvision },
       );
     } catch (e: any) {
       this.logService.warn('QA', `sendMessage failed for run ${runId}: ${e?.message || e}`);
@@ -280,6 +314,42 @@ export class QaRunService {
     return this.runRepo.save(run);
   }
 
+  /**
+   * Transition a run to a new phase (multi-phase QA, ticket 90cc22f7). Stamps
+   * `current_phase` + `current_phase_at` (the deadline baseline the
+   * `phase_timeouts` detector measures from — so entering a phase RESETS its
+   * timeout clock) and appends a phase_history entry, closing the previous
+   * entry's `left_at`. Rejected once the run is terminal (no phase to enter on a
+   * finished run). The phase id is stored verbatim — it need not exist in the
+   * resolved qa_phases model; an unmatched phase simply falls back in the reaper.
+   *
+   * workspaceId is required (scopes the read, like recordStep/completeRun). The
+   * MCP/REST surface that exposes this is a follow-up ticket; this is the service
+   * entry point so callers (and tests) can drive transitions now.
+   */
+  async setPhase(runId: string, workspaceId: string, phase: string): Promise<QaRun> {
+    const phaseId = (phase || '').trim();
+    if (!phaseId) throw makeError(400, 'phase is required');
+    const run = await this.getRun(runId, workspaceId);
+    const terminal: QaRunStatus[] = ['passed', 'failed', 'error'];
+    if (terminal.includes(run.status)) {
+      throw makeError(409, `QA run is already '${run.status}'; phase transitions are only accepted while running/pending`);
+    }
+
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const history: QaPhaseHistoryEntry[] = Array.isArray(run.phase_history) ? [...run.phase_history] : [];
+    // Close the currently-open phase (if any) before opening the new one.
+    const last = history[history.length - 1];
+    if (last && last.left_at == null) last.left_at = nowIso;
+    history.push({ phase: phaseId, entered_at: nowIso, left_at: null });
+
+    run.current_phase = phaseId;
+    run.current_phase_at = now;
+    run.phase_history = history;
+    return this.runRepo.save(run);
+  }
+
   async attachArtifact(runId: string, workspaceId: string, resourceIds: string[]): Promise<QaRun> {
     const run = await this.getRun(runId, workspaceId);
     const add = (resourceIds || []).filter(Boolean);
@@ -298,18 +368,38 @@ export class QaRunService {
     let finalStatus = status;
     let finalSummary = summary;
 
-    // Evidence gate — a visual-driver run can't be PASSED on the agent's word
-    // alone. If it self-reports `passed` but produced zero image/video
-    // artifacts, downgrade to `failed` so "증거 없는 PASSED" never lands.
+    // PASSED gates — a self-reported `passed` is never trusted on the agent's
+    // word alone. Two independent checks run; either failing downgrades the run
+    // to `failed` and appends its reason to the summary.
+    //   1) Step gate — the run can't be `passed` if any recorded step is
+    //      `failed`, or if any step is still `pending` (incomplete). This stops
+    //      the "run=passed 인데 step 은 failed" mismatch the UI surfaced as <100%.
+    //   2) Evidence gate — a visual-driver run needs at least one image/video
+    //      artifact ("증거 없는 PASSED" guard).
     if (status === 'passed') {
-      const gate = await this._evidenceGate(run);
-      if (!gate.ok) {
-        finalStatus = 'failed';
-        finalSummary = [gate.reason, summary].filter(Boolean).join('\n\n');
+      const reasons: string[] = [];
+
+      const stepGate = this._stepGate(run);
+      if (!stepGate.ok) {
+        reasons.push(stepGate.reason);
         this.logService.warn(
           'QA',
-          `run ${run.id} self-reported passed but ${gate.reason} — downgraded to failed`,
+          `run ${run.id} self-reported passed but ${stepGate.reason} — downgraded to failed`,
         );
+      }
+
+      const evidenceGate = await this._evidenceGate(run);
+      if (!evidenceGate.ok) {
+        reasons.push(evidenceGate.reason);
+        this.logService.warn(
+          'QA',
+          `run ${run.id} self-reported passed but ${evidenceGate.reason} — downgraded to failed`,
+        );
+      }
+
+      if (reasons.length) {
+        finalStatus = 'failed';
+        finalSummary = [...reasons, summary].filter(Boolean).join('\n\n');
       }
     }
 
@@ -338,6 +428,40 @@ export class QaRunService {
       this.logService.warn('QA', `batch advance after completeRun ${runId} failed: ${e?.message || e}`),
     );
     return saved;
+  }
+
+  /**
+   * Decide whether the recorded step results justify a `passed`. A run is only
+   * allowed to pass when every step it recorded resolved cleanly:
+   *   - `failed`  → reject (a failed step can never live under a passed run)
+   *   - `pending` → reject (incomplete — the step never reached a verdict)
+   *   - `skipped` → allowed (intentionally not run, treated as a pass)
+   *   - `passed`  → allowed
+   * A run with no recorded steps passes the gate (nothing to contradict the
+   * agent's verdict — the evidence gate still applies for visual drivers).
+   */
+  private _stepGate(run: QaRun): { ok: true } | { ok: false; reason: string } {
+    const steps = run.step_results || [];
+    const failed = steps.filter((s) => s.status === 'failed');
+    const pending = steps.filter((s) => s.status === 'pending');
+    if (!failed.length && !pending.length) return { ok: true };
+
+    const parts: string[] = [];
+    if (failed.length) parts.push(`failed step ${failed.length}개`);
+    if (pending.length) parts.push(`미완료(pending) step ${pending.length}개`);
+    const idxList = (arr: typeof steps) =>
+      arr.map((s) => `#${s.idx}`).join(', ');
+    const detail: string[] = [];
+    if (failed.length) detail.push(`failed: ${idxList(failed)}`);
+    if (pending.length) detail.push(`pending: ${idxList(pending)}`);
+
+    return {
+      ok: false,
+      reason:
+        `⚠️ step 불일치 (step gate): run 은 passed 로 보고됐으나 ${parts.join(', ')}가 ` +
+        `남아 있어 PASSED 를 거부하고 failed 로 강등함 (${detail.join(' / ')}). ` +
+        `모든 step 이 passed/skipped 여야 passed 가 허용됩니다.`,
+    };
   }
 
   /**

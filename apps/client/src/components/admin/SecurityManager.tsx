@@ -10,6 +10,12 @@ import { tokens } from '../../tokens';
 import { Button, Input, Select, Modal, Card, ConfirmDialog } from '../common';
 import { relativeTime } from '../../utils/time';
 import { formatAgentDisplayName } from '../../utils/agentName';
+import {
+  WorkspaceFolderOptions,
+  initWorkspaceFolderState,
+  buildWorkspaceFolderPayload,
+  type WorkspaceFolderFormState,
+} from './WorkspaceFolderOptions';
 
 // SecurityManager 내부에서 다루는 agent 표시용 최소 형태. 서버 GET /api/agents 가
 // _enrichManagerNames 로 채워주는 manager_name 을 보존해 full name 렌더에 사용한다.
@@ -1155,6 +1161,10 @@ function ProfileEditor({ profile, workspaceId, boardId, agents, onClose, onSaved
   const [maxRuns, setMaxRuns] = useState(String(profile?.max_runs ?? 20));
   const [saving, setSaving] = useState(false);
 
+  // 작업폴더 옵션 (workspace_folder / repo_ref / checkout_mode / build_mode).
+  const [wf, setWf] = useState<WorkspaceFolderFormState>(initWorkspaceFolderState(profile));
+  const patchWf = (patch: Partial<WorkspaceFolderFormState>) => setWf((prev) => ({ ...prev, ...patch }));
+
   // On-failure auto-ticket policy (실패 시 → 티켓 생성), severity-gated.
   const oft = profile?.on_failure_ticket ?? null;
   const [oftEnabled, setOftEnabled] = useState(!!oft?.enabled);
@@ -1196,6 +1206,7 @@ function ProfileEditor({ profile, workspaceId, boardId, agents, onClose, onSaved
         target_resource_id: targetResourceId.trim() || null,
         scan_driver: scanDriver, scan_driver_config: config, scope_mode: scopeMode,
         checklist, tags, enabled, on_failure_ticket: onFailureTicket, max_runs: maxRunsNum,
+        ...buildWorkspaceFolderPayload(wf),
       };
       if (profile) {
         saved = await api.updateSecurityProfile(profile.id, { workspace_id: workspaceId, ...common });
@@ -1281,6 +1292,9 @@ function ProfileEditor({ profile, workspaceId, boardId, agents, onClose, onSaved
         <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary }}>
           <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} /> Enabled
         </label>
+
+        {/* 작업폴더 옵션 (workspace_folder / repo_ref / checkout_mode / build_mode) */}
+        <WorkspaceFolderOptions kind="security" state={wf} onChange={patchWf} />
 
         {/* 실패 시 → 티켓 생성 (severity-gated on-failure auto-ticket) */}
         <div style={{ borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 12, marginTop: 4 }}>

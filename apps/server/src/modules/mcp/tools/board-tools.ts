@@ -20,6 +20,7 @@ import { HarnessConfigSchema, serializeHarnessConfig } from '../../../common/har
 import { EffortPresetsConfigSchema, validateEffortPresetsInput, serializeEffortPresets } from '../../../common/effort-presets';
 import { EnvironmentConfigSchema, validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../../../common/environment-config';
 import { LivenessPolicySchema, serializeLivenessPolicy } from '../../qa/qa-liveness-policy';
+import { QaPhasesSchema, serializeQaPhases } from '../../qa/qa-phases';
 import { writeRoutingConfigThrough } from '../../boards/routing-config.helper';
 import { getCallerAgent } from '../shared/session-auth';
 import { WorkspaceMoveService, WorkspaceMoveBlockedError } from '../../../services/workspace-move.service';
@@ -250,8 +251,10 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
         .describe('Board-wide soft pause. true sets paused_at=now — every agent_trigger for tickets on this board is dropped (TriggerLoopService gate) and backlog promotion short-circuits; humans can still read/comment/drag. false clears paused_at to resume dispatch. Mirrors REST POST /api/boards/:id/pause|resume so the awb-mcp agent driver can engage the gate. Omit to leave the pause state untouched.'),
       liveness_policy: LivenessPolicySchema.nullable().optional()
         .describe('Per-board QaRun liveness policy for the reaper: { "type": "zero_progress", "deadline_sec"?: N } (default — reap when a run\'s age exceeds the deadline, defaulting to the global QA_RUN_TTL_MS) or { "type": "heartbeat_deadline", "deadline_sec": N } (reap only when the run\'s monotonic qa_run_heartbeat token has not strictly advanced within N seconds). Scenario-level liveness_policy overrides this. Pass null to clear (board falls back to the zero_progress default — the pre-existing behavior).'),
+      qa_phases: QaPhasesSchema.nullable().optional()
+        .describe('Per-board QA multi-phase model: { "phases": [ { "id": "import", "label"?: "Import", "timeout_sec": 600 }, { "id": "build", "timeout_sec": 1800 } ] }. Array order = phase order; ids unique; timeout_sec a positive integer. When set (and no explicit liveness_policy overrides it) the reaper auto-selects the phase_timeouts detector so each phase is judged against its own timeout_sec from when the run entered it (set_qa_phase). A scenario-level qa_phases overrides this. Pass null to clear (board falls back to legacy single-running behavior).'),
     },
-    async ({ board_id, name, description, routing_config, column_prompts, auto_archive_days, harness_config, effort_presets, language, environment_config, paused, liveness_policy }) => {
+    async ({ board_id, name, description, routing_config, column_prompts, auto_archive_days, harness_config, effort_presets, language, environment_config, paused, liveness_policy, qa_phases }) => {
       const boardRepo = dataSource.getRepository(Board);
       const board = await boardRepo.findOne({ where: { id: board_id } });
       if (!board) return err('Board not found');
@@ -334,6 +337,12 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
       // override back to the built-in zero_progress default.
       if (liveness_policy !== undefined) {
         board.liveness_policy = serializeLivenessPolicy(liveness_policy);
+      }
+      // QA multi-phase model (ticket 90cc22f7 / 38192044). Args already passed the
+      // strict QaPhasesSchema, so storage is a straight serialize; null clears the
+      // model back to legacy single-running behavior.
+      if (qa_phases !== undefined) {
+        board.qa_phases = serializeQaPhases(qa_phases);
       }
 
       await boardRepo.save(board);

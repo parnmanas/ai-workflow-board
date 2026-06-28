@@ -99,11 +99,40 @@ export class QaRun {
   @Column({ type: Date, nullable: true, default: null })
   liveness_token_at: Date | null;
 
+  // ── Multi-phase QA model (ticket 90cc22f7) ───────────────────────────────────
+  // A run can move through several phases (e.g. Unity import → build → run), each
+  // with its own timeout. `current_phase` is the active phase id (matched against
+  // the resolved qa_phases config — scenario ?? board, see resolveQaPhases). null =
+  // legacy single-running run that never set a phase (regression-safe: the
+  // phase_timeouts detector falls back to a sane default and the default
+  // zero_progress / heartbeat_deadline policies ignore these fields entirely).
+  // `current_phase_at` is the entry instant — the deadline baseline for the active
+  // phase's timeout_sec (each setPhase resets it).
+  @Column({ type: 'varchar', nullable: true, default: null })
+  current_phase: string | null;
+
+  @Column({ type: Date, nullable: true, default: null })
+  current_phase_at: Date | null;
+
+  // Ordered transition log for the RunDetail timeline — one entry per phase the
+  // run entered. The latest entry's left_at is null while that phase is active;
+  // setPhase stamps it when the next phase begins. null on legacy runs.
+  @Column({ type: 'simple-json', nullable: true, default: null })
+  phase_history: QaPhaseHistoryEntry[] | null;
+
   @CreateDateColumn()
   created_at: Date;
 }
 
 export type QaRunStatus = 'pending' | 'running' | 'passed' | 'failed' | 'error';
+
+/** One phase-transition record for QaRun.phase_history (ISO timestamps). */
+export interface QaPhaseHistoryEntry {
+  phase: string;
+  entered_at: string;
+  // null while the phase is active; set to the next phase's entry instant on transition.
+  left_at: string | null;
+}
 
 export interface QaStepResult {
   idx: number;

@@ -71,6 +71,7 @@ import {
   getLivenessDetector,
   resolveLivenessPolicy,
 } from './qa-liveness-policy';
+import { QaPhasesConfig, resolveQaPhases } from './qa-phases';
 
 const DEFAULT_SWEEP_MS = 30 * 60_000; // 30 minutes
 const MIN_SWEEP_MS = 60_000;          // 1 minute
@@ -158,19 +159,21 @@ export class QaRunReaperService implements OnModuleInit, OnModuleDestroy {
     });
     if (candidates.length === 0) return { reaped: [], details: [] };
 
-    const policyForRun = await this._buildPolicyResolver(candidates);
-    const ctx = { now, defaultTtlMs: this.ttlMs, defaultZeroProgressMs: this.zeroProgressMs };
+    const resolveForRun = await this._buildPolicyResolver(candidates);
+    const baseCtx = { now, defaultTtlMs: this.ttlMs, defaultZeroProgressMs: this.zeroProgressMs };
 
     const reaped: string[] = [];
     const details: Array<{ id: string; reason: string; age_min: number }> = [];
     for (const run of candidates) {
       try {
-        const policy = policyForRun(run);
+        const { policy, phases } = resolveForRun(run);
         // Unknown type can only happen if a registered detector was removed after
         // a board stored its policy; fall back to zero_progress so the run is
         // still subject to the TTL backstop rather than becoming immortal.
         const detector = getLivenessDetector(policy.type) ?? getLivenessDetector('zero_progress');
-        const reason = detector ? detector.evaluate(run, policy, ctx) : null;
+        // Per-run ctx: phases is the only per-run field (the `phase_timeouts`
+        // detector reads it); the rest of baseCtx is shared across the sweep.
+        const reason = detector ? detector.evaluate(run, policy, { ...baseCtx, phases }) : null;
         if (!reason) continue;
 
         const startedAt = run.started_at ?? run.created_at;
@@ -204,14 +207,17 @@ export class QaRunReaperService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Bulk-resolve the liveness policy for every candidate run with a single
-   * scenario query + single board query (no per-run N+1). A run's policy is its
-   * scenario-level `liveness_policy` if set, else its board-level policy, else
-   * the built-in `zero_progress` default. The board is taken from the run's own
-   * board_id, falling back to the scenario's board_id (workspace-scoped runs
-   * carry a null board_id but their scenario may still be board-pinned).
+   * Bulk-resolve the liveness policy AND QA phase model for every candidate run
+   * with a single scenario query + single board query (no per-run N+1). The phase
+   * model (scenario.qa_phases ?? board.qa_phases) is resolved alongside the policy
+   * so the `phase_timeouts` detector can be auto-selected when phases are defined
+   * and no explicit liveness_policy overrides it. The board is taken from the
+   * run's own board_id, falling back to the scenario's board_id (workspace-scoped
+   * runs carry a null board_id but their scenario may still be board-pinned).
    */
-  private async _buildPolicyResolver(runs: QaRun[]): Promise<(run: QaRun) => LivenessPolicy> {
+  private async _buildPolicyResolver(
+    runs: QaRun[],
+  ): Promise<(run: QaRun) => { policy: LivenessPolicy; phases: QaPhasesConfig | null }> {
     const scenarioIds = [...new Set(runs.map((r) => r.scenario_id).filter(Boolean))];
     const scenarios = scenarioIds.length
       ? await this.scenarioRepo.find({ where: { id: In(scenarioIds) } })
@@ -224,11 +230,17 @@ export class QaRunReaperService implements OnModuleInit, OnModuleDestroy {
     const boards = boardIds.size ? await this.boardRepo.find({ where: { id: In([...boardIds]) } }) : [];
     const boardById = new Map(boards.map((b) => [b.id, b]));
 
-    return (run: QaRun): LivenessPolicy => {
+    return (run: QaRun): { policy: LivenessPolicy; phases: QaPhasesConfig | null } => {
       const scenario = scenarioById.get(run.scenario_id);
       const boardId = run.board_id ?? scenario?.board_id ?? null;
       const board = boardId ? boardById.get(boardId) : undefined;
-      return resolveLivenessPolicy(scenario?.liveness_policy ?? null, board?.liveness_policy ?? null);
+      const phases = resolveQaPhases(scenario?.qa_phases ?? null, board?.qa_phases ?? null);
+      const policy = resolveLivenessPolicy(
+        scenario?.liveness_policy ?? null,
+        board?.liveness_policy ?? null,
+        phases,
+      );
+      return { policy, phases };
     };
   }
 }

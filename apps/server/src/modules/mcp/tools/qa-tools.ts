@@ -30,6 +30,16 @@ import {
   serializeLivenessPolicy,
   parseLivenessPolicy,
 } from '../../qa/qa-liveness-policy';
+import {
+  QaPhasesSchema,
+  serializeQaPhases,
+  parseQaPhases,
+} from '../../qa/qa-phases';
+import {
+  repoRefSchema,
+  checkoutModeSchema,
+  buildModeSchema,
+} from '../../../common/workspace-folder-options';
 import type { ToolContext } from './context';
 
 function scenarioToJson(s: QaScenario) {
@@ -48,8 +58,18 @@ function scenarioToJson(s: QaScenario) {
     on_failure_ticket: s.on_failure_ticket ?? null,
     created_by: s.created_by,
     max_runs: s.max_runs,
+    // Working-folder options (shared with security profiles, ticket 4c49f567).
+    workspace_folder: s.workspace_folder ?? '',
+    repo_ref: s.repo_ref ?? null,
+    checkout_mode: s.checkout_mode,
+    build_mode: s.build_mode,
+    last_built_commit: s.last_built_commit ?? null,
+    built_at: s.built_at ?? null,
     // Normalized policy object (or null) so the client never sees raw JSON text.
     liveness_policy: parseLivenessPolicy(s.liveness_policy),
+    // Normalized phase model object (or null) — scenario override of the board's
+    // qa_phases (multi-phase QA, ticket 90cc22f7).
+    qa_phases: parseQaPhases(s.qa_phases),
     created_at: s.created_at,
     updated_at: s.updated_at,
   };
@@ -78,6 +98,12 @@ function runToJson(r: QaRun) {
     // and the time it last STRICTLY advanced (the deadline baseline).
     liveness_token: r.liveness_token ?? null,
     liveness_token_at: r.liveness_token_at ?? null,
+    // Multi-phase QA state (ticket 90cc22f7): the active phase id, the instant it
+    // was entered (the phase_timeouts deadline baseline), and the ordered
+    // transition log for the RunDetail timeline. null on legacy single-running runs.
+    current_phase: r.current_phase ?? null,
+    current_phase_at: r.current_phase_at ?? null,
+    phase_history: r.phase_history ?? [],
     created_at: r.created_at,
   };
 }
@@ -189,11 +215,19 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
       tags: z.array(z.string()).optional(),
       on_failure_ticket: onFailureTicketSchema.optional().describe('On-failure auto-ticket policy (see schema). Omit/null to disable.'),
       max_runs: z.number().optional().describe('FIFO run-history budget per scenario (default 20)'),
+      workspace_folder: z.string().optional().describe('agent-home-relative working folder. Omit/"" → deterministic default qa/<scenario_id>.'),
+      repo_ref: repoRefSchema.nullable().optional(),
+      checkout_mode: checkoutModeSchema.optional(),
+      build_mode: buildModeSchema.optional(),
       liveness_policy: LivenessPolicySchema.nullable().optional()
         .describe('Reaper liveness policy override for this scenario\'s runs. ' +
           '{ "type": "zero_progress", "deadline_sec"?: N } (default: reap when run age > deadline, default the global TTL) or ' +
           '{ "type": "heartbeat_deadline", "deadline_sec": N } (reap only when the monotonic qa_run_heartbeat token has not strictly advanced within N seconds). ' +
           'Overrides the board policy; omit/null to inherit the board (then the built-in zero_progress default).'),
+      qa_phases: QaPhasesSchema.nullable().optional()
+        .describe('QA multi-phase model override for this scenario: { "phases": [ { "id": "import", "label"?: "Import", "timeout_sec": 600 }, ... ] }. ' +
+          'Array order = phase order; ids unique; timeout_sec a positive integer. Overrides the board qa_phases; omit/null to inherit the board (then legacy single-running). ' +
+          'Drives the phase_timeouts reaper detector — each phase is judged against its own timeout_sec from when the run entered it (set_qa_phase).'),
     },
     async (args, extra: { sessionId?: string }) => {
       if (!qaService) return err('QA service unavailable in this MCP context');
@@ -213,7 +247,12 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
           on_failure_ticket: args.on_failure_ticket,
           created_by: caller?.agentId ?? '',
           max_runs: args.max_runs,
+          workspace_folder: args.workspace_folder,
+          repo_ref: args.repo_ref ?? null,
+          checkout_mode: args.checkout_mode,
+          build_mode: args.build_mode,
           liveness_policy: args.liveness_policy === undefined ? undefined : serializeLivenessPolicy(args.liveness_policy),
+          qa_phases: args.qa_phases === undefined ? undefined : serializeQaPhases(args.qa_phases),
         });
         return ok(scenarioToJson(row));
       } catch (e: any) {
@@ -239,16 +278,23 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
       tags: z.array(z.string()).optional(),
       on_failure_ticket: onFailureTicketSchema.optional().describe('On-failure auto-ticket policy (see create_qa_scenario). Pass null to clear, omit to leave unchanged.'),
       max_runs: z.number().optional(),
+      workspace_folder: z.string().optional().describe('agent-home-relative working folder (see create_qa_scenario). "" resets to the qa/<scenario_id> default.'),
+      repo_ref: repoRefSchema.nullable().optional().describe('Repo to run against (see create_qa_scenario). Pass null to clear and inherit the board/workspace env repo.'),
+      checkout_mode: checkoutModeSchema.optional(),
+      build_mode: buildModeSchema.optional(),
       liveness_policy: LivenessPolicySchema.nullable().optional()
         .describe('Reaper liveness policy override (see create_qa_scenario). Pass null to clear and inherit the board policy.'),
+      qa_phases: QaPhasesSchema.nullable().optional()
+        .describe('QA multi-phase model override (see create_qa_scenario). Pass null to clear and inherit the board qa_phases.'),
     },
-    async ({ scenario_id, workspace_id, liveness_policy, ...patch }) => {
+    async ({ scenario_id, workspace_id, liveness_policy, qa_phases, ...patch }) => {
       if (!qaService) return err('QA service unavailable in this MCP context');
       try {
         const row = await qaService.update(scenario_id, workspace_id, {
           ...(patch as any),
           // Serialize only when the key was provided; undefined leaves it untouched.
           ...(liveness_policy === undefined ? {} : { liveness_policy: serializeLivenessPolicy(liveness_policy) }),
+          ...(qa_phases === undefined ? {} : { qa_phases: serializeQaPhases(qa_phases) }),
         });
         return ok(scenarioToJson(row));
       } catch (e: any) {
@@ -282,8 +328,12 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
     'Start (or re-run) a QA scenario. Creates a QaRun + a ChatRoom, adds the scenario\'s ' +
     'target agent, and posts the rendered step prompt. Returns run_id + room_id. Call again ' +
     'with the same scenario to re-run — a fresh QaRun is stacked, preserving history.',
-    { scenario_id: z.string().describe('QaScenario ID to run') },
-    async ({ scenario_id }, extra: { sessionId?: string }) => {
+    {
+      scenario_id: z.string().describe('QaScenario ID to run'),
+      initial_phase: z.string().optional()
+        .describe('Optional phase id to stamp on the new run at dispatch (multi-phase QA). Seeds current_phase / current_phase_at and the first phase_history entry so the phase_timeouts reaper measures the opening phase from run start. Typically the first id in the resolved qa_phases (e.g. "import"). Omit for legacy single-running.'),
+    },
+    async ({ scenario_id, initial_phase }, extra: { sessionId?: string }) => {
       if (!qaRunService) return err('QA run service unavailable in this MCP context');
       const caller = getCallerAgent(extra);
       try {
@@ -291,6 +341,7 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
           scenarioId: scenario_id,
           triggeredByType: caller?.agentId ? 'agent' : 'system',
           triggeredById: caller?.agentId ?? '',
+          initialPhase: initial_phase,
         });
         return ok({ run_id: result.run.id, room_id: result.room_id, prompt: result.prompt });
       } catch (e: any) {
@@ -357,6 +408,31 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
         return ok(runToJson(row));
       } catch (e: any) {
         return err(e?.message || 'Failed to record QA heartbeat');
+      }
+    },
+  );
+
+  server.tool(
+    'set_qa_phase',
+    'Transition a running QaRun into a new phase (multi-phase QA — e.g. Unity import → build → run). ' +
+    'SEPARATE from qa_run_heartbeat: heartbeat is a within-phase progress token; this is a STAGE transition. ' +
+    'Stamps current_phase + current_phase_at (which RESETS the phase_timeouts deadline clock — the new phase ' +
+    'is judged against its own timeout_sec from this instant) and appends a phase_history entry, closing the ' +
+    'previous one. The phase id is stored verbatim; it need not appear in the resolved qa_phases model (an ' +
+    'unmatched phase just falls back to the first-phase / global TTL timeout in the reaper). Rejected once the ' +
+    'run is terminal.',
+    {
+      run_id: z.string().describe('QaRun ID'),
+      workspace_id: z.string().describe('Workspace ID (required, scope guard)'),
+      phase: z.string().describe('Phase id to enter (e.g. "import", "build", "run"). Should match an id in the resolved qa_phases for its timeout to apply.'),
+    },
+    async ({ run_id, workspace_id, phase }) => {
+      if (!qaRunService) return err('QA run service unavailable in this MCP context');
+      try {
+        const row = await qaRunService.setPhase(run_id, workspace_id, phase);
+        return ok(runToJson(row));
+      } catch (e: any) {
+        return err(e?.message || 'Failed to set QA phase');
       }
     },
   );

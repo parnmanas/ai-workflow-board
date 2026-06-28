@@ -95,3 +95,45 @@ The run loop (render → start → record → complete, including step upsert + 
 accumulation) is regression-guarded by
 [`test/qa-flows/qa-run-lifecycle.test.mjs`](../apps/server/test/qa-flows/qa-run-lifecycle.test.mjs),
 registered in the admin `run-flows` harness under category `Flow-QA`.
+
+## Multi-phase scenarios (per-phase timeouts)
+
+A scenario whose stages have wildly different normal durations — a Unity drive is
+`import` (seconds) → `build` (minutes) → `run` (hours) — should NOT live under a
+single run-wide timeout. Define an ordered **phase model** on the board (or
+override it on the scenario) and the run's stages each get their own timeout. Full
+reference: [`docs/qa-phases.md`](./qa-phases.md).
+
+Authoring such a scenario adds two things on top of the normal loop:
+
+1. **Declare the phases** — board-level via `update_board(qa_phases)`, or
+   scenario-level via `create_qa_scenario` / `update_qa_scenario(qa_phases)`:
+
+   ```jsonc
+   { "phases": [
+       { "id": "import", "label": "Import", "timeout_sec": 600  },
+       { "id": "build",  "label": "Build",  "timeout_sec": 1800 },
+       { "id": "run",    "label": "Run",    "timeout_sec": 3600 } ] }
+   ```
+
+   Defining phases is enough — the reaper auto-selects the `phase_timeouts`
+   detector (no separate `liveness_policy` write).
+
+2. **Author phase-transition steps** — start the run on the opening phase, then
+   add a `set_qa_phase` call as the agent crosses each stage boundary, so each
+   phase's timeout clock starts when the run actually enters it:
+
+   ```
+   start_qa_run   { scenario_id, initial_phase: "import" }
+     step: import the project              → record_qa_step
+   set_qa_phase   { run_id, phase: "build" }   # build budget starts HERE
+     step: build the player                → record_qa_step
+   set_qa_phase   { run_id, phase: "run" }     # run budget starts HERE
+     step: drive the running client        → record_qa_step
+   complete_qa_run { run_id, status, summary }
+   ```
+
+   Entering a phase resets its deadline baseline, so a slow `import` never eats
+   into the `build` budget. If the agent dies mid-stage, the reaper reaps the run
+   on **that stage's** timeout and the summary names the overran phase. A scenario
+   with no `qa_phases` keeps the legacy single-`running` behavior unchanged.

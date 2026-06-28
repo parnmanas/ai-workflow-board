@@ -113,6 +113,20 @@ export class Board {
   @Column({ type: 'text', nullable: true, default: null })
   liveness_policy: string | null;
 
+  // Per-board QA phase model (multi-phase QA, ticket 90cc22f7). JSON text of a
+  // QaPhasesConfig (see modules/qa/qa-phases.ts):
+  //   { "phases": [ { "id": "import", "label": "Import", "timeout_sec": 600 },
+  //                 { "id": "build",  "label": "Build",  "timeout_sec": 1800 } ] }
+  // Array order = phase order. When set (and no explicit liveness_policy overrides
+  // it), the reaper auto-selects the `phase_timeouts` detector so each phase is
+  // judged against its own timeout_sec from current_phase_at. A scenario-level
+  // qa_phases overrides this (resolveQaPhases). null = no phase model → legacy
+  // single-running behavior (zero_progress / heartbeat_deadline unchanged), so
+  // this is opt-in / regression-safe. Validated with fail-safe parse — a malformed
+  // config falls back to null and never breaks the reaper sweep.
+  @Column({ type: 'text', nullable: true, default: null })
+  qa_phases: string | null;
+
   @CreateDateColumn()
   created_at: Date;
 

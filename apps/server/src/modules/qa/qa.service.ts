@@ -6,6 +6,12 @@ import { QaRun, QaRunStatus } from '../../entities/QaRun';
 import { Agent } from '../../entities/Agent';
 import { Board } from '../../entities/Board';
 import { findOrFail } from '../../common/find-or-fail';
+import {
+  normalizeWorkspaceFolder,
+  normalizeCheckoutMode,
+  normalizeBuildMode,
+  normalizeRepoRef,
+} from '../../common/workspace-folder-options';
 import { QaRunService } from './qa-run.service';
 
 function makeError(status: number, message: string): Error & { status: number } {
@@ -68,8 +74,6 @@ function normalizeOnFailureTicket(input: any): QaOnFailureTicketConfig | null {
 export interface QaScenarioListItem extends QaScenario {
   last_run_at: string | null;
   last_run_status: QaRunStatus | null;
-  /** Pass ratio (0–100) over finished runs (passed/failed/error); null if none finished. */
-  pass_rate: number | null;
   /** Total retained runs for the scenario (bounded by max_runs). */
   run_count: number;
 }
@@ -88,9 +92,18 @@ export interface CreateScenarioInput {
   on_failure_ticket?: any;
   created_by?: string;
   max_runs?: number;
+  /** Working-folder options (shared with SecurityProfile). repo_ref is loose
+   *  input normalized via normalizeRepoRef; the rest are normalized scalars. */
+  workspace_folder?: string;
+  repo_ref?: any;
+  checkout_mode?: any;
+  build_mode?: any;
   /** Pre-serialized LivenessPolicy JSON string (or null to clear). The MCP/REST
    *  layer validates + serializes via qa-liveness-policy before calling in. */
   liveness_policy?: string | null;
+  /** Pre-serialized QaPhasesConfig JSON string (or null to clear/inherit board).
+   *  The MCP/REST layer validates + serializes via qa-phases before calling in. */
+  qa_phases?: string | null;
 }
 
 /**
@@ -139,17 +152,13 @@ export class QaService {
       order: { created_at: 'DESC' },
     });
 
-    type Agg = { latest: QaRun | null; passed: number; finished: number; count: number };
+    type Agg = { latest: QaRun | null; count: number };
     const byScenario = new Map<string, Agg>();
     for (const r of runs) {
       let agg = byScenario.get(r.scenario_id);
-      if (!agg) { agg = { latest: null, passed: 0, finished: 0, count: 0 }; byScenario.set(r.scenario_id, agg); }
+      if (!agg) { agg = { latest: null, count: 0 }; byScenario.set(r.scenario_id, agg); }
       if (!agg.latest) agg.latest = r; // DESC order → first row per scenario is the latest.
       agg.count++;
-      if (r.status === 'passed' || r.status === 'failed' || r.status === 'error') {
-        agg.finished++;
-        if (r.status === 'passed') agg.passed++;
-      }
     }
 
     return scenarios.map((s) => {
@@ -160,7 +169,6 @@ export class QaService {
         ...s,
         last_run_at: lastRunAt ? new Date(lastRunAt).toISOString() : null,
         last_run_status: latest ? latest.status : null,
-        pass_rate: agg && agg.finished > 0 ? Math.round((agg.passed / agg.finished) * 100) : null,
         run_count: agg ? agg.count : 0,
       };
     });
@@ -203,7 +211,15 @@ export class QaService {
       on_failure_ticket: normalizeOnFailureTicket(input.on_failure_ticket),
       created_by: input.created_by ?? '',
       max_runs: typeof input.max_runs === 'number' && input.max_runs > 0 ? Math.floor(input.max_runs) : 20,
+      workspace_folder: normalizeWorkspaceFolder(input.workspace_folder),
+      repo_ref: normalizeRepoRef(input.repo_ref),
+      checkout_mode: normalizeCheckoutMode(input.checkout_mode),
+      build_mode: normalizeBuildMode(input.build_mode),
+      // cold/warm state starts empty — advanced by the provisioner after a build.
+      last_built_commit: null,
+      built_at: null,
       liveness_policy: input.liveness_policy ?? null,
+      qa_phases: input.qa_phases ?? null,
     });
     return this.scenarioRepo.save(created);
   }
@@ -245,8 +261,16 @@ export class QaService {
       const n = Number(patch.max_runs);
       if (Number.isFinite(n) && n > 0) existing.max_runs = Math.floor(n);
     }
+    // Working-folder options (normalized). Changing checkout/build/repo does NOT
+    // reset last_built_commit here — the provisioner owns that state.
+    if (patch.workspace_folder !== undefined) existing.workspace_folder = normalizeWorkspaceFolder(patch.workspace_folder);
+    if (patch.repo_ref !== undefined) existing.repo_ref = normalizeRepoRef(patch.repo_ref);
+    if (patch.checkout_mode !== undefined) existing.checkout_mode = normalizeCheckoutMode(patch.checkout_mode);
+    if (patch.build_mode !== undefined) existing.build_mode = normalizeBuildMode(patch.build_mode);
     // liveness_policy arrives pre-validated + serialized (string) or null to clear.
     if (patch.liveness_policy !== undefined) existing.liveness_policy = patch.liveness_policy ?? null;
+    // qa_phases arrives pre-validated + serialized (string) or null to clear/inherit board.
+    if (patch.qa_phases !== undefined) existing.qa_phases = patch.qa_phases ?? null;
     return this.scenarioRepo.save(existing);
   }
 

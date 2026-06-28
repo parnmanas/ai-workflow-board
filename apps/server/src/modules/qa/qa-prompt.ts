@@ -1,4 +1,5 @@
 import { QaScenario } from '../../entities/QaScenario';
+import { renderWorkspaceFolderBlock } from '../../common/workspace-folder-options';
 
 /**
  * Render the instruction prompt sent to the QA agent when a QaRun starts.
@@ -37,6 +38,16 @@ export function renderQaRunPrompt(scenario: QaScenario, runId: string): string {
     '```',
     ``,
     `**Run id:** \`${runId}\``,
+    ``,
+    renderWorkspaceFolderBlock({
+      workspace_folder: scenario.workspace_folder,
+      repo_ref: scenario.repo_ref,
+      checkout_mode: scenario.checkout_mode,
+      build_mode: scenario.build_mode,
+      last_built_commit: scenario.last_built_commit,
+      kind: 'qa',
+      id: scenario.id,
+    }),
     ``,
     `## Steps`,
     stepLines,

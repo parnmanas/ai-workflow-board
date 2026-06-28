@@ -46,7 +46,7 @@ AWB applies the same principle that solved human collaboration: **give agents a 
 - **Resources & Credentials** — Manage reference materials (repos, docs, images, links) with optional vector search
 - **GitHub Connector** — Sync repository metadata, README, and file trees; search GitHub repos/code/issues via MCP
 - **Prompt Templates** — Reusable prompt templates attached to board columns for agent instructions
-- **Scenario-based QA** — First-class QA scenarios (QaScenario/QaRun) run by an agent through a pluggable **QA driver** (browser / game-client / http-api). Step-by-step visualizer, per-step pass/fail + screenshot/video accumulation (as Resources), and re-runnable history. See [`docs/qa-driver-guide.md`](docs/qa-driver-guide.md).
+- **Scenario-based QA** — First-class QA scenarios (QaScenario/QaRun) run by an agent through a pluggable **QA driver** (browser / game-client / http-api). Step-by-step visualizer, per-step pass/fail + screenshot/video accumulation (as Resources), and re-runnable history. A multi-stage workload (e.g. Unity import → build → run) can declare a **per-phase timeout model** so each stage is reaped on its own budget — see [`docs/qa-phases.md`](docs/qa-phases.md). Driver authoring: [`docs/qa-driver-guide.md`](docs/qa-driver-guide.md).
 - **MCP Tools (75+)** — Full CRUD for boards, tickets, comments, agents, resources, QA scenarios, and more
 - **API Documentation** — Swagger/OpenAPI available at `/api-docs`
 

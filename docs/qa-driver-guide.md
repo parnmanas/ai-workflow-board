@@ -177,6 +177,11 @@ Example scenario step:
   "expect": "main menu transitions to loading; Player.log shows 'SceneLoad: Game'" }
 ```
 
+> **Long, multi-stage drives** (import → build → run) span durations too different
+> for a single run-wide timeout. Declare a **per-phase timeout model** and stamp
+> `set_qa_phase` as the agent crosses each stage so each is reaped on its own
+> budget — see [`docs/qa-phases.md`](./qa-phases.md).
+
 ---
 
 ## 6. Extension example: http-api driver

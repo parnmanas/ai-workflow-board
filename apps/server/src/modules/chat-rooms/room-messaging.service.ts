@@ -14,6 +14,7 @@ import { MentionService, ResolvedMention } from '../../services/mention.service'
 import { RoomMembershipService } from './room-membership.service';
 import { resolveAgentDisplayName } from '../../utils/agent-name';
 import { projectChatAttachment } from '../mcp/shared/ticket-helpers';
+import { RunProvision } from '../../common/workspace-folder-options';
 
 const CONTENT_MAX = 10000;
 
@@ -188,6 +189,11 @@ export class RoomMessagingService {
     images?: Array<{ data: string; filename: string; mimetype: string }>,
     attachmentIds?: string[],
     type: ChatMessageType = 'message',
+    // QA/security run-dispatch provisioning hint (ticket 25db3cc6). Present ONLY
+    // on the system 'user' send that opens a QA/security run room — the
+    // agent-manager reads it to prepare the run's working folder before spawning.
+    // Forwarded verbatim on the chat_room_message SSE event; never persisted.
+    opts?: { runProvision?: RunProvision | null },
   ): Promise<any> {
     await this.membership.requireActiveParticipant(roomId, senderId, senderType);
 
@@ -336,6 +342,7 @@ export class RoomMessagingService {
       agent_chain_depth: agentChainDepth,
       member_ids: memberIds,
       agent_member_ids: agentMemberIds,
+      ...(opts?.runProvision ? { run_provision: opts.runProvision } : {}),
     });
 
     // B1 fix: auto-advance the sender's read marker so their own message never

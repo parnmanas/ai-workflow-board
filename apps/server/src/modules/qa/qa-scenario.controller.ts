@@ -10,6 +10,23 @@ import { QaRunReaperService } from './qa-run-reaper.service';
 import { QaScheduleService } from './qa-schedule.service';
 import { QaRunBatch } from '../../entities/QaRunBatch';
 import { QaSchedule } from '../../entities/QaSchedule';
+import { validateQaPhasesInput, serializeQaPhases } from './qa-phases';
+
+/**
+ * Normalize a raw qa_phases field off a REST body into the pre-serialized string
+ * (or null) the QaService expects. Returns { error } on a malformed config so the
+ * caller can 400, or { value } (string | null | undefined — undefined = field
+ * absent, leave untouched). Mirrors how the MCP layer serializes before the service.
+ */
+function normalizeQaPhasesBody(
+  body: any,
+): { error: string } | { value: string | null | undefined } {
+  if (!body || body.qa_phases === undefined) return { value: undefined };
+  if (body.qa_phases === null) return { value: null };
+  const checked = validateQaPhasesInput(body.qa_phases);
+  if (!checked.ok) return { error: checked.error };
+  return { value: serializeQaPhases(checked.value) };
+}
 
 /**
  * Normalize a QaRunBatch row for the client: coalesce the nullable simple-json
@@ -116,7 +133,15 @@ export class QaScenarioController {
   async create(@Body() body: any, @Req() req: Request, @Res() res: Response) {
     try {
       const user = (req as any).currentUser as { id: string } | undefined;
-      const row = await this.qaService.create({ ...body, created_by: body?.created_by || user?.id || '' });
+      // qa_phases arrives as an object on REST (no zod tool boundary) — validate
+      // + serialize before the service, which expects a pre-serialized string.
+      const phases = normalizeQaPhasesBody(body);
+      if ('error' in phases) return res.status(400).json({ error: phases.error });
+      const row = await this.qaService.create({
+        ...body,
+        created_by: body?.created_by || user?.id || '',
+        ...(phases.value === undefined ? {} : { qa_phases: phases.value }),
+      });
       return res.status(201).json(row);
     } catch (e: any) {
       return res.status(e?.status || 400).json({ error: e?.message || 'Failed to create QA scenario' });
@@ -126,7 +151,13 @@ export class QaScenarioController {
   @Patch('scenarios/:id')
   async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     try {
-      return res.json(await this.qaService.update(id, body?.workspace_id, body));
+      const phases = normalizeQaPhasesBody(body);
+      if ('error' in phases) return res.status(400).json({ error: phases.error });
+      const patch = {
+        ...body,
+        ...(phases.value === undefined ? {} : { qa_phases: phases.value }),
+      };
+      return res.json(await this.qaService.update(id, body?.workspace_id, patch));
     } catch (e: any) {
       return res.status(e?.status || 400).json({ error: e?.message || 'Failed to update QA scenario' });
     }
