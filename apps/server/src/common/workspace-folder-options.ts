@@ -117,6 +117,43 @@ export function decideRunFreshness(input: RunFreshnessInput): RunFreshness {
   return input.last_built_commit ? 'warm' : 'cold';
 }
 
+// ── Run-provision wire contract (ticket 4 — QA/security dispatch → agent-manager) ─
+
+/**
+ * A repo the agent-manager provisioner can clone for a run, after the server has
+ * already expanded a `repo_ref` (resource_id / board-environment_config) into a
+ * concrete url. `branch` omitted = the repo's default branch.
+ */
+export interface RunRepoSpec {
+  url: string;
+  branch?: string;
+}
+
+/**
+ * The structured provisioning hint the server ships on the QA/security run
+ * dispatch (`chat_room_message` payload). It tells the agent-manager exactly
+ * which folder to prepare and how, BEFORE the run subagent spawns — closing the
+ * gap that ticket (3) left to the prompt alone:
+ *   - `workspace_folder` is the resolved agent-home-relative folder
+ *     (`resolveWorkspaceFolder` output, e.g. `qa/<scenario_id>`).
+ *   - `repo` is the already-resolved clone source (or null = nothing to clone,
+ *     just ensure the folder exists; the prompt still tells the agent what to do).
+ *   - `checkout_mode` drives reuse (fetch+ff-pull / clone) vs fresh (wipe + clone).
+ *   - `run_id` / `workspace_id` let the manager finalize the run as `error` if
+ *     provisioning fails (the "dispatch 중단 + 코멘트" path).
+ *
+ * Provisioner = source sync only (checkout). Build/test stays the agent's job
+ * (the responsibility boundary agreed with ticket (3)).
+ */
+export interface RunProvision {
+  kind: 'qa' | 'security';
+  run_id: string;
+  workspace_id: string;
+  workspace_folder: string;
+  checkout_mode: CheckoutMode;
+  repo: RunRepoSpec | null;
+}
+
 // ── Run-prompt block (reused by qa-prompt.ts + security-prompt.ts) ────────────
 
 export interface WorkspaceFolderPromptInput {

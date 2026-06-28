@@ -6,6 +6,7 @@
 import type { HarnessConfig } from '../harness-config';
 import type { ResolvedEffortPreset } from '../effort-presets';
 import type { ResolvedEnvironmentConfig } from '../environment-config';
+import type { RunProvision } from '../workspace-folder-options';
 
 export type StreamEventType =
   | 'board_update'
@@ -215,6 +216,13 @@ export interface ChatRoomMessagePayload {
   // spawned CLI tries to send_chat_room_message into a room it does not
   // belong to.
   agent_member_ids?: string[];
+  // ticket 4: run-workspace provisioning hint. Present ONLY on a QA/security run
+  // dispatch message (the system 'user' send that opens the run room) — absent on
+  // every ordinary chat turn. The agent-manager reads it to prepare the run's
+  // working folder (clone/pull, reuse vs fresh) and pin the subagent cwd BEFORE
+  // spawning, so the run never improvises a folder. Forwarded verbatim on the
+  // wire; consumers that don't understand it ignore the field.
+  run_provision?: RunProvision;
 }
 
 export interface ChatRoomUpdatePayload {
