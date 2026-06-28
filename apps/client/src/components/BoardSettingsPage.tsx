@@ -14,6 +14,8 @@ import PageHeader from './PageHeader';
 import ColumnManager from './ColumnManager';
 import HarnessConfigEditor from './HarnessConfigEditor';
 import EnvironmentConfigEditor from './EnvironmentConfigEditor';
+import { QaPhaseRowsEditor, parseQaPhasesValue, qaPhasesError } from './QaPhasesEditor';
+import { QaPhase } from '../types';
 import { tokens } from '../tokens';
 import { Button, Input, HeaderAction } from './common';
 
@@ -191,6 +193,20 @@ export default function BoardSettingsPage() {
             await api.updateBoard(board.id, { effort_presets: config });
             await refresh();
             showToast(config === null ? 'Effort presets cleared' : 'Effort presets saved', 'success');
+          }}
+        />
+        <QaPhasesSetting
+          board={board}
+          onSave={async (config) => {
+            try {
+              await api.updateBoard(board.id, { qa_phases: config });
+              await refresh();
+              showToast(config === null ? 'QA phases cleared' : 'QA phases saved', 'success');
+            } catch (err: any) {
+              // Server zod rejection (400) surfaces its message here.
+              showToast(err?.message || 'Failed to save QA phases', 'error');
+              throw err;
+            }
           }}
         />
         <EnvironmentConfigEditor
@@ -1056,6 +1072,90 @@ function EffortPresetsSetting({ board, onSave }: EffortPresetsSettingProps) {
               // Empty preset list → clear the board override (null), so the
               // server serializes an empty column and falls back to builtins.
               await onSave(config.presets.length === 0 ? null : config);
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          {busy ? 'Saving…' : 'Save'}
+        </Button>
+      </div>
+    </section>
+  );
+}
+
+// ─── QA phases (multi-phase QA model, ticket 90cc22f7) ──────────────────────
+// A board can declare an ordered list of QA phases (e.g. import → build → run),
+// each with its own timeout, so the QA reaper judges "is THIS phase overdue"
+// instead of "is the whole run overdue". A scenario can override this per-scenario
+// (QaManager scenario form). Empty list = clear the override (null) → legacy
+// single-timeout behavior. Mirrors EffortPresetsSetting's read/edit/save shape.
+interface QaPhasesSettingProps {
+  board: BoardWithCards;
+  onSave(config: { phases: QaPhase[] } | null): Promise<void>;
+}
+
+function QaPhasesSetting({ board, onSave }: QaPhasesSettingProps) {
+  const initial = parseQaPhasesValue(board.qa_phases)?.phases ?? [];
+  const [phases, setPhases] = useState<QaPhase[]>(initial);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    setPhases(parseQaPhasesValue(board.qa_phases)?.phases ?? []);
+  }, [board.qa_phases]);
+
+  const dirty = JSON.stringify(phases) !== JSON.stringify(initial);
+  const validationError = qaPhasesError(phases);
+
+  const sectionStyle: React.CSSProperties = {
+    padding: 16,
+    marginBottom: 16,
+    background: tokens.colors.surfaceCard,
+    border: `1px solid ${tokens.colors.border}`,
+    borderRadius: tokens.radii.md,
+  };
+
+  return (
+    <section style={sectionStyle}>
+      <h3 style={{ margin: 0, fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>
+        QA phases
+      </h3>
+      <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, marginBottom: 12 }}>
+        Ordered phases for QA runs on this board (e.g. <code>import</code> → <code>build</code> →
+        <code>run</code>), each with its own timeout. The QA reaper applies the <em>current</em>{' '}
+        phase's timeout from when it was entered, so a long build doesn't false-reap and a hung
+        import is still caught. A scenario can override these per-scenario. Leave empty to clear the
+        override — runs fall back to the single whole-run timeout (legacy behavior).
+      </div>
+
+      {phases.length === 0 && (
+        <div style={{ fontSize: 12, color: tokens.colors.textSecondary, marginBottom: 10, fontStyle: 'italic' }}>
+          No phases — this board uses the legacy single-timeout QA model.
+        </div>
+      )}
+
+      <QaPhaseRowsEditor phases={phases} onChange={setPhases} />
+
+      {validationError && (
+        <div style={{ fontSize: 12, color: tokens.colors.danger, marginTop: 10 }}>
+          {validationError}
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+        <Button
+          variant="primary"
+          size="sm"
+          disabled={!dirty || busy || !!validationError}
+          onClick={async () => {
+            if (!dirty || validationError) return;
+            setBusy(true);
+            try {
+              // Empty list → clear the board override (null) so the server stores
+              // an empty column and runs fall back to the single-timeout model.
+              await onSave(phases.length === 0 ? null : { phases });
+            } catch {
+              // onSave toasts; keep the editor dirty so the user can retry.
             } finally {
               setBusy(false);
             }
