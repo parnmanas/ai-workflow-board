@@ -6,6 +6,12 @@ import { tokens } from '../../tokens';
 import { Button, Input, Select, Modal, Card, Badge, ConfirmDialog } from '../common';
 import { relativeTime } from '../../utils/time';
 import { formatAgentDisplayName } from '../../utils/agentName';
+import {
+  WorkspaceFolderOptions,
+  initWorkspaceFolderState,
+  buildWorkspaceFolderPayload,
+  type WorkspaceFolderFormState,
+} from './WorkspaceFolderOptions';
 
 // QaManager 내부에서 다루는 agent 표시용 최소 형태. 서버 GET /api/agents 가
 // _enrichManagerNames 로 채워주는 manager_name 을 보존해 full name 렌더에 사용한다.
@@ -960,6 +966,10 @@ function ScenarioEditor({ scenario, workspaceId, boardId, agents, onClose, onSav
   const [tagsText, setTagsText] = useState((scenario?.tags ?? []).join(', '));
   const [saving, setSaving] = useState(false);
 
+  // 작업폴더 옵션 (workspace_folder / repo_ref / checkout_mode / build_mode).
+  const [wf, setWf] = useState<WorkspaceFolderFormState>(initWorkspaceFolderState(scenario));
+  const patchWf = (patch: Partial<WorkspaceFolderFormState>) => setWf((prev) => ({ ...prev, ...patch }));
+
   // On-failure auto-ticket policy (실패 시 → 티켓 생성).
   const oft = scenario?.on_failure_ticket ?? null;
   const [oftEnabled, setOftEnabled] = useState(!!oft?.enabled);
@@ -999,6 +1009,7 @@ function ScenarioEditor({ scenario, workspaceId, boardId, agents, onClose, onSav
           } : {}),
         }
       : { enabled: false };
+    const wfPayload = buildWorkspaceFolderPayload(wf);
     setSaving(true);
     try {
       let saved: QaScenario;
@@ -1006,13 +1017,13 @@ function ScenarioEditor({ scenario, workspaceId, boardId, agents, onClose, onSav
         saved = await api.updateQaScenario(scenario.id, {
           workspace_id: workspaceId, name, description, target_agent_id: targetAgentId,
           qa_driver: qaDriver, qa_driver_config: config, steps, tags, enabled,
-          on_failure_ticket: onFailureTicket,
+          on_failure_ticket: onFailureTicket, ...wfPayload,
         });
       } else {
         saved = await api.createQaScenario({
           workspace_id: workspaceId, board_id: boardId || null, name, description,
           target_agent_id: targetAgentId, qa_driver: qaDriver, qa_driver_config: config, steps, tags, enabled,
-          on_failure_ticket: onFailureTicket,
+          on_failure_ticket: onFailureTicket, ...wfPayload,
         });
       }
       showToast(`Scenario ${scenario ? 'updated' : 'created'}`, 'success');
@@ -1067,6 +1078,9 @@ function ScenarioEditor({ scenario, workspaceId, boardId, agents, onClose, onSav
         <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary }}>
           <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} /> Enabled
         </label>
+
+        {/* 작업폴더 옵션 (workspace_folder / repo_ref / checkout_mode / build_mode) */}
+        <WorkspaceFolderOptions kind="qa" state={wf} onChange={patchWf} />
 
         {/* 실패 시 → 티켓 생성 (on-failure auto-ticket) */}
         <div style={{ borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 12, marginTop: 4 }}>

@@ -994,6 +994,10 @@ export const api = {
     tags?: string[];
     on_failure_ticket?: QaScenario['on_failure_ticket'];
     max_runs?: number;
+    workspace_folder?: string;
+    repo_ref?: QaScenario['repo_ref'];
+    checkout_mode?: QaScenario['checkout_mode'];
+    build_mode?: QaScenario['build_mode'];
   }) => request<QaScenario>('/qa/scenarios', { method: 'POST', body: JSON.stringify(data) }),
   updateQaScenario: (
     id: string,
@@ -1010,6 +1014,10 @@ export const api = {
       tags?: string[];
       on_failure_ticket?: QaScenario['on_failure_ticket'];
       max_runs?: number;
+      workspace_folder?: string;
+      repo_ref?: QaScenario['repo_ref'];
+      checkout_mode?: QaScenario['checkout_mode'];
+      build_mode?: QaScenario['build_mode'];
     },
   ) => request<QaScenario>(`/qa/scenarios/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteQaScenario: (id: string, workspaceId: string) => {
@@ -1109,6 +1117,10 @@ export const api = {
     tags?: string[];
     on_failure_ticket?: SecurityProfile['on_failure_ticket'];
     max_runs?: number;
+    workspace_folder?: string;
+    repo_ref?: SecurityProfile['repo_ref'];
+    checkout_mode?: SecurityProfile['checkout_mode'];
+    build_mode?: SecurityProfile['build_mode'];
   }) => request<SecurityProfile>('/security/profiles', { method: 'POST', body: JSON.stringify(data) }),
   updateSecurityProfile: (
     id: string,
@@ -1127,6 +1139,10 @@ export const api = {
       tags?: string[];
       on_failure_ticket?: SecurityProfile['on_failure_ticket'];
       max_runs?: number;
+      workspace_folder?: string;
+      repo_ref?: SecurityProfile['repo_ref'];
+      checkout_mode?: SecurityProfile['checkout_mode'];
+      build_mode?: SecurityProfile['build_mode'];
     },
   ) => request<SecurityProfile>(`/security/profiles/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteSecurityProfile: (id: string, workspaceId: string) => {
