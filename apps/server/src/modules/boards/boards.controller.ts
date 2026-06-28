@@ -26,6 +26,7 @@ import { resolveAgentDisplayMap } from '../../utils/agent-name';
 import { validateHarnessConfigInput, serializeHarnessConfig } from '../../common/harness-config';
 import { validateEffortPresetsInput, serializeEffortPresets } from '../../common/effort-presets';
 import { validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../../common/environment-config';
+import { validateQaPhasesInput, serializeQaPhases } from '../qa/qa-phases';
 
 // Narrow projection of a Comment as it ships on a board card. The board GET
 // only needs enough to render the comment count and the stale-open-question
@@ -422,7 +423,7 @@ export class BoardsController {
   async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     const board = await findOrFail(this.boardRepo, { where: { id } }, 'Board not found');
 
-    const { name, description, routing_config, column_prompts, max_concurrent_tickets_per_agent, self_improvement_mode, benchmark_mode, auto_archive_days, harness_config, effort_presets, language, environment_config } = body;
+    const { name, description, routing_config, column_prompts, max_concurrent_tickets_per_agent, self_improvement_mode, benchmark_mode, auto_archive_days, harness_config, effort_presets, language, environment_config, qa_phases } = body;
     if (name !== undefined) board.name = name;
     if (description !== undefined) board.description = description;
     // Board output language (i18n, ticket ae28dcaf). Human-readable name that
@@ -526,6 +527,20 @@ export class BoardsController {
         const checked = validateEnvironmentConfigInput(environment_config);
         if (!checked.ok) return res.status(400).json({ error: checked.error });
         board.environment_config = serializeEnvironmentConfig(checked.value);
+      }
+    }
+
+    // Per-board QA multi-phase model (ticket 90cc22f7 / 38192044). null clears
+    // back to legacy single-running; an object is fail-safe validated (non-empty
+    // phases, unique ids, positive timeout_sec) so a typo'd config 400s instead
+    // of being silently stored. Mirrors environment_config / harness_config.
+    if (qa_phases !== undefined) {
+      if (qa_phases === null) {
+        board.qa_phases = null;
+      } else {
+        const checked = validateQaPhasesInput(qa_phases);
+        if (!checked.ok) return res.status(400).json({ error: checked.error });
+        board.qa_phases = serializeQaPhases(checked.value);
       }
     }
 

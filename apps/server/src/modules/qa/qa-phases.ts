@@ -64,6 +64,27 @@ export function serializeQaPhases(config: QaPhasesConfig | null | undefined): st
   return JSON.stringify(config);
 }
 
+/**
+ * Validate a raw qa_phases WRITE input (an object straight off a REST body, where
+ * — unlike the MCP tool boundary — no zod schema has run yet). Returns the
+ * validated config on success or a flat error message on failure, mirroring
+ * validateHarnessConfigInput / validateEnvironmentConfigInput so the boards /
+ * scenario REST handlers can 400 on a malformed config instead of silently
+ * storing garbage. null/clear is handled by the caller (pass the object only).
+ */
+export function validateQaPhasesInput(
+  input: unknown,
+): { ok: true; value: QaPhasesConfig } | { ok: false; error: string } {
+  const parsed = QaPhasesSchema.safeParse(input);
+  if (!parsed.success) {
+    const msg = parsed.error.issues
+      .map((i) => `${i.path.join('.') || 'qa_phases'}: ${i.message}`)
+      .join('; ');
+    return { ok: false, error: msg || 'invalid qa_phases config' };
+  }
+  return { ok: true, value: parsed.data };
+}
+
 function isPosInt(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v) && v > 0;
 }

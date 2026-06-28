@@ -89,6 +89,9 @@ export interface CreateScenarioInput {
   /** Pre-serialized LivenessPolicy JSON string (or null to clear). The MCP/REST
    *  layer validates + serializes via qa-liveness-policy before calling in. */
   liveness_policy?: string | null;
+  /** Pre-serialized QaPhasesConfig JSON string (or null to clear/inherit board).
+   *  The MCP/REST layer validates + serializes via qa-phases before calling in. */
+  qa_phases?: string | null;
 }
 
 /**
@@ -197,6 +200,7 @@ export class QaService {
       created_by: input.created_by ?? '',
       max_runs: typeof input.max_runs === 'number' && input.max_runs > 0 ? Math.floor(input.max_runs) : 20,
       liveness_policy: input.liveness_policy ?? null,
+      qa_phases: input.qa_phases ?? null,
     });
     return this.scenarioRepo.save(created);
   }
@@ -240,6 +244,8 @@ export class QaService {
     }
     // liveness_policy arrives pre-validated + serialized (string) or null to clear.
     if (patch.liveness_policy !== undefined) existing.liveness_policy = patch.liveness_policy ?? null;
+    // qa_phases arrives pre-validated + serialized (string) or null to clear/inherit board.
+    if (patch.qa_phases !== undefined) existing.qa_phases = patch.qa_phases ?? null;
     return this.scenarioRepo.save(existing);
   }
 

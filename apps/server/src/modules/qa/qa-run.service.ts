@@ -51,6 +51,11 @@ export interface StartQaRunArgs {
   // this run finalizes. Standalone runs omit both.
   batchId?: string;
   batchIndex?: number;
+  // Optional opening phase (multi-phase QA, ticket 90cc22f7). When set, the new
+  // run is stamped current_phase/current_phase_at + a first phase_history entry
+  // at dispatch, so the phase_timeouts reaper measures the opening phase from run
+  // start (rather than waiting for the first set_qa_phase). Omit = legacy null.
+  initialPhase?: string;
 }
 
 export interface StartQaRunResult {
@@ -161,6 +166,10 @@ export class QaRunService {
     }));
 
     const now = new Date();
+    // Optional opening phase (multi-phase QA). Seed current_phase + the deadline
+    // baseline + the first (still-open) phase_history entry so the phase_timeouts
+    // reaper measures from run start. Empty/whitespace → treated as unset (null).
+    const initialPhase = (args.initialPhase || '').trim();
     const run = await this.runRepo.save(this.runRepo.create({
       id: runId,
       scenario_id: scenario.id,
@@ -176,6 +185,9 @@ export class QaRunService {
       rerun_generation: args.rerunGeneration && args.rerunGeneration > 0 ? Math.floor(args.rerunGeneration) : 0,
       batch_id: args.batchId ?? null,
       batch_index: args.batchIndex ?? null,
+      current_phase: initialPhase || null,
+      current_phase_at: initialPhase ? now : null,
+      phase_history: initialPhase ? [{ phase: initialPhase, entered_at: now.toISOString(), left_at: null }] : null,
       started_at: now,
       finished_at: null,
     }));
