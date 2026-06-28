@@ -15,6 +15,7 @@ import {
   fetchTicketContext,
   fetchChatRoomHistory,
   postFsResponse,
+  postChatRoomMessage,
 } from './rest.js';
 import { recordEvent } from './event-log-recorder.js';
 import { MANAGED_AGENTS_DIR } from './constants.js';
@@ -26,6 +27,7 @@ import type { HarnessSpec, ResolvedEffortPreset, EffortLevel } from './cli-adapt
 import { createAdapter, ADAPTER_CAPABILITIES } from './cli-adapters/index.js';
 import { EnvironmentProvisioner } from './environment-provisioner.js';
 import type { ResolvedEnvironmentConfig } from './environment-provisioner.js';
+import { parseRunProvision, provisionRunWorkspace } from './run-provisioner.js';
 import { fireAndForgetTool } from './mcp-client.js';
 
 /**
@@ -1256,6 +1258,54 @@ export class EventDispatcher {
       }
     }
 
+    // QA/security run-workspace provisioning (ticket 25db3cc6). A run-dispatch
+    // chat_room_message carries a `run_provision` hint: prepare the working
+    // folder (clone / fetch+ff-pull, reuse vs fresh) BEFORE spawning so the run
+    // never improvises a folder. The prepared absolute path is pinned as the
+    // subagent cwd, matching the folder the server-rendered prompt already names.
+    // On failure, abort the dispatch, finalize the run as `error`, and post a
+    // room message — the chat-room twin of the ticket-trigger provisioning abort.
+    // An ordinary chat turn carries no run_provision → runContext stays untouched.
+    let runContext = agentContext;
+    const runProvision = parseRunProvision(p.run_provision);
+    if (runProvision) {
+      log(
+        `Chat room run dispatch: kind=${runProvision.kind} run=${runProvision.run_id.slice(0, 8)} ` +
+          `folder=${runProvision.workspace_folder} checkout=${runProvision.checkout_mode} ` +
+          `repo=${runProvision.repo ? runProvision.repo.url : 'none'}`,
+      );
+      const result = await provisionRunWorkspace(runProvision);
+      if (!result.ok) {
+        const responder = agentContext?.agent_id || loadAgentInfo()?.agent_id || '';
+        if (p.room_id && responder) {
+          const detail = result.steps.length > 0 ? `\n\n실행 단계:\n${result.steps.map((s) => `- ${s}`).join('\n')}` : '';
+          await postChatRoomMessage(
+            this.#config,
+            p.room_id,
+            responder,
+            `⚠️ **런 작업폴더 프로비저닝 실패** — 작업을 시작하지 않고 디스패치를 중단했습니다.\n\n` +
+              `\`\`\`\n${result.error || 'unknown error'}\n\`\`\`${detail}\n\n` +
+              `시나리오의 repo / branch / checkout 설정을 확인한 뒤 다시 실행하세요.`,
+          ).catch(() => {});
+        }
+        // Finalize the run as error so it doesn't hang waiting on the liveness
+        // reaper — the run subagent never spawns, so nothing else will close it.
+        const completeTool = runProvision.kind === 'qa' ? 'complete_qa_run' : 'complete_security_run';
+        await fireAndForgetTool(this.#config, completeTool, {
+          run_id: runProvision.run_id,
+          workspace_id: runProvision.workspace_id,
+          status: 'error',
+          summary: `작업폴더 프로비저닝 실패: ${result.error || 'unknown error'}`,
+        });
+        if (p.room_id) await this.#setChatRoomTyping(p.room_id, false, '').catch(() => {});
+        log(`Chat room run dispatch aborted — provisioning failed: run=${runProvision.run_id.slice(0, 8)} dir=${result.dir}`);
+        return;
+      }
+      // Pin the prepared folder as the subagent cwd (matches the prompt path).
+      if (agentContext) runContext = { ...agentContext, cwd: result.dir };
+      log(`Run workspace ready: run=${runProvision.run_id.slice(0, 8)} dir=${result.dir}`);
+    }
+
     // Three-stage typing contract:
     //   reading   — set immediately on receive
     //   thinking  — first stdout from subagent
@@ -1291,7 +1341,7 @@ export class EventDispatcher {
           content: p.content || '',
           rolePrompt: p.role_prompt || '',
           onProgress,
-          agentContext,
+          agentContext: runContext,
           attachments: Array.isArray(p.attachments) ? p.attachments : [],
         });
         // Record into ring AFTER dispatch so the spawn path sees real prior
@@ -1364,7 +1414,7 @@ export class EventDispatcher {
           ticketId: '',
           agentId: agentContext?.agent_id || '',
           roomId: p.room_id || '',
-          agentContext,
+          agentContext: runContext,
         });
 
         if (result.spawned) {
