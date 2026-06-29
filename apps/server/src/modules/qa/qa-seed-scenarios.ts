@@ -145,9 +145,17 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
     tags: ['comments', 'mentions', 'triggers'],
     steps: [
       step(0, 'Create a ticket already in In Progress with an assignee', 'Ticket exists in In Progress', 'create_ticket', { workspace_id: '{{workspace_id}}', column_id: '{{in_progress_column_id}}', title: 'QA comment-trigger probe', assignee_id: '{{assignee_agent_id}}' }),
-      step(1, 'Add a plain note comment', 'Assignee (In Progress role holder) receives a comment trigger', 'add_comment', { ticket_id: '{{ticket_id}}', content: 'QA: plain note — should wake assignee', type: 'note' }),
-      step(2, 'Add a comment with a structured reviewer mention', 'comment_mention notification is scoped to the reviewer only', 'add_comment', { ticket_id: '{{ticket_id}}', content: 'QA: @[role:reviewer|Reviewer] please look', type: 'note' }),
-      step(3, 'Reload the ticket thread', 'Both comments present with author_role recorded in metadata', 'get_ticket', { ticket_id: '{{ticket_id}}' }),
+      // author_role is passed explicitly here. The awb-mcp QA driver runs as a
+      // CHAT subagent (no X-AWB-Subagent-Role pin) and the probe ticket's author
+      // (the driver agent) ends up holding 2 roles — assignee (set in step 0) and
+      // reporter (create_ticket auto-fills reporter→caller). With 2+ roles and no
+      // pin, add_comment.resolveAuthorRole intentionally OMITS author_role to avoid
+      // misattributing the comment to a role the agent isn't acting as. That guard
+      // is correct product behaviour; the scenario must therefore exercise the
+      // explicit-override path (resolution order #1) to assert role attribution.
+      step(1, 'Add a plain note comment as the assignee', 'Assignee (In Progress role holder) receives a comment trigger', 'add_comment', { ticket_id: '{{ticket_id}}', content: 'QA: plain note — should wake assignee', type: 'note', author_role: 'assignee' }),
+      step(2, 'Add a comment with a structured reviewer mention, authored as the assignee', 'comment_mention notification is scoped to the reviewer only', 'add_comment', { ticket_id: '{{ticket_id}}', content: 'QA: @[role:reviewer|Reviewer] please look', type: 'note', author_role: 'assignee' }),
+      step(3, 'Reload the ticket thread', "Both comments present with metadata.author_role == 'assignee' (explicit override recorded)", 'get_ticket', { ticket_id: '{{ticket_id}}' }),
     ],
   },
 
