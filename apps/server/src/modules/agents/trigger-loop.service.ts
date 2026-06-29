@@ -258,6 +258,9 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
     //      branch and emit to the filled role(s) in the per-role loop below.
     //   2. Is the TICKET staffed at all? `_ticketHasAnyHolder` — does ANY role
     //      on the ticket (not just this column's routed roles) have a holder.
+    //      The reporter counts (a reporter-only follow-up is staffed enough to
+    //      cascade through active stages; the gate guard below still stops it
+    //      before any review/merging gate — ticket cc48f06f / 519fad18).
     //
     // Decision when the column is unservable (column_move only — comments and
     // ticket-field updates are local events that must not shove an unrelated
@@ -494,6 +497,14 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
    * Both `agent_id` and `user_id` count as a holder. A ticket whose only
    * holders are humans still has an owner who can act, so the empty agent-routed
    * stage is a legitimate skip — not the orphan case.
+   *
+   * The reporter IS counted (ticket cc48f06f / 519fad18): a reporter-only ticket
+   * — the common shape of an agent-created follow-up, since create_ticket
+   * auto-fills the reporter to the caller — is treated as "staffed enough" to
+   * cascade through ACTIVE stages, but the gate guard (`_isGateColumn` /
+   * `_flagGateHalt`) still halts it one short of the first review/merging gate so
+   * it never silently skips to Done. The completely-unassigned (zero-holder)
+   * orphan is the only case that halts on the spot via `_flagUnassignedHalt`.
    */
   private async _ticketHasAnyHolder(ticketId: string): Promise<boolean> {
     const count = await this.dataSource

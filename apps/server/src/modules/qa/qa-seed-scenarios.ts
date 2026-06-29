@@ -305,7 +305,12 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
     description:
       'A routed column with no matching role holder auto-advances a staffed ticket to the next '
       + 'servable column, but HALTs a completely-unassigned ticket. Mirrors auto-advance-unassigned / '
-      + 'auto-advance-halt-unassigned.test.mjs.',
+      + 'auto-advance-halt-unassigned.test.mjs.\n\n'
+      + 'GOTCHA — the orphan case needs a TRUE zero-holder ticket. create_ticket auto-defaults the '
+      + 'reporter to the calling agent (commit 29f7df8), so a freshly-created ticket is NOT an orphan: '
+      + 'it carries a reporter holder and TriggerLoopService._ticketHasAnyHolder counts the reporter, '
+      + 'so the ticket takes the staffed (reporter-only) cascade path instead of halting. Step 3 below '
+      + 'strips that auto-filled reporter so step 4 actually exercises the halt-unassigned guard.',
     qa_driver: AWB_MCP_DRIVER,
     qa_driver_config: driverConfig(),
     tags: ['columns', 'column-policies', 'routing', 'auto-advance'],
@@ -313,7 +318,8 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
       step(0, 'Create a board whose Plan column routes to "planner"', 'Board + columns created', 'create_board', { workspace_id: '{{workspace_id}}', name: 'QA policy probe' }),
       step(1, 'Set Plan column role_routing to a role no agent holds', 'update_column persists role_routing=["planner"]', 'update_column', { column_id: '{{plan_column_id}}', role_routing: ['planner'] }),
       step(2, 'Move a ticket WITH an assignee (but no planner) onto Plan', 'Ticket auto-advances past the unservable Plan column to In Progress; assignee woken', 'move_ticket', { ticket_id: '{{staffed_ticket_id}}', target_column_name: 'Plan', board_id: '{{policy_board_id}}' }),
-      step(3, 'Move a completely-unassigned ticket onto Plan', 'Ticket HALTS in place with auto_advance_halted_unassigned (no silent skip to Done)', 'move_ticket', { ticket_id: '{{orphan_ticket_id}}', target_column_name: 'Plan', board_id: '{{policy_board_id}}' }),
+      step(3, 'Strip the auto-filled reporter off the orphan ticket so it has ZERO role holders (create_ticket auto-defaults reporter→caller, so a fresh ticket is NOT a true orphan)', 'Reporter slot cleared via role_assignments — the ticket now holds no agent/user on any role (assignee/reporter/reviewer all empty)', 'update_ticket', { ticket_id: '{{orphan_ticket_id}}', role_assignments: [{ role_slug: 'reporter', agent_id: '' }] }),
+      step(4, 'Move the now truly-unassigned ticket onto Plan', 'Ticket HALTS in place on Plan with an auto_advance_halted_unassigned activity marker (no auto-advance, no silent skip to Done)', 'move_ticket', { ticket_id: '{{orphan_ticket_id}}', target_column_name: 'Plan', board_id: '{{policy_board_id}}' }),
     ],
   },
 
