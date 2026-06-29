@@ -1018,8 +1018,23 @@ function Gallery({ ids, onPreview }: { ids: string[]; onPreview: (src: string, k
 }
 
 function MediaThumb({ src, onClick }: { src: string; onClick: (kind: 'image' | 'video') => void }) {
-  const [isVideo, setIsVideo] = useState(false);
-  if (isVideo) {
+  // Resolve the real mimetype before choosing the element. The previous version
+  // always rendered an <img> and relied on its onError to swap to <video> — but
+  // a video/* resource streams back HTTP 200, so the <img> just shows a broken
+  // frame and never fires onError, leaving QA video evidence completely
+  // invisible. A tiny ranged GET (bytes=0-0) of the streaming endpoint gives us
+  // the authoritative Content-Type while transferring a single byte (src already
+  // carries the ?token the /raw route requires).
+  const [kind, setKind] = useState<'image' | 'video' | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch(src, { headers: { Range: 'bytes=0-0' } })
+      .then((res) => (res.headers.get('content-type') || '').toLowerCase())
+      .then((ct) => { if (!cancelled) setKind(ct.startsWith('video/') ? 'video' : 'image'); })
+      .catch(() => { if (!cancelled) setKind('image'); });
+    return () => { cancelled = true; };
+  }, [src]);
+  if (kind === 'video') {
     return (
       <div onClick={() => onClick('video')} style={{ width: 120, height: 76, borderRadius: tokens.radii.sm, overflow: 'hidden', position: 'relative', background: '#000', cursor: 'pointer', border: `1px solid ${tokens.colors.border}` }}>
         <video src={src} muted playsInline preload="metadata" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
@@ -1027,11 +1042,13 @@ function MediaThumb({ src, onClick }: { src: string; onClick: (kind: 'image' | '
       </div>
     );
   }
+  // image (or not-yet-resolved): keep the onError→video fallback as a safety net
+  // in case the Content-Type probe fails or is stripped by a proxy.
   return (
     <img
       src={src}
       onClick={() => onClick('image')}
-      onError={() => setIsVideo(true)}
+      onError={() => setKind('video')}
       alt="artifact"
       style={{ width: 76, height: 76, objectFit: 'cover', borderRadius: tokens.radii.sm, cursor: 'pointer', border: `1px solid ${tokens.colors.border}` }}
     />
