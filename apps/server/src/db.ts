@@ -332,6 +332,13 @@ export function buildDataSourceOptions(): DataSourceOptions {
       username: process.env.DB_USER || 'postgres',
       password: process.env.DB_PASS || '',
       database: process.env.DB_NAME || 'ai_workflow',
+      // DB_SCHEMA (default unset → 'public', i.e. production untouched) lets the
+      // qa-flows Postgres matrix give each test process its OWN schema so the
+      // suite — every file connecting to the same ephemeral CI database — does
+      // not cross-contaminate the way SQLJS_DB_PATH isolates the sqljs path.
+      // bootApp() creates the schema before TypeORM synchronize builds the
+      // tables into it (ticket 0c175408).
+      schema: process.env.DB_SCHEMA || undefined,
       entities,
       migrations: migrationsGlob,
       synchronize: true,   // D-01
