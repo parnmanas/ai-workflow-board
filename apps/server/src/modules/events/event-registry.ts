@@ -341,6 +341,15 @@ export const EVENT_TYPES: EventDefinition[] = [
         agent_member_ids: event.agent_member_ids
           ? Array.from(event.agent_member_ids as Set<string>)
           : undefined,
+        // ticket 25db3cc6 / fe297886: forward the run-workspace provisioning
+        // hint untouched. RoomMessagingService.sendMessage stamps it ONLY on a
+        // QA/security run-dispatch send; the agent-manager reads p.run_provision
+        // (event-dispatcher.ts) to prepare the run folder + pin the subagent cwd
+        // BEFORE spawning. This field-by-field map() previously dropped it, so
+        // every run dispatched into an unprovisioned cwd → the driver had no
+        // checkout to build/drive → 0 record_qa_step → reaper. Omit when absent
+        // so ordinary chat turns keep the wire shape byte-for-byte unchanged.
+        run_provision: event.run_provision ? event.run_provision : undefined,
       };
       return {
         payload,
