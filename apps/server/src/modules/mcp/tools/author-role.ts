@@ -10,7 +10,7 @@
  * carries an `X-AWB-Subagent-Role` pin). Ticket ed07eeeb.
  *
  * `comment-tools.ts` keeps a thin wrapper that binds `ticketRoleAssignmentService`
- * so the four call sites (add_comment / ask_question / answer_question /
+ * so the five call sites (add_comment / ask_question / answer_question /
  * record_decision / handoff_to_agent) keep their original signature.
  */
 
