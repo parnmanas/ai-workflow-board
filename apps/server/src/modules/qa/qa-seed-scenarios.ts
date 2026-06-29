@@ -144,7 +144,7 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
     qa_driver_config: driverConfig(),
     tags: ['comments', 'mentions', 'triggers'],
     steps: [
-      step(0, 'Create a ticket already in In Progress with an assignee', 'Ticket exists in In Progress', 'create_ticket', { workspace_id: '{{workspace_id}}', column_id: '{{in_progress_column_id}}', title: 'QA comment-trigger probe', assignee_id: '{{assignee_agent_id}}' }),
+      step(0, 'Create a ticket already in In Progress with assignee and reviewer roles set', 'Ticket exists in In Progress with a reviewer so the structured reviewer mention can resolve', 'create_ticket', { workspace_id: '{{workspace_id}}', column_id: '{{in_progress_column_id}}', title: 'QA comment-trigger probe', assignee_id: '{{assignee_agent_id}}', reviewer_id: '{{reviewer_agent_id}}' }),
       // author_role is passed explicitly here. The awb-mcp QA driver runs as a
       // CHAT subagent (no X-AWB-Subagent-Role pin) and the probe ticket's author
       // (the driver agent) ends up holding 2 roles — assignee (set in step 0) and
