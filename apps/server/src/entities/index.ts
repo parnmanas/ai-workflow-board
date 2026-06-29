@@ -40,3 +40,4 @@ export { SecurityProfile } from './SecurityProfile';
 export { SecurityRun } from './SecurityRun';
 export { SecurityRunBatch } from './SecurityRunBatch';
 export { SecuritySchedule } from './SecuritySchedule';
+export { WorkspaceSchedule } from './WorkspaceSchedule';
