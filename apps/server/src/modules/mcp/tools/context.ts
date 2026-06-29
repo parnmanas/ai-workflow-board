@@ -50,6 +50,7 @@ import type { QaScheduleService } from '../../qa/qa-schedule.service';
 import type { SecurityProfileService } from '../../security/security-profile.service';
 import type { SecurityRunService } from '../../security/security-run.service';
 import type { SecurityScheduleService } from '../../security/security-schedule.service';
+import type { WorkspaceScheduleService } from '../../workspace-schedule/workspace-schedule.service';
 import { TicketPrerequisitesService } from '../../tickets/ticket-prerequisites.service';
 import { BenchmarkService } from '../../benchmarks/benchmark.service';
 
@@ -122,6 +123,11 @@ export interface ToolContext {
   // security-schedule MCP tools (CRUD + run-now). Standalone context omits it;
   // the tools degrade to an explicit error (no background tick in standalone mode).
   securityScheduleService?: SecurityScheduleService;
+  // Workspace scheduler (ticket 769eb260, foundation 8845be79) — general-purpose
+  // agent-task trigger layer. Required by the workspace-schedule MCP tools (CRUD +
+  // run-now). Standalone context omits it; the tools degrade to an explicit error
+  // (no background tick in standalone mode).
+  workspaceScheduleService?: WorkspaceScheduleService;
   // Ticket a57517be: `unpend_ticket` tool needs to wake the ticket's current
   // column's role-holders right after clearing `pending_user_action` (the
   // `field_changed='pending_user_action'` activity row by itself does not

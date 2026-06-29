@@ -91,6 +91,13 @@ const EXPECTED_TOOLS = [
   'update_security_schedule',
   'delete_security_schedule',
   'run_security_schedule_now',
+  // Ticket 769eb260 — workspace scheduler (general-purpose agent-task trigger).
+  'list_workspace_schedules',
+  'get_workspace_schedule',
+  'create_workspace_schedule',
+  'update_workspace_schedule',
+  'delete_workspace_schedule',
+  'run_workspace_schedule_now',
 ];
 
 test('MCP initialize + tools/list returns expected AWB tool surface', async (t) => {

@@ -10,6 +10,7 @@ import { ActionsModule } from '../actions/actions.module';
 import { QaScenarioModule } from '../qa/qa-scenario.module';
 import { SecurityProfileModule } from '../security/security-profile.module';
 import { BenchmarksModule } from '../benchmarks/benchmarks.module';
+import { WorkspaceScheduleModule } from '../workspace-schedule/workspace-schedule.module';
 
 @Module({
   imports: [
@@ -25,6 +26,8 @@ import { BenchmarksModule } from '../benchmarks/benchmarks.module';
     SecurityProfileModule,
     // Provides BenchmarkService for the benchmark MCP tools (ticket 684c012b).
     BenchmarksModule,
+    // Provides WorkspaceScheduleService for the workspace-schedule MCP tools (ticket 769eb260).
+    WorkspaceScheduleModule,
   ],
   controllers: [McpController],
 })
