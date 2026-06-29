@@ -618,12 +618,18 @@ export class RoomMessagingService {
     const normalized = query.normalize('NFC').toLowerCase();
     const pattern = `%${normalized}%`;
 
+    // Postgres stores chat_room_participants.room_id as uuid but
+    // chat_room_messages.room_id as varchar — a bare `p.room_id = m.room_id`
+    // join raises `operator does not exist: uuid = character varying`.
+    // Wrap both sides with ::text (no-op on sqlite), mirroring
+    // RoomCrudService.listRooms which uses the same RoomMembershipService.toText().
+    const t = (col: string) => this.membership.toText(col);
     const messages = await this.messageRepo
       .createQueryBuilder('m')
       .innerJoin(
         'chat_room_participants',
         'p',
-        'p.room_id = m.room_id AND p.participant_id = :callerId AND p.participant_type = :participantType AND p.left_at IS NULL',
+        `${t('p.room_id')} = ${t('m.room_id')} AND p.participant_id = :callerId AND p.participant_type = :participantType AND p.left_at IS NULL`,
         { callerId, participantType },
       )
       .where('m.workspace_id = :wsId', { wsId: workspaceId })
