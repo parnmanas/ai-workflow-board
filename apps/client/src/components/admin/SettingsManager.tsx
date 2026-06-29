@@ -566,6 +566,11 @@ export default function SettingsManager() {
                 Save settings before testing.
               </span>
             )}
+            {!dirty && isLocalMode && !remoteTestResult && (
+              <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>
+                Local (this instance) — no API key required.
+              </span>
+            )}
             {remoteTestResult && !dirty && (
               <div style={{
                 display: 'flex', alignItems: 'center', gap: 8,
