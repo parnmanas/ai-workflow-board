@@ -25,74 +25,33 @@ import { ok, err, MENTION_SYNTAX_DOC, sanitizeHarnessMarkers } from '../shared/h
 import { getCallerAgent } from '../shared/session-auth';
 import { TicketArchivedError } from '../shared/archive-helpers';
 import { resolveAgentDisplayName } from '../../../utils/agent-name';
+import { resolveAuthorRole as resolveAuthorRoleImpl, mergeAuthorRoleIntoMetadata } from './author-role';
 import type { ToolContext } from './context';
 
 export function registerCommentTools(server: McpServer, ctx: ToolContext): void {
   const { dataSource, activityService, mentionService, logger, ticketRoleAssignmentService } = ctx;
 
-  /**
-   * Snapshot which role an agent comment was authored as, on the ticket the
-   * comment lives on. Stored under `metadata.author_role` (string when the
-   * role is unambiguous; otherwise omitted entirely).
-   *
-   * Resolution order:
-   *   1. caller-supplied `author_role` (override — the agent knows what it
-   *      is doing right now).
-   *   2. session-pinned role from X-AWB-Subagent-Role headers (the plugin
-   *      ticket-session-manager spawns one subagent per (ticket, role) and
-   *      pins the role on that child's MCP config — this is the common path
-   *      for agent-authored comments).
-   *   3. TicketRoleAssignmentService lookup. Only used when the agent holds
-   *      exactly ONE role on the ticket — falling back to "all roles the
-   *      agent holds" stamps every role onto the comment, which is exactly
-   *      the multi-role attribution bug we want to avoid. When the agent
-   *      holds 2+ roles and didn't pin one, return null and let the UI
-   *      render the comment without a role badge instead of attributing it
-   *      to roles the agent isn't currently acting as.
-   *
-   * Returns `null` when nothing resolves, so callers can omit the field
-   * entirely rather than write a misleading empty string.
-   */
-  async function resolveAuthorRole(
+  // `resolveAuthorRole` / `mergeAuthorRoleIntoMetadata` live in ./author-role
+  // so their resolution-order contract is unit-testable (ticket ed07eeeb).
+  // This thin wrapper binds the closure's `ticketRoleAssignmentService` so the
+  // five call sites below keep their original argument list.
+  const resolveAuthorRole = (
     ticketId: string,
     requestedRole: string | undefined,
     authorType: 'user' | 'agent',
     authorId: string,
     sessionRole: string | undefined,
     sessionTicketId: string | undefined,
-  ): Promise<string | null> {
-    const explicit = (requestedRole || '').trim().toLowerCase();
-    if (explicit) return explicit;
-    if (authorType !== 'agent') return null;
-
-    const sessionMatchesTicket = sessionTicketId && sessionTicketId === ticketId;
-    if (sessionMatchesTicket && sessionRole) return sessionRole;
-
-    if (!ticketRoleAssignmentService) return null;
-    try {
-      const resolved = await ticketRoleAssignmentService.resolveForTicket(ticketId);
-      const slugs = resolved
-        .filter(r => r.holder?.type === 'agent' && r.holder.id === authorId)
-        .map(r => r.role.slug);
-      if (slugs.length === 1) return slugs[0];
-      // 0 holdings → not on this ticket; 2+ → ambiguous (e.g. same agent is
-      // both assignee and reviewer). Either way we don't have enough info to
-      // say which role the agent is acting as right now, so omit the badge.
-      return null;
-    } catch {
-      return null;
-    }
-  }
-
-  function mergeAuthorRoleIntoMetadata(
-    metadata: Record<string, unknown> | undefined,
-    authorRole: string | null,
-  ): Record<string, unknown> {
-    const base = metadata && typeof metadata === 'object' ? { ...metadata } : {};
-    if (authorRole === null) return base;
-    if (base.author_role === undefined) base.author_role = authorRole;
-    return base;
-  }
+  ): Promise<string | null> =>
+    resolveAuthorRoleImpl(
+      ticketRoleAssignmentService,
+      ticketId,
+      requestedRole,
+      authorType,
+      authorId,
+      sessionRole,
+      sessionTicketId,
+    );
 
   server.tool(
     'add_comment',
