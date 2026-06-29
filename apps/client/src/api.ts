@@ -9,6 +9,8 @@ import type {
   QaRunBatch,
   QaSchedule,
   QaScheduleScope,
+  WorkspaceSchedule,
+  WorkspaceScheduleDispatch,
   SecurityProfile,
   SecurityProfileListItem,
   SecurityRun,
@@ -1096,6 +1098,49 @@ export const api = {
   },
   runQaScheduleNow: (id: string, workspaceId: string) =>
     request<{ schedule: QaSchedule; batch: QaRunBatch }>(`/qa/schedules/${id}/run-now`, {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: workspaceId }),
+    }),
+
+  // ─── Workspace schedules (ticket 8845be79 foundation / 1927ed4a UI) ──────────
+  // General-purpose agent-task scheduler: when due, the server opens a fresh chat
+  // room and sends `task_prompt` to `target_agent_id`. Exactly one of cron /
+  // interval_ms. board_id omitted → all schedules in the workspace; "" → only
+  // workspace-scoped (board_id IS NULL); <uuid> → that board's.
+  listWorkspaceSchedules: (workspaceId: string, boardId?: string | null) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    if (boardId !== undefined && boardId !== null) params.set('board_id', boardId);
+    return request<WorkspaceSchedule[]>(`/workspace-schedules?${params.toString()}`);
+  },
+  createWorkspaceSchedule: (data: {
+    workspace_id: string;
+    board_id?: string | null;
+    name: string;
+    target_agent_id: string;
+    task_prompt: string;
+    cron?: string | null;
+    interval_ms?: number | null;
+    enabled?: boolean;
+  }) => request<WorkspaceSchedule>('/workspace-schedules', { method: 'POST', body: JSON.stringify(data) }),
+  updateWorkspaceSchedule: (
+    id: string,
+    data: {
+      workspace_id: string;
+      board_id?: string | null;
+      name?: string;
+      target_agent_id?: string;
+      task_prompt?: string;
+      cron?: string | null;
+      interval_ms?: number | null;
+      enabled?: boolean;
+    },
+  ) => request<WorkspaceSchedule>(`/workspace-schedules/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteWorkspaceSchedule: (id: string, workspaceId: string) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    return request<{ success: true; id: string }>(`/workspace-schedules/${id}?${params.toString()}`, { method: 'DELETE' });
+  },
+  runWorkspaceScheduleNow: (id: string, workspaceId: string) =>
+    request<{ schedule: WorkspaceSchedule; dispatch: WorkspaceScheduleDispatch }>(`/workspace-schedules/${id}/run-now`, {
       method: 'POST',
       body: JSON.stringify({ workspace_id: workspaceId }),
     }),
