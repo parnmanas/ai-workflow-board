@@ -360,7 +360,7 @@ export class QaRunService {
     return this.runRepo.save(run);
   }
 
-  async completeRun(runId: string, workspaceId: string, status: QaRunStatus, summary?: string): Promise<QaRun> {
+  async completeRun(runId: string, workspaceId: string, status: QaRunStatus, summary?: string, builtCommit?: string): Promise<QaRun> {
     const run = await this.getRun(runId, workspaceId);
     const valid: QaRunStatus[] = ['pending', 'running', 'passed', 'failed', 'error'];
     if (!valid.includes(status)) throw makeError(400, `status must be one of ${valid.join(', ')}`);
@@ -405,8 +405,33 @@ export class QaRunService {
 
     run.status = finalStatus;
     if (finalSummary !== undefined) run.summary = finalSummary;
+    if (builtCommit) run.built_commit = builtCommit;
     run.finished_at = new Date();
     const saved = await this.runRepo.save(run);
+
+    // Warm-build advance (ticket be2f998a) — the QA mirror of the security
+    // last_passed_commit advance (security-run.service.ts). On a genuine PASS with
+    // a reported built commit, stamp the scenario's last_built_commit/built_at so
+    // decideRunFreshness flips the NEXT run of this scenario cold → warm
+    // (cold_then_warm). Without this stamp the "이후 warm" branch never turns on and
+    // every run cold-rebuilds (~35min) — the exact bug this ticket fixes.
+    //
+    // CRITICAL QA-specific difference from the security mirror: gate on
+    // `saved.status` (the POST-gate status), NOT the raw `status` arg. A
+    // self-reported `passed` that the step/evidence gates above downgraded to
+    // `failed` must NOT advance the warm commit — otherwise an unproven run would
+    // poison the next run into skipping a needed cold rebuild. Skip silently when
+    // no commit was reported (can't warm to an unknown SHA; staying cold is safe).
+    if (saved.status === 'passed' && saved.built_commit) {
+      await this.scenarioRepo.update(
+        { id: saved.scenario_id },
+        { last_built_commit: saved.built_commit, built_at: saved.finished_at ?? new Date() },
+      );
+      this.logService.info(
+        'QA',
+        `run ${runId} passed → scenario ${saved.scenario_id} last_built_commit advanced to ${saved.built_commit} (next run warm)`,
+      );
+    }
 
     // On-failure auto-ticket hook. completeRun is the single QaRun finalization
     // choke point, so the side-effect is called here directly (synchronous,

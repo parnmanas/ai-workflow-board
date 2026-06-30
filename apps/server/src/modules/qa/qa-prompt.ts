@@ -62,6 +62,7 @@ export function renderQaRunPrompt(scenario: QaScenario, runId: string): string {
     `   - \`artifact_resource_ids\`: the Resource id(s) you just uploaded`,
     `3. If a step fails, keep going where it makes sense, but record the failure.`,
     `4. When all steps are done, call \`complete_qa_run\` with \`run_id\` \`${runId}\`, a final \`status\` (\`passed\` if every step passed, otherwise \`failed\`/\`error\`), and a \`summary\`.`,
+    `   - **On a PASS, also pass \`built_commit\`** = the repo HEAD SHA you built/tested (e.g. \`git -C <work folder> rev-parse HEAD\`). The server records it as this scenario's \`last_built_commit\` so the **next run builds warm** (incremental, minutes) instead of a full cold rebuild (~35min). Omit it and the next run stays cold.`,
     ``,
     `Refer to \`docs/qa-driver-guide.md\` for the driver contract (setup/do/observe/assert) and the step ↔ driver-action mapping.`,
   ]

@@ -86,6 +86,9 @@ function runToJson(r: QaRun) {
     step_results: r.step_results ?? [],
     artifact_resource_ids: r.artifact_resource_ids ?? [],
     summary: r.summary,
+    // Warm-build provenance (ticket be2f998a): the repo HEAD SHA this run
+    // built/tested. On a PASS it advanced the scenario's last_built_commit.
+    built_commit: r.built_commit,
     auto_ticket_id: r.auto_ticket_id ?? null,
     rerun_generation: r.rerun_generation ?? 0,
     triggered_by_type: r.triggered_by_type,
@@ -460,17 +463,21 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
   server.tool(
     'complete_qa_run',
     'Finalize a QaRun with an overall status (passed if every step passed, else failed/error) ' +
-    'and a summary. Stamps finished_at.',
+    'and a summary. Stamps finished_at. `built_commit` is the repo HEAD SHA you built/tested — ' +
+    'REPORT IT ON A PASS so the scenario records it as last_built_commit and the NEXT run of this ' +
+    'scenario builds WARM (incremental, minutes) instead of cold-rebuilding from scratch (~35min). ' +
+    'A self-reported pass that fails the step/evidence gates is downgraded and will NOT advance the warm commit.',
     {
       run_id: z.string().describe('QaRun ID'),
       workspace_id: z.string().describe('Workspace ID (required, scope guard)'),
       status: z.enum(['passed', 'failed', 'error']).describe('Final run status'),
       summary: z.string().optional().describe('Human-readable run summary'),
+      built_commit: z.string().optional().describe('Repo HEAD SHA built/tested. On a PASS it becomes the scenario last_built_commit → the next run is warm (cold_then_warm). Omit and the next run stays cold.'),
     },
-    async ({ run_id, workspace_id, status, summary }) => {
+    async ({ run_id, workspace_id, status, summary, built_commit }) => {
       if (!qaRunService) return err('QA run service unavailable in this MCP context');
       try {
-        const row = await qaRunService.completeRun(run_id, workspace_id, status, summary);
+        const row = await qaRunService.completeRun(run_id, workspace_id, status, summary, built_commit);
         return ok(runToJson(row));
       } catch (e: any) {
         return err(e?.message || 'Failed to complete QA run');

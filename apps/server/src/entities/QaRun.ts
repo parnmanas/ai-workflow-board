@@ -44,6 +44,15 @@ export class QaRun {
   @Column({ type: 'text', default: '' })
   summary: string;
 
+  // The repo HEAD SHA this run built/tested, reported by the agent at completion
+  // via complete_qa_run (the server has no local clone to resolve it). On a PASS
+  // this becomes the scenario's new last_built_commit, flipping cold_then_warm to
+  // the warm branch for the NEXT run (decideRunFreshness). '' = not reported →
+  // next run stays cold (safe). Mirrors SecurityRun.scanned_commit, whose PASS
+  // advances SecurityProfile.last_passed_commit. (warm-build, ticket be2f998a)
+  @Column({ type: 'varchar', default: '' })
+  built_commit: string;
+
   @Column({ type: 'varchar', default: 'user' })
   triggered_by_type: string;
 
