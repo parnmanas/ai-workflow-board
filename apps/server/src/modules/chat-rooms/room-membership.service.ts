@@ -10,6 +10,13 @@ import { resolveAgentDisplayName } from '../../utils/agent-name';
 
 const PARTICIPANT_CAP = 50;
 
+/**
+ * RFC-4122 shape. A participant/sender id that isn't a uuid (the synthetic
+ * 'system' author QA/Action dispatch uses) must never reach a uuid-typed
+ * column lookup — see resolveParticipantName for the full rationale.
+ */
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
 function makeError(status: number, message: string): Error & { status: number } {
   const err = new Error(message) as Error & { status: number };
   err.status = status;
@@ -200,8 +207,26 @@ export class RoomMembershipService {
   /**
    * Shared helper: resolve a (type, id) pair to a human-readable display name.
    * Returns 'Unknown User' / 'Unknown Agent' / 'Unknown' on miss (never throws).
+   *
+   * Synthetic non-uuid senders short-circuit BEFORE any DB lookup. QA-run and
+   * scheduler-triggered Action dispatch author their first room message as the
+   * literal `'system'` sender (see QaRunService.startQaRun / ActionsService.
+   * dispatch). users.id / agents.id are uuid columns, so on Postgres the lookup
+   * `WHERE id = 'system'` aborts the whole query with `invalid input syntax for
+   * type uuid: "system"`. That doesn't just 500 a manual get_chat_room_messages
+   * read — the agent-manager fetches a room's history (this same getMessages →
+   * resolveParticipantName path, via GET /api/agent/chat-rooms/:id/messages)
+   * BEFORE spawning a worker for a chat dispatch, so the throw made the dispatch
+   * fall into its catch-and-drop branch and NO QA executor ever spawned. Guarding
+   * the cast here fixes both the read and the silent no-spawn in one place, and
+   * also covers every already-persisted 'system' row.
    */
   async resolveParticipantName(participantType: string, participantId: string): Promise<string> {
+    if (!participantId || !UUID_RE.test(participantId)) {
+      // 'system' is the known dispatch author; anything else non-uuid is a
+      // malformed/legacy id — neither is a row in users/agents.
+      return participantId === 'system' ? 'System' : 'Unknown';
+    }
     if (participantType === 'user') {
       const user = await this.userRepo.findOne({ where: { id: participantId } });
       return user ? (user.name || user.email) : 'Unknown User';

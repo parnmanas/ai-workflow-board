@@ -485,6 +485,41 @@ export interface QaSchedule {
   updated_at: string;
 }
 
+/**
+ * WorkspaceSchedule — general-purpose "dispatch this task to one agent on this
+ * cadence" trigger (ticket 8845be79 foundation; this UI = ticket 1927ed4a). When
+ * due, the server opens a FRESH chat room, seats `target_agent_id`, and sends
+ * `task_prompt` as the opening message (the QA/Security RUN dispatch shape).
+ * Cadence is exactly one of `cron` (5-field UTC) or `interval_ms`.
+ * `next_run_at`/`last_run_at`/`last_room_id` track firing; `last_room_id`
+ * deep-links to the most recent dispatched conversation. `board_id` is optional
+ * context (null = workspace-scoped); it does not affect WHEN the schedule fires.
+ */
+export interface WorkspaceSchedule {
+  id: string;
+  workspace_id: string;
+  board_id: string | null;
+  name: string;
+  target_agent_id: string;
+  task_prompt: string;
+  cron: string | null;
+  interval_ms: number | null;
+  enabled: boolean;
+  next_run_at: string | null;
+  last_run_at: string | null;
+  last_room_id: string | null;
+  triggered_by_type: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkspaceScheduleDispatch {
+  schedule_id: string;
+  room_id: string;
+  agent_id: string;
+}
+
 // ─── Security inspection (보안 점검 — sibling of scenario QA) ────────────────
 // Mirrors the QA scenario/run model but swaps the step flow for a checklist +
 // severity-graded findings model, plus incremental git-diff scoping. Server

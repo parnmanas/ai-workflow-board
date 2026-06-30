@@ -153,6 +153,20 @@ export const EVENT_TYPES: EventDefinition[] = [
         base_repo: event.base_repo ?? null,
         base_branch: event.base_branch || '',
         harness_config: event.harness_config ?? null,
+        // Resolved abstract effort preset (board catalog × ticket effort_preset);
+        // agent-manager maps it onto per-CLI options at spawn. Null = no override.
+        // Previously DROPPED by this field-by-field reconstruction (and by flatten
+        // below), so board effort presets silently no-op'd on the SSE wire — the
+        // exact "one cell missed" class the parity guard test now prevents.
+        effort_preset: event.effort_preset ?? null,
+        // Resolved environment setup (ticket 354d336b); agent-manager provisions
+        // the working env (clone/update repos, setup commands, env_vars) before
+        // spawn. Null = no provisioning. Same drop story as effort_preset.
+        environment_config: event.environment_config ?? null,
+        // TicketSupervisor kill-and-respawn signal — agent-manager reads
+        // force_respawn off the flattened event to drop a wedged subagent before
+        // handling the trigger. Defaults false.
+        force_respawn: event.force_respawn === true,
         max_concurrent_tickets_per_agent:
           typeof event.max_concurrent_tickets_per_agent === 'number'
             ? event.max_concurrent_tickets_per_agent
@@ -198,6 +212,15 @@ export const EVENT_TYPES: EventDefinition[] = [
         // as column_prompt: without this line the field never leaves the
         // envelope and the manager sees undefined.
         harness_config: p.harness_config ?? null,
+        // Same flatten rule as harness_config: agent-manager's event-dispatcher
+        // reads these off the FLATTENED event (parseEffortPreset(ev.effort_preset),
+        // parseEnvironmentConfig(ev.environment_config), ev.force_respawn). Without
+        // these lines the fields never leave the envelope and the manager silently
+        // falls back to "no override / no provisioning / no respawn" — the latent
+        // wire break this ticket's parity guard now locks down.
+        effort_preset: p.effort_preset ?? null,
+        environment_config: p.environment_config ?? null,
+        force_respawn: p.force_respawn === true,
         // Per-board cap forwarded so the manager can keep a defensive drop
         // alongside the server-side gate.
         max_concurrent_tickets_per_agent: p.max_concurrent_tickets_per_agent,
@@ -341,6 +364,15 @@ export const EVENT_TYPES: EventDefinition[] = [
         agent_member_ids: event.agent_member_ids
           ? Array.from(event.agent_member_ids as Set<string>)
           : undefined,
+        // ticket 25db3cc6 / fe297886: forward the run-workspace provisioning
+        // hint untouched. RoomMessagingService.sendMessage stamps it ONLY on a
+        // QA/security run-dispatch send; the agent-manager reads p.run_provision
+        // (event-dispatcher.ts) to prepare the run folder + pin the subagent cwd
+        // BEFORE spawning. This field-by-field map() previously dropped it, so
+        // every run dispatched into an unprovisioned cwd → the driver had no
+        // checkout to build/drive → 0 record_qa_step → reaper. Omit when absent
+        // so ordinary chat turns keep the wire shape byte-for-byte unchanged.
+        run_provision: event.run_provision ? event.run_provision : undefined,
       };
       return {
         payload,
@@ -720,6 +752,31 @@ export const EVENT_TYPES: EventDefinition[] = [
           agent_ids: Array.isArray(inst.agent_ids) ? inst.agent_ids.map(String) : undefined,
           working_dirs: Array.isArray(inst.working_dirs) ? inst.working_dirs.map(String) : undefined,
           paired_at: typeof inst.paired_at === 'string' ? inst.paired_at : undefined,
+          // Manager self-update fields — the admin UI (AgentManagerPage) reads
+          // these off the LIVE SSE instance to render the "update available"
+          // badge. This field-by-field reconstruction previously dropped them,
+          // so the badge only appeared on a full REST page reload, never via the
+          // live heartbeat. Same silent-drop class as the agent_trigger fields.
+          latest_version:
+            typeof inst.latest_version === 'string' || inst.latest_version === null
+              ? inst.latest_version
+              : undefined,
+          update_available:
+            typeof inst.update_available === 'boolean' ? inst.update_available : undefined,
+          repo_root:
+            typeof inst.repo_root === 'string' || inst.repo_root === null ? inst.repo_root : undefined,
+          default_branch:
+            typeof inst.default_branch === 'string' || inst.default_branch === null
+              ? inst.default_branch
+              : undefined,
+          update_last_checked_at:
+            typeof inst.update_last_checked_at === 'string' || inst.update_last_checked_at === null
+              ? inst.update_last_checked_at
+              : undefined,
+          update_last_error:
+            typeof inst.update_last_error === 'string' || inst.update_last_error === null
+              ? inst.update_last_error
+              : undefined,
         },
       };
       return {

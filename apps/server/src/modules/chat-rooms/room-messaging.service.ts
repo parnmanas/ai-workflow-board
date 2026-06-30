@@ -618,11 +618,13 @@ export class RoomMessagingService {
     const normalized = query.normalize('NFC').toLowerCase();
     const pattern = `%${normalized}%`;
 
-    // Postgres stores chat_room_participants.room_id as uuid but
-    // chat_room_messages.room_id as varchar — a bare `p.room_id = m.room_id`
-    // join raises `operator does not exist: uuid = character varying`.
-    // Wrap both sides with ::text (no-op on sqlite), mirroring
-    // RoomCrudService.listRooms which uses the same RoomMembershipService.toText().
+    // chat_room_participants.room_id 는 ChatRoom uuid PK 의 @ManyToOne FK 라
+    // pre-sync-postgres 가 운영 Postgres 에서 uuid 컬럼으로 정렬한다. 반면
+    // chat_room_messages.room_id 는 평범한 varchar 컬럼이라, 컬럼-대-컬럼
+    // 조인 `p.room_id = m.room_id` 가 `uuid = character varying` 로 깨진다
+    // (파라미터 coercion 으로 안 풀리는 구조적 실패). listRooms 와 동일하게
+    // 양쪽을 toText() 로 감싸 Postgres 에서만 ::text 로 맞춘다. (SQLite 는
+    // 둘 다 text 라 무영향.)
     const t = (col: string) => this.membership.toText(col);
     const messages = await this.messageRepo
       .createQueryBuilder('m')

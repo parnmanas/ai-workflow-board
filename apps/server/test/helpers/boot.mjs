@@ -31,6 +31,36 @@ export async function loadServerModules() {
   return { NestFactory, AppModule, activityEvents, ActivityService, AuthService, ActionsService, getDataSourceToken, mcpTools };
 }
 
+// Create a fresh, isolated Postgres schema for this test process and point the
+// datasource at it via DB_SCHEMA (read in buildDataSourceOptions). Drops any
+// leftover schema of the same name first so a reused pid can't inherit stale
+// tables. Connects with the raw `pg` driver because the TypeORM DataSource is
+// not up yet at this boot stage. Postgres matrix only — see bootApp().
+async function prepareIsolatedPgSchema(schema) {
+  // Defensive identifier validation — schema is built from pid+port (always
+  // safe) but never interpolate an unvalidated value into DDL.
+  if (!/^[a-z_][a-z0-9_]*$/i.test(schema)) {
+    throw new Error(`unsafe pg schema name: ${schema}`);
+  }
+  const { Client } = await import('pg');
+  const client = new Client({
+    host: process.env.DB_HOST || 'localhost',
+    port: parseInt(process.env.DB_PORT || '5432', 10),
+    user: process.env.DB_USER || 'postgres',
+    password: process.env.DB_PASS || '',
+    database: process.env.DB_NAME || 'ai_workflow',
+  });
+  await client.connect();
+  try {
+    await client.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+    await client.query(`CREATE SCHEMA "${schema}"`);
+  } finally {
+    await client.end();
+  }
+  process.env.DB_SCHEMA = schema;
+  traceEvent('pg-schema-isolated', { schema });
+}
+
 export async function bootApp({ port = 7800, logger = false } = {}) {
   process.env.DB_TYPE = process.env.DB_TYPE || 'sqlite';
   process.env.NODE_ENV = 'test';
@@ -50,6 +80,16 @@ export async function bootApp({ port = 7800, logger = false } = {}) {
     const isolated = path.join(os.tmpdir(), `awb-qa-${process.pid}-${port}.db`);
     try { fs.rmSync(isolated, { force: true }); } catch { /* best-effort */ }
     process.env.SQLJS_DB_PATH = isolated;
+  }
+  // Postgres matrix (ticket 0c175408): the qa-flows suite chains every flow
+  // file through its own process but they all connect to the SAME ephemeral CI
+  // database — without per-process isolation they cross-contaminate the way the
+  // shared data.db did before SQLJS_DB_PATH. Give each process a dedicated
+  // Postgres schema (keyed on pid+port, like the sqljs temp path) and create it
+  // up front so TypeORM synchronize builds the tables into it. No-op unless
+  // DB_TYPE=postgres; production (DB_SCHEMA unset → 'public') is untouched.
+  if (process.env.DB_TYPE === 'postgres' && !process.env.DB_SCHEMA) {
+    await prepareIsolatedPgSchema(`qa_${process.pid}_${port}`);
   }
   // Auto-start the trace buffer so every helper below records into it
   // without the test author having to wire anything.

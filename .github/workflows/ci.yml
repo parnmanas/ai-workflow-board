@@ -1,0 +1,88 @@
+# CI — Postgres dialect matrix (ticket 0c175408)
+#
+# Why this exists: dev runs on sql.js (dynamically typed) and prod runs on
+# Postgres (strictly typed). Dialect-specific bugs — e.g. the
+# `operator does not exist: uuid = character varying` crash in
+# chat-rooms searchMessages (ticket ca31a6ea) — pass every local sqlite run and
+# only surface AFTER deploy on live Postgres. That made live-only verification a
+# recurring structural pattern.
+#
+# This workflow runs the cross-table / chat-join contract flows against a real
+# ephemeral Postgres so that class of bug fails the build BEFORE merge. The
+# qa-flows harness (bootApp) already honors DB_TYPE=postgres and, for the
+# matrix, isolates each test process in its own pg schema.
+#
+# The grep guard job is the cheap static backstop (no Postgres needed): it fails
+# fast if a chat-rooms query reintroduces a bare `*.room_id = *.room_id`
+# column-vs-column join without the ::text cast.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  # Fast static guard — runs everywhere, no DB. Catches the bare-join regression
+  # class deterministically in seconds.
+  chat-join-grep-guard:
+    name: chat-rooms join cast guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Run chat-rooms join cast guard
+        working-directory: apps/server
+        run: node --test --test-force-exit test/chat-room-join-cast-guard.test.mjs
+
+  # Dialect matrix — the actual pre-deploy safety net. Boots the contract flows
+  # against Postgres 16 (matching the prod image) so uuid/varchar mismatches and
+  # other Postgres-only failures are caught here, not on the live server.
+  postgres-dialect-matrix:
+    name: qa-flows on Postgres
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: awb
+          POSTGRES_PASSWORD: awb
+          POSTGRES_DB: awb_ci
+        ports:
+          - 5432:5432
+        # Wait until pg accepts connections before the job's steps run.
+        options: >-
+          --health-cmd "pg_isready -U awb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DB_TYPE: postgres
+      DB_HOST: localhost
+      DB_PORT: 5432
+      DB_USER: awb
+      DB_PASS: awb
+      DB_NAME: awb_ci
+      NODE_ENV: test
+      MCP_DEV_MODE: 'true'
+      AGENT_DEV_MODE: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Build server
+        run: npm run build -w server
+      - name: Run qa-flows dialect matrix on Postgres
+        working-directory: apps/server
+        run: npm run test:qa:pg

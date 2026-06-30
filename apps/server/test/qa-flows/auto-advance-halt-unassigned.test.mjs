@@ -225,5 +225,71 @@ test('auto-advance halts fully-unassigned tickets and advances staffed ones', as
     `config-drift column must not be a dead-end; expected ${cWork.id}, got ${driftRow.column_id}`,
   );
 
+  // ---------------------------------------------------------------------------
+  // (d) REPORTER-ONLY ticket on an unservable active column → CASCADE, not halt
+  //     (ticket 519fad18). A ticket whose only holder is the reporter is NOT an
+  //     orphan: `_ticketHasAnyHolder` counts the reporter, so it takes the
+  //     staffed-elsewhere skip path and auto-advances past the unservable stage
+  //     instead of writing an `auto_advance_halted_unassigned` flag. This is the
+  //     exact shape the live "Column role routing & auto-advance" QA scenario
+  //     produces: create_ticket auto-defaults the reporter to the caller
+  //     (commit 29f7df8), so the scenario's "completely-unassigned" ticket
+  //     actually carries a reporter and must cascade — NOT halt — here. The
+  //     regression this guards: dropping the reporter from `_ticketHasAnyHolder`
+  //     would silently re-break that scenario (orphan-halt firing on a staffed
+  //     ticket). The truly-zero-holder orphan is covered by case (a) above.
+  // ---------------------------------------------------------------------------
+  step('(d) build board where Plan routes to planner (unheld) and Work routes to reporter');
+  const boardD = await createBoard(app, getDataSourceToken, ws.id, { name: 'reporter-only-cascade-board' });
+  await createColumn(app, getDataSourceToken, boardD.id, {
+    name: 'Todo', position: 0, workspaceId: ws.id, kind: 'intake', roleRouting: ['assignee'],
+  });
+  const dPlan = await createColumn(app, getDataSourceToken, boardD.id, {
+    name: 'Plan', position: 1, workspaceId: ws.id, kind: 'active', roleRouting: ['planner'],
+  });
+  const dWork = await createColumn(app, getDataSourceToken, boardD.id, {
+    name: 'Work', position: 2, workspaceId: ws.id, kind: 'active', roleRouting: ['reporter'],
+  });
+  await createColumn(app, getDataSourceToken, boardD.id, {
+    name: 'Done', position: 3, workspaceId: ws.id, isTerminal: true, kind: 'terminal',
+    roleRouting: ['reporter'],
+  });
+
+  // Only a reporter — no assignee, no reviewer. Mirrors an MCP-created ticket
+  // whose reporter was auto-filled to the creator and nothing else was set.
+  const reporterOnly = await createTicket(app, getDataSourceToken, {
+    columnId: dPlan.id,
+    workspaceId: ws.id,
+    title: 'Reporter-only ticket on an unservable Plan',
+    reporterId: trio.reporter.agent.id,
+  });
+
+  step('(d) emit "moved" onto the unservable (planner-routed) Plan column');
+  await activity.logActivity({
+    entity_type: 'ticket', entity_id: reporterOnly.id, action: 'moved',
+    field_changed: 'column', old_value: 'Todo', new_value: 'Plan',
+    ticket_id: reporterOnly.id, actor_id: 'test-user', actor_name: 'tester',
+  });
+
+  step('(d) ticket cascaded past Plan to the reporter-servable Work column');
+  const reporterRow = await waitForTicket(ds, reporterOnly.id, (r) => r.column_id === dWork.id);
+  assert.equal(
+    reporterRow.column_id, dWork.id,
+    `reporter-only ticket must cascade past the unservable Plan to Work (${dWork.id}); got ${reporterRow.column_id}`,
+  );
+
+  step('(d) NO orphan-halt flag was written — a reporter is a holder, not an orphan');
+  const reporterLogs = await ds
+    .getRepository('ActivityLog')
+    .find({ where: { ticket_id: reporterOnly.id } });
+  assert.ok(
+    !reporterLogs.some((l) => l.action === 'auto_advance_halted_unassigned'),
+    `reporter-only ticket must NOT produce an auto_advance_halted_unassigned row; got ${JSON.stringify(reporterLogs.map((l) => l.action))}`,
+  );
+  assert.ok(
+    reporterLogs.some((l) => l.action === 'moved' && l.actor_id === 'auto-advance'),
+    'reporter-only ticket must cascade via an auto-advance moved row',
+  );
+
   exitAfterTests(0);
 });

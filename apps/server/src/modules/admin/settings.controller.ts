@@ -146,29 +146,37 @@ export class SettingsController {
   }
 
   /**
-   * Probe the configured remote AWB target so the admin can verify that not
-   * only the URL + API key combo works but that the configured DESTINATION
-   * (workspace, board, column) actually resolves and matches before relying
-   * on `create_remote_improvement_ticket` to fire in production.
+   * Probe the configured self-improvement target so the admin can verify that
+   * the configured DESTINATION (workspace, board, column) actually resolves and
+   * matches before relying on `create_remote_improvement_ticket` to fire in
+   * production.
    *
-   * Validation steps (all must pass for ok=true):
-   *   1. All five settings populated and the API key decrypts.
-   *   2. Remote `get_board` for the configured board_id succeeds — exercises
-   *      auth (a bad key fails here just as well as on whoami) AND proves
-   *      the board id exists on the remote.
-   *   3. The returned board's `workspace_id` matches the configured workspace.
-   *      Catches the "right board id, wrong workspace id" typo that would
-   *      otherwise create tickets where the admin doesn't expect.
-   *   4. The configured column_id is present in the board's columns list.
-   *      Catches the "valid column id from a DIFFERENT board" pitfall that
-   *      create_ticket would silently honor.
+   * Two modes — mirrors `resolveDiscoveryTarget`/`isSelfUrl` so the test path
+   * agrees with the dropdown discovery path:
    *
-   * Returns { ok, message, board?, column? }. Never echoes the API key back.
+   *   - `local`:  configured URL is blank OR matches this request's own origin.
+   *               No API key required (the AdminGuard session already authorizes
+   *               the caller). Destination is validated against THIS server's
+   *               TypeORM repositories directly — no MCP round-trip.
+   *   - `remote`: any other URL → speak MCP to the remote via `callRemoteMcpTool`.
+   *               An API key is mandatory; a missing one yields an actionable
+   *               error telling the admin which field to fill and to save first.
+   *
+   * Validation steps (all must pass for ok=true), identical intent in both modes:
+   *   1. All three destination ids populated (workspace/board/column). API key
+   *      additionally required in remote mode.
+   *   2. The configured board_id exists (local: boardRepo; remote: get_board).
+   *   3. The board's `workspace_id` matches the configured workspace. Catches the
+   *      "right board id, wrong workspace id" typo.
+   *   4. The configured column_id belongs to that board. Catches the "valid
+   *      column id from a DIFFERENT board" pitfall.
+   *
+   * Returns { ok, mode, message, board?, column? }. Never echoes the API key back.
    *
    * Auth: AdminGuard at the class level already covers it.
    */
   @Post('self-improvement/test')
-  async testRemoteTarget(@Res() res: Response) {
+  async testRemoteTarget(@Req() req: Request, @Res() res: Response) {
     const rows = await this.settingRepo.find({
       where: [
         { key: 'self_improvement.remote_awb_url' },
@@ -185,20 +193,34 @@ export class SettingsController {
     const remoteColumnId = (byKey.get('self_improvement.remote_awb_column_id') || '').trim();
     const rawKey = byKey.get('self_improvement.remote_awb_api_key') || '';
 
-    if (!remoteUrl) {
-      return res.status(400).json({ ok: false, message: 'remote_awb_url is not set' });
-    }
+    // 목적지 id 3종은 두 모드 공통 필수. 비었으면 어느 칸인지 + 저장 필요 여부를 명시.
     if (!remoteWorkspaceId) {
-      return res.status(400).json({ ok: false, message: 'remote_awb_workspace_id is not set' });
+      return res.status(400).json({ ok: false, kind: 'validation', message: 'Workspace 가 설정되지 않았습니다. 드롭다운에서 workspace 를 고른 뒤 Save settings 하세요.' });
     }
     if (!remoteBoardId) {
-      return res.status(400).json({ ok: false, message: 'remote_awb_board_id is not set' });
+      return res.status(400).json({ ok: false, kind: 'validation', message: 'Board 가 설정되지 않았습니다. 드롭다운에서 board 를 고른 뒤 Save settings 하세요.' });
     }
     if (!remoteColumnId) {
-      return res.status(400).json({ ok: false, message: 'remote_awb_column_id is not set' });
+      return res.status(400).json({ ok: false, kind: 'validation', message: 'Column 이 설정되지 않았습니다. 드롭다운에서 column 을 고른 뒤 Save settings 하세요.' });
     }
+
+    // URL 빈칸 또는 self-origin → local 모드(이 서버 자신이 타깃). API key 불필요,
+    // 로컬 DB 를 직접 조회해 목적지 존재·일치를 검증한다.
+    const isLocal = !remoteUrl || isSelfUrl(remoteUrl, req);
+    if (isLocal) {
+      return this.testLocalTarget(res, remoteWorkspaceId, remoteBoardId, remoteColumnId);
+    }
+
+    // remote 모드 — 다른 AWB 인스턴스가 타깃이므로 그 원격에서 발급한 API key 가 필수.
     if (!rawKey) {
-      return res.status(400).json({ ok: false, message: 'remote_awb_api_key is not set' });
+      return res.status(400).json({
+        ok: false,
+        kind: 'auth',
+        message:
+          '원격 AWB(' + remoteUrl + ')를 가리키면 그 원격에서 발급한 agent API key(X-Agent-Key)가 필요합니다. ' +
+          'API key 칸에 키를 입력하고 Save settings 한 뒤 다시 테스트하세요. ' +
+          '(이 서버 자신을 타깃으로 하려면 URL 칸을 비우면 키 없이 동작합니다.)',
+      });
     }
     const apiKey = decrypt(rawKey);
     if (!apiKey) {
@@ -212,6 +234,7 @@ export class SettingsController {
     if (!result.ok) {
       return res.json({
         ok: false,
+        mode: 'remote',
         kind: result.kind,
         message: `Remote ${result.kind} failure: ${result.message}`,
       });
@@ -222,6 +245,7 @@ export class SettingsController {
     if (actualWorkspaceId !== remoteWorkspaceId) {
       return res.json({
         ok: false,
+        mode: 'remote',
         kind: 'validation',
         message:
           `Configured workspace_id does not match the remote board's workspace. ` +
@@ -235,6 +259,7 @@ export class SettingsController {
       const columnSummary = columns.map((c: any) => `${c?.name || '?'} (${c?.id || '?'})`).join(', ');
       return res.json({
         ok: false,
+        mode: 'remote',
         kind: 'validation',
         message:
           `Configured column_id ${remoteColumnId} is not a column of board "${board?.name || remoteBoardId}". ` +
@@ -244,11 +269,70 @@ export class SettingsController {
 
     return res.json({
       ok: true,
+      mode: 'remote',
       message:
         `Remote AWB reachable — improvement tickets will land in column ` +
         `"${column.name}" on board "${board?.name || remoteBoardId}" ` +
         `(workspace ${remoteWorkspaceId}).`,
       board: { id: board?.id, name: board?.name, workspace_id: actualWorkspaceId },
+      column: { id: column.id, name: column.name },
+    });
+  }
+
+  /**
+   * Local-mode destination validation for `testRemoteTarget`. The target is
+   * THIS server, so we validate against TypeORM repositories directly (no MCP,
+   * no API key). Mirrors the remote-mode checks: board exists → workspace
+   * matches → column belongs to the board. Success message keeps the same
+   * shape as the remote branch so the UI renders identically.
+   */
+  private async testLocalTarget(
+    res: Response,
+    workspaceId: string,
+    boardId: string,
+    columnId: string,
+  ) {
+    const board = await this.boardRepo.findOne({ where: { id: boardId } });
+    if (!board) {
+      return res.json({
+        ok: false,
+        mode: 'local',
+        kind: 'validation',
+        message: `Board ${boardId} 가 이 서버에 존재하지 않습니다. 드롭다운에서 board 를 다시 선택하고 저장하세요.`,
+      });
+    }
+    if (String(board.workspace_id) !== workspaceId) {
+      return res.json({
+        ok: false,
+        mode: 'local',
+        kind: 'validation',
+        message:
+          `설정된 workspace_id 가 board 의 workspace 와 일치하지 않습니다. ` +
+          `설정값: ${workspaceId}; board "${board.name}" 의 실제 workspace: ${board.workspace_id || '(unknown)'}.`,
+      });
+    }
+    const column = await this.colRepo.findOne({ where: { id: columnId, board_id: boardId } });
+    if (!column) {
+      const cols = await this.colRepo.find({ where: { board_id: boardId }, order: { position: 'ASC' } });
+      const columnSummary = cols.map((c) => `${c.name} (${c.id})`).join(', ');
+      return res.json({
+        ok: false,
+        mode: 'local',
+        kind: 'validation',
+        message:
+          `설정된 column_id ${columnId} 는 board "${board.name}" 의 column 이 아닙니다. ` +
+          `사용 가능한 column: ${columnSummary || '(none)'}.`,
+      });
+    }
+
+    return res.json({
+      ok: true,
+      mode: 'local',
+      message:
+        `Local AWB (this instance) reachable — improvement tickets will land in column ` +
+        `"${column.name}" on board "${board.name}" ` +
+        `(workspace ${workspaceId}). No API key required.`,
+      board: { id: board.id, name: board.name, workspace_id: board.workspace_id },
       column: { id: column.id, name: column.name },
     });
   }

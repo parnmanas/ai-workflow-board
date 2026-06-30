@@ -27,3 +27,9 @@ Ticket columns that hold arrays are stored as JSON **strings** in the DB and mus
 ## Smell test
 
 If the client ever renders `["a","b"]` as literal text, or saving a field silently no-ops, you missed one of the 5 — diff your change against this list before debugging anywhere else.
+
+## Sibling class — SSE payload field wiring
+
+The same "one cell missed in a multi-touch wire" failure exists on the SSE side. `apps/server/src/modules/events/event-registry.ts` rebuilds each event payload **field-by-field** in its `map()` (and reshapes it in `flatten()`). Add an optional field to a `*Payload` type in `apps/server/src/common/types/stream-events.ts` but forget to copy it into the `map()`/`flatten()` literal and it vanishes on the wire — TypeScript won't complain, the consumer (agent-manager / web UI) silently sees `undefined`, and the symptom surfaces somewhere unrelated (e.g. a QA run that never spawns an executor, an effort preset that never applies, an "update available" badge that never lights). Real incidents: `run_provision` (fe297886), and `agent_trigger.effort_preset` / `environment_config` / `force_respawn` + `agent_instance_update.instance.*` self-update fields (665bd10c).
+
+Guard: `apps/server/test/event-registry-payload-parity-guard.test.mjs` (wired into `npm test`) statically asserts every declared payload field — top-level and one level of nested inline objects — is present as a key in its `map()` literal. It checks key **presence**, so conditional-omit values (`x ? x : undefined`) are preserved. If you add an SSE payload field, the guard tells you the moment the `map()` doesn't forward it.
