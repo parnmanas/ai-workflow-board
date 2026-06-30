@@ -30,13 +30,28 @@ export class AgentAuthGuard implements CanActivate {
     try {
       const dbResult = await this.apiKeyService.validateApiKey(providedKey);
       if (dbResult.valid && dbResult.apiKey) {
+        const apiKey = dbResult.apiKey;
+        // Manager identities are instance-wide by design: their Agent row is
+        // workspace_id=null and they supervise managed children that may live
+        // in ANY workspace, fetching those children's tickets / chat history
+        // over the /api/agent/* REST surface. The pairing redeem, however,
+        // mints the manager's key scoped to the pairing workspace (see
+        // agent-manager.controller pair/redeem), so without this carve-out
+        // AgentApiController.scopeRejects 403s every cross-workspace fetch —
+        // symptom: daemon logs "Ticket fetch failed: 403" / "Chat room history
+        // fetch failed: 403" / "chat fallback POST failed: 403" for any board
+        // outside the manager's pairing workspace. Treat a manager-owned key as
+        // full-scope to honour the documented "workspace-less manager keys that
+        // legitimately operate across the instance" invariant the IDOR fix
+        // (AgentApiController scope guards) already assumes.
+        const isManagerKey = apiKey.agent?.type === 'manager';
         // Inject workspace_id from the API key record for workspace-scoped queries
-        request.currentWorkspaceId = dbResult.apiKey.workspace_id || null;
+        request.currentWorkspaceId = isManagerKey ? null : apiKey.workspace_id || null;
         // Also expose the resolved ApiKey row + agent id so downstream
         // controllers (e.g. fs-browser response receiver) can identify
         // WHICH agent is calling without a second lookup.
-        request.apiKey = dbResult.apiKey;
-        request.currentAgentId = dbResult.apiKey.agent_id || null;
+        request.apiKey = apiKey;
+        request.currentAgentId = apiKey.agent_id || null;
         return true;
       }
     } catch {

@@ -74,7 +74,7 @@ export async function createAgent(
   app,
   getDataSourceToken,
   workspaceId,
-  { name = 'agent', rolePrompt } = {},
+  { name = 'agent', rolePrompt, type = 'custom' } = {},
 ) {
   const ds = app.get(getDataSourceToken());
   const repo = ds.getRepository('Agent');
@@ -82,7 +82,7 @@ export async function createAgent(
     repo.create({
       name: `${name}-${stamp()}`,
       description: 'qa agent',
-      type: 'custom',
+      type,
       is_active: 1,
       is_online: 0,
       workspace_id: workspaceId,

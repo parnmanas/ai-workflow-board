@@ -323,8 +323,13 @@ export class AgentManagerController {
     // isn't a per-workspace concept — it supervises managed children that may
     // live in any workspace — so the AI Agents tab in every workspace should
     // see it. The pair record still carries the original workspace_id for
-    // audit / cleanup, and the API key below stays scoped there so its
-    // permission surface remains workspace-bounded.
+    // audit / cleanup, and the API key below is stamped with it for the same
+    // bookkeeping. NOTE: that stamp is NOT a permission boundary — the manager
+    // operates instance-wide, so AgentAuthGuard treats any manager-owned key
+    // as full-scope (currentWorkspaceId=null) regardless of this column.
+    // (Earlier this column WAS the manager's effective scope, which broke
+    // cross-workspace /api/agent/* fetches with 403 once AgentApiController
+    // added workspace-scope guards.)
     const agentName = (rec.agent_name || `awb-agent-manager (${hostname})`).slice(0, 200);
     const agent = await this.agentRepo.save(
       this.agentRepo.create({

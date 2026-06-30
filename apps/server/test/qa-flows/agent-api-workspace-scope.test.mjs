@@ -20,6 +20,7 @@ import {
   createBoard,
   createColumn,
   createTicket,
+  createAgent,
   createApiKey,
 } from '../helpers/fixtures.mjs';
 
@@ -65,6 +66,26 @@ test('agent-api enforces workspace scoping on the legacy /api/agent surface', as
   step('a full-scope (workspace-less) key still works — env/admin/manager keys unaffected');
   const globalRead = await getTicket(port, ticket.id, keyGlobal.raw_key);
   assert.equal(globalRead.status, 200, 'null-scope key keeps full access');
+
+  // Regression — daemon "Ticket/Chat history/fallback POST 403" (ticket
+  // 2f13e3d7): pair/redeem mints the manager's key scoped to its pairing
+  // workspace, but the manager supervises children across ALL workspaces and
+  // fetches their tickets/chat over /api/agent/*. Once AgentApiController added
+  // workspace-scope guards, that scoped key 403'd every cross-workspace fetch.
+  // AgentAuthGuard now treats a manager-owned key as full-scope, matching the
+  // "workspace-less manager keys" invariant the IDOR fix documents.
+  step('a manager-owned key scoped to a DIFFERENT workspace still reads cross-workspace (200)');
+  const manager = await createAgent(app, getDataSourceToken, null, {
+    name: 'mgr', type: 'manager',
+  });
+  // Scoped to wsB on the row, but owned by a manager → guard resolves full-scope.
+  const keyManager = await createApiKey(app, getDataSourceToken, manager.id, {
+    workspaceId: wsB.id, label: 'mgr',
+  });
+  const mgrCross = await getTicket(port, ticket.id, keyManager.raw_key);
+  assert.equal(mgrCross.status, 200, 'manager key must reach across workspaces');
+  const mgrBody = await mgrCross.json();
+  assert.equal(mgrBody.id, ticket.id, 'returns the cross-workspace ticket payload');
 
   step('an invalid key is rejected by the guard (401) — dev bypass is off');
   const noKey = await getTicket(port, ticket.id, 'awb_not_a_real_key');
