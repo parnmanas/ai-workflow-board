@@ -227,7 +227,9 @@ This ticket is in the In Progress column. Implement the work on a feature branch
    - Build / test results if you ran them.
    - If a PR already exists, its URL.
 
-6. **Move to Review** — \`move_ticket\` to the **Review** column.
+6. **File any inline follow-up flags before moving** — if you wrote (or spotted in this thread) a "track in a separate ticket" / "follow-up needed" note that isn't a ticket yet, file it **now** with \`create_ticket\` (Backlog, \`priority=low\`, description starting with a \`Source:\` link back to this ticket) before handing off. Don't defer it to the Self-Improvement Review — the retrospective is a safety net, not the primary filing mechanism.
+
+7. **Move to Review** — \`move_ticket\` to the **Review** column.
 
 ## When to park instead of bouncing back
 
@@ -304,7 +306,7 @@ This ticket is in the Review column. Both the reviewer **and** the assignee are 
    - **Do not attempt local build or test.** You may not have a repo. If coverage looks thin, say so in the bounce comment.
 
 5. **Decision**
-   - **LGTM** → \`add_comment\` "LGTM — approved for merge." with 1–2 lines of rationale **and the reviewed base SHA** (\`reviewed against origin/<default>@<sha>\` from step 2) so "no regression vs. what?" is auditable → \`move_ticket\` to **Merging**. (Do not move to Done — Merging handles the actual merge.)
+   - **LGTM** → \`add_comment\` "LGTM — approved for merge." with 1–2 lines of rationale **and the reviewed base SHA** (\`reviewed against origin/<default>@<sha>\` from step 2) so "no regression vs. what?" is auditable. **Before moving**, file any inline follow-up: if you wrote or spotted a "track in a separate ticket" / "follow-up needed" note in this thread that isn't a ticket yet, \`create_ticket\` it **now** (Backlog, \`priority=low\`, \`Source:\` link) — don't defer it to the retrospective. Then \`move_ticket\` to **Merging**. (Do not move to Done — Merging handles the actual merge.)
    - **Changes requested** → \`add_comment\` with concrete findings (\`file:line\` citations, "X instead of Y" suggestions), mention the assignee (\`@[role:assignee|<name>]\`) → \`move_ticket\` back to **In Progress**.
    - **Question for the assignee** → \`add_comment\` with a specific question, mention the assignee (\`@[role:assignee|<name>]\`), and stop. Do **not** \`move_ticket\` — the ticket stays in Review so the assignee can answer without a round-trip to In Progress.
    - **Cannot decide on your own** → \`add_comment\` with a specific question to the **reporter** (use \`@[role:reporter|<name>]\`) and stop. Do not \`move_ticket\`.
