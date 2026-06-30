@@ -553,6 +553,78 @@ export function isSystemdReExecPending(): boolean {
   return _systemdReExecPending;
 }
 
+/**
+ * Adopt `origin/<branch>` into the working tree WITHOUT occupying or moving any
+ * local branch ref. This is the structural fix for ticket dc38dce6.
+ *
+ * The previous self-update flow did `git checkout <branch>` followed by
+ * `git pull --ff-only origin <branch>`. In agent-manager's per-(ticket,role)
+ * worktree-pool setup that fails *permanently*: a ticket worktree can hold
+ * `<branch>` checked out — an agent ran `git checkout main` inside its worktree
+ * per the column workflow, then the worktree was left behind — and git allows a
+ * branch to be checked out in at most ONE worktree. So `git checkout main` in
+ * this shared base repo aborts with
+ *   fatal: '<branch>' is already used by worktree at <path>
+ * and the manager self-locks into its current version forever (it can never
+ * pull + build the new release; see the field reports in ticket dc38dce6).
+ *
+ * `git fetch` + `git checkout --detach origin/<branch>` sidesteps the whole
+ * class of conflict:
+ *   - a detached HEAD never *holds* the `<branch>` ref, so it cannot collide
+ *     with a ticket worktree that has `<branch>` checked out;
+ *   - it never *moves* a local branch ref, so it cannot silently clobber an
+ *     unrelated branch the operator left checked out (e.g. production.private)
+ *     the way `git reset --hard origin/<branch>` would;
+ *   - it unconditionally adopts the published commit — exactly the "run the
+ *     latest released code" semantic self-update wants.
+ * Detached HEAD is also the manager checkout's documented steady state, so the
+ * post-update tree matches what the worktree pool already expects.
+ *
+ * Tracked-file safety is handled by the caller's earlier steps (lockfile reset
+ * + auto-stash), so the checkout has a clean tree to move by the time we get
+ * here; a genuine conflict still surfaces as { ok:false } rather than being
+ * force-discarded.
+ */
+export async function adoptRemoteBranch(
+  repoRoot: string,
+  branch: string,
+  out: (msg: string) => void,
+): Promise<{ ok: true } | { ok: false; summary: string }> {
+  out(`Self-update: git fetch --quiet origin ${branch}`);
+  const fetchResult = await runAsync(
+    'git',
+    ['-C', repoRoot, 'fetch', '--quiet', 'origin', branch],
+    repoRoot,
+    FETCH_TIMEOUT_MS,
+    (line) => out(`  [git] ${line}`),
+  );
+  if (!fetchResult.ok) {
+    const detail =
+      (fetchResult.stderr.trim() || fetchResult.stdout.trim() || 'unknown').split('\n').pop() || '';
+    return { ok: false, summary: `git fetch failed: ${detail.slice(0, 240)}` };
+  }
+
+  out(`Self-update: git checkout --detach origin/${branch}`);
+  const checkoutResult = await runAsync(
+    'git',
+    ['-C', repoRoot, 'checkout', '--detach', `origin/${branch}`],
+    repoRoot,
+    15_000,
+    (line) => out(`  [git] ${line}`),
+  );
+  if (!checkoutResult.ok) {
+    const detail =
+      (checkoutResult.stderr.trim() || checkoutResult.stdout.trim() || 'unknown')
+        .split('\n')
+        .pop() || '';
+    return {
+      ok: false,
+      summary: `git checkout --detach origin/${branch} failed: ${detail.slice(0, 240)}`,
+    };
+  }
+  return { ok: true };
+}
+
 async function runSelfUpdateLocked(
   opts: SelfUpdateOpts,
   out: (msg: string) => void,
@@ -568,18 +640,19 @@ async function runSelfUpdateLocked(
   const branch = detectDefaultBranch(repoRoot);
   out(`Self-update: starting (root=${repoRoot} branch=${branch})`);
 
-  // 0. Reset package-lock.json before pull.
+  // 0. Reset package-lock.json before adopting origin/<branch>.
   //
   // The previous self-update's step 2 (`npm install` at workspace root) can
   // silently rewrite the lockfile — npm reorders sub-deps, recomputes
   // integrity hashes, and resolves optionalDependencies differently across
   // platforms (Windows vs Linux npm both legitimately produce non-identical
   // lockfiles from the same package.json). The lockfile is then dirty in
-  // the working tree, which makes the NEXT `git pull --ff-only` abort with
-  // `Your local changes to the following files would be overwritten by
-  // merge: package-lock.json` and self-locks the manager into its current
-  // version forever. Operators see "update_manager: git pull failed" with
-  // a one-line tail that doesn't make the trap obvious.
+  // the working tree, which makes the NEXT `git checkout --detach
+  // origin/<branch>` (step 0c+1) abort with `Your local changes to the
+  // following files would be overwritten by checkout: package-lock.json` and
+  // self-locks the manager into its current version forever. Operators see
+  // "update_manager: ... failed" with a one-line tail that doesn't make the
+  // trap obvious.
   //
   // The reset is safe: step 2 regenerates package-lock.json from the
   // workspace's package.json files anyway, so any local lockfile diff is
@@ -654,67 +727,22 @@ async function runSelfUpdateLocked(
     }
   }
 
-  // 0c. Make sure we're on the default branch. The agent-manager runs from a
-  // shared worktree the operator may also use interactively, so the current
-  // branch can be anything (a ticket branch, a PR branch, etc.). A
-  // `git pull --ff-only origin main` from a different branch either fails
-  // ("not currently on a branch" / "no tracking" / "diverged") or — worse —
-  // succeeds but leaves the working tree pointing at the wrong branch.
-  // Always checkout the default branch first; if that branch doesn't exist
-  // locally yet, create it from origin.
-  const currentBranchResult = await runAsync(
-    'git',
-    ['-C', repoRoot, 'rev-parse', '--abbrev-ref', 'HEAD'],
-    repoRoot,
-    10_000,
-  );
-  const currentBranch = currentBranchResult.ok
-    ? currentBranchResult.stdout.trim()
-    : '';
-  if (currentBranch && currentBranch !== branch) {
-    out(`Self-update: current branch is "${currentBranch}", switching to "${branch}"`);
-    // Check whether the local branch exists.
-    const localExists = await runAsync(
-      'git',
-      ['-C', repoRoot, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`],
-      repoRoot,
-      10_000,
-    );
-    const checkoutArgs = localExists.ok
-      ? ['-C', repoRoot, 'checkout', branch]
-      : ['-C', repoRoot, 'checkout', '-B', branch, `origin/${branch}`];
-    const checkoutResult = await runAsync(
-      'git',
-      checkoutArgs,
-      repoRoot,
-      15_000,
-      (l) => out(`  [git] ${l}`),
-    );
-    if (!checkoutResult.ok) {
-      const detail =
-        (checkoutResult.stderr.trim() || checkoutResult.stdout.trim() || 'unknown')
-          .split('\n')
-          .pop() || '';
-      const summary = `git checkout ${branch} failed: ${detail.slice(0, 240)}`;
-      out(`Self-update: ${summary}`);
-      return { changed: false, summary };
-    }
-  }
-
-  // 1. git pull --ff-only origin <branch>
-  out(`Self-update: git pull --ff-only origin ${branch}`);
-  const pullResult = await runAsync(
-    'git',
-    ['-C', repoRoot, 'pull', '--ff-only', 'origin', branch],
-    repoRoot,
-    FETCH_TIMEOUT_MS,
-    (line) => out(`  [git] ${line}`),
-  );
-  if (!pullResult.ok) {
-    const detail = (pullResult.stderr.trim() || pullResult.stdout.trim() || 'unknown').split('\n').pop() || '';
-    const summary = `git pull failed: ${detail.slice(0, 240)}`;
-    out(`Self-update: ${summary}`);
-    return { changed: false, summary };
+  // 0c + 1. Adopt origin/<branch> WITHOUT occupying or moving any branch ref.
+  //
+  // The agent-manager runs from a shared worktree the operator may also use
+  // interactively (current branch could be production.private, a ticket
+  // branch, …) AND its per-(ticket,role) worktree pool can hold <branch>
+  // checked out in another worktree. The old `git checkout <branch>` +
+  // `git pull --ff-only` flow collided with both: a branch is checkable-out in
+  // only one worktree, so the checkout aborted with "already used by worktree"
+  // and self-locked the manager forever. `git fetch` + detached checkout of
+  // origin/<branch> never holds or moves a branch ref, so it is immune to the
+  // worktree conflict and never clobbers an unrelated local branch. See
+  // adoptRemoteBranch() for the full rationale (ticket dc38dce6).
+  const adopt = await adoptRemoteBranch(repoRoot, branch, out);
+  if (!adopt.ok) {
+    out(`Self-update: ${adopt.summary}`);
+    return { changed: false, summary: adopt.summary };
   }
 
   // 2. npm install (workspace root — installs everything for monorepo).
