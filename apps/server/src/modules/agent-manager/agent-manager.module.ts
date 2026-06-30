@@ -13,6 +13,7 @@ import { AgentManagerController } from './agent-manager.controller';
 import { InstanceRegistryService } from './instance-registry.service';
 import { PairingService } from './pairing.service';
 import { CommandLedgerService } from './command-ledger.service';
+import { ManagerDriftMonitorService } from './manager-drift-monitor.service';
 
 @Module({
   // AgentsModule re-exports SubagentMonitorService so the same singleton that
@@ -34,6 +35,10 @@ import { CommandLedgerService } from './command-ledger.service';
     InstanceRegistryService,
     PairingService,
     CommandLedgerService,
+    // version-drift / stale self-update health monitor (ticket 7485df07). Runs
+    // its own sweep timer; consumes InstanceRegistryService — same module, no
+    // extra wiring. No HTTP surface, so it isn't in `controllers`/`exports`.
+    ManagerDriftMonitorService,
     AgentAuthGuard,
     AuthGuard,
     PermissionGuard,
