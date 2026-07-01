@@ -22,6 +22,8 @@ import { PresenceService } from '../../services/presence.service';
 import { TriggerLoopService } from '../agents/trigger-loop.service';
 import { TicketPrerequisitesService } from './ticket-prerequisites.service';
 import { TicketRoleAssignmentService } from '../workspace-roles/ticket-role-assignment.service';
+import { getConsensusView, openMoveProposal, recordConsensusVote } from '../../services/consensus-actions';
+import { evaluateConsensusMoveGate } from '../../services/consensus.service';
 import {
   MAX_COMMENT_ATTACHMENT_SIZE,
   MAX_COMMENT_ATTACHMENTS,
@@ -737,6 +739,27 @@ export class TicketsController {
         const e = new ReviewApprovalRequiredError(ticket.id, sourceColForGuard?.name ?? String(ticket.column_id), destColForGuard?.name ?? String(targetColumnId));
         return res.status(e.status).json({ error: e.code, hint: e.hint, message: e.message });
       }
+
+      // 다중담당자·합의 게이트(T5/T6): 이탈(현재) 컬럼 라우팅 역할 홀더가 ≥2 이고
+      // 합의 미성립이면 직접 컬럼 이동을 차단한다 — 사람이 보드에서 드래그해도
+      // 팀 합의를 우회하지 못하게(MCP move_ticket 게이트와 동일). force / reporter
+      // override(satisfied) 는 통과. 같은 컬럼 재정렬(targetColumnId===현재)은 면제.
+      if (!force && targetColumnId !== ticket.column_id) {
+        const gate = await evaluateConsensusMoveGate(this.consensusDeps(), ticket);
+        if (gate.blocked) {
+          return res.status(409).json({
+            error: 'consensus_required',
+            message: `다중담당자 티켓 — 라우팅 역할 홀더 ${gate.state.required.length}명의 합의가 필요합니다. `
+              + `합의 패널에서 '이동 제안' 후 전원 동의(또는 reporter override) 시 서버가 자동 이동합니다.`,
+            consensus: {
+              required: gate.state.required.length,
+              agreed: gate.state.agreed.length,
+              pending: gate.state.pending.length,
+              objected: gate.state.objected.length,
+            },
+          });
+        }
+      }
     }
 
     await this.dataSource.transaction(async (manager) => {
@@ -1218,6 +1241,87 @@ export class TicketsController {
         holder: r.holder,
       })),
     });
+  }
+
+  // ─── 다중담당자·합의 REST 브릿지 (T6) ────────────────────────────────────
+  // 합의 READ/제안/투표/override 는 지금까지 MCP 툴 전용(코멘트 마커 기반)이었다.
+  // 브라우저(웹 UI T6)가 소비할 수 있도록 같은 서버 로직(consensus-actions)을 얇게
+  // REST 로 노출한다 — 저자는 로그인 유저(req.currentUser). SSE consensus_update 는
+  // 액션 함수 안에서 방출되고, 합의 성립 시 서버가 auto-execute 로 실제 이동한다.
+  private consensusDeps() {
+    return {
+      dataSource: this.dataSource,
+      activityService: this.activityService,
+      ticketRoleAssignmentService: this.ticketRoleAssignments,
+    };
+  }
+
+  /**
+   * 현재 합의 상태 뷰 — 역할홀더별 agree/pending/object, 열린 이동 제안(target),
+   * party 표시 이름, 게이트 요약(홀더≥2 & 미성립이면 blocked). 합의 패널이 소비.
+   */
+  @Get('tickets/:id/consensus')
+  async getTicketConsensus(@Param('id') id: string, @Res() res: Response) {
+    const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
+    const view = await getConsensusView(this.consensusDeps(), ticket);
+    return res.json(view);
+  }
+
+  /**
+   * 이동 제안 열기(홀더≥2). Body `{ target_column_id, content? }`. 제안 comment 의
+   * id 가 곧 proposal_id — 전 홀더가 동의하면 서버가 자동 이동한다. 홀더≤1 이면 400.
+   */
+  @Post('tickets/:id/consensus/propose')
+  async proposeTicketConsensusMove(@Param('id') id: string, @Body() body: any, @Req() req: any, @Res() res: Response) {
+    const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
+    if (ticket.archived_at) return res.status(409).json({ error: 'ticket_archived', hint: 'Call unarchive first', message: new TicketArchivedError(ticket.id).message });
+    const currentUser = req.currentUser;
+    if (!currentUser) return res.status(401).json({ error: 'Authentication required' });
+    const targetColumnId: string = body?.target_column_id || body?.targetColumnId || '';
+    if (!targetColumnId) return res.status(400).json({ error: 'target_column_id is required' });
+    try {
+      const result = await openMoveProposal(this.consensusDeps(), {
+        ticket,
+        by: { type: 'user', id: currentUser.id },
+        byName: currentUser.name || currentUser.email || 'user',
+        destColumnId: targetColumnId,
+        content: typeof body?.content === 'string' ? body.content : undefined,
+      });
+      return res.json(result);
+    } catch (e: any) {
+      return res.status(e?.status || 400).json({ error: e?.message || 'Failed to open move proposal' });
+    }
+  }
+
+  /**
+   * 합의 시그널 캐스트. Body `{ status:'agree'|'object', proposal_id?, override?, content? }`.
+   * override 는 reporter 홀더에게만 유효(서버가 검증·무시). 합의 성립 시 서버가
+   * 열린 제안을 auto-execute 로 이동시킨다 — 응답 `moved` 에 반영.
+   */
+  @Post('tickets/:id/consensus/vote')
+  async recordTicketConsensusVote(@Param('id') id: string, @Body() body: any, @Req() req: any, @Res() res: Response) {
+    const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
+    if (ticket.archived_at) return res.status(409).json({ error: 'ticket_archived', hint: 'Call unarchive first', message: new TicketArchivedError(ticket.id).message });
+    const currentUser = req.currentUser;
+    if (!currentUser) return res.status(401).json({ error: 'Authentication required' });
+    const status = body?.status;
+    if (status !== 'agree' && status !== 'object') {
+      return res.status(400).json({ error: "status must be 'agree' or 'object'" });
+    }
+    try {
+      const result = await recordConsensusVote(this.consensusDeps(), {
+        ticket,
+        by: { type: 'user', id: currentUser.id },
+        byName: currentUser.name || currentUser.email || 'user',
+        status,
+        proposalId: typeof body?.proposal_id === 'string' ? body.proposal_id : null,
+        override: body?.override === true,
+        content: typeof body?.content === 'string' ? body.content : undefined,
+      });
+      return res.json(result);
+    } catch (e: any) {
+      return res.status(e?.status || 400).json({ error: e?.message || 'Failed to record consensus vote' });
+    }
   }
 
   /**
