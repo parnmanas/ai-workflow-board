@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Ticket, Agent, Channel, ActivityLog, Comment, CommentType, User, TicketAttachmentMeta, Resource, RepoBranch, TicketPrerequisiteRow, Action, EffortPreset, EffortPresetsConfig, BUILTIN_EFFORT_PRESETS } from '../types';
-import { api, TicketRoleAssignmentRow, getActiveWorkspaceId, rawResourceUrl } from '../api';
+import { api, TicketRoleAssignmentRow, ConsensusView, ConsensusParty, getActiveWorkspaceId, rawResourceUrl } from '../api';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 import { useConfirm } from '../contexts/ConfirmContext';
@@ -34,6 +34,9 @@ interface TicketPanelProps {
   // Flat list of all root tickets on the board, used by the SubtaskList
   // "Link existing" picker. Optional so legacy callers don't break.
   boardTickets?: Ticket[];
+  // The board's columns (id + name), used by the consensus move-proposal
+  // picker (T6) to pick a target column. Optional so legacy callers don't break.
+  boardColumns?: Array<{ id: string; name: string }>;
   typingIndicators: Record<string, string | null>;
   onClose: () => void;
   // May be sync or async — the Save/Discard footer awaits the result so the
@@ -53,12 +56,15 @@ interface TicketPanelProps {
   // Commit the buffered Save/Discard draft in one shot. MUST reject (throw)
   // on server failure — the footer relies on the rejection to preserve dirty
   // state so the user doesn't lose their unsaved edits behind a misleading
-  // success toast. Falls back to per-field onUpdate / onSetRoleAssignment if
-  // omitted (legacy embedders).
+  // success toast. Falls back to per-field onUpdate if omitted (legacy
+  // embedders). MULTI-HOLDER (T6): role edits are delivered as the T1
+  // `role_assignments[]` array (repeated role_slug = multiple holders; a
+  // role_slug with no holder clears the slot), saved atomically through the
+  // ticket PATCH's role_assignments path.
   onSaveDraft?: (
     ticketId: string,
     ticketFields: Record<string, any>,
-    roleDrafts: Record<string, { agent_id: string | null; user_id: string | null }>,
+    roleAssignments: Array<{ role_slug: string; agent_id?: string; user_id?: string }>,
   ) => Promise<void>;
   onAddComment: (
     ticketId: string,
@@ -107,6 +113,17 @@ const priorityColors: Record<string, string> = {
   high: '#fbbf24',
   critical: '#ef4444',
 };
+
+// Multi-holder role draft (T6 다중담당자). Each entry pins exactly one of
+// agent_id / user_id; a role's draft is its FULL desired holder set. The
+// picker buffers these and Save flushes them as the T1 role_assignments[] array.
+type HolderDraft = { agent_id: string | null; user_id: string | null };
+// Normalize a holder to `agent:<id>` / `user:<id>` for set comparison + dedupe.
+const holderDraftKey = (h: HolderDraft): string =>
+  h.agent_id ? `agent:${h.agent_id}` : h.user_id ? `user:${h.user_id}` : '';
+// A resolved holder (from a role-assignment row) → its draft shape.
+const holderToDraft = (h: { type: 'agent' | 'user'; id: string }): HolderDraft =>
+  h.type === 'agent' ? { agent_id: h.id, user_id: null } : { agent_id: null, user_id: h.id };
 
 // Read path for the board's effort presets — degrade malformed/empty input to
 // the builtins, never throw (mirrors the server READ contract). Accepts the
@@ -492,7 +509,7 @@ function ResourceReferencePicker({
 }
 
 export default function TicketPanel({
-  ticket, columnName, agents, users, channels, workspaceRoles, boardTickets, typingIndicators,
+  ticket, columnName, agents, users, channels, workspaceRoles, boardTickets, boardColumns, typingIndicators,
   onClose, onUpdate, onDelete, onCreateChild, onDeleteChild, onReparentChild, onSetRoleAssignment, onSaveDraft, onAddComment, onSetCommentStatus, onSelectTicket,
   currentBoardId, workspaceId, effortPresets, onMoveToBoard,
   scrollToCommentId, onScrollToCommentConsumed,
@@ -504,13 +521,23 @@ export default function TicketPanel({
   const [roleAssignments, setRoleAssignments] = useState<TicketRoleAssignmentRow[]>([]);
   // Buffered role-assignment edits keyed by role id. Drains to the server on
   // Save (clearing matching keys); cleared wholesale on Discard / ticket
-  // switch. Each value is the holder spec that would be sent to
-  // onSetRoleAssignment if/when the user commits.
-  const [roleDrafts, setRoleDrafts] = useState<Record<string, { agent_id: string | null; user_id: string | null }>>({});
+  // switch. MULTI-HOLDER (T6): each value is the role's FULL desired holder set
+  // (add/remove chips mutate it); Save flushes it as role_assignments[].
+  const [roleDrafts, setRoleDrafts] = useState<Record<string, HolderDraft[]>>({});
   // True while a Save round-trip is in flight — disables the Save/Discard
   // footer buttons and the role pickers so the user can't fire a second
   // commit before the first has resolved.
   const [savingDraft, setSavingDraft] = useState(false);
+
+  // ─── 다중담당자·합의 (T6) ────────────────────────────────
+  // 현재 합의 상태(역할홀더별 agree/pending/object) + 열린 이동 제안. root 티켓만
+  // 대상 — 서버 REST 브릿지(getTicketConsensus)로 조회하고 consensus_update SSE +
+  // updated_at 변화로 라이브 갱신한다.
+  const [consensus, setConsensus] = useState<ConsensusView | null>(null);
+  // propose / vote / override 요청 in-flight — 액션 버튼 중복 클릭 방지.
+  const [consensusBusy, setConsensusBusy] = useState(false);
+  // 이동 제안 대상 컬럼 id(제안 picker 버퍼).
+  const [proposeTarget, setProposeTarget] = useState<string>('');
   const { user } = useAuth();
   const { showToast } = useToast();
   const confirm = useConfirm();
@@ -1045,6 +1072,34 @@ export default function TicketPanel({
     return () => { cancelled = true; };
   }, [activeTicket.id, activeTicket.updated_at]);
 
+  // ─── 합의 상태 조회/갱신 (T6) ────────────────────────────
+  // root 티켓만 대상. updated_at 변화(이동/투표가 보드 refresh 로 bump)에 재조회 →
+  // 수렴. 실패/비-root 는 null(패널 숨김).
+  const refreshConsensus = useCallback(async () => {
+    if (activeTicket.depth !== 0) { setConsensus(null); return; }
+    try {
+      const v = await api.getTicketConsensus(activeTicket.id);
+      setConsensus(v);
+    } catch {
+      setConsensus(null);
+    }
+  }, [activeTicket.id, activeTicket.depth]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (activeTicket.depth !== 0) { setConsensus(null); return; }
+    api.getTicketConsensus(activeTicket.id)
+      .then(v => { if (!cancelled) setConsensus(v); })
+      .catch(() => { if (!cancelled) setConsensus(null); });
+    return () => { cancelled = true; };
+  }, [activeTicket.id, activeTicket.updated_at, activeTicket.depth]);
+
+  // 라이브 갱신: consensus_update SSE 는 카운트만 실으므로, 이 티켓 대상 이벤트가
+  // 오면 상세 홀더 상태를 재조회한다.
+  useBoardStreamEvent('consensus_update', (data: any) => {
+    if (data?.ticket_id === activeTicket.id) refreshConsensus();
+  });
+
   // Seed @-mention candidates from props + ticket role_ids immediately so the
   // dropdown works before the workspace-user API call returns.
   useEffect(() => {
@@ -1148,25 +1203,35 @@ export default function TicketPanel({
     activeTicket.next_ticket_id, activeTicket.on_done_action_ids,
   ]);
 
-  // Role drafts that genuinely change the current holder. A draft equal to
-  // the live assignment is dropped (e.g., user picks Bob then switches back to
-  // the previously-assigned Alice — that's a no-op, no need to fire a save).
+  // Current holders grouped by role id (multi-holder T6). roleAssignments is one
+  // row per (role, holder), so a role with N holders appears as N rows — group
+  // them into a holder list per role for both the chip picker and the dirty diff.
+  const holdersByRoleId = useMemo(() => {
+    const m = new Map<string, Array<{ type: 'agent' | 'user'; id: string; name: string }>>();
+    for (const r of roleAssignments) {
+      if (!r.holder) continue;
+      const list = m.get(r.role.id) || [];
+      list.push(r.holder);
+      m.set(r.role.id, list);
+    }
+    return m;
+  }, [roleAssignments]);
+
+  // Role drafts that genuinely change the holder SET. A draft whose holder set
+  // equals the live set is dropped (no-op — e.g. add then remove the same one,
+  // or reorder). Compared as unordered key sets (holder order isn't meaningful).
   const dirtyRoleDrafts = useMemo(() => {
-    const assignmentByRoleId = new Map(roleAssignments.map(r => [r.role.id, r]));
-    const out: Record<string, { agent_id: string | null; user_id: string | null }> = {};
+    const out: Record<string, HolderDraft[]> = {};
     for (const [roleId, draft] of Object.entries(roleDrafts)) {
-      const currentRow = assignmentByRoleId.get(roleId);
-      const currentHolder = currentRow?.holder || null;
-      const draftAgentId = draft.agent_id || null;
-      const draftUserId = draft.user_id || null;
-      const currentAgentId = currentHolder?.type === 'agent' ? (currentHolder.id || null) : null;
-      const currentUserId = currentHolder?.type === 'user' ? (currentHolder.id || null) : null;
-      if (draftAgentId !== currentAgentId || draftUserId !== currentUserId) {
-        out[roleId] = draft;
-      }
+      const currentKeys = new Set(
+        (holdersByRoleId.get(roleId) || []).map(h => holderDraftKey(holderToDraft(h))).filter(Boolean),
+      );
+      const draftKeys = new Set(draft.map(holderDraftKey).filter(Boolean));
+      const same = draftKeys.size === currentKeys.size && [...draftKeys].every(k => currentKeys.has(k));
+      if (!same) out[roleId] = draft;
     }
     return out;
-  }, [roleDrafts, roleAssignments]);
+  }, [roleDrafts, holdersByRoleId]);
 
   const isDirty = Object.keys(dirtyTicketFields).length > 0 || Object.keys(dirtyRoleDrafts).length > 0;
 
@@ -1194,23 +1259,43 @@ export default function TicketPanel({
     // success, leaving newer edits ready for the next Save click.
     const ticketFieldsToSave = dirtyTicketFields;
     const roleDraftsToSave = { ...dirtyRoleDrafts };
-    if (Object.keys(ticketFieldsToSave).length === 0 && Object.keys(roleDraftsToSave).length === 0) return;
+    const dirtyRoleIds = Object.keys(roleDraftsToSave);
+    if (Object.keys(ticketFieldsToSave).length === 0 && dirtyRoleIds.length === 0) return;
     setSavingDraft(true);
+    // Build the T1 role_assignments[] payload from the dirty holder sets. One
+    // entry per holder (repeated role_slug = multi-holder set); a dirty role
+    // whose set is empty emits a holder-less entry so the server CLEARS the slot.
+    const roleIdToSlug = new Map((workspaceRoles || []).map(r => [r.id, r.slug]));
+    const roleAssignmentsPayload: Array<{ role_slug: string; agent_id?: string; user_id?: string }> = [];
+    for (const roleId of dirtyRoleIds) {
+      const slug = roleIdToSlug.get(roleId);
+      if (!slug) continue;
+      const holders = roleDraftsToSave[roleId].filter(h => h.agent_id || h.user_id);
+      if (holders.length === 0) {
+        roleAssignmentsPayload.push({ role_slug: slug }); // holder-less → clear
+      } else {
+        for (const h of holders) {
+          roleAssignmentsPayload.push(
+            h.agent_id ? { role_slug: slug, agent_id: h.agent_id } : { role_slug: slug, user_id: h.user_id! },
+          );
+        }
+      }
+    }
     try {
       if (onSaveDraft) {
-        await onSaveDraft(activeTicket.id, ticketFieldsToSave, roleDraftsToSave);
+        await onSaveDraft(activeTicket.id, ticketFieldsToSave, roleAssignmentsPayload);
       } else {
-        // Legacy fallback: per-field calls. These wrappers may swallow errors
-        // upstream — we can't enforce throw-on-failure here, so dirty state may
-        // be cleared on a silently-failed save. Embedders should provide
-        // onSaveDraft to get the correct behavior.
+        // Legacy fallback (no onSaveDraft embedder): ticket fields via onUpdate,
+        // plus a best-effort SINGLE-holder role write (first holder) through
+        // onSetRoleAssignment. Multi-holder edits require onSaveDraft.
         const ops: Array<Promise<unknown>> = [];
         if (Object.keys(ticketFieldsToSave).length > 0) {
           ops.push(Promise.resolve(onUpdate(activeTicket.id, ticketFieldsToSave)));
         }
         if (onSetRoleAssignment) {
-          for (const [roleId, holder] of Object.entries(roleDraftsToSave)) {
-            ops.push(Promise.resolve(onSetRoleAssignment(activeTicket.id, roleId, holder)));
+          for (const roleId of dirtyRoleIds) {
+            const first = roleDraftsToSave[roleId].find(h => h.agent_id || h.user_id) || { agent_id: null, user_id: null };
+            ops.push(Promise.resolve(onSetRoleAssignment(activeTicket.id, roleId, first)));
           }
         }
         await Promise.all(ops);
@@ -1220,7 +1305,7 @@ export default function TicketPanel({
       // stays visible, and only the upstream error toast fires.
       setRoleDrafts(prev => {
         const next = { ...prev };
-        for (const k of Object.keys(roleDraftsToSave)) delete next[k];
+        for (const k of dirtyRoleIds) delete next[k];
         return next;
       });
       showToast('Saved', 'success');
@@ -1229,7 +1314,7 @@ export default function TicketPanel({
     } finally {
       setSavingDraft(false);
     }
-  }, [savingDraft, dirtyTicketFields, dirtyRoleDrafts, activeTicket.id, onSaveDraft, onUpdate, onSetRoleAssignment, showToast]);
+  }, [savingDraft, dirtyTicketFields, dirtyRoleDrafts, activeTicket.id, onSaveDraft, onUpdate, onSetRoleAssignment, showToast, workspaceRoles]);
 
   // Wrap close so X / Escape prompt before discarding unsaved edits. The
   // post-Delete close path uses raw onClose (the ticket is gone — there's
@@ -2385,10 +2470,10 @@ export default function TicketPanel({
               </div>
 
               {(() => {
-                // One cell per workspace role, sorted by position. Encoding
-                // the holder as a prefixed select value (`agent:<id>` /
-                // `user:<id>`) keeps the picker a single dropdown that spans
-                // both holder kinds without duplicating the row.
+                // One cell per workspace role, sorted by position. MULTI-HOLDER
+                // (T6): each role is a chip picker — existing holders render as
+                // removable chips and an "add" dropdown appends more (agents or
+                // users). A single holder looks like one chip (no regression).
                 const sortedRoles = (workspaceRoles || []).slice()
                   .sort((a, b) => a.position - b.position);
                 if (sortedRoles.length === 0) {
@@ -2398,65 +2483,337 @@ export default function TicketPanel({
                     </div>
                   );
                 }
-                const assignmentByRoleId = new Map(roleAssignments.map(r => [r.role.id, r]));
                 const activeAgents = (agents || []).filter(a => a.is_active);
                 const activeUsers = users || [];
+                const editable = !!onSetRoleAssignment && !savingDraft;
                 return sortedRoles.map(role => {
-                  const row = assignmentByRoleId.get(role.id);
-                  const holder = row?.holder || null;
-                  // Buffered draft (if any) wins over the server-authoritative
-                  // holder so the picker reflects the user's pending choice
-                  // before they hit Save.
+                  // Effective holder set = buffered draft (if any) else the live
+                  // holders. A draft is the role's FULL desired holder set.
                   const draft = roleDrafts[role.id];
-                  const value = draft
-                    ? (draft.agent_id ? `agent:${draft.agent_id}` : draft.user_id ? `user:${draft.user_id}` : '')
-                    : holder ? `${holder.type}:${holder.id}` : '';
+                  const effective: HolderDraft[] = draft
+                    ? draft
+                    : (holdersByRoleId.get(role.id) || []).map(holderToDraft);
+                  const heldKeys = new Set(effective.map(holderDraftKey).filter(Boolean));
+
+                  const nameOf = (h: HolderDraft): string => {
+                    if (h.agent_id) {
+                      const a = (agents || []).find(x => x.id === h.agent_id);
+                      return a ? formatAgentDisplayName(a) : h.agent_id;
+                    }
+                    if (h.user_id) {
+                      const u = (users || []).find(x => x.id === h.user_id);
+                      return u ? (u.name || u.email) : h.user_id;
+                    }
+                    return '?';
+                  };
+                  const commit = (next: HolderDraft[]) => setRoleDrafts(prev => ({ ...prev, [role.id]: next }));
+                  const removeHolder = (h: HolderDraft) =>
+                    commit(effective.filter(e => holderDraftKey(e) !== holderDraftKey(h)));
+                  const addFromValue = (raw: string) => {
+                    if (!raw) return;
+                    const h: HolderDraft = raw.startsWith('agent:')
+                      ? { agent_id: raw.slice(6), user_id: null }
+                      : { agent_id: null, user_id: raw.slice(5) };
+                    const key = holderDraftKey(h);
+                    if (!key || heldKeys.has(key)) return;
+                    commit([...effective, h]);
+                  };
+                  const addableAgents = activeAgents.filter(a => !heldKeys.has(`agent:${a.id}`));
+                  const addableUsers = activeUsers.filter(u => !heldKeys.has(`user:${u.id}`));
+
                   return (
                     <div key={role.id}>
-                      <label style={labelStyle}>{role.name}</label>
-                      <select
-                        value={value}
-                        disabled={!onSetRoleAssignment || savingDraft}
-                        onChange={e => {
-                          if (!onSetRoleAssignment) return;
-                          const raw = e.target.value;
-                          const next: { agent_id: string | null; user_id: string | null } = !raw
-                            ? { agent_id: null, user_id: null }
-                            : raw.startsWith('agent:')
-                              ? { agent_id: raw.slice(6), user_id: null }
-                              : raw.startsWith('user:')
-                                ? { agent_id: null, user_id: raw.slice(5) }
-                                : { agent_id: null, user_id: null };
-                          setRoleDrafts(prev => ({ ...prev, [role.id]: next }));
-                        }}
+                      <label style={labelStyle}>
+                        {role.name}
+                        {effective.length >= 2 && (
+                          <span style={{ marginLeft: 6, fontSize: '10px', color: tokens.colors.accentLight, fontWeight: 700 }}>
+                            ×{effective.length}
+                          </span>
+                        )}
+                      </label>
+                      <div
                         title={role.description || ''}
                         style={{
-                          background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
-                          padding: '5px 8px', color: tokens.colors.textStrong, fontSize: '12px', width: '100%',
-                          cursor: !onSetRoleAssignment ? 'not-allowed' : 'pointer',
+                          display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center',
+                          background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`,
+                          borderRadius: tokens.radii.md, padding: '4px 6px', minHeight: 30,
                         }}
                       >
-                        <option value="">Unassigned</option>
-                        {activeAgents.length > 0 && (
-                          <optgroup label="Agents">
-                            {activeAgents.map(a => (
-                              <option key={`a-${a.id}`} value={`agent:${a.id}`}>{formatAgentDisplayName(a)}</option>
-                            ))}
-                          </optgroup>
+                        {effective.length === 0 && (
+                          <span style={{ fontSize: '11px', color: tokens.colors.textMuted, fontStyle: 'italic' }}>Unassigned</span>
                         )}
-                        {activeUsers.length > 0 && (
-                          <optgroup label="Users">
-                            {activeUsers.map(u => (
-                              <option key={`u-${u.id}`} value={`user:${u.id}`}>{u.name || u.email}</option>
-                            ))}
-                          </optgroup>
+                        {effective.map(h => (
+                          <span
+                            key={holderDraftKey(h)}
+                            style={{
+                              display: 'inline-flex', alignItems: 'center', gap: 4,
+                              background: h.agent_id ? `${tokens.colors.accent}20` : `${tokens.colors.info}20`,
+                              color: tokens.colors.textStrong, fontSize: '11px', fontWeight: 600,
+                              borderRadius: tokens.radii.sm, padding: '2px 4px 2px 8px',
+                            }}
+                          >
+                            {nameOf(h)}
+                            {editable && (
+                              <button
+                                type="button"
+                                aria-label={`remove ${nameOf(h)}`}
+                                onClick={() => removeHolder(h)}
+                                style={{
+                                  background: 'transparent', border: 'none', color: tokens.colors.textSecondary,
+                                  cursor: 'pointer', fontSize: '13px', lineHeight: 1, padding: 0,
+                                }}
+                              >×</button>
+                            )}
+                          </span>
+                        ))}
+                        {editable && (addableAgents.length > 0 || addableUsers.length > 0) && (
+                          <select
+                            value=""
+                            onChange={e => { addFromValue(e.target.value); e.currentTarget.value = ''; }}
+                            style={{
+                              background: 'transparent', border: 'none', color: tokens.colors.accentMid,
+                              fontSize: '11px', cursor: 'pointer', outline: 'none',
+                            }}
+                          >
+                            <option value="">+ 추가…</option>
+                            {addableAgents.length > 0 && (
+                              <optgroup label="Agents">
+                                {addableAgents.map(a => (
+                                  <option key={`a-${a.id}`} value={`agent:${a.id}`}>{formatAgentDisplayName(a)}</option>
+                                ))}
+                              </optgroup>
+                            )}
+                            {addableUsers.length > 0 && (
+                              <optgroup label="Users">
+                                {addableUsers.map(u => (
+                                  <option key={`u-${u.id}`} value={`user:${u.id}`}>{u.name || u.email}</option>
+                                ))}
+                              </optgroup>
+                            )}
+                          </select>
                         )}
-                      </select>
+                      </div>
                     </div>
                   );
                 });
               })()}
             </div>
+
+            {/* 다중담당자·합의 패널 (T6). 이탈(현재) 컬럼 라우팅 홀더가 ≥2 이거나
+                열린 이동 제안이 있을 때만 렌더 — 단일홀더 티켓은 숨겨져 시각 회귀
+                없음. 홀더별 agree/pending/object, 진행바, why-blocked, 이동 제안,
+                (홀더면) 투표, (reporter면) override 를 노출한다. */}
+            {(() => {
+              if (!consensus) return null;
+              const st = consensus.state;
+              const showPanel = consensus.gate.holder_count >= 2 || !!consensus.proposal;
+              if (!showPanel) return null;
+
+              const keyOf = (p: ConsensusParty) => `${p.type}:${p.id}`;
+              const agreedKeys = new Set(st.agreed.map(keyOf));
+              const objectedKeys = new Set(st.objected.map(keyOf));
+              const nameOfParty = (p: ConsensusParty): string => {
+                const k = keyOf(p);
+                if (consensus.names[k]) return consensus.names[k];
+                if (p.type === 'agent') {
+                  const a = (agents || []).find(x => x.id === p.id);
+                  if (a) return formatAgentDisplayName(a);
+                } else {
+                  const u = (users || []).find(x => x.id === p.id);
+                  if (u) return u.name || u.email;
+                }
+                return p.id.slice(0, 8);
+              };
+              const statusOf = (p: ConsensusParty): 'agree' | 'object' | 'pending' =>
+                agreedKeys.has(keyOf(p)) ? 'agree' : objectedKeys.has(keyOf(p)) ? 'object' : 'pending';
+
+              // 현재 유저가 required 홀더인지 / reporter 홀더인지 → vote / override 노출.
+              const myKey = user ? `user:${user.id}` : '';
+              const iAmRequired = !!myKey && st.required.some(p => keyOf(p) === myKey);
+              const reporterRole = (workspaceRoles || []).find(r => r.slug === 'reporter');
+              const reporterHolderKeys = reporterRole
+                ? new Set((holdersByRoleId.get(reporterRole.id) || []).map(h => `${h.type}:${h.id}`))
+                : new Set<string>();
+              const iAmReporter = !!myKey && reporterHolderKeys.has(myKey);
+
+              const proposalId = consensus.proposal?.proposal_id || st.proposalId || null;
+              const requiredCount = st.required.length;
+              const agreedCount = st.agreed.length;
+              const pct = requiredCount > 0 ? Math.round((agreedCount / requiredCount) * 100) : 0;
+              const targetCols = (boardColumns || []).filter(c => c.id !== activeTicket.column_id);
+
+              const statusStyle: Record<string, { bg: string; fg: string; label: string }> = {
+                agree: { bg: `${tokens.colors.success}22`, fg: tokens.colors.successLight, label: '동의' },
+                object: { bg: `${tokens.colors.danger}22`, fg: tokens.colors.dangerLight, label: '이의' },
+                pending: { bg: `${tokens.colors.border}55`, fg: tokens.colors.textMuted, label: '대기' },
+              };
+
+              const doVote = async (status: 'agree' | 'object', override = false) => {
+                if (consensusBusy) return;
+                setConsensusBusy(true);
+                try {
+                  const r = await api.recordTicketConsensusVote(activeTicket.id, {
+                    status, proposal_id: proposalId || undefined, override,
+                  });
+                  await refreshConsensus();
+                  if (r?.moved) showToast(`합의 성립 → '${r.moved.to_column_name || '이동'}' 자동 이동`, 'success');
+                  else showToast(override ? 'Override 적용' : `시그널 기록: ${status}`, 'success');
+                } catch (e: any) {
+                  showToast(`실패: ${e?.message || 'unknown error'}`, 'error');
+                } finally {
+                  setConsensusBusy(false);
+                }
+              };
+              const doPropose = async () => {
+                if (consensusBusy || !proposeTarget) return;
+                setConsensusBusy(true);
+                try {
+                  await api.proposeTicketMove(activeTicket.id, proposeTarget);
+                  setProposeTarget('');
+                  await refreshConsensus();
+                  showToast('이동 제안 등록 — 전 홀더 동의 시 자동 이동', 'success');
+                } catch (e: any) {
+                  showToast(`제안 실패: ${e?.message || 'unknown error'}`, 'error');
+                } finally {
+                  setConsensusBusy(false);
+                }
+              };
+
+              const headerBadge = st.satisfied
+                ? { bg: `${tokens.colors.success}22`, fg: tokens.colors.successLight, label: st.overriddenBy ? '합의(override)' : '합의 성립' }
+                : consensus.gate.blocked
+                  ? { bg: `${tokens.colors.warning}22`, fg: tokens.colors.warningLight, label: '합의 필요' }
+                  : { bg: `${tokens.colors.border}55`, fg: tokens.colors.textSecondary, label: '진행 중' };
+
+              return (
+                <div style={{
+                  border: `1px solid ${tokens.colors.accent}55`, borderRadius: tokens.radii.md,
+                  padding: '10px 12px', marginBottom: 14, background: `${tokens.colors.accent}0d`,
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                    <span style={{ fontSize: '12px', fontWeight: 700, color: tokens.colors.textStrong }}>
+                      합의 <span style={{ color: tokens.colors.textMuted, fontWeight: 500 }}>· 다중담당자 {requiredCount}명</span>
+                    </span>
+                    <span style={{
+                      fontSize: '10px', fontWeight: 700, textTransform: 'uppercase',
+                      background: headerBadge.bg, color: headerBadge.fg, padding: '2px 8px', borderRadius: tokens.radii.sm,
+                    }}>{headerBadge.label}</span>
+                  </div>
+
+                  {/* 열린 이동 제안 */}
+                  {consensus.proposal && (
+                    <div style={{ fontSize: '11px', color: tokens.colors.textSecondary, marginBottom: 8 }}>
+                      이동 제안: <strong style={{ color: tokens.colors.accentLight }}>{columnName || '현재'}</strong>
+                      {' → '}
+                      <strong style={{ color: tokens.colors.accentLight }}>{consensus.proposal.target_column_name || '대상'}</strong>
+                      {' '}(by {nameOfParty(consensus.proposal.by)})
+                    </div>
+                  )}
+
+                  {/* 진행바 */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                    <div style={{ flex: 1, height: 6, background: `${tokens.colors.border}66`, borderRadius: tokens.radii.xs, overflow: 'hidden' }}>
+                      <div style={{
+                        width: `${pct}%`, height: '100%',
+                        background: st.satisfied ? tokens.colors.successLight : tokens.colors.accent,
+                        borderRadius: tokens.radii.xs, transition: 'width 0.2s',
+                      }} />
+                    </div>
+                    <span style={{ fontSize: '11px', color: tokens.colors.textSecondary, fontWeight: 600 }}>
+                      동의 {agreedCount}/{requiredCount}
+                    </span>
+                  </div>
+
+                  {/* 홀더별 상태 */}
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: consensus.gate.blocked ? 8 : 0 }}>
+                    {st.required.map(p => {
+                      const s = statusOf(p);
+                      const ss = statusStyle[s];
+                      return (
+                        <span key={keyOf(p)} style={{
+                          display: 'inline-flex', alignItems: 'center', gap: 4,
+                          background: ss.bg, color: ss.fg, fontSize: '11px', fontWeight: 600,
+                          borderRadius: tokens.radii.sm, padding: '2px 8px',
+                        }}>
+                          {s === 'agree' ? '✓' : s === 'object' ? '✗' : '⋯'} {nameOfParty(p)}
+                        </span>
+                      );
+                    })}
+                  </div>
+
+                  {/* why-blocked */}
+                  {consensus.gate.blocked && (
+                    <div style={{ fontSize: '11px', color: tokens.colors.warningLight, marginBottom: 8 }}>
+                      이동 차단: {st.pending.length > 0 && `${st.pending.length}명 미투표`}
+                      {st.pending.length > 0 && st.objected.length > 0 && ', '}
+                      {st.objected.length > 0 && `${st.objected.length}명 이의`}
+                      {' — 전원 동의 또는 reporter override 필요.'}
+                    </div>
+                  )}
+
+                  {/* 액션: 이동 제안 (누구나) + 투표(홀더) + override(reporter) */}
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', marginTop: 4 }}>
+                    {targetCols.length > 0 && (
+                      <>
+                        <select
+                          value={proposeTarget}
+                          disabled={consensusBusy}
+                          onChange={e => setProposeTarget(e.target.value)}
+                          style={{
+                            background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`,
+                            borderRadius: tokens.radii.sm, padding: '4px 6px', color: tokens.colors.textStrong, fontSize: '11px',
+                          }}
+                        >
+                          <option value="">{consensus.proposal ? '다른 컬럼으로 제안…' : '이동 대상 컬럼…'}</option>
+                          {targetCols.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                        </select>
+                        <button
+                          type="button"
+                          disabled={consensusBusy || !proposeTarget}
+                          onClick={doPropose}
+                          style={{
+                            background: tokens.colors.accent, color: '#fff', border: 'none',
+                            borderRadius: tokens.radii.sm, padding: '4px 10px', fontSize: '11px', fontWeight: 600,
+                            cursor: consensusBusy || !proposeTarget ? 'not-allowed' : 'pointer', opacity: consensusBusy || !proposeTarget ? 0.6 : 1,
+                          }}
+                        >이동 제안</button>
+                      </>
+                    )}
+                    {iAmRequired && proposalId && (
+                      <>
+                        <button
+                          type="button" disabled={consensusBusy} onClick={() => doVote('agree')}
+                          style={{
+                            background: `${tokens.colors.success}22`, color: tokens.colors.successLight,
+                            border: `1px solid ${tokens.colors.success}55`, borderRadius: tokens.radii.sm,
+                            padding: '4px 10px', fontSize: '11px', fontWeight: 600, cursor: consensusBusy ? 'not-allowed' : 'pointer',
+                          }}
+                        >동의</button>
+                        <button
+                          type="button" disabled={consensusBusy} onClick={() => doVote('object')}
+                          style={{
+                            background: `${tokens.colors.danger}22`, color: tokens.colors.dangerLight,
+                            border: `1px solid ${tokens.colors.danger}55`, borderRadius: tokens.radii.sm,
+                            padding: '4px 10px', fontSize: '11px', fontWeight: 600, cursor: consensusBusy ? 'not-allowed' : 'pointer',
+                          }}
+                        >이의</button>
+                      </>
+                    )}
+                    {iAmReporter && !st.satisfied && (
+                      <button
+                        type="button" disabled={consensusBusy} onClick={() => doVote('agree', true)}
+                        title="reporter 권한으로 합의를 강제 통과시켜 즉시 이동합니다(감사 로그 기록)."
+                        style={{
+                          background: `${tokens.colors.warning}22`, color: tokens.colors.warningLight,
+                          border: `1px solid ${tokens.colors.warning}66`, borderRadius: tokens.radii.sm,
+                          padding: '4px 10px', fontSize: '11px', fontWeight: 700, cursor: consensusBusy ? 'not-allowed' : 'pointer',
+                        }}
+                      >⚡ Override</button>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
 
             {/* Base repository / branch — pinned per-ticket so the assignee
                 agent's `in_progress_workflow` cuts its feature branch from

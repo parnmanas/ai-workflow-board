@@ -194,22 +194,71 @@ export default function TicketCard({ ticket, index, onClick, focusHolders }: Tic
               </div>
             )}
 
-            {/* Assignee */}
-            {ticket.assignee && (
-              <span style={{
-                fontSize: '10px',
-                color: tokens.colors.textSecondary,
-                background: tokens.colors.surface,
-                padding: '2px 8px',
-                borderRadius: 10,
-                maxWidth: 80,
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-              }}>
-                {ticket.assignee}
-              </span>
-            )}
+            {/* Assignee — multi-holder aware (T6 다중담당자). 1명이면 기존 이름
+                pill 그대로(단일-홀더 시각 회귀 없음), ≥2명이면 겹친 아바타 스택
+                + "+N" 오버플로. role_holders 프로젝션이 없으면(구 payload) 레거시
+                assignee 문자열로 폴백. */}
+            {(() => {
+              const assigneeHolders = (ticket.role_holders || []).find(r => r.role_slug === 'assignee')?.holders || [];
+              const holders = assigneeHolders.length > 0
+                ? assigneeHolders
+                : (ticket.assignee ? [{ type: 'agent' as const, id: '', name: ticket.assignee }] : []);
+              if (holders.length === 0) return null;
+              if (holders.length === 1) {
+                return (
+                  <span style={{
+                    fontSize: '10px',
+                    color: tokens.colors.textSecondary,
+                    background: tokens.colors.surface,
+                    padding: '2px 8px',
+                    borderRadius: 10,
+                    maxWidth: 80,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}>
+                    {holders[0].name}
+                  </span>
+                );
+              }
+              const MAX_AVATARS = 3;
+              const shown = holders.slice(0, MAX_AVATARS);
+              const overflow = holders.length - shown.length;
+              return (
+                <div
+                  style={{ display: 'flex', alignItems: 'center' }}
+                  title={holders.map(h => h.name).join(', ')}
+                >
+                  {shown.map((h, i) => (
+                    <div
+                      key={`${h.type}:${h.id}:${i}`}
+                      style={{
+                        width: 18, height: 18, borderRadius: '50%',
+                        marginLeft: i > 0 ? -6 : 0,
+                        background: h.type === 'agent' ? tokens.colors.accent : tokens.colors.info,
+                        color: '#fff', fontSize: '9px', fontWeight: 700,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        border: `1.5px solid ${tokens.colors.surfaceCard}`,
+                        flexShrink: 0,
+                      }}
+                    >
+                      {(h.name || '?').charAt(0).toUpperCase()}
+                    </div>
+                  ))}
+                  {overflow > 0 && (
+                    <div style={{
+                      marginLeft: -6, height: 18, minWidth: 18, padding: '0 4px',
+                      borderRadius: 9, background: tokens.colors.surface,
+                      color: tokens.colors.textSecondary, fontSize: '9px', fontWeight: 700,
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      border: `1.5px solid ${tokens.colors.surfaceCard}`,
+                    }}>
+                      +{overflow}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
           </div>
 
           {/* Comments indicator */}

@@ -310,19 +310,20 @@ export default function Board() {
   const handleSaveTicketDraft = useCallback(async (
     ticketId: string,
     ticketFields: Record<string, any>,
-    roleDrafts: Record<string, { agent_id: string | null; user_id: string | null }>,
+    roleAssignments: Array<{ role_slug: string; agent_id?: string; user_id?: string }>,
   ) => {
     await withLoading(async () => {
-      const ops: Array<Promise<unknown>> = [];
-      if (Object.keys(ticketFields).length > 0) {
-        ops.push(updateTicket(ticketId, ticketFields));
+      // Multi-holder (T6): fold role_assignments[] into the SINGLE ticket PATCH
+      // (server _applyRoleAssignments groups by slug → setHolders, replacing each
+      // touched role's holder set; a holder-less slug clears the slot). One
+      // atomic write; updateTicket → refresh() reconverges board cards + panel.
+      const patch: Record<string, any> = { ...ticketFields };
+      if (roleAssignments.length > 0) patch.role_assignments = roleAssignments;
+      if (Object.keys(patch).length > 0) {
+        await updateTicket(ticketId, patch);
       }
-      for (const [roleId, holder] of Object.entries(roleDrafts)) {
-        ops.push(setTicketRoleAssignment(ticketId, roleId, holder));
-      }
-      await Promise.all(ops);
     });
-  }, [withLoading, updateTicket, setTicketRoleAssignment]);
+  }, [withLoading, updateTicket]);
 
   const handleAddComment = useCallback(async (
     ticketId: string,
@@ -575,6 +576,7 @@ export default function Board() {
                     channels={channels}
                     workspaceRoles={workspaceRoles}
                     boardTickets={board.columns.flatMap(c => c.tickets).map(cardTicketToFull)}
+                    boardColumns={board.columns.map(c => ({ id: c.id, name: c.name }))}
                     typingIndicators={typingIndicators}
                     onClose={handleCloseDetail}
                     onUpdate={handleUpdateTicket}

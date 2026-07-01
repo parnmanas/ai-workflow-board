@@ -40,7 +40,8 @@ type StreamNamedEventType =
   | 'comment_typing'   // Phase-9 typed comments — "user is composing" indicator
   | 'ticket_presence'  // Tier-1 E — viewer set for a ticket (panel-open indicator)
   | 'subagent_registered' | 'subagent_log' | 'subagent_ended'  // v0.32 subagent monitor
-  | 'agent_instance_update';  // Phase 3 Agent Manager dashboard
+  | 'agent_instance_update'  // Phase 3 Agent Manager dashboard
+  | 'consensus_update';  // 다중담당자·합의 T6 — 합의 배지/패널 라이브 갱신
 
 interface BoardStreamContextValue {
   /** Subscribe to a named SSE event (board_update/agent_typing/agent_trigger). */
@@ -199,6 +200,12 @@ export function BoardStreamProvider({ children }: ProviderProps) {
       // Phase 3 — Agent Manager dashboard: live daemon/proxy registry updates.
       eventSource.addEventListener('agent_instance_update', (event: MessageEvent) => {
         dispatch('agent_instance_update', event.data);
+      });
+
+      // 다중담당자·합의 T6 — 합의 상태 push(카운트). 티켓 패널이 배지/진행바를
+      // 재조회 없이 갱신하고, 필요 시 getTicketConsensus 로 상세를 당긴다.
+      eventSource.addEventListener('consensus_update', (event: MessageEvent) => {
+        dispatch('consensus_update', event.data);
       });
 
       eventSource.onerror = () => {
