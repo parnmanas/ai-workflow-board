@@ -1960,7 +1960,12 @@ export class TicketsController {
     const refs = this.mentionService.parseMentions(comment.content);
     if (refs.length === 0) return;
 
-    const resolved = await this.mentionService.resolveMentions(refs, ticket);
+    // T3 self-exclusion: the comment author (a user on this REST path — the
+    // emitted events below hardcode actor_type 'user') is dropped so a
+    // `@[role:…]` fan-out never notifies them of their own comment.
+    const resolved = await this.mentionService.resolveMentions(refs, ticket, {
+      excludeActor: { type: 'user', id: actor.id },
+    });
     if (resolved.length === 0) return;
 
     const preview = (comment.content || '').slice(0, 500);

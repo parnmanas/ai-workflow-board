@@ -196,7 +196,13 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       try {
         const refs = mentionService.parseMentions(content);
         if (refs.length > 0) {
-          const resolved = await mentionService.resolveMentions(refs, ticket);
+          // T3 self-exclusion: drop the comment author so `@[role:assignee]`
+          // summons only the OTHER co-holders — never a comment_mention back
+          // to yourself (recursive self-spawn guard, mirrors the T2 dispatch
+          // per-holder self-guard).
+          const resolved = await mentionService.resolveMentions(refs, ticket, {
+            excludeActor: { type: resolvedAuthorType, id: resolvedAuthorId },
+          });
           const preview = (content || '').slice(0, 500);
           const ts = (comment.created_at instanceof Date ? comment.created_at : new Date()).toISOString();
           const userMentionRepo = dataSource.getRepository(UserMention);
@@ -341,7 +347,11 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       try {
         const refs = mentionService.parseMentions(content);
         if (refs.length > 0) {
-          const resolvedRefs = await mentionService.resolveMentions(refs, ticket);
+          // T3 self-exclusion (see add_comment): the author never mentions
+          // themselves via a role fan-out or a direct self `@[agent:…]`.
+          const resolvedRefs = await mentionService.resolveMentions(refs, ticket, {
+            excludeActor: { type: resolved.authorType, id: resolved.authorId },
+          });
           const preview = (content || '').slice(0, 500);
           const ts = (comment.created_at instanceof Date ? comment.created_at : new Date()).toISOString();
           const userMentionRepo = dataSource.getRepository(UserMention);

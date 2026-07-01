@@ -139,11 +139,28 @@ export class MentionService {
   /**
    * Expand role refs to concrete user/agent refs using the ticket context.
    * user/agent refs pass through unchanged. Deduped by (type, id).
+   *
+   * 다중담당자 T3 — self-exclusion: when `opts.excludeActor` is supplied, the
+   * comment author is dropped from the resolved set (both role fan-out AND a
+   * direct self `@[agent:<own-id>]`). This is the mention-path twin of the T2
+   * per-holder self-guard in TriggerLoopService: without it, a co-holder who
+   * writes `@[role:assignee]` to summon their peers would also notify
+   * themselves → a `comment_mention` SSE back to the author → agent-manager
+   * re-spawns the author's own subagent → recursive loop. Excluding the actor
+   * lets `@[role:slug]` mean "every OTHER holder of slug" safely.
+   *
+   * Callers on ticket-comment paths pass their resolved author as
+   * `excludeActor`; the chat path leaves it unset (out of scope, different
+   * event) and behaves exactly as before.
    */
   async resolveMentions(
     refs: MentionRef[],
     ticket: Ticket | null | undefined,
+    opts?: { excludeActor?: { type: 'user' | 'agent'; id: string } | null },
   ): Promise<ResolvedMention[]> {
+    const exclude = opts?.excludeActor ?? null;
+    const isActor = (type: 'user' | 'agent', id: string): boolean =>
+      !!exclude && exclude.type === type && exclude.id === id;
     const seen = new Set<string>();
     const out: ResolvedMention[] = [];
     for (const ref of refs) {
@@ -154,6 +171,8 @@ export class MentionService {
         // an agent who holds several mentioned roles down to one notification.
         const holders = await this.resolveRoleHolders(ticket, ref.id);
         for (const resolved of holders) {
+          // T3: never notify the author of their own role fan-out.
+          if (isActor(resolved.type, resolved.id)) continue;
           const key = `${resolved.type}:${resolved.id}`;
           if (seen.has(key)) continue;
           seen.add(key);
@@ -165,6 +184,8 @@ export class MentionService {
           });
         }
       } else {
+        // T3: a direct self-mention (`@[agent:<own-id>]`) is dropped too.
+        if (isActor(ref.type, ref.id)) continue;
         const key = `${ref.type}:${ref.id}`;
         if (seen.has(key)) continue;
         seen.add(key);

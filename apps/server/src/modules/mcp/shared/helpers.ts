@@ -155,7 +155,13 @@ export const MENTION_SYNTAX_DOC =
   '  • `@[role:assignee|Alice]`        — role shortcut, expands to the ticket\'s current assignee\n' +
   '  • `@[role:reporter|Bob]`          — role shortcut, expands to the ticket\'s reporter\n' +
   '  • `@[role:reviewer|Carol]`        — role shortcut, expands to the ticket\'s reviewer (dropped if unset)\n' +
+  'A `@[role:slug]` shortcut fans out to EVERY current holder of that role (다중담당자 — a role may have ' +
+  'several co-holders), each notified independently.\n' +
   'Resolve ids by calling `list_users` / `list_agents` / `get_ticket` first. The `|Display Name` segment is ' +
   'optional but recommended — it\'s what humans read in the UI when the link target is a UUID. ' +
-  'Self-mention rule: never write `@[role:<your-role>|...]` pointing at yourself inside a subagent comment — ' +
-  'it triggers a recursive spawn loop. Mention the other role(s) instead.';
+  'Co-holder call & self-exclusion: `@[role:<slug>]` reaches every holder **except you** — the comment author ' +
+  'is auto-excluded server-side (and a direct `@[agent:<your-own-uuid>]` self-mention is likewise dropped), so ' +
+  'you can safely `@[role:assignee]` to summon your co-assignees for discussion without spawning yourself in a ' +
+  'loop. Discussion threading: reply with `parent_id` set to the comment you are answering (type `note`/`chat`) ' +
+  'so a phase\'s discussion stays one thread. Keep plain discussion as `note`/`chat`; consensus/vote signals are ' +
+  'a separate channel (reserved for the multi-holder consensus feature via `metadata`) — do not overload note.';

@@ -23,6 +23,7 @@ import { priorityIndex } from './priority';
 import { appendBoardLanguageInstruction, resolveHarnessConfig, HarnessConfig } from '../../common/harness-config';
 import { resolveEffortPreset, ResolvedEffortPreset } from '../../common/effort-presets';
 import { mergeEnvironmentConfig, resolveEnvironmentConfig, ResolvedEnvironmentConfig } from '../../common/environment-config';
+import { isConsensusVoteComment } from '../../common/consensus-meta';
 
 // Sentinel actor written onto auto-advance `moved` activities. Deliberately
 // non-'system' so the trigger loop re-enters and processes the destination
@@ -437,6 +438,11 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
    * on a single-holder role costs nothing. A missing / unreadable comment row
    * (tests fire synthetic comment activities with no backing row) reads as
    * "not a consensus comment" → false.
+   *
+   * The marker string + predicate live in `common/consensus-meta` (T3) so the
+   * discussion tooling, the future T4 consensus tool, and this dispatch path all
+   * agree on ONE definition of "this comment is a consensus vote" and cannot
+   * drift on the literal key.
    */
   private async _commentSuppressesFanout(log: ActivityLog): Promise<boolean> {
     if (log.entity_type !== COMMENT_ENTITY || !log.entity_id) return false;
@@ -445,7 +451,7 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
       .findOne({ where: { id: log.entity_id } });
     if (!comment) return false;
     const meta = safeJsonParse<Record<string, unknown>>(comment.metadata, {});
-    return meta?.consensus_vote === true;
+    return isConsensusVoteComment(meta);
   }
 
   /**
