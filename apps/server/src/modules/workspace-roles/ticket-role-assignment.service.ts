@@ -12,6 +12,12 @@ export interface ResolvedAssignment {
   holder: { type: 'agent' | 'user'; id: string; name: string } | null;
 }
 
+/** One role with ALL of its holders — the multi-holder (T1) view. */
+export interface ResolvedRoleHolders {
+  role: WorkspaceRole;
+  holders: Array<{ type: 'agent' | 'user'; id: string; name: string }>;
+}
+
 function makeError(status: number, message: string): Error & { status: number } {
   const err = new Error(message) as Error & { status: number };
   err.status = status;
@@ -124,14 +130,58 @@ export class TicketRoleAssignmentService {
       .sort((a, b) => a.role.position - b.role.position);
   }
 
-  /** Lookup the assignment for one (ticket, role) pair, or null. */
-  async getOne(ticketId: string, roleId: string): Promise<TicketRoleAssignment | null> {
-    return this.assignRepo.findOne({ where: { ticket_id: ticketId, role_id: roleId } });
+  /**
+   * Same data as `resolveForTicket` but grouped by role into a `holders[]`
+   * array — the multi-holder (T1) shape the UI (T6) and consensus gate (T3)
+   * consume. The flat `resolveForTicket` is kept for the existing single-holder
+   * callers (author-role badge, REST role-assignments projection) that filter
+   * row-by-row; this grouped view is the additive multi-holder accessor.
+   */
+  async resolveGroupedForTicket(ticketId: string): Promise<ResolvedRoleHolders[]> {
+    const flat = await this.resolveForTicket(ticketId);
+    const byRole = new Map<string, ResolvedRoleHolders>();
+    for (const r of flat) {
+      let group = byRole.get(r.role.id);
+      if (!group) {
+        group = { role: r.role, holders: [] };
+        byRole.set(r.role.id, group);
+      }
+      if (r.holder) group.holders.push(r.holder);
+    }
+    return [...byRole.values()].sort((a, b) => a.role.position - b.role.position);
   }
 
   /**
-   * Set (or clear) the holder of a role on a ticket. Mutually exclusive
-   * agent_id / user_id; passing both null removes the assignment row.
+   * Lookup the FIRST assignment for one (ticket, role) pair, or null.
+   *
+   * With multi-holder a role can now own several rows; single-holder consumers
+   * (trigger loop / allocation / mention via `getHolderBySlug`) call this as a
+   * shim and get the earliest-created holder deterministically. Explicit order
+   * matters — an unordered findOne would pick a nondeterministic row once a
+   * role has 2+ holders. Real fan-out (iterate every holder) arrives in T2.
+   */
+  async getOne(ticketId: string, roleId: string): Promise<TicketRoleAssignment | null> {
+    return this.assignRepo.findOne({
+      where: { ticket_id: ticketId, role_id: roleId },
+      order: { created_at: 'ASC', id: 'ASC' },
+    });
+  }
+
+  /** ALL holder rows for one (ticket, role) pair, earliest-created first. */
+  async getAll(ticketId: string, roleId: string): Promise<TicketRoleAssignment[]> {
+    return this.assignRepo.find({
+      where: { ticket_id: ticketId, role_id: roleId },
+      order: { created_at: 'ASC', id: 'ASC' },
+    });
+  }
+
+  /**
+   * SINGLE-holder authoritative set. Makes `holder` the *sole* occupant of the
+   * role on the ticket (clearing any other holders); passing both null clears
+   * the whole slot. This preserves the exact v1 semantics every current
+   * consumer depends on — even if a role has since gained extra holders via the
+   * multi-holder path, `setHolder` collapses it back to one. Mutually exclusive
+   * agent_id / user_id.
    *
    * Caller is responsible for verifying the holder exists in the right
    * workspace — this helper accepts the IDs as-is and only enforces the
@@ -152,23 +202,131 @@ export class TicketRoleAssignmentService {
     const role = await this.roleRepo.findOne({ where: { id: roleId } });
     if (!role) throw makeError(404, `role ${roleId} not found`);
 
-    const existing = await this.getOne(ticketId, roleId);
-    if (!agent_id && !user_id) {
-      if (existing) await this.assignRepo.delete({ id: existing.id });
-      return null;
-    }
+    // Authoritative: drop every existing holder of this role first, so the end
+    // state is exactly "this one holder" (or vacant). Delete-then-insert also
+    // sidesteps the (ticket_id, role_id, holder_key) unique key when switching
+    // between holders.
+    await this.assignRepo.delete({ ticket_id: ticketId, role_id: roleId });
+    if (!agent_id && !user_id) return null;
 
-    if (existing) {
-      existing.agent_id = agent_id;
-      existing.user_id = user_id;
-      return this.assignRepo.save(existing);
-    }
     return this.assignRepo.save(this.assignRepo.create({
       ticket_id: ticketId,
       role_id: roleId,
       agent_id,
       user_id,
+      holder_key: computeHolderKey({ agent_id, user_id }),
     }));
+  }
+
+  /**
+   * MULTI-holder: add one holder to a role WITHOUT disturbing existing holders.
+   * Idempotent on (ticket, role, holder) — re-adding the same holder returns
+   * the existing row instead of creating a duplicate (the unique key would
+   * reject it anyway). Passing both null is a no-op. Mutually exclusive
+   * agent_id / user_id.
+   */
+  async addHolder(
+    ticketId: string,
+    roleId: string,
+    holder: { agent_id?: string | null; user_id?: string | null },
+  ): Promise<TicketRoleAssignment | null> {
+    const agent_id = holder.agent_id || null;
+    const user_id = holder.user_id || null;
+    if (agent_id && user_id) {
+      throw makeError(400, 'cannot set both agent_id and user_id on the same role assignment');
+    }
+    if (!agent_id && !user_id) return null;
+
+    const role = await this.roleRepo.findOne({ where: { id: roleId } });
+    if (!role) throw makeError(404, `role ${roleId} not found`);
+
+    const holder_key = computeHolderKey({ agent_id, user_id });
+    const existing = await this.assignRepo.findOne({
+      where: { ticket_id: ticketId, role_id: roleId, holder_key },
+    });
+    if (existing) return existing;
+
+    return this.assignRepo.save(this.assignRepo.create({
+      ticket_id: ticketId,
+      role_id: roleId,
+      agent_id,
+      user_id,
+      holder_key,
+    }));
+  }
+
+  /**
+   * MULTI-holder: remove one specific holder from a role, leaving the rest in
+   * place. No-op if that holder isn't currently on the role. Returns true iff a
+   * row was actually deleted.
+   */
+  async removeHolder(
+    ticketId: string,
+    roleId: string,
+    holder: { agent_id?: string | null; user_id?: string | null },
+  ): Promise<boolean> {
+    const holder_key = computeHolderKey({
+      agent_id: holder.agent_id || null,
+      user_id: holder.user_id || null,
+    });
+    if (!holder_key) return false;
+    const res = await this.assignRepo.delete({ ticket_id: ticketId, role_id: roleId, holder_key });
+    return (res.affected || 0) > 0;
+  }
+
+  /**
+   * MULTI-holder: replace the ENTIRE holder set of a role with `holders`.
+   * Deletes holders no longer present and inserts new ones, leaving unchanged
+   * holders untouched (so their created_at — the getOne "first holder" tiebreak
+   * — is preserved). Passing `[]` clears the role. Duplicate holders in the
+   * input are de-duplicated by holder_key. Mutually exclusive agent_id/user_id
+   * per entry.
+   */
+  async setHolders(
+    ticketId: string,
+    roleId: string,
+    holders: Array<{ agent_id?: string | null; user_id?: string | null }>,
+  ): Promise<TicketRoleAssignment[]> {
+    const role = await this.roleRepo.findOne({ where: { id: roleId } });
+    if (!role) throw makeError(404, `role ${roleId} not found`);
+
+    // Normalize + de-dupe the desired set, keeping the first occurrence.
+    const desired = new Map<string, { agent_id: string | null; user_id: string | null }>();
+    for (const h of holders) {
+      const agent_id = h.agent_id || null;
+      const user_id = h.user_id || null;
+      if (agent_id && user_id) {
+        throw makeError(400, 'cannot set both agent_id and user_id on the same role assignment');
+      }
+      const key = computeHolderKey({ agent_id, user_id });
+      if (!key) continue; // skip vacant entries
+      if (!desired.has(key)) desired.set(key, { agent_id, user_id });
+    }
+
+    const existing = await this.getAll(ticketId, roleId);
+    const existingKeys = new Set(existing.map(r => r.holder_key));
+
+    // Delete rows whose holder is no longer desired.
+    const toDelete = existing.filter(r => !desired.has(r.holder_key));
+    if (toDelete.length) {
+      await this.assignRepo.delete(toDelete.map(r => r.id));
+    }
+
+    // Insert rows for newly-desired holders.
+    const toInsert: TicketRoleAssignment[] = [];
+    for (const [key, h] of desired) {
+      if (existingKeys.has(key)) continue;
+      toInsert.push(this.assignRepo.create({
+        ticket_id: ticketId,
+        role_id: roleId,
+        agent_id: h.agent_id,
+        user_id: h.user_id,
+        holder_key: key,
+      }));
+    }
+    if (toInsert.length) await this.assignRepo.save(toInsert);
+
+    return this.getAll(ticketId, roleId);
   }
 
   /** Holder lookup keyed by role slug — convenience for the trigger loop. */
