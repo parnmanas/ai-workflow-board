@@ -89,31 +89,51 @@ export class MentionService {
 
   /**
    * Resolve a role slug against a ticket via workspace_roles +
-   * ticket_role_assignments. Returns the holder (agent or user) or null.
+   * ticket_role_assignments. Returns EVERY holder (agent or user) of the role,
+   * earliest-created first — the multi-holder (다중담당자 T2) fan-out shape.
+   * `resolveMentions` fires one `comment_mention` per entry, so a `@[role:x]`
+   * token now notifies all of role x's holders, not just the first.
    *
-   * Returns null (instead of the legacy agent-only path) when:
+   * Returns [] (instead of the legacy agent-only path) when:
    *   - no repos injected (standalone mode)
    *   - ticket has no workspace_id
    *   - workspace has no role with that slug
    *   - the ticket has no holder for that role
    */
+  async resolveRoleHolders(
+    ticket: Ticket | null | undefined,
+    shortcut: string,
+  ): Promise<Array<{ type: 'agent' | 'user'; id: string }>> {
+    if (!ticket || !ticket.workspace_id) return [];
+    if (!this.roleRepo || !this.assignRepo) return [];
+    const role = await this.roleRepo.findOne({
+      where: { workspace_id: ticket.workspace_id, slug: shortcut },
+    });
+    if (!role) return [];
+    const assignments = await this.assignRepo.find({
+      where: { ticket_id: ticket.id, role_id: role.id },
+      order: { created_at: 'ASC', id: 'ASC' },
+    });
+    const out: Array<{ type: 'agent' | 'user'; id: string }> = [];
+    for (const a of assignments) {
+      if (a.agent_id) out.push({ type: 'agent', id: a.agent_id });
+      else if (a.user_id) out.push({ type: 'user', id: a.user_id });
+    }
+    return out;
+  }
+
+  /**
+   * Single-holder (first) resolution — back-compat shim over
+   * `resolveRoleHolders`. Retained for callers that still expect one holder;
+   * the earliest-created holder is returned deterministically (same ordering
+   * as the T1 `getOne` shim). Returns null when the role has no holder.
+   */
   async resolveRoleShortcut(
     ticket: Ticket | null | undefined,
     shortcut: string,
   ): Promise<{ type: 'agent' | 'user'; id: string } | null> {
-    if (!ticket || !ticket.workspace_id) return null;
-    if (!this.roleRepo || !this.assignRepo) return null;
-    const role = await this.roleRepo.findOne({
-      where: { workspace_id: ticket.workspace_id, slug: shortcut },
-    });
-    if (!role) return null;
-    const assignment = await this.assignRepo.findOne({
-      where: { ticket_id: ticket.id, role_id: role.id },
-    });
-    if (!assignment) return null;
-    if (assignment.agent_id) return { type: 'agent', id: assignment.agent_id };
-    if (assignment.user_id) return { type: 'user', id: assignment.user_id };
-    return null;
+    const holders = await this.resolveRoleHolders(ticket, shortcut);
+    return holders[0] ?? null;
   }
 
   /**
@@ -128,17 +148,22 @@ export class MentionService {
     const out: ResolvedMention[] = [];
     for (const ref of refs) {
       if (ref.type === 'role') {
-        const resolved = await this.resolveRoleShortcut(ticket, ref.id);
-        if (!resolved) continue;
-        const key = `${resolved.type}:${resolved.id}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        out.push({
-          type: resolved.type,
-          id: resolved.id,
-          displayName: ref.displayName,
-          roleShortcut: ref.id,
-        });
+        // 다중담당자 T2: expand to EVERY holder of the role, not just the
+        // first. Each becomes its own ResolvedMention so the downstream
+        // consumers fire one comment_mention SSE per holder. `seen` de-dupes
+        // an agent who holds several mentioned roles down to one notification.
+        const holders = await this.resolveRoleHolders(ticket, ref.id);
+        for (const resolved of holders) {
+          const key = `${resolved.type}:${resolved.id}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          out.push({
+            type: resolved.type,
+            id: resolved.id,
+            displayName: ref.displayName,
+            roleShortcut: ref.id,
+          });
+        }
       } else {
         const key = `${ref.type}:${ref.id}`;
         if (seen.has(key)) continue;
