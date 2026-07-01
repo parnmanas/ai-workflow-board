@@ -32,6 +32,7 @@ import {
   SubagentEndedPayload,
   AgentInstanceUpdatePayload,
   AgentManagerCommandPayload,
+  ConsensusUpdatePayload,
 } from '../../common/types/stream-events';
 import { EventDefinition, SubscriberIdentity } from './types';
 
@@ -828,5 +829,42 @@ export const EVENT_TYPES: EventDefinition[] = [
       ...(env.payload as object),
       timestamp: env.timestamp,
     }),
+  },
+
+  // ───────── consensus_update ─────────
+  // 다중담당자·합의 T4. record_agreement 시그널 직후 서버가 재판정한 합의 상태를
+  // 밀어 넣는다. UI(T6)만 소비 — agent(agent-manager 포함)는 서버가 이동 시점에
+  // getConsensusState 로 재계산하므로 이 이벤트가 필요 없다. 따라서 user-only
+  // filter: agent-manager 스위치는 이 타입을 받지 않고 SSE contract 무관.
+  // subagent_*/agent_instance_update 와 같은 "UI fuel" 패턴 — 워크스페이스
+  // 스코프는 페이지(REST) 레벨에서 좁혀지고, 여기선 user 구독자에게만 흘린다.
+  {
+    eventType: 'consensus_update',
+    emitterEvent: 'consensus_update',
+    map(event: any) {
+      const payload: ConsensusUpdatePayload = {
+        ticket_id: event.ticket_id,
+        workspace_id: event.workspace_id || '',
+        proposal_id: event.proposal_id ?? null,
+        satisfied: !!event.satisfied,
+        required: Number.isFinite(event.required) ? Number(event.required) : 0,
+        agreed: Number.isFinite(event.agreed) ? Number(event.agreed) : 0,
+        objected: Number.isFinite(event.objected) ? Number(event.objected) : 0,
+        pending: Number.isFinite(event.pending) ? Number(event.pending) : 0,
+        status: event.status === 'object' ? 'object' : 'agree',
+        override: !!event.override,
+        actor_id: event.actor_id || '',
+        actor_name: event.actor_name || '',
+      };
+      return {
+        payload,
+        scope: { workspace_id: event.workspace_id || undefined, ticket_id: event.ticket_id },
+        timestamp: event.timestamp,
+      };
+    },
+    // UI fuel only — human dashboards / ticket panels. Agents don't consume
+    // consensus state (the gate recomputes server-side at move time).
+    filter: (_env, identity) => identity.type === 'user',
+    flatten: (env) => ({ event_type: 'consensus_update', ...(env.payload as object), timestamp: env.timestamp }),
   },
 ];

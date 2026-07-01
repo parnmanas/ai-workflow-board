@@ -630,6 +630,27 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         new_value: activityValue, field_changed: 'consensus',
       });
 
+      // consensus_update SSE(UI T6 소비). state 가 있을 때만 — standalone 은
+      // 라이브 컨슈머가 없어 생략. board_update(위 activity)와 별개로 재판정
+      // 결과를 구조화해 밀어 넣어 UI 가 재조회 없이 배지를 갱신하게 한다.
+      if (state) {
+        activityEvents.emit('consensus_update', {
+          ticket_id,
+          workspace_id: ticket.workspace_id,
+          proposal_id: state.proposalId,
+          satisfied: state.satisfied,
+          required: state.required.length,
+          agreed: state.agreed.length,
+          objected: state.objected.length,
+          pending: state.pending.length,
+          status,
+          override: effectiveOverride,
+          actor_id: resolved.authorId,
+          actor_name: resolved.authorName,
+          timestamp: (comment.created_at instanceof Date ? comment.created_at : new Date()).toISOString(),
+        });
+      }
+
       // reporter override 감사 로그(DoD).
       if (effectiveOverride && state?.overriddenBy) {
         await activityService.logActivity({

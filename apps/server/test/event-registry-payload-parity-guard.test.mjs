@@ -280,6 +280,7 @@ test('parser covers the known event types (tripwire against lost coverage)', () 
     'subagent_ended',
     'agent_instance_update',
     'agent_manager_command',
+    'consensus_update',
   ]) {
     assert.ok(seen.has(expected), `parity guard lost coverage of event type "${expected}"`);
   }

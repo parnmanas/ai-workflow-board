@@ -27,7 +27,8 @@ export type StreamEventType =
   | 'subagent_log'         // Subagent monitor: stream-json line in/out
   | 'subagent_ended'       // Subagent monitor: subagent process exited
   | 'agent_instance_update' // Agent Manager: daemon/proxy instance heartbeat / removal
-  | 'agent_manager_command'; // ST-4: AWB → awb-agent-manager control message (spawn/stop/reload-config)
+  | 'agent_manager_command' // ST-4: AWB → awb-agent-manager control message (spawn/stop/reload-config)
+  | 'consensus_update';     // 다중담당자·합의 T4: 합의 상태 변화 (UI T6 소비, agent 비소비)
 
 export interface StreamEventScope {
   board_id?: string;
@@ -452,4 +453,29 @@ export interface AgentManagerCommandPayload {
   args: Record<string, any>;
   issued_by: string;     // user_id of the admin who triggered the command
   issued_at: string;     // ISO-8601
+}
+
+/**
+ * 다중담당자·합의 T4 — 합의 상태 변화 push. `record_agreement` 시그널 직후
+ * 서버가 재판정한 상태를 UI(T6)로 흘린다. agent(agent-manager 포함)는 소비하지
+ * 않으므로 registry filter 는 user-only — SSE contract 상 agent-manager 무관.
+ * T5 이동 게이트는 이 이벤트를 기다리지 않고 이동 시점에 서버에서 재계산한다.
+ *
+ * 모든 필드는 flat primitive — event-registry map() 이 필드별로 그대로 전달
+ * (패리티 가드가 누락을 머지 시점에 잡는다). 세부 홀더 목록은 UI 가 필요 시
+ * REST 로 재조회한다.
+ */
+export interface ConsensusUpdatePayload {
+  ticket_id: string;
+  workspace_id: string;
+  proposal_id: string | null; // 판정이 고정된 이동 제안(앵커). null = 제안 무관.
+  satisfied: boolean;         // 지금 합의 성립 여부.
+  required: number;           // 필수 홀더 수.
+  agreed: number;
+  objected: number;
+  pending: number;            // 미투표 + stale.
+  status: 'agree' | 'object'; // 방금 캐스트된 시그널.
+  override: boolean;          // reporter 강제 통과 여부.
+  actor_id: string;           // 시그널을 남긴 홀더.
+  actor_name: string;
 }
