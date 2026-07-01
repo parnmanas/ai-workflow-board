@@ -13,11 +13,15 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST = path.resolve(__dirname, '..', 'dist', 'common', 'consensus-state.js');
+const META = path.resolve(__dirname, '..', 'dist', 'common', 'consensus-meta.js');
 const {
   computeConsensusState,
   buildConsensusMetadata,
   parseConsensusVote,
+  buildProposalMetadata,
+  parseConsensusProposal,
 } = await import('file://' + DIST);
+const { isConsensusProposalComment } = await import('file://' + META);
 
 const agent = (id) => ({ type: 'agent', id });
 const user = (id) => ({ type: 'user', id });
@@ -214,4 +218,46 @@ test('parse → compute 왕복: 저장된 vote 로 satisfied 판정', () => {
   const v = parseConsensusVote(md, 1000);
   const s = computeConsensusState({ requiredHolders: [agent('a')], votes: [v], proposalId: 'p1' });
   assert.equal(s.satisfied, true);
+});
+
+// ─── 이동 제안(T5) 브릿지 ───────────────────────────────────────────────
+test('buildProposalMetadata: 마커(consensus_proposal:true)+payload(proposal), vote 마커 없음', () => {
+  const md = buildProposalMetadata({ targetColumnId: 'col-review', targetColumnName: 'Review', by: agent('a') });
+  assert.equal(md.consensus_proposal, true, '제안 마커 === true');
+  assert.equal(md.consensus_vote, undefined, '제안은 vote 마커를 심지 않는다(팬아웃 유지 → 공동 홀더 깨움)');
+  assert.ok(md.proposal && typeof md.proposal === 'object', 'payload 는 마커와 분리된 proposal 키');
+  assert.equal(md.proposal.target_column_id, 'col-review');
+  assert.equal(md.proposal.target_column_name, 'Review');
+  assert.deepEqual(md.proposal.by, { type: 'agent', id: 'a' });
+  assert.equal(isConsensusProposalComment(md), true);
+});
+
+test('parseConsensusProposal 는 build 를 왕복 복원한다(executed_at 유/무 · 이름 생략)', () => {
+  const open = buildProposalMetadata({ targetColumnId: 'c1', targetColumnName: 'Rev', by: user('u') });
+  assert.deepEqual(parseConsensusProposal(open), {
+    targetColumnId: 'c1', targetColumnName: 'Rev', by: { type: 'user', id: 'u' }, executedAt: null,
+  });
+  const done = buildProposalMetadata({ targetColumnId: 'c1', by: agent('a'), executedAt: '2026-07-01T00:00:00.000Z' });
+  const parsed = parseConsensusProposal(done);
+  assert.equal(parsed.executedAt, '2026-07-01T00:00:00.000Z');
+  assert.equal(parsed.targetColumnName, null, '이름 생략 시 null');
+});
+
+test('parseConsensusProposal 는 마커 없는/손상 metadata 를 null 로', () => {
+  assert.equal(parseConsensusProposal(null), null);
+  assert.equal(parseConsensusProposal({}), null);
+  assert.equal(parseConsensusProposal({ consensus_proposal: true }), null, 'payload 없음');
+  assert.equal(parseConsensusProposal({ consensus_proposal: true, proposal: {} }), null, 'target_column_id 없음');
+  assert.equal(parseConsensusProposal({ proposal: { target_column_id: 'c1', by: agent('a') } }), null, '마커 없음');
+  assert.equal(
+    parseConsensusProposal({ consensus_proposal: true, proposal: { target_column_id: 'c1', by: { type: 'x', id: '1' } } }),
+    null, 'by.type 손상',
+  );
+});
+
+test('제안 마커와 투표 마커는 서로 배타적으로 인식된다(교차 파싱 null)', () => {
+  const prop = buildProposalMetadata({ targetColumnId: 'c1', by: agent('a') });
+  const voteMd = buildConsensusMetadata({ status: 'agree', proposalId: 'c1', by: agent('a') });
+  assert.equal(parseConsensusVote(prop, 1), null, '제안은 vote 로 파싱되지 않는다');
+  assert.equal(parseConsensusProposal(voteMd), null, 'vote 는 제안으로 파싱되지 않는다');
 });

@@ -27,6 +27,8 @@ const EXPECTED_TOOLS = [
   'add_comment',
   // Ticket 44f7f0eb — 다중담당자·합의 T4 명시적 합의 시그널.
   'record_agreement',
+  // Ticket c1512333 — 다중담당자·합의 T5 이동 제안(전원 승인 → auto-execute).
+  'propose_move',
   'get_allocated_tickets',
   'list_agents',
   'list_workspaces',
