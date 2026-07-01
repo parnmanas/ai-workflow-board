@@ -25,6 +25,8 @@ const EXPECTED_TOOLS = [
   'claim_ticket',
   'release_ticket',
   'add_comment',
+  // Ticket 44f7f0eb — 다중담당자·합의 T4 명시적 합의 시그널.
+  'record_agreement',
   'get_allocated_tickets',
   'list_agents',
   'list_workspaces',

@@ -26,6 +26,8 @@ import { getCallerAgent } from '../shared/session-auth';
 import { TicketArchivedError } from '../shared/archive-helpers';
 import { resolveAgentDisplayName } from '../../../utils/agent-name';
 import { resolveAuthorRole as resolveAuthorRoleImpl, mergeAuthorRoleIntoMetadata } from './author-role';
+import { buildConsensusMetadata } from '../../../common/consensus-state';
+import { getConsensusState } from '../../../services/consensus.service';
 import type { ToolContext } from './context';
 
 export function registerCommentTools(server: McpServer, ctx: ToolContext): void {
@@ -507,6 +509,138 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       });
 
       return ok(comment);
+    }
+  );
+
+  // ─── record_agreement (다중담당자·합의 T4) ──────────────────────────
+  // 홀더가 특정 이동 제안(T5)에 대해 명시적 승인/이의 시그널을 남긴다. 코멘트에
+  // metadata.consensus_vote=true 마커를 심어 (1) 트리거 루프의
+  // `_commentSuppressesFanout` hook 이 이 코멘트로는 다른 홀더를 재디스패치하지
+  // 않도록(승인이 또 승인을 부르는 self-echo 방지) 하고, (2) 판정 서비스가
+  // 최신 시그널만 유효로 집계하게 한다. 순수 판정은 common/consensus-state.
+  server.tool(
+    'record_agreement',
+    'Cast a formal multi-holder consensus signal (agree/object) on a ticket, so a gate can decide whether the current phase may advance. ' +
+      'This is the T4 consensus vote — distinct from the free-form discussion notes co-holders exchange. ' +
+      'The signal is stamped with metadata.consensus_vote so it does NOT re-dispatch the other holders (no approval-echo loop), ' +
+      'and only your LATEST signal counts (re-call to change agree↔object). ' +
+      'Consensus is satisfied when every holder of the current column\'s routing role(s) has an `agree` on the current move proposal; ' +
+      'a newer proposal invalidates (stales) earlier signals. Reporters may `override` to force-pass (audit-logged).\n\n' +
+      MENTION_SYNTAX_DOC,
+    {
+      ticket_id: z.string().describe('Ticket ID the signal is about'),
+      status: z.enum(['agree', 'object']).describe("Your consensus signal on the current move proposal. 'agree' consents to advancing the phase; 'object' blocks it."),
+      proposal_id: z.string().optional().describe('The move proposal (T5) this signal targets. Omit for a proposal-less signal — the most recently referenced proposal is used as the anchor.'),
+      override: z.boolean().optional().describe('Reporter-only tie-break / force-pass. Honored ONLY when you currently hold the reporter role on this ticket; it is stamped and audit-logged, and forces consensus satisfied even over an objection.'),
+      content: z.string().optional().describe('Optional rationale shown in the ticket timeline alongside the signal.'),
+      author_type: z.enum(['user', 'agent']).optional(),
+      author_id: z.string().optional(),
+      author: z.string().optional(),
+      author_role: z.string().optional()
+        .describe('Role the signal is cast as. Auto-filled from subagent session pin or TicketRoleAssignment when omitted; stored on metadata.author_role.'),
+    },
+    async ({ ticket_id, status, proposal_id, override, content, author_type, author_id, author, author_role }, extra: { sessionId?: string }) => {
+      const ticket = await dataSource.getRepository(Ticket).findOne({ where: { id: ticket_id } });
+      if (!ticket) return err('Ticket not found');
+      if (ticket.archived_at) return err(new TicketArchivedError(ticket.id).message);
+
+      const resolved = await resolveAuthor(author_type, author_id, author, extra);
+      if ('error' in resolved) return err(resolved.error);
+
+      const by = { type: resolved.authorType, id: resolved.authorId } as const;
+      const proposalId = proposal_id && proposal_id.trim() ? proposal_id.trim() : null;
+
+      // override 게이트: reporter 홀더만 강제 통과할 수 있다. 판정 로직도
+      // reporter 홀더의 override 만 인정하므로 잘못 켜도 무해하지만, 비-reporter
+      // 시그널에 오해를 부르는 마커를 심지 않도록 여기서 걸러 낸다.
+      let effectiveOverride = false;
+      if (override === true && ticketRoleAssignmentService) {
+        try {
+          const grouped = await ticketRoleAssignmentService.resolveGroupedForTicket(ticket.id);
+          const reporter = grouped.find((g) => g.role.slug === 'reporter');
+          effectiveOverride = !!reporter?.holders.some((h) => h.type === by.type && h.id === by.id);
+        } catch {
+          effectiveOverride = false;
+        }
+      }
+
+      const rationale = sanitizeHarnessMarkers(content || '', { logger, toolName: 'record_agreement', fieldName: 'content', agentId: resolved.authorId });
+      const headline = `합의 시그널: ${status}${proposalId ? ` (제안 ${proposalId})` : ''}${effectiveOverride ? ' · reporter override' : ''}`;
+      const body = rationale ? `${headline}\n\n${rationale}` : headline;
+
+      // 마커(consensus_vote) + 구조화 payload + author_role 병합. 마커는
+      // common/consensus-meta 단일 정의 → T2 hook 과 정합.
+      const callerCtx = getCallerAgent(extra);
+      const resolvedAuthorRole = await resolveAuthorRole(
+        ticket_id, author_role, resolved.authorType, resolved.authorId,
+        callerCtx?.subagentRole, callerCtx?.subagentTicketId,
+      );
+      const metadata = mergeAuthorRoleIntoMetadata(
+        buildConsensusMetadata({ status, proposalId, by, override: effectiveOverride }),
+        resolvedAuthorRole,
+      );
+
+      const commentRepo = dataSource.getRepository(Comment);
+      const comment = await commentRepo.save(commentRepo.create({
+        ticket_id,
+        author_type: resolved.authorType,
+        author_id: resolved.authorId,
+        author: resolved.authorName,
+        content: body,
+        type: 'note' as CommentType,
+        metadata: JSON.stringify(metadata),
+      }));
+
+      // 이 vote 반영 후 합의 상태 재판정(best-effort — 판정 실패가 시그널 저장을
+      // 깨뜨리지 않게). 표준 컨텍스트(role-assignment 서비스 부재)면 생략 —
+      // standalone 에는 소비할 라이브 컨슈머가 없다.
+      let state: Awaited<ReturnType<typeof getConsensusState>> | null = null;
+      if (ticketRoleAssignmentService) {
+        try {
+          state = await getConsensusState(
+            { dataSource, ticketRoleAssignmentService },
+            ticket,
+            { proposalId },
+          );
+        } catch (e) {
+          logger.warn('Consensus', `getConsensusState failed on record_agreement: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+
+      // activity 노출: 시그널 + 결과 상태. board_update SSE 가 field_changed=
+      // 'consensus' 로 흘러 UI(T6)가 반응하고, get_ticket_activity 가 감사 트레일.
+      const activityValue = JSON.stringify({
+        status,
+        proposal_id: proposalId,
+        override: effectiveOverride,
+        ...(state
+          ? {
+              satisfied: state.satisfied,
+              required: state.required.length,
+              agreed: state.agreed.length,
+              objected: state.objected.length,
+              pending: state.pending.length,
+              proposal_anchor: state.proposalId,
+            }
+          : {}),
+      });
+      await activityService.logActivity({
+        entity_type: 'comment', entity_id: comment.id, action: 'created',
+        ticket_id, actor_id: resolved.authorId, actor_name: resolved.authorName,
+        new_value: activityValue, field_changed: 'consensus',
+      });
+
+      // reporter override 감사 로그(DoD).
+      if (effectiveOverride && state?.overriddenBy) {
+        await activityService.logActivity({
+          entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
+          ticket_id, actor_id: resolved.authorId, actor_name: resolved.authorName,
+          field_changed: 'consensus_override',
+          new_value: `reporter ${resolved.authorName} forced consensus${proposalId ? ` on proposal ${proposalId}` : ''}`,
+        });
+      }
+
+      return ok({ comment, consensus: state });
     }
   );
 
