@@ -152,6 +152,60 @@ export class TicketRoleAssignmentService {
   }
 
   /**
+   * Board-wide batched multi-holder view: `resolveGroupedForTicket` for MANY
+   * tickets in one shot (4 queries total — assignments + roles + agents + users),
+   * returned as `ticketId → ResolvedRoleHolders[]`. Feeds the board-card
+   * projection (T6 multi-avatar) without N+1 per-card lookups. Tickets with no
+   * assignment are simply absent from the map (caller defaults to `[]`).
+   */
+  async resolveGroupedForTickets(ticketIds: string[]): Promise<Map<string, ResolvedRoleHolders[]>> {
+    const result = new Map<string, ResolvedRoleHolders[]>();
+    if (ticketIds.length === 0) return result;
+
+    const rows = await this.assignRepo.find({ where: { ticket_id: In(ticketIds) } });
+    if (rows.length === 0) return result;
+
+    const roleIds = [...new Set(rows.map(r => r.role_id))];
+    const agentIds = [...new Set(rows.map(r => r.agent_id).filter((x): x is string => !!x))];
+    const userIds = [...new Set(rows.map(r => r.user_id).filter((x): x is string => !!x))];
+
+    const [roles, agents, users] = await Promise.all([
+      this.roleRepo.find({ where: { id: In(roleIds) } }),
+      agentIds.length ? this.agentRepo.find({ where: { id: In(agentIds) } }) : Promise.resolve([] as Agent[]),
+      userIds.length ? this.userRepo.find({ where: { id: In(userIds) } }) : Promise.resolve([] as User[]),
+    ]);
+    const roleMap = new Map(roles.map(r => [r.id, r]));
+    const agentMap = new Map(agents.map(a => [a.id, a]));
+    const userMap = new Map(users.map(u => [u.id, u]));
+
+    // ticketId → (roleId → group). Preserves per-ticket role grouping while
+    // keeping insertion cheap; sorted by role.position on the way out.
+    const byTicket = new Map<string, Map<string, ResolvedRoleHolders>>();
+    for (const r of rows) {
+      const role = roleMap.get(r.role_id);
+      if (!role) continue;
+      let holder: { type: 'agent' | 'user'; id: string; name: string } | null = null;
+      if (r.agent_id && agentMap.has(r.agent_id)) {
+        const a = agentMap.get(r.agent_id)!;
+        holder = { type: 'agent', id: a.id, name: a.name };
+      } else if (r.user_id && userMap.has(r.user_id)) {
+        const u = userMap.get(r.user_id)!;
+        holder = { type: 'user', id: u.id, name: u.name || u.email };
+      }
+      if (!holder) continue;
+      let roleGroups = byTicket.get(r.ticket_id);
+      if (!roleGroups) { roleGroups = new Map(); byTicket.set(r.ticket_id, roleGroups); }
+      let group = roleGroups.get(role.id);
+      if (!group) { group = { role, holders: [] }; roleGroups.set(role.id, group); }
+      group.holders.push(holder);
+    }
+    for (const [ticketId, roleGroups] of byTicket) {
+      result.set(ticketId, [...roleGroups.values()].sort((a, b) => a.role.position - b.role.position));
+    }
+    return result;
+  }
+
+  /**
    * Lookup the FIRST assignment for one (ticket, role) pair, or null.
    *
    * With multi-holder a role can now own several rows; single-holder consumers

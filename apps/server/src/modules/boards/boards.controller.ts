@@ -17,6 +17,7 @@ import { PromptTemplatesService } from '../prompt-templates/prompt-templates.ser
 import { Agent } from '../../entities/Agent';
 import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { WorkspaceRole } from '../../entities/WorkspaceRole';
+import { TicketRoleAssignmentService } from '../workspace-roles/ticket-role-assignment.service';
 import { findOrFail } from '../../common/find-or-fail';
 import { Comment } from '../../entities/Comment';
 import { buildArchiveCursor, parseArchiveCursor } from '../mcp/shared/archive-helpers';
@@ -40,6 +41,16 @@ import { validateQaPhasesInput, serializeQaPhases } from '../qa/qa-phases';
 // two field lists in sync.
 type BoardCardComment = Pick<Comment, 'id' | 'ticket_id' | 'type' | 'status' | 'created_at'>;
 
+// Compact multi-holder role projection for a board card (T6 다중담당자 아바타).
+// One entry per role that has ≥1 holder; `holders` carries every holder so the
+// card can render an avatar stack with a "+N" overflow. The matching client
+// type lives in apps/client/src/types.ts (BoardCardRoleHolders) — keep in sync.
+type BoardCardRoleHolders = {
+  role_slug: string;
+  role_name: string;
+  holders: Array<{ type: 'agent' | 'user'; id: string; name: string }>;
+};
+
 @ApiBearerAuth('user-session')
 @ApiTags('boards')
 @Controller('api/boards')
@@ -53,6 +64,7 @@ export class BoardsController {
     private readonly promptTemplatesService: PromptTemplatesService,
     private readonly agentWorkload: AgentWorkloadService,
     private readonly workspaceMove: WorkspaceMoveService,
+    private readonly ticketRoleAssignments: TicketRoleAssignmentService,
   ) {}
 
   @Get()
@@ -163,6 +175,9 @@ export class BoardsController {
             // below. Typed (not `any[]`) so the shape is enforced end-to-end.
             comments: [] as BoardCardComment[],
             prerequisite_count: 0,
+            // Multi-holder role projection (T6 다중담당자 아바타) — populated by
+            // the grouped query below. Empty until then.
+            role_holders: [] as BoardCardRoleHolders[],
           })),
         };
       })
@@ -210,10 +225,21 @@ export class BoardsController {
         .getRawMany();
       const countMap = new Map<string, number>(counts.map((r: any) => [r.ticket_id, Number(r.cnt)]));
 
+      // Multi-holder role projection for the cards (T6 다중담당자 아바타). One
+      // batched grouped read (assignments + roles + agents + users) → ticketId →
+      // holders-per-role; compacted to the card shape. Same grouped-query
+      // rationale as the comment/prereq projections above (no N+1 per card).
+      const groupedHolders = await this.ticketRoleAssignments.resolveGroupedForTickets(rootTicketIds);
+
       for (const col of columnsWithTickets) {
         for (const t of col.tickets) {
           t.comments = commentsByTicket.get(t.id) || [];
           t.prerequisite_count = countMap.get(t.id) || 0;
+          t.role_holders = (groupedHolders.get(t.id) || []).map(g => ({
+            role_slug: g.role.slug,
+            role_name: g.role.name,
+            holders: g.holders,
+          }));
         }
       }
     }
