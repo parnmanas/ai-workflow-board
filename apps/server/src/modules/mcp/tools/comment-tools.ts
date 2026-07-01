@@ -25,12 +25,12 @@ import { ok, err, MENTION_SYNTAX_DOC, sanitizeHarnessMarkers } from '../shared/h
 import { getCallerAgent } from '../shared/session-auth';
 import { TicketArchivedError } from '../shared/archive-helpers';
 import { findColumnByName } from '../shared/ticket-helpers';
-import { performColumnMove } from '../shared/ticket-move';
 import { resolveAgentDisplayName } from '../../../utils/agent-name';
 import { resolveAuthorRole as resolveAuthorRoleImpl, mergeAuthorRoleIntoMetadata } from './author-role';
 import { BoardColumn } from '../../../entities/BoardColumn';
 import { buildConsensusMetadata, buildProposalMetadata } from '../../../common/consensus-state';
-import { getConsensusState, findOpenProposal, markProposalExecuted } from '../../../services/consensus.service';
+import { getConsensusState, findOpenProposal } from '../../../services/consensus.service';
+import { buildConsensusUpdatePayload, autoExecuteConsensusMove } from '../../../services/consensus-actions';
 import type { ToolContext } from './context';
 
 export function registerCommentTools(server: McpServer, ctx: ToolContext): void {
@@ -648,21 +648,13 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       // 라이브 컨슈머가 없어 생략. board_update(위 activity)와 별개로 재판정
       // 결과를 구조화해 밀어 넣어 UI 가 재조회 없이 배지를 갱신하게 한다.
       if (state) {
-        activityEvents.emit('consensus_update', {
-          ticket_id,
-          workspace_id: ticket.workspace_id,
-          proposal_id: state.proposalId,
-          satisfied: state.satisfied,
-          required: state.required.length,
-          agreed: state.agreed.length,
-          objected: state.objected.length,
-          pending: state.pending.length,
+        activityEvents.emit('consensus_update', buildConsensusUpdatePayload(ticket, state, {
           status,
           override: effectiveOverride,
-          actor_id: resolved.authorId,
-          actor_name: resolved.authorName,
+          actorId: resolved.authorId,
+          actorName: resolved.authorName,
           timestamp: (comment.created_at instanceof Date ? comment.created_at : new Date()).toISOString(),
-        });
+        }));
       }
 
       // reporter override 감사 로그(DoD).
@@ -684,34 +676,17 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       //     per-holder self-guard 를 건드리지 않고 감사상 '합의 자동실행'으로 읽힌다.
       //     제안이 소진되어 다음 record_agreement 는 재이동하지 않으므로 무한루프 없음.
       //   - best-effort: 이동 실패가 시그널 저장을 깨뜨리지 않게 try/catch.
+      // auto-execute (T5, 결정 2): 합의 성립 + 열린 제안 매칭 시 서버가 실제 이동.
+      // consensus-actions.autoExecuteConsensusMove 로 단일화 — REST 투표 브릿지와
+      // 동일한 부작용(performColumnMove + markProposalExecuted + consensus_move 감사).
       let moved: { proposal_id: string; to_column_id: string; to_column_name: string | null } | null = null;
-      if (state && state.satisfied && ticketRoleAssignmentService) {
+      if (state && ticketRoleAssignmentService) {
         try {
-          const open = await findOpenProposal(dataSource, ticket_id);
-          if (open && open.proposalId === state.proposalId) {
-            const destCol = await dataSource.getRepository(BoardColumn).findOne({ where: { id: open.targetColumnId } });
-            if (destCol) {
-              const nowIso = (comment.created_at instanceof Date ? comment.created_at : new Date()).toISOString();
-              await performColumnMove(dataSource, activityService, {
-                ticket,
-                destColumnId: open.targetColumnId,
-                actorId: 'system',
-                actorName: 'Consensus',
-                triggerSource: 'consensus_auto',
-              });
-              await markProposalExecuted(dataSource, open.proposalId, nowIso);
-              moved = { proposal_id: open.proposalId, to_column_id: destCol.id, to_column_name: destCol.name ?? null };
-              // 감사: 어떤 합의가 어디로 이동시켰는지 + 마지막 승인자.
-              await activityService.logActivity({
-                entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
-                ticket_id, actor_id: 'system', actor_name: 'Consensus',
-                field_changed: 'consensus_move',
-                new_value: `합의 성립(제안 ${open.proposalId}) → '${destCol.name}' 자동 이동 · 마지막 승인 ${resolved.authorName}`,
-              });
-            } else {
-              logger.warn('Consensus', `auto-execute skipped: target column ${open.targetColumnId} not found (proposal ${open.proposalId})`);
-            }
-          }
+          const nowIso = (comment.created_at instanceof Date ? comment.created_at : new Date()).toISOString();
+          moved = await autoExecuteConsensusMove(
+            { dataSource, activityService, ticketRoleAssignmentService },
+            ticket, state, nowIso, resolved.authorName,
+          );
         } catch (e) {
           logger.warn('Consensus', `auto-execute move failed on record_agreement: ${e instanceof Error ? e.message : String(e)}`);
         }
@@ -829,21 +804,13 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       // consensus_update SSE(UI T6) — 새 제안으로 배지/pending 갱신. status 는 방금
       // 캐스트된 시그널 필드지만 제안엔 시그널이 없어 중립값 'agree'(레지스트리 기본).
       if (state) {
-        activityEvents.emit('consensus_update', {
-          ticket_id,
-          workspace_id: ticket.workspace_id,
-          proposal_id: state.proposalId,
-          satisfied: state.satisfied,
-          required: state.required.length,
-          agreed: state.agreed.length,
-          objected: state.objected.length,
-          pending: state.pending.length,
+        activityEvents.emit('consensus_update', buildConsensusUpdatePayload(ticket, state, {
           status: 'agree',
           override: false,
-          actor_id: resolved.authorId,
-          actor_name: resolved.authorName,
+          actorId: resolved.authorId,
+          actorName: resolved.authorName,
           timestamp: (comment.created_at instanceof Date ? comment.created_at : new Date()).toISOString(),
-        });
+        }));
       }
 
       return ok({
