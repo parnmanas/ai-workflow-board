@@ -18,16 +18,50 @@ function makeError(status: number, message: string): Error & { status: number } 
   return err;
 }
 
+/** A single holder identity — exactly one of agent_id / user_id is set. */
+export interface HolderRef {
+  agent_id?: string | null;
+  user_id?: string | null;
+}
+
+/**
+ * Normalized holder identity written into `holder_key` — the third leg of the
+ * `(ticket_id, role_id, holder_key)` unique key. Agents win when (illegally)
+ * both are supplied; the empty string marks a vacant slot, which we never
+ * actually persist (vacant rows are deleted). Kept as a pure function so the
+ * migration backfill and the service agree on the exact format.
+ */
+export function computeHolderKey(holder: HolderRef): string {
+  const agent_id = holder.agent_id || null;
+  const user_id = holder.user_id || null;
+  if (agent_id) return `agent:${agent_id}`;
+  if (user_id) return `user:${user_id}`;
+  return '';
+}
+
 /**
  * Read/write helper for `ticket_role_assignments`. Centralizes the
  * (ticket_id, role_id) → holder lookup so the trigger loop, allocation
  * service, notification service, ticket CRUD, and MCP tools all share one
  * implementation of "who holds role X on ticket Y."
  *
+ * MULTI-HOLDER (다중담당자 T1): a role may now carry several holders. Two
+ * families of write helpers:
+ *   - `setHolder()` / `syncBuiltinTrio()` — SINGLE-holder authoritative. They
+ *     make the given holder the *sole* occupant of the role (clearing any
+ *     others), preserving the exact v1 semantics every current consumer
+ *     depends on. Passing both null clears the whole slot.
+ *   - `addHolder()` / `removeHolder()` / `setHolders()` — MULTI-holder. They
+ *     add/remove/replace individual holders without disturbing siblings.
+ *
  * Setting a holder is upsert-style: passing `agent_id`/`user_id` writes the
- * row, passing both null clears it (deletes the assignment row outright —
- * we don't keep empty rows around because the absence-of-a-row already means
- * "vacant" everywhere else in the codebase).
+ * row (keyed by `holder_key`), passing both null clears it (deletes the
+ * assignment row outright — we don't keep empty rows around because the
+ * absence-of-a-row already means "vacant" everywhere else in the codebase).
+ *
+ * Single-holder consumers (trigger loop / allocation / mention) read the
+ * FIRST holder via `getHolderBySlug()` / `getOne()` shims until the T2
+ * fan-out teaches them to iterate every holder.
  */
 @Injectable()
 export class TicketRoleAssignmentService {
