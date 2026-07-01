@@ -51,6 +51,15 @@ export class AllocationService {
     // TicketRoleAssignment instead of the legacy assignee_id/reporter_id/
     // reviewer_id columns. Build the candidate ticket set from assignment
     // rows first so custom workspace roles are picked up automatically.
+    //
+    // 다중담당자 T2 (#3): this lookup is agent-SCOPED — it reads THIS agent's
+    // own assignment rows (agent_id = agentId), so a role now held by several
+    // agents (e.g. reviewer = [X, Y]) already yields an independent allocation
+    // row per holder when the method is called for X versus Y. Each holder
+    // recognizes the ticket as their own share; there is no first-holder shim
+    // here. The (ticket, role, holder) granularity falls out of the per-agent
+    // scan below — the multi-holder fan-out lives in the trigger loop, while
+    // this "what should I be working on" view is naturally per-holder already.
     const assignRepo = this.dataSource.getRepository(TicketRoleAssignment);
     const myAssignments = await assignRepo.find({ where: { agent_id: agentId } });
     if (myAssignments.length === 0) return [];
