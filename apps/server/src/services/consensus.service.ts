@@ -176,8 +176,8 @@ export async function findOpenProposal(
 
 /**
  * 제안을 소진 처리(executed_at 스탬프) — auto-execute 성공 후 호출해 중복 이동을
- * 막는다. 기존 metadata(author_role 등)를 보존하고 consensus_proposal.executed_at
- * 만 채운다. `nowIso` 를 주입받아 순수하게(테스트 결정성) 유지.
+ * 막는다. 기존 metadata(author_role · consensus_proposal 마커 등)를 보존하고
+ * proposal.executed_at 만 채운다. `nowIso` 를 주입받아 순수하게(테스트 결정성) 유지.
  */
 export async function markProposalExecuted(
   dataSource: DataSource,
@@ -194,10 +194,37 @@ export async function markProposalExecuted(
   } catch {
     meta = {};
   }
-  const proposal = (meta.consensus_proposal && typeof meta.consensus_proposal === 'object')
-    ? (meta.consensus_proposal as Record<string, unknown>)
+  const proposal = (meta.proposal && typeof meta.proposal === 'object')
+    ? (meta.proposal as Record<string, unknown>)
     : {};
   proposal.executed_at = nowIso;
-  meta.consensus_proposal = proposal;
+  meta.proposal = proposal;
   await repo.update(proposalCommentId, { metadata: JSON.stringify(meta) });
+}
+
+// ─── 이동 게이트 판정(T5, 결정 4) ────────────────────────────────────────────
+// 홀더 수 기반 자동 게이트: 현재(이탈) 컬럼 라우팅 역할의 **전 홀더**가 ≥2 이고
+// 합의 미성립이면 직접 이동을 차단한다. 홀더 ≤1 이면 절대 차단하지 않는다
+// (하위호환 — 기존 단일홀더 보드/티켓은 게이트 없이 그대로 move_ticket 작동).
+
+export interface ConsensusMoveGate {
+  /** 게이트가 이동을 차단하는가(홀더 ≥2 & 미성립). */
+  blocked: boolean;
+  /** 판정 상태 — 차단 메시지(누가 pending)와 디버깅에 사용. */
+  state: ResolvedConsensusState;
+}
+
+/**
+ * T5 이동 게이트 판정. 현재 컬럼 라우팅 홀더가 ≥2 이고 `satisfied=false` 면
+ * `blocked=true`. 홀더 ≤1 이면 항상 `blocked=false`(제안 ceremony 불필요).
+ * `force`/reporter override 우회는 **호출측**(move_ticket)이 판단한다 — 이 함수는
+ * 순수 판정만.
+ */
+export async function evaluateConsensusMoveGate(
+  deps: ConsensusResolverDeps,
+  ticket: Ticket,
+): Promise<ConsensusMoveGate> {
+  const state = await getConsensusState(deps, ticket, {});
+  const blocked = state.required.length >= 2 && !state.satisfied;
+  return { blocked, state };
 }

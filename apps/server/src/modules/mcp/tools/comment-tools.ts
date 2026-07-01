@@ -24,10 +24,13 @@ import { activityEvents } from '../../../services/activity.service';
 import { ok, err, MENTION_SYNTAX_DOC, sanitizeHarnessMarkers } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
 import { TicketArchivedError } from '../shared/archive-helpers';
+import { findColumnByName } from '../shared/ticket-helpers';
+import { performColumnMove } from '../shared/ticket-move';
 import { resolveAgentDisplayName } from '../../../utils/agent-name';
 import { resolveAuthorRole as resolveAuthorRoleImpl, mergeAuthorRoleIntoMetadata } from './author-role';
-import { buildConsensusMetadata } from '../../../common/consensus-state';
-import { getConsensusState } from '../../../services/consensus.service';
+import { BoardColumn } from '../../../entities/BoardColumn';
+import { buildConsensusMetadata, buildProposalMetadata } from '../../../common/consensus-state';
+import { getConsensusState, findOpenProposal, markProposalExecuted } from '../../../services/consensus.service';
 import type { ToolContext } from './context';
 
 export function registerCommentTools(server: McpServer, ctx: ToolContext): void {
@@ -548,7 +551,18 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       if ('error' in resolved) return err(resolved.error);
 
       const by = { type: resolved.authorType, id: resolved.authorId } as const;
-      const proposalId = proposal_id && proposal_id.trim() ? proposal_id.trim() : null;
+      let proposalId = proposal_id && proposal_id.trim() ? proposal_id.trim() : null;
+      // T5 UX: proposal_id 생략 시 최신 열린 이동 제안을 앵커로 자동 채택 → 홀더는
+      // record_agreement(agree) 만 호출해도 현재 제안에 투표된다. 열린 제안이 없으면
+      // (예: 제안 없는 순수 T4 시그널) null 유지 → auto-execute 도 발동하지 않는다.
+      if (!proposalId && ticketRoleAssignmentService) {
+        try {
+          const open = await findOpenProposal(dataSource, ticket_id);
+          if (open) proposalId = open.proposalId;
+        } catch {
+          /* best-effort — 앵커 자동채택 실패는 명시 투표 흐름을 막지 않는다 */
+        }
+      }
 
       // override 게이트: reporter 홀더만 강제 통과할 수 있다. 판정 로직도
       // reporter 홀더의 override 만 인정하므로 잘못 켜도 무해하지만, 비-reporter
@@ -661,7 +675,183 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         });
       }
 
-      return ok({ comment, consensus: state });
+      // ─── auto-execute (T5, 결정 2): 합의 성립 + 열린 이동 제안이 있으면 서버가
+      // 실제 move 를 실행한다(마지막 승인 시점 자동실행).
+      //   - satisfied && 열린 제안 존재 && 판정 앵커(state.proposalId)==그 제안 일 때만
+      //     실행 → 엉뚱한/stale 앵커로는 움직이지 않는다.
+      //   - markProposalExecuted 로 executed_at 스탬프 → 중복 이동/재실행 방지.
+      //   - actor='system'/'Consensus'(마지막 승인자 아님) → 목적지 컬럼 트리거의
+      //     per-holder self-guard 를 건드리지 않고 감사상 '합의 자동실행'으로 읽힌다.
+      //     제안이 소진되어 다음 record_agreement 는 재이동하지 않으므로 무한루프 없음.
+      //   - best-effort: 이동 실패가 시그널 저장을 깨뜨리지 않게 try/catch.
+      let moved: { proposal_id: string; to_column_id: string; to_column_name: string | null } | null = null;
+      if (state && state.satisfied && ticketRoleAssignmentService) {
+        try {
+          const open = await findOpenProposal(dataSource, ticket_id);
+          if (open && open.proposalId === state.proposalId) {
+            const destCol = await dataSource.getRepository(BoardColumn).findOne({ where: { id: open.targetColumnId } });
+            if (destCol) {
+              const nowIso = (comment.created_at instanceof Date ? comment.created_at : new Date()).toISOString();
+              await performColumnMove(dataSource, activityService, {
+                ticket,
+                destColumnId: open.targetColumnId,
+                actorId: 'system',
+                actorName: 'Consensus',
+                triggerSource: 'consensus_auto',
+              });
+              await markProposalExecuted(dataSource, open.proposalId, nowIso);
+              moved = { proposal_id: open.proposalId, to_column_id: destCol.id, to_column_name: destCol.name ?? null };
+              // 감사: 어떤 합의가 어디로 이동시켰는지 + 마지막 승인자.
+              await activityService.logActivity({
+                entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
+                ticket_id, actor_id: 'system', actor_name: 'Consensus',
+                field_changed: 'consensus_move',
+                new_value: `합의 성립(제안 ${open.proposalId}) → '${destCol.name}' 자동 이동 · 마지막 승인 ${resolved.authorName}`,
+              });
+            } else {
+              logger.warn('Consensus', `auto-execute skipped: target column ${open.targetColumnId} not found (proposal ${open.proposalId})`);
+            }
+          }
+        } catch (e) {
+          logger.warn('Consensus', `auto-execute move failed on record_agreement: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+
+      return ok({ comment, consensus: state, moved });
+    }
+  );
+
+  // ─── propose_move (다중담당자·합의 T5) ───────────────────────────────
+  // 다중홀더(≥2) 티켓의 컬럼 이동을 '제안'으로 연다. 제안 comment 의 id 가 곧
+  // proposalId — 전 홀더가 record_agreement(agree) 로 이 제안에 동의하면 서버가
+  // 자동 이동한다(auto-execute). 홀더 ≤1 이면 ceremony 불필요 → move_ticket 안내.
+  // 제안 comment 는 vote 마커를 심지 않아 팬아웃되어 공동 홀더를 깨운다(투표 유도).
+  server.tool(
+    'propose_move',
+    'Open a MOVE PROPOSAL to advance a MULTI-HOLDER ticket (its current column\'s routing role has ≥2 holders) to another column. ' +
+      'The proposal comment\'s id IS the proposal_id: once EVERY routing-role holder casts record_agreement(agree) referencing it, the server AUTO-EXECUTES the move ' +
+      '(position shift, branch-tip clear, terminal stamp — identical to move_ticket). A reporter may override to force-pass. ' +
+      'If the routing role has ≤1 holder there is no consensus ceremony — call move_ticket directly instead. ' +
+      'The proposal is deliberately NOT a consensus vote, so it fans out to wake the co-holders who must vote.\n\n' +
+      MENTION_SYNTAX_DOC,
+    {
+      ticket_id: z.string().describe('Ticket ID to propose a move for'),
+      target_column_id: z.string().optional().describe('Target column ID (use this OR target_column_name)'),
+      target_column_name: z.string().optional().describe('Target column name (case-insensitive; requires board_id)'),
+      board_id: z.string().optional().describe('Board ID (required when using target_column_name)'),
+      content: z.string().optional().describe('Optional rationale shown in the ticket timeline alongside the proposal.'),
+      author_type: z.enum(['user', 'agent']).optional(),
+      author_id: z.string().optional(),
+      author: z.string().optional(),
+      author_role: z.string().optional()
+        .describe('Role the proposal is authored as. Auto-filled from subagent session pin or TicketRoleAssignment when omitted; stored on metadata.author_role.'),
+    },
+    async ({ ticket_id, target_column_id, target_column_name, board_id, content, author_type, author_id, author, author_role }, extra: { sessionId?: string }) => {
+      const ticket = await dataSource.getRepository(Ticket).findOne({ where: { id: ticket_id } });
+      if (!ticket) return err('Ticket not found');
+      if (ticket.archived_at) return err(new TicketArchivedError(ticket.id).message);
+
+      if (!ticketRoleAssignmentService) {
+        return err('propose_move requires the role-assignment service (unavailable in standalone MCP mode).');
+      }
+
+      // 대상 컬럼 해석(move_ticket 과 동일 규약).
+      let destColumnId = target_column_id;
+      if (!destColumnId && target_column_name) {
+        if (!board_id) return err('board_id is required when using target_column_name');
+        const col = await findColumnByName(dataSource, board_id, target_column_name);
+        if (!col) return err(`Column "${target_column_name}" not found`);
+        destColumnId = col.id;
+      }
+      if (!destColumnId) return err('Either target_column_id or target_column_name is required');
+      if (destColumnId === ticket.column_id) return err('제안 대상이 현재 컬럼과 동일합니다 — 이동 제안이 아닙니다.');
+      const destCol = await dataSource.getRepository(BoardColumn).findOne({ where: { id: destColumnId } });
+      if (!destCol) return err('Target column not found');
+
+      const resolved = await resolveAuthor(author_type, author_id, author, extra);
+      if ('error' in resolved) return err(resolved.error);
+      const by = { type: resolved.authorType, id: resolved.authorId } as const;
+
+      // 현재(이탈) 컬럼 라우팅 홀더 수 확인 — ≤1 이면 ceremony 불필요.
+      const preState = await getConsensusState({ dataSource, ticketRoleAssignmentService }, ticket, {});
+      if (preState.required.length < 2) {
+        return err(
+          `이 컬럼의 라우팅 역할 홀더가 ${preState.required.length}명입니다(≤1). ` +
+          `합의 ceremony 가 불필요하니 move_ticket 으로 직접 이동하세요.`,
+        );
+      }
+
+      // 제안 comment — id 가 곧 proposalId. vote 마커는 심지 않는다(팬아웃 유지 →
+      // 공동 홀더를 깨워 투표하게). buildProposalMetadata + author_role 병합.
+      const currentCol = ticket.column_id
+        ? await dataSource.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } })
+        : null;
+      const rationale = sanitizeHarnessMarkers(content || '', { logger, toolName: 'propose_move', fieldName: 'content', agentId: resolved.authorId });
+      const headline = `이동 제안: '${currentCol?.name ?? '—'}' → '${destCol.name}' (by ${resolved.authorName}). 전 홀더가 record_agreement(agree) 하면 서버가 자동 이동합니다.`;
+      const body = rationale ? `${headline}\n\n${rationale}` : headline;
+
+      const callerCtx = getCallerAgent(extra);
+      const resolvedAuthorRole = await resolveAuthorRole(
+        ticket_id, author_role, resolved.authorType, resolved.authorId,
+        callerCtx?.subagentRole, callerCtx?.subagentTicketId,
+      );
+      const metadata = mergeAuthorRoleIntoMetadata(
+        buildProposalMetadata({ targetColumnId: destCol.id, targetColumnName: destCol.name, by }),
+        resolvedAuthorRole,
+      );
+
+      const commentRepo = dataSource.getRepository(Comment);
+      const comment = await commentRepo.save(commentRepo.create({
+        ticket_id,
+        author_type: resolved.authorType,
+        author_id: resolved.authorId,
+        author: resolved.authorName,
+        content: body,
+        type: 'note' as CommentType,
+        metadata: JSON.stringify(metadata),
+      }));
+
+      // 이 제안을 앵커로 재판정 — pending(아직 투표 안 한 홀더)이 드러난다.
+      let state: Awaited<ReturnType<typeof getConsensusState>> | null = null;
+      try {
+        state = await getConsensusState({ dataSource, ticketRoleAssignmentService }, ticket, { proposalId: comment.id });
+      } catch (e) {
+        logger.warn('Consensus', `getConsensusState failed on propose_move: ${e instanceof Error ? e.message : String(e)}`);
+      }
+
+      await activityService.logActivity({
+        entity_type: 'comment', entity_id: comment.id, action: 'created',
+        ticket_id, actor_id: resolved.authorId, actor_name: resolved.authorName,
+        new_value: JSON.stringify({ target_column_id: destCol.id, target_column_name: destCol.name, proposal_id: comment.id }),
+        field_changed: 'consensus_proposal',
+      });
+
+      // consensus_update SSE(UI T6) — 새 제안으로 배지/pending 갱신. status 는 방금
+      // 캐스트된 시그널 필드지만 제안엔 시그널이 없어 중립값 'agree'(레지스트리 기본).
+      if (state) {
+        activityEvents.emit('consensus_update', {
+          ticket_id,
+          workspace_id: ticket.workspace_id,
+          proposal_id: state.proposalId,
+          satisfied: state.satisfied,
+          required: state.required.length,
+          agreed: state.agreed.length,
+          objected: state.objected.length,
+          pending: state.pending.length,
+          status: 'agree',
+          override: false,
+          actor_id: resolved.authorId,
+          actor_name: resolved.authorName,
+          timestamp: (comment.created_at instanceof Date ? comment.created_at : new Date()).toISOString(),
+        });
+      }
+
+      return ok({
+        proposal: comment,
+        proposal_id: comment.id,
+        target_column: { id: destCol.id, name: destCol.name },
+        consensus: state,
+      });
     }
   );
 

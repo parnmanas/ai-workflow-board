@@ -40,7 +40,9 @@ export const CONSENSUS_VOTE_META_KEY = 'consensus_vote';
  * Reserved `metadata` key a T5 **move proposal** comment stamps `=== true`.
  *
  * `propose_move` opens a proposal by writing a comment carrying this marker plus
- * a structured `consensus_proposal` payload (target column + proposer). The
+ * a structured `proposal` payload (target column + proposer), under a SEPARATE
+ * key from this boolean marker (mirrors the vote's consensus_vote+consensus pair
+ * so the marker and its payload never collide on one key). The
  * proposal comment's own id BECOMES the `proposalId` that consensus votes
  * ({@link CONSENSUS_VOTE_META_KEY}) reference, so the two markers never collide:
  * a proposal comment carries THIS key (and deliberately NOT the vote key, so it

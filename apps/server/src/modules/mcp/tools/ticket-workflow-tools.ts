@@ -16,14 +16,16 @@ import { Ticket } from '../../../entities/Ticket';
 import { ok, err } from '../shared/helpers';
 import { loadTicketFull } from '../shared/ticket-parsing';
 import { findColumnByName, maxTicketPosition, shiftTicketPositions } from '../shared/ticket-helpers';
+import { performColumnMove } from '../shared/ticket-move';
 import { applyTerminalEnteredAtForMove, isTerminalReopen, TerminalReopenError, TicketArchivedError } from '../shared/archive-helpers';
 import { isReviewToMerging, hasReviewerApproval, ReviewApprovalRequiredError } from '../shared/review-approval-guard';
 import { getCallerAgent } from '../shared/session-auth';
 import { resolveAgentDisplayName } from '../../../utils/agent-name';
+import { evaluateConsensusMoveGate } from '../../../services/consensus.service';
 import type { ToolContext } from './context';
 
 export function registerTicketWorkflowTools(server: McpServer, ctx: ToolContext): void {
-  const { dataSource, activityService } = ctx;
+  const { dataSource, activityService, ticketRoleAssignmentService, logger } = ctx;
 
   server.tool(
     'move_ticket',
@@ -91,53 +93,41 @@ export function registerTicketWorkflowTools(server: McpServer, ctx: ToolContext)
         return err(new ReviewApprovalRequiredError(ticket.id, sourceColForGuard?.name ?? String(oldColumnId), destColForGuard.name).message);
       }
 
-      await dataSource.transaction(async (manager) => {
-        const tRepo = manager.getRepository(Ticket);
+      // Consensus gate (다중담당자·합의 T5, 결정 4). 이탈 컬럼(현재)의 라우팅 역할
+      // 홀더가 ≥2 이고 합의 미성립이면 직접 이동을 차단한다 — propose_move + 전 홀더
+      // record_agreement(agree) 로만 넘어가거나 force / reporter override 로 우회.
+      // 홀더 ≤1 이면 게이트가 절대 걸리지 않아 기존 단일홀더 보드/티켓은 무회귀.
+      // 순수 리오더(같은 컬럼)와 standalone(role-assignment 서비스 부재)은 제외.
+      if (!force && ticketRoleAssignmentService && destColumnId !== oldColumnId) {
+        try {
+          const gate = await evaluateConsensusMoveGate(
+            { dataSource, ticketRoleAssignmentService },
+            ticket,
+          );
+          if (gate.blocked) {
+            const pending = gate.state.pending.map((p) => `${p.type}:${p.id}`).join(', ');
+            return err(
+              `합의 필요(T5): 이 컬럼의 라우팅 역할 홀더 ${gate.state.required.length}명 전원이 합의해야 이동할 수 있습니다. ` +
+              `아직 미성립 — 대기 중: [${pending || '없음'}]. ` +
+              `propose_move(target) 로 제안을 열고 전 홀더가 record_agreement(agree) 하면 자동 이동합니다. ` +
+              `force=true 또는 reporter override 로 우회할 수 있습니다.`,
+            );
+          }
+        } catch (e) {
+          // best-effort: 판정 실패가 이동을 완전히 막지 않도록(가용성 우선) 통과.
+          logger?.warn?.('Consensus', `move_ticket gate eval failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
 
-        await shiftTicketPositions(tRepo, { column_id: ticket.column_id }, ticket.position, -1);
-
-        const destCount = await tRepo.createQueryBuilder('t')
-          .where('t.column_id = :colId AND t.id != :id AND t.parent_id IS NULL', { colId: destColumnId, id: ticket.id })
-          .getCount();
-        const pos = Math.min(position ?? destCount, destCount);
-
-        await shiftTicketPositions(tRepo, { column_id: destColumnId! }, pos, +1, { inclusive: true, excludeId: ticket.id });
-
-        // Clear the claim-verification branch-tip snapshot (ticket dcb9d661).
-        // The snapshot is tied to the prior column's claim cycle — once the
-        // ticket moves, that cycle is closed. The next assignee trigger on
-        // the destination (if it's also an active column) will re-snapshot
-        // against the fresh baseline. Inline rather than a service call so
-        // move_ticket stays decoupled from the agents module.
-        await tRepo.update(ticket.id, {
-          column_id: destColumnId!,
-          position: pos,
-          branch_tip_sha_at_trigger: '',
-          branch_tip_snapshot_at: null,
-        });
-
-        // Stamp / clear terminal_entered_at when the move crosses the
-        // terminal boundary so the archiver has an accurate Done-entry time.
-        const colRepoTx = manager.getRepository(BoardColumn);
-        const [sourceColForStamp, destColForStamp] = await Promise.all([
-          oldColumnId ? colRepoTx.findOne({ where: { id: oldColumnId } }) : Promise.resolve(null),
-          colRepoTx.findOne({ where: { id: destColumnId! } }),
-        ]);
-        await applyTerminalEnteredAtForMove(tRepo, ticket.id, sourceColForStamp, destColForStamp);
+      // 실제 이동은 공유 코어(performColumnMove) — record_agreement auto-execute 와
+      // 동일한 부작용(포지션 시프트 · branch_tip clear · terminal 스탬프 · moved 로그).
+      const updated = await performColumnMove(dataSource, activityService, {
+        ticket,
+        destColumnId: destColumnId!,
+        position,
+        actorId: caller?.agentId,
+        actorName: caller?.agentName,
       });
-
-      // Resolve column names for activity log
-      const oldCol = await dataSource.getRepository(BoardColumn).findOne({ where: { id: oldColumnId } });
-      const newCol = await dataSource.getRepository(BoardColumn).findOne({ where: { id: destColumnId! } });
-
-      await activityService.logActivity({
-        entity_type: 'ticket', entity_id: ticket.id, action: 'moved',
-        field_changed: 'column', old_value: oldCol?.name || String(oldColumnId),
-        new_value: newCol?.name || String(destColumnId), ticket_id: ticket.id,
-        actor_id: caller?.agentId, actor_name: caller?.agentName,
-      });
-
-      const updated = await loadTicketFull(dataSource, ticket.id);
       return ok(updated);
     }
   );
