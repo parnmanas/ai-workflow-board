@@ -37,6 +37,21 @@
 export const CONSENSUS_VOTE_META_KEY = 'consensus_vote';
 
 /**
+ * Reserved `metadata` key a T5 **move proposal** comment stamps `=== true`.
+ *
+ * `propose_move` opens a proposal by writing a comment carrying this marker plus
+ * a structured `consensus_proposal` payload (target column + proposer). The
+ * proposal comment's own id BECOMES the `proposalId` that consensus votes
+ * ({@link CONSENSUS_VOTE_META_KEY}) reference, so the two markers never collide:
+ * a proposal comment carries THIS key (and deliberately NOT the vote key, so it
+ * still fans out to wake the co-holders who must vote), while each vote carries
+ * the vote key (suppressed from fan-out). The consensus gate reads the latest
+ * un-executed proposal to know where a satisfied consensus should move the
+ * ticket. Kept here so the tool, the gate, and tests agree on one literal.
+ */
+export const CONSENSUS_PROPOSAL_META_KEY = 'consensus_proposal';
+
+/**
  * Optional `metadata` marker a discussion comment (T3) MAY carry so the client
  * / a future consensus gate can facet "this was phase discussion" without
  * guessing from `type` alone. Purely advisory — its presence or absence never
@@ -60,4 +75,17 @@ export function isConsensusVoteComment(
 ): boolean {
   if (!metadata || typeof metadata !== 'object') return false;
   return (metadata as Record<string, unknown>)[CONSENSUS_VOTE_META_KEY] === true;
+}
+
+/**
+ * True iff a comment's (already-parsed) metadata bag marks it as a T5 move
+ * proposal. Same tolerant contract as {@link isConsensusVoteComment}. A proposal
+ * comment is deliberately NOT a vote comment, so it does NOT suppress fan-out —
+ * proposing a move SHOULD wake the co-holders so they can cast their votes.
+ */
+export function isConsensusProposalComment(
+  metadata: Record<string, unknown> | null | undefined,
+): boolean {
+  if (!metadata || typeof metadata !== 'object') return false;
+  return (metadata as Record<string, unknown>)[CONSENSUS_PROPOSAL_META_KEY] === true;
 }

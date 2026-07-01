@@ -18,7 +18,12 @@
  * `ConsensusService` 가, 결과 `ConsensusState` 소비는 T5 게이트·T6 UI 가 맡는다.
  */
 
-import { CONSENSUS_VOTE_META_KEY, isConsensusVoteComment } from './consensus-meta';
+import {
+  CONSENSUS_VOTE_META_KEY,
+  CONSENSUS_PROPOSAL_META_KEY,
+  isConsensusVoteComment,
+  isConsensusProposalComment,
+} from './consensus-meta';
 
 export type ConsensusStatus = 'agree' | 'object';
 
@@ -218,4 +223,74 @@ export function parseConsensusVote(
   };
   if (c.override === true) vote.override = true;
   return vote;
+}
+
+// ─── Comment.metadata ↔ 이동 제안(T5) 브릿지 ──────────────────────────────
+// 투표 브릿지와 같은 위치에 둬서 마커/payload 모양이 한 곳에 모이게 한다.
+// 제안 comment 의 **id 자체가 proposalId** — 투표는 그 id 를 참조하고, 게이트는
+// 최신 미실행 제안을 읽어 "합의 성립 시 어디로 이동할지" 를 안다.
+
+/** metadata.consensus_proposal 하위 payload 모양. */
+export interface ConsensusProposalMeta {
+  /** 합의 성립 시 이동할 대상 컬럼. */
+  target_column_id: string;
+  /** 감사/표시용 대상 컬럼 이름(선택). */
+  target_column_name?: string;
+  /** 제안자. */
+  by: ConsensusParty;
+  /** auto-execute 가 실행된 시각(ISO). 있으면 그 제안은 소진됨(재실행 금지). */
+  executed_at?: string;
+}
+
+/** 파싱된 제안 payload(런타임 read 편의 형태). */
+export interface ParsedConsensusProposal {
+  targetColumnId: string;
+  targetColumnName: string | null;
+  by: ConsensusParty;
+  executedAt: string | null;
+}
+
+/**
+ * 이동 제안 comment 의 metadata 를 만든다. `consensus_proposal: true` 마커(팬아웃
+ * 억제 안 함 — 공동 홀더를 깨워 투표하게) + 구조화된 `consensus_proposal` payload.
+ * **투표 마커(consensus_vote)는 심지 않는다** — 제안은 투표가 아니다.
+ */
+export function buildProposalMetadata(proposal: {
+  targetColumnId: string;
+  targetColumnName?: string | null;
+  by: ConsensusParty;
+  executedAt?: string | null;
+}): Record<string, unknown> {
+  const payload: ConsensusProposalMeta = {
+    target_column_id: proposal.targetColumnId,
+    by: { type: proposal.by.type, id: proposal.by.id },
+  };
+  if (proposal.targetColumnName) payload.target_column_name = proposal.targetColumnName;
+  if (proposal.executedAt) payload.executed_at = proposal.executedAt;
+  return { [CONSENSUS_PROPOSAL_META_KEY]: true, consensus_proposal: payload };
+}
+
+/**
+ * 파싱된 metadata 에서 이동 제안을 복원. 마커가 없거나 payload 가 손상되면 null.
+ * `target_column_id` 는 필수 — 없으면 무효 제안으로 무시.
+ */
+export function parseConsensusProposal(
+  metadata: Record<string, unknown> | null | undefined,
+): ParsedConsensusProposal | null {
+  if (!isConsensusProposalComment(metadata)) return null;
+  const raw = (metadata as Record<string, unknown>).consensus_proposal;
+  if (!raw || typeof raw !== 'object') return null;
+  const p = raw as Record<string, unknown>;
+  const targetColumnId = typeof p.target_column_id === 'string' && p.target_column_id ? p.target_column_id : null;
+  if (!targetColumnId) return null;
+  const by = p.by as Record<string, unknown> | undefined;
+  const byType = by?.type;
+  const byId = by?.id;
+  if ((byType !== 'agent' && byType !== 'user') || typeof byId !== 'string' || !byId) return null;
+  return {
+    targetColumnId,
+    targetColumnName: typeof p.target_column_name === 'string' && p.target_column_name ? p.target_column_name : null,
+    by: { type: byType, id: byId },
+    executedAt: typeof p.executed_at === 'string' && p.executed_at ? p.executed_at : null,
+  };
 }

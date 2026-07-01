@@ -20,9 +20,11 @@ import { Ticket } from '../entities/Ticket';
 import {
   computeConsensusState,
   parseConsensusVote,
+  parseConsensusProposal,
   type ConsensusParty,
   type ConsensusState,
   type ConsensusVote,
+  type ParsedConsensusProposal,
 } from '../common/consensus-state';
 import type { TicketRoleAssignmentService } from '../modules/workspace-roles/ticket-role-assignment.service';
 
@@ -133,4 +135,69 @@ export async function getConsensusState(
   });
 
   return { ...state, routingRoleSlugs };
+}
+
+// ─── 이동 제안(T5) 조회/소진 ───────────────────────────────────────────────
+// `propose_move` 가 만든 제안 comment(marker consensus_proposal, id === proposalId)
+// 를 조회하고, auto-execute 후 executed_at 을 찍어 재실행을 막는다.
+
+export interface OpenConsensusProposal extends ParsedConsensusProposal {
+  /** 제안 comment 의 id — 이것이 곧 proposalId(투표가 참조하는 값). */
+  proposalId: string;
+  /** 제안 comment created_at(epoch ms) — 최신 제안 선택용. */
+  at: number;
+}
+
+/**
+ * 티켓의 **최신 미실행 이동 제안**을 반환. 실행됨(executed_at) 제안은 제외.
+ * 없으면 null. proposalId 는 제안 comment 의 id.
+ */
+export async function findOpenProposal(
+  dataSource: DataSource,
+  ticketId: string,
+): Promise<OpenConsensusProposal | null> {
+  const comments = await dataSource.getRepository(Comment).find({ where: { ticket_id: ticketId } });
+  let best: OpenConsensusProposal | null = null;
+  for (const c of comments) {
+    let meta: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse(c.metadata || '{}');
+      if (parsed && typeof parsed === 'object') meta = parsed as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    const proposal = parseConsensusProposal(meta);
+    if (!proposal || proposal.executedAt) continue; // 미실행 제안만
+    const at = toEpochMs(c.created_at);
+    if (!best || at >= best.at) best = { ...proposal, proposalId: c.id, at };
+  }
+  return best;
+}
+
+/**
+ * 제안을 소진 처리(executed_at 스탬프) — auto-execute 성공 후 호출해 중복 이동을
+ * 막는다. 기존 metadata(author_role 등)를 보존하고 consensus_proposal.executed_at
+ * 만 채운다. `nowIso` 를 주입받아 순수하게(테스트 결정성) 유지.
+ */
+export async function markProposalExecuted(
+  dataSource: DataSource,
+  proposalCommentId: string,
+  nowIso: string,
+): Promise<void> {
+  const repo = dataSource.getRepository(Comment);
+  const comment = await repo.findOne({ where: { id: proposalCommentId } });
+  if (!comment) return;
+  let meta: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(comment.metadata || '{}');
+    if (parsed && typeof parsed === 'object') meta = parsed as Record<string, unknown>;
+  } catch {
+    meta = {};
+  }
+  const proposal = (meta.consensus_proposal && typeof meta.consensus_proposal === 'object')
+    ? (meta.consensus_proposal as Record<string, unknown>)
+    : {};
+  proposal.executed_at = nowIso;
+  meta.consensus_proposal = proposal;
+  await repo.update(proposalCommentId, { metadata: JSON.stringify(meta) });
 }
