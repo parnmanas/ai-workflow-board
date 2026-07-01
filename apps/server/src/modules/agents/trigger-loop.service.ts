@@ -12,6 +12,7 @@ import { Resource } from '../../entities/Resource';
 import { Workspace } from '../../entities/Workspace';
 import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
+import { Comment } from '../../entities/Comment';
 import { LogService } from '../../services/log.service';
 import { ActivityService, activityEvents } from '../../services/activity.service';
 import { GitHubConnectorService, parseGitHubUrl } from '../../services/github-connector.service';
@@ -220,18 +221,17 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
     // auto-advance check below can ask "did ANY routed role on this column
     // resolve to a holder on this ticket?". A single-pass loop that emits + skips
     // can't answer that without a second scan.
-    const roleRepo = this.dataSource.getRepository(WorkspaceRole);
+    // 다중담당자 T2 (#1): resolve EVERY agent holder of each routed slug, not
+    // just the first. `_resolveRoleHolders` returns the WorkspaceRole plus its
+    // distinct agent holders (earliest-created first; user holders skipped —
+    // humans receive no agent_trigger). The two-phase gather is still what the
+    // auto-advance / halt decision below reads via `columnHasHolder`.
     const assignRepo = this.dataSource.getRepository(TicketRoleAssignment);
-    const resolved: Array<{ slug: string; role: WorkspaceRole; targetAgentId: string | null }> = [];
+    const resolved: Array<{ slug: string; role: WorkspaceRole; targetAgentIds: string[] }> = [];
     for (const slug of roles) {
-      const role = await roleRepo.findOne({
-        where: { workspace_id: ticket.workspace_id, slug },
-      });
-      if (!role) continue;
-      const assignment = await assignRepo.findOne({
-        where: { ticket_id: ticket.id, role_id: role.id },
-      });
-      resolved.push({ slug, role, targetAgentId: assignment?.agent_id || null });
+      const holders = await this._resolveRoleHolders(ticket, slug);
+      if (!holders) continue;
+      resolved.push({ slug, role: holders.role, targetAgentIds: holders.agentIds });
     }
 
     // AUTO-ADVANCE vs HALT (ticket c5951280). A non-terminal column with no
@@ -287,7 +287,7 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    const columnHasHolder = resolved.some((r) => !!r.targetAgentId);
+    const columnHasHolder = resolved.some((r) => r.targetAgentIds.length > 0);
     if (triggerSource === 'column_move' && !columnHasHolder) {
       if (this._isGateColumn(col)) {
         // GATE COLUMN (review / merging) with no holder — never auto-advance a
@@ -309,53 +309,143 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    for (const { slug, role, targetAgentId } of resolved) {
-      if (!targetAgentId) continue;
-      // Self-trigger guard, action-type aware (v0.34 onward, refined v0.41):
-      //
-      //   - comment / ticket_update: same agent_id implies the actor's own
-      //     role context — re-firing on the same (ticket, role) would just
-      //     wake the same persistent subagent that just produced the event,
-      //     which is a deadlock-shaped feedback loop. Always skip.
-      //
-      //   - column_move: the destination column may shift role responsibility
-      //     (e.g. Review → Merging changes owner from reviewer → assignee).
-      //     With v0.34's per-(ticket, role) plugin subagents, a SAME-agent
-      //     DIFFERENT-role transition spawns a separate subagent for the new
-      //     role — there's no LLM-level loop to prevent and dropping the
-      //     trigger would silently deadlock single-agent multi-role workflows
-      //     (a single AWB agent holding assignee+reviewer+merger on the same
-      //     ticket is the production default).
-      //
-      //     But a SAME-agent SAME-role transition (e.g. assignee moves their
-      //     own ticket To Do → In Progress, both columns route to assignee)
-      //     IS a self-loop: the actor just performed the move that would
-      //     have triggered them, and re-emitting just spawns a redundant
-      //     subagent. Pre-v0.41 (and the bypass that lived here from v0.34
-      //     onward) the column_move case was unguarded entirely — it
-      //     happened to be safe in production only because fixtures /
-      //     prod tickets typically had no TicketRoleAssignment row, so
-      //     `targetAgentId` was null and the loop short-circuited above.
-      //     Once role assignments are reliably seeded the bypass becomes
-      //     a live self-loop, exercised by self-trigger-guard.test.mjs.
-      //
-      //     Discriminator: the actor is in role-shift (don't skip) iff the
-      //     actor holds at least one role on THIS ticket that is NOT the
-      //     target role. Otherwise the actor's only role is the target
-      //     role, the move is a same-role self-action, and we skip.
-      if (targetAgentId === log.actor_id) {
-        if (triggerSource !== 'column_move') continue;
-        const actorAssignments = await assignRepo.find({
-          where: { ticket_id: ticket.id, agent_id: log.actor_id || '' },
-        });
-        const hasOtherRole = actorAssignments.some(
-          (a) => a.role_id && a.role_id !== role.id,
-        );
-        if (!hasOtherRole) continue;
-      }
+    // 다중담당자 T2 fan-out (#1 / #2 / #6). Emit to EVERY holder of each routed
+    // slug, with three refinements over the single-holder loop:
+    //   - agent_id dedup (`emittedAgentIds`): a 겸직 agent that holds several
+    //     routed roles on this column wakes ONCE (carrying the first routed role
+    //     it holds, role_routing order). Deduping avoids the twin-subagent
+    //     double-spawn a single-agent-multi-role ticket would otherwise get.
+    //   - the self-trigger guard is applied PER HOLDER: the actor being one
+    //     holder of a role must not re-wake ITSELF, but the OTHER holders of
+    //     that role still fan out.
+    //   - a comment fanned out to non-author holders passes through the
+    //     recursion-prevention hook so consensus/vote comments don't ping-pong.
+    const emittedAgentIds = new Set<string>();
+    let commentFanoutSuppressed: boolean | null = null;
+    for (const { slug, role, targetAgentIds } of resolved) {
+      for (const targetAgentId of targetAgentIds) {
+        if (!targetAgentId) continue;
+        // Self-trigger guard, action-type aware (v0.34 onward, refined v0.41,
+        // per-holder in T2). Only the ACTOR's own emit is gated here — other
+        // holders of the same role are always candidates (T2 #2).
+        //
+        //   - comment / ticket_update: same agent_id implies the actor's own
+        //     role context — re-firing on the same (ticket, role) would just
+        //     wake the same persistent subagent that just produced the event,
+        //     which is a deadlock-shaped feedback loop. Always skip.
+        //
+        //   - column_move: the destination column may shift role responsibility
+        //     (e.g. Review → Merging changes owner from reviewer → assignee).
+        //     With v0.34's per-(ticket, role) plugin subagents, a SAME-agent
+        //     DIFFERENT-role transition spawns a separate subagent for the new
+        //     role — there's no LLM-level loop to prevent and dropping the
+        //     trigger would silently deadlock single-agent multi-role workflows
+        //     (a single AWB agent holding assignee+reviewer+merger on the same
+        //     ticket is the production default).
+        //
+        //     But a SAME-agent SAME-role transition (e.g. assignee moves their
+        //     own ticket To Do → In Progress, both columns route to assignee)
+        //     IS a self-loop: the actor just performed the move that would
+        //     have triggered them, and re-emitting just spawns a redundant
+        //     subagent.
+        //
+        //     Discriminator: the actor is in role-shift (don't skip) iff the
+        //     actor holds at least one role on THIS ticket that is NOT the
+        //     target role. Otherwise the actor's only role is the target
+        //     role, the move is a same-role self-action, and we skip.
+        if (targetAgentId === log.actor_id) {
+          if (triggerSource !== 'column_move') continue;
+          const actorAssignments = await assignRepo.find({
+            where: { ticket_id: ticket.id, agent_id: log.actor_id || '' },
+          });
+          const hasOtherRole = actorAssignments.some(
+            (a) => a.role_id && a.role_id !== role.id,
+          );
+          if (!hasOtherRole) continue;
+        } else if (triggerSource === 'comment') {
+          // Non-author holder on a comment trigger — the fan-out target
+          // (author≠holder). Recursion-prevention hook (T2 #6): a
+          // consensus/vote comment must NOT re-dispatch the other holders, or
+          // mutual holder comments ping-pong into an infinite re-trigger loop
+          // (the self-echo / watchdog exit-143 failure family). Resolve the
+          // suppression verdict lazily, once per activity.
+          if (commentFanoutSuppressed === null) {
+            commentFanoutSuppressed = await this._commentSuppressesFanout(log);
+          }
+          if (commentFanoutSuppressed) continue;
+        }
 
-      await this._emitTrigger(ticket, targetAgentId, slug, triggerSource, log.actor_id || '');
+        // agent_id dedup: one physical agent wakes at most once per dispatch.
+        if (emittedAgentIds.has(targetAgentId)) continue;
+        emittedAgentIds.add(targetAgentId);
+
+        await this._emitTrigger(ticket, targetAgentId, slug, triggerSource, log.actor_id || '');
+      }
     }
+  }
+
+  /**
+   * 다중담당자 T2 fan-out primitive. Resolve a routed role slug against the
+   * ticket's workspace to its WorkspaceRole and the DISTINCT agent holders of
+   * that role on the ticket, earliest-created first (deterministic order,
+   * mirroring the T1 `getOne` tiebreak). User holders are skipped — humans
+   * receive no agent_trigger. Returns null when the slug maps to no
+   * WorkspaceRole (config drift); an empty `agentIds` means the role exists but
+   * has no agent holder (vacant / user-only) — the caller reads that as
+   * "column unservable by an agent".
+   *
+   * Query shape matches the pre-fan-out single-holder lookup (one role findOne
+   * + one assignment read) — it turns the old `findOne` into a `find`, so
+   * fanning out does NOT add an N+1 per slug.
+   */
+  private async _resolveRoleHolders(
+    ticket: Ticket,
+    slug: string,
+  ): Promise<{ role: WorkspaceRole; agentIds: string[] } | null> {
+    const role = await this.dataSource.getRepository(WorkspaceRole).findOne({
+      where: { workspace_id: ticket.workspace_id, slug },
+    });
+    if (!role) return null;
+    const rows = await this.dataSource.getRepository(TicketRoleAssignment).find({
+      where: { ticket_id: ticket.id, role_id: role.id },
+      order: { created_at: 'ASC', id: 'ASC' },
+    });
+    const seen = new Set<string>();
+    const agentIds: string[] = [];
+    for (const r of rows) {
+      const a = r.agent_id;
+      if (a && !seen.has(a)) {
+        seen.add(a);
+        agentIds.push(a);
+      }
+    }
+    return { role, agentIds };
+  }
+
+  /**
+   * 다중담당자 T2 recursion-prevention hook (#6). A comment authored by one
+   * holder of a routed role fans out a re-trigger to the OTHER holders
+   * (author≠holder). Left unchecked, mutual holder comments ping-pong into an
+   * infinite re-trigger loop — the self-echo / watchdog exit-143 failure
+   * family. This predicate is the single suppression point: a consensus / vote
+   * comment must NOT re-dispatch the other holders.
+   *
+   * T4 introduces the consensus comment type and stamps `metadata.consensus_vote`
+   * on it; until then nothing sets the marker so this returns false (no
+   * behavior change) — securing the hook point is what T2 delivers. Consulted
+   * only on the comment path and lazily (once per activity), so a normal note
+   * on a single-holder role costs nothing. A missing / unreadable comment row
+   * (tests fire synthetic comment activities with no backing row) reads as
+   * "not a consensus comment" → false.
+   */
+  private async _commentSuppressesFanout(log: ActivityLog): Promise<boolean> {
+    if (log.entity_type !== COMMENT_ENTITY || !log.entity_id) return false;
+    const comment = await this.dataSource
+      .getRepository(Comment)
+      .findOne({ where: { id: log.entity_id } });
+    if (!comment) return false;
+    const meta = safeJsonParse<Record<string, unknown>>(comment.metadata, {});
+    return meta?.consensus_vote === true;
   }
 
   /**
@@ -758,31 +848,22 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    // Resolve role slugs against the linked ticket's workspace + assignments.
-    // Dedupe per (slug, holder) so a routing config that lists the same slug
-    // twice — or two distinct slugs that happen to share a holder agent_id —
-    // emits at most once per unique pair. The focus selector inside
-    // _emitTrigger gates whether the emit actually lands.
-    const roleRepo = this.dataSource.getRepository(WorkspaceRole);
-    const assignRepo = this.dataSource.getRepository(TicketRoleAssignment);
-    const seen = new Set<string>();
+    // 다중담당자 T2 (#1): fan out to EVERY agent holder of each routed slug,
+    // deduped by agent_id across the whole chain dispatch (a 겸직 agent wakes
+    // once, carrying the first routed role it holds). The focus selector inside
+    // _emitTrigger still gates whether each emit actually lands.
+    const emittedAgentIds = new Set<string>();
     for (const slug of roles) {
-      const role = await roleRepo.findOne({
-        where: { workspace_id: nextTicket.workspace_id, slug },
-      });
-      if (!role) continue;
-      const assignment = await assignRepo.findOne({
-        where: { ticket_id: nextTicket.id, role_id: role.id },
-      });
-      const targetAgentId = assignment?.agent_id || null;
-      if (!targetAgentId) continue;
-      const dedupeKey = `${slug}|${targetAgentId}`;
-      if (seen.has(dedupeKey)) continue;
-      seen.add(dedupeKey);
-      // No self-trigger guard here — by definition the actor that closed the
-      // source ticket may also hold a role on the next ticket, and we DO
-      // want to wake that subagent now (the chain semantics promise it).
-      await this._emitTrigger(nextTicket, targetAgentId, slug, 'next_ticket', actorId);
+      const holders = await this._resolveRoleHolders(nextTicket, slug);
+      if (!holders) continue;
+      for (const targetAgentId of holders.agentIds) {
+        if (emittedAgentIds.has(targetAgentId)) continue;
+        emittedAgentIds.add(targetAgentId);
+        // No self-trigger guard here — by definition the actor that closed the
+        // source ticket may also hold a role on the next ticket, and we DO
+        // want to wake that subagent now (the chain semantics promise it).
+        await this._emitTrigger(nextTicket, targetAgentId, slug, 'next_ticket', actorId);
+      }
     }
   }
 
@@ -828,40 +909,37 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
     const mode = (board as any).self_improvement_mode || 'off';
     if (mode === 'off') return;
 
-    // Resolve reviewer holder. Reuse the same workspace-roles + assignment
-    // lookup as `_handleActivity` so custom workspace role naming still works
-    // — but reviewer is a builtin slug everywhere, so this is the common case.
-    const role = await this.dataSource.getRepository(WorkspaceRole).findOne({
-      where: { workspace_id: ticket.workspace_id, slug: 'reviewer' },
-    });
-    if (!role) {
+    // Resolve reviewer holders (다중담당자 T2 #1 — every reviewer files their
+    // own retrospective). Reuse the shared fan-out primitive so custom
+    // workspace role naming still works — reviewer is a builtin slug
+    // everywhere, so this is the common case.
+    const reviewer = await this._resolveRoleHolders(ticket, 'reviewer');
+    if (!reviewer) {
       this.logService.info('MCP', 'post_done_review skipped (no reviewer WorkspaceRole)', {
         ticket_id: ticket.id, workspace_id: ticket.workspace_id,
       });
       return;
     }
-    const assignment = await this.dataSource.getRepository(TicketRoleAssignment).findOne({
-      where: { ticket_id: ticket.id, role_id: role.id },
-    });
-    const reviewerAgentId = assignment?.agent_id || null;
-    if (!reviewerAgentId) {
+    if (reviewer.agentIds.length === 0) {
       this.logService.info('MCP', 'post_done_review skipped (no reviewer assigned)', {
         ticket_id: ticket.id,
       });
       return;
     }
 
-    await this._emitTrigger(
-      ticket, reviewerAgentId, 'reviewer', 'ticket_done_review', actorId,
-      {
-        bypassFocus: true,
-        columnPromptOverride: {
-          template_id: 'self-improvement-inline',
-          name: 'Self-Improvement Review',
-          content: TriggerLoopService.SELF_IMPROVEMENT_PROMPT,
+    for (const reviewerAgentId of reviewer.agentIds) {
+      await this._emitTrigger(
+        ticket, reviewerAgentId, 'reviewer', 'ticket_done_review', actorId,
+        {
+          bypassFocus: true,
+          columnPromptOverride: {
+            template_id: 'self-improvement-inline',
+            name: 'Self-Improvement Review',
+            content: TriggerLoopService.SELF_IMPROVEMENT_PROMPT,
+          },
         },
-      },
-    );
+      );
+    }
   }
 
   /**
@@ -1094,30 +1172,25 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
       return { emitted: 0 };
     }
 
-    const roleRepo = this.dataSource.getRepository(WorkspaceRole);
-    const assignRepo = this.dataSource.getRepository(TicketRoleAssignment);
+    // 다중담당자 T2 (#1): fan out to EVERY agent holder of each routed slug,
+    // deduped by agent_id (a 겸직 agent wakes once). The focus selector inside
+    // _emitTrigger still gates whether each emit actually lands.
     let emitted = 0;
-    const seen = new Set<string>();
+    const emittedAgentIds = new Set<string>();
     for (const slug of slugs) {
-      const role = await roleRepo.findOne({
-        where: { workspace_id: ticket.workspace_id, slug },
-      });
-      if (!role) continue;
-      const assignment = await assignRepo.findOne({
-        where: { ticket_id: ticket.id, role_id: role.id },
-      });
-      const targetAgentId = assignment?.agent_id || '';
-      if (!targetAgentId) continue;
-      const dedupeKey = `${slug}|${targetAgentId}`;
-      if (seen.has(dedupeKey)) continue;
-      seen.add(dedupeKey);
-      try {
-        await this._emitTrigger(ticket, targetAgentId, slug, triggerSource, triggeredBy);
-        emitted++;
-      } catch (e) {
-        this.logService.warn('MCP', 'dispatchCurrentColumn emit failed (continuing)', {
-          err: String(e), ticket_id: ticket.id, role: slug, agent_id: targetAgentId,
-        });
+      const holders = await this._resolveRoleHolders(ticket, slug);
+      if (!holders) continue;
+      for (const targetAgentId of holders.agentIds) {
+        if (emittedAgentIds.has(targetAgentId)) continue;
+        emittedAgentIds.add(targetAgentId);
+        try {
+          await this._emitTrigger(ticket, targetAgentId, slug, triggerSource, triggeredBy);
+          emitted++;
+        } catch (e) {
+          this.logService.warn('MCP', 'dispatchCurrentColumn emit failed (continuing)', {
+            err: String(e), ticket_id: ticket.id, role: slug, agent_id: targetAgentId,
+          });
+        }
       }
     }
     return { emitted };
