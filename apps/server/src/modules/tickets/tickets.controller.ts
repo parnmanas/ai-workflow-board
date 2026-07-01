@@ -197,6 +197,10 @@ export class TicketsController {
    * `applyRoleAssignments` helper so `planner` and any workspace custom
    * role can be set from either surface. Throws on unknown slug; empty slug
    * is silently skipped.
+   *
+   * MULTI-HOLDER (다중담당자 T1): repeated same-slug entries are grouped and
+   * applied as one holder set via `setHolders()` — matching the MCP path —
+   * so a role can carry several holders. An all-empty group clears the slot.
    */
   private async _applyRoleAssignments(
     ticketId: string,
@@ -207,15 +211,24 @@ export class TicketsController {
       throw new Error('Cannot apply role_assignments — ticket has no workspace_id');
     }
     const roleRepo = this.dataSource.getRepository(WorkspaceRole);
+
+    // Group by slug (first-seen order) so repeated same-slug entries become a
+    // multi-holder set instead of clobbering each other.
+    const bySlug = new Map<string, Array<{ agent_id: string | null; user_id: string | null }>>();
     for (const a of assignments) {
       const slug = (a?.role_slug || '').trim();
       if (!slug) continue;
+      const holder = { agent_id: a?.agent_id || null, user_id: a?.user_id || null };
+      const list = bySlug.get(slug);
+      if (list) list.push(holder);
+      else bySlug.set(slug, [holder]);
+    }
+
+    for (const [slug, holders] of bySlug) {
       const role = await roleRepo.findOne({ where: { workspace_id: workspaceId, slug } });
       if (!role) throw new Error(`Unknown role slug "${slug}" in workspace ${workspaceId}`);
-      await this.ticketRoleAssignments.setHolder(ticketId, role.id, {
-        agent_id: a?.agent_id || null,
-        user_id: a?.user_id || null,
-      });
+      // setHolders drops all-empty entries → an all-empty group clears the slot.
+      await this.ticketRoleAssignments.setHolders(ticketId, role.id, holders);
     }
   }
 

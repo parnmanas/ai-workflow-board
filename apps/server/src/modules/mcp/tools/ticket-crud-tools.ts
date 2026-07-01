@@ -40,6 +40,10 @@ import type { ToolContext } from './context';
  * onto the ticket. Pass `agent_id`/`user_id` to set, both empty/null to
  * clear the slot. Mutually exclusive — the helper rejects rows that supply
  * both. Unknown slug returns an explicit error so silent typos don't hide.
+ *
+ * MULTI-HOLDER (다중담당자 T1): repeat the same `role_slug` across multiple
+ * entries to give one role several holders (e.g. two assignees). Entries are
+ * grouped by slug and applied as a whole set.
  */
 const RoleAssignmentInputSchema = z.object({
   role_slug: z.string().describe('Workspace role slug (e.g. "assignee", "reporter", "reviewer", "planner", or any custom slug)'),
@@ -49,10 +53,19 @@ const RoleAssignmentInputSchema = z.object({
 
 /**
  * Apply a `role_assignments[]` array onto a ticket. Resolves each slug
- * against the ticket's workspace WorkspaceRole row and writes the holder
+ * against the ticket's workspace WorkspaceRole row and writes the holder(s)
  * via TicketRoleAssignmentService. Empty `role_slug` is silently skipped;
  * unknown slug throws so callers can fix typos. Mutual exclusion of
- * agent_id / user_id is enforced by `setHolder`.
+ * agent_id / user_id is enforced by the service.
+ *
+ * MULTI-HOLDER (다중담당자 T1): entries that repeat the SAME `role_slug` are
+ * grouped into one holder set — so `[{role_slug:'assignee',agent_id:'a'},
+ * {role_slug:'assignee',agent_id:'b'}]` pins BOTH a and b as assignees. We
+ * therefore group-by-slug and call `setHolders()` (whole-set replace) once
+ * per slug instead of `setHolder()` per entry, which would otherwise clobber
+ * same-slug siblings. A slug whose entries are all empty (e.g. a single
+ * `{agent_id:''}`) clears the slot — preserving the legacy "empty clears"
+ * contract.
  *
  * Returns the list of (slug, role_id, holder) entries actually applied so
  * the caller can include them in activity logs / debug output.
@@ -70,19 +83,35 @@ async function applyRoleAssignments(
   if (!workspaceId) {
     throw new Error('Cannot apply role_assignments — ticket has no workspace_id (column → board lookup failed)');
   }
-  const applied: Array<{ slug: string; role_id: string; agent_id: string | null; user_id: string | null }> = [];
   const roleRepo = ctx.dataSource.getRepository(WorkspaceRole);
+
+  // Group holders by slug (first-seen order) so repeated same-slug entries
+  // become a multi-holder set rather than clobbering each other.
+  const bySlug = new Map<string, Array<{ agent_id: string | null; user_id: string | null }>>();
   for (const a of assignments) {
     const slug = (a.role_slug || '').trim();
     if (!slug) continue;
+    const holder = { agent_id: a.agent_id || null, user_id: a.user_id || null };
+    const list = bySlug.get(slug);
+    if (list) list.push(holder);
+    else bySlug.set(slug, [holder]);
+  }
+
+  const applied: Array<{ slug: string; role_id: string; agent_id: string | null; user_id: string | null }> = [];
+  for (const [slug, holders] of bySlug) {
     const role = await roleRepo.findOne({ where: { workspace_id: workspaceId, slug } });
     if (!role) {
       throw new Error(`Unknown role slug "${slug}" in workspace ${workspaceId}`);
     }
-    const agent_id = a.agent_id || null;
-    const user_id = a.user_id || null;
-    await ctx.ticketRoleAssignmentService.setHolder(ticketId, role.id, { agent_id, user_id });
-    applied.push({ slug, role_id: role.id, agent_id, user_id });
+    // setHolders drops all-empty entries → an all-empty group clears the slot.
+    const rows = await ctx.ticketRoleAssignmentService.setHolders(ticketId, role.id, holders);
+    if (rows.length === 0) {
+      applied.push({ slug, role_id: role.id, agent_id: null, user_id: null });
+    } else {
+      for (const r of rows) {
+        applied.push({ slug, role_id: role.id, agent_id: r.agent_id, user_id: r.user_id });
+      }
+    }
   }
   return applied;
 }
@@ -114,7 +143,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       assignee_id: z.string().optional().default('').describe('Assignee agent ID (preferred over `assignee` name)'),
       reporter_id: z.string().optional().default('').describe('Reporter agent ID (preferred over `reporter` name)'),
       reviewer_id: z.string().optional().default('').describe('Reviewer agent ID'),
-      role_assignments: z.array(RoleAssignmentInputSchema).optional().describe('Per-role assignments (slug → agent/user). Use this to set planner or any workspace custom role. Builtin slugs (assignee/reporter/reviewer) here override the legacy fields above when both are supplied for the same slug.'),
+      role_assignments: z.array(RoleAssignmentInputSchema).optional().describe('Per-role assignments (slug → agent/user). Use this to set planner or any workspace custom role. Builtin slugs (assignee/reporter/reviewer) here override the legacy fields above when both are supplied for the same slug. Repeat the same role_slug across entries to assign MULTIPLE holders to one role (다중담당자).'),
       labels: z.array(z.string()).optional().default([]).describe('Labels'),
       channel_ids: z.array(z.string()).optional().default([]).describe('Notification channel IDs'),
       column_id: z.string().optional().describe('Column ID (use this OR column_name)'),
@@ -278,7 +307,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       assignee_id: z.string().optional().describe('New assignee agent ID'),
       reporter_id: z.string().optional().describe('New reporter agent ID'),
       reviewer_id: z.string().optional().describe('Reviewer agent ID'),
-      role_assignments: z.array(RoleAssignmentInputSchema).optional().describe('Per-role assignments (slug → agent/user). Use to set planner or any workspace custom role. Builtin slugs (assignee/reporter/reviewer) here override the legacy fields above when both are supplied.'),
+      role_assignments: z.array(RoleAssignmentInputSchema).optional().describe('Per-role assignments (slug → agent/user). Use to set planner or any workspace custom role. Builtin slugs (assignee/reporter/reviewer) here override the legacy fields above when both are supplied. Repeat the same role_slug across entries to assign MULTIPLE holders to one role (다중담당자).'),
       labels: z.array(z.string()).optional().describe('New labels array'),
       channel_ids: z.array(z.string()).optional().describe('New notification channel IDs'),
       base_repo_resource_id: z.string().optional().describe('Resource ID (type=repository) the ticket builds against. Empty string clears.'),
