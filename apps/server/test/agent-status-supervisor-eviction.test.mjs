@@ -121,9 +121,15 @@ function makeSupervisor(SupervisorClass, RegistryClass, { agentRows, allocFor })
     },
   };
   const triggerLoop = { async emitAgentTrigger() {} };
+  // ticket fdc69c13 added AgentStatusService as a supervisor dep (output-
+  // liveness gate). These leak tests never reach the force-escalation branch
+  // (allocation throws / returns non-array / prune-helper only), so a stub that
+  // reports "no output" is enough — but it MUST occupy the right ctor slot or
+  // the metrics arg shifts and construction throws.
+  const agentStatus = { getOutputLivenessAt() { return undefined; } };
   const registry = new RegistryClass();
   const service = new SupervisorClass(
-    agentRepo, dataSource, allocationService, triggerLoop, noopLog, registry,
+    agentRepo, dataSource, allocationService, triggerLoop, agentStatus, noopLog, registry,
   );
   return { service, registry };
 }

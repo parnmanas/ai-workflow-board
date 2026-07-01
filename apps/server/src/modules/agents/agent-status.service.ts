@@ -58,10 +58,25 @@ const OFFLINE_THRESHOLD_MS = 90_000;
 // without manual intervention. Tuned long enough that legitimate long-running
 // reviews don't flap, short enough that crashes self-heal within ~one sweep.
 const CURRENT_TASK_STALE_MS = 15 * 60_000;
+// Output-liveness eviction TTL (ticket fdc69c13). A per-(agent,ticket,role)
+// output timestamp has nobody to clear it once the session ends; the 30s sweep
+// drops entries older than this so the map stays bounded. Set comfortably above
+// any sane Workspace.supervisor_stale_ms so the supervisor's force-gate never
+// misses a still-relevant entry (default stale is 30 min; this is 6 h).
+const OUTPUT_LIVENESS_TTL_MS = 6 * 60 * 60_000;
 
 @Injectable()
 export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
   private readonly state = new Map<string, AgentStatus>();
+  // Output-liveness (ticket fdc69c13): last server-receipt time (epoch ms) that
+  // agent-manager reported a subagent for `${agent_id}:${ticket_id}:${role}`
+  // emitted model output (thinking/tool/text). DISTINCT from active_tasks
+  // (spawn time) and from Ticket.my_last_update_at (ticket writes). Purely
+  // in-memory; never emitted on SSE nor written to the DB, so recording it can
+  // never re-enter TriggerLoopService._handleActivity (self-echo guard, DoD#4).
+  // Read by TicketSupervisorService to suppress force_respawn for a worker
+  // that's alive-but-quiet-on-the-ticket (the exit-143 deathloop fix).
+  private readonly outputLiveness = new Map<string, number>();
   private sweepHandle: NodeJS.Timeout | null = null;
 
   constructor(
@@ -76,6 +91,10 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
     // deleted-agent eviction in _sweep regressed. At rest it should equal the
     // live agent-row count.
     metrics.register('agentStatus.state', () => this.state.size);
+    // Bound-check gauge for the output-liveness map (ticket fdc69c13). At rest
+    // it tracks live (agent,ticket,role) strands producing output; a persistent
+    // climb means the sweep's TTL eviction regressed.
+    metrics.register('agentStatus.outputLiveness', () => this.outputLiveness.size);
   }
 
   async onModuleInit(): Promise<void> {
@@ -185,6 +204,34 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
     // task (pre-v0.34 plugin that didn't pin a role) is treated as matching
     // any role — conservative: better to serialize than to race.
     return !task.role || task.role === role;
+  }
+
+  private _outputLivenessKey(agentId: string, ticketId: string, role: string): string {
+    return `${agentId}:${ticketId}:${role || ''}`;
+  }
+
+  /**
+   * agent-manager signal (ticket fdc69c13): a subagent for (agent, ticket,
+   * role) just emitted model output. Records the SERVER-receipt time (not the
+   * manager's clock — avoids skew) so TicketSupervisorService can tell a worker
+   * that's actively producing tokens but hasn't written to the ticket from a
+   * genuinely wedged one, and suppress force_respawn for the former.
+   *
+   * In-memory only: no SSE emit, no DB write, no ActivityLog — so this can
+   * never re-enter TriggerLoopService._handleActivity (self-echo guard, DoD#4).
+   */
+  recordOutputLiveness(agent_id: string, ticket_id: string, role: string): void {
+    if (!agent_id || !ticket_id) return;
+    this.outputLiveness.set(this._outputLivenessKey(agent_id, ticket_id, role), Date.now());
+  }
+
+  /**
+   * Last output-liveness timestamp (epoch ms) for (agent, ticket, role), or
+   * undefined when none was recorded (or the entry aged past the sweep TTL).
+   * Read by TicketSupervisorService's force_respawn gate.
+   */
+  getOutputLivenessAt(agent_id: string, ticket_id: string, role: string): number | undefined {
+    return this.outputLiveness.get(this._outputLivenessKey(agent_id, ticket_id, role));
   }
 
   /**
@@ -365,6 +412,15 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
     // that agent signals; only ids absent from the DB snapshot are dropped.)
     for (const id of this.state.keys()) {
       if (!seen.has(id)) this.state.delete(id);
+    }
+
+    // Evict aged output-liveness entries (ticket fdc69c13) so the map stays
+    // bounded — a finished/dead session's last entry has nobody to clear it.
+    // The TTL is well above any sane supervisor_stale_ms, so an entry still
+    // within the supervisor's force-gate window is never dropped early.
+    const outputCutoff = Date.now() - OUTPUT_LIVENESS_TTL_MS;
+    for (const [k, ts] of this.outputLiveness) {
+      if (ts < outputCutoff) this.outputLiveness.delete(k);
     }
   }
 }

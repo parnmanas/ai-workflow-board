@@ -20,12 +20,14 @@
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
+import { ActivityLog } from '../../entities/ActivityLog';
 import { Agent } from '../../entities/Agent';
 import { StuckTicketAlert } from '../../entities/StuckTicketAlert';
 import { Ticket } from '../../entities/Ticket';
 import { Workspace } from '../../entities/Workspace';
 import { LogService } from '../../services/log.service';
 import { MemoryMetricsRegistry } from '../../services/memory-metrics.registry';
+import { AgentStatusService } from './agent-status.service';
 import { AllocationService, AllocatedTicketRow } from './allocation.service';
 import { TriggerLoopService } from './trigger-loop.service';
 
@@ -34,6 +36,15 @@ import { TriggerLoopService } from './trigger-loop.service';
 // has already identified — each respawn writes a redundant heartbeat
 // comment and wastes LLM budget for zero output.
 const STUCK_TICKET_MIN_RESEND_MS = 60 * 60_000; // 1 hour
+
+// Circuit-breaker cap (ticket fdc69c13). A genuinely silent (no output-
+// liveness AND no ticket-write) session is force_respawned on each resend tick.
+// If that recovery still hasn't worked after this many CONSECUTIVE
+// force_respawns (no my_last_update_at progress in between), stop forcing and
+// raise a grepable flag — respawning a truly unrecoverable ticket forever just
+// burns budget. Resets the instant the ticket makes progress (state entry
+// dropped) or the session shows fresh output-liveness.
+const SUPERVISOR_FORCE_RESPAWN_MAX = 5;
 
 const SUPERVISOR_TICK_MS = 60_000;
 // Defaults — overridable per Workspace via Workspace.supervisor_stale_ms /
@@ -49,6 +60,46 @@ const ONLINE_THRESHOLD_MS = 90_000;
 
 interface SupervisorEntry {
   lastEmitAt: number;
+  // Consecutive force_respawns emitted for this key with no ticket-write
+  // progress in between (ticket fdc69c13). Drives the circuit-breaker; reset to
+  // 0 when the ticket advances (entry deleted) or the session shows fresh
+  // output-liveness.
+  forceCount: number;
+  // Latched once the circuit-breaker trips so the grepable flag is written
+  // exactly once per stuck episode, not on every resend tick.
+  circuitOpen: boolean;
+}
+
+/**
+ * Pure force_respawn decision (ticket fdc69c13) — extracted so the suppression
+ * + circuit-breaker logic can be unit-tested deterministically without booting
+ * the supervisor / DataSource (mirrors the decideRunFreshness pattern). Given
+ * the current signals for a stale (agent, ticket, role):
+ *   - isStuck         → stuck detector already flagged it (existing throttle)
+ *   - hasRecentOutput → agent-manager reported fresh output-liveness
+ *   - forceCount      → consecutive force_respawns so far with no progress
+ *   - maxForce        → circuit-breaker cap (SUPERVISOR_FORCE_RESPAWN_MAX)
+ * Returns whether to force this tick, whether the breaker just tripped, and
+ * whether the caller should reset the breaker counter (the session recovered).
+ */
+export function decideForceRespawn(opts: {
+  isStuck: boolean;
+  hasRecentOutput: boolean;
+  forceCount: number;
+  maxForce: number;
+}): { forceRespawn: boolean; circuitOpen: boolean; resetBreaker: boolean } {
+  // Live worker (fresh output) or stuck-flagged ticket → never force. Fresh
+  // output also means the session recovered, so clear any prior breaker count.
+  if (opts.isStuck || opts.hasRecentOutput) {
+    return { forceRespawn: false, circuitOpen: false, resetBreaker: opts.hasRecentOutput };
+  }
+  // Genuinely silent AND the force budget is spent → give up forcing and raise
+  // the circuit-breaker flag.
+  if (opts.forceCount >= opts.maxForce) {
+    return { forceRespawn: false, circuitOpen: true, resetBreaker: false };
+  }
+  // Genuinely silent, budget remains → force_respawn (the legitimate recovery).
+  return { forceRespawn: true, circuitOpen: false, resetBreaker: false };
 }
 
 @Injectable()
@@ -61,6 +112,7 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly allocationService: AllocationService,
     private readonly triggerLoop: TriggerLoopService,
+    private readonly agentStatus: AgentStatusService,
     private readonly logService: LogService,
     metrics: MemoryMetricsRegistry,
   ) {
@@ -217,19 +269,52 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
           ? Math.max(resendMs, STUCK_TICKET_MIN_RESEND_MS)
           : resendMs;
 
+        // Output-liveness gate (ticket fdc69c13). my_last_update_at only sees
+        // ticket WRITES; a subagent can spend 30+ min exploring/editing code —
+        // actively emitting tokens — without touching the ticket. agent-manager
+        // reports per-(agent,ticket,role) output to AgentStatusService; if that
+        // output is fresh (within the same stale window) the worker is alive and
+        // must NOT be force_respawned — killing it is the exit-143 deathloop
+        // this ticket fixes. (A non-force re-push still fires below: harmless —
+        // the in-flight strand gate drops it for a live strand, and it wakes a
+        // truly idle-but-finished session to move its ticket.)
+        const lastOutputMs = this.agentStatus.getOutputLivenessAt(agent.id, row.ticket_id, row.role);
+        const hasRecentOutput = lastOutputMs !== undefined && (now - lastOutputMs) < staleMs;
+
         const entry = this.state.get(key);
 
         if (!entry) {
+          // First re-push after crossing the stale threshold is ALWAYS non-force
+          // (a gentle nudge), regardless of output-liveness. Escalation to force
+          // only happens on later ticks if silence persists.
           await this._emit(row, agent.id, false, now);
-          this.state.set(key, { lastEmitAt: now });
+          this.state.set(key, { lastEmitAt: now, forceCount: 0, circuitOpen: false });
           continue;
         }
 
         if (now - entry.lastEmitAt >= effectiveResendMs) {
-          // Suppress force_respawn for stuck tickets — a non-force
-          // re-push still lets the subagent check the gate, but
-          // doesn't kill a potentially useful session.
-          await this._emit(row, agent.id, isStuck ? false : true, now);
+          // Force is the recovery hammer for a genuinely SILENT (wedged/dead)
+          // session; it is suppressed for (a) stuck-detector-flagged tickets,
+          // (b) sessions with fresh output-liveness (deathloop fix), and (c)
+          // sessions already force_respawned SUPERVISOR_FORCE_RESPAWN_MAX times
+          // with no progress (circuit-breaker). See decideForceRespawn.
+          const decision = decideForceRespawn({
+            isStuck,
+            hasRecentOutput,
+            forceCount: entry.forceCount,
+            maxForce: SUPERVISOR_FORCE_RESPAWN_MAX,
+          });
+          if (decision.resetBreaker) {
+            entry.forceCount = 0;
+            entry.circuitOpen = false;
+          }
+          if (decision.forceRespawn) {
+            entry.forceCount += 1;
+          } else if (decision.circuitOpen && !entry.circuitOpen) {
+            entry.circuitOpen = true;
+            await this._flagCircuitOpen(row, agent.id, entry.forceCount);
+          }
+          await this._emit(row, agent.id, decision.forceRespawn, now);
           entry.lastEmitAt = now;
         }
       }
@@ -271,6 +356,48 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
     } catch (e: unknown) {
       this.logService.error('TicketSupervisor', 'emit failed', {
         err: e, ticket_id: row.ticket_id, agent_id: agentId, role: row.role,
+      });
+    }
+  }
+
+  /**
+   * Circuit-breaker flag (ticket fdc69c13). A genuinely silent session has been
+   * force_respawned SUPERVISOR_FORCE_RESPAWN_MAX times with no my_last_update_at
+   * progress — respawning isn't recovering it, so the caller stops forcing
+   * (switches to non-force) and we write ONE grepable ActivityLog flag.
+   *
+   * actor_id='system' so the row does NOT re-enter TriggerLoopService.
+   * _handleActivity (no self-trigger). Deliberately NOT a StuckTicketAlert row:
+   * that table is owned by StuckTicketDetectorService, whose unstuck sweep would
+   * delete a row that doesn't match its WAIT-loop shape. Failing the write must
+   * not change the circuit-open outcome.
+   */
+  private async _flagCircuitOpen(
+    row: AllocatedTicketRow,
+    agentId: string,
+    forceCount: number,
+  ): Promise<void> {
+    this.logService.warn(
+      'TicketSupervisor',
+      'force_respawn circuit-breaker OPEN — giving up force (session silent through max respawns)',
+      { ticket_id: row.ticket_id, agent_id: agentId, role: row.role, force_count: forceCount },
+    );
+    try {
+      const activityLogRepo = this.dataSource.getRepository(ActivityLog);
+      await activityLogRepo.save(activityLogRepo.create({
+        entity_type: 'ticket',
+        entity_id: row.ticket_id,
+        ticket_id: row.ticket_id,
+        actor_id: 'system',
+        actor_name: 'TicketSupervisor',
+        action: 'supervisor_force_respawn_circuit_open',
+        new_value: `agent=${agentId} role=${row.role} force_count=${forceCount} reason=silent_through_max_respawns`,
+        role: row.role,
+        trigger_source: 'supervisor',
+      }));
+    } catch (e) {
+      this.logService.warn('TicketSupervisor', 'circuit-open flag write failed (circuit still open)', {
+        err: String(e), ticket_id: row.ticket_id,
       });
     }
   }

@@ -9,6 +9,7 @@ import { Credential } from '../../entities/Credential';
 import { Ticket } from '../../entities/Ticket';
 import { decrypt } from '../../services/encryption.service';
 import { TriggerLoopService } from '../agents/trigger-loop.service';
+import { AgentStatusService } from '../agents/agent-status.service';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { WorkspaceGuard } from '../../common/guards/workspace.guard';
@@ -66,6 +67,7 @@ export class AgentManagerController {
     private readonly logService: LogService,
     private readonly commandLedger: CommandLedgerService,
     private readonly triggerLoop: TriggerLoopService,
+    private readonly agentStatus: AgentStatusService,
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     @InjectRepository(Credential) private readonly credentialRepo: Repository<Credential>,
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
@@ -440,6 +442,42 @@ export class AgentManagerController {
       { command_id, status, detail, command: record.command, agent_id: callerAgentId },
     );
     return res.json({ ok: true });
+  }
+
+  /**
+   * Manager → server per-(agent,ticket,role) OUTPUT-LIVENESS heartbeat
+   * (ticket fdc69c13). agent-manager POSTs this (throttled) whenever a ticket
+   * subagent emits model output, so TicketSupervisorService can tell a worker
+   * that's actively producing tokens (but hasn't written to the ticket yet)
+   * from a genuinely wedged one — and NOT force-respawn the former into the
+   * exit-143 deathloop. Fire-and-forget on the manager side; we just stamp the
+   * server-receipt time in-memory via AgentStatusService.recordOutputLiveness.
+   * NO DB write / SSE emit here → recording liveness can never re-enter the
+   * trigger loop (self-echo guard, DoD#4).
+   *
+   * Auth: AgentAuthGuard (X-Agent-Key). A manager key is full-scope; the body
+   * carries the managed agent_id. Same open trust model as /api/agent/ping (any
+   * valid key may report) — the only abuse is a bogus liveness DELAYING a
+   * force_respawn, which the circuit-breaker + agent-manager's own watchdog
+   * still backstop. Accepts one record or a batch under `items`.
+   */
+  @ApiSecurity('agent-api-key')
+  @Post('api/agent-manager/output-liveness')
+  @UseGuards(AgentAuthGuard)
+  @ApiOperation({ summary: 'Manager → server: per-(agent,ticket,role) output-liveness heartbeat' })
+  async reportOutputLiveness(@Body() body: any, @Req() req: Request, @Res() res: Response) {
+    const callerAgentId = (req as any).currentAgentId || (req as any).apiKey?.agent_id || null;
+    const items: any[] = Array.isArray(body?.items) ? body.items : [body];
+    let recorded = 0;
+    for (const it of items) {
+      const agentId = String(it?.agent_id || callerAgentId || '').trim();
+      const ticketId = String(it?.ticket_id || '').trim();
+      const role = String(it?.role || '').trim();
+      if (!agentId || !ticketId) continue;
+      this.agentStatus.recordOutputLiveness(agentId, ticketId, role);
+      recorded++;
+    }
+    return res.json({ ok: true, recorded });
   }
 
   // ─── Admin → Server (instances) ──────────────────────────────────────────

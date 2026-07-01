@@ -40,6 +40,12 @@ export const RECONNECT_INITIAL_MS = 2000;
 export const RECONNECT_MAX_MS = 30000;
 export const REQUEST_TIMEOUT_MS = 30000;
 export const HEARTBEAT_INTERVAL_MS = 30_000;
+// Output-liveness heartbeat throttle (ticket fdc69c13). A ticket subagent emits
+// output constantly during a turn; the manager reports per-(agent,ticket,role)
+// liveness to the server at most once per this interval so the TicketSupervisor
+// can distinguish a live worker from a wedged one without POST spam. Well under
+// the server's force-gate window (default supervisor_stale_ms = 30 min).
+export const OUTPUT_LIVENESS_MIN_INTERVAL_MS = 15_000;
 
 export const DELEGATION_DEFAULTS = Object.freeze({
   enabled: true,

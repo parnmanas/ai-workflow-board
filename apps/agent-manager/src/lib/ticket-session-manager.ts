@@ -11,7 +11,8 @@ import type { ParseResult } from './cli-adapters/base.js';
 import { composeTriggerPrompt } from './prompts.js';
 import { fireAndForgetTool } from './mcp-client.js';
 import { log } from './logging.js';
-import { postSilentExitSystemComment } from './rest.js';
+import { postSilentExitSystemComment, postOutputLiveness } from './rest.js';
+import { OUTPUT_LIVENESS_MIN_INTERVAL_MS } from './constants.js';
 import { CircuitBreaker } from './circuit-breaker.js';
 import { classifyCliError } from './cli-error-signatures.js';
 import type {
@@ -488,6 +489,24 @@ export class TicketSessionManager
   // its toolcall stream after step 1 would still stall without this guard.
 
   protected _onStdoutParsed(sess: SessionRecord, parsed: ParseResult, rawLine: string): void {
+    // Output-liveness heartbeat (ticket fdc69c13). Any model output
+    // (thinking/composing stage, or a final result) proves this
+    // (agent,ticket,role) strand is alive — mirror the base watchdog's liveness
+    // condition (#wireStdio resets unrespondedSince on the same signal). Report
+    // it to the server (throttled) so TicketSupervisor won't force-respawn a
+    // worker that's actively producing tokens but hasn't written to the ticket
+    // recently (the exit-143 deathloop). Fire-and-forget; never blocks the turn.
+    if ((parsed.stage || parsed.isResult) && sess.agentId && sess.ticketId) {
+      const nowMs = Date.now();
+      if (nowMs - (sess._lastLivenessPostAtMs ?? 0) >= OUTPUT_LIVENESS_MIN_INTERVAL_MS) {
+        sess._lastLivenessPostAtMs = nowMs;
+        void postOutputLiveness(
+          this._config,
+          sess._effectiveApiKey || this._config.apiKey,
+          { agent_id: sess.agentId, ticket_id: sess.ticketId, role: sess.role || '' },
+        );
+      }
+    }
     if (parsed.raw?.type === 'assistant') {
       const content = parsed.raw?.message?.content;
       if (Array.isArray(content)) {

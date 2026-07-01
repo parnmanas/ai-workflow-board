@@ -135,6 +135,42 @@ export async function postCommandAck(
 }
 
 /**
+ * ticket fdc69c13 — manager → server output-liveness heartbeat. Called
+ * (throttled by OUTPUT_LIVENESS_MIN_INTERVAL_MS) whenever a ticket subagent
+ * emits model output, so the server's TicketSupervisor knows the
+ * (agent,ticket,role) strand is alive and must NOT be force-respawned into the
+ * exit-143 deathloop. Fire-and-log: a dropped heartbeat just means the
+ * supervisor falls back to ticket-write staleness for that window. `apiKey` is
+ * the effective (managed-agent-or-manager) key so the report authenticates even
+ * when the child runs as a managed agent.
+ */
+export async function postOutputLiveness(
+  config: AwbConfig,
+  apiKey: string,
+  body: { agent_id: string; ticket_id: string; role: string },
+): Promise<void> {
+  if (!body.agent_id || !body.ticket_id) return;
+  try {
+    const url = `${trimSlash(config.url)}/api/agent-manager/output-liveness`;
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'X-Agent-Key': apiKey || config.apiKey,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!resp.ok) {
+      log(`output-liveness POST failed: ${resp.status} ${resp.statusText} (ticket=${body.ticket_id})`);
+    }
+  } catch (err: any) {
+    log(`output-liveness POST error: ${err?.message ?? err} (ticket=${body.ticket_id})`);
+  }
+}
+
+/**
  * ST-7 — pull a managed agent's record from AWB. Used when the manager
  * receives a spawn_agent / set_working_dir command and needs to know the
  * canonical working_dir / cli for that agent identity. Returns null on any

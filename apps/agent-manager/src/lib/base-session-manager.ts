@@ -176,6 +176,9 @@ export interface SessionRecord {
    *  manager-posted audit comments (silent-exit, session-split) to the right
    *  identity instead of always the manager. */
   _effectiveApiKey?: string;
+  /** ticket fdc69c13 — last epoch-ms an output-liveness heartbeat was POSTed
+   *  for this session; throttles reporting to OUTPUT_LIVENESS_MIN_INTERVAL_MS. */
+  _lastLivenessPostAtMs?: number;
 }
 
 /** Reservation placed on `_inflight` from the moment a dispatcher commits to
