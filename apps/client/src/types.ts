@@ -1099,6 +1099,18 @@ export interface HarnessConfig {
 // introduced the projection; hardening ticket 24bbd0ad typed it.
 export type BoardCardComment = Pick<Comment, 'id' | 'ticket_id' | 'type' | 'status' | 'created_at'>;
 
+// Compact multi-holder role projection on a board card (T6 다중담당자 아바타).
+// One entry per role that has ≥1 holder; `holders` carries every holder so the
+// card renders an avatar stack with a "+N" overflow. Mirror of the server
+// projection in apps/server/src/modules/boards/boards.controller.ts
+// (BoardCardRoleHolders) — keep the two field lists in sync. Present only on the
+// card pipeline; the detail panel reads full role_assignments via getTicket.
+export interface BoardCardRoleHolders {
+  role_slug: string;
+  role_name: string;
+  holders: Array<{ type: 'agent' | 'user'; id: string; name: string }>;
+}
+
 // A ticket as it appears on a board card: identical to the full Ticket except
 // its `comments` (and recursively its `children`) carry only the narrow
 // projection. The detail panel re-fetches the full Ticket via getTicket, so
@@ -1107,6 +1119,9 @@ export type BoardCardComment = Pick<Comment, 'id' | 'ticket_id' | 'type' | 'stat
 export type BoardCardTicket = Omit<Ticket, 'comments' | 'children'> & {
   comments: BoardCardComment[];
   children: BoardCardTicket[];
+  // Multi-holder role holders for the card avatars (T6). Optional so an older
+  // board payload (pre-projection) degrades gracefully to the legacy assignee.
+  role_holders?: BoardCardRoleHolders[];
 };
 
 export type BoardCardColumn = Omit<Column, 'tickets'> & {

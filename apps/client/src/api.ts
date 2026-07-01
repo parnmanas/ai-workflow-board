@@ -149,11 +149,15 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
       window.dispatchEvent(new Event('auth-expired'));
     }
     const err = await res.json().catch(() => ({ error: res.statusText }));
-    // Preserve the server's machine-readable `code` (e.g. 'ssh_unsupported' vs
-    // 'git_read_failed') and HTTP status on the thrown error so callers can
-    // branch on the *kind* of failure instead of pattern-matching the message.
-    const error = new Error(err.error || 'Request failed') as Error & { code?: string; status?: number };
+    // Prefer the server's human-readable `message` (structured errors — the
+    // consensus gate / review-approval guard — set it) so toasts show a legible
+    // reason instead of a machine slug; fall back to the `error` slug, then a
+    // generic string. The machine-readable `code`/`error` slug + HTTP status are
+    // preserved on the thrown error so callers can still branch on the *kind* of
+    // failure instead of pattern-matching the message.
+    const error = new Error(err.message || err.error || 'Request failed') as Error & { code?: string; status?: number };
     if (err.code) error.code = err.code;
+    else if (typeof err.error === 'string') error.code = err.error;
     error.status = res.status;
     throw error;
   }
@@ -270,6 +274,26 @@ export const api = {
     request<{ assignments: TicketRoleAssignmentRow[] }>(
       `/tickets/${ticketId}/role-assignments/${roleId}`,
       { method: 'PUT', body: JSON.stringify(holder) },
+    ),
+
+  // ─── 다중담당자·합의 (T6) ───────────────────────────────
+  // 합의 상태 READ + 이동 제안/투표/override. 서버는 이 REST 브릿지로 MCP 전용
+  // 합의 로직을 브라우저에 노출한다. 투표가 합의를 성립시키면 서버가 auto-execute
+  // 로 실제 이동하고 응답 `moved` 에 반영한다.
+  getTicketConsensus: (ticketId: string) =>
+    request<ConsensusView>(`/tickets/${ticketId}/consensus`),
+  proposeTicketMove: (ticketId: string, targetColumnId: string, content?: string) =>
+    request<{ proposal_id: string; target_column: { id: string; name: string }; consensus: ConsensusStateView }>(
+      `/tickets/${ticketId}/consensus/propose`,
+      { method: 'POST', body: JSON.stringify({ target_column_id: targetColumnId, content }) },
+    ),
+  recordTicketConsensusVote: (
+    ticketId: string,
+    payload: { status: 'agree' | 'object'; proposal_id?: string | null; override?: boolean; content?: string },
+  ) =>
+    request<{ consensus: ConsensusStateView; moved: { proposal_id: string; to_column_id: string; to_column_name: string | null } | null }>(
+      `/tickets/${ticketId}/consensus/vote`,
+      { method: 'POST', body: JSON.stringify(payload) },
     ),
 
   // ─── Boards ────────────────────────────────────────────
@@ -1770,6 +1794,53 @@ export const api = {
 export interface TicketRoleAssignmentRow {
   role: { id: string; slug: string; name: string; position: number; is_builtin: boolean };
   holder: { type: 'agent' | 'user'; id: string; name: string } | null;
+}
+
+// ─── 다중담당자·합의 뷰 타입 (T6) ─────────────────────────
+// 서버 common/consensus-state 의 ConsensusState + consensus-actions 의
+// ConsensusView 를 미러. party 는 {type,id} 뿐 — 이름은 `names` 맵으로 해석한다.
+export interface ConsensusParty { type: 'agent' | 'user'; id: string; }
+export interface ConsensusStateView {
+  proposalId: string | null;
+  required: ConsensusParty[];
+  agreed: ConsensusParty[];
+  objected: ConsensusParty[];
+  pending: ConsensusParty[];
+  satisfied: boolean;
+  overriddenBy?: ConsensusParty;
+  routingRoleSlugs: string[];
+}
+export interface ConsensusProposalView {
+  proposal_id: string;
+  target_column_id: string;
+  target_column_name: string | null;
+  by: ConsensusParty;
+  at: number;
+}
+export interface ConsensusView {
+  state: ConsensusStateView;
+  proposal: ConsensusProposalView | null;
+  /** `"type:id" → 표시 이름`. required/agreed/pending 홀더 이름 해석용. */
+  names: Record<string, string>;
+  gate: { blocked: boolean; holder_count: number };
+}
+// consensus_update SSE 프레임(서버 event-registry flatten). 카운트만 실린다 —
+// 상세 홀더 목록은 UI 가 getTicketConsensus 로 재조회.
+export interface ConsensusUpdateEvent {
+  event_type: 'consensus_update';
+  ticket_id: string;
+  workspace_id: string;
+  proposal_id: string | null;
+  satisfied: boolean;
+  required: number;
+  agreed: number;
+  objected: number;
+  pending: number;
+  status: 'agree' | 'object';
+  override: boolean;
+  actor_id: string;
+  actor_name: string;
+  timestamp: string;
 }
 
 // ─── Mention types ───────────────────────────────────────
