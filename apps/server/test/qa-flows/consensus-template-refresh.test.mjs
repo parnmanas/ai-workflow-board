@@ -16,6 +16,8 @@
 //   2. 운영자 커스텀 행은 byte-for-byte 보존.
 //   3. 템플릿이 아예 없는 워크스페이스에는 INSERT 하지 않음.
 //   4. 재실행은 no-op (멱등 — updated_at 불변).
+//   5. V0 이전 강착 세대(pre-9ed2285 코호트 — 22→44 체인의 priorList 에 없어
+//      영구 스킵되던 plan/in_progress 행)도 현재 기본값으로 lift (T7 리뷰 후속).
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -82,8 +84,10 @@ test('consensus-gate prompt template refresh migration updates stale defaults, p
   for (const name of REFRESHED_NAMES) {
     const prior = PRIORS[name];
     assert.ok(Array.isArray(prior) && prior[0], `PRIORS['${name}'] must be a non-empty list`);
-    assert.ok(!prior[0].includes(GATE_MARKER),
-      `prior ${name} must NOT contain the consensus gate section (fixture drift?)`);
+    for (const [i, p] of prior.entries()) {
+      assert.ok(!p.includes(GATE_MARKER),
+        `prior ${name}[${i}] must NOT contain the consensus gate section (fixture drift?)`);
+    }
     const current = currentByName.get(name);
     assert.ok(current && current.includes(GATE_MARKER),
       `current ${name} default must contain the consensus gate section (was the change rolled back?)`);
@@ -162,6 +166,38 @@ test('consensus-gate prompt template refresh migration updates stale defaults, p
   const afterStamps = afterRerun.map((r) => `${r.name}:${r.updated_at?.toISOString?.() ?? r.updated_at}`);
   assert.deepStrictEqual(afterStamps, beforeStamps,
     'idempotency — re-running the migration must not touch any row (updated_at unchanged)');
+
+  step('Case 5 — 강착 세대(pre-9ed2285 코호트): V0 이전 priorList 세대도 현재 기본값으로 lift');
+  // T7 리뷰 후속: plan_workflow 1개(7722527) + in_progress_workflow 2개(7722527,
+  // c02a927) 세대 리터럴이 priorList[1..] 로 추가되어야 한다. 각 세대를 별도
+  // 워크스페이스 행으로 심고 마이그레이션이 전부 현재 기본값으로 올리는지 확인.
+  const ancientEntries = [];
+  for (const name of REFRESHED_NAMES) {
+    for (let i = 1; i < PRIORS[name].length; i++) ancientEntries.push({ name, idx: i });
+  }
+  assert.ok(
+    ancientEntries.some((e) => e.name === 'plan_workflow') &&
+      ancientEntries.filter((e) => e.name === 'in_progress_workflow').length >= 2,
+    'priorList 세대 보강(plan 1 + in_progress 2)이 빠졌다 — 마이그레이션 46 확인',
+  );
+  const ancientRows = [];
+  for (const { name, idx } of ancientEntries) {
+    const ws = await createWorkspace(app, getDataSourceToken, `consensus-ancient-${name}-${idx}`);
+    await tplRepo.save([tplRepo.create({
+      workspace_id: ws.id, name,
+      description: `stranded-generation-${idx}`, category: 'default_workflow',
+      content: PRIORS[name][idx],
+    })]);
+    ancientRows.push({ wsId: ws.id, name, idx });
+  }
+  await migration.up(queryRunner);
+  for (const { wsId, name, idx } of ancientRows) {
+    const row = await tplRepo.findOne({ where: { workspace_id: wsId, name } });
+    assert.equal(row.content, currentByName.get(name),
+      `강착 세대 ${name}[${idx}] 행이 현재 기본값으로 lift 되어야 함`);
+    assert.ok(row.content.includes(GATE_MARKER),
+      `lift 된 ${name} 행은 합의 게이트 안내를 포함해야 함`);
+  }
 
   exitAfterTests(0);
 });
