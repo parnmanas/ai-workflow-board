@@ -108,10 +108,23 @@ This ticket is in the To Do column and you are its assignee. Decide whether to s
    - **Start** → \`add_comment\` with:
      - A one-line "starting" declaration.
      - If running in parallel: list concurrent ticket ids and the independence rationale (e.g., \`"touching apps/client/src/components/chat/* only — no overlap with ticket 1f92d68"\`).
-     Then \`move_ticket\` to **In Progress**.
+     Then \`move_ticket\` to **In Progress** (if two or more distinct agents share the assignee role on this ticket, the move is consensus-gated — see **Multi-holder consensus gate** below).
    - **Wait** → \`add_comment\` with the waiting reason and which ticket you are waiting on. Do **not** \`move_ticket\`.
 
 5. **After In Progress** — \`in_progress_workflow\` takes over with the branch → work → push → Review hand-off flow.
+
+## Multi-holder consensus gate
+
+If **two or more distinct holders** (agents or users, counted across this column's routing role(s) — the same party wearing several hats counts once) share the ticket here, the server gates **every move out of this column — forward or bounce-back —** on **unanimous explicit agreement**: a direct \`move_ticket\` is rejected with an error naming the holders still pending (the REST/board-drag path returns \`consensus_required\`), and no co-holder may advance the ticket unilaterally. **Single-holder tickets are unaffected: the gate never fires and you move exactly as before.**
+
+To advance a co-held ticket:
+
+1. **Discuss** in normal comments (mention your co-holders so they're triggered). Plain notes are *not* votes.
+2. **Propose** — \`mcp__awb__propose_move\` to the target column. The proposal comment's id is the vote anchor; a newer proposal supersedes it (votes on the old one go stale).
+3. **Vote** — every holder casts \`mcp__awb__record_agreement\` with \`status="agree"\` (or \`"object"\`, rationale in \`content\`). \`proposal_id\` can be omitted — the latest open proposal is the anchor. Silence ≠ consent; only your latest signal counts.
+4. **Server auto-moves** — the instant every required holder has agreed on the current proposal, the server performs the move itself (actor \`Consensus\`). Nobody calls \`move_ticket\`.
+
+The reporter may \`record_agreement(..., override=true)\` to force-pass a deadlock — honored only while holding the reporter role, and audit-logged. \`move_ticket(force=true)\` also bypasses the gate, but it is a deliberate human/operator escape hatch — as an agent, never use it to dodge consensus.
 
 ## Notes
 
@@ -169,7 +182,20 @@ This ticket is in the Plan column and you were triggered as its planner. Your jo
 
 6. **Post the plan** — \`add_comment\` with the full plan markdown. Mention the **assignee** (\`@[role:assignee|<name>]\`) so they receive a fresh trigger when the ticket lands in In Progress.
 
-7. **Hand off** — \`mcp__awb__move_ticket\` to **In Progress**. The \`in_progress_workflow\` takes over with the branch → work → push → Review flow.
+7. **Hand off** — \`mcp__awb__move_ticket\` to **In Progress**. The \`in_progress_workflow\` takes over with the branch → work → push → Review flow. **If two or more distinct agents share the planner role on this ticket, this move is consensus-gated — see _Multi-holder consensus gate_ below.**
+
+## Multi-holder consensus gate
+
+If **two or more distinct holders** (agents or users, counted across this column's routing role(s) — the same party wearing several hats counts once) share the ticket here, the server gates **every move out of this column — forward or bounce-back —** on **unanimous explicit agreement**: a direct \`move_ticket\` is rejected with an error naming the holders still pending (the REST/board-drag path returns \`consensus_required\`), and no co-holder may advance the ticket unilaterally. **Single-holder tickets are unaffected: the gate never fires and you move exactly as before.**
+
+To advance a co-held ticket:
+
+1. **Discuss** in normal comments (mention your co-holders so they're triggered). Plain notes are *not* votes.
+2. **Propose** — \`mcp__awb__propose_move\` to the target column. The proposal comment's id is the vote anchor; a newer proposal supersedes it (votes on the old one go stale).
+3. **Vote** — every holder casts \`mcp__awb__record_agreement\` with \`status="agree"\` (or \`"object"\`, rationale in \`content\`). \`proposal_id\` can be omitted — the latest open proposal is the anchor. Silence ≠ consent; only your latest signal counts.
+4. **Server auto-moves** — the instant every required holder has agreed on the current proposal, the server performs the move itself (actor \`Consensus\`). Nobody calls \`move_ticket\`.
+
+The reporter may \`record_agreement(..., override=true)\` to force-pass a deadlock — honored only while holding the reporter role, and audit-logged. \`move_ticket(force=true)\` also bypasses the gate, but it is a deliberate human/operator escape hatch — as an agent, never use it to dodge consensus.
 
 ## Notes
 
@@ -229,7 +255,20 @@ This ticket is in the In Progress column. Implement the work on a feature branch
 
 6. **File any inline follow-up flags before moving** — if you wrote (or spotted in this thread) a "track in a separate ticket" / "follow-up needed" note that isn't a ticket yet, file it **now** with \`create_ticket\` (Backlog, \`priority=low\`, description starting with a \`Source:\` link back to this ticket) before handing off. Don't defer it to the Self-Improvement Review — the retrospective is a safety net, not the primary filing mechanism.
 
-7. **Move to Review** — \`move_ticket\` to the **Review** column.
+7. **Move to Review** — \`move_ticket\` to the **Review** column. **If two or more distinct agents share the assignee role on this ticket, this move is consensus-gated — a direct \`move_ticket\` is rejected; follow the _Multi-holder consensus gate_ section below instead.**
+
+## Multi-holder consensus gate
+
+If **two or more distinct holders** (agents or users, counted across this column's routing role(s) — the same party wearing several hats counts once) share the ticket here, the server gates **every move out of this column — forward or bounce-back —** on **unanimous explicit agreement**: a direct \`move_ticket\` is rejected with an error naming the holders still pending (the REST/board-drag path returns \`consensus_required\`), and no co-holder may advance the ticket unilaterally. **Single-holder tickets are unaffected: the gate never fires and you move exactly as before.**
+
+To advance a co-held ticket:
+
+1. **Discuss** in normal comments (mention your co-holders so they're triggered). Plain notes are *not* votes.
+2. **Propose** — \`mcp__awb__propose_move\` to the target column. The proposal comment's id is the vote anchor; a newer proposal supersedes it (votes on the old one go stale).
+3. **Vote** — every holder casts \`mcp__awb__record_agreement\` with \`status="agree"\` (or \`"object"\`, rationale in \`content\`). \`proposal_id\` can be omitted — the latest open proposal is the anchor. Silence ≠ consent; only your latest signal counts.
+4. **Server auto-moves** — the instant every required holder has agreed on the current proposal, the server performs the move itself (actor \`Consensus\`). Nobody calls \`move_ticket\`.
+
+The reporter may \`record_agreement(..., override=true)\` to force-pass a deadlock — honored only while holding the reporter role, and audit-logged. \`move_ticket(force=true)\` also bypasses the gate, but it is a deliberate human/operator escape hatch — as an agent, never use it to dodge consensus.
 
 ## When to park instead of bouncing back
 
@@ -306,10 +345,23 @@ This ticket is in the Review column. Both the reviewer **and** the assignee are 
    - **Do not attempt local build or test.** You may not have a repo. If coverage looks thin, say so in the bounce comment.
 
 5. **Decision**
-   - **LGTM** → \`add_comment\` "LGTM — approved for merge." with 1–2 lines of rationale **and the reviewed base SHA** (\`reviewed against origin/<default>@<sha>\` from step 2) so "no regression vs. what?" is auditable. **Before moving**, file any inline follow-up: if you wrote or spotted a "track in a separate ticket" / "follow-up needed" note in this thread that isn't a ticket yet, \`create_ticket\` it **now** (Backlog, \`priority=low\`, \`Source:\` link) — don't defer it to the retrospective. Then \`move_ticket\` to **Merging**. (Do not move to Done — Merging handles the actual merge.)
-   - **Changes requested** → \`add_comment\` with concrete findings (\`file:line\` citations, "X instead of Y" suggestions), mention the assignee (\`@[role:assignee|<name>]\`) → \`move_ticket\` back to **In Progress**.
+   - **LGTM** → \`add_comment\` "LGTM — approved for merge." with 1–2 lines of rationale **and the reviewed base SHA** (\`reviewed against origin/<default>@<sha>\` from step 2) so "no regression vs. what?" is auditable. **Before moving**, file any inline follow-up: if you wrote or spotted a "track in a separate ticket" / "follow-up needed" note in this thread that isn't a ticket yet, \`create_ticket\` it **now** (Backlog, \`priority=low\`, \`Source:\` link) — don't defer it to the retrospective. Then \`move_ticket\` to **Merging** (if two or more distinct agents share the reviewer role on this ticket, this move is consensus-gated — see **Multi-holder consensus gate** below). (Do not move to Done — Merging handles the actual merge.)
+   - **Changes requested** → \`add_comment\` with concrete findings (\`file:line\` citations, "X instead of Y" suggestions), mention the assignee (\`@[role:assignee|<name>]\`) → \`move_ticket\` back to **In Progress** (a bounce-back is a move out of this column too — on a co-held ticket it is consensus-gated the same way; see **Multi-holder consensus gate** below).
    - **Question for the assignee** → \`add_comment\` with a specific question, mention the assignee (\`@[role:assignee|<name>]\`), and stop. Do **not** \`move_ticket\` — the ticket stays in Review so the assignee can answer without a round-trip to In Progress.
    - **Cannot decide on your own** → \`add_comment\` with a specific question to the **reporter** (use \`@[role:reporter|<name>]\`) and stop. Do not \`move_ticket\`.
+
+## Multi-holder consensus gate
+
+If **two or more distinct holders** (agents or users, counted across this column's routing role(s) — e.g. co-reviewers, or a distinct reviewer + assignee pair when this column routes both roles; the same party wearing several hats counts once) share the ticket here, the server gates **every move out of this column — forward or bounce-back —** on **unanimous explicit agreement**: a direct \`move_ticket\` is rejected with an error naming the holders still pending (the REST/board-drag path returns \`consensus_required\`), and no co-holder may advance the ticket unilaterally. **Single-holder tickets are unaffected: the gate never fires and you move exactly as before.**
+
+To advance a co-held ticket:
+
+1. **Discuss** in normal comments (mention your co-holders so they're triggered). Plain notes are *not* votes.
+2. **Propose** — \`mcp__awb__propose_move\` to the target column. The proposal comment's id is the vote anchor; a newer proposal supersedes it (votes on the old one go stale).
+3. **Vote** — every holder casts \`mcp__awb__record_agreement\` with \`status="agree"\` (or \`"object"\`, rationale in \`content\`). \`proposal_id\` can be omitted — the latest open proposal is the anchor. Silence ≠ consent; only your latest signal counts.
+4. **Server auto-moves** — the instant every required holder has agreed on the current proposal, the server performs the move itself (actor \`Consensus\`). Nobody calls \`move_ticket\`.
+
+The reporter may \`record_agreement(..., override=true)\` to force-pass a deadlock — honored only while holding the reporter role, and audit-logged. \`move_ticket(force=true)\` also bypasses the gate, but it is a deliberate human/operator escape hatch — as an agent, never use it to dodge consensus.
 
 ## Reviewer notes
 
@@ -410,7 +462,7 @@ This ticket is in the Merging column, which means Review approved the diff. Your
    - **If you integrated any rebase/merge conflicts in step 2/3**: which hunk(s) conflicted, why each was safe to fold (same meaning / duplicate work already on the default / mechanical), and confirmation that build + relevant tests still pass after the integration. This is the audit trail for the relaxed-ff policy.
    - If any step failed, record the failure mode precisely so Done's sanity check can surface it.
 
-8. **Move to Done — only when (a) the completeness proof is clean *and* (b) both-side branch deletion verified empty** — \`move_ticket\` to the **Done** column. Leave the ticket in Merging if you recorded a \`manual merge required\` block, a partial-merge gap, or an unfinished cleanup per the recovery section — never advance a half-merged or half-cleaned ticket into the terminal column, because bouncing it back *out* of Done is expensive.
+8. **Move to Done — only when (a) the completeness proof is clean *and* (b) both-side branch deletion verified empty** — \`move_ticket\` to the **Done** column. Leave the ticket in Merging if you recorded a \`manual merge required\` block, a partial-merge gap, or an unfinished cleanup per the recovery section — never advance a half-merged or half-cleaned ticket into the terminal column, because bouncing it back *out* of Done is expensive. **If two or more distinct agents share the assignee role on this ticket, this move is consensus-gated — see _Multi-holder consensus gate_ below.**
 
 ## When to integrate vs. escalate
 
@@ -431,6 +483,19 @@ Cleanup — remote branch delete, local branch delete, ticket worktree removal �
 - **Local branch delete failed** → record the exact error in the comment, resolve it (e.g. \`git checkout <default>\` first), and retry. Never advance to Done with the local \`ticket/<id>\` branch still listed.
 - **Ticket worktree** → you are typically *running inside* it, so you cannot remove your own worktree mid-run; that removal is the server's terminal-cleanup job once the ticket lands in Done. Your responsibility is (a) leave no new uncommitted junk in it and (b) state in the step-7 comment that no stray worktree work remains, so Done's audit can trust the state. If you created an *extra* worktree yourself (\`git worktree add\`), remove it with \`git worktree remove\` and confirm via \`git worktree list\`.
 - **Bottom line**: advance to Done only when remote+local branch deletion verifies empty — or you have explicitly recorded in a comment why a human must finish cleanup and left the ticket in Merging. A leaked branch/worktree reaching Done is exactly what this prompt exists to stop.
+
+## Multi-holder consensus gate
+
+If **two or more distinct holders** (agents or users, counted across this column's routing role(s) — the same party wearing several hats counts once) share the ticket here, the server gates **every move out of this column — forward or bounce-back —** on **unanimous explicit agreement**: a direct \`move_ticket\` is rejected with an error naming the holders still pending (the REST/board-drag path returns \`consensus_required\`), and no co-holder may advance the ticket unilaterally. **Single-holder tickets are unaffected: the gate never fires and you move exactly as before.**
+
+To advance a co-held ticket:
+
+1. **Discuss** in normal comments (mention your co-holders so they're triggered). Plain notes are *not* votes.
+2. **Propose** — \`mcp__awb__propose_move\` to the target column. The proposal comment's id is the vote anchor; a newer proposal supersedes it (votes on the old one go stale).
+3. **Vote** — every holder casts \`mcp__awb__record_agreement\` with \`status="agree"\` (or \`"object"\`, rationale in \`content\`). \`proposal_id\` can be omitted — the latest open proposal is the anchor. Silence ≠ consent; only your latest signal counts.
+4. **Server auto-moves** — the instant every required holder has agreed on the current proposal, the server performs the move itself (actor \`Consensus\`). Nobody calls \`move_ticket\`.
+
+The reporter may \`record_agreement(..., override=true)\` to force-pass a deadlock — honored only while holding the reporter role, and audit-logged. \`move_ticket(force=true)\` also bypasses the gate, but it is a deliberate human/operator escape hatch — as an agent, never use it to dodge consensus.
 
 ## Notes
 
