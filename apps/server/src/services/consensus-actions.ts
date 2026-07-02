@@ -32,6 +32,7 @@ import {
   getConsensusState,
   findOpenProposal,
   markProposalExecuted,
+  evaluateConsensusMoveGate,
   type ConsensusResolverDeps,
   type ResolvedConsensusState,
 } from './consensus.service';
@@ -120,7 +121,10 @@ export async function resolvePartyNames(
  * 헬퍼를 써서 "마지막 승인 → 자동 이동" 이 두 경로에서 한 번만 정의되게 한다.
  *
  *   - satisfied && 열린 제안 존재 && 판정 앵커(state.proposalId)==그 제안 일 때만 실행.
- *   - markProposalExecuted 로 executed_at 스탬프 → 중복/재실행 방지.
+ *   - **이동 전에** markProposalExecuted 로 원자 클레임(조건부 UPDATE) — 동시에
+ *     도착한 두 "마지막 승인"이 각각 satisfied 를 보더라도 클레임 승자 한쪽만
+ *     이동한다(이중 이동/이중 팬아웃 방지). 클레임 후 이동이 실패하는 드문 경우
+ *     제안은 소진된 채 남는다 — 복구는 재제안(안전 방향: 이동 0회 ≤ 1회).
  *   - moved 활동의 actor 는 CONSENSUS_ACTOR_ID('consensus')/'Consensus' —
  *     non-'system' 이라 트리거 루프가 재진입해 **목적지 컬럼 role 홀더를
  *     디스패치**한다(다음 phase 진입). 감사용 consensus_move 활동은 반대로
@@ -142,6 +146,9 @@ export async function autoExecuteConsensusMove(
   const destCol = await deps.dataSource.getRepository(BoardColumn).findOne({ where: { id: open.targetColumnId } });
   if (!destCol) return null;
 
+  const claimed = await markProposalExecuted(deps.dataSource, open.proposalId, nowIso);
+  if (!claimed) return null; // 경쟁 승인 경로가 이미 클레임 — 이중 이동 방지
+
   await performColumnMove(deps.dataSource, deps.activityService, {
     ticket,
     destColumnId: open.targetColumnId,
@@ -149,7 +156,6 @@ export async function autoExecuteConsensusMove(
     actorName: 'Consensus',
     triggerSource: 'consensus_auto',
   });
-  await markProposalExecuted(deps.dataSource, open.proposalId, nowIso);
 
   // 감사: 어떤 합의가 어디로 이동시켰는지 + 마지막 승인자. actor_id 는 의도적으로
   // 'system' — 이 updated 활동까지 non-system 이면 트리거 루프의 ticket_update
@@ -182,12 +188,13 @@ export interface ConsensusView {
 
 /**
  * 티켓의 현재 합의 상태를 REST 로 노출(브라우저는 MCP 판정 경로에 접근 못 함).
- * `getConsensusState`(현재 컬럼 라우팅 홀더 + 저장된 vote) + 최신 열린 제안 +
- * party 이름 + 게이트 요약을 한 번에 반환한다.
+ * 판정은 `evaluateConsensusMoveGate` 를 그대로 재사용한다 — 게이트와 뷰가 같은
+ * 열린-제안 앵커를 쓰지 않으면, 소진(executed)된 제안의 표로 뷰만 satisfied 로
+ * 보여 UI 가 열어 준 직접 이동이 서버 게이트(409 consensus_required)에 막히는
+ * 불일치가 생긴다.
  */
 export async function getConsensusView(deps: ConsensusActionDeps, ticket: Ticket): Promise<ConsensusView> {
-  const state = await getConsensusState(deps, ticket, {});
-  const open = await findOpenProposal(deps.dataSource, ticket.id);
+  const { blocked, state, openProposal: open } = await evaluateConsensusMoveGate(deps, ticket);
 
   const parties: ConsensusParty[] = [
     ...state.required, ...state.agreed, ...state.objected, ...state.pending,
@@ -209,7 +216,7 @@ export async function getConsensusView(deps: ConsensusActionDeps, ticket: Ticket
       : null,
     names,
     // 이탈(현재) 컬럼 라우팅 홀더가 ≥2 & 미성립이면 직접 이동 차단 → 제안 필요.
-    gate: { blocked: state.required.length >= 2 && !state.satisfied, holder_count: state.required.length },
+    gate: { blocked, holder_count: state.required.length },
   };
 }
 

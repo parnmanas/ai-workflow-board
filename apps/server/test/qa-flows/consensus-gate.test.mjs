@@ -5,6 +5,8 @@
 //   - 홀더 ≥2 컬럼에서 직접 move_ticket 은 합의 미성립 시 차단된다(누가 pending).
 //   - propose_move 가 제안을 열고(제안 comment id === proposal_id), 전 홀더가
 //     record_agreement(agree) 하면 마지막 승인 순간 서버가 자동으로 이동시킨다.
+//   - 소진(실행)된 제안의 표는 다음 멀티홀더 컬럼의 게이트를 만족시키지 못한다
+//     (T7 리뷰 회귀 — 게이트 앵커는 열린 제안, phase 마다 새 합의).
 //   - force / reporter override 는 게이트를 우회한다.
 //   - 홀더 ≤1 은 무회귀: 직접 move_ticket 이 그대로 작동하고 propose_move 는 안내.
 
@@ -130,6 +132,54 @@ test('T5 핵심: 2홀더 직접이동 차단 → propose_move → 전원 승인 
   step('멱등: 소진된 제안에는 다시 auto-execute 하지 않는다(중복 이동 방지)');
   const rAgain = await a.callTool('record_agreement', { ticket_id: ticket.id, status: 'agree' });
   assert.equal(rAgain.moved, null, '이미 실행된 제안 → 재이동 없음');
+});
+
+test('회귀(T7 리뷰): 소진된 제안의 표는 다음 멀티홀더 컬럼 게이트를 만족시키지 못한다', async (t) => {
+  // 시나리오: In Progress(assignee A+B) 합의 성립 → auto-move → Review 도 같은
+  // 역할(assignee) 라우팅(2연속 멀티홀더 phase). 게이트 앵커를 "최신 vote 가 참조한
+  // 제안"으로 잡으면 실행(소진)된 P1 의 표가 Review 이탈 게이트까지 만족시켜 —
+  // 새 제안 전까지 무게이트 통과, 합의가 티켓당 사실상 1회로 붕괴한다. 게이트는
+  // 열린 제안(없으면 null) 앵커로만 판정해야 한다.
+  const { app, port, modules } = await bootApp({ port: BASE_PORT + 3 });
+  t.after(() => { void app.close().catch(() => {}); });
+  const { getDataSourceToken } = modules;
+
+  const { columns, trio, holderB, ticket } = await twoHolderScene(app, getDataSourceToken, 'consensus-gate-d');
+  // 다음 phase(Review)도 assignee 라우팅으로 바꿔 같은 두 홀더가 다시 게이트 대상이 되게 한다.
+  {
+    const ds = app.get(getDataSourceToken());
+    await ds.getRepository('BoardColumn').update(columns.review.id, { role_routing: JSON.stringify(['assignee']) });
+  }
+  const a = await mcpFor(port, trio.assignee.key.raw_key);
+  const b = await mcpFor(port, holderB.key.raw_key);
+  t.after(() => { void a.close(); void b.close(); });
+
+  step('phase 1: 제안 P1 → 전원 agree → auto-move → Review');
+  const p1 = await a.callTool('propose_move', { ticket_id: ticket.id, target_column_id: columns.review.id });
+  assert.ok(!p1.isError, `P1 제안 실패: ${JSON.stringify(p1)}`);
+  const rA1 = await a.callTool('record_agreement', { ticket_id: ticket.id, status: 'agree' });
+  assert.ok(!rA1.isError, `A agree 실패: ${JSON.stringify(rA1)}`);
+  const rB1 = await b.callTool('record_agreement', { ticket_id: ticket.id, status: 'agree' });
+  assert.ok(rB1.moved, 'P1 합의 성립 → auto-move');
+  assert.equal(await columnIdOf(app, getDataSourceToken, ticket.id), columns.review.id, '티켓이 Review 진입');
+
+  step('phase 2(회귀 핵심): 소진된 P1 의 표로는 Review 이탈 직접 이동이 열리지 않는다');
+  const blocked = await a.callTool('move_ticket', { ticket_id: ticket.id, target_column_id: columns.done.id });
+  assert.equal(blocked.isError, true, '소진된 제안의 표가 다음 컬럼 게이트를 만족시키면 안 됨');
+  assert.match(blocked.error?.error || '', /consensus_required/, '재차 consensus_required 로 차단');
+  assert.equal(await columnIdOf(app, getDataSourceToken, ticket.id), columns.review.id, '차단 → 티켓은 Review 그대로');
+
+  step('phase 2 ceremony: 새 제안 P2 → 전원 agree → 재차 auto-move(phase 당 합의)');
+  const p2 = await a.callTool('propose_move', { ticket_id: ticket.id, target_column_id: columns.done.id });
+  assert.ok(!p2.isError, `P2 제안 실패: ${JSON.stringify(p2)}`);
+  assert.notEqual(p2.proposal_id, p1.proposal_id, '새 phase 는 새 proposal');
+  assert.equal(p2.consensus.pending.length, 2, 'P1 의 표는 P2 기준 stale — 표 리셋');
+  const rA2 = await a.callTool('record_agreement', { ticket_id: ticket.id, status: 'agree' });
+  assert.ok(!rA2.isError);
+  const rB2 = await b.callTool('record_agreement', { ticket_id: ticket.id, status: 'agree' });
+  assert.ok(rB2.moved, 'P2 합의 성립 → 재차 auto-move');
+  assert.equal(rB2.moved.to_column_id, columns.done.id);
+  assert.equal(await columnIdOf(app, getDataSourceToken, ticket.id), columns.done.id, '두 번째 phase 도 합의로만 통과');
 });
 
 test('force / reporter override 는 게이트를 우회한다', async (t) => {

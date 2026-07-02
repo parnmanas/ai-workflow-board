@@ -152,9 +152,14 @@ test('E2E: 2홀더 논의→object→재제안(표 리셋)→전원 agree→auto
   assert.equal(rB.moved.to_column_id, columns.review.id);
   assert.equal(await columnIdOf(app, getDataSourceToken, ticket.id), columns.review.id, '실제 컬럼 = Review');
 
-  step('다음 phase 진입: Review 라우팅 홀더(reviewer)에게 agent_trigger 팬아웃');
+  step('다음 phase 진입: Review 라우팅 홀더(reviewer)에게 agent_trigger 팬아웃 — 정확히 1회');
   await reviewer.waitForTrigger((tr) => tr.ticket_id === ticket.id, 8000);
-  assert.ok(reviewer.triggersFor(ticket.id).length >= 1, 'auto-move 가 다음 컬럼 role 트리거를 발화해야 함');
+  // 이중 발화 금지까지 고정: moved(actor 'consensus') 가 유일한 디스패치 소스여야
+  // 한다 — consensus_move 감사(actor 'system')나 auto-execute 경합이 두 번째
+  // 트리거를 만들면 다음 phase 워커가 트윈 스폰된다. 잠깐의 유예 후 정확-1 회 확인.
+  await new Promise((r) => setTimeout(r, 1200));
+  assert.equal(reviewer.triggersFor(ticket.id).length, 1,
+    'auto-move 는 다음 컬럼 role 트리거를 정확히 1회만 발화해야 함(이중 발화 금지)');
 
   step('감사: consensus_move(마지막 승인자 표기) + moved(→Review, trigger_source=consensus_auto)');
   const ds = app.get(getDataSourceToken());

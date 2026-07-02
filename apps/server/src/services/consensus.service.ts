@@ -175,21 +175,26 @@ export async function findOpenProposal(
 }
 
 /**
- * 제안을 소진 처리(executed_at 스탬프) — auto-execute 성공 후 호출해 중복 이동을
- * 막는다. 기존 metadata(author_role · consensus_proposal 마커 등)를 보존하고
- * proposal.executed_at 만 채운다. `nowIso` 를 주입받아 순수하게(테스트 결정성) 유지.
+ * 제안을 소진 처리(executed_at 스탬프)하고 **원자적으로 클레임**한다 — 동시에
+ * 도착한 두 "마지막 승인"이 각각 satisfied 판정을 받아도 실제 이동은 한 번만
+ * 실행되도록, 호출측(auto-execute)은 클레임 성공(true) 시에만 이동한다.
+ * 조건부 UPDATE(compare-and-swap: 읽어 둔 metadata 원문과 일치할 때만 갱신)라
+ * 경쟁자가 먼저 스탬프하면 affected=0 → false. 기존 metadata(author_role ·
+ * consensus_proposal 마커 등)는 보존하고 proposal.executed_at 만 채운다.
+ * `nowIso` 를 주입받아 순수하게(테스트 결정성) 유지.
  */
 export async function markProposalExecuted(
   dataSource: DataSource,
   proposalCommentId: string,
   nowIso: string,
-): Promise<void> {
+): Promise<boolean> {
   const repo = dataSource.getRepository(Comment);
   const comment = await repo.findOne({ where: { id: proposalCommentId } });
-  if (!comment) return;
+  if (!comment) return false;
+  const prevRaw = comment.metadata || '';
   let meta: Record<string, unknown> = {};
   try {
-    const parsed = JSON.parse(comment.metadata || '{}');
+    const parsed = JSON.parse(prevRaw || '{}');
     if (parsed && typeof parsed === 'object') meta = parsed as Record<string, unknown>;
   } catch {
     meta = {};
@@ -197,9 +202,16 @@ export async function markProposalExecuted(
   const proposal = (meta.proposal && typeof meta.proposal === 'object')
     ? (meta.proposal as Record<string, unknown>)
     : {};
+  if (typeof proposal.executed_at === 'string' && proposal.executed_at) return false; // 이미 소진
   proposal.executed_at = nowIso;
   meta.proposal = proposal;
-  await repo.update(proposalCommentId, { metadata: JSON.stringify(meta) });
+  const result = await repo
+    .createQueryBuilder()
+    .update(Comment)
+    .set({ metadata: JSON.stringify(meta) })
+    .where('id = :id AND metadata = :prev', { id: proposalCommentId, prev: prevRaw })
+    .execute();
+  return (result.affected ?? 0) > 0;
 }
 
 // ─── 이동 게이트 판정(T5, 결정 4) ────────────────────────────────────────────
@@ -212,6 +224,8 @@ export interface ConsensusMoveGate {
   blocked: boolean;
   /** 판정 상태 — 차단 메시지(누가 pending)와 디버깅에 사용. */
   state: ResolvedConsensusState;
+  /** 판정 앵커로 쓰인 열린(미실행) 제안 — 없으면 null. 뷰(T6)가 재조회 없이 재사용. */
+  openProposal: OpenConsensusProposal | null;
 }
 
 /**
@@ -219,12 +233,19 @@ export interface ConsensusMoveGate {
  * `blocked=true`. 홀더 ≤1 이면 항상 `blocked=false`(제안 ceremony 불필요).
  * `force`/reporter override 우회는 **호출측**(move_ticket)이 판단한다 — 이 함수는
  * 순수 판정만.
+ *
+ * 앵커는 **열린(미실행) 제안**으로 고정한다. 앵커를 생략(=최신 vote 가 참조한
+ * proposalId)하면 auto-execute 로 이미 소진된 제안의 표가 다음 컬럼의 게이트를
+ * 다시 만족시켜 — 합의가 티켓당 사실상 1회로 붕괴한다(실행 경로는 findOpenProposal
+ * 로 소진을 방어하는데 게이트만 무방비인 비대칭). 열린 제안이 없으면 null 앵커 —
+ * 소진된 제안을 참조하는 표는 전부 stale(pending) 처리된다.
  */
 export async function evaluateConsensusMoveGate(
   deps: ConsensusResolverDeps,
   ticket: Ticket,
 ): Promise<ConsensusMoveGate> {
-  const state = await getConsensusState(deps, ticket, {});
+  const open = await findOpenProposal(deps.dataSource, ticket.id);
+  const state = await getConsensusState(deps, ticket, { proposalId: open ? open.proposalId : null });
   const blocked = state.required.length >= 2 && !state.satisfied;
-  return { blocked, state };
+  return { blocked, state, openProposal: open };
 }

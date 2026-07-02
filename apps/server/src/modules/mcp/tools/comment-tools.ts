@@ -667,18 +667,10 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         });
       }
 
-      // ─── auto-execute (T5, 결정 2): 합의 성립 + 열린 이동 제안이 있으면 서버가
-      // 실제 move 를 실행한다(마지막 승인 시점 자동실행).
-      //   - satisfied && 열린 제안 존재 && 판정 앵커(state.proposalId)==그 제안 일 때만
-      //     실행 → 엉뚱한/stale 앵커로는 움직이지 않는다.
-      //   - markProposalExecuted 로 executed_at 스탬프 → 중복 이동/재실행 방지.
-      //   - actor='system'/'Consensus'(마지막 승인자 아님) → 목적지 컬럼 트리거의
-      //     per-holder self-guard 를 건드리지 않고 감사상 '합의 자동실행'으로 읽힌다.
-      //     제안이 소진되어 다음 record_agreement 는 재이동하지 않으므로 무한루프 없음.
-      //   - best-effort: 이동 실패가 시그널 저장을 깨뜨리지 않게 try/catch.
       // auto-execute (T5, 결정 2): 합의 성립 + 열린 제안 매칭 시 서버가 실제 이동.
       // consensus-actions.autoExecuteConsensusMove 로 단일화 — REST 투표 브릿지와
-      // 동일한 부작용(performColumnMove + markProposalExecuted + consensus_move 감사).
+      // 동일한 부작용(원자 클레임 → performColumnMove, actor 'consensus' sentinel,
+      // consensus_move 감사). best-effort: 이동 실패가 시그널 저장을 깨뜨리지 않게.
       let moved: { proposal_id: string; to_column_id: string; to_column_name: string | null } | null = null;
       if (state && ticketRoleAssignmentService) {
         try {
