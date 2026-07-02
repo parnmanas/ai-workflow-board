@@ -193,9 +193,48 @@ test('ticket-session: second trigger AFTER first spawn lands collapses to follow
   assert.equal(mgr.followUps.length, 1, 'exactly one follow-up turn was written');
 });
 
+test('ticket-session: same (ticket, role) but DIFFERENT holder agents get SEPARATE sessions (다중담당자 T7)', async () => {
+  // 한 manager 가 같은 role 의 공동 홀더 agent 둘을 소유할 때(T2 팬아웃), 두 번째
+  // 홀더의 트리거가 첫 홀더 세션의 follow-up 으로 접히면 그 홀더는 자기 identity
+  // 로 record_agreement 를 못 해 합의가 데드락된다. 키에 agent 차원이 들어가
+  // 각자 스폰되어야 한다.
+  const mgr = new FakeTicketMgr(makeConfig(), 5);
+  const base = {
+    ticketId: 'ticket-mh',
+    role: 'assignee',
+    rolePrompt: '',
+    ticketPrompt: '',
+    columnPrompt: null,
+    ticket: { title: 'MultiHolder' },
+    forceRespawn: false,
+    maxConcurrentTicketsPerAgent: 5,
+  };
+  const rA = await mgr.dispatchTrigger({ ...base, triggerId: 'trig-A', agentId: 'agent-A' });
+  const rB = await mgr.dispatchTrigger({ ...base, triggerId: 'trig-B', agentId: 'agent-B' });
+
+  assert.equal(rA.dispatched, true);
+  assert.equal(rB.dispatched, true);
+  assert.equal(mgr.spawnCount, 2, 'each holder agent gets its own session');
+  assert.notEqual(rB.pid, rA.pid, 'holder B must not fold into holder A session');
+  assert.equal(rB.firstTurn, true, 'holder B starts a fresh first turn');
+
+  // 같은 홀더의 재트리거는 종전대로 follow-up 으로 접힌다(단일-플라이트 유지).
+  const rA2 = await mgr.dispatchTrigger({ ...base, triggerId: 'trig-A2', agentId: 'agent-A' });
+  assert.equal(rA2.dispatched, true);
+  assert.equal(rA2.pid, rA.pid, 'same holder reuses its own session');
+  assert.equal(mgr.spawnCount, 2, 'no third spawn for a same-holder re-trigger');
+
+  // 보드 업데이트 브로드캐스트는 두 홀더 세션 모두에 전달된다.
+  const before = mgr.followUps.length;
+  const forwarded = mgr.forwardBoardUpdate('ticket-mh', { entity_type: 'ticket', action: 'updated' });
+  assert.equal(forwarded, true);
+  const pids = mgr.followUps.slice(before).map((f) => f.pid).sort();
+  assert.deepEqual(pids, [rA.pid, rB.pid].sort(), 'board update reaches BOTH holder sessions');
+});
+
 test('ticket-session: stale session record (dead pid) is purged by _getLiveSession', async () => {
   const mgr = new FakeTicketMgr(makeConfig(), 5);
-  const sessionKey = 'ticket-stale:assignee';
+  const sessionKey = 'ticket-stale:assignee:agent-1';
   // A pid this high (just below INT32_MAX) is guaranteed not to map to a
   // live process — Linux pid_max defaults to 2^15 or 2^22, and macOS caps
   // even lower. process.kill(pid, 0) returns ESRCH.
@@ -353,7 +392,7 @@ test('ticket-session: split sentinel in assistant text arms the split flag', asy
     maxConcurrentTicketsPerAgent: 5,
   };
   await mgr.dispatchTrigger({ ...base, triggerId: 's1' });
-  const sess = mgr._sessions.get('ticket-split:assignee');
+  const sess = mgr._sessions.get('ticket-split:assignee:agent-1');
   assert.ok(sess, 'session exists');
   assert.notEqual(sess.splitRequested, true, 'not split yet');
 
@@ -380,7 +419,7 @@ test('ticket-session: armed split makes the next trigger force-respawn a fresh s
     maxConcurrentTicketsPerAgent: 5,
   };
   const r1 = await mgr.dispatchTrigger({ ...base, triggerId: 's1' });
-  const sess = mgr._sessions.get('ticket-split2:assignee');
+  const sess = mgr._sessions.get('ticket-split2:assignee:agent-1');
   mgr._onStdoutParsed(sess, assistantTextLine('[[AWB:SESSION_SPLIT]] reason here'), '');
   assert.equal(sess.splitRequested, true);
 
@@ -405,7 +444,7 @@ test('ticket-session: WITHOUT a split sentinel the next trigger reuses the sessi
     maxConcurrentTicketsPerAgent: 5,
   };
   const r1 = await mgr.dispatchTrigger({ ...base, triggerId: 'n1' });
-  const sess = mgr._sessions.get('ticket-nosplit:assignee');
+  const sess = mgr._sessions.get('ticket-nosplit:assignee:agent-1');
   // A quoted mention of the token must NOT false-arm a split when it isn't the
   // real sentinel — but our token is literal, so feed unrelated text instead.
   mgr._onStdoutParsed(sess, assistantTextLine('Continuing work, no split needed.'), '');

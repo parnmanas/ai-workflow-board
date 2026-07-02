@@ -72,6 +72,7 @@ interface SpawnIdentityRecord {
   chat_request_id?: string | null;
   ticket_id?: string | null;
   role?: string | null;
+  agent_id?: string | null;
 }
 
 /**
@@ -81,7 +82,7 @@ interface SpawnIdentityRecord {
  *   1. Exact trigger idempotency — same non-empty triggerId (redelivered
  *      agent_trigger / SSE replay).
  *   2. Exact chat idempotency — same non-empty chatRequestId.
- *   3. (ticket, role) single-flight — a column `trigger` spawn whose
+ *   3. (ticket, role, agent) single-flight — a column `trigger` spawn whose
  *      (ticketId, role) matches any live record / in-flight reservation
  *      collapses onto it, REGARDLESS of triggerId. The one-shot path can't
  *      deliver a follow-up turn the way the persistent ticket-session path does
@@ -94,6 +95,12 @@ interface SpawnIdentityRecord {
  *      spawns: once the prior strand exits its record leaves `#map`, so nothing
  *      matches. Restricted to `trigger` kind so chat spawns (no role) are never
  *      merged on a blank role.
+ *
+ *      다중담당자 팬아웃(T2/T7): 같은 (ticket, role)이라도 **서로 다른 holder
+ *      agent** 의 스폰은 중복이 아니라 각 홀더의 몫이다 — 합의는 전 홀더의
+ *      record_agreement 를 요구하므로 두 번째 홀더를 drop 하면 데드락된다.
+ *      양쪽 agent id 가 모두 알려졌고 서로 다를 때만 통과시키고, 어느 한쪽이라도
+ *      미상이면 종전대로 collapse(레거시 무회귀).
  *
  *      EXCEPTION — comment-mention spawns (`triggerId` of the form
  *      `mention:<commentId>`) are NOT coalesced here. A distinct @-mention is
@@ -112,9 +119,11 @@ export function findDuplicateSpawn(
     chatRequestId?: string;
     ticketId?: string;
     role?: string;
+    agentId?: string;
   },
 ): false | 'duplicate_trigger' | 'duplicate_chat' {
   const specRole = spec.role || '';
+  const specAgent = spec.agentId || '';
   for (const rec of records) {
     if (spec.triggerId && rec.trigger_id === spec.triggerId) {
       return 'duplicate_trigger';
@@ -127,7 +136,9 @@ export function findDuplicateSpawn(
       !(spec.triggerId || '').startsWith('mention:') &&
       spec.ticketId &&
       rec.ticket_id === spec.ticketId &&
-      (rec.role || '') === specRole
+      (rec.role || '') === specRole &&
+      // 서로 다른 holder agent(양쪽 모두 식별된 경우)는 별개 스폰 — 팬아웃.
+      (!specAgent || !(rec.agent_id || '') || (rec.agent_id || '') === specAgent)
     ) {
       return 'duplicate_trigger';
     }
@@ -158,6 +169,9 @@ interface ReservationRecord {
   chat_request_id?: string | null;
   ticket_id?: string | null;
   role?: string | null;
+  // 다중담당자 팬아웃: 같은 (ticket, role)의 다른 holder agent 스폰을 중복으로
+  // 오인해 drop 하지 않도록 reservation 에도 agent 신원을 실어 둔다.
+  agent_id?: string | null;
 }
 
 interface SubagentRecord {
@@ -396,6 +410,7 @@ export class SubagentManager implements SubagentManagerContract {
       chat_request_id: spec.chatRequestId || null,
       ticket_id: spec.ticketId || null,
       role: spec.role || null,
+      agent_id: spec.agentId || null,
     });
 
     // ST-6 / ST-7: per-call managed-agent context. When provided we

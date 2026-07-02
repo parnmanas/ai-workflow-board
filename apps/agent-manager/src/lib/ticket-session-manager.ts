@@ -1,6 +1,11 @@
-// Ticket Session Manager — keeps one CLI child alive per (ticket, role)
+// Ticket Session Manager — keeps one CLI child alive per (ticket, role, agent)
 // so successive events reuse the same KV cache and context. Per-role keying
 // keeps assignee / reviewer / reporter scopes from bleeding into one another.
+// Per-agent keying(다중담당자 T7): 한 manager 가 같은 role 의 서로 다른 holder
+// agent 를 여럿 소유할 때(T2 팬아웃), 두 번째 홀더의 트리거가 첫 홀더의 살아있는
+// 세션으로 follow-up 접힘되면 그 홀더는 자기 identity 로 record_agreement 를 영영
+// 못 해 합의가 데드락된다 — ChatSessionManager 의 `${roomId}|${agentId}` 키와
+// 같은 이유로 agent 차원을 키에 포함한다.
 
 import {
   BaseSessionManager,
@@ -121,14 +126,14 @@ export class TicketSessionManager
     this.circuitBreaker = circuitBreaker ?? new CircuitBreaker();
   }
 
-  #makeKey(ticketId: string, role: string): string {
-    return `${ticketId}:${role || '_'}`;
+  #makeKey(ticketId: string, role: string, agentId: string): string {
+    return `${ticketId}:${role || '_'}:${agentId || '_'}`;
   }
 
   async dispatchTrigger(spec: TicketTriggerArgs): Promise<TicketDispatchResult> {
     if (!spec.ticketId) return { dispatched: false, reason: 'no_ticket' };
     const role = spec.role || '';
-    const sessionKey = this.#makeKey(spec.ticketId, role);
+    const sessionKey = this.#makeKey(spec.ticketId, role, spec.agentId || '');
 
     // Circuit-breaker gate: if this (agent, ticket, role) has hit the
     // non-transient failure threshold, drop the trigger so we don't burn
@@ -174,25 +179,24 @@ export class TicketSessionManager
     // still walks raw `_sessions.values()` so stale entries don't inflate
     // the count before the next dispatch purges them through this path.
     if (!this._getLiveSession(sessionKey)) {
-      // Same (ticket, role) already spawning — drop as duplicate so the
-      // first spawn wins. The next trigger for the same key will arrive
+      // Same (ticket, role, agent) already spawning — drop as duplicate so
+      // the first spawn wins. The next trigger for the same key will arrive
       // after _sessions.set and become a follow-up turn naturally.
       //
-      // This guard is UNCONDITIONAL on agentId: the `_inflight` map is keyed
-      // by sessionKey (`${ticketId}:${role}`), so it is the (ticket,role)
-      // fallback the spec asks for when triggerId is empty. A trigger that
-      // arrives with an empty field_changed (triggerId='') AND an empty
-      // actor_name (agentId='') used to skip this whole block and race past
-      // the live-session check, twin-spawning a second child that bypassed
-      // the reuse path. Keying the drop on the sessionKey reservation closes
-      // that window regardless of whether the trigger carried an agentId.
+      // This guard stays UNCONDITIONAL on identity presence: the `_inflight`
+      // map is keyed by sessionKey (`${ticketId}:${role}:${agentId||'_'}`),
+      // so a trigger with an empty field_changed (triggerId='') AND an empty
+      // actor_name (agentId='') still collapses onto the same `_` bucket
+      // instead of racing past the live-session check and twin-spawning.
+      // 서로 다른 holder agent 의 트리거는 키가 달라 각자 스폰된다(다중담당자
+      // 팬아웃 — 의도된 동작).
       // (We deliberately do NOT add sessionKey to the persistent dedup *set*:
       // that set is only forgotten on child exit / drop, never after a
       // successful spawn, so a sessionKey entry there would wrongly reject
       // every later follow-up trigger for a live session as a "duplicate".)
       if (this._inflight.has(sessionKey)) {
         log(
-          `[ticket-session] dispatch dropped (spawn already in-flight for same key): ticket=${spec.ticketId.slice(0, 8)} role=${role}`,
+          `[ticket-session] dispatch dropped (spawn already in-flight for same key): ticket=${spec.ticketId.slice(0, 8)} role=${role} agent=${(spec.agentId || '').slice(0, 8) || '_'}`,
         );
         if (dedupKey) this._forgetDedup(dedupKey);
         return { dispatched: false, reason: 'inflight_spawn' };

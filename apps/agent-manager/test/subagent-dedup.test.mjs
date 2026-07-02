@@ -196,3 +196,58 @@ test('subagent dedup: role compared as empty-vs-empty (null === "")', () => {
   });
   assert.equal(res, 'duplicate_trigger');
 });
+
+// ─── 다중담당자 팬아웃 (T2/T7): (ticket, role, agent) 단일-플라이트 ──────────
+
+test('subagent dedup: same (ticket, role) but DIFFERENT holder agents both spawn', () => {
+  // 다중담당자 팬아웃: agent-A 의 strand 가 살아있는 동안 도착한 agent-B(같은
+  // ticket, 같은 role 의 공동 홀더) 트리거를 drop 하면 B 는 자기 identity 로
+  // record_agreement 를 못 해 합의가 데드락된다 — 반드시 별개 스폰.
+  const records = [{ trigger_id: 't-old', ticket_id: 'ticket-a', role: 'assignee', agent_id: 'agent-A' }];
+  const res = findDuplicateSpawn(records, {
+    kind: 'trigger',
+    triggerId: 't-new',
+    ticketId: 'ticket-a',
+    role: 'assignee',
+    agentId: 'agent-B',
+  });
+  assert.equal(res, false, 'distinct holder agent is a separate strand, not a duplicate');
+});
+
+test('subagent dedup: same (ticket, role) AND same agent still collapses (single-flight kept)', () => {
+  const records = [{ trigger_id: 't-old', ticket_id: 'ticket-a', role: 'assignee', agent_id: 'agent-A' }];
+  const res = findDuplicateSpawn(records, {
+    kind: 'trigger',
+    triggerId: 't-new',
+    ticketId: 'ticket-a',
+    role: 'assignee',
+    agentId: 'agent-A',
+  });
+  assert.equal(res, 'duplicate_trigger', 'same holder re-trigger stays single-flight');
+});
+
+test('subagent dedup: agent unknown on the RECORD side falls back to (ticket, role) collapse', () => {
+  // 레거시 무회귀: 어느 한쪽이라도 agent 신원이 없으면 종전 (ticket, role)
+  // 단일-플라이트를 유지한다(식별 불가 상태에서 팬아웃 허용 시 twin-spawn 재발).
+  const records = [{ trigger_id: 't-old', ticket_id: 'ticket-a', role: 'assignee' }];
+  const res = findDuplicateSpawn(records, {
+    kind: 'trigger',
+    triggerId: 't-new',
+    ticketId: 'ticket-a',
+    role: 'assignee',
+    agentId: 'agent-B',
+  });
+  assert.equal(res, 'duplicate_trigger', 'unknown record agent keeps legacy single-flight');
+});
+
+test('subagent dedup: agent unknown on the SPEC side falls back to (ticket, role) collapse', () => {
+  const records = [{ trigger_id: 't-old', ticket_id: 'ticket-a', role: 'assignee', agent_id: 'agent-A' }];
+  const res = findDuplicateSpawn(records, {
+    kind: 'trigger',
+    triggerId: 't-new',
+    ticketId: 'ticket-a',
+    role: 'assignee',
+    agentId: '',
+  });
+  assert.equal(res, 'duplicate_trigger', 'unknown spec agent keeps legacy single-flight');
+});
