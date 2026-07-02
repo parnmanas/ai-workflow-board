@@ -103,12 +103,17 @@ interface SpawnIdentityRecord {
  *      미상이면 종전대로 collapse(레거시 무회귀).
  *
  *      EXCEPTION — comment-mention spawns (`triggerId` of the form
- *      `mention:<commentId>`) are NOT coalesced here. A distinct @-mention is
- *      NEW work (a reviewer's question to the assignee, etc.), not a duplicate
- *      re-trigger: the one-shot strand can't receive a follow-up turn and its
- *      prompt is frozen at spawn, so dropping the mention would silently lose
- *      the comment. Rule 1 still dedupes an exact redelivery of the same
- *      `commentId`; only genuinely-new mentions are allowed past this gate.
+ *      `mention:<commentId>:<agentId>`, see {@link mentionTriggerId}) are NOT
+ *      coalesced here. A distinct @-mention is NEW work (a reviewer's question
+ *      to the assignee, etc.), not a duplicate re-trigger: the one-shot strand
+ *      can't receive a follow-up turn and its prompt is frozen at spawn, so
+ *      dropping the mention would silently lose the comment. Rule 1 still
+ *      dedupes an exact redelivery of the same `(commentId, agent)`; only
+ *      genuinely-new mentions are allowed past this gate. The **agent 차원**이
+ *      id 에 없으면(구 `mention:<commentId>`) role 멘션(@[role:assignee])의
+ *      공동 홀더 팬아웃 — per-agent SSE 가 같은 commentId 로 홀더 수만큼
+ *      도착한다 — 이 rule 1 에 걸려 두 번째 홀더 스폰이 drop, 그 홀더가
+ *      합의 논의에서 배제된다(T7 리뷰 blocker #2).
  * Returns the drop reason or `false` when the spawn is unique.
  */
 export function findDuplicateSpawn(
@@ -144,6 +149,20 @@ export function findDuplicateSpawn(
     }
   }
   return false;
+}
+
+/**
+ * comment-mention one-shot 의 triggerId — **per-(comment, target agent)** 차원.
+ * 서버 comment_mention 은 per-agent 스코프 SSE 라 role 멘션의 공동 홀더 수만큼
+ * 같은 commentId 이벤트가 도착한다. agent 무차원 id(`mention:<commentId>`)는
+ * findDuplicateSpawn rule 1(exact trigger_id)에 걸려 두 번째 홀더 스폰이 drop —
+ * 합의(전 홀더 record_agreement)가 데드락된다. agent 차원을 붙이면 rule 1 은
+ * 같은 (comment, agent) 재전달만 정확히 dedup 한다. agentId 미상이면 종전
+ * collapse 형태(`mention:<commentId>:`)로 접혀 레거시 무회귀. rule 3 의 mention
+ * 예외(`startsWith('mention:')`)는 접두 형태가 같아 그대로 작동한다.
+ */
+export function mentionTriggerId(commentId: string, agentId?: string): string {
+  return `mention:${commentId}:${agentId || ''}`;
 }
 
 export interface SubagentDelegationConfig {

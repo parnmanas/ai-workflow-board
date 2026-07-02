@@ -29,6 +29,7 @@ import { EnvironmentProvisioner } from './environment-provisioner.js';
 import type { ResolvedEnvironmentConfig } from './environment-provisioner.js';
 import { parseRunProvision, provisionRunWorkspace } from './run-provisioner.js';
 import { fireAndForgetTool } from './mcp-client.js';
+import { mentionTriggerId } from './subagent-manager.js';
 
 /**
  * Defensive parse of the `harness_config` field on a flattened agent_trigger
@@ -1101,7 +1102,9 @@ export class EventDispatcher {
           kind: 'trigger',
           taskText,
           rolePrompt,
-          triggerId: `mention:${commentId}`,
+          // per-(comment, target agent) — role 멘션의 공동 홀더 팬아웃(per-agent
+          // SSE × 같은 commentId)이 rule 1 dedup 에 drop 되지 않게 agent 차원 포함.
+          triggerId: mentionTriggerId(commentId, agentId),
           ticketId,
           agentId,
           // Pin role only for role-shortcut mentions (@assignee / @reviewer).

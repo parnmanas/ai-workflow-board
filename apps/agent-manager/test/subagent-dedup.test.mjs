@@ -15,7 +15,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { findDuplicateSpawn } from '../dist/lib/subagent-manager.js';
+import { findDuplicateSpawn, mentionTriggerId } from '../dist/lib/subagent-manager.js';
 
 test('subagent dedup: unique trigger spawn is not a duplicate', () => {
   const records = [];
@@ -127,6 +127,49 @@ test('subagent dedup: a mention spawn does NOT collapse onto a live COLUMN-trigg
     role: 'assignee',
   });
   assert.equal(res, false, 'mention is new work even against a live column-trigger strand');
+});
+
+test('subagent dedup: SAME comment mention fans out to DIFFERENT holder agents (T7 리뷰 #2)', () => {
+  // role 멘션(@[role:assignee])은 per-agent SSE 로 공동 홀더 수만큼 **같은
+  // commentId** 이벤트가 도착한다. triggerId 에 agent 차원이 없으면 rule 1(exact
+  // trigger_id)이 두 번째 홀더 스폰을 duplicate_trigger 로 drop — 그 홀더는
+  // record_agreement 를 못 해 합의가 데드락된다. mentionTriggerId 가 agent 차원을
+  // 붙여 홀더별로 스폰되게 한다.
+  const records = [{
+    trigger_id: mentionTriggerId('c1', 'agent-A'),
+    ticket_id: 'ticket-a', role: 'assignee', agent_id: 'agent-A',
+  }];
+  const res = findDuplicateSpawn(records, {
+    kind: 'trigger',
+    triggerId: mentionTriggerId('c1', 'agent-B'), // 같은 comment, 다른 공동 홀더
+    ticketId: 'ticket-a', role: 'assignee', agentId: 'agent-B',
+  });
+  assert.equal(res, false, 'same comment fanned out to a second holder agent must spawn');
+});
+
+test('subagent dedup: SAME (comment, agent) mention redelivery is still deduped by rule 1', () => {
+  const records = [{
+    trigger_id: mentionTriggerId('c1', 'agent-A'),
+    ticket_id: 'ticket-a', role: 'assignee', agent_id: 'agent-A',
+  }];
+  const res = findDuplicateSpawn(records, {
+    kind: 'trigger',
+    triggerId: mentionTriggerId('c1', 'agent-A'), // 정확히 같은 (comment, agent) 재전달
+    ticketId: 'ticket-a', role: 'assignee', agentId: 'agent-A',
+  });
+  assert.equal(res, 'duplicate_trigger', 'exact (comment, agent) redelivery stays idempotent');
+});
+
+test('subagent dedup: agent-차원 mention id 도 rule 3 mention 예외를 그대로 탄다', () => {
+  // startsWith('mention:') 는 3-세그먼트 형태(mention:<commentId>:<agentId>)에도
+  // 참 — 같은 홀더의 라이브 컬럼-트리거 스트랜드가 있어도 새 멘션은 스폰된다.
+  const records = [{ trigger_id: 'trig-live', ticket_id: 'ticket-a', role: 'assignee', agent_id: 'agent-A' }];
+  const res = findDuplicateSpawn(records, {
+    kind: 'trigger',
+    triggerId: mentionTriggerId('c9', 'agent-A'),
+    ticketId: 'ticket-a', role: 'assignee', agentId: 'agent-A',
+  });
+  assert.equal(res, false, 'mention must not collapse onto the same holder\'s live column-trigger strand');
 });
 
 test('subagent dedup: EMPTY triggerId collapses on matching (ticket, role)', () => {
