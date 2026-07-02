@@ -318,7 +318,7 @@ test('ticket-session: empty agentId + empty triggerId burst still produces ONE s
 
 test('ticket-session: unhealthyKilled session is not reused — _getLiveSession purges it', () => {
   const mgr = new FakeTicketMgr(makeConfig(), 5);
-  const sessionKey = 'ticket-stuck:assignee';
+  const sessionKey = 'ticket-stuck:assignee:agent-1';
   const ALIVE_PID = 90555;
   mgr.__alivePids.add(ALIVE_PID); // pid is "alive" at the OS level…
   const stuck = makeFakeSession(sessionKey, 'sessionKey', ALIVE_PID);
@@ -335,7 +335,10 @@ test('ticket-session: unhealthyKilled session is not reused — _getLiveSession 
 
 test('ticket-session: next trigger after an unhealthy session fresh-spawns (no reuse)', async () => {
   const mgr = new FakeTicketMgr(makeConfig(), 5);
-  const sessionKey = 'ticket-stuck2:assignee';
+  // 3-세그먼트 키(ticketId:role:agentId) — dispatchTrigger 가 실제로 계산하는
+  // 키와 일치해야 이 테스트가 공허 통과하지 않는다(구 2-세그먼트 리터럴은 아래
+  // dispatch 가 다른 키를 보므로 stuck 레코드가 아예 조회되지 않았다).
+  const sessionKey = 'ticket-stuck2:assignee:agent-1';
   const ALIVE_PID = 90777;
   mgr.__alivePids.add(ALIVE_PID);
   const stuck = makeFakeSession(sessionKey, 'sessionKey', ALIVE_PID);
@@ -453,6 +456,65 @@ test('ticket-session: WITHOUT a split sentinel the next trigger reuses the sessi
   assert.equal(mgr.spawnCount, 1, 'reused — no second spawn');
   assert.equal(r2.pid, r1.pid, 'same pid (reuse)');
   assert.equal(mgr.followUps.length, 1, 'one follow-up turn');
+});
+
+// ─── Comment-mention 타깃 배달(T7 리뷰 blocker #3) ───────────────────────
+// forwardCommentMention 은 per-agent 스코프 comment_mention 의 타깃 agent 에게만
+// 배달해야 한다: 타깃 미라이브면 false(one-shot 스폰 경로 보존), 타깃 라이브면
+// 그 세션에만(다른 공동 홀더 세션 오배달 금지), 타깃 미상(레거시)은 종전
+// 브로드캐스트.
+
+async function spawnHolderSession(mgr, ticketId, agentId, triggerId) {
+  return mgr.dispatchTrigger({
+    ticketId, role: 'assignee', agentId, triggerId,
+    rolePrompt: '', ticketPrompt: '', columnPrompt: null,
+    ticket: { title: 'Mention' }, forceRespawn: false,
+    maxConcurrentTicketsPerAgent: 5,
+  });
+}
+
+test('ticket-session: 타깃 홀더가 미라이브면 forwardCommentMention 은 false — 다른 홀더 세션을 훔치지 않는다', async () => {
+  const mgr = new FakeTicketMgr(makeConfig(), 5);
+  await spawnHolderSession(mgr, 'ticket-mention-a', 'agent-A', 'tA');
+  const before = mgr.followUps.length;
+  const forwarded = mgr.forwardCommentMention(
+    'ticket-mention-a',
+    { content: '재논의합시다', mention_source: 'role', role_shortcut: 'assignee', actor_name: 'reviewer' },
+    'agent-B', // B 몫 멘션 — B 는 라이브 세션 없음
+  );
+  assert.equal(forwarded, false, 'B 몫 멘션이 A 세션 존재만으로 true 가 되면 B 의 one-shot 이 스킵된다(멘션 소실)');
+  assert.equal(mgr.followUps.length, before, 'A 세션에 중복 주입되면 안 됨');
+});
+
+test('ticket-session: 타깃 홀더 라이브 → 그 세션에만 배달(공동 홀더 오배달 금지)', async () => {
+  const mgr = new FakeTicketMgr(makeConfig(), 5);
+  const rA = await spawnHolderSession(mgr, 'ticket-mention-b', 'agent-A', 'tA');
+  const rB = await spawnHolderSession(mgr, 'ticket-mention-b', 'agent-B', 'tB');
+  const before = mgr.followUps.length;
+  const forwarded = mgr.forwardCommentMention(
+    'ticket-mention-b',
+    { content: 'B 님 의견 주세요', mention_source: 'direct', actor_name: 'reviewer' },
+    'agent-B',
+  );
+  assert.equal(forwarded, true);
+  const delivered = mgr.followUps.slice(before);
+  assert.equal(delivered.length, 1, '타깃 한 세션에만 배달');
+  assert.equal(delivered[0].pid, rB.pid, 'B 세션이 수신');
+  assert.notEqual(delivered[0].pid, rA.pid, '"addressed to YOU" 가 A 에게 가면 오배달');
+});
+
+test('ticket-session: 타깃 미상(레거시 이벤트)은 종전 브로드캐스트 폴백 유지', async () => {
+  const mgr = new FakeTicketMgr(makeConfig(), 5);
+  const rA = await spawnHolderSession(mgr, 'ticket-mention-c', 'agent-A', 'tA');
+  const rB = await spawnHolderSession(mgr, 'ticket-mention-c', 'agent-B', 'tB');
+  const before = mgr.followUps.length;
+  const forwarded = mgr.forwardCommentMention(
+    'ticket-mention-c',
+    { content: '모두 확인', mention_source: 'direct', actor_name: 'user' },
+  );
+  assert.equal(forwarded, true);
+  const pids = mgr.followUps.slice(before).map((f) => f.pid).sort();
+  assert.deepEqual(pids, [rA.pid, rB.pid].sort(), '레거시(타깃 미상)는 전 세션 배달 무회귀');
 });
 
 // ─── Chat-session dedup ─────────────────────────────────────────────────

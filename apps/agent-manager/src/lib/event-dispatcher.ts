@@ -376,7 +376,10 @@ export interface TicketDispatchResult {
 
 export interface TicketSessionManager {
   dispatchTrigger(args: TicketTriggerArgs): Promise<TicketDispatchResult>;
-  forwardCommentMention(ticketId: string, mention: any): boolean;
+  /** targetAgentId — comment_mention 이벤트의 수신 agent(per-agent 스코프).
+   *  식별되면 그 agent 의 세션에만 주입하고, 라이브 세션이 없으면 false 를
+   *  반환해 one-shot 스폰 경로를 살린다(멘션 swallow/오배달 방지, T7 리뷰 #3). */
+  forwardCommentMention(ticketId: string, mention: any, targetAgentId?: string): boolean;
   forwardBoardUpdate(ticketId: string, ev: any): boolean;
 }
 
@@ -1069,9 +1072,12 @@ export class EventDispatcher {
 
     if (delegationEnabled && persistentTicket && this.#ticketSessionManager && ticketId) {
       try {
+        // 타깃은 ev.agent_id(uuid)만 — agentId 변수의 actor_name 폴백은 표시
+        // 이름이라 세션 agentId 와의 동등 비교에 쓰면 안 된다.
         const forwarded = this.#ticketSessionManager.forwardCommentMention(
           ticketId,
           mention,
+          ev.agent_id || '',
         );
         if (forwarded) {
           log(

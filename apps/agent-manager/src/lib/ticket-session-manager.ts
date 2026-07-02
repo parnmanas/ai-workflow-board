@@ -409,8 +409,21 @@ export class TicketSessionManager
     return hits;
   }
 
-  forwardCommentMention(ticketId: string, mention: any): boolean {
-    const sessions = this.#sessionsForTicket(ticketId);
+  forwardCommentMention(ticketId: string, mention: any, targetAgentId = ''): boolean {
+    const all = this.#sessionsForTicket(ticketId);
+    // 타깃 agent 필터(T7 리뷰 blocker #3). comment_mention 은 per-agent 스코프 SSE
+    // 라 이벤트가 "어느 홀더 몫인지"(targetAgentId)를 안다. ticketId(+role)만으로
+    // 수신 세션을 고르면 혼재 상태에서:
+    //   (a) 타깃 B 미라이브 + 다른 홀더 A 라이브 → B 몫 멘션이 A 세션에 중복
+    //       주입되고 true 반환 → B 의 one-shot 스폰이 스킵되어 멘션 소실(swallow).
+    //   (b) @[agent:B] 지정 멘션(role shortcut 아님) → recipients=전 세션 →
+    //       "addressed to YOU" 가 엉뚱한 홀더에게 오배달.
+    // 타깃이 식별되면 그 agent 의 세션만 수신하고, 라이브 세션이 없으면 false 를
+    // 반환해 one-shot 스폰 경로를 살린다. 타깃 미상(레거시 서버 이벤트)이면 종전
+    // 브로드캐스트 유지.
+    const sessions = targetAgentId
+      ? all.filter((s) => s.agentId === targetAgentId)
+      : all;
     if (sessions.length === 0) return false;
 
     const lines: string[] = [];
