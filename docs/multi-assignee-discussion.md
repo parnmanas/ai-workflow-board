@@ -1,8 +1,9 @@
 # 다중담당자 논의 채널 (Multi-assignee discussion channel) — T3
 
 여러 담당자가 **같은 phase(= 티켓이 현재 놓인 컬럼)** 에 함께 붙었을 때, 코멘트로
-안전하게 논의를 굴리는 규약을 정리한다. (합의 **판정** 로직 자체는 T4 — 여기선
-"논의" 를 매끄럽게 만들고, T4 가 얹을 자리만 예약한다.)
+안전하게 논의를 굴리는 규약을 정리한다. (합의 **판정** 로직은 T4~T6 에서
+랜딩됐다 — `record_agreement`/`propose_move`/이동 게이트/합의 패널. 이 문서는
+"논의" 쪽 규약이고, 합의 프로토콜 요약은 §3 끝을 보라.)
 
 관련 코드: `apps/server/src/services/mention.service.ts`,
 `apps/server/src/common/consensus-meta.ts`,
@@ -41,23 +42,35 @@
 
 - 논의 코멘트: `type: 'note' | 'chat'`, 답글은 `parent_id` = 답하는 코멘트.
 
-## 3. 논의 ↔ 합의 경계 (T4 자리 예약)
+## 3. 논의 ↔ 합의 경계
 
-두 종류의 코멘트가 같은 타임라인을 공유하므로 다운스트림(디스패치 팬아웃, 미래
+두 종류의 코멘트가 같은 타임라인을 공유하므로 다운스트림(디스패치 팬아웃,
 합의 게이트, 클라이언트)이 반드시 구분할 수 있어야 한다. 경계 문자열은
 `apps/server/src/common/consensus-meta.ts` 한 곳에만 산다:
 
 | 종류 | 표식 | 팬아웃 |
 | --- | --- | --- |
 | **논의 (T3)** | `type note/chat`, consensus 마커 없음 | 정상 (co-holder 를 깨움) |
-| **합의 (T4)** | `metadata.consensus_vote === true` (T4 가 스탬프) | **억제** — 투표가 서로를 ping-pong 재트리거하지 않게 |
+| **합의 (T4~)** | `metadata.consensus_vote === true` (`record_agreement` 가 스탬프) | **억제** — 투표가 서로를 ping-pong 재트리거하지 않게 |
+| **이동 제안 (T5~)** | `metadata.consensus_proposal === true` (`propose_move` 가 스탬프) | 정상 — 공동 홀더를 깨워 투표를 유도 |
 
 - `CONSENSUS_VOTE_META_KEY = 'consensus_vote'` + `isConsensusVoteComment()` 가
   단일 진실원. `trigger-loop._commentSuppressesFanout` 이 이 predicate 를 쓴다.
 - `DISCUSSION_META_KEY = 'discussion'` 은 논의 코멘트가 선택적으로 달 수 있는
   advisory 마커 (게이트에 영향 없음 — 네임스페이스 충돌만 예약).
-- **오늘은 동작 변화 0**: 아직 아무 데서도 `consensus_vote` 를 스탬프하지 않아
-  `isConsensusVoteComment` 는 항상 false. T4 가 스탬프하는 순간 억제가 살아난다.
+- **합의 프로토콜 (T4~T7 랜딩 후 현행)**: 이탈 컬럼 routing role(s) 의 서로 다른
+  홀더가 2+명이면 직접 `move_ticket`/REST 이동/보드 드래그가 `consensus_required`
+  로 거부된다. `propose_move` 가 제안 comment 를 열고(comment id = proposal_id,
+  새 제안이 이전 표를 stale 리셋), 전 홀더가 `record_agreement(agree)` 하면(홀더별
+  최신 시그널만 유효) 마지막 승인 순간 서버가 auto-execute 로 이동시킨다 —
+  moved 활동 actor 는 `consensus`/'Consensus'(non-'system' sentinel 이라 목적지
+  컬럼 트리거가 정상 발화, 다음 phase 진입). reporter 는
+  `record_agreement(..., override=true)` 로 강제 통과할 수 있다(감사 로그).
+  구현: `services/consensus.service.ts`(판정) · `services/consensus-actions.ts`
+  (제안/투표/auto-execute) · `common/consensus-state.ts`(순수 로직) · REST 브릿지
+  `GET /api/tickets/:id/consensus`, `POST .../consensus/{propose,vote}` ·
+  `consensus_update` SSE(웹 UI 전용, agent 스트림 미전달). E2E:
+  `test/qa-flows/consensus-e2e.test.mjs`.
 
 ## 4. plugin-sync
 

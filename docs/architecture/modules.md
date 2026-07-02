@@ -43,6 +43,7 @@ AppModule
 ├── ResourcesModule         /api/resources/*
 ├── CredentialsModule       /api/credentials/*
 ├── AgentLogsModule         /api/agent-logs/*
+├── WorkspaceRolesModule    /api/workspaces/:workspaceId/roles/*
 └── MentionsModule          /api/workspaces/:id/mentions/*
 ```
 
@@ -133,9 +134,9 @@ status state.
 - `AuthService` / `ApiKeyService` / `ReBACService` come from `SharedServicesModule`.
 
 ### `BoardsModule`
-- Imports: `TypeOrmModule.forFeature([Board, BoardColumn, Ticket])`
+- Imports: `TypeOrmModule.forFeature([Board, BoardColumn, Ticket])`, `PromptTemplatesModule`, `forwardRef(AgentsModule)` (focus-tickets 의 AgentWorkloadService), `WorkspaceRolesModule` (보드 카드 멀티홀더 `role_holders` 프로젝션 — T6)
 - Controllers: `BoardsController`
-- Providers: `AuthGuard`
+- Providers: `AuthGuard`, `AdminGuard`, `WorkspaceMoveService`
 
 ### `ChannelsModule`
 - Imports: `TypeOrmModule.forFeature([Channel])`
@@ -194,14 +195,23 @@ status state.
 - Providers: `AuthGuard`, `PermissionGuard`
 
 ### `TicketsModule`
-- Imports: `TypeOrmModule.forFeature([Ticket, BoardColumn, Comment, Agent, UserMention])`
+- Imports: `TypeOrmModule.forFeature([Ticket, BoardColumn, Comment, Agent, Board, UserMention, TicketReadState, TicketAttachment])`, `AgentsModule` (`/api/tickets/:id/trigger` 의 TriggerLoopService), `WorkspaceRolesModule` (합의 이동 게이트 `evaluateConsensusMoveGate` + `GET /:id/consensus`, `POST /:id/consensus/{propose,vote}` REST 브릿지)
 - Controllers: `TicketsController`
-- Providers: `AuthGuard`
+- Providers: `AuthGuard`, `TicketArchiverService`
 
 ### `UsersModule`
 - Imports: `TypeOrmModule.forFeature([User])`
 - Controllers: `UsersController`
 - Providers: `AuthGuard`, `PermissionGuard`
+
+### `WorkspaceRolesModule`
+- Imports: `TypeOrmModule.forFeature([WorkspaceRole, TicketRoleAssignment, Agent, User])`
+- Controllers: `WorkspaceRolesController` (`/api/workspaces/:workspaceId/roles`)
+- Providers / Exports: `WorkspaceRolesService`, `TicketRoleAssignmentService`
+- 멀티홀더 `role_assignments` 의 홈 — 한 (ticket, role) 을 여러 agent/user 가
+  공동 보유할 수 있고(T1 유니크 인덱스 완화), 합의 판정(`consensus.service`)과
+  보드 카드 `role_holders` 프로젝션(T6)이
+  `TicketRoleAssignmentService.resolveGroupedForTicket` 를 통해 이 모듈을 소비한다.
 
 ### `WorkspacesModule`
 - Imports: `TypeOrmModule.forFeature([Workspace, Board, BoardColumn, Ticket, User, Agent])`

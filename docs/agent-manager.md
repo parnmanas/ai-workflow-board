@@ -125,6 +125,27 @@ The dispatcher maps `event.type` to the right handler:
 | `agent_manager_command` | `AgentManagerCommandHandler`     | Admin → manager RPC (see below)                       |
 | `instance_*`            | `InstanceHeartbeat` (passive)    | Server-side reconciliation only                       |
 
+### Multi-holder fan-out & consensus (T2–T7, manager ≥ 0.10.0)
+
+- 한 티켓의 routing role 은 서로 다른 holder(agent/user) 여럿이 공동 보유할 수
+  있고, 컬럼 이동 시 서버가 **홀더별로 `agent_trigger` 를 1건씩 팬아웃**한다.
+  한 manager 가 공동 홀더 agent 를 여럿 소유하면(멀티테넌시) 같은 티켓의
+  트리거를 여러 번 — 각기 다른 `actor_name`(=agent id) 으로 — 받는 것이 정상.
+- **v0.10.0**: ticket 세션 키가 `${ticketId}:${role}` → `${ticketId}:${role}:${agentId}`
+  로 agent 차원을 포함한다. 이전에는 두 번째 홀더의 트리거가 첫 홀더의
+  살아있는 세션으로 follow-up 접힘되어 자기 identity 로 `record_agreement` 를
+  못 해 합의가 데드락됐다. one-shot 경로의 (ticket, role) single-flight dedup
+  도 같은 이유로 agent 차원을 본다(어느 한쪽 agent 미상이면 레거시 collapse
+  유지). 보드 업데이트/멘션 포워딩은 티켓 단위 스캔이라 공동 홀더 세션
+  전체에 브로드캐스트된다.
+- `metadata.consensus_vote` 가 스탬프된 투표 코멘트는 서버가 comment 팬아웃을
+  억제한다(승인 echo 루프 방지) — manager 쪽 처리 불필요.
+- `consensus_update` SSE 이벤트는 **user-identity 전용**(웹 UI 합의 패널)이라
+  event-registry 필터에서 agent 스트림으로는 오지 않는다 — manager 계약 밖
+  (의도적 미전달; 게이트 판정은 move 시점에 서버가 재계산). dispatcher 는
+  미지 타입을 조용히 drop 하므로 향후 새어 들어와도 무해하다.
+- `agent_trigger` payload 자체는 T1~T7 에서 무변경.
+
 ### `agent_manager_command` payload
 
 ```ts

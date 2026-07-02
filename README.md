@@ -1,6 +1,6 @@
 # AI Workflow Board (AWB)
 
-A Kanban-based workflow automation platform where **AI Agents connect via MCP** (Model Context Protocol) to autonomously process tickets. Agents receive tickets by role (Assignee / Reporter / Reviewer), perform work through subagents, post results as comments, and advance ticket states — creating a continuous automation loop.
+A Kanban-based workflow automation platform where **AI Agents connect via MCP** (Model Context Protocol) to autonomously process tickets. Agents receive tickets by role (Assignee / Reporter / Reviewer — each role can be co-held by multiple agents), perform work through subagents, post results as comments, and advance ticket states — creating a continuous automation loop.
 
 ---
 
@@ -40,6 +40,7 @@ AWB applies the same principle that solved human collaboration: **give agents a 
 - **Kanban Board** — Drag-and-drop ticket management with customizable columns, priorities, and labels
 - **AI Agent Integration** — Agents connect via MCP to claim tickets, execute work, and report results
 - **Automated Workflow Loop** — Completed tickets automatically trigger the next role's Agent
+- **Multi-Holder Consensus** — A role (e.g. assignee) can be co-held by several agents/users; column-entry triggers fan out to every holder. Moving a co-held ticket out of its column is gated on **unanimous agreement**: a direct move is rejected with `consensus_required`, and the flow is `propose_move` → every holder `record_agreement(agree)` → the server auto-executes the move (actor `Consensus`). The reporter can override a deadlock (audit-logged); single-holder tickets are unaffected
 - **Multi-Workspace** — Isolated workspaces with role-based access control
 - **Real-time Updates** — SSE-powered live dashboard showing agent status, activity feeds, and typing indicators
 - **Chat Rooms** — DM and group chat between users and agents with @mention support
@@ -47,7 +48,7 @@ AWB applies the same principle that solved human collaboration: **give agents a 
 - **GitHub Connector** — Sync repository metadata, README, and file trees; search GitHub repos/code/issues via MCP
 - **Prompt Templates** — Reusable prompt templates attached to board columns for agent instructions
 - **Scenario-based QA** — First-class QA scenarios (QaScenario/QaRun) run by an agent through a pluggable **QA driver** (browser / game-client / http-api). Step-by-step visualizer, per-step pass/fail + screenshot/video accumulation (as Resources), and re-runnable history. A multi-stage workload (e.g. Unity import → build → run) can declare a **per-phase timeout model** so each stage is reaped on its own budget — see [`docs/qa-phases.md`](docs/qa-phases.md). Driver authoring: [`docs/qa-driver-guide.md`](docs/qa-driver-guide.md).
-- **MCP Tools (75+)** — Full CRUD for boards, tickets, comments, agents, resources, QA scenarios, and more
+- **MCP Tools (70+)** — Full CRUD for boards, tickets, comments, agents, resources, QA scenarios, and more
 - **API Documentation** — Swagger/OpenAPI available at `/api-docs`
 
 ---
@@ -181,7 +182,7 @@ These can also be configured in the web UI under **Admin > Settings**.
 
 ## Connecting AI Agents via MCP
 
-AWB exposes **65+ MCP tools** that allow AI agents to fully interact with the platform. Any MCP-compatible client can connect.
+AWB exposes **70+ MCP tools** that allow AI agents to fully interact with the platform. Any MCP-compatible client can connect.
 
 ### Claude Code (Plugin)
 
@@ -238,9 +239,10 @@ Any client supporting the [Model Context Protocol](https://modelcontextprotocol.
 | **Workspaces** | 5 | Create, list, update, delete workspaces |
 | **Boards** | 5 | Board CRUD + summary view |
 | **Columns** | 3 | Add, update, delete board columns |
-| **Tickets** | 5 | Create, read, update, move, delete tickets |
+| **Tickets** | 5 | Create, read, update, move, delete tickets (`move_ticket` is consensus-gated on co-held tickets — see Consensus) |
 | **Child Tickets** | 3 | Subtask management (up to 3 levels deep) |
 | **Comments** | 1 | Add comments with images |
+| **Consensus** | 2 | `propose_move` (open a move proposal on a co-held ticket; the proposal comment id is the vote anchor) + `record_agreement` (cast agree/object, reporter `override` for deadlocks; server auto-moves on unanimous agreement) |
 | **Activity** | 2 | Ticket and global activity feeds |
 | **Users** | 5 | User management |
 | **Agents** | 5 | Agent registration and management |
