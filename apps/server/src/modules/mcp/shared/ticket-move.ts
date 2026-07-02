@@ -27,7 +27,8 @@ export interface PerformColumnMoveArgs {
   destColumnId: string;
   /** 목적지 내 포지션(생략 시 끝). */
   position?: number;
-  /** moved 활동 로그의 actor(감사). auto-execute 는 'system'/'Consensus'. */
+  /** moved 활동 로그의 actor(감사). auto-execute 는 'consensus'/'Consensus'
+   *  (non-'system' sentinel — 트리거 루프가 목적지 컬럼을 디스패치하게). */
   actorId?: string;
   actorName?: string;
   /** moved 활동의 trigger_source(감사 구분). */

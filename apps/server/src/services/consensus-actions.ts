@@ -49,6 +49,14 @@ function makeError(status: number, message: string): Error & { status: number } 
   return err;
 }
 
+/** 합의 auto-move 의 `moved` 활동에 찍는 sentinel actor id. trigger-loop 의
+ *  auto-advance(AUTO_ADVANCE_ACTOR_ID='auto-advance')와 같은 이유로 **의도적으로
+ *  non-'system'** — 'system' actor 의 moved 는 트리거 루프 최상단에서 드랍되어
+ *  목적지 컬럼 role 홀더가 영영 디스패치되지 않는다(다음 phase 미진입, T7 E2E 가
+ *  검출한 T5 잔존 버그). uuid 가 아니므로 per-holder self-guard 는 아무도 스킵하지
+ *  않는다(전 홀더 팬아웃 — 새 phase 의 정상 트리거). */
+const CONSENSUS_ACTOR_ID = 'consensus';
+
 const partyKey = (p: ConsensusParty): string => `${p.type}:${p.id}`;
 
 function toIso(d: Date | string | null | undefined): string {
@@ -113,8 +121,10 @@ export async function resolvePartyNames(
  *
  *   - satisfied && 열린 제안 존재 && 판정 앵커(state.proposalId)==그 제안 일 때만 실행.
  *   - markProposalExecuted 로 executed_at 스탬프 → 중복/재실행 방지.
- *   - actor='system'/'Consensus' → 목적지 트리거 self-guard 를 건드리지 않고 감사상
- *     '합의 자동실행' 으로 읽힌다.
+ *   - moved 활동의 actor 는 CONSENSUS_ACTOR_ID('consensus')/'Consensus' —
+ *     non-'system' 이라 트리거 루프가 재진입해 **목적지 컬럼 role 홀더를
+ *     디스패치**한다(다음 phase 진입). 감사용 consensus_move 활동은 반대로
+ *     actor_id='system' 을 유지해 ticket_update 트리거로 이중 발화되지 않는다.
  *
  * 이동 실패는 호출측 시그널 저장을 깨뜨리지 않도록 호출측이 try/catch 로 감싼다.
  */
@@ -135,13 +145,15 @@ export async function autoExecuteConsensusMove(
   await performColumnMove(deps.dataSource, deps.activityService, {
     ticket,
     destColumnId: open.targetColumnId,
-    actorId: 'system',
+    actorId: CONSENSUS_ACTOR_ID,
     actorName: 'Consensus',
     triggerSource: 'consensus_auto',
   });
   await markProposalExecuted(deps.dataSource, open.proposalId, nowIso);
 
-  // 감사: 어떤 합의가 어디로 이동시켰는지 + 마지막 승인자.
+  // 감사: 어떤 합의가 어디로 이동시켰는지 + 마지막 승인자. actor_id 는 의도적으로
+  // 'system' — 이 updated 활동까지 non-system 이면 트리거 루프의 ticket_update
+  // 경로로 목적지 홀더가 이중 트리거된다(moved 쪽이 유일한 디스패치 소스).
   await deps.activityService.logActivity({
     entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
     ticket_id: ticket.id, actor_id: 'system', actor_name: 'Consensus',
