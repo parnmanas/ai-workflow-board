@@ -51,7 +51,7 @@ export function registerTicketWorkflowTools(server: McpServer, ctx: ToolContext)
       target_column_name: z.string().optional().describe('Target column name (case-insensitive)'),
       board_id: z.string().optional().describe('Board ID (used with target_column_name)'),
       position: z.number().optional().describe('Target position in the column (default: end)'),
-      force: z.boolean().optional().describe('Override move guards: (1) terminal-reopen — moving a ticket OUT of a terminal column (e.g. Done) into a non-terminal one; (2) review-approval — moving Review→Merging without a reviewer-authored comment. Default false — leave unset unless you truly mean to reopen completed work or deliberately bypass review independence.'),
+      force: z.boolean().optional().describe('Override move guards: (1) terminal-reopen — moving a ticket OUT of a terminal column (e.g. Done) into a non-terminal one; (2) review-approval — moving Review→Merging without a reviewer-authored comment; (3) multi-holder consensus — moving a co-held ticket out of its column without unanimous agreement (see propose_move / record_agreement). Default false — a deliberate human/operator override; agents must not use it to dodge review independence or consensus.'),
     },
     async ({ ticket_id, target_column_id, target_column_name, board_id, position, force }, extra: { sessionId?: string }) => {
       const ticketRepo = dataSource.getRepository(Ticket);
@@ -106,8 +106,10 @@ export function registerTicketWorkflowTools(server: McpServer, ctx: ToolContext)
           );
           if (gate.blocked) {
             const pending = gate.state.pending.map((p) => `${p.type}:${p.id}`).join(', ');
+            // 'consensus_required' 리터럴은 REST(tickets.controller) 409 코드 및
+            // 프롬프트 템플릿 안내와 일치시킨다 — MCP 소비자도 같은 토큰을 grep.
             return err(
-              `합의 필요(T5): 이 컬럼의 라우팅 역할 홀더 ${gate.state.required.length}명 전원이 합의해야 이동할 수 있습니다. ` +
+              `consensus_required — 합의 필요(T5): 이 컬럼의 라우팅 역할 홀더 ${gate.state.required.length}명 전원이 합의해야 이동할 수 있습니다. ` +
               `아직 미성립 — 대기 중: [${pending || '없음'}]. ` +
               `propose_move(target) 로 제안을 열고 전 홀더가 record_agreement(agree) 하면 자동 이동합니다. ` +
               `force=true 또는 reporter override 로 우회할 수 있습니다.`,

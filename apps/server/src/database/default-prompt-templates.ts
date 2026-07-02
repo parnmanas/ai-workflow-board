@@ -115,16 +115,16 @@ This ticket is in the To Do column and you are its assignee. Decide whether to s
 
 ## Multi-holder consensus gate
 
-If **two or more distinct holders** (agents or users, counted across this column's routing role(s) — the same party wearing several hats counts once) share the ticket here, the server gates **every move out of this column — forward or bounce-back —** on **unanimous explicit agreement**: a direct \`move_ticket\` is rejected with an error naming the holders still pending (the REST/board-drag path returns \`consensus_required\`), and no co-holder may advance the ticket unilaterally. **Single-holder tickets are unaffected: the gate never fires and you move exactly as before.**
+If **two or more distinct holders** (agents or users, counted across this column's routing role(s) — the same party wearing several hats counts once) share the ticket here, the server gates **every move out of this column — forward or bounce-back —** on **unanimous explicit agreement**: a direct \`move_ticket\` is rejected with a \`consensus_required\` error naming the holders still pending, and no co-holder may advance the ticket unilaterally. **Single-holder tickets are unaffected: the gate never fires and you move exactly as before.**
 
 To advance a co-held ticket:
 
 1. **Discuss** in normal comments (mention your co-holders so they're triggered). Plain notes are *not* votes.
-2. **Propose** — \`mcp__awb__propose_move\` to the target column. The proposal comment's id is the vote anchor; a newer proposal supersedes it (votes on the old one go stale).
-3. **Vote** — every holder casts \`mcp__awb__record_agreement\` with \`status="agree"\` (or \`"object"\`, rationale in \`content\`). \`proposal_id\` can be omitted — the latest open proposal is the anchor. Silence ≠ consent; only your latest signal counts.
-4. **Server auto-moves** — the instant every required holder has agreed on the current proposal, the server performs the move itself (actor \`Consensus\`). Nobody calls \`move_ticket\`.
+2. **Propose** — \`mcp__awb__propose_move\` to the target column. The proposal comment itself fans out to your co-holders (no extra mention needed); its id is the vote anchor, and a newer proposal supersedes it (votes on the old one go stale).
+3. **Vote** — every holder casts \`mcp__awb__record_agreement\` with \`status="agree"\` (or \`"object"\`, rationale in \`content\`). \`proposal_id\` can be omitted — the latest open proposal is the anchor. Vote comments never re-trigger anyone (no echo loop). Silence ≠ consent; only your latest signal counts.
+4. **Server auto-moves** — the instant every required holder has agreed on the current proposal, the server performs the move itself (actor \`Consensus\`). Nobody calls \`move_ticket\`. Unanimous signals without an open proposal never auto-move — open the proposal first.
 
-The reporter may \`record_agreement(..., override=true)\` to force-pass a deadlock — honored only while holding the reporter role, and audit-logged. \`move_ticket(force=true)\` also bypasses the gate, but it is a deliberate human/operator escape hatch — as an agent, never use it to dodge consensus.
+The reporter may \`record_agreement(..., override=true)\` to force-pass a deadlock — honored only while holding the reporter role, and audit-logged. \`move_ticket(force=true)\` also bypasses the gate (any caller — no reporter check — and it skips the terminal-reopen and review-approval guards too); it is a human/operator escape hatch, never an agent's way around consensus.
 
 ## Notes
 
@@ -186,16 +186,16 @@ This ticket is in the Plan column and you were triggered as its planner. Your jo
 
 ## Multi-holder consensus gate
 
-If **two or more distinct holders** (agents or users, counted across this column's routing role(s) — the same party wearing several hats counts once) share the ticket here, the server gates **every move out of this column — forward or bounce-back —** on **unanimous explicit agreement**: a direct \`move_ticket\` is rejected with an error naming the holders still pending (the REST/board-drag path returns \`consensus_required\`), and no co-holder may advance the ticket unilaterally. **Single-holder tickets are unaffected: the gate never fires and you move exactly as before.**
+If **two or more distinct holders** (agents or users, counted across this column's routing role(s) — the same party wearing several hats counts once) share the ticket here, the server gates **every move out of this column — forward or bounce-back —** on **unanimous explicit agreement**: a direct \`move_ticket\` is rejected with a \`consensus_required\` error naming the holders still pending, and no co-holder may advance the ticket unilaterally. **Single-holder tickets are unaffected: the gate never fires and you move exactly as before.**
 
 To advance a co-held ticket:
 
 1. **Discuss** in normal comments (mention your co-holders so they're triggered). Plain notes are *not* votes.
-2. **Propose** — \`mcp__awb__propose_move\` to the target column. The proposal comment's id is the vote anchor; a newer proposal supersedes it (votes on the old one go stale).
-3. **Vote** — every holder casts \`mcp__awb__record_agreement\` with \`status="agree"\` (or \`"object"\`, rationale in \`content\`). \`proposal_id\` can be omitted — the latest open proposal is the anchor. Silence ≠ consent; only your latest signal counts.
-4. **Server auto-moves** — the instant every required holder has agreed on the current proposal, the server performs the move itself (actor \`Consensus\`). Nobody calls \`move_ticket\`.
+2. **Propose** — \`mcp__awb__propose_move\` to the target column. The proposal comment itself fans out to your co-holders (no extra mention needed); its id is the vote anchor, and a newer proposal supersedes it (votes on the old one go stale).
+3. **Vote** — every holder casts \`mcp__awb__record_agreement\` with \`status="agree"\` (or \`"object"\`, rationale in \`content\`). \`proposal_id\` can be omitted — the latest open proposal is the anchor. Vote comments never re-trigger anyone (no echo loop). Silence ≠ consent; only your latest signal counts.
+4. **Server auto-moves** — the instant every required holder has agreed on the current proposal, the server performs the move itself (actor \`Consensus\`). Nobody calls \`move_ticket\`. Unanimous signals without an open proposal never auto-move — open the proposal first.
 
-The reporter may \`record_agreement(..., override=true)\` to force-pass a deadlock — honored only while holding the reporter role, and audit-logged. \`move_ticket(force=true)\` also bypasses the gate, but it is a deliberate human/operator escape hatch — as an agent, never use it to dodge consensus.
+The reporter may \`record_agreement(..., override=true)\` to force-pass a deadlock — honored only while holding the reporter role, and audit-logged. \`move_ticket(force=true)\` also bypasses the gate (any caller — no reporter check — and it skips the terminal-reopen and review-approval guards too); it is a human/operator escape hatch, never an agent's way around consensus.
 
 ## Notes
 
@@ -259,16 +259,16 @@ This ticket is in the In Progress column. Implement the work on a feature branch
 
 ## Multi-holder consensus gate
 
-If **two or more distinct holders** (agents or users, counted across this column's routing role(s) — the same party wearing several hats counts once) share the ticket here, the server gates **every move out of this column — forward or bounce-back —** on **unanimous explicit agreement**: a direct \`move_ticket\` is rejected with an error naming the holders still pending (the REST/board-drag path returns \`consensus_required\`), and no co-holder may advance the ticket unilaterally. **Single-holder tickets are unaffected: the gate never fires and you move exactly as before.**
+If **two or more distinct holders** (agents or users, counted across this column's routing role(s) — the same party wearing several hats counts once) share the ticket here, the server gates **every move out of this column — forward or bounce-back —** on **unanimous explicit agreement**: a direct \`move_ticket\` is rejected with a \`consensus_required\` error naming the holders still pending, and no co-holder may advance the ticket unilaterally. **Single-holder tickets are unaffected: the gate never fires and you move exactly as before.**
 
 To advance a co-held ticket:
 
 1. **Discuss** in normal comments (mention your co-holders so they're triggered). Plain notes are *not* votes.
-2. **Propose** — \`mcp__awb__propose_move\` to the target column. The proposal comment's id is the vote anchor; a newer proposal supersedes it (votes on the old one go stale).
-3. **Vote** — every holder casts \`mcp__awb__record_agreement\` with \`status="agree"\` (or \`"object"\`, rationale in \`content\`). \`proposal_id\` can be omitted — the latest open proposal is the anchor. Silence ≠ consent; only your latest signal counts.
-4. **Server auto-moves** — the instant every required holder has agreed on the current proposal, the server performs the move itself (actor \`Consensus\`). Nobody calls \`move_ticket\`.
+2. **Propose** — \`mcp__awb__propose_move\` to the target column. The proposal comment itself fans out to your co-holders (no extra mention needed); its id is the vote anchor, and a newer proposal supersedes it (votes on the old one go stale).
+3. **Vote** — every holder casts \`mcp__awb__record_agreement\` with \`status="agree"\` (or \`"object"\`, rationale in \`content\`). \`proposal_id\` can be omitted — the latest open proposal is the anchor. Vote comments never re-trigger anyone (no echo loop). Silence ≠ consent; only your latest signal counts.
+4. **Server auto-moves** — the instant every required holder has agreed on the current proposal, the server performs the move itself (actor \`Consensus\`). Nobody calls \`move_ticket\`. Unanimous signals without an open proposal never auto-move — open the proposal first.
 
-The reporter may \`record_agreement(..., override=true)\` to force-pass a deadlock — honored only while holding the reporter role, and audit-logged. \`move_ticket(force=true)\` also bypasses the gate, but it is a deliberate human/operator escape hatch — as an agent, never use it to dodge consensus.
+The reporter may \`record_agreement(..., override=true)\` to force-pass a deadlock — honored only while holding the reporter role, and audit-logged. \`move_ticket(force=true)\` also bypasses the gate (any caller — no reporter check — and it skips the terminal-reopen and review-approval guards too); it is a human/operator escape hatch, never an agent's way around consensus.
 
 ## When to park instead of bouncing back
 
@@ -352,16 +352,16 @@ This ticket is in the Review column. Both the reviewer **and** the assignee are 
 
 ## Multi-holder consensus gate
 
-If **two or more distinct holders** (agents or users, counted across this column's routing role(s) — e.g. co-reviewers, or a distinct reviewer + assignee pair when this column routes both roles; the same party wearing several hats counts once) share the ticket here, the server gates **every move out of this column — forward or bounce-back —** on **unanimous explicit agreement**: a direct \`move_ticket\` is rejected with an error naming the holders still pending (the REST/board-drag path returns \`consensus_required\`), and no co-holder may advance the ticket unilaterally. **Single-holder tickets are unaffected: the gate never fires and you move exactly as before.**
+If **two or more distinct holders** (agents or users, counted across this column's routing role(s) — e.g. co-reviewers, or a distinct reviewer + assignee pair when this column routes both roles; the same party wearing several hats counts once) share the ticket here, the server gates **every move out of this column — forward or bounce-back —** on **unanimous explicit agreement**: a direct \`move_ticket\` is rejected with a \`consensus_required\` error naming the holders still pending, and no co-holder may advance the ticket unilaterally. **Single-holder tickets are unaffected: the gate never fires and you move exactly as before.**
 
 To advance a co-held ticket:
 
 1. **Discuss** in normal comments (mention your co-holders so they're triggered). Plain notes are *not* votes.
-2. **Propose** — \`mcp__awb__propose_move\` to the target column. The proposal comment's id is the vote anchor; a newer proposal supersedes it (votes on the old one go stale).
-3. **Vote** — every holder casts \`mcp__awb__record_agreement\` with \`status="agree"\` (or \`"object"\`, rationale in \`content\`). \`proposal_id\` can be omitted — the latest open proposal is the anchor. Silence ≠ consent; only your latest signal counts.
-4. **Server auto-moves** — the instant every required holder has agreed on the current proposal, the server performs the move itself (actor \`Consensus\`). Nobody calls \`move_ticket\`.
+2. **Propose** — \`mcp__awb__propose_move\` to the target column. The proposal comment itself fans out to your co-holders (no extra mention needed); its id is the vote anchor, and a newer proposal supersedes it (votes on the old one go stale).
+3. **Vote** — every holder casts \`mcp__awb__record_agreement\` with \`status="agree"\` (or \`"object"\`, rationale in \`content\`). \`proposal_id\` can be omitted — the latest open proposal is the anchor. Vote comments never re-trigger anyone (no echo loop). Silence ≠ consent; only your latest signal counts.
+4. **Server auto-moves** — the instant every required holder has agreed on the current proposal, the server performs the move itself (actor \`Consensus\`). Nobody calls \`move_ticket\`. Unanimous signals without an open proposal never auto-move — open the proposal first.
 
-The reporter may \`record_agreement(..., override=true)\` to force-pass a deadlock — honored only while holding the reporter role, and audit-logged. \`move_ticket(force=true)\` also bypasses the gate, but it is a deliberate human/operator escape hatch — as an agent, never use it to dodge consensus.
+The reporter may \`record_agreement(..., override=true)\` to force-pass a deadlock — honored only while holding the reporter role, and audit-logged. \`move_ticket(force=true)\` also bypasses the gate (any caller — no reporter check — and it skips the terminal-reopen and review-approval guards too); it is a human/operator escape hatch, never an agent's way around consensus.
 
 ## Reviewer notes
 
@@ -486,16 +486,16 @@ Cleanup — remote branch delete, local branch delete, ticket worktree removal �
 
 ## Multi-holder consensus gate
 
-If **two or more distinct holders** (agents or users, counted across this column's routing role(s) — the same party wearing several hats counts once) share the ticket here, the server gates **every move out of this column — forward or bounce-back —** on **unanimous explicit agreement**: a direct \`move_ticket\` is rejected with an error naming the holders still pending (the REST/board-drag path returns \`consensus_required\`), and no co-holder may advance the ticket unilaterally. **Single-holder tickets are unaffected: the gate never fires and you move exactly as before.**
+If **two or more distinct holders** (agents or users, counted across this column's routing role(s) — the same party wearing several hats counts once) share the ticket here, the server gates **every move out of this column — forward or bounce-back —** on **unanimous explicit agreement**: a direct \`move_ticket\` is rejected with a \`consensus_required\` error naming the holders still pending, and no co-holder may advance the ticket unilaterally. **Single-holder tickets are unaffected: the gate never fires and you move exactly as before.**
 
 To advance a co-held ticket:
 
 1. **Discuss** in normal comments (mention your co-holders so they're triggered). Plain notes are *not* votes.
-2. **Propose** — \`mcp__awb__propose_move\` to the target column. The proposal comment's id is the vote anchor; a newer proposal supersedes it (votes on the old one go stale).
-3. **Vote** — every holder casts \`mcp__awb__record_agreement\` with \`status="agree"\` (or \`"object"\`, rationale in \`content\`). \`proposal_id\` can be omitted — the latest open proposal is the anchor. Silence ≠ consent; only your latest signal counts.
-4. **Server auto-moves** — the instant every required holder has agreed on the current proposal, the server performs the move itself (actor \`Consensus\`). Nobody calls \`move_ticket\`.
+2. **Propose** — \`mcp__awb__propose_move\` to the target column. The proposal comment itself fans out to your co-holders (no extra mention needed); its id is the vote anchor, and a newer proposal supersedes it (votes on the old one go stale).
+3. **Vote** — every holder casts \`mcp__awb__record_agreement\` with \`status="agree"\` (or \`"object"\`, rationale in \`content\`). \`proposal_id\` can be omitted — the latest open proposal is the anchor. Vote comments never re-trigger anyone (no echo loop). Silence ≠ consent; only your latest signal counts.
+4. **Server auto-moves** — the instant every required holder has agreed on the current proposal, the server performs the move itself (actor \`Consensus\`). Nobody calls \`move_ticket\`. Unanimous signals without an open proposal never auto-move — open the proposal first.
 
-The reporter may \`record_agreement(..., override=true)\` to force-pass a deadlock — honored only while holding the reporter role, and audit-logged. \`move_ticket(force=true)\` also bypasses the gate, but it is a deliberate human/operator escape hatch — as an agent, never use it to dodge consensus.
+The reporter may \`record_agreement(..., override=true)\` to force-pass a deadlock — honored only while holding the reporter role, and audit-logged. \`move_ticket(force=true)\` also bypasses the gate (any caller — no reporter check — and it skips the terminal-reopen and review-approval guards too); it is a human/operator escape hatch, never an agent's way around consensus.
 
 ## Notes
 
