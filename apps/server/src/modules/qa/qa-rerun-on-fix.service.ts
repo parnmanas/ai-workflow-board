@@ -5,12 +5,15 @@ import { ActivityLog } from '../../entities/ActivityLog';
 import { Ticket } from '../../entities/Ticket';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { Comment } from '../../entities/Comment';
-import { QaScenario } from '../../entities/QaScenario';
+import { QaScenario, QaOnFailureTicketConfig } from '../../entities/QaScenario';
+import { Deployment } from '../../entities/Deployment';
 import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
 import { isTerminalColumn } from '../mcp/shared/archive-helpers';
 import { QaRunService } from './qa-run.service';
 import { RERUN_LABEL_PREFIX } from './qa-failure-ticket.service';
+import { deploymentIncludesCommit, findLatestDeployment, normalizeSha } from '../../common/deployment-options';
+import { DEPLOYMENT_REPORTED_EVENT, DeploymentReportedSignal } from '../deployments/deployment.service';
 
 // The marker labels QaFailureTicketService stamps on every fix ticket it files.
 // A ticket must carry ALL of these to be eligible for an automatic rerun — this
@@ -28,8 +31,36 @@ import { RERUN_LABEL_PREFIX } from './qa-failure-ticket.service';
 const REQUIRED_LABELS = ['qa-failure', 'auto'];
 const SCENARIO_LABEL_PREFIX = 'qa-scenario:';
 
+// Optional label a merging/assignee step stamps on a fix ticket to name the exact
+// merged commit — the anchor the deployment-fact gate (DoD 3) checks for inclusion
+// in the target environment's live deployment. Absent → the gate falls back to
+// deploy-freshness ordering (deployed_at >= the fix ticket's Done instant).
+const FIX_COMMIT_LABEL_PREFIX = 'fix-commit:';
+
 // Default convergence cap when the scenario doesn't set max_rerun_attempts.
 const DEFAULT_MAX_RERUN_ATTEMPTS = 3;
+
+/**
+ * A rerun deferred by the deployment-fact gate (DoD 3): the fix ticket reached
+ * Done but the target environment's live deployment does not yet include the fix.
+ * Held in-memory (like the legacy delay timers) keyed by `${ticketId}:${gen}` and
+ * fired the instant a matching deployment lands — or by the optional fallback cap
+ * timer. NOTE: not durable across a server restart (same limitation the legacy
+ * rerun_delay_seconds timer has); a restart-while-pending drops the deferred run.
+ */
+interface PendingRerun {
+  scenarioId: string;
+  generation: number;
+  fixTicketId: string;
+  scenarioName: string;
+  workspaceId: string | null;
+  environment: string;
+  /** '' when no `fix-commit:` label → the gate uses deploy-freshness ordering. */
+  fixCommitSha: string;
+  /** The fix ticket's terminal_entered_at — the freshness-ordering baseline. */
+  notBefore: Date | null;
+  fallbackTimer?: ReturnType<typeof setTimeout>;
+}
 
 function safeJsonParse<T = any>(val: string | null | undefined, fallback: T): T {
   try {
@@ -68,16 +99,31 @@ function safeJsonParse<T = any>(val: string | null | undefined, fallback: T): T 
  *
  * Deployment timing: the rerun hits the RUNNING server, which auto-deploys from
  * `production.private` only AFTER main merges. An instant rerun can therefore
- * validate the pre-fix code. `on_failure_ticket.rerun_delay_seconds` defers the
- * rerun (best-effort, in-process — not durable across a restart) so a deploy can
- * land first. See docs/qa-rerun-on-fix.md.
+ * validate the pre-fix code.
+ *   • Legacy fallback — `on_failure_ticket.rerun_delay_seconds` defers the rerun
+ *     by a fixed N seconds (best-effort, in-process) so a deploy can land first.
+ *     Re-breaks whenever the real deploy time drifts.
+ *   • Deployment-fact gate (DoD 3) — when `deployment_gate` is set and the
+ *     scenario has a `target_environment`, the rerun instead WAITS until that
+ *     environment's live deployment actually includes the fix commit (or, absent
+ *     a `fix-commit:<sha>` label, until a deploy lands at/after the fix's Done),
+ *     firing the instant a matching `report_deployment` / self-report arrives
+ *     (DEPLOYMENT_REPORTED_EVENT). `rerun_delay_seconds` still applies as a
+ *     best-effort fallback cap. Not time-hardcoded — this is the DoD path.
+ * See docs/qa-rerun-on-fix.md.
  */
 @Injectable()
 export class QaRerunOnFixService implements OnModuleInit, OnModuleDestroy {
   private _activityListener?: (log: ActivityLog) => void;
+  // Deployment-fact gate (DoD 3): re-evaluates pending reruns when a deployment
+  // lands. Separate listener on the same in-process bus (no module dependency).
+  private _deploymentListener?: (signal: DeploymentReportedSignal) => void;
   // Pending delayed reruns so onModuleDestroy can cancel them (test rigs that
   // build/tear down the Nest module per spec would otherwise leak timers).
   private readonly _timers = new Set<ReturnType<typeof setTimeout>>();
+  // Reruns deferred until the target environment deploys the fix (DoD 3), keyed
+  // by `${fixTicketId}:${generation}` so a duplicate 'moved' can't double-register.
+  private readonly _pending = new Map<string, PendingRerun>();
 
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
@@ -92,6 +138,13 @@ export class QaRerunOnFixService implements OnModuleInit, OnModuleDestroy {
       });
     };
     activityEvents.on('activity', this._activityListener);
+
+    this._deploymentListener = (signal: DeploymentReportedSignal) => {
+      this._onDeploymentReported(signal).catch((e: unknown) => {
+        this.logService.error('QA', 'QaRerunOnFixService _onDeploymentReported error', { err: e });
+      });
+    };
+    activityEvents.on(DEPLOYMENT_REPORTED_EVENT, this._deploymentListener);
   }
 
   onModuleDestroy() {
@@ -99,8 +152,14 @@ export class QaRerunOnFixService implements OnModuleInit, OnModuleDestroy {
       activityEvents.removeListener('activity', this._activityListener);
       this._activityListener = undefined;
     }
+    if (this._deploymentListener) {
+      activityEvents.removeListener(DEPLOYMENT_REPORTED_EVENT, this._deploymentListener);
+      this._deploymentListener = undefined;
+    }
     for (const t of this._timers) clearTimeout(t);
     this._timers.clear();
+    for (const p of this._pending.values()) if (p.fallbackTimer) clearTimeout(p.fallbackTimer);
+    this._pending.clear();
   }
 
   private async _handleActivity(log: ActivityLog): Promise<void> {
@@ -167,6 +226,17 @@ export class QaRerunOnFixService implements OnModuleInit, OnModuleDestroy {
 
     // ── Re-run the scenario (server-side, deterministic) ────────────────────
     const nextGen = currentGen + 1;
+
+    // Deployment-fact gate (DoD 3): when the scenario is env-bound and opted in,
+    // don't fire on the Done edge — defer until that environment actually deploys
+    // the fix. Falls back to the legacy time path when the gate is off / no env.
+    const env = (scenario.target_environment || '').trim();
+    if (cfg.deployment_gate === true && env) {
+      await this._gateOnDeployment(scenario, ticket, cfg, nextGen, env);
+      return;
+    }
+
+    // Legacy path: fire immediately, or after rerun_delay_seconds (best-effort).
     const delayMs = this._resolveDelayMs(cfg.rerun_delay_seconds);
     this.logService.info('QA', 'rerun-on-fix firing', {
       ticket_id: ticket.id, scenario_id: scenarioId, next_generation: nextGen, delay_ms: delayMs,
@@ -184,6 +254,122 @@ export class QaRerunOnFixService implements OnModuleInit, OnModuleDestroy {
     } else {
       await this._startRerun(scenarioId, nextGen, ticket.id);
     }
+  }
+
+  // ── Deployment-fact gate (DoD 3) ─────────────────────────────────────────────
+
+  /**
+   * Gate the rerun on the target environment's live deployment INCLUDING the fix.
+   * If it already does, fire now. Otherwise register a pending rerun that fires
+   * when a matching DEPLOYMENT_REPORTED_EVENT lands — with rerun_delay_seconds, if
+   * set, as a best-effort fallback cap so the rerun is never stranded forever.
+   */
+  private async _gateOnDeployment(
+    scenario: QaScenario,
+    ticket: Ticket,
+    cfg: QaOnFailureTicketConfig,
+    generation: number,
+    environment: string,
+  ): Promise<void> {
+    const fixSha = this._resolveFixCommit(ticket);
+    const dep = await findLatestDeployment(this.dataSource.getRepository(Deployment), scenario.workspace_id, environment);
+    if (this._deploymentSatisfies(dep, fixSha, ticket.terminal_entered_at)) {
+      this.logService.info('QA', 'rerun-on-fix deployment gate already satisfied — firing now', {
+        ticket_id: ticket.id, scenario_id: scenario.id, environment,
+        deployed_commit: dep?.deployed_commit_sha?.slice(0, 12), fix_commit: fixSha || '(freshness)',
+      });
+      await this._startRerun(scenario.id, generation, ticket.id);
+      return;
+    }
+
+    const key = `${ticket.id}:${generation}`;
+    // A duplicate 'moved' for the same entry is already blocked by the atomic
+    // qa_rerun_dispatched_at claim upstream, but guard the map too.
+    if (this._pending.has(key)) return;
+    const pending: PendingRerun = {
+      scenarioId: scenario.id,
+      generation,
+      fixTicketId: ticket.id,
+      scenarioName: scenario.name,
+      workspaceId: scenario.workspace_id,
+      environment,
+      fixCommitSha: fixSha,
+      notBefore: ticket.terminal_entered_at ?? null,
+    };
+    const capMs = this._resolveDelayMs(cfg.rerun_delay_seconds);
+    if (capMs > 0) {
+      const timer = setTimeout(() => {
+        this.logService.warn('QA', 'rerun-on-fix deployment gate fallback cap reached — firing without a confirmed deploy', {
+          ticket_id: ticket.id, scenario_id: scenario.id, environment, cap_ms: capMs,
+        });
+        this._firePending(key).catch((e) => {
+          this.logService.error('QA', 'rerun-on-fix fallback fire failed', { err: String(e), ticket_id: ticket.id });
+        });
+      }, capMs);
+      if (typeof (timer as any).unref === 'function') (timer as any).unref();
+      pending.fallbackTimer = timer;
+    }
+    this._pending.set(key, pending);
+    this.logService.info('QA', 'rerun-on-fix waiting for deployment', {
+      ticket_id: ticket.id, scenario_id: scenario.id, environment,
+      fix_commit: fixSha || '(freshness-ordering: deployed_at >= fix Done)',
+      fallback_cap_ms: capMs || 0,
+    });
+  }
+
+  /**
+   * A deployment landed — re-evaluate every pending rerun bound to that
+   * environment and fire the ones the new deployment now satisfies.
+   */
+  private async _onDeploymentReported(signal: DeploymentReportedSignal): Promise<void> {
+    if (this._pending.size === 0) return;
+    const env = (signal.environment || '').trim();
+    if (!env) return;
+    // Snapshot entries — _firePending mutates the map mid-loop.
+    for (const [key, p] of [...this._pending.entries()]) {
+      if (p.environment !== env) continue;
+      const dep = await findLatestDeployment(this.dataSource.getRepository(Deployment), p.workspaceId, env);
+      if (!this._deploymentSatisfies(dep, p.fixCommitSha, p.notBefore)) continue;
+      this.logService.info('QA', 'rerun-on-fix deployment gate satisfied — firing', {
+        fix_ticket_id: p.fixTicketId, scenario_id: p.scenarioId, environment: env,
+        deployed_commit: signal.deployed_commit_sha?.slice(0, 12),
+      });
+      await this._firePending(key);
+    }
+  }
+
+  /**
+   * Fire a pending rerun exactly once: delete-then-run so the fallback-cap timer
+   * and a deployment event can never start the same run twice.
+   */
+  private async _firePending(key: string): Promise<void> {
+    const p = this._pending.get(key);
+    if (!p) return; // already fired (race between cap timer and deploy event).
+    this._pending.delete(key);
+    if (p.fallbackTimer) { clearTimeout(p.fallbackTimer); p.fallbackTimer = undefined; }
+    await this._startRerun(p.scenarioId, p.generation, p.fixTicketId);
+  }
+
+  /** `fix-commit:<sha>` label → normalized sha, or '' (→ freshness-ordering gate). */
+  private _resolveFixCommit(ticket: Ticket): string {
+    const labels = safeJsonParse<string[]>(ticket.labels, []);
+    if (!Array.isArray(labels)) return '';
+    const marker = labels.find((l) => typeof l === 'string' && l.startsWith(FIX_COMMIT_LABEL_PREFIX));
+    if (!marker) return '';
+    return normalizeSha(marker.slice(FIX_COMMIT_LABEL_PREFIX.length));
+  }
+
+  /**
+   * Does `dep` prove the fix is live? With a known fix commit → the deployment
+   * must INCLUDE it (the deployed commit itself or a known ancestor). Without one
+   * (no `fix-commit:` label) → deploy-freshness ordering: a deployment that went
+   * live at/after the fix ticket's Done instant is treated as carrying it.
+   */
+  private _deploymentSatisfies(dep: Deployment | null, fixSha: string, fixDoneAt: Date | null): boolean {
+    if (!dep) return false;
+    if (fixSha) return deploymentIncludesCommit(dep, fixSha);
+    if (!fixDoneAt || !dep.deployed_at) return false;
+    return new Date(dep.deployed_at).getTime() >= new Date(fixDoneAt).getTime();
   }
 
   // ── Internals ──────────────────────────────────────────────────────────────
