@@ -102,6 +102,10 @@ const EXPECTED_TOOLS = [
   'update_workspace_schedule',
   'delete_workspace_schedule',
   'run_workspace_schedule_now',
+  // Ticket 80d52250 — Build & Artifact Registry (commit↔산출물 서버 권위 추적).
+  'get_latest_artifact',
+  'register_build_artifact',
+  'report_build_failure',
 ];
 
 test('MCP initialize + tools/list returns expected AWB tool surface', async (t) => {
