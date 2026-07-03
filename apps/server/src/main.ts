@@ -7,6 +7,7 @@ import { AppModule } from './app.module';
 import { AllExceptionsFilter } from './common/filters/http-exception.filter';
 import { RequestLoggerInterceptor } from './common/interceptors/request-logger.interceptor';
 import { ApiKeyService } from './services/api-key.service';
+import { DeploymentService } from './modules/deployments/deployment.service';
 import { LogService } from './services/log.service';
 import { preSyncPostgres } from './database/pre-sync-postgres';
 import { ensureSqljsDbHealthy } from './db';
@@ -80,6 +81,21 @@ async function bootstrap() {
 
   const PORT = process.env.PORT || 7701;
   await app.listen(PORT, '0.0.0.0');
+
+  // Boot-time deployment self-report (ticket 8ce72b18, "배포 인지" DoD 2). Record
+  // THIS server's own build commit as a GLOBAL deployment so a board that treats
+  // the AWB server itself as the SUT can gate QA reruns on the deployment fact.
+  // No-ops unless a build commit is resolvable from the env (AWB_BUILD_COMMIT or a
+  // known CI/PaaS var); best-effort — never blocks or crashes boot.
+  try {
+    const deploymentService = app.get(DeploymentService);
+    const dep = await deploymentService.recordSelfDeployment();
+    if (dep) {
+      logService.info('System', `Self-deployment recorded — env=${dep.environment} commit=${dep.deployed_commit_sha.slice(0, 12)}`);
+    }
+  } catch (err) {
+    logService.warn('System', `Self-deployment record skipped: ${err}`);
+  }
 
   // Check MCP auth status
   let authStatus = 'DISABLED (dev mode)';
