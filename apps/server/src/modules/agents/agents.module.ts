@@ -17,6 +17,7 @@ import { AgentWorkloadService } from './agent-workload.service';
 import { BacklogPromotionService } from './backlog-promotion.service';
 import { ClaimVerificationService } from './claim-verification.service';
 import { StuckTicketDetectorService } from './stuck-ticket-detector.service';
+import { RespawnStormDetectorService } from './respawn-storm-detector.service';
 import { TicketPrerequisitesService } from '../tickets/ticket-prerequisites.service';
 import { FsBrowserService } from '../../services/fs-browser.service';
 import { SubagentMonitorService } from '../../services/subagent-monitor.service';
@@ -54,6 +55,7 @@ import { ColumnPoliciesModule } from '../column-policies/column-policies.module'
     BacklogPromotionService,
     AgentWorkloadService,
     StuckTicketDetectorService,
+    RespawnStormDetectorService,
     ClaimVerificationService,
     TicketPrerequisitesService,
     FsBrowserService, SubagentMonitorService,
@@ -64,6 +66,7 @@ import { ColumnPoliciesModule } from '../column-policies/column-policies.module'
     BacklogPromotionService,
     AgentWorkloadService,
     StuckTicketDetectorService,
+    RespawnStormDetectorService,
     ClaimVerificationService,
     TicketPrerequisitesService,
     FsBrowserService, SubagentMonitorService,

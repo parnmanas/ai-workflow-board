@@ -28,6 +28,7 @@ import { validateHarnessConfigInput, serializeHarnessConfig } from '../../common
 import { validateEffortPresetsInput, serializeEffortPresets } from '../../common/effort-presets';
 import { validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../../common/environment-config';
 import { validateMergeGateConfigInput, serializeMergeGateConfig } from '../../common/merge-gate-config';
+import { validateRespawnStormConfigInput, serializeRespawnStormConfig } from '../../common/respawn-storm-config';
 import { validateQaPhasesInput, serializeQaPhases } from '../qa/qa-phases';
 
 // Narrow projection of a Comment as it ships on a board card. The board GET
@@ -450,7 +451,7 @@ export class BoardsController {
   async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     const board = await findOrFail(this.boardRepo, { where: { id } }, 'Board not found');
 
-    const { name, description, routing_config, column_prompts, max_concurrent_tickets_per_agent, self_improvement_mode, benchmark_mode, auto_archive_days, harness_config, effort_presets, language, environment_config, qa_phases, merge_gate_config } = body;
+    const { name, description, routing_config, column_prompts, max_concurrent_tickets_per_agent, self_improvement_mode, benchmark_mode, auto_archive_days, harness_config, effort_presets, language, environment_config, qa_phases, merge_gate_config, respawn_storm_config } = body;
     if (name !== undefined) board.name = name;
     if (description !== undefined) board.description = description;
     // Board output language (i18n, ticket ae28dcaf). Human-readable name that
@@ -582,6 +583,19 @@ export class BoardsController {
         const checked = validateMergeGateConfigInput(merge_gate_config);
         if (!checked.ok) return res.status(400).json({ error: checked.error });
         board.merge_gate_config = serializeMergeGateConfig(checked.value);
+      }
+    }
+
+    // Per-board respawn-storm circuit breaker (ticket ab06eac2). Same shape as
+    // merge_gate_config: null clears the override back to the env-folded
+    // baseline; an object is zod-validated (strict keys) so a typo'd field 400s.
+    if (respawn_storm_config !== undefined) {
+      if (respawn_storm_config === null) {
+        board.respawn_storm_config = null;
+      } else {
+        const checked = validateRespawnStormConfigInput(respawn_storm_config);
+        if (!checked.ok) return res.status(400).json({ error: checked.error });
+        board.respawn_storm_config = serializeRespawnStormConfig(checked.value);
       }
     }
 

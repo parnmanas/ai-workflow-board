@@ -20,6 +20,7 @@ import { HarnessConfigSchema, serializeHarnessConfig } from '../../../common/har
 import { EffortPresetsConfigSchema, validateEffortPresetsInput, serializeEffortPresets } from '../../../common/effort-presets';
 import { EnvironmentConfigSchema, validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../../../common/environment-config';
 import { MergeGateConfigSchema, serializeMergeGateConfig } from '../../../common/merge-gate-config';
+import { RespawnStormConfigSchema, serializeRespawnStormConfig } from '../../../common/respawn-storm-config';
 import { LivenessPolicySchema, serializeLivenessPolicy } from '../../qa/qa-liveness-policy';
 import { QaPhasesSchema, serializeQaPhases } from '../../qa/qa-phases';
 import { writeRoutingConfigThrough } from '../../boards/routing-config.helper';
@@ -256,8 +257,10 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
         .describe('Per-board QA multi-phase model: { "phases": [ { "id": "import", "label"?: "Import", "timeout_sec": 600 }, { "id": "build", "timeout_sec": 1800 } ] }. Array order = phase order; ids unique; timeout_sec a positive integer. When set (and no explicit liveness_policy overrides it) the reaper auto-selects the phase_timeouts detector so each phase is judged against its own timeout_sec from when the run entered it (set_qa_phase). A scenario-level qa_phases overrides this. Pass null to clear (board falls back to legacy single-running behavior).'),
       merge_gate_config: MergeGateConfigSchema.nullable().optional()
         .describe('Per-board merge/integration gate: { enabled?: bool, require_fresh_base?: bool, require_full_merge?: bool }. When enabled the server mechanically checks git invariants on the Merging boundary — Review→Merging is blocked when the feature branch is BEHIND base (stale-base; require_fresh_base), Merging→Done is blocked when the feature branch is not fully merged into base (partial-merge; require_full_merge). Each check is ON unless explicitly set false. The check degrades to a pass when the repo/branch can\'t be resolved (never a false block). Pass null (or enabled:false) to disable — board reverts to prompt-driven merge with no server checks.'),
+      respawn_storm_config: RespawnStormConfigSchema.nullable().optional()
+        .describe('Per-board respawn-storm circuit breaker (ticket ab06eac2): { enabled?: bool, window_minutes?: int, min_deaths?: int, quick_death_seconds?: int, auto_pend?: bool, notify?: bool, detect_twins?: bool, auto_stop_late_twin?: bool }. The server counts abnormal QUICK subagent deaths per (ticket,role) off the durable subagents table; past min_deaths inside window_minutes with ZERO forward progress (no fresh comment / column move) it auto-pends the ticket + alerts + writes a respawn_storm_halted activity. Cause-agnostic last line of defence against death-loops / twin-echo. Conservative defaults are ON (30m window, 5 quick deaths, 120s quick-death) so an untouched board is protected. Pass null (or {}) to clear the override back to the env baseline; enabled:false opts the board out.'),
     },
-    async ({ board_id, name, description, routing_config, column_prompts, auto_archive_days, harness_config, effort_presets, language, environment_config, paused, liveness_policy, qa_phases, merge_gate_config }) => {
+    async ({ board_id, name, description, routing_config, column_prompts, auto_archive_days, harness_config, effort_presets, language, environment_config, paused, liveness_policy, qa_phases, merge_gate_config, respawn_storm_config }) => {
       const boardRepo = dataSource.getRepository(Board);
       const board = await boardRepo.findOne({ where: { id: board_id } });
       if (!board) return err('Board not found');
@@ -352,6 +355,12 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
       // empty object) clears the override back to "no gate" (prompt-driven merge).
       if (merge_gate_config !== undefined) {
         board.merge_gate_config = serializeMergeGateConfig(merge_gate_config);
+      }
+      // Respawn-storm circuit breaker (ticket ab06eac2). Args already passed the
+      // strict RespawnStormConfigSchema, so storage is a straight serialize; null
+      // (or an empty object) clears the override back to the env baseline.
+      if (respawn_storm_config !== undefined) {
+        board.respawn_storm_config = serializeRespawnStormConfig(respawn_storm_config);
       }
 
       await boardRepo.save(board);

@@ -10,6 +10,7 @@ import { LogsController } from './logs.controller';
 import { PendingUsersController } from './pending-users.controller';
 import { SettingsController } from './settings.controller';
 import { StuckTicketsController } from './stuck-tickets.controller';
+import { WorkflowHealthController } from './workflow-health.controller';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { AdminGuard } from '../../common/guards/admin.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
@@ -31,6 +32,7 @@ import { AgentsModule } from '../agents/agents.module';
     PendingUsersController,
     SettingsController,
     StuckTicketsController,
+    WorkflowHealthController,
   ],
   providers: [AuthGuard, AdminGuard, PermissionGuard],
 })

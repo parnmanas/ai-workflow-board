@@ -13,7 +13,14 @@ export interface LogActivityParams {
   // beyond the ticket/comment pair and `ticket_id` is passed as '' for them.
   entity_type: 'ticket' | 'comment' | 'board' | 'agent';
   entity_id: string | number;
-  action: 'created' | 'updated' | 'moved' | 'deleted' | 'status_changed' | 'archived' | 'unarchived';
+  // The three `respawn_*` actions are first-class events written by
+  // RespawnStormDetectorService (ticket ab06eac2). ActivityLog.action is a bare
+  // varchar (no DB constraint) and the event-registry `board_update` entry
+  // forwards `action` verbatim, so widening this union is the only step needed
+  // for them to persist AND ride the live SSE stream like any other activity.
+  action:
+    | 'created' | 'updated' | 'moved' | 'deleted' | 'status_changed' | 'archived' | 'unarchived'
+    | 'respawn_storm_halted' | 'respawn_twin_detected' | 'respawn_twin_autostop_intent';
   field_changed?: string;
   old_value?: string;
   new_value?: string;
