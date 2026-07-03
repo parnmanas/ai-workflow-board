@@ -3,7 +3,7 @@ import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, In, Repository } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { QaScenario } from '../../entities/QaScenario';
-import { QaRun, QaRunStatus, QaStepResult, QaPhaseHistoryEntry } from '../../entities/QaRun';
+import { QaRun, QaRunStatus, QaStepResult, QaPhaseHistoryEntry, TERMINAL_QA_RUN_STATUSES } from '../../entities/QaRun';
 import { QaRunBatch } from '../../entities/QaRunBatch';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
@@ -297,8 +297,7 @@ export class QaRunService {
    */
   async recordHeartbeat(args: RecordHeartbeatArgs): Promise<QaRun> {
     const run = await this.getRun(args.runId, args.workspaceId);
-    const terminal: QaRunStatus[] = ['passed', 'failed', 'error'];
-    if (terminal.includes(run.status)) {
+    if (TERMINAL_QA_RUN_STATUSES.includes(run.status)) {
       throw makeError(409, `QA run is already '${run.status}'; heartbeats are only accepted while running/pending`);
     }
     const token = Number(args.progressToken);
@@ -331,8 +330,7 @@ export class QaRunService {
     const phaseId = (phase || '').trim();
     if (!phaseId) throw makeError(400, 'phase is required');
     const run = await this.getRun(runId, workspaceId);
-    const terminal: QaRunStatus[] = ['passed', 'failed', 'error'];
-    if (terminal.includes(run.status)) {
+    if (TERMINAL_QA_RUN_STATUSES.includes(run.status)) {
       throw makeError(409, `QA run is already '${run.status}'; phase transitions are only accepted while running/pending`);
     }
 
@@ -362,7 +360,11 @@ export class QaRunService {
 
   async completeRun(runId: string, workspaceId: string, status: QaRunStatus, summary?: string, builtCommit?: string): Promise<QaRun> {
     const run = await this.getRun(runId, workspaceId);
-    const valid: QaRunStatus[] = ['pending', 'running', 'passed', 'failed', 'error'];
+    // `build_failed` (ticket 80d52250) is accepted here — it is set by
+    // report_build_failure via this same choke point. It bypasses the PASSED
+    // gates below (they only fire on status==='passed') and is treated as a
+    // genuine failure by the on-failure hook + batch rollup further down.
+    const valid: QaRunStatus[] = ['pending', 'running', 'passed', 'failed', 'error', 'build_failed'];
     if (!valid.includes(status)) throw makeError(400, `status must be one of ${valid.join(', ')}`);
 
     let finalStatus = status;
@@ -439,7 +441,12 @@ export class QaRunService {
     // service is a no-op unless the scenario opts in AND the run failed/errored,
     // and it self-guards against double-filing via run.auto_ticket_id. It never
     // throws, so a side-effect failure can't abort the finalization above.
-    if (saved.status === 'failed' || saved.status === 'error') {
+    // `build_failed` (ticket 80d52250) is a genuine failure and files a fix
+    // ticket exactly like failed/error — report_build_failure packs the build
+    // log tail into `summary`, so the filed ticket carries the build evidence
+    // (DoD #4). maybeCreateOnFailure has no status filter of its own, and
+    // _buildBody handles run-level failures with no per-step rows.
+    if (saved.status === 'failed' || saved.status === 'error' || saved.status === 'build_failed') {
       const scenario = await this.scenarioRepo.findOne({ where: { id: saved.scenario_id } });
       if (scenario) {
         const ticketId = await this.failureTicketService.maybeCreateOnFailure(saved, scenario);

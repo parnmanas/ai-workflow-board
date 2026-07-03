@@ -137,7 +137,12 @@ export class QaRun {
   created_at: Date;
 }
 
-export type QaRunStatus = 'pending' | 'running' | 'passed' | 'failed' | 'error';
+export type QaRunStatus = 'pending' | 'running' | 'passed' | 'failed' | 'error' | 'build_failed';
+
+// Terminal QaRun statuses — a run here is finished; heartbeats / phase moves are
+// rejected on it. `build_failed` (ticket 80d52250) is terminal exactly like
+// failed/error. One exported list so the guard never drifts across call sites.
+export const TERMINAL_QA_RUN_STATUSES: QaRunStatus[] = ['passed', 'failed', 'error', 'build_failed'];
 
 /** One phase-transition record for QaRun.phase_history (ISO timestamps). */
 export interface QaPhaseHistoryEntry {
