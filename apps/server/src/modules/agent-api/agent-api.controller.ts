@@ -37,6 +37,7 @@ import {
   TicketArchivedError,
 } from '../mcp/shared/archive-helpers';
 import { isReviewToMerging, hasReviewerApproval, ReviewApprovalRequiredError } from '../mcp/shared/review-approval-guard';
+import { evaluateMergeGate, MergeGateBlockedError } from '../mcp/shared/merge-gate';
 import { findOrFail } from '../../common/find-or-fail';
 import { resolveAgentDisplayName } from '../../utils/agent-name';
 
@@ -444,6 +445,17 @@ export class AgentApiController {
     if (!force && isReviewToMerging(sourceColForGuard, col) && !(await hasReviewerApproval(this.dataSource, ticket.id))) {
       const e = new ReviewApprovalRequiredError(ticket.id, sourceColForGuard?.name ?? String(ticket.column_id), col.name);
       return res.status(e.status).json({ error: e.code, hint: e.hint, message: e.message });
+    }
+
+    // 머지 게이트(티켓 c806bad3) — 이 legacy 자동 이동 표면도 백도어가 되지 않게
+    // MCP/REST 와 동일한 검증. board opt-in(merge_gate_config) 시에만 동작, 해석 실패는
+    // 통과(availability-first). force=true 우회.
+    if (!force) {
+      const mg = await evaluateMergeGate(this.dataSource, ticket, sourceColForGuard, col);
+      if (mg.blocked) {
+        const e = new MergeGateBlockedError(mg);
+        return res.status(e.status).json({ error: e.code, hint: e.hint, message: e.message });
+      }
     }
 
     await this.dataSource.transaction(async (manager) => {

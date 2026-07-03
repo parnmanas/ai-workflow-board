@@ -35,6 +35,7 @@ import { TicketAttachment } from '../../entities/TicketAttachment';
 import { loadTicketFull, parseComments, expandCommentAttachments, loadTicketComments, DETAIL_COMMENT_PAGE } from '../mcp/shared/ticket-parsing';
 import { applyTerminalEnteredAtForMove, getRootArchivedAt, isTerminalColumn, TicketArchivedError } from '../mcp/shared/archive-helpers';
 import { isReviewToMerging, hasReviewerApproval, ReviewApprovalRequiredError } from '../mcp/shared/review-approval-guard';
+import { evaluateMergeGate, MergeGateBlockedError } from '../mcp/shared/merge-gate';
 import {
   maxTicketPosition,
   maxChildPosition,
@@ -738,6 +739,17 @@ export class TicketsController {
       if (!force && isReviewToMerging(sourceColForGuard, destColForGuard) && !(await hasReviewerApproval(this.dataSource, ticket.id))) {
         const e = new ReviewApprovalRequiredError(ticket.id, sourceColForGuard?.name ?? String(ticket.column_id), destColForGuard?.name ?? String(targetColumnId));
         return res.status(e.status).json({ error: e.code, hint: e.hint, message: e.message });
+      }
+
+      // 머지 게이트(티켓 c806bad3): Review→Merging(stale-base) / Merging→Done(부분머지)
+      // 기계 검증. board 가 merge_gate_config 로 opt-in 한 경우에만 동작하며 해석 실패는
+      // 전부 통과(availability-first) — 미설정 보드 무회귀. force 는 의도적 우회.
+      if (!force) {
+        const mg = await evaluateMergeGate(this.dataSource, ticket, sourceColForGuard, destColForGuard);
+        if (mg.blocked) {
+          const e = new MergeGateBlockedError(mg);
+          return res.status(e.status).json({ error: e.code, hint: e.hint, message: e.message });
+        }
       }
 
       // 다중담당자·합의 게이트(T5/T6): 이탈(현재) 컬럼 라우팅 역할 홀더가 ≥2 이고

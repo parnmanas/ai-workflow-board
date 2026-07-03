@@ -19,6 +19,7 @@ import { findColumnByName, maxTicketPosition, shiftTicketPositions } from '../sh
 import { performColumnMove } from '../shared/ticket-move';
 import { applyTerminalEnteredAtForMove, isTerminalReopen, TerminalReopenError, TicketArchivedError } from '../shared/archive-helpers';
 import { isReviewToMerging, hasReviewerApproval, ReviewApprovalRequiredError } from '../shared/review-approval-guard';
+import { evaluateMergeGate } from '../shared/merge-gate';
 import { getCallerAgent } from '../shared/session-auth';
 import { resolveAgentDisplayName } from '../../../utils/agent-name';
 import { evaluateConsensusMoveGate } from '../../../services/consensus.service';
@@ -91,6 +92,15 @@ export function registerTicketWorkflowTools(server: McpServer, ctx: ToolContext)
       // human override, same escape hatch as the terminal-reopen guard above.
       if (!force && isReviewToMerging(sourceColForGuard, destColForGuard) && !(await hasReviewerApproval(dataSource, ticket.id))) {
         return err(new ReviewApprovalRequiredError(ticket.id, sourceColForGuard?.name ?? String(oldColumnId), destColForGuard.name).message);
+      }
+
+      // Merge gate (ticket c806bad3) — Review→Merging(stale-base) / Merging→Done
+      // (부분머지) 기계 검증. board가 merge_gate_config 로 opt-in 한 경우에만 동작하고,
+      // 레포/브랜치/git 해석 실패는 전부 통과(availability-first)라 미설정 보드는 무회귀.
+      // force=true 는 review-approval / terminal-reopen 과 동일한 의도적 우회.
+      if (!force) {
+        const gate = await evaluateMergeGate(dataSource, ticket, sourceColForGuard, destColForGuard);
+        if (gate.blocked) return err(gate.message || 'Merge gate blocked this move.');
       }
 
       // Consensus gate (다중담당자·합의 T5, 결정 4). 이탈 컬럼(현재)의 라우팅 역할
