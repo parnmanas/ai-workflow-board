@@ -22,6 +22,13 @@
 //   4. gate ON, stub clean     : Merging→Done    → ALLOWED (lands in Done)
 //   5. gate ON, stub behind=9  : Review→Merging + force=true → ALLOWED (override)
 //   6. gate OFF (other board)  : Review→Merging  → ALLOWED despite a dirty stub
+//
+// Cases 1–6 drive the MCP move_ticket tool. The gate is also wired on the legacy
+// agent-api surface (single + batch). The batch loop is the known backdoor risk
+// (it moves inside one transaction), so cases 7–8 drive the REAL agent-api
+// /api/agent/batch endpoint over HTTP to prove the gate isn't bypassable there:
+//   7. gate ON, stub behind=5  : BATCH Review→Merging → REJECTED (stays in Review)
+//   8. gate ON, stub behind=7  : BATCH Review→Merging + force=true → ALLOWED
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -111,6 +118,12 @@ test('merge gate blocks stale-base / partial-merge and passes clean / forced / d
   const moveTo = (name) => va.mcp.callTool('move_ticket', {
     ticket_id: ticket.id, target_column_name: name, board_id: board.id,
   });
+  // Drive the legacy agent-api batch move surface over real HTTP (X-Agent-Key).
+  const batchMove = (operations) => fetch(`http://127.0.0.1:${port}/api/agent/batch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Agent-Key': workerKey.raw_key },
+    body: JSON.stringify({ operations }),
+  });
 
   step('CASE 1: stub behind=2 — Review→Merging REJECTED, stays in Review, MergeGate comment');
   await setStub(2, 0);
@@ -167,6 +180,41 @@ test('merge gate blocks stale-base / partial-merge and passes clean / forced / d
   assert.ok(!forced?.isError, `force=true must override the gate: ${JSON.stringify(forced)}`);
   const row2 = await ticketRepo.findOne({ where: { id: ticket2.id } });
   assert.equal(row2?.column_id, merging.id, 'forced move lands in Merging (case 5)');
+
+  step('CASE 7: agent-api BATCH surface — stale-base Review→Merging REJECTED (batch is not a backdoor)');
+  const ticketBatch = await createTicket(app, getDataSourceToken, {
+    columnId: columns.review.id, workspaceId: ws.id, title: 'Merge-gate batch',
+    assigneeId: worker.id, reporterId: worker.id, reviewerId: worker.id,
+  });
+  await ticketRepo.update(ticketBatch.id, { base_repo_resource_id: resource.id, base_branch: 'main' });
+  await va.mcp.callTool('add_comment', { ticket_id: ticketBatch.id, content: 'LGTM', author_role: 'reviewer' });
+  await setStub(5, 0);
+  const batchBlocked = await batchMove([
+    { action: 'move-ticket', ticketId: ticketBatch.id, toColumn: 'Merging', boardId: board.id },
+  ]);
+  assert.ok(batchBlocked.ok, `batch endpoint returns a 2xx with per-op results (got ${batchBlocked.status})`);
+  const batchBlockedBody = await batchBlocked.json();
+  assert.match(
+    JSON.stringify(batchBlockedBody.results),
+    /merge_gate_stale_base/,
+    `batch move-ticket must carry the stale-base merge-gate error (gate wired on batch): ${JSON.stringify(batchBlockedBody)}`,
+  );
+  let rowBatch = await ticketRepo.findOne({ where: { id: ticketBatch.id } });
+  assert.equal(rowBatch?.column_id, columns.review.id, 'batch-blocked ticket STAYS in Review (case 7)');
+
+  step('CASE 8: agent-api BATCH surface — force=true overrides the gate');
+  await setStub(7, 0);
+  const batchForced = await batchMove([
+    { action: 'move-ticket', ticketId: ticketBatch.id, toColumn: 'Merging', boardId: board.id, force: true },
+  ]);
+  const batchForcedBody = await batchForced.json();
+  assert.match(
+    JSON.stringify(batchForcedBody.results),
+    /"success":true/,
+    `batch force=true must move the ticket: ${JSON.stringify(batchForcedBody)}`,
+  );
+  rowBatch = await ticketRepo.findOne({ where: { id: ticketBatch.id } });
+  assert.equal(rowBatch?.column_id, merging.id, 'batch force=true lands in Merging (case 8)');
 
   step('CASE 6: a board WITHOUT merge_gate_config is unaffected (no regression)');
   const scene2 = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'merge-gate-off' });

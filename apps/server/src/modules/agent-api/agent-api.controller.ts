@@ -510,12 +510,44 @@ export class AgentApiController {
       ticketId,
     });
 
+    // 머지 게이트(티켓 c806bad3) — batch move-ticket 도 자동 이동 표면이라
+    // stale-base(Review→Merging)·부분머지(Merging→Done)를 서버가 막아야 한다.
+    // ⚠️ evaluateMergeGate 의 기본 prober 는 forceFetch git fetch 를 수행하므로,
+    // single move 핸들러(트랜잭션 밖 평가)와 동일하게 **트랜잭션 진입 전**에
+    // 미리 평가한다. 트랜잭션 안에서 git I/O 를 돌리면 fetch 동안 DB 트랜잭션을
+    // 붙잡는다(sql.js 는 전역 단일 연결이라 서버 전체를 막는다). 차단 결과를 op
+    // 인덱스로 캐싱해 아래 루프에서는 조회만 한다. board opt-in·해석 실패 통과는
+    // evaluateMergeGate 가 처리하고, 루프에서 merge gate 보다 먼저 거부되는
+    // op(scope/archived/review-approval)는 여기서도 건너뛰어 single 핸들러와 동일한
+    // 순서·부작용(차단 코멘트)을 유지한다. op.force 는 여기서 걸러진다.
+    const mergeGateBlocks = new Map<number, MergeGateBlockedError>();
+    for (let i = 0; i < operations.length; i++) {
+      const op = operations[i];
+      if (!op || op.action !== 'move-ticket' || op.force) continue;
+      const col = await findColumnByName(this.dataSource, String(op.boardId), op.toColumn);
+      if (!col) continue;
+      const t = await this.ticketRepo.findOne({ where: { id: String(op.ticketId) } });
+      if (!t) continue;
+      if (batchScope && (await this.resolveTicketWorkspaceId(this.dataSource, t.id)) !== batchScope) continue;
+      if (t.archived_at) continue;
+      const sourceCol = t.column_id
+        ? await this.colRepo.findOne({ where: { id: t.column_id } })
+        : null;
+      // review-approval 은 루프에서 merge gate 보다 먼저 거부하므로 여기서도 건너뛴다
+      // (불필요한 git fetch + 오해 소지 있는 차단 코멘트 방지).
+      if (isReviewToMerging(sourceCol, col) && !(await hasReviewerApproval(this.dataSource, t.id))) continue;
+      const mg = await evaluateMergeGate(this.dataSource, t, sourceCol, col);
+      if (mg.blocked) mergeGateBlocks.set(i, new MergeGateBlockedError(mg));
+    }
+
     await this.dataSource.transaction(async (manager) => {
       const tRepo = manager.getRepository(Ticket);
       const cRepo = manager.getRepository(Comment);
       const colRepoTx = manager.getRepository(BoardColumn);
 
+      let opIndex = -1;
       for (const op of operations) {
+        opIndex++;
         try {
           switch (op.action) {
             case 'create-ticket': {
@@ -567,6 +599,16 @@ export class AgentApiController {
               if (!op.force && isReviewToMerging(sourceColForGuard, col) && !(await hasReviewerApproval(manager, t.id))) {
                 const e = new ReviewApprovalRequiredError(t.id, sourceColForGuard?.name ?? String(sourceColumnId), col.name);
                 results.push({ error: e.code, hint: e.hint, message: e.message, ticketId: t.id });
+                continue;
+              }
+
+              // 머지 게이트(티켓 c806bad3) — 이 이동은 트랜잭션 진입 전(batch() 상단)에
+              // 미리 평가해 op 인덱스로 캐싱했다(git fetch 동안 DB 트랜잭션을 잡지 않기
+              // 위함 — single 핸들러와 동일 의도). 여기서는 조회만; op.force 는 pre-pass
+              // 에서 이미 걸러졌고, review-approval 등 앞선 가드도 pre-pass 가 미러링한다.
+              const mgBlock = mergeGateBlocks.get(opIndex);
+              if (mgBlock) {
+                results.push({ error: mgBlock.code, hint: mgBlock.hint, message: mgBlock.message, ticketId: t.id });
                 continue;
               }
 

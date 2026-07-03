@@ -91,10 +91,26 @@ for (const [relPath, forceToken, why] of GUARDED_MOVE_SOURCES) {
   });
 }
 
-// The agent-api batch surface loops move-ticket ops in one transaction — a known
-// backdoor risk. Its move branch must carry the gate too, on op.force and the
-// transaction manager scope (same as its review-approval guard).
-test('agent-api batch move-ticket guards op.force for the merge gate', () => {
+// The agent-api batch surface loops move-ticket ops in ONE transaction — a known
+// backdoor risk. Its move branch must carry the gate too. Unlike the review-
+// approval guard (a cheap DB read that can run inside the txn), the merge gate's
+// prober does a git fetch, so holding the DB transaction during it would stall
+// sql.js's single connection. The batch therefore PRE-evaluates the gate BEFORE
+// entering the transaction — on the dataSource scope, gated on op.force — and
+// caches the block for the loop to consume. This test pins that shape so a
+// refactor can neither drop the batch gate (BLOCKER that shipped once) nor move
+// the git I/O back inside the transaction.
+test('agent-api batch move-ticket is guarded by a PRE-transaction merge-gate pass', () => {
   const src = code('modules/agent-api/agent-api.controller.ts');
-  assert.match(src, /!op\.force[\s\S]{0,160}?evaluateMergeGate\(manager,/, 'batch move must honor op.force + manager scope');
+  // A pre-computed block map, built outside the txn and consumed by the loop.
+  assert.match(src, /const mergeGateBlocks = new Map/, 'batch must build a pre-computed merge-gate block map');
+  // The pre-pass skips non-move and force ops, then evaluates on the dataSource
+  // scope (NOT the txn manager) — proving the git fetch is outside the DB txn.
+  assert.match(src, /op\.action !== 'move-ticket' \|\| op\.force\) continue;/, 'batch pre-pass must skip non-move and forced ops');
+  assert.match(src, /evaluateMergeGate\(this\.dataSource,/, 'batch merge-gate must pre-evaluate outside the txn on the dataSource scope');
+  // The move-ticket branch inside the loop consumes the cached block by op index.
+  assert.match(src, /mergeGateBlocks\.get\(opIndex\)/, 'batch move loop must consume the pre-computed merge-gate block');
+  // The evaluate must NOT sit on the txn manager scope (would re-introduce the
+  // git-fetch-inside-transaction problem the pre-pass exists to avoid).
+  assert.doesNotMatch(src, /evaluateMergeGate\(manager,/, 'batch merge-gate must not run inside the transaction (manager scope)');
 });
