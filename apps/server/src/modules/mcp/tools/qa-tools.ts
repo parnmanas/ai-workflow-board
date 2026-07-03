@@ -60,6 +60,8 @@ function scenarioToJson(s: QaScenario) {
     max_runs: s.max_runs,
     // Working-folder options (shared with security profiles, ticket 4c49f567).
     workspace_folder: s.workspace_folder ?? '',
+    // Build & Artifact Registry target (ticket 80d52250).
+    build_target: s.build_target ?? '',
     repo_ref: s.repo_ref ?? null,
     checkout_mode: s.checkout_mode,
     build_mode: s.build_mode,
@@ -219,6 +221,7 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
       on_failure_ticket: onFailureTicketSchema.optional().describe('On-failure auto-ticket policy (see schema). Omit/null to disable.'),
       max_runs: z.number().optional().describe('FIFO run-history budget per scenario (default 20)'),
       workspace_folder: z.string().optional().describe('agent-home-relative working folder. Omit/"" → deterministic default qa/<scenario_id>.'),
+      build_target: z.string().optional().describe('Build & Artifact Registry target — free-text platform/config selector (e.g. "windows/Development"). Keys artifacts in the registry and renders into the run prompt\'s "check the registry before you build" block. Omit/"" → falls back to qa_driver.'),
       repo_ref: repoRefSchema.nullable().optional(),
       checkout_mode: checkoutModeSchema.optional(),
       build_mode: buildModeSchema.optional(),
@@ -251,6 +254,7 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
           created_by: caller?.agentId ?? '',
           max_runs: args.max_runs,
           workspace_folder: args.workspace_folder,
+          build_target: args.build_target,
           repo_ref: args.repo_ref ?? null,
           checkout_mode: args.checkout_mode,
           build_mode: args.build_mode,
@@ -282,6 +286,7 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
       on_failure_ticket: onFailureTicketSchema.optional().describe('On-failure auto-ticket policy (see create_qa_scenario). Pass null to clear, omit to leave unchanged.'),
       max_runs: z.number().optional(),
       workspace_folder: z.string().optional().describe('agent-home-relative working folder (see create_qa_scenario). "" resets to the qa/<scenario_id> default.'),
+      build_target: z.string().optional().describe('Build & Artifact Registry target (see create_qa_scenario). "" resets to the qa_driver fallback.'),
       repo_ref: repoRefSchema.nullable().optional().describe('Repo to run against (see create_qa_scenario). Pass null to clear and inherit the board/workspace env repo.'),
       checkout_mode: checkoutModeSchema.optional(),
       build_mode: buildModeSchema.optional(),

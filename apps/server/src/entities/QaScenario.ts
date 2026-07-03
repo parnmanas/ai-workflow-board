@@ -83,6 +83,14 @@ export class QaScenario {
   @Column({ type: 'simple-json', nullable: true, default: null })
   repo_ref: WorkspaceFolderRepoRef | null;
 
+  // Build & Artifact Registry target (ticket 80d52250). Free-text platform/config
+  // selector (e.g. `windows/Development`) that keys artifacts in the registry and
+  // is rendered into the run prompt's "check the registry before you build" block.
+  // '' = unset → the prompt falls back to `qa_driver` so the artifact share key
+  // still stays stable per scenario. See common/build-artifact-options.ts.
+  @Column({ type: 'varchar', default: '' })
+  build_target: string;
+
   // How the working folder is prepared before a run. 'fresh' → wipe + re-checkout
   // (always cold). default 'reuse'.
   @Column({ type: 'varchar', default: 'reuse' })

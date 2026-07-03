@@ -1,5 +1,6 @@
 import { QaScenario } from '../../entities/QaScenario';
-import { renderWorkspaceFolderBlock } from '../../common/workspace-folder-options';
+import { renderWorkspaceFolderBlock, resolveWorkspaceFolder } from '../../common/workspace-folder-options';
+import { renderBuildRegistryBlock } from '../../common/build-artifact-options';
 
 /**
  * Render the instruction prompt sent to the QA agent when a QaRun starts.
@@ -47,6 +48,21 @@ export function renderQaRunPrompt(scenario: QaScenario, runId: string): string {
       last_built_commit: scenario.last_built_commit,
       kind: 'qa',
       id: scenario.id,
+    }),
+    ``,
+    // Build & Artifact Registry (ticket 80d52250): supersedes the COLD/WARM hint
+    // above with a server-authoritative "is this exact commit already built?"
+    // check, so the agent queries the registry instead of blindly rebuilding.
+    // work_path mirrors the workspace-folder block's resolved path exactly (same
+    // `$AWB_AGENT_MANAGER_HOME/<folder>`) so both blocks point at one directory.
+    // build_target falls back to qa_driver when unset (keeps the share key stable).
+    renderBuildRegistryBlock({
+      workspace_id: scenario.workspace_id,
+      run_id: runId,
+      kind: 'qa',
+      repo_ref: scenario.repo_ref,
+      build_target: scenario.build_target || scenario.qa_driver || '',
+      work_path: `"$AWB_AGENT_MANAGER_HOME/${resolveWorkspaceFolder(scenario.workspace_folder, 'qa', scenario.id)}"`,
     }),
     ``,
     `## Steps`,

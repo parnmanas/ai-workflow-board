@@ -56,6 +56,16 @@ export function buildRepoKey(ref: BuildRepoRef | WorkspaceFolderRepoRef | null |
   return '';
 }
 
+/**
+ * Normalize a free-text `build_target` (platform/config selector, e.g.
+ * `windows/Development`). Free-form on purpose so a new target never needs a
+ * schema change; we only trim. '' = unset → the caller falls back (qa_driver for
+ * a QA scenario) at prompt-render time.
+ */
+export function normalizeBuildTarget(input: any): string {
+  return String(input ?? '').trim();
+}
+
 export const BUILD_ARTIFACT_STATUSES = ['building', 'ok', 'failed'] as const;
 
 /** Zod schema for the `repo` argument shared by the build MCP tools. */

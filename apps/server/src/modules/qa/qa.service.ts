@@ -12,6 +12,7 @@ import {
   normalizeBuildMode,
   normalizeRepoRef,
 } from '../../common/workspace-folder-options';
+import { normalizeBuildTarget } from '../../common/build-artifact-options';
 import { QaRunService } from './qa-run.service';
 
 function makeError(status: number, message: string): Error & { status: number } {
@@ -98,6 +99,8 @@ export interface CreateScenarioInput {
   repo_ref?: any;
   checkout_mode?: any;
   build_mode?: any;
+  /** Build & Artifact Registry target (free-text platform/config selector). */
+  build_target?: string;
   /** Pre-serialized LivenessPolicy JSON string (or null to clear). The MCP/REST
    *  layer validates + serializes via qa-liveness-policy before calling in. */
   liveness_policy?: string | null;
@@ -212,6 +215,7 @@ export class QaService {
       created_by: input.created_by ?? '',
       max_runs: typeof input.max_runs === 'number' && input.max_runs > 0 ? Math.floor(input.max_runs) : 20,
       workspace_folder: normalizeWorkspaceFolder(input.workspace_folder),
+      build_target: normalizeBuildTarget(input.build_target),
       repo_ref: normalizeRepoRef(input.repo_ref),
       checkout_mode: normalizeCheckoutMode(input.checkout_mode),
       build_mode: normalizeBuildMode(input.build_mode),
@@ -264,6 +268,7 @@ export class QaService {
     // Working-folder options (normalized). Changing checkout/build/repo does NOT
     // reset last_built_commit here — the provisioner owns that state.
     if (patch.workspace_folder !== undefined) existing.workspace_folder = normalizeWorkspaceFolder(patch.workspace_folder);
+    if (patch.build_target !== undefined) existing.build_target = normalizeBuildTarget(patch.build_target);
     if (patch.repo_ref !== undefined) existing.repo_ref = normalizeRepoRef(patch.repo_ref);
     if (patch.checkout_mode !== undefined) existing.checkout_mode = normalizeCheckoutMode(patch.checkout_mode);
     if (patch.build_mode !== undefined) existing.build_mode = normalizeBuildMode(patch.build_mode);
