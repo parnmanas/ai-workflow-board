@@ -139,6 +139,19 @@ export interface MergeGateProbeInput {
  */
 export type MergeGateProbe = (input: MergeGateProbeInput) => Promise<BehindAhead | null>;
 
+/**
+ * Test-only override for the prober the move surfaces use. Production leaves it
+ * null → the real cache-clone prober runs. An E2E spec (which boots the app
+ * in-process from the same compiled module) sets a deterministic stub so the
+ * block/pass paths can be driven over the real HTTP/MCP move surface without a
+ * live git remote. `evaluateMergeGate` prefers an explicit `options.probe`, then
+ * this override, then the default.
+ */
+let testProbeOverride: MergeGateProbe | null = null;
+export function __setMergeGateProbeForTests(probe: MergeGateProbe | null): void {
+  testProbeOverride = probe;
+}
+
 export const defaultMergeGateProbe: MergeGateProbe = async ({ resource, credential, baseBranch, ticketId }) => {
   try {
     const repoPath = await ensureRepoCache({
@@ -243,7 +256,7 @@ export async function evaluateMergeGate(
     credential = null;
   }
 
-  const probe = options.probe ?? defaultMergeGateProbe;
+  const probe = options.probe ?? testProbeOverride ?? defaultMergeGateProbe;
   let ba: BehindAhead | null;
   try {
     ba = await probe({ resource, credential, baseBranch, ticketId: ticket.id });
