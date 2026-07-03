@@ -26,6 +26,8 @@ import { WorkspaceScheduleModule } from '../workspace-schedule/workspace-schedul
     QaScenarioModule,
     // Provides BuildArtifactService for the build-tools MCP tools (ticket 80d52250).
     BuildsModule,
+    // Provides DeploymentService for the report_deployment MCP tool (ticket 8ce72b18).
+    DeploymentsModule,
     // Provides SecurityProfileService + SecurityRunService for the security-tools MCP tools.
     SecurityProfileModule,
     // Provides BenchmarkService for the benchmark MCP tools (ticket 684c012b).
