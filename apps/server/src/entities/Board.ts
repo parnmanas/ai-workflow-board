@@ -77,6 +77,21 @@ export class Board {
   @Column({ type: 'text', nullable: true, default: null })
   merge_gate_config: string | null;
 
+  // Per-board respawn-storm circuit breaker (ticket ab06eac2). JSON text of a
+  // RespawnStormConfig (see common/respawn-storm-config.ts): { enabled?,
+  // window_minutes?, min_deaths?, quick_death_seconds?, auto_pend?, notify?,
+  // detect_twins?, auto_stop_late_twin? }. The RespawnStormDetectorService counts
+  // abnormal QUICK subagent deaths per (ticket,role) off the durable `subagents`
+  // table and, past min_deaths inside window_minutes with ZERO forward progress
+  // (no fresh comment / column move), halts the ticket (pend) + alerts + writes a
+  // first-class `respawn_storm_halted` activity. Cause-agnostic last line of
+  // defence against death-loops / twin-echo. null = inherit the (env-folded)
+  // baseline; the baseline is ON by default but conservative, so an untouched
+  // board is protected without regressing normal work (progress signal ALWAYS
+  // vetoes a storm — watchdog false-positive lesson).
+  @Column({ type: 'text', nullable: true, default: null })
+  respawn_storm_config: string | null;
+
   // Per-board output language (i18n, ticket ae28dcaf). A human-readable
   // language name (e.g. "Korean", "English", "日本語") that rides the existing
   // harness plumbing: at dispatch TriggerLoopService appends a "Respond in
