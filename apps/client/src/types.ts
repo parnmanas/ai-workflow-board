@@ -319,6 +319,10 @@ export interface QaOnFailureTicketConfig {
   rerun_on_fix?: boolean;
   max_rerun_attempts?: number;
   rerun_delay_seconds?: number;
+  // Deployment-fact gate (ticket 8ce72b18): when true + scenario.target_environment,
+  // the rerun waits until that environment actually deploys the fix commit, instead
+  // of the fixed rerun_delay_seconds. rerun_delay_seconds stays as a fallback cap.
+  deployment_gate?: boolean;
 }
 
 /**
@@ -369,11 +373,35 @@ export interface QaScenario {
   build_mode: BuildMode;
   last_built_commit: string | null;
   built_at: string | null;
+  // Deployment-awareness target environment (ticket 8ce72b18) — the
+  // Deployment.environment name this scenario validates. '' = not env-bound.
+  target_environment: string;
   // Per-scenario QA phases override (ticket 90cc22f7). Same JSON wire convention
   // as Board.qa_phases (the server may ship the parsed object or the raw string);
   // when set, scenario-level config wins over the board's qa_phases. null/absent
   // = inherit the board default (or fall back to legacy single-timeout).
   qa_phases?: QaPhasesConfig | string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Deployment — server-authoritative "what commit is LIVE in this environment"
+ * (ticket 8ce72b18). GET /api/deployments returns the current live row per
+ * environment visible to a workspace; the QA screen renders it as a live-commit
+ * badge and the run detail shows which commit a run tested against.
+ */
+export interface Deployment {
+  id: string;
+  workspace_id: string | null;
+  environment: string;
+  base_url: string;
+  repo_resource_id: string;
+  deployed_commit_sha: string;
+  ancestor_shas: string[];
+  source: 'self_report' | 'webhook' | 'mcp' | 'poll' | 'manual';
+  reported_by: string;
+  deployed_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -408,6 +436,12 @@ export interface QaRun {
   step_results: QaStepResult[];
   artifact_resource_ids: string[];
   summary: string;
+  // Agent-reported repo HEAD the run built (warm-build provenance, ticket be2f998a).
+  built_commit?: string;
+  // Deployment awareness (ticket 8ce72b18): SERVER-authoritative live commit of
+  // the scenario's target environment at dispatch — the "tested against" evidence.
+  tested_commit?: string;
+  tested_environment?: string;
   auto_ticket_id: string | null;
   rerun_generation: number;
   triggered_by_type: string;

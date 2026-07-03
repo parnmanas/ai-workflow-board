@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { api, getActiveWorkspaceId, rawResourceUrl } from '../../api';
-import type { QaScenario, QaScenarioListItem, QaRun, QaStepResult, QaOnFailureTicketConfig, QaRunBatch, QaSchedule, QaScheduleScope, QaPhase, QaPhasesConfig } from '../../types';
+import type { QaScenario, QaScenarioListItem, QaRun, QaStepResult, QaOnFailureTicketConfig, QaRunBatch, QaSchedule, QaScheduleScope, QaPhase, QaPhasesConfig, Deployment } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 import { Button, Input, Select, Modal, Card, Badge, ConfirmDialog } from '../common';
@@ -60,18 +60,23 @@ export default function QaManager({ workspaceId, boardId }: QaManagerProps) {
   const [schedules, setSchedules] = useState<QaSchedule[]>([]);
   const [editingSchedule, setEditingSchedule] = useState<QaSchedule | 'new' | null>(null);
   const [confirmDeleteSchedule, setConfirmDeleteSchedule] = useState<QaSchedule | null>(null);
+  // Deployment-awareness live-commit badges (ticket 8ce72b18): current live commit
+  // per environment this workspace sees (its own + global). Best-effort read.
+  const [deployments, setDeployments] = useState<Deployment[]>([]);
 
   const load = useCallback(async () => {
-    if (!effectiveWorkspaceId) { setScenarios([]); setSchedules([]); return; }
+    if (!effectiveWorkspaceId) { setScenarios([]); setSchedules([]); setDeployments([]); return; }
     try {
-      const [list, agentList, scheduleList] = await Promise.all([
+      const [list, agentList, scheduleList, deploymentList] = await Promise.all([
         api.listQaScenarios(effectiveWorkspaceId, boardId !== undefined ? (boardId || '') : undefined),
         api.getAgents().catch(() => []),
         api.listQaSchedules(effectiveWorkspaceId, boardId !== undefined ? (boardId || '') : undefined).catch(() => []),
+        api.listDeployments(effectiveWorkspaceId).catch(() => []),
       ]);
       setScenarios(list);
       setAgents((agentList || []).map((a: any) => ({ id: a.id, name: a.name, manager_name: a.manager_name })));
       setSchedules(scheduleList || []);
+      setDeployments(deploymentList || []);
     } catch (err: any) {
       showToast(err?.message || 'Failed to load QA scenarios', 'error');
     }
@@ -302,6 +307,9 @@ export default function QaManager({ workspaceId, boardId }: QaManagerProps) {
           <Button variant="primary" size="md" onClick={() => setEditing('new')}>+ New Scenario</Button>
         </div>
       </div>
+
+      {/* 환경별 live commit 배지 (배포 인지 — ticket 8ce72b18) */}
+      <DeploymentBadges deployments={deployments} />
 
       {activeBatch && (
         <BatchProgressBanner
@@ -869,6 +877,16 @@ function RunDetail({ run, phases, onPreview }: { run: QaRun; phases: QaPhasesCon
             <Badge variant="info" size="md">🔁 재실행 #{run.rerun_generation}</Badge>
           </span>
         )}
+        {run.tested_commit && (
+          <span
+            title={`서버권위 — dispatch 시점 ${run.tested_environment || 'env'} 의 live 배포 commit (배포 인지)`}
+            style={{ display: 'inline-flex' }}
+          >
+            <Badge variant="neutral" size="md">
+              🚀 tested @ {run.tested_environment || 'env'}: <code>{run.tested_commit.slice(0, 8)}</code>
+            </Badge>
+          </span>
+        )}
         {run.auto_ticket_id && (
           <a
             href={run.board_id
@@ -1042,6 +1060,38 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   return <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, color: tokens.colors.textMuted, marginBottom: 8 }}>{children}</div>;
 }
 
+// ── Live-commit badges (배포 인지, ticket 8ce72b18) ────────────────────────────
+// One badge per environment showing the commit currently LIVE there, so an
+// operator can see at a glance "merged ≠ deployed" — which env is on which commit.
+function DeploymentBadges({ deployments }: { deployments: Deployment[] }) {
+  if (!deployments || deployments.length === 0) return null;
+  const sorted = [...deployments].sort((a, b) => a.environment.localeCompare(b.environment));
+  return (
+    <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: tokens.spacing.md }}>
+      <span style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, color: tokens.colors.textMuted }}>
+        🚀 Live commits
+      </span>
+      {sorted.map((d) => {
+        const short = (d.deployed_commit_sha || '').slice(0, 8) || '—';
+        const when = d.deployed_at ? relativeTime(d.deployed_at) : '';
+        const label = (
+          <Badge variant="neutral" size="sm">
+            {d.environment}: <code>{short}</code>{d.workspace_id === null ? ' 🌐' : ''}
+          </Badge>
+        );
+        const title = `${d.environment} — deployed ${short}${when ? ` (${when})` : ''} · source=${d.source}${d.workspace_id === null ? ' · global' : ''}`;
+        return d.base_url ? (
+          <a key={d.id} href={d.base_url} target="_blank" rel="noopener noreferrer" title={title} style={{ textDecoration: 'none', display: 'inline-flex' }}>
+            {label}
+          </a>
+        ) : (
+          <span key={d.id} title={title} style={{ display: 'inline-flex' }}>{label}</span>
+        );
+      })}
+    </div>
+  );
+}
+
 // ── Create / edit modal ──────────────────────────────────────────────────────
 
 interface ScenarioEditorProps {
@@ -1059,6 +1109,8 @@ function ScenarioEditor({ scenario, workspaceId, boardId, agents, onClose, onSav
   const [description, setDescription] = useState(scenario?.description ?? '');
   const [targetAgentId, setTargetAgentId] = useState(scenario?.target_agent_id ?? (agents[0]?.id ?? ''));
   const [qaDriver, setQaDriver] = useState(scenario?.qa_driver ?? 'browser');
+  // Deployment-awareness target environment (ticket 8ce72b18).
+  const [targetEnvironment, setTargetEnvironment] = useState(scenario?.target_environment ?? '');
   const [enabled, setEnabled] = useState(scenario?.enabled ?? true);
   const [stepsText, setStepsText] = useState(JSON.stringify(scenario?.steps ?? [], null, 2));
   const [configText, setConfigText] = useState(JSON.stringify(scenario?.qa_driver_config ?? {}, null, 2));
@@ -1082,6 +1134,9 @@ function ScenarioEditor({ scenario, workspaceId, boardId, agents, onClose, onSav
   const [oftRerunOnFix, setOftRerunOnFix] = useState(!!oft?.rerun_on_fix);
   const [oftMaxRerun, setOftMaxRerun] = useState(String(oft?.max_rerun_attempts ?? 3));
   const [oftRerunDelay, setOftRerunDelay] = useState(String(oft?.rerun_delay_seconds ?? 0));
+  // Deployment-fact gate (ticket 8ce72b18): wait for target_environment to deploy
+  // the fix before re-running, instead of the fixed rerun_delay_seconds.
+  const [oftDeploymentGate, setOftDeploymentGate] = useState(!!oft?.deployment_gate);
 
   // Per-scenario QA phases override (ticket 90cc22f7). Off = inherit the board's
   // qa_phases (or legacy single-timeout). On = these phases win for this scenario.
@@ -1122,6 +1177,7 @@ function ScenarioEditor({ scenario, workspaceId, boardId, agents, onClose, onSav
           ...(oftRerunOnFix ? {
             max_rerun_attempts: Math.max(0, parseInt(oftMaxRerun, 10) || 0),
             rerun_delay_seconds: Math.max(0, parseInt(oftRerunDelay, 10) || 0),
+            deployment_gate: oftDeploymentGate,
           } : {}),
         }
       : { enabled: false };
@@ -1141,12 +1197,14 @@ function ScenarioEditor({ scenario, workspaceId, boardId, agents, onClose, onSav
         saved = await api.updateQaScenario(scenario.id, {
           workspace_id: workspaceId, name, description, target_agent_id: targetAgentId,
           qa_driver: qaDriver, qa_driver_config: config, steps, tags, enabled,
+          target_environment: targetEnvironment.trim(),
           on_failure_ticket: onFailureTicket, qa_phases: qaPhasesPayload, ...wfPayload,
         });
       } else {
         saved = await api.createQaScenario({
           workspace_id: workspaceId, board_id: boardId || null, name, description,
           target_agent_id: targetAgentId, qa_driver: qaDriver, qa_driver_config: config, steps, tags, enabled,
+          target_environment: targetEnvironment.trim(),
           on_failure_ticket: onFailureTicket, qa_phases: qaPhasesPayload, ...wfPayload,
         });
       }
@@ -1190,6 +1248,18 @@ function ScenarioEditor({ scenario, workspaceId, boardId, agents, onClose, onSav
           onChange={(e) => setTargetAgentId((e.target as HTMLSelectElement).value)}
         />
         <Input label="QA driver (browser / game-client / http-api)" value={qaDriver} onChange={(e) => setQaDriver((e.target as HTMLInputElement).value)} />
+        <div>
+          <Input
+            label="Target environment (배포 인지 — Deployment.environment)"
+            placeholder="예: awb-server, production, staging (비우면 env 미연결)"
+            value={targetEnvironment}
+            onChange={(e) => setTargetEnvironment((e.target as HTMLInputElement).value)}
+          />
+          <div style={{ fontSize: 12, color: tokens.colors.textMuted, marginTop: 4 }}>
+            설정 시 각 run 이 이 환경의 live 배포 commit 을 <code>tested_commit</code> 으로 기록하고,
+            아래 배포 게이트가 이 환경에 fix 가 배포될 때까지 재실행을 대기시킵니다.
+          </div>
+        </div>
         <div>
           <label style={fieldLabel}>Steps (JSON array of {'{ idx, action, expect?, mcp_tool?, params? }'})</label>
           <textarea style={textareaStyle} value={stepsText} onChange={(e) => setStepsText(e.target.value)} />
@@ -1339,13 +1409,26 @@ function ScenarioEditor({ scenario, workspaceId, boardId, agents, onClose, onSav
                     </div>
                     <div style={{ flex: 1 }}>
                       <Input
-                        label="재실행 지연 (초 — 배포 게이트)"
+                        label="재실행 지연 (초 — fallback cap)"
                         type="number"
                         value={oftRerunDelay}
                         onChange={(e) => setOftRerunDelay((e.target as HTMLInputElement).value)}
                       />
                     </div>
                   </div>
+                )}
+                {oftRerunOnFix && (
+                  <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 13, color: tokens.colors.textSecondary, marginTop: 6 }}>
+                    <input type="checkbox" checked={oftDeploymentGate} onChange={(e) => setOftDeploymentGate(e.target.checked)} style={{ marginTop: 3 }} />
+                    <span>
+                      배포 사실에 게이팅 (deployment_gate)
+                      <span style={{ display: 'block', fontSize: 12, color: tokens.colors.textMuted }}>
+                        시간 지연 대신, 위 <b>Target environment</b> 에 fix commit 이 실제로 배포되는 순간 재실행합니다
+                        (fix-commit 라벨 ancestry / 없으면 배포시각 &ge; Done). 재실행 지연은 fallback cap 으로만 사용.
+                        {!targetEnvironment.trim() && <span style={{ color: tokens.colors.danger }}> ⚠ Target environment 미설정 시 게이트 미작동(즉시/지연 경로).</span>}
+                      </span>
+                    </span>
+                  </label>
                 )}
               </div>
             </div>

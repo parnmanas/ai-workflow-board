@@ -7,6 +7,7 @@ import type {
   QaScenarioListItem,
   QaRun,
   QaRunBatch,
+  Deployment,
   QaSchedule,
   QaScheduleScope,
   WorkspaceSchedule,
@@ -1028,6 +1029,8 @@ export const api = {
     repo_ref?: QaScenario['repo_ref'];
     checkout_mode?: QaScenario['checkout_mode'];
     build_mode?: QaScenario['build_mode'];
+    // Deployment-awareness target environment (ticket 8ce72b18).
+    target_environment?: string;
     // Per-scenario QA phases override (object to set, null to clear/inherit board).
     qa_phases?: QaPhasesConfig | null;
   }) => request<QaScenario>('/qa/scenarios', { method: 'POST', body: JSON.stringify(data) }),
@@ -1050,6 +1053,8 @@ export const api = {
       repo_ref?: QaScenario['repo_ref'];
       checkout_mode?: QaScenario['checkout_mode'];
       build_mode?: QaScenario['build_mode'];
+      // Deployment-awareness target environment (ticket 8ce72b18).
+      target_environment?: string;
       // Per-scenario QA phases override (object to set, null to clear/inherit board).
       qa_phases?: QaPhasesConfig | null;
     },
@@ -1067,6 +1072,13 @@ export const api = {
   getQaRun: (runId: string, workspaceId: string) => {
     const params = new URLSearchParams({ workspace_id: workspaceId });
     return request<QaRun>(`/qa/runs/${runId}?${params.toString()}`);
+  },
+  // ─── Deployment awareness (ticket 8ce72b18) ──────────
+  // The current live commit per environment visible to a workspace (its own
+  // environments + all global ones). Powers the QA "live commit" badge.
+  listDeployments: (workspaceId: string) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    return request<Deployment[]>(`/deployments?${params.toString()}`);
   },
   // ─── Sequential QA batches (ticket daf06262) ──────────
   // scenario_ids[] OR all (→ enabled scenarios in scope). Only the first
