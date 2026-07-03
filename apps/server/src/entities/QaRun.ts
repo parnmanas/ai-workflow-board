@@ -57,6 +57,21 @@ export class QaRun {
   @Column({ type: 'varchar', default: '' })
   built_commit: string;
 
+  // ── Deployment awareness (ticket 8ce72b18, DoD item 4) ───────────────────────
+  // SERVER-authoritative record of what commit was LIVE in the scenario's
+  // target_environment at the instant this run was dispatched — distinct from the
+  // agent-reported `built_commit` (which is the repo HEAD the agent *built*, self-
+  // reported at completion). startQaRun stamps these from findLatestDeployment when
+  // the scenario has a target_environment; '' when the scenario is not env-bound or
+  // the environment has no deployment on record yet. This is the "tested against
+  // commit X" evidence shown on the run detail, and closes the "merged ≠ deployed"
+  // ambiguity: the run detail now states the exact deployed commit it validated.
+  @Column({ type: 'varchar', default: '' })
+  tested_commit: string;
+
+  @Column({ type: 'varchar', default: '' })
+  tested_environment: string;
+
   @Column({ type: 'varchar', default: 'user' })
   triggered_by_type: string;
 

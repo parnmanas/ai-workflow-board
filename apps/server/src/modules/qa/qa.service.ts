@@ -63,6 +63,7 @@ function normalizeOnFailureTicket(input: any): QaOnFailureTicketConfig | null {
     rerun_on_fix: input.rerun_on_fix === undefined ? undefined : !!input.rerun_on_fix,
     max_rerun_attempts: Number.isFinite(maxRerun) && maxRerun >= 0 ? Math.floor(maxRerun) : undefined,
     rerun_delay_seconds: Number.isFinite(rerunDelay) && rerunDelay >= 0 ? Math.floor(rerunDelay) : undefined,
+    deployment_gate: input.deployment_gate === undefined ? undefined : !!input.deployment_gate,
   };
 }
 
@@ -101,6 +102,9 @@ export interface CreateScenarioInput {
   build_mode?: any;
   /** Build & Artifact Registry target (free-text platform/config selector). */
   build_target?: string;
+  /** Deployment-awareness target environment (ticket 8ce72b18) — the
+   *  Deployment.environment join key this scenario validates. '' = unset. */
+  target_environment?: string;
   /** Pre-serialized LivenessPolicy JSON string (or null to clear). The MCP/REST
    *  layer validates + serializes via qa-liveness-policy before calling in. */
   liveness_policy?: string | null;
@@ -216,6 +220,7 @@ export class QaService {
       max_runs: typeof input.max_runs === 'number' && input.max_runs > 0 ? Math.floor(input.max_runs) : 20,
       workspace_folder: normalizeWorkspaceFolder(input.workspace_folder),
       build_target: normalizeBuildTarget(input.build_target),
+      target_environment: (input.target_environment ?? '').trim(),
       repo_ref: normalizeRepoRef(input.repo_ref),
       checkout_mode: normalizeCheckoutMode(input.checkout_mode),
       build_mode: normalizeBuildMode(input.build_mode),
@@ -269,6 +274,7 @@ export class QaService {
     // reset last_built_commit here — the provisioner owns that state.
     if (patch.workspace_folder !== undefined) existing.workspace_folder = normalizeWorkspaceFolder(patch.workspace_folder);
     if (patch.build_target !== undefined) existing.build_target = normalizeBuildTarget(patch.build_target);
+    if (patch.target_environment !== undefined) existing.target_environment = (patch.target_environment ?? '').trim();
     if (patch.repo_ref !== undefined) existing.repo_ref = normalizeRepoRef(patch.repo_ref);
     if (patch.checkout_mode !== undefined) existing.checkout_mode = normalizeCheckoutMode(patch.checkout_mode);
     if (patch.build_mode !== undefined) existing.build_mode = normalizeBuildMode(patch.build_mode);

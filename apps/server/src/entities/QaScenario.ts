@@ -134,6 +134,18 @@ export class QaScenario {
   @Column({ type: 'text', nullable: true, default: null })
   qa_phases: string | null;
 
+  // ── Deployment awareness (ticket 8ce72b18) ──────────────────────────────────
+  // The logical environment this scenario validates — the join key into
+  // `Deployment.environment` (e.g. 'awb-server', 'production', 'staging'). '' =
+  // unset → the run is NOT gated on a deployment fact and no server-authoritative
+  // `tested_commit` is recorded (legacy behaviour). When set:
+  //   • startQaRun stamps the run's `tested_commit`/`tested_environment` with the
+  //     environment's live deployed commit at dispatch (DoD item 4 — evidence).
+  //   • QaRerunOnFixService gates a rerun on this environment's deployed_commit
+  //     actually INCLUDING the fix commit (DoD item 3), instead of a fixed delay.
+  @Column({ type: 'varchar', default: '' })
+  target_environment: string;
+
   @CreateDateColumn()
   created_at: Date;
 
@@ -200,5 +212,23 @@ export interface QaOnFailureTicketConfig {
   // pre-fix code. This delays the rerun by N seconds (best-effort, in-process;
   // not durable across a server restart) so a deploy can land first. Default 0
   // (immediate). Set to your typical main→prod deploy lag to make Done≈deployed.
+  //
+  // ⚠️ Superseded (but retained as fallback) by `deployment_gate` below: a fixed
+  // delay re-breaks whenever the real deploy time drifts. Prefer the fact-based
+  // gate; keep this as a safety-net cap so a rerun still fires if the deployment
+  // signal never arrives.
   rerun_delay_seconds?: number;
+
+  // ── Deployment-fact gate (ticket 8ce72b18, DoD item 3) ───────────────────────
+  // When true AND the scenario has a `target_environment`, QaRerunOnFixService
+  // does NOT fire the rerun on the fix ticket's Done edge. It waits until that
+  // environment's live deployment actually INCLUDES the fix commit (the deployed
+  // commit itself, or a known ancestor of it — deploymentIncludesCommit) and
+  // fires the instant a matching `report_deployment` / self-report lands. The fix
+  // commit is read from a `fix-commit:<sha>` ticket label (preferred, exact
+  // ancestry) or, absent that, gated on `deployed_at >= terminal_entered_at`
+  // (deploy-freshness ordering). `rerun_delay_seconds` still applies as a
+  // best-effort fallback cap so the rerun is never stranded forever if no deploy
+  // signal ever arrives. Default false (legacy: fire immediately / after delay).
+  deployment_gate?: boolean;
 }

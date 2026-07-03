@@ -62,6 +62,8 @@ function scenarioToJson(s: QaScenario) {
     workspace_folder: s.workspace_folder ?? '',
     // Build & Artifact Registry target (ticket 80d52250).
     build_target: s.build_target ?? '',
+    // Deployment-awareness target environment (ticket 8ce72b18).
+    target_environment: s.target_environment ?? '',
     repo_ref: s.repo_ref ?? null,
     checkout_mode: s.checkout_mode,
     build_mode: s.build_mode,
@@ -91,6 +93,10 @@ function runToJson(r: QaRun) {
     // Warm-build provenance (ticket be2f998a): the repo HEAD SHA this run
     // built/tested. On a PASS it advanced the scenario's last_built_commit.
     built_commit: r.built_commit,
+    // Deployment awareness (ticket 8ce72b18): SERVER-authoritative live commit of
+    // the scenario's target environment at dispatch — the "tested against" evidence.
+    tested_commit: r.tested_commit ?? '',
+    tested_environment: r.tested_environment ?? '',
     auto_ticket_id: r.auto_ticket_id ?? null,
     rerun_generation: r.rerun_generation ?? 0,
     triggered_by_type: r.triggered_by_type,
@@ -161,6 +167,7 @@ const onFailureTicketSchema = z.object({
   rerun_on_fix: z.boolean().optional().describe('Opt-in: when the auto-filed fix ticket reaches Done, the server re-runs THIS scenario (QA→fix→QA closed loop). Default false. Scoped to tickets carrying the qa-failure/auto/qa-scenario markers.'),
   max_rerun_attempts: z.number().optional().describe('Convergence cap: max automatic reruns before the loop halts with a "human intervention needed" comment (default 3; 0 disables reruns)'),
   rerun_delay_seconds: z.number().optional().describe('Deploy-timing gate: delay each rerun by N seconds (best-effort, in-process) so a main→prod auto-deploy can land before re-validating. Default 0 (immediate). See docs/qa-rerun-on-fix.md.'),
+  deployment_gate: z.boolean().optional().describe('Deployment-FACT gate (ticket 8ce72b18): when true AND the scenario has a target_environment, a rerun waits until that environment actually deploys the fix commit (deployed_commit includes it, or deployed_at ≥ the fix Done when no fix-commit label) and fires the instant a matching report_deployment lands — instead of a fixed time delay. rerun_delay_seconds still applies as a best-effort fallback cap. Default false.'),
 }).nullable();
 
 export function registerQaTools(server: McpServer, ctx: ToolContext): void {
@@ -222,6 +229,7 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
       max_runs: z.number().optional().describe('FIFO run-history budget per scenario (default 20)'),
       workspace_folder: z.string().optional().describe('agent-home-relative working folder. Omit/"" → deterministic default qa/<scenario_id>.'),
       build_target: z.string().optional().describe('Build & Artifact Registry target — free-text platform/config selector (e.g. "windows/Development"). Keys artifacts in the registry and renders into the run prompt\'s "check the registry before you build" block. Omit/"" → falls back to qa_driver.'),
+      target_environment: z.string().optional().describe('Deployment-awareness target environment (ticket 8ce72b18) — the Deployment.environment name this scenario validates (e.g. "awb-server", "production"). When set, each run records the environment\'s live deployed commit as tested_commit, and (with on_failure_ticket.deployment_gate) reruns wait until that environment actually deploys the fix commit. Omit/"" = not env-bound.'),
       repo_ref: repoRefSchema.nullable().optional(),
       checkout_mode: checkoutModeSchema.optional(),
       build_mode: buildModeSchema.optional(),
@@ -255,6 +263,7 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
           max_runs: args.max_runs,
           workspace_folder: args.workspace_folder,
           build_target: args.build_target,
+          target_environment: args.target_environment,
           repo_ref: args.repo_ref ?? null,
           checkout_mode: args.checkout_mode,
           build_mode: args.build_mode,
@@ -287,6 +296,7 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
       max_runs: z.number().optional(),
       workspace_folder: z.string().optional().describe('agent-home-relative working folder (see create_qa_scenario). "" resets to the qa/<scenario_id> default.'),
       build_target: z.string().optional().describe('Build & Artifact Registry target (see create_qa_scenario). "" resets to the qa_driver fallback.'),
+      target_environment: z.string().optional().describe('Deployment-awareness target environment (see create_qa_scenario). "" clears the env binding.'),
       repo_ref: repoRefSchema.nullable().optional().describe('Repo to run against (see create_qa_scenario). Pass null to clear and inherit the board/workspace env repo.'),
       checkout_mode: checkoutModeSchema.optional(),
       build_mode: buildModeSchema.optional(),

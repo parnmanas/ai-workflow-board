@@ -17,6 +17,8 @@ import { findOrFail } from '../../common/find-or-fail';
 import { renderQaRunPrompt } from './qa-prompt';
 import { QaFailureTicketService } from './qa-failure-ticket.service';
 import { buildRunProvision } from '../../common/run-workspace-resolver';
+import { Deployment } from '../../entities/Deployment';
+import { findLatestDeployment } from '../../common/deployment-options';
 
 function makeError(status: number, message: string): Error & { status: number } {
   const err = new Error(message) as Error & { status: number };
@@ -172,6 +174,23 @@ export class QaRunService {
     // baseline + the first (still-open) phase_history entry so the phase_timeouts
     // reaper measures from run start. Empty/whitespace → treated as unset (null).
     const initialPhase = (args.initialPhase || '').trim();
+
+    // Deployment awareness (ticket 8ce72b18, DoD item 4): record the SERVER-
+    // authoritative live commit of the scenario's target environment AT DISPATCH
+    // — the "tested against commit X" evidence, distinct from the agent-reported
+    // built_commit. '' when the scenario is not env-bound or the environment has
+    // no deployment on record yet (regression-safe).
+    const targetEnv = (scenario.target_environment || '').trim();
+    let testedCommit = '';
+    if (targetEnv) {
+      const dep = await findLatestDeployment(
+        this.dataSource.getRepository(Deployment),
+        scenario.workspace_id,
+        targetEnv,
+      );
+      testedCommit = dep?.deployed_commit_sha ?? '';
+    }
+
     const run = await this.runRepo.save(this.runRepo.create({
       id: runId,
       scenario_id: scenario.id,
@@ -182,6 +201,8 @@ export class QaRunService {
       step_results: [],
       artifact_resource_ids: [],
       summary: '',
+      tested_commit: testedCommit,
+      tested_environment: targetEnv,
       triggered_by_type: args.triggeredByType,
       triggered_by_id: args.triggeredById || '',
       rerun_generation: args.rerunGeneration && args.rerunGeneration > 0 ? Math.floor(args.rerunGeneration) : 0,
