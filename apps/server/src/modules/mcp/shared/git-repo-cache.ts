@@ -673,3 +673,49 @@ export async function listRefs(repoPath: string): Promise<RepoRefs> {
   tags.sort((a, b) => a.localeCompare(b));
   return { branches, tags, head };
 }
+
+/** Ahead/behind counts of a head ref relative to a base ref, used by the merge
+ *  gate to answer "is the feature branch stale (behind base)?" and "is it fully
+ *  merged into base (0 ahead)?" against the cache clone — the host-agnostic
+ *  primitive the merge gate needs on top of the existing read API. */
+export interface BehindAhead {
+  /** Commits reachable from base but NOT from head — head is missing these
+   *  (feature branch is BEHIND base → stale-base). */
+  behind: number;
+  /** Commits reachable from head but NOT from base — base is missing these
+   *  (feature branch has unmerged work → not fully merged). */
+  ahead: number;
+}
+
+/**
+ * Compute {behind, ahead} of `headRef` relative to `baseRef` via
+ * `git rev-list --left-right --count base...head`. In the symmetric-difference
+ * `A...B`, the left count is commits in A(base) not in B(head) = behind, the
+ * right count is commits in B(head) not in A(base) = ahead.
+ *
+ * Both refs are validated (rejecting flag-like / `..`-smuggling input, same as
+ * every other read here) and resolved against the cache clone — a ref that
+ * doesn't exist throws GitReadError, which the merge gate treats as
+ * "unverifiable → degrade to pass" rather than a block.
+ */
+export async function countBehindAhead(
+  repoPath: string,
+  baseRef: string,
+  headRef: string,
+): Promise<BehindAhead> {
+  if (!isValidRef(baseRef) || !baseRef.trim()) throw new GitReadError('잘못된 base ref 입니다.');
+  if (!isValidRef(headRef) || !headRef.trim()) throw new GitReadError('잘못된 head ref 입니다.');
+  const spec = `${baseRef.trim()}...${headRef.trim()}`;
+  const { stdout } = await runGit(
+    ['rev-list', '--left-right', '--count', spec, '--'],
+    { cwd: repoPath, maxBytes: 4 * 1024 },
+  );
+  // Output is "<behind>\t<ahead>" (a single line; whitespace-separated).
+  const parts = stdout.trim().split(/\s+/);
+  const behind = parseInt(parts[0] ?? '', 10);
+  const ahead = parseInt(parts[1] ?? '', 10);
+  if (!Number.isFinite(behind) || !Number.isFinite(ahead)) {
+    throw new GitReadError(`rev-list --count 출력 파싱 실패: "${stdout.trim()}"`);
+  }
+  return { behind, ahead };
+}

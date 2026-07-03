@@ -27,6 +27,7 @@ import { resolveAgentDisplayMap } from '../../utils/agent-name';
 import { validateHarnessConfigInput, serializeHarnessConfig } from '../../common/harness-config';
 import { validateEffortPresetsInput, serializeEffortPresets } from '../../common/effort-presets';
 import { validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../../common/environment-config';
+import { validateMergeGateConfigInput, serializeMergeGateConfig } from '../../common/merge-gate-config';
 import { validateQaPhasesInput, serializeQaPhases } from '../qa/qa-phases';
 
 // Narrow projection of a Comment as it ships on a board card. The board GET
@@ -449,7 +450,7 @@ export class BoardsController {
   async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     const board = await findOrFail(this.boardRepo, { where: { id } }, 'Board not found');
 
-    const { name, description, routing_config, column_prompts, max_concurrent_tickets_per_agent, self_improvement_mode, benchmark_mode, auto_archive_days, harness_config, effort_presets, language, environment_config, qa_phases } = body;
+    const { name, description, routing_config, column_prompts, max_concurrent_tickets_per_agent, self_improvement_mode, benchmark_mode, auto_archive_days, harness_config, effort_presets, language, environment_config, qa_phases, merge_gate_config } = body;
     if (name !== undefined) board.name = name;
     if (description !== undefined) board.description = description;
     // Board output language (i18n, ticket ae28dcaf). Human-readable name that
@@ -567,6 +568,20 @@ export class BoardsController {
         const checked = validateQaPhasesInput(qa_phases);
         if (!checked.ok) return res.status(400).json({ error: checked.error });
         board.qa_phases = serializeQaPhases(checked.value);
+      }
+    }
+
+    // Per-board merge/integration gate (ticket c806bad3). null clears the gate
+    // (board reverts to prompt-driven merge, no server checks); an object is
+    // zod-validated (strict keys) so a typo'd field 400s instead of being
+    // silently stored. Empty configs collapse to null via the serializer.
+    if (merge_gate_config !== undefined) {
+      if (merge_gate_config === null) {
+        board.merge_gate_config = null;
+      } else {
+        const checked = validateMergeGateConfigInput(merge_gate_config);
+        if (!checked.ok) return res.status(400).json({ error: checked.error });
+        board.merge_gate_config = serializeMergeGateConfig(checked.value);
       }
     }
 

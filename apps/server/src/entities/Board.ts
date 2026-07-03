@@ -64,6 +64,19 @@ export class Board {
   @Column({ type: 'text', nullable: true, default: null })
   environment_config: string | null;
 
+  // Per-board merge/integration gate (ticket c806bad3). JSON text of
+  // MergeGateConfig (see common/merge-gate-config.ts): { enabled?,
+  // require_fresh_base?, require_full_merge? }. When a board opts in the
+  // server mechanically verifies git invariants on the Merging column
+  // boundary — Review→Merging is blocked when the ticket's feature branch is
+  // BEHIND base (stale-base), Merging→Done is blocked when the feature branch
+  // is not fully merged into base (partial-merge). null/disabled = no gate →
+  // existing prompt-driven behaviour, no regression. The check degrades to a
+  // pass (never blocks) when the repo/branch can't be resolved
+  // (availability-first, same posture as the consensus gate's try/catch).
+  @Column({ type: 'text', nullable: true, default: null })
+  merge_gate_config: string | null;
+
   // Per-board output language (i18n, ticket ae28dcaf). A human-readable
   // language name (e.g. "Korean", "English", "日本語") that rides the existing
   // harness plumbing: at dispatch TriggerLoopService appends a "Respond in

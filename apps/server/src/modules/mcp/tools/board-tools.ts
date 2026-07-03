@@ -19,6 +19,7 @@ import { ok, err, safeJsonParse } from '../shared/helpers';
 import { HarnessConfigSchema, serializeHarnessConfig } from '../../../common/harness-config';
 import { EffortPresetsConfigSchema, validateEffortPresetsInput, serializeEffortPresets } from '../../../common/effort-presets';
 import { EnvironmentConfigSchema, validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../../../common/environment-config';
+import { MergeGateConfigSchema, serializeMergeGateConfig } from '../../../common/merge-gate-config';
 import { LivenessPolicySchema, serializeLivenessPolicy } from '../../qa/qa-liveness-policy';
 import { QaPhasesSchema, serializeQaPhases } from '../../qa/qa-phases';
 import { writeRoutingConfigThrough } from '../../boards/routing-config.helper';
@@ -253,8 +254,10 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
         .describe('Per-board QaRun liveness policy for the reaper: { "type": "zero_progress", "deadline_sec"?: N } (default — reap when a run\'s age exceeds the deadline, defaulting to the global QA_RUN_TTL_MS) or { "type": "heartbeat_deadline", "deadline_sec": N } (reap only when the run\'s monotonic qa_run_heartbeat token has not strictly advanced within N seconds). Scenario-level liveness_policy overrides this. Pass null to clear (board falls back to the zero_progress default — the pre-existing behavior).'),
       qa_phases: QaPhasesSchema.nullable().optional()
         .describe('Per-board QA multi-phase model: { "phases": [ { "id": "import", "label"?: "Import", "timeout_sec": 600 }, { "id": "build", "timeout_sec": 1800 } ] }. Array order = phase order; ids unique; timeout_sec a positive integer. When set (and no explicit liveness_policy overrides it) the reaper auto-selects the phase_timeouts detector so each phase is judged against its own timeout_sec from when the run entered it (set_qa_phase). A scenario-level qa_phases overrides this. Pass null to clear (board falls back to legacy single-running behavior).'),
+      merge_gate_config: MergeGateConfigSchema.nullable().optional()
+        .describe('Per-board merge/integration gate: { enabled?: bool, require_fresh_base?: bool, require_full_merge?: bool }. When enabled the server mechanically checks git invariants on the Merging boundary — Review→Merging is blocked when the feature branch is BEHIND base (stale-base; require_fresh_base), Merging→Done is blocked when the feature branch is not fully merged into base (partial-merge; require_full_merge). Each check is ON unless explicitly set false. The check degrades to a pass when the repo/branch can\'t be resolved (never a false block). Pass null (or enabled:false) to disable — board reverts to prompt-driven merge with no server checks.'),
     },
-    async ({ board_id, name, description, routing_config, column_prompts, auto_archive_days, harness_config, effort_presets, language, environment_config, paused, liveness_policy, qa_phases }) => {
+    async ({ board_id, name, description, routing_config, column_prompts, auto_archive_days, harness_config, effort_presets, language, environment_config, paused, liveness_policy, qa_phases, merge_gate_config }) => {
       const boardRepo = dataSource.getRepository(Board);
       const board = await boardRepo.findOne({ where: { id: board_id } });
       if (!board) return err('Board not found');
@@ -343,6 +346,12 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
       // model back to legacy single-running behavior.
       if (qa_phases !== undefined) {
         board.qa_phases = serializeQaPhases(qa_phases);
+      }
+      // Merge/integration gate (ticket c806bad3). Args already passed the strict
+      // MergeGateConfigSchema, so storage is a straight serialize; null (or an
+      // empty object) clears the override back to "no gate" (prompt-driven merge).
+      if (merge_gate_config !== undefined) {
+        board.merge_gate_config = serializeMergeGateConfig(merge_gate_config);
       }
 
       await boardRepo.save(board);
