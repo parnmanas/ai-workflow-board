@@ -8,6 +8,7 @@ import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
 import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module';
 import { ActionsModule } from '../actions/actions.module';
 import { QaScenarioModule } from '../qa/qa-scenario.module';
+import { BuildsModule } from '../builds/build-artifact.module';
 import { SecurityProfileModule } from '../security/security-profile.module';
 import { BenchmarksModule } from '../benchmarks/benchmarks.module';
 import { WorkspaceScheduleModule } from '../workspace-schedule/workspace-schedule.module';
@@ -22,6 +23,8 @@ import { WorkspaceScheduleModule } from '../workspace-schedule/workspace-schedul
     ActionsModule,
     // Provides QaService + QaRunService for the qa-tools MCP tools.
     QaScenarioModule,
+    // Provides BuildArtifactService for the build-tools MCP tools (ticket 80d52250).
+    BuildsModule,
     // Provides SecurityProfileService + SecurityRunService for the security-tools MCP tools.
     SecurityProfileModule,
     // Provides BenchmarkService for the benchmark MCP tools (ticket 684c012b).

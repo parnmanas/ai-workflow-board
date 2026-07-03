@@ -25,7 +25,11 @@ export class QaRun {
   @Column({ type: 'varchar', nullable: true, default: null })
   board_id: string | null;
 
-  // pending → running → passed | failed | error
+  // pending → running → passed | failed | error | build_failed
+  // `build_failed` is a first-class build death (ticket 80d52250): the build step
+  // itself failed, distinct from a functional `failed` or an infra `error`. It is
+  // terminal and, like failed/error, files an on-failure fix ticket (carrying the
+  // build log). Set by report_build_failure, never self-reported as a pass.
   @Column({ type: 'varchar', default: 'pending' })
   status: QaRunStatus;
 

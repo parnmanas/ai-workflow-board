@@ -46,6 +46,7 @@ import type { TicketRoleAssignmentService } from '../../workspace-roles/ticket-r
 import type { ActionsService } from '../../actions/actions.service';
 import type { QaService } from '../../qa/qa.service';
 import type { QaRunService } from '../../qa/qa-run.service';
+import { BuildArtifactService } from '../../builds/build-artifact.service';
 import type { QaScheduleService } from '../../qa/qa-schedule.service';
 import type { SecurityProfileService } from '../../security/security-profile.service';
 import type { SecurityRunService } from '../../security/security-run.service';
@@ -108,6 +109,10 @@ export interface ToolContext {
   // Standalone context omits both — the tools degrade to an explicit error.
   qaService?: QaService;
   qaRunService?: QaRunService;
+  // Build & Artifact Registry (ticket 80d52250). Required by the build-tools MCP
+  // tools. Stateless over the DataSource, so BOTH modes provide it — the
+  // standalone builder constructs a thin instance directly (like benchmarkService).
+  buildArtifactService?: BuildArtifactService;
   // QA scheduler (ticket b6bb7efd) — automatic batch trigger layer. Required by
   // the qa-schedule MCP tools (CRUD + run-now). Standalone context omits it; the
   // tools degrade to an explicit error (no background tick in standalone mode).
@@ -205,6 +210,10 @@ export function createStandaloneContext(dataSource: DataSource): ToolContext {
   // standalone equivalent of the DI singleton, matching the prereq service above).
   const benchmarkService = new BenchmarkService(dataSource);
 
+  // BuildArtifactService is likewise stateless over the DataSource (+ LogService),
+  // so the build-tools work in standalone MCP mode too (ticket 80d52250).
+  const buildArtifactService = new BuildArtifactService(dataSource, logService);
+
   return {
     dataSource,
     activityService,
@@ -217,5 +226,6 @@ export function createStandaloneContext(dataSource: DataSource): ToolContext {
     roomMessagingService,
     ticketPrerequisitesService,
     benchmarkService,
+    buildArtifactService,
   };
 }
