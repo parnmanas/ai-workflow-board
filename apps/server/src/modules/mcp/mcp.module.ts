@@ -9,6 +9,7 @@ import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module'
 import { ActionsModule } from '../actions/actions.module';
 import { QaScenarioModule } from '../qa/qa-scenario.module';
 import { BuildsModule } from '../builds/build-artifact.module';
+import { DeploymentsModule } from '../deployments/deployment.module';
 import { SecurityProfileModule } from '../security/security-profile.module';
 import { BenchmarksModule } from '../benchmarks/benchmarks.module';
 import { WorkspaceScheduleModule } from '../workspace-schedule/workspace-schedule.module';

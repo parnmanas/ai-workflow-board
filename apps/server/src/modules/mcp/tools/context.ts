@@ -47,6 +47,7 @@ import type { ActionsService } from '../../actions/actions.service';
 import type { QaService } from '../../qa/qa.service';
 import type { QaRunService } from '../../qa/qa-run.service';
 import { BuildArtifactService } from '../../builds/build-artifact.service';
+import { DeploymentService } from '../../deployments/deployment.service';
 import type { QaScheduleService } from '../../qa/qa-schedule.service';
 import type { SecurityProfileService } from '../../security/security-profile.service';
 import type { SecurityRunService } from '../../security/security-run.service';
@@ -113,6 +114,10 @@ export interface ToolContext {
   // tools. Stateless over the DataSource, so BOTH modes provide it — the
   // standalone builder constructs a thin instance directly (like benchmarkService).
   buildArtifactService?: BuildArtifactService;
+  // Deployment awareness (ticket 8ce72b18). Required by the deployment-tools MCP
+  // tool (report_deployment). Stateless over the DataSource, so BOTH modes
+  // provide it — the standalone builder constructs a thin instance directly.
+  deploymentService?: DeploymentService;
   // QA scheduler (ticket b6bb7efd) — automatic batch trigger layer. Required by
   // the qa-schedule MCP tools (CRUD + run-now). Standalone context omits it; the
   // tools degrade to an explicit error (no background tick in standalone mode).
@@ -214,6 +219,10 @@ export function createStandaloneContext(dataSource: DataSource): ToolContext {
   // so the build-tools work in standalone MCP mode too (ticket 80d52250).
   const buildArtifactService = new BuildArtifactService(dataSource, logService);
 
+  // DeploymentService — stateless over the DataSource (+ LogService), so
+  // report_deployment works in standalone MCP mode too (ticket 8ce72b18).
+  const deploymentService = new DeploymentService(dataSource, logService);
+
   return {
     dataSource,
     activityService,
@@ -227,5 +236,6 @@ export function createStandaloneContext(dataSource: DataSource): ToolContext {
     ticketPrerequisitesService,
     benchmarkService,
     buildArtifactService,
+    deploymentService,
   };
 }
