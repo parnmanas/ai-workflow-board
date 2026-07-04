@@ -5,6 +5,7 @@ import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { Agent } from '../../entities/Agent';
 import { User } from '../../entities/User';
+import type { DefaultRoleAssignments } from '../../common/default-role-assignments-config';
 
 export interface ResolvedAssignment {
   assignment: TicketRoleAssignment;
@@ -444,6 +445,109 @@ export class TicketRoleAssignmentService {
       // Orphan ID — store as agent_id to mirror v1 column semantics.
       await this.setHolder(ticketId, role.id, { agent_id: raw, user_id: null });
     }
+  }
+
+  /**
+   * Keep only the holders whose agent/user still exists. A stale board default
+   * config must never manufacture an orphan assignment row pointing at a
+   * deleted agent/user. Batched (2 queries max). Agent-vs-user is mutually
+   * exclusive per entry — an entry that names an agent that no longer exists is
+   * dropped even if a user_id is also (illegally) present.
+   */
+  private async filterExistingHolders(
+    holders: Array<{ agent_id?: string | null; user_id?: string | null }>,
+  ): Promise<Array<{ agent_id: string | null; user_id: string | null }>> {
+    const agentIds = [...new Set(holders.map(h => (h.agent_id || '').trim()).filter(Boolean))];
+    const userIds = [...new Set(holders.map(h => (h.user_id || '').trim()).filter(Boolean))];
+    const [agents, users] = await Promise.all([
+      agentIds.length ? this.agentRepo.find({ where: { id: In(agentIds) }, select: ['id'] }) : Promise.resolve([] as Agent[]),
+      userIds.length ? this.userRepo.find({ where: { id: In(userIds) }, select: ['id'] }) : Promise.resolve([] as User[]),
+    ]);
+    const agentSet = new Set(agents.map(a => a.id));
+    const userSet = new Set(users.map(u => u.id));
+    const out: Array<{ agent_id: string | null; user_id: string | null }> = [];
+    for (const h of holders) {
+      const agent_id = (h.agent_id || '').trim();
+      const user_id = (h.user_id || '').trim();
+      if (agent_id && agentSet.has(agent_id)) out.push({ agent_id, user_id: null });
+      else if (user_id && userSet.has(user_id)) out.push({ agent_id: null, user_id });
+    }
+    return out;
+  }
+
+  /**
+   * Apply a board's DEFAULT role holders (ticket d94a1b87) to a freshly-created
+   * ticket. For each slug in `defaults`, if the ticket currently has NO holder
+   * for that role, the default holders are written; a role that already carries
+   * ≥1 holder (an explicit assignment already synced via syncBuiltinTrio /
+   * setHolders at the creation site) is left untouched. This encodes the
+   * create-time priority **explicit holder > board default > unassigned**.
+   *
+   * Contract for callers: run this AFTER the explicit-assignment writes at
+   * every root-ticket creation site (MCP create_ticket, REST POST, QA/Security
+   * auto-ticket, feature chain). `defaults` is the already-parsed/normalized
+   * map from `parseDefaultRoleAssignments(board.default_role_assignments)`.
+   * Holders whose agent/user no longer exists are dropped (a stale board config
+   * must never manufacture an orphan). Never touches existing tickets — only
+   * the one just created. Returns a per-slug summary of what was applied (for
+   * the caller's activity/log line); a slug absent from the result was already
+   * held or had no valid default holder.
+   */
+  async applyBoardDefaults(
+    ticketId: string,
+    workspaceId: string,
+    defaults: DefaultRoleAssignments,
+  ): Promise<Array<{ slug: string; applied: number }>> {
+    if (!workspaceId || !defaults) return [];
+    const slugs = Object.keys(defaults);
+    if (slugs.length === 0) return [];
+
+    const summary: Array<{ slug: string; applied: number }> = [];
+    for (const slug of slugs) {
+      const holders = defaults[slug] || [];
+      if (holders.length === 0) continue;
+      const role = await this.roleRepo.findOne({ where: { workspace_id: workspaceId, slug } });
+      if (!role) continue; // board default names a slug this workspace doesn't have
+      // Priority: explicit holder wins — only fill a role that is currently vacant.
+      const existing = await this.getAll(ticketId, role.id);
+      if (existing.length > 0) continue;
+      const valid = await this.filterExistingHolders(holders);
+      if (valid.length === 0) continue;
+      const rows = await this.setHolders(ticketId, role.id, valid);
+      if (rows.length > 0) summary.push({ slug, applied: rows.length });
+    }
+    return summary;
+  }
+
+  /**
+   * Write-path (update_board) DB existence check for a board default config.
+   * The JSON SHAPE is already validated by validateDefaultRoleAssignmentsInput;
+   * this adds the layer that needs the DB — every slug must be a real role in
+   * the board's workspace and every holder id a real agent/user. Returns the
+   * first problem as an error string so the caller can 400, or `{ ok: true }`.
+   * An empty config is trivially valid.
+   */
+  async validateBoardDefaults(
+    workspaceId: string,
+    defaults: DefaultRoleAssignments,
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    if (!workspaceId) return { ok: false, error: 'cannot validate default_role_assignments — board has no workspace' };
+    for (const [slug, holders] of Object.entries(defaults)) {
+      const role = await this.roleRepo.findOne({ where: { workspace_id: workspaceId, slug } });
+      if (!role) return { ok: false, error: `default_role_assignments: unknown role slug "${slug}" for this workspace` };
+      for (const h of holders) {
+        const agent_id = (h.agent_id || '').trim();
+        const user_id = (h.user_id || '').trim();
+        if (agent_id) {
+          const a = await this.agentRepo.findOne({ where: { id: agent_id }, select: ['id'] });
+          if (!a) return { ok: false, error: `default_role_assignments["${slug}"]: agent ${agent_id} not found` };
+        } else if (user_id) {
+          const u = await this.userRepo.findOne({ where: { id: user_id }, select: ['id'] });
+          if (!u) return { ok: false, error: `default_role_assignments["${slug}"]: user ${user_id} not found` };
+        }
+      }
+    }
+    return { ok: true };
   }
 
   /** All tickets where the given agent (or user) holds at least one role. */

@@ -92,6 +92,25 @@ export class Board {
   @Column({ type: 'text', nullable: true, default: null })
   respawn_storm_config: string | null;
 
+  // Per-board DEFAULT role holders (ticket d94a1b87). JSON text of a
+  // DefaultRoleAssignments map (see common/default-role-assignments-config.ts):
+  //   { "assignee": [{ "agent_id": "…" }], "reviewer": [{ "agent_id": "…" }],
+  //     "reporter": [{ "user_id": "…" }] }
+  // A slug maps to an ARRAY of holders (다중담당자 T1 model). At ticket-creation
+  // time — across ALL paths (MCP create_ticket, REST POST, QA/Security
+  // auto-ticket) — every role the caller did NOT explicitly staff is filled
+  // from this map, so a new ticket lands on the loop without a human manually
+  // wiring assignee/reviewer/reporter (the single most-repeated manual step in
+  // the board activity logs). Priority is explicit holder > board default >
+  // unassigned; callers pass skip_default_assignments to opt a specific create
+  // out (e.g. QA orphan probes that need a true zero-holder ticket). Defaults
+  // are applied only to NEW tickets — never retroactively. null / '{}' = no
+  // defaults → behaviour unchanged. synchronize:true (db.ts D-01) auto-adds the
+  // column in every env, matching the recent config-column convention
+  // (respawn_storm_config / merge_gate_config / qa_phases have no migration).
+  @Column({ type: 'text', nullable: true, default: null })
+  default_role_assignments: string | null;
+
   // Per-board output language (i18n, ticket ae28dcaf). A human-readable
   // language name (e.g. "Korean", "English", "日本語") that rides the existing
   // harness plumbing: at dispatch TriggerLoopService appends a "Respond in
