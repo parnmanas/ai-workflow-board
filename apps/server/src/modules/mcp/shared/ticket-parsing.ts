@@ -18,6 +18,7 @@ import { Ticket } from '../../../entities/Ticket';
 import { TicketRoleAssignment } from '../../../entities/TicketRoleAssignment';
 import { Resource } from '../../../entities/Resource';
 import { TicketAttachment } from '../../../entities/TicketAttachment';
+import { parseHandoffSpec } from '../../../common/handoff-spec-config';
 import { User } from '../../../entities/User';
 import { WorkspaceRole } from '../../../entities/WorkspaceRole';
 import { safeJsonParse } from './helpers';
@@ -44,6 +45,9 @@ export function parseTicket(ticket: Ticket) {
     // On-ticket-done hook binding (ticket 16a6339c) — decode the JSON-string
     // column to an array, same treatment as labels / channel_ids.
     on_done_action_ids: safeJsonParse(ticket.on_done_action_ids),
+    // Cross-board handoff relay (ticket ac21a745) — decode the JSON-string spec
+    // to an object so the detail panel's handoff editor binds against it.
+    handoff_spec: parseHandoffSpec(ticket.handoff_spec),
   };
 }
 
@@ -224,6 +228,9 @@ export async function loadTicketFull(
     // returns string[] (the picker binds against it). parseTicket already does
     // this; loadTicketFull must match or the client sees a raw JSON string.
     on_done_action_ids: safeJsonParse(ticket.on_done_action_ids),
+    // Cross-board handoff relay (ticket ac21a745) — decode on the root so the
+    // detail panel's handoff editor binds against a spec object, not a raw string.
+    handoff_spec: parseHandoffSpec(ticket.handoff_spec),
     children: (ticket.children || []).sort((a, b) => a.position - b.position).map(child => ({
       ...child,
       labels: safeJsonParse(child.labels),

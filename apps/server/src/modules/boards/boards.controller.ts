@@ -18,6 +18,7 @@ import { Agent } from '../../entities/Agent';
 import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { TicketRoleAssignmentService } from '../workspace-roles/ticket-role-assignment.service';
+import { parseHandoffSpec } from '../../common/handoff-spec-config';
 import { findOrFail } from '../../common/find-or-fail';
 import { Comment } from '../../entities/Comment';
 import { buildArchiveCursor, parseArchiveCursor } from '../mcp/shared/archive-helpers';
@@ -167,6 +168,11 @@ export class BoardsController {
             labels: JSON.parse(t.labels || '[]'),
             channel_ids: JSON.parse(t.channel_ids || '[]'),
             on_done_action_ids: JSON.parse(t.on_done_action_ids || '[]'),
+            // Cross-board handoff relay (ticket ac21a745) — decode the JSON-string
+            // spec so the detail panel (which binds off the board payload) can
+            // render/edit it without a second round-trip. Root-only, like the
+            // handoff concept itself.
+            handoff_spec: parseHandoffSpec(t.handoff_spec),
             children: (t.children || []).sort((a, b) => a.position - b.position).map(child => ({
               ...child,
               labels: JSON.parse(child.labels || '[]'),

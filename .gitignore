@@ -1,5 +1,10 @@
 # Dependencies
 node_modules/
+# ...also as a symlink (worktrees symlink node_modules → main checkout); the
+# trailing-slash pattern above only matches a real directory, so a bare
+# `node_modules` symlink would otherwise be stage-able (a past accident).
+node_modules
+apps/*/node_modules
 
 # Build output
 dist/

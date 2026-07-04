@@ -51,6 +51,7 @@ import {
 } from '../mcp/shared/ticket-helpers';
 import { findOrFail } from '../../common/find-or-fail';
 import { parseDefaultRoleAssignments, type DefaultRoleAssignments } from '../../common/default-role-assignments-config';
+import { validateHandoffSpecInput } from '../../common/handoff-spec-config';
 
 @ApiBearerAuth('user-session')
 @ApiTags('tickets')
@@ -491,7 +492,7 @@ export class TicketsController {
     const actorId = currentUser?.id || undefined;
     const actorName = currentUser?.name || currentUser?.email || undefined;
 
-    const { title, description, priority, assignee, reporter, reviewer_id, assignee_id, reporter_id, labels, channel_ids, status, prompt_text, base_repo_resource_id, base_branch, role_assignments, next_ticket_id, on_done_action_ids, pending_user_action, pending_reason, effort_preset } = body;
+    const { title, description, priority, assignee, reporter, reviewer_id, assignee_id, reporter_id, labels, channel_ids, status, prompt_text, base_repo_resource_id, base_branch, role_assignments, next_ticket_id, on_done_action_ids, handoff_spec, pending_user_action, pending_reason, effort_preset } = body;
     const oldAssignee = ticket.assignee;
     const oldReporter = ticket.reporter;
     const oldReviewerId = ticket.reviewer_id;
@@ -583,6 +584,18 @@ export class TicketsController {
       const arr = Array.isArray(on_done_action_ids) ? on_done_action_ids : [];
       const cleaned = Array.from(new Set(arr.filter((s: any) => typeof s === 'string' && s)));
       ticket.on_done_action_ids = JSON.stringify(cleaned);
+    }
+
+    // Cross-board handoff relay spec (ticket ac21a745). Validate → canonical JSON
+    // string ('' clears). A bad shape throws a 400 (loud typo). Mirrors the MCP
+    // update_ticket path (ticket-crud-tools.ts).
+    const oldHandoffSpec = ticket.handoff_spec;
+    if (handoff_spec !== undefined) {
+      try {
+        ticket.handoff_spec = validateHandoffSpecInput(handoff_spec);
+      } catch (e: any) {
+        return res.status(e?.status || 400).json({ error: e?.message || 'handoff_spec rejected' });
+      }
     }
 
     // Abstract effort preset id — stored as-is (trim; empty → null). Resolved
@@ -699,6 +712,7 @@ export class TicketsController {
     if (base_branch !== undefined && (base_branch || '') !== (oldBaseBranch || '')) changes.push('base_branch');
     if (next_ticket_id !== undefined && (ticket.next_ticket_id || '') !== (oldNextTicketId || '')) changes.push('next_ticket');
     if (on_done_action_ids !== undefined && ticket.on_done_action_ids !== oldOnDoneActionIds) changes.push('on_done_action_ids');
+    if (handoff_spec !== undefined && (ticket.handoff_spec || '') !== (oldHandoffSpec || '')) changes.push('handoff_spec');
     if (effort_preset !== undefined && (ticket.effort_preset || '') !== (oldEffortPreset || '')) changes.push('effort_preset');
     if (pendingReasonChanged) changes.push('pending_reason');
     const otherChanges = changes.filter(c => !['assignee', 'reporter', 'status'].includes(c));

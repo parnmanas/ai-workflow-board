@@ -143,6 +143,38 @@ export class Ticket {
   @Column({ type: Date, nullable: true, default: null })
   qa_rerun_dispatched_at: Date | null;
 
+  // Cross-board handoff pipeline (ticket ac21a745). JSON string describing the
+  // relay this ticket kicks off when it lands on a terminal column:
+  // `{ hops: [{ target_board_id, target_column_name?, title_template?, ... }] }`
+  // (see common/handoff-spec-config.ts). HandoffService pops the first hop,
+  // creates a follow-up ticket on that board carrying this ticket's deliverable
+  // context, and passes the REMAINING hops down to the follow-up's own
+  // handoff_spec — so one spec drives a multi-board relay (기획→그래픽→클라→QA).
+  // '' / '{}' = no handoff (the default). Stored as a JSON string like
+  // `labels` / `on_done_action_ids` for SQLite/Postgres parity.
+  @Column({ type: 'varchar', default: '' })
+  handoff_spec: string;
+
+  // Idempotency stamp for the handoff relay (ticket ac21a745). A SEPARATE stamp
+  // from `on_done_dispatched_at` / `qa_rerun_dispatched_at` on purpose: all
+  // three hooks subscribe to the same terminal-entry stream, so sharing one
+  // claim column would let whichever fires first starve the others. HandoffService
+  // claims this the moment it dispatches the relay for this ticket's CURRENT
+  // terminal entry, with the same edge-claim predicate the on-done hook uses
+  // (`terminal_entered_at` set AND (stamp IS NULL OR stamp < terminal_entered_at)).
+  // Null until the handoff relay first fires.
+  @Column({ type: Date, nullable: true, default: null })
+  handoff_dispatched_at: Date | null;
+
+  // Relay lineage back-pointer (ticket ac21a745). Set on a ticket that was
+  // AUTO-CREATED as a handoff follow-up: points at the source ticket whose
+  // completion produced it. Empty for tickets not born from a handoff. Powers
+  // (a) reverse rejection — `reject_handoff` files the defect ticket back on the
+  // source's board, and (b) the pipeline rollup — walking source→follow-up links
+  // reconstructs the whole relay across boards.
+  @Column({ type: 'varchar', default: '' })
+  handoff_source_ticket_id: string;
+
   // User-intervention pending flag. When true the ticket is "parked" awaiting
   // a human decision: TriggerLoopService drops every agent_trigger for it
   // (so the agent's focus moves to another ticket), the auto-advance cascade

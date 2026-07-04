@@ -32,7 +32,31 @@ import {
 import { getCallerAgent } from '../shared/session-auth';
 import { isTerminalColumn, TicketArchivedError } from '../shared/archive-helpers';
 import { parseDefaultRoleAssignments, type DefaultRoleAssignments } from '../../../common/default-role-assignments-config';
+import { validateHandoffSpecInput } from '../../../common/handoff-spec-config';
 import type { ToolContext } from './context';
+
+/**
+ * Cross-board handoff relay spec accepted by create/update tools (ticket
+ * ac21a745). Shape doc only — the authoritative validation/normalization is
+ * `validateHandoffSpecInput` (common/handoff-spec-config.ts), which the handlers
+ * run at write time so there's a single source of truth. `.passthrough()` keeps
+ * the tool schema forgiving; a bad shape is rejected by the validator, not here.
+ */
+const HandoffHopInputSchema = z.object({
+  target_board_id: z.string().describe('Board the follow-up ticket is created on when this ticket completes'),
+  target_column_name: z.string().optional().describe('Target column (omit → first routed non-terminal column)'),
+  title_template: z.string().optional().describe('Follow-up title; supports {{source_title}}'),
+  description_template: z.string().optional().describe('Follow-up body; supports {{source_title}}/{{source_link}}/{{source_id}}/{{handoff_note}}/{{attachments}}. Carried context is always appended.'),
+  assignee_id: z.string().optional(),
+  reporter_id: z.string().optional(),
+  reviewer_id: z.string().optional(),
+  labels: z.array(z.string()).optional(),
+  priority: z.string().optional(),
+  effort_preset: z.string().optional(),
+  carry_attachments: z.boolean().optional().describe('Carry every source-ticket attachment onto the follow-up'),
+  carry_attachment_ids: z.array(z.string()).optional().describe('Carry only these specific resource ids'),
+}).passthrough();
+const HandoffSpecInputSchema = z.object({ hops: z.array(HandoffHopInputSchema) }).passthrough().nullable();
 
 /**
  * Schema for the per-ticket `role_assignments[]` payload accepted by
@@ -153,13 +177,21 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       subtasks: z.array(z.string()).optional().default([]).describe('List of subtask titles to create inline'),
       next_ticket_id: z.string().optional().describe('Optional pointer to the ticket TriggerLoopService should auto-trigger once this one lands on a terminal column. Must live in the same workspace; cleared when omitted or empty.'),
       effort_preset: z.string().optional().describe('Abstract effort preset id (NOT a CLI flag) referencing one of the board\'s effort_presets[].id. Empty/omitted = board default preset. Resolved against the board catalog at dispatch; agent-manager maps the matched preset onto per-CLI options.'),
+      handoff_spec: HandoffSpecInputSchema.optional().describe('Cross-board handoff relay (ticket ac21a745). `{ hops: [{ target_board_id, target_column_name?, title_template?, description_template?, assignee_id?, reporter_id?, reviewer_id?, labels?, priority?, effort_preset?, carry_attachments?, carry_attachment_ids? }] }`. When this ticket lands on a terminal column, HandoffService creates a follow-up ticket on the first hop\'s board (carrying this ticket\'s deliverable context) and hands the remaining hops to the follow-up — driving a multi-board relay (기획→그래픽→클라→QA) with zero human intervention. Omit / null / empty hops = no handoff.'),
       skip_default_assignments: z.boolean().optional().default(false).describe('Opt OUT of the board\'s default_role_assignments backfill (ticket d94a1b87). When the board defines default role holders, any role left unstaffed by this call is auto-filled from that config so the new ticket lands on the loop without manual staffing. Set true to keep the roles you did NOT explicitly assign VACANT — e.g. QA orphan probes that need a true zero-holder ticket. Explicitly-assigned roles are unaffected either way.'),
       created_by: z.string().optional().default('').describe('Creator name (user or agent)'),
       created_by_type: z.enum(['user', 'agent']).optional().default('agent').describe('Creator type'),
       created_by_id: z.string().optional().default('').describe('Creator ID'),
     },
-    async ({ title, description, priority, assignee, reporter, assignee_id, reporter_id, reviewer_id, role_assignments, labels, channel_ids, column_id, column_name, board_id, subtasks, next_ticket_id, effort_preset, skip_default_assignments, created_by, created_by_type, created_by_id }, extra: { sessionId?: string }) => {
+    async ({ title, description, priority, assignee, reporter, assignee_id, reporter_id, reviewer_id, role_assignments, labels, channel_ids, column_id, column_name, board_id, subtasks, next_ticket_id, effort_preset, handoff_spec, skip_default_assignments, created_by, created_by_type, created_by_id }, extra: { sessionId?: string }) => {
       const __createSanitizeCaller = getCallerAgent(extra);
+      // Validate the handoff relay spec up front (throws → clean err) so a typo
+      // surfaces as a 400 instead of a silently-dropped relay.
+      let handoffSpecJson = '';
+      if (handoff_spec !== undefined) {
+        try { handoffSpecJson = validateHandoffSpecInput(handoff_spec); }
+        catch (e: any) { return err(e?.message || 'handoff_spec rejected'); }
+      }
       description = sanitizeHarnessMarkers(description, { logger, toolName: 'create_ticket', fieldName: 'description', agentId: __createSanitizeCaller?.agentId });
       let resolvedColumnId = column_id;
       if (!resolvedColumnId && column_name) {
@@ -258,6 +290,8 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           // against the board catalog at dispatch; null = board default.
           effort_preset: typeof effort_preset === 'string' && effort_preset.trim() ? effort_preset.trim() : null,
           terminal_entered_at: terminalEnteredAt,
+          // Cross-board handoff relay spec (validated above; '' = no handoff).
+          handoff_spec: handoffSpecJson,
           created_by: creatorName, created_by_type: creatorType, created_by_id: creatorId,
         }));
 
@@ -347,10 +381,11 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       next_ticket_id: z.string().optional().describe('Optional pointer to the ticket TriggerLoopService should auto-trigger once this one lands on a terminal column. Must live in the same workspace and cannot self-link. Empty string clears.'),
       on_done_action_ids: z.array(z.string()).optional().describe('Action ids to dispatch once when this ticket lands on a terminal column (on-ticket-done hook, method "a"). The finished ticket is exposed to each Action prompt as {{ticket.*}}. enabled=false actions are skipped. Empty array clears the per-ticket binding.'),
       effort_preset: z.string().optional().describe('Abstract effort preset id (NOT a CLI flag) referencing one of the board\'s effort_presets[].id. Empty string clears (board default preset applies). Resolved against the board catalog at dispatch; agent-manager maps the matched preset onto per-CLI options.'),
+      handoff_spec: HandoffSpecInputSchema.optional().describe('Cross-board handoff relay (ticket ac21a745). `{ hops: [{ target_board_id, target_column_name?, ... }] }` — on terminal-column entry HandoffService creates a follow-up on the first hop\'s board carrying this ticket\'s deliverable context and passes remaining hops down (multi-board relay). null / { hops: [] } clears the handoff.'),
       pending_user_action: z.boolean().optional().describe('Park the ticket for user intervention. While true, TriggerLoopService drops every agent_trigger for this ticket, AgentWorkloadService.getFocusTicket skips it, and BacklogPromotionService refuses to promote into its column slot. Pair with `pending_reason` so the user can see why. Use this when a decision genuinely needs a human and would otherwise loop the ticket between System and Agent columns. Prefer the dedicated `pend_ticket` / `unpend_ticket` tools when the call is single-purpose.'),
       pending_reason: z.string().optional().describe('Free-text explanation rendered verbatim on the ticket detail panel\'s "User" tab. Cleared automatically when pending_user_action transitions to false.'),
     },
-    async ({ ticket_id, title, description, priority, assignee, reporter, assignee_id, reporter_id, reviewer_id, role_assignments, labels, channel_ids, base_repo_resource_id, base_branch, next_ticket_id, on_done_action_ids, effort_preset, pending_user_action, pending_reason }, extra: { sessionId?: string }) => {
+    async ({ ticket_id, title, description, priority, assignee, reporter, assignee_id, reporter_id, reviewer_id, role_assignments, labels, channel_ids, base_repo_resource_id, base_branch, next_ticket_id, on_done_action_ids, effort_preset, handoff_spec, pending_user_action, pending_reason }, extra: { sessionId?: string }) => {
       const ticketRepo = dataSource.getRepository(Ticket);
       const ticket = await ticketRepo.findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Ticket not found');
@@ -462,6 +497,19 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
         const cleaned = Array.from(new Set(on_done_action_ids.filter((s) => typeof s === 'string' && s)));
         ticket.on_done_action_ids = JSON.stringify(cleaned);
         changes.push('on_done_action_ids');
+      }
+      if (handoff_spec !== undefined) {
+        // Cross-board handoff relay spec (ticket ac21a745). Validate → canonical
+        // JSON string ('' clears). Throws on a bad shape so a typo is loud.
+        try {
+          const nextSpec = validateHandoffSpecInput(handoff_spec);
+          if ((ticket.handoff_spec || '') !== nextSpec) {
+            ticket.handoff_spec = nextSpec;
+            changes.push('handoff_spec');
+          }
+        } catch (e: any) {
+          return err(e?.message || 'handoff_spec rejected');
+        }
       }
       if (effort_preset !== undefined) {
         // Abstract effort preset id — stored as-is (trim; empty → null).
