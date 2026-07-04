@@ -30,10 +30,12 @@ SSE stream and does **not** spawn subagents.
 awb-agent-manager (single Node process per host/instance)
 ├── EventStream           SSE consumer; reconnect with backoff
 ├── EventDispatcher       routes incoming events by type
-│   ├── trigger_event       → SubagentManager (spawn ticket subagent)
-│   ├── chat_room_message   → ChatSessionManager (persistent room session)
-│   ├── ticket_*            → TicketSessionManager (persistent ticket session)
-│   ├── fs_browse_request   → FsBrowser (reverse-RPC fs handler)
+│   ├── agent_trigger        → TicketSessionManager (dispatch ticket subagent)
+│   ├── board_update         → TicketSessionManager (persistent ticket session)
+│   ├── comment_mention      → TicketSessionManager (mention fan-out)
+│   ├── chat_request         → ChatSessionManager (ticket-chat session)
+│   ├── chat_room_message    → ChatSessionManager (persistent room session)
+│   ├── fs_request           → FsBrowser (reverse-RPC fs handler)
 │   └── agent_manager_command → AgentManagerCommandHandler (admin RPC)
 ├── ManagedAgentRegistry  in-memory state of CLI children (status, pid, cwd)
 ├── InstanceHeartbeat     POST /api/agent/instance-heartbeat every 30s
@@ -113,17 +115,25 @@ Display code alphabet: `ABCDEFGHJKLMNPQRSTUVWXYZ23456789` (no
 
 ## SSE event contract
 
-Events arrive on the AWB SSE stream (`GET /api/sse/...`, scoped by API key).
-The dispatcher maps `event.type` to the right handler:
+Events arrive on the AWB SSE stream (`GET /api/events/stream`, scoped by API
+key via `?token=` or `Authorization: Bearer`). The dispatcher maps `event.type`
+to the right handler:
 
-| `type`                  | Handler                          | Notes                                                 |
-|-------------------------|----------------------------------|-------------------------------------------------------|
-| `trigger_event`         | `SubagentManager`                | Spawns a ticket-scoped Claude subagent                |
-| `ticket_*`              | `TicketSessionManager`           | Forwards into the long-lived ticket session           |
-| `chat_room_message`     | `ChatSessionManager`             | Forwards into the chat-room session                   |
-| `fs_browse_request`     | `FsBrowser`                      | Reverse-RPC: lists / reads files in scoped paths      |
-| `agent_manager_command` | `AgentManagerCommandHandler`     | Admin → manager RPC (see below)                       |
-| `instance_*`            | `InstanceHeartbeat` (passive)    | Server-side reconciliation only                       |
+| `type`                  | Handler                        | Notes                                                             |
+|-------------------------|--------------------------------|-------------------------------------------------------------------|
+| `agent_trigger`         | `TicketSessionManager`         | Dispatches into the ticket session; one-shot spawn falls back to `SubagentManager` |
+| `board_update`          | `TicketSessionManager`         | Forwards board/ticket updates into the long-lived ticket session  |
+| `comment_mention`       | `TicketSessionManager`         | Mention fan-out into the ticket session (spawn fallback)          |
+| `chat_request`          | `ChatSessionManager`           | Forwards into the ticket-chat session (spawn fallback)            |
+| `chat_room_message`     | `ChatSessionManager`           | Forwards into the chat-room session (spawn fallback)             |
+| `fs_request`            | `FsBrowser`                    | Reverse-RPC: lists / reads files in scoped paths                  |
+| `agent_manager_command` | `AgentManagerCommandHandler`   | Admin → manager RPC (see below)                                   |
+
+The dispatcher switches on exactly these seven `type` strings; every other event
+the server emits (`agent_instance_update`, `agent_typing`, `consensus_update`,
+`server_meta`, `ping` keepalive, …) hits the `default` branch and is silently
+dropped. Instance heartbeat is an **outbound** `POST /api/agent/instance-heartbeat`
+from the manager, not an inbound SSE event.
 
 ### Multi-holder fan-out & consensus (T2–T7, manager ≥ 0.10.0)
 
