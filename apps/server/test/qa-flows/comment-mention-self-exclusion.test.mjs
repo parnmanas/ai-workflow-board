@@ -24,6 +24,7 @@ import {
   createAgent,
   createApiKey,
   createTicket,
+  addRoleHolder,
 } from '../helpers/fixtures.mjs';
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
@@ -31,28 +32,6 @@ import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 // from the prior test can't collide (EADDRINUSE).
 const BASE_PORT = parseInt(process.env.QA_MENTION_SELF_EXCL_PORT || '7853', 10);
 process.env.PORT = String(BASE_PORT);
-
-/**
- * Seed a SECOND agent holder onto the ticket's assignee role. createTicket
- * wrote the first holder with holder_key='' (fixture default); a distinct
- * holder_key ('agent:<id>') is required or the second row collides on the
- * uniq_ticket_role_holder index (same shape as multi-holder-fanout.test.mjs).
- */
-async function addAssigneeHolder(app, getDataSourceToken, { ticketId, workspaceId, agentId }) {
-  const ds = app.get(getDataSourceToken());
-  const role = await ds.getRepository('WorkspaceRole').findOne({
-    where: { workspace_id: workspaceId, slug: 'assignee' },
-  });
-  assert.ok(role, 'assignee WorkspaceRole must exist');
-  const assignRepo = ds.getRepository('TicketRoleAssignment');
-  await assignRepo.save(assignRepo.create({
-    ticket_id: ticketId,
-    role_id: role.id,
-    agent_id: agentId,
-    user_id: null,
-    holder_key: `agent:${agentId}`,
-  }));
-}
 
 async function seedTwoAssigneeScene(app, getDataSourceToken, port, wsName) {
   const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: wsName });
@@ -68,7 +47,7 @@ async function seedTwoAssigneeScene(app, getDataSourceToken, port, wsName) {
     title: 'Discussion self-exclusion',
     assigneeId: agentA.id,
   });
-  await addAssigneeHolder(app, getDataSourceToken, {
+  await addRoleHolder(app, getDataSourceToken, {
     ticketId: ticket.id, workspaceId: ws.id, agentId: agentB.id,
   });
 

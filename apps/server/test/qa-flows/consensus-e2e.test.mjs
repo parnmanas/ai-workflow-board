@@ -24,31 +24,13 @@ import {
   createAgent,
   createApiKey,
   createTicket,
+  addRoleHolder,
 } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
 const BASE_PORT = parseInt(process.env.QA_CONSENSUS_E2E_PORT || '7881', 10);
 process.env.PORT = String(BASE_PORT);
-
-/** consensus-gate/record-agreement 와 동일한 두 번째 assignee 홀더 픽스처.
- *  createTicket 이 첫 홀더를 holder_key='' 로 심으므로 두 번째는
- *  holder_key='agent:<id>' 로 유니크 인덱스를 회피한다. */
-async function addAssigneeHolder(app, getDataSourceToken, { ticketId, workspaceId, agentId }) {
-  const ds = app.get(getDataSourceToken());
-  const role = await ds.getRepository('WorkspaceRole').findOne({
-    where: { workspace_id: workspaceId, slug: 'assignee' },
-  });
-  assert.ok(role, 'assignee WorkspaceRole must exist');
-  const assignRepo = ds.getRepository('TicketRoleAssignment');
-  await assignRepo.save(assignRepo.create({
-    ticket_id: ticketId,
-    role_id: role.id,
-    agent_id: agentId,
-    user_id: null,
-    holder_key: `agent:${agentId}`,
-  }));
-}
 
 async function mcpFor(port, apiKey) {
   const c = new McpClient({ baseUrl: `http://localhost:${port}`, apiKey });
@@ -82,7 +64,7 @@ test('E2E: 2홀더 논의→object→재제안(표 리셋)→전원 agree→auto
     reporterId: trio.reporter.agent.id,
     reviewerId: trio.reviewer.agent.id,
   });
-  await addAssigneeHolder(app, getDataSourceToken, {
+  await addRoleHolder(app, getDataSourceToken, {
     ticketId: ticket.id, workspaceId: ws.id, agentId: holderB.agent.id,
   });
 

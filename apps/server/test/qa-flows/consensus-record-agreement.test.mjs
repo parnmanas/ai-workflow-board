@@ -18,33 +18,13 @@ import {
   createAgent,
   createApiKey,
   createTicket,
+  addRoleHolder,
 } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
 const BASE_PORT = parseInt(process.env.QA_CONSENSUS_PORT || '7861', 10);
 process.env.PORT = String(BASE_PORT);
-
-/**
- * assignee 역할에 두 번째 홀더를 추가(multi-holder-fanout 픽스처와 동일 패턴).
- * createTicket 이 첫 홀더를 holder_key='' 로 심으므로, 두 번째는 구별되는
- * holder_key='agent:<id>' 가 필요하다(유니크 인덱스 회피).
- */
-async function addAssigneeHolder(app, getDataSourceToken, { ticketId, workspaceId, agentId }) {
-  const ds = app.get(getDataSourceToken());
-  const role = await ds.getRepository('WorkspaceRole').findOne({
-    where: { workspace_id: workspaceId, slug: 'assignee' },
-  });
-  assert.ok(role, 'assignee WorkspaceRole must exist');
-  const assignRepo = ds.getRepository('TicketRoleAssignment');
-  await assignRepo.save(assignRepo.create({
-    ticket_id: ticketId,
-    role_id: role.id,
-    agent_id: agentId,
-    user_id: null,
-    holder_key: `agent:${agentId}`,
-  }));
-}
 
 async function mcpFor(port, apiKey) {
   const c = new McpClient({ baseUrl: `http://localhost:${port}`, apiKey });
@@ -67,7 +47,7 @@ async function twoHolderScene(app, getDataSourceToken, name) {
     assigneeId: trio.assignee.agent.id,
     reporterId: trio.reporter.agent.id,
   });
-  await addAssigneeHolder(app, getDataSourceToken, {
+  await addRoleHolder(app, getDataSourceToken, {
     ticketId: ticket.id, workspaceId: ws.id, agentId: holderB.agent.id,
   });
   return { ws, columns, trio, holderB, ticket };

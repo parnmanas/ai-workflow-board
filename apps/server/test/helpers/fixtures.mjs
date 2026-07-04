@@ -275,6 +275,47 @@ export async function createTicket(
 }
 
 /**
+ * Seed an ADDITIONAL holder onto an existing ticket role (다중담당자 — a
+ * single routed role may be co-held by several agents since T1 relaxed the
+ * TicketRoleAssignment uniqueness to (ticket, role, holder)). createTicket
+ * already wrote the FIRST holder per builtin slug with holder_key='' (the
+ * fixture default); a distinct holder_key ('agent:<id>') is required or the
+ * second row collides on the uniq_ticket_role_holder index. Production sets
+ * holder_key via TicketRoleAssignmentService; this raw-repo fixture mirrors
+ * that so multi-holder QA flows (fan-out, consensus gate, mention exclusion)
+ * can build a role with >1 agent holder. `slug` defaults to 'assignee' —
+ * the role the multi-holder flows exercise — but any builtin slug works.
+ */
+export async function addRoleHolder(
+  app,
+  getDataSourceToken,
+  { ticketId, workspaceId, agentId, slug = 'assignee' },
+) {
+  const ds = app.get(getDataSourceToken());
+  const role = await ds.getRepository('WorkspaceRole').findOne({
+    where: { workspace_id: workspaceId, slug },
+  });
+  if (!role) {
+    throw new Error(`addRoleHolder: ${slug} WorkspaceRole must exist for workspace ${workspaceId}`);
+  }
+  const assignRepo = ds.getRepository('TicketRoleAssignment');
+  const row = await assignRepo.save(assignRepo.create({
+    ticket_id: ticketId,
+    role_id: role.id,
+    agent_id: agentId,
+    user_id: null,
+    holder_key: `agent:${agentId}`,
+  }));
+  traceEvent('fixture', {
+    kind: 'role-holder',
+    ticket_id: ticketId,
+    role: slug,
+    agent_id: agentId,
+  });
+  return row;
+}
+
+/**
  * Standard Kanban scene: workspace + board + 5 columns + routing_config.
  *
  * Routing:

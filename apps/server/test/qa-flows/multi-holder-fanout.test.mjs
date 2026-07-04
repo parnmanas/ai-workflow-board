@@ -20,6 +20,7 @@ import {
   createAgent,
   createApiKey,
   createTicket,
+  addRoleHolder,
 } from '../helpers/fixtures.mjs';
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
@@ -27,29 +28,6 @@ import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 // listener from the prior test can't collide (EADDRINUSE).
 const BASE_PORT = parseInt(process.env.QA_MULTI_HOLDER_FANOUT_PORT || '7841', 10);
 process.env.PORT = String(BASE_PORT);
-
-/**
- * Seed a SECOND agent holder onto an existing role assignment. createTicket
- * already wrote the first holder with holder_key='' (the fixture default);
- * a distinct holder_key ('agent:<id>') is required or the second row collides
- * on the uniq_ticket_role_holder index. Production sets holder_key via
- * TicketRoleAssignmentService; the raw-repo fixture mirrors that here.
- */
-async function addAssigneeHolder(app, getDataSourceToken, { ticketId, workspaceId, agentId }) {
-  const ds = app.get(getDataSourceToken());
-  const role = await ds.getRepository('WorkspaceRole').findOne({
-    where: { workspace_id: workspaceId, slug: 'assignee' },
-  });
-  assert.ok(role, 'assignee WorkspaceRole must exist');
-  const assignRepo = ds.getRepository('TicketRoleAssignment');
-  await assignRepo.save(assignRepo.create({
-    ticket_id: ticketId,
-    role_id: role.id,
-    agent_id: agentId,
-    user_id: null,
-    holder_key: `agent:${agentId}`,
-  }));
-}
 
 test('multi-holder fan-out: two assignee holders both get triggered', async (t) => {
   const { app, port, modules } = await bootApp({ port: BASE_PORT });
@@ -77,7 +55,7 @@ test('multi-holder fan-out: two assignee holders both get triggered', async (t) 
     assigneeId: trio.assignee.agent.id,
     reporterId: trio.reporter.agent.id,
   });
-  await addAssigneeHolder(app, getDataSourceToken, {
+  await addRoleHolder(app, getDataSourceToken, {
     ticketId: ticket.id, workspaceId: ws.id, agentId: holderB.agent.id,
   });
 
@@ -130,7 +108,7 @@ test('per-holder self-guard: actor holder is skipped, other holder still fans ou
     title: 'Per-holder self-guard',
     assigneeId: trio.assignee.agent.id,
   });
-  await addAssigneeHolder(app, getDataSourceToken, {
+  await addRoleHolder(app, getDataSourceToken, {
     ticketId: ticket.id, workspaceId: ws.id, agentId: holderB.agent.id,
   });
 
