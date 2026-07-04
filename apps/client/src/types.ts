@@ -279,6 +279,73 @@ export interface ActionRun {
   created_at: string;
 }
 
+// ─── Feature/Epic intake (ticket aae7644c) ─────────────────────────────────
+export type FeatureStatus =
+  | 'draft'
+  | 'planning'
+  | 'proposed'
+  | 'approved'
+  | 'running'
+  | 'done'
+  | 'rejected';
+
+export interface FeatureProposedTicket {
+  key: string;
+  title: string;
+  description?: string;
+  priority?: 'low' | 'medium' | 'high' | 'critical';
+  labels?: string[];
+  effort_preset?: string | null;
+  column_name?: string;
+  assignee_id?: string;
+  reporter_id?: string;
+  reviewer_id?: string;
+}
+
+export interface FeatureChainEdge {
+  from: string;
+  to: string;
+}
+
+export interface FeatureChainProposal {
+  summary?: string;
+  tickets: FeatureProposedTicket[];
+  edges?: FeatureChainEdge[];
+}
+
+export interface FeatureRollupTicket {
+  id: string;
+  title: string;
+  column_id: string | null;
+  column_name: string | null;
+  terminal: boolean;
+}
+
+export interface FeatureRollup {
+  total: number;
+  done: number;
+  tickets: FeatureRollupTicket[];
+}
+
+export interface Feature {
+  id: string;
+  workspace_id: string;
+  board_id: string | null;
+  title: string;
+  requirement: string;
+  status: FeatureStatus;
+  planner_agent_id: string;
+  proposal: FeatureChainProposal | null;
+  generated_ticket_ids: string[];
+  planning_room_id: string;
+  feedback: string;
+  source_chat_room_id: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  rollup?: FeatureRollup;
+}
+
 // ─── Scenario-based QA (ticket 3c655d20) ───────────────────────────────────
 export interface QaScenarioStep {
   idx: number;

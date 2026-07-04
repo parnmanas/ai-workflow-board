@@ -3,6 +3,7 @@ import type {
   Resource,
   Action,
   ActionRun,
+  Feature,
   QaScenario,
   QaScenarioListItem,
   QaRun,
@@ -1004,6 +1005,29 @@ export const api = {
     const params = new URLSearchParams({ workspace_id: workspaceId });
     return request<ActionRun>(`/actions/runs/${runId}?${params.toString()}`);
   },
+
+  // ─── Feature/Epic intake (ticket aae7644c) ────────────
+  listFeatures: (workspaceId: string, boardId?: string | null) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    if (boardId !== undefined && boardId !== null) params.set('board_id', boardId);
+    return request<Feature[]>(`/features?${params.toString()}`);
+  },
+  getFeature: (id: string) => request<Feature>(`/features/${id}`),
+  createFeature: (data: {
+    workspace_id: string;
+    board_id?: string | null;
+    title: string;
+    requirement: string;
+    planner_agent_id?: string;
+    source_chat_room_id?: string;
+    auto_plan?: boolean;
+  }) => request<Feature>('/features', { method: 'POST', body: JSON.stringify(data) }),
+  approveFeature: (id: string) =>
+    request<Feature>(`/features/${id}/approve`, { method: 'POST', body: '{}' }),
+  rejectFeature: (id: string, feedback: string, replan = true) =>
+    request<Feature>(`/features/${id}/reject`, { method: 'POST', body: JSON.stringify({ feedback, replan }) }),
+  replanFeature: (id: string) =>
+    request<Feature>(`/features/${id}/replan`, { method: 'POST', body: '{}' }),
 
   // ─── Scenario-based QA (ticket 3c655d20) ──────────────
   listQaScenarios: (workspaceId: string, boardId?: string | null) => {

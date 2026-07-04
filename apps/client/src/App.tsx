@@ -14,6 +14,7 @@ import BoardSettingsPage from './components/BoardSettingsPage';
 import BoardResourcesPage from './components/BoardResourcesPage';
 import BoardArchivePage from './components/BoardArchivePage';
 import BoardActionsPage from './components/BoardActionsPage';
+import BoardFeaturesPage from './components/BoardFeaturesPage';
 import BoardQaPage from './components/BoardQaPage';
 import BoardSecurityPage from './components/BoardSecurityPage';
 import BenchmarkLeaderboardPage from './components/BenchmarkLeaderboardPage';
@@ -160,6 +161,7 @@ function AppContent() {
           <Route path="boards/:boardId" element={<Board />} />
           <Route path="boards/:boardId/resources" element={<BoardResourcesPage />} />
           <Route path="boards/:boardId/actions" element={<BoardActionsPage />} />
+          <Route path="boards/:boardId/features" element={<BoardFeaturesPage />} />
           <Route path="boards/:boardId/qa" element={<BoardQaPage />} />
           <Route path="boards/:boardId/security" element={<BoardSecurityPage />} />
           <Route path="boards/:boardId/settings" element={<BoardSettingsPage />} />
