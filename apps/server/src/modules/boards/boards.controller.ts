@@ -29,6 +29,7 @@ import { validateEffortPresetsInput, serializeEffortPresets } from '../../common
 import { validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../../common/environment-config';
 import { validateMergeGateConfigInput, serializeMergeGateConfig } from '../../common/merge-gate-config';
 import { validateRespawnStormConfigInput, serializeRespawnStormConfig } from '../../common/respawn-storm-config';
+import { validateDefaultRoleAssignmentsInput, serializeDefaultRoleAssignments } from '../../common/default-role-assignments-config';
 import { validateQaPhasesInput, serializeQaPhases } from '../qa/qa-phases';
 
 // Narrow projection of a Comment as it ships on a board card. The board GET
@@ -451,7 +452,7 @@ export class BoardsController {
   async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     const board = await findOrFail(this.boardRepo, { where: { id } }, 'Board not found');
 
-    const { name, description, routing_config, column_prompts, max_concurrent_tickets_per_agent, self_improvement_mode, benchmark_mode, auto_archive_days, harness_config, effort_presets, language, environment_config, qa_phases, merge_gate_config, respawn_storm_config } = body;
+    const { name, description, routing_config, column_prompts, max_concurrent_tickets_per_agent, self_improvement_mode, benchmark_mode, auto_archive_days, harness_config, effort_presets, language, environment_config, qa_phases, merge_gate_config, respawn_storm_config, default_role_assignments } = body;
     if (name !== undefined) board.name = name;
     if (description !== undefined) board.description = description;
     // Board output language (i18n, ticket ae28dcaf). Human-readable name that
@@ -596,6 +597,23 @@ export class BoardsController {
         const checked = validateRespawnStormConfigInput(respawn_storm_config);
         if (!checked.ok) return res.status(400).json({ error: checked.error });
         board.respawn_storm_config = serializeRespawnStormConfig(checked.value);
+      }
+    }
+
+    // Per-board DEFAULT role holders (ticket d94a1b87). null / {} clears the
+    // config. Two-layer validation: the JSON shape (validateDefaultRoleAssignmentsInput)
+    // then the DB-existence layer (every slug a real workspace role, every id a
+    // real agent/user) via validateBoardDefaults — so a typo 400s instead of
+    // silently manufacturing an orphan default at ticket-create time.
+    if (default_role_assignments !== undefined) {
+      if (default_role_assignments === null) {
+        board.default_role_assignments = null;
+      } else {
+        const checked = validateDefaultRoleAssignmentsInput(default_role_assignments);
+        if (!checked.ok) return res.status(400).json({ error: checked.error });
+        const dbCheck = await this.ticketRoleAssignments.validateBoardDefaults(board.workspace_id, checked.value);
+        if (!dbCheck.ok) return res.status(400).json({ error: dbCheck.error });
+        board.default_role_assignments = serializeDefaultRoleAssignments(checked.value);
       }
     }
 
