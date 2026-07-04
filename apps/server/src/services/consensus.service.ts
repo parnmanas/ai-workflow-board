@@ -229,16 +229,26 @@ export interface ConsensusMoveGate {
 }
 
 /**
- * T5 이동 게이트 판정. 현재 컬럼 라우팅 홀더가 ≥2 이고 `satisfied=false` 면
- * `blocked=true`. 홀더 ≤1 이면 항상 `blocked=false`(제안 ceremony 불필요).
- * `force`/reporter override 우회는 **호출측**(move_ticket)이 판단한다 — 이 함수는
- * 순수 판정만.
+ * T5 이동 게이트 판정. 현재 컬럼 라우팅 홀더가 ≥2 이고 미성립이면 `blocked=true`.
+ * 홀더 ≤1 이면 항상 `blocked=false`(제안 ceremony 불필요). `force`/reporter override
+ * 우회는 **호출측**(move_ticket)이 판단한다 — 이 함수는 순수 판정만.
  *
  * 앵커는 **열린(미실행) 제안**으로 고정한다. 앵커를 생략(=최신 vote 가 참조한
  * proposalId)하면 auto-execute 로 이미 소진된 제안의 표가 다음 컬럼의 게이트를
  * 다시 만족시켜 — 합의가 티켓당 사실상 1회로 붕괴한다(실행 경로는 findOpenProposal
  * 로 소진을 방어하는데 게이트만 무방비인 비대칭). 열린 제안이 없으면 null 앵커 —
  * 소진된 제안을 참조하는 표는 전부 stale(pending) 처리된다.
+ *
+ * **게이트는 열린 제안이 있을 때만 통과시킨다(ticket bd6d58db).** 열린 제안이
+ * 없으면(null 앵커) `state.satisfied` 여도 `blocked=true` 를 유지한다. null 앵커로
+ * satisfied 가 되는 두 경로 — (1) 열린 제안 없이 던진 null-agree 표, (2) null-앵커
+ * reporter override — 는 제안(executed_at 소진)과 달리 **소진 메커니즘이 없어**, 한
+ * 번 게이트를 통과하면 앵커가 null 인 동안 다음 컬럼에서도 같은 표가 계속 게이트를
+ * 연다(컬럼마다 재게이트되지 않는 지속성 우회). 정상 ceremony(propose_move)는 늘
+ * 열린 제안을 앵커로 satisfied 되므로 무영향이고, 단일홀더(required<2)는 애초에
+ * 차단되지 않는다. reporter 의 무제안 강제 통과는 `move_ticket(force=true)` 또는
+ * propose_move 후 record_agreement(override)(열린 제안 auto-execute) 로 대체된다 —
+ * 둘 다 소진/1회성이라 지속성이 없다.
  */
 export async function evaluateConsensusMoveGate(
   deps: ConsensusResolverDeps,
@@ -246,6 +256,10 @@ export async function evaluateConsensusMoveGate(
 ): Promise<ConsensusMoveGate> {
   const open = await findOpenProposal(deps.dataSource, ticket.id);
   const state = await getConsensusState(deps, ticket, { proposalId: open ? open.proposalId : null });
-  const blocked = state.required.length >= 2 && !state.satisfied;
+  // 게이트 통과는 **열린 제안** 앵커의 합의로만 인정한다(null 앵커 satisfied 는
+  // 소진되지 않아 컬럼 간 지속 우회를 만든다). openProposal 은 마지막 승인 순간
+  // auto-execute 가 executed_at 으로 소진하므로, 이동 후 다음 컬럼에선 다시 null → 재게이트.
+  const satisfiedForGate = state.satisfied && open !== null;
+  const blocked = state.required.length >= 2 && !satisfiedForGate;
   return { blocked, state, openProposal: open };
 }
