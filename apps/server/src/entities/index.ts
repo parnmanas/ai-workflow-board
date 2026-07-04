@@ -45,3 +45,6 @@ export { WorkspaceSchedule } from './WorkspaceSchedule';
 // Deployment awareness (ticket 8ce72b18) — the current live commit per environment.
 export { Deployment } from './Deployment';
 export { Feature } from './Feature';
+// Board knowledge base (ticket 9d0d6ac4) — per-board Lessons/Runbook entries
+// injected into dispatch prompts.
+export { BoardLesson } from './BoardLesson';
