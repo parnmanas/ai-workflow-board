@@ -32,6 +32,13 @@ import { validateMergeGateConfigInput, serializeMergeGateConfig } from '../../co
 import { validateRespawnStormConfigInput, serializeRespawnStormConfig } from '../../common/respawn-storm-config';
 import { validateDefaultRoleAssignmentsInput, serializeDefaultRoleAssignments } from '../../common/default-role-assignments-config';
 import { validateQaPhasesInput, serializeQaPhases } from '../qa/qa-phases';
+import { BoardLesson } from '../../entities/BoardLesson';
+import {
+  validateBoardLessonInput,
+  validateBoardLessonUpdate,
+  parseLessonTags,
+  serializeLessonTags,
+} from '../../common/board-lessons';
 
 // Narrow projection of a Comment as it ships on a board card. The board GET
 // only needs enough to render the comment count and the stale-open-question
@@ -64,6 +71,7 @@ export class BoardsController {
     @InjectRepository(Board) private readonly boardRepo: Repository<Board>,
     @InjectRepository(BoardColumn) private readonly colRepo: Repository<BoardColumn>,
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
+    @InjectRepository(BoardLesson) private readonly lessonRepo: Repository<BoardLesson>,
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly promptTemplatesService: PromptTemplatesService,
     private readonly agentWorkload: AgentWorkloadService,
@@ -742,6 +750,116 @@ export class BoardsController {
   async delete(@Param('id') id: string, @Res() res: Response) {
     const result = await this.boardRepo.delete(id);
     if (result.affected === 0) return res.status(404).json({ error: 'Board not found' });
+    return res.json({ success: true });
+  }
+
+  // ── Board Lessons / Runbook (ticket 9d0d6ac4) ────────────────────────────
+  // Board-scoped knowledge base. Active lessons are auto-injected into the
+  // board's dispatch prompts (TriggerLoopService._emitTrigger). These endpoints
+  // back the Board Settings > Lessons UI and mirror the MCP tools
+  // (add/list/update_board_lesson). tags decode to an array on the wire.
+
+  private projectLesson(row: BoardLesson) {
+    return {
+      id: row.id,
+      workspace_id: row.workspace_id,
+      board_id: row.board_id,
+      title: row.title,
+      body: row.body,
+      tags: parseLessonTags(row.tags),
+      source_ticket_id: row.source_ticket_id,
+      active: row.active,
+      hit_count: row.hit_count,
+      created_by: row.created_by,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    };
+  }
+
+  @Get(':id/lessons')
+  async listLessons(
+    @Param('id') id: string,
+    @Query('include_inactive') includeInactive: string,
+    @Res() res: Response,
+  ) {
+    const where: any = { board_id: id };
+    if (includeInactive !== 'true') where.active = true;
+    const rows = await this.lessonRepo.find({ where, order: { updated_at: 'DESC' } });
+    return res.json(rows.map((r) => this.projectLesson(r)));
+  }
+
+  @Post(':id/lessons')
+  async createLesson(
+    @Param('id') id: string,
+    @Body() body: any,
+    @CurrentUser() user: CurrentUserData | undefined,
+    @Res() res: Response,
+  ) {
+    const board = await this.boardRepo.findOne({ where: { id } });
+    if (!board) return res.status(404).json({ error: 'Board not found' });
+
+    const checked = validateBoardLessonInput({
+      title: body?.title,
+      body: body?.body,
+      tags: body?.tags,
+      source_ticket_id: body?.source_ticket_id,
+    });
+    if (!checked.ok) return res.status(400).json({ error: checked.error });
+
+    const row = this.lessonRepo.create({
+      workspace_id: board.workspace_id ?? null,
+      board_id: id,
+      title: checked.value.title,
+      body: checked.value.body,
+      tags: serializeLessonTags(checked.value.tags),
+      source_ticket_id: checked.value.source_ticket_id || null,
+      active: true,
+      hit_count: 0,
+      created_by: user?.name || 'user',
+    });
+    const saved = await this.lessonRepo.save(row);
+    return res.status(201).json(this.projectLesson(saved));
+  }
+
+  @Patch(':id/lessons/:lessonId')
+  async updateLesson(
+    @Param('id') id: string,
+    @Param('lessonId') lessonId: string,
+    @Body() body: any,
+    @Res() res: Response,
+  ) {
+    const row = await this.lessonRepo.findOne({ where: { id: lessonId, board_id: id } });
+    if (!row) return res.status(404).json({ error: 'Lesson not found' });
+
+    // Only validate the fields actually supplied.
+    const patch: Record<string, unknown> = {};
+    if (body?.title !== undefined) patch.title = body.title;
+    if (body?.body !== undefined) patch.body = body.body;
+    if (body?.tags !== undefined) patch.tags = body.tags;
+    if (body?.source_ticket_id !== undefined) patch.source_ticket_id = body.source_ticket_id;
+    if (body?.active !== undefined) patch.active = body.active;
+    const checked = validateBoardLessonUpdate(patch);
+    if (!checked.ok) return res.status(400).json({ error: checked.error });
+
+    const v = checked.value;
+    if (v.title !== undefined) row.title = v.title;
+    if (v.body !== undefined) row.body = v.body;
+    if (v.tags !== undefined) row.tags = serializeLessonTags(v.tags);
+    if (v.source_ticket_id !== undefined) row.source_ticket_id = v.source_ticket_id || null;
+    if (v.active !== undefined) row.active = v.active;
+
+    const saved = await this.lessonRepo.save(row);
+    return res.json(this.projectLesson(saved));
+  }
+
+  @Delete(':id/lessons/:lessonId')
+  async deleteLesson(
+    @Param('id') id: string,
+    @Param('lessonId') lessonId: string,
+    @Res() res: Response,
+  ) {
+    const result = await this.lessonRepo.delete({ id: lessonId, board_id: id });
+    if (result.affected === 0) return res.status(404).json({ error: 'Lesson not found' });
     return res.json({ success: true });
   }
 }

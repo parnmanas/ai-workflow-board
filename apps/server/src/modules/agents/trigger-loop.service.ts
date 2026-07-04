@@ -1,6 +1,6 @@
 import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { DataSource, In } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { Ticket } from '../../entities/Ticket';
@@ -23,6 +23,8 @@ import { priorityIndex } from './priority';
 import { appendBoardLanguageInstruction, resolveHarnessConfig, HarnessConfig } from '../../common/harness-config';
 import { resolveEffortPreset, ResolvedEffortPreset } from '../../common/effort-presets';
 import { mergeEnvironmentConfig, resolveEnvironmentConfig, ResolvedEnvironmentConfig } from '../../common/environment-config';
+import { appendBoardLessons, MAX_INJECTED_LESSONS } from '../../common/board-lessons';
+import { BoardLesson } from '../../entities/BoardLesson';
 import { isConsensusVoteComment } from '../../common/consensus-meta';
 
 // Sentinel actor written onto auto-advance `moved` activities. Deliberately
@@ -1238,10 +1240,21 @@ team can learn something repeatable from it.
    - Personal style preferences with no team-wide impact.
    - Speculative refactor itches without a real driver.
 
-3. If you found one, file it via either:
+3. If you found one, file it via ONE (or more) of:
+   - \`mcp__awb__add_board_lesson\` — PREFERRED when the lesson is a repeatable
+     "next strand must remember this" runbook rather than a unit of work:
+     an environment gotcha, a build/QA/git trap, a preflight step, a
+     recurrence someone already hit more than once. This registers a
+     board-scoped Lesson that is auto-injected into EVERY future dispatch
+     prompt on this board, so the knowledge stops dying in one ticket's
+     comment thread. Keep the \`body\` short and imperative; set
+     \`source_ticket_id\` to this ticket. A lesson is the right home for
+     "how not to repeat this" — a ticket is the right home for "work someone
+     must do". File both when both apply.
    - \`mcp__awb__create_ticket\` — to file on THIS board (Backlog column,
      priority=low unless clearly urgent). Add label \`self-improvement\` and a
-     short \`Source:\` link back to this ticket id in the description.
+     short \`Source:\` link back to this ticket id in the description. Use this
+     when there is concrete work to be done (tooling/tests/docs to build).
    - \`mcp__awb__create_remote_improvement_ticket\` — to file against the
      remote AWB instance configured by the admin (only available when the
      board's \`self_improvement_mode\` is \`remote_awb\` or \`both\`). Use
@@ -1733,6 +1746,41 @@ candidate's branch or move the ticket.
       this.logService.warn('MCP', 'harness_config / effort_preset / environment_config resolve failed (continuing without)', {
         err: String(e), ticket_id: ticket.id, board_id: boardId,
       });
+    }
+
+    // Board Lessons / Runbook (ticket 9d0d6ac4). Append the board's ACTIVE
+    // lessons onto harness_config.system_prompt_append, riding the exact same
+    // plumbing as the language instruction above (server→SSE→agent-manager→CLI
+    // --append-system-prompt) so no new SSE field / agent-manager change is
+    // needed. Applies to EVERY dispatch — _emitTrigger is the single chokepoint
+    // (ticket/QA/security/schedule all flow through here), so QA/security run
+    // prompts get the same injection for free. Deliberately its own try/catch
+    // and its own Board(Lesson) query so a lessons failure never masks the
+    // harness/effort/env resolution above. Zero active lessons ⇒ composeLessons
+    // returns null ⇒ harnessConfig returned untouched ⇒ byte-identical prompt
+    // (the DoD regression guard). Count/length/byte caps live in board-lessons.
+    if (boardId) {
+      try {
+        const lessons = await this.dataSource.getRepository(BoardLesson).find({
+          where: { board_id: boardId, active: true },
+          order: { updated_at: 'DESC' },
+          take: MAX_INJECTED_LESSONS,
+        });
+        if (lessons.length > 0) {
+          harnessConfig = appendBoardLessons(harnessConfig, lessons);
+          // Best-effort hit_count bump on the injected rows — one cheap UPDATE,
+          // fire-and-forget so it can never block or fail the dispatch emit.
+          const injectedIds = lessons.map((l) => l.id);
+          this.dataSource
+            .getRepository(BoardLesson)
+            .increment({ id: In(injectedIds) }, 'hit_count', 1)
+            .catch(() => {});
+        }
+      } catch (e) {
+        this.logService.warn('MCP', 'board lessons injection failed (continuing without)', {
+          err: String(e), ticket_id: ticket.id, board_id: boardId,
+        });
+      }
     }
 
     // Chain-target flag for the audit row — one IN query scoped to this
