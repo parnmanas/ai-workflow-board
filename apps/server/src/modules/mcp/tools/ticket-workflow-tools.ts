@@ -149,15 +149,20 @@ export function registerTicketWorkflowTools(server: McpServer, ctx: ToolContext)
     'Move a root ticket (with all its subtasks) to a different board in the same workspace. ' +
     'Specify target column by id, by name, or omit both to land in the destination board\'s first column. ' +
     'Subtasks travel with the parent automatically — their parent_id link survives the move. ' +
-    'Rejects non-root tickets, cross-workspace moves, and unknown boards/columns.',
+    'Rejects non-root tickets, cross-workspace moves, and unknown boards/columns.\n\n' +
+    'CONSENSUS GATE — a cross-board move is a column exit, so it is consensus-gated exactly like move_ticket ' +
+    '(ticket bd6d58db): if the source column\'s routing role has ≥2 distinct holders and consensus is not satisfied, ' +
+    'the move is rejected with consensus_required. Pass force=true (operator escape hatch) to bypass. ' +
+    'Single-holder tickets and same-column reorders are never gated.',
     {
       ticket_id: z.string().describe('Ticket ID (must be a root ticket)'),
       target_board_id: z.string().describe('Destination board ID'),
       target_column_id: z.string().optional().describe('Destination column ID (use this OR target_column_name; omit both for first column)'),
       target_column_name: z.string().optional().describe('Destination column name (case-insensitive); resolved against target_board_id'),
       target_position: z.number().optional().describe('Position in destination column (default: end)'),
+      force: z.boolean().optional().describe('Bypass the multi-holder consensus gate on the source column (see propose_move / record_agreement). Default false — a deliberate human/operator override; agents must not use it to dodge consensus.'),
     },
-    async ({ ticket_id, target_board_id, target_column_id, target_column_name, target_position }, extra: { sessionId?: string }) => {
+    async ({ ticket_id, target_board_id, target_column_id, target_column_name, target_position, force }, extra: { sessionId?: string }) => {
       const ticketRepo = dataSource.getRepository(Ticket);
       const ticket = await ticketRepo.findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Ticket not found');
@@ -194,6 +199,30 @@ export function registerTicketWorkflowTools(server: McpServer, ctx: ToolContext)
       if (sourceBoardId === target_board_id && targetCol.id === ticket.column_id && target_position === undefined) {
         const unchanged = await loadTicketFull(dataSource, ticket.id);
         return ok(unchanged);
+      }
+
+      // Consensus gate (다중담당자·합의, ticket bd6d58db). A cross-board move is a
+      // column exit, so it must clear the SAME gate as move_ticket / REST /move —
+      // otherwise moving a multi-holder ticket to another board is a bypass around
+      // consensus. Gate only when the target column differs from the current one
+      // (pure same-column reorder is exempt, matching move_ticket). force / reporter
+      // override / standalone (no role-assignment service) exempt, same as move_ticket.
+      if (!force && ticketRoleAssignmentService && targetCol.id !== ticket.column_id) {
+        try {
+          const gate = await evaluateConsensusMoveGate({ dataSource, ticketRoleAssignmentService }, ticket);
+          if (gate.blocked) {
+            const pending = gate.state.pending.map((p) => `${p.type}:${p.id}`).join(', ');
+            // 'consensus_required' 리터럴은 move_ticket / REST 409 코드와 일치 — 소비자가 같은 토큰 grep.
+            return err(
+              `consensus_required — 합의 필요: 현재 컬럼의 라우팅 역할 홀더 ${gate.state.required.length}명 전원이 합의해야 다른 보드로 이동할 수 있습니다. ` +
+              `아직 미성립 — 대기 중: [${pending || '없음'}]. ` +
+              `propose_move(target) 로 제안을 열고 전 홀더가 record_agreement(agree) 하거나, force=true / reporter override 로 우회하세요.`,
+            );
+          }
+        } catch (e) {
+          // best-effort: 판정 실패가 이동을 완전히 막지 않도록(가용성 우선) 통과.
+          logger?.warn?.('Consensus', `move_ticket_to_board gate eval failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
       }
 
       await dataSource.transaction(async (manager) => {

@@ -1075,6 +1075,7 @@ export class TicketsController {
     const targetPosition: number | undefined = typeof body?.target_position === 'number'
       ? body.target_position
       : undefined;
+    const force: boolean = body?.force === true;
 
     const boardRepo = this.dataSource.getRepository(Board);
     const targetBoard = await boardRepo.findOne({ where: { id: targetBoardId } });
@@ -1110,6 +1111,27 @@ export class TicketsController {
     if (sourceBoardId === targetBoardId && targetCol.id === ticket.column_id && targetPosition === undefined) {
       const unchanged = await loadTicketFull(this.dataSource, ticket.id);
       return res.json(unchanged);
+    }
+
+    // 다중담당자·합의 게이트(ticket bd6d58db). 보드 간 이동도 현재 컬럼 이탈이므로
+    // move_ticket / REST /move 와 동일한 게이트를 태운다 — 안 그러면 멀티홀더 티켓을
+    // 다른 보드로 옮기는 방식이 합의 우회 경로가 된다. 목적지 컬럼이 현재와 다를
+    // 때만 발동(같은 컬럼 순수 재정렬은 면제). body.force 는 의도적 operator 우회.
+    if (!force && targetCol.id !== ticket.column_id) {
+      const gate = await evaluateConsensusMoveGate(this.consensusDeps(), ticket);
+      if (gate.blocked) {
+        return res.status(409).json({
+          error: 'consensus_required',
+          message: `다중담당자 티켓 — 현재 컬럼의 라우팅 역할 홀더 ${gate.state.required.length}명의 합의가 필요합니다. `
+            + `합의 패널에서 '이동 제안' 후 전원 동의(또는 reporter override) 시 서버가 자동 이동합니다. force=true 로 우회할 수 있습니다.`,
+          consensus: {
+            required: gate.state.required.length,
+            agreed: gate.state.agreed.length,
+            pending: gate.state.pending.length,
+            objected: gate.state.objected.length,
+          },
+        });
+      }
     }
 
     await this.dataSource.transaction(async (manager) => {
