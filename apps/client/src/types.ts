@@ -1102,6 +1102,12 @@ export interface Board {
   // absent = no phase model → legacy single-timeout QA runs. A scenario's
   // qa_phases overrides this per-scenario (see QaScenario.qa_phases).
   qa_phases?: QaPhasesConfig | string | null;
+  // Per-board DEFAULT role holders (ticket d94a1b87). Stored JSON-encoded map
+  // of role slug → array of holders ({ agent_id } | { user_id }); null/absent =
+  // no defaults. At ticket-creation time every role the caller left unstaffed
+  // is filled from this map so a new ticket lands on the loop without a human
+  // wiring assignee/reviewer/reporter. The client parses the string.
+  default_role_assignments?: string | null;
 }
 
 // Stored JSON-encoded in Board.environment_config (per-board override) and

@@ -59,6 +59,17 @@ export default function BoardSettingsPage() {
     return () => { cancelled = true; };
   }, [wsId]);
 
+  // Agents roster for the Default-role-holders picker (ticket d94a1b87). Silent
+  // fall-back to [] so a non-privileged user can still view settings.
+  const [agents, setAgents] = useState<Array<{ id: string; name: string }>>([]);
+  useEffect(() => {
+    let cancelled = false;
+    api.getAgents()
+      .then((rows) => { if (!cancelled) setAgents((rows || []).map((a: any) => ({ id: a.id, name: a.name }))); })
+      .catch(() => { if (!cancelled) setAgents([]); });
+    return () => { cancelled = true; };
+  }, [wsId]);
+
   const wrap = async (fn: () => Promise<any>, okMsg?: string) => {
     try {
       await withLoading(fn);
@@ -243,6 +254,22 @@ export default function BoardSettingsPage() {
             const payload = Object.keys(next).length === 0 ? null : next;
             await api.updateBoard(board.id, { column_prompts: payload });
             refresh();
+          }}
+        />
+        <DefaultRoleHoldersEditor
+          board={board}
+          workspaceRoles={workspaceRoles}
+          agents={agents}
+          onSave={async (next) => {
+            try {
+              await api.updateBoard(board.id, { default_role_assignments: next });
+              await refresh();
+              showToast(next ? 'Default role holders saved' : 'Default role holders cleared', 'success');
+            } catch (e: any) {
+              // Server rejection (400 — unknown slug / missing agent) surfaces here.
+              showToast(e?.message || 'Failed to save default role holders', 'error');
+              throw e;
+            }
           }}
         />
         <MoveToWorkspaceSetting board={board} sourceWorkspaceId={wsId ?? board.workspace_id} />
@@ -544,6 +571,203 @@ function MoveToWorkspaceSetting({ board, sourceWorkspaceId }: MoveToWorkspaceSet
 }
 
 type SelfImprovementMode = NonNullable<Board['self_improvement_mode']>;
+
+// ─── Default role holders (ticket d94a1b87) ─────────────────────
+// Per-board default assignee / reviewer / reporter (and any custom-role)
+// holders. A freshly-created ticket fills every role the caller left unstaffed
+// from this map, so a new ticket lands on the loop without a human wiring roles
+// each time (the single most-repeated manual step in the board activity logs).
+// Priority at create time: explicit holder > board default > unassigned.
+type DefaultHolder = { agent_id?: string; user_id?: string };
+type DefaultHolderMap = Record<string, DefaultHolder[]>;
+
+// Parse the stored JSON map, keeping BOTH agent_id and user_id holders so a
+// user_id set via MCP/REST survives an agent-only edit here.
+function parseDefaultHolderMap(raw: string | null | undefined): DefaultHolderMap {
+  if (!raw) return {};
+  try {
+    const obj = JSON.parse(raw);
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return {};
+    const out: DefaultHolderMap = {};
+    for (const [slug, holders] of Object.entries(obj as Record<string, unknown>)) {
+      if (!Array.isArray(holders)) continue;
+      const list: DefaultHolder[] = [];
+      for (const h of holders) {
+        if (!h || typeof h !== 'object') continue;
+        const a = String((h as any).agent_id || '').trim();
+        const u = String((h as any).user_id || '').trim();
+        if (a) list.push({ agent_id: a });
+        else if (u) list.push({ user_id: u });
+      }
+      if (list.length) out[slug] = list;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+interface DefaultRoleHoldersEditorProps {
+  board: BoardWithCards;
+  workspaceRoles: Array<{ id: string; slug: string; name: string; is_builtin: boolean; position: number }>;
+  agents: Array<{ id: string; name: string }>;
+  onSave(next: DefaultHolderMap | null): Promise<void>;
+}
+
+function DefaultRoleHoldersEditor({ board, workspaceRoles, agents, onSave }: DefaultRoleHoldersEditorProps) {
+  const [draft, setDraft] = useState<DefaultHolderMap>(() => parseDefaultHolderMap(board.default_role_assignments));
+  const [busy, setBusy] = useState(false);
+
+  // Re-seed when the persisted value changes (post-save refresh / board switch).
+  useEffect(() => {
+    setDraft(parseDefaultHolderMap(board.default_role_assignments));
+  }, [board.default_role_assignments]);
+
+  const roles = [...workspaceRoles].sort((a, b) => a.position - b.position);
+  const agentName = (id: string) => agents.find((a) => a.id === id)?.name || id;
+
+  const addAgent = (slug: string, agentId: string) => {
+    if (!agentId) return;
+    setDraft((prev) => {
+      const list = prev[slug] ? [...prev[slug]] : [];
+      if (list.some((h) => h.agent_id === agentId)) return prev; // no duplicates
+      list.push({ agent_id: agentId });
+      return { ...prev, [slug]: list };
+    });
+  };
+  const removeHolder = (slug: string, idx: number) => {
+    setDraft((prev) => {
+      const list = (prev[slug] || []).filter((_, i) => i !== idx);
+      const next = { ...prev };
+      if (list.length) next[slug] = list;
+      else delete next[slug];
+      return next;
+    });
+  };
+
+  // Only slugs carrying ≥1 holder are persisted; an all-empty map → null (clear).
+  const buildPayload = (): DefaultHolderMap | null => {
+    const out: DefaultHolderMap = {};
+    for (const [slug, list] of Object.entries(draft)) {
+      if (list && list.length) out[slug] = list;
+    }
+    return Object.keys(out).length ? out : null;
+  };
+
+  const labelStyle: React.CSSProperties = {
+    display: 'block', fontSize: 11, color: tokens.colors.textMuted,
+    marginBottom: 4, textTransform: 'uppercase', fontWeight: 600,
+  };
+  const chipStyle: React.CSSProperties = {
+    display: 'inline-flex', alignItems: 'center', gap: 6, padding: '3px 8px',
+    background: tokens.colors.surface, border: `1px solid ${tokens.colors.border}`,
+    borderRadius: tokens.radii.md, fontSize: 12, color: tokens.colors.textStrong,
+  };
+
+  return (
+    <section
+      style={{
+        padding: 16,
+        marginBottom: 16,
+        background: tokens.colors.surfaceCard,
+        border: `1px solid ${tokens.colors.border}`,
+        borderRadius: tokens.radii.md,
+      }}
+    >
+      <h3 style={{ margin: 0, fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>
+        Default role holders
+      </h3>
+      <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, marginBottom: 12 }}>
+        When a ticket is created on this board, any role left unstaffed is filled from these defaults
+        so the ticket lands on the loop without manual staffing. Explicit assignments always win;
+        callers pass <code>skip_default_assignments</code> for a genuine zero-holder ticket. Applies to
+        new tickets only — existing tickets are never changed. User holders set via the API are shown
+        as <code>user:…</code> and preserved.
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {roles.map((role) => {
+          const holders = draft[role.slug] || [];
+          const takenAgentIds = new Set(holders.map((h) => h.agent_id).filter(Boolean) as string[]);
+          const available = agents.filter((a) => !takenAgentIds.has(a.id));
+          return (
+            <div key={role.id}>
+              <label style={labelStyle}>{role.name} <span style={{ textTransform: 'none', opacity: 0.7 }}>({role.slug})</span></label>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                {holders.length === 0 && (
+                  <span style={{ fontSize: 12, color: tokens.colors.textMuted }}>No default — left unassigned.</span>
+                )}
+                {holders.map((h, i) => (
+                  <span key={`${role.slug}-${i}`} style={chipStyle}>
+                    {h.agent_id ? agentName(h.agent_id) : `user:${h.user_id}`}
+                    <button
+                      type="button"
+                      onClick={() => removeHolder(role.slug, i)}
+                      title="Remove holder"
+                      style={{
+                        border: 'none', background: 'transparent', cursor: 'pointer',
+                        color: tokens.colors.textMuted, fontSize: 13, lineHeight: 1, padding: 0,
+                      }}
+                    >
+                      ✕
+                    </button>
+                  </span>
+                ))}
+                <select
+                  value=""
+                  onChange={(e) => { addAgent(role.slug, e.target.value); e.target.value = ''; }}
+                  style={{
+                    background: tokens.colors.surface,
+                    border: `1px solid ${tokens.colors.border}`,
+                    borderRadius: tokens.radii.md,
+                    padding: '6px 8px',
+                    color: tokens.colors.textStrong,
+                    fontSize: 12,
+                    fontFamily: 'inherit',
+                  }}
+                >
+                  <option value="">+ Add agent…</option>
+                  {available.map((a) => (
+                    <option key={a.id} value={a.id}>{a.name}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          );
+        })}
+        {roles.length === 0 && (
+          <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>No workspace roles found.</div>
+        )}
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+        <Button
+          variant="primary"
+          size="sm"
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            try {
+              await onSave(buildPayload());
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          {busy ? 'Saving…' : 'Save'}
+        </Button>
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={busy || Object.keys(draft).length === 0}
+          onClick={() => setDraft({})}
+        >
+          Clear all
+        </Button>
+      </div>
+    </section>
+  );
+}
 
 // ─── Output language (i18n) ─────────────────────────────────────
 // Per-board language for agent output. The stored value is the human-readable

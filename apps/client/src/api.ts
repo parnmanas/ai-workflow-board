@@ -335,6 +335,11 @@ export const api = {
       // Per-board QA phases model (ticket 90cc22f7). null clears the override
       // (legacy single-timeout); the server validates it (zod) and 400s a typo.
       qa_phases?: QaPhasesConfig | null;
+      // Per-board DEFAULT role holders (ticket d94a1b87): { [roleSlug]: [{ agent_id }
+      // | { user_id }], … }. null or {} clears. The server validates the shape
+      // AND that each slug/holder exists (400s a typo). Filled into any role the
+      // caller left unstaffed at ticket-create time.
+      default_role_assignments?: Record<string, Array<{ agent_id?: string; user_id?: string }>> | null;
     },
   ) =>
     request<any>(`/boards/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
