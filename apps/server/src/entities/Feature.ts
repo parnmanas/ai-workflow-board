@@ -1,4 +1,5 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
+import type { HandoffSpec } from '../common/handoff-spec-config';
 
 /**
  * Feature (Epic intake) — the *entry point* of the "one-stop automated
@@ -131,6 +132,14 @@ export interface FeatureProposedTicket {
   assignee_id?: string;
   reporter_id?: string;
   reviewer_id?: string;
+  // Cross-board handoff relay (ticket ac21a745). When set, the generated ticket
+  // carries this handoff_spec — so on completion it auto-relays to the next
+  // functional board (기획→그래픽→클라). This is how intake proposes a chain that
+  // spans MULTIPLE boards: the intake chain itself lives on one board (prereq
+  // edges), and a ticket's handoff_spec hands the baton across board boundaries.
+  // Stored as the normalized spec object; validated at propose time. `{ hops:[] }`
+  // / omitted = no relay. See common/handoff-spec-config.ts.
+  handoff_spec?: HandoffSpec;
 }
 
 export interface FeatureChainEdge {

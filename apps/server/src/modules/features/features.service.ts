@@ -16,6 +16,7 @@ import { TicketPrerequisitesService } from '../tickets/ticket-prerequisites.serv
 import { TriggerLoopService } from '../agents/trigger-loop.service';
 import { isTerminalColumn } from '../mcp/shared/archive-helpers';
 import { parseDefaultRoleAssignments } from '../../common/default-role-assignments-config';
+import { validateHandoffSpecInput, parseHandoffSpec } from '../../common/handoff-spec-config';
 import {
   findColumnByName,
   maxTicketPosition,
@@ -247,6 +248,18 @@ export class FeaturesService {
       keys.add(key);
       const title = (t.title || '').trim();
       if (!title) throw new BadRequestException(`proposal.tickets[${i}].title is required`);
+      // Cross-board handoff relay (ticket ac21a745). Validate at propose time so a
+      // planner's typo surfaces as a 400 here instead of a silently-dropped relay
+      // at approval. Store the normalized spec object (or undefined when empty).
+      let handoffSpec: ReturnType<typeof parseHandoffSpec> | undefined;
+      if (t.handoff_spec !== undefined && t.handoff_spec !== null) {
+        try {
+          const canonical = validateHandoffSpecInput(t.handoff_spec);
+          handoffSpec = canonical ? parseHandoffSpec(canonical) : undefined;
+        } catch (e: any) {
+          throw new BadRequestException(`proposal.tickets[${i}].handoff_spec: ${e?.message || 'invalid'}`);
+        }
+      }
       return {
         key,
         title,
@@ -258,6 +271,7 @@ export class FeaturesService {
         assignee_id: t.assignee_id || undefined,
         reporter_id: t.reporter_id || undefined,
         reviewer_id: t.reviewer_id || undefined,
+        handoff_spec: handoffSpec,
       };
     });
     const edges = (raw.edges || []).map((e, i) => {
@@ -378,6 +392,17 @@ export class FeaturesService {
     return chosen;
   }
 
+  /** Canonical handoff_spec JSON string for a proposed ticket ('' = no relay). */
+  private _resolveChainHandoffSpec(pt: FeatureProposedTicket): string {
+    if (!pt.handoff_spec) return '';
+    try {
+      return validateHandoffSpecInput(pt.handoff_spec);
+    } catch (e: any) {
+      this.logService.warn('Features', `chain ticket handoff_spec dropped (re-validation failed): ${e?.message || e}`);
+      return '';
+    }
+  }
+
   private _routingSlugs(col: BoardColumn): string[] {
     try {
       const parsed = JSON.parse(col.role_routing || '[]');
@@ -431,6 +456,10 @@ export class FeaturesService {
         channel_ids: '[]',
         position,
         effort_preset: effort,
+        // Cross-board handoff relay (ticket ac21a745) — validated at propose time;
+        // re-run defensively ('' on the rare re-validation miss so one bad spec
+        // never aborts the whole chain build).
+        handoff_spec: this._resolveChainHandoffSpec(pt),
         terminal_entered_at: isTerminalColumn(col) ? new Date() : null,
         created_by: 'Feature Intake',
         created_by_type: 'system',

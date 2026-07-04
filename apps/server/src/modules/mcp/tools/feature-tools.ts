@@ -65,6 +65,15 @@ const proposedTicketShape = z.object({
   assignee_id: z.string().optional().describe('Assignee agent id. Omit → defaults to the Feature planner/creator'),
   reporter_id: z.string().optional(),
   reviewer_id: z.string().optional(),
+  // Cross-board handoff relay (ticket ac21a745). Lets a proposed ticket span
+  // MULTIPLE boards: on completion it auto-relays a follow-up to the next
+  // functional board. `.passthrough()` keeps the shape forgiving — the
+  // authoritative validation is validateHandoffSpecInput at propose time.
+  handoff_spec: z.object({
+    hops: z.array(z.object({ target_board_id: z.string() }).passthrough()),
+  }).passthrough().nullable().optional().describe(
+    'Cross-board handoff relay for THIS ticket (ticket ac21a745). `{ hops: [{ target_board_id, target_column_name?, title_template?, description_template?, carry_attachments?, ... }] }` — on terminal-column completion a follow-up is auto-created on the first hop\'s board carrying this ticket\'s deliverable context, remaining hops inherited. This is how an intake chain spans boards (기획→그래픽→클라). Omit / null = no relay.'
+  ),
 });
 
 const edgeShape = z.object({
