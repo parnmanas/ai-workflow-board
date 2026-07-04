@@ -942,6 +942,51 @@ export interface Comment {
   last_repeated_at?: string | null;
 }
 
+// Cross-board handoff relay (ticket ac21a745). One hop = create a follow-up on
+// `target_board_id` when the carrying ticket completes. Mirrors the server
+// HandoffHop zod shape (common/handoff-spec-config.ts).
+export interface HandoffHop {
+  target_board_id: string;
+  target_column_name?: string;
+  title_template?: string;
+  description_template?: string;
+  assignee_id?: string;
+  reporter_id?: string;
+  reviewer_id?: string;
+  labels?: string[];
+  priority?: string;
+  effort_preset?: string;
+  carry_attachments?: boolean;
+  carry_attachment_ids?: string[];
+}
+
+export interface HandoffSpec {
+  hops: HandoffHop[];
+}
+
+// One stage of a handoff relay, as returned by GET /tickets/:id/handoff-pipeline.
+export interface HandoffPipelineStage {
+  ticket_id: string;
+  title: string;
+  board_id: string;
+  board_name: string;
+  column_id: string | null;
+  column_name: string;
+  is_terminal: boolean;
+  status: string;
+  is_followup: boolean;
+  is_rejection: boolean;
+  source_ticket_id: string;
+  pending_on_tickets: boolean;
+  remaining_hops: number;
+  created_at: string;
+}
+
+export interface HandoffPipeline {
+  root_ticket_id: string;
+  stages: HandoffPipelineStage[];
+}
+
 export interface Ticket {
   id: string; // GUID
   column_id: string | null; // GUID — references BoardColumn.id, null for child tickets
@@ -982,6 +1027,16 @@ export interface Ticket {
   // dispatch into per-CLI options). null/empty = "no effort override", spawn
   // exactly as before. Not a CLI flag — the server maps it per CLI.
   effort_preset?: string | null;
+  // Cross-board handoff relay (ticket ac21a745). Decoded to an object on every
+  // read path (loadTicketFull / parseTicket / board projection). When it has
+  // hops, completing this ticket auto-creates a follow-up on the first hop's
+  // board carrying this ticket's deliverable context; the follow-up inherits the
+  // remaining hops. `{ hops: [] }` / omitted = no relay.
+  handoff_spec?: HandoffSpec;
+  // Relay lineage back-pointer — set on a ticket AUTO-CREATED as a handoff
+  // follow-up; points at the source ticket whose completion produced it. Empty
+  // for tickets not born from a handoff. Powers reverse rejection + pipeline.
+  handoff_source_ticket_id?: string;
   // Ticket parked awaiting user intervention (ticket a57517be). When true the
   // server drops every agent_trigger for this ticket, the focus selector
   // skips it, and the board view renders a high-visibility outline + badge.

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Ticket, Agent, Channel, ActivityLog, Comment, CommentType, User, TicketAttachmentMeta, Resource, RepoBranch, TicketPrerequisiteRow, Action, EffortPreset, EffortPresetsConfig, BUILTIN_EFFORT_PRESETS } from '../types';
+import { Ticket, Agent, Channel, ActivityLog, Comment, CommentType, User, TicketAttachmentMeta, Resource, RepoBranch, TicketPrerequisiteRow, Action, EffortPreset, EffortPresetsConfig, BUILTIN_EFFORT_PRESETS, HandoffSpec } from '../types';
 import { api, TicketRoleAssignmentRow, ConsensusView, ConsensusParty, getActiveWorkspaceId, rawResourceUrl } from '../api';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
@@ -8,6 +8,7 @@ import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
 import { useNotifications } from '../contexts/NotificationContext';
 import ChildTicketList from './SubtaskList';
 import CommentList from './CommentList';
+import HandoffEditor from './HandoffEditor';
 import { TypingIndicator } from './TypingIndicator';
 import { tokens } from '../tokens';
 import { MentionTextarea, MentionCandidate } from './common/MentionTextarea';
@@ -796,6 +797,11 @@ export default function TicketPanel({
   // checks workspace + enabled, not board scope, so any workspace Action is
   // validly bindable here.
   const [onDoneActionIds, setOnDoneActionIds] = useState<string[]>(activeTicket.on_done_action_ids || []);
+  // Cross-board handoff relay draft (ticket ac21a745). null = no relay. Committed
+  // via the same Save/Discard footer (dirtyTicketFields) as update_ticket(handoff_spec).
+  const [handoffSpec, setHandoffSpec] = useState<HandoffSpec | null>(
+    activeTicket.handoff_spec && (activeTicket.handoff_spec.hops || []).length > 0 ? activeTicket.handoff_spec : null,
+  );
   const [actionOptions, setActionOptions] = useState<Action[]>([]);
   const [repoOptions, setRepoOptions] = useState<Resource[]>([]);
   const [branchOptions, setBranchOptions] = useState<RepoBranch[]>([]);
@@ -887,6 +893,9 @@ export default function TicketPanel({
     setBaseBranch(activeTicket.base_branch || '');
     setNextTicketId(activeTicket.next_ticket_id || '');
     setOnDoneActionIds(activeTicket.on_done_action_ids || []);
+    setHandoffSpec(
+      activeTicket.handoff_spec && (activeTicket.handoff_spec.hops || []).length > 0 ? activeTicket.handoff_spec : null,
+    );
     setBranchOptions([]);
     setBranchesError(null);
     setRoleDrafts({});
@@ -1159,6 +1168,15 @@ export default function TicketPanel({
   const idsEqualOrdered = (a: string[], b: string[]) =>
     a.length === b.length && a.every((v, i) => v === b[i]);
 
+  // Canonical equality for the handoff relay spec (ticket ac21a745). Both sides
+  // normalize to null when there are no hops, then compare hop JSON — so a draft
+  // that only reorders/edits a hop registers dirty, and null↔empty is a no-op.
+  const handoffSpecEqual = (a: HandoffSpec | null, b: HandoffSpec | undefined) => {
+    const norm = (s: HandoffSpec | null | undefined) =>
+      s && (s.hops || []).length > 0 ? JSON.stringify(s.hops) : '';
+    return norm(a) === norm(b);
+  };
+
   // Ticket-field drafts that differ from the server-side row. Empty when the
   // form matches the ticket exactly. The Save handler PATCHes whatever lives
   // in this object in a single round trip, which collapses the previous
@@ -1194,13 +1212,18 @@ export default function TicketPanel({
       // binding server-side.
       out.on_done_action_ids = onDoneActionIds;
     }
+    if (!handoffSpecEqual(handoffSpec, activeTicket.handoff_spec)) {
+      // Object compare via canonical hop JSON. Draft null / empty hops → null,
+      // which the server treats as "clear the handoff relay".
+      out.handoff_spec = handoffSpec && (handoffSpec.hops || []).length > 0 ? handoffSpec : null;
+    }
     return out;
   }, [
     title, description, priority, effortPreset, selectedChannelIds, baseRepoId, baseBranch, nextTicketId,
-    onDoneActionIds,
+    onDoneActionIds, handoffSpec,
     activeTicket.title, activeTicket.description, activeTicket.priority, activeTicket.effort_preset,
     activeTicket.channel_ids, activeTicket.base_repo_resource_id, activeTicket.base_branch,
-    activeTicket.next_ticket_id, activeTicket.on_done_action_ids,
+    activeTicket.next_ticket_id, activeTicket.on_done_action_ids, activeTicket.handoff_spec,
   ]);
 
   // Current holders grouped by role id (multi-holder T6). roleAssignments is one
@@ -1245,11 +1268,14 @@ export default function TicketPanel({
     setBaseBranch(activeTicket.base_branch || '');
     setNextTicketId(activeTicket.next_ticket_id || '');
     setOnDoneActionIds(activeTicket.on_done_action_ids || []);
+    setHandoffSpec(
+      activeTicket.handoff_spec && (activeTicket.handoff_spec.hops || []).length > 0 ? activeTicket.handoff_spec : null,
+    );
     setRoleDrafts({});
   }, [
     activeTicket.title, activeTicket.description, activeTicket.priority, activeTicket.effort_preset,
     activeTicket.channel_ids, activeTicket.base_repo_resource_id, activeTicket.base_branch,
-    activeTicket.next_ticket_id, activeTicket.on_done_action_ids,
+    activeTicket.next_ticket_id, activeTicket.on_done_action_ids, activeTicket.handoff_spec,
   ]);
 
   const handleSaveDraft = useCallback(async () => {
@@ -2914,6 +2940,22 @@ export default function TicketPanel({
                   ))}
               </select>
             </div>
+
+            {/* Cross-board handoff relay (ticket ac21a745). Root tickets only —
+                a follow-up is created on the next functional board when this
+                ticket completes, carrying its deliverable context. Also renders
+                the read-only pipeline rollup for the relay this ticket is in.
+                Reuses the move-to-board picker's lazily-loaded workspace boards. */}
+            {activeTicket.depth === 0 && !activeTicket.parent_id && (
+              <HandoffEditor
+                ticket={activeTicket}
+                boardOptions={moveBoardOptions}
+                boardsLoading={moveBoardLoading}
+                onEnsureBoards={loadMoveBoardOptions}
+                value={handoffSpec}
+                onChange={setHandoffSpec}
+              />
+            )}
 
             {/* Run on Done — per-ticket on-done action binding (ticket
                 16a6339c, method "a"; picker reworked in 59afc55a). The bound

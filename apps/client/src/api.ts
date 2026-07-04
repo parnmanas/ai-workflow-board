@@ -4,6 +4,7 @@ import type {
   Action,
   ActionRun,
   Feature,
+  HandoffPipeline,
   QaScenario,
   QaScenarioListItem,
   QaRun,
@@ -446,6 +447,12 @@ export const api = {
     request<any>(`/tickets/${ticketId}/unarchive`, { method: 'POST' }),
   getTicket: async (ticketId: string) =>
     request<any>(`/tickets/${ticketId}`),
+  // Cross-board handoff pipeline rollup (ticket ac21a745). Given any ticket in a
+  // relay, returns every stage across boards (root walk-up + follow-up walk-down)
+  // so the detail panel can render the relay without hopping boards. REST bridge
+  // for the MCP get_handoff_pipeline (the client never speaks MCP directly).
+  getHandoffPipeline: async (ticketId: string) =>
+    request<HandoffPipeline>(`/tickets/${ticketId}/handoff-pipeline`),
   // 티켓(root/하위)의 커서 페이지네이션 코멘트. `before` 는 코멘트 id 이고, 서버는
   // (created_at, id) 커서를 따라가 그보다 오래된 코멘트를 최신순으로 최대 `limit`개
   // 반환한다. detail 패널이 getTicket 의 첫 페이지 너머 더 오래된 코멘트를

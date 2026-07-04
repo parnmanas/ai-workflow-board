@@ -7,9 +7,11 @@ import { Comment } from '../../entities/Comment';
 import { TicketAttachment } from '../../entities/TicketAttachment';
 import { Agent } from '../../entities/Agent';
 import { HandoffService } from './handoff.service';
+import { HandoffController } from './handoff.controller';
 import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module';
 import { AgentsModule } from '../agents/agents.module';
 import { SharedServicesModule } from '../../services/shared-services.module';
+import { AuthGuard } from '../../common/guards/auth.guard';
 
 /**
  * Cross-board handoff pipeline module (ticket ac21a745) — the relay engine that
@@ -33,7 +35,8 @@ import { SharedServicesModule } from '../../services/shared-services.module';
     AgentsModule,
     SharedServicesModule,
   ],
-  providers: [HandoffService],
+  controllers: [HandoffController],
+  providers: [HandoffService, AuthGuard],
   exports: [HandoffService],
 })
 export class HandoffModule {}
