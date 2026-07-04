@@ -34,6 +34,7 @@ import { UserChannelsModule } from './modules/user-channels/user-channels.module
 import { ColumnPoliciesModule } from './modules/column-policies/column-policies.module';
 import { BenchmarksModule } from './modules/benchmarks/benchmarks.module';
 import { WorkspaceScheduleModule } from './modules/workspace-schedule/workspace-schedule.module';
+import { FeaturesModule } from './modules/features/features.module';
 
 @Module({
   imports: [
@@ -94,6 +95,7 @@ import { WorkspaceScheduleModule } from './modules/workspace-schedule/workspace-
     ColumnPoliciesModule,
     BenchmarksModule,
     WorkspaceScheduleModule,
+    FeaturesModule,
   ],
 })
 export class AppModule {}

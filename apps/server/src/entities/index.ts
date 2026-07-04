@@ -44,3 +44,4 @@ export { SecuritySchedule } from './SecuritySchedule';
 export { WorkspaceSchedule } from './WorkspaceSchedule';
 // Deployment awareness (ticket 8ce72b18) — the current live commit per environment.
 export { Deployment } from './Deployment';
+export { Feature } from './Feature';
