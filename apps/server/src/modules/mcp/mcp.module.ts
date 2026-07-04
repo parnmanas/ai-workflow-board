@@ -14,6 +14,7 @@ import { SecurityProfileModule } from '../security/security-profile.module';
 import { BenchmarksModule } from '../benchmarks/benchmarks.module';
 import { WorkspaceScheduleModule } from '../workspace-schedule/workspace-schedule.module';
 import { FeaturesModule } from '../features/features.module';
+import { HandoffModule } from '../handoff/handoff.module';
 
 @Module({
   imports: [
@@ -37,6 +38,8 @@ import { FeaturesModule } from '../features/features.module';
     WorkspaceScheduleModule,
     // Provides FeaturesService for the feature-tools MCP tools (ticket aae7644c).
     FeaturesModule,
+    // Provides HandoffService for the handoff-tools MCP tools (ticket ac21a745).
+    HandoffModule,
   ],
   controllers: [McpController],
 })

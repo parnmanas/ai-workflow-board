@@ -55,6 +55,7 @@ import type { SecurityScheduleService } from '../../security/security-schedule.s
 import type { WorkspaceScheduleService } from '../../workspace-schedule/workspace-schedule.service';
 import type { FeaturesService } from '../../features/features.service';
 import { TicketPrerequisitesService } from '../../tickets/ticket-prerequisites.service';
+import type { HandoffService } from '../../handoff/handoff.service';
 import { BenchmarkService } from '../../benchmarks/benchmark.service';
 
 /**
@@ -157,6 +158,12 @@ export interface ToolContext {
   // on the DataSource since the service is stateless over dataSource +
   // activityService. Used by ticket-prerequisite-tools.
   ticketPrerequisitesService?: TicketPrerequisitesService;
+  // Cross-board handoff pipeline (ticket ac21a745). Required by handoff-tools
+  // (reject_handoff / get_handoff_pipeline). Present only in NestJS integrated
+  // mode — the relay engine subscribes to the live activity bus, which the
+  // standalone MCP entry point has no counterpart for, so it's omitted there and
+  // the tools degrade to an explicit error (same posture as featuresService).
+  handoffService?: HandoffService;
   // Ticket 684c012b: benchmark score persistence + leaderboard aggregation.
   // Present in both modes — the service is stateless over the DataSource, so the
   // standalone builder constructs a thin instance directly (same pattern as

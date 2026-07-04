@@ -35,6 +35,7 @@ import { ColumnPoliciesModule } from './modules/column-policies/column-policies.
 import { BenchmarksModule } from './modules/benchmarks/benchmarks.module';
 import { WorkspaceScheduleModule } from './modules/workspace-schedule/workspace-schedule.module';
 import { FeaturesModule } from './modules/features/features.module';
+import { HandoffModule } from './modules/handoff/handoff.module';
 
 @Module({
   imports: [
@@ -96,6 +97,7 @@ import { FeaturesModule } from './modules/features/features.module';
     BenchmarksModule,
     WorkspaceScheduleModule,
     FeaturesModule,
+    HandoffModule,
   ],
 })
 export class AppModule {}
