@@ -106,6 +106,13 @@ const EXPECTED_TOOLS = [
   'get_latest_artifact',
   'register_build_artifact',
   'report_build_failure',
+  // Ticket aae7644c — Feature/Epic intake (one-stop automated development 진입 플로우).
+  'submit_feature_request',
+  'propose_feature_chain',
+  'approve_feature',
+  'reject_feature',
+  'list_features',
+  'get_feature',
 ];
 
 test('MCP initialize + tools/list returns expected AWB tool surface', async (t) => {

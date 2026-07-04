@@ -13,6 +13,7 @@ import { DeploymentsModule } from '../deployments/deployment.module';
 import { SecurityProfileModule } from '../security/security-profile.module';
 import { BenchmarksModule } from '../benchmarks/benchmarks.module';
 import { WorkspaceScheduleModule } from '../workspace-schedule/workspace-schedule.module';
+import { FeaturesModule } from '../features/features.module';
 
 @Module({
   imports: [
@@ -34,6 +35,8 @@ import { WorkspaceScheduleModule } from '../workspace-schedule/workspace-schedul
     BenchmarksModule,
     // Provides WorkspaceScheduleService for the workspace-schedule MCP tools (ticket 769eb260).
     WorkspaceScheduleModule,
+    // Provides FeaturesService for the feature-tools MCP tools (ticket aae7644c).
+    FeaturesModule,
   ],
   controllers: [McpController],
 })

@@ -53,6 +53,7 @@ import type { SecurityProfileService } from '../../security/security-profile.ser
 import type { SecurityRunService } from '../../security/security-run.service';
 import type { SecurityScheduleService } from '../../security/security-schedule.service';
 import type { WorkspaceScheduleService } from '../../workspace-schedule/workspace-schedule.service';
+import type { FeaturesService } from '../../features/features.service';
 import { TicketPrerequisitesService } from '../../tickets/ticket-prerequisites.service';
 import { BenchmarkService } from '../../benchmarks/benchmark.service';
 
@@ -138,6 +139,12 @@ export interface ToolContext {
   // run-now). Standalone context omits it; the tools degrade to an explicit error
   // (no background tick in standalone mode).
   workspaceScheduleService?: WorkspaceScheduleService;
+  // Feature/Epic intake (ticket aae7644c) — the entry point of the one-stop
+  // automated development loop. Required by feature-tools MCP tools
+  // (submit_feature_request / propose_feature_chain / approve_feature / ...).
+  // Standalone context omits it; the tools degrade to an explicit error (the
+  // planning dispatch + chain build need the DI-wired trigger/prereq services).
+  featuresService?: FeaturesService;
   // Ticket a57517be: `unpend_ticket` tool needs to wake the ticket's current
   // column's role-holders right after clearing `pending_user_action` (the
   // `field_changed='pending_user_action'` activity row by itself does not

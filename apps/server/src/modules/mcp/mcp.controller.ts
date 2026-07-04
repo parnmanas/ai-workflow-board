@@ -32,6 +32,7 @@ import { SecurityProfileService } from '../security/security-profile.service';
 import { SecurityRunService } from '../security/security-run.service';
 import { SecurityScheduleService } from '../security/security-schedule.service';
 import { WorkspaceScheduleService } from '../workspace-schedule/workspace-schedule.service';
+import { FeaturesService } from '../features/features.service';
 import { TicketPrerequisitesService } from '../tickets/ticket-prerequisites.service';
 import { BenchmarkService } from '../benchmarks/benchmark.service';
 import { MentionService } from '../../services/mention.service';
@@ -168,6 +169,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     private readonly securityRunService: SecurityRunService,
     private readonly securityScheduleService: SecurityScheduleService,
     private readonly workspaceScheduleService: WorkspaceScheduleService,
+    private readonly featuresService: FeaturesService,
     private readonly ticketPrerequisitesService: TicketPrerequisitesService,
     private readonly benchmarkService: BenchmarkService,
     private readonly metricsRegistry: MemoryMetricsRegistry,
@@ -293,6 +295,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       securityRunService: this.securityRunService,
       securityScheduleService: this.securityScheduleService,
       workspaceScheduleService: this.workspaceScheduleService,
+      featuresService: this.featuresService,
       triggerLoopService: this.triggerLoopService,
       ticketPrerequisitesService: this.ticketPrerequisitesService,
       benchmarkService: this.benchmarkService,
