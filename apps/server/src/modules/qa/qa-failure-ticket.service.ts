@@ -4,7 +4,9 @@ import { DataSource } from 'typeorm';
 import { Ticket } from '../../entities/Ticket';
 import { Comment } from '../../entities/Comment';
 import { BoardColumn } from '../../entities/BoardColumn';
+import { Board } from '../../entities/Board';
 import { Resource } from '../../entities/Resource';
+import { parseDefaultRoleAssignments } from '../../common/default-role-assignments-config';
 import { QaScenario, QaOnFailureTicketConfig } from '../../entities/QaScenario';
 import { QaRun } from '../../entities/QaRun';
 import { LogService } from '../../services/log.service';
@@ -186,6 +188,22 @@ export class QaFailureTicketService {
         reporter_id: holderId,
         reviewer_id: holderId,
       });
+    }
+
+    // Board default role holders (ticket d94a1b87): fill any role still VACANT
+    // after the explicit trio above from the board's default_role_assignments.
+    // When the scenario names no assignee the trio sync is skipped, so this is
+    // what lets a board-configured default pick the auto-ticket up (and fills a
+    // default reviewer even when an assignee IS set — the "no default reviewer
+    // → pend" gap). Only ever fills vacant roles; never clobbers an explicit one.
+    if (wsId) {
+      try {
+        const defBoard = await this.dataSource.getRepository(Board).findOne({ where: { id: column.board_id } });
+        const defaults = parseDefaultRoleAssignments(defBoard?.default_role_assignments);
+        if (Object.keys(defaults).length > 0) {
+          await this.roleAssignmentService.applyBoardDefaults(ticket.id, wsId, defaults);
+        }
+      } catch { /* non-fatal — degrade to "no defaults" */ }
     }
 
     await this.activityService.logActivity({

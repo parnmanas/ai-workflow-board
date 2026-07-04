@@ -15,6 +15,7 @@ import { TicketRoleAssignmentService } from '../workspace-roles/ticket-role-assi
 import { TicketPrerequisitesService } from '../tickets/ticket-prerequisites.service';
 import { TriggerLoopService } from '../agents/trigger-loop.service';
 import { isTerminalColumn } from '../mcp/shared/archive-helpers';
+import { parseDefaultRoleAssignments } from '../../common/default-role-assignments-config';
 import {
   findColumnByName,
   maxTicketPosition,
@@ -447,6 +448,19 @@ export class FeaturesService {
         reporter_id: reporterId,
         reviewer_id: reviewerId,
       });
+    }
+
+    // Board default role holders (ticket d94a1b87): fill any role still VACANT
+    // after the explicit trio above from the board's default_role_assignments.
+    // Only ever fills vacant roles; never clobbers an explicit chain holder.
+    if (wsId) {
+      try {
+        const defBoard = await this.dataSource.getRepository(Board).findOne({ where: { id: col.board_id } });
+        const defaults = parseDefaultRoleAssignments(defBoard?.default_role_assignments);
+        if (Object.keys(defaults).length > 0) {
+          await this.roleAssignmentService.applyBoardDefaults(ticket.id, wsId, defaults);
+        }
+      } catch { /* non-fatal — degrade to "no defaults" */ }
     }
 
     await this.activityService.logActivity({
