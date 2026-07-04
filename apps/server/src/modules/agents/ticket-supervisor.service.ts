@@ -27,7 +27,11 @@ import { Ticket } from '../../entities/Ticket';
 import { Workspace } from '../../entities/Workspace';
 import { LogService } from '../../services/log.service';
 import { MemoryMetricsRegistry } from '../../services/memory-metrics.registry';
-import { AgentStatusService } from './agent-status.service';
+import {
+  AgentStatusService,
+  OUTPUT_LIVENESS_TTL_FLOOR_MS,
+  OUTPUT_LIVENESS_TTL_CEILING_MS,
+} from './agent-status.service';
 import { AllocationService, AllocatedTicketRow } from './allocation.service';
 import { TriggerLoopService } from './trigger-loop.service';
 
@@ -105,6 +109,12 @@ export function decideForceRespawn(opts: {
 @Injectable()
 export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
   private readonly state = new Map<string, SupervisorEntry>();
+  // Workspaces whose supervisor_stale_ms currently exceeds the output-liveness
+  // retention FLOOR (ticket 47a72129). Drives a once-per-workspace warn (no log
+  // spam across ticks) and an observability gauge — the "silent neutering must
+  // be observable" DoD. Membership == currently-misconfigured set: added on
+  // detection, removed when the value drops back within the floor.
+  private readonly staleMsExceedsTtlWorkspaces = new Set<string>();
   private tickHandle: NodeJS.Timeout | null = null;
 
   constructor(
@@ -122,6 +132,12 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
     // (e.g. sustained per-agent allocation errors orphaning entries — the leak
     // this ticket closes).
     metrics.register('ticketSupervisor.state', () => this.state.size);
+    // Observability for the staleMs > retention-floor regime (ticket 47a72129).
+    // Non-zero means at least one workspace set supervisor_stale_ms above the
+    // output-liveness base TTL — retention auto-extends to match, but an operator
+    // should know the window grew (and, past the CEILING, that the gate is
+    // capped). Pairs with the once-per-workspace warn in resolveCadence.
+    metrics.register('ticketSupervisor.staleMsExceedsTtl', () => this.staleMsExceedsTtlWorkspaces.size);
   }
 
   onModuleInit(): void {
@@ -165,6 +181,40 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /**
+   * Surface a supervisor_stale_ms that exceeds the output-liveness retention
+   * FLOOR (ticket 47a72129) — the "no silent neutering" DoD. Below the CEILING
+   * this is informational (retention auto-extends so the gate still honors the
+   * full stale window); above the CEILING it is actionable (retention is capped
+   * at the ceiling, so a worker output-silent past the ceiling but within the
+   * stale window can be force_respawned). Warns at most once per workspace per
+   * episode; clears when the value drops back within the floor so a later
+   * re-misconfiguration re-warns. Also feeds the ticketSupervisor.staleMsExceedsTtl
+   * gauge.
+   */
+  private _observeStaleMsVsTtl(workspaceId: string, staleMs: number): void {
+    if (staleMs > OUTPUT_LIVENESS_TTL_FLOOR_MS) {
+      if (!this.staleMsExceedsTtlWorkspaces.has(workspaceId)) {
+        this.staleMsExceedsTtlWorkspaces.add(workspaceId);
+        const beyondCeiling = staleMs > OUTPUT_LIVENESS_TTL_CEILING_MS;
+        this.logService.warn(
+          'TicketSupervisor',
+          beyondCeiling
+            ? 'supervisor_stale_ms exceeds the output-liveness retention CEILING — force-suppression gate is capped at the ceiling; a worker output-silent past the ceiling (but within the stale window) may be force_respawned'
+            : 'supervisor_stale_ms exceeds the output-liveness base TTL — output-liveness retention auto-extends to match (gate still honors the full stale window); verify the large stale window is intended',
+          {
+            workspace_id: workspaceId,
+            supervisor_stale_ms: staleMs,
+            output_liveness_ttl_floor_ms: OUTPUT_LIVENESS_TTL_FLOOR_MS,
+            output_liveness_ttl_ceiling_ms: OUTPUT_LIVENESS_TTL_CEILING_MS,
+          },
+        );
+      }
+    } else {
+      this.staleMsExceedsTtlWorkspaces.delete(workspaceId);
+    }
+  }
+
   private async _tick(): Promise<void> {
     const now = Date.now();
     const onlineCutoff = new Date(now - ONLINE_THRESHOLD_MS);
@@ -197,6 +247,9 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
           err: String(e), workspace_id: workspaceId,
         });
       }
+      // Observe the staleMs > output-liveness retention regime (ticket 47a72129).
+      // Warn once per workspace per misconfiguration episode — not every tick.
+      this._observeStaleMsVsTtl(workspaceId, staleMs);
       cadence = { staleMs, resendMs };
       cadenceByWorkspace.set(workspaceId, cadence);
       return cadence;
@@ -278,8 +331,19 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
         // this ticket fixes. (A non-force re-push still fires below: harmless —
         // the in-flight strand gate drops it for a live strand, and it wakes a
         // truly idle-but-finished session to move its ticket.)
+        // Clamp the gate window to what AgentStatusService actually retains
+        // (ticket 47a72129). The raw window is staleMs, but if staleMs exceeds
+        // the retention TTL an entry in the (TTL, staleMs) band is already
+        // evicted → getOutputLivenessAt undefined → a live worker looks silent →
+        // force_respawned (exit-143 deathloop, silently regressed). Retention is
+        // derived to be >= staleMs up to a ceiling, so in the normal and
+        // moderately-raised range this equals staleMs (the operator's full
+        // escalation window is honored); only a pathological staleMs past the
+        // ceiling caps it. Enforces the `gate-window <= retention` invariant
+        // directly, independent of the derivation's freshness.
+        const gateWindowMs = Math.min(staleMs, this.agentStatus.getOutputLivenessTtlMs());
         const lastOutputMs = this.agentStatus.getOutputLivenessAt(agent.id, row.ticket_id, row.role);
-        const hasRecentOutput = lastOutputMs !== undefined && (now - lastOutputMs) < staleMs;
+        const hasRecentOutput = lastOutputMs !== undefined && (now - lastOutputMs) < gateWindowMs;
 
         const entry = this.state.get(key);
 

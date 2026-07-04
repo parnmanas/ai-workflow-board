@@ -16,6 +16,7 @@ import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import { Agent } from '../../entities/Agent';
 import { Ticket } from '../../entities/Ticket';
+import { Workspace } from '../../entities/Workspace';
 import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
 import { MemoryMetricsRegistry } from '../../services/memory-metrics.registry';
@@ -58,12 +59,48 @@ const OFFLINE_THRESHOLD_MS = 90_000;
 // without manual intervention. Tuned long enough that legitimate long-running
 // reviews don't flap, short enough that crashes self-heal within ~one sweep.
 const CURRENT_TASK_STALE_MS = 15 * 60_000;
-// Output-liveness eviction TTL (ticket fdc69c13). A per-(agent,ticket,role)
-// output timestamp has nobody to clear it once the session ends; the 30s sweep
-// drops entries older than this so the map stays bounded. Set comfortably above
-// any sane Workspace.supervisor_stale_ms so the supervisor's force-gate never
-// misses a still-relevant entry (default stale is 30 min; this is 6 h).
-const OUTPUT_LIVENESS_TTL_MS = 6 * 60 * 60_000;
+// Output-liveness eviction TTL (ticket fdc69c13, hardened by 47a72129). A
+// per-(agent,ticket,role) output timestamp has nobody to clear it once the
+// session ends; the 30s sweep drops entries older than the *effective* TTL so
+// the map stays bounded.
+//
+// The effective TTL is NOT a fixed constant — it is derived every sweep as
+// clamp(MAX(Workspace.supervisor_stale_ms), FLOOR, CEILING). Why: the
+// TicketSupervisor force-suppression gate compares a strand's output age
+// against that workspace's supervisor_stale_ms. If retention were a fixed 6 h
+// but an operator raised supervisor_stale_ms above it (a real incident-response
+// move — see ticket 47a72129), an entry in the (TTL, staleMs) band would be
+// evicted while the gate still treats it as recent → getOutputLivenessAt()
+// returns undefined → hasRecentOutput=false → a live worker is force_respawned
+// (the exit-143 deathloop fdc69c13 fixed, silently regressed). Deriving
+// retention from staleMs makes the invariant `retention >= staleMs` hold by
+// construction (up to the CEILING). The CEILING bounds the in-memory Map even
+// under a pathological supervisor_stale_ms — its write path enforces only
+// positive, no upper limit.
+export const OUTPUT_LIVENESS_TTL_FLOOR_MS = 6 * 60 * 60_000;     // 6 h — preserves pre-47a72129 retention for normal configs
+export const OUTPUT_LIVENESS_TTL_CEILING_MS = 24 * 60 * 60_000;  // 24 h — hard cap so a huge supervisor_stale_ms can't unbound the Map
+
+/**
+ * Effective output-liveness retention TTL (ticket 47a72129), derived from the
+ * largest supervisor_stale_ms across workspaces so the supervisor's force-gate
+ * window (which compares output age against supervisor_stale_ms) is always
+ * backed by a still-present entry. Pure + exported for unit testing.
+ *   - maxStaleMs <= FLOOR (normal config) → FLOOR (unchanged 6 h behavior)
+ *   - FLOOR < maxStaleMs <= CEILING       → maxStaleMs (retention tracks the knob)
+ *   - maxStaleMs > CEILING (pathological) → CEILING (Map stays bounded)
+ *   - null / non-finite / <= 0            → FLOOR
+ */
+export function resolveOutputLivenessTtlMs(
+  maxStaleMs: number | null | undefined,
+  floorMs: number = OUTPUT_LIVENESS_TTL_FLOOR_MS,
+  ceilingMs: number = OUTPUT_LIVENESS_TTL_CEILING_MS,
+): number {
+  const base =
+    typeof maxStaleMs === 'number' && Number.isFinite(maxStaleMs) && maxStaleMs > 0
+      ? Math.floor(maxStaleMs)
+      : 0;
+  return Math.min(ceilingMs, Math.max(floorMs, base));
+}
 
 @Injectable()
 export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
@@ -77,6 +114,11 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
   // Read by TicketSupervisorService to suppress force_respawn for a worker
   // that's alive-but-quiet-on-the-ticket (the exit-143 deathloop fix).
   private readonly outputLiveness = new Map<string, number>();
+  // Effective output-liveness retention TTL (ticket 47a72129), recomputed each
+  // sweep as resolveOutputLivenessTtlMs(MAX(supervisor_stale_ms)). Seeded at the
+  // FLOOR so the pre-first-sweep window (and any workspace-query failure) is
+  // safe — it never starts shorter than the historical fixed 6 h.
+  private outputLivenessTtlMs: number = OUTPUT_LIVENESS_TTL_FLOOR_MS;
   private sweepHandle: NodeJS.Timeout | null = null;
 
   constructor(
@@ -95,6 +137,11 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
     // it tracks live (agent,ticket,role) strands producing output; a persistent
     // climb means the sweep's TTL eviction regressed.
     metrics.register('agentStatus.outputLiveness', () => this.outputLiveness.size);
+    // Effective retention TTL gauge (ticket 47a72129). Surfaces the derived
+    // output-liveness TTL (ms) so an operator can watch it track a raised
+    // supervisor_stale_ms — and see it pinned at the CEILING under a
+    // pathological value.
+    metrics.register('agentStatus.outputLivenessTtlMs', () => this.outputLivenessTtlMs);
   }
 
   async onModuleInit(): Promise<void> {
@@ -232,6 +279,17 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
    */
   getOutputLivenessAt(agent_id: string, ticket_id: string, role: string): number | undefined {
     return this.outputLiveness.get(this._outputLivenessKey(agent_id, ticket_id, role));
+  }
+
+  /**
+   * Effective output-liveness retention TTL (ms window) currently in force
+   * (ticket 47a72129). TicketSupervisorService clamps its force-gate comparison
+   * window to this so the window can never exceed what the map actually retains
+   * (the `gate-window <= retention` invariant). Derived each sweep from
+   * MAX(supervisor_stale_ms); seeded at the FLOOR before the first sweep.
+   */
+  getOutputLivenessTtlMs(): number {
+    return this.outputLivenessTtlMs;
   }
 
   /**
@@ -414,13 +472,44 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
       if (!seen.has(id)) this.state.delete(id);
     }
 
+    // Refresh the effective output-liveness retention TTL (ticket 47a72129)
+    // from the largest supervisor_stale_ms across workspaces, so retention is
+    // always >= any workspace's force-gate window (up to the CEILING).
+    this.outputLivenessTtlMs = await this._resolveOutputLivenessTtlMs();
+
     // Evict aged output-liveness entries (ticket fdc69c13) so the map stays
     // bounded — a finished/dead session's last entry has nobody to clear it.
-    // The TTL is well above any sane supervisor_stale_ms, so an entry still
-    // within the supervisor's force-gate window is never dropped early.
-    const outputCutoff = Date.now() - OUTPUT_LIVENESS_TTL_MS;
+    // The effective TTL is derived to sit at or above every workspace's
+    // supervisor_stale_ms, so an entry still within the supervisor's force-gate
+    // window is never dropped early (the exit-143 deathloop guard).
+    const outputCutoff = Date.now() - this.outputLivenessTtlMs;
     for (const [k, ts] of this.outputLiveness) {
       if (ts < outputCutoff) this.outputLiveness.delete(k);
+    }
+  }
+
+  /**
+   * Derive the effective output-liveness retention TTL (ticket 47a72129) from
+   * the largest Workspace.supervisor_stale_ms. A single cheap aggregate per 30s
+   * sweep. On any failure returns the CURRENT TTL — never shrinks retention on a
+   * transient DB blip, since a shrink is exactly what would re-open the
+   * exit-143 deathloop.
+   */
+  private async _resolveOutputLivenessTtlMs(): Promise<number> {
+    try {
+      const row = await this.dataSource
+        .getRepository(Workspace)
+        .createQueryBuilder('ws')
+        .select('MAX(ws.supervisor_stale_ms)', 'max')
+        .getRawOne<{ max: number | string | null }>();
+      const maxStaleMs = row?.max != null ? Number(row.max) : 0;
+      return resolveOutputLivenessTtlMs(maxStaleMs);
+    } catch (e) {
+      this.logService.warn('AgentStatus', 'output-liveness TTL derivation failed — keeping current TTL', {
+        err: String(e),
+        current_ttl_ms: this.outputLivenessTtlMs,
+      });
+      return this.outputLivenessTtlMs;
     }
   }
 }

@@ -54,14 +54,14 @@ function fakeDataSource({ workspace = null, stuckIds = [], activitySink } = {}) 
   };
 }
 
-async function makeSupervisor(SupervisorClass, RegistryClass, { allocRow, outputAtFor, stuckIds = [] }) {
+async function makeSupervisor(SupervisorClass, RegistryClass, { allocRow, outputAtFor, stuckIds = [], ttlMs = 6 * 60 * 60_000, workspace = null }) {
   const agentRepo = {
     async find() {
       return [{ id: 'A', last_seen_at: new Date(), workspace_id: 'ws1' }];
     },
   };
   const activitySink = [];
-  const dataSource = fakeDataSource({ stuckIds, activitySink });
+  const dataSource = fakeDataSource({ workspace, stuckIds, activitySink });
   const allocationService = { async getAllocatedTickets() { return [allocRow]; } };
   const emitted = [];
   const triggerLoop = {
@@ -69,7 +69,14 @@ async function makeSupervisor(SupervisorClass, RegistryClass, { allocRow, output
       emitted.push({ ticketId: ticket.id, agentId, role, forceRespawn: !!(opts && opts.forceRespawn) });
     },
   };
-  const agentStatus = { getOutputLivenessAt: outputAtFor || (() => undefined) };
+  // getOutputLivenessTtlMs added by ticket 47a72129 — the gate now clamps its
+  // window to min(staleMs, retentionTtl). Default the mock to the real 6h FLOOR
+  // so min(staleMs<=30min, 6h) === staleMs and these pre-existing cases keep
+  // their original gate window; override ttlMs to exercise the clamp.
+  const agentStatus = {
+    getOutputLivenessAt: outputAtFor || (() => undefined),
+    getOutputLivenessTtlMs: () => ttlMs,
+  };
   const service = new SupervisorClass(
     agentRepo, dataSource, allocationService, triggerLoop, agentStatus, noopLog, new RegistryClass(),
   );
@@ -104,6 +111,53 @@ test('DoD(a) integration: a live-output worker is NEVER force-respawned across m
   assert.ok(
     emitted.every((e) => e.forceRespawn === false),
     'a worker with fresh output-liveness must never be force_respawned (deathloop fixed)',
+  );
+});
+
+// ---- ticket 47a72129: gate-window clamp against the retained TTL ----
+const NINE_H_AGO_ISO = () => new Date(Date.now() - 9 * 60 * 60 * 1000).toISOString();
+
+test('47a72129 integration: staleMs=8h + output 7h old + retention extended to 8h → gate SUPPRESSES force', async () => {
+  const { TicketSupervisorService } = await loadDist(['modules', 'agents', 'ticket-supervisor.service.js']);
+  const { MemoryMetricsRegistry } = await loadDist(['services', 'memory-metrics.registry.js']);
+  // Operator raised supervisor_stale_ms to 8h (incident response). Ticket-write
+  // has been silent 9h (> 8h → the gate is reached), but the worker emitted
+  // output 7h ago — inside the 8h escalation window and in the band a fixed-6h
+  // TTL would have evicted. Retention derives to 8h, so the gate window is
+  // min(8h, 8h)=8h → 7h < 8h → alive → force is suppressed on every tick.
+  const { service, emitted } = await makeSupervisor(TicketSupervisorService, MemoryMetricsRegistry, {
+    workspace: { id: 'ws1', supervisor_stale_ms: 8 * 60 * 60_000 },
+    allocRow: { ticket_id: 't1', role: 'assignee', my_last_update_at: NINE_H_AGO_ISO() },
+    outputAtFor: () => Date.now() - 7 * 60 * 60_000, // 7h ago — the old-evict band
+    ttlMs: 8 * 60 * 60_000,                          // retention tracks the raised staleMs
+  });
+  for (let i = 0; i < 6; i++) { await service._tick(); elapseResend(service); }
+  assert.ok(emitted.length >= 1, 'supervisor re-pushes the write-stale ticket');
+  assert.ok(
+    emitted.every((e) => e.forceRespawn === false),
+    'with retention extended to 8h a 7h-old-output worker is never force_respawned (exit-143 deathloop stays closed)',
+  );
+});
+
+test('47a72129 integration contrast: same case but retention NOT extended (stuck at 6h) → gate FORCES (the bug)', async () => {
+  const { TicketSupervisorService } = await loadDist(['modules', 'agents', 'ticket-supervisor.service.js']);
+  const { MemoryMetricsRegistry } = await loadDist(['services', 'memory-metrics.registry.js']);
+  // Feed the gate a 6h retention (what the old fixed-constant TTL reported)
+  // while staleMs=8h: the window clamps to min(8h, 6h)=6h, so the 7h-old output
+  // reads as stale → force. Proves the derivation (retention tracking staleMs)
+  // is the load-bearing fix; the clamp alone can't resurrect an evicted entry.
+  const { service, emitted } = await makeSupervisor(TicketSupervisorService, MemoryMetricsRegistry, {
+    workspace: { id: 'ws1', supervisor_stale_ms: 8 * 60 * 60_000 },
+    allocRow: { ticket_id: 't1', role: 'assignee', my_last_update_at: NINE_H_AGO_ISO() },
+    outputAtFor: () => Date.now() - 7 * 60 * 60_000,
+    ttlMs: 6 * 60 * 60_000,                          // retention NOT extended past the floor
+  });
+  await service._tick();          // first re-push → non-force nudge
+  elapseResend(service);
+  await service._tick();          // escalation → force (because the gate window is only 6h)
+  assert.ok(
+    emitted.some((e) => e.forceRespawn === true),
+    'un-extended retention reproduces the false force_respawn — exactly what the derived TTL fixes',
   );
 });
 
