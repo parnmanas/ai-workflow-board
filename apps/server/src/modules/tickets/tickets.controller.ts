@@ -50,6 +50,7 @@ import {
   validateNextTicketId,
 } from '../mcp/shared/ticket-helpers';
 import { findOrFail } from '../../common/find-or-fail';
+import { parseDefaultRoleAssignments, type DefaultRoleAssignments } from '../../common/default-role-assignments-config';
 
 @ApiBearerAuth('user-session')
 @ApiTags('tickets')
@@ -97,7 +98,7 @@ export class TicketsController {
 
   @Post('columns/:columnId/tickets')
   async create(@Param('columnId') columnId: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
-    const { title, description = '', priority = 'medium', assignee = '', reporter = '', assignee_id = '', reporter_id = '', labels = [], channel_ids = [], role_assignments, next_ticket_id, effort_preset } = body;
+    const { title, description = '', priority = 'medium', assignee = '', reporter = '', assignee_id = '', reporter_id = '', labels = [], channel_ids = [], role_assignments, next_ticket_id, effort_preset, skip_default_assignments = false } = body;
     if (!title) return res.status(400).json({ error: 'title is required' });
 
     await findOrFail(this.colRepo, { where: { id: columnId } }, 'Column not found');
@@ -137,9 +138,30 @@ export class TicketsController {
     let resolvedReporterId = reporterResolved.id;
     let resolvedReporter = reporterResolved.name;
     const creator = this.resolveCreator(req, body);
+
+    // Board default role holders (ticket d94a1b87). Parse the destination
+    // board's config up front (a) so a board-configured default reporter wins
+    // over the generic creator→reporter auto-fill, and (b) to backfill vacant
+    // roles after the explicit assignments below. skip_default_assignments opts
+    // the whole create out (genuine zero-holder — QA orphan probes) and also
+    // suppresses the creator→reporter auto-fill so no holder sneaks in.
+    let boardDefaults: DefaultRoleAssignments = {};
+    if (!skip_default_assignments) {
+      try {
+        const col = await this.colRepo.findOne({ where: { id: columnId } });
+        if (col) {
+          const defBoard = await this.dataSource.getRepository(Board).findOne({ where: { id: col.board_id } });
+          boardDefaults = parseDefaultRoleAssignments(defBoard?.default_role_assignments);
+        }
+      } catch { /* non-fatal — degrade to "no defaults" */ }
+    }
+    const hasDefaultReporter = Array.isArray(boardDefaults['reporter']) && boardDefaults['reporter'].length > 0;
+
     // Default Reporter to the ticket's creator when none was supplied — keeps
     // the original requester reachable without forcing the create form to ask.
-    if (!resolvedReporter && !resolvedReporterId && creator.created_by_id) {
+    // Suppressed on opt-out (zero-holder) or when the board sets a default
+    // reporter (that configured holder wins — applyBoardDefaults fills it).
+    if (!resolvedReporter && !resolvedReporterId && creator.created_by_id && !skip_default_assignments && !hasDefaultReporter) {
       resolvedReporter = creator.created_by;
       resolvedReporterId = creator.created_by_id;
     }
@@ -183,6 +205,14 @@ export class TicketsController {
       } catch (e: any) {
         return res.status(400).json({ error: e?.message || 'role_assignments rejected' });
       }
+    }
+
+    // Board defaults (d94a1b87): fill roles still VACANT after the explicit
+    // trio + role_assignments. Priority is explicit holder > board default >
+    // unassigned — applyBoardDefaults only writes a currently-vacant role.
+    // Empty config / opt-out → boardDefaults is {} → no-op.
+    if (ticket.workspace_id && Object.keys(boardDefaults).length > 0) {
+      await this.ticketRoleAssignments.applyBoardDefaults(ticket.id, ticket.workspace_id, boardDefaults);
     }
 
     await this.activityService.logActivity({

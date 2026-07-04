@@ -31,6 +31,7 @@ import {
 } from '../shared/ticket-helpers';
 import { getCallerAgent } from '../shared/session-auth';
 import { isTerminalColumn, TicketArchivedError } from '../shared/archive-helpers';
+import { parseDefaultRoleAssignments, type DefaultRoleAssignments } from '../../../common/default-role-assignments-config';
 import type { ToolContext } from './context';
 
 /**
@@ -152,11 +153,12 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       subtasks: z.array(z.string()).optional().default([]).describe('List of subtask titles to create inline'),
       next_ticket_id: z.string().optional().describe('Optional pointer to the ticket TriggerLoopService should auto-trigger once this one lands on a terminal column. Must live in the same workspace; cleared when omitted or empty.'),
       effort_preset: z.string().optional().describe('Abstract effort preset id (NOT a CLI flag) referencing one of the board\'s effort_presets[].id. Empty/omitted = board default preset. Resolved against the board catalog at dispatch; agent-manager maps the matched preset onto per-CLI options.'),
+      skip_default_assignments: z.boolean().optional().default(false).describe('Opt OUT of the board\'s default_role_assignments backfill (ticket d94a1b87). When the board defines default role holders, any role left unstaffed by this call is auto-filled from that config so the new ticket lands on the loop without manual staffing. Set true to keep the roles you did NOT explicitly assign VACANT — e.g. QA orphan probes that need a true zero-holder ticket. Explicitly-assigned roles are unaffected either way.'),
       created_by: z.string().optional().default('').describe('Creator name (user or agent)'),
       created_by_type: z.enum(['user', 'agent']).optional().default('agent').describe('Creator type'),
       created_by_id: z.string().optional().default('').describe('Creator ID'),
     },
-    async ({ title, description, priority, assignee, reporter, assignee_id, reporter_id, reviewer_id, role_assignments, labels, channel_ids, column_id, column_name, board_id, subtasks, next_ticket_id, effort_preset, created_by, created_by_type, created_by_id }, extra: { sessionId?: string }) => {
+    async ({ title, description, priority, assignee, reporter, assignee_id, reporter_id, reviewer_id, role_assignments, labels, channel_ids, column_id, column_name, board_id, subtasks, next_ticket_id, effort_preset, skip_default_assignments, created_by, created_by_type, created_by_id }, extra: { sessionId?: string }) => {
       const __createSanitizeCaller = getCallerAgent(extra);
       description = sanitizeHarnessMarkers(description, { logger, toolName: 'create_ticket', fieldName: 'description', agentId: __createSanitizeCaller?.agentId });
       let resolvedColumnId = column_id;
@@ -197,6 +199,23 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       const creatorType = created_by ? created_by_type : (caller?.agentId ? 'agent' : (reporter ? 'agent' : ''));
       const creatorId = created_by_id || (caller?.agentId) || (reporter ? await resolveAgentId(dataSource, '', reporter, logger) : '');
 
+      // Board default role holders (ticket d94a1b87). Parse the destination
+      // board's config up front so it can (a) let a board-configured default
+      // reporter take precedence over the generic creator→reporter auto-fill
+      // below, and (b) backfill every role the caller left vacant AFTER the
+      // explicit assignments are written. skip_default_assignments opts the
+      // whole create out (true zero-holder — e.g. QA orphan probes, the
+      // 519fad18 trap) which also suppresses the creator→reporter auto-fill so
+      // no holder sneaks in.
+      let boardDefaults: DefaultRoleAssignments = {};
+      if (!skip_default_assignments) {
+        try {
+          const defBoard = await dataSource.getRepository(Board).findOne({ where: { id: col.board_id } });
+          boardDefaults = parseDefaultRoleAssignments(defBoard?.default_role_assignments);
+        } catch { /* non-fatal — degrade to "no defaults" */ }
+      }
+      const hasDefaultReporter = Array.isArray(boardDefaults['reporter']) && boardDefaults['reporter'].length > 0;
+
       const ticket = await dataSource.transaction(async (manager) => {
         const tRepo = manager.getRepository(Ticket);
 
@@ -213,8 +232,12 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
         let resolvedReporter = reporterResolved.name;
         // Default Reporter to the ticket's creator when none was supplied —
         // mirrors the REST controller so an agent that calls create_ticket
-        // ends up listed as Reporter automatically.
-        if (!resolvedReporter && !resolvedReporterId && creatorId) {
+        // ends up listed as Reporter automatically. Suppressed when the caller
+        // opted out (skip_default_assignments → genuine zero-holder ticket) or
+        // when the board defines a default reporter (that configured holder
+        // should win over the generic creator fallback — applyBoardDefaults
+        // fills it below).
+        if (!resolvedReporter && !resolvedReporterId && creatorId && !skip_default_assignments && !hasDefaultReporter) {
           resolvedReporter = creatorName;
           resolvedReporterId = creatorId;
         }
@@ -276,6 +299,15 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       // entry for slug=`assignee` lands on the role-assignment value as the
       // final write — explicit slug wins over the legacy mirror.
       await applyRoleAssignments(ctx, ticket.id, ticket.workspace_id, role_assignments);
+
+      // Board defaults (d94a1b87): fill roles still VACANT after the explicit
+      // trio + role_assignments with the board's default holders. Priority is
+      // explicit holder > board default > unassigned — applyBoardDefaults only
+      // writes a role that currently has NO holder, so nothing above is
+      // clobbered. Empty config / opt-out → boardDefaults is {} → no-op.
+      if (ticketRoleAssignmentService && ticket.workspace_id && Object.keys(boardDefaults).length > 0) {
+        await ticketRoleAssignmentService.applyBoardDefaults(ticket.id, ticket.workspace_id, boardDefaults);
+      }
 
       await activityService.logActivity({
         entity_type: 'ticket', entity_id: ticket.id, action: 'created',
