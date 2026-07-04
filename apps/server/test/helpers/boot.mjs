@@ -27,8 +27,11 @@ export async function loadServerModules() {
   const { ActionsService } = await import(
     'file://' + path.join(DIST_ROOT, 'modules', 'actions', 'actions.service.js')
   );
+  const { HandoffService } = await import(
+    'file://' + path.join(DIST_ROOT, 'modules', 'handoff', 'handoff.service.js')
+  );
   const mcpTools = await import('file://' + path.join(DIST_ROOT, 'modules', 'mcp', 'mcp-tools.js'));
-  return { NestFactory, AppModule, activityEvents, ActivityService, AuthService, ActionsService, getDataSourceToken, mcpTools };
+  return { NestFactory, AppModule, activityEvents, ActivityService, AuthService, ActionsService, HandoffService, getDataSourceToken, mcpTools };
 }
 
 // Create a fresh, isolated Postgres schema for this test process and point the
