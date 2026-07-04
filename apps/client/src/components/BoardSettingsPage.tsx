@@ -4,6 +4,7 @@ import { api } from '../api';
 import {
   Board, BoardWithCards, PromptTemplate, BoardMovePreview, MoveBlocker, MoveRemedy,
   EffortPreset, EffortPresetsConfig, EffortLevel, BUILTIN_EFFORT_PRESETS, Resource,
+  BoardLesson,
 } from '../types';
 import MoveBlockerList from './MoveBlockerList';
 import { useBoard } from '../hooks/useBoard';
@@ -272,10 +273,275 @@ export default function BoardSettingsPage() {
             }
           }}
         />
+        <LessonsSetting board={board} wsId={wsId ?? board.workspace_id} />
         <MoveToWorkspaceSetting board={board} sourceWorkspaceId={wsId ?? board.workspace_id} />
         <DeleteBoardSetting board={board} workspaceId={wsId ?? board.workspace_id} />
       </div>
     </div>
+  );
+}
+
+// ── Board Lessons / Runbook (ticket 9d0d6ac4) ──────────────────────────────
+// Board-scoped knowledge base. Active lessons are auto-injected into the
+// board's dispatch prompts server-side; this section is the human surface to
+// review / add / deactivate them. Self-manages its own list (the collection is
+// not part of the Board row, so it fetches from /boards/:id/lessons).
+const LESSON_TITLE_MAX = 120;
+const LESSON_BODY_MAX = 600;
+
+interface LessonsSettingProps {
+  board: BoardWithCards;
+  wsId: string;
+}
+
+function LessonsSetting({ board, wsId }: LessonsSettingProps) {
+  const { showToast } = useToast();
+  const navigate = useNavigate();
+  const [lessons, setLessons] = useState<BoardLesson[]>([]);
+  const [showInactive, setShowInactive] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+
+  // Add-form state
+  const [title, setTitle] = useState('');
+  const [body, setBody] = useState('');
+  const [tagsRaw, setTagsRaw] = useState('');
+  const [sourceTicket, setSourceTicket] = useState('');
+
+  const load = async (includeInactive: boolean) => {
+    setLoading(true);
+    try {
+      const rows = await api.listBoardLessons(board.id, includeInactive);
+      setLessons(rows);
+    } catch (e: any) {
+      showToast(e?.message || 'Failed to load lessons', 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    load(showInactive);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [board.id, showInactive]);
+
+  const add = async () => {
+    if (!title.trim() || !body.trim()) return;
+    setBusy(true);
+    try {
+      const tags = tagsRaw
+        .split(',')
+        .map((t) => t.trim())
+        .filter(Boolean);
+      await api.createBoardLesson(board.id, {
+        title: title.trim(),
+        body: body.trim(),
+        tags: tags.length ? tags : undefined,
+        source_ticket_id: sourceTicket.trim() || undefined,
+      });
+      setTitle('');
+      setBody('');
+      setTagsRaw('');
+      setSourceTicket('');
+      await load(showInactive);
+      showToast('Lesson added — it will be injected into this board\'s dispatch prompts', 'success');
+    } catch (e: any) {
+      showToast(e?.message || 'Failed to add lesson', 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggleActive = async (l: BoardLesson) => {
+    setBusy(true);
+    try {
+      await api.updateBoardLesson(board.id, l.id, { active: !l.active });
+      await load(showInactive);
+      showToast(l.active ? 'Lesson deactivated (no longer injected)' : 'Lesson re-activated', 'success');
+    } catch (e: any) {
+      showToast(e?.message || 'Failed to update lesson', 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async (l: BoardLesson) => {
+    setBusy(true);
+    try {
+      await api.deleteBoardLesson(board.id, l.id);
+      await load(showInactive);
+      showToast('Lesson deleted', 'success');
+    } catch (e: any) {
+      showToast(e?.message || 'Failed to delete lesson', 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const sectionStyle: React.CSSProperties = {
+    padding: 16,
+    marginBottom: 16,
+    background: tokens.colors.surfaceCard,
+    border: `1px solid ${tokens.colors.border}`,
+    borderRadius: tokens.radii.md,
+  };
+  const inputStyle: React.CSSProperties = {
+    width: '100%',
+    boxSizing: 'border-box',
+    padding: '8px 10px',
+    background: tokens.colors.surface,
+    color: tokens.colors.textPrimary,
+    border: `1px solid ${tokens.colors.border}`,
+    borderRadius: tokens.radii.sm,
+    fontSize: 13,
+  };
+  const canAdd = title.trim().length > 0 && body.trim().length > 0 && !busy;
+
+  return (
+    <section style={sectionStyle}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <h3 style={{ margin: 0, fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>
+          Lessons / Runbook
+        </h3>
+        <label style={{ fontSize: 11, color: tokens.colors.textMuted, display: 'flex', gap: 6, alignItems: 'center' }}>
+          <input
+            type="checkbox"
+            checked={showInactive}
+            onChange={(e) => setShowInactive(e.target.checked)}
+          />
+          Show deactivated
+        </label>
+      </div>
+      <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, marginBottom: 12 }}>
+        Short, imperative lessons captured from past tickets. Every <em>active</em> lesson is appended
+        onto the system prompt of every subagent spawned on this board (tickets, QA, security), so the
+        knowledge stops dying in one ticket's comment thread. Keep them tight — there is a total
+        injected-size cap; deactivate stale ones. A board with zero lessons ships unchanged prompts.
+      </div>
+
+      {/* Existing lessons */}
+      {loading ? (
+        <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>Loading…</div>
+      ) : lessons.length === 0 ? (
+        <div style={{ fontSize: 12, color: tokens.colors.textMuted, marginBottom: 12 }}>
+          No lessons yet.
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+          {lessons.map((l) => (
+            <div
+              key={l.id}
+              style={{
+                padding: 10,
+                border: `1px solid ${tokens.colors.border}`,
+                borderRadius: tokens.radii.sm,
+                background: tokens.colors.surface,
+                opacity: l.active ? 1 : 0.55,
+              }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'baseline' }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>
+                  {l.title}
+                  {!l.active && (
+                    <span style={{ fontSize: 10, color: tokens.colors.textMuted, marginLeft: 8 }}>
+                      (deactivated)
+                    </span>
+                  )}
+                </div>
+                <div style={{ fontSize: 10, color: tokens.colors.textMuted, whiteSpace: 'nowrap' }}>
+                  hits: {l.hit_count}
+                </div>
+              </div>
+              <div style={{ fontSize: 12, color: tokens.colors.textSecondary, marginTop: 4, whiteSpace: 'pre-wrap' }}>
+                {l.body}
+              </div>
+              <div style={{ display: 'flex', gap: 8, marginTop: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                {l.tags.map((t) => (
+                  <span
+                    key={t}
+                    style={{
+                      fontSize: 10,
+                      color: tokens.colors.accentLight,
+                      border: `1px solid ${tokens.colors.border}`,
+                      borderRadius: 4,
+                      padding: '1px 6px',
+                    }}
+                  >
+                    {t}
+                  </span>
+                ))}
+                {l.source_ticket_id && (
+                  <button
+                    onClick={() => navigate(`/ws/${wsId}/boards/${board.id}?ticket=${l.source_ticket_id}`)}
+                    style={{
+                      fontSize: 10,
+                      color: tokens.colors.accentSubtle,
+                      background: 'none',
+                      border: 'none',
+                      cursor: 'pointer',
+                      padding: 0,
+                      textDecoration: 'underline',
+                    }}
+                    title={l.source_ticket_id}
+                  >
+                    source ↗
+                  </button>
+                )}
+                <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+                  <Button variant="secondary" size="sm" disabled={busy} onClick={() => toggleActive(l)}>
+                    {l.active ? 'Deactivate' : 'Activate'}
+                  </Button>
+                  <Button variant="danger" size="sm" disabled={busy} onClick={() => remove(l)}>
+                    Delete
+                  </Button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Add form */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ fontSize: 11, fontWeight: 600, color: tokens.colors.textSecondary }}>Add a lesson</div>
+        <input
+          style={inputStyle}
+          placeholder="Title (short headline)"
+          maxLength={LESSON_TITLE_MAX}
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+        />
+        <textarea
+          style={{ ...inputStyle, minHeight: 64, resize: 'vertical', fontFamily: 'inherit' }}
+          placeholder="Imperative runbook — what to do / avoid. This lands in the prompt."
+          maxLength={LESSON_BODY_MAX}
+          value={body}
+          onChange={(e) => setBody(e.target.value)}
+        />
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <input
+            style={{ ...inputStyle, flex: 1, minWidth: 160 }}
+            placeholder="Tags (comma-separated: build, QA, git…)"
+            value={tagsRaw}
+            onChange={(e) => setTagsRaw(e.target.value)}
+          />
+          <input
+            style={{ ...inputStyle, flex: 1, minWidth: 160 }}
+            placeholder="Source ticket id (optional)"
+            value={sourceTicket}
+            onChange={(e) => setSourceTicket(e.target.value)}
+          />
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span style={{ fontSize: 10, color: tokens.colors.textMuted }}>
+            {title.length}/{LESSON_TITLE_MAX} title · {body.length}/{LESSON_BODY_MAX} body
+          </span>
+          <Button variant="primary" size="sm" disabled={!canAdd} onClick={add}>
+            {busy ? 'Saving…' : 'Add lesson'}
+          </Button>
+        </div>
+      </div>
+    </section>
   );
 }
 

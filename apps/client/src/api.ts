@@ -63,6 +63,7 @@ import type {
   EffortPresetsConfig,
   EnvironmentConfig,
   QaPhasesConfig,
+  BoardLesson,
   Comment,
   RepoRefs,
   RepoCommitSummary,
@@ -426,6 +427,40 @@ export const api = {
     request<any>(`/boards/${boardId}/pause`, { method: 'POST' }),
   resumeBoard: async (boardId: string) =>
     request<any>(`/boards/${boardId}/resume`, { method: 'POST' }),
+  // ─── Board Lessons / Runbook (ticket 9d0d6ac4) ───────────
+  // Board-scoped knowledge base. Active lessons are auto-injected into the
+  // board's dispatch prompts server-side; these back the Settings > Lessons UI.
+  listBoardLessons: (boardId: string, includeInactive = false) =>
+    request<BoardLesson[]>(
+      `/boards/${boardId}/lessons${includeInactive ? '?include_inactive=true' : ''}`,
+    ),
+  createBoardLesson: (
+    boardId: string,
+    data: { title: string; body: string; tags?: string[]; source_ticket_id?: string },
+  ) =>
+    request<BoardLesson>(`/boards/${boardId}/lessons`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  updateBoardLesson: (
+    boardId: string,
+    lessonId: string,
+    data: {
+      title?: string;
+      body?: string;
+      tags?: string[];
+      source_ticket_id?: string;
+      active?: boolean;
+    },
+  ) =>
+    request<BoardLesson>(`/boards/${boardId}/lessons/${lessonId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+  deleteBoardLesson: (boardId: string, lessonId: string) =>
+    request<{ success: boolean }>(`/boards/${boardId}/lessons/${lessonId}`, {
+      method: 'DELETE',
+    }),
   // Archived-ticket surface — distinct from board archive (Board.archived_at)
   // and the active ticket list (which filters archived_at IS NOT NULL).
   listArchivedTickets: async (

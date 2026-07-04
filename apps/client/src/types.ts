@@ -473,6 +473,23 @@ export interface Deployment {
   updated_at: string;
 }
 
+// Board Lessons / Runbook (ticket 9d0d6ac4). A board-scoped knowledge entry;
+// active lessons are auto-injected into the board's dispatch prompts server-side.
+export interface BoardLesson {
+  id: string;
+  workspace_id: string | null;
+  board_id: string;
+  title: string;
+  body: string;
+  tags: string[];
+  source_ticket_id: string | null;
+  active: boolean;
+  hit_count: number;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export type QaRunStatus = 'pending' | 'running' | 'passed' | 'failed' | 'error';
 
 /**
