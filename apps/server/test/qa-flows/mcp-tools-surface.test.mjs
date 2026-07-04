@@ -113,6 +113,10 @@ const EXPECTED_TOOLS = [
   'reject_feature',
   'list_features',
   'get_feature',
+  // Ticket 9d0d6ac4 — board 지식베이스(Lessons/Runbook) 등록/조회/비활성 surface.
+  'add_board_lesson',
+  'list_board_lessons',
+  'update_board_lesson',
 ];
 
 test('MCP initialize + tools/list returns expected AWB tool surface', async (t) => {
