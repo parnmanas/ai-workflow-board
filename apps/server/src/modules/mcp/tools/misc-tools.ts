@@ -14,10 +14,11 @@ import { Comment } from '../../../entities/Comment';
 import { Ticket } from '../../../entities/Ticket';
 import { ok, err } from '../shared/helpers';
 import { findColumnByName, maxTicketPosition, maxChildPosition, shiftTicketPositions } from '../shared/ticket-helpers';
+import { evaluateConsensusMoveGate } from '../../../services/consensus.service';
 import type { ToolContext } from './context';
 
 export function registerMiscTools(server: McpServer, ctx: ToolContext): void {
-  const { dataSource } = ctx;
+  const { dataSource, ticketRoleAssignmentService, logger } = ctx;
 
   // ─── Channels ──────────────────────────────────────────
 
@@ -111,10 +112,16 @@ export function registerMiscTools(server: McpServer, ctx: ToolContext): void {
     `Execute multiple operations in a single transaction. Each operation object has an "action" field.
 Supported actions:
   - create-ticket: { action, boardId?, column, title, description?, priority?, assignee? }
-  - move-ticket: { action, boardId?, ticketId, toColumn, position? }
+  - move-ticket: { action, boardId?, ticketId, toColumn, position?, force? }
   - add-child: { action, ticketId, title } (also accepts legacy "add-subtask")
   - update-child: { action, ticketId, title?, status? } (also accepts legacy "update-subtask" with subtaskId)
-  - add-comment: { action, ticketId, author, content }`,
+  - add-comment: { action, ticketId, author, content }
+
+CONSENSUS GATE — a move-ticket op that takes a MULTI-HOLDER ticket (its current column's routing
+role has >=2 holders) OUT of its column (toColumn != current column) is rejected with a
+"consensus_required" error on that op, same as the move_ticket tool. Advance such a ticket through
+propose_move + record_agreement instead. Pass force:true on the op to bypass the gate — a deliberate
+human/operator escape hatch, not an agent's way around consensus.`,
     {
       operations: z.array(z.record(z.string(), z.unknown())).describe('Array of operation objects'),
     },
@@ -144,6 +151,37 @@ Supported actions:
                 if (!col) { results.push({ error: `Column "${op.toColumn}" not found` }); continue; }
                 const t = await tRepo.findOne({ where: { id: String(op.ticketId) } });
                 if (!t) { results.push({ error: 'Ticket not found' }); continue; }
+
+                // 다중담당자·합의 게이트(T5, 잔여 경화 #3). batch_operations 의 raw 컬럼
+                // 이동도 move_ticket 과 동일하게 게이트한다 — 홀더 ≥2 인 티켓을 컬럼 밖
+                // (또는 다른 보드)으로 옮기는 우회를 봉쇄. move_ticket 과 같은 3개 조건:
+                //   (1) op.force===true 는 우회(operator escape hatch),
+                //   (2) ticketRoleAssignmentService 존재(standalone MCP 는 면제),
+                //   (3) 대상컬럼 ≠ 현재컬럼(같은 컬럼 재정렬은 이탈이 아니라 면제).
+                // 판정 실패는 이동을 막지 않는다(가용성 우선) — move_ticket 동일.
+                if (op.force !== true && ticketRoleAssignmentService && col.id !== t.column_id) {
+                  try {
+                    const gate = await evaluateConsensusMoveGate(
+                      { dataSource, ticketRoleAssignmentService },
+                      t,
+                    );
+                    if (gate.blocked) {
+                      const pending = gate.state.pending.map((p) => `${p.type}:${p.id}`).join(', ');
+                      // 'consensus_required' 리터럴은 move_ticket(MCP)·REST 409·프롬프트
+                      // 안내와 동일 토큰 — 소비자가 한 번의 grep 으로 모든 표면을 잡는다.
+                      results.push({
+                        error:
+                          `consensus_required — 합의 필요(T5): 이 컬럼의 라우팅 역할 홀더 ${gate.state.required.length}명 ` +
+                          `전원이 합의해야 이동할 수 있습니다. 아직 미성립 — 대기 중: [${pending || '없음'}]. ` +
+                          `propose_move(target) 로 제안을 열고 전 홀더가 record_agreement(agree) 하면 자동 이동합니다. ` +
+                          `op 에 force:true 또는 reporter override 로 우회할 수 있습니다.`,
+                      });
+                      continue;
+                    }
+                  } catch (e) {
+                    logger?.warn?.('Consensus', `batch move-ticket gate eval failed: ${e instanceof Error ? e.message : String(e)}`);
+                  }
+                }
 
                 await shiftTicketPositions(tRepo, { column_id: t.column_id }, t.position, -1);
 
