@@ -23,7 +23,8 @@ import { Resource } from '../../../entities/Resource';
 import { activityEvents } from '../../../services/activity.service';
 import { ok, err, MENTION_SYNTAX_DOC, sanitizeHarnessMarkers } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
-import { TicketArchivedError } from '../shared/archive-helpers';
+import { TicketArchivedError, isTerminalColumn } from '../shared/archive-helpers';
+import { detectDeferralToTerminal, formatDeferralTerminalWarning } from '../shared/deferral-terminal-guard';
 import { findColumnByName } from '../shared/ticket-helpers';
 import { resolveAgentDisplayName } from '../../../utils/agent-name';
 import { resolveAuthorRole as resolveAuthorRoleImpl, mergeAuthorRoleIntoMetadata } from './author-role';
@@ -166,6 +167,61 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       );
       const finalMetadata = mergeAuthorRoleIntoMetadata(metadata, resolvedAuthorRole);
 
+      // Deferral-to-terminal guard (ticket 9f2adfd0): FLAG — never block — when
+      // this comment hands scope to an already-terminal ticket, so the deferring
+      // agent notices at post time and the flag persists on the comment for
+      // future readers. Non-blocking sibling of the terminal-reopen guard.
+      let deferralWarning:
+        | { message: string; targets: Array<{ id: string; title: string; column: string | null; archived: boolean }> }
+        | null = null;
+      try {
+        const terminalTargets = await detectDeferralToTerminal(
+          content,
+          async (token) => {
+            const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(token);
+            let t: Ticket | null = null;
+            if (isUuid) {
+              t = await dataSource.getRepository(Ticket).findOne({ where: { id: token } });
+            } else {
+              // 8-hex short id → unique prefix match; skip if ambiguous (2+ hits)
+              // so a coincidental prefix collision never mislabels a ticket.
+              const rows = await dataSource.getRepository(Ticket).createQueryBuilder('t')
+                .where('LOWER(t.id) LIKE :p', { p: `${token.toLowerCase()}%` })
+                .limit(2)
+                .getMany();
+              if (rows.length === 1) t = rows[0];
+            }
+            if (!t) return null;
+            const col = t.column_id
+              ? await dataSource.getRepository(BoardColumn).findOne({ where: { id: t.column_id } })
+              : null;
+            return {
+              id: t.id,
+              title: t.title,
+              columnName: col?.name ?? null,
+              isTerminal: isTerminalColumn(col),
+              archived: !!t.archived_at,
+            };
+          },
+          { selfTicketId: ticket_id },
+        );
+        if (terminalTargets.length > 0) {
+          deferralWarning = {
+            message: formatDeferralTerminalWarning(terminalTargets),
+            targets: terminalTargets.map((t) => ({ id: t.id, title: t.title, column: t.columnName, archived: t.archived })),
+          };
+          // Persist the flag so the UI + future readers see it, not just the poster.
+          finalMetadata.deferral_terminal_warning = deferralWarning;
+          logger.warn(
+            'DeferralGuard',
+            `add_comment on ${ticket_id} defers to terminal ticket(s): ${terminalTargets.map((t) => t.id).join(', ')}`,
+          );
+        }
+      } catch (e) {
+        // Detection is advisory — never fail the comment write because it blew up.
+        logger.warn('DeferralGuard', `deferral-terminal detection failed on ${ticket_id}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+
       const comment = await commentRepo.save(commentRepo.create({
         ticket_id,
         author_type: resolvedAuthorType,
@@ -268,6 +324,12 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         logger.warn('Mentions', `MCP add_comment mention dispatch failed: ${e instanceof Error ? e.message : String(e)}`);
       }
 
+      // Surface the deferral-to-terminal flag back to the poster in the tool
+      // result (extra field — backward compatible) as well as persisting it on
+      // the comment metadata above.
+      if (deferralWarning) {
+        return ok({ ...comment, deferral_terminal_warning: deferralWarning });
+      }
       return ok(comment);
     }
   );
