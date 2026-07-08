@@ -1,19 +1,45 @@
 {
-  "name": "agent-manager",
-  "version": "0.10.1",
-  "private": true,
+  "name": "awb-agent-manager",
+  "version": "1.0.0",
   "description": "Standalone subagent runner for AWB — drives Claude / DeepSeek / Codex / Antigravity CLIs without a host editor",
   "type": "module",
   "main": "dist/main.js",
   "bin": {
     "awb-agent-manager": "dist/main.js"
   },
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "awb",
+    "ai-workflow-board",
+    "mcp",
+    "agent",
+    "subagent",
+    "claude",
+    "cli"
+  ],
+  "author": "parnmanas",
+  "license": "MIT",
+  "homepage": "https://github.com/parnmanas/ai-workflow-board/tree/main/apps/agent-manager#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/parnmanas/ai-workflow-board.git",
+    "directory": "apps/agent-manager"
+  },
+  "bugs": {
+    "url": "https://github.com/parnmanas/ai-workflow-board/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "dev": "tsx watch src/main.ts",
     "build": "tsc -p tsconfig.json && node -e \"require('fs').copyFileSync('package.json','dist/package.json')\"",
     "start": "node dist/main.js",
     "test": "npm run build && node --test 'test/*.test.mjs'",
-    "clean": "rimraf dist"
+    "clean": "rimraf dist",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

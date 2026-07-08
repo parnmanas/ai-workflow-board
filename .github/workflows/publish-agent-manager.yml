@@ -1,0 +1,56 @@
+# Publish awb-agent-manager to npm.
+#
+# Auth: NPM_TOKEN (Automation token) stored as a repo Actions secret.
+#   Settings → Secrets and variables → Actions → New repository secret → NPM_TOKEN
+#
+# Trigger: push a tag shaped `awb-agent-manager-v<version>` (must match the
+# version in apps/agent-manager/package.json), or run manually via the Actions
+# tab (workflow_dispatch). The tag→version guard fails fast on a mismatch so a
+# stale tag can never publish the wrong version.
+#
+#   npm version <x> -w awb-agent-manager        # bump apps/agent-manager/package.json
+#   git commit -am "release(agent-manager): vX"
+#   git tag awb-agent-manager-vX && git push origin main --tags
+
+name: Publish agent-manager
+
+on:
+  push:
+    tags:
+      - 'awb-agent-manager-v*'
+  workflow_dispatch:
+
+jobs:
+  publish:
+    name: build + npm publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Guard — tag matches package version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          PKG_VERSION="$(node -p "require('./apps/agent-manager/package.json').version")"
+          TAG_VERSION="${GITHUB_REF_NAME#awb-agent-manager-v}"
+          echo "package.json=$PKG_VERSION  tag=$TAG_VERSION"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package version $PKG_VERSION"
+            exit 1
+          fi
+
+      - name: Build agent-manager
+        run: npm run build -w awb-agent-manager
+
+      - name: Publish to npm
+        run: npm publish -w awb-agent-manager --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
