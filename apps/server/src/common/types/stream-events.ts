@@ -7,6 +7,7 @@ import type { HarnessConfig } from '../harness-config';
 import type { ResolvedEffortPreset } from '../effort-presets';
 import type { ResolvedEnvironmentConfig } from '../environment-config';
 import type { RunProvision } from '../workspace-folder-options';
+import type { WorktreeMode } from '../worktree-config';
 
 export type StreamEventType =
   | 'board_update'
@@ -116,6 +117,13 @@ export interface AgentTriggerPayload {
   // nothing resolves to a cloneable/runnable step) — the manager must treat
   // null as "no provisioning, spawn exactly as before".
   environment_config?: ResolvedEnvironmentConfig | null;
+  // Resolved board worktree placement mode (worktree 규약 ②, board option ①).
+  // 'per_ticket' → one worktree per ticket at `<working_dir>/.awb/wt/<ticket8>`;
+  // 'shared' → one reused worktree at `<working_dir>/.awb/wt/shared`. agent-manager's
+  // WorktreeManager.resolveCwd reads this to pick the worktree slug at spawn.
+  // Absent/undefined → the manager defaults to 'per_ticket' (DEFAULT_WORKTREE_MODE),
+  // so a pre-② server that never sets the field keeps today's per-ticket behaviour.
+  worktree_mode?: WorktreeMode;
 }
 
 // Phase 2 D-26 — finalized payload shape emitted by chat producers.

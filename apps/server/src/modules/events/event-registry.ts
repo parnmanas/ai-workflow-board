@@ -164,6 +164,11 @@ export const EVENT_TYPES: EventDefinition[] = [
         // the working env (clone/update repos, setup commands, env_vars) before
         // spawn. Null = no provisioning. Same drop story as effort_preset.
         environment_config: event.environment_config ?? null,
+        // Resolved board worktree placement mode (worktree 규약 ②). agent-manager
+        // maps it onto the worktree slug at spawn (per_ticket → `.awb/wt/<ticket8>`,
+        // shared → `.awb/wt/shared`). Undefined = manager defaults to per_ticket.
+        // Same field-by-field drop story as effort_preset/environment_config.
+        worktree_mode: event.worktree_mode ?? undefined,
         // TicketSupervisor kill-and-respawn signal — agent-manager reads
         // force_respawn off the flattened event to drop a wedged subagent before
         // handling the trigger. Defaults false.
@@ -221,6 +226,11 @@ export const EVENT_TYPES: EventDefinition[] = [
         // wire break this ticket's parity guard now locks down.
         effort_preset: p.effort_preset ?? null,
         environment_config: p.environment_config ?? null,
+        // Worktree mode rides the same flatten rule — agent-manager's
+        // #applyWorktreeCwd reads ev.worktree_mode off the FLATTENED event.
+        // Without this line it never leaves the envelope and the manager
+        // falls back to per_ticket regardless of the board setting.
+        worktree_mode: p.worktree_mode ?? undefined,
         force_respawn: p.force_respawn === true,
         // Per-board cap forwarded so the manager can keep a defensive drop
         // alongside the server-side gate.

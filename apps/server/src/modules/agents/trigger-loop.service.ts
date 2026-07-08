@@ -23,6 +23,7 @@ import { priorityIndex } from './priority';
 import { appendBoardLanguageInstruction, resolveHarnessConfig, HarnessConfig } from '../../common/harness-config';
 import { resolveEffortPreset, ResolvedEffortPreset } from '../../common/effort-presets';
 import { mergeEnvironmentConfig, resolveEnvironmentConfig, ResolvedEnvironmentConfig } from '../../common/environment-config';
+import { resolveBoardWorktreeMode, WorktreeMode } from '../../common/worktree-config';
 import { appendBoardLessons, MAX_INJECTED_LESSONS } from '../../common/board-lessons';
 import { BoardLesson } from '../../entities/BoardLesson';
 import { isConsensusVoteComment } from '../../common/consensus-meta';
@@ -1691,10 +1692,18 @@ candidate's branch or move the ticket.
     // provisioning" and spawns exactly as before. Reuses the same board/
     // workspace rows loaded for harness so there's no extra round-trip.
     let environmentConfig: ResolvedEnvironmentConfig | null = null;
+    // Resolved board worktree placement mode (worktree 규약 ②, board option ①).
+    // Null-safe read via the shared resolver — a missing/malformed column falls
+    // back to DEFAULT_WORKTREE_MODE ('per_ticket'). Shipped on the trigger payload
+    // so agent-manager's WorktreeManager picks the worktree slug at spawn
+    // (per_ticket → `.awb/wt/<ticket8>`, shared → `.awb/wt/shared`). Reuses the
+    // same Board row loaded for harness — no extra round-trip.
+    let worktreeMode: WorktreeMode = resolveBoardWorktreeMode(undefined);
     try {
       const boardForHarness = boardId
         ? await this.dataSource.getRepository(Board).findOne({ where: { id: boardId } })
         : null;
+      worktreeMode = resolveBoardWorktreeMode(boardForHarness?.worktree_mode);
       const workspaceForHarness = ticket.workspace_id
         ? await this.dataSource.getRepository(Workspace).findOne({ where: { id: ticket.workspace_id } })
         : null;
@@ -1832,6 +1841,11 @@ candidate's branch or move the ticket.
       // update repos, run setup commands, inject env_vars), guarded by a
       // per-(agent,board) fingerprint marker. Null = no provisioning.
       environment_config: environmentConfig,
+      // Resolved board worktree placement mode (worktree 규약 ②). agent-manager
+      // maps it onto the worktree slug at spawn (per_ticket → `.awb/wt/<ticket8>`,
+      // shared → `.awb/wt/shared`). Always a concrete enum (resolver defaults to
+      // per_ticket) so the manager never has to guess.
+      worktree_mode: worktreeMode,
       triggered_by: triggeredBy,
       timestamp: now.toISOString(),
       force_respawn: forceRespawn,
