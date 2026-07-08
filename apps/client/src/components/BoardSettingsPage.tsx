@@ -166,6 +166,14 @@ export default function BoardSettingsPage() {
             showToast(mode === 'on' ? 'Benchmark mode enabled' : 'Benchmark mode disabled', 'success');
           }}
         />
+        <WorktreeConventionSetting
+          board={board}
+          onSave={async ({ worktree_mode, use_pr }) => {
+            await api.updateBoard(board.id, { worktree_mode, use_pr });
+            await refresh();
+            showToast('Worktree & merge convention saved', 'success');
+          }}
+        />
         <AutoArchiveSetting
           board={board}
           onSave={async (days) => {
@@ -1755,6 +1763,135 @@ function BenchmarkModeSetting({ board, onSave }: BenchmarkModeSettingProps) {
       {hint && (
         <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 10 }}>
           {hint}
+        </div>
+      )}
+    </section>
+  );
+}
+
+// ── Worktree / merge convention (worktree 규약 chain, ticket 4ba844ea) ───────
+// Two board-level scalars in one card: where an agent lays down its ticket
+// worktree (select) and whether the Merging boundary goes through a PR (toggle).
+// Both default to the pre-existing behaviour (per_ticket / direct ff merge); a
+// single Save ships whichever changed.
+type WorktreeMode = NonNullable<Board['worktree_mode']>;
+
+interface WorktreeConventionSettingProps {
+  board: BoardWithCards;
+  onSave(next: { worktree_mode: WorktreeMode; use_pr: boolean }): Promise<void>;
+}
+
+const WORKTREE_MODE_OPTIONS: Array<{ value: WorktreeMode; label: string; hint: string }> = [
+  {
+    value: 'per_ticket',
+    label: 'Per ticket (default)',
+    hint: 'Each ticket gets its own worktree under .awb/wt/<ticket8>/ — fully isolated, removed on archive.',
+  },
+  {
+    value: 'shared',
+    label: 'Shared',
+    hint: 'All tickets reuse one worktree at .awb/wt/shared/ — lighter on disk, but serialises concurrent ticket work.',
+  },
+];
+
+function WorktreeConventionSetting({ board, onSave }: WorktreeConventionSettingProps) {
+  const initialMode: WorktreeMode = (board.worktree_mode || 'per_ticket') as WorktreeMode;
+  const initialUsePr = board.use_pr ?? false;
+  const [mode, setMode] = useState<WorktreeMode>(initialMode);
+  const [usePr, setUsePr] = useState<boolean>(initialUsePr);
+  const [busy, setBusy] = useState(false);
+
+  // Re-sync if the board prop refreshes (another tab / save elsewhere).
+  useEffect(() => {
+    setMode((board.worktree_mode || 'per_ticket') as WorktreeMode);
+    setUsePr(board.use_pr ?? false);
+  }, [board.worktree_mode, board.use_pr]);
+
+  const dirty = mode !== initialMode || usePr !== initialUsePr;
+  const hint = WORKTREE_MODE_OPTIONS.find((o) => o.value === mode)?.hint;
+
+  return (
+    <section
+      style={{
+        padding: 16,
+        marginBottom: 16,
+        background: tokens.colors.surfaceCard,
+        border: `1px solid ${tokens.colors.border}`,
+        borderRadius: tokens.radii.md,
+      }}
+    >
+      <h3 style={{ margin: 0, fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>
+        Worktree &amp; merge convention
+      </h3>
+      <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, marginBottom: 12 }}>
+        Where subagents lay down the worktree they work a ticket in — always rooted inside the
+        working_dir's <code>.awb/</code> — and whether the Merging boundary goes through a pull
+        request. Defaults are <strong>per-ticket</strong> worktrees and <strong>direct
+        fast-forward</strong> merges (today's behaviour); change only when the board's repo flow
+        calls for it.
+      </div>
+      <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+        <div style={{ minWidth: 220 }}>
+          <label
+            style={{
+              display: 'block',
+              fontSize: 11,
+              color: tokens.colors.textMuted,
+              marginBottom: 4,
+              textTransform: 'uppercase',
+              fontWeight: 600,
+            }}
+          >
+            Worktree mode
+          </label>
+          <select
+            value={mode}
+            onChange={(e) => setMode(e.target.value as WorktreeMode)}
+            style={{
+              width: '100%',
+              background: tokens.colors.surface,
+              border: `1px solid ${tokens.colors.border}`,
+              borderRadius: tokens.radii.md,
+              padding: '8px 10px',
+              color: tokens.colors.textStrong,
+              fontSize: 13,
+              fontFamily: 'inherit',
+              boxSizing: 'border-box',
+            }}
+          >
+            {WORKTREE_MODE_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
+        </div>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: tokens.colors.textStrong, paddingBottom: 8 }}>
+          <input
+            type="checkbox"
+            checked={usePr}
+            onChange={(e) => setUsePr(e.target.checked)}
+          />
+          Use pull requests
+        </label>
+        <Button
+          variant="primary"
+          size="sm"
+          disabled={!dirty || busy}
+          onClick={async () => {
+            if (!dirty) return;
+            setBusy(true);
+            try {
+              await onSave({ worktree_mode: mode, use_pr: usePr });
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          {busy ? 'Saving…' : 'Save'}
+        </Button>
+      </div>
+      {hint && (
+        <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 10 }}>
+          {hint} PR path is {usePr ? 'ON — create/merge via pull request.' : 'OFF — direct fast-forward merge.'}
         </div>
       )}
     </section>

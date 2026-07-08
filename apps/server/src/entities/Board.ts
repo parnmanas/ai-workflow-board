@@ -224,6 +224,26 @@ export class Board {
   @Column({ type: 'varchar', default: 'off' })
   benchmark_mode: string;
 
+  // Worktree / merge convention (worktree 규약 chain foundation, ticket 4ba844ea).
+  // Two board-level scalars that govern where an agent lays down the worktree it
+  // works a ticket in and whether the Merging boundary goes through a PR:
+  //   - worktree_mode 'per_ticket' (default) → one worktree per ticket under
+  //     `<working_dir>/.awb/wt/<ticket8>/`; 'shared' → one reused worktree at
+  //     `<working_dir>/.awb/wt/shared/`. Every worktree is rooted inside the
+  //     working_dir's `.awb/` — never scattered outside the repo tree.
+  //   - use_pr false (default) → direct fast-forward merge (today's behaviour);
+  //     true → the opt-in PR create/merge path.
+  // Both are resolved null-safe via resolveBoardWorktreeMode / resolveBoardUsePr
+  // (common/worktree-config.ts), which follow-up tickets in the chain reuse.
+  // Plain default-bearing columns, so synchronize:true (db.ts) auto-adds them in
+  // every env with no migration and every existing board keeps per_ticket /
+  // false — the pre-existing behaviour ([[awb_db_synchronize_always_on_all_envs]]).
+  @Column({ type: 'varchar', default: 'per_ticket' })
+  worktree_mode: string;
+
+  @Column({ type: 'boolean', default: false })
+  use_pr: boolean;
+
   @ManyToOne(() => Workspace, ws => ws.boards, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'workspace_id' })
   workspace: Workspace;

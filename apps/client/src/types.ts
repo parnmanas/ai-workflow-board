@@ -1141,6 +1141,13 @@ export interface Board {
   // the board into a benchmark host — candidate children get scored by
   // evaluator agents on review entry and the Leaderboard panel renders.
   benchmark_mode?: 'off' | 'on';
+  // Per-board worktree layout (worktree 규약 chain). 'per_ticket' (default) gives
+  // each ticket its own worktree under `<working_dir>/.awb/wt/<ticket8>/`;
+  // 'shared' reuses one worktree at `.awb/wt/shared/`.
+  worktree_mode?: 'per_ticket' | 'shared';
+  // Per-board PR usage (worktree 규약 chain). false (default) → direct
+  // fast-forward merge on the Merging boundary; true → the opt-in PR path.
+  use_pr?: boolean;
   // Auto-archive policy: null/absent disables, 1..365 archives Done-column
   // tickets that have been idle for N days — where "idle" means no Done-entry,
   // edit, or comment newer than N days (GREATEST(terminal_entered_at,

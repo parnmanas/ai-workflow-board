@@ -31,6 +31,7 @@ import { validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../.
 import { validateMergeGateConfigInput, serializeMergeGateConfig } from '../../common/merge-gate-config';
 import { validateRespawnStormConfigInput, serializeRespawnStormConfig } from '../../common/respawn-storm-config';
 import { validateDefaultRoleAssignmentsInput, serializeDefaultRoleAssignments } from '../../common/default-role-assignments-config';
+import { validateWorktreeModeInput, validateUsePrInput } from '../../common/worktree-config';
 import { validateQaPhasesInput, serializeQaPhases } from '../qa/qa-phases';
 import { BoardLesson } from '../../entities/BoardLesson';
 import {
@@ -466,7 +467,7 @@ export class BoardsController {
   async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     const board = await findOrFail(this.boardRepo, { where: { id } }, 'Board not found');
 
-    const { name, description, routing_config, column_prompts, max_concurrent_tickets_per_agent, self_improvement_mode, benchmark_mode, auto_archive_days, harness_config, effort_presets, language, environment_config, qa_phases, merge_gate_config, respawn_storm_config, default_role_assignments } = body;
+    const { name, description, routing_config, column_prompts, max_concurrent_tickets_per_agent, self_improvement_mode, benchmark_mode, auto_archive_days, harness_config, effort_presets, language, environment_config, qa_phases, merge_gate_config, respawn_storm_config, default_role_assignments, worktree_mode, use_pr } = body;
     if (name !== undefined) board.name = name;
     if (description !== undefined) board.description = description;
     // Board output language (i18n, ticket ae28dcaf). Human-readable name that
@@ -629,6 +630,22 @@ export class BoardsController {
         if (!dbCheck.ok) return res.status(400).json({ error: dbCheck.error });
         board.default_role_assignments = serializeDefaultRoleAssignments(checked.value);
       }
+    }
+
+    // Worktree / merge convention (worktree 규약 chain, ticket 4ba844ea). Two
+    // plain scalars validated on the write path so a typo'd mode / non-boolean
+    // 400s instead of being silently coerced. There is no "clear" state — the
+    // columns are non-null with a DB default (per_ticket / false); omit the
+    // field to leave it unchanged.
+    if (worktree_mode !== undefined) {
+      const checked = validateWorktreeModeInput(worktree_mode);
+      if (!checked.ok) return res.status(400).json({ error: checked.error });
+      board.worktree_mode = checked.value;
+    }
+    if (use_pr !== undefined) {
+      const checked = validateUsePrInput(use_pr);
+      if (!checked.ok) return res.status(400).json({ error: checked.error });
+      board.use_pr = checked.value;
     }
 
     await this.boardRepo.save(board);

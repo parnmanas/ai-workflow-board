@@ -323,6 +323,12 @@ export const api = {
       max_concurrent_tickets_per_agent?: number;
       self_improvement_mode?: 'off' | 'same_board' | 'remote_awb' | 'both';
       benchmark_mode?: 'off' | 'on';
+      // Per-board worktree layout (worktree 규약 chain). 'per_ticket' (default)
+      // → one worktree per ticket; 'shared' → one reused worktree.
+      worktree_mode?: 'per_ticket' | 'shared';
+      // Per-board PR usage (worktree 규약 chain). false (default) → direct ff
+      // merge; true → the opt-in PR path. Server validates and 400s a non-boolean.
+      use_pr?: boolean;
       auto_archive_days?: number | null;
       harness_config?: HarnessConfig | null;
       // Abstract effort presets (per-CLI option mapping). null clears the

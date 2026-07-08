@@ -22,6 +22,7 @@ import { EnvironmentConfigSchema, validateEnvironmentConfigInput, serializeEnvir
 import { MergeGateConfigSchema, serializeMergeGateConfig } from '../../../common/merge-gate-config';
 import { RespawnStormConfigSchema, serializeRespawnStormConfig } from '../../../common/respawn-storm-config';
 import { DefaultRoleAssignmentsSchema, validateDefaultRoleAssignmentsInput, serializeDefaultRoleAssignments } from '../../../common/default-role-assignments-config';
+import { WORKTREE_MODES } from '../../../common/worktree-config';
 import { LivenessPolicySchema, serializeLivenessPolicy } from '../../qa/qa-liveness-policy';
 import { QaPhasesSchema, serializeQaPhases } from '../../qa/qa-phases';
 import { writeRoutingConfigThrough } from '../../boards/routing-config.helper';
@@ -262,8 +263,12 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
         .describe('Per-board respawn-storm circuit breaker (ticket ab06eac2): { enabled?: bool, window_minutes?: int, min_deaths?: int, quick_death_seconds?: int, auto_pend?: bool, notify?: bool, detect_twins?: bool, auto_stop_late_twin?: bool }. The server counts abnormal QUICK subagent deaths per (ticket,role) off the durable subagents table; past min_deaths inside window_minutes with ZERO forward progress (no fresh comment / column move) it auto-pends the ticket + alerts + writes a respawn_storm_halted activity. Cause-agnostic last line of defence against death-loops / twin-echo. Conservative defaults are ON (30m window, 5 quick deaths, 120s quick-death) so an untouched board is protected. Pass null (or {}) to clear the override back to the env baseline; enabled:false opts the board out.'),
       default_role_assignments: DefaultRoleAssignmentsSchema.nullable().optional()
         .describe('Per-board DEFAULT role holders (ticket d94a1b87): { "<role slug>": [ { "agent_id": "…" } | { "user_id": "…" }, … ], … } e.g. { "assignee": [{ "agent_id": "a1" }], "reviewer": [{ "agent_id": "a2" }] }. At ticket-creation time — across create_ticket (MCP/REST) and QA/Security/Feature auto-tickets — every role the caller did NOT explicitly staff is filled from this map so a fresh ticket lands on the loop without a human wiring assignee/reviewer/reporter each time (the single most-repeated manual step in the board logs). Priority: explicit holder > board default > unassigned; a caller passes skip_default_assignments=true on create to opt out (true zero-holder, e.g. QA orphan probes). Each slug must be a real workspace role and each id a real agent/user (400 otherwise). A holder sets at most one of agent_id / user_id. Applied to NEW tickets only — never retroactively. Pass null or {} to clear.'),
+      worktree_mode: z.enum(WORKTREE_MODES).optional()
+        .describe('Per-board worktree layout (worktree 규약 chain, ticket 4ba844ea): "per_ticket" (default) gives each ticket its own worktree under `<working_dir>/.awb/wt/<ticket8>/`; "shared" reuses one worktree at `<working_dir>/.awb/wt/shared/`. Both are always rooted inside the working_dir\'s `.awb/`. Omit to leave unchanged.'),
+      use_pr: z.boolean().optional()
+        .describe('Per-board PR usage (worktree 규약 chain, ticket 4ba844ea): false (default) does a direct fast-forward merge on the Merging boundary; true opts into the PR create/merge path. Omit to leave unchanged.'),
     },
-    async ({ board_id, name, description, routing_config, column_prompts, auto_archive_days, harness_config, effort_presets, language, environment_config, paused, liveness_policy, qa_phases, merge_gate_config, respawn_storm_config, default_role_assignments }) => {
+    async ({ board_id, name, description, routing_config, column_prompts, auto_archive_days, harness_config, effort_presets, language, environment_config, paused, liveness_policy, qa_phases, merge_gate_config, respawn_storm_config, default_role_assignments, worktree_mode, use_pr }) => {
       const boardRepo = dataSource.getRepository(Board);
       const board = await boardRepo.findOne({ where: { id: board_id } });
       if (!board) return err('Board not found');
@@ -382,6 +387,16 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
           }
           board.default_role_assignments = serializeDefaultRoleAssignments(checked.value);
         }
+      }
+      // Worktree / merge convention (ticket 4ba844ea). Args already passed the
+      // strict z.enum / z.boolean, so storage is a straight assign. Omitting a
+      // field leaves the stored value untouched; there is no "clear" state — the
+      // columns are non-null scalars with a DB default (per_ticket / false).
+      if (worktree_mode !== undefined) {
+        board.worktree_mode = worktree_mode;
+      }
+      if (use_pr !== undefined) {
+        board.use_pr = use_pr;
       }
 
       await boardRepo.save(board);
