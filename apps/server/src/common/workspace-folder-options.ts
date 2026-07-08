@@ -259,15 +259,15 @@ export function renderWorkspaceFolderBlock(input: WorkspaceFolderPromptInput): s
 
   const preparedNote =
     checkout === 'fresh'
-      ? 'freshly re-cloned for you'
-      : 'checked out with the latest changes already pulled';
+      ? 'wiped and freshly re-cloned'
+      : 'reused and fast-forwarded to the latest commit';
 
   return [
     `## Working folder & build (server-decided — do NOT improvise)`,
     ``,
-    `**Working folder:** \`${displayPath}\` — already ${preparedNote} and set as your`,
-    `**current directory** (\`${RUN_WORKSPACE_PROMPT_PATH}\`). Work **only** here; do not \`cd\` elsewhere, re-clone, or`,
-    `build from any other location. Every run of this ${input.kind === 'qa' ? 'scenario' : 'profile'} reuses this exact path.`,
+    `**Working folder:** \`${displayPath}\` — the run workspace has been prepared here for you`,
+    `(${preparedNote}) and set as your **current directory** (\`${RUN_WORKSPACE_PROMPT_PATH}\`). Work **only** here; do`,
+    `not \`cd\` elsewhere, re-clone, or build from any other location. Every run of this ${input.kind === 'qa' ? 'scenario' : 'profile'} reuses this exact path.`,
     ``,
     `**Repo:** ${repoLine}`,
     ``,
