@@ -2,12 +2,11 @@
 import { parseArgs } from 'node:util';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, resolve, join as pathJoin } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import {
   AGENT_MANAGER_HOME,
   CONFIG_PATH,
   LEGACY_CONFIG_PATH,
-  MANAGED_AGENTS_DIR,
 } from './lib/constants.js';
 import { loadConfig, resolveAgentId } from './lib/config.js';
 import { installCrashHandlers, log } from './lib/logging.js';
@@ -675,24 +674,27 @@ async function runRuntime(
   const sweepWorktrees = async (): Promise<void> => {
     if (!worktreeManager.enabled) return;
     try {
+      // worktree 규약 ②: a worktree dir's slug is now the ticket's <ticket8>
+      // (per_ticket) — role is no longer part of the path, and the 'shared'
+      // worktree is skipped by sweep() unconditionally. So the active-set holds
+      // the per-ticket slug; a live session for a ticket keeps its worktree.
       const activeKeys = new Set<string>();
       for (const s of ticketSessionManager._snapshot()) {
-        if (s.ticketId && s.role) activeKeys.add(worktreeSlug(s.ticketId, s.role));
+        if (s.ticketId) activeKeys.add(worktreeSlug(s.ticketId));
       }
       for (const s of subagentManager._snapshot()) {
-        if (s.ticket_id && s.role) activeKeys.add(worktreeSlug(s.ticket_id, s.role));
+        if (s.ticket_id) activeKeys.add(worktreeSlug(s.ticket_id));
       }
       let total = 0;
-      const seenRoots = new Set<string>();
+      // The worktree root is derived from working_dir (`<working_dir>/.awb/wt`)
+      // inside the manager, so agents sharing one working_dir dedupe on it alone.
+      const seenDirs = new Set<string>();
       for (const ctx of managedAgentContexts.list()) {
         if (!ctx.working_dir) continue;
-        const worktreesRoot = pathJoin(MANAGED_AGENTS_DIR, ctx.agent_id, 'worktrees');
-        const dedupeKey = `${ctx.working_dir} ${worktreesRoot}`;
-        if (seenRoots.has(dedupeKey)) continue;
-        seenRoots.add(dedupeKey);
+        if (seenDirs.has(ctx.working_dir)) continue;
+        seenDirs.add(ctx.working_dir);
         total += await worktreeManager.sweep({
           baseWorkingDir: ctx.working_dir,
-          worktreesRoot,
           activeKeys,
         });
       }

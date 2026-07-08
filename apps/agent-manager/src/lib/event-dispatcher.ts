@@ -8,7 +8,6 @@
 // from claude-plugin's daemon.mjs are intentionally absent. When no delegation
 // path is available, events are simply logged.
 
-import { join } from 'node:path';
 import { log } from './logging.js';
 import { loadAgentInfo } from './config.js';
 import {
@@ -18,10 +17,9 @@ import {
   postChatRoomMessage,
 } from './rest.js';
 import { recordEvent } from './event-log-recorder.js';
-import { MANAGED_AGENTS_DIR } from './constants.js';
 import type { AwbConfig } from './rest.js';
 import type { ManagedAgentContextRegistry } from './managed-agent-context.js';
-import type { WorktreeManager } from './worktree-manager.js';
+import type { WorktreeManager, WorktreeMode } from './worktree-manager.js';
 import { prepareChatAttachments } from './chat-attachment-prep.js';
 import type { HarnessSpec, ResolvedEffortPreset, EffortLevel } from './cli-adapters/base.js';
 import { createAdapter, ADAPTER_CAPABILITIES } from './cli-adapters/index.js';
@@ -181,6 +179,16 @@ export function parseEnvironmentConfig(raw: unknown): ResolvedEnvironmentConfig 
     setup_timeout_seconds: Number.isFinite(timeout) && timeout > 0 ? Math.floor(timeout) : 600,
     version: Number.isFinite(Number(obj.version)) ? Math.floor(Number(obj.version)) : 0,
   };
+}
+
+/**
+ * Parse the board worktree placement mode off the flattened agent_trigger
+ * event (worktree 규약 ②). Returns the concrete enum only for a recognized
+ * value; anything else (absent / typo / pre-② server) → undefined, which makes
+ * WorktreeManager.resolveCwd fall back to its per_ticket default. Never throws.
+ */
+export function parseWorktreeMode(raw: unknown): WorktreeMode | undefined {
+  return raw === 'per_ticket' || raw === 'shared' ? raw : undefined;
 }
 
 // Hard cap on consecutive agent-to-agent turns within a single chat room.
@@ -502,19 +510,23 @@ export class EventDispatcher {
     agentContext: AgentExecutionContext | undefined,
     ticketId: string | undefined,
     role: string | undefined,
+    mode: WorktreeMode | undefined,
   ): Promise<void> {
     if (!agentContext || !this.#worktreeManager || !ticketId || !role) return;
     if ((this.#config as any)?.delegation?.worktreeIsolation === false) return;
     try {
+      // worktree 규약 ②: the manager fixes the root at `<working_dir>/.awb/wt`
+      // internally, so no worktreesRoot is passed. mode (per_ticket|shared) is
+      // the board setting the server flattened onto the trigger event.
       const res = await this.#worktreeManager.resolveCwd({
         baseWorkingDir: agentContext.cwd,
-        worktreesRoot: join(MANAGED_AGENTS_DIR, agentContext.agent_id, 'worktrees'),
         ticketId,
         role,
+        mode,
       });
       if (res.isWorktree) {
         log(
-          `[worktree] ticket=${ticketId.slice(0, 8)} role=${role} agent=${agentContext.agent_id.slice(0, 8)} cwd=${res.cwd}${res.reused ? ' (reused)' : ' (new)'}`,
+          `[worktree] ticket=${ticketId.slice(0, 8)} role=${role} agent=${agentContext.agent_id.slice(0, 8)} mode=${res.mode ?? mode ?? 'per_ticket'} cwd=${res.cwd}${res.reused ? ' (reused)' : ' (new)'}`,
         );
         agentContext.cwd = res.cwd;
       } else if (res.reason && res.reason !== 'disabled') {
@@ -551,16 +563,16 @@ export class EventDispatcher {
       // live ticket's worktree.
       if (!ticket || !ticket.terminal_entered_at) return;
       let total = 0;
-      const seenRoots = new Set<string>();
+      const seenDirs = new Set<string>();
       for (const ctx of this.#managedAgentContexts.list()) {
         if (!ctx.working_dir) continue;
-        const worktreesRoot = join(MANAGED_AGENTS_DIR, ctx.agent_id, 'worktrees');
-        const dedupeKey = `${ctx.working_dir} ${worktreesRoot}`;
-        if (seenRoots.has(dedupeKey)) continue;
-        seenRoots.add(dedupeKey);
+        // worktree 규약 ②: the worktree root is derived from working_dir
+        // (`<working_dir>/.awb/wt`) inside the manager, so agents sharing one
+        // working_dir dedupe on that alone.
+        if (seenDirs.has(ctx.working_dir)) continue;
+        seenDirs.add(ctx.working_dir);
         total += await this.#worktreeManager.removeTicketWorktrees({
           baseWorkingDir: ctx.working_dir,
-          worktreesRoot,
           ticketId,
         });
       }
@@ -736,11 +748,19 @@ export class EventDispatcher {
       return;
     }
 
-    // ticket 9f26f091: route this (ticket,role) into its own git worktree so a
-    // branch switch here can't contaminate another ticket sharing the agent's
-    // working_dir. Both the persistent ticket-session and one-shot subagent
-    // fallback below read agentContext.cwd, so one rewrite covers both paths.
-    await this.#applyWorktreeCwd(agentContext, ev.ticket_id, ev.action);
+    // ticket 9f26f091: route this ticket into its own git worktree so a branch
+    // switch here can't contaminate another ticket sharing the agent's
+    // working_dir. worktree 규약 ②: the worktree lands under
+    // `<working_dir>/.awb/wt/`, per_ticket|shared picked from the board mode the
+    // server flattened onto the event. Both the persistent ticket-session and
+    // one-shot subagent fallback below read agentContext.cwd, so one rewrite
+    // covers both paths.
+    await this.#applyWorktreeCwd(
+      agentContext,
+      ev.ticket_id,
+      ev.action,
+      parseWorktreeMode(ev.worktree_mode),
+    );
 
     // Board/workspace harness resolved server-side and flattened onto the
     // event (e9c7a896). Parsed once here; both the persistent-session and
