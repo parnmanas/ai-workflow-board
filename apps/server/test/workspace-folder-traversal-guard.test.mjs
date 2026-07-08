@@ -41,8 +41,20 @@ test('normalizeWorkspaceFolder: drops .. / . segments (no traversal escape)', ()
   assert.equal(normalizeWorkspaceFolder('..\\..\\win'), 'win');
 });
 
-test('resolveWorkspaceFolder: a pure-traversal folder falls back to the deterministic default', () => {
-  // '..' normalizes to '' → resolver uses the <kind>/<id> default, never an escape.
-  assert.equal(resolveWorkspaceFolder('../../..', 'qa', 'sc-9'), 'qa/sc-9');
-  assert.equal(resolveWorkspaceFolder('builds/x', 'security', 'p-1'), 'builds/x');
+test('resolveWorkspaceFolder: every folder is rooted under .awb/qa/ (worktree 규약 ③)', () => {
+  // worktree 규약 ③: QA/security run folders live at `<working_dir>/.awb/qa/<leaf>`
+  // (symmetric with the worktree `.awb/wt/` root). The default leaf is the
+  // scenario/profile id's first 8 chars; an explicit workspace_folder becomes the
+  // leaf but stays nested under .awb/qa/ (never escaping the .awb/ sandbox).
+
+  // Unset / pure-traversal explicit → id-8 default leaf, under .awb/qa/.
+  assert.equal(resolveWorkspaceFolder('../../..', 'qa', 'sc-9'), '.awb/qa/sc-9');
+  assert.equal(resolveWorkspaceFolder('', 'qa', 'abcdef1234567890'), '.awb/qa/abcdef12'); // id truncated to 8
+  assert.equal(resolveWorkspaceFolder(null, 'security', 'p1234567890'), '.awb/qa/p1234567'); // both kinds share .awb/qa/
+
+  // Explicit folder → the leaf, still under .awb/qa/.
+  assert.equal(resolveWorkspaceFolder('builds/x', 'security', 'p-1'), '.awb/qa/builds/x');
+  // A traversal segment in an explicit folder is stripped, so it cannot climb
+  // out of .awb/qa/ — the normalize guard + the fixed root both hold.
+  assert.equal(resolveWorkspaceFolder('../../etc/passwd', 'qa', 'x'), '.awb/qa/etc/passwd');
 });

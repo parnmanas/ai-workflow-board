@@ -8,11 +8,15 @@
 //   - `fresh`: wipe the folder, then clone.
 //   - no repo: just ensure the folder exists (the rendered prompt drives the rest).
 //
-// Folder is rooted at AGENT_MANAGER_HOME, NOT MANAGED_AGENTS_DIR/<agentId> — this
-// matches exactly the path ticket (3) renders into the run prompt
-// (`$AWB_AGENT_MANAGER_HOME/<workspace_folder>`), so the prepared checkout and the
-// agent's instructions point at the same directory. The prepared absolute path is
-// returned so the caller can pin it as the subagent cwd.
+// worktree 규약 ③: the folder is rooted at the agent's WORKING_DIR — a run folder
+// is `<working_dir>/.awb/qa/<id8>`, symmetric with the worktree manager's
+// `<working_dir>/.awb/wt/<slug>` root (규약 ②). The server ships the
+// working_dir-relative `workspace_folder` (`.awb/qa/<id8>`) and the caller passes
+// the agent's working_dir as `baseWorkingDir`; this provisioner joins them and
+// returns the absolute path so the caller can pin it as the subagent cwd —
+// matching exactly the path ticket (3) renders into the run prompt. When no
+// working_dir is available it falls back to AGENT_MANAGER_HOME (the pre-규약-③
+// root) so a run dispatched without a resolved agent context still gets a folder.
 //
 // Responsibility boundary (agreed with ticket 3): this provisioner does SOURCE
 // SYNC only (checkout). Build/test stays the agent's job, kept in the prompt.
@@ -130,24 +134,33 @@ export function parseRunProvision(raw: unknown): RunProvision | null {
  * git failure is captured into `{ ok:false, error, steps }` so the caller can
  * abort the dispatch and surface the reason (the "dispatch 중단 + 코멘트" path).
  */
-export async function provisionRunWorkspace(p: RunProvision): Promise<RunProvisionResult> {
+export async function provisionRunWorkspace(
+  p: RunProvision,
+  baseWorkingDir: string,
+): Promise<RunProvisionResult> {
   const steps: string[] = [];
-  // workspace_folder is manager-home-relative; strip any leading slash so it can
-  // never escape the home root (matches the server's normalizeWorkspaceFolder).
+  // worktree 규약 ③: root the run folder at the agent's working_dir. Fall back to
+  // AGENT_MANAGER_HOME when no working_dir was resolved (a degenerate dispatch
+  // where the caller could not pin a cwd anyway) so a run still gets a folder.
+  const root =
+    typeof baseWorkingDir === 'string' && baseWorkingDir.trim() ? baseWorkingDir : AGENT_MANAGER_HOME;
+  // workspace_folder is root-relative; strip any leading slash so it can never
+  // escape the root (matches the server's normalizeWorkspaceFolder).
   const rel = p.workspace_folder.replace(/^[/\\]+/, '');
-  const dir = join(AGENT_MANAGER_HOME, rel);
+  const dir = join(root, rel);
   const gitDir = join(dir, '.git');
 
   // Defense-in-depth path-traversal guard: this provisioner runs `rm -rf` on
   // `dir` for a fresh checkout (and to clear a non-git reuse folder), and it
   // trusts a wire value the server already normalized. Re-assert here that the
-  // resolved folder stays STRICTLY under AGENT_MANAGER_HOME before any
-  // destructive op — a `..` that slipped past the server guard must abort via
-  // the standard "dispatch 중단 + 코멘트" path, never wipe outside the sandbox.
-  const home = resolve(AGENT_MANAGER_HOME);
+  // resolved folder stays STRICTLY under the root (a proper subdir — never the
+  // working_dir itself) before any destructive op — a `..` that slipped past the
+  // server guard must abort via the standard "dispatch 중단 + 코멘트" path, never
+  // wipe outside the sandbox (or the working_dir root).
+  const rootResolved = resolve(root);
   const resolvedDir = resolve(dir);
-  if (!resolvedDir.startsWith(home + sep)) {
-    const error = `run workspace_folder escapes the agent home (path traversal): ${p.workspace_folder}`;
+  if (!resolvedDir.startsWith(rootResolved + sep)) {
+    const error = `run workspace_folder escapes the working dir (path traversal): ${p.workspace_folder}`;
     log(`[run-provision] ${p.kind} run=${p.run_id.slice(0, 8)} REJECTED: ${error}`);
     return { ok: false, dir: resolvedDir, steps: [`reject ${rel}: path traversal`], error };
   }

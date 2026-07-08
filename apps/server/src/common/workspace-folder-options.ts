@@ -46,6 +46,26 @@ export const DEFAULT_CHECKOUT_MODE: CheckoutMode = 'reuse';
 export const DEFAULT_BUILD_MODE: BuildMode = 'cold_then_warm';
 
 /**
+ * Fixed root (relative to the agent's working_dir) for every QA/security run
+ * folder: `.awb/qa` (worktree 규약 ③). Mirrors the worktree convention's
+ * `.awb/wt` root (규약 ②) so every agent-created scratch folder lives inside
+ * `<working_dir>/.awb/` — never scattered under the manager home or the repo
+ * tree. A resolved run folder is `<working_dir>/.awb/qa/<leaf>`; the
+ * agent-manager provisioner joins it onto the agent's working_dir (which the
+ * server never knows), and the run prompt names the same relative path.
+ */
+export const RUN_WORKSPACE_ROOT = '.awb/qa';
+
+/**
+ * The in-prompt shell token for a run's working folder. The agent-manager
+ * provisioner pins the run subagent's cwd to the resolved folder BEFORE spawn
+ * (규약 ③), so every command in a run prompt operates on the current directory.
+ * Exported so the build-artifact-registry block (qa-prompt) points at the exact
+ * same place as the working-folder block — keeping the two in lockstep.
+ */
+export const RUN_WORKSPACE_PROMPT_PATH = '.';
+
+/**
  * Normalize a free-text `workspace_folder` into a clean relative path (or '').
  * Leading slashes are stripped so the value stays under the agent's home — it is
  * never allowed to be absolute. '' means "unset" → the deterministic default is
@@ -91,10 +111,16 @@ export function normalizeRepoRef(input: any): WorkspaceFolderRepoRef | null {
 }
 
 /**
- * Resolve the effective working folder: the explicit `workspace_folder` when
- * set, otherwise the deterministic id-based default `<kind>/<id>` (e.g.
- * `qa/<scenario_id>`, `security/<profile_id>`). Keeps the folder stable across
- * runs of the same scenario/profile so a warm build dir survives.
+ * Resolve the effective working folder as a working_dir-relative path under the
+ * shared `.awb/qa` root (규약 ③): `<RUN_WORKSPACE_ROOT>/<leaf>`. The leaf is the
+ * explicit `workspace_folder` when set, otherwise the scenario/profile id's
+ * first 8 chars — parallel to the worktree slug's `<ticket8>` (규약 ②), keeping
+ * the folder stable across runs of the same scenario/profile so a warm build
+ * dir survives. `kind` is a last-ditch fallback for the leaf if the id is empty.
+ *
+ * QA scenarios and security profiles share the `.awb/qa` root (both kinds land
+ * under it, keyed by their own id); UUID first-8 collision across the two id
+ * spaces is negligible — the same tradeoff the worktree slug accepts.
  */
 export function resolveWorkspaceFolder(
   folder: string | null | undefined,
@@ -102,7 +128,8 @@ export function resolveWorkspaceFolder(
   id: string,
 ): string {
   const explicit = normalizeWorkspaceFolder(folder);
-  return explicit || `${kind}/${id}`;
+  const leaf = explicit || String(id || '').slice(0, 8) || kind;
+  return `${RUN_WORKSPACE_ROOT}/${leaf}`;
 }
 
 export interface RunFreshnessInput {
@@ -146,8 +173,9 @@ export interface RunRepoSpec {
  * dispatch (`chat_room_message` payload). It tells the agent-manager exactly
  * which folder to prepare and how, BEFORE the run subagent spawns — closing the
  * gap that ticket (3) left to the prompt alone:
- *   - `workspace_folder` is the resolved agent-home-relative folder
- *     (`resolveWorkspaceFolder` output, e.g. `qa/<scenario_id>`).
+ *   - `workspace_folder` is the resolved working_dir-relative folder under
+ *     `.awb/qa` (`resolveWorkspaceFolder` output, e.g. `.awb/qa/<scenario8>`);
+ *     the agent-manager joins it onto the agent's working_dir (규약 ③).
  *   - `repo` is the already-resolved clone source (or null = nothing to clone,
  *     just ensure the folder exists; the prompt still tells the agent what to do).
  *   - `checkout_mode` drives reuse (fetch+ff-pull / clone) vs fresh (wipe + clone).
@@ -182,17 +210,21 @@ export interface WorkspaceFolderPromptInput {
 
 /**
  * Render the imperative "where + how do I build" block injected into a QA /
- * security run prompt. This is the heart of ticket (3): the server resolves the
- * absolute-ish folder (relative to `$AWB_AGENT_MANAGER_HOME`, since the server
- * never knows the agent's real home path) and the COLD/WARM decision, then
- * states them as commands so the agent has **no inference to do** — it does not
- * guess a folder, does not re-clone on a warm run, and does not probe markers to
- * decide cold vs warm.
+ * security run prompt. worktree 규약 ③: the run working folder lives at
+ * `<working_dir>/.awb/qa/<id8>` and the agent-manager provisioner checks it out
+ * and PINS it as the run subagent's cwd BEFORE spawn — so the agent starts
+ * INSIDE the folder and never improvises a location. The server never knows the
+ * absolute working_dir, so the block names the working_dir-relative location for
+ * the human/agent and drives every command off the current directory
+ * (`RUN_WORKSPACE_PROMPT_PATH`), keeping the rendered path and the real cwd in
+ * lockstep (the ticket's core invariant).
  *
- * Responsibility boundary with ticket (4): the prompt is written self-contained
- * (it tells the agent to clone/pull itself). When the agent-manager provisioner
- * lands and guarantees the checkout, the agent can skip the clone/pull and go
- * straight to the build — the block says so explicitly so no edit is needed here.
+ * The COLD/WARM decision stays server-authoritative (`decideRunFreshness`) and
+ * imperative so the agent has **no inference to do** — no folder guess, no
+ * re-clone on a warm run, no marker probing. Source checkout is the
+ * provisioner's job (규약 ④ boundary); build/test stays the agent's — so the
+ * block states the guaranteed prepared state rather than re-issuing clone/pull
+ * commands, which have no well-defined shell form once the cwd IS the folder.
  */
 export function renderWorkspaceFolderBlock(input: WorkspaceFolderPromptInput): string {
   const folder = resolveWorkspaceFolder(input.workspace_folder, input.kind, input.id);
@@ -204,68 +236,45 @@ export function renderWorkspaceFolderBlock(input: WorkspaceFolderPromptInput): s
     last_built_commit: input.last_built_commit ?? null,
   });
 
-  // Path is stated relative to $AWB_AGENT_MANAGER_HOME — the server has no clone
-  // and cannot know the absolute home, so the agent resolves the env var itself.
-  const path = `"$AWB_AGENT_MANAGER_HOME/${folder}"`;
+  // Location is stated `<working_dir>`-relative — the server has no clone and
+  // cannot know the absolute working_dir. The provisioner pins the cwd to this
+  // exact folder, so it is both the described path and the current directory.
+  const displayPath = `<working_dir>/${folder}`;
 
   const ref = normalizeRepoRef(input.repo_ref);
   const branchSuffix = ref?.branch ? ` (branch \`${ref.branch}\`)` : '';
-  const branchCheckout = ref?.branch ? ` && git -C ${path} checkout ${ref.branch}` : '';
-  // For the reuse `cd … && git pull` command the cwd is already the folder, so a
-  // bare `git checkout <branch>` keeps the whole thing in one code span.
-  const branchCheckoutInline = ref?.branch ? ` && git checkout ${ref.branch}` : '';
-  let cloneCmd: string;
   let repoLine: string;
   if (ref?.url) {
-    repoLine = `Clone from \`${ref.url}\`${branchSuffix}.`;
-    cloneCmd = `git clone ${ref.url} ${path}${branchCheckout}`;
+    repoLine = `Cloned from \`${ref.url}\`${branchSuffix}.`;
   } else if (ref?.resource_id) {
-    repoLine = `Use repo Resource \`${ref.resource_id}\`${branchSuffix} — resolve its git URL / credentials from AWB, then clone it.`;
-    cloneCmd = `git clone <resource ${ref.resource_id} url> ${path}${branchCheckout}`;
+    repoLine = `Repo Resource \`${ref.resource_id}\`${branchSuffix} (git URL / credentials resolved from AWB).`;
   } else {
-    repoLine = `Use the repo configured for this board / workspace (\`environment_config\`)${branchSuffix}.`;
-    cloneCmd = `git clone <board environment_config repo url> ${path}${branchCheckout}`;
+    repoLine = `The repo configured for this board / workspace (\`environment_config\`)${branchSuffix}.`;
   }
 
   const buildLabel =
     freshness === 'cold'
-      ? 'a **COLD build** (clean checkout artifacts + full build from scratch)'
+      ? 'a **COLD build** (clean any prior build artifacts + full build from scratch)'
       : 'a **WARM build** (incremental — reuse the existing build artifacts; do NOT clean)';
 
-  let steps: string[];
-  if (checkout === 'fresh') {
-    // fresh always wipes → always COLD (decideRunFreshness guarantees freshness==='cold' here).
-    steps = [
-      `1. **Wipe** the working folder: \`rm -rf ${path}\`.`,
-      `2. Clone fresh: \`${cloneCmd}\`.`,
-      `3. Run ${buildLabel}.`,
-    ];
-  } else if (freshness === 'cold') {
-    steps = [
-      `1. If ${path} does **not** exist, clone into it: \`${cloneCmd}\`. If it already exists, \`cd ${path} && git pull --ff-only${branchCheckoutInline}\`. Do NOT create a new/arbitrary folder.`,
-      `2. Run ${buildLabel}.`,
-    ];
-  } else {
-    steps = [
-      `1. \`cd ${path} && git pull --ff-only${branchCheckoutInline}\`. Do **NOT** re-clone and do **NOT** create a new folder — reuse this exact checkout.`,
-      `2. Run ${buildLabel}.`,
-    ];
-  }
+  const preparedNote =
+    checkout === 'fresh'
+      ? 'freshly re-cloned for you'
+      : 'checked out with the latest changes already pulled';
 
   return [
     `## Working folder & build (server-decided — do NOT improvise)`,
     ``,
-    `**Working folder:** \`$AWB_AGENT_MANAGER_HOME/${folder}\` — resolve \`$AWB_AGENT_MANAGER_HOME\` yourself`,
-    `(the server does not know your absolute home path). Work **only** inside this folder; do not`,
-    `clone into or build from any other location. Every run of this ${input.kind === 'qa' ? 'scenario' : 'profile'} reuses this exact path.`,
+    `**Working folder:** \`${displayPath}\` — already ${preparedNote} and set as your`,
+    `**current directory** (\`${RUN_WORKSPACE_PROMPT_PATH}\`). Work **only** here; do not \`cd\` elsewhere, re-clone, or`,
+    `build from any other location. Every run of this ${input.kind === 'qa' ? 'scenario' : 'profile'} reuses this exact path.`,
     ``,
     `**Repo:** ${repoLine}`,
     ``,
     `**This run is ${freshness.toUpperCase()}** — decided by the server (build_mode=\`${build}\`, checkout_mode=\`${checkout}\`${freshness === 'warm' || build === 'cold_then_warm' ? `, last_built_commit=${input.last_built_commit ? `\`${input.last_built_commit}\`` : 'none'}` : ''}). Do not second-guess this.`,
     ``,
-    ...steps,
-    ``,
-    `> If the working folder was already prepared for you (checkout done by the provisioner), skip the clone/pull above and go straight to the build step.`,
+    `1. Your working folder is ready (see above) and is your current directory — do **not** re-clone or create a new/arbitrary folder.`,
+    `2. Run ${buildLabel}.`,
   ].join('\n');
 }
 

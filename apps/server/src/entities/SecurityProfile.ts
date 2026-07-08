@@ -109,8 +109,9 @@ export class SecurityProfile {
   // NOTE: distinct from `target_resource_id` (which repo to *inspect*) — these
   // describe *where + how* the run's working folder is prepared/built.
 
-  // agent-home-relative working folder. '' = unset → deterministic default
-  // `security/<profile_id>` resolved at prompt render (resolveWorkspaceFolder).
+  // working_dir-relative run folder under `.awb/qa/` (worktree 규약 ③). '' =
+  // unset → deterministic default `.awb/qa/<profile8>` resolved at prompt
+  // render (resolveWorkspaceFolder).
   @Column({ type: 'varchar', default: '' })
   workspace_folder: string;
 

@@ -1303,7 +1303,12 @@ export class EventDispatcher {
           `folder=${runProvision.workspace_folder} checkout=${runProvision.checkout_mode} ` +
           `repo=${runProvision.repo ? runProvision.repo.url : 'none'}`,
       );
-      const result = await provisionRunWorkspace(runProvision);
+      // worktree 규약 ③: root the run folder at the agent's working_dir
+      // (agentContext.cwd) so it lands at `<working_dir>/.awb/qa/<id8>`, matching
+      // the path the server-rendered prompt names and symmetric with the worktree
+      // manager's `.awb/wt/` root. Empty when no agent context resolved → the
+      // provisioner falls back to the manager home (pre-규약-③ behavior).
+      const result = await provisionRunWorkspace(runProvision, agentContext?.cwd || '');
       if (!result.ok) {
         const responder = agentContext?.agent_id || loadAgentInfo()?.agent_id || '';
         if (p.room_id && responder) {

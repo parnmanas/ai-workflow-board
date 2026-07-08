@@ -1,14 +1,21 @@
-// QA/security run-workspace provisioning (ticket 25db3cc6 4/5). Covers:
+// QA/security run-workspace provisioning (ticket 25db3cc6 4/5; rooting moved by
+// worktree 규약 ③ ticket e8ee8ee6). Covers:
 //   - parseRunProvision: defensive wire parse (valid / missing fields / bad repo)
-//   - provisionRunWorkspace reuse: first run clones, second run fetch+ff-pulls
-//     into the SAME folder and picks up a new upstream commit
+//   - provisionRunWorkspace roots the run folder at the agent's WORKING_DIR
+//     (규약 ③) — `<working_dir>/.awb/qa/<leaf>` — not the manager home
+//   - reuse: first run clones, second run fetch+ff-pulls into the SAME folder
+//     and picks up a new upstream commit
 //   - fresh: wipes the folder and re-clones (a stray file is gone afterwards)
 //   - no repo: just ensures the folder exists
+//   - fallback: an empty baseWorkingDir falls back to AGENT_MANAGER_HOME
+//   - path traversal: a ../ workspace_folder is rejected, never rm's outside root
 //   - clone failure (bad url): ok=false with an error, no exception thrown
 //
 // The provisioner reads AGENT_MANAGER_HOME from AWB_AGENT_MANAGER_HOME at module
-// load, so it is dynamic-imported AFTER pointing that env at a temp dir. A local
-// bare repo stands in for the remote so no network is needed.
+// load (only used as the fallback root now), so it is dynamic-imported AFTER
+// pointing that env at a temp dir. `BASE` stands in for the agent's working_dir
+// that the dispatcher passes in. A local bare repo stands in for the remote so
+// no network is needed.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -19,6 +26,8 @@ import { join } from 'node:path';
 
 const HOME = mkdtempSync(join(tmpdir(), 'awb-runprov-home-'));
 process.env.AWB_AGENT_MANAGER_HOME = HOME;
+// The agent's working_dir the dispatcher passes as baseWorkingDir (규약 ③).
+const BASE = mkdtempSync(join(tmpdir(), 'awb-runprov-base-'));
 
 const { parseRunProvision, provisionRunWorkspace } = await import('../dist/lib/run-provisioner.js');
 
@@ -64,12 +73,12 @@ test('parseRunProvision: valid object, missing fields, and bad repo', () => {
     kind: 'qa',
     run_id: 'r1',
     workspace_id: 'w1',
-    workspace_folder: 'qa/s1',
+    workspace_folder: '.awb/qa/s1',
     checkout_mode: 'reuse',
     repo: { url: 'https://x/r.git', branch: 'dev' },
   });
   assert.equal(ok.kind, 'qa');
-  assert.equal(ok.workspace_folder, 'qa/s1');
+  assert.equal(ok.workspace_folder, '.awb/qa/s1');
   assert.equal(ok.checkout_mode, 'reuse');
   assert.deepEqual(ok.repo, { url: 'https://x/r.git', branch: 'dev' });
 
@@ -90,20 +99,22 @@ test('parseRunProvision: valid object, missing fields, and bad repo', () => {
   assert.equal(noUrl.repo, null);
 });
 
-test('reuse: first clones, second fetch+ff-pulls into the same folder and picks up new commits', async () => {
+test('reuse: rooted at working_dir; first clones, second fetch+ff-pulls the same folder', async () => {
   const remote = makeRemote();
-  const base = { kind: 'qa', run_id: 'r1', workspace_id: 'w1', workspace_folder: 'qa/reuse-s', checkout_mode: 'reuse', repo: { url: remote.url } };
+  const base = { kind: 'qa', run_id: 'r1', workspace_id: 'w1', workspace_folder: '.awb/qa/reuse-s', checkout_mode: 'reuse', repo: { url: remote.url } };
 
-  const first = await provisionRunWorkspace(base);
+  const first = await provisionRunWorkspace(base, BASE);
   assert.equal(first.ok, true);
-  assert.equal(first.dir, join(HOME, 'qa/reuse-s'));
+  // 규약 ③: the run folder is rooted at the agent working_dir, NOT the manager home.
+  assert.equal(first.dir, join(BASE, '.awb/qa/reuse-s'));
+  assert.ok(!first.dir.startsWith(HOME), 'not rooted under the manager home');
   assert.ok(existsSync(join(first.dir, '.git')), 'cloned');
   assert.ok(first.steps.some((s) => s.startsWith('clone')), 'first run clones');
   assert.equal(readFileSync(join(first.dir, 'README.md'), 'utf8'), 'v1\n');
 
   // New upstream commit, then a second reuse run must pull it in (same folder).
   remote.pushFile('NEW.txt', 'hello\n');
-  const second = await provisionRunWorkspace(base);
+  const second = await provisionRunWorkspace(base, BASE);
   assert.equal(second.ok, true);
   assert.equal(second.dir, first.dir, 'same folder reused');
   assert.ok(second.steps.some((s) => s.startsWith('fetch')), 'second run fetches');
@@ -113,15 +124,15 @@ test('reuse: first clones, second fetch+ff-pulls into the same folder and picks 
 
 test('fresh: wipes the folder and re-clones (a stray file is gone)', async () => {
   const remote = makeRemote();
-  const base = { kind: 'qa', run_id: 'r2', workspace_id: 'w1', workspace_folder: 'qa/fresh-s', checkout_mode: 'fresh', repo: { url: remote.url } };
+  const base = { kind: 'qa', run_id: 'r2', workspace_id: 'w1', workspace_folder: '.awb/qa/fresh-s', checkout_mode: 'fresh', repo: { url: remote.url } };
 
-  const first = await provisionRunWorkspace(base);
+  const first = await provisionRunWorkspace(base, BASE);
   assert.equal(first.ok, true);
   // Drop a stray file the next fresh run must wipe.
   writeFileSync(join(first.dir, 'STRAY.txt'), 'x');
   assert.ok(existsSync(join(first.dir, 'STRAY.txt')));
 
-  const second = await provisionRunWorkspace(base);
+  const second = await provisionRunWorkspace(base, BASE);
   assert.equal(second.ok, true);
   assert.ok(second.steps.some((s) => s.startsWith('wipe')), 'fresh wipes first');
   assert.ok(second.steps.some((s) => s.startsWith('clone')), 'fresh re-clones');
@@ -130,17 +141,25 @@ test('fresh: wipes the folder and re-clones (a stray file is gone)', async () =>
 });
 
 test('no repo: ensures the folder exists without cloning', async () => {
-  const r = await provisionRunWorkspace({ kind: 'security', run_id: 'r3', workspace_id: 'w1', workspace_folder: 'security/p1', checkout_mode: 'reuse', repo: null });
+  const r = await provisionRunWorkspace({ kind: 'security', run_id: 'r3', workspace_id: 'w1', workspace_folder: '.awb/qa/p1', checkout_mode: 'reuse', repo: null }, BASE);
   assert.equal(r.ok, true);
+  assert.equal(r.dir, join(BASE, '.awb/qa/p1'), 'rooted at working_dir');
   assert.ok(existsSync(r.dir), 'folder created');
   assert.ok(!existsSync(join(r.dir, '.git')), 'nothing cloned');
   assert.ok(r.steps.some((s) => s.includes('no repo to clone')));
 });
 
-test('path traversal: a ../ workspace_folder is rejected and does NOT rm outside the home', async () => {
-  // Stand up a victim dir OUTSIDE the agent home; a fresh checkout (rm -rf) must
-  // never wipe it. The workspace_folder climbs out of HOME via ../ then targets
-  // the victim — enough `..` to escape any depth of HOME under /tmp.
+test('fallback: an empty baseWorkingDir roots at AGENT_MANAGER_HOME (degenerate dispatch)', async () => {
+  const r = await provisionRunWorkspace({ kind: 'qa', run_id: 'r6', workspace_id: 'w1', workspace_folder: '.awb/qa/fallback-s', checkout_mode: 'reuse', repo: null }, '');
+  assert.equal(r.ok, true);
+  assert.equal(r.dir, join(HOME, '.awb/qa/fallback-s'), 'falls back to the manager home when no working_dir');
+  assert.ok(existsSync(r.dir), 'folder created');
+});
+
+test('path traversal: a ../ workspace_folder is rejected and does NOT rm outside the working_dir', async () => {
+  // Stand up a victim dir OUTSIDE the working_dir; a fresh checkout (rm -rf) must
+  // never wipe it. The workspace_folder climbs out of BASE via ../ then targets
+  // the victim — enough `..` to escape any depth of BASE under /tmp.
   const victimRoot = mkdtempSync(join(tmpdir(), 'awb-runprov-victim-'));
   const victim = join(victimRoot, 'precious');
   writeFileSync(victim, 'do not delete\n');
@@ -153,10 +172,10 @@ test('path traversal: a ../ workspace_folder is rejected and does NOT rm outside
     workspace_folder: `../../../../../../../../../..${victimRoot}`,
     checkout_mode: 'fresh',
     repo: null,
-  });
+  }, BASE);
   assert.equal(r.ok, false, 'traversal rejected');
   assert.ok(/traversal/i.test(r.error || ''), 'error names the traversal');
-  assert.ok(existsSync(victim), 'victim file untouched — no rm outside the home');
+  assert.ok(existsSync(victim), 'victim file untouched — no rm outside the working_dir');
 });
 
 test('clone failure (bad url): ok=false with an error, no throw', async () => {
@@ -164,10 +183,10 @@ test('clone failure (bad url): ok=false with an error, no throw', async () => {
     kind: 'qa',
     run_id: 'r4',
     workspace_id: 'w1',
-    workspace_folder: 'qa/badurl-s',
+    workspace_folder: '.awb/qa/badurl-s',
     checkout_mode: 'reuse',
     repo: { url: join(tmpdir(), 'definitely-not-a-repo-xyz.git') },
-  });
+  }, BASE);
   assert.equal(r.ok, false);
   assert.ok(r.error && r.error.length > 0, 'error captured');
   assert.ok(r.steps.some((s) => s.includes('FAIL')), 'failure recorded in steps');

@@ -72,8 +72,9 @@ export class QaScenario {
   // Shared, identical field set with SecurityProfile. See
   // common/workspace-folder-options.ts for the types + the cold/warm decision.
 
-  // agent-home-relative working folder. '' = unset → deterministic default
-  // `qa/<scenario_id>` resolved at prompt render (resolveWorkspaceFolder).
+  // working_dir-relative run folder under `.awb/qa/` (worktree 규약 ③). '' =
+  // unset → deterministic default `.awb/qa/<scenario8>` resolved at prompt
+  // render (resolveWorkspaceFolder).
   @Column({ type: 'varchar', default: '' })
   workspace_folder: string;
 

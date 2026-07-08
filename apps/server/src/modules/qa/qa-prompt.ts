@@ -1,5 +1,5 @@
 import { QaScenario } from '../../entities/QaScenario';
-import { renderWorkspaceFolderBlock, resolveWorkspaceFolder } from '../../common/workspace-folder-options';
+import { renderWorkspaceFolderBlock, RUN_WORKSPACE_PROMPT_PATH } from '../../common/workspace-folder-options';
 import { renderBuildRegistryBlock } from '../../common/build-artifact-options';
 
 /**
@@ -53,8 +53,9 @@ export function renderQaRunPrompt(scenario: QaScenario, runId: string): string {
     // Build & Artifact Registry (ticket 80d52250): supersedes the COLD/WARM hint
     // above with a server-authoritative "is this exact commit already built?"
     // check, so the agent queries the registry instead of blindly rebuilding.
-    // work_path mirrors the workspace-folder block's resolved path exactly (same
-    // `$AWB_AGENT_MANAGER_HOME/<folder>`) so both blocks point at one directory.
+    // work_path mirrors the workspace-folder block's path token exactly — the
+    // provisioner pins the run subagent's cwd to the resolved folder (규약 ③), so
+    // both blocks address the current directory (RUN_WORKSPACE_PROMPT_PATH).
     // build_target falls back to qa_driver when unset (keeps the share key stable).
     renderBuildRegistryBlock({
       workspace_id: scenario.workspace_id,
@@ -62,7 +63,7 @@ export function renderQaRunPrompt(scenario: QaScenario, runId: string): string {
       kind: 'qa',
       repo_ref: scenario.repo_ref,
       build_target: scenario.build_target || scenario.qa_driver || '',
-      work_path: `"$AWB_AGENT_MANAGER_HOME/${resolveWorkspaceFolder(scenario.workspace_folder, 'qa', scenario.id)}"`,
+      work_path: RUN_WORKSPACE_PROMPT_PATH,
     }),
     ``,
     `## Steps`,

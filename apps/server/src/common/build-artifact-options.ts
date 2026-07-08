@@ -88,7 +88,9 @@ export interface BuildRegistryPromptInput {
   repo_ref: WorkspaceFolderRepoRef | null | undefined;
   /** Resolved build target string (caller applies its own fallback). */
   build_target: string;
-  /** The resolved `$AWB_AGENT_MANAGER_HOME/<folder>` path string (as rendered by the working-folder block). */
+  /** The run working-folder path token, as rendered by the working-folder block
+   *  — the provisioner pins the run subagent cwd to the resolved folder (규약 ③),
+   *  so this is `RUN_WORKSPACE_PROMPT_PATH` (the current directory). */
   work_path: string;
 }
 
