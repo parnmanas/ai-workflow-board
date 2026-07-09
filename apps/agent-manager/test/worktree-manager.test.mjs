@@ -20,6 +20,7 @@ import {
   WorktreeManager,
   worktreeSlug,
   worktreesRootFor,
+  runWorkspaceRootFor,
   DEFAULT_WORKTREE_MODE,
 } from '../dist/lib/worktree-manager.js';
 
@@ -267,6 +268,78 @@ test('removeTicketWorktrees never removes the reusable shared checkout', async (
       (await wm.listWorktrees(repo)).some((w) => w.path === join(wtRoot, 'shared')),
       'shared checkout survives a terminal ticket',
     );
+  } finally {
+    await cleanup();
+  }
+});
+
+// ── archive reclamation: removeTicketRunWorkspace (규약 ⑤) ────────────────────
+
+test('runWorkspaceRootFor is always <working_dir>/.awb/qa', () => {
+  assert.equal(runWorkspaceRootFor('/x/y/z'), join('/x/y/z', '.awb', 'qa'));
+});
+
+test('removeTicketRunWorkspace removes .awb/qa/<ticket8> but keeps the root + siblings', async () => {
+  const { repo, cleanup } = await makeRepo();
+  try {
+    const wm = new WorktreeManager();
+    const qaRoot = runWorkspaceRootFor(repo);
+    const target = join(qaRoot, 'aaaaaaaa'); // <ticket8> of TICKET_A
+    const sibling = join(qaRoot, 'scenario99'); // a QA scenario run dir, unrelated
+    await fsp.mkdir(join(target, 'nested'), { recursive: true });
+    await fsp.writeFile(join(target, 'nested', 'artifact.txt'), 'run output\n');
+    await fsp.mkdir(sibling, { recursive: true });
+
+    const removed = await wm.removeTicketRunWorkspace({ baseWorkingDir: repo, ticketId: TICKET_A });
+    assert.equal(removed, true, 'the ticket run workspace was removed');
+    assert.ok(!existsSync(target), '.awb/qa/<ticket8> gone (recursively)');
+    // The qa ROOT itself and unrelated sibling run dirs must survive.
+    assert.ok(existsSync(qaRoot), 'qa root preserved');
+    assert.ok(existsSync(sibling), 'unrelated sibling run dir preserved');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('removeTicketRunWorkspace is a no-op (returns false) when no run dir exists', async () => {
+  const { repo, cleanup } = await makeRepo();
+  try {
+    const wm = new WorktreeManager();
+    // Ordinary dev ticket: run workspaces are keyed by scenario/profile id, not
+    // ticket id, so there is nothing to remove — must not throw, returns false.
+    const removed = await wm.removeTicketRunWorkspace({ baseWorkingDir: repo, ticketId: TICKET_B });
+    assert.equal(removed, false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('removeTicketRunWorkspace strips filesystem-hostile ticket-id chars', async () => {
+  const { repo, cleanup } = await makeRepo();
+  try {
+    const wm = new WorktreeManager();
+    const qaRoot = runWorkspaceRootFor(repo);
+    // slice(0,8) of 'id/with*bad' = 'id/with*' → sanitized to 'id_with_'.
+    const target = join(qaRoot, 'id_with_');
+    await fsp.mkdir(target, { recursive: true });
+    const removed = await wm.removeTicketRunWorkspace({ baseWorkingDir: repo, ticketId: 'id/with*bad' });
+    assert.equal(removed, true);
+    assert.ok(!existsSync(target), 'sanitized run dir removed');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('removeTicketRunWorkspace on a disabled manager returns false', async () => {
+  const { repo, cleanup } = await makeRepo();
+  try {
+    const wm = new WorktreeManager({ enabled: false });
+    const qaRoot = runWorkspaceRootFor(repo);
+    const target = join(qaRoot, 'aaaaaaaa');
+    await fsp.mkdir(target, { recursive: true });
+    const removed = await wm.removeTicketRunWorkspace({ baseWorkingDir: repo, ticketId: TICKET_A });
+    assert.equal(removed, false, 'disabled manager does nothing');
+    assert.ok(existsSync(target), 'target left intact when disabled');
   } finally {
     await cleanup();
   }

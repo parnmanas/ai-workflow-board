@@ -63,6 +63,14 @@ export function worktreesRootFor(baseWorkingDir: string): string {
   return join(baseWorkingDir, '.awb', 'wt');
 }
 
+/** Fixed QA/Security run-workspace root for an agent working_dir:
+ *  `<working_dir>/.awb/qa` — mirrors the server's `RUN_WORKSPACE_ROOT` ('.awb/qa',
+ *  worktree 규약 ③). Exported so the archive-reclamation path (규약 ⑤) can target
+ *  `<root>/<ticket8>` without re-deriving the segment layout. */
+export function runWorkspaceRootFor(baseWorkingDir: string): string {
+  return join(baseWorkingDir, '.awb', 'qa');
+}
+
 interface GitResult {
   ok: boolean;
   stdout: string;
@@ -426,6 +434,46 @@ export class WorktreeManager {
     }
     if (removed > 0) await this.prune(baseWorkingDir);
     return removed;
+  }
+
+  /**
+   * worktree 규약 ⑤: best-effort removal of a ticket's per-ticket QA/Security
+   * run workspace (`<working_dir>/.awb/qa/<ticket8>`), invoked when the ticket is
+   * ARCHIVED. Unlike a worktree this is a plain directory rm — a run workspace is
+   * not a registered git worktree, it's a checkout the run provisioner clones
+   * into, so `git worktree remove` doesn't apply. Strongly guarded: the target
+   * is always `<runRoot>/<ticket8>` and must sit strictly UNDER
+   * `<working_dir>/.awb/qa` (never the qa root itself, never anything outside
+   * `.awb/`). Returns true when a dir was removed. Never throws.
+   *
+   * Note: run workspaces are keyed by QA scenario / security profile id (id8),
+   * not by ticket id, so for an ordinary dev ticket this is a no-op (no such
+   * dir). It's kept so archive reclaims everything a ticket could have used and
+   * stays symmetric with removeTicketWorktrees.
+   */
+  async removeTicketRunWorkspace(opts: {
+    baseWorkingDir: string;
+    ticketId: string;
+  }): Promise<boolean> {
+    if (!this.#enabled) return false;
+    const { baseWorkingDir, ticketId } = opts;
+    if (!baseWorkingDir || !ticketId) return false;
+    const runRoot = runWorkspaceRootFor(baseWorkingDir);
+    const ticket8 = String(ticketId).slice(0, 8).replace(/[^A-Za-z0-9._-]/g, '_');
+    if (!ticket8) return false;
+    const target = join(runRoot, ticket8);
+    // Guard: only ever remove a dir strictly under `<working_dir>/.awb/qa`.
+    if (!isUnder(target, runRoot)) return false;
+    try {
+      const st = await fsp.stat(target).catch(() => null);
+      if (!st || !st.isDirectory()) return false;
+      await fsp.rm(target, { recursive: true, force: true });
+      log(`[worktree] removed archived-ticket run workspace ${target}`);
+      return true;
+    } catch (err: any) {
+      log(`[worktree] run workspace remove failed ${target}: ${err?.message ?? err}`);
+      return false;
+    }
   }
 
   /**

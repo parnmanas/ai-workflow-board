@@ -590,6 +590,67 @@ export class EventDispatcher {
   }
 
   /**
+   * worktree 규약 ⑤: when a ticket is ARCHIVED, physically remove everything it
+   * used across every managed agent this manager owns — its per_ticket worktree
+   * (`.awb/wt/<ticket8>`, force-removed even if dirty) AND its QA/Security run
+   * workspace (`.awb/qa/<ticket8>`). The reusable 'shared' worktree is never
+   * touched (removeTicketWorktrees skips it).
+   *
+   * Distinct from #cleanupTerminalTicketWorktrees:
+   *   - triggered by the archive board_update (action==='archived'), not a move;
+   *   - also reclaims the run workspace, which Done-time terminal cleanup leaves;
+   *   - covers tickets archived straight from a NON-terminal column (obsolete /
+   *     superseded work) that never entered terminal and so never hit terminal
+   *     cleanup — the primary case that motivated 규약 ⑤.
+   *
+   * No REST re-fetch gate is used (terminal cleanup re-reads terminal_entered_at
+   * because 'moved' doesn't reveal the destination's terminal-ness). The
+   * 'archived' action IS the confirmation, archived tickets are filtered out of
+   * most REST reads anyway, and both removals are idempotent no-ops when the
+   * dirs are already gone (e.g. the worktree was reclaimed at Done). Best-effort,
+   * fire-and-forget; never throws.
+   */
+  async #cleanupArchivedTicketWorkspace(ticketId: string): Promise<void> {
+    if (!this.#worktreeManager || !this.#worktreeManager.enabled) return;
+    if ((this.#config as any)?.delegation?.worktreeIsolation === false) return;
+    if (!this.#managedAgentContexts) return;
+    try {
+      let worktrees = 0;
+      let runDirs = 0;
+      const seenDirs = new Set<string>();
+      for (const ctx of this.#managedAgentContexts.list()) {
+        if (!ctx.working_dir) continue;
+        // The worktree + run-workspace roots both derive from working_dir
+        // (`<working_dir>/.awb/{wt,qa}`), so agents sharing one working_dir
+        // dedupe on that alone.
+        if (seenDirs.has(ctx.working_dir)) continue;
+        seenDirs.add(ctx.working_dir);
+        worktrees += await this.#worktreeManager.removeTicketWorktrees({
+          baseWorkingDir: ctx.working_dir,
+          ticketId,
+        });
+        if (
+          await this.#worktreeManager.removeTicketRunWorkspace({
+            baseWorkingDir: ctx.working_dir,
+            ticketId,
+          })
+        ) {
+          runDirs++;
+        }
+      }
+      if (worktrees > 0 || runDirs > 0) {
+        log(
+          `[worktree] archived ticket=${ticketId.slice(0, 8)} reclaimed ${worktrees} worktree(s) + ${runDirs} run workspace(s)`,
+        );
+      }
+    } catch (err: any) {
+      log(
+        `[worktree] archive cleanup failed for ticket=${ticketId.slice(0, 8)}: ${err?.message ?? err}`,
+      );
+    }
+  }
+
+  /**
    * ST-6: resolve a managed-agent context by id (the event's target agent).
    * Returns null when (a) no registry is wired, (b) the id doesn't match
    * any registered managed agent, or (c) the agent is not yet bootstrapped
@@ -1194,6 +1255,18 @@ export class EventDispatcher {
       // so the live-session forward below stays synchronous.
       if (ev.entity_type === 'ticket' && ev.action === 'moved' && ev.ticket_id) {
         void this.#cleanupTerminalTicketWorktrees(ev.ticket_id);
+      }
+
+      // worktree 규약 ⑤ — archive reclamation. Archiving a ticket writes an
+      // activity_log 'archived' row which fans out as this very board_update
+      // (entity_type='ticket', action='archived'). That is the authoritative
+      // "physically remove everything this ticket used" signal: its per_ticket
+      // worktree AND its QA/Security run workspace. Distinct from the 'moved'
+      // terminal cleanup above — it also reclaims the run workspace and covers
+      // tickets archived straight from a non-terminal column. Fire-and-forget so
+      // the live-session forward below stays synchronous.
+      if (ev.entity_type === 'ticket' && ev.action === 'archived' && ev.ticket_id) {
+        void this.#cleanupArchivedTicketWorkspace(ev.ticket_id);
       }
 
       if (this.#ticketSessionManager && ev.ticket_id) {
