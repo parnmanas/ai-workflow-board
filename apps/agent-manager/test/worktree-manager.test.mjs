@@ -22,6 +22,8 @@ import {
   worktreesRootFor,
   runWorkspaceRootFor,
   DEFAULT_WORKTREE_MODE,
+  sharedSlotName,
+  isSharedSlotSeg,
 } from '../dist/lib/worktree-manager.js';
 
 function git(cwd, args) {
@@ -41,8 +43,35 @@ async function makeRepo() {
   return { root, repo, cleanup: () => fsp.rm(root, { recursive: true, force: true }) };
 }
 
+// A repo whose base branch has a real `origin` remote, so the warm-pool
+// reset-on-acquire can target `origin/<base>`. The primary tree is deliberately
+// advanced ONE commit past what was pushed, so a reset to origin/main is
+// distinguishable from a reset to the primary HEAD.
+async function makeRepoWithRemote() {
+  const root = await fsp.mkdtemp(join(tmpdir(), 'awb-wt-remote-'));
+  const remote = join(root, 'remote.git');
+  execFileSync('git', ['init', '-q', '--bare', '-b', 'main', remote]);
+  const repo = join(root, 'repo');
+  await fsp.mkdir(repo, { recursive: true });
+  git(repo, ['init', '-q', '-b', 'main']);
+  git(repo, ['config', 'user.email', 'test@awb.local']);
+  git(repo, ['config', 'user.name', 'AWB Test']);
+  await fsp.writeFile(join(repo, 'README.md'), '# base\n');
+  git(repo, ['add', '.']);
+  git(repo, ['commit', '-q', '-m', 'base']);
+  git(repo, ['remote', 'add', 'origin', remote]);
+  git(repo, ['push', '-q', '-u', 'origin', 'main']);
+  git(repo, ['remote', 'set-head', 'origin', 'main']); // sets refs/remotes/origin/HEAD
+  // Advance the primary tree past origin/main WITHOUT pushing.
+  await fsp.writeFile(join(repo, 'README.md'), '# base v2 (unpushed)\n');
+  git(repo, ['add', '.']);
+  git(repo, ['commit', '-q', '-m', 'v2 local only']);
+  return { root, repo, remote, cleanup: () => fsp.rm(root, { recursive: true, force: true }) };
+}
+
 const TICKET_A = 'aaaaaaaa-1111-2222-3333-444444444444';
 const TICKET_B = 'bbbbbbbb-1111-2222-3333-444444444444';
+const TICKET_C = 'cccccccc-1111-2222-3333-444444444444';
 
 // ── slug + root helpers ─────────────────────────────────────────────────────
 
@@ -55,6 +84,18 @@ test('worktreeSlug: per_ticket → <ticket8>, shared → shared, default per_tic
   assert.equal(worktreeSlug('id/with*bad', 'per_ticket'), 'id_with_');
   // shared is a fixed literal regardless of the ticket id
   assert.equal(worktreeSlug('id/with*bad', 'shared'), 'shared');
+});
+
+test('sharedSlotName / isSharedSlotSeg: pool slot naming + protection set', () => {
+  assert.equal(sharedSlotName(0), 'shared-0');
+  assert.equal(sharedSlotName(3), 'shared-3');
+  // Every pool slot AND the legacy literal are protected from sweep/removal.
+  assert.ok(isSharedSlotSeg('shared-0'));
+  assert.ok(isSharedSlotSeg('shared-7'));
+  assert.ok(isSharedSlotSeg('shared'), 'legacy single-shared dir still protected');
+  // Per-ticket slugs are NOT pool slots (they get swept / terminal-removed).
+  assert.ok(!isSharedSlotSeg('aaaaaaaa'));
+  assert.ok(!isSharedSlotSeg('sharedx'));
 });
 
 test('worktreesRootFor is always <working_dir>/.awb/wt', () => {
@@ -94,23 +135,143 @@ test('per_ticket: worktrees land under .awb/wt/<ticket8>, distinct per ticket', 
   }
 });
 
-test('shared: every ticket reuses the ONE .awb/wt/shared checkout', async () => {
+// ── shared = warm worktree pool (규약 ⑥) ─────────────────────────────────────
+
+test('shared pool: concurrent tickets lease DISTINCT slots up to N (poolSize)', async () => {
   const { repo, cleanup } = await makeRepo();
   try {
     const wm = new WorktreeManager();
     const wtRoot = worktreesRootFor(repo);
-    const a = await wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_A, role: 'assignee', mode: 'shared' });
-    const b = await wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_B, role: 'assignee', mode: 'shared' });
+    // Pool size N = board concurrency = 2.
+    const a = await wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_A, role: 'assignee', mode: 'shared', poolSize: 2 });
+    const b = await wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_B, role: 'assignee', mode: 'shared', poolSize: 2 });
 
-    assert.ok(a.isWorktree && b.isWorktree);
+    assert.ok(a.isWorktree && b.isWorktree, 'both leased a slot');
     assert.equal(a.mode, 'shared');
-    assert.equal(a.worktreePath, join(wtRoot, 'shared'));
-    assert.equal(a.worktreePath, b.worktreePath, 'both tickets share one checkout dir');
-    assert.equal(a.reused, false, 'first ticket creates the shared checkout');
-    assert.equal(b.reused, true, 'second ticket reattaches to the same shared checkout');
-    // Only ONE worktree exists under .awb/wt despite two tickets.
-    const under = (await wm.listWorktrees(repo)).filter((w) => w.path.startsWith(wtRoot));
-    assert.equal(under.length, 1, 'exactly one shared worktree');
+    assert.equal(a.worktreePath, join(wtRoot, 'shared-0'));
+    assert.equal(b.worktreePath, join(wtRoot, 'shared-1'), 'second concurrent ticket gets a DIFFERENT slot');
+    assert.notEqual(a.cwd, b.cwd, 'distinct cwd per concurrent ticket — no branch contention');
+
+    // Independent branches across the two pool slots (the whole point of the pool).
+    git(a.cwd, ['checkout', '-q', '-b', 'ticket/aaaaaaaa']);
+    git(b.cwd, ['checkout', '-q', '-b', 'ticket/bbbbbbbb']);
+    await fsp.writeFile(join(a.cwd, 'a.txt'), 'A\n');
+    git(a.cwd, ['add', '.']);
+    git(a.cwd, ['commit', '-q', '-m', 'A commit']);
+    assert.ok(!git(b.cwd, ['log', '--oneline']).includes('A commit'), 'B slot has no A commit');
+
+    // The lease registry is persisted under the gitignored .awb/.
+    assert.ok(existsSync(join(wtRoot, '.pool-leases.json')), 'lease registry persisted');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('shared pool: same ticket reattaches to its slot across roles/turns (no reset)', async () => {
+  const { repo, cleanup } = await makeRepo();
+  try {
+    const wm = new WorktreeManager();
+    const wtRoot = worktreesRootFor(repo);
+    const first = await wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_A, role: 'assignee', mode: 'shared', poolSize: 2 });
+    git(first.cwd, ['checkout', '-q', '-b', 'ticket/aaaaaaaa']);
+    await fsp.writeFile(join(first.cwd, 'wip.txt'), 'in progress\n'); // uncommitted
+
+    // A different role / resume for the SAME ticket lands back on the same slot
+    // with its branch + dirty tree intact — NOT reset.
+    const second = await wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_A, role: 'reviewer', mode: 'shared', poolSize: 2 });
+    assert.equal(second.worktreePath, join(wtRoot, 'shared-0'), 'same slot regardless of role');
+    assert.equal(second.reused, true);
+    assert.equal(git(second.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), 'ticket/aaaaaaaa', 'branch intact');
+    assert.equal(await fsp.readFile(join(second.cwd, 'wip.txt'), 'utf8'), 'in progress\n', 'dirty tree intact');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('shared pool: release → reacquire RESETS tracked source but PRESERVES untracked warm build', async () => {
+  const { repo, cleanup } = await makeRepo();
+  try {
+    const wm = new WorktreeManager();
+    const wtRoot = worktreesRootFor(repo);
+    // N=1: a single reused slot. Ticket A leases it and does work.
+    const a = await wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_A, role: 'assignee', mode: 'shared', poolSize: 1 });
+    assert.equal(a.worktreePath, join(wtRoot, 'shared-0'));
+    git(a.cwd, ['checkout', '-q', '-b', 'ticket/aaaaaaaa']);
+    await fsp.writeFile(join(a.cwd, 'README.md'), '# MODIFIED by A\n'); // tracked change
+    git(a.cwd, ['add', '.']);
+    git(a.cwd, ['commit', '-q', '-m', 'A modifies tracked source']);
+    await fsp.writeFile(join(a.cwd, 'build-artifact.bin'), 'WARM\n'); // untracked build output
+
+    // A reaches a terminal column → its slot is RELEASED (lazy), not removed.
+    const removed = await wm.removeTicketWorktrees({ baseWorkingDir: repo, ticketId: TICKET_A });
+    assert.equal(removed, 0, 'a pool slot is released, never removed');
+    assert.ok(existsSync(join(wtRoot, 'shared-0')), 'slot dir + warm artifacts survive release');
+
+    // Ticket B leases the freed slot → reset-on-acquire.
+    const b = await wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_B, role: 'assignee', mode: 'shared', poolSize: 1 });
+    assert.equal(b.worktreePath, join(wtRoot, 'shared-0'), 'B reuses the freed warm slot');
+    assert.equal(b.reused, true, 'the warm checkout dir was reused, not recreated');
+    // Tracked source is back at the base tip …
+    assert.equal(await fsp.readFile(join(b.cwd, 'README.md'), 'utf8'), '# base\n', 'tracked source reset to base');
+    // … but the untracked warm-build artifact survived (the pool's whole value).
+    assert.ok(existsSync(join(b.cwd, 'build-artifact.bin')), 'untracked warm build artifact PRESERVED');
+    // A's stale work branch was dropped, and B is detached (no leftover branch).
+    assert.ok(!git(repo, ['branch', '--list', 'ticket/aaaaaaaa']).includes('ticket/aaaaaaaa'), 'prior work branch -D');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('shared pool: reset-on-acquire targets origin/<base> when a remote exists', async () => {
+  const { repo, cleanup } = await makeRepoWithRemote();
+  try {
+    const wm = new WorktreeManager();
+    const wtRoot = worktreesRootFor(repo);
+    // A leases a fresh slot (created at the primary HEAD = the unpushed v2 commit).
+    const a = await wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_A, role: 'assignee', mode: 'shared', poolSize: 1 });
+    assert.equal(await fsp.readFile(join(a.cwd, 'README.md'), 'utf8'), '# base v2 (unpushed)\n', 'fresh slot starts at primary HEAD');
+    // Release, then B reacquires → reset-on-acquire must go to origin/main (the
+    // pushed base tip), NOT the primary's unpushed HEAD.
+    await wm.removeTicketWorktrees({ baseWorkingDir: repo, ticketId: TICKET_A });
+    const b = await wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_B, role: 'assignee', mode: 'shared', poolSize: 1 });
+    assert.equal(b.worktreePath, join(wtRoot, 'shared-0'));
+    assert.equal(await fsp.readFile(join(b.cwd, 'README.md'), 'utf8'), '# base\n', 'reset went to origin/main, not the unpushed primary HEAD');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('shared pool: exhausted (all N slots active) → safe fallback to base cwd', async () => {
+  const { repo, cleanup } = await makeRepo();
+  try {
+    const wm = new WorktreeManager();
+    // N=1, and A holds the only slot (still active — not released).
+    await wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_A, role: 'assignee', mode: 'shared', poolSize: 1 });
+    const b = await wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_B, role: 'assignee', mode: 'shared', poolSize: 1 });
+    assert.equal(b.isWorktree, false, 'no free slot → not a worktree');
+    assert.equal(b.reason, 'pool_exhausted');
+    assert.equal(b.cwd, repo, 'falls back to the base cwd');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('shared pool: lease registry persists across a manager restart (resume reattaches)', async () => {
+  const { repo, cleanup } = await makeRepo();
+  try {
+    const wm1 = new WorktreeManager();
+    const wtRoot = worktreesRootFor(repo);
+    const a = await wm1.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_A, role: 'assignee', mode: 'shared', poolSize: 2 });
+    assert.equal(a.worktreePath, join(wtRoot, 'shared-0'));
+
+    // Fresh manager instance (simulating a restart) reads the on-disk registry.
+    const wm2 = new WorktreeManager();
+    const a2 = await wm2.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_A, role: 'reviewer', mode: 'shared', poolSize: 2 });
+    assert.equal(a2.worktreePath, join(wtRoot, 'shared-0'), 'restart reattaches ticket to its persisted slot');
+    assert.equal(a2.reused, true);
+    // A concurrent NEW ticket after restart must get slot-1, not clobber slot-0.
+    const c = await wm2.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_C, role: 'assignee', mode: 'shared', poolSize: 2 });
+    assert.equal(c.worktreePath, join(wtRoot, 'shared-1'), 'new ticket takes the still-free slot');
   } finally {
     await cleanup();
   }
@@ -254,20 +415,23 @@ test('removeTicketWorktrees drops the per_ticket worktree (even dirty) but keeps
   }
 });
 
-test('removeTicketWorktrees never removes the reusable shared checkout', async () => {
+test('removeTicketWorktrees releases (never removes) a warm-pool slot', async () => {
   const { repo, cleanup } = await makeRepo();
   try {
     const wm = new WorktreeManager();
     const wtRoot = worktreesRootFor(repo);
-    // Ticket A ran in shared mode; its dir is 'shared', reused across tickets.
-    await wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_A, role: 'assignee', mode: 'shared' });
+    // Ticket A ran in shared mode → holds pool slot shared-0.
+    await wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_A, role: 'assignee', mode: 'shared', poolSize: 2 });
     // A reaches a terminal column → cleanup fires for ticket A.
     const removed = await wm.removeTicketWorktrees({ baseWorkingDir: repo, ticketId: TICKET_A });
-    assert.equal(removed, 0, 'shared checkout is not a per-ticket worktree');
+    assert.equal(removed, 0, 'a pool slot is not a per-ticket worktree — nothing removed');
     assert.ok(
-      (await wm.listWorktrees(repo)).some((w) => w.path === join(wtRoot, 'shared')),
-      'shared checkout survives a terminal ticket',
+      (await wm.listWorktrees(repo)).some((w) => w.path === join(wtRoot, 'shared-0')),
+      'pool slot survives a terminal ticket (warm build preserved)',
     );
+    // The slot is now released (idle): a NEW ticket reuses shared-0, not shared-1.
+    const b = await wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_B, role: 'assignee', mode: 'shared', poolSize: 2 });
+    assert.equal(b.worktreePath, join(wtRoot, 'shared-0'), 'released slot is reused before opening a new one');
   } finally {
     await cleanup();
   }
@@ -359,8 +523,8 @@ test('sweep removes idle clean worktrees, keeps active, dirty, and shared', asyn
     await fsp.writeFile(join(dirty.cwd, 'unsaved.txt'), 'do not lose me\n');
     // active → kept even though clean
     await wm.resolveCwd({ baseWorkingDir: repo, ticketId: 'cccccccc-x', role: 'assignee' });
-    // shared → kept unconditionally
-    await wm.resolveCwd({ baseWorkingDir: repo, ticketId: 'dddddddd-x', role: 'assignee', mode: 'shared' });
+    // shared pool slot → kept unconditionally (warm build must survive)
+    await wm.resolveCwd({ baseWorkingDir: repo, ticketId: 'dddddddd-x', role: 'assignee', mode: 'shared', poolSize: 1 });
 
     const activeKeys = new Set([worktreeSlug('cccccccc-x')]); // == 'cccccccc'
     const removed = await wm.sweep({ baseWorkingDir: repo, activeKeys });
@@ -370,7 +534,7 @@ test('sweep removes idle clean worktrees, keeps active, dirty, and shared', asyn
     assert.ok(!remaining.includes(join(wtRoot, 'aaaaaaaa')), 'clean idle removed');
     assert.ok(remaining.includes(join(wtRoot, 'bbbbbbbb')), 'dirty kept');
     assert.ok(remaining.includes(join(wtRoot, 'cccccccc')), 'active kept');
-    assert.ok(remaining.includes(join(wtRoot, 'shared')), 'shared kept');
+    assert.ok(remaining.includes(join(wtRoot, 'shared-0')), 'pool slot kept');
   } finally {
     await cleanup();
   }
