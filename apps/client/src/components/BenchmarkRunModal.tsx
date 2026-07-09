@@ -209,6 +209,14 @@ export default function BenchmarkRunModal({
     [columns],
   );
 
+  // manager(type='manager') agent 은 role holder·트리거·chat 대상에서 구조적으로 차단되어
+  // 후보/평가자로 골라도 실제 dispatch 되지 않는다. 다른 4개 셀렉트(⑦ 티켓)와 동일하게
+  // 후보·평가자 드롭다운에서 숨겨 무반응/혼동을 막는다.
+  const selectableAgents = useMemo(
+    () => agents.filter((a) => a.type !== 'manager'),
+    [agents],
+  );
+
   const submit = async () => {
     if (!prompt.trim()) {
       showToast('Prompt is required', 'error');
@@ -352,7 +360,7 @@ export default function BenchmarkRunModal({
               Candidate agents{started ? ' (existing locked — add only)' : ''}
             </label>
             <AgentMultiSelect
-              agents={agents}
+              agents={selectableAgents}
               selected={candidateIds}
               lockedIds={started ? lockedCandidates : undefined}
               lockedReason={STARTED_REASON}
@@ -377,7 +385,7 @@ export default function BenchmarkRunModal({
               </div>
             ) : (
               <AgentMultiSelect
-                agents={agents}
+                agents={selectableAgents}
                 selected={evaluatorIds}
                 onToggle={(id) => toggle(evaluatorIds, setEvaluatorIds, id)}
               />
