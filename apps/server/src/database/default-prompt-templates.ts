@@ -326,7 +326,12 @@ The rule of thumb: **human answer → \`pend_ticket\`; another ticket finishing 
 - Out-of-scope bugs or refactor itches are not yours here. Propose a new ticket in a comment (or file it with \`create_ticket\` if it's a hard blocker — see "When to park instead of bouncing back" above).
 - Keep the feature branch rebased onto the latest default before the final push. Merging will rebase and actively integrate the branch onto the default if it has fallen behind, but a clean rebase here keeps that step trivial.
 - \`--force-with-lease\` is OK on the feature branch only. Force-pushing to a shared branch (default, release, …) is forbidden.
-- For PR-gated repos, open the PR with \`gh pr create --draft\` during this stage and include its URL in the comment so Review can inspect the diff remotely.
+<!--awb:pr-only-->
+- **This board uses PRs (\`use_pr\`=true).** After pushing, open the PR with \`gh pr create --fill\` (or \`--draft\`) during this stage and include its URL in the step-5 comment so Review can inspect the diff via the PR. Do **not** merge it here — Merging runs \`gh pr merge\` after Review approval.
+<!--/awb:pr-only-->
+<!--awb:no-pr-->
+- **This board merges directly (\`use_pr\`=false — the default).** Do **not** open a PR: Review reads the branch diff and Merging fast-forwards it. A stray \`gh pr create\` just forks the flow the merge path doesn't use.
+<!--/awb:no-pr-->
 `,
   },
   {
@@ -355,6 +360,13 @@ This ticket is in the Review column. Both the reviewer **and** the assignee are 
 ---
 
 ## Reviewer branch
+
+<!--awb:no-pr-->
+> **This board merges directly (\`use_pr\`=false — the default): there is usually no PR.** Review the *branch* diff, not a PR. Substitute every \`gh pr …\` command below with its git/branch equivalent: base-freshness via \`git fetch origin && git rev-list --left-right --count origin/<default>...<branch>\` (a non-zero left/behind count = the branch forked from an older base → BEHIND); the diff via \`git diff origin/<default>...<branch>\` (or the GitHub compare URL); and skip \`gh pr checks\` — there is no PR CI gate, so rely on the build/test signal the assignee posted plus your own read.
+<!--/awb:no-pr-->
+<!--awb:pr-only-->
+> **This board uses PRs (\`use_pr\`=true):** the assignee opened a PR in In Progress and its URL is in the comments. Use the \`gh pr …\` commands below (\`gh pr view\`, \`gh pr diff\`, \`gh pr checks\`) directly against it.
+<!--/awb:pr-only-->
 
 1. **Identify the branch / PR** — find the branch name (and PR URL if present) the assignee posted in the ticket comments. If missing, \`add_comment\` asking for the branch name (mention the assignee with \`@[role:assignee|<name>]\`) and stop.
 
@@ -466,7 +478,7 @@ This ticket is in the Merging column, which means Review approved the diff. Your
 4. **Push to origin (required)**
    - \`git push origin <default-branch>\`
    - **Verify the push landed**: \`git rev-parse HEAD\` == \`git rev-parse origin/<default-branch>\`. If they differ, the push did not land — read the error and retry.
-   - **Verify completeness (no partial merge)**: \`git fetch origin\`, then \`git merge-base --is-ancestor <feature-branch> origin/<default-branch>\` must exit 0 **and** \`git diff --name-only origin/<default-branch>...<feature-branch>\` must be **empty**. Together they prove *every* feature commit is reachable from the pushed default — not just the tip. If anything still shows as unmerged, the merge is partial: re-integrate the missing commits, or escalate per the boundary below. (For the PR-gated squash path, use the stronger file-list comparison in the Notes.)
+   - **Verify completeness (no partial merge)**: \`git fetch origin\`, then \`git merge-base --is-ancestor <feature-branch> origin/<default-branch>\` must exit 0 **and** \`git diff --name-only origin/<default-branch>...<feature-branch>\` must be **empty**. Together they prove *every* feature commit is reachable from the pushed default — not just the tip. If anything still shows as unmerged, the merge is partial: re-integrate the missing commits, or escalate per the boundary below.
    - If the push is rejected (branch protection, CI gate, …) → **never force-push the default branch**. Skip step 5, go to step 7, record \`"manual merge required — <default> push rejected: <reason>"\`, and stop.
 
 5. **Delete the feature branch (both sides) — by the name it was *actually pushed as***
@@ -488,7 +500,7 @@ This ticket is in the Merging column, which means Review approved the diff. Your
 
 7. **Ticket comment** — \`add_comment\` with all of, **pasting the actual command output** (not a bare "OK" — Done independently re-checks these, and a no-repo reporter can only audit what you paste):
    - Merge commit SHA (\`git rev-parse origin/<default-branch>\`).
-   - **Completeness proof**: the step-4 output showing \`git diff --name-only origin/<default>...<feature-branch>\` empty (or, for the PR-gated squash path, the file-list comparison below) — i.e. every feature commit is reachable from \`origin/<default>\`, no partial merge.
+   - **Completeness proof**: the step-4 output showing \`git diff --name-only origin/<default>...<feature-branch>\` empty — i.e. every feature commit is reachable from \`origin/<default>\`, no partial merge. (For a squash-merged PR, use the stronger file-list comparison from the PR-gated note instead.)
    - Default branch name + the \`HEAD == origin/<default>\` rev-parse check (\`origin push: OK\`).
    - Feature branch name **exactly as it was pushed** + the step-5 \`git ls-remote --heads origin | grep <ticket-id-short>\` empty output (remote delete verified) + \`git branch --list\` empty (local delete verified).
    - Parent bump commit SHA (if step 6 applied).
@@ -535,11 +547,17 @@ The reporter may \`record_agreement(..., override=true)\` to force-pass a deadlo
 - **A local merge is not completion.** Step 4's verification (\`HEAD == origin/<default>\`) is the threshold.
 - **Feature branches must be deleted on BOTH sides.** Deleting only one leaves dangling refs.
 - **Never force-push master / main / the default branch.** Ever. \`--force-with-lease\` is only acceptable on the feature branch during rebase.
-- **PR-gated repos** — replace steps 3–5 with \`gh pr merge <pr> --squash --delete-branch\`. **\`--squash\` collapses N commits into one — before you call it complete, prove no change was dropped.** This is the \`9b8f338f\` partial-merge failure mode: a 6-commit branch squashed so only a 1-line \`.asset\` change landed and the other 5 commits (guard tests, shader variant, …) were silently lost, yet the ticket reached Done.
+<!--awb:no-pr-->
+- **This board merges directly (\`use_pr\`=false — the default).** Do **not** open a PR or run \`gh pr merge\`: the fast-forward path above (steps 3–5) *is* the whole merge. If you catch yourself reaching for \`gh pr create\` / \`gh pr merge\`, stop — this board integrates by branch ff, and a stray PR just forks the flow.
+<!--/awb:no-pr-->
+<!--awb:pr-only-->
+- **This board uses PRs (\`use_pr\`=true)** — replace steps 3–5 with \`gh pr merge <pr> --squash --delete-branch\`. **\`--squash\` collapses N commits into one — before you call it complete, prove no change was dropped.** This is the \`9b8f338f\` partial-merge failure mode: a 6-commit branch squashed so only a 1-line \`.asset\` change landed and the other 5 commits (guard tests, shader variant, …) were silently lost, yet the ticket reached Done.
   - *Before* merging, capture the full reviewed change set: \`git diff --name-only origin/<default>...<feature-branch>\` (every file the branch touches) and \`git log --oneline origin/<default>..<feature-branch>\` (the DoD commits).
   - *After* the squash lands, \`git fetch origin\` and diff the merge commit against its parent: \`git show --name-only <merge-commit>\` (or \`git diff --name-only <merge-commit>^ <merge-commit>\`). **Every file from the pre-merge list must appear**, and \`git diff --name-only origin/<default>...<feature-branch>\` must now be **empty** (net patch fully landed). For rewritten commits, cross-check with \`git range-diff origin/<default>...<feature-branch> <merge-commit>^...<merge-commit>\` or compare \`git patch-id\`.
   - **If any reviewed file or DoD commit is missing from the merge commit → the squash was partial. Do NOT proceed to Done.** \`add_comment\` naming exactly which files/commits dropped (paste the file-list comparison as evidence) and bounce to **In Progress**, or re-do the merge non-squashed (\`--merge\`/ff) so all commits land.
   - Then verify with \`gh pr view <pr> --json state,mergeCommit\` (\`state\` must be \`MERGED\`). If \`--delete-branch\` silently failed, fall back to manual \`git push origin --delete\` + \`git branch -d\` — and re-resolve the real remote ref name per step 5 (the PR head ref may differ from your local name). If the PR reports conflicts, integrate them locally first via step 2 (rebase + fold same-meaning changes, push \`--force-with-lease\` on the feature branch), then re-run the merge — same integrate-vs-escalate boundary applies.
+  - Leave the PR link in the step-7 ticket comment.
+<!--/awb:pr-only-->
 - **No \`gh\` available and direct push rejected** → stop, record \`"manual merge required"\`, leave the ticket in Merging for a human.
 - **Submodule changes must run through step 6.** Skipping the parent bump leaves every other environment pointing at the old ref.
 - After merge, a quick sanity build on the default branch is cheap insurance. If it's broken, open a follow-up ticket or revert immediately.
