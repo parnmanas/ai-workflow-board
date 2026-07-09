@@ -25,7 +25,10 @@ import {
   validateUsePrInput,
   worktreeSlugFor,
   resolveWorktreeRelPath,
+  USE_PR_MARKER,
+  renderUsePrTemplate,
 } from '../dist/common/worktree-config.js';
+import { DEFAULT_PROMPT_TEMPLATES } from '../dist/database/default-prompt-templates.js';
 
 test('defaults are the regression baseline: per_ticket / false', () => {
   assert.deepEqual([...WORKTREE_MODES], ['per_ticket', 'shared']);
@@ -146,4 +149,162 @@ test('resolveWorktreeRelPath: `.awb/wt/<slug>` for per_ticket|shared, mirrors th
       `${WORKTREE_ROOT_REL}/${worktreeSlugFor(id, mode)}`,
     );
   }
+});
+
+// ── worktree 규약 ⑥: use_pr-conditional prompt rendering ──────────────────────
+// The server strips the pr-only / no-pr marker blocks at trigger-prompt assembly
+// so a use_pr=false board never sees the `gh pr` merge branch and a use_pr=true
+// board gets the PR create/merge path. Marker-free content must pass through
+// byte-identical (the regression guard — existing seeded / custom prompts).
+
+test('USE_PR_MARKER: the four marker tokens are the documented HTML comments', () => {
+  assert.equal(USE_PR_MARKER.prOnlyOpen, '<!--awb:pr-only-->');
+  assert.equal(USE_PR_MARKER.prOnlyClose, '<!--/awb:pr-only-->');
+  assert.equal(USE_PR_MARKER.noPrOpen, '<!--awb:no-pr-->');
+  assert.equal(USE_PR_MARKER.noPrClose, '<!--/awb:no-pr-->');
+});
+
+test('renderUsePrTemplate: marker-free content passes through byte-identical (both modes)', () => {
+  const plain = '# Merging\n\n1. do the thing\n2. do another\n';
+  assert.equal(renderUsePrTemplate(plain, true), plain);
+  assert.equal(renderUsePrTemplate(plain, false), plain);
+  // null / undefined / empty degrade to '' without throwing
+  assert.equal(renderUsePrTemplate(null, true), '');
+  assert.equal(renderUsePrTemplate(undefined, false), '');
+  assert.equal(renderUsePrTemplate('', true), '');
+});
+
+test('renderUsePrTemplate: use_pr=true keeps pr-only, drops no-pr (markers stripped)', () => {
+  const src = [
+    'before',
+    '<!--awb:pr-only-->',
+    'PR PATH: gh pr merge --squash',
+    '<!--/awb:pr-only-->',
+    '<!--awb:no-pr-->',
+    'FF PATH: direct merge',
+    '<!--/awb:no-pr-->',
+    'after',
+  ].join('\n');
+  const out = renderUsePrTemplate(src, true);
+  assert.equal(out, 'before\nPR PATH: gh pr merge --squash\nafter');
+  // no marker token survives in either branch
+  assert.equal(out.includes('<!--awb:'), false);
+  assert.equal(out.includes('FF PATH'), false);
+});
+
+test('renderUsePrTemplate: use_pr=false keeps no-pr, drops pr-only (markers stripped)', () => {
+  const src = [
+    'before',
+    '<!--awb:pr-only-->',
+    'PR PATH: gh pr merge --squash',
+    '<!--/awb:pr-only-->',
+    '<!--awb:no-pr-->',
+    'FF PATH: direct merge',
+    '<!--/awb:no-pr-->',
+    'after',
+  ].join('\n');
+  const out = renderUsePrTemplate(src, false);
+  assert.equal(out, 'before\nFF PATH: direct merge\nafter');
+  assert.equal(out.includes('<!--awb:'), false);
+  assert.equal(out.includes('gh pr merge'), false);
+});
+
+test('renderUsePrTemplate: a dropped multi-line block leaves no stray blank-line run', () => {
+  const src = [
+    'para one',
+    '',
+    '<!--awb:pr-only-->',
+    'pr line a',
+    'pr line b',
+    '<!--/awb:pr-only-->',
+    '',
+    'para two',
+  ].join('\n');
+  const out = renderUsePrTemplate(src, false);
+  // block gone, and the surrounding blank lines collapse to a single blank line
+  assert.equal(out, 'para one\n\npara two');
+  assert.match(out, /para one\n\npara two/);
+  assert.equal(/\n\n\n/.test(out), false);
+});
+
+test('renderUsePrTemplate: indented (nested-bullet) markers still match via trim', () => {
+  const src = [
+    '- top bullet',
+    '  <!--awb:pr-only-->',
+    '  - pr sub-bullet',
+    '  <!--/awb:pr-only-->',
+    '- next bullet',
+  ].join('\n');
+  assert.equal(renderUsePrTemplate(src, true), '- top bullet\n  - pr sub-bullet\n- next bullet');
+  assert.equal(renderUsePrTemplate(src, false), '- top bullet\n- next bullet');
+});
+
+// ── integration: the real seeded merging / in-progress / review templates ─────
+// Proves the template markers + the renderer agree: the exact strings the DoD
+// names must appear / disappear per use_pr. Guards against a future template
+// edit that unbalances a marker or drops the `gh pr` gating.
+
+function seededTemplate(name) {
+  const tpl = DEFAULT_PROMPT_TEMPLATES.find((t) => t.name === name);
+  assert.ok(tpl, `default template ${name} must exist`);
+  return tpl.content;
+}
+
+test('seeded merging_workflow: use_pr=false renders the ff path only, no `gh pr` merge branch', () => {
+  const merging = seededTemplate('merging_workflow');
+  // the raw template carries balanced markers
+  assert.ok(merging.includes(USE_PR_MARKER.prOnlyOpen) && merging.includes(USE_PR_MARKER.prOnlyClose));
+  assert.ok(merging.includes(USE_PR_MARKER.noPrOpen) && merging.includes(USE_PR_MARKER.noPrClose));
+
+  const off = renderUsePrTemplate(merging, false);
+  assert.equal(off.includes('<!--awb:'), false, 'no marker tokens leak to the prompt');
+  // the actual PR squash-merge COMMAND (pr-only) is gated out; only the no-pr
+  // guidance — which names `gh pr merge` to say "do NOT run it" — remains.
+  assert.equal(off.includes('gh pr merge <pr> --squash --delete-branch'), false,
+    'use_pr=false must not render the PR merge command');
+  assert.match(off, /merges directly/); // the no-pr guidance is present
+  assert.equal(/uses PRs/.test(off), false, 'the pr-only guidance is dropped when PRs are off');
+  // the direct ff steps stay intact for the default path
+  assert.match(off, /git merge --ff-only/);
+});
+
+test('seeded merging_workflow: use_pr=true renders the PR squash-merge path', () => {
+  const merging = seededTemplate('merging_workflow');
+  const on = renderUsePrTemplate(merging, true);
+  assert.equal(on.includes('<!--awb:'), false);
+  assert.match(on, /gh pr merge <pr> --squash --delete-branch/);
+  assert.match(on, /uses PRs/); // the pr-only guidance is present
+  assert.equal(/merges directly/.test(on), false, 'the no-pr guidance is dropped when PRs are on');
+  // the ff steps remain (a PR board still rebases/integrates before merging)
+  assert.match(on, /git merge --ff-only/);
+});
+
+test('seeded in_progress_workflow: gh pr create renders only when use_pr=true', () => {
+  const inprog = seededTemplate('in_progress_workflow');
+  const off = renderUsePrTemplate(inprog, false);
+  const on = renderUsePrTemplate(inprog, true);
+  assert.equal(off.includes('<!--awb:'), false);
+  assert.equal(on.includes('<!--awb:'), false);
+  // the PR-open COMMAND (pr-only) is gated out; the no-pr guidance may still
+  // mention `gh pr create` to forbid it, so assert on the mutually-exclusive
+  // mode headers and the concrete `--fill` command form.
+  assert.equal(off.includes('gh pr create --fill'), false, 'use_pr=false must not tell the agent to open a PR');
+  assert.match(off, /merges directly/);
+  assert.equal(/uses PRs/.test(off), false);
+  assert.match(on, /gh pr create --fill/);
+  assert.match(on, /uses PRs/);
+  assert.equal(/merges directly/.test(on), false);
+});
+
+test('seeded review_workflow: reviewer preamble switches PR vs branch per use_pr', () => {
+  const review = seededTemplate('review_workflow');
+  const off = renderUsePrTemplate(review, false);
+  const on = renderUsePrTemplate(review, true);
+  assert.equal(off.includes('<!--awb:'), false);
+  assert.equal(on.includes('<!--awb:'), false);
+  // OFF: told to review the branch diff (git equivalents), not a PR
+  assert.match(off, /there is usually no PR/i);
+  assert.match(off, /git rev-list --left-right --count/);
+  // ON: told to use the gh pr commands directly
+  assert.match(on, /the assignee opened a PR/i);
 });
