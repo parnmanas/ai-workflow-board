@@ -1791,8 +1791,9 @@ interface WorktreeConventionSettingProps {
 
 // 작업 폴더 규약 경로의 단일 출처는 서버·agent-manager 에 있으나, 클라(Vite)는 그
 // 패키지를 import 할 수 없어 리터럴로 미러링한다 — 값을 바꾸면 아래 출처도 함께 고칠 것.
-//   - 워크트리 루트 `.awb/wt` + shared 슬러그 → apps/agent-manager/src/lib/worktree-manager.ts
-//     (worktreeRootFor / worktree_mode='shared')
+//   - 워크트리 루트 `.awb/wt` + shared 풀 슬롯 접두사 `shared-` (`shared-0 … shared-N-1`,
+//     N = Agent concurrency) → apps/agent-manager/src/lib/worktree-manager.ts
+//     (SHARED_SLOT_PREFIX / worktree_mode='shared' = concurrency 개수만큼의 warm 풀)
 //   - QA·보안 실행 루트 `.awb/qa` → apps/server/src/common/workspace-folder-options.ts
 //     (RUN_WORKSPACE_ROOT; leaf = 시나리오/프로필 id 앞 8자)
 const AWB_WORKTREE_ROOT = '.awb/wt';
@@ -1808,7 +1809,7 @@ const WORKTREE_MODE_OPTIONS: Array<{ value: WorktreeMode; label: string; hint: s
   {
     value: 'shared',
     label: '공유',
-    hint: '모든 티켓이 .awb/wt/shared/ 워크트리 하나를 재사용한다 — 디스크는 가볍지만 동시 티켓 작업이 직렬화됨.',
+    hint: 'Agent concurrency(N) 개수만큼의 warm worktree 풀(.awb/wt/shared-0 … shared-N-1). 티켓이 유휴 슬롯을 lease 받아 작업 브랜치를 만들고, 슬롯 반납은 지연식 idle 표시일 뿐 — 다음 lease 가 그 슬롯을 가져갈 때 main/master 최신으로 git reset(reset-on-acquire, untracked warm build 산출물은 보존)한다. 동시 티켓+QA 는 N 으로 제한되고 초과분은 큐 대기.',
   },
 ];
 
@@ -1830,9 +1831,11 @@ function WorktreeConventionSetting({ board, onSave }: WorktreeConventionSettingP
 
   // 선택된 worktree_mode 로 이 보드가 실제 배치할 경로를 미리 보여준다. base 는
   // 보드가 아니라 이 보드를 도는 agent 의 working_dir 이라 리터럴 <working_dir> 로 표기.
+  // shared 모드의 풀 크기 N = 이 보드의 Agent concurrency (슬롯 shared-0 … shared-N-1).
+  const poolSize = Math.max(1, Math.floor(board.max_concurrent_tickets_per_agent ?? 1));
   const worktreePreviewPath =
     mode === 'shared'
-      ? `<working_dir>/${AWB_WORKTREE_ROOT}/${AWB_WORKTREE_SHARED_SLUG}`
+      ? `<working_dir>/${AWB_WORKTREE_ROOT}/${AWB_WORKTREE_SHARED_SLUG}-<0…${poolSize - 1}>`
       : `<working_dir>/${AWB_WORKTREE_ROOT}/<티켓8자>`;
   // QA·보안 실행 폴더는 worktree_mode 와 무관하게 항상 .awb/qa 아래(규약 ③).
   const runWorkspacePreviewPath = `<working_dir>/${AWB_RUN_WORKSPACE_ROOT}/<시나리오8자>`;
@@ -1948,6 +1951,12 @@ function WorktreeConventionSetting({ board, onSave }: WorktreeConventionSettingP
         <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 6 }}>
           실제 base 는 이 보드를 도는 agent 의 <code>working_dir</code> 입니다 (보드가 아닌 agent
           속성). QA·보안 실행 폴더는 worktree_mode 와 무관하게 항상 <code>.awb/qa</code> 아래입니다.
+          {mode === 'shared' && (
+            <>
+              {' '}shared 모드는 <strong>Agent concurrency({poolSize})</strong> 개의 warm 슬롯을
+              풀로 두며, 이 값이 곧 풀 크기입니다.
+            </>
+          )}
         </div>
       </div>
       {hint && (
@@ -2096,6 +2105,11 @@ function ConcurrencySetting({ board, onSave }: ConcurrencySettingProps) {
         Default <strong>1</strong> — same agent assigned to multiple tickets would otherwise
         spawn parallel subagents that stomp on the same working_dir. Raise only when concurrent
         local-repo work is genuinely safe (e.g. a read-only review queue).
+      </div>
+      <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: -4, marginBottom: 12 }}>
+        <strong>Worktree mode = shared</strong> 일 때 이 값은 <strong>warm worktree 풀의 크기</strong>도
+        겸합니다 (슬롯 <code>shared-0 … shared-N-1</code>). 동시 티켓과 QA·보안 실행이 이 한 예산을
+        나눠 쓰므로 총합이 이 값을 넘으면 <strong>초과분은 슬롯이 빌 때까지 큐 대기</strong>합니다.
       </div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
         <div style={{ width: 120 }}>

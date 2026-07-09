@@ -392,6 +392,85 @@ Gated by `delegation.worktreeIsolation` (default `true`); set `false` to keep
 the legacy shared-cwd path. This is an agent-manager-internal change — no SSE
 event contract changed.
 
+## Shared worktree warm pool (`worktree_mode = shared`)
+
+Since 규약 ④/⑥ every worktree lives inside the agent's `working_dir` under
+`<working_dir>/.awb/wt/<slug>` (auto-registered in `.gitignore`). The board's
+`worktree_mode` picks the slug scheme:
+
+- **`per_ticket`** (default) — `slug = <ticket8>`, one dedicated worktree per
+  ticket, removed when the ticket lands terminal/archived.
+- **`shared`** — a **warm pool** of slots `shared-0 … shared-<N-1>`, where
+  **`N` = the board's Agent concurrency** (`max_concurrent_tickets_per_agent`,
+  flattened onto the trigger event). The pool trades per-ticket isolation for a
+  warm incremental build cache that survives ticket→ticket handover.
+
+Set the mode on the board (Board Settings → *폴더·Worktree 규약*); its **Agent
+concurrency** field is what sizes the pool. QA/Security runs never touch this
+pool — they get a separate `.awb/qa/<id8>` clone (run-provisioner).
+
+### Lease / release
+
+- A ticket **leases an idle slot** for its whole lifecycle. The lease is keyed
+  by ticket id, so every role hop and every resume (idle-reap → respawn,
+  pend/unpend) **reattaches to the same slot** — the branch and any uncommitted
+  work survive, exactly like the per-ticket path.
+- **Release is lazy** — reaching a terminal column (or archive) only *idle-marks*
+  the lease, it does not clean the checkout. A worker that dies uncleanly
+  (exit-143 mid-build, the common case) never gets to run a tidy handback, so
+  cleanup can't depend on one.
+- The pool is **protected from the sweeps**: neither the idle sweep nor the
+  terminal-ticket removal ever deletes a `shared-<i>` slot (guarded by
+  `isSharedSlotSeg`) — deleting it would wipe the warm build the pool exists to
+  keep.
+
+### Reset-on-acquire (not on-release)
+
+The **next** lease resets the slot before handing it over: a `git reset --hard`
+to the base tip returns **tracked source** to base while **untracked build
+artifacts** (`node_modules`, Unity `Library/`, `tsbuildinfo`, out-of-tree
+outputs) survive, so the incoming ticket builds incrementally (warm). The
+manager never runs `git clean -fdx` — that would defeat the whole point.
+Resetting on *acquire* rather than on *release* is deliberate: it makes cleanup
+robust to workers that exit uncleanly, since the tidy-up is owned by the taker,
+not the leaver.
+
+### No starvation — the concurrency gate queues the excess
+
+Pool size **equals** concurrency, and the manager independently caps concurrent
+ticket sessions at `N` (ticket-session-manager). So any lease that clears the
+gate is guaranteed a free slot — **the pool itself never starves**. When more
+tickets (plus QA/Security runs, which share the same `N` budget via the server
+concurrency gate) are eligible than `N`, the **excess queues at the gate** until
+a slot frees; it never spins waiting on an empty pool.
+
+### Crash-tolerant lease reclaim
+
+Because release is lazy and workers die uncleanly, a slot could otherwise stay
+`active` forever after its owner vanished, leaking a pool slot. `reconcilePoolLeases`
+(driven off the same reconcile tick as the worktree sweep) reconciles the
+on-disk lease registry (`<working_dir>/.awb/wt/.pool-leases.json`, persisted so a
+manager restart re-reads slot ownership) back to **IDLE** for any lease whose
+owner is no longer alive:
+
+- A lease is reclaimed only when **no live session** (persistent ticket or
+  one-shot subagent snapshot) owns the ticket **and** no live process is working
+  inside the slot dir (best-effort `/proc/<pid>/cwd` scan) — this spares a
+  detached-but-quiet worker.
+- A **freshness grace** (`POOL_LEASE_RECLAIM_GRACE_MS`, 20 min) never reclaims a
+  lease whose `leasedAt` is inside the window, even if no owner is visible yet.
+  The lease is written durably at *acquire* time but the spawned child only
+  registers in the live-session snapshot at the *end* of spawn; without the grace
+  a reconcile tick during that gap would false-reclaim a live-but-still-dispatching
+  worker. A genuinely dead worker leased long ago, so its `leasedAt` is already
+  past the grace and it is reclaimed on the next tick.
+
+### Fallback
+
+When `working_dir` is not a git repo, or `git worktree` fails (old git, disk
+error), `resolveCwd` returns the shared base cwd with `isWorktree=false` and the
+legacy single-cwd behavior applies (dispatch-level serialization keeps it safe).
+
 ## Security model
 
 - **API key scope** — pairing redeem creates an `ApiKey` bound to the
