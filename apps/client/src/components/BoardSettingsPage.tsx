@@ -1789,16 +1789,26 @@ interface WorktreeConventionSettingProps {
   onSave(next: { worktree_mode: WorktreeMode; use_pr: boolean }): Promise<void>;
 }
 
+// 작업 폴더 규약 경로의 단일 출처는 서버·agent-manager 에 있으나, 클라(Vite)는 그
+// 패키지를 import 할 수 없어 리터럴로 미러링한다 — 값을 바꾸면 아래 출처도 함께 고칠 것.
+//   - 워크트리 루트 `.awb/wt` + shared 슬러그 → apps/agent-manager/src/lib/worktree-manager.ts
+//     (worktreeRootFor / worktree_mode='shared')
+//   - QA·보안 실행 루트 `.awb/qa` → apps/server/src/common/workspace-folder-options.ts
+//     (RUN_WORKSPACE_ROOT; leaf = 시나리오/프로필 id 앞 8자)
+const AWB_WORKTREE_ROOT = '.awb/wt';
+const AWB_WORKTREE_SHARED_SLUG = 'shared';
+const AWB_RUN_WORKSPACE_ROOT = '.awb/qa';
+
 const WORKTREE_MODE_OPTIONS: Array<{ value: WorktreeMode; label: string; hint: string }> = [
   {
     value: 'per_ticket',
-    label: 'Per ticket (default)',
-    hint: 'Each ticket gets its own worktree under .awb/wt/<ticket8>/ — fully isolated, removed on archive.',
+    label: '티켓별 (기본값)',
+    hint: '티켓마다 자체 워크트리를 .awb/wt/<티켓8자>/ 에 둔다 — 완전 격리, 아카이브 시 삭제.',
   },
   {
     value: 'shared',
-    label: 'Shared',
-    hint: 'All tickets reuse one worktree at .awb/wt/shared/ — lighter on disk, but serialises concurrent ticket work.',
+    label: '공유',
+    hint: '모든 티켓이 .awb/wt/shared/ 워크트리 하나를 재사용한다 — 디스크는 가볍지만 동시 티켓 작업이 직렬화됨.',
   },
 ];
 
@@ -1818,6 +1828,15 @@ function WorktreeConventionSetting({ board, onSave }: WorktreeConventionSettingP
   const dirty = mode !== initialMode || usePr !== initialUsePr;
   const hint = WORKTREE_MODE_OPTIONS.find((o) => o.value === mode)?.hint;
 
+  // 선택된 worktree_mode 로 이 보드가 실제 배치할 경로를 미리 보여준다. base 는
+  // 보드가 아니라 이 보드를 도는 agent 의 working_dir 이라 리터럴 <working_dir> 로 표기.
+  const worktreePreviewPath =
+    mode === 'shared'
+      ? `<working_dir>/${AWB_WORKTREE_ROOT}/${AWB_WORKTREE_SHARED_SLUG}`
+      : `<working_dir>/${AWB_WORKTREE_ROOT}/<티켓8자>`;
+  // QA·보안 실행 폴더는 worktree_mode 와 무관하게 항상 .awb/qa 아래(규약 ③).
+  const runWorkspacePreviewPath = `<working_dir>/${AWB_RUN_WORKSPACE_ROOT}/<시나리오8자>`;
+
   return (
     <section
       style={{
@@ -1829,14 +1848,13 @@ function WorktreeConventionSetting({ board, onSave }: WorktreeConventionSettingP
       }}
     >
       <h3 style={{ margin: 0, fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>
-        Worktree &amp; merge convention
+        폴더·Worktree 규약 <span style={{ fontWeight: 400, color: tokens.colors.textMuted }}>(Worktree &amp; merge convention)</span>
       </h3>
       <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, marginBottom: 12 }}>
-        Where subagents lay down the worktree they work a ticket in — always rooted inside the
-        working_dir's <code>.awb/</code> — and whether the Merging boundary goes through a pull
-        request. Defaults are <strong>per-ticket</strong> worktrees and <strong>direct
-        fast-forward</strong> merges (today's behaviour); change only when the board's repo flow
-        calls for it.
+        서브에이전트가 티켓을 작업할 워크트리(작업 폴더)를 어디에 두는지 — 언제나 working_dir 의{' '}
+        <code>.awb/</code> 안에 뿌리를 둔다 — 그리고 Merging 경계를 pull request 로 통과할지 정한다.
+        기본값은 <strong>티켓별</strong> 워크트리 + <strong>직접 fast-forward</strong> 머지(현재
+        동작)이며, 보드의 저장소 흐름이 필요로 할 때만 바꾼다.
       </div>
       <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
         <div style={{ minWidth: 220 }}>
@@ -1850,7 +1868,7 @@ function WorktreeConventionSetting({ board, onSave }: WorktreeConventionSettingP
               fontWeight: 600,
             }}
           >
-            Worktree mode
+            Worktree 모드 (작업 폴더)
           </label>
           <select
             value={mode}
@@ -1878,7 +1896,7 @@ function WorktreeConventionSetting({ board, onSave }: WorktreeConventionSettingP
             checked={usePr}
             onChange={(e) => setUsePr(e.target.checked)}
           />
-          Use pull requests
+          Pull Request 사용
         </label>
         <Button
           variant="primary"
@@ -1897,9 +1915,44 @@ function WorktreeConventionSetting({ board, onSave }: WorktreeConventionSettingP
           {busy ? 'Saving…' : 'Save'}
         </Button>
       </div>
+      <div
+        style={{
+          marginTop: 12,
+          padding: '10px 12px',
+          background: tokens.colors.surface,
+          border: `1px solid ${tokens.colors.border}`,
+          borderRadius: tokens.radii.md,
+        }}
+      >
+        <div
+          style={{
+            fontSize: 11,
+            fontWeight: 600,
+            color: tokens.colors.textMuted,
+            textTransform: 'uppercase',
+            marginBottom: 6,
+          }}
+        >
+          계산된 폴더 경로 미리보기
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12 }}>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'baseline' }}>
+            <span style={{ color: tokens.colors.textMuted, minWidth: 92 }}>작업 워크트리</span>
+            <code style={{ color: tokens.colors.textStrong }}>{worktreePreviewPath}</code>
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'baseline' }}>
+            <span style={{ color: tokens.colors.textMuted, minWidth: 92 }}>QA·보안 실행</span>
+            <code style={{ color: tokens.colors.textStrong }}>{runWorkspacePreviewPath}</code>
+          </div>
+        </div>
+        <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 6 }}>
+          실제 base 는 이 보드를 도는 agent 의 <code>working_dir</code> 입니다 (보드가 아닌 agent
+          속성). QA·보안 실행 폴더는 worktree_mode 와 무관하게 항상 <code>.awb/qa</code> 아래입니다.
+        </div>
+      </div>
       {hint && (
         <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 10 }}>
-          {hint} PR path is {usePr ? 'ON — create/merge via pull request.' : 'OFF — direct fast-forward merge.'}
+          {hint} PR 경로는 {usePr ? '켜짐 — pull request 로 생성/머지.' : '꺼짐 — 직접 fast-forward 머지.'}
         </div>
       )}
     </section>
