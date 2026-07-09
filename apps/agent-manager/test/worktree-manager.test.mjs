@@ -14,7 +14,8 @@ import assert from 'node:assert/strict';
 import { promises as fsp, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { once } from 'node:events';
 
 import {
   WorktreeManager,
@@ -535,6 +536,132 @@ test('sweep removes idle clean worktrees, keeps active, dirty, and shared', asyn
     assert.ok(remaining.includes(join(wtRoot, 'bbbbbbbb')), 'dirty kept');
     assert.ok(remaining.includes(join(wtRoot, 'cccccccc')), 'active kept');
     assert.ok(remaining.includes(join(wtRoot, 'shared-0')), 'pool slot kept');
+  } finally {
+    await cleanup();
+  }
+});
+
+// ── crash-tolerant lease reclaim: reconcilePoolLeases (ticket 4ed77ad5) ───────
+
+async function readRegistry(wtRoot) {
+  return JSON.parse(await fsp.readFile(join(wtRoot, '.pool-leases.json'), 'utf8'));
+}
+
+test('reconcilePoolLeases reclaims a dead worker\'s orphaned active lease → idle (state flip only)', async () => {
+  const { repo, cleanup } = await makeRepo();
+  try {
+    const wm = new WorktreeManager();
+    const wtRoot = worktreesRootFor(repo);
+    // Ticket A leases shared-0 and does work, then its worker DIES (exit-143)
+    // WITHOUT ever releasing — the slot stays active in the registry.
+    const a = await wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_A, role: 'assignee', mode: 'shared', poolSize: 2 });
+    git(a.cwd, ['checkout', '-q', '-b', 'ticket/aaaaaaaa']);
+    await fsp.writeFile(join(a.cwd, 'build-artifact.bin'), 'WARM\n'); // untracked warm build
+    assert.equal((await readRegistry(wtRoot)).slots['shared-0'].active, true, 'lease active before reclaim');
+
+    // Reconcile against a live set that does NOT contain A (its worker is dead).
+    const reclaimed = await wm.reconcilePoolLeases({ baseWorkingDir: repo, liveTicketIds: new Set() });
+    assert.equal(reclaimed, 1, 'the orphaned lease was reclaimed');
+
+    const reg = await readRegistry(wtRoot);
+    assert.equal(reg.slots['shared-0'].active, false, 'lease flipped to idle');
+    assert.equal(reg.slots['shared-0'].branch, 'ticket/aaaaaaaa', 'slot branch recorded for the next acquire to drop');
+    // Pure state flip: the slot dir and its untracked warm build are UNTOUCHED.
+    assert.ok(existsSync(join(wtRoot, 'shared-0')), 'slot dir preserved (never rm)');
+    assert.ok(existsSync(join(a.cwd, 'build-artifact.bin')), 'untracked warm build preserved by reclaim');
+    assert.ok(git(repo, ['branch', '--list', 'ticket/aaaaaaaa']).includes('ticket/aaaaaaaa'), 'branch not dropped by reclaim (deferred to acquire)');
+
+    // The reclaimed slot behaves exactly like a released one: the next ticket
+    // reuses it (warm) and reset-on-acquire cleans tracked source + drops the branch.
+    const b = await wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_B, role: 'assignee', mode: 'shared', poolSize: 2 });
+    assert.equal(b.worktreePath, join(wtRoot, 'shared-0'), 'reclaimed slot is reused before opening a new one');
+    assert.ok(existsSync(join(b.cwd, 'build-artifact.bin')), 'warm build still preserved through the reset-on-acquire');
+    assert.ok(!git(repo, ['branch', '--list', 'ticket/aaaaaaaa']).includes('ticket/aaaaaaaa'), 'stale branch dropped at acquire');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('reconcilePoolLeases KEEPS a lease whose ticket is still live (no false reclaim)', async () => {
+  const { repo, cleanup } = await makeRepo();
+  try {
+    const wm = new WorktreeManager();
+    const wtRoot = worktreesRootFor(repo);
+    await wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_A, role: 'assignee', mode: 'shared', poolSize: 2 });
+    // A is still alive → present in the live set.
+    const reclaimed = await wm.reconcilePoolLeases({
+      baseWorkingDir: repo,
+      liveTicketIds: new Set([TICKET_A]),
+    });
+    assert.equal(reclaimed, 0, 'a live worker\'s slot is never reclaimed');
+    assert.equal((await readRegistry(wtRoot)).slots['shared-0'].active, true, 'lease stays active');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('reconcilePoolLeases is a no-op (0) on a per_ticket board — no registry', async () => {
+  const { repo, cleanup } = await makeRepo();
+  try {
+    const wm = new WorktreeManager();
+    // per_ticket worktree, no pool registry ever written.
+    await wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_A, role: 'assignee' });
+    const reclaimed = await wm.reconcilePoolLeases({ baseWorkingDir: repo, liveTicketIds: new Set() });
+    assert.equal(reclaimed, 0, 'nothing to reconcile when there is no pool');
+    assert.ok(!existsSync(join(worktreesRootFor(repo), '.pool-leases.json')), 'no spurious registry created');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('reconcilePoolLeases spares a slot a live process is still cwd\'d inside (OS-liveness guard)', {
+  skip: process.platform !== 'linux' ? 'Linux /proc only' : false,
+}, async () => {
+  const { repo, cleanup } = await makeRepo();
+  let child;
+  try {
+    const wm = new WorktreeManager();
+    const wtRoot = worktreesRootFor(repo);
+    const a = await wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_A, role: 'assignee', mode: 'shared', poolSize: 1 });
+    // A detached worker that outlived a manager restart: absent from the live
+    // session snapshot (empty liveTicketIds) but still RUNNING with its cwd
+    // inside the slot. reclaim must NOT flip it (it would reset the tree under a
+    // live build). Real /proc/<pid>/cwd, not a mock.
+    child = spawn('sleep', ['30'], { cwd: a.cwd, stdio: 'ignore' });
+    await once(child, 'spawn');
+
+    const reclaimed = await wm.reconcilePoolLeases({ baseWorkingDir: repo, liveTicketIds: new Set() });
+    assert.equal(reclaimed, 0, 'a slot with a live process cwd\'d inside is spared');
+    assert.equal((await readRegistry(wtRoot)).slots['shared-0'].active, true, 'lease stays active');
+  } finally {
+    if (child) {
+      child.kill('SIGKILL');
+      await once(child, 'exit').catch(() => {});
+    }
+    await cleanup();
+  }
+});
+
+test('reset-on-acquire never `branch -D` the base branch literal (main/master) even when base detection returns null', async () => {
+  const { repo, cleanup } = await makeRepo();
+  try {
+    const wm = new WorktreeManager();
+    const wtRoot = worktreesRootFor(repo);
+    // No remote → #detectBaseBranch returns null, so the old `b !== base` guard
+    // (b !== null → always true) would delete a slot's `master` branch. The
+    // literal-protection must save it.
+    const a = await wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_A, role: 'assignee', mode: 'shared', poolSize: 1 });
+    // Put the slot on a branch literally named `master` and record it via release.
+    git(a.cwd, ['checkout', '-q', '-b', 'master']);
+    await fsp.writeFile(join(a.cwd, 'x.txt'), 'x\n');
+    git(a.cwd, ['add', '.']);
+    git(a.cwd, ['commit', '-q', '-m', 'on master']);
+    await wm.removeTicketWorktrees({ baseWorkingDir: repo, ticketId: TICKET_A }); // release (records branch=master)
+
+    // B reacquires shared-0 → reset-on-acquire runs its branch-drop loop.
+    const b = await wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_B, role: 'assignee', mode: 'shared', poolSize: 1 });
+    assert.equal(b.worktreePath, join(wtRoot, 'shared-0'));
+    assert.ok(git(repo, ['branch', '--list', 'master']).includes('master'), 'base-branch literal survives reset-on-acquire');
   } finally {
     await cleanup();
   }
