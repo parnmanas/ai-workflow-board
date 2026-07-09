@@ -17,6 +17,7 @@ import HarnessConfigEditor from './HarnessConfigEditor';
 import EnvironmentConfigEditor from './EnvironmentConfigEditor';
 import { QaPhaseRowsEditor, parseQaPhasesValue, qaPhasesError } from './QaPhasesEditor';
 import { QaPhase } from '../types';
+import { formatAgentDisplayName } from '../utils/agentName';
 import { tokens } from '../tokens';
 import { Button, Input, HeaderAction } from './common';
 
@@ -62,12 +63,14 @@ export default function BoardSettingsPage() {
 
   // Agents roster for the Default-role-holders picker (ticket d94a1b87). Silent
   // fall-back to [] so a non-privileged user can still view settings.
-  const [agents, setAgents] = useState<Array<{ id: string; name: string }>>([]);
+  // manager_name 을 보존해야 같은 agent 이름이 여러 manager/머신에 중복 존재할 때
+  // picker/목록이 <manager>/<agent> 로 식별 가능하게 렌더된다 (ticket d95821b2).
+  const [agents, setAgents] = useState<Array<{ id: string; name: string; manager_name?: string }>>([]);
   useEffect(() => {
     let cancelled = false;
     api.getAgents()
       // Agent Manager(type='manager')는 기본 역할 담당자가 될 수 없다 (ticket 941c72d3) — 후보에서 숨김.
-      .then((rows) => { if (!cancelled) setAgents((rows || []).filter((a: any) => a.type !== 'manager').map((a: any) => ({ id: a.id, name: a.name }))); })
+      .then((rows) => { if (!cancelled) setAgents((rows || []).filter((a: any) => a.type !== 'manager').map((a: any) => ({ id: a.id, name: a.name, manager_name: a.manager_name }))); })
       .catch(() => { if (!cancelled) setAgents([]); });
     return () => { cancelled = true; };
   }, [wsId]);
@@ -885,7 +888,7 @@ function parseDefaultHolderMap(raw: string | null | undefined): DefaultHolderMap
 interface DefaultRoleHoldersEditorProps {
   board: BoardWithCards;
   workspaceRoles: Array<{ id: string; slug: string; name: string; is_builtin: boolean; position: number }>;
-  agents: Array<{ id: string; name: string }>;
+  agents: Array<{ id: string; name: string; manager_name?: string }>;
   onSave(next: DefaultHolderMap | null): Promise<void>;
 }
 
@@ -899,7 +902,11 @@ function DefaultRoleHoldersEditor({ board, workspaceRoles, agents, onSave }: Def
   }, [board.default_role_assignments]);
 
   const roles = [...workspaceRoles].sort((a, b) => a.position - b.position);
-  const agentName = (id: string) => agents.find((a) => a.id === id)?.name || id;
+  // 공유 헬퍼로 <manager>/<agent> 통일 (manager_name 없으면 bare name fallback).
+  const agentName = (id: string) => {
+    const a = agents.find((a) => a.id === id);
+    return a ? formatAgentDisplayName(a) : id;
+  };
 
   const addAgent = (slug: string, agentId: string) => {
     if (!agentId) return;
@@ -1003,7 +1010,7 @@ function DefaultRoleHoldersEditor({ board, workspaceRoles, agents, onSave }: Def
                 >
                   <option value="">+ Add agent…</option>
                   {available.map((a) => (
-                    <option key={a.id} value={a.id}>{a.name}</option>
+                    <option key={a.id} value={a.id}>{formatAgentDisplayName(a)}</option>
                   ))}
                 </select>
               </div>
