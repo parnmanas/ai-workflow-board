@@ -2509,7 +2509,8 @@ export default function TicketPanel({
                     </div>
                   );
                 }
-                const activeAgents = (agents || []).filter(a => a.is_active);
+                // Agent Manager(type='manager')는 역할 담당자가 될 수 없다 (ticket 941c72d3) — 후보에서 숨김.
+                const activeAgents = (agents || []).filter(a => a.is_active && a.type !== 'manager');
                 const activeUsers = users || [];
                 const editable = !!onSetRoleAssignment && !savingDraft;
                 return sortedRoles.map(role => {

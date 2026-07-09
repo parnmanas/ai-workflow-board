@@ -61,7 +61,8 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
       const excludeIds = new Set([...existingParticipantIds, currentUser?.id].filter(Boolean));
       const list: PickerParticipant[] = [
         ...users.map((u: any) => ({ id: u.id, name: u.name, type: 'user' as const })),
-        ...agents.map((a: any) => ({ id: a.id, name: formatAgentDisplayName(a), type: 'agent' as const })),
+        // Agent Manager(type='manager')는 chat 참가자가 될 수 없다 (ticket 941c72d3) — 후보에서 숨김.
+        ...agents.filter((a: any) => a.type !== 'manager').map((a: any) => ({ id: a.id, name: formatAgentDisplayName(a), type: 'agent' as const })),
       ].filter((p) => !excludeIds.has(p.id));
       setParticipants(list);
     });

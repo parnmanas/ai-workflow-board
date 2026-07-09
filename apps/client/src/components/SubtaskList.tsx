@@ -344,7 +344,8 @@ export default function ChildTicketList({ parentTicket, agents, maxDepth, boardT
             </select>
             <select value={createForm.assignee} onChange={e => setCreateForm({ ...createForm, assignee: e.target.value })} style={inputStyle}>
               <option value="">Unassigned</option>
-              {agents.filter(a => a.is_active).map(a => <option key={a.id} value={a.name}>{formatAgentDisplayName(a)}</option>)}
+              {/* Agent Manager(type='manager')는 담당자가 될 수 없다 (ticket 941c72d3) — 후보에서 숨김. */}
+              {agents.filter(a => a.is_active && a.type !== 'manager').map(a => <option key={a.id} value={a.name}>{formatAgentDisplayName(a)}</option>)}
             </select>
           </div>
           <div>
