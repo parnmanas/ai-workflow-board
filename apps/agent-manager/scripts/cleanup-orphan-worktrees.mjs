@@ -12,38 +12,60 @@
 //
 // This script is cross-platform (pure Node + `git`, no build step) so it runs on
 // both the Linux and Windows hosts. It is SAFE BY DEFAULT: dry-run unless
-// `--execute` is passed, and it NEVER removes a worktree that is dirty or that
-// carries unmerged commits (e.g. a live `ticket/...` branch) — those are logged
-// and skipped so no in-flight work is lost.
+// `--execute` is passed, and it NEVER removes a worktree that is dirty, carries
+// unmerged commits (e.g. a live `ticket/...` branch), or was touched recently
+// (a live subagent checkout) — those are logged and skipped so no in-flight work
+// is lost.
+//
+// IMPORTANT — the manager's CURRENT worktree layout is `<home>/agents/<id>/
+// worktrees/<ticket>-<role>` (the `.awb/wt/` migration is still in flight). Those
+// are LIVE subagent checkouts, so the default match set does NOT touch them: a
+// clean+merged idle reviewer/just-spawned strand would otherwise sail past the
+// dirty/unmerged skips and get its cwd `git worktree remove --force`d out from
+// under it (exit-143). Sweeping the manager root is opt-in (`--include-manager-root`)
+// and guarded by the freshness check below — run it only with the manager stopped.
 //
 // Usage:
 //   node cleanup-orphan-worktrees.mjs --repo <path> [--repo <path2> ...]
-//                                     [--execute] [--all-non-awb] [--base <ref>]
+//                                     [--execute] [--all-non-awb]
+//                                     [--include-manager-root] [--min-age-hours <n>]
+//                                     [--base <ref>]
 //
-//   --repo <path>     Repo (or any dir inside it) to sweep. Repeatable. Required.
-//   --execute         Actually remove. Omit for a dry-run (default) that only logs.
-//   --all-non-awb     Aggressive: treat EVERY non-main worktree that is not under
-//                     `.awb/` as an orphan candidate (still gated by dirty/unmerged
-//                     skips). Default matches only the known `_compilecheck_*` /
-//                     `_wt_*` name patterns + the legacy `<home>/agents/*/worktrees/`
-//                     manager root.
-//   --base <ref>      Ref an orphan's commits must be merged into to be removable
-//                     (default: auto-detect origin/HEAD, falling back to origin/main).
+//   --repo <path>            Repo (or any dir inside it) to sweep. Repeatable. Required.
+//   --execute                Actually remove. Omit for a dry-run (default) that only logs.
+//   --all-non-awb            Aggressive: treat EVERY non-main worktree that is not
+//                            under `.awb/` as an orphan candidate (still gated by the
+//                            freshness/dirty/unmerged skips). Default matches only the
+//                            known `_compilecheck_*` / `_wt_*` name patterns.
+//   --include-manager-root   ALSO sweep the manager worktree root
+//                            `<home>/agents/*/worktrees/*`. LIVE layout — pass this
+//                            only with the manager stopped. Still freshness-gated.
+//   --min-age-hours <n>      Skip any candidate touched within the last <n> hours
+//                            (default 24) — a live worktree is touched constantly, a
+//                            real orphan is not. `--min-age-hours 0` disables it.
+//   --base <ref>             Ref an orphan's commits must be merged into to be removable
+//                            (default: auto-detect origin/HEAD, falling back to origin/main).
 //
 // Exit code is always 0 (best-effort maintenance). Every decision is logged.
 
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import path from 'node:path';
 
+const DEFAULT_MIN_AGE_HOURS = 24;
+
 function parseArgs(argv) {
-  const opts = { repos: [], execute: false, allNonAwb: false, base: '' };
+  const opts = { repos: [], execute: false, allNonAwb: false, includeManagerRoot: false, minAgeHours: DEFAULT_MIN_AGE_HOURS, base: '' };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--repo') opts.repos.push(argv[++i]);
     else if (a === '--execute') opts.execute = true;
     else if (a === '--all-non-awb') opts.allNonAwb = true;
-    else if (a === '--base') opts.base = argv[++i];
+    else if (a === '--include-manager-root') opts.includeManagerRoot = true;
+    else if (a === '--min-age-hours') {
+      const n = Number(argv[++i]);
+      opts.minAgeHours = Number.isFinite(n) && n >= 0 ? n : DEFAULT_MIN_AGE_HOURS;
+    } else if (a === '--base') opts.base = argv[++i];
     else if (a === '--help' || a === '-h') opts.help = true;
     else console.error(`[warn] ignoring unknown arg: ${a}`);
   }
@@ -114,14 +136,48 @@ function isAwbManaged(p) {
   return false;
 }
 
-// Known orphan shapes: `_compilecheck*` / `_wt_*` basenames, or the legacy
-// manager worktree root `.../agents/<id>/worktrees/<x>`.
+// Known orphan shapes: throwaway `_compilecheck*` / `_wt_*` basenames left by
+// ad-hoc `git worktree add`. These are genuine debris, never a live checkout, so
+// they are matched by default.
 function matchesKnownOrphan(p) {
   const base = basename(p);
-  if (/^_compilecheck/.test(base) || /^_wt[_-]/.test(base) || base.includes('compilecheck')) return true;
-  const n = norm(p);
-  if (/\/agents\/[^/]+\/worktrees\//.test(n)) return true;
-  return false;
+  return /^_compilecheck/.test(base) || /^_wt[_-]/.test(base) || base.includes('compilecheck');
+}
+
+// The manager's worktree root `.../agents/<id>/worktrees/<x>`. This is the CURRENT
+// live layout (the `.awb/wt/` migration is unfinished), so it is NOT a default
+// candidate — only swept behind `--include-manager-root`, with the manager stopped.
+function matchesManagerRoot(p) {
+  return /\/agents\/[^/]+\/worktrees\//.test(norm(p));
+}
+
+// Newest activity timestamp (ms) touching a worktree: the checkout dir itself plus
+// its linked git admin dir (`<main>/.git/worktrees/<name>`) and that dir's
+// index / HEAD / log files. A live subagent worktree is touched constantly
+// (checkout on spawn, file writes while running, index/HEAD on any git op); a
+// genuine stale orphan is not. Returns 0 when nothing can be stat'd (treat as
+// ancient → eligible for removal).
+function recentActivityMs(worktreePath) {
+  let newest = 0;
+  const bump = (f) => {
+    try {
+      const s = statSync(f);
+      const m = Math.max(s.mtimeMs, s.ctimeMs);
+      if (m > newest) newest = m;
+    } catch {
+      /* missing/unreadable → ignore */
+    }
+  };
+  bump(worktreePath);
+  const gd = git(worktreePath, ['rev-parse', '--absolute-git-dir']);
+  if (gd.ok && gd.out.trim()) {
+    const adminDir = gd.out.trim();
+    bump(adminDir);
+    for (const f of ['index', 'HEAD', 'ORIG_HEAD', 'FETCH_HEAD', path.join('logs', 'HEAD')]) {
+      bump(path.join(adminDir, f));
+    }
+  }
+  return newest;
 }
 
 // Resolve the base ref (what "merged" means). Prefer an explicit --base, else the
@@ -151,8 +207,10 @@ function sweepRepo(repo, opts) {
   const repoRoot = top.out.trim();
   const base = resolveBase(repo, opts.base);
   const baseExists = git(repo, ['rev-parse', '--verify', '--quiet', base]).ok;
+  const nowMs = Date.now();
+  const matchLabel = opts.allNonAwb ? 'all-non-awb' : `known-patterns${opts.includeManagerRoot ? '+manager-root' : ''}`;
   console.log(`\n=== ${repoRoot}`);
-  console.log(`    base=${base}${baseExists ? '' : ' (WARNING: base ref not found — unmerged check will skip-preserve everything)'} · mode=${opts.execute ? 'EXECUTE' : 'DRY-RUN'} · match=${opts.allNonAwb ? 'all-non-awb' : 'known-patterns'}`);
+  console.log(`    base=${base}${baseExists ? '' : ' (WARNING: base ref not found — unmerged check will skip-preserve everything)'} · mode=${opts.execute ? 'EXECUTE' : 'DRY-RUN'} · match=${matchLabel} · min-age=${opts.minAgeHours}h`);
 
   const entries = listWorktrees(repo);
   const stats = { scanned: entries.length, kept: 0, removed: 0, skipped: 0, pruned: 0 };
@@ -167,12 +225,30 @@ function sweepRepo(repo, opts) {
     if (i === 0 || np === mainPath) { stats.kept++; console.log(`  KEEP  (main)        ${p}`); continue; }
     if (isAwbManaged(p)) { stats.kept++; console.log(`  KEEP  (.awb managed) ${p}`); continue; }
 
-    const isCandidate = opts.allNonAwb || matchesKnownOrphan(p);
+    const isCandidate =
+      opts.allNonAwb || matchesKnownOrphan(p) || (opts.includeManagerRoot && matchesManagerRoot(p));
     if (!isCandidate) { stats.kept++; console.log(`  KEEP  (unmatched)    ${p} [${tag}]`); continue; }
 
     // Prunable = registered but the dir vanished → let `worktree prune` handle it.
     if (w.prunable || !existsSync(p)) { console.log(`  PRUNE (dir gone)     ${p}`); continue; }
     if (w.locked) { stats.skipped++; console.log(`  SKIP  (locked)       ${p} [${tag}]`); continue; }
+
+    // Freshness guard: a recently-touched worktree is almost certainly a LIVE
+    // subagent checkout (idle-clean or just-spawned), not a stale orphan — and the
+    // dirty/unmerged skips below do NOT protect a clean+merged idle worktree. This
+    // is the guard that keeps `--include-manager-root` / `--all-non-awb` from
+    // removing a running strand's cwd (exit-143). Disable with --min-age-hours 0.
+    if (opts.minAgeHours > 0) {
+      const act = recentActivityMs(p);
+      if (act > 0) {
+        const ageH = (nowMs - act) / 3_600_000;
+        if (ageH < opts.minAgeHours) {
+          stats.skipped++;
+          console.log(`  SKIP  (recently active) ${p} [${tag}] — touched ${ageH.toFixed(1)}h ago (< ${opts.minAgeHours}h)`);
+          continue;
+        }
+      }
+    }
 
     // Never drop uncommitted work.
     const status = git(p, ['status', '--porcelain']);
@@ -219,8 +295,11 @@ function main() {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help || opts.repos.length === 0) {
     console.log(
-      'Usage: node cleanup-orphan-worktrees.mjs --repo <path> [--repo <path2> ...] [--execute] [--all-non-awb] [--base <ref>]\n' +
-        '  Dry-run by default. Skips dirty + unmerged worktrees. See file header for details.',
+      'Usage: node cleanup-orphan-worktrees.mjs --repo <path> [--repo <path2> ...] [--execute]\n' +
+        '         [--all-non-awb] [--include-manager-root] [--min-age-hours <n>] [--base <ref>]\n' +
+        '  Dry-run by default. Skips recently-active + dirty + unmerged worktrees.\n' +
+        '  The manager root (agents/*/worktrees/*) is only swept with --include-manager-root.\n' +
+        '  See file header for details.',
     );
     process.exit(0);
   }
