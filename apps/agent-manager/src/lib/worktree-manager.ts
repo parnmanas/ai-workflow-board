@@ -628,8 +628,16 @@ export class WorktreeManager {
     // Drop the prior occupant's work branch(es) so `ticket/<id>` refs don't pile
     // up. Safe: release only happens at terminal (work merged) / archive (work
     // abandoned). `-D` is best-effort — a no-op when already deleted by Merging.
+    // Base-branch guard: also skip the `main`/`master` literals unconditionally,
+    // not just the detected `base`. When #detectBaseBranch returns null (no
+    // remote), `b !== base` is `b !== null` — always true — so a slot that ever
+    // sat on `main` could get `branch -D main`. Protecting the literals closes
+    // that (crash-reclaim hardening requested in the ticket 83b2d43b review).
+    const protectedBranches = new Set(
+      ['HEAD', base, 'main', 'master'].filter((x): x is string => !!x),
+    );
     for (const b of new Set([liveBranch, opts.recordedBranch ?? ''])) {
-      if (b && b !== 'HEAD' && b !== base) {
+      if (b && !protectedBranches.has(b)) {
         await git(slotPath, ['branch', '-D', b]);
       }
     }
@@ -688,6 +696,134 @@ export class WorktreeManager {
       );
       return 1;
     });
+  }
+
+  /**
+   * Crash-tolerant lease reclaim (this ticket): reconcile the persisted lease
+   * registry against the set of live ticket workers, flipping any ACTIVE lease
+   * whose owner is no longer alive back to IDLE. This closes the leak that
+   * reset-on-acquire alone can't: a worker that dies uncleanly (exit-143 /
+   * crash) BEFORE its ticket reaches terminal/archive never runs the release
+   * path (#releaseSharedSlot), so its slot stays `active` forever and the pool
+   * eventually starves (`pool_exhausted`).
+   *
+   * The persisted registry is the source of truth; `liveTicketIds` is the
+   * caller's live-worker view — the union of the manager's live ticket sessions
+   * and one-shot subagents (the same snapshots the worktree sweep reuses, kept
+   * honest against the OS by _getLiveSession / #reconcileOnStart). A lease is an
+   * orphan candidate when its ticket is `active` in the registry but ABSENT from
+   * that live set. We trust this OS/output-liveness view, NOT a ticket's
+   * my_last_update_at — the force_respawn death-loop lesson (fdc69c13): a live
+   * but quiet worker still holds a live session, so it stays in the snapshot and
+   * is never mistaken for dead.
+   *
+   * Safety belt (규약: never false-reclaim a live worker): before reclaiming, a
+   * best-effort `/proc/<pid>/cwd` scan (#liveProcessCwds) spares any slot a live
+   * process is still working INSIDE. This covers a detached persistent ticket
+   * child that outlived a manager restart but isn't yet re-registered in
+   * `_sessions` at boot — its cwd still points at the slot, so it survives.
+   *
+   * Reclaim is a pure STATE FLIP: mark idle + record the slot's branch for the
+   * next acquire's `branch -D`. The slot dir (and its untracked warm build) is
+   * NEVER touched — the reset-on-acquire the next lease runs does the cleanup.
+   * Serialized under the same per-root pool lock as acquire/release. Returns the
+   * number of leases reclaimed. Never throws.
+   */
+  async reconcilePoolLeases(opts: {
+    baseWorkingDir: string;
+    liveTicketIds: Set<string>;
+  }): Promise<number> {
+    if (!this.#enabled) return 0;
+    const { baseWorkingDir, liveTicketIds } = opts;
+    if (!baseWorkingDir) return 0;
+    const worktreesRoot = worktreesRootFor(baseWorkingDir);
+    return this.#withPoolLock(worktreesRoot, async () => {
+      const reg = await this.#readRegistry(worktreesRoot);
+      // Orphan candidates: active leases with no live owner. A per_ticket board
+      // has an empty registry → no candidates → cheap no-op (no /proc scan).
+      const candidates = Object.keys(reg.slots).filter(
+        (s) => reg.slots[s].active && !liveTicketIds.has(reg.slots[s].ticketId),
+      );
+      if (candidates.length === 0) return 0;
+
+      // Secondary guard — spare any slot a live process is still cwd'd inside
+      // (a detached child that outlived a restart before the session map was
+      // rebuilt). Best-effort; empty on non-Linux / failure → snapshot-only.
+      const liveCwds = (await this.#liveProcessCwds()).map(normPath);
+      const inUse = (slotPath: string): boolean => {
+        const p = normPath(slotPath);
+        // === covers working_dir==repo-root; startsWith covers a repo-subdir
+        // working_dir (child cwd is `<slot>/<subpath>`, strictly under the slot).
+        return liveCwds.some((c) => c === p || c.startsWith(p + '/'));
+      };
+
+      let reclaimed = 0;
+      for (const slot of candidates) {
+        const lease = reg.slots[slot];
+        const t8 = String(lease.ticketId).slice(0, 8);
+        const wtPath = join(worktreesRoot, slot);
+        // `/proc/<pid>/cwd` is kernel-canonicalized, so compare against the slot's
+        // realpath (working_dir / .awb may sit under a symlink). Dir gone → the
+        // raw path, and inUse is false anyway (no live cwd in a vanished dir).
+        let realWt = wtPath;
+        try {
+          realWt = await fsp.realpath(wtPath);
+        } catch {
+          /* slot dir pruned/removed — nothing can be cwd'd inside it */
+        }
+        if (inUse(realWt)) {
+          log(
+            `[worktree] pool reclaim SKIP slot ${slot} ticket=${t8} — a live process is still working in it (not in session snapshot but OS-alive)`,
+          );
+          continue;
+        }
+        // Record the branch the dead occupant left so the next acquire drops it
+        // (falls back to the already-recorded branch when the dir is gone).
+        let branch: string | null = lease.branch ?? null;
+        const hb = await git(wtPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
+        if (hb.ok) {
+          const b = hb.stdout.trim();
+          branch = b && b !== 'HEAD' ? b : null;
+        }
+        reg.slots[slot] = { ...lease, active: false, releasedAt: nowIso(), branch };
+        reclaimed++;
+        log(
+          `[worktree] pool reclaim slot ${slot} — orphaned lease from dead ticket=${t8} flipped to idle (reset deferred to next acquire)`,
+        );
+      }
+      if (reclaimed > 0) await this.#writeRegistry(worktreesRoot, reg);
+      return reclaimed;
+    });
+  }
+
+  /**
+   * Best-effort snapshot of the cwd of every live process (Linux
+   * `/proc/<pid>/cwd`). Used by reconcilePoolLeases as an OS-liveness cross-check
+   * so a slot a live process is still working in is never reclaimed. Returns []
+   * on non-Linux or any read failure (the caller then relies on the live-session
+   * snapshot alone). Mirrors subagent-manager's `/proc` scan — same host
+   * assumption. Never throws.
+   */
+  async #liveProcessCwds(): Promise<string[]> {
+    if (process.platform !== 'linux') return [];
+    let entries: string[];
+    try {
+      entries = await fsp.readdir('/proc');
+    } catch {
+      return [];
+    }
+    const cwds: string[] = [];
+    await Promise.all(
+      entries.map(async (e) => {
+        if (!/^\d+$/.test(e)) return; // only numeric pid dirs
+        try {
+          cwds.push(await fsp.readlink(`/proc/${e}/cwd`));
+        } catch {
+          /* process gone between readdir and readlink, or EPERM — skip */
+        }
+      }),
+    );
+    return cwds;
   }
 
   #registryPath(worktreesRoot: string): string {

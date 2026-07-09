@@ -461,7 +461,10 @@ async function runRuntime(
   const circuitBreaker = new CircuitBreaker();
 
   const subagentManager = new SubagentManager(config, circuitBreaker);
-  subagentManager.init().catch((err: any) =>
+  // Capture the init promise so the boot-time warm-pool lease reclaim can wait
+  // for #reconcileOnStart to revive surviving detached subagents into the
+  // snapshot BEFORE it decides which leases are orphaned (ticket 4ed77ad5).
+  const subagentReady = subagentManager.init().catch((err: any) =>
     log(`SubagentManager init failed: ${err?.message ?? err}`),
   );
 
@@ -671,6 +674,7 @@ async function runRuntime(
   // dirty tree means a pended ticket still has unsaved changes — kept). The
   // branch ref survives removal, so resume just recreates the worktree.
   let worktreeSweepTimer: NodeJS.Timeout | null = null;
+  let poolReclaimTimer: NodeJS.Timeout | null = null;
   const sweepWorktrees = async (): Promise<void> => {
     if (!worktreeManager.enabled) return;
     try {
@@ -705,6 +709,49 @@ async function runRuntime(
   };
   worktreeSweepTimer = setInterval(() => void sweepWorktrees(), 10 * 60 * 1000);
   worktreeSweepTimer.unref?.();
+
+  // ticket 4ed77ad5 — crash-tolerant warm-pool lease reclaim. reset-on-acquire
+  // cleans a slot's tree, but a worker that dies uncleanly (exit-143) before its
+  // ticket reaches terminal/archive never runs the release path, so its slot
+  // stays leased forever and the shared pool eventually starves. Reconcile the
+  // persisted lease registry against the live-worker view (the SAME session
+  // snapshots the sweep reuses) and flip any active-but-ownerless lease back to
+  // idle — a pure state flip; the next acquire's reset-on-acquire does the
+  // cleanup and the slot dir (warm build) is never touched. Runs on the sweep
+  // cadence AND once at boot (the prime leak window: pre-restart workers are
+  // gone but their active leases persisted).
+  const computeLiveTicketIds = (): Set<string> => {
+    const live = new Set<string>();
+    for (const s of ticketSessionManager._snapshot()) if (s.ticketId) live.add(s.ticketId);
+    for (const s of subagentManager._snapshot()) if (s.ticket_id) live.add(s.ticket_id);
+    return live;
+  };
+  const reconcilePoolLeasesAll = async (trigger: string): Promise<void> => {
+    if (!worktreeManager.enabled) return;
+    try {
+      const liveTicketIds = computeLiveTicketIds();
+      let total = 0;
+      const seenDirs = new Set<string>();
+      for (const ctx of managedAgentContexts.list()) {
+        if (!ctx.working_dir || seenDirs.has(ctx.working_dir)) continue;
+        seenDirs.add(ctx.working_dir);
+        total += await worktreeManager.reconcilePoolLeases({
+          baseWorkingDir: ctx.working_dir,
+          liveTicketIds,
+        });
+      }
+      if (total > 0) {
+        log(`[worktree] pool reclaim (${trigger}) reclaimed ${total} orphaned lease(s)`);
+      }
+    } catch (err: any) {
+      log(`[worktree] pool reclaim (${trigger}) failed: ${err?.message ?? err}`);
+    }
+  };
+  poolReclaimTimer = setInterval(() => void reconcilePoolLeasesAll('tick'), 10 * 60 * 1000);
+  poolReclaimTimer.unref?.();
+  // Boot reconcile — wait on the subagent reconcile so a detached one-shot that
+  // survived the restart is in the snapshot first (else it looks orphaned).
+  void subagentReady.then(() => reconcilePoolLeasesAll('boot'));
 
   agentIdReady.then(async (agentId) => {
     if (!agentId) return;
@@ -846,6 +893,10 @@ async function runRuntime(
     if (worktreeSweepTimer) {
       clearInterval(worktreeSweepTimer);
       worktreeSweepTimer = null;
+    }
+    if (poolReclaimTimer) {
+      clearInterval(poolReclaimTimer);
+      poolReclaimTimer = null;
     }
     eventStream.stop();
     try {
