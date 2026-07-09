@@ -24,7 +24,23 @@
 //     <working_dir>/.awb/wt/<slug>
 //
 //   - worktree_mode = 'per_ticket' (default) → slug = <ticket8>  (one per ticket)
-//   - worktree_mode = 'shared'               → slug = 'shared'   (one reused for all)
+//   - worktree_mode = 'shared'   → a WARM POOL of slots `shared-0 … shared-<N-1>`
+//         (규약 ⑥). N = the board concurrency (max_concurrent_tickets_per_agent,
+//         flattened onto the trigger event). A ticket LEASES an idle slot for its
+//         whole lifecycle (reattaches across roles / resumes) and RELEASES it
+//         (idle-mark only, lazy) at terminal/archive. The NEXT lease RESETS the
+//         slot to the base tip before handing it over — `git reset --hard` returns
+//         only TRACKED source to the base while UNTRACKED build artifacts (Unity
+//         Library/, node_modules, out-of-tree outputs) survive, so the next ticket
+//         builds incrementally (warm). Never `git clean -fdx` — that would defeat
+//         the whole point. Reset-on-acquire (not on-release) is deliberate: workers
+//         die uncleanly (exit-143) all the time, so cleanup can't depend on a tidy
+//         handback. Pool size == concurrency and the manager caps concurrent ticket
+//         sessions at N (ticket-session-manager), so a lease that clears the gate
+//         always finds a free slot — the pool never starves. QA/Security runs use a
+//         SEPARATE `.awb/qa/<id8>` clone (run-provisioner), NOT this pool; the
+//         "shared" ticket+QA budget is enforced by the server concurrency gate.
+//         See #acquireSharedSlot + the on-disk lease registry (.pool-leases.json).
 //
 // This replaces the old `<MANAGER_HOME>/agents/<id>/worktrees/<ticket>-<role>`
 // root that scattered checkouts outside the repo tree. `.awb/` is a dot-prefix
@@ -54,6 +70,51 @@ const GIT_TIMEOUT_MS = 20_000;
  *  kept as a local literal so agent-manager doesn't depend on the server pkg). */
 export type WorktreeMode = 'per_ticket' | 'shared';
 export const DEFAULT_WORKTREE_MODE: WorktreeMode = 'per_ticket';
+
+/** Prefix for warm-pool slot dirs in shared mode: `shared-0 … shared-<N-1>`.
+ *  The legacy single reused checkout was the literal `shared` — both are treated
+ *  as pool members (protected from sweep/terminal removal) by isSharedSlotSeg. */
+export const SHARED_SLOT_PREFIX = 'shared-';
+
+/** Warm-pool slot dir name for index i (`shared-0`, `shared-1`, …). */
+export function sharedSlotName(i: number): string {
+  return `${SHARED_SLOT_PREFIX}${i}`;
+}
+
+/** Is this last-path-segment a shared-pool slot (new `shared-<i>` OR the legacy
+ *  literal `shared`)? Used so sweep()/removeTicketWorktrees never delete a pool
+ *  slot — that would wipe the warm build the pool exists to preserve. */
+export function isSharedSlotSeg(seg: string): boolean {
+  return seg === 'shared' || seg.startsWith(SHARED_SLOT_PREFIX);
+}
+
+/** On-disk warm-pool lease registry (`<working_dir>/.awb/wt/.pool-leases.json`).
+ *  Persisted so a manager restart re-reads which ticket owns which slot (resume
+ *  reattaches; released slots stay released). Keyed by slot name. */
+export interface PoolSlotLease {
+  slot: string;
+  /** The ticket that currently (active) or last (released) held this slot. */
+  ticketId: string;
+  /** Role of the last acquire — observability only. */
+  role?: string;
+  /** true = leased to a ticket that has not reached terminal/archive; false =
+   *  released (idle) and awaiting a reset-on-acquire by the next lease. */
+  active: boolean;
+  leasedAt: string;
+  releasedAt?: string;
+  /** The slot's checked-out branch captured AT RELEASE — the next acquire deletes
+   *  it (`git branch -D`) so stale `ticket/<id>` refs don't accumulate. */
+  branch?: string | null;
+}
+
+export interface PoolRegistry {
+  version: number;
+  slots: Record<string, PoolSlotLease>;
+}
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
 
 /** Fixed worktree root for an agent working_dir: `<working_dir>/.awb/wt`.
  *  Every worktree this manager creates lives directly under it. Exported so the
@@ -113,6 +174,11 @@ export interface ResolveCwdArgs {
   role: string;
   /** Board worktree_mode (worktree 규약 ①/②). Defaults to 'per_ticket'. */
   mode?: WorktreeMode;
+  /** Warm-pool size for shared mode (규약 ⑥) = the board concurrency
+   *  (max_concurrent_tickets_per_agent), flattened onto the trigger event.
+   *  Ignored in per_ticket mode. Absent / ≤0 → 1 (a single reused slot, i.e. the
+   *  pre-pool behavior). */
+  poolSize?: number;
 }
 
 export interface ResolveCwdResult {
@@ -146,6 +212,10 @@ export function worktreeSlug(ticketId: string, mode: WorktreeMode = DEFAULT_WORK
 
 export class WorktreeManager {
   #enabled: boolean;
+  /** Per-worktree-root serialization for warm-pool acquire/release so two
+   *  concurrent triggers can't lease the same idle slot (규약 ⑥). Keyed by the
+   *  normalized worktrees root; one chained promise per key. */
+  #poolLocks = new Map<string, Promise<unknown>>();
 
   constructor(opts: { enabled?: boolean } = {}) {
     this.#enabled = opts.enabled !== false;
@@ -293,7 +363,8 @@ export class WorktreeManager {
 
     if (!this.#enabled) return fallback('disabled');
     if (!baseWorkingDir) return fallback('no_base_dir');
-    if (mode === 'per_ticket' && !ticketId) return fallback('no_ticket');
+    // Both modes key a lease/slug on the ticket id, so it is required for either.
+    if (!ticketId) return fallback('no_ticket');
 
     if (!(await this.#isGitWorkTree(baseWorkingDir))) {
       return fallback('not_a_git_repo');
@@ -305,8 +376,6 @@ export class WorktreeManager {
     const withSub = (p: string) => (workSubpath ? join(p, workSubpath) : p);
 
     const worktreesRoot = worktreesRootFor(baseWorkingDir);
-    const slug = worktreeSlug(ticketId, mode);
-    const wtPath = join(worktreesRoot, slug);
 
     // Keep the nested worktrees out of `git status` (and out of Unity scans).
     await this.#ensureAwbIgnored(repoRoot, workSubpath);
@@ -315,78 +384,373 @@ export class WorktreeManager {
     // removed doesn't block recreating it here.
     await this.prune(baseWorkingDir);
 
-    // Reuse an existing registered worktree at this exact path — that is the
-    // resume path (idle-reap → respawn lands back in the same branch/dirty
-    // tree the prior session left behind). In shared mode this is also how the
-    // one reused checkout is picked up across tickets.
+    // ── shared: lease a warm-pool slot (규약 ⑥) ─────────────────────────────
+    if (mode === 'shared') {
+      return this.#acquireSharedSlot({
+        baseWorkingDir,
+        worktreesRoot,
+        ticketId,
+        role,
+        poolSize: args.poolSize,
+        workSubpath,
+        withSub,
+        fallback,
+      });
+    }
+
+    // ── per_ticket: one dedicated worktree named `<ticket8>` ────────────────
+    const wtPath = join(worktreesRoot, worktreeSlug(ticketId, mode));
+    const ens = await this.#ensureWorktree(baseWorkingDir, worktreesRoot, wtPath);
+    if (!ens.ok) {
+      if (ens.reason === 'add_failed') {
+        log(
+          `[worktree] add failed for ticket=${String(ticketId).slice(0, 8)} role=${role} mode=${mode}: ${ens.detail ?? ''} — falling back to base cwd`,
+        );
+      }
+      return fallback(ens.reason ?? 'worktree_unavailable');
+    }
+    if (ens.created) {
+      log(
+        `[worktree] created ${wtPath} for ticket=${String(ticketId).slice(0, 8)} role=${role} mode=${mode}${workSubpath ? ` subpath=${workSubpath}` : ''} (detached at base HEAD)`,
+      );
+    }
+    return {
+      cwd: withSub(wtPath),
+      isWorktree: true,
+      reused: !ens.created,
+      worktreePath: wtPath,
+      workSubpath,
+      mode,
+    };
+  }
+
+  /**
+   * Materialize the worktree at `wtPath`: reattach to an existing registered
+   * worktree (the resume path — branch + dirty tree the prior session left
+   * behind), or create a fresh detached checkout at the base repo's HEAD. We
+   * deliberately do NOT check out a named branch (a branch can live in only one
+   * worktree; the column workflow creates its own `ticket/<id>` branch here).
+   * Never throws — failures come back as { ok:false, reason }. Assumes the
+   * caller has already run `prune`. Shared by the per_ticket path and each
+   * warm-pool slot in #acquireSharedSlot.
+   */
+  async #ensureWorktree(
+    baseWorkingDir: string,
+    worktreesRoot: string,
+    wtPath: string,
+  ): Promise<{ ok: boolean; created: boolean; reason?: string; detail?: string }> {
     const existing = (await this.listWorktrees(baseWorkingDir)).find((w) =>
       samePath(w.path, wtPath),
     );
     if (existing) {
       try {
         const st = await fsp.stat(wtPath);
-        if (st.isDirectory()) {
-          return {
-            cwd: withSub(wtPath),
-            isWorktree: true,
-            reused: true,
-            worktreePath: wtPath,
-            workSubpath,
-            mode,
-          };
-        }
+        if (st.isDirectory()) return { ok: true, created: false };
       } catch {
         // Registered but dir is gone — prune already ran; fall through to add.
       }
     }
 
     // If the dir exists but isn't a registered worktree, we don't know what's
-    // in it — refuse to clobber and fall back to the shared cwd.
+    // in it — refuse to clobber.
     if (!existing && (await pathExists(wtPath))) {
       log(
         `[worktree] path exists but is not a registered worktree, falling back to base cwd: ${wtPath}`,
       );
-      return fallback('path_conflict');
+      return { ok: false, created: false, reason: 'path_conflict' };
     }
 
-    // Fresh worktree, detached at the base repo's current HEAD. We deliberately
-    // do NOT check out a named branch: a branch can only be checked out in one
-    // worktree, and the agent's column workflow creates/attaches its own
-    // `ticket/<id>` branch inside this worktree anyway.
     try {
       await fsp.mkdir(worktreesRoot, { recursive: true });
     } catch (err: any) {
-      return fallback(`mkdir_failed:${err?.message ?? err}`);
+      return { ok: false, created: false, reason: `mkdir_failed:${err?.message ?? err}` };
     }
 
     // Free the base branch: the column workflow guide tells the agent to
     // `git checkout <base-branch> && git pull` first, but a branch can be
-    // checked out in only ONE worktree. If the base repo's primary tree is
-    // sitting on the base branch, that checkout fails ("already used by
-    // worktree"). Detaching the base HEAD (no file changes — same commit)
-    // frees the branch so every ticket worktree can check it out per the
-    // documented flow. Best-effort; on failure the agent can still branch
-    // off origin/<base> directly.
+    // checked out in only ONE worktree. Detaching the base HEAD (no file
+    // changes — same commit) frees the branch. Best-effort.
     await this.#freeBaseBranch(baseWorkingDir);
 
     const add = await git(baseWorkingDir, ['worktree', 'add', '--detach', wtPath]);
     if (!add.ok) {
-      log(
-        `[worktree] add failed for ticket=${String(ticketId).slice(0, 8)} role=${role} mode=${mode}: ${add.stderr.trim()} — falling back to base cwd`,
-      );
-      return fallback('add_failed');
+      return { ok: false, created: false, reason: 'add_failed', detail: add.stderr.trim() };
     }
-    log(
-      `[worktree] created ${wtPath} for ticket=${String(ticketId).slice(0, 8)} role=${role} mode=${mode}${workSubpath ? ` subpath=${workSubpath}` : ''} (detached at base HEAD)`,
-    );
-    return {
-      cwd: withSub(wtPath),
+    return { ok: true, created: true };
+  }
+
+  // ── warm-pool (shared mode, 규약 ⑥) ──────────────────────────────────────
+
+  /**
+   * Lease a warm-pool slot for a shared-mode ticket. Serialized per worktrees
+   * root so two triggers never grab the same idle slot. Three outcomes:
+   *   - Reattach: this ticket already owns a slot → return it, no reset (its
+   *     branch + tree survive — resume / next role / follow-up turn).
+   *   - Fresh lease: pick an idle slot (a released one first — it's warm — else
+   *     an unused index), reset-on-acquire it (tracked source → base tip;
+   *     untracked build artifacts preserved), and record the lease.
+   *   - Pool exhausted: no idle slot in [0, N). The invariant (N == concurrency,
+   *     the ticket cap holds concurrent ticket sessions ≤ N) makes this
+   *     unreachable in normal operation; a leaked dead-worker lease can still
+   *     exhaust it (crash reclaim is a follow-up ticket). Safe fallback: base cwd.
+   */
+  async #acquireSharedSlot(a: {
+    baseWorkingDir: string;
+    worktreesRoot: string;
+    ticketId: string;
+    role: string;
+    poolSize?: number;
+    workSubpath: string;
+    withSub: (p: string) => string;
+    fallback: (reason: string) => ResolveCwdResult;
+  }): Promise<ResolveCwdResult> {
+    const N = Math.max(1, Math.floor(a.poolSize && a.poolSize > 0 ? a.poolSize : 1));
+    const t8 = String(a.ticketId).slice(0, 8);
+    const result = (wtPath: string, reused: boolean): ResolveCwdResult => ({
+      cwd: a.withSub(wtPath),
       isWorktree: true,
-      reused: false,
+      reused,
       worktreePath: wtPath,
-      workSubpath,
-      mode,
-    };
+      workSubpath: a.workSubpath,
+      mode: 'shared',
+    });
+
+    return this.#withPoolLock(a.worktreesRoot, async () => {
+      const reg = await this.#readRegistry(a.worktreesRoot);
+
+      // 1. Reattach — this ticket already holds a slot (active OR released; a
+      //    released ticket re-triggering keeps its own tree, no reset).
+      const mine = Object.keys(reg.slots).find((s) => reg.slots[s].ticketId === a.ticketId);
+      if (mine) {
+        const wtPath = join(a.worktreesRoot, mine);
+        const ens = await this.#ensureWorktree(a.baseWorkingDir, a.worktreesRoot, wtPath);
+        if (ens.ok) {
+          reg.slots[mine].active = true;
+          reg.slots[mine].role = a.role;
+          delete reg.slots[mine].releasedAt;
+          await this.#writeRegistry(a.worktreesRoot, reg);
+          return result(wtPath, !ens.created);
+        }
+        // Owned slot can't be materialized (dir clobbered by a non-worktree,
+        // add failed) — drop the stale lease and fall through to a fresh pick.
+        delete reg.slots[mine];
+      }
+
+      // 2. Fresh lease — classify slots [0, N): prefer a released (warm) slot,
+      //    else an unused index.
+      let resetIdx = -1;
+      let freshIdx = -1;
+      for (let i = 0; i < N; i++) {
+        const lease = reg.slots[sharedSlotName(i)];
+        if (lease && lease.active) continue; // held by a live ticket — never touch
+        if (lease) {
+          if (resetIdx < 0) resetIdx = i; // released → warm, reuse first
+        } else if (freshIdx < 0) {
+          freshIdx = i; // never used
+        }
+      }
+      const pick = resetIdx >= 0 ? resetIdx : freshIdx;
+      if (pick < 0) {
+        log(
+          `[worktree] shared pool exhausted (N=${N}) for ticket=${t8} — every slot is an active lease; falling back to base cwd`,
+        );
+        return a.fallback('pool_exhausted');
+      }
+
+      const slotName = sharedSlotName(pick);
+      const wtPath = join(a.worktreesRoot, slotName);
+      const prevLease = reg.slots[slotName];
+      const ens = await this.#ensureWorktree(a.baseWorkingDir, a.worktreesRoot, wtPath);
+      if (!ens.ok) return a.fallback(ens.reason ?? 'worktree_unavailable');
+
+      // Reset-on-acquire: hand a clean TRACKED tree at the base tip while keeping
+      // UNTRACKED warm-build artifacts. A brand-new dir is already clean at base
+      // HEAD, so it only needs the stale recorded branch dropped.
+      await this.#resetSlotOnAcquire(a.baseWorkingDir, wtPath, {
+        fullReset: !ens.created,
+        recordedBranch: prevLease?.branch ?? null,
+      });
+
+      reg.slots[slotName] = {
+        slot: slotName,
+        ticketId: a.ticketId,
+        role: a.role,
+        active: true,
+        leasedAt: nowIso(),
+      };
+      await this.#writeRegistry(a.worktreesRoot, reg);
+      log(
+        `[worktree] leased shared pool slot ${slotName} (${resetIdx >= 0 ? 'reset warm' : 'fresh'}) to ticket=${t8} role=${a.role} of N=${N}`,
+      );
+      return result(wtPath, !ens.created);
+    });
+  }
+
+  /**
+   * Reset a pool slot back to the base tip before handing it to a new lease.
+   * `git reset --hard` restores TRACKED source only — UNTRACKED build artifacts
+   * (Unity Library/, node_modules, out-of-tree outputs) survive, so the next
+   * ticket builds warm. NEVER `git clean` — that would wipe exactly what makes
+   * the pool valuable. Detaches HEAD first so a hard-reset can't be blocked by
+   * (and the prior work branch can be deleted despite) a checked-out branch. All
+   * steps best-effort; a git failure degrades to "slightly less clean", never a
+   * throw.
+   */
+  async #resetSlotOnAcquire(
+    baseWorkingDir: string,
+    slotPath: string,
+    opts: { fullReset: boolean; recordedBranch: string | null },
+  ): Promise<void> {
+    const base = await this.#detectBaseBranch(baseWorkingDir);
+    // The branch the dead/prior occupant left checked out — delete it too.
+    const liveHead = await git(slotPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
+    const liveBranch = liveHead.ok ? liveHead.stdout.trim() : '';
+
+    if (opts.fullReset) {
+      // Detach at the current commit (no file changes → safe on a dirty tree),
+      // freeing the branch so `reset --hard` and `branch -D` below can proceed.
+      await git(slotPath, ['checkout', '--detach']);
+      let resetOk = false;
+      if (base) {
+        const r = await git(slotPath, ['reset', '--hard', `origin/${base}`]);
+        resetOk = r.ok;
+      }
+      if (!resetOk) {
+        // origin/<base> unresolvable (no remote / stale) → fall back to the base
+        // repo's current HEAD commit, which is where fresh slots start anyway.
+        const head = await git(baseWorkingDir, ['rev-parse', 'HEAD']);
+        if (head.ok && head.stdout.trim()) {
+          await git(slotPath, ['reset', '--hard', head.stdout.trim()]);
+        }
+      }
+    }
+
+    // Drop the prior occupant's work branch(es) so `ticket/<id>` refs don't pile
+    // up. Safe: release only happens at terminal (work merged) / archive (work
+    // abandoned). `-D` is best-effort — a no-op when already deleted by Merging.
+    for (const b of new Set([liveBranch, opts.recordedBranch ?? ''])) {
+      if (b && b !== 'HEAD' && b !== base) {
+        await git(slotPath, ['branch', '-D', b]);
+      }
+    }
+  }
+
+  /**
+   * Determine the repo's base branch name (typically `main` / `master`) for the
+   * reset-on-acquire target. Prefers the remote's default (`origin/HEAD`), then
+   * probes `origin/main` / `origin/master`. Returns null when none resolves (the
+   * caller then falls back to the base repo HEAD). Never throws.
+   */
+  async #detectBaseBranch(baseWorkingDir: string): Promise<string | null> {
+    const sym = await git(baseWorkingDir, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
+    if (sym.ok) {
+      const b = sym.stdout.trim().replace(/^origin\//, '');
+      if (b) return b;
+    }
+    for (const cand of ['main', 'master']) {
+      const ref = await git(baseWorkingDir, [
+        'show-ref',
+        '--verify',
+        '--quiet',
+        `refs/remotes/origin/${cand}`,
+      ]);
+      if (ref.ok) return cand;
+    }
+    return null;
+  }
+
+  /**
+   * Release the pool slot a shared-mode ticket holds — LAZY: mark it idle and
+   * record its current branch (for the next acquire's `branch -D`), but do NOT
+   * reset or remove it. The reset is deferred to the next acquire so cleanup
+   * never depends on a tidy handback (workers die on exit-143 mid-work). No-op
+   * (returns 0) when the ticket holds no active slot. Never throws.
+   */
+  async #releaseSharedSlot(baseWorkingDir: string, ticketId: string): Promise<number> {
+    const worktreesRoot = worktreesRootFor(baseWorkingDir);
+    return this.#withPoolLock(worktreesRoot, async () => {
+      const reg = await this.#readRegistry(worktreesRoot);
+      const key = Object.keys(reg.slots).find(
+        (s) => reg.slots[s].ticketId === ticketId && reg.slots[s].active,
+      );
+      if (!key) return 0;
+      const wtPath = join(worktreesRoot, key);
+      let branch: string | null = null;
+      const hb = await git(wtPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
+      if (hb.ok) {
+        const b = hb.stdout.trim();
+        if (b && b !== 'HEAD') branch = b;
+      }
+      reg.slots[key] = { ...reg.slots[key], active: false, releasedAt: nowIso(), branch };
+      await this.#writeRegistry(worktreesRoot, reg);
+      log(
+        `[worktree] released shared pool slot ${key} for ticket=${String(ticketId).slice(0, 8)} (idle; reset deferred to next acquire)`,
+      );
+      return 1;
+    });
+  }
+
+  #registryPath(worktreesRoot: string): string {
+    return join(worktreesRoot, '.pool-leases.json');
+  }
+
+  /** Read the on-disk lease registry; a missing / malformed file yields an empty
+   *  registry (so a per_ticket board never spuriously creates one). Never throws. */
+  async #readRegistry(worktreesRoot: string): Promise<PoolRegistry> {
+    try {
+      const raw = await fsp.readFile(this.#registryPath(worktreesRoot), 'utf8');
+      const parsed = JSON.parse(raw);
+      const slots: Record<string, PoolSlotLease> = {};
+      if (parsed && typeof parsed === 'object' && parsed.slots && typeof parsed.slots === 'object') {
+        for (const [k, v] of Object.entries(parsed.slots as Record<string, any>)) {
+          if (v && typeof v.ticketId === 'string' && v.ticketId) {
+            slots[k] = {
+              slot: k,
+              ticketId: v.ticketId,
+              role: typeof v.role === 'string' ? v.role : undefined,
+              active: v.active === true,
+              leasedAt: typeof v.leasedAt === 'string' ? v.leasedAt : '',
+              releasedAt: typeof v.releasedAt === 'string' ? v.releasedAt : undefined,
+              branch:
+                typeof v.branch === 'string' ? v.branch : v.branch === null ? null : undefined,
+            };
+          }
+        }
+      }
+      return { version: 1, slots };
+    } catch {
+      return { version: 1, slots: {} };
+    }
+  }
+
+  /** Persist the lease registry under `<worktreesRoot>/.pool-leases.json`
+   *  (inside the gitignored `.awb/`). Best-effort; never throws. */
+  async #writeRegistry(worktreesRoot: string, reg: PoolRegistry): Promise<void> {
+    try {
+      await fsp.mkdir(worktreesRoot, { recursive: true });
+      await fsp.writeFile(
+        this.#registryPath(worktreesRoot),
+        JSON.stringify({ version: 1, slots: reg.slots }, null, 2) + '\n',
+        'utf8',
+      );
+    } catch (err: any) {
+      log(`[worktree] pool lease registry write failed under ${worktreesRoot}: ${err?.message ?? err}`);
+    }
+  }
+
+  /** Serialize an async op per worktrees root (one chained promise per key). */
+  async #withPoolLock<T>(worktreesRoot: string, fn: () => Promise<T>): Promise<T> {
+    const key = normPath(worktreesRoot);
+    const prev = this.#poolLocks.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    this.#poolLocks.set(key, prev.then(() => gate));
+    await prev.catch(() => {});
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
   }
 
   /**
@@ -400,10 +764,13 @@ export class WorktreeManager {
    * so a dirty-preserving sweep would never reclaim a terminal ticket's tree.
    *
    * Matches the worktree dir whose last path segment is the ticket's `<ticket8>`
-   * (tolerating a legacy `<ticket8>-<role>` suffix). The 'shared' worktree never
-   * matches — it is reused across tickets and must survive a terminal ticket.
-   * Confined to `<working_dir>/.awb/wt` so the agent's main worktree is never
-   * touched. Returns the number removed. Best-effort; never throws.
+   * (tolerating a legacy `<ticket8>-<role>` suffix). A shared-pool slot
+   * (`shared-<i>` / legacy `shared`) never matches — it is reused across tickets
+   * and must survive a terminal ticket (규약 ⑥); instead this RELEASES the
+   * shared-mode ticket's pool slot (idle-mark, lazy — the reset happens at the
+   * next acquire). Confined to `<working_dir>/.awb/wt` so the agent's main
+   * worktree is never touched. Returns the number of per_ticket worktrees
+   * physically removed (a released pool slot is not a removal). Never throws.
    */
   async removeTicketWorktrees(opts: {
     baseWorkingDir: string;
@@ -422,7 +789,8 @@ export class WorktreeManager {
     for (const w of worktrees) {
       if (!isUnder(w.path, worktreesRoot)) continue; // never the main worktree
       const seg = lastSegment(w.path);
-      // per_ticket dir == <ticket8>; skip 'shared' and unrelated tickets.
+      if (isSharedSlotSeg(seg)) continue; // pool slot — released below, not removed
+      // per_ticket dir == <ticket8>; skip unrelated tickets.
       if (seg !== ticket8 && !seg.startsWith(legacyPrefix)) continue;
       const r = await git(baseWorkingDir, ['worktree', 'remove', '--force', w.path]);
       if (r.ok || /is not a working tree|No such file/i.test(r.stderr)) {
@@ -433,6 +801,10 @@ export class WorktreeManager {
       }
     }
     if (removed > 0) await this.prune(baseWorkingDir);
+    // Shared mode: this ticket held a warm-pool slot (not a per_ticket dir) —
+    // release it (idle-mark) so the next lease can reset + reuse it. No-op for a
+    // per_ticket ticket (no matching lease → empty registry read, nothing written).
+    await this.#releaseSharedSlot(baseWorkingDir, ticketId).catch(() => {});
     return removed;
   }
 
@@ -480,7 +852,8 @@ export class WorktreeManager {
    * Reclaim worktrees that are no longer in use. Conservative on purpose:
    * a worktree is removed only when ALL hold:
    *   - its dir lives under `<working_dir>/.awb/wt` (never the main worktree),
-   *   - it is NOT the reusable 'shared' worktree,
+   *   - it is NOT a warm-pool slot (`shared-<i>` / legacy `shared`) — those are
+   *     reused across tickets and their untracked warm build must survive (규약 ⑥),
    *   - its slug is NOT in `activeKeys` (no live session), and
    *   - its working tree is clean (no uncommitted / untracked changes) — a
    *     dirty tree means a pended ticket still has unsaved work; keep it.
@@ -502,7 +875,7 @@ export class WorktreeManager {
     for (const w of worktrees) {
       if (!isUnder(w.path, worktreesRoot)) continue; // never the main worktree
       const slug = lastSegment(w.path);
-      if (slug === 'shared') continue; // the reusable checkout — never sweep
+      if (isSharedSlotSeg(slug)) continue; // warm-pool slot — never sweep (규약 ⑥)
       if (activeKeys.has(slug)) continue; // a live session owns this worktree
       const status = await git(w.path, ['status', '--porcelain']);
       if (!status.ok) continue;

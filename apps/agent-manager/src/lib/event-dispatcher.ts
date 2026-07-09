@@ -512,18 +512,22 @@ export class EventDispatcher {
     ticketId: string | undefined,
     role: string | undefined,
     mode: WorktreeMode | undefined,
+    poolSize: number | undefined,
   ): Promise<void> {
     if (!agentContext || !this.#worktreeManager || !ticketId || !role) return;
     if ((this.#config as any)?.delegation?.worktreeIsolation === false) return;
     try {
       // worktree 규약 ②: the manager fixes the root at `<working_dir>/.awb/wt`
       // internally, so no worktreesRoot is passed. mode (per_ticket|shared) is
-      // the board setting the server flattened onto the trigger event.
+      // the board setting the server flattened onto the trigger event. poolSize
+      // (규약 ⑥, shared mode only) = the board concurrency the server also
+      // flattened on — sizes the warm-pool at N = max_concurrent_tickets_per_agent.
       const res = await this.#worktreeManager.resolveCwd({
         baseWorkingDir: agentContext.cwd,
         ticketId,
         role,
         mode,
+        poolSize,
       });
       if (res.isWorktree) {
         log(
@@ -822,6 +826,9 @@ export class EventDispatcher {
       ev.ticket_id,
       ev.action,
       parseWorktreeMode(ev.worktree_mode),
+      typeof ev.max_concurrent_tickets_per_agent === 'number'
+        ? ev.max_concurrent_tickets_per_agent
+        : undefined,
     );
 
     // worktree 규약 ④: name the ACTUAL work folder in the trigger prompt. The
