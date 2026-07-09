@@ -438,11 +438,20 @@ not the leaver.
 ### No starvation — the concurrency gate queues the excess
 
 Pool size **equals** concurrency, and the manager independently caps concurrent
-ticket sessions at `N` (ticket-session-manager). So any lease that clears the
-gate is guaranteed a free slot — **the pool itself never starves**. When more
-tickets (plus QA/Security runs, which share the same `N` budget via the server
-concurrency gate) are eligible than `N`, the **excess queues at the gate** until
-a slot frees; it never spins waiting on an empty pool.
+ticket sessions at `N` (ticket-session-manager). So **in normal operation** any
+lease that clears the gate finds a free slot — the pool does not starve. When
+more tickets (plus QA/Security runs, which share the same `N` budget via the
+server concurrency gate) are eligible than `N`, the **excess queues at the gate**
+until a slot frees; it never spins waiting on an empty pool.
+
+The one exception is a **leaked dead-worker lease**: a worker that dies uncleanly
+keeps its slot marked `active` until crash reclaim runs, so during that window a
+lease that has already cleared the gate can still find every slot busy — the
+acquire path reports `pool_exhausted`. That case is **not fatal**: the manager
+falls back to the shared base cwd (see *Fallback* below) and `reconcilePoolLeases`
+returns the orphaned slot to IDLE once its freshness grace elapses (see
+*Crash-tolerant lease reclaim*). The invariant `N == concurrency` makes exhaustion
+unreachable in normal operation; only an unreclaimed dead lease can trip it.
 
 ### Crash-tolerant lease reclaim
 
@@ -467,9 +476,16 @@ owner is no longer alive:
 
 ### Fallback
 
-When `working_dir` is not a git repo, or `git worktree` fails (old git, disk
-error), `resolveCwd` returns the shared base cwd with `isWorktree=false` and the
-legacy single-cwd behavior applies (dispatch-level serialization keeps it safe).
+`resolveCwd` returns the shared base cwd (`isWorktree=false`, legacy single-cwd
+behavior — dispatch-level serialization keeps it safe) whenever it cannot hand
+out a slot:
+
+- `working_dir` is not a git repo, or `git worktree add` fails (old git, disk
+  error);
+- (`shared` pool only) **`pool_exhausted`** — every `shared-<i>` slot is held by
+  an `active` lease. Because pool size equals concurrency, in a correctly-sized
+  pool this only happens when a dead-worker lease has not yet been reclaimed (see
+  *No starvation* above); `reconcilePoolLeases` frees it on a later tick.
 
 ## Security model
 
