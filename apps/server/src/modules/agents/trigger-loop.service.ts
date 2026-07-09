@@ -23,7 +23,7 @@ import { priorityIndex } from './priority';
 import { appendBoardLanguageInstruction, resolveHarnessConfig, HarnessConfig } from '../../common/harness-config';
 import { resolveEffortPreset, ResolvedEffortPreset } from '../../common/effort-presets';
 import { mergeEnvironmentConfig, resolveEnvironmentConfig, ResolvedEnvironmentConfig } from '../../common/environment-config';
-import { resolveBoardWorktreeMode, resolveWorktreeRelPath, WorktreeMode } from '../../common/worktree-config';
+import { resolveBoardUsePr, resolveBoardWorktreeMode, resolveWorktreeRelPath, renderUsePrTemplate, WorktreeMode } from '../../common/worktree-config';
 import { appendBoardLessons, MAX_INJECTED_LESSONS } from '../../common/board-lessons';
 import { BoardLesson } from '../../entities/BoardLesson';
 import { isConsensusVoteComment } from '../../common/consensus-meta';
@@ -1756,11 +1756,18 @@ candidate's branch or move the ticket.
     // (per_ticket → `.awb/wt/<ticket8>`, shared → `.awb/wt/shared`). Reuses the
     // same Board row loaded for harness — no extra round-trip.
     let worktreeMode: WorktreeMode = resolveBoardWorktreeMode(undefined);
+    // Resolved board PR usage (worktree 규약 ⑥, board option ①). Drives which
+    // merge branch the column workflow prompt renders — false (default) → direct
+    // ff merge only, true → the `gh pr` create/merge path. Read null-safe via the
+    // shared resolver from the SAME Board row loaded for harness (no extra query);
+    // applied to `columnPrompt.content` below before the trigger emits.
+    let usePr = resolveBoardUsePr(undefined);
     try {
       const boardForHarness = boardId
         ? await this.dataSource.getRepository(Board).findOne({ where: { id: boardId } })
         : null;
       worktreeMode = resolveBoardWorktreeMode(boardForHarness?.worktree_mode);
+      usePr = resolveBoardUsePr(boardForHarness?.use_pr);
       const workspaceForHarness = ticket.workspace_id
         ? await this.dataSource.getRepository(Workspace).findOne({ where: { id: ticket.workspace_id } })
         : null;
@@ -1847,6 +1854,19 @@ candidate's branch or move the ticket.
           err: String(e), ticket_id: ticket.id, board_id: boardId,
         });
       }
+    }
+
+    // Worktree 규약 ⑥: render the column workflow prompt for this board's use_pr
+    // BEFORE it ships. The server owns the prompt the agent receives (same channel
+    // as 규약 ④'s work-folder injection), so the pr-only / no-pr marker blocks are
+    // resolved here — a use_pr=false board never sees the `gh pr` merge branch and
+    // a use_pr=true board gets the PR create/merge path. No new SSE field: this
+    // only transforms an existing payload field's value, so agent-manager / the
+    // plugin need no change and the SSE parity guard is untouched. Marker-free
+    // content (every existing seeded template + custom prompt) passes through
+    // byte-identical.
+    if (columnPrompt) {
+      columnPrompt = { ...columnPrompt, content: renderUsePrTemplate(columnPrompt.content, usePr) };
     }
 
     // Chain-target flag for the audit row — one IN query scoped to this

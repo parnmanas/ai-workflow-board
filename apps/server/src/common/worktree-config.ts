@@ -133,3 +133,69 @@ export function validateUsePrInput(
   if (input === 0 || input === '0' || input === 'false') return { ok: true, value: false };
   return { ok: false, error: 'use_pr must be a boolean' };
 }
+
+/**
+ * use_pr-conditional prompt block markers (worktree 규약 ⑥). Each pair wraps a
+ * span of a workflow prompt so the SERVER can render only the branch that fits
+ * the board's use_pr at trigger-prompt assembly time (same channel as 규약 ④'s
+ * work-folder injection — the server owns the prompt the agent receives):
+ *
+ *   <!--awb:pr-only--> … <!--/awb:pr-only-->   → kept only when use_pr = true
+ *   <!--awb:no-pr-->   … <!--/awb:no-pr-->     → kept only when use_pr = false
+ *
+ * So a use_pr=false board (the default) never even sees the `gh pr` merge branch,
+ * and a use_pr=true board gets the PR create/merge path. Markers live on their
+ * OWN line in the default templates; `renderUsePrTemplate` matches them trimmed.
+ */
+export const USE_PR_MARKER = {
+  prOnlyOpen: '<!--awb:pr-only-->',
+  prOnlyClose: '<!--/awb:pr-only-->',
+  noPrOpen: '<!--awb:no-pr-->',
+  noPrClose: '<!--/awb:no-pr-->',
+} as const;
+
+/**
+ * Render a column workflow prompt for a concrete use_pr value by resolving the
+ * pr-only / no-pr marker blocks: the block that applies is unwrapped (marker
+ * lines dropped, inner content kept) and the block that does not is removed
+ * whole (markers + inner content). Line-oriented — every marker must sit alone
+ * on its line — so no whitespace inside a bullet/sentence is ever disturbed.
+ *
+ * REGRESSION SAFETY: content with no `<!--awb:` marker (every existing seeded
+ * template + every operator-custom prompt) is returned byte-identical via the
+ * fast path, so wiring this into the dispatch path changes nothing until a
+ * template actually carries markers. Unbalanced/stray markers degrade to
+ * dropping just the marker line (never throws) — the prompt still renders.
+ */
+export function renderUsePrTemplate(content: string | null | undefined, usePr: boolean): string {
+  const text = content || '';
+  if (text.indexOf('<!--awb:') === -1) return text; // fast path: no markers
+
+  const { prOnlyOpen, prOnlyClose, noPrOpen, noPrClose } = USE_PR_MARKER;
+  // The block whose OPEN marker starts a span we must drop wholesale.
+  const dropOpen = usePr ? noPrOpen : prOnlyOpen;
+  const dropClose = usePr ? noPrClose : prOnlyClose;
+
+  const out: string[] = [];
+  let skipUntil: string | null = null; // close marker we're skipping toward
+  for (const line of text.split('\n')) {
+    const t = line.trim();
+    if (skipUntil) {
+      if (t === skipUntil) skipUntil = null; // consume + drop the close marker line
+      continue; // drop everything inside the non-applicable block
+    }
+    if (t === dropOpen) {
+      skipUntil = dropClose; // begin dropping the non-applicable block
+      continue;
+    }
+    // Any remaining marker line (the applicable block's open/close, or the
+    // already-handled counterpart) is stripped, keeping surrounding content.
+    if (t === prOnlyOpen || t === prOnlyClose || t === noPrOpen || t === noPrClose) {
+      continue;
+    }
+    out.push(line);
+  }
+  // Collapse any 3+ newline run a dropped block may have left into a single
+  // blank line so the rendered markdown stays tidy regardless of marker spacing.
+  return out.join('\n').replace(/\n{3,}/g, '\n\n');
+}
