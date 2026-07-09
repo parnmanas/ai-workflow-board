@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, Repository, In } from 'typeorm';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { User } from '../../entities/User';
@@ -59,6 +59,25 @@ export class RoomMembershipService {
   }
 
   /**
+   * Agent Manager(type='manager')는 chat 참가자가 될 수 없다 (ticket 941c72d3) —
+   * 절대 작업하지 않으므로 대화에도 끼지 않는다. 참가자 목록에서 manager agent 를
+   * 조용히 제거한다(user 참가자·비-manager agent 는 그대로 통과). manager 가 없으면
+   * 입력 배열을 그대로 반환(추가 질의 없음). RoomCrudService 도 이 헬퍼를 공유한다.
+   */
+  async filterOutManagerParticipants(
+    participants: { participant_type: string; participant_id: string }[],
+  ): Promise<{ participant_type: string; participant_id: string }[]> {
+    const agentIds = [...new Set(
+      participants.filter(p => p.participant_type === 'agent').map(p => p.participant_id).filter(Boolean),
+    )];
+    if (agentIds.length === 0) return participants;
+    const managers = await this.agentRepo.find({ where: { id: In(agentIds), type: 'manager' }, select: ['id'] });
+    if (managers.length === 0) return participants;
+    const managerSet = new Set(managers.map(a => a.id));
+    return participants.filter(p => !(p.participant_type === 'agent' && managerSet.has(p.participant_id)));
+  }
+
+  /**
    * Add participants to a group room (not DM). Respects 50-participant cap.
    * Re-joining a previously left user creates a new participant row.
    */
@@ -79,6 +98,9 @@ export class RoomMembershipService {
     }
 
     await this.requireActiveParticipant(roomId, c.id, c.type);
+
+    // Manager(type='manager')는 chat 참가자가 될 수 없다 (ticket 941c72d3) — 조용히 제거.
+    newParticipants = await this.filterOutManagerParticipants(newParticipants);
 
     // Wrap cap-check and insert in a transaction to prevent concurrent requests from
     // exceeding the participant cap (read-check-then-write race condition).

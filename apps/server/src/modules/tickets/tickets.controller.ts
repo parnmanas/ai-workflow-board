@@ -1260,6 +1260,12 @@ export class TicketsController {
     if (agent_id) {
       const a = await this.agentRepo.findOne({ where: { id: agent_id } });
       if (!a) return res.status(404).json({ error: 'Agent not found' });
+      // Agent Manager(type='manager')는 절대 작업하지 않는다 (ticket 941c72d3) —
+      // supervisor 로서 agent 를 spawn/stop 할 뿐 role holder 가 될 수 없다. 직접
+      // 지정 시도는 명시적으로 거부한다(기존 holder 는 건드리지 않음).
+      if (a.type === 'manager') {
+        return res.status(400).json({ error: 'manager_cannot_hold_role', message: 'Agent Manager(type=manager)는 역할 담당자로 지정할 수 없습니다.' });
+      }
       // Canonical `<Manager>/<Agent>` for subagents — matches what the MCP
       // create/update path writes via `resolveAgentIdAndName`. Without this
       // the legacy `ticket.assignee` text column stores the bare leaf name

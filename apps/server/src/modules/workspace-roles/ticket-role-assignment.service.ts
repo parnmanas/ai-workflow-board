@@ -231,6 +231,31 @@ export class TicketRoleAssignmentService {
   }
 
   /**
+   * Agent Manager(type='manager')는 절대 작업하지 않는다 (ticket 941c72d3) —
+   * supervisor 로서 agent 를 spawn/stop 할 뿐, 티켓의 role holder 가 될 수 없다.
+   * 단건 확인용.
+   */
+  private async isManagerAgent(agentId: string | null | undefined): Promise<boolean> {
+    const id = (agentId || '').trim();
+    if (!id) return false;
+    const a = await this.agentRepo.findOne({ where: { id }, select: ['id', 'type'] });
+    return a?.type === 'manager';
+  }
+
+  /**
+   * 주어진 agent_id 들 중 manager(type='manager')인 것들의 집합을 한 번의 질의로
+   * 반환. 여러 holder 를 한꺼번에 거를 때 사용 (ticket 941c72d3).
+   */
+  private async managerAgentIdSet(
+    agentIds: Array<string | null | undefined>,
+  ): Promise<Set<string>> {
+    const ids = [...new Set(agentIds.map(x => (x || '').trim()).filter(Boolean))];
+    if (ids.length === 0) return new Set();
+    const rows = await this.agentRepo.find({ where: { id: In(ids), type: 'manager' }, select: ['id'] });
+    return new Set(rows.map(r => r.id));
+  }
+
+  /**
    * SINGLE-holder authoritative set. Makes `holder` the *sole* occupant of the
    * role on the ticket (clearing any other holders); passing both null clears
    * the whole slot. This preserves the exact v1 semantics every current
@@ -251,6 +276,13 @@ export class TicketRoleAssignmentService {
     const user_id = holder.user_id || null;
     if (agent_id && user_id) {
       throw makeError(400, 'cannot set both agent_id and user_id on the same role assignment');
+    }
+
+    // Manager(type='manager')는 role holder 가 될 수 없다 (ticket 941c72d3).
+    // manager 만 지정된 경우는 무시 — 명시적 clear(둘 다 null)와 달리 기존
+    // holder 를 지우지 않고 현 상태를 그대로 보존한다(엉뚱한 wipe 방지).
+    if (agent_id && await this.isManagerAgent(agent_id)) {
+      return this.getOne(ticketId, roleId);
     }
 
     // Validate role exists (cheap; prevents orphan assignment rows)
@@ -291,6 +323,8 @@ export class TicketRoleAssignmentService {
       throw makeError(400, 'cannot set both agent_id and user_id on the same role assignment');
     }
     if (!agent_id && !user_id) return null;
+    // Manager(type='manager')는 role holder 가 될 수 없다 (ticket 941c72d3) — 무시.
+    if (agent_id && await this.isManagerAgent(agent_id)) return null;
 
     const role = await this.roleRepo.findOne({ where: { id: roleId } });
     if (!role) throw makeError(404, `role ${roleId} not found`);
@@ -345,6 +379,10 @@ export class TicketRoleAssignmentService {
     const role = await this.roleRepo.findOne({ where: { id: roleId } });
     if (!role) throw makeError(404, `role ${roleId} not found`);
 
+    // Manager(type='manager')는 role holder 가 될 수 없다 (ticket 941c72d3).
+    // 교체 집합에서 미리 걸러낸다 — manager 만 넘어오면 결과적으로 슬롯이 빈다.
+    const managerIds = await this.managerAgentIdSet(holders.map(h => h.agent_id));
+
     // Normalize + de-dupe the desired set, keeping the first occurrence.
     const desired = new Map<string, { agent_id: string | null; user_id: string | null }>();
     for (const h of holders) {
@@ -353,6 +391,7 @@ export class TicketRoleAssignmentService {
       if (agent_id && user_id) {
         throw makeError(400, 'cannot set both agent_id and user_id on the same role assignment');
       }
+      if (agent_id && managerIds.has(agent_id)) continue; // manager 는 holder 불가
       const key = computeHolderKey({ agent_id, user_id });
       if (!key) continue; // skip vacant entries
       if (!desired.has(key)) desired.set(key, { agent_id, user_id });
@@ -460,10 +499,12 @@ export class TicketRoleAssignmentService {
     const agentIds = [...new Set(holders.map(h => (h.agent_id || '').trim()).filter(Boolean))];
     const userIds = [...new Set(holders.map(h => (h.user_id || '').trim()).filter(Boolean))];
     const [agents, users] = await Promise.all([
-      agentIds.length ? this.agentRepo.find({ where: { id: In(agentIds) }, select: ['id'] }) : Promise.resolve([] as Agent[]),
+      agentIds.length ? this.agentRepo.find({ where: { id: In(agentIds) }, select: ['id', 'type'] }) : Promise.resolve([] as Agent[]),
       userIds.length ? this.userRepo.find({ where: { id: In(userIds) }, select: ['id'] }) : Promise.resolve([] as User[]),
     ]);
-    const agentSet = new Set(agents.map(a => a.id));
+    // Manager(type='manager')는 default holder 가 될 수 없다 (ticket 941c72d3) —
+    // 존재하는 비-manager agent 만 유효 holder 로 남긴다.
+    const agentSet = new Set(agents.filter(a => a.type !== 'manager').map(a => a.id));
     const userSet = new Set(users.map(u => u.id));
     const out: Array<{ agent_id: string | null; user_id: string | null }> = [];
     for (const h of holders) {
@@ -539,8 +580,10 @@ export class TicketRoleAssignmentService {
         const agent_id = (h.agent_id || '').trim();
         const user_id = (h.user_id || '').trim();
         if (agent_id) {
-          const a = await this.agentRepo.findOne({ where: { id: agent_id }, select: ['id'] });
+          const a = await this.agentRepo.findOne({ where: { id: agent_id }, select: ['id', 'type'] });
           if (!a) return { ok: false, error: `default_role_assignments["${slug}"]: agent ${agent_id} not found` };
+          // Manager(type='manager')는 role holder 가 될 수 없다 (ticket 941c72d3).
+          if (a.type === 'manager') return { ok: false, error: `default_role_assignments["${slug}"]: agent ${agent_id} 는 manager 이므로 역할 담당자로 지정할 수 없습니다` };
         } else if (user_id) {
           const u = await this.userRepo.findOne({ where: { id: user_id }, select: ['id'] });
           if (!u) return { ok: false, error: `default_role_assignments["${slug}"]: user ${user_id} not found` };

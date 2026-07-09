@@ -801,6 +801,9 @@ export class RoomMessagingService {
       if (m.type === 'agent') {
         const agent = await this.agentRepo.findOne({ where: { id: m.id } });
         if (!agent) continue;
+        // Agent Manager(type='manager')는 절대 chat 대상이 아니다 (ticket 941c72d3) —
+        // 작업하지 않으므로 @멘션을 받아도 chat_request 를 emit 하지 않는다.
+        if (agent.type === 'manager') continue;
         // Workspace-scope safety: never cross-post a mention into the wrong workspace.
         if (agent.workspace_id && agent.workspace_id !== workspaceId) continue;
 
@@ -896,6 +899,9 @@ export class RoomMessagingService {
     // Resolve the agent entity for role_prompt
     const agent = await this.agentRepo.findOne({ where: { id: otherParticipant.participant_id } });
     if (!agent) return;
+    // Agent Manager(type='manager')는 절대 chat 대상이 아니다 (ticket 941c72d3) —
+    // 방에 남아있는 manager 참가자에게도 DM auto-route 를 하지 않는다.
+    if (agent.type === 'manager') return;
 
     // Dedup: skip if @mention already dispatched to this agent
     if (alreadyDispatched.has(agent.id)) return;

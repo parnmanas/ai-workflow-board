@@ -423,7 +423,27 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
         agentIds.push(a);
       }
     }
-    return { role, agentIds };
+    // Agent Manager(type='manager')는 절대 트리거 대상이 아니다 (ticket 941c72d3).
+    // 이미 배정돼 있던 manager holder 도 여기서 제외해, 컬럼-서비스가능 판정
+    // (columnHasHolder = agentIds.length > 0) 이 manager 만으로 성립해 자동 이동을
+    // 막아버리는 일이 없게 한다.
+    const nonManager = await this._excludeManagerAgents(agentIds);
+    return { role, agentIds: nonManager };
+  }
+
+  /**
+   * 주어진 agent_id 목록에서 manager(type='manager')를 제거해 반환 (ticket 941c72d3).
+   * manager 가 하나도 없으면 입력 배열을 그대로 돌려준다(추가 질의 없음).
+   */
+  private async _excludeManagerAgents(agentIds: string[]): Promise<string[]> {
+    if (agentIds.length === 0) return agentIds;
+    const managers = await this.dataSource.getRepository(Agent).find({
+      where: { id: In(agentIds), type: 'manager' },
+      select: ['id'],
+    });
+    if (managers.length === 0) return agentIds;
+    const managerSet = new Set(managers.map(a => a.id));
+    return agentIds.filter(a => !managerSet.has(a));
   }
 
   /**
@@ -1361,6 +1381,43 @@ candidate's branch or move the ticket.
       ? await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } })
       : null;
     const boardId = col?.board_id ?? '';
+
+    // Agent Manager(type='manager') 드롭 게이트 (ticket 941c72d3). Manager 는 절대
+    // 작업하지 않는다 — holder-resolution(_resolveRoleHolders) 에서 대부분 걸러
+    // 지지만, 수동 트리거(emitManualTrigger)나 legacy 배정 경로로 manager id 가
+    // 이 최종 chokepoint 까지 올 수 있으므로 여기서도 명시적으로 드롭한다. 다른
+    // 드롭 게이트와 동일하게 info 로그 + audit row(action='agent_trigger_dropped_manager')
+    // 를 남겨 "manager 는 왜 안 깨어나나" 를 grep 할 수 있게 한다.
+    {
+      const targetAgent = await this.dataSource.getRepository(Agent).findOne({
+        where: { id: agentId },
+        select: ['id', 'type'],
+      });
+      if (targetAgent?.type === 'manager') {
+        this.logService.info('MCP', 'agent_trigger dropped (manager agent)', {
+          ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource,
+        });
+        try {
+          const activityLogRepo = this.dataSource.getRepository(ActivityLog);
+          await activityLogRepo.save(activityLogRepo.create({
+            entity_type: 'ticket',
+            entity_id: ticket.id,
+            ticket_id: ticket.id,
+            actor_id: 'system',
+            actor_name: 'TriggerLoopService',
+            action: 'agent_trigger_dropped_manager',
+            new_value: `agent=${agentId} type=manager`,
+            role,
+            trigger_source: triggerSource,
+          }));
+        } catch (e) {
+          this.logService.warn('MCP', 'manager-drop audit write failed (drop still applied)', {
+            err: String(e), ticket_id: ticket.id,
+          });
+        }
+        return '';
+      }
+    }
 
     // Board pause gate. _emitTrigger is the SINGLE chokepoint every dispatch
     // path funnels through (activity-driven column_move / comment /

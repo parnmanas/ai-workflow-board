@@ -267,12 +267,16 @@ export class RoomCrudService {
 
     // Deduplicate participants list
     const seen = new Set<string>();
-    const uniqueParticipants = participantIds.filter(p => {
+    let uniqueParticipants = participantIds.filter(p => {
       const key = `${p.participant_type}:${p.participant_id}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
     });
+
+    // Manager(type='manager')는 chat 참가자가 될 수 없다 (ticket 941c72d3). 걸러낸 뒤
+    // 남은 인원으로 방을 만든다 — manager 만 상대로 지정하면 아래 최소-2명 가드가 거른다.
+    uniqueParticipants = await this.membership.filterOutManagerParticipants(uniqueParticipants);
 
     if (uniqueParticipants.length < 2) {
       throw makeError(400, 'At least 2 participants required');
