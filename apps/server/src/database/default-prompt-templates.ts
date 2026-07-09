@@ -47,6 +47,29 @@ export interface DefaultPromptTemplateDef {
   content: string;
 }
 
+/**
+ * Work-folder rule (worktree 규약 ④) — injected at the TOP of every role's
+ * column workflow guide EXCEPT merging. Merging deliberately opts out: it
+ * integrates the branch in the agent's MAIN checkout (working_dir root), not a
+ * per-ticket worktree, so pinning it to `.awb/wt/<id>` would misdirect the merge.
+ *
+ * `{{AWB_WORK_FOLDER}}` is a placeholder, NOT rendered server-side: the server
+ * never knows the agent's absolute working_dir, so it only ships the
+ * working_dir-relative path (`worktree_rel_path` on the agent_trigger SSE —
+ * `.awb/wt/<id8>` | `.awb/wt/shared`). agent-manager substitutes the token with
+ * the ACTUAL absolute spawn cwd it resolved (`agentContext.cwd`, the very folder
+ * the subagent is spawned in), falling back to the relative path only when it
+ * can't resolve a concrete cwd. When the server doesn't ship the path (a pre-④
+ * server), agent-manager leaves the token untouched — byte-identical to a pre-④
+ * prompt (0-diff regression guard).
+ *
+ * Shared const so the 6 injected copies stay byte-identical and edit in one place.
+ */
+const WORK_FOLDER_RULE = `> 🗂️ **작업 폴더 규약 (worktree 규약 ④)** — AWB 가 이 티켓에 배정한 작업 폴더는 \`{{AWB_WORK_FOLDER}}\` 이다.
+> git worktree · 브랜치 체크아웃 · 빌드 · 테스트 등 파일을 만지는 모든 작업은 **이 폴더 안에서만** 수행하라.
+> repo 트리 밖 · 홈 디렉터리 · \`/tmp\` · 다른 드라이브(예: \`D:\\...\`)에 worktree/체크아웃을 **새로 만들지 마라** — AWB 가 이미 폴더를 정해 배정했다.
+> 작업이 끝나면 이 폴더 안에서 정리하라.`;
+
 export const DEFAULT_PROMPT_TEMPLATES: DefaultPromptTemplateDef[] = [
   {
     name: 'backlog_workflow',
@@ -54,6 +77,8 @@ export const DEFAULT_PROMPT_TEMPLATES: DefaultPromptTemplateDef[] = [
     category: 'default_workflow',
     column_match: 'backlog',
     content: `# Backlog — Narrate Server-Driven Promotions (reporter)
+
+${WORK_FOLDER_RULE}
 
 This ticket sits in an intake column. **Backlog → first-active promotion is now owned by the server's \`BacklogPromotionService\`** — it runs whenever an agent on the board frees up, picks the highest-priority intake ticket whose destination-column role holders are below cap, and moves it in a single transaction.
 
@@ -85,6 +110,8 @@ Your job here as reporter is **not to scan or schedule** — that path was a per
     category: 'default_workflow',
     column_match: 'to do',
     content: `# To Do — Start-or-Wait Decision (assignee)
+
+${WORK_FOLDER_RULE}
 
 This ticket is in the To Do column and you are its assignee. Decide whether to start now or wait.
 
@@ -142,6 +169,8 @@ The reporter may \`record_agreement(..., override=true)\` to force-pass a deadlo
     category: 'default_workflow',
     column_match: 'plan',
     content: `# Plan — Concrete Plan Before Code (planner)
+
+${WORK_FOLDER_RULE}
 
 This ticket is in the Plan column and you were triggered as its planner. Your job: turn the ticket's intent into a concrete plan an assignee can execute without re-deriving the design — then hand it off to In Progress. If the requirements are still ambiguous, ask the reporter and wait.
 
@@ -216,6 +245,8 @@ The reporter may \`record_agreement(..., override=true)\` to force-pass a deadlo
     category: 'default_workflow',
     column_match: 'in progress',
     content: `# In Progress — Branch Work (assignee)
+
+${WORK_FOLDER_RULE}
 
 This ticket is in the In Progress column. Implement the work on a feature branch and hand it off to Review.
 
@@ -304,6 +335,8 @@ The rule of thumb: **human answer → \`pend_ticket\`; another ticket finishing 
     category: 'default_workflow',
     column_match: 'review',
     content: `# Review — Code Review + Q&A (reviewer / assignee)
+
+${WORK_FOLDER_RULE}
 
 This ticket is in the Review column. Both the reviewer **and** the assignee are triggered here so they can iterate on questions without bouncing the ticket back and forth. Your first job is to check which role you hold on this ticket, then follow only the matching branch below.
 
@@ -518,6 +551,8 @@ The reporter may \`record_agreement(..., override=true)\` to force-pass a deadlo
     category: 'default_workflow',
     column_match: 'done',
     content: `# Done — Completion + Merge Audit (reporter)
+
+${WORK_FOLDER_RULE}
 
 This ticket is in the Done column. Merging *claims* it landed the code and deleted the feature branch — your job is to **independently re-verify that the merge is real and complete before you bless it**, then record completion. A \`"Merged"\` comment is **not** evidence (CLAUDE.md: "'Merged' comment ≠ evidence — always check \`git rev-parse origin/<default>\`"). **Backlog scheduling is no longer your responsibility** — \`BacklogPromotionService\` runs server-side on the same capacity event the supervisor watches, so a freed agent triggers the next promotion automatically.
 
