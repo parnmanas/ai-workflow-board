@@ -82,6 +82,33 @@ function appendBaseRepoBlock(
   lines.push('- Before editing code, ensure your working_dir is a clone of this repository, then `git fetch` and check out the base branch (creating a fresh feature branch off it for your changes).');
 }
 
+/**
+ * Work-folder placeholder token (worktree 규약 ④). The server bakes this literal
+ * into every non-merging column workflow guide (default-prompt-templates.ts) and
+ * ships only the working_dir-RELATIVE path (`worktree_rel_path` on the trigger
+ * SSE) — it never knows the agent's absolute working_dir. agent-manager owns the
+ * absolute-path render because it resolves the concrete spawn cwd.
+ */
+export const WORK_FOLDER_TOKEN = '{{AWB_WORK_FOLDER}}';
+
+/**
+ * Substitute the work-folder placeholder in a column-prompt content string with
+ * the resolved absolute work folder (worktree 규약 ④), so the trigger prompt
+ * names the exact directory the subagent is spawned in.
+ *
+ * Byte-identity guarantee: returns `content` UNCHANGED when the token is absent
+ * (a pre-④ board's template, or the merging guide which intentionally omits it)
+ * or when `workFolder` is empty — so boards that never opted in stay byte-for-
+ * byte the same as before this feature.
+ *
+ * `workFolder` should be the resolved absolute cwd (`agentContext.cwd`); the
+ * caller passes the relative path only as a last-resort fallback.
+ */
+export function injectWorkFolder(content: string, workFolder: string): string {
+  if (!content || !workFolder || !content.includes(WORK_FOLDER_TOKEN)) return content;
+  return content.split(WORK_FOLDER_TOKEN).join(workFolder);
+}
+
 export function composeTriggerPrompt(
   ticket: any,
   _rolePrompt: string,

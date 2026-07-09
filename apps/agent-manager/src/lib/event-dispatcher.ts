@@ -21,6 +21,7 @@ import type { AwbConfig } from './rest.js';
 import type { ManagedAgentContextRegistry } from './managed-agent-context.js';
 import type { WorktreeManager, WorktreeMode } from './worktree-manager.js';
 import { prepareChatAttachments } from './chat-attachment-prep.js';
+import { injectWorkFolder } from './prompts.js';
 import type { HarnessSpec, ResolvedEffortPreset, EffortLevel } from './cli-adapters/base.js';
 import { createAdapter, ADAPTER_CAPABILITIES } from './cli-adapters/index.js';
 import { EnvironmentProvisioner } from './environment-provisioner.js';
@@ -761,6 +762,25 @@ export class EventDispatcher {
       ev.action,
       parseWorktreeMode(ev.worktree_mode),
     );
+
+    // worktree 규약 ④: name the ACTUAL work folder in the trigger prompt. The
+    // server bakes a `{{AWB_WORK_FOLDER}}` placeholder into every non-merging
+    // column workflow guide and ships only the working_dir-RELATIVE path
+    // (ev.worktree_rel_path) — it never knows the absolute working_dir. We fill
+    // the token with the concrete spawn cwd #applyWorktreeCwd just resolved
+    // (agentContext.cwd == the real worktree/base dir the child runs in),
+    // falling back to the relative path only when no cwd is resolvable. Gated on
+    // ev.worktree_rel_path so a pre-④ server (field absent) leaves the prompt
+    // byte-identical. Rewriting ev.column_prompt.content ONCE here covers all
+    // three downstream compose sites — one-shot subagent, persistent first turn,
+    // and follow-up turn — which each read ev.column_prompt.
+    if (ev.worktree_rel_path && ev.column_prompt && typeof ev.column_prompt.content === 'string') {
+      const workFolder = agentContext?.cwd || ev.worktree_rel_path;
+      ev.column_prompt = {
+        ...ev.column_prompt,
+        content: injectWorkFolder(ev.column_prompt.content, workFolder),
+      };
+    }
 
     // Board/workspace harness resolved server-side and flattened onto the
     // event (e9c7a896). Parsed once here; both the persistent-session and
