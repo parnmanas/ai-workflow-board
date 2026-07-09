@@ -112,6 +112,28 @@ export interface PoolRegistry {
   slots: Record<string, PoolSlotLease>;
 }
 
+/**
+ * Freshness grace for crash-reclaim: a lease whose `leasedAt` is within this
+ * window is NEVER reclaimed, even if no live session/`/proc` owner is visible
+ * yet. A slot's lease is written durably (`active=true`) at acquire time, but
+ * the worker only becomes visible to the live-session snapshot much later —
+ * dispatch first runs environment provisioning (a cold clone of a large repo
+ * can take many minutes — see run-provisioner's 20-min git timeout), then
+ * fetches ticket context, then spawns the child, which registers in `_sessions`
+ * only at the END of spawn. During that whole [lease → child registered] gap the
+ * ticket is in neither snapshot and has no `/proc` cwd in the slot yet, so a
+ * reconcile tick would otherwise false-reclaim a live-but-still-dispatching
+ * worker (the exact failure the ticket forbids — cf. the force_respawn
+ * death-loop lesson). The grace covers that provision+spawn upper bound.
+ *
+ * This does NOT delay the common leak this feature targets: a worker that dies
+ * mid-work (exit-143 hours into a build) leased its slot long ago, so its
+ * `leasedAt` is already well past the grace and it is reclaimed on the next
+ * tick regardless. Only a worker that dies *inside* the dispatch window has its
+ * reclaim deferred — by at most one extra tick, which is harmless.
+ */
+const POOL_LEASE_RECLAIM_GRACE_MS = 20 * 60 * 1000;
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -527,6 +549,12 @@ export class WorktreeManager {
         if (ens.ok) {
           reg.slots[mine].active = true;
           reg.slots[mine].role = a.role;
+          // Refresh leasedAt on reattach too: a re-dispatch (idle-reap respawn,
+          // pend/unpend) reopens the same [lease → child registered] gap, and the
+          // reclaim freshness grace keys off leasedAt. Without this, a slot whose
+          // leasedAt is stale (worker was reaped long ago) would be reclaimable
+          // during its re-spawn window before the new child registers a session.
+          reg.slots[mine].leasedAt = nowIso();
           delete reg.slots[mine].releasedAt;
           await this.#writeRegistry(a.worktreesRoot, reg);
           return result(wtPath, !ens.created);
@@ -739,11 +767,23 @@ export class WorktreeManager {
     const worktreesRoot = worktreesRootFor(baseWorkingDir);
     return this.#withPoolLock(worktreesRoot, async () => {
       const reg = await this.#readRegistry(worktreesRoot);
+      const now = Date.now();
       // Orphan candidates: active leases with no live owner. A per_ticket board
       // has an empty registry → no candidates → cheap no-op (no /proc scan).
-      const candidates = Object.keys(reg.slots).filter(
-        (s) => reg.slots[s].active && !liveTicketIds.has(reg.slots[s].ticketId),
-      );
+      // Freshness grace (POOL_LEASE_RECLAIM_GRACE_MS): skip a lease still within
+      // its dispatch window — the worker may be provisioning/spawning and just
+      // not yet in the live-session snapshot (never false-reclaim a live worker).
+      // An unparseable leasedAt falls through to a candidate; the /proc belt is
+      // the final safety net there.
+      const candidates = Object.keys(reg.slots).filter((s) => {
+        const lease = reg.slots[s];
+        if (!lease.active || liveTicketIds.has(lease.ticketId)) return false;
+        const leasedMs = Date.parse(lease.leasedAt);
+        if (Number.isFinite(leasedMs) && now - leasedMs < POOL_LEASE_RECLAIM_GRACE_MS) {
+          return false;
+        }
+        return true;
+      });
       if (candidates.length === 0) return 0;
 
       // Secondary guard — spare any slot a live process is still cwd'd inside

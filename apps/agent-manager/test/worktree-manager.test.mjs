@@ -547,6 +547,16 @@ async function readRegistry(wtRoot) {
   return JSON.parse(await fsp.readFile(join(wtRoot, '.pool-leases.json'), 'utf8'));
 }
 
+// Rewrite a slot's leasedAt to `agoMs` in the past so crash-reclaim's freshness
+// grace treats it as a genuinely orphaned (old) lease rather than a worker still
+// mid-dispatch. 60 min comfortably clears the 20-min grace.
+async function backdateLease(wtRoot, slot, agoMs) {
+  const path = join(wtRoot, '.pool-leases.json');
+  const reg = JSON.parse(await fsp.readFile(path, 'utf8'));
+  reg.slots[slot].leasedAt = new Date(Date.now() - agoMs).toISOString();
+  await fsp.writeFile(path, JSON.stringify(reg, null, 2));
+}
+
 test('reconcilePoolLeases reclaims a dead worker\'s orphaned active lease → idle (state flip only)', async () => {
   const { repo, cleanup } = await makeRepo();
   try {
@@ -558,6 +568,9 @@ test('reconcilePoolLeases reclaims a dead worker\'s orphaned active lease → id
     git(a.cwd, ['checkout', '-q', '-b', 'ticket/aaaaaaaa']);
     await fsp.writeFile(join(a.cwd, 'build-artifact.bin'), 'WARM\n'); // untracked warm build
     assert.equal((await readRegistry(wtRoot)).slots['shared-0'].active, true, 'lease active before reclaim');
+    // The worker died a while ago (mid-build), so its lease is well past the
+    // freshness grace — it's a genuine orphan, not a mid-dispatch worker.
+    await backdateLease(wtRoot, 'shared-0', 60 * 60 * 1000);
 
     // Reconcile against a live set that does NOT contain A (its worker is dead).
     const reclaimed = await wm.reconcilePoolLeases({ baseWorkingDir: repo, liveTicketIds: new Set() });
@@ -629,6 +642,9 @@ test('reconcilePoolLeases spares a slot a live process is still cwd\'d inside (O
     // live build). Real /proc/<pid>/cwd, not a mock.
     child = spawn('sleep', ['30'], { cwd: a.cwd, stdio: 'ignore' });
     await once(child, 'spawn');
+    // Backdate past the freshness grace so it can't short-circuit — the /proc
+    // belt must be the thing that spares this slot, not the leasedAt grace.
+    await backdateLease(wtRoot, 'shared-0', 60 * 60 * 1000);
 
     const reclaimed = await wm.reconcilePoolLeases({ baseWorkingDir: repo, liveTicketIds: new Set() });
     assert.equal(reclaimed, 0, 'a slot with a live process cwd\'d inside is spared');
@@ -662,6 +678,50 @@ test('reset-on-acquire never `branch -D` the base branch literal (main/master) e
     const b = await wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_B, role: 'assignee', mode: 'shared', poolSize: 1 });
     assert.equal(b.worktreePath, join(wtRoot, 'shared-0'));
     assert.ok(git(repo, ['branch', '--list', 'master']).includes('master'), 'base-branch literal survives reset-on-acquire');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('reconcilePoolLeases spares a just-leased slot (freshness grace) but reclaims it once past the grace', async () => {
+  const { repo, cleanup } = await makeRepo();
+  try {
+    const wm = new WorktreeManager();
+    const wtRoot = worktreesRootFor(repo);
+    // A slot leased THIS instant: the worker may still be provisioning/spawning
+    // (env clone → fetch context → spawn) and not yet in the live snapshot. An
+    // empty live set must NOT reclaim it — that is the mid-dispatch false-reclaim
+    // the ticket forbids (force_respawn death-loop lesson).
+    await wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_A, role: 'assignee', mode: 'shared', poolSize: 1 });
+    let reclaimed = await wm.reconcilePoolLeases({ baseWorkingDir: repo, liveTicketIds: new Set() });
+    assert.equal(reclaimed, 0, 'fresh lease within the grace is spared even with an empty live set');
+    assert.equal((await readRegistry(wtRoot)).slots['shared-0'].active, true, 'fresh lease stays active');
+
+    // Advance past the grace → now a genuine orphan → reclaimed.
+    await backdateLease(wtRoot, 'shared-0', 60 * 60 * 1000);
+    reclaimed = await wm.reconcilePoolLeases({ baseWorkingDir: repo, liveTicketIds: new Set() });
+    assert.equal(reclaimed, 1, 'once past the grace the orphaned lease is reclaimed');
+    assert.equal((await readRegistry(wtRoot)).slots['shared-0'].active, false, 'old orphan flipped to idle');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('reattach refreshes leasedAt so a re-dispatched worker is re-protected by the grace', async () => {
+  const { repo, cleanup } = await makeRepo();
+  try {
+    const wm = new WorktreeManager();
+    const wtRoot = worktreesRootFor(repo);
+    await wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_A, role: 'assignee', mode: 'shared', poolSize: 1 });
+    // A was leased long ago and its worker was idle-reaped (lease still active).
+    await backdateLease(wtRoot, 'shared-0', 60 * 60 * 1000);
+    // A re-triggers → reattaches the SAME slot; leasedAt must bump to now so the
+    // re-spawn window is inside the grace again (else a reconcile tick during
+    // re-dispatch would false-reclaim the reattaching worker).
+    await wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_A, role: 'assignee', mode: 'shared', poolSize: 1 });
+    const reclaimed = await wm.reconcilePoolLeases({ baseWorkingDir: repo, liveTicketIds: new Set() });
+    assert.equal(reclaimed, 0, 'a just-reattached slot is within the refreshed grace → not reclaimed');
+    assert.equal((await readRegistry(wtRoot)).slots['shared-0'].active, true, 'reattached lease stays active');
   } finally {
     await cleanup();
   }
