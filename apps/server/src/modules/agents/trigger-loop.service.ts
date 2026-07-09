@@ -23,7 +23,7 @@ import { priorityIndex } from './priority';
 import { appendBoardLanguageInstruction, resolveHarnessConfig, HarnessConfig } from '../../common/harness-config';
 import { resolveEffortPreset, ResolvedEffortPreset } from '../../common/effort-presets';
 import { mergeEnvironmentConfig, resolveEnvironmentConfig, ResolvedEnvironmentConfig } from '../../common/environment-config';
-import { resolveBoardWorktreeMode, WorktreeMode } from '../../common/worktree-config';
+import { resolveBoardWorktreeMode, resolveWorktreeRelPath, WorktreeMode } from '../../common/worktree-config';
 import { appendBoardLessons, MAX_INJECTED_LESSONS } from '../../common/board-lessons';
 import { BoardLesson } from '../../entities/BoardLesson';
 import { isConsensusVoteComment } from '../../common/consensus-meta';
@@ -1846,6 +1846,13 @@ candidate's branch or move the ticket.
       // shared → `.awb/wt/shared`). Always a concrete enum (resolver defaults to
       // per_ticket) so the manager never has to guess.
       worktree_mode: worktreeMode,
+      // Working_dir-relative worktree folder AWB assigns this ticket (worktree 규약 ④):
+      // `.awb/wt/<ticket8>` | `.awb/wt/shared`, derived from worktreeMode via the same
+      // slug the manager uses. agent-manager fills the `{{AWB_WORK_FOLDER}}` placeholder
+      // in the column prompt with the ACTUAL resolved worktree cwd (this path joined
+      // onto the working_dir), so the trigger prompt names the exact spawn folder and
+      // the agent never improvises a worktree location.
+      worktree_rel_path: resolveWorktreeRelPath(ticket.id, worktreeMode),
       triggered_by: triggeredBy,
       timestamp: now.toISOString(),
       force_respawn: forceRespawn,

@@ -303,6 +303,12 @@ test('agent_trigger flatten() forwards every manager-consumed field', () => {
   // force_respawn → board effort presets + environment provisioning + server
   // force-respawn silently no-op'd (the latent bug this ticket fixed). Lock the
   // wire so a flatten refactor can't re-break it.
+  //
+  // worktree_mode (규약 ②) + worktree_rel_path (규약 ④) are the newest additions:
+  // the manager reads worktree_mode to place the worktree under `.awb/wt/` and
+  // worktree_rel_path to fill the `{{AWB_WORK_FOLDER}}` column-prompt placeholder
+  // with the real spawn cwd. Drop either from flatten() and the worktree lands in
+  // the wrong place / the work-folder rule silently loses its path.
   const code = read(REGISTRY_REL);
   const flat = code.slice(code.indexOf("eventType: 'agent_trigger'"));
   for (const field of [
@@ -312,6 +318,8 @@ test('agent_trigger flatten() forwards every manager-consumed field', () => {
     'force_respawn',
     'column_prompt',
     'max_concurrent_tickets_per_agent',
+    'worktree_mode',
+    'worktree_rel_path',
   ]) {
     assert.match(
       flat,

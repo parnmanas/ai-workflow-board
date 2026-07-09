@@ -124,6 +124,17 @@ export interface AgentTriggerPayload {
   // Absent/undefined → the manager defaults to 'per_ticket' (DEFAULT_WORKTREE_MODE),
   // so a pre-② server that never sets the field keeps today's per-ticket behaviour.
   worktree_mode?: WorktreeMode;
+  // Working_dir-relative worktree folder AWB assigns this ticket (worktree 규약 ④):
+  // `.awb/wt/<ticket8>` (per_ticket) or `.awb/wt/shared` (shared) — computed from
+  // worktree_mode via resolveWorktreeRelPath(), mirroring the manager's slug so
+  // the two agree on placement. The server never knows the absolute working_dir,
+  // so it ships only this relative path; agent-manager substitutes the
+  // `{{AWB_WORK_FOLDER}}` placeholder in the column-prompt with the ACTUAL resolved
+  // worktree cwd (which equals this joined onto working_dir) so the trigger prompt
+  // names the exact folder the subagent is spawned in — and falls back to this
+  // relative path only when it can't resolve a concrete cwd. Absent/undefined →
+  // the manager leaves any placeholder untouched (byte-identical to a pre-④ prompt).
+  worktree_rel_path?: string;
 }
 
 // Phase 2 D-26 — finalized payload shape emitted by chat producers.

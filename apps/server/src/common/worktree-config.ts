@@ -41,6 +41,46 @@ export function isWorktreeMode(value: unknown): value is WorktreeMode {
 }
 
 /**
+ * Fixed worktree root, relative to the agent's working_dir: `.awb/wt` (규약 ②).
+ * Mirrors agent-manager's `worktreesRootFor()` so the server and the manager
+ * agree on placement — the server never knows the absolute working_dir, so it
+ * only ever produces this working_dir-relative path.
+ */
+export const WORKTREE_ROOT_REL = '.awb/wt';
+
+/**
+ * Map a ticket + mode to the worktree dir's last path segment — the EXACT
+ * mirror of agent-manager's `worktreeSlug()` (worktree-manager.ts), kept in
+ * sync so the relative path the server injects into the trigger prompt (규약 ④)
+ * resolves to the same folder the manager actually checks out at spawn:
+ *   per_ticket → the ticket uuid's first 8 chars (sanitized);
+ *   shared     → the literal 'shared' (one reused checkout for every ticket).
+ */
+export function worktreeSlugFor(
+  ticketId: string,
+  mode: WorktreeMode = DEFAULT_WORKTREE_MODE,
+): string {
+  if (mode === 'shared') return 'shared';
+  const t = String(ticketId || '').slice(0, 8).replace(/[^A-Za-z0-9._-]/g, '_');
+  return t || 'ticket';
+}
+
+/**
+ * Resolve the working_dir-relative worktree path AWB assigns a ticket (규약 ④):
+ * `.awb/wt/<slug>`. Shipped on the agent_trigger SSE payload so agent-manager
+ * can name the concrete work folder in the trigger prompt; the manager joins it
+ * onto the agent's working_dir (which the server never knows) and prefers the
+ * actual resolved cwd so the printed path matches the real spawn cwd/worktree.
+ * `mode` is the already-resolved board worktree_mode.
+ */
+export function resolveWorktreeRelPath(
+  ticketId: string,
+  mode: WorktreeMode = DEFAULT_WORKTREE_MODE,
+): string {
+  return `${WORKTREE_ROOT_REL}/${worktreeSlugFor(ticketId, mode)}`;
+}
+
+/**
  * Null-safe READ: resolve a stored worktree_mode into a concrete mode. Any
  * null / undefined / unknown / malformed value degrades to the default
  * 'per_ticket' so a corrupt row never breaks a dispatch path (read path never

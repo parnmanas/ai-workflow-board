@@ -17,11 +17,14 @@ import {
   WORKTREE_MODES,
   DEFAULT_WORKTREE_MODE,
   DEFAULT_USE_PR,
+  WORKTREE_ROOT_REL,
   isWorktreeMode,
   resolveBoardWorktreeMode,
   resolveBoardUsePr,
   validateWorktreeModeInput,
   validateUsePrInput,
+  worktreeSlugFor,
+  resolveWorktreeRelPath,
 } from '../dist/common/worktree-config.js';
 
 test('defaults are the regression baseline: per_ticket / false', () => {
@@ -97,4 +100,50 @@ test('validateUsePrInput: accepts bool + wire encodings, rejects genuine non-boo
   assert.equal(validateUsePrInput(2).ok, false);
   assert.equal(validateUsePrInput({}).ok, false);
   assert.equal(validateUsePrInput(null).ok, false);
+});
+
+// ── worktree 규약 ④: the path the server injects into the trigger prompt ──────
+// worktreeSlugFor / resolveWorktreeRelPath must MIRROR agent-manager's
+// worktreeSlug (worktree-manager.ts) exactly — the server ships the relative
+// path on the SSE trigger and the manager joins it onto working_dir. If the two
+// slug fns diverge, the prompt names a folder the manager didn't check out.
+
+test('WORKTREE_ROOT_REL is the fixed .awb/wt root', () => {
+  assert.equal(WORKTREE_ROOT_REL, '.awb/wt');
+});
+
+test('worktreeSlugFor: per_ticket → first 8 chars, shared → literal "shared"', () => {
+  // per_ticket takes the uuid's first 8 chars
+  assert.equal(worktreeSlugFor('cd7fc2c6-942e-4b8a-8ab7-56be8787f711', 'per_ticket'), 'cd7fc2c6');
+  // default mode is per_ticket (matches DEFAULT_WORKTREE_MODE)
+  assert.equal(DEFAULT_WORKTREE_MODE, 'per_ticket');
+  assert.equal(worktreeSlugFor('cd7fc2c6-942e-4b8a-8ab7-56be8787f711'), 'cd7fc2c6');
+  // shared collapses every ticket to one reusable checkout
+  assert.equal(worktreeSlugFor('cd7fc2c6-942e-4b8a-8ab7-56be8787f711', 'shared'), 'shared');
+  // a short id shorter than 8 chars is used whole
+  assert.equal(worktreeSlugFor('abc', 'per_ticket'), 'abc');
+});
+
+test('worktreeSlugFor: sanitizes path-hostile chars and degrades empty → "ticket"', () => {
+  // only [A-Za-z0-9._-] survive; everything else → '_' (no path traversal / separators)
+  assert.equal(worktreeSlugFor('a/b\\c:d!', 'per_ticket'), 'a_b_c_d_');
+  // empty / non-string ids never produce an empty slug (would collide with the root)
+  assert.equal(worktreeSlugFor('', 'per_ticket'), 'ticket');
+  assert.equal(worktreeSlugFor(null, 'per_ticket'), 'ticket');
+  assert.equal(worktreeSlugFor(undefined, 'per_ticket'), 'ticket');
+});
+
+test('resolveWorktreeRelPath: `.awb/wt/<slug>` for per_ticket|shared, mirrors the slug fn', () => {
+  const id = 'cd7fc2c6-942e-4b8a-8ab7-56be8787f711';
+  assert.equal(resolveWorktreeRelPath(id, 'per_ticket'), '.awb/wt/cd7fc2c6');
+  assert.equal(resolveWorktreeRelPath(id, 'shared'), '.awb/wt/shared');
+  // default mode = per_ticket
+  assert.equal(resolveWorktreeRelPath(id), '.awb/wt/cd7fc2c6');
+  // invariant: rel path is exactly root + '/' + slug for either mode
+  for (const mode of ['per_ticket', 'shared']) {
+    assert.equal(
+      resolveWorktreeRelPath(id, mode),
+      `${WORKTREE_ROOT_REL}/${worktreeSlugFor(id, mode)}`,
+    );
+  }
 });

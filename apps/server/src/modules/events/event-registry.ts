@@ -169,6 +169,12 @@ export const EVENT_TYPES: EventDefinition[] = [
         // shared → `.awb/wt/shared`). Undefined = manager defaults to per_ticket.
         // Same field-by-field drop story as effort_preset/environment_config.
         worktree_mode: event.worktree_mode ?? undefined,
+        // Working_dir-relative worktree folder AWB assigned this ticket (규약 ④).
+        // agent-manager fills the `{{AWB_WORK_FOLDER}}` column-prompt placeholder
+        // from it (joined onto the working_dir / the actual resolved cwd). Same
+        // field-by-field drop story — omit it and the manager never sees the
+        // assigned folder, so the placeholder can't render the real spawn path.
+        worktree_rel_path: event.worktree_rel_path ?? undefined,
         // TicketSupervisor kill-and-respawn signal — agent-manager reads
         // force_respawn off the flattened event to drop a wedged subagent before
         // handling the trigger. Defaults false.
@@ -231,6 +237,10 @@ export const EVENT_TYPES: EventDefinition[] = [
         // Without this line it never leaves the envelope and the manager
         // falls back to per_ticket regardless of the board setting.
         worktree_mode: p.worktree_mode ?? undefined,
+        // 규약 ④: the assigned worktree folder. agent-manager reads
+        // ev.worktree_rel_path off the FLATTENED event to fill the work-folder
+        // placeholder — same flatten rule as worktree_mode.
+        worktree_rel_path: p.worktree_rel_path ?? undefined,
         force_respawn: p.force_respawn === true,
         // Per-board cap forwarded so the manager can keep a defensive drop
         // alongside the server-side gate.
