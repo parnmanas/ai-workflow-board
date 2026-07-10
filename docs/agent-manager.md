@@ -294,9 +294,20 @@ Idempotency, concurrency, failure:
 Two heartbeats run on independent timers:
 
 - **InstanceHeartbeat** — `POST /api/agent/instance-heartbeat` every 30s with
-  `{ mode, agent_ids, working_dirs, paired_at, ... }`. AWB stores the latest
-  payload and surfaces it in the admin dashboard. `mode='manager'` triggers
-  the additional ManagedAgents UI section.
+  `{ mode, agent_ids, working_dirs, paired_at, active_worktrees, ... }`. AWB
+  stores the latest payload and surfaces it in the admin dashboard.
+  `mode='manager'` triggers the additional ManagedAgents UI section.
+  `active_worktrees[]` (ticket 72fc244f) is a best-effort snapshot of every live
+  worktree under each supervised agent's `<working_dir>/.awb/wt/`, joined to the
+  warm-pool lease registry (`.pool-leases.json`): each row carries
+  `{ working_dir, path, slot, mode, ticket_id, branch, state, live }` where
+  `state` is `allocated` / `idle` / `orphaned` (an `orphaned` shared slot is an
+  active lease past the reclaim grace with no live owner — the exact leak
+  `reconcilePoolLeases` reclaims). The server joins `ticket_id → ticket_title`
+  on the admin instance-list fetch; the "Live worktrees" panel renders shared
+  pool slots as an explicit `slot → current task` map. QA/Security run clones
+  (`.awb/qa/<id8>`) are separate checkouts, not repo worktrees, so they never
+  appear here.
 - **PresenceHeartbeat** — `POST /api/agent/presence`. Coarser ping that drives
   the agent's online/offline indicator.
 
