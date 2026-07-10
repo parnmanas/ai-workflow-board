@@ -59,6 +59,11 @@ function splitCrumbs(path: string): Crumb[] {
   if (isWindows) {
     const drive = path.slice(0, 2);
     crumbs.push({ label: drive, path: `${drive}${sep}` });
+    // The split above keeps the drive-letter segment (`C:`) as parts[0]; it is
+    // already represented by the root crumb pushed above. Drop it — otherwise
+    // the drive shows twice in the breadcrumb AND every child crumb path gets
+    // a doubled `C:\C:\…` prefix that the manager rejects as an invalid path.
+    parts.shift();
   } else {
     crumbs.push({ label: '/', path: '/' });
   }
