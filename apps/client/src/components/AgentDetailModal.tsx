@@ -1,16 +1,17 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 import { useConfirm } from '../contexts/ConfirmContext';
-import type { Agent, AgentDetail, ActivityRow, AgentLiveSession, Credential } from '../types';
+import type { Agent, AgentDetail, ActivityRow, AgentLiveSession, AgentManagerInstance, Credential } from '../types';
 import { tokens } from '../tokens';
 import { formatAgentDisplayName } from '../utils/agentName';
 import AgentFileBrowser from './AgentFileBrowser';
 import AgentSubagentsPanel from './AgentSubagentsPanel';
 import AgentMoveToWorkspaceSection from './AgentMoveToWorkspaceSection';
+import AgentLifecycleControls from './AgentLifecycleControls';
 import ManagedAgentDialog from './admin/ManagedAgentDialog';
 import { useParams } from 'react-router-dom';
 
@@ -179,6 +180,10 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
   // round-trip GET.
   const canEdit = !!detail && !detail.redacted;
   const isManaged = !!detail?.manager_agent_id;
+  // Lifecycle controls (Start/Stop/Restart + maintenance) are admin-only:
+  // the manager instance list and the command endpoint are both
+  // ADMIN_ACCESS-gated server-side, so a non-admin fetch would 403.
+  const isAdmin = user?.role === 'admin';
   const [editing, setEditing] = useState(false);
   const [savingEdit, setSavingEdit] = useState(false);
   const [editName, setEditName] = useState('');
@@ -325,6 +330,52 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
     loadDetail();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentId]);
+
+  // ─── Manager instances (running-state source for lifecycle controls) ──
+  // Admin-only. A managed agent's owning manager may be paired in a different
+  // workspace than the agent, so we fetch every instance and resolve the owner
+  // by manager_agent_id. Mirrors AgentsPage — running/stopped comes from the
+  // owning manager's heartbeat (agent_ids[]), never optimistic.
+  const [managerInstances, setManagerInstances] = useState<AgentManagerInstance[]>([]);
+  const loadInstances = useCallback(async () => {
+    if (!isAdmin) {
+      setManagerInstances([]);
+      return;
+    }
+    try {
+      setManagerInstances(await api.listAgentManagerInstances());
+    } catch {
+      // Non-fatal — the lifecycle panel degrades to "manager offline" and the
+      // buttons disable; a failure here must not blank the detail view.
+      setManagerInstances([]);
+    }
+  }, [isAdmin]);
+
+  useEffect(() => {
+    loadInstances();
+  }, [loadInstances]);
+
+  // Every manager heartbeat upsert / TTL eviction fires agent_instance_update;
+  // re-fetch so the running/stopped badge flips within one heartbeat (≤30s)
+  // after a spawn/stop/restart lands, rather than optimistically.
+  useBoardStreamEvent('agent_instance_update', () => {
+    loadInstances();
+  });
+
+  // manager_agent_id → owning manager instance (mode='manager'); newest
+  // heartbeat wins when one identity has more than one live process. Resolving
+  // from manager_agent_id (not the agent's own live_instance) is what lets a
+  // STOPPED agent — absent from every agent_ids[] — still be Started.
+  const ownerManagerInstance = useMemo<AgentManagerInstance | null>(() => {
+    const mid = detail?.manager_agent_id;
+    if (!mid) return null;
+    let best: AgentManagerInstance | null = null;
+    for (const inst of managerInstances) {
+      if (inst.mode !== 'manager' || inst.agent_id !== mid) continue;
+      if (!best || best.last_seen_at < inst.last_seen_at) best = inst;
+    }
+    return best;
+  }, [detail?.manager_agent_id, managerInstances]);
 
   // Resolve credential_id → credential.name for the MANAGED AGENT card.
   // Skipped on non-managed agents and on agents with no credential. Errors
@@ -911,6 +962,24 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
                       : <span style={{ color: tokens.colors.textMuted }}>None - fall back to operator HOME</span>}
                   </div>
                 </div>
+                {/* Lifecycle controls — Start/Stop/Restart + maintenance
+                    (update_plugins / refresh_mcp_config / pull_working_dir /
+                    reload_config) + set working dir. Admin-only; the owning
+                    manager instance is resolved from manager_agent_id so a
+                    STOPPED agent can still be Started. Running/stopped comes
+                    from the manager heartbeat, not optimistic UI. */}
+                {isAdmin && (
+                  <div style={{ marginTop: 14, borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 12 }}>
+                    <div style={{ ...sectionLabelStyle, marginBottom: 8 }}>LIFECYCLE</div>
+                    <AgentLifecycleControls
+                      agentId={agentId}
+                      workingDir={detail.working_dir}
+                      managerInstance={ownerManagerInstance}
+                      layout="full"
+                      onDispatched={loadInstances}
+                    />
+                  </div>
+                )}
                 {canEdit && (
                   <div style={{ marginTop: 12, fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.5 }}>
                     Click <b>Edit</b> in the header to open the managed-agent form (same as the AgentManager admin page). CLI is fixed once an identity is created.
