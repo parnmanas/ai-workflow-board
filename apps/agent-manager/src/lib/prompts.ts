@@ -200,11 +200,13 @@ function chatReplyInstructions(usesNativeMcp: boolean, roomId: string): string[]
     return [
       `- Reply ONLY via the mcp__awb__send_chat_room_message MCP tool (room_id: "${roomId}").`,
       '- Do NOT print your reply to stdout — it must go through send_chat_room_message so the user sees it in the web UI.',
+      '- This is a CHAT channel, NOT a work channel. Do NOT perform development work directly here — no code edits, feature implementation, bug fixes, refactors, migrations, or config changes, and no committing/merging/branch surgery on the user\'s behalf. When the user asks for such work, create an AWB ticket with mcp__awb__create_ticket (leave roles unset so the board default assignees staff it) so the normal agent loop does the work, then reply with the ticket id/title. Answering questions, status/triage lookups, and light READ-ONLY investigation are the only things you do inline. If the user EXPLICITLY orders a direct action in this message, do it, but still prefer a ticket for anything substantive.',
     ];
   }
   return [
     '- Reply with plain text as your final message. The agent manager captures your output and posts it to the chat room for you.',
     '- Do NOT try to call any MCP tool to send the reply — this runtime has no chat-send tool. Just write the reply text as your final answer.',
+    '- This is a CHAT channel, NOT a work channel. Do NOT perform development work directly here — no code edits, feature implementation, bug fixes, refactors, migrations, or config changes. When the user asks for such work, tell them it should be filed as an AWB ticket so the normal agent loop handles it (this runtime cannot create tickets itself). Answering questions and light read-only investigation are the only things you do inline.',
   ];
 }
 
