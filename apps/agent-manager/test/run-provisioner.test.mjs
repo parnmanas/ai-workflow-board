@@ -29,7 +29,7 @@ process.env.AWB_AGENT_MANAGER_HOME = HOME;
 // The agent's working_dir the dispatcher passes as baseWorkingDir (규약 ③).
 const BASE = mkdtempSync(join(tmpdir(), 'awb-runprov-base-'));
 
-const { parseRunProvision, provisionRunWorkspace } = await import('../dist/lib/run-provisioner.js');
+const { parseRunProvision, provisionRunWorkspace, reconcileRunBaseWorkingDir } = await import('../dist/lib/run-provisioner.js');
 
 // ── Build a local bare "remote" with one commit, return its path + a push helper.
 function git(cwd, args) {
@@ -149,11 +149,48 @@ test('no repo: ensures the folder exists without cloning', async () => {
   assert.ok(r.steps.some((s) => s.includes('no repo to clone')));
 });
 
-test('fallback: an empty baseWorkingDir roots at AGENT_MANAGER_HOME (degenerate dispatch)', async () => {
+test('fallback: an empty baseWorkingDir roots at AGENT_MANAGER_HOME (degenerate dispatch) and WARNS', async () => {
   const r = await provisionRunWorkspace({ kind: 'qa', run_id: 'r6', workspace_id: 'w1', workspace_folder: '.awb/qa/fallback-s', checkout_mode: 'reuse', repo: null }, '');
   assert.equal(r.ok, true);
   assert.equal(r.dir, join(HOME, '.awb/qa/fallback-s'), 'falls back to the manager home when no working_dir');
   assert.ok(existsSync(r.dir), 'folder created');
+  // Scope 3: the silent-misplacement path must be loud — the warning shows up in
+  // the returned steps (which surface in the failure/room message), not just logs.
+  assert.ok(
+    r.steps.some((s) => s.includes('AGENT_MANAGER_HOME') && /폴백|규약 ③/.test(s)),
+    'fallback warning surfaced in steps',
+  );
+});
+
+test('reconcileRunBaseWorkingDir: server value wins on drift; cache kept when server absent/equal', () => {
+  // Drift → prefer server, flag drifted + serverAuthoritative.
+  const drift = reconcileRunBaseWorkingDir('D:\\Repository\\txiv\\gameclient\\txiv', 'D:\\AWBAgents\\GameClient');
+  assert.equal(drift.base, 'D:\\AWBAgents\\GameClient', 'server value is authoritative on drift');
+  assert.equal(drift.drifted, true);
+  assert.equal(drift.serverAuthoritative, true);
+
+  // In sync → no drift, keep cache, but re-validation DID run (server present).
+  const same = reconcileRunBaseWorkingDir('/home/a/ws', '/home/a/ws');
+  assert.equal(same.base, '/home/a/ws');
+  assert.equal(same.drifted, false);
+  assert.equal(same.serverAuthoritative, true);
+
+  // Trailing separator only → NOT a drift (no needless heal/warn loop).
+  const trail = reconcileRunBaseWorkingDir('/home/a/ws', '/home/a/ws/');
+  assert.equal(trail.drifted, false, 'trailing slash is not drift');
+
+  // Server unavailable (fetch failed → null/empty) → availability-first, keep cache.
+  for (const empty of [null, undefined, '', '   ']) {
+    const r = reconcileRunBaseWorkingDir('/home/a/ws', empty);
+    assert.equal(r.base, '/home/a/ws', 'cache kept when server record unavailable');
+    assert.equal(r.drifted, false);
+    assert.equal(r.serverAuthoritative, false, 're-validation did not run');
+  }
+
+  // Empty cache but server has a value → adopt server (heals a never-hydrated base).
+  const adopt = reconcileRunBaseWorkingDir('', '/home/a/ws');
+  assert.equal(adopt.base, '/home/a/ws');
+  assert.equal(adopt.drifted, true);
 });
 
 test('path traversal: a ../ workspace_folder is rejected and does NOT rm outside the working_dir', async () => {

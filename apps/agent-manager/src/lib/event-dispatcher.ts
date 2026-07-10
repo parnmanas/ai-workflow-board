@@ -13,6 +13,7 @@ import { loadAgentInfo } from './config.js';
 import {
   fetchTicketContext,
   fetchChatRoomHistory,
+  fetchAgentRecord,
   postFsResponse,
   postChatRoomMessage,
 } from './rest.js';
@@ -26,7 +27,11 @@ import type { HarnessSpec, ResolvedEffortPreset, EffortLevel } from './cli-adapt
 import { createAdapter, ADAPTER_CAPABILITIES } from './cli-adapters/index.js';
 import { EnvironmentProvisioner } from './environment-provisioner.js';
 import type { ResolvedEnvironmentConfig } from './environment-provisioner.js';
-import { parseRunProvision, provisionRunWorkspace } from './run-provisioner.js';
+import {
+  parseRunProvision,
+  provisionRunWorkspace,
+  reconcileRunBaseWorkingDir,
+} from './run-provisioner.js';
 import { fireAndForgetTool } from './mcp-client.js';
 import { mentionTriggerId } from './subagent-manager.js';
 
@@ -1412,7 +1417,40 @@ export class EventDispatcher {
       // the path the server-rendered prompt names and symmetric with the worktree
       // manager's `.awb/wt/` root. Empty when no agent context resolved → the
       // provisioner falls back to the manager home (pre-규약-③ behavior).
-      const result = await provisionRunWorkspace(runProvision, agentContext?.cwd || '');
+      //
+      // BUT the resolved cwd comes from the managed-agent CONTEXT registry, an
+      // in-memory cache hydrated at the last spawn_agent. It can drift from the
+      // server-authoritative working_dir (a set_working_dir that updated only the
+      // heartbeat registry, or a working_dir changed on the server since spawn) —
+      // and 규약 ③ applied to a stale base silently checks the run out at the wrong
+      // path (the GameClient divergence this ticket exists for). Re-validate against
+      // the server record at dispatch time; on drift, prefer the server value AND
+      // heal the context cache so the next dispatch / ticket trigger is consistent.
+      // Availability-first: a failed/empty fetch keeps the cached base (never blocks
+      // a run on a transient server hiccup). Run dispatches are rare vs ticket
+      // triggers, so the extra round-trip is cheap here.
+      let baseWorkingDir = agentContext?.cwd || '';
+      const revalAgentId = agentContext?.agent_id || '';
+      if (revalAgentId) {
+        const record = await fetchAgentRecord(this.#config, revalAgentId);
+        const reconciled = reconcileRunBaseWorkingDir(baseWorkingDir, record?.working_dir);
+        if (reconciled.drifted) {
+          log(
+            `[run-provision] ⚠️ working_dir drift for agent=${revalAgentId.slice(0, 8)}: ` +
+              `cached='${baseWorkingDir || '(empty)'}' server='${reconciled.base}' — using the server ` +
+              `value and healing the context cache (규약 ③ base was stale; prevents run misplacement)`,
+          );
+          this.#managedAgentContexts?.setWorkingDir(revalAgentId, reconciled.base);
+          if (agentContext) agentContext.cwd = reconciled.base;
+          baseWorkingDir = reconciled.base;
+        } else if (!reconciled.serverAuthoritative) {
+          log(
+            `[run-provision] working_dir re-validation skipped for agent=${revalAgentId.slice(0, 8)} ` +
+              `(server record unavailable) — using cached base '${baseWorkingDir || '(empty)'}'`,
+          );
+        }
+      }
+      const result = await provisionRunWorkspace(runProvision, baseWorkingDir);
       if (!result.ok) {
         const responder = agentContext?.agent_id || loadAgentInfo()?.agent_id || '';
         if (p.room_id && responder) {

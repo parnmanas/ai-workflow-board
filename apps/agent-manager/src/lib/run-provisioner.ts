@@ -129,6 +129,48 @@ export function parseRunProvision(raw: unknown): RunProvision | null {
   return { kind, run_id, workspace_id, workspace_folder: folderRaw, checkout_mode, repo };
 }
 
+/** Drop trailing path separators so `<dir>` and `<dir>/` compare equal. */
+function stripTrailingSep(p: string): string {
+  return p.replace(/[/\\]+$/, '');
+}
+
+export interface RunBaseReconcile {
+  /** The working_dir to root the run folder at (규약 ③ base). */
+  base: string;
+  /** True when the server-registered working_dir differed from the cache. */
+  drifted: boolean;
+  /** True when the server returned a usable working_dir (i.e. re-validation ran). */
+  serverAuthoritative: boolean;
+}
+
+/**
+ * Reconcile the cached base working_dir (the managed-agent context registry's
+ * `cwd`, resolved at dispatch time) against the server-authoritative working_dir
+ * fetched fresh for the same agent. The cache can drift from the server record —
+ * e.g. a `set_working_dir` command that updated the heartbeat registry but not the
+ * hot-path context cache, or a working_dir changed on the server since the last
+ * spawn_agent — and applying 규약 ③ to a stale base silently checks the run out at
+ * the WRONG path (the GameClient `D:\Repository\...` vs `D:\AWBAgents\GameClient`
+ * divergence this ticket exists for).
+ *
+ * When the server reports a non-empty working_dir that differs from the cache,
+ * prefer the SERVER value (authoritative) and flag `drifted` so the caller can heal
+ * the cache + warn. A missing/empty server value (fetch failed, record gone) is
+ * availability-first: keep the cached base rather than block the run on a transient
+ * server hiccup. Pure + side-effect free so the dispatch path can unit-test it.
+ */
+export function reconcileRunBaseWorkingDir(
+  cachedCwd: string,
+  serverWorkingDir: string | null | undefined,
+): RunBaseReconcile {
+  const cached = (cachedCwd || '').trim();
+  const server = (serverWorkingDir || '').trim();
+  if (server && stripTrailingSep(server) !== stripTrailingSep(cached)) {
+    return { base: server, drifted: true, serverAuthoritative: true };
+  }
+  return { base: cached, drifted: false, serverAuthoritative: !!server };
+}
+
 /**
  * Prepare the run's working folder per its `run_provision`. Never throws — a
  * git failure is captured into `{ ok:false, error, steps }` so the caller can
@@ -142,8 +184,25 @@ export async function provisionRunWorkspace(
   // worktree 규약 ③: root the run folder at the agent's working_dir. Fall back to
   // AGENT_MANAGER_HOME when no working_dir was resolved (a degenerate dispatch
   // where the caller could not pin a cwd anyway) so a run still gets a folder.
-  const root =
-    typeof baseWorkingDir === 'string' && baseWorkingDir.trim() ? baseWorkingDir : AGENT_MANAGER_HOME;
+  const hasBase = typeof baseWorkingDir === 'string' && !!baseWorkingDir.trim();
+  const root = hasBase ? baseWorkingDir : AGENT_MANAGER_HOME;
+  if (!hasBase) {
+    // Loud about the silent-misplacement path: the run folder is about to land
+    // under the MANAGER HOME, not the agent's working_dir (규약 ③ base absent).
+    // This usually means the managed-agent context was not bootstrapped at
+    // dispatch time. Surface it in both the log and the returned steps so the
+    // failure/room message makes the misplacement visible instead of silent.
+    const warn =
+      `⚠️ working_dir 미해석 — AGENT_MANAGER_HOME 로 폴백 (${AGENT_MANAGER_HOME}): ` +
+      `런 폴더가 agent working_dir 가 아닌 매니저 홈 밑에 생성됩니다 (규약 ③ base 없음)`;
+    steps.push(warn);
+    log(
+      `[run-provision] ⚠️ ${p.kind} run=${p.run_id.slice(0, 8)} NO working_dir resolved — ` +
+        `falling back to AGENT_MANAGER_HOME (${AGENT_MANAGER_HOME}); run folder lands under the ` +
+        `manager home, NOT the agent working_dir. Managed-agent context likely not bootstrapped ` +
+        `at dispatch time.`,
+    );
+  }
   // workspace_folder is root-relative; strip any leading slash so it can never
   // escape the root (matches the server's normalizeWorkspaceFolder).
   const rel = p.workspace_folder.replace(/^[/\\]+/, '');

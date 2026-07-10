@@ -88,6 +88,24 @@ export class ManagedAgentContextRegistry {
     return this.#byId.get(agentId) ?? null;
   }
 
+  /**
+   * Update the cached working_dir (subagent cwd) for an already-registered
+   * context IN PLACE, without a full re-provision. Used when a `set_working_dir`
+   * command lands, or when run-dispatch re-validation detects the cache drifted
+   * from the server-authoritative working_dir. Without this heal, the hot path
+   * (EventDispatcher cwd routing + 규약 ②/③ worktree/run-folder roots) keeps
+   * spawning under a STALE base until the next spawn_agent re-hydrates the
+   * context — the exact drift that placed GameClient QA runs at the wrong base.
+   * No-op returning false when no context exists yet (the agent was never spawned
+   * since this manager booted); the next spawn_agent populates it fresh.
+   */
+  setWorkingDir(agentId: string, workingDir: string): boolean {
+    const ctx = this.#byId.get(agentId);
+    if (!ctx) return false;
+    ctx.working_dir = workingDir;
+    return true;
+  }
+
   list(): ManagedAgentContext[] {
     return Array.from(this.#byId.values());
   }

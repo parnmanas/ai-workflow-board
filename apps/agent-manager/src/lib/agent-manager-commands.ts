@@ -738,7 +738,14 @@ export class AgentManagerCommandHandler {
     } else {
       this.#deps.registry.setWorkingDir(agentId, workingDir);
     }
-    return `set_working_dir: agent=${agentId.slice(0, 8)} cwd=${workingDir}`;
+    // Heal the hot-path context registry too. The heartbeat registry above is the
+    // status source of truth, but EventDispatcher roots subagent cwd + 규약 ②/③
+    // worktree/run folders off the CONTEXT registry — leaving it stale means every
+    // dispatch until the next spawn_agent still uses the OLD working_dir (the exact
+    // drift that placed GameClient QA runs at the wrong base). No-op when the agent
+    // has no live context yet (never spawned since this manager booted).
+    const healed = this.#deps.contextRegistry?.setWorkingDir(agentId, workingDir) ?? false;
+    return `set_working_dir: agent=${agentId.slice(0, 8)} cwd=${workingDir}${healed ? ' (context cache healed)' : ''}`;
   }
 
   async #reloadConfig(): Promise<string> {
