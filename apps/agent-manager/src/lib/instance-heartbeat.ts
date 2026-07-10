@@ -51,6 +51,12 @@ export interface InstanceMeta {
   // Returning [] (or omitting the provider entirely) skips the field;
   // older AWB servers ignore it, newer ones render expiry badges.
   agentCredentialMetaProvider?: AgentCredentialMetaProvider | null;
+  // Per-tick provider that enumerates the manager's live worktrees + pool-lease
+  // state (ticket 72fc244f). Best-effort/async like the credential provider —
+  // errors are swallowed and the field is skipped. Returning [] (or omitting it)
+  // means older servers see no change; newer ones render the "Live worktrees"
+  // panel with the shared slot→task mapping.
+  worktreeStatusProvider?: WorktreeStatusProvider | null;
 }
 
 /** Tiny duck-typed read-only snapshot of ManagedAgentRegistry. */
@@ -80,6 +86,36 @@ export interface AgentCredentialEntry {
 
 export type AgentCredentialMetaProvider = () => Promise<AgentCredentialEntry[]>;
 
+/** One live worktree the manager currently knows about, for the admin
+ *  "Live worktrees" view (ticket 72fc244f). Mirrors WorktreeSnapshotEntry in
+ *  worktree-manager.ts but flattened to snake_case wire keys and tagged with the
+ *  managed-agent working_dir it belongs to. The server joins `ticket_id` to the
+ *  ticket table to add a human title. QA/Security run clones (`.awb/qa/`) are not
+ *  worktrees of the repo and never appear here. */
+export interface WorktreeStatusEntry {
+  /** The managed-agent base working_dir this worktree's `.awb/wt/` root sits under. */
+  working_dir: string;
+  /** Absolute worktree path (`<working_dir>/.awb/wt/<slot>`). */
+  path: string;
+  /** Last path segment: `shared-<i>` (shared pool slot) or `<ticket8>` (per_ticket). */
+  slot: string;
+  mode: 'shared' | 'per_ticket';
+  /** Full ticket uuid when known (shared active lease / live per_ticket), else null. */
+  ticket_id: string | null;
+  /** Current branch; null when detached / at base HEAD. */
+  branch: string | null;
+  /** allocated = holding a task; idle = warm/free; orphaned = active lease, no
+   *  live owner, past reclaim grace (a leak the reaper will reclaim). */
+  state: 'allocated' | 'idle' | 'orphaned';
+  /** A live worker session / subagent currently owns this worktree's ticket. */
+  live: boolean;
+}
+
+/** Per-tick provider that enumerates live worktrees across every supervised
+ *  managed agent. Async (shells `git worktree list` per working_dir) and
+ *  best-effort — must never throw; returning [] skips the heartbeat field. */
+export type WorktreeStatusProvider = () => Promise<WorktreeStatusEntry[]>;
+
 export interface InstanceHeartbeatPayload {
   instance_id: string;
   agent_id: string | null;
@@ -102,6 +138,11 @@ export interface InstanceHeartbeatPayload {
   // agent, only when the heartbeat factory was given a provider. See
   // AgentCredentialEntry for the field semantics.
   agent_credentials?: AgentCredentialEntry[];
+  // Live worktrees + pool-lease state across all supervised agents (ticket
+  // 72fc244f). Only present when the worktree provider is wired and returns
+  // rows. Older AWB servers ignore it; newer ones render the "Live worktrees"
+  // panel with the shared slot→task mapping.
+  active_worktrees?: WorktreeStatusEntry[];
   // Self-update fields — populated when InstanceMeta carries an UpdateChecker.
   // Older AWB servers ignore them; newer ones surface them on the admin UI.
   latest_version?: string | null;
@@ -136,6 +177,7 @@ export class InstanceHeartbeat {
         : null;
     const updateChecker = meta?.updateChecker ?? null;
     const credentialMetaProvider = meta?.agentCredentialMetaProvider ?? null;
+    const worktreeStatusProvider = meta?.worktreeStatusProvider ?? null;
     this.#payloadFactory = async () => {
       const agentIds = managedSnapshot ? managedSnapshot.liveAgentIds() : [];
       const workingDirs = managedSnapshot ? managedSnapshot.workingDirs() : [];
@@ -150,6 +192,17 @@ export class InstanceHeartbeat {
         } catch (err: any) {
           log(`Instance heartbeat: credential-meta provider failed: ${err?.message ?? err}`);
           agentCredentials = [];
+        }
+      }
+      // Same best-effort contract: a throwing worktree provider must never wedge
+      // the heartbeat — treat failure as "no worktrees this tick".
+      let activeWorktrees: WorktreeStatusEntry[] = [];
+      if (worktreeStatusProvider) {
+        try {
+          activeWorktrees = await worktreeStatusProvider();
+        } catch (err: any) {
+          log(`Instance heartbeat: worktree-status provider failed: ${err?.message ?? err}`);
+          activeWorktrees = [];
         }
       }
       return {
@@ -171,6 +224,7 @@ export class InstanceHeartbeat {
           ? { available_models: availableModels }
           : {}),
         ...(agentCredentials.length ? { agent_credentials: agentCredentials } : {}),
+        ...(activeWorktrees.length ? { active_worktrees: activeWorktrees } : {}),
         ...(updateStatus
           ? {
               latest_version: updateStatus.latest_version,

@@ -21,6 +21,7 @@ import { runSetup, type SetupOptions } from './lib/setup.js';
 import { installService, uninstallService, type ServicePlatform } from './lib/service-install.js';
 import { PresenceHeartbeat } from './lib/presence-heartbeat.js';
 import { InstanceHeartbeat } from './lib/instance-heartbeat.js';
+import type { WorktreeStatusEntry } from './lib/instance-heartbeat.js';
 import { EventStream } from './lib/event-stream.js';
 import { SubagentManager } from './lib/subagent-manager.js';
 import { ChatSessionManager } from './lib/chat-session-manager.js';
@@ -867,6 +868,38 @@ async function runRuntime(
             expires_at_ms: meta.expires_at_ms,
             refresh_token_present: meta.refresh_token_present,
           });
+        }
+        return out;
+      },
+      // Live worktrees + pool-lease state across every supervised agent (ticket
+      // 72fc244f). Best-effort/async like the credential provider — a git failure
+      // or missing pool registry yields []. Reuses the SAME live-ticket view the
+      // sweep/reconcile use (computeLiveTicketIds) so an 'orphaned' entry here is
+      // the exact lease reconcilePoolLeases would reclaim. Deduped per working_dir.
+      worktreeStatusProvider: async (): Promise<WorktreeStatusEntry[]> => {
+        if (!worktreeManager.enabled) return [];
+        const liveTicketIds = computeLiveTicketIds();
+        const out: WorktreeStatusEntry[] = [];
+        const seenDirs = new Set<string>();
+        for (const ctx of managedAgentContexts.list()) {
+          if (!ctx.working_dir || seenDirs.has(ctx.working_dir)) continue;
+          seenDirs.add(ctx.working_dir);
+          const entries = await worktreeManager.snapshotWorktrees({
+            baseWorkingDir: ctx.working_dir,
+            liveTicketIds,
+          });
+          for (const e of entries) {
+            out.push({
+              working_dir: ctx.working_dir,
+              path: e.path,
+              slot: e.slot,
+              mode: e.mode,
+              ticket_id: e.ticketId,
+              branch: e.branch,
+              state: e.state,
+              live: e.live,
+            });
+          }
         }
         return out;
       },

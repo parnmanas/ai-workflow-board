@@ -187,6 +187,38 @@ export interface WorktreeInfo {
   detached: boolean;
 }
 
+/** Lease state of a worktree for the observability snapshot.
+ *  - allocated: a live worker owns it (or a shared slot leased inside its
+ *    dispatch grace window — assumed in-flight, not a leak).
+ *  - idle: released / never-leased (shared warm slot) or a per_ticket dir with
+ *    no live session.
+ *  - orphaned: a shared slot with an ACTIVE lease but no live owner AND past the
+ *    reclaim grace — the exact leak reconcilePoolLeases will reclaim. Surfaced so
+ *    an operator can spot a stuck lease by eye. */
+export type WorktreeState = 'allocated' | 'idle' | 'orphaned';
+
+/** Read-only observability view of one worktree under `<working_dir>/.awb/wt/`,
+ *  joined to the pool lease registry. Produced by snapshotWorktrees() for the
+ *  instance heartbeat so the admin UI can render "slot → current task". This is
+ *  a pure projection — no mutation path consumes it. */
+export interface WorktreeSnapshotEntry {
+  /** Absolute worktree path (`<working_dir>/.awb/wt/<slot>`). */
+  path: string;
+  /** Last path segment: `shared-<i>` (shared pool slot) or `<ticket8>` (per_ticket). */
+  slot: string;
+  mode: WorktreeMode;
+  /** Full ticket uuid when known (shared active lease from the registry, or a
+   *  live per_ticket dir matched by prefix); null for an idle shared slot and an
+   *  idle per_ticket dir (only the 8-char slug is locally known). */
+  ticketId: string | null;
+  /** Current branch (from `git worktree list --porcelain`); null when detached /
+   *  sitting at the base HEAD. */
+  branch: string | null;
+  state: WorktreeState;
+  /** True when a live worker session / subagent currently holds this worktree's ticket. */
+  live: boolean;
+}
+
 export interface ResolveCwdArgs {
   /** The agent's base repo working_dir (the shared cwd). */
   baseWorkingDir: string;
@@ -834,6 +866,110 @@ export class WorktreeManager {
       if (reclaimed > 0) await this.#writeRegistry(worktreesRoot, reg);
       return reclaimed;
     });
+  }
+
+  /**
+   * Read-only observability snapshot of every worktree under this working_dir's
+   * `<working_dir>/.awb/wt/` root, joined to the pool lease registry so the admin
+   * UI can render "which slot / folder holds which task" (ticket 72fc244f). Pure
+   * projection — never mutates state and never throws (a failure yields []).
+   * Best-effort; called on the instance-heartbeat clock (30s), so it stays cheap:
+   * one `git worktree list` + one registry read per working_dir.
+   *
+   * SHARED mode — the lease registry (`.pool-leases.json`) is the source of truth
+   * for slot→ticket. An active lease with a live owner → 'allocated'; an active
+   * lease with no live owner but still inside the reclaim grace → 'allocated'
+   * (assumed mid-dispatch, not a leak); an active lease past the grace with no
+   * owner → 'orphaned' (the exact lease reconcilePoolLeases reclaims). A
+   * released/absent lease → 'idle' (warm slot awaiting the next acquire's reset).
+   *
+   * PER_TICKET mode — no lease record exists; the dir `<ticket8>` IS the task.
+   * 'allocated' when a live worker session owns it (matched by id prefix), else
+   * 'idle'. Only a live per_ticket dir yields a full ticket uuid; an idle one is
+   * reported with ticketId=null (only the 8-char slug is locally knowable).
+   *
+   * QA/Security run workspaces are a SEPARATE `.awb/qa/<id8>` clone (not a git
+   * worktree of this repo), so they never appear in `git worktree list` and are
+   * intentionally out of scope here.
+   */
+  async snapshotWorktrees(opts: {
+    baseWorkingDir: string;
+    liveTicketIds: Set<string>;
+  }): Promise<WorktreeSnapshotEntry[]> {
+    if (!this.#enabled) return [];
+    const { baseWorkingDir, liveTicketIds } = opts;
+    if (!baseWorkingDir) return [];
+    const worktreesRoot = worktreesRootFor(baseWorkingDir);
+    try {
+      // Read the lease registry under the pool lock so we never observe a
+      // half-written file mid-acquire. listWorktrees is a read-only git call and
+      // needs no lock.
+      const reg = await this.#withPoolLock(worktreesRoot, () =>
+        this.#readRegistry(worktreesRoot),
+      );
+      const wts = await this.listWorktrees(baseWorkingDir);
+      // Keep only worktrees strictly under `.awb/wt` (drops the main checkout).
+      const bySlot = new Map<string, WorktreeInfo>();
+      for (const w of wts) {
+        if (!isUnder(w.path, worktreesRoot)) continue;
+        bySlot.set(lastSegment(w.path), w);
+      }
+      // Union of on-disk slots and registry slots — a lease pointing at a
+      // vanished dir is itself a leak worth surfacing.
+      const slots = new Set<string>([...bySlot.keys(), ...Object.keys(reg.slots)]);
+      const now = Date.now();
+      const out: WorktreeSnapshotEntry[] = [];
+      for (const slot of slots) {
+        const wt = bySlot.get(slot) ?? null;
+        const path = wt?.path ?? join(worktreesRoot, slot);
+        if (isSharedSlotSeg(slot)) {
+          const lease = reg.slots[slot] ?? null;
+          const active = lease?.active === true;
+          const ticketId = active ? lease!.ticketId : null;
+          const live = active && !!ticketId && liveTicketIds.has(ticketId);
+          let state: WorktreeState = 'idle';
+          if (active) {
+            const leasedMs = lease ? Date.parse(lease.leasedAt) : NaN;
+            const withinGrace =
+              Number.isFinite(leasedMs) && now - leasedMs < POOL_LEASE_RECLAIM_GRACE_MS;
+            state = live || withinGrace ? 'allocated' : 'orphaned';
+          }
+          out.push({
+            path,
+            slot,
+            mode: 'shared',
+            ticketId,
+            branch: wt?.branch ?? lease?.branch ?? null,
+            state,
+            live,
+          });
+        } else {
+          // per_ticket: slug is the ticket's first 8 chars. The full id is only
+          // knowable when a live session holds it.
+          const fullLive = [...liveTicketIds].find((id) => id.slice(0, 8) === slot) ?? null;
+          const live = !!fullLive;
+          out.push({
+            path,
+            slot,
+            mode: 'per_ticket',
+            ticketId: fullLive,
+            branch: wt?.branch ?? null,
+            state: live ? 'allocated' : 'idle',
+            live,
+          });
+        }
+      }
+      // Stable order: shared pool slots first (numeric by index), then per_ticket
+      // dirs by slug — deterministic so the UI list doesn't jitter between ticks.
+      out.sort((a, b) => {
+        if (a.mode !== b.mode) return a.mode === 'shared' ? -1 : 1;
+        return a.slot.localeCompare(b.slot, undefined, { numeric: true });
+      });
+      return out;
+    } catch (err: any) {
+      log(`[worktree] snapshotWorktrees failed under ${worktreesRoot}: ${err?.message ?? err}`);
+      return [];
+    }
   }
 
   /**
