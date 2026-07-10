@@ -1762,6 +1762,11 @@ export interface AgentManagerInstance {
   // agent the manager could read auth state for. Older managers leave
   // this undefined; the UI degrades to "no credential metadata" then.
   agent_credentials?: AgentCredentialEntry[];
+  // Live worktrees + pool-lease state across the manager's supervised agents
+  // (ticket 72fc244f). One row per live/leased worktree under each working_dir's
+  // `.awb/wt/`. `ticket_title` is joined server-side on the instance-list fetch.
+  // Older managers leave this undefined; the "Live worktrees" panel hides then.
+  active_worktrees?: WorktreeStatusEntry[];
   // Per-CLI model lists the manager's installed CLIs accept (cliType →
   // model ids), gathered via each adapter's listModels() at boot. Drives the
   // per-agent model selector in ManagedAgentDialog. Older managers leave
@@ -1797,6 +1802,32 @@ export interface AgentCredentialEntry {
   /** OAuth access-token expiry (Unix ms); null when not applicable. */
   expires_at_ms: number | null;
   refresh_token_present: boolean;
+}
+
+/**
+ * One live worktree reported on a manager heartbeat (ticket 72fc244f). Mirrors
+ * WorktreeStatusEntry on the manager + server. `ticket_title` is joined
+ * server-side on the admin instance-list fetch (absent on the raw SSE payload).
+ */
+export interface WorktreeStatusEntry {
+  /** The managed-agent base working_dir whose `.awb/wt/` root this sits under. */
+  working_dir: string;
+  /** Absolute worktree path (`<working_dir>/.awb/wt/<slot>`). */
+  path: string;
+  /** Last path segment: `shared-<i>` (shared pool slot) or `<ticket8>` (per_ticket). */
+  slot: string;
+  mode: 'shared' | 'per_ticket';
+  /** Full ticket uuid when known (shared active lease / live per_ticket), else null. */
+  ticket_id: string | null;
+  /** Current branch; null when detached / at base HEAD. */
+  branch: string | null;
+  /** allocated = holding a task; idle = warm/free; orphaned = active lease with
+   *  no live owner past the reclaim grace (a leak the manager's reaper reclaims). */
+  state: 'allocated' | 'idle' | 'orphaned';
+  /** A live worker session / subagent currently owns this worktree's ticket. */
+  live: boolean;
+  /** Human ticket title, joined server-side from ticket_id (null when unknown). */
+  ticket_title?: string | null;
 }
 
 // ST-5 — pairing tokens. PairingTokenMint is the response of

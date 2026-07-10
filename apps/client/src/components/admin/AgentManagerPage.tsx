@@ -10,6 +10,7 @@ import type {
   PairingTokenMint,
   PairingTokenSafe,
   SubagentSummary,
+  WorktreeStatusEntry,
 } from '../../types';
 import { useBoardStreamEvent } from '../../contexts/BoardStreamContext';
 import { useToast } from '../../contexts/ToastContext';
@@ -77,6 +78,155 @@ function modeBadgeColor(mode: 'daemon' | 'proxy' | 'manager'): string {
   if (mode === 'manager') return tokens.colors.accent;
   if (mode === 'daemon') return tokens.colors.accentLight;
   return tokens.colors.successLight;
+}
+
+// ─── Live worktrees (ticket 72fc244f) ──────────────────────────────────────
+
+function worktreeStateMeta(state: 'allocated' | 'idle' | 'orphaned'): {
+  label: string;
+  color: string;
+  bg: string;
+} {
+  // allocated → green (a worker is on it), idle → muted (warm/free), orphaned →
+  // red (active lease with no live owner past the reclaim grace — a visible leak).
+  if (state === 'allocated') {
+    return { label: 'allocated', color: tokens.colors.successLight, bg: tokens.colors.successBg };
+  }
+  if (state === 'orphaned') {
+    return { label: 'orphaned', color: tokens.colors.dangerLight, bg: tokens.colors.dangerBg };
+  }
+  return { label: 'idle', color: tokens.colors.textMuted, bg: tokens.colors.surfaceSubtle };
+}
+
+/** Short ticket ref for the "slot → task" line: "#d68afab5 <title>" (title only
+ *  when the server joined one; falls back to the raw slug for idle per_ticket). */
+function worktreeTaskLabel(w: WorktreeStatusEntry): string {
+  if (w.ticket_id) {
+    const short = w.ticket_id.slice(0, 8);
+    return w.ticket_title ? `#${short} ${w.ticket_title}` : `#${short}`;
+  }
+  // per_ticket idle dir: only the 8-char slug is knowable locally.
+  if (w.mode === 'per_ticket') return `#${w.slot}`;
+  return 'idle';
+}
+
+function StatePill({ state }: { state: 'allocated' | 'idle' | 'orphaned' }) {
+  const meta = worktreeStateMeta(state);
+  return (
+    <span
+      style={{
+        display: 'inline-block',
+        padding: '1px 7px',
+        borderRadius: 4,
+        fontSize: 10,
+        fontWeight: 600,
+        textTransform: 'uppercase',
+        letterSpacing: '0.04em',
+        color: meta.color,
+        background: meta.bg,
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {meta.label}
+    </span>
+  );
+}
+
+/**
+ * Renders a manager instance's live worktrees, grouped by working_dir then by
+ * mode. Shared pool slots come first as an explicit "slot → current task" map
+ * (the core ask of ticket 72fc244f: dark shared-N leases are legible at a
+ * glance); per_ticket dirs follow. QA/Security run clones (`.awb/qa/`) are a
+ * separate workspace and intentionally not listed here.
+ */
+function WorktreeStatusList({ entries }: { entries: WorktreeStatusEntry[] }) {
+  // Group by working_dir so a multi-agent manager doesn't blur two repos' pools.
+  const byDir = new Map<string, WorktreeStatusEntry[]>();
+  for (const e of entries) {
+    const key = e.working_dir || '(unknown working_dir)';
+    (byDir.get(key) ?? byDir.set(key, []).get(key)!).push(e);
+  }
+  const rowStyle: React.CSSProperties = {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    fontFamily: 'monospace',
+    fontSize: 11,
+    padding: '2px 0',
+  };
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      {Array.from(byDir.entries()).map(([dir, rows]) => {
+        const shared = rows.filter((r) => r.mode === 'shared');
+        const perTicket = rows.filter((r) => r.mode === 'per_ticket');
+        return (
+          <div key={dir} style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+            <div
+              style={{
+                fontFamily: 'monospace',
+                fontSize: 10,
+                color: tokens.colors.textMuted,
+                wordBreak: 'break-all',
+              }}
+            >
+              {dir}
+            </div>
+            {shared.length > 0 && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 1, paddingLeft: 6 }}>
+                {shared.map((w) => (
+                  <div key={w.path} style={rowStyle}>
+                    <span style={{ color: tokens.colors.accentLight, minWidth: 62 }}>{w.slot}</span>
+                    <span style={{ color: tokens.colors.textMuted }}>→</span>
+                    <span
+                      style={{
+                        color:
+                          w.state === 'idle' ? tokens.colors.textMuted : tokens.colors.textStrong,
+                        flex: 1,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}
+                      title={`${worktreeTaskLabel(w)}${w.branch ? ` @${w.branch}` : ''}`}
+                    >
+                      {worktreeTaskLabel(w)}
+                      {w.branch ? (
+                        <span style={{ color: tokens.colors.textMuted }}> @{w.branch}</span>
+                      ) : null}
+                    </span>
+                    <StatePill state={w.state} />
+                  </div>
+                ))}
+              </div>
+            )}
+            {perTicket.length > 0 && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 1, paddingLeft: 6 }}>
+                {perTicket.map((w) => (
+                  <div key={w.path} style={rowStyle}>
+                    <span
+                      style={{
+                        color: tokens.colors.textStrong,
+                        flex: 1,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}
+                      title={`${worktreeTaskLabel(w)}${w.branch ? ` @${w.branch}` : ''}`}
+                    >
+                      {worktreeTaskLabel(w)}
+                      {w.branch ? (
+                        <span style={{ color: tokens.colors.textMuted }}> @{w.branch}</span>
+                      ) : null}
+                    </span>
+                    <StatePill state={w.state} />
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 interface InstanceRowProps {
@@ -438,6 +588,22 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
                   </dd>
                 </div>
               )}
+              <div style={{ gridColumn: '1 / -1' }}>
+                <dt style={{ color: tokens.colors.textMuted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                  Live worktrees ({inst.active_worktrees?.length ?? 0})
+                </dt>
+                <dd style={{ margin: '4px 0 0' }}>
+                  {inst.active_worktrees && inst.active_worktrees.length > 0 ? (
+                    <WorktreeStatusList entries={inst.active_worktrees} />
+                  ) : (
+                    <span style={{ color: tokens.colors.textMuted, fontSize: 12, fontStyle: 'italic' }}>
+                      {inst.active_worktrees
+                        ? 'no live worktrees (all slots idle / worktree isolation off)'
+                        : 'no worktree telemetry (pre-worktree-visibility manager)'}
+                    </span>
+                  )}
+                </dd>
+              </div>
             </>
           )}
         </dl>
