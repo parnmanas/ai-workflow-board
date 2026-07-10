@@ -349,10 +349,11 @@ export interface UserMentionPayload {
 export interface FsRequestPayload {
   request_id: string;                        // server-generated uuid; plugin echoes it on the response POST
   agent_id: string;                          // target agent (matches identity for filter)
-  op: 'list' | 'stat' | 'read';
+  op: 'list' | 'stat' | 'read' | 'mkdir' | 'roots' | 'drives';
   path: string;                              // absolute path on the agent machine
   offset?: number;                           // read: byte offset (default 0)
   limit?: number;                            // read: max bytes (server caps at 5MB)
+  name?: string;                             // mkdir: single-segment name of the new folder under `path`
 }
 
 // Subagent monitor — plugin reports subagent lifecycle + stream-json traffic

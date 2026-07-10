@@ -641,6 +641,7 @@ export const EVENT_TYPES: EventDefinition[] = [
         path: event.path,
         offset: event.offset,
         limit: event.limit,
+        name: event.name,
       };
       return {
         payload,
@@ -669,6 +670,7 @@ export const EVENT_TYPES: EventDefinition[] = [
         path: p.path,
         offset: p.offset,
         limit: p.limit,
+        name: p.name,
         timestamp: env.timestamp,
       };
     },
