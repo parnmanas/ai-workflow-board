@@ -726,3 +726,85 @@ test('reattach refreshes leasedAt so a re-dispatched worker is re-protected by t
     await cleanup();
   }
 });
+
+// ── snapshotWorktrees (ticket 72fc244f — worktree visibility) ────────────────
+
+test('snapshotWorktrees: shared slot → allocated/idle/orphaned + per_ticket, joined to lease registry', async () => {
+  const { repo, cleanup } = await makeRepo();
+  try {
+    const wm = new WorktreeManager({ enabled: true });
+    const wtRoot = worktreesRootFor(repo);
+
+    // Lease a shared pool slot for A (poolSize 2) and create a per_ticket dir for C.
+    await wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_A, role: 'assignee', mode: 'shared', poolSize: 2 });
+    await wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_C, role: 'assignee', mode: 'per_ticket' });
+
+    const findShared = (snap) => snap.find((w) => w.mode === 'shared' && w.slot === 'shared-0');
+    const findPer = (snap) => snap.find((w) => w.mode === 'per_ticket' && w.slot === 'cccccccc');
+
+    // 1) A + C both live → allocated + live; the shared entry carries the full uuid.
+    let snap = await wm.snapshotWorktrees({ baseWorkingDir: repo, liveTicketIds: new Set([TICKET_A, TICKET_C]) });
+    let sA = findShared(snap);
+    assert.ok(sA, 'shared-0 present');
+    assert.equal(sA.state, 'allocated');
+    assert.equal(sA.live, true);
+    assert.equal(sA.ticketId, TICKET_A, 'shared active lease carries the full ticket uuid');
+    let pC = findPer(snap);
+    assert.ok(pC, 'per_ticket dir present');
+    assert.equal(pC.state, 'allocated');
+    assert.equal(pC.live, true);
+    assert.equal(pC.ticketId, TICKET_C, 'live per_ticket dir resolves to the full uuid');
+    // Ordering: shared pool slots sort before per_ticket dirs.
+    assert.equal(snap[0].mode, 'shared', 'shared entries sort first');
+
+    // 2) Nothing live but the lease is still fresh → allocated (assumed mid-dispatch),
+    //    and the idle per_ticket dir reports ticketId=null (only the 8-char slug is local).
+    snap = await wm.snapshotWorktrees({ baseWorkingDir: repo, liveTicketIds: new Set() });
+    sA = findShared(snap);
+    assert.equal(sA.state, 'allocated', 'a fresh lease within the grace is NOT a leak');
+    assert.equal(sA.live, false);
+    pC = findPer(snap);
+    assert.equal(pC.state, 'idle');
+    assert.equal(pC.ticketId, null, 'an idle per_ticket dir exposes no full uuid');
+
+    // 3) Age the lease past the reclaim grace with no live owner → orphaned (the exact
+    //    leak reconcilePoolLeases would reclaim, surfaced so an operator can eyeball it).
+    await backdateLease(wtRoot, 'shared-0', 60 * 60 * 1000);
+    snap = await wm.snapshotWorktrees({ baseWorkingDir: repo, liveTicketIds: new Set() });
+    sA = findShared(snap);
+    assert.equal(sA.state, 'orphaned', 'aged, ownerless active lease → orphaned');
+    assert.equal(sA.live, false);
+
+    // 4) A released (inactive) lease → idle, no ticket.
+    const reg = await readRegistry(wtRoot);
+    reg.slots['shared-0'].active = false;
+    await fsp.writeFile(join(wtRoot, '.pool-leases.json'), JSON.stringify(reg, null, 2));
+    snap = await wm.snapshotWorktrees({ baseWorkingDir: repo, liveTicketIds: new Set() });
+    sA = findShared(snap);
+    assert.equal(sA.state, 'idle', 'a released lease → idle');
+    assert.equal(sA.ticketId, null);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('snapshotWorktrees: disabled manager and an empty .awb/wt root → [] (never throws)', async () => {
+  const { repo, cleanup } = await makeRepo();
+  try {
+    const disabled = new WorktreeManager({ enabled: false });
+    assert.deepEqual(
+      await disabled.snapshotWorktrees({ baseWorkingDir: repo, liveTicketIds: new Set() }),
+      [],
+      'a disabled manager reports nothing',
+    );
+    const wm = new WorktreeManager({ enabled: true });
+    // No .awb/wt created yet → empty list, no throw.
+    assert.deepEqual(
+      await wm.snapshotWorktrees({ baseWorkingDir: repo, liveTicketIds: new Set() }),
+      [],
+      'an untouched repo has no live worktrees',
+    );
+  } finally {
+    await cleanup();
+  }
+});
