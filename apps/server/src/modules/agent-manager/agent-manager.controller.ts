@@ -151,6 +151,34 @@ export class AgentManagerController {
           }))
       : undefined;
 
+    // Live worktrees + pool-lease state (ticket 72fc244f). Manager-mode only;
+    // best-effort like the credential rows — bad shapes are dropped silently
+    // (a rolling-out manager version is the likely cause). A row needs at least
+    // a path + slot to be renderable; other fields are narrowed defensively.
+    const active_worktrees = Array.isArray(body?.active_worktrees)
+      ? body.active_worktrees
+          .filter(
+            (row: any) =>
+              row &&
+              typeof row === 'object' &&
+              typeof row.path === 'string' && row.path &&
+              typeof row.slot === 'string' && row.slot,
+          )
+          .map((row: any) => ({
+            working_dir: typeof row.working_dir === 'string' ? row.working_dir : '',
+            path: String(row.path),
+            slot: String(row.slot),
+            mode: row.mode === 'shared' ? 'shared' : 'per_ticket',
+            ticket_id: typeof row.ticket_id === 'string' && row.ticket_id ? row.ticket_id : null,
+            branch: typeof row.branch === 'string' && row.branch ? row.branch : null,
+            state:
+              row.state === 'allocated' || row.state === 'idle' || row.state === 'orphaned'
+                ? row.state
+                : 'idle',
+            live: row.live === true,
+          }))
+      : undefined;
+
     // Self-update fields — manager fills these via its UpdateChecker. Older
     // managers omit them and we leave the registry record's fields undefined.
     // `null` here is a meaningful "checker has run but couldn't read the
@@ -238,6 +266,7 @@ export class AgentManagerController {
       working_dirs,
       paired_at,
       agent_credentials,
+      active_worktrees,
       available_models,
       latest_version,
       update_available,
@@ -500,7 +529,38 @@ export class AgentManagerController {
       const agents = await this.agentRepo.find({ where: { id: In(agentIds) } });
       for (const a of agents) if (a.name) nameMap.set(a.id, a.name);
     }
-    const enriched = data.map((inst) => ({ ...inst, agent_name: nameMap.get(inst.agent_id) || null }));
+    // Join each worktree entry's ticket_id → title so the admin "Live worktrees"
+    // panel can show "slot → #ticket8 <title>" (ticket 72fc244f). Same enrich
+    // pattern as agent_name above: one In() query, missing rows fall back to null.
+    const ticketIds = Array.from(
+      new Set(
+        data.flatMap((i) =>
+          (i.active_worktrees ?? [])
+            .map((w) => w.ticket_id)
+            .filter((x): x is string => !!x),
+        ),
+      ),
+    );
+    const titleMap = new Map<string, string>();
+    if (ticketIds.length > 0) {
+      const tickets = await this.ticketRepo.find({
+        where: { id: In(ticketIds) },
+        select: ['id', 'title'],
+      });
+      for (const t of tickets) titleMap.set(t.id, t.title);
+    }
+    const enriched = data.map((inst) => ({
+      ...inst,
+      agent_name: nameMap.get(inst.agent_id) || null,
+      ...(inst.active_worktrees
+        ? {
+            active_worktrees: inst.active_worktrees.map((w) => ({
+              ...w,
+              ticket_title: w.ticket_id ? titleMap.get(w.ticket_id) ?? null : null,
+            })),
+          }
+        : {}),
+    }));
     return res.json(enriched);
   }
 

@@ -46,6 +46,13 @@ export interface InstanceRecord {
   // Older managers (pre credential-expiry telemetry) leave undefined; the
   // dashboard collapses to "no credential metadata" in that case.
   agent_credentials?: AgentCredentialEntry[];
+  // Live worktrees + pool-lease state across the manager's supervised agents
+  // (ticket 72fc244f — worktree visibility). One row per live/leased worktree
+  // under each working_dir's `.awb/wt/`. Older managers leave undefined; the
+  // admin "Live worktrees" panel collapses to "no worktree telemetry" then.
+  // ticket_title is joined server-side (see AgentManagerController.list()), so
+  // the stored record carries only ticket_id.
+  active_worktrees?: WorktreeStatusEntry[];
   // Per-CLI model lists this manager's installed CLIs accept (cliType →
   // model ids), gathered via each adapter's listModels() at boot. Powers the
   // per-agent model selector in the admin UI. Older managers leave undefined.
@@ -82,6 +89,35 @@ export interface AgentCredentialEntry {
   /** OAuth access-token expiry (Unix ms); null when not applicable. */
   expires_at_ms: number | null;
   refresh_token_present: boolean;
+}
+
+/**
+ * One live worktree reported on a manager heartbeat (ticket 72fc244f). Mirrors
+ * WorktreeStatusEntry in `apps/agent-manager/src/lib/instance-heartbeat.ts` —
+ * keep the two in sync if the wire shape changes. `ticket_title` is NOT on the
+ * wire; the server fills it by joining `ticket_id` against the ticket table when
+ * serving the admin instance list.
+ */
+export interface WorktreeStatusEntry {
+  /** The managed-agent base working_dir whose `.awb/wt/` root this sits under. */
+  working_dir: string;
+  /** Absolute worktree path (`<working_dir>/.awb/wt/<slot>`). */
+  path: string;
+  /** Last path segment: `shared-<i>` (shared pool slot) or `<ticket8>` (per_ticket). */
+  slot: string;
+  mode: 'shared' | 'per_ticket';
+  /** Full ticket uuid when known (shared active lease / live per_ticket), else null. */
+  ticket_id: string | null;
+  /** Current branch; null when detached / at base HEAD. */
+  branch: string | null;
+  /** allocated = holding a task; idle = warm/free; orphaned = active lease with
+   *  no live owner past the reclaim grace (a leak the manager's reaper reclaims). */
+  state: 'allocated' | 'idle' | 'orphaned';
+  /** A live worker session / subagent currently owns this worktree's ticket. */
+  live: boolean;
+  /** Human ticket title, joined server-side from `ticket_id`. Absent on the
+   *  wire; undefined when the ticket_id is null or the ticket row is gone. */
+  ticket_title?: string | null;
 }
 
 const INSTANCE_TTL_MS = 90_000;     // 3x default plugin heartbeat interval

@@ -428,6 +428,20 @@ export interface AgentInstanceUpdatePayload {
     agent_ids?: string[];
     working_dirs?: string[];
     paired_at?: string;
+    // Live worktrees + pool-lease state (ticket 72fc244f). The event ships the
+    // raw registry record (ticket_id only, no ticket_title — titles are joined
+    // on the admin REST fetch, which the dashboard re-runs on this event). Older
+    // managers leave it undefined.
+    active_worktrees?: Array<{
+      working_dir: string;
+      path: string;
+      slot: string;
+      mode: 'shared' | 'per_ticket';
+      ticket_id: string | null;
+      branch: string | null;
+      state: 'allocated' | 'idle' | 'orphaned';
+      live: boolean;
+    }>;
     // Self-update fields — populated by manager-mode heartbeats. Pre-update
     // managers leave them undefined; the admin UI handles the missing case.
     latest_version?: string | null;
