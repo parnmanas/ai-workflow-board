@@ -10,6 +10,7 @@
 //     spawn carried a ticketId
 
 import { promises as fsp } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { createInterface } from 'node:readline';
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -30,6 +31,7 @@ import {
   selectEffortSlice,
 } from './cli-adapters/base.js';
 import { CircuitBreaker } from './circuit-breaker.js';
+import { writeMcpConfig } from './managed-agent-store.js';
 import { classifyCliError } from './cli-error-signatures.js';
 import { summarizeCliJsonLine } from './cli-output-summary.js';
 import { fireAndForgetTool } from './mcp-client.js';
@@ -501,7 +503,15 @@ export class SubagentManager implements SubagentManagerContract {
         const needsSessionPin = !!(spec.ticketId && spec.role);
 
         if (ctx?.mcp_config_path && !needsSessionPin) {
-          configPath = ctx.mcp_config_path;
+          // Reuse the static per-agent mcp-config.json for non-role spawns. If
+          // it vanished from disk (partial spawn / manual cleanup / pre-file
+          // manager upgrade), the CLI would fail with "MCP config file not
+          // found" — regenerate it in place from the in-context apiKey.
+          // Regeneration preserves the host stdio server the temp else-branch
+          // below would drop.
+          configPath = existsSync(ctx.mcp_config_path)
+            ? ctx.mcp_config_path
+            : await writeMcpConfig(ctx.agent_id, this.#config.url, effectiveApiKey);
           configPathIsTemp = false;
         } else {
           configPath = join(
@@ -619,7 +629,13 @@ export class SubagentManager implements SubagentManagerContract {
 
       const pid = child.pid;
       if (!pid) {
-        if (configPath) await fsp.unlink(configPath).catch(() => {});
+        // Only unlink a per-spawn TEMP config. Reused static per-agent
+        // mcp-config.json (configPathIsTemp=false) is shared across every
+        // spawn for the agent — deleting it here on a no-pid spawn failure
+        // is what left agents with a missing mcp-config.json, breaking all
+        // later chat/subagent sessions ("MCP config file not found").
+        // Mirrors the catch (line ~694) and exit-handler (line ~709) guards.
+        if (configPath && configPathIsTemp) await fsp.unlink(configPath).catch(() => {});
         this.#map.delete(reservationId);
         return { spawned: false, reason: 'spawn_failed' };
       }

@@ -9,6 +9,7 @@
 // the manager can fail fast instead of leaving a half-broken child running.
 
 import { promises as fsp } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { createInterface } from 'node:readline';
 import { spawn, type ChildProcessByStdio } from 'node:child_process';
@@ -30,6 +31,7 @@ import {
   selectEffortSlice,
 } from './cli-adapters/base.js';
 import type { AwbConfig } from './rest.js';
+import { writeMcpConfig } from './managed-agent-store.js';
 import type { SubagentMonitor, SubagentTapHandle } from './subagent-monitor.js';
 
 const { PERSISTENT_SESSION } = ADAPTER_CAPABILITIES;
@@ -412,7 +414,15 @@ export class BaseSessionManager {
         const needsSessionPin = !!(monitorMeta?.ticket_id && monitorMeta?.role);
 
         if (agentContext?.mcp_config_path && !needsSessionPin) {
-          configPath = agentContext.mcp_config_path;
+          // Reuse the static per-agent mcp-config.json for chat / non-pinned
+          // sessions. If it vanished from disk (partial spawn, manual cleanup,
+          // or a manager upgrade that predates the file), the CLI would fail
+          // with "MCP config file not found" — regenerate it in place from the
+          // in-context apiKey. Regeneration preserves the host stdio server the
+          // temp-config else-branch below would drop.
+          configPath = existsSync(agentContext.mcp_config_path)
+            ? agentContext.mcp_config_path
+            : await writeMcpConfig(agentContext.agent_id, this._config.url, effectiveApiKey);
           configPathIsTemp = false;
         } else {
           configPath = join(
