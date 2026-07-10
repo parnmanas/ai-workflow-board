@@ -814,7 +814,13 @@ export class SubagentManager implements SubagentManagerContract {
     if (record.kind === 'trigger' && record.ticket_id && record.agent_id) {
       const role = record.role || '';
       const cbKey = CircuitBreaker.key(record.agent_id, record.ticket_id, role);
-      if (record.commentSent && code === 0) {
+      // ticket 7e7e23bf: a subagent that surfaced an audit-trail comment did
+      // real work; a post-hoc non-zero exit is NOT a failure to count. Reset
+      // the breaker even on a non-zero exit — UNLESS the tail carries a
+      // non-retryable fatal signature (usage-limit / auth), where the immediate
+      // pend still protects against burning respawns on a hard external block
+      // (ticket ac958c06).
+      if (record.commentSent && !errClass.nonRetryable) {
         this.circuitBreaker.reset(cbKey);
       } else if (!CircuitBreaker.isTransientExit(code) || errClass.nonRetryable) {
         const tail = this.#collectTail(record);
@@ -842,21 +848,31 @@ export class SubagentManager implements SubagentManagerContract {
       }
     }
 
-    // Silent-exit fallback for ticket subagents. Fires when:
-    //   - exit code != 0 (subagent crashed / was killed), OR
-    //   - exit code == 0 AND no comment-creating tool fired during the spawn
-    //     (the "dead state" the ticket was opened against — trigger dispatched
-    //     but ticket activity has zero trace of work).
+    // Silent-exit fallback for ticket subagents. Fires ONLY when the subagent
+    // left NO comment-creating tool trace during the spawn — the "dead state"
+    // the ticket was opened against (trigger dispatched but ticket activity has
+    // zero trace of work), whether the exit was clean or non-zero.
+    //
+    // A subagent that DID surface a comment and then exited non-zero is a
+    // post-hoc crash, not a silent exit (ticket 7e7e23bf) — the deliverable is
+    // already persisted, so the "exited without leaving a ticket comment"
+    // warning would be a false positive. Suppress it (log only).
+    //
     // Chat-only spawns (room_id but no ticket_id) are already covered by the
     // room_id branch above and by ChatSessionManager's fallback, so we skip
     // them here. This system-attributed comment is what the server trigger-loop
     // guard drops, so it never re-fires the loop.
-    if (record.ticket_id && (!record.commentSent || code !== 0)) {
+    if (record.ticket_id && !record.commentSent) {
       try {
         await this.#postSilentExitFallback(record, code);
       } catch (err: any) {
         log(`Subagent silent-exit fallback failed pid=${pid}: ${err?.message ?? err}`);
       }
+    } else if (record.ticket_id && code !== 0) {
+      log(
+        `Subagent post-comment exit (exit=${code ?? 'null'}) — deliverable already persisted, ` +
+          `suppressing silent-exit fallback ticket=${record.ticket_id.slice(0, 8)}`,
+      );
     }
   }
 

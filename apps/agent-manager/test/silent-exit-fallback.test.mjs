@@ -112,22 +112,63 @@ test('silent-exit: exit code 0 + no comment tool fired → posts system comment'
   assert.match(fallback.body.content, /timeout reached/);
 });
 
-test('silent-exit: exit code != 0 → posts system comment even if comment tool fired', async () => {
+test('silent-exit: comment fired + non-zero exit → NO fallback (post-hoc crash, ticket 7e7e23bf)', async () => {
   const mgr = new TicketSessionManager(makeConfig());
   const sess = makeFakeSession(11002);
-  // Pretend the agent DID add a comment during its life — but then the CLI
-  // crashed before it could complete the cycle (e.g. SIGKILL). We still
-  // want the fallback because exit != 0 means something went wrong.
-  mgr._onStdoutParsed(sess, makeAssistantToolUseLine('mcp__awb__add_comment', { content: 'partial work' }), '');
-  mgr._outputRings.set(sess.pid, ['fatal: segfault']);
+  // The reviewer LGTM'd + moved the ticket (a real audit-trail comment), then
+  // the CLI crashed post-hoc (exit 1) while re-reading its own echo. The
+  // deliverable is already persisted — the old "exited without leaving a
+  // comment" warning was a FALSE POSITIVE. No fallback should post.
+  mgr._onStdoutParsed(sess, makeAssistantToolUseLine('mcp__awb__add_comment', { content: 'LGTM — moving to Merging' }), '');
+  mgr._outputRings.set(sess.pid, ['echo re-read output', 'exit 1']);
+
+  await mgr._onChildExit(sess, 1, null);
+
+  const fallback = recordedRequests.find((r) => r.url.endsWith('/silent-exit-comment'));
+  assert.equal(fallback, undefined, 'no silent-exit fallback when a comment was already surfaced');
+});
+
+test('silent-exit: comment fired + SIGKILL reap → NO fallback', async () => {
+  const mgr = new TicketSessionManager(makeConfig());
+  const sess = makeFakeSession(11007);
+  // A benign SIGTERM/SIGKILL reap after the deliverable landed is also a
+  // post-hoc exit, not a silent one — any comment variant counts as work.
+  mgr._onStdoutParsed(sess, makeAssistantToolUseLine('mcp__awb__record_decision', { content: 'decided' }), '');
+  mgr._outputRings.set(sess.pid, ['killed by watchdog']);
 
   await mgr._onChildExit(sess, 137, 'SIGKILL');
 
   const fallback = recordedRequests.find((r) => r.url.endsWith('/silent-exit-comment'));
-  assert.ok(fallback, 'silent-exit endpoint was hit on non-zero exit');
-  assert.equal(fallback.body.exit_code, 137);
-  assert.match(fallback.body.content, /non-zero exit code 137/);
+  assert.equal(fallback, undefined, 'benign reap after a comment is not a silent exit');
+});
+
+test('silent-exit: NO comment + non-zero exit → still posts (genuine dead state)', async () => {
+  const mgr = new TicketSessionManager(makeConfig());
+  const sess = makeFakeSession(11008);
+  // No comment tool ever fired and the CLI exited non-zero — this IS the dead
+  // state the fallback exists for; it must still surface.
+  mgr._outputRings.set(sess.pid, ['fatal: segfault']);
+
+  await mgr._onChildExit(sess, 1, null);
+
+  const fallback = recordedRequests.find((r) => r.url.endsWith('/silent-exit-comment'));
+  assert.ok(fallback, 'silent-exit endpoint hit for a no-comment non-zero exit');
+  assert.equal(fallback.body.exit_code, 1);
+  assert.match(fallback.body.content, /non-zero exit code 1/);
   assert.match(fallback.body.content, /segfault/);
+});
+
+test('twin-terminated session → NO fallback and no circuit-breaker touch (ticket 7e7e23bf)', async () => {
+  const mgr = new TicketSessionManager(makeConfig());
+  const sess = makeFakeSession(11009, { _twinTerminated: true });
+  // Even with a buffered tail and no comment, a session we deliberately killed
+  // as a redundant twin must not post a scary "exited without a comment" note.
+  mgr._outputRings.set(sess.pid, ['SIGTERM received']);
+
+  await mgr._onChildExit(sess, 143, 'SIGTERM');
+
+  const fallback = recordedRequests.find((r) => r.url.endsWith('/silent-exit-comment'));
+  assert.equal(fallback, undefined, 'no fallback for a deliberately-terminated twin');
 });
 
 test('silent-exit: comment tool fired + exit code 0 → NO fallback POST', async () => {

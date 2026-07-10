@@ -173,6 +173,11 @@ export interface SessionRecord {
   splitRequested?: boolean;
   /** Human-readable reason captured from the split sentinel line (capped). */
   splitReason?: string;
+  /** Set when the manager deliberately SIGTERM'd this session as a redundant
+   *  twin sibling (ticket 7e7e23bf, TicketSessionManager#terminateTwinSiblings).
+   *  Read by `_onChildExit` so the exit hook skips the silent-exit fallback and
+   *  circuit-breaker accounting — we killed it on purpose, it is not a crash. */
+  _twinTerminated?: boolean;
   /** Effective MCP api key the child authenticates with — the managed
    *  agent's key when running for one, else the manager's. Used to attribute
    *  manager-posted audit comments (silent-exit, session-split) to the right

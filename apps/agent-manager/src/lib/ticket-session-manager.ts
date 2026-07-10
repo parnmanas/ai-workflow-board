@@ -263,6 +263,30 @@ export class TicketSessionManager
         }
         this._sessions.delete(sessionKey);
       }
+      // Twin-sibling guard (ticket 7e7e23bf). A force-respawn — most acutely the
+      // `ticket_done_review` retrospective, which force-spawns a FRESH
+      // trigger-source session — must end up the SOLE strand for this
+      // (ticket, role). Kill any OTHER live session for the same (ticket, role)
+      // owned by this agent (or the unknown `_` bucket) so a lingering same-role
+      // strand under a DRIFTED sessionKey can't run concurrently and double-post
+      // retrospective artifacts. This is the real-time close on the reviewer-twin
+      // we observed: a Merging-entry reviewer wake racing the Done retrospective
+      // through the server's set_current_task lag (the server inflight-strand
+      // gate misses it, and RespawnStormDetector only detects it 5 min later).
+      // Distinct co-holders (다중담당자, a different non-empty agentId) are never
+      // touched.
+      const respawnReason = agentRequestedSplit
+        ? 'session_split'
+        : needsFreshTriggerSession
+          ? 'ticket_done_review'
+          : spec.triggerSource || 'force_respawn';
+      this.#terminateTwinSiblings(
+        spec.ticketId,
+        role,
+        spec.agentId || '',
+        sessionKey,
+        respawnReason,
+      );
     }
 
     const sess = this._getLiveSession(sessionKey);
@@ -407,6 +431,55 @@ export class TicketSessionManager
       if (sess.ticketId === ticketId) hits.push(sess);
     }
     return hits;
+  }
+
+  /** Terminate every OTHER live session for the same (ticket, role) owned by
+   *  `agentId` (or the unknown `_` bucket) — everything except `keepKey`. Used
+   *  by the force-respawn path to guarantee a `ticket_done_review` retrospective
+   *  (and any other force-respawn) is the sole surviving strand, closing the
+   *  reviewer-twin gap (ticket 7e7e23bf) that the server's set_current_task-lag
+   *  inflight gate can miss. Terminated sessions are flagged `_twinTerminated`
+   *  so their exit hook skips the silent-exit fallback — we killed them on
+   *  purpose. A DISTINCT co-holder's strand (a different, non-empty agentId) is
+   *  preserved (다중담당자 fan-out). Runs synchronously so the kill lands before
+   *  the fresh spawn below can register a racing sibling. */
+  #terminateTwinSiblings(
+    ticketId: string,
+    role: string,
+    agentId: string,
+    keepKey: string,
+    reason: string,
+  ): void {
+    if (!ticketId) return;
+    for (const [key, sess] of this._sessions) {
+      if (key === keepKey) continue;
+      if (sess.ticketId !== ticketId) continue;
+      if ((sess.role || '') !== (role || '')) continue;
+      const sessAgent = sess.agentId || '';
+      // Only collapse THIS agent's own siblings and the unknown-agent (`_`)
+      // bucket that no distinct co-holder owns; never a different named holder.
+      if (agentId && sessAgent && sessAgent !== agentId) continue;
+      log(
+        `[ticket-session] terminating twin sibling ticket=${ticketId.slice(0, 8)} role=${role || '_'} ` +
+          `pid=${sess.pid} key=${key} reason=${reason}`,
+      );
+      sess._twinTerminated = true;
+      if (sess.idleTimer) {
+        clearTimeout(sess.idleTimer);
+        sess.idleTimer = null;
+      }
+      try {
+        sess.child.stdin.end();
+      } catch {
+        /* already closed */
+      }
+      try {
+        process.kill(sess.pid, 'SIGTERM');
+      } catch {
+        /* already dead */
+      }
+      this._sessions.delete(key);
+    }
   }
 
   forwardCommentMention(ticketId: string, mention: any, targetAgentId = ''): boolean {
@@ -643,13 +716,28 @@ export class TicketSessionManager
     code: number | null,
     _signal: NodeJS.Signals | null,
   ): Promise<void> {
+    // A session we deliberately SIGTERM'd as a redundant twin sibling (ticket
+    // 7e7e23bf, #terminateTwinSiblings) is NOT a silent exit — we killed it on
+    // purpose. Clean up its per-pid tracking and return without posting a
+    // fallback or touching the circuit-breaker.
+    if (sess._twinTerminated) {
+      const cue = this.#movingCue.get(sess.pid);
+      if (cue?.timer) clearTimeout(cue.timer);
+      this.#movingCue.delete(sess.pid);
+      this.#commentSent.delete(sess.pid);
+      this.#lastTriggerId.delete(sess.pid);
+      return;
+    }
+
     // Snapshot silent-exit decision inputs BEFORE state cleanup so we can
     // dispatch the fallback after deleting the tracking entries.
     const commented = this.#commentSent.has(sess.pid);
     const triggerId = this.#lastTriggerId.get(sess.pid) || '';
     const ticketId: string = sess.ticketId || '';
     const role: string = sess.role || '';
-    const tail = commented && code === 0
+    // Only collect a tail for a genuine silent/dead exit — a strand that left an
+    // audit-trail comment already surfaced its work, so we never surface a tail.
+    const tail = commented
       ? ''
       : this._collectOutputTail(sess.pid, SILENT_EXIT_TAIL_MAX_CHARS);
 
@@ -661,19 +749,26 @@ export class TicketSessionManager
     this.#commentSent.delete(sess.pid);
     this.#lastTriggerId.delete(sess.pid);
 
-    // Silent-exit fallback. Conditions match the ticket acceptance criteria:
-    //   - exit code != 0  → spawned but crashed / killed; surface the tail.
-    //   - exit code == 0 AND no comment-creating tool fired → "clean" exit
-    //     with no audit trail, which is exactly the dead-state operators see
-    //     on the board.
-    // If a comment-creating tool DID fire during this cycle and the exit was
-    // clean, the subagent has already left a real trace and we skip — the
-    // fallback is opt-in noise otherwise.
-    if (commented && code === 0) {
-      // Successful comment → reset circuit-breaker for this key.
+    // Post-comment exit is NOT a silent exit (ticket 7e7e23bf). If the strand
+    // fired a comment-creating tool at ANY point during this session, its
+    // deliverable is already persisted on the ticket. A later exit — clean, a
+    // benign SIGTERM/SIGKILL reap, or a post-hoc CLI crash (e.g. a reviewer that
+    // exits 1 while re-reading its own echo notification AFTER an LGTM +
+    // move_ticket) — must NOT be mis-reported as "exited without leaving a
+    // ticket comment", and must NOT count as a circuit-breaker failure that
+    // could pend the ticket or drive a respawn. The real crash-loop backstop is
+    // the multi-death circuit breaker + RespawnStormDetector (which vetoes on
+    // fresh forward progress), never a single post-hoc exit after work landed.
+    if (commented) {
       if (sess.agentId && ticketId) {
         this.circuitBreaker.reset(
           CircuitBreaker.key(sess.agentId, ticketId, role),
+        );
+      }
+      if (code !== 0) {
+        log(
+          `[ticket-session] post-comment exit (exit=${code === null ? 'null' : code}) — deliverable already ` +
+            `persisted, suppressing silent-exit fallback ticket=${ticketId.slice(0, 8)} role=${role || '_'} pid=${sess.pid}`,
         );
       }
       return;

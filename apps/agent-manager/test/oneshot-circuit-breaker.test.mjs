@@ -253,3 +253,63 @@ test('successful answer resets a partially-tripped breaker', async () => {
   await mgr._handleOneshotExit(ok, 0);
   assert.equal(cb.shouldBlock(key), null);
 });
+
+test('post-comment crash (ticket 7e7e23bf): commentSent + non-zero exit → NO silent-exit, breaker reset, no pend', async () => {
+  // The one-shot mirror of the reviewer false-positive: a NATIVE_MCP (claude)
+  // strand fired add_comment during its turn — its deliverable is persisted —
+  // then the CLI crashed post-hoc (exit 1) with a benign, non-fatal tail. This
+  // must NOT surface the "exited without leaving a ticket comment" warning, must
+  // NOT pend, and must RESET the breaker (the strand made forward progress).
+  const cb = new CircuitBreaker();
+  const mgr = new SubagentManager(makeConfig(), cb);
+  const key = CircuitBreaker.key('agent-rolf', 'ticket-loop', 'assignee');
+
+  // Pre-trip the breaker with two retryable failures so a reset is observable.
+  for (let i = 0; i < 2; i++) {
+    const rec = makeCodexRecord({
+      outLines: [JSON.stringify({ type: 'turn.failed', error: { message: 'stream disconnected' } })],
+    });
+    await mgr._handleOneshotExit(rec, 1);
+  }
+  assert.equal(cb.size, 1, 'breaker is tracking the key after two failures');
+
+  // The pre-trip failures each posted their own (legitimate) silent-exit
+  // fallback — drop those captures so the assertion below only sees what the
+  // post-comment crash dispatch does.
+  restPosts.length = 0;
+  mcpToolCalls.length = 0;
+
+  // claude one-shot: NATIVE_MCP → captureOutput false (no stdout aggregation),
+  // commentSent already true from an add_comment tool_use during the turn, then
+  // a post-hoc non-zero exit with a benign (non-fatal) tail.
+  const crashed = makeCodexRecord({
+    cli_type: 'claude',
+    captureOutput: false,
+    outLines: [],
+    tailLines: ['post-hoc echo re-read', 'exit 1'],
+    commentSent: true,
+  });
+  await mgr._handleOneshotExit(crashed, 1);
+
+  assert.equal(silentExit(), undefined, 'no silent-exit fallback when a comment was already surfaced');
+  assert.equal(mcpToolCalls.includes('pend_ticket'), false, 'no pend on a post-comment crash');
+  assert.equal(cb.size, 0, 'breaker entry cleared — the progress-making strand reset it');
+});
+
+test('post-comment usage-limit (ticket 7e7e23bf): commentSent + non-retryable tail still pends but stays silent', async () => {
+  // Edge of the same rule: if the post-comment exit carries a NON-RETRYABLE
+  // signature (usage-limit / auth), the immediate pend still protects against
+  // burning respawns on a hard external block — but the scary silent-exit
+  // warning is still suppressed because a real comment already landed.
+  const cb = new CircuitBreaker();
+  const mgr = new SubagentManager(makeConfig(), cb);
+  const rec = makeCodexRecord({
+    outLines: codexUsageLimitLines(), // codex stdout → classifyCliError = non-retryable
+    commentSent: true,
+  });
+
+  await mgr._handleOneshotExit(rec, 1);
+
+  assert.equal(silentExit(), undefined, 'no silent-exit fallback — a comment was already surfaced');
+  assert.ok(mcpToolCalls.includes('pend_ticket'), 'a hard external block still pends the ticket');
+});

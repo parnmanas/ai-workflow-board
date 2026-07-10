@@ -232,6 +232,68 @@ test('ticket-session: same (ticket, role) but DIFFERENT holder agents get SEPARA
   assert.deepEqual(pids, [rA.pid, rB.pid].sort(), 'board update reaches BOTH holder sessions');
 });
 
+test('ticket-session: force-respawn (ticket_done_review) terminates a drifted-key twin sibling, spares a distinct co-holder (ticket 7e7e23bf)', async () => {
+  // The reviewer-twin gap: a lingering same-(ticket, role) strand survives under
+  // a DRIFTED sessionKey (the unknown-agent `_` bucket) while the Done
+  // retrospective force-spawns a FRESH ticket_done_review session. The server's
+  // in-flight gate misses this because set_current_task lags, and
+  // RespawnStormDetector only notices ~5 min later. #terminateTwinSiblings closes
+  // it in real time: the force-respawn dispatch must SIGTERM the drifted sibling
+  // yet leave a DISTINCT co-holder (다중담당자) untouched.
+  const mgr = new FakeTicketMgr(makeConfig(), 5);
+
+  // High sentinel pids that map to no live process, so the SIGTERM in
+  // #terminateTwinSiblings throws ESRCH (caught) instead of hitting anything.
+  const DRIFT_PID = 2147483641;
+  const CO_PID = 2147483642;
+
+  const drift = makeFakeSession('ticket-twin:reviewer:_', 'sessionKey', DRIFT_PID);
+  drift.ticketId = 'ticket-twin';
+  drift.role = 'reviewer';
+  drift.agentId = ''; // unknown `_` bucket — same holder, drifted key
+  mgr._sessions.set('ticket-twin:reviewer:_', drift);
+
+  const co = makeFakeSession('ticket-twin:reviewer:agent-OTHER', 'sessionKey', CO_PID);
+  co.ticketId = 'ticket-twin';
+  co.role = 'reviewer';
+  co.agentId = 'agent-OTHER'; // a DISTINCT co-holder — must be preserved
+  mgr._sessions.set('ticket-twin:reviewer:agent-OTHER', co);
+
+  const r = await mgr.dispatchTrigger({
+    ticketId: 'ticket-twin',
+    role: 'reviewer',
+    triggerId: 'trig-done-review',
+    triggerSource: 'ticket_done_review',
+    agentId: 'agent-R',
+    rolePrompt: '',
+    ticketPrompt: '',
+    columnPrompt: null,
+    ticket: { title: 'T' },
+    forceRespawn: false,
+    maxConcurrentTicketsPerAgent: 5,
+  });
+
+  assert.equal(r.dispatched, true, 'retrospective session spawned');
+  assert.equal(r.firstTurn, true, 'fresh trigger-source session, not a reuse');
+
+  // Drifted twin sibling collapsed: flagged (so its exit hook skips the
+  // silent-exit fallback) and removed from the session map.
+  assert.equal(drift._twinTerminated, true, 'drifted twin flagged terminated');
+  assert.equal(
+    mgr._sessions.has('ticket-twin:reviewer:_'),
+    false,
+    'drifted twin removed from _sessions',
+  );
+
+  // Distinct co-holder untouched (다중담당자 fan-out preserved).
+  assert.equal(co._twinTerminated, undefined, 'distinct co-holder NOT terminated');
+  assert.equal(
+    mgr._sessions.has('ticket-twin:reviewer:agent-OTHER'),
+    true,
+    'co-holder session preserved',
+  );
+});
+
 test('ticket-session: stale session record (dead pid) is purged by _getLiveSession', async () => {
   const mgr = new FakeTicketMgr(makeConfig(), 5);
   const sessionKey = 'ticket-stale:assignee:agent-1';
