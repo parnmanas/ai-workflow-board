@@ -428,20 +428,14 @@ export interface AgentInstanceUpdatePayload {
     agent_ids?: string[];
     working_dirs?: string[];
     paired_at?: string;
-    // Live worktrees + pool-lease state (ticket 72fc244f). The event ships the
-    // raw registry record (ticket_id only, no ticket_title — titles are joined
-    // on the admin REST fetch, which the dashboard re-runs on this event). Older
-    // managers leave it undefined.
-    active_worktrees?: Array<{
-      working_dir: string;
-      path: string;
-      slot: string;
-      mode: 'shared' | 'per_ticket';
-      ticket_id: string | null;
-      branch: string | null;
-      state: 'allocated' | 'idle' | 'orphaned';
-      live: boolean;
-    }>;
+    // NOTE: `active_worktrees` (ticket 72fc244f) is intentionally NOT on this SSE
+    // payload — it is REST-only telemetry, exactly like `agent_credentials` /
+    // `available_models`. The admin dashboard reads `agent_instance_update` only
+    // as a "re-fetch" hint and renders worktrees from the REST instance list
+    // (GET /admin/agent-manager/instances), which is where the raw registry rows
+    // get their `ticket_id → ticket_title` join. Declaring it here (without also
+    // forwarding it in event-registry.ts `map()`) would trip the payload-parity
+    // guard and ship an untitled, unread raw row on the wire for no gain.
     // Self-update fields — populated by manager-mode heartbeats. Pre-update
     // managers leave them undefined; the admin UI handles the missing case.
     latest_version?: string | null;
