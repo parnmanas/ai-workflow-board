@@ -12,6 +12,7 @@ import { Button, Input, Select, Modal } from './common';
 import type {
   DashboardAgent,
   AgentCurrentTask,
+  AgentManagerInstance,
   Credential,
   ManagedAgentCreateBody,
 } from '../types';
@@ -112,6 +113,12 @@ export default function AgentsPage() {
   const [agents, setAgents] = useState<DashboardAgent[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [snapshotError, setSnapshotError] = useState<string | null>(null);
+  const isAdmin = user?.role === 'admin';
+  // Live manager instances — the running-state source for managed-agent
+  // lifecycle controls. `agent_ids[]` on a manager instance lists the agents
+  // it currently supervises (running). Admin-only: the list endpoint and the
+  // command endpoint are both ADMIN_ACCESS-gated.
+  const [managerInstances, setManagerInstances] = useState<AgentManagerInstance[]>([]);
   const navigate = useNavigate();
   const openDetail = useCallback((id: string) => {
     if (wsId) navigate(`/ws/${wsId}/agents/${id}`);
@@ -188,6 +195,49 @@ export default function AgentsPage() {
     }
     setAgents((prev) => (prev ? mergeAgentStatus(prev, update) : prev));
   });
+
+  // ─── Manager instances (running-state source for lifecycle) ───
+  // No workspace filter: a managed agent's owning manager may be paired in a
+  // different workspace than the agent, so we fetch every instance and resolve
+  // the owner by manager_agent_id below.
+  const loadInstances = useCallback(async () => {
+    if (!isAdmin) {
+      setManagerInstances([]);
+      return;
+    }
+    try {
+      const rows = await api.listAgentManagerInstances();
+      setManagerInstances(rows);
+    } catch {
+      // Non-fatal — the status badge degrades to "manager offline" and the
+      // buttons disable. Errors here shouldn't blank the agent grid.
+      setManagerInstances([]);
+    }
+  }, [isAdmin]);
+
+  useEffect(() => {
+    loadInstances();
+  }, [loadInstances]);
+
+  // Every manager heartbeat upsert / TTL eviction fires agent_instance_update.
+  // Re-fetching keeps running/stopped badges heartbeat-honest (not optimistic)
+  // and picks up an agent joining/leaving a manager's agent_ids[] after a
+  // spawn/stop/restart lands.
+  useBoardStreamEvent('agent_instance_update', () => {
+    loadInstances();
+  });
+
+  // manager_agent_id → owning manager instance (mode='manager'), newest
+  // heartbeat wins when an identity has more than one live process.
+  const managerInstanceByManagerAgentId = useMemo(() => {
+    const m = new Map<string, AgentManagerInstance>();
+    for (const inst of managerInstances) {
+      if (inst.mode !== 'manager') continue;
+      const prev = m.get(inst.agent_id);
+      if (!prev || prev.last_seen_at < inst.last_seen_at) m.set(inst.agent_id, inst);
+    }
+    return m;
+  }, [managerInstances]);
 
   // ─── Handlers ─────────────────────────────────────────────────
   // Track in-flight state so double-clicks on Create don't spawn parallel
@@ -467,6 +517,13 @@ export default function AgentsPage() {
                 <AgentCard
                   agent={agent}
                   onOpenDetail={() => openDetail(agent.id)}
+                  isAdmin={isAdmin}
+                  managerInstance={
+                    agent.manager_agent_id
+                      ? managerInstanceByManagerAgentId.get(agent.manager_agent_id) ?? null
+                      : null
+                  }
+                  onLifecycleDispatched={loadInstances}
                 />
               </div>
             ))}

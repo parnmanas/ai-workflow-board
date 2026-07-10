@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
-import type { DashboardAgent } from '../types';
+import type { DashboardAgent, AgentManagerInstance } from '../types';
 import { tokens } from '../tokens';
 import { Badge } from './common';
 import { formatAgentDisplayName } from '../utils/agentName';
+import AgentLifecycleControls from './AgentLifecycleControls';
 
 /**
  * AgentCard — Phase 3 Plan 03-03 §Component Inventory #2.
@@ -22,6 +23,16 @@ import { formatAgentDisplayName } from '../utils/agentName';
 interface AgentCardProps {
   agent: DashboardAgent;
   onOpenDetail: (agentId: string) => void;
+  /** Owning manager's live instance (resolved by the parent from the agent's
+   *  manager_agent_id). Present only for managed agents whose manager is
+   *  heartbeating; drives the running/stopped badge + lifecycle dispatch. */
+  managerInstance?: AgentManagerInstance | null;
+  /** Lifecycle actions are admin-only (the server command endpoint is
+   *  ADMIN_ACCESS-gated); non-admins never see the control row. */
+  isAdmin?: boolean;
+  /** Called after a lifecycle command dispatches so the parent can re-fetch
+   *  manager instances (real state still arrives via the next heartbeat). */
+  onLifecycleDispatched?: () => void;
 }
 
 function formatClaimedTime(claimedAt: string | Date): string {
@@ -60,12 +71,23 @@ function formatRelative(timestamp: string | Date | null): string {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
-export default function AgentCard({ agent, onOpenDetail }: AgentCardProps) {
+export default function AgentCard({
+  agent,
+  onOpenDetail,
+  managerInstance,
+  isAdmin,
+  onLifecycleDispatched,
+}: AgentCardProps) {
   const [cardHover, setCardHover] = useState(false);
   const [btnHover, setBtnHover] = useState(false);
 
   const isOnline = agent.is_online === true;
   const hasTask = !!agent.current_task;
+  // Managed agents (spawned by an agent-manager) get the lifecycle control row.
+  // Standalone / manager-identity agents have no owning manager to route
+  // commands through, so the row is hidden for them.
+  const isManaged = !!agent.manager_agent_id;
+  const showLifecycle = isManaged && !!isAdmin;
   // Glyph stays bare-name first-char so two managed agents under different
   // managers don't both flash the manager's initial; the full
   // <manager>/<agent> rendering happens on the name line below.
@@ -268,6 +290,25 @@ export default function AgentCard({ agent, onOpenDetail }: AgentCardProps) {
           <div style={idleValueStyle}>Idle</div>
         )}
       </div>
+
+      {/* Managed-agent lifecycle controls (admin-only). Rendered inside the
+          navigate-on-click card; AgentLifecycleControls stops click
+          propagation so a button press doesn't also open the detail page. */}
+      {showLifecycle && (
+        <div
+          style={{
+            borderTop: `1px solid ${tokens.colors.border}`,
+            paddingTop: 10,
+          }}
+        >
+          <AgentLifecycleControls
+            agentId={agent.id}
+            managerInstance={managerInstance}
+            layout="compact"
+            onDispatched={onLifecycleDispatched}
+          />
+        </div>
+      )}
 
       {/* Details CTA button */}
       <button
