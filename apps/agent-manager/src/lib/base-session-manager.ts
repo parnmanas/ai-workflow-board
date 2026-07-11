@@ -74,6 +74,11 @@ export interface SessionDelegationConfig {
   /** ticket 9f26f091: per-(ticket,role) git worktree isolation. Default true
    *  (DELEGATION_DEFAULTS); false reverts to the shared single-cwd behavior. */
   worktreeIsolation?: boolean;
+  /** ticket e9d0e8bc: hold a folder-keyed lock across a QA/security run's whole
+   *  provision→execute lifetime (not just git provisioning) so same-scenario
+   *  runs never execute concurrently in the shared folder. Default true
+   *  (DELEGATION_DEFAULTS); false reverts to provisioning-only locking. */
+  runExecutionLock?: boolean;
 }
 
 export interface SessionAwareConfig extends AwbConfig {
@@ -181,6 +186,11 @@ export interface SessionRecord {
   tap: SubagentTapHandle | null;
   _currentTurn?: TurnState | null;
   onResult?: (raw: any) => void;
+  /** ticket e9d0e8bc: run-lifetime folder-lock release for a QA/security run
+   *  session, invoked once from `_onChildExit` on any process exit. Set by
+   *  ChatSessionManager.dispatch when the dispatch carries a run lock; unset for
+   *  ordinary chat/ticket sessions. Idempotent on the caller side. */
+  onRunExit?: () => void;
   /** Set when the running subagent emitted the session-split sentinel in its
    *  output (TicketSessionManager only). The next dispatchTrigger for this
    *  (ticket, role) force-respawns a fresh session instead of reusing this

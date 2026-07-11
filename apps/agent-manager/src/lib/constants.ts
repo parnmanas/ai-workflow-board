@@ -62,6 +62,12 @@ export const DELEGATION_DEFAULTS = Object.freeze({
   // shares the agent's working_dir. Set false to keep the legacy single-cwd
   // behavior (e.g. on hosts with an old git that lacks `worktree`).
   worktreeIsolation: true,
+  // ticket e9d0e8bc: hold a folder-keyed lock across a QA/security run's whole
+  // provision→execute lifetime so two runs of the SAME scenario never execute
+  // concurrently in the shared `.awb/qa/<scenario>` folder and clobber each
+  // other's checkout/build artifacts. Same folder serializes; different
+  // scenarios stay parallel. Set false to revert to provisioning-only locking.
+  runExecutionLock: true,
 });
 
 export const TTL_SWEEP_INTERVAL_MS = 60_000;

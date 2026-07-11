@@ -229,6 +229,11 @@ export class ChatSessionManager
       });
       const followupText = this.#followupTurnText(spec, prepared);
       const images = canEmitImages ? this.#extractTurnImages(prepared) : undefined;
+      // ticket e9d0e8bc: a run always gets a fresh room → a fresh session, so this
+      // reuse branch is unreachable for runs; attach defensively anyway (guarded
+      // by spec.onExit, which ordinary chat turns never set) so a hypothetical
+      // reuse can't strand a held lock until the manager restarts.
+      if (spec.onExit) sess.onRunExit = spec.onExit;
       this._sendFollowUp(sess, followupText, { onProgress: spec.onProgress, images });
       return { dispatched: true, pid: sess.pid };
     }
@@ -341,6 +346,11 @@ export class ChatSessionManager
         // ticket 89716f04 — mark one-shot QA/security run sessions so their
         // turn end is swept for orphaned background tasks.
         if (spec.run) spawned._run = spec.run;
+        // ticket e9d0e8bc: run-lifetime folder-lock release, fired from
+        // _onChildExit when this session's process exits. Set synchronously
+        // here (no await between the spawn and this assignment), so the exit
+        // handler — which can only run on a later macrotask — always sees it.
+        if (spec.onExit) spawned.onRunExit = spec.onExit;
       }
     } finally {
       this._inflight.delete(sessionKey);
@@ -411,6 +421,17 @@ export class ChatSessionManager
     // ticket 89716f04 — the child is gone; its descendants died or reparented,
     // so a pending turn-end orphan sweep has nothing valid to enumerate.
     this.#cancelOrphanSweep(sess);
+    // ticket e9d0e8bc: release the run-lifetime folder lock — before any
+    // early-return below. `sess` is captured in the base-class exit closure, so
+    // this fires on EVERY exit path (normal reply, idle-reap, unhealthy-kill),
+    // even after the record is dropped from `_sessions`. Idempotent release.
+    if (sess.onRunExit) {
+      try {
+        sess.onRunExit();
+      } catch {
+        /* ignore — lock release must never break exit cleanup */
+      }
+    }
     const sent = this.#chatSent.has(sess.pid);
     // Snapshot the buffered output BEFORE the base class clears it (the
     // base clears the ring after this hook returns).

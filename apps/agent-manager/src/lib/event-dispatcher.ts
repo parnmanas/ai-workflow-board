@@ -32,7 +32,10 @@ import {
   parseRunProvision,
   provisionRunWorkspace,
   reconcileRunBaseWorkingDir,
+  resolveRunFolder,
 } from './run-provisioner.js';
+import { FolderMutex } from './run-execution-lock.js';
+import type { RunLockHandle } from './run-execution-lock.js';
 import { fireAndForgetTool } from './mcp-client.js';
 import { mentionTriggerId } from './subagent-manager.js';
 
@@ -318,6 +321,11 @@ export interface SubagentSpawnArgs {
   /** 내부용 (ticket 61f4dd18): 이번 spawn 이 사용하는 _modelChain 인덱스.
    *  0=주 모델. 폴백 respawn 마다 1씩 증가. */
   _chainAttempt?: number;
+  /** ticket e9d0e8bc: fired ONCE when this spawn's subagent process exits (any
+   *  reason — normal, crash, kill). Used to release a run-lifetime folder lock
+   *  the dispatcher acquired before provisioning. Invoked even when a kill/reaper
+   *  path force-dropped the record, so it must be idempotent on the caller side. */
+  onExit?: () => void;
 }
 
 export interface SubagentSpawnResult {
@@ -369,6 +377,12 @@ export interface ChatDispatchArgs {
    *  one-shot run's turn end is swept for orphaned background tasks. Undefined
    *  for an ordinary chat turn. */
   run?: RunSessionBinding;
+  /** ticket e9d0e8bc: fired ONCE when the dispatched session's subagent process
+   *  exits (any reason). Used to release a run-lifetime folder lock. Only wired
+   *  when this dispatch actually spawns / owns a session (result.dispatched);
+   *  a declined dispatch never calls it, so the dispatcher releases on that path
+   *  itself. Idempotent on the caller side (kill paths may double-fire). */
+  onExit?: () => void;
 }
 
 export interface ChatDispatchResult {
@@ -530,6 +544,11 @@ export class EventDispatcher {
   #managedAgentContexts: ManagedAgentContextRegistry | null;
   #worktreeManager: WorktreeManager | null;
   #environmentProvisioner: EnvironmentProvisioner | null;
+  // ticket e9d0e8bc: folder-keyed run-lifetime lock. One per manager process
+  // (this dispatcher is a singleton), so it serializes same-scenario QA/security
+  // runs across the whole provision→execute window. Keyed by the absolute run
+  // folder; different scenarios never contend.
+  readonly #runExecLock = new FolderMutex();
 
   constructor(config: AwbConfig, deps: EventDispatcherDeps = {}) {
     this.#config = config;
@@ -1445,6 +1464,16 @@ export class EventDispatcher {
     // An ordinary chat turn carries no run_provision → runContext stays untouched.
     let runContext = agentContext;
     const runProvision = parseRunProvision(p.run_provision);
+    // ticket e9d0e8bc: run-lifetime folder lock for a QA/security run. Acquired
+    // below (before provisioning) and held until the spawned run subagent's
+    // process exits, whose onExit hook releases it. The try/finally spans the
+    // whole provision→dispatch body so the lock is freed on EVERY path no spawn
+    // took ownership of (provision-fail, decline, throw, drop). Release is
+    // idempotent, so a defensive double-release is harmless. Ordinary chat turns
+    // keep runLock null and are unaffected.
+    let runLock: RunLockHandle | null = null;
+    let runLockTransferred = false;
+    try {
     if (runProvision) {
       log(
         `Chat room run dispatch: kind=${runProvision.kind} run=${runProvision.run_id.slice(0, 8)} ` +
@@ -1487,6 +1516,32 @@ export class EventDispatcher {
             `[run-provision] working_dir re-validation skipped for agent=${revalAgentId.slice(0, 8)} ` +
               `(server record unavailable) — using cached base '${baseWorkingDir || '(empty)'}'`,
           );
+        }
+      }
+      // ticket e9d0e8bc: acquire the run-lifetime folder lock BEFORE provisioning,
+      // keyed by the SAME absolute folder the provisioner uses (resolveRunFolder
+      // shares run-provisioner's root logic). A second run of the same scenario
+      // waits here — and then executes — instead of racing this run's checkout /
+      // build in the shared folder. Different scenarios never contend. Gated by
+      // delegation.runExecutionLock (default on) as a kill-switch.
+      if ((this.#config as any)?.delegation?.runExecutionLock !== false) {
+        const runFolder = resolveRunFolder(runProvision, baseWorkingDir);
+        runLock = await this.#runExecLock.acquire(runFolder);
+        if (runLock.wasBusy) {
+          log(
+            `[run-exec-lock] ${runProvision.kind} run=${runProvision.run_id.slice(0, 8)} ` +
+              `serialized behind a concurrent same-folder run → ${runFolder}`,
+          );
+          const waitResponder = agentContext?.agent_id || loadAgentInfo()?.agent_id || '';
+          if (p.room_id && waitResponder) {
+            await postChatRoomMessage(
+              this.#config,
+              p.room_id,
+              waitResponder,
+              `ℹ️ **런 실행 직렬화** — 같은 시나리오의 선행 run 이 공유 작업폴더에서 실행 중이라 ` +
+                `완료까지 대기한 뒤 진행했습니다 (동시 실행 시 워킹트리 clobber 방지).`,
+            ).catch(() => {});
+          }
         }
       }
       const result = await provisionRunWorkspace(runProvision, baseWorkingDir);
@@ -1589,11 +1644,16 @@ export class EventDispatcher {
                 workspace_id: runProvision.workspace_id,
               }
             : undefined,
+          // ticket e9d0e8bc: release the run lock when this session's process
+          // exits. Only wired when a run lock is held; undefined for chat turns.
+          onExit: runLock ? () => runLock!.release() : undefined,
         });
         // Record into ring AFTER dispatch so the spawn path sees real prior
         // history rather than self-referencing the message that triggered it.
         this.#chatSessionManager?.recordRoomMessage(p);
         if (result.dispatched) {
+          // The session now owns the run lock; its exit hook releases it.
+          runLockTransferred = !!runLock;
           log(
             `Chat room message dispatched to session: room=${p.room_id} ` +
               `agent=${responderAgentId.slice(0, 8)} pid=${result.pid}` +
@@ -1667,9 +1727,13 @@ export class EventDispatcher {
           agentId: agentContext?.agent_id || '',
           roomId: p.room_id || '',
           agentContext: runContext,
+          // ticket e9d0e8bc: release the run lock when this oneshot exits.
+          onExit: runLock ? () => runLock!.release() : undefined,
         });
 
         if (result.spawned) {
+          // The oneshot now owns the run lock; its exit hook releases it.
+          runLockTransferred = !!runLock;
           await this.#setChatRoomTyping(p.room_id, true, 'composing reply');
           log(
             `Chat room message dispatched to subagent: room=${p.room_id} pid=${result.pid}`,
@@ -1687,5 +1751,11 @@ export class EventDispatcher {
     log(
       `Chat room message dropped (no delegation path): room=${p.room_id} sender=${p.sender_name || p.sender_id}`,
     );
+    } finally {
+      // Release the run lock unless a spawned subagent took ownership above (its
+      // exit hook releases it then). Idempotent + no-op for ordinary chat turns
+      // (runLock null), so this safely covers every non-spawn exit path.
+      if (runLock && !runLockTransferred) runLock.release();
+    }
   }
 }

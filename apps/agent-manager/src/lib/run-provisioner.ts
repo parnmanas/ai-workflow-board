@@ -292,6 +292,30 @@ async function gitWithLockRecovery(
 }
 
 /**
+ * worktree 규약 ③ root for a run folder: the agent's working_dir when resolved,
+ * else AGENT_MANAGER_HOME (the pre-규약-③ fallback for a run dispatched without a
+ * resolved agent context). Shared by `resolveRunFolder` + `provisionRunWorkspace`
+ * so both derive the run folder from the exact same rule.
+ */
+function runFolderRoot(baseWorkingDir: string): string {
+  const hasBase = typeof baseWorkingDir === 'string' && !!baseWorkingDir.trim();
+  return hasBase ? baseWorkingDir : AGENT_MANAGER_HOME;
+}
+
+/**
+ * Resolve the ABSOLUTE run working folder for a `run_provision` + base
+ * working_dir WITHOUT touching disk. This is both the folder the provisioner
+ * checks out (and pins as the subagent cwd) AND the key the dispatcher locks for
+ * the run's whole provision→execute lifetime (ticket e9d0e8bc). It must match
+ * exactly what `provisionRunWorkspace` computes as its `dir`, so it reuses the
+ * same `runFolderRoot` + leading-slash strip. Pure + side-effect free.
+ */
+export function resolveRunFolder(p: RunProvision, baseWorkingDir: string): string {
+  const rel = p.workspace_folder.replace(/^[/\\]+/, '');
+  return resolve(join(runFolderRoot(baseWorkingDir), rel));
+}
+
+/**
  * Prepare the run's working folder per its `run_provision`. Never throws — a
  * git failure is captured into `{ ok:false, error, steps }` so the caller can
  * abort the dispatch and surface the reason (the "dispatch 중단 + 코멘트" path).
@@ -306,7 +330,7 @@ export async function provisionRunWorkspace(
   // AGENT_MANAGER_HOME when no working_dir was resolved (a degenerate dispatch
   // where the caller could not pin a cwd anyway) so a run still gets a folder.
   const hasBase = typeof baseWorkingDir === 'string' && !!baseWorkingDir.trim();
-  const root = hasBase ? baseWorkingDir : AGENT_MANAGER_HOME;
+  const root = runFolderRoot(baseWorkingDir);
   if (!hasBase) {
     // Loud about the silent-misplacement path: the run folder is about to land
     // under the MANAGER HOME, not the agent's working_dir (규약 ③ base absent).

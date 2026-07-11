@@ -239,6 +239,10 @@ interface SubagentRecord {
   /** 원본 spawn 인자. exit 핸들러가 폴백-적격 실패 + 산출물 없음일 때 다음
    *  모델로 재-spawn 하기 위해 보관. 런타임 전용 — #persist 시 제외한다. */
   respawnSpec?: SubagentSpawnArgs;
+  /** ticket e9d0e8bc: run-lifetime folder-lock release, fired once from the
+   *  exit handler. Captured in the handler closure so a force-drop of this
+   *  record by a kill/reaper path still releases the lock. 런타임 전용. */
+  onSpawnExit?: () => void;
 }
 
 type AnyRecord = SubagentRecord | ReservationRecord;
@@ -695,6 +699,7 @@ export class SubagentManager implements SubagentManagerContract {
         modelChain,
         chainAttempt,
         respawnSpec: spec,
+        onSpawnExit: spec.onExit,
       };
       record.tap =
         this.#monitor?.register({
@@ -732,7 +737,21 @@ export class SubagentManager implements SubagentManagerContract {
   }
 
   #wireExitHandler(child: ChildProcess, pid: number): void {
+    // Capture the run-lifetime lock release NOW (ticket e9d0e8bc). A kill /
+    // reaper path can force-drop this record from #map before the exit fires,
+    // which would make the lookup below early-return and leak the lock — so hold
+    // the release in the closure and fire it on ANY exit. The callback is
+    // idempotent (FolderMutex release), so a double-fire is harmless.
+    const rec0 = this.#map.get(pid);
+    const onSpawnExit = rec0 && rec0.kind !== 'reservation' ? rec0.onSpawnExit : undefined;
     child.once('exit', async (code, signal) => {
+      if (onSpawnExit) {
+        try {
+          onSpawnExit();
+        } catch {
+          /* ignore — lock release must never break exit cleanup */
+        }
+      }
       const record = this.#map.get(pid);
       if (!record || record.kind === 'reservation') return;
       const durationSec = Math.round((Date.now() - record.started_at) / 1000);
