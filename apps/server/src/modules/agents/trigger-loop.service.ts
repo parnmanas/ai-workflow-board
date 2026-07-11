@@ -48,15 +48,16 @@ const AUTO_ADVANCE_ACTOR_NAME = 'Auto-Advance';
 //
 // All resolve the ticket's current column, look up routing_config, and emit
 // one agent_trigger per (role, role-holding agent_id) pair — but ONLY if
-// the (agent, board, role) focus selector picks THIS ticket. Non-focus
-// triggers are silently dropped (no DB row, no SSE emit) so a board with
-// N parked tickets doesn't thrash the agent.
+// THIS ticket sits inside the agent's top-N focus window for the board.
+// Out-of-window triggers are silently dropped (no DB row, no SSE emit) so a
+// board with many parked tickets doesn't thrash the agent.
 //
-// Focus gate (ticket 4a6cdfd7):
-//   - `AgentWorkloadService.getFocusTicket(agent, board, role)` returns
-//     the single ticket id that the agent should be working on for this
-//     (board, role) right now. Trigger emits iff the candidate ticket is
-//     that focus ticket.
+// Focus-window gate (ticket 4a6cdfd7 → generalized top-N in 701e5e36):
+//   - `AgentWorkloadService.getAgentFocusTicketIds(agent, board, N)` returns
+//     the agent's top-N ranked ticket ids (agent-unit, collapsed across
+//     roles), where N = `Board.max_concurrent_tickets_per_agent`. Trigger
+//     emits iff the candidate ticket is inside that window. At N=1 this is
+//     exactly the old single-focus gate (no behavioural change).
 //   - Manual triggers (`emitManualTrigger`) explicitly opt out of the
 //     gate via `opts.bypassFocus = true` — they're deliberate user
 //     overrides and the audit trail already records the human / agent
@@ -1343,17 +1344,43 @@ candidate's branch or move the ticket.
    * loaded fresh at dispatch time) and emit via activityEvents so the
    * EventsController SSE listener forwards it to connected agents.
    *
-   * Focus selector gate (ticket 4a6cdfd7):
-   *   Unless `opts.bypassFocus` is true, the emit only lands if the
-   *   focus selector picks THIS ticket as the agent's focus for
-   *   (board, role). Otherwise the call returns '' and writes no
-   *   DB rows — non-focus triggers are silent (AC #8).
+   * Focus-window gate (ticket 4a6cdfd7 → generalized top-N in 701e5e36):
+   *   Unless `opts.bypassFocus` is true, the emit only lands if THIS
+   *   ticket sits inside the agent's top-N focus window for the board,
+   *   where N = `Board.max_concurrent_tickets_per_agent`. Otherwise the
+   *   call returns '' and writes no DB rows — non-window triggers are
+   *   silent (AC #8).
    *
    * Fire-and-forget after the gate: no DB row, no ack, no retry.
    * TicketSupervisorService re-pushes stale allocations
    * (my_last_update_at older than 30 min) and escalates to
    * force_respawn after the cooldown if silence persists.
    */
+  /**
+   * Resolve the board's Agent-concurrency cap
+   * (`Board.max_concurrent_tickets_per_agent`), clamped to a positive
+   * integer with a default of 1. Single source of truth shared by the
+   * focus-window admission gate and the manager-side defensive cap hint on
+   * the trigger payload, so server-side rank admission and the manager
+   * ceiling can never disagree about N. A lookup failure logs a warning
+   * and falls back to 1 (serial) — the safe direction.
+   */
+  private async _resolveConcurrencyCap(boardId: string): Promise<number> {
+    try {
+      const board = await this.dataSource
+        .getRepository(Board)
+        .findOne({ where: { id: boardId } });
+      if (board && Number.isFinite(board.max_concurrent_tickets_per_agent)) {
+        return Math.max(1, Math.floor(board.max_concurrent_tickets_per_agent));
+      }
+    } catch (e) {
+      this.logService.warn('MCP', 'board concurrency cap lookup failed (defaulting to 1)', {
+        err: String(e), board_id: boardId,
+      });
+    }
+    return 1;
+  }
+
   private async _emitTrigger(
     ticket: Ticket,
     agentId: string,
@@ -1549,21 +1576,46 @@ candidate's branch or move the ticket.
       }
     }
 
-    // Focus selector gate. The selector returns the single ticket id
-    // this agent should be working on for (board, role) right now —
-    // ranked by column.position DESC, is_chain_target ASC, priority
-    // ASC, created_at ASC. Manual triggers bypass via opts.bypassFocus.
+    // Focus-window gate (ticket 701e5e36 — generalizes the old top-1
+    // focus gate to top-N). The window is the agent's top-N ranked
+    // tickets for this board, where N = `Board.max_concurrent_tickets_per_agent`
+    // ("Agent concurrency", default 1). A trigger is admitted only when
+    // its ticket sits inside that window; anything ranked below N is
+    // silently inert. Ranking (column.position DESC → chain-head →
+    // priority → created_at ASC) is shared with the board FOCUS badge
+    // and the backlog-promotion gate via `getAgentFocusTicketIds`, so all
+    // three agree on the same cap meaning. Manual triggers bypass via
+    // opts.bypassFocus.
+    //
+    // Why this doesn't reopen the GameClient storm (43 To Do tickets all
+    // re-triggering every 5 min): the window is workflow-state ranked, and
+    // In-Progress / Merging columns outrank To Do (higher column.position).
+    // So an agent already holding N tickets on active columns fills its
+    // whole window with those, and every excess To Do trigger drops. The
+    // cap is enforced by *rank position*, not by counting live subagent
+    // processes — that keeps the static workflow-state-cap guard invariant
+    // (never gate on AgentStatusService.getActiveTicketIds, which re-opens
+    // on WAIT-only turns). A To Do ticket is admitted only once an active
+    // slot frees (a held ticket lands on terminal and leaves the window).
+    //
+    // Agent-unit, not per-role: the window collapses across every role the
+    // agent holds (SELECT DISTINCT by ticket), matching the manager's
+    // per-agent ceiling (ticket-session-manager counts distinct tickets per
+    // agentId) and the FOCUS badge. A 겸직 agent (e.g. assignee + reviewer)
+    // therefore gets N total dispatch slots, not N-per-role — the old
+    // per-role gate over-promised for 겸직 while the manager capped at N.
     //
     // Drops are SILENT: no SSE emit, no DB row, no audit. Per AC #8 of
-    // ticket 4a6cdfd7 we want zero queue churn on drops. The selector
-    // result is logged at info level so an operator running the server
-    // log tail can still see why a particular emit dropped.
+    // ticket 4a6cdfd7 we keep zero queue churn on drops. The window is
+    // logged at info level so an operator tailing the server log can still
+    // see why a particular emit dropped.
     if (!opts?.bypassFocus && boardId) {
-      const focusTicketId = await this.agentWorkload.getFocusTicket(agentId, boardId, role);
-      if (focusTicketId !== ticket.id) {
-        this.logService.info('MCP', 'agent_trigger dropped (not focus)', {
+      const cap = await this._resolveConcurrencyCap(boardId);
+      const focusWindow = await this.agentWorkload.getAgentFocusTicketIds(agentId, boardId, cap);
+      if (!focusWindow.includes(ticket.id)) {
+        this.logService.info('MCP', 'agent_trigger dropped (outside focus window)', {
           ticket_id: ticket.id, agent_id: agentId, role,
-          source: triggerSource, focus_ticket_id: focusTicketId,
+          source: triggerSource, cap, focus_window: focusWindow,
         });
         return '';
       }
@@ -1698,26 +1750,14 @@ candidate's branch or move the ticket.
       }
     }
 
-    // Manager-side defensive cap hint, kept on the wire for backward
-    // compat with plugin / agent-manager versions that read this field
-    // as a second line of defense. Server-side enforcement is now the
-    // focus selector above, NOT this cap. After plugin / manager bumps
-    // can drop the field, this `findOne` goes too.
-    let maxConcurrent = 1;
-    if (boardId) {
-      try {
-        const board = await this.dataSource
-          .getRepository(Board)
-          .findOne({ where: { id: boardId } });
-        if (board && Number.isFinite(board.max_concurrent_tickets_per_agent)) {
-          maxConcurrent = Math.max(1, Math.floor(board.max_concurrent_tickets_per_agent));
-        }
-      } catch (e) {
-        this.logService.warn('MCP', 'board cap lookup failed (defaulting to 1)', {
-          err: String(e), ticket_id: ticket.id,
-        });
-      }
-    }
+    // Manager-side defensive cap, shipped on the wire so the agent-manager
+    // can back-stop the server admission during the set_current_task lag
+    // window (ticket-session-manager counts distinct tickets per agent).
+    // Same cap the server-side focus-window gate above enforces by rank —
+    // both read `Board.max_concurrent_tickets_per_agent` through the shared
+    // `_resolveConcurrencyCap` helper so server and manager never disagree
+    // about N.
+    const maxConcurrent = boardId ? await this._resolveConcurrencyCap(boardId) : 1;
 
     // Resolved harness config (ticket e9c7a896): workspace default merged
     // with the board override, key-level, via the shared helper — the same

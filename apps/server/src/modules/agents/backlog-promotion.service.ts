@@ -41,21 +41,24 @@
  *     terminal-column landing path / explicit operator action.
  *
  * Promotion is best-effort: if no ticket on any intake column has a
- * fully-filled role set with holders whose focus selector returns null
- * (i.e. they aren't already busy on a non-intake / non-terminal
- * ticket), the call is a no-op. The next capacity event will retry.
- * The supervisor 30-min stale check remains as a final eventual-
- * consistency backstop.
+ * fully-filled role set with holders whose focus window still has a free
+ * slot (i.e. they hold fewer than N non-intake / non-terminal tickets),
+ * the call is a no-op. The next capacity event will retry. The supervisor
+ * 30-min stale check remains as a final eventual-consistency backstop.
  *
- * Promotion gate (ticket 4a6cdfd7, replaces the workflow-load cap):
+ * Promotion gate (ticket 4a6cdfd7 → top-N in 701e5e36, replaces the
+ * workflow-load cap):
  *
  *   For each destination role on the promoted ticket, the holder is
- *   eligible iff `AgentWorkloadService.getFocusTicket(holder, board,
- *   slug)` returns null. A non-null return means the holder already
- *   has a focus ticket on this board, so promoting another one onto
- *   them would just stack a non-emittable trigger. The audit trail
- *   records each skip as `backlog_promotion_skipped_focus_held` with
- *   `holder=` and `focus_ticket_id=` in `new_value`.
+ *   eligible iff its top-N focus window
+ *   (`AgentWorkloadService.getAgentFocusTicketIds(holder, board, N)`,
+ *   N = `Board.max_concurrent_tickets_per_agent`) still has a free slot
+ *   (`length < N`). A full window means the holder already runs N tickets
+ *   on this board, so promoting another one onto them would just stack a
+ *   non-emittable trigger. At N=1 this is the old "any focus held ⇒
+ *   ineligible" gate. The audit trail records each skip as
+ *   `backlog_promotion_skipped_focus_held` with `holder=` and
+ *   `focus_ticket_id=` (the window head) in `new_value`.
  */
 import { Injectable, OnModuleDestroy, OnModuleInit, forwardRef, Inject } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
@@ -304,6 +307,14 @@ export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
 
     const assignRepo = this.dataSource.getRepository(TicketRoleAssignment);
 
+    // Agent-concurrency cap (ticket 701e5e36). A destination-role holder is
+    // eligible for a NEW promotion only while it has a free slot inside its
+    // top-N focus window (N = this board's `max_concurrent_tickets_per_agent`,
+    // default 1). At N=1 this is identical to the old "any focus held ⇒
+    // ineligible" gate; at N>1 it lets the holder pick up a 2nd..Nth ticket
+    // so the board actually runs N concurrent instead of stalling at 1.
+    const cap = Math.max(1, Math.floor(board.max_concurrent_tickets_per_agent ?? 1));
+
     for (const ticket of candidates) {
       const assignments = await assignRepo.find({ where: { ticket_id: ticket.id } });
       const assignByRoleId = new Map(assignments.map(a => [a.role_id, a]));
@@ -330,21 +341,24 @@ export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
           eligible = false;
           break;
         }
-        // Focus-selector gate (ticket 4a6cdfd7) — replaces the previous
-        // per-candidate workflow-load cap loop. A holder that currently
-        // has ANY focus ticket on this board (for this role slug) is
-        // ineligible: the focus model says one ticket per agent per
-        // board / role, and that ticket is `focusTicketId`. The
-        // candidate itself is in an intake column so it can never be
-        // its own focus (the selector excludes intake by construction);
-        // a non-null return here therefore names a DIFFERENT ticket
-        // already occupying the slot.
-        const focusTicketId = await this.agentWorkload.getFocusTicket(
-          a.agent_id, boardId, slug,
+        // Focus-window gate (ticket 4a6cdfd7 → top-N in 701e5e36) —
+        // replaces the previous per-candidate workflow-load cap loop. The
+        // holder's top-N focus window is its top-N ranked tickets on this
+        // board (agent-unit, collapsed across roles). It is eligible for a
+        // new promotion iff that window still has a free slot
+        // (`length < cap`). A full window (`length >= cap`) names the
+        // tickets already occupying every slot; the candidate itself sits
+        // in an intake column so it can never appear there (the selector
+        // excludes intake by construction). At cap=1 `length >= 1` is the
+        // old "any focus held ⇒ skip" behaviour verbatim.
+        const focusWindow = await this.agentWorkload.getAgentFocusTicketIds(
+          a.agent_id, boardId, cap,
         );
-        if (focusTicketId) {
+        if (focusWindow.length >= cap) {
           eligible = false;
-          skipReason = { slug, holderId: a.agent_id, focusTicketId };
+          // Report the head of the full window (the highest-ranked ticket
+          // holding a slot) so the audit trail names a concrete occupant.
+          skipReason = { slug, holderId: a.agent_id, focusTicketId: focusWindow[0] || '' };
           break;
         }
         dispatchTargets.push({ slug, holderId: a.agent_id });

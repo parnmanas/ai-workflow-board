@@ -8,10 +8,15 @@
 // board's `max_concurrent_tickets_per_agent` was 1.
 //
 // Both dispatch paths now read workflow state via
-// `AgentWorkloadService` — specifically `getFocusTicket()` (the
-// selector layered on top in ticket 4a6cdfd7) which internally calls
-// `getWorkflowLoadTicketIds()` for its candidate set. This static
-// check guards against a future refactor reverting to the
+// `AgentWorkloadService` — specifically `getAgentFocusTicketIds()` (the
+// top-N focus WINDOW that generalized the top-1 selector in ticket
+// 701e5e36) which internally calls `getWorkflowLoadTicketIds()` for its
+// candidate set. Admission is by rank position within that window, NOT by
+// counting live subagent processes — which is exactly why the anti-
+// process-state invariant below matters MORE with N>1: a cap enforced by
+// `getActiveTicketIds` would re-open every time a WAIT-only turn shrank
+// active_tasks, letting the window over-admit and re-spawning the storm.
+// This static check guards against a future refactor reverting to the
 // process-state helper: it greps the two source files (after stripping
 // comments so doc-prose that still names the old helper doesn't
 // false-positive) and fails if `getActiveTicketIds` is called from

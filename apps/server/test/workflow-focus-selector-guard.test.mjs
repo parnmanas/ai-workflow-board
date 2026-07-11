@@ -81,12 +81,20 @@ for (const SOURCE of [TRIGGER_LOOP, BACKLOG_PROMOTE]) {
 }
 
 for (const SOURCE of [TRIGGER_LOOP, BACKLOG_PROMOTE]) {
-  test(`${path.basename(SOURCE)} calls agentWorkload.getFocusTicket()`, () => {
+  // Ticket 701e5e36 generalized the top-1 focus gate to a top-N focus
+  // WINDOW: both dispatch paths now admit against
+  // `AgentWorkloadService.getAgentFocusTicketIds(agent, board, N)` (the
+  // agent's top-N ranked tickets, N = max_concurrent_tickets_per_agent)
+  // instead of the single-ticket `getFocusTicket`. At N=1 the window is
+  // the old single focus, so behaviour is unchanged for cap=1 boards. The
+  // guard still enforces that the workflow-state focus selector — NOT a
+  // process-state count — remains the admission source of truth.
+  test(`${path.basename(SOURCE)} gates on agentWorkload.getAgentFocusTicketIds()`, () => {
     const code = stripComments(fs.readFileSync(SOURCE, 'utf8'));
     assert.match(
       code,
-      /agentWorkload\.getFocusTicket\s*\(/,
-      `${path.basename(SOURCE)} must gate emission/promotion on AgentWorkloadService.getFocusTicket — the single source of truth for "which ticket should this agent be working on right now".`,
+      /agentWorkload\.getAgentFocusTicketIds\s*\(/,
+      `${path.basename(SOURCE)} must gate emission/promotion on AgentWorkloadService.getAgentFocusTicketIds — the top-N focus window is the single source of truth for "which N tickets should this agent be working on right now" (ticket 701e5e36).`,
     );
   });
 }
@@ -101,7 +109,12 @@ test('AgentWorkloadService exposes both getFocusTicket and getWorkflowLoadTicket
   assert.match(
     src,
     /getFocusTicket\s*\(/,
-    'AgentWorkloadService must expose getFocusTicket — the new focus-selector entry point.',
+    'AgentWorkloadService must expose getFocusTicket — the top-1 focus selector (still used by the qa-flows selector tests and as the N=1 special case).',
+  );
+  assert.match(
+    src,
+    /getAgentFocusTicketIds\s*\(/,
+    'AgentWorkloadService must expose getAgentFocusTicketIds — the top-N focus window that backs both the dispatch admission gate (ticket 701e5e36) and the board FOCUS badge, keeping cap meaning consistent across all three surfaces.',
   );
   assert.match(
     src,
