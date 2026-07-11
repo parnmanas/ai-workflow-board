@@ -1510,6 +1510,25 @@ export class EventDispatcher {
         log(`Chat room run dispatch aborted — provisioning failed: run=${runProvision.run_id.slice(0, 8)} dir=${result.dir}`);
         return;
       }
+      // Surface non-fatal provisioning notes (stale .git/index.lock recovery, or a
+      // serialized wait behind a concurrent same-scenario run) into the run room so
+      // a recovery/conflict is visible in the run record rather than silently
+      // swallowed (ticket 6254fb4e req 3). The run proceeds normally regardless.
+      if (result.notes && result.notes.length > 0) {
+        const noteResponder = agentContext?.agent_id || loadAgentInfo()?.agent_id || '';
+        if (p.room_id && noteResponder) {
+          await postChatRoomMessage(
+            this.#config,
+            p.room_id,
+            noteResponder,
+            `ℹ️ **런 작업폴더 프로비저닝 참고** — 아래 사유로 자동 복구/직렬화 후 정상 진행했습니다.\n` +
+              result.notes.map((n) => `- ${n}`).join('\n'),
+          ).catch(() => {});
+        }
+        log(
+          `[run-provision] notes surfaced for run=${runProvision.run_id.slice(0, 8)}: ${result.notes.join(' | ')}`,
+        );
+      }
       // Pin the prepared folder as the subagent cwd (matches the prompt path).
       if (agentContext) runContext = { ...agentContext, cwd: result.dir };
       log(`Run workspace ready: run=${runProvision.run_id.slice(0, 8)} dir=${result.dir}`);

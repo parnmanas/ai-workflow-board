@@ -58,6 +58,14 @@ export interface RunProvisionResult {
   dir: string;
   /** Human-readable log of each step (surfaced in the failure room message). */
   steps: string[];
+  /**
+   * Noteworthy NON-FATAL provisioning events — a stale `.git/index.lock` that was
+   * auto-recovered, or a serialized wait behind a concurrent same-folder
+   * provisioning. A surfaced SUBSET of `steps`: the dispatcher posts these to the
+   * run room even on success so a conflict/recovery is never silently swallowed
+   * (ticket 6254fb4e req 3). Empty/undefined on an uneventful provisioning.
+   */
+  notes?: string[];
   error?: string;
 }
 
@@ -171,6 +179,118 @@ export function reconcileRunBaseWorkingDir(
   return { base: cached, drifted: false, serverAuthoritative: !!server };
 }
 
+// ── Provisioning serialization + stale-lock recovery (ticket 6254fb4e) ─────────
+//
+// A QA/security run folder is scenario-keyed (`.awb/qa/<scenario>`), NOT run-keyed,
+// so two runs of the SAME scenario resolve to the SAME folder. event-stream
+// dispatches chat_room_message events fire-and-forget, so two provisionRunWorkspace
+// calls for that folder can be in-flight AT ONCE inside one manager process — and
+// their concurrent `git fetch`/`checkout`/`pull` race on git's own `.git/index.lock`.
+// The later one dies with "Unable to create '.../index.lock': File exists" before
+// its driver ever starts; that run finalizes as `error` and auto-files a phantom
+// failure ticket (the reported crash). Serialize provisioning PER FOLDER so the
+// later run WAITS for the earlier one's git ops to finish instead of racing them.
+// Different scenarios (different folders) still provision in parallel. Mirrors the
+// chained-promise mutex in WorktreeManager.#withPoolLock.
+const provisionLocks = new Map<string, Promise<void>>();
+
+async function withFolderLock<T>(
+  key: string,
+  fn: (wasBusy: boolean) => Promise<T>,
+): Promise<T> {
+  const prev = provisionLocks.get(key);
+  const wasBusy = prev !== undefined; // someone was already provisioning this folder
+  let release!: () => void;
+  const mine = new Promise<void>((r) => (release = r));
+  const composed = (prev ?? Promise.resolve()).then(() => mine);
+  provisionLocks.set(key, composed);
+  if (prev) await prev.catch(() => {});
+  try {
+    return await fn(wasBusy);
+  } finally {
+    release();
+    // Drop the entry once the chain drains so a LATER, non-concurrent run sees the
+    // folder as free (wasBusy=false → warm reuse, no spurious "waited" note). A
+    // waiter that chained after us replaced the map value, so only delete our own.
+    if (provisionLocks.get(key) === composed) provisionLocks.delete(key);
+  }
+}
+
+// A stale `.git/index.lock` blocks every index-writing git op (checkout, pull)
+// with "Unable to create '.../index.lock': File exists". git leaves it behind when
+// a git process is killed mid-write — a run subagent hard-killed, a crashed/oom'd
+// manager. Left in place it PERMANENTLY blocks every future run of the scenario
+// (the "다음 run 이 영구 차단" failure this ticket fixes). We reclaim it, but guard
+// against yanking a lock a genuinely-live git just created: git's index.lock
+// carries NO pid, so — combined with our per-folder mutex guaranteeing no
+// concurrent provisioning of OURS holds it — a lock is treated as stale when it is
+// either older than STALE_INDEX_LOCK_MS or is actively blocking a git op we just
+// ran (blocking=true → reclaimed regardless of age, since retrying is the only way
+// forward). Cross-process sharing of one `.awb/qa/<scenario>` by two managers is an
+// unusual setup; the age guard is the best-effort liveness proxy for it.
+const STALE_INDEX_LOCK_MS = 10_000;
+
+async function recoverStaleIndexLock(
+  gitDir: string,
+  steps: string[],
+  notes: string[],
+  opts: { blocking?: boolean } = {},
+): Promise<boolean> {
+  const lockPath = join(gitDir, 'index.lock');
+  let st;
+  try {
+    st = await fsp.stat(lockPath);
+  } catch {
+    return false; // no lock present — nothing to recover
+  }
+  const ageMs = Date.now() - st.mtimeMs;
+  const stale = !!opts.blocking || ageMs >= STALE_INDEX_LOCK_MS;
+  if (!stale) {
+    // Fresh and not (yet) blocking us: a live git may hold it. Don't reclaim — the
+    // serialized git op will either succeed or fail-then-reclaim reactively.
+    steps.push(`index.lock present but fresh (${Math.round(ageMs)}ms) — not reclaiming yet`);
+    return false;
+  }
+  try {
+    await fsp.rm(lockPath, { force: true });
+    const msg =
+      `stale .git/index.lock 자동 복구(제거 후 진행) — age ${Math.round(ageMs / 1000)}s` +
+      `${opts.blocking ? ', git op 을 차단 중이었음' : ''}`;
+    steps.push(msg);
+    notes.push(msg);
+    log(
+      `[run-provision] recovered stale index.lock ${lockPath} ` +
+        `(age ${Math.round(ageMs)}ms, blocking=${!!opts.blocking})`,
+    );
+    return true;
+  } catch (err: any) {
+    steps.push(`index.lock 제거 실패: ${String(err?.message ?? err)}`);
+    return false;
+  }
+}
+
+/**
+ * Run a git op, and if it fails specifically because `.git/index.lock` exists,
+ * reclaim the stale lock (see recoverStaleIndexLock) and retry ONCE. Any other
+ * failure is returned as-is for the caller's normal error handling.
+ */
+async function gitWithLockRecovery(
+  args: string[],
+  gitDir: string,
+  steps: string[],
+  notes: string[],
+): Promise<ExecResult> {
+  let res = await git(args, RUN_GIT_TIMEOUT_MS);
+  if (!res.ok && /index\.lock/i.test(res.stderr)) {
+    const recovered = await recoverStaleIndexLock(gitDir, steps, notes, { blocking: true });
+    if (recovered) {
+      steps.push('retry git op after stale index.lock recovery');
+      res = await git(args, RUN_GIT_TIMEOUT_MS);
+    }
+  }
+  return res;
+}
+
 /**
  * Prepare the run's working folder per its `run_provision`. Never throws — a
  * git failure is captured into `{ ok:false, error, steps }` so the caller can
@@ -181,6 +301,7 @@ export async function provisionRunWorkspace(
   baseWorkingDir: string,
 ): Promise<RunProvisionResult> {
   const steps: string[] = [];
+  const notes: string[] = [];
   // worktree 규약 ③: root the run folder at the agent's working_dir. Fall back to
   // AGENT_MANAGER_HOME when no working_dir was resolved (a degenerate dispatch
   // where the caller could not pin a cwd anyway) so a run still gets a folder.
@@ -221,61 +342,80 @@ export async function provisionRunWorkspace(
   if (!resolvedDir.startsWith(rootResolved + sep)) {
     const error = `run workspace_folder escapes the working dir (path traversal): ${p.workspace_folder}`;
     log(`[run-provision] ${p.kind} run=${p.run_id.slice(0, 8)} REJECTED: ${error}`);
-    return { ok: false, dir: resolvedDir, steps: [`reject ${rel}: path traversal`], error };
+    return { ok: false, dir: resolvedDir, steps: [`reject ${rel}: path traversal`], notes, error };
   }
 
-  try {
-    if (p.checkout_mode === 'fresh') {
-      await fsp.rm(dir, { recursive: true, force: true });
-      steps.push(`wipe ${rel} → ok`);
+  // Serialize provisioning PER FOLDER (keyed by the absolute dir) so two runs of
+  // the same scenario never race git on the shared `.git/index.lock`. The later
+  // run WAITS here for the earlier one's git ops to finish, then does its own.
+  return withFolderLock(resolvedDir, async (wasBusy) => {
+    if (wasBusy) {
+      const note =
+        '같은 작업폴더의 선행 run 프로비저닝 완료까지 직렬화 대기 (.git/index.lock 동시 접근 충돌 방지)';
+      steps.push(`serialize: ${note}`);
+      notes.push(note);
+      log(
+        `[run-provision] ${p.kind} run=${p.run_id.slice(0, 8)} serialized behind a concurrent ` +
+          `provisioning of the same folder (${rel})`,
+      );
     }
-
-    if (!p.repo) {
-      // No clone source — just ensure the folder exists; the rendered prompt
-      // still tells the agent what to do inside it.
-      await fsp.mkdir(dir, { recursive: true });
-      steps.push(`ensure folder ${rel} (no repo to clone) → ok`);
-      log(`[run-provision] ${p.kind} run=${p.run_id.slice(0, 8)} folder ready (no repo): ${dir}`);
-      return { ok: true, dir, steps };
-    }
-
-    const haveClone = p.checkout_mode === 'reuse' && (await pathExists(gitDir));
-    if (haveClone) {
-      // Existing clone — update non-destructively: fetch, then ff-only pull.
-      const fetched = await git(['-C', dir, 'fetch', '--all', '--prune'], RUN_GIT_TIMEOUT_MS);
-      steps.push(`fetch ${rel} → ${fetched.ok ? 'ok' : `FAIL: ${tail(fetched.stderr)}`}`);
-      if (!fetched.ok) throw new Error(`git fetch failed for ${rel}: ${tail(fetched.stderr)}`);
-      if (p.repo.branch) {
-        const co = await git(['-C', dir, 'checkout', p.repo.branch], RUN_GIT_TIMEOUT_MS);
-        steps.push(`checkout ${p.repo.branch} → ${co.ok ? 'ok' : `FAIL: ${tail(co.stderr)}`}`);
-        if (!co.ok) throw new Error(`git checkout ${p.repo.branch} failed in ${rel}: ${tail(co.stderr)}`);
-      }
-      // ff-only so a diverged local tree stays usable rather than getting clobbered.
-      const pulled = await git(['-C', dir, 'pull', '--ff-only'], RUN_GIT_TIMEOUT_MS);
-      steps.push(`pull --ff-only ${rel} → ${pulled.ok ? 'ok' : `non-ff (left as-is): ${tail(pulled.stderr)}`}`);
-    } else {
-      // Clone — folder is absent (reuse first run), was just wiped (fresh), or
-      // exists without a .git. In the last case the leftover would make clone
-      // fail, so clear it first.
-      if (p.checkout_mode === 'reuse' && (await pathExists(dir))) {
+    try {
+      if (p.checkout_mode === 'fresh') {
         await fsp.rm(dir, { recursive: true, force: true });
-        steps.push(`clear non-git ${rel} before clone → ok`);
+        steps.push(`wipe ${rel} → ok`);
       }
-      await fsp.mkdir(dirname(dir), { recursive: true });
-      const args = ['clone'];
-      if (p.repo.branch) args.push('--branch', p.repo.branch);
-      args.push(p.repo.url, dir);
-      log(`[run-provision] ${p.kind} run=${p.run_id.slice(0, 8)} clone ${p.repo.url} → ${dir}`);
-      const cloned = await git(args, RUN_GIT_TIMEOUT_MS);
-      steps.push(`clone ${p.repo.url} → ${rel} ${cloned.ok ? 'ok' : `FAIL: ${tail(cloned.stderr)}`}`);
-      if (!cloned.ok) throw new Error(`git clone failed for ${p.repo.url}: ${tail(cloned.stderr)}`);
-    }
 
-    log(`[run-provision] ${p.kind} run=${p.run_id.slice(0, 8)} ready: ${dir}`);
-    return { ok: true, dir, steps };
-  } catch (err: any) {
-    const error = String(err?.message ?? err);
-    log(`[run-provision] ${p.kind} run=${p.run_id.slice(0, 8)} FAILED: ${error}`);
-    return { ok: false, dir, steps, error };
-  }
+      if (!p.repo) {
+        // No clone source — just ensure the folder exists; the rendered prompt
+        // still tells the agent what to do inside it.
+        await fsp.mkdir(dir, { recursive: true });
+        steps.push(`ensure folder ${rel} (no repo to clone) → ok`);
+        log(`[run-provision] ${p.kind} run=${p.run_id.slice(0, 8)} folder ready (no repo): ${dir}`);
+        return { ok: true, dir, steps, notes };
+      }
+
+      const haveClone = p.checkout_mode === 'reuse' && (await pathExists(gitDir));
+      if (haveClone) {
+        // Proactively clear a stale index.lock a prior crashed run may have left,
+        // so the first index-writing op below doesn't trip over a crash remnant.
+        await recoverStaleIndexLock(gitDir, steps, notes);
+        // Existing clone — update non-destructively: fetch, then ff-only pull.
+        // Each index-writing op self-recovers a stale index.lock and retries once.
+        const fetched = await gitWithLockRecovery(['-C', dir, 'fetch', '--all', '--prune'], gitDir, steps, notes);
+        steps.push(`fetch ${rel} → ${fetched.ok ? 'ok' : `FAIL: ${tail(fetched.stderr)}`}`);
+        if (!fetched.ok) throw new Error(`git fetch failed for ${rel}: ${tail(fetched.stderr)}`);
+        if (p.repo.branch) {
+          const co = await gitWithLockRecovery(['-C', dir, 'checkout', p.repo.branch], gitDir, steps, notes);
+          steps.push(`checkout ${p.repo.branch} → ${co.ok ? 'ok' : `FAIL: ${tail(co.stderr)}`}`);
+          if (!co.ok) throw new Error(`git checkout ${p.repo.branch} failed in ${rel}: ${tail(co.stderr)}`);
+        }
+        // ff-only so a diverged local tree stays usable rather than getting clobbered.
+        const pulled = await gitWithLockRecovery(['-C', dir, 'pull', '--ff-only'], gitDir, steps, notes);
+        steps.push(`pull --ff-only ${rel} → ${pulled.ok ? 'ok' : `non-ff (left as-is): ${tail(pulled.stderr)}`}`);
+      } else {
+        // Clone — folder is absent (reuse first run), was just wiped (fresh), or
+        // exists without a .git. In the last case the leftover would make clone
+        // fail, so clear it first.
+        if (p.checkout_mode === 'reuse' && (await pathExists(dir))) {
+          await fsp.rm(dir, { recursive: true, force: true });
+          steps.push(`clear non-git ${rel} before clone → ok`);
+        }
+        await fsp.mkdir(dirname(dir), { recursive: true });
+        const args = ['clone'];
+        if (p.repo.branch) args.push('--branch', p.repo.branch);
+        args.push(p.repo.url, dir);
+        log(`[run-provision] ${p.kind} run=${p.run_id.slice(0, 8)} clone ${p.repo.url} → ${dir}`);
+        const cloned = await git(args, RUN_GIT_TIMEOUT_MS);
+        steps.push(`clone ${p.repo.url} → ${rel} ${cloned.ok ? 'ok' : `FAIL: ${tail(cloned.stderr)}`}`);
+        if (!cloned.ok) throw new Error(`git clone failed for ${p.repo.url}: ${tail(cloned.stderr)}`);
+      }
+
+      log(`[run-provision] ${p.kind} run=${p.run_id.slice(0, 8)} ready: ${dir}`);
+      return { ok: true, dir, steps, notes };
+    } catch (err: any) {
+      const error = String(err?.message ?? err);
+      log(`[run-provision] ${p.kind} run=${p.run_id.slice(0, 8)} FAILED: ${error}`);
+      return { ok: false, dir, steps, notes, error };
+    }
+  });
 }

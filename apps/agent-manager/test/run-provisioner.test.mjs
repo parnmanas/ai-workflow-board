@@ -10,6 +10,11 @@
 //   - fallback: an empty baseWorkingDir falls back to AGENT_MANAGER_HOME
 //   - path traversal: a ../ workspace_folder is rejected, never rm's outside root
 //   - clone failure (bad url): ok=false with an error, no exception thrown
+//   - concurrency (ticket 6254fb4e): two same-folder provisionings run at once are
+//     SERIALIZED (no .git/index.lock race), and the later one surfaces a wait note
+//   - stale index.lock recovery (ticket 6254fb4e): an aged crash-remnant lock is
+//     swept proactively; a fresh lock actively blocking a git op is reclaimed
+//     reactively (fail → remove → retry). Both surface the reason in notes.
 //
 // The provisioner reads AGENT_MANAGER_HOME from AWB_AGENT_MANAGER_HOME at module
 // load (only used as the fallback root now), so it is dynamic-imported AFTER
@@ -19,7 +24,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, existsSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, existsSync, writeFileSync, readFileSync, utimesSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -227,4 +232,83 @@ test('clone failure (bad url): ok=false with an error, no throw', async () => {
   assert.equal(r.ok, false);
   assert.ok(r.error && r.error.length > 0, 'error captured');
   assert.ok(r.steps.some((s) => s.includes('FAIL')), 'failure recorded in steps');
+});
+
+test('concurrency: two same-folder provisionings are serialized (no index.lock race; later run notes the wait)', async () => {
+  const remote = makeRemote();
+  const base = { kind: 'qa', run_id: 'cc1', workspace_id: 'w1', workspace_folder: '.awb/qa/concurrent-s', checkout_mode: 'reuse', repo: { url: remote.url } };
+
+  // Fire two provisionings for the SAME folder at once. Without the per-folder
+  // mutex their concurrent clone/fetch/pull would collide on .git/index.lock and
+  // one would die; serialized, BOTH must succeed into the same folder.
+  const [a, b] = await Promise.all([
+    provisionRunWorkspace(base, BASE),
+    provisionRunWorkspace(base, BASE),
+  ]);
+
+  assert.equal(a.ok, true, 'first concurrent run ok');
+  assert.equal(b.ok, true, 'second concurrent run ok');
+  assert.equal(a.dir, join(BASE, '.awb/qa/concurrent-s'));
+  assert.equal(b.dir, a.dir, 'both resolve to the same scenario folder (warm reuse preserved)');
+  assert.ok(existsSync(join(a.dir, '.git')), 'clone present');
+
+  // Neither may report a FAILED git op (the reported crash surfaces as a
+  // `checkout … → FAIL: … index.lock … File exists` step + error).
+  for (const r of [a, b]) {
+    assert.ok(!/FAIL/.test(JSON.stringify(r.steps)), 'no failed git op (no index.lock collision)');
+    assert.equal(r.error, undefined, 'no provisioning error');
+  }
+  // Exactly one had to wait behind the other → a single surfaced serialize note.
+  const waited = [a, b].filter((r) => (r.notes || []).some((n) => n.includes('직렬화 대기')));
+  assert.equal(waited.length, 1, 'exactly one run serialized behind the other and surfaced a note');
+});
+
+test('stale index.lock (aged crash remnant) is swept proactively; run proceeds and notes it', async () => {
+  const remote = makeRemote();
+  const base = { kind: 'qa', run_id: 'lk1', workspace_id: 'w1', workspace_folder: '.awb/qa/lock-s', checkout_mode: 'reuse', repo: { url: remote.url } };
+
+  const first = await provisionRunWorkspace(base, BASE);
+  assert.equal(first.ok, true);
+  assert.ok(existsSync(join(first.dir, '.git')));
+
+  // Simulate a crash remnant: an index.lock left behind, aged past the staleness
+  // threshold (10s) so the proactive sweep reclaims it before any git op.
+  const lockPath = join(first.dir, '.git', 'index.lock');
+  writeFileSync(lockPath, '');
+  const old = new Date(Date.now() - 60_000);
+  utimesSync(lockPath, old, old);
+  assert.ok(existsSync(lockPath), 'lock planted');
+
+  const second = await provisionRunWorkspace(base, BASE);
+  assert.equal(second.ok, true, 'run proceeds after recovery (not permanently blocked)');
+  assert.ok(!existsSync(lockPath), 'stale lock removed');
+  assert.ok(
+    (second.notes || []).some((n) => n.includes('index.lock') && /복구/.test(n)),
+    'recovery reason surfaced in notes (not silently swallowed)',
+  );
+});
+
+test('fresh index.lock actively blocking a git op is reclaimed reactively and retried', async () => {
+  const remote = makeRemote();
+  const base = { kind: 'qa', run_id: 'lk2', workspace_id: 'w1', workspace_folder: '.awb/qa/lock-reactive-s', checkout_mode: 'reuse', repo: { url: remote.url } };
+
+  const first = await provisionRunWorkspace(base, BASE);
+  assert.equal(first.ok, true);
+
+  // A new upstream commit so the second run's `pull --ff-only` actually merges (and
+  // thus takes .git/index.lock). Plant a FRESH lock (age ~0) — the proactive sweep
+  // leaves it (looks live), so only the reactive path (op fails on index.lock →
+  // reclaim → retry) can rescue the pull.
+  remote.pushFile('REACTIVE.txt', 'x\n');
+  const lockPath = join(first.dir, '.git', 'index.lock');
+  writeFileSync(lockPath, '');
+
+  const second = await provisionRunWorkspace(base, BASE);
+  assert.equal(second.ok, true, 'run proceeds after reactive recovery');
+  assert.ok(!existsSync(lockPath), 'lock removed');
+  assert.ok(existsSync(join(second.dir, 'REACTIVE.txt')), 'pulled the new commit after recovery');
+  assert.ok(
+    (second.notes || []).some((n) => n.includes('index.lock') && /차단/.test(n)),
+    'reactive (blocking) recovery reason surfaced',
+  );
 });
