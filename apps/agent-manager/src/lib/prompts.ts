@@ -194,20 +194,46 @@ export function composeTriggerPrompt(
  *  When `usesNativeMcp` is true (default — preserves prior claude behavior) the
  *  subagent is told to call the MCP tool with the explicit room id. When false
  *  it is told to emit the reply as its final plain-text answer; the manager
- *  captures that and posts it to the room. */
-function chatReplyInstructions(usesNativeMcp: boolean, roomId: string): string[] {
+ *  captures that and posts it to the room.
+ *
+ *  `isActionRoom` (ticket e6d32e9d) flips the WORK-POLICY line only — the reply
+ *  CHANNEL lines are identical. An Action Run reuses the chat-room pipeline but
+ *  its intent is the opposite of a chat: the message is a task the subagent must
+ *  perform DIRECTLY, not defer into an AWB ticket. So for Action rooms we drop
+ *  the "this is a CHAT channel, create a ticket" rule and substitute a
+ *  "do the work directly, do NOT create a ticket" rule. Ordinary chat rooms
+ *  (isActionRoom = false, the default) keep the prior behavior verbatim. */
+function chatReplyInstructions(usesNativeMcp: boolean, roomId: string, isActionRoom = false): string[] {
   if (usesNativeMcp) {
-    return [
+    const lines = [
       `- Reply ONLY via the mcp__awb__send_chat_room_message MCP tool (room_id: "${roomId}").`,
       '- Do NOT print your reply to stdout — it must go through send_chat_room_message so the user sees it in the web UI.',
-      '- This is a CHAT channel, NOT a work channel. Do NOT perform development work directly here — no code edits, feature implementation, bug fixes, refactors, migrations, or config changes, and no committing/merging/branch surgery on the user\'s behalf. When the user asks for such work, create an AWB ticket with mcp__awb__create_ticket (leave roles unset so the board default assignees staff it) so the normal agent loop does the work, then reply with the ticket id/title. Answering questions, status/triage lookups, and light READ-ONLY investigation are the only things you do inline. If the user EXPLICITLY orders a direct action in this message, do it, but still prefer a ticket for anything substantive.',
     ];
+    if (isActionRoom) {
+      lines.push(
+        '- This is an ACTION run, NOT a chat. The message above is a task assigned specifically to YOU — carry it out DIRECTLY (code edits, feature implementation, bug fixes, refactors, migrations, config changes, and any committing/merging/branch work the task calls for). Do NOT create an AWB ticket to defer it and do NOT tell anyone to file one — you ARE the agent meant to do this work. Perform the requested task, then use send_chat_room_message to report your result / progress / summary.',
+      );
+    } else {
+      lines.push(
+        '- This is a CHAT channel, NOT a work channel. Do NOT perform development work directly here — no code edits, feature implementation, bug fixes, refactors, migrations, or config changes, and no committing/merging/branch surgery on the user\'s behalf. When the user asks for such work, create an AWB ticket with mcp__awb__create_ticket (leave roles unset so the board default assignees staff it) so the normal agent loop does the work, then reply with the ticket id/title. Answering questions, status/triage lookups, and light READ-ONLY investigation are the only things you do inline. If the user EXPLICITLY orders a direct action in this message, do it, but still prefer a ticket for anything substantive.',
+      );
+    }
+    return lines;
   }
-  return [
+  const lines = [
     '- Reply with plain text as your final message. The agent manager captures your output and posts it to the chat room for you.',
     '- Do NOT try to call any MCP tool to send the reply — this runtime has no chat-send tool. Just write the reply text as your final answer.',
-    '- This is a CHAT channel, NOT a work channel. Do NOT perform development work directly here — no code edits, feature implementation, bug fixes, refactors, migrations, or config changes. When the user asks for such work, tell them it should be filed as an AWB ticket so the normal agent loop handles it (this runtime cannot create tickets itself). Answering questions and light read-only investigation are the only things you do inline.',
   ];
+  if (isActionRoom) {
+    lines.push(
+      '- This is an ACTION run, NOT a chat. The message above is a task assigned specifically to YOU — carry it out DIRECTLY (code edits, fixes, refactors, migrations, config changes — whatever the task asks). Do NOT defer it to an AWB ticket; you are the agent meant to do this work. Write your result / summary as your final message.',
+    );
+  } else {
+    lines.push(
+      '- This is a CHAT channel, NOT a work channel. Do NOT perform development work directly here — no code edits, feature implementation, bug fixes, refactors, migrations, or config changes. When the user asks for such work, tell them it should be filed as an AWB ticket so the normal agent loop handles it (this runtime cannot create tickets itself). Answering questions and light read-only investigation are the only things you do inline.',
+    );
+  }
+  return lines;
 }
 
 export function composeChatPrompt(
@@ -299,9 +325,18 @@ export function composeChatRoomPrompt(
   // generate and persist a title on this first turn. Once set, later turns
   // see a non-empty name and the instruction is omitted (one-time naming).
   roomName = '',
+  // ticket e6d32e9d: true when this room was minted by an Action dispatch. Flips
+  // the work-policy instruction from "this is a chat, file a ticket" to "perform
+  // the task directly" and suppresses the auto-title prompt (Action rooms are
+  // already named `Action: … · <id>`). Default false → ordinary chat behavior.
+  isActionRoom = false,
 ): string {
   const lines: string[] = [];
-  lines.push('You are an AWB chat subagent responding to a user message in a chat room.');
+  lines.push(
+    isActionRoom
+      ? 'You are an AWB agent executing an Action Run. The message below is a task assigned to you — perform it directly.'
+      : 'You are an AWB chat subagent responding to a user message in a chat room.',
+  );
   lines.push('');
   lines.push(`Room ID: ${roomId}`);
   lines.push('');
@@ -339,11 +374,13 @@ export function composeChatRoomPrompt(
   lines.push('');
   lines.push('Instructions:');
   lines.push('- Compose a helpful reply using your knowledge and the conversation context.');
-  for (const ln of chatReplyInstructions(usesNativeMcp, roomId)) lines.push(ln);
+  for (const ln of chatReplyInstructions(usesNativeMcp, roomId, isActionRoom)) lines.push(ln);
   // Auto-title an untitled room (native MCP only — non-native runtimes have no
   // tool to persist the name). Fired only when roomName is empty, which is true
-  // just on the opening turn; once set, subsequent turns omit this.
-  if (usesNativeMcp && !roomName.trim()) {
+  // just on the opening turn; once set, subsequent turns omit this. Skipped for
+  // Action rooms (ticket e6d32e9d): those are already named `Action: … · <id>`,
+  // and a task-executing agent shouldn't spend its turn renaming the room.
+  if (usesNativeMcp && !isActionRoom && !roomName.trim()) {
     lines.push(
       '- This chat room has no title yet. Derive a concise title (3-6 words) ' +
         'capturing the conversation topic and set it ONCE via the ' +

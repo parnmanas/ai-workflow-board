@@ -321,6 +321,11 @@ export interface ChatDispatchArgs {
    *  untitled room — the first-turn prompt then asks the subagent to generate
    *  a title and persist it via the set_chat_room_name MCP tool. */
   roomName?: string;
+  /** ticket e6d32e9d: server SSE `is_action_room`. True when this room was
+   *  minted by an Action dispatch (ChatRoom.action_id set). The first-turn
+   *  prompt then tells the subagent to perform the task DIRECTLY instead of
+   *  filing an AWB ticket, and skips the auto-title instruction. */
+  isActionRoom?: boolean;
   onProgress?: (stage: string) => void;
   /** ST-6: per-event managed-agent runtime context. When set, the chat
    *  session spawns under this agent's identity (apiKey + cwd + cli) so the
@@ -440,6 +445,8 @@ export interface PromptComposer {
     attachments?: any[],
     usesNativeMcp?: boolean,
     historyAttachments?: Map<any, any[]>,
+    roomName?: string,
+    isActionRoom?: boolean,
   ): string;
   composeCommentMentionPrompt(
     ticket: any,
@@ -1517,6 +1524,8 @@ export class EventDispatcher {
           content: p.content || '',
           rolePrompt: p.role_prompt || '',
           roomName: typeof p.room_name === 'string' ? p.room_name : '',
+          // ticket e6d32e9d: Action Run rooms get "do the work directly" prompts.
+          isActionRoom: !!p.is_action_room,
           onProgress,
           agentContext: runContext,
           attachments: Array.isArray(p.attachments) ? p.attachments : [],
@@ -1581,6 +1590,12 @@ export class EventDispatcher {
             },
             prepared,
             usesNativeMcp,
+            // No history-attachment map / room title on the oneshot path; pass
+            // through only the Action-room flag (ticket e6d32e9d) so a codex /
+            // antigravity Action Run also gets "do the work directly" prompts.
+            undefined,
+            '',
+            !!p.is_action_room,
           ) ?? `[chat_room] ${p.content || ''}`;
 
         const result = await this.#subagentManager.spawn({

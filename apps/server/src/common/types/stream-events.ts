@@ -243,6 +243,15 @@ export interface ChatRoomMessagePayload {
   // spawning, so the run never improvises a folder. Forwarded verbatim on the
   // wire; consumers that don't understand it ignore the field.
   run_provision?: RunProvision;
+  // ticket e6d32e9d: true when this room was minted by an Action dispatch
+  // (ActionsService stamps ChatRoom.action_id). Action Runs reuse the chat-room
+  // pipeline, but their intent is the OPPOSITE of a chat: the agent must perform
+  // the requested work DIRECTLY, not file an AWB ticket for it. The agent-manager
+  // reads this to swap the composeChatRoomPrompt "this is a CHAT channel, create a
+  // ticket" instruction for a "do the work directly" variant. Conditional-omit on
+  // the wire (absent for ordinary chat turns) so the legacy shape is byte-for-byte
+  // unchanged for non-Action rooms.
+  is_action_room?: boolean;
 }
 
 export interface ChatRoomUpdatePayload {

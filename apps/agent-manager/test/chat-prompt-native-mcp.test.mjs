@@ -78,3 +78,60 @@ test('composeChatPrompt defaults preserve native-MCP behavior', () => {
   const p = composeChatPrompt('', [], 'hi');
   assert.ok(p.includes('mcp__awb__send_chat_room_message MCP tool'));
 });
+
+// ── Action Run branch (ticket e6d32e9d) ──────────────────────────────────────
+// Action Runs reuse the chat-room pipeline but must tell the subagent to DO the
+// work directly, not file a ticket. The `isActionRoom` flag (8th positional arg)
+// swaps the work-policy instruction and suppresses the auto-title prompt.
+const ACTION_MSG = { content: 'Bump all deps then run the build', sender_name: 'Scheduler', sender_id: 'system' };
+
+test('composeChatRoomPrompt Action room (native) → do-the-work-directly, no create_ticket', () => {
+  const p = composeChatRoomPrompt(ROOM, [], ACTION_MSG, undefined, true, undefined, '', true);
+  assert.ok(p.includes('This is an ACTION run'), 'work-policy line frames it as an Action run');
+  assert.ok(p.includes('carry it out DIRECTLY'), 'tells the agent to perform the task directly');
+  assert.ok(
+    !p.includes('create an AWB ticket with mcp__awb__create_ticket'),
+    'must NOT tell an Action Run to file a ticket — that is the exact bug',
+  );
+  assert.ok(
+    !p.includes('This is a CHAT channel, NOT a work channel'),
+    'the chat work-policy rule is dropped for Action rooms',
+  );
+  // Reply CHANNEL is unchanged — still native-MCP send_chat_room_message.
+  assert.ok(
+    p.includes(`mcp__awb__send_chat_room_message MCP tool (room_id: "${ROOM}")`),
+    'reply channel instruction unchanged for Action rooms',
+  );
+  // Auto-title instruction is suppressed even though roomName is empty.
+  assert.ok(
+    !p.includes('This chat room has no title yet'),
+    'no auto-title prompt for Action rooms (they are already named)',
+  );
+});
+
+test('composeChatRoomPrompt Action room (non-native / codex) → direct work via plain stdout', () => {
+  const p = composeChatRoomPrompt(ROOM, [], ACTION_MSG, undefined, false, undefined, '', true);
+  assert.ok(p.includes('This is an ACTION run'), 'Action framing present on the stdout path too');
+  assert.ok(p.includes('Write your result'), 'result reported as the final message');
+  assert.ok(
+    p.includes('Reply with plain text as your final message'),
+    'stdout reply channel preserved (codex has no chat-send tool)',
+  );
+  assert.ok(
+    !p.includes('filed as an AWB ticket'),
+    'the chat ticket-defer rule is dropped for Action rooms',
+  );
+});
+
+test('composeChatRoomPrompt ordinary chat still files a ticket (regression — flag defaults false)', () => {
+  const p = composeChatRoomPrompt(ROOM, [], MSG, undefined, true);
+  assert.ok(
+    p.includes('This is a CHAT channel, NOT a work channel'),
+    'chat work-policy rule intact when isActionRoom is omitted',
+  );
+  assert.ok(
+    p.includes('create an AWB ticket with mcp__awb__create_ticket'),
+    'ordinary chat still creates a ticket for dev work',
+  );
+  assert.ok(!p.includes('This is an ACTION run'), 'Action framing never leaks into ordinary chat');
+});

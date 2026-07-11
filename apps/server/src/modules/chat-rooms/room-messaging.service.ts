@@ -327,9 +327,10 @@ export class RoomMessagingService {
     // so a chatty tool-narration burst never inflates the chain.
     const agentChainDepth = await this._computeAgentChainDepth(roomId);
 
-    // Room title for auto-naming: the agent-manager injects a "generate a
-    // title" instruction into the first chat-subagent turn only when this is
-    // empty, so an untitled room gets named from its opening conversation.
+    // Room metadata: the agent-manager injects a "generate a title" instruction
+    // into the first chat-subagent turn only when the name is empty (so an
+    // untitled room gets named from its opening conversation), and reads
+    // action_id to tell Action Runs from ordinary chats (ticket e6d32e9d).
     const roomForName = await this.roomRepo.findOne({ where: { id: roomId } });
 
     activityEvents.emit('chat_room_message', {
@@ -348,6 +349,10 @@ export class RoomMessagingService {
       agent_chain_depth: agentChainDepth,
       member_ids: memberIds,
       agent_member_ids: agentMemberIds,
+      // ticket e6d32e9d: signal Action Run rooms so the agent-manager gives the
+      // subagent "do the work directly" instructions instead of the chat
+      // "create a ticket" rule. True whenever the room carries an action_id.
+      is_action_room: !!roomForName?.action_id,
       ...(opts?.runProvision ? { run_provision: opts.runProvision } : {}),
     });
 
@@ -462,6 +467,10 @@ export class RoomMessagingService {
       agent_chain_depth: 0,
       member_ids: memberIds,
       agent_member_ids: agentMemberIds,
+      // ticket e6d32e9d: keep the Action-room signal consistent across both
+      // chat_room_message emits. A system alert posted into an Action room
+      // still carries the action_id so any responder gets the right prompt.
+      is_action_room: !!room.action_id,
     });
 
     this.logService.info('ChatRooms', `system message posted to room ${roomId}`, {

@@ -394,6 +394,12 @@ export const EVENT_TYPES: EventDefinition[] = [
         // checkout to build/drive → 0 record_qa_step → reaper. Omit when absent
         // so ordinary chat turns keep the wire shape byte-for-byte unchanged.
         run_provision: event.run_provision ? event.run_provision : undefined,
+        // ticket e6d32e9d: Action Run signal. RoomMessagingService stamps this
+        // true when the room carries an action_id (minted by ActionsService).
+        // agent-manager reads p.is_action_room to drop the chat "create a ticket"
+        // instruction and tell the subagent to do the work directly. Omit when
+        // absent so ordinary chat turns keep the wire byte-for-byte unchanged.
+        is_action_room: event.is_action_room ? true : undefined,
       };
       return {
         payload,

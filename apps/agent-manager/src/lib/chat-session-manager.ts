@@ -291,6 +291,7 @@ export class ChatSessionManager
       true,
       historyAttachments,
       spec.roomName || '',
+      spec.isActionRoom || false,
     );
     // Vision blocks: history images first (chronological), current turn last
     // so the freshest image is the most salient.

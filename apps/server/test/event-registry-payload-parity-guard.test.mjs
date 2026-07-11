@@ -295,6 +295,9 @@ test('chat_room_message conditional-omit fields are preserved (legacy wire-shape
   assert.match(code, /type:\s*event\.type === 'progress' \|\| event\.type === 'message'\s*\?\s*event\.type\s*:\s*undefined/);
   assert.match(code, /attachments:\s*Array\.isArray\(event\.attachments\)[\s\S]*?:\s*undefined/);
   assert.match(code, /run_provision:\s*event\.run_provision \? event\.run_provision : undefined/);
+  // ticket e6d32e9d: Action Run signal — omitted-when-false so ordinary chat
+  // turns keep the wire byte-for-byte unchanged.
+  assert.match(code, /is_action_room:\s*event\.is_action_room \? true : undefined/);
 });
 
 test('agent_trigger flatten() forwards every manager-consumed field', () => {
