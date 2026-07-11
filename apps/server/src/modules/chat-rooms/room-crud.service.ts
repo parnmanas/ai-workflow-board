@@ -13,6 +13,15 @@ import { resolveAgentDisplayMap } from '../../utils/agent-name';
 
 const PARTICIPANT_CAP = 50;
 
+/**
+ * RFC-4122 shape guard (same pattern as room-membership.service). A non-uuid
+ * participant/sender id — notably the synthetic 'system' author QA/Action
+ * dispatch seeds as a room participant (qa-run.service.ts / actions.service.ts)
+ * — must never reach a uuid-typed column lookup (users.id / agents.id). See
+ * listAllWorkspaceRooms for the Postgres crash this prevents.
+ */
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
 function makeError(status: number, message: string): Error & { status: number } {
   const err = new Error(message) as Error & { status: number };
   err.status = status;
@@ -461,14 +470,27 @@ export class RoomCrudService {
       arr.push(p);
       partsByRoom.set(p.room_id, arr);
     }
-    // Bulk-resolve participant names
-    const userIds = [...new Set(participantRows.filter(p => p.participant_type === 'user').map(p => p.participant_id))];
-    const agentIds = [...new Set(participantRows.filter(p => p.participant_type === 'agent').map(p => p.participant_id))];
+    // Bulk-resolve participant names. Guard the uuid columns: participant_id is
+    // a plain varchar that can legitimately hold the synthetic 'system' author
+    // QA-run dispatch seeds as a room participant (qa-run.service.ts:229-235).
+    // users.id / agents.id are uuid, so feeding 'system' to findByIds aborts the
+    // WHOLE observer query on Postgres with `invalid input syntax for type uuid:
+    // "system"` — a 500 that surfaces as "Could not load chats". SQLite doesn't
+    // type-check, so it silently matched nothing and masked the bug. Filter to
+    // well-formed uuids before the bulk lookup; synthetic ids are resolved by
+    // name in nameOf() below. Mirrors resolveParticipantName's single-lookup
+    // UUID_RE guard in room-membership.service.
+    const userIds = [...new Set(participantRows.filter(p => p.participant_type === 'user').map(p => p.participant_id))].filter(id => UUID_RE.test(id));
+    const agentIds = [...new Set(participantRows.filter(p => p.participant_type === 'agent').map(p => p.participant_id))].filter(id => UUID_RE.test(id));
     const [usersById, agentsById] = await Promise.all([
       userIds.length > 0 ? this.userRepo.findByIds(userIds).then(list => new Map(list.map(u => [u.id, u.name || u.email]))) : Promise.resolve(new Map<string, string>()),
       agentIds.length > 0 ? this.agentRepo.findByIds(agentIds).then(list => resolveAgentDisplayMap(this.agentRepo, list)) : Promise.resolve(new Map<string, string>()),
     ]);
     const nameOf = (type: string, id: string): string => {
+      // Non-uuid ids never made it into the maps above (filtered out) — resolve
+      // the known synthetic 'system' author by convention, same as
+      // resolveParticipantName, so the observer view shows "System" not "Unknown".
+      if (!id || !UUID_RE.test(id)) return id === 'system' ? 'System' : 'Unknown';
       if (type === 'user') return usersById.get(id) || 'Unknown User';
       if (type === 'agent') return agentsById.get(id) || 'Unknown Agent';
       return 'Unknown';

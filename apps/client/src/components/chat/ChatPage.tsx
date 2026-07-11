@@ -154,7 +154,16 @@ export default function ChatPage() {
         setRooms(list);
         setRoomsError(null);
       })
-      .catch(() => {
+      .catch((err: any) => {
+        // Surface the real failure in the console so a future "Could not load
+        // chats" (e.g. a server 500) is diagnosable at a glance instead of an
+        // opaque generic toast — request() preserves HTTP status + error code
+        // on the thrown error. The user-facing message is intentionally left
+        // generic (we don't leak backend detail into the UI).
+        console.error(
+          `[chat] listChatRooms failed (scope=${showAllRooms ? 'workspace' : 'mine'}, status=${err?.status ?? '?'}, code=${err?.code ?? ''})`,
+          err,
+        );
         setRoomsError('Could not load chats.');
       })
       .finally(() => setLoading(false));
