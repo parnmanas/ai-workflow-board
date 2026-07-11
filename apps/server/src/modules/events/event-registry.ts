@@ -310,6 +310,21 @@ export const EVENT_TYPES: EventDefinition[] = [
               role: event.current_task.role || undefined,
             }
           : undefined,
+        // Full concurrency-N list. AgentStatusService._emit attaches a Date-
+        // carrying array here (board-ticket tasks only); convert claimed_at to
+        // ISO like current_task. Absent → omit (idle agents emit []).
+        active_tasks: Array.isArray(event.active_tasks)
+          ? event.active_tasks.map((t: any) => ({
+              ticket_id: t.ticket_id,
+              ticket_title: t.ticket_title,
+              claimed_at:
+                t.claimed_at instanceof Date
+                  ? t.claimed_at.toISOString()
+                  : String(t.claimed_at),
+              role: t.role || undefined,
+              kind: t.kind === 'qa' ? 'qa' : 'ticket',
+            }))
+          : undefined,
       };
       return { payload, scope: { agent_id: event.agent_id } };
     },

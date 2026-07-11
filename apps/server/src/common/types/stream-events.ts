@@ -149,17 +149,37 @@ export interface ChatMessagePayload {
   created_at: string; // ISO-8601; carried alongside envelope.timestamp for client-side rendering
 }
 
+// One entry in an agent's live task list. Board-ticket tasks (kind:'ticket')
+// carry the ticket id + title; QA-run tasks (kind:'qa') carry the run id as
+// `ticket_id` and the scenario name as `ticket_title` (a QA run is not a board
+// ticket). `kind` is absent on the legacy singular current_task shape — treat
+// absent as 'ticket'.
+export interface AgentActiveTask {
+  ticket_id: string;
+  ticket_title: string;
+  claimed_at: string;  // ISO-8601
+  role?: string;       // role slug the subagent was spawned for; undefined for older plugins
+  kind?: 'ticket' | 'qa';
+}
+
 // Phase 3 — producer wired in Plan 03-01 (AgentStatusService + agentStatusListener)
 export interface AgentStatusPayload {
   agent_id: string;
   is_online: boolean;
   last_seen_at: string | null;  // ISO-8601
+  // Legacy singular — most-recently-claimed task. Kept so older clients that
+  // read only current_task keep rendering. New clients read active_tasks.
   current_task?: {
     ticket_id: string;
     ticket_title: string;
     claimed_at: string;  // ISO-8601
     role?: string;       // role slug the subagent was spawned for; undefined for older plugins
   };
+  // Full live task list for concurrency N (max_concurrent_tickets_per_agent > 1).
+  // On this SSE wire it carries board-ticket tasks only (all kind:'ticket');
+  // QA-run tasks are merged into the REST /dashboard and /:id responses, not the
+  // live event (agent_status only fires on ticket-task changes). Absent/[] = idle.
+  active_tasks?: AgentActiveTask[];
 }
 
 // Phase 4 D-71/D-72/D-73 — emitted by ChatService.sendUserMessage on activityEvents 'chat_request'.

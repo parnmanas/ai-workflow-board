@@ -6,6 +6,8 @@ import { DataSource, Repository, In, IsNull } from 'typeorm';
 import { Agent } from '../../entities/Agent';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { Workspace } from '../../entities/Workspace';
+import { QaRun } from '../../entities/QaRun';
+import { QaScenario } from '../../entities/QaScenario';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { WorkspaceGuard } from '../../common/guards/workspace.guard';
 import { AdminGuard } from '../../common/guards/admin.guard';
@@ -55,6 +57,18 @@ export interface AgentSubagentRollup {
 }
 
 const SUBAGENTS_PREVIEW_LIMIT = 5;
+
+/** One row in an agent's merged active-task list surfaced on the dashboard /
+ *  detail responses. Mirrors AgentStatusPayload.active_tasks (stream-events.ts).
+ *  kind:'ticket' → board-ticket subagent; kind:'qa' → in-progress QA run (its
+ *  run id in ticket_id, scenario name in ticket_title). */
+interface AgentActiveTaskRow {
+  ticket_id: string;
+  ticket_title: string;
+  claimed_at: string;
+  role?: string;
+  kind: 'ticket' | 'qa';
+}
 
 @ApiBearerAuth('user-session')
 @ApiTags('agents')
@@ -249,6 +263,74 @@ export class AgentsController {
     });
   }
 
+  /**
+   * Merged active-task rollup per agent: in-memory board-ticket tasks (from
+   * AgentStatusService — concurrency N, stale-filtered) + live QA-run tasks.
+   * The singular `current_task` still ships separately for back-compat; this is
+   * the full list the multi-task dashboard renders. One QA query for the whole
+   * agent set.
+   */
+  private async _activeTasksByAgent(
+    agentIds: string[],
+    workspaceId: string,
+  ): Promise<Map<string, AgentActiveTaskRow[]>> {
+    const qaByAgent = await this._qaActiveTasksByAgent(workspaceId);
+    const out = new Map<string, AgentActiveTaskRow[]>();
+    for (const id of agentIds) {
+      const ticketTasks: AgentActiveTaskRow[] = this.agentStatusService
+        .getActiveTasks(id)
+        .map((t) => ({
+          ticket_id: t.ticket_id,
+          ticket_title: t.ticket_title,
+          claimed_at: t.claimed_at.toISOString(),
+          role: t.role || undefined,
+          kind: 'ticket' as const,
+        }));
+      out.set(id, [...ticketTasks, ...(qaByAgent.get(id) || [])]);
+    }
+    return out;
+  }
+
+  /**
+   * Live QA-run tasks keyed by executor agent (QaScenario.target_agent_id) for a
+   * workspace. A QaRun in status 'running' is an in-progress task the dashboard
+   * should surface even though it is not a board ticket (its run id rides in
+   * ticket_id, its scenario name in ticket_title). Two cheap queries — runs,
+   * then their scenarios by PK — deliberately AVOIDING a QaRun↔QaScenario JOIN,
+   * whose `scenario_id`(varchar) = `id`(uuid) predicate crashes on Postgres
+   * (ticket ca31a6ea). Empty map when workspaceId is blank or nothing is running.
+   */
+  private async _qaActiveTasksByAgent(
+    workspaceId: string,
+  ): Promise<Map<string, AgentActiveTaskRow[]>> {
+    const byAgent = new Map<string, AgentActiveTaskRow[]>();
+    if (!workspaceId) return byAgent;
+    const runs = await this.dataSource.getRepository(QaRun).find({
+      where: { workspace_id: workspaceId, status: 'running' as any },
+    });
+    if (runs.length === 0) return byAgent;
+    const scenarioIds = Array.from(
+      new Set(runs.map((r) => r.scenario_id).filter((s): s is string => !!s)),
+    );
+    const scenarios = scenarioIds.length
+      ? await this.dataSource.getRepository(QaScenario).find({ where: { id: In(scenarioIds) } })
+      : [];
+    const scById = new Map(scenarios.map((s) => [s.id, s]));
+    for (const run of runs) {
+      const sc = scById.get(run.scenario_id);
+      if (!sc || !sc.target_agent_id) continue;
+      const list = byAgent.get(sc.target_agent_id) || [];
+      list.push({
+        ticket_id: run.id, // QA run id — not a board ticket; detail link target
+        ticket_title: sc.name || '(QA scenario)',
+        claimed_at: (run.started_at || run.created_at).toISOString(),
+        kind: 'qa',
+      });
+      byAgent.set(sc.target_agent_id, list);
+    }
+    return byAgent;
+  }
+
   @Get('dashboard')
   @RequirePermission(PERMISSIONS.VIEW_ACTIVITY)  // override class-level MANAGE_AGENTS (research §Pattern 4)
   async dashboard(@Query('workspace_id') workspaceId: string, @Res() res: Response) {
@@ -269,6 +351,13 @@ export class AgentsController {
     });
 
     const enriched = await this._enrichManagerNames(agents);
+    // Concurrency-N + QA rollup. One QA query for the whole set; ticket tasks
+    // come from AgentStatusService in-memory. current_task (singular) stays for
+    // back-compat.
+    const activeTasksByAgent = await this._activeTasksByAgent(
+      enriched.map((a) => a.id),
+      workspaceId,
+    );
     const rows = enriched.map((agent) => {
       // Phase 3 D-42 — pull live current_task from AgentStatusService (in-memory)
       const liveStatus = this.agentStatusService.getOne(agent.id);
@@ -294,6 +383,8 @@ export class AgentsController {
         // v0.25.0: AgentTrigger table removed; field kept for UI compat but always 0.
         pending_trigger_count: 0,
         current_task: currentTask,
+        // Full live task list (concurrency N) + in-progress QA runs.
+        active_tasks: activeTasksByAgent.get(agent.id) || [],
       };
     });
 
@@ -374,15 +465,24 @@ export class AgentsController {
         }
       : undefined;
 
+    // Same concurrency-N + QA rollup as /dashboard, scoped to this one agent.
+    // Scope QA by the agent's own workspace (a QaRun.workspace_id equals the
+    // scenario's, which is this agent's) — fall back to the request workspace.
+    const activeTasks =
+      (await this._activeTasksByAgent(
+        [agent.id],
+        agent.workspace_id || workspaceId || '',
+      )).get(agent.id) || [];
+
     const named = await this._enrichManagerNames([agent]);
     const [enriched] = await this._enrichLiveData(named);
     if (canSeeRolePrompt) {
-      return res.json({ ...enriched, current_task: currentTask, redacted: false });
+      return res.json({ ...enriched, current_task: currentTask, active_tasks: activeTasks, redacted: false });
     }
 
     // Non-admin: strip role_prompt + role_prompt_meta before returning
     const { role_prompt, role_prompt_meta, ...safe } = enriched as any;
-    return res.json({ ...safe, role_prompt: '', role_prompt_meta: null, current_task: currentTask, redacted: true });
+    return res.json({ ...safe, role_prompt: '', role_prompt_meta: null, current_task: currentTask, active_tasks: activeTasks, redacted: true });
   }
 
   @Post()

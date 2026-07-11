@@ -43,11 +43,16 @@ interface AgentStatus {
   agent_id: string;
   is_online: boolean;
   last_seen_at: Date | null;
-  // Map<ticket_id, ActiveTask>. Internal-only; never serialized to SSE.
+  // Map<ticket_id, ActiveTask>. Internal store. The full non-stale list is
+  // now derived for the wire (AgentStatusPayload.active_tasks) via
+  // _nonStaleTaskList / getActiveTasks — concurrency N is what the dashboard
+  // renders. The Map stays the source of truth; the id-only view feeds the
+  // per-board concurrency gate (getActiveTicketIds).
   active_tasks?: Map<string, ActiveTask>;
   // Derived from active_tasks — most-recently-claimed entry, or undefined
-  // when active_tasks is empty. Kept on the object so the existing
-  // event-registry mapper and dashboard reads stay unchanged.
+  // when active_tasks is empty. Kept on the object for back-compat: the
+  // singular current_task still ships on both SSE and REST so older clients
+  // that read only it keep working.
   current_task?: ActiveTask;
 }
 
@@ -212,6 +217,29 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Full non-stale ActiveTask list for this agent (concurrency N), newest-first.
+   * Same stale cutoff as getActiveTicketIds — mirrors what the sweep would keep.
+   * Powers the multi-task dashboard surfaces (the SSE active_tasks list + the
+   * REST /dashboard and /:id rollups). getActiveTicketIds stays the id-only
+   * concurrency-gate input, untouched.
+   */
+  getActiveTasks(agent_id: string): ActiveTask[] {
+    return this._nonStaleTaskList(this.state.get(agent_id)?.active_tasks);
+  }
+
+  /** Non-stale entries (CURRENT_TASK_STALE_MS cutoff) of a task Map, newest-first. */
+  private _nonStaleTaskList(tasks?: Map<string, ActiveTask>): ActiveTask[] {
+    if (!tasks || tasks.size === 0) return [];
+    const cutoff = new Date(Date.now() - CURRENT_TASK_STALE_MS);
+    const out: ActiveTask[] = [];
+    for (const t of tasks.values()) {
+      if (t.claimed_at >= cutoff) out.push(t);
+    }
+    out.sort((a, b) => b.claimed_at.getTime() - a.claimed_at.getTime());
+    return out;
+  }
+
+  /**
    * Is there a LIVE (non-stale) subagent strand for this exact (agent,
    * ticket, role) right now? Used by TriggerLoopService's in-flight gate
    * (ticket c9622a40) to serialize same-(ticket, role) strands: the focus
@@ -298,7 +326,15 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
    * envelope construction boundary.
    */
   private _emit(status: AgentStatus): void {
-    activityEvents.emit('agent_status', status);
+    // Emit a fresh object: keep the Date-carrying singular current_task (the
+    // EventsController map() converts Date → ISO) AND attach the full non-stale
+    // task list (concurrency N) as an array. The stored `status` in `this.state`
+    // is untouched — its active_tasks stays a Map (the gate reads it). Board-
+    // ticket tasks only; QA runs are merged at the REST layer, not here.
+    activityEvents.emit('agent_status', {
+      ...status,
+      active_tasks: this._nonStaleTaskList(status.active_tasks),
+    });
   }
 
   /**
