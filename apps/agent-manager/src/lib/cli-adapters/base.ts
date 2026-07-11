@@ -91,7 +91,7 @@ export function partitionHarness(
  * is gracefully skipped. Shapes must agree byte-for-byte with the server's
  * effort-preset config (JSON keys identical on both sides).
  */
-export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export type EffortLevel = 'low' | 'medium' | 'high' | 'max';
 
 /** The claude-family slice of a preset — the only CLI that maps the full
  *  surface. `effort` → claude `--effort`; `ultracode` → the prompt keyword

@@ -18,7 +18,7 @@ import { z } from 'zod';
  * harness_config).
  *
  * Per-CLI mapping (agent-manager applies this at spawn time):
- *   - claude: `effort` → `--effort <low|medium|high|xhigh|max>` (session-level);
+ *   - claude: `effort` → `--effort <low|medium|high|max>` (session-level);
  *     `ultracode: true` appends the literal PROMPT KEYWORD "ultracode" to the
  *     task text (oneshot) / first user turn (session) — it is NOT a CLI flag.
  *     `model` → `--model`.
@@ -26,9 +26,9 @@ import { z } from 'zod';
  *     whatever the preset expresses that they can't (effort / ultracode).
  */
 
-export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export type EffortLevel = 'low' | 'medium' | 'high' | 'max';
 
-export const EffortLevelSchema = z.enum(['low', 'medium', 'high', 'xhigh', 'max']);
+export const EffortLevelSchema = z.enum(['low', 'medium', 'high', 'max']);
 
 /** Per-CLI option blocks. Claude supports the rich set; codex/antigravity model-only. */
 export const EffortPresetSchema = z
@@ -83,7 +83,7 @@ export const BUILTIN_EFFORT_PRESETS: EffortPresetsConfig = {
     { id: 'light', label: 'Light', claude: { effort: 'low' } },
     { id: 'standard', label: 'Standard', claude: { effort: 'medium' } },
     { id: 'deep', label: 'Deep', claude: { effort: 'high' } },
-    { id: 'max', label: 'Max', claude: { effort: 'xhigh', ultracode: true } },
+    { id: 'max', label: 'Max', claude: { effort: 'max', ultracode: true } },
   ],
 };
 

@@ -70,6 +70,30 @@ const CLAUDE_CURATED_MODELS = [
   'claude-fable-5',
 ];
 
+// Claude `--effort` accepts a fixed tier set that has shifted across CLI
+// releases — the top tier used to be `xhigh`, now it's `max`. Passing a value
+// the installed CLI no longer knows hard-fails the spawn outright
+// (`option '--effort <level>' argument 'xhigh' is invalid`), which is exactly
+// how a stale board preset took down every dispatch on a board (ticket
+// 3188fd1b). So clamp before emitting the flag: known levels pass through, the
+// retired `xhigh` remaps to its nearest live tier, and anything unrecognized is
+// omitted so the CLI keeps its default rather than crashing the process. This
+// mirrors the best-effort model handling — the CLI's option set is the moving
+// target, so its churn must never hard-fail a dispatch.
+const CLAUDE_EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'max']);
+const CLAUDE_EFFORT_ALIASES: Record<string, string> = { xhigh: 'max' };
+
+/** Clamp a preset effort onto what this claude CLI accepts, or null to omit
+ *  `--effort` entirely (unknown/retired value → CLI default, never a spawn
+ *  hard-fail). */
+function normalizeEffort(effort?: string | null): string | null {
+  if (!effort) return null;
+  const v = String(effort).trim().toLowerCase();
+  if (!v) return null;
+  const mapped = CLAUDE_EFFORT_ALIASES[v] ?? v;
+  return CLAUDE_EFFORT_LEVELS.has(mapped) ? mapped : null;
+}
+
 export class ClaudeCliAdapter extends CliAdapter {
   static cliType = 'claude';
 
@@ -94,13 +118,14 @@ export class ClaudeCliAdapter extends CliAdapter {
     // spawned Claude Code subagent into multi-agent orchestration, so it goes
     // onto the task text rather than argv.
     const finalTaskText = ultracode ? `${taskText}\n\nultracode` : taskText;
+    const effortArg = normalizeEffort(effort);
     return {
       args: [
         // Per-agent default model (Agent.model) or harness/effort override —
         // spawn sites fold the precedence into `model`. Omitted when unset
         // so the CLI keeps its own default — preserves prior behaviour.
         ...(model ? ['--model', model] : []),
-        ...(effort ? ['--effort', effort] : []),
+        ...(effortArg ? ['--effort', effortArg] : []),
         '--print',
         '--output-format',
         'json',
@@ -130,10 +155,11 @@ export class ClaudeCliAdapter extends CliAdapter {
     const finalSystemPrompt = ultracode
       ? `${systemPrompt}${systemPrompt ? '\n\n' : ''}ultracode`
       : systemPrompt;
+    const effortArg = normalizeEffort(effort);
     return {
       args: [
         ...(model ? ['--model', model] : []),
-        ...(effort ? ['--effort', effort] : []),
+        ...(effortArg ? ['--effort', effortArg] : []),
         '--verbose',
         '--input-format',
         'stream-json',

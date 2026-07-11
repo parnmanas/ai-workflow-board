@@ -1310,7 +1310,7 @@ function SelfImprovementSetting({ board, onSave }: SelfImprovementSettingProps) 
 // antigravity get model-only. Starts from the board's stored presets, else
 // BUILTIN_EFFORT_PRESETS. Save writes the whole config (or null to clear the
 // override and fall back to the builtins on the server).
-const EFFORT_LEVELS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+const EFFORT_LEVELS: EffortLevel[] = ['low', 'medium', 'high', 'max'];
 
 // Read path — degrade malformed / empty input to the builtins, never throw
 // (mirror the server READ contract). Accepts either the parsed config or the

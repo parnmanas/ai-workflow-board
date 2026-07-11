@@ -70,10 +70,17 @@ export function parseHarnessConfig(raw: unknown): HarnessSpec | null {
   return Object.keys(out).length > 0 ? out : null;
 }
 
-/** Valid claude `--effort` levels. A preset slice carrying anything else has
- *  its `effort` dropped (the rest of the slice survives) so a malformed level
- *  can never reach the CLI flag. */
-const EFFORT_LEVELS = new Set<EffortLevel>(['low', 'medium', 'high', 'xhigh', 'max']);
+/** Valid claude `--effort` levels (current AWB vocabulary). A preset slice
+ *  carrying anything else has its `effort` dropped (the rest of the slice
+ *  survives) so a malformed level can never reach the CLI flag. */
+const EFFORT_LEVELS = new Set<EffortLevel>(['low', 'medium', 'high', 'max']);
+
+/** Retired effort levels that may still sit in stale board settings, mapped to
+ *  their nearest live tier. The claude CLI dropped its old top tier `xhigh` in
+ *  favour of `max` (ticket 3188fd1b); a stale `xhigh` preset is folded to `max`
+ *  before validation so it survives as a valid level instead of being silently
+ *  dropped. */
+const LEGACY_EFFORT_ALIASES: Record<string, EffortLevel> = { xhigh: 'max' };
 
 /**
  * Defensive parse of the `effort_preset` field on a flattened agent_trigger
@@ -104,8 +111,10 @@ export function parseEffortPreset(raw: unknown): ResolvedEffortPreset | null {
   if (obj.claude && typeof obj.claude === 'object' && !Array.isArray(obj.claude)) {
     const c: { model?: string; effort?: EffortLevel; ultracode?: boolean } = {};
     if (typeof obj.claude.model === 'string' && obj.claude.model.trim()) c.model = obj.claude.model.trim();
-    if (typeof obj.claude.effort === 'string' && EFFORT_LEVELS.has(obj.claude.effort as EffortLevel)) {
-      c.effort = obj.claude.effort as EffortLevel;
+    if (typeof obj.claude.effort === 'string') {
+      const level = obj.claude.effort.trim().toLowerCase();
+      const mapped = (LEGACY_EFFORT_ALIASES[level] ?? level) as EffortLevel;
+      if (EFFORT_LEVELS.has(mapped)) c.effort = mapped;
     }
     if (typeof obj.claude.ultracode === 'boolean') c.ultracode = obj.claude.ultracode;
     if (Object.keys(c).length > 0) out.claude = c;

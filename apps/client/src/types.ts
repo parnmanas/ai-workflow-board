@@ -1224,7 +1224,7 @@ export interface EnvironmentConfig {
 // Mirror of the server-side contract — both sides must agree byte-for-byte on
 // these JSON keys. Claude gets rich options (effort + ultracode + model);
 // codex/antigravity get model-only (other keys gracefully skipped at dispatch).
-export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export type EffortLevel = 'low' | 'medium' | 'high' | 'max';
 
 export interface EffortPreset {
   id: string;    // stable slug, e.g. 'standard'
@@ -1254,7 +1254,7 @@ export const BUILTIN_EFFORT_PRESETS: EffortPresetsConfig = {
     { id: 'light',    label: 'Light',    claude: { effort: 'low' } },
     { id: 'standard', label: 'Standard', claude: { effort: 'medium' } },
     { id: 'deep',     label: 'Deep',     claude: { effort: 'high' } },
-    { id: 'max',      label: 'Max',      claude: { effort: 'xhigh', ultracode: true } },
+    { id: 'max',      label: 'Max',      claude: { effort: 'max', ultracode: true } },
   ],
 };
 
