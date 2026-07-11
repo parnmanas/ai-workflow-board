@@ -748,17 +748,7 @@ export default function TicketPanel({
   // requestClose is in scope (which depends on form-draft state declared
   // further down). Closing with unsaved edits prompts.
 
-  // Form state — sync when activeTicket changes. Agent display name uses
-  // ST-7 <ManagerName>/<AgentName> when the agent is owned by an
-  // agent-manager, plain name otherwise.
-  const resolveAgentName = (id: string | undefined, name: string) => {
-    if (id) {
-      const agent = agents.find(a => a.id === id);
-      if (agent) return formatAgentDisplayName(agent);
-    }
-    return name;
-  };
-
+  // Form state — sync when activeTicket changes.
   const [title, setTitle] = useState(activeTicket.title);
   const [description, setDescription] = useState(activeTicket.description);
   // Dynamic Description textarea sizing: clamp visible rows between 10 and 20,
@@ -778,8 +768,6 @@ export default function TicketPanel({
   // Abstract effort preset id ('' = board default / no override). Resolved
   // per-CLI on the server at dispatch; here it's just the preset slug.
   const [effortPreset, setEffortPreset] = useState<string>(activeTicket.effort_preset || '');
-  const [assignee, setAssignee] = useState(resolveAgentName(activeTicket.assignee_id, activeTicket.assignee));
-  const [reporter, setReporter] = useState(resolveAgentName(activeTicket.reporter_id, activeTicket.reporter));
   const [reviewerId, setReviewerId] = useState(activeTicket.reviewer_id || '');
   const [selectedChannelIds, setSelectedChannelIds] = useState<string[]>(activeTicket.channel_ids || []);
   // Base repository / branch picker state. The repo list is filtered to
@@ -920,12 +908,10 @@ export default function TicketPanel({
     if (scrollToCommentId) setActiveTab('comments');
   }, [scrollToCommentId]);
 
-  // Authoritative server-side facts — display names and the attachment list
+  // Authoritative server-side facts — the reviewer id and the attachment list
   // — keep refreshing on updated_at because they have no client-side draft
   // concept. The form drafts above are isolated from this stream.
   useEffect(() => {
-    setAssignee(resolveAgentName(activeTicket.assignee_id, activeTicket.assignee));
-    setReporter(resolveAgentName(activeTicket.reporter_id, activeTicket.reporter));
     setReviewerId(activeTicket.reviewer_id || '');
     // Seed from the ticket payload (only loadTicketFull populates this; the
     // board listing doesn't), then fetch fresh metadata so the list is
