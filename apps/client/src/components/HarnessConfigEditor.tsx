@@ -53,12 +53,23 @@ const textToTools = (text: string): string[] | undefined => {
   return items.length > 0 ? items : undefined;
 };
 
+// 폴백 모델은 한 줄에 하나 — 순서가 곧 우선순위(위→아래). 콤마 분리는 하지
+// 않는다(모델 id 에 콤마가 없고, 줄 순서로 우선순위를 명확히 유지하기 위함).
+const textToModels = (text: string): string[] | undefined => {
+  const items = text
+    .split('\n')
+    .map(s => s.trim())
+    .filter(s => s.length > 0);
+  return items.length > 0 ? items : undefined;
+};
+
 export default function HarnessConfigEditor({ raw, title, description, onSave }: HarnessConfigEditorProps) {
   const initial = parseHarnessConfigRaw(raw);
   const [systemPrompt, setSystemPrompt] = useState(initial.system_prompt_append ?? '');
   const [allowedTools, setAllowedTools] = useState(toolsToText(initial.allowed_tools));
   const [disallowedTools, setDisallowedTools] = useState(toolsToText(initial.disallowed_tools));
   const [model, setModel] = useState(initial.model ?? '');
+  const [fallbackModels, setFallbackModels] = useState(toolsToText(initial.fallback_models));
   const [permissionMode, setPermissionMode] = useState(initial.permission_mode ?? '');
   const [busy, setBusy] = useState(false);
 
@@ -69,6 +80,7 @@ export default function HarnessConfigEditor({ raw, title, description, onSave }:
     setAllowedTools(toolsToText(next.allowed_tools));
     setDisallowedTools(toolsToText(next.disallowed_tools));
     setModel(next.model ?? '');
+    setFallbackModels(toolsToText(next.fallback_models));
     setPermissionMode(next.permission_mode ?? '');
   }, [raw]);
 
@@ -80,6 +92,8 @@ export default function HarnessConfigEditor({ raw, title, description, onSave }:
     const disallowed = textToTools(disallowedTools);
     if (disallowed) next.disallowed_tools = disallowed;
     if (model.trim().length > 0) next.model = model.trim();
+    const fallbacks = textToModels(fallbackModels);
+    if (fallbacks) next.fallback_models = fallbacks;
     if (permissionMode.trim().length > 0) next.permission_mode = permissionMode.trim();
     return Object.keys(next).length > 0 ? next : null;
   };
@@ -166,6 +180,21 @@ export default function HarnessConfigEditor({ raw, title, description, onSave }:
           </div>
         </div>
 
+        <div>
+          <label style={fieldLabelStyle}>Fallback models</label>
+          <textarea
+            rows={3}
+            value={fallbackModels}
+            onChange={(e) => setFallbackModels(e.target.value)}
+            placeholder={
+              'One model id per line — order = priority (top tried first).\n' +
+              'Used when the main model errors (usage cap / model unavailable)\n' +
+              'before producing any deliverable.\ne.g. claude-opus-4-6\nclaude-sonnet-4-6'
+            }
+            style={textareaStyle}
+          />
+        </div>
+
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
           <div style={{ width: 260 }}>
             <Input
@@ -216,6 +245,7 @@ function normalize(value: HarnessConfig): HarnessConfig | null {
   if (value.allowed_tools && value.allowed_tools.length > 0) next.allowed_tools = value.allowed_tools;
   if (value.disallowed_tools && value.disallowed_tools.length > 0) next.disallowed_tools = value.disallowed_tools;
   if (value.model && value.model.trim().length > 0) next.model = value.model.trim();
+  if (value.fallback_models && value.fallback_models.length > 0) next.fallback_models = value.fallback_models;
   if (value.permission_mode && value.permission_mode.trim().length > 0) next.permission_mode = value.permission_mode.trim();
   return Object.keys(next).length > 0 ? next : null;
 }

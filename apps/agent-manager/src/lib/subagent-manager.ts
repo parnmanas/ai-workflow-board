@@ -26,13 +26,14 @@ import { createAdapter } from './cli-adapters/index.js';
 import {
   ADAPTER_CAPABILITIES,
   type CliAdapter,
+  buildModelChain,
   describeHarness,
   partitionHarness,
   selectEffortSlice,
 } from './cli-adapters/base.js';
 import { CircuitBreaker } from './circuit-breaker.js';
 import { writeMcpConfig } from './managed-agent-store.js';
-import { classifyCliError } from './cli-error-signatures.js';
+import { classifyCliError, isFallbackEligible } from './cli-error-signatures.js';
 import { summarizeCliJsonLine } from './cli-output-summary.js';
 import { fireAndForgetTool } from './mcp-client.js';
 import {
@@ -230,6 +231,14 @@ interface SubagentRecord {
    *  fallback when this is true keeps clean cycles quiet. */
   commentSent: boolean;
   tap: SubagentTapHandle | null;
+  /** 폴백 모델 체인 (ticket 61f4dd18). head=주 모델(null=CLI 기본), 이후는
+   *  우선순위 순 폴백. 길이 1 이면 폴백 없음. */
+  modelChain?: (string | null)[];
+  /** 이번 spawn 이 사용한 modelChain 인덱스. 0=주 모델. */
+  chainAttempt?: number;
+  /** 원본 spawn 인자. exit 핸들러가 폴백-적격 실패 + 산출물 없음일 때 다음
+   *  모델로 재-spawn 하기 위해 보관. 런타임 전용 — #persist 시 제외한다. */
+  respawnSpec?: SubagentSpawnArgs;
 }
 
 type AnyRecord = SubagentRecord | ReservationRecord;
@@ -477,6 +486,20 @@ export class SubagentManager implements SubagentManagerContract {
           `effort=${effortFlag ?? '-'} ultracode=${ultracode} model=${slice.model ?? '-'}`,
       );
     }
+    // 폴백 모델 체인 (ticket 61f4dd18). 최초 spawn 은 effectiveModel(=주 모델)과
+    // harness.fallback_models 로 체인을 만든다. 폴백 respawn 은 exit 핸들러가
+    // _modelChain/_chainAttempt 를 넘겨오므로 그대로 이어쓴다. attemptModel 이
+    // 이번 시도의 실제 모델(null=CLI 기본)이며 아래 buildOneshotSpawn 에 전달된다.
+    const modelChain =
+      spec._modelChain ?? buildModelChain(effectiveModel, spec.harness?.fallback_models);
+    const chainAttempt = spec._chainAttempt ?? 0;
+    const attemptModel = modelChain[chainAttempt] ?? null;
+    if (modelChain.length > 1) {
+      log(
+        `[subagent] model chain: ticket=${spec.ticketId.slice(0, 8) || '-'} cli=${adapter.cliType} ` +
+          `attempt=${chainAttempt + 1}/${modelChain.length} model=${attemptModel ?? '(default)'}`,
+      );
+    }
     let configPath: string | null = null;
     let configPathIsTemp = false;
     try {
@@ -484,7 +507,7 @@ export class SubagentManager implements SubagentManagerContract {
         rolePrompt: spec.rolePrompt || '',
         taskText: spec.taskText,
         mcpConfigPath: null,
-        model: effectiveModel,
+        model: attemptModel,
         harness,
         effort: effortFlag,
         ultracode,
@@ -546,7 +569,7 @@ export class SubagentManager implements SubagentManagerContract {
             rolePrompt: spec.rolePrompt || '',
             taskText: spec.taskText,
             mcpConfigPath: configPath,
-            model: effectiveModel,
+            model: attemptModel,
             harness,
             effort: effortFlag,
             ultracode,
@@ -669,6 +692,9 @@ export class SubagentManager implements SubagentManagerContract {
         tailLines: [],
         commentSent: false,
         tap: null,
+        modelChain,
+        chainAttempt,
+        respawnSpec: spec,
       };
       record.tap =
         this.#monitor?.register({
@@ -803,6 +829,49 @@ export class SubagentManager implements SubagentManagerContract {
         }
       } catch (err: any) {
         log(`Subagent post-answer failed pid=${pid}: ${err?.message ?? err}`);
+      }
+    }
+
+    // 폴백 모델 체인 (ticket 61f4dd18). 주 모델이 폴백-적격 실패(usage cap /
+    // model unavailable)로 죽었고, 이번 시도가 산출물(commentSent)을 전혀 남기지
+    // 못했으며, 체인에 남은 모델이 있으면 다음 모델로 재-spawn 한다. 서킷브레이커/
+    // silent-exit 앞에 두어, 폴백이 성공적으로 시작되면 이번 사망을 실패로 세지
+    // 않고 조용히 넘긴다(early return). 체인이 소진된 마지막 시도만 아래의
+    // 브레이커/silent-exit 경로로 떨어진다. commentSent 가드 + 적격 사유 + 체인
+    // 길이 상한이 무한 폴백(scope ④)을 막는다.
+    if (
+      record.kind === 'trigger' &&
+      record.ticket_id &&
+      !record.commentSent &&
+      isFallbackEligible(errClass) &&
+      record.respawnSpec &&
+      Array.isArray(record.modelChain) &&
+      (record.chainAttempt ?? 0) + 1 < record.modelChain.length
+    ) {
+      const nextAttempt = (record.chainAttempt ?? 0) + 1;
+      const prevModel = record.modelChain[record.chainAttempt ?? 0];
+      const nextModel = record.modelChain[nextAttempt];
+      log(
+        `[subagent] model fallback: ticket=${record.ticket_id.slice(0, 8)} role=${record.role || '_'} ` +
+          `reason=${errClass.reason} ${prevModel ?? '(default)'} → ${nextModel ?? '(default)'} ` +
+          `(attempt ${nextAttempt + 1}/${record.modelChain.length})`,
+      );
+      try {
+        const res = await this.spawn({
+          ...record.respawnSpec,
+          _modelChain: record.modelChain,
+          _chainAttempt: nextAttempt,
+        });
+        // 다음 모델 spawn 이 실제로 떴을 때만 이번 사망을 폴백으로 흡수한다.
+        // 못 떴으면(브레이커 open / 중복 / spawn 실패) 아래로 떨어져 정상적인
+        // 브레이커/silent-exit 경로가 이 티켓을 처리하게 둔다.
+        if (res.spawned) return;
+        log(
+          `[subagent] model fallback respawn not started (reason=${res.reason ?? 'unknown'}) — ` +
+            `falling through to breaker/silent-exit`,
+        );
+      } catch (err: any) {
+        log(`[subagent] model fallback respawn threw: ${err?.message ?? err} — falling through`);
       }
     }
 
@@ -1138,11 +1207,12 @@ export class SubagentManager implements SubagentManagerContract {
     const pids: any[] = [];
     for (const rec of this.#map.values()) {
       if (rec.kind === 'reservation') continue;
-      const { process_handle, outLines, tailLines, tap, ...serializable } = rec;
+      const { process_handle, outLines, tailLines, tap, respawnSpec, ...serializable } = rec;
       void process_handle;
       void outLines;
       void tailLines;
       void tap;
+      void respawnSpec;
       pids.push(serializable);
     }
     fsp

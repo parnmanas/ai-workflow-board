@@ -27,6 +27,16 @@ export const HarnessConfigSchema = z
     disallowed_tools: z.array(z.string()).optional(),
     /** --model override (free text — CLIs validate their own model ids). */
     model: z.string().optional(),
+    /**
+     * Ordered fallback model chain (ticket 61f4dd18). When the primary model
+     * (the resolved `model`, or an effort-preset / per-agent model) errors with
+     * a fallback-eligible failure (usage cap / model unavailable / spawn
+     * failure) BEFORE producing any deliverable, agent-manager retries the next
+     * model in this list, highest-priority first. NOT a CLI flag — a
+     * manager-side retry policy — so it is deliberately excluded from
+     * HARNESS_CONFIG_KEYS' per-flag partition on the agent-manager side.
+     */
+    fallback_models: z.array(z.string()).optional(),
     /** --permission-mode override (free text for forward-compat). */
     permission_mode: z.string().optional(),
   })
@@ -39,6 +49,7 @@ export const HARNESS_CONFIG_KEYS = [
   'allowed_tools',
   'disallowed_tools',
   'model',
+  'fallback_models',
   'permission_mode',
 ] as const;
 

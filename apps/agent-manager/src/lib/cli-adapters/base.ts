@@ -46,10 +46,22 @@ export interface HarnessSpec {
   disallowed_tools?: string[];
   /** --model override; beats the per-agent Agent.model default. */
   model?: string;
+  /**
+   * Ordered fallback model chain (ticket 61f4dd18), highest priority first.
+   * NOT a CLI flag — a manager-side retry policy read at the spawn site to
+   * build the model chain `[primaryModel, ...fallback_models]`. Deliberately
+   * absent from HARNESS_SPEC_KEYS so partitionHarness() never treats it as an
+   * adapter flag (it would otherwise be warn-skipped / stripped); the spawn
+   * site reads it off the PRE-partition harness.
+   */
+  fallback_models?: string[];
   /** --permission-mode override (claude-family only). */
   permission_mode?: string;
 }
 
+// Per-CLI FLAG keys only — the subset partitionHarness() maps onto adapter
+// arguments. `fallback_models` is intentionally excluded (retry policy, not a
+// flag); it rides on HarnessSpec but is consumed at the spawn site directly.
 export const HARNESS_SPEC_KEYS = [
   'system_prompt_append',
   'allowed_tools',
@@ -79,6 +91,33 @@ export function partitionHarness(
     else skipped.push(key);
   }
   return { applied: Object.keys(applied).length > 0 ? applied : null, skipped };
+}
+
+/**
+ * Build the ordered model chain to try for a spawn (ticket 61f4dd18). The
+ * primary (whatever won the model precedence: effort-preset ?? harness ??
+ * per-agent ?? null) is the head; the harness `fallback_models` list follows
+ * in priority order. Empty/blank entries are dropped and duplicates collapse
+ * (a fallback equal to the primary or to an earlier fallback adds no attempt).
+ * `null` (CLI's own default) is a valid head — kept as the first element so a
+ * board that only lists fallbacks still tries the CLI default first.
+ *
+ * A chain of length 1 == current behaviour (single spawn, no fallback).
+ */
+export function buildModelChain(
+  primary: string | null | undefined,
+  fallbacks: string[] | null | undefined,
+): (string | null)[] {
+  const head = typeof primary === 'string' && primary.trim() ? primary.trim() : null;
+  const chain: (string | null)[] = [head];
+  const seen = new Set<string>(head ? [head] : []);
+  for (const raw of fallbacks ?? []) {
+    const m = typeof raw === 'string' ? raw.trim() : '';
+    if (!m || seen.has(m)) continue;
+    seen.add(m);
+    chain.push(m);
+  }
+  return chain;
 }
 
 /**

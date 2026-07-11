@@ -19,7 +19,7 @@ import { log } from './logging.js';
 import { postSilentExitSystemComment, postOutputLiveness } from './rest.js';
 import { OUTPUT_LIVENESS_MIN_INTERVAL_MS } from './constants.js';
 import { CircuitBreaker } from './circuit-breaker.js';
-import { classifyCliError } from './cli-error-signatures.js';
+import { classifyCliError, isFallbackEligible } from './cli-error-signatures.js';
 import type {
   TicketDispatchResult,
   TicketSessionManager as TicketSessionManagerContract,
@@ -377,6 +377,34 @@ export class TicketSessionManager
         // fallback can correlate the dead cycle back to its origin in
         // ticket activity / manager logs.
         if (spec.triggerId) this.#lastTriggerId.set(spawned.pid, spec.triggerId);
+        // 폴백 모델 respawn 클로저 (ticket 61f4dd18). 주 모델이 폴백-적격
+        // 실패(usage cap / model unavailable)로 산출물 없이 죽으면 _onChildExit
+        // 이 다음 체인 인덱스로 이걸 호출한다. dispatchTrigger 를 재진입하지
+        // 않고 _spawnSession 을 직접 부르되(체인 인덱스만 교체) 여기서 원본
+        // 인자를 렉시컬 캡처했으므로 stamping·트리거 상관관계·다음 폴백까지
+        // 그대로 복제한다. 체인은 harness 로부터 결정적이라 인덱스만 넘기면 된다.
+        const respawnWithModel = async (
+          nextAttempt: number,
+        ): Promise<SessionRecord | null> => {
+          const s = await this._spawnSession(sessionKey, spec.rolePrompt || '', firstTurnText, {
+            monitorMeta,
+            agentContext: spec.agentContext,
+            harness: spec.harness ?? null,
+            effortPreset: spec.effortPreset ?? null,
+            envVars: spec.envVars,
+            chainAttempt: nextAttempt,
+          });
+          if (s) {
+            s.ticketId = spec.ticketId;
+            s.role = role;
+            s.agentId = spec.agentId || '';
+            s._effectiveApiKey = spec.agentContext?.api_key || this._config.apiKey;
+            s._fallbackRespawn = respawnWithModel;
+            if (spec.triggerId) this.#lastTriggerId.set(s.pid, spec.triggerId);
+          }
+          return s;
+        };
+        spawned._fallbackRespawn = respawnWithModel;
       }
     } finally {
       // Spawn outcome resolved and identity stamped — _sessions takes over
@@ -774,6 +802,44 @@ export class TicketSessionManager
       return;
     }
     if (!ticketId) return; // sanity — shouldn't happen for a ticket session
+
+    // 폴백 모델 체인 (ticket 61f4dd18). 산출물 없이 죽은 세션의 CLI tail 이
+    // 폴백-적격 실패(usage cap / model unavailable)이고 체인에 남은 모델이
+    // 있으면 다음 모델로 재-spawn 한다. 서킷브레이커/silent-exit 앞에 두어,
+    // 폴백이 실제로 뜨면 이번 사망을 실패로 세지 않고 조용히 넘긴다(early
+    // return). transient 신호(143/137, twin-reap/restart)는 폴백 대상이
+    // 아니다 — classifyCliError 가 usage/model 시그니처를 잡을 때만 발화하며,
+    // commentSent 가드 + 적격 사유 + 체인 길이 상한이 무한 폴백(scope ④)을 막는다.
+    if (
+      !commented &&
+      typeof sess._fallbackRespawn === 'function' &&
+      Array.isArray(sess.modelChain) &&
+      (sess.chainAttempt ?? 0) + 1 < sess.modelChain.length &&
+      !CircuitBreaker.isTransientExit(code)
+    ) {
+      const errClass = classifyCliError(tail, { exitCode: code });
+      if (isFallbackEligible(errClass)) {
+        const nextAttempt = (sess.chainAttempt ?? 0) + 1;
+        const prevModel = sess.modelChain[sess.chainAttempt ?? 0];
+        const nextModel = sess.modelChain[nextAttempt];
+        log(
+          `[ticket-session] model fallback: ticket=${ticketId.slice(0, 8)} role=${role || '_'} ` +
+            `reason=${errClass.reason} ${prevModel ?? '(default)'} → ${nextModel ?? '(default)'} ` +
+            `(attempt ${nextAttempt + 1}/${sess.modelChain.length})`,
+        );
+        try {
+          const s = await sess._fallbackRespawn(nextAttempt);
+          if (s) return; // 폴백 세션 기동 — 브레이커/silent-exit 건너뜀
+          log(
+            `[ticket-session] model fallback respawn returned null — falling through to breaker/silent-exit`,
+          );
+        } catch (err: any) {
+          log(
+            `[ticket-session] model fallback respawn threw: ${err?.message ?? err} — falling through`,
+          );
+        }
+      }
+    }
 
     // Circuit-breaker: record non-transient exits. Transient signals
     // (143/SIGTERM, 137/SIGKILL) are the zombie-reap / restart path and

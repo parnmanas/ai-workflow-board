@@ -67,6 +67,15 @@ export function parseHarnessConfig(raw: unknown): HarnessSpec | null {
   for (const key of ['model', 'permission_mode'] as const) {
     if (typeof obj[key] === 'string' && obj[key].trim()) out[key] = obj[key].trim();
   }
+  // Ordered fallback model chain (ticket 61f4dd18) — priority order preserved,
+  // blanks dropped. NOT a CLI flag (see HarnessSpec.fallback_models): the spawn
+  // site reads it off the pre-partition harness to build the model chain.
+  if (Array.isArray(obj.fallback_models)) {
+    const list = obj.fallback_models
+      .filter((m: unknown) => typeof m === 'string' && (m as string).trim())
+      .map((m: string) => m.trim());
+    if (list.length > 0) out.fallback_models = list;
+  }
   return Object.keys(out).length > 0 ? out : null;
 }
 
@@ -300,6 +309,14 @@ export interface SubagentSpawnArgs {
    *  injected into the spawned CLI's environment. Applied on every spawn (not
    *  persisted on disk like the cloned repos). Absent → none. */
   envVars?: Record<string, string>;
+  /** 내부용 (ticket 61f4dd18): fallback 모델 체인. 최초 spawn 은 비워두고
+   *  spawn() 이 harness.model + harness.fallback_models 로 계산한다. 폴백
+   *  respawn 에서만 exit 핸들러가 채워 넘긴다 — 재계산을 피하고 시도 인덱스를
+   *  이어가기 위함. head=주 모델(null=CLI 기본), 이후=우선순위 순 폴백. */
+  _modelChain?: (string | null)[];
+  /** 내부용 (ticket 61f4dd18): 이번 spawn 이 사용하는 _modelChain 인덱스.
+   *  0=주 모델. 폴백 respawn 마다 1씩 증가. */
+  _chainAttempt?: number;
 }
 
 export interface SubagentSpawnResult {

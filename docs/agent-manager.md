@@ -220,6 +220,7 @@ spawn time (ticket e9c7a896):
 | `allowed_tools`        | appended to the AWB baseline in `--allowedTools` (baseline `mcp__awb__*,mcp__host__*` always survives) | warn + skip |
 | `disallowed_tools`     | `--disallowedTools`                               | warn + skip |
 | `model`                | `--model` — beats the per-agent `Agent.model` default | `--model` (codex / antigravity support it; deepseek also mirrors it into `ANTHROPIC_MODEL` so flag and env agree) |
+| `fallback_models`      | NOT a flag — a manager-side retry policy (see below) | same (CLI-agnostic) |
 | `permission_mode`      | `--permission-mode`, REPLACING `--dangerously-skip-permissions` (the skip flag pins bypassPermissions, so passing both would no-op the mode) | warn + skip |
 
 Rules and constraints:
@@ -241,6 +242,25 @@ Rules and constraints:
   validates them itself. A mode that blocks tool prompts in non-interactive
   runs (`default`, `plan`) is an operator choice, not something the manager
   second-guesses.
+- **`fallback_models` — model fallback chain (ticket 61f4dd18)**: an ordered
+  list of model ids (highest priority first). It is NOT a CLI flag — it is a
+  manager-side retry policy, so it rides the harness object but is excluded
+  from the per-flag partition (`HARNESS_SPEC_KEYS`). The spawn site builds the
+  chain `[primary model, ...fallback_models]` (`buildModelChain`), dedupes and
+  drops blanks, and starts with the primary. If a spawn dies with a
+  **fallback-eligible** failure (`classifyCliError` → `usage_limit` or
+  `model_unavailable`, i.e. `isFallbackEligible`) **before it produced any
+  deliverable** (no comment-creating tool trace / no posted one-shot answer),
+  the manager retries the next model in the chain in place of the normal
+  circuit-breaker / silent-exit path. Both the one-shot subagent path
+  (`SubagentManager._handleOneshotExit`) and the persistent ticket-session
+  path (`TicketSessionManager._onChildExit`) honor it. Deliberately NOT
+  eligible: `auth_failure` (same credential — a different model won't help) and
+  `codex_error` (transient — a plain retry on the same model is the breaker's
+  job). The `commentSent` guard + eligible-reason gate + the finite chain
+  length bound the total attempts so a mid-work code-bug crash never triggers
+  an endless model walk. Only the exhausted final attempt falls through to the
+  breaker / silent-exit fallback.
 
 ## Environment provisioning (per-board working environment)
 

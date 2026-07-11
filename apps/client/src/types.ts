@@ -1268,6 +1268,7 @@ export interface HarnessConfig {
   allowed_tools?: string[];      // claude CLI --allowedTools
   disallowed_tools?: string[];   // claude CLI --disallowedTools
   model?: string;                // --model override
+  fallback_models?: string[];    // 우선순위 순 폴백 모델 체인 (ticket 61f4dd18)
   permission_mode?: string;      // --permission-mode
 }
 

@@ -26,6 +26,7 @@ import {
   type ParseResult,
   type ResolvedEffortPreset,
   type TurnImage,
+  buildModelChain,
   describeHarness,
   partitionHarness,
   selectEffortSlice,
@@ -130,6 +131,12 @@ export interface SpawnOpts {
    *  auth / cli-home / credential / harness env so those always win. Applied
    *  at session CREATION only. */
   envVars?: Record<string, string>;
+  /** 내부용 폴백 모델 체인 인덱스 (ticket 61f4dd18). 최초 spawn 은 생략(0)하고,
+   *  주 모델이 폴백-적격 실패로 죽으면 TicketSessionManager 의 exit 핸들러가
+   *  다음 인덱스로 _spawnSession 을 다시 부를 때만 넘긴다. 체인 자체는 harness
+   *  (effectiveModel + fallback_models)로부터 매번 결정적으로 재구성되므로
+   *  인덱스만 전달하면 충분하다. */
+  chainAttempt?: number;
 }
 
 interface TurnState {
@@ -186,6 +193,17 @@ export interface SessionRecord {
   /** ticket fdc69c13 — last epoch-ms an output-liveness heartbeat was POSTed
    *  for this session; throttles reporting to OUTPUT_LIVENESS_MIN_INTERVAL_MS. */
   _lastLivenessPostAtMs?: number;
+  /** 폴백 모델 체인 (ticket 61f4dd18). head=주 모델(null=CLI 기본), 이후는
+   *  우선순위 순 폴백. 길이 1 이면 폴백 없음. */
+  modelChain?: (string | null)[];
+  /** 이번 세션이 사용한 modelChain 인덱스. 0=주 모델. */
+  chainAttempt?: number;
+  /** 폴백 respawn 클로저 (ticket 61f4dd18, TicketSessionManager 만 설정).
+   *  주 모델이 폴백-적격 실패로 죽고 산출물이 없을 때 exit 핸들러가 다음
+   *  체인 인덱스로 호출한다. dispatch 시점에 원본 인자를 렉시컬 캡처해 둔
+   *  것이라 dispatchTrigger 재진입(dedup/inflight/twin) 없이 안전하게
+   *  같은 트리거 작업을 이어간다. */
+  _fallbackRespawn?: (nextAttempt: number) => Promise<SessionRecord | null>;
 }
 
 /** Reservation placed on `_inflight` from the moment a dispatcher commits to
@@ -339,7 +357,7 @@ export class BaseSessionManager {
     sessionKey: string,
     rolePrompt: string,
     firstTurnText: string,
-    { onProgress, monitorMeta, agentContext, firstTurnImages, harness: rawHarness, effortPreset, envVars }: SpawnOpts = {},
+    { onProgress, monitorMeta, agentContext, firstTurnImages, harness: rawHarness, effortPreset, envVars, chainAttempt: chainAttemptOpt }: SpawnOpts = {},
   ): Promise<SessionRecord | null> {
     // ST-7: pick the adapter for this agent's CLI choice (claude/codex/antigravity)
     // and bind it to the session record so future turns formatTurn /
@@ -392,6 +410,20 @@ export class BaseSessionManager {
           `effort=${effortFlag ?? '-'} ultracode=${ultracode} model=${slice.model ?? '-'}`,
       );
     }
+    // 폴백 모델 체인 (ticket 61f4dd18). 체인은 effectiveModel(=주 모델) +
+    // harness.fallback_models 로부터 결정적으로 구성되므로, 폴백 respawn 은
+    // chainAttempt 인덱스만 넘기면 동일 체인의 다음 모델을 고른다. attemptModel
+    // 이 이번 세션의 실제 모델(null=CLI 기본). 체인 상태는 아래 SessionRecord 에
+    // 저장해 exit 핸들러가 남은 폴백 여부를 판단한다.
+    const modelChain = buildModelChain(effectiveModel, rawHarness?.fallback_models);
+    const chainAttempt = chainAttemptOpt ?? 0;
+    const attemptModel = modelChain[chainAttempt] ?? null;
+    if (modelChain.length > 1) {
+      log(
+        `${this.#logTag} model chain: ${this.#keyField}=${sessionKey} cli=${adapter.cliType} ` +
+          `attempt=${chainAttempt + 1}/${modelChain.length} model=${attemptModel ?? '(default)'}`,
+      );
+    }
 
     let configPath: string | null = null;
     let configPathIsTemp = false;
@@ -400,7 +432,7 @@ export class BaseSessionManager {
       let descriptor = adapter.buildSessionSpawn({
         rolePrompt: rolePrompt || '',
         mcpConfigPath: null,
-        model: effectiveModel,
+        model: attemptModel,
         harness,
         effort: effortFlag,
         ultracode,
@@ -458,7 +490,7 @@ export class BaseSessionManager {
         descriptor = adapter.buildSessionSpawn({
           rolePrompt: rolePrompt || '',
           mcpConfigPath: configPath,
-          model: effectiveModel,
+          model: attemptModel,
           harness,
           effort: effortFlag,
           ultracode,
@@ -561,6 +593,8 @@ export class BaseSessionManager {
         unrespondedSince: null,
         unhealthyKilled: false,
         tap: null,
+        modelChain,
+        chainAttempt,
       };
       sess.tap =
         this.#monitor?.register({

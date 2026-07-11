@@ -39,6 +39,13 @@ const USAGE_LIMIT_RE =
 const AUTH_RE =
   /\b401\b|\b403\b|unauthorized|forbidden|invalid api key|authentication failed|not logged in|login required|please (?:run )?[a-z-]*\s*login|missing (?:the )?api key|no api key|api key not (?:set|found)/i;
 
+// Model-selection failures — the configured `--model` id is unknown to the
+// CLI / provider, or the account can't access it. Unlike usage/auth these DO
+// self-heal on a *different* model, so they are the primary fallback trigger
+// (ticket 61f4dd18): retry the next model in the chain rather than pending.
+const MODEL_UNAVAILABLE_RE =
+  /model[_\s-]?not[_\s-]?found|unknown model|no such model|model .{0,40}?(?:does not exist|not found|is not available|unavailable|not supported|isn'?t available)|(?:invalid|unsupported|unrecognized) model|does not have access to (?:the )?model|not_?found_?error.{0,40}?model/i;
+
 // codex's own structured-error wrapper. `collectOneshotResult` emits this
 // prefix only when codex reported a `turn.failed` / `error` event instead of a
 // real `agent_message` — i.e. the "answer" is actually an error report.
@@ -86,6 +93,11 @@ export function classifyCliError(
   if (hasErrorContext) {
     if (USAGE_LIMIT_RE.test(s)) return { isFatal: true, nonRetryable: true, reason: 'usage_limit' };
     if (AUTH_RE.test(s)) return { isFatal: true, nonRetryable: true, reason: 'auth_failure' };
+    // A bad --model id won't self-heal on THIS config (nonRetryable → the
+    // breaker force-opens if the fallback chain is exhausted) but IS the prime
+    // fallback trigger — isFallbackEligible() routes it to the next model.
+    if (MODEL_UNAVAILABLE_RE.test(s))
+      return { isFatal: true, nonRetryable: true, reason: 'model_unavailable' };
   }
 
   // A bare codex error wrapper (transient model/turn failure with no
@@ -94,4 +106,24 @@ export function classifyCliError(
   if (isCodexErrorWrapped) return { isFatal: true, nonRetryable: false, reason: 'codex_error' };
 
   return OK;
+}
+
+// Failure reasons that switching to a DIFFERENT model can plausibly clear
+// (ticket 61f4dd18). `model_unavailable`: the id is bad — another id may work.
+// `usage_limit`: an external cap on the current model/tier — a cheaper or
+// separate-quota fallback may still have headroom (the ticket's canonical
+// case). Deliberately NOT eligible: `auth_failure` (same credential — a
+// different model won't fix a bad/missing key) and `codex_error` (transient;
+// a plain retry on the same model is the breaker's job, not a model switch).
+const FALLBACK_ELIGIBLE_REASONS = new Set(['model_unavailable', 'usage_limit']);
+
+/**
+ * Should agent-manager try the next model in the fallback chain for this
+ * failure? True only for classifications whose failure a different model can
+ * clear. The spawn site additionally gates on "no deliverable was produced
+ * this attempt" so a mid-work code-bug crash never triggers an endless model
+ * walk (ticket 61f4dd18 scope ④); the chain length also bounds total attempts.
+ */
+export function isFallbackEligible(c: CliErrorClassification): boolean {
+  return c.isFatal && FALLBACK_ELIGIBLE_REASONS.has(c.reason);
 }

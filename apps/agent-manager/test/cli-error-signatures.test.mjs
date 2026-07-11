@@ -8,7 +8,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { classifyCliError } from '../dist/lib/cli-error-signatures.js';
+import { classifyCliError, isFallbackEligible } from '../dist/lib/cli-error-signatures.js';
+import { buildModelChain } from '../dist/lib/cli-adapters/base.js';
 
 test('clean / empty input is non-fatal', () => {
   for (const v of [null, undefined, '', '   ', '\n\t']) {
@@ -100,4 +101,56 @@ test('usage/auth wording with a non-zero exit → fatal (real failure context)',
   assert.equal(c.isFatal, true);
   assert.equal(c.nonRetryable, true);
   assert.equal(c.reason, 'usage_limit');
+});
+
+// ── 폴백 모델 체인 (ticket 61f4dd18) ──────────────────────────────
+
+test('model-unavailable signatures → fatal + non-retryable + reason=model_unavailable', () => {
+  for (const s of [
+    'Error: model not found: claude-opus-9',
+    'unknown model "gpt-nonexistent"',
+    'The model claude-foo does not exist or you do not have access to it.',
+    'invalid model specified',
+    'model claude-bar is not available on your plan',
+    'Your account does not have access to the model requested.',
+  ]) {
+    const c = classifyCliError(s, { exitCode: 1 });
+    assert.equal(c.isFatal, true, `fatal: ${s}`);
+    assert.equal(c.nonRetryable, true, `non-retryable: ${s}`);
+    assert.equal(c.reason, 'model_unavailable', `reason: ${s}`);
+  }
+});
+
+test('model-unavailable wording in a clean exit-0 answer → NOT fatal (false-positive guard)', () => {
+  const c = classifyCliError(
+    'Added handling for the "model not found" error path with a friendly message.',
+    { exitCode: 0 },
+  );
+  assert.equal(c.isFatal, false);
+  assert.equal(c.reason, '');
+});
+
+test('isFallbackEligible: usage_limit + model_unavailable are eligible; auth/codex are not', () => {
+  const usage = classifyCliError('[codex error] hit your usage limit');
+  const model = classifyCliError('unknown model xyz', { exitCode: 1 });
+  const auth = classifyCliError('401 Unauthorized', { exitCode: 1 });
+  const codex = classifyCliError('[codex error] stream disconnected');
+  const clean = classifyCliError('all good', { exitCode: 0 });
+  assert.equal(isFallbackEligible(usage), true, 'usage_limit eligible');
+  assert.equal(isFallbackEligible(model), true, 'model_unavailable eligible');
+  assert.equal(isFallbackEligible(auth), false, 'auth NOT eligible (same credential)');
+  assert.equal(isFallbackEligible(codex), false, 'codex_error NOT eligible (plain retry)');
+  assert.equal(isFallbackEligible(clean), false, 'clean answer NOT eligible');
+});
+
+test('buildModelChain: head = primary, fallbacks appended in order, dupes/blanks dropped', () => {
+  assert.deepEqual(buildModelChain('opus', ['sonnet', 'haiku']), ['opus', 'sonnet', 'haiku']);
+  // null / empty primary → head is null (CLI default), fallbacks still ride.
+  assert.deepEqual(buildModelChain(null, ['sonnet']), [null, 'sonnet']);
+  assert.deepEqual(buildModelChain('   ', ['sonnet']), [null, 'sonnet']);
+  // primary duplicated in fallbacks is not repeated; blanks + later dupes drop.
+  assert.deepEqual(buildModelChain('opus', ['opus', ' ', 'sonnet', 'sonnet']), ['opus', 'sonnet']);
+  // no fallbacks → single-element chain (no fallback attempts).
+  assert.deepEqual(buildModelChain('opus', undefined), ['opus']);
+  assert.deepEqual(buildModelChain('opus', []), ['opus']);
 });
