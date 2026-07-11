@@ -233,7 +233,7 @@ export class ChatSessionManager
       // reuse branch is unreachable for runs; attach defensively anyway (guarded
       // by spec.onExit, which ordinary chat turns never set) so a hypothetical
       // reuse can't strand a held lock until the manager restarts.
-      if (spec.onExit) sess.onRunExit = spec.onExit;
+      if (spec.onExit) sess.releaseRunLock = spec.onExit;
       this._sendFollowUp(sess, followupText, { onProgress: spec.onProgress, images });
       return { dispatched: true, pid: sess.pid };
     }
@@ -346,11 +346,12 @@ export class ChatSessionManager
         // ticket 89716f04 — mark one-shot QA/security run sessions so their
         // turn end is swept for orphaned background tasks.
         if (spec.run) spawned._run = spec.run;
-        // ticket e9d0e8bc: run-lifetime folder-lock release, fired from
-        // _onChildExit when this session's process exits. Set synchronously
-        // here (no await between the spawn and this assignment), so the exit
-        // handler — which can only run on a later macrotask — always sees it.
-        if (spec.onExit) spawned.onRunExit = spec.onExit;
+        // ticket e9d0e8bc / 9a28bf53: run-lifetime folder-lock release. Fired
+        // from the turn-end orphan sweep once the folder is confirmed idle (fast
+        // path) and from _onChildExit on process exit (backstop). Set
+        // synchronously here (no await between the spawn and this assignment), so
+        // both later-macrotask callers always see it.
+        if (spec.onExit) spawned.releaseRunLock = spec.onExit;
       }
     } finally {
       this._inflight.delete(sessionKey);
@@ -421,13 +422,17 @@ export class ChatSessionManager
     // ticket 89716f04 — the child is gone; its descendants died or reparented,
     // so a pending turn-end orphan sweep has nothing valid to enumerate.
     this.#cancelOrphanSweep(sess);
-    // ticket e9d0e8bc: release the run-lifetime folder lock — before any
-    // early-return below. `sess` is captured in the base-class exit closure, so
-    // this fires on EVERY exit path (normal reply, idle-reap, unhealthy-kill),
-    // even after the record is dropped from `_sessions`. Idempotent release.
-    if (sess.onRunExit) {
+    // ticket e9d0e8bc / 9a28bf53: release the run-lifetime folder lock — before
+    // any early-return below. This is the BACKSTOP: the turn-end orphan sweep
+    // already releases early on a clean turn (folder idle), but this covers every
+    // path the sweep does not — the child dying before the grace elapses, kill /
+    // reaper, `_run` unset, and the orphan-reap branches. `sess` is captured in
+    // the base-class exit closure, so it fires on EVERY exit path (normal reply,
+    // idle-reap, unhealthy-kill), even after the record is dropped from
+    // `_sessions`. Idempotent, so a double release after the early one is a no-op.
+    if (sess.releaseRunLock) {
       try {
-        sess.onRunExit();
+        sess.releaseRunLock();
       } catch {
         /* ignore — lock release must never break exit cleanup */
       }
@@ -490,22 +495,27 @@ export class ChatSessionManager
     this.#cancelOrphanSweep(sess);
     const timer = setTimeout(() => {
       sess._orphanSweepTimer = null;
-      void this.#sweepTurnEndOrphans(sess);
+      void this._sweepTurnEndOrphans(sess);
     }, ORPHAN_SWEEP_GRACE_MS);
     timer.unref?.();
     sess._orphanSweepTimer = timer;
   }
 
-  /** Fired ORPHAN_SWEEP_GRACE_MS after a run session's result line. If the
-   *  still-alive CLI child has live non-benign descendants, they are background
-   *  tasks the session left running with no re-invocation contract — the CLI's
-   *  positive-pid teardown would kill them silently and strand the run in
-   *  `running` until the ~45-min liveness reaper. So: reap them visibly and
-   *  finalize the run as `error`, recording the kill in the summary + manager
-   *  log (requirements 1b + 2). Re-reads run status first so a run the agent
-   *  already finalized is never clobbered. Every await is guarded — this runs
-   *  detached via `void`, so it must never reject. */
-  async #sweepTurnEndOrphans(sess: SessionRecord): Promise<void> {
+  /** Fired ORPHAN_SWEEP_GRACE_MS after a run session's result line. Two outcomes:
+   *  (1) ticket 9a28bf53 — the common CLEAN turn: no live non-benign descendants,
+   *  so the shared run folder is idle → release the run-lifetime folder lock early
+   *  (see the `orphans.length === 0` branch) instead of waiting for process exit.
+   *  (2) ticket 89716f04 — the still-alive CLI child has live non-benign
+   *  descendants: background tasks the session left running with no re-invocation
+   *  contract — the CLI's positive-pid teardown would kill them silently and
+   *  strand the run in `running` until the ~45-min liveness reaper. So: reap them
+   *  visibly and finalize the run as `error`, recording the kill in the summary +
+   *  manager log (requirements 1b + 2). Re-reads run status first so a run the
+   *  agent already finalized is never clobbered. Every await is guarded — this
+   *  runs detached via `void`, so it must never reject.
+   *  `protected` (not `#private`) purely so the unit test can drive it directly
+   *  without the ORPHAN_SWEEP_GRACE_MS timer; not part of the public contract. */
+  protected async _sweepTurnEndOrphans(sess: SessionRecord): Promise<void> {
     const run = sess._run;
     if (!run) return;
     // Child already gone → its descendants died or reparented to init;
@@ -520,7 +530,29 @@ export class ChatSessionManager
       log(`[chat-session] orphan sweep enumeration failed pid=${sess.pid}: ${err?.message ?? err}`);
       return;
     }
-    if (orphans.length === 0) return; // clean one-shot turn — nothing stranded
+    if (orphans.length === 0) {
+      // ticket 9a28bf53 — TURN-END EARLY RELEASE. The run's CLI child ended its
+      // turn with NO live background descendants, so the shared run folder is now
+      // idle even though the persistent (claude) session lingers until idle-reap
+      // (~idleMinutes). Release the run-lifetime folder lock NOW instead of
+      // waiting for process exit: this is the positive folder-idle verification
+      // the parent (e9d0e8bc) deferred to a follow-up, and it lets a same-scenario
+      // successor run stop waiting up to idleMinutes and provision warm at once.
+      // `_onChildExit` still fires the same idempotent release as the backstop.
+      if (sess.releaseRunLock) {
+        log(
+          `[chat-session] run ${run.run_id.slice(0, 8)} clean turn end — releasing run-exec ` +
+            `folder lock early (folder idle ${ORPHAN_SWEEP_GRACE_MS}ms after result line; ` +
+            `not waiting for process exit)`,
+        );
+        try {
+          sess.releaseRunLock();
+        } catch {
+          /* ignore — lock release must never break the detached sweep */
+        }
+      }
+      return; // clean one-shot turn — nothing stranded
+    }
 
     const run8 = run.run_id.slice(0, 8);
     const pidList = orphans.map((o) => o.pid).join(',');

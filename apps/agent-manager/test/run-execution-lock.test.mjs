@@ -5,11 +5,17 @@
 //   - resolveRunFolder: the dispatcher's lock key equals the folder
 //     provisionRunWorkspace actually uses (they MUST match or the lock guards
 //     the wrong path); leading-slash strip; AGENT_MANAGER_HOME fallback.
-//   - ChatSessionManager._onChildExit fires the run-lock release (onRunExit) on
-//     EVERY exit, including a path that would otherwise early-return — this is
-//     the persistent (Claude) run path's half of the run-exit hook. The oneshot
-//     SubagentManager path stores + fires the symmetric onSpawnExit from its
-//     #wireExitHandler closure (type-checked; mirrors this path).
+//   - ChatSessionManager._onChildExit fires the run-lock release (releaseRunLock)
+//     on EVERY exit, including a path that would otherwise early-return — this is
+//     the process-exit BACKSTOP of the run-exit hook. The oneshot SubagentManager
+//     path stores + fires the symmetric onSpawnExit from its #wireExitHandler
+//     closure (type-checked; mirrors this path).
+//   - ticket 9a28bf53: ChatSessionManager._sweepTurnEndOrphans releases the lock
+//     EARLY on a clean turn (folder idle — no live background descendants) so a
+//     same-scenario successor stops waiting up to idleMinutes; it does NOT release
+//     on the pid-dead path (there _onChildExit owns it). Idempotency (early
+//     release unblocks the waiter; the process-exit backstop is a no-op) is
+//     pinned at the FolderMutex level.
 //
 // The fallback test asserts against the AGENT_MANAGER_HOME constant directly
 // (rather than repointing the env) so it is immune to ES-module import-hoist
@@ -184,28 +190,110 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
 });
 
-test('ChatSessionManager._onChildExit fires onRunExit once on a normal exit', async () => {
+test('ChatSessionManager._onChildExit fires releaseRunLock once on a normal exit', async () => {
   const mgr = new ChatSessionManager(makeConfig());
   let released = 0;
-  const sess = makeChatSession(30001, { onRunExit: () => released++ });
+  const sess = makeChatSession(30001, { releaseRunLock: () => released++ });
   await mgr._onChildExit(sess, 0, null);
   assert.equal(released, 1, 'run-lifetime lock release fired exactly once on exit');
 });
 
-test('ChatSessionManager._onChildExit fires onRunExit BEFORE any early-return (killed session, empty agentId)', async () => {
+test('ChatSessionManager._onChildExit fires releaseRunLock BEFORE any early-return (killed session, empty agentId)', async () => {
   const mgr = new ChatSessionManager(makeConfig());
   let released = 0;
   // agentId '' makes _onChildExit return early at `if (!roomId || !agentId)`;
-  // onRunExit must still fire (it runs first), so a SIGTERM-killed run session
+  // releaseRunLock must still fire (it runs first), so a SIGTERM-killed run session
   // releases its folder lock instead of stranding it.
-  const sess = makeChatSession(30002, { agentId: '', onRunExit: () => released++ });
+  const sess = makeChatSession(30002, { agentId: '', releaseRunLock: () => released++ });
   await mgr._onChildExit(sess, 143, 'SIGTERM');
   assert.equal(released, 1, 'lock released even when the fallback path early-returns');
 });
 
-test('ChatSessionManager._onChildExit is a no-op for ordinary sessions (no onRunExit set)', async () => {
+test('ChatSessionManager._onChildExit is a no-op for ordinary sessions (no releaseRunLock set)', async () => {
   const mgr = new ChatSessionManager(makeConfig());
-  const sess = makeChatSession(30003); // no onRunExit
+  const sess = makeChatSession(30003); // no releaseRunLock
   await mgr._onChildExit(sess, 0, null); // must not throw
   assert.ok(true);
+});
+
+// ── ticket 9a28bf53: turn-end early release via _sweepTurnEndOrphans ──────────
+//
+// The sweep is driven directly (it is `protected`, not `#private`) to skip the
+// ORPHAN_SWEEP_GRACE_MS timer. `_isPidAlive` is overridden so pid liveness is a
+// fixed verdict; a sentinel pid has no OS descendants, so the real
+// findLiveBackgroundTasks returns [] and the clean-turn branch runs
+// deterministically — no real child process, no wall-clock wait.
+class SweepTestManager extends ChatSessionManager {
+  constructor(config, pidAlive) {
+    super(config);
+    this._pidAliveVerdict = pidAlive;
+  }
+  _isPidAlive() {
+    return this._pidAliveVerdict;
+  }
+}
+
+const DEAD_SENTINEL_PID = 2147483640; // no live process has this as an ancestor
+
+test('_sweepTurnEndOrphans: clean turn (folder idle) releases the run lock EARLY', async () => {
+  const mgr = new SweepTestManager(makeConfig(), true); // pid treated as alive
+  let released = 0;
+  const sess = makeChatSession(DEAD_SENTINEL_PID, {
+    _run: { run_id: 'runclean1', workspace_id: 'ws-1', kind: 'qa' },
+    releaseRunLock: () => released++,
+  });
+  await mgr._sweepTurnEndOrphans(sess);
+  assert.equal(
+    released,
+    1,
+    'clean turn (0 live background tasks) → run folder lock released early, without waiting for process exit',
+  );
+});
+
+test('_sweepTurnEndOrphans: does NOT release when the child is already gone (backstop owns it)', async () => {
+  const mgr = new SweepTestManager(makeConfig(), false); // pid already dead
+  let released = 0;
+  const sess = makeChatSession(DEAD_SENTINEL_PID, {
+    _run: { run_id: 'rundead01', workspace_id: 'ws-1', kind: 'qa' },
+    releaseRunLock: () => released++,
+  });
+  await mgr._sweepTurnEndOrphans(sess);
+  assert.equal(
+    released,
+    0,
+    'child gone → sweep returns before the idle branch; _onChildExit is the release owner on that path',
+  );
+});
+
+test('FolderMutex: turn-end early release unblocks a waiting successor; the process-exit backstop is a no-op', async () => {
+  const m = new FolderMutex();
+  const events = [];
+  const a = await m.acquire('/shared-run-folder'); // run A: provision→execute hold
+  let bAcquired = false;
+  const bp = m.acquire('/shared-run-folder').then((h) => {
+    bAcquired = true;
+    events.push('B-start');
+    return h;
+  });
+
+  await tick();
+  assert.equal(bAcquired, false, 'same-scenario successor waits while run A holds the lock');
+
+  // Run A's turn ends cleanly → the sweep releases EARLY, before A's process exits.
+  events.push('A-turn-end-release');
+  a.release();
+  const b = await bp;
+  assert.deepEqual(
+    events,
+    ['A-turn-end-release', 'B-start'],
+    'successor proceeds at the EARLY turn-end release, not at process exit',
+  );
+  assert.equal(b.wasBusy, true);
+
+  // Later, run A's process actually exits → _onChildExit fires the SAME handle
+  // again. It must be a no-op: it can neither release B's lock nor wedge the chain.
+  a.release();
+  assert.equal(m.activeKeyCount, 1, 'process-exit backstop double-release is a no-op; B still holds its lock');
+  b.release();
+  assert.equal(m.activeKeyCount, 0);
 });

@@ -186,11 +186,14 @@ export interface SessionRecord {
   tap: SubagentTapHandle | null;
   _currentTurn?: TurnState | null;
   onResult?: (raw: any) => void;
-  /** ticket e9d0e8bc: run-lifetime folder-lock release for a QA/security run
-   *  session, invoked once from `_onChildExit` on any process exit. Set by
-   *  ChatSessionManager.dispatch when the dispatch carries a run lock; unset for
-   *  ordinary chat/ticket sessions. Idempotent on the caller side. */
-  onRunExit?: () => void;
+  /** ticket e9d0e8bc / 9a28bf53: release the run-lifetime folder lock held for a
+   *  QA/security run session. Set by ChatSessionManager.dispatch when the dispatch
+   *  carries a run lock; unset for ordinary chat/ticket sessions. Called from two
+   *  independent folder-idle signals: the turn-end orphan sweep once the folder is
+   *  confirmed idle (ticket 9a28bf53 — the fast path, ~ORPHAN_SWEEP_GRACE_MS after
+   *  the result line) AND `_onChildExit` on any process exit (the backstop that
+   *  covers every path the sweep does not). Idempotent, so both firing is harmless. */
+  releaseRunLock?: () => void;
   /** Set when the running subagent emitted the session-split sentinel in its
    *  output (TicketSessionManager only). The next dispatchTrigger for this
    *  (ticket, role) force-respawns a fresh session instead of reusing this
