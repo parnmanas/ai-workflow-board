@@ -146,6 +146,15 @@ interface TurnState {
   heartbeatTimer: NodeJS.Timeout | null;
 }
 
+/** Identity of a one-shot QA/security run bound to a chat session (ticket
+ *  89716f04). Only ChatSessionManager stamps this — its presence marks a
+ *  session whose turn end must be swept for live background tasks. */
+export interface RunSessionBinding {
+  kind: 'qa' | 'security';
+  run_id: string;
+  workspace_id: string;
+}
+
 export interface SessionRecord {
   // Subclass-defined identity field (`roomId` or `sessionKey`).
   [key: string]: any;
@@ -211,6 +220,17 @@ export interface SessionRecord {
    *  를 정상적으로 새로 타는 fresh 세션은 이 필드가 undefined(=0)로 시작하므로
    *  카운터는 "연속 UNHEALTHY respawn" 에만 누적된다. */
   unhealthyRespawnCount?: number;
+  /** ticket 89716f04 — QA/security run identity, stamped by ChatSessionManager
+   *  only. When set, this is a one-shot run session: if its turn ends with a
+   *  live non-benign descendant process (a background task the positive-pid
+   *  teardown would kill silently), the run is finalized as `error` and the
+   *  strays are reaped visibly, instead of stranding the run until the ~45-min
+   *  liveness reaper. Cleared once the run is finalized so the sweep is one-shot. */
+  _run?: RunSessionBinding;
+  /** ticket 89716f04 — pending turn-end orphan-sweep timer for `_run` sessions.
+   *  Armed on the result line, cancelled when a new turn begins or the child
+   *  exits. Mirrors the `idleTimer` lifecycle idiom. */
+  _orphanSweepTimer?: NodeJS.Timeout | null;
 }
 
 /** Reservation placed on `_inflight` from the moment a dispatcher commits to

@@ -19,6 +19,7 @@ import {
 } from './rest.js';
 import { recordEvent } from './event-log-recorder.js';
 import type { AwbConfig } from './rest.js';
+import type { RunSessionBinding } from './base-session-manager.js';
 import type { ManagedAgentContextRegistry } from './managed-agent-context.js';
 import type { WorktreeManager, WorktreeMode } from './worktree-manager.js';
 import { prepareChatAttachments } from './chat-attachment-prep.js';
@@ -363,6 +364,11 @@ export interface ChatDispatchArgs {
    *  blocks for Claude, inline text for text-ish mime) before assembling the
    *  turn. Undefined / empty when the message has no attachments. */
   attachments?: any[];
+  /** ticket 89716f04 — set when this chat dispatch carries a QA/security
+   *  run_provision hint. ChatSessionManager stamps it on the session so the
+   *  one-shot run's turn end is swept for orphaned background tasks. Undefined
+   *  for an ordinary chat turn. */
+  run?: RunSessionBinding;
 }
 
 export interface ChatDispatchResult {
@@ -1574,6 +1580,15 @@ export class EventDispatcher {
           onProgress,
           agentContext: runContext,
           attachments: Array.isArray(p.attachments) ? p.attachments : [],
+          // ticket 89716f04 — thread run identity so the session's turn end is
+          // swept for orphaned background tasks (one-shot run, no re-invocation).
+          run: runProvision
+            ? {
+                kind: runProvision.kind,
+                run_id: runProvision.run_id,
+                workspace_id: runProvision.workspace_id,
+              }
+            : undefined,
         });
         // Record into ring AFTER dispatch so the spawn path sees real prior
         // history rather than self-referencing the message that triggered it.

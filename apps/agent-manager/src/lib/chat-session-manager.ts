@@ -8,12 +8,15 @@
 import {
   BaseSessionManager,
   type MonitorMeta,
+  type RunSessionBinding,
   type SessionAwareConfig,
   type SessionRecord,
 } from './base-session-manager.js';
 import { ADAPTER_CAPABILITIES, type ParseResult, type TurnImage } from './cli-adapters/base.js';
 import { fetchChatRoomHistory, postChatRoomMessage } from './rest.js';
 import { log } from './logging.js';
+import { callMcpTool, fireAndForgetTool, unwrapToolResult } from './mcp-client.js';
+import { findLiveBackgroundTasks, reapProcessTrees, type ProcNode } from './process-tree.js';
 import { composeChatRoomPrompt } from './prompts.js';
 import {
   approxBase64Bytes,
@@ -68,6 +71,16 @@ const PROGRESS_MIN_INTERVAL_MS = 1500;
 const PROGRESS_MAX_PER_SESSION = 30;
 /** Truncation for the summary slice rendered alongside the tool name. */
 const PROGRESS_SUMMARY_MAX = 80;
+
+/** ticket 89716f04 — grace after a run session's result line before the
+ *  turn-end orphan sweep runs. Lets any tail-end benign shell-out from the
+ *  just-finished turn exit first (avoids false positives), while staying far
+ *  under the ~45-min liveness reaper it replaces. A new turn on the session
+ *  cancels the pending sweep. */
+const ORPHAN_SWEEP_GRACE_MS = 4000;
+/** Max orphan pids described inline in the run summary / log (the full pid
+ *  list is always included; this only caps the per-pid cmdline detail). */
+const ORPHAN_SUMMARY_MAX_DETAIL = 5;
 
 export class ChatSessionManager
   extends BaseSessionManager
@@ -197,6 +210,11 @@ export class ChatSessionManager
     const sess = this._getLiveSession(sessionKey);
 
     if (sess) {
+      // ticket 89716f04 — a follow-up turn means the run is progressing, not
+      // stranded: cancel any orphan sweep the previous turn armed, and refresh
+      // the run binding in case this dispatch carries updated run identity.
+      this.#cancelOrphanSweep(sess);
+      if (spec.run) sess._run = spec.run;
       // Acceptance criterion: explicit "reused existing pid=…" log so the
       // log stream clearly distinguishes follow-ups from fresh spawns.
       log(
@@ -320,6 +338,9 @@ export class ChatSessionManager
         spawned.roomId = spec.roomId;
         spawned.agentId = spec.agentId;
         spawned._effectiveApiKey = spec.agentContext?.api_key || this._config.apiKey;
+        // ticket 89716f04 — mark one-shot QA/security run sessions so their
+        // turn end is swept for orphaned background tasks.
+        if (spec.run) spawned._run = spec.run;
       }
     } finally {
       this._inflight.delete(sessionKey);
@@ -342,6 +363,10 @@ export class ChatSessionManager
     // future turns on the same pid.
     if (parsed.isResult) {
       this.#progressMeta.delete(sess.pid);
+      // ticket 89716f04 — turn ended: for a one-shot run session, arm the
+      // orphan sweep (no-op unless sess._run is set). A follow-up turn or the
+      // child exiting cancels it before it fires.
+      this.#armOrphanSweep(sess);
     }
     // Detect send_chat_room_message tool use in Claude stream-json output.
     // assistant messages carry content blocks; each tool_use block has a `name`.
@@ -383,6 +408,9 @@ export class ChatSessionManager
     _code: number | null,
     _signal: NodeJS.Signals | null,
   ): Promise<void> {
+    // ticket 89716f04 — the child is gone; its descendants died or reparented,
+    // so a pending turn-end orphan sweep has nothing valid to enumerate.
+    this.#cancelOrphanSweep(sess);
     const sent = this.#chatSent.has(sess.pid);
     // Snapshot the buffered output BEFORE the base class clears it (the
     // base clears the ring after this hook returns).
@@ -422,6 +450,114 @@ export class ChatSessionManager
     log(`[chat-session] fallback message for room=${roomId} agent=${agentId} pid=${sess.pid} outputLen=${body.length}`);
     const cfg = { ...this._config, apiKey: sess._effectiveApiKey || this._config.apiKey };
     await postChatRoomMessage(cfg, roomId, agentId, message);
+  }
+
+  // -- Turn-end orphan sweep (ticket 89716f04) -------------------------------
+
+  #cancelOrphanSweep(sess: SessionRecord): void {
+    if (sess._orphanSweepTimer) {
+      clearTimeout(sess._orphanSweepTimer);
+      sess._orphanSweepTimer = null;
+    }
+  }
+
+  /** Arm the turn-end orphan sweep for a one-shot run session. No-op for an
+   *  ordinary chat session (`sess._run` unset). Cancels any previously-armed
+   *  timer so only the latest turn's sweep stays pending. */
+  #armOrphanSweep(sess: SessionRecord): void {
+    if (!sess._run) return;
+    this.#cancelOrphanSweep(sess);
+    const timer = setTimeout(() => {
+      sess._orphanSweepTimer = null;
+      void this.#sweepTurnEndOrphans(sess);
+    }, ORPHAN_SWEEP_GRACE_MS);
+    timer.unref?.();
+    sess._orphanSweepTimer = timer;
+  }
+
+  /** Fired ORPHAN_SWEEP_GRACE_MS after a run session's result line. If the
+   *  still-alive CLI child has live non-benign descendants, they are background
+   *  tasks the session left running with no re-invocation contract — the CLI's
+   *  positive-pid teardown would kill them silently and strand the run in
+   *  `running` until the ~45-min liveness reaper. So: reap them visibly and
+   *  finalize the run as `error`, recording the kill in the summary + manager
+   *  log (requirements 1b + 2). Re-reads run status first so a run the agent
+   *  already finalized is never clobbered. Every await is guarded — this runs
+   *  detached via `void`, so it must never reject. */
+  async #sweepTurnEndOrphans(sess: SessionRecord): Promise<void> {
+    const run = sess._run;
+    if (!run) return;
+    // Child already gone → its descendants died or reparented to init;
+    // enumerating from a dead pid is meaningless and _onChildExit owns that
+    // path. Also closes the pid-reuse window (sess.pid could now be unrelated).
+    if (!this._isPidAlive(sess.pid)) return;
+
+    let orphans: ProcNode[];
+    try {
+      orphans = await findLiveBackgroundTasks(sess.pid);
+    } catch (err: any) {
+      log(`[chat-session] orphan sweep enumeration failed pid=${sess.pid}: ${err?.message ?? err}`);
+      return;
+    }
+    if (orphans.length === 0) return; // clean one-shot turn — nothing stranded
+
+    const run8 = run.run_id.slice(0, 8);
+    const pidList = orphans.map((o) => o.pid).join(',');
+
+    // Never overwrite a run the agent already finalized. Availability-first: an
+    // unreadable status is treated as non-terminal so a transient server hiccup
+    // doesn't leave the trap uncaught.
+    let status: string | null = null;
+    try {
+      const getTool = run.kind === 'qa' ? 'get_qa_run' : 'get_security_run';
+      const resp = await callMcpTool(this._config, getTool, {
+        run_id: run.run_id,
+        workspace_id: run.workspace_id,
+      });
+      const rec = unwrapToolResult(resp);
+      if (rec && typeof rec.status === 'string') status = rec.status;
+    } catch (err: any) {
+      log(`[chat-session] orphan sweep status read failed run=${run8}: ${err?.message ?? err}`);
+    }
+    if (status === 'passed' || status === 'failed' || status === 'error') {
+      // Run already finalized — the strays are the agent's own leftovers, not a
+      // stranded run. Log for forensics but don't reap (avoid clobbering a
+      // benign helper an exclusion gap missed) or overwrite the summary.
+      log(
+        `[chat-session] run ${run8} already ${status}; ${orphans.length} live background task(s) present ` +
+          `at session cleanup [pids=${pidList}] — leaving to normal teardown`,
+      );
+      return;
+    }
+
+    // THE TRAP: one-shot run ended its turn with live non-benign descendants and
+    // is still non-terminal. Reap them visibly + finalize the run as error.
+    let reaped: number[] = [];
+    try {
+      reaped = await reapProcessTrees(orphans.map((o) => o.pid));
+    } catch (err: any) {
+      log(`[chat-session] orphan reap failed run=${run8}: ${err?.message ?? err}`);
+    }
+    const detail = orphans
+      .slice(0, ORPHAN_SUMMARY_MAX_DETAIL)
+      .map((o) => `pid=${o.pid} ${o.cmd.slice(0, 80)}`)
+      .join('; ');
+    const summary =
+      `session cleanup killed ${orphans.length} live background task(s) — ` +
+      `run 세션이 재호출 계약 없이 살아있는 백그라운드 태스크를 남긴 채 턴을 종료했습니다. ` +
+      `reaped pids: ${pidList}. ${detail}`;
+    const completeTool = run.kind === 'qa' ? 'complete_qa_run' : 'complete_security_run';
+    await fireAndForgetTool(this._config, completeTool, {
+      run_id: run.run_id,
+      workspace_id: run.workspace_id,
+      status: 'error',
+      summary,
+    });
+    sess._run = undefined; // finalized — don't sweep this session again
+    log(
+      `[chat-session] run ${run8} session cleanup: reaped ${reaped.length}/${orphans.length} ` +
+        `live background task(s) [pids=${pidList}] — finalized run as error`,
+    );
   }
 
   /** Fire a single coalesced progress message for a batch of tool_use blocks
