@@ -5,6 +5,7 @@ import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { Agent } from '../../entities/Agent';
 import { User } from '../../entities/User';
+import { resolveAgentDisplayMap } from '../../utils/agent-name';
 import type { DefaultRoleAssignments } from '../../common/default-role-assignments-config';
 
 export interface ResolvedAssignment {
@@ -112,6 +113,14 @@ export class TicketRoleAssignmentService {
     const roleMap = new Map(roles.map(r => [r.id, r]));
     const agentMap = new Map(agents.map(a => [a.id, a]));
     const userMap = new Map(users.map(u => [u.id, u]));
+    // Canonical <Manager>/<Agent> display per ST-7 — resolved by id with NO
+    // workspace filter (the `agents` load above is already id-only), so an
+    // agent assigned from ANOTHER workspace still renders its full name (never
+    // a bare leaf or raw id) on the REST role-assignments projection the ticket
+    // panel + trigger menu read. Matches the MCP get_ticket path
+    // (hydrateRoleAssignments). One extra manager query only when a holder is a
+    // managed agent (ticket 0cccf9b5).
+    const agentDisplayById = await resolveAgentDisplayMap(this.agentRepo, agents);
 
     return rows
       .map(r => {
@@ -120,7 +129,7 @@ export class TicketRoleAssignmentService {
         let holder: ResolvedAssignment['holder'] = null;
         if (r.agent_id && agentMap.has(r.agent_id)) {
           const a = agentMap.get(r.agent_id)!;
-          holder = { type: 'agent', id: a.id, name: a.name };
+          holder = { type: 'agent', id: a.id, name: agentDisplayById.get(a.id) ?? a.name };
         } else if (r.user_id && userMap.has(r.user_id)) {
           const u = userMap.get(r.user_id)!;
           holder = { type: 'user', id: u.id, name: u.name || u.email };
@@ -178,6 +187,11 @@ export class TicketRoleAssignmentService {
     const roleMap = new Map(roles.map(r => [r.id, r]));
     const agentMap = new Map(agents.map(a => [a.id, a]));
     const userMap = new Map(users.map(u => [u.id, u]));
+    // Canonical <Manager>/<Agent> display per ST-7 — same rationale as
+    // resolveForTicket above. Feeds the board-card multi-holder avatars
+    // (t.role_holders), which previously dropped the manager prefix on cross-
+    // workspace holders (ticket 0cccf9b5).
+    const agentDisplayById = await resolveAgentDisplayMap(this.agentRepo, agents);
 
     // ticketId → (roleId → group). Preserves per-ticket role grouping while
     // keeping insertion cheap; sorted by role.position on the way out.
@@ -188,7 +202,7 @@ export class TicketRoleAssignmentService {
       let holder: { type: 'agent' | 'user'; id: string; name: string } | null = null;
       if (r.agent_id && agentMap.has(r.agent_id)) {
         const a = agentMap.get(r.agent_id)!;
-        holder = { type: 'agent', id: a.id, name: a.name };
+        holder = { type: 'agent', id: a.id, name: agentDisplayById.get(a.id) ?? a.name };
       } else if (r.user_id && userMap.has(r.user_id)) {
         const u = userMap.get(r.user_id)!;
         holder = { type: 'user', id: u.id, name: u.name || u.email };

@@ -1240,6 +1240,20 @@ export default function TicketPanel({
     return m;
   }, [roleAssignments]);
 
+  // Server-resolved holder display names keyed by holder id. The REST
+  // role-assignments projection resolves ids workspace-independently (and, per
+  // ST-7, with the <Manager>/<Agent> prefix), so this is the fallback when a
+  // holder's agent/user isn't in the workspace-scoped `agents`/`users` lists —
+  // an already-assigned cross-workspace agent then shows its name instead of a
+  // raw id (ticket 0cccf9b5).
+  const resolvedHolderNameById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const r of roleAssignments) {
+      if (r.holder) m.set(r.holder.id, r.holder.name);
+    }
+    return m;
+  }, [roleAssignments]);
+
   // Role drafts that genuinely change the holder SET. A draft whose holder set
   // equals the live set is dropped (no-op — e.g. add then remove the same one,
   // or reorder). Compared as unordered key sets (holder order isn't meaningful).
@@ -2525,11 +2539,16 @@ export default function TicketPanel({
                   const nameOf = (h: HolderDraft): string => {
                     if (h.agent_id) {
                       const a = (agents || []).find(x => x.id === h.agent_id);
-                      return a ? formatAgentDisplayName(a) : h.agent_id;
+                      if (a) return formatAgentDisplayName(a);
+                      // Cross-workspace holder: not in the ws-scoped agents
+                      // list. Fall back to the server-resolved display name
+                      // (workspace-independent) instead of leaking the raw id.
+                      return resolvedHolderNameById.get(h.agent_id) || h.agent_id;
                     }
                     if (h.user_id) {
                       const u = (users || []).find(x => x.id === h.user_id);
-                      return u ? (u.name || u.email) : h.user_id;
+                      if (u) return (u.name || u.email);
+                      return resolvedHolderNameById.get(h.user_id) || h.user_id;
                     }
                     return '?';
                   };
