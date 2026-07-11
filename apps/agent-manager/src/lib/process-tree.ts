@@ -24,6 +24,12 @@ export interface ProcNode {
    *  one-shot exit path keys on it); undefined on the ppid-only parsers used by
    *  the persistent sweep. */
   pgid?: number;
+  /** Process-state token from `ps -o stat=` (e.g. 'S', 'Ss', 'R+', 'Z'). Only
+   *  the `*WithGroup` parser populates it — the one-shot pid-reuse guard
+   *  (isGroupLeaderReused) needs it to tell a still-unreaped zombie leader
+   *  ('Z', ours) from a LIVE leader (pid reused by an unrelated group).
+   *  undefined on the ppid-only parsers. */
+  state?: string;
   /** Full command line (best-effort). Used both to identify benign machinery
    *  and to describe the orphan in logs / the run summary. */
   cmd: string;
@@ -152,17 +158,36 @@ export async function findLiveBackgroundTasks(
 // Windows has no detached process groups (detached is off there), so this
 // returns [] on win32 — the one-shot Windows orphan case is out of scope.
 
-/** Parse `ps -A -ww -o pid=,ppid=,pgid=,args=` output into ProcNodes carrying
- *  `pgid`. Lines that don't start with `<pid> <ppid> <pgid> ` are skipped.
+/** Parse `ps -A -ww -o pid=,ppid=,pgid=,stat=,args=` output into ProcNodes
+ *  carrying `pgid` and the process-`state` token. `stat` is a single no-space
+ *  field (e.g. 'Ss', 'R+', 'Z'), so it's captured with `\S+` before the free-form
+ *  args. Lines that don't start with `<pid> <ppid> <pgid> <stat> ` are skipped.
  *  Pure — unit-tested. */
 export function parseProcListUnixWithGroup(stdout: string): ProcNode[] {
   const out: ProcNode[] = [];
   for (const line of stdout.split('\n')) {
-    const m = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.*)$/.exec(line);
+    const m = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(line);
     if (!m) continue;
-    out.push({ pid: Number(m[1]), ppid: Number(m[2]), pgid: Number(m[3]), cmd: m[4] });
+    out.push({ pid: Number(m[1]), ppid: Number(m[2]), pgid: Number(m[3]), state: m[4], cmd: m[5] });
   }
   return out;
+}
+
+/** pid-reuse guard for the one-shot group sweep. A process-group leader has
+ *  `pid == pgid`. Our one-shot leader is a DEAD CLI, so its group-id (== the pid
+ *  we key on) must have NO live leader: the leader row is either gone (already
+ *  reaped) or a lingering zombie ('Z', parent hasn't `wait()`ed yet) — both
+ *  still "ours". If instead a LIVE, non-zombie process now holds `pid == pgid`,
+ *  the OS reused that pid for an UNRELATED detached group leader between the
+ *  leader's death and this scan; the members keyed on this pgid are that group's,
+ *  not our orphans, so the caller must abort the sweep. Absent leader → not
+ *  reused (proceed). Present-but-unparseable state → treated as reused (abort),
+ *  the safe direction: a missed sweep falls back to the ~45-min liveness reaper,
+ *  strictly less harmful than a mis-reap of an unrelated run. Pure — unit-tested. */
+export function isGroupLeaderReused(all: ProcNode[], pgid: number): boolean {
+  const leader = all.find((p) => p.pid === pgid);
+  if (!leader) return false; // reaped — our dead leader, safe to sweep
+  return (leader.state ?? '')[0] !== 'Z'; // zombie → ours; live/unknown → reused
 }
 
 /** Live members of process group `pgid`, EXCLUDING the group leader (pid ==
@@ -171,12 +196,17 @@ export function parseProcListUnixWithGroup(stdout: string): ProcNode[] {
  *  mirroring collectNonBenignDescendants so the mcp-host child and its transient
  *  shell-outs are never reaped). Unlike the ppid walk, membership is keyed on
  *  pgid so an orphan reparented to init when the leader exited is still found.
- *  Pure — unit-tested. */
+ *  Returns [] when the leader's pid was reused (isGroupLeaderReused) — the group
+ *  isn't ours. Pure — unit-tested. */
 export function collectNonBenignGroupMembers(
   all: ProcNode[],
   pgid: number,
   patterns: readonly RegExp[] = BENIGN_CMD_PATTERNS,
 ): ProcNode[] {
+  // pid-reuse window (ticket 7b5f2572): if the dead leader's pid is now held by
+  // a LIVE process, the pid was reused for an unrelated detached group — abort
+  // so we don't mis-reap it / falsely error a stranger's run.
+  if (isGroupLeaderReused(all, pgid)) return [];
   const members = all.filter((p) => p.pgid === pgid && p.pid !== pgid);
   if (members.length === 0) return [];
   const byParent = new Map<number, ProcNode[]>();
@@ -205,14 +235,16 @@ export function collectNonBenignGroupMembers(
 
 /** Enumerate the live non-benign members of the process group led by `pgid`
  *  (POSIX only — the one-shot exit path passes the detached child's pid, which
- *  is its own pgid). Returns [] on win32 (no detached groups) and on any
- *  enumeration failure — availability-first, exactly like listAllProcesses. */
+ *  is its own pgid). The `stat` column is requested so collectNonBenignGroupMembers
+ *  can run its pid-reuse guard (abort if a live leader now holds our old pid).
+ *  Returns [] on win32 (no detached groups) and on any enumeration failure —
+ *  availability-first, exactly like listAllProcesses. */
 export async function findLiveGroupBackgroundTasks(
   pgid: number,
   patterns: readonly RegExp[] = BENIGN_CMD_PATTERNS,
 ): Promise<ProcNode[]> {
   if (hostPlatform() === 'win32') return [];
-  const res = await runCommand('ps', ['-A', '-ww', '-o', 'pid=,ppid=,pgid=,args='], { timeoutMs: 15_000 });
+  const res = await runCommand('ps', ['-A', '-ww', '-o', 'pid=,ppid=,pgid=,stat=,args='], { timeoutMs: 15_000 });
   if (res.spawnFailed || res.code !== 0) return [];
   const all = parseProcListUnixWithGroup(res.stdout);
   if (all.length === 0) return [];
