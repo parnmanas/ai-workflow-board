@@ -163,3 +163,98 @@ test('5 assignees × 4 tickets each, cap=4: all N triggers land at the owning ag
 
   exitAfterTests(0);
 });
+
+// OVER-CAP DROP (storm-prevention, ticket 701e5e36 요구 2):
+// The test above runs cap == owned-ticket-count, so every owned ticket fits the
+// window and all N are admitted — it never exercises the admission BOUNDARY.
+// Here the agent owns MORE tickets than the cap (4 > 2), so the top-N window
+// must admit exactly `cap` triggers and SILENTLY DROP the surplus. This is the
+// invariant that stops a To Do backlog from re-triggering the agent every
+// supervisor tick (the GameClient 2026-05-12 storm). We assert on the COUNT and
+// scope only — not which specific tickets win the rank tie-break — so the test
+// stays coupled to the admission cap, not to internal ordering details.
+const OVER_CAP = 2;
+const OWNED_OVER_CAP = 4;
+
+test(`over-cap: 1 assignee owns ${OWNED_OVER_CAP} tickets, cap=${OVER_CAP} → exactly ${OVER_CAP} admitted, surplus dropped`, async (t) => {
+  const port = parseInt(process.env.QA_CONCURRENCY_OVERCAP_PORT || '7805', 10);
+  const { app, port: boundPort, modules } = await bootApp({ port });
+  t.after(() => { void app.close().catch(() => {}); });
+  const { getDataSourceToken, ActivityService } = modules;
+
+  const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, {
+    workspaceName: 'concurrency-overcap',
+    maxConcurrent: OVER_CAP,
+  });
+  const user = await createUser(app, getDataSourceToken, { name: 'driver-overcap' });
+
+  const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'oc0' });
+  const key = await createApiKey(app, getDataSourceToken, agent.id, {
+    workspaceId: ws.id,
+    label: 'oc0',
+  });
+  const va = new VirtualAgent({ name: 'oc0', agentId: agent.id, apiKey: key.raw_key, port: boundPort });
+  await va.start();
+  t.after(async () => { await va.stop(); });
+  await new Promise((r) => setTimeout(r, 400));
+
+  // All OWNED_OVER_CAP tickets sit in In Progress so each move-emit triggers the
+  // owner — but only the top-OVER_CAP ranked fit the window.
+  const owned = [];
+  for (let j = 0; j < OWNED_OVER_CAP; j++) {
+    const t2 = await createTicket(app, getDataSourceToken, {
+      columnId: columns.inProgress.id,
+      workspaceId: ws.id,
+      title: `oc-t-${j}`,
+      assigneeId: agent.id,
+      position: j,
+    });
+    owned.push(t2);
+  }
+
+  step(`Fire ${OWNED_OVER_CAP} "moved" activities for one agent whose cap is ${OVER_CAP}`);
+  const activityService = app.get(ActivityService);
+  await Promise.all(owned.map((ticket) =>
+    activityService.logActivity({
+      entity_type: 'ticket',
+      entity_id: ticket.id,
+      action: 'moved',
+      ticket_id: ticket.id,
+      new_value: 'In Progress',
+      old_value: 'Todo',
+      actor_id: user.id,
+      actor_name: user.name,
+    }),
+  ));
+
+  // Wait long enough that any (buggy) over-cap trigger would also have landed.
+  // We deliberately wait past the point where OVER_CAP triggers arrive, then a
+  // settle window, so a surplus emit shows up and fails the equality below.
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline) {
+    if (va.triggers.length >= OVER_CAP) break;
+    await new Promise((r) => setTimeout(r, 80));
+  }
+  await new Promise((r) => setTimeout(r, 500));
+
+  const ownedIds = new Set(owned.map((o) => o.id));
+  // Admission cap: exactly OVER_CAP delivered — the window admits the top-N and
+  // drops the surplus (no storm).
+  assert.equal(
+    va.triggers.length,
+    OVER_CAP,
+    `over-cap admission: expected exactly ${OVER_CAP} window triggers, got ${va.triggers.length}`,
+  );
+  // Every admitted trigger is a distinct owned ticket (no leak, no duplicate).
+  const seen = new Set();
+  for (const tr of va.triggers) {
+    assert.ok(ownedIds.has(tr.ticket_id), `leak: ${tr.ticket_id}`);
+    assert.ok(!seen.has(tr.ticket_id), `duplicate trigger for ${tr.ticket_id}`);
+    seen.add(tr.ticket_id);
+    assert.equal(tr.role, 'assignee');
+    assert.equal(tr.agent_id, agent.id);
+    assert.equal(tr.trigger_source, 'column_move');
+  }
+
+  exitAfterTests(0);
+});
