@@ -20,6 +20,10 @@ import { log } from './logging.js';
 export interface ProcNode {
   pid: number;
   ppid: number;
+  /** POSIX process-group id. Only populated by the `*WithGroup` parser (the
+   *  one-shot exit path keys on it); undefined on the ppid-only parsers used by
+   *  the persistent sweep. */
+  pgid?: number;
   /** Full command line (best-effort). Used both to identify benign machinery
    *  and to describe the orphan in logs / the run summary. */
   cmd: string;
@@ -130,6 +134,89 @@ export async function findLiveBackgroundTasks(
   const all = await listAllProcesses();
   if (all.length === 0) return [];
   return collectNonBenignDescendants(all, rootPid, patterns);
+}
+
+// -- POSIX process-group enumeration (ticket 55d3063f) ------------------------
+//
+// The ppid tree-walk above only works while the root (the CLI child) is STILL
+// ALIVE — the persistent chat session sweeps its turn end ~4s after the result
+// line, before the CLI tears down, so `findLiveBackgroundTasks(sess.pid)` sees
+// a live parent. The one-shot subagent path (codex / antigravity, or a declined
+// persistent-chat fallback) has NO such pre-kill window: the CLI self-exits when
+// its turn ends, so by the time our exit handler runs, `rootPid` is dead and any
+// background task it spawned has been reparented to init — a ppid walk from the
+// dead pid finds nothing. The one-shot child is spawned `detached` on POSIX
+// (subagent-manager spawn), which makes it a process-group LEADER (pgid == pid);
+// a descendant that didn't `setsid` itself keeps that pgid even after reparent.
+// So the one-shot exit path keys on pgid, not ppid, to stay reparent-robust.
+// Windows has no detached process groups (detached is off there), so this
+// returns [] on win32 — the one-shot Windows orphan case is out of scope.
+
+/** Parse `ps -A -ww -o pid=,ppid=,pgid=,args=` output into ProcNodes carrying
+ *  `pgid`. Lines that don't start with `<pid> <ppid> <pgid> ` are skipped.
+ *  Pure — unit-tested. */
+export function parseProcListUnixWithGroup(stdout: string): ProcNode[] {
+  const out: ProcNode[] = [];
+  for (const line of stdout.split('\n')) {
+    const m = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.*)$/.exec(line);
+    if (!m) continue;
+    out.push({ pid: Number(m[1]), ppid: Number(m[2]), pgid: Number(m[3]), cmd: m[4] });
+  }
+  return out;
+}
+
+/** Live members of process group `pgid`, EXCLUDING the group leader (pid ==
+ *  pgid — the now-dead CLI) and every benign process together with its subtree
+ *  (a benign node's descendants are pruned via ppid among the group members,
+ *  mirroring collectNonBenignDescendants so the mcp-host child and its transient
+ *  shell-outs are never reaped). Unlike the ppid walk, membership is keyed on
+ *  pgid so an orphan reparented to init when the leader exited is still found.
+ *  Pure — unit-tested. */
+export function collectNonBenignGroupMembers(
+  all: ProcNode[],
+  pgid: number,
+  patterns: readonly RegExp[] = BENIGN_CMD_PATTERNS,
+): ProcNode[] {
+  const members = all.filter((p) => p.pgid === pgid && p.pid !== pgid);
+  if (members.length === 0) return [];
+  const byParent = new Map<number, ProcNode[]>();
+  for (const p of members) {
+    const arr = byParent.get(p.ppid);
+    if (arr) arr.push(p);
+    else byParent.set(p.ppid, [p]);
+  }
+  // Mark every benign member and its (in-group) subtree for exclusion.
+  const excluded = new Set<number>();
+  for (const p of members) {
+    if (excluded.has(p.pid) || !isBenignCmd(p.cmd, patterns)) continue;
+    const stack = [p.pid];
+    excluded.add(p.pid);
+    while (stack.length) {
+      const cur = stack.pop() as number;
+      for (const child of byParent.get(cur) || []) {
+        if (excluded.has(child.pid)) continue;
+        excluded.add(child.pid);
+        stack.push(child.pid);
+      }
+    }
+  }
+  return members.filter((p) => !excluded.has(p.pid));
+}
+
+/** Enumerate the live non-benign members of the process group led by `pgid`
+ *  (POSIX only — the one-shot exit path passes the detached child's pid, which
+ *  is its own pgid). Returns [] on win32 (no detached groups) and on any
+ *  enumeration failure — availability-first, exactly like listAllProcesses. */
+export async function findLiveGroupBackgroundTasks(
+  pgid: number,
+  patterns: readonly RegExp[] = BENIGN_CMD_PATTERNS,
+): Promise<ProcNode[]> {
+  if (hostPlatform() === 'win32') return [];
+  const res = await runCommand('ps', ['-A', '-ww', '-o', 'pid=,ppid=,pgid=,args='], { timeoutMs: 15_000 });
+  if (res.spawnFailed || res.code !== 0) return [];
+  const all = parseProcListUnixWithGroup(res.stdout);
+  if (all.length === 0) return [];
+  return collectNonBenignGroupMembers(all, pgid, patterns);
 }
 
 function isPidAlive(pid: number): boolean {

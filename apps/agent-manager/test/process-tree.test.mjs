@@ -10,9 +10,11 @@ import assert from 'node:assert/strict';
 
 const {
   parseProcListUnix,
+  parseProcListUnixWithGroup,
   parseProcListWin,
   isBenignCmd,
   collectNonBenignDescendants,
+  collectNonBenignGroupMembers,
   BENIGN_CMD_PATTERNS,
 } = await import('../dist/lib/process-tree.js');
 
@@ -119,5 +121,82 @@ test('collectNonBenignDescendants honours a custom benign denylist', () => {
   ];
   // Treat unity as benign for this call only.
   const res = collectNonBenignDescendants(table, 10, [/\bunity\b/i]);
+  assert.deepEqual(pids(res), [30]); // unity pruned, bash kept
+});
+
+// -- POSIX process-group enumeration (ticket 55d3063f) ------------------------
+
+test('parseProcListUnixWithGroup parses pid/ppid/pgid/args and skips junk', () => {
+  const stdout = [
+    '      1       0       1 /sbin/init splash',
+    '  46479   26923   46479 codex --model x',
+    '  99999       1   46479 node /x/self.js mcp-host', // reparented (ppid=1) but same pgid
+    '  50000       1   46479 bash -c "build monitor loop"', // orphaned bg task, same pgid
+    'garbage header',
+    '',
+  ].join('\n');
+  const nodes = parseProcListUnixWithGroup(stdout);
+  assert.equal(nodes.length, 4);
+  assert.deepEqual(nodes[0], { pid: 1, ppid: 0, pgid: 1, cmd: '/sbin/init splash' });
+  assert.equal(nodes[1].pgid, 46479);
+  assert.equal(nodes[2].ppid, 1); // reparented
+  assert.equal(nodes[2].pgid, 46479); // still in the leader's group
+  assert.equal(nodes[3].cmd, 'bash -c "build monitor loop"'); // full args preserved
+});
+
+test('collectNonBenignGroupMembers finds reparented orphans by pgid (the ppid walk would miss)', () => {
+  // The one-shot CLI (leader pid=46479, pgid=46479) has EXITED, so its children
+  // reparented to init (ppid=1). A ppid walk from 46479 finds nothing; the group
+  // scan still catches them because they kept the leader's pgid.
+  const table = [
+    { pid: 1, ppid: 0, pgid: 1, cmd: '/sbin/init' },
+    { pid: 200, ppid: 1, pgid: 46479, cmd: 'node /x/self.js mcp-host' }, // benign, reparented
+    { pid: 250, ppid: 200, pgid: 46479, cmd: 'screencapture -x /tmp/a.png' }, // benign subtree
+    { pid: 300, ppid: 1, pgid: 46479, cmd: 'bash -c "build monitor"' }, // orphan bg task
+    { pid: 400, ppid: 300, pgid: 46479, cmd: 'powershell -File build.ps1' }, // orphan grandchild
+    { pid: 500, ppid: 1, pgid: 777, cmd: 'unrelated other-group' }, // different group
+  ];
+  const res = collectNonBenignGroupMembers(table, 46479);
+  // bash (300) + its child (400); NOT the mcp-host subtree (200/250), NOT the
+  // process in another group (500).
+  assert.deepEqual(pids(res), [300, 400]);
+});
+
+test('collectNonBenignGroupMembers excludes the group leader itself (pid === pgid)', () => {
+  const table = [
+    { pid: 46479, ppid: 1, pgid: 46479, cmd: 'codex --model x' }, // the (maybe-zombie) leader
+    { pid: 300, ppid: 46479, pgid: 46479, cmd: 'bash -c sleep' },
+  ];
+  assert.deepEqual(pids(collectNonBenignGroupMembers(table, 46479)), [300]);
+});
+
+test('collectNonBenignGroupMembers prunes a non-benign child under a benign parent', () => {
+  const table = [
+    { pid: 20, ppid: 1, pgid: 46479, cmd: 'self mcp-host' }, // benign
+    { pid: 30, ppid: 20, pgid: 46479, cmd: 'evil-thing --do-stuff' }, // child of benign → pruned
+  ];
+  assert.deepEqual(collectNonBenignGroupMembers(table, 46479), []);
+});
+
+test('collectNonBenignGroupMembers returns [] when the group has no non-leader members', () => {
+  assert.deepEqual(collectNonBenignGroupMembers([], 46479), []);
+  // Only the leader present.
+  assert.deepEqual(
+    collectNonBenignGroupMembers([{ pid: 46479, ppid: 1, pgid: 46479, cmd: 'codex' }], 46479),
+    [],
+  );
+  // Members exist but none share the target pgid.
+  assert.deepEqual(
+    collectNonBenignGroupMembers([{ pid: 300, ppid: 1, pgid: 999, cmd: 'bash' }], 46479),
+    [],
+  );
+});
+
+test('collectNonBenignGroupMembers honours a custom benign denylist', () => {
+  const table = [
+    { pid: 20, ppid: 1, pgid: 46479, cmd: 'unity -batchmode -build' },
+    { pid: 30, ppid: 1, pgid: 46479, cmd: 'bash -c sleep' },
+  ];
+  const res = collectNonBenignGroupMembers(table, 46479, [/\bunity\b/i]);
   assert.deepEqual(pids(res), [30]); // unity pruned, bash kept
 });
