@@ -204,6 +204,13 @@ export interface SessionRecord {
    *  것이라 dispatchTrigger 재진입(dedup/inflight/twin) 없이 안전하게
    *  같은 트리거 작업을 이어간다. */
   _fallbackRespawn?: (nextAttempt: number) => Promise<SessionRecord | null>;
+  /** ticket 54a66701 — watchdog 가 UNHEALTHY(응답 불능)로 SIGTERM 한 세션을
+   *  exit 핸들러가 respawn 할 때마다 +1 되어 respawn 체인을 따라 이월되는
+   *  카운터. UNHEALTHY_RESPAWN_MAX 로 상한을 둬서 만성적으로 wedge 되는
+   *  (ticket,role) 이 exit-143 데스루프를 내지 못하게 한다. dispatchTrigger
+   *  를 정상적으로 새로 타는 fresh 세션은 이 필드가 undefined(=0)로 시작하므로
+   *  카운터는 "연속 UNHEALTHY respawn" 에만 누적된다. */
+  unhealthyRespawnCount?: number;
 }
 
 /** Reservation placed on `_inflight` from the moment a dispatcher commits to

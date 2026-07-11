@@ -78,6 +78,16 @@ const SESSION_SPLIT_SENTINEL_RE = /\[\[AWB:SESSION_SPLIT\]\][ \t]*([^\r\n]*)/;
  *  the audit comment. */
 const SESSION_SPLIT_REASON_MAX_CHARS = 280;
 
+/** Max consecutive watchdog-UNHEALTHY respawns for one (ticket, role) strand
+ *  before we stop respawning and let the stall surface (silent-exit fallback /
+ *  circuit-breaker) instead (ticket 54a66701). The health watchdog only fires
+ *  after 5 silent turns OR 30m without an LLM response, so each wedge-respawn
+ *  cycle is expensive and slow; a fresh session (new pid / KV cache) almost
+ *  always clears a transient wedge, and anything still wedging after 2 fresh
+ *  respawns is systemic — surfacing it beats an unbounded exit-143 death loop.
+ *  Counted via SessionRecord.unhealthyRespawnCount, carried across respawns. */
+const UNHEALTHY_RESPAWN_MAX = 2;
+
 export class TicketSessionManager
   extends BaseSessionManager
   implements TicketSessionManagerContract
@@ -776,6 +786,84 @@ export class TicketSessionManager
     this.#movingCue.delete(sess.pid);
     this.#commentSent.delete(sess.pid);
     this.#lastTriggerId.delete(sess.pid);
+
+    // Watchdog UNHEALTHY respawn (ticket 54a66701). When the health watchdog
+    // SIGTERM'd this session for going unresponsive (#killUnhealthy set
+    // unhealthyKilled after 5 silent turns / 30m without an LLM response), the
+    // trigger work that had been injected into the wedged session was NEVER
+    // executed — its stdin turns died with the child. "kill for respawn" must
+    // actually respawn: dispatch a FRESH session for the same (ticket, role) so
+    // that consumed trigger's work runs. This takes PRECEDENCE over the
+    // post-comment suppression below — a deliverable persisted by an EARLIER
+    // turn does not mean the LATEST (wedged) trigger's work is done, so
+    // `commented` must not swallow the respawn. We key off unhealthyKilled (the
+    // CAUSE of the kill), NOT exit code 143 — an idle-reap / restart / twin
+    // kill also exits 143 but must NOT respawn here (unhealthyKilled stays
+    // false for those). Voluntary post-comment completion likewise leaves
+    // unhealthyKilled=false, so this block is skipped and the existing
+    // suppression path runs unchanged (no spurious re-runs). Bounded by
+    // UNHEALTHY_RESPAWN_MAX carried across respawns so a chronically-wedging
+    // strand can't drive an exit-143 death loop — past the cap we fall through
+    // to the normal breaker / silent-exit path which surfaces the stall.
+    if (sess.unhealthyKilled && ticketId && typeof sess._fallbackRespawn === 'function') {
+      const sessionKey = sess.sessionKey;
+      // A concurrent dispatchTrigger may have already fresh-spawned in the
+      // window between #killUnhealthy's _sessions.delete and this exit — don't
+      // twin it. _getLiveSession returns a live replacement only if a real one
+      // is already running (and purges the dead self-entry otherwise).
+      if (this._getLiveSession(sessionKey)) {
+        log(
+          `[ticket-session] watchdog respawn skipped (session already live) ` +
+            `ticket=${ticketId.slice(0, 8)} role=${role || '_'}`,
+        );
+        return;
+      }
+      const attempts = (sess.unhealthyRespawnCount ?? 0) + 1;
+      if (attempts <= UNHEALTHY_RESPAWN_MAX) {
+        log(
+          `[ticket-session] watchdog respawn: ticket=${ticketId.slice(0, 8)} role=${role || '_'} ` +
+            `— UNHEALTHY kill, re-dispatching fresh session ` +
+            `(attempt ${attempts}/${UNHEALTHY_RESPAWN_MAX}, prior_deliverable=${commented})`,
+        );
+        try {
+          // Same model as the killed session (chainAttempt unchanged) — the
+          // wedge was unresponsiveness, not a model failure. _fallbackRespawn
+          // re-runs the original firstTurnText and re-stamps identity +
+          // _fallbackRespawn on the fresh session, so a re-wedge can respawn
+          // again up to the cap.
+          const s = await sess._fallbackRespawn(sess.chainAttempt ?? 0);
+          if (s) {
+            s.unhealthyRespawnCount = attempts;
+            // Re-assert current_task: the killed session's own exit handler
+            // fires clear_current_task + release_ticket, so without this the
+            // server would see the agent as idle while the respawned child is
+            // actively working the ticket — freeing the per-agent cap slot to a
+            // DIFFERENT ticket. set_current_task is idempotent + fire-and-forget.
+            if (s.agentId) {
+              fireAndForgetTool(this._config, 'set_current_task', {
+                agent_id: s.agentId,
+                ticket_id: ticketId,
+                role,
+              });
+            }
+            return; // fresh session took over — skip suppression + silent-exit
+          }
+          log(
+            `[ticket-session] watchdog respawn returned null — falling through to breaker/silent-exit`,
+          );
+        } catch (err: any) {
+          log(
+            `[ticket-session] watchdog respawn threw: ${err?.message ?? err} — falling through`,
+          );
+        }
+      } else {
+        log(
+          `[ticket-session] watchdog respawn budget exhausted ` +
+            `(${attempts - 1}/${UNHEALTHY_RESPAWN_MAX}) ticket=${ticketId.slice(0, 8)} ` +
+            `role=${role || '_'} — surfacing stall instead of respawning`,
+        );
+      }
+    }
 
     // Post-comment exit is NOT a silent exit (ticket 7e7e23bf). If the strand
     // fired a comment-creating tool at ANY point during this session, its
