@@ -161,8 +161,17 @@ export class RoomCrudService {
         participantIds.add(`${m.sender_type}:${m.sender_id}`);
       }
     }
-    const userIds = [...participantIds].filter(k => k.startsWith('user:')).map(k => k.slice(5));
-    const agentIds = [...participantIds].filter(k => k.startsWith('agent:')).map(k => k.slice(6));
+    // Guard the uuid columns before the bulk lookup: participant_id / sender_id
+    // are plain varchar that can hold the synthetic 'system' author QA/Action
+    // dispatch seeds as a room participant (qa-run.service.ts:229-235). users.id
+    // / agents.id are uuid, so feeding 'system' to findByIds aborts the WHOLE
+    // query on Postgres with `invalid input syntax for type uuid: "system"` — the
+    // same 500 the observer view hit (see listAllWorkspaceRooms). SQLite doesn't
+    // type-check so dev never saw it. My rooms is latent today (a QA room's only
+    // user participant is 'system', which the caller can't be), but filter
+    // defensively — synthetic ids resolve by name in resolveName() below.
+    const userIds = [...participantIds].filter(k => k.startsWith('user:')).map(k => k.slice(5)).filter(id => UUID_RE.test(id));
+    const agentIds = [...participantIds].filter(k => k.startsWith('agent:')).map(k => k.slice(6)).filter(id => UUID_RE.test(id));
     const [usersById, agentsById] = await Promise.all([
       userIds.length > 0
         ? this.userRepo.findByIds(userIds).then(list => new Map(list.map(u => [u.id, u.name || u.email])))
@@ -173,6 +182,10 @@ export class RoomCrudService {
     ]);
 
     const resolveName = (type: string, id: string): string => {
+      // Non-uuid ids never made it into the maps above (filtered out) — resolve
+      // the known synthetic 'system' author by convention (mirrors nameOf in
+      // listAllWorkspaceRooms) so My rooms shows "System" not "Unknown".
+      if (!id || !UUID_RE.test(id)) return id === 'system' ? 'System' : 'Unknown';
       if (type === 'user') return usersById.get(id) ?? 'Unknown User';
       if (type === 'agent') return agentsById.get(id) ?? 'Unknown Agent';
       return 'Unknown';
