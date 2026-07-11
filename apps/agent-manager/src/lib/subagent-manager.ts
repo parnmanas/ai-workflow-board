@@ -35,7 +35,12 @@ import { CircuitBreaker } from './circuit-breaker.js';
 import { writeMcpConfig } from './managed-agent-store.js';
 import { classifyCliError, isFallbackEligible } from './cli-error-signatures.js';
 import { summarizeCliJsonLine } from './cli-output-summary.js';
-import { fireAndForgetTool } from './mcp-client.js';
+import { callMcpTool, fireAndForgetTool, unwrapToolResult } from './mcp-client.js';
+import {
+  findLiveGroupBackgroundTasks,
+  reapProcessTrees,
+  type ProcNode,
+} from './process-tree.js';
 import {
   postChatRoomMessage,
   postSilentExitSystemComment,
@@ -46,6 +51,7 @@ import type {
   SubagentSpawnArgs,
   SubagentSpawnResult,
 } from './event-dispatcher.js';
+import type { RunSessionBinding } from './base-session-manager.js';
 import type { SubagentMonitor, SubagentTapHandle } from './subagent-monitor.js';
 
 const { NATIVE_MCP } = ADAPTER_CAPABILITIES;
@@ -57,6 +63,10 @@ const TAIL_RING_MAX_LINES = 100;
 /** Max bytes of `tail.join('\n')` posted in the silent-exit system
  *  comment. 4KB keeps the comment readable in the board UI. */
 const SILENT_EXIT_TAIL_MAX_CHARS = 4096;
+/** Max per-pid detail lines embedded in a one-shot run's orphan-sweep summary
+ *  (ticket 55d3063f). Mirrors ChatSessionManager's ORPHAN_SUMMARY_MAX_DETAIL —
+ *  the full pid list is always included; this only caps the cmd detail. */
+const ORPHAN_SUMMARY_MAX_DETAIL = 5;
 /** MCP tool name suffixes that count as the subagent leaving a real
  *  ticket comment. Matched by suffix so a future MCP prefix rename
  *  doesn't break detection. Keep aligned with the ticket-session list. */
@@ -243,6 +253,12 @@ interface SubagentRecord {
    *  exit handler. Captured in the handler closure so a force-drop of this
    *  record by a kill/reaper path still releases the lock. 런타임 전용. */
   onSpawnExit?: () => void;
+  /** ticket 55d3063f: QA/security run this one-shot is executing, when the
+   *  spawn was a run dispatch (codex/antigravity or declined-persistent
+   *  fallback). Present → the exit handler sweeps the turn end for orphaned
+   *  background tasks and finalizes a stranded run as `error`. Plain data, so
+   *  it survives #persist (unlike onSpawnExit, a function). */
+  run?: RunSessionBinding | null;
 }
 
 type AnyRecord = SubagentRecord | ReservationRecord;
@@ -700,6 +716,7 @@ export class SubagentManager implements SubagentManagerContract {
         chainAttempt,
         respawnSpec: spec,
         onSpawnExit: spec.onExit,
+        run: spec.run ?? null,
       };
       record.tap =
         this.#monitor?.register({
@@ -769,6 +786,12 @@ export class SubagentManager implements SubagentManagerContract {
       // Answer-posting, circuit-breaker and silent-exit fallback. Extracted to
       // a named method so it can be unit-tested without forking a real child.
       await this._handleOneshotExit(record, code);
+
+      // ticket 55d3063f: if this was a QA/security run one-shot, sweep the turn
+      // end for orphaned background tasks the CLI left running and finalize a
+      // stranded run as `error`. Gated on record.run so ordinary spawns skip the
+      // process enumeration entirely. Guarded internally — never throws.
+      if (record.run) await this._sweepOneshotRunOrphans(record);
 
       // Drop the tail ring now that all post-exit hooks have read it.
       record.tailLines = [];
@@ -962,6 +985,95 @@ export class SubagentManager implements SubagentManagerContract {
           `suppressing silent-exit fallback ticket=${record.ticket_id.slice(0, 8)}`,
       );
     }
+  }
+
+  /**
+   * Turn-end orphan sweep for a one-shot QA/security run (ticket 55d3063f) —
+   * the non-persistent twin of ChatSessionManager#sweepTurnEndOrphans. Fired
+   * from the exit handler when `record.run` is set. The one-shot CLI self-exits
+   * at turn end with NO pre-kill window, so — unlike the persistent path, which
+   * sweeps ~4s later while the CLI is still alive — we enumerate the child's
+   * POSIX process GROUP (the child was spawned detached, so pgid == pid) instead
+   * of ppid-walking from the now-dead pid: a background task reparented to init
+   * when the CLI exited still carries the group id, whereas a ppid walk from the
+   * dead pid would find nothing. If live non-benign tasks remain, they are ones
+   * the run left running with no re-invocation contract — reap them visibly and
+   * finalize the run as `error` (recording the kill in the summary + manager
+   * log) instead of letting the ~45-min liveness reaper find the `running`
+   * zombie. Re-reads run status first so a run the agent already finalized is
+   * never clobbered. Every await is guarded — this runs inside the exit closure
+   * and must never reject. Public (`_`-prefixed) for the test runner.
+   */
+  async _sweepOneshotRunOrphans(record: SubagentRecord): Promise<void> {
+    const run = record.run;
+    if (!run) return;
+
+    let orphans: ProcNode[];
+    try {
+      orphans = await findLiveGroupBackgroundTasks(record.pid);
+    } catch (err: any) {
+      log(`[subagent] run orphan sweep enumeration failed pid=${record.pid}: ${err?.message ?? err}`);
+      return;
+    }
+    if (orphans.length === 0) return; // clean one-shot turn — nothing stranded
+
+    const run8 = run.run_id.slice(0, 8);
+    const pidList = orphans.map((o) => o.pid).join(',');
+
+    // Never overwrite a run the agent already finalized. Availability-first: an
+    // unreadable status is treated as non-terminal so a transient server hiccup
+    // doesn't leave the trap uncaught.
+    let status: string | null = null;
+    try {
+      const getTool = run.kind === 'qa' ? 'get_qa_run' : 'get_security_run';
+      const resp = await callMcpTool(this.#config, getTool, {
+        run_id: run.run_id,
+        workspace_id: run.workspace_id,
+      });
+      const rec = unwrapToolResult(resp);
+      if (rec && typeof rec.status === 'string') status = rec.status;
+    } catch (err: any) {
+      log(`[subagent] run orphan sweep status read failed run=${run8}: ${err?.message ?? err}`);
+    }
+    if (status === 'passed' || status === 'failed' || status === 'error') {
+      // Run already finalized — the strays are the agent's own leftovers, not a
+      // stranded run. Log for forensics but don't reap (avoid clobbering a
+      // benign helper an exclusion gap missed) or overwrite the summary.
+      log(
+        `[subagent] run ${run8} already ${status}; ${orphans.length} live background task(s) present ` +
+          `at oneshot cleanup [pids=${pidList}] — leaving to normal teardown`,
+      );
+      return;
+    }
+
+    // THE TRAP: one-shot run exited its turn with live non-benign descendants and
+    // is still non-terminal. Reap them visibly + finalize the run as error.
+    let reaped: number[] = [];
+    try {
+      reaped = await reapProcessTrees(orphans.map((o) => o.pid));
+    } catch (err: any) {
+      log(`[subagent] run orphan reap failed run=${run8}: ${err?.message ?? err}`);
+    }
+    const detail = orphans
+      .slice(0, ORPHAN_SUMMARY_MAX_DETAIL)
+      .map((o) => `pid=${o.pid} ${o.cmd.slice(0, 80)}`)
+      .join('; ');
+    const summary =
+      `session cleanup killed ${orphans.length} live background task(s) — ` +
+      `원샷 run 세션이 재호출 계약 없이 살아있는 백그라운드 태스크를 남긴 채 턴을 종료했습니다. ` +
+      `reaped pids: ${pidList}. ${detail}`;
+    const completeTool = run.kind === 'qa' ? 'complete_qa_run' : 'complete_security_run';
+    await fireAndForgetTool(this.#config, completeTool, {
+      run_id: run.run_id,
+      workspace_id: run.workspace_id,
+      status: 'error',
+      summary,
+    });
+    record.run = null; // finalized — belt-and-suspenders against a double sweep
+    log(
+      `[subagent] run ${run8} oneshot cleanup: reaped ${reaped.length}/${orphans.length} ` +
+        `live background task(s) [pids=${pidList}] — finalized run as error`,
+    );
   }
 
   #wireStdioCapture(child: ChildProcess, pid: number): void {

@@ -326,6 +326,12 @@ export interface SubagentSpawnArgs {
    *  the dispatcher acquired before provisioning. Invoked even when a kill/reaper
    *  path force-dropped the record, so it must be idempotent on the caller side. */
   onExit?: () => void;
+  /** ticket 55d3063f: QA/security run identity, threaded so the one-shot exit
+   *  handler can sweep the turn end for orphaned background tasks and finalize a
+   *  stranded run as `error` — the one-shot twin of the `run` binding the
+   *  persistent chat path carries on ChatDispatchArgs (89716f04). Undefined for
+   *  an ordinary chat / non-run spawn. */
+  run?: RunSessionBinding;
 }
 
 export interface SubagentSpawnResult {
@@ -1729,6 +1735,16 @@ export class EventDispatcher {
           agentContext: runContext,
           // ticket e9d0e8bc: release the run lock when this oneshot exits.
           onExit: runLock ? () => runLock!.release() : undefined,
+          // ticket 55d3063f: thread run identity so the oneshot exit handler
+          // sweeps this turn end for orphaned background tasks (one-shot run,
+          // no re-invocation) — the twin of the persistent path's `run` above.
+          run: runProvision
+            ? {
+                kind: runProvision.kind,
+                run_id: runProvision.run_id,
+                workspace_id: runProvision.workspace_id,
+              }
+            : undefined,
         });
 
         if (result.spawned) {
