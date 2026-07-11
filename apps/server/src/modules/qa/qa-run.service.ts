@@ -264,10 +264,30 @@ export class QaRunService {
         undefined,
         undefined,
         'message',
-        { runProvision },
+        // bypassContentLimit: the rendered step prompt is machine-authored and can
+        // legitimately exceed the 10k interactive chat cap (ticket acd24e5d) — the
+        // 10,257-char INV-VIS scenario was 400-blocked here for 7 runs straight.
+        { runProvision, bypassContentLimit: true },
       );
     } catch (e: any) {
-      this.logService.warn('QA', `sendMessage failed for run ${runId}: ${e?.message || e}`);
+      // Dispatch send failed — the target agent never received the run prompt.
+      // Do NOT leave the run 'running': it would sit as an empty-room zombie
+      // until the reaper collects it 40+ min later with 0 steps (ticket
+      // acd24e5d). Finalize it to `error` NOW with the reason in the summary,
+      // then rethrow so the caller sees the failure. For a sequential batch the
+      // dispatcher (_dispatchBatchIndex) catches this, tallies the run as
+      // errored, and advances to the next scenario instead of stalling — we do
+      // NOT call onRunFinalized here to avoid a reentrant batch advance while
+      // _dispatchBatchIndex still holds the batch row.
+      const reason =
+        `[dispatch failed] QA 지시 프롬프트를 런 방에 게시하지 못했습니다: ${e?.message || e} ` +
+        `(렌더된 프롬프트 ${prompt.length}자)`;
+      this.logService.error('QA', `dispatch send failed for run ${runId}, finalizing as error: ${e?.message || e}`);
+      run.status = 'error';
+      run.summary = run.summary ? `${reason}\n\n${run.summary}` : reason;
+      run.finished_at = new Date();
+      await this.runRepo.save(run);
+      throw makeError(e?.status ?? 502, reason);
     }
 
     this.logService.info('QA', `started qa run ${runId} scenario ${scenario.id} → agent ${agent.id} room ${room.id}`);

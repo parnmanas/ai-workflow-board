@@ -18,6 +18,17 @@ import { RunProvision } from '../../common/workspace-folder-options';
 
 const CONTENT_MAX = 10000;
 
+// Raised ceiling for in-process server-issued run dispatch (QA / security run
+// prompts). These are machine-rendered from a scenario/profile the workspace
+// controls, not a human typing into a box, and can legitimately exceed the
+// interactive CONTENT_MAX (observed: a 10,257-char QA prompt 400-blocked at the
+// 10k cliff — ticket acd24e5d). Still bounded (not unlimited) so a pathological
+// scenario prompt can't be a memory/DB DoS. Reachable ONLY via sendMessage's
+// internal opts.bypassContentLimit, which no REST / MCP / agent-api caller sets
+// (they all stop at positional args before `opts`) — so user/agent senders stay
+// held to CONTENT_MAX.
+const SYSTEM_DISPATCH_CONTENT_MAX = 100000;
+
 // Look-back window for agent-chain depth derivation. Bounded so the query
 // stays cheap even on very busy rooms; large enough to expose any realistic
 // loop because the plugin caps long before this many turns.
@@ -193,7 +204,12 @@ export class RoomMessagingService {
     // on the system 'user' send that opens a QA/security run room — the
     // agent-manager reads it to prepare the run's working folder before spawning.
     // Forwarded verbatim on the chat_room_message SSE event; never persisted.
-    opts?: { runProvision?: RunProvision | null },
+    //
+    // `bypassContentLimit` (ticket acd24e5d): raise the content ceiling to
+    // SYSTEM_DISPATCH_CONTENT_MAX for this send. Set ONLY by in-process server
+    // dispatch (QA / security run prompts) — never plumbed through the REST / MCP
+    // / agent-api send paths, so an external caller can't lift their own limit.
+    opts?: { runProvision?: RunProvision | null; bypassContentLimit?: boolean },
   ): Promise<any> {
     await this.membership.requireActiveParticipant(roomId, senderId, senderType);
 
@@ -205,8 +221,11 @@ export class RoomMessagingService {
       throw makeError(400, 'content must be a string');
     }
     const trimmed = (content ?? '').trim();
-    if (trimmed.length > CONTENT_MAX) {
-      throw makeError(400, `Message exceeds ${CONTENT_MAX} character limit`);
+    // Server dispatch (opts.bypassContentLimit) is machine-rendered and may run
+    // past the interactive cap; everyone else stays held to CONTENT_MAX.
+    const effectiveMax = opts?.bypassContentLimit ? SYSTEM_DISPATCH_CONTENT_MAX : CONTENT_MAX;
+    if (trimmed.length > effectiveMax) {
+      throw makeError(400, `Message exceeds ${effectiveMax} character limit`);
     }
 
     const resolvedAttachmentIds = Array.isArray(attachmentIds)

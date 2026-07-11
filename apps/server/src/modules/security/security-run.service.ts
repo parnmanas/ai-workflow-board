@@ -241,10 +241,25 @@ export class SecurityRunService {
         undefined,
         undefined,
         'message',
-        { runProvision },
+        // bypassContentLimit: same rationale as QA (ticket acd24e5d) — the
+        // rendered inspection prompt is machine-authored and can exceed the 10k
+        // interactive chat cap without being an abuse.
+        { runProvision, bypassContentLimit: true },
       );
     } catch (e: any) {
-      this.logService.warn('Security', `sendMessage failed for run ${runId}: ${e?.message || e}`);
+      // Dispatch send failed — mirror QaRunService.startQaRun (ticket acd24e5d):
+      // finalize the run to `error` NOW with the reason in the summary instead of
+      // leaving a 'running' empty-room zombie for the reaper, then rethrow so a
+      // sequential batch advances past this index rather than stalling.
+      const reason =
+        `[dispatch failed] Security 지시 프롬프트를 런 방에 게시하지 못했습니다: ${e?.message || e} ` +
+        `(렌더된 프롬프트 ${prompt.length}자)`;
+      this.logService.error('Security', `dispatch send failed for run ${runId}, finalizing as error: ${e?.message || e}`);
+      run.status = 'error';
+      run.summary = run.summary ? `${reason}\n\n${run.summary}` : reason;
+      run.finished_at = new Date();
+      await this.runRepo.save(run);
+      throw makeError(e?.status ?? 502, reason);
     }
 
     this.logService.info('Security', `started security run ${runId} profile ${profile.id} scope=${scopeUsed} baseline=${baselineCommit ?? '(none)'} → agent ${agent.id} room ${room.id}`);
