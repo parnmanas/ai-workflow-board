@@ -416,17 +416,14 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
             is_online: !!payload.is_online,
             last_seen_at: payload.last_seen_at ?? prev.last_seen_at,
             current_task: payload.current_task,
-            // SSE agent_status carries board-ticket tasks only — QA runs are
-            // merged into the REST snapshot server-side, not this live event.
-            // Take the fresh ticket tasks but PRESERVE any REST-seeded kind:'qa'
-            // entry so an in-progress QA run doesn't blink out on the next
-            // ticket change. Omitted active_tasks (older server) → keep current.
+            // SSE agent_status now carries the full authoritative list — board-
+            // ticket tasks AND in-progress QA runs, pushed live on QA start/
+            // finalize (ticket 09ed8def) — so trust it wholesale: QA runs appear
+            // and disappear live. Omitted active_tasks (older server) → keep
+            // current.
             active_tasks:
               payload.active_tasks !== undefined
-                ? [
-                    ...payload.active_tasks,
-                    ...(prev.active_tasks || []).filter((t) => t.kind === 'qa'),
-                  ]
+                ? payload.active_tasks
                 : prev.active_tasks,
           }
         : prev,

@@ -13,6 +13,7 @@ import { Resource } from '../../entities/Resource';
 import { Agent } from '../../entities/Agent';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { LogService } from '../../services/log.service';
+import { activityEvents } from '../../services/activity.service';
 import { findOrFail } from '../../common/find-or-fail';
 import { renderQaRunPrompt } from './qa-prompt';
 import { QaFailureTicketService } from './qa-failure-ticket.service';
@@ -291,6 +292,23 @@ export class QaRunService {
     }
 
     this.logService.info('QA', `started qa run ${runId} scenario ${scenario.id} → agent ${agent.id} room ${room.id}`);
+
+    // Live QA task push (ticket 09ed8def): a QA run just went 'running' and was
+    // dispatched, so tell AgentStatusService to add a kind:'qa' entry to the
+    // executor agent's active_tasks. That rides the live agent_status SSE event
+    // — the AI Agents view surfaces the QA run the instant it starts, not only
+    // on the next REST refetch. Internal fire-and-forget bus signal (like
+    // agent_idle); the removal half fires from onRunFinalized. Emitted AFTER the
+    // successful dispatch so the failed-dispatch path (which finalizes to 'error'
+    // above without an onRunFinalized) never leaves a phantom live task.
+    activityEvents.emit('qa_task_changed', {
+      active: true,
+      run_id: runId,
+      agent_id: agent.id,
+      scenario_name: scenario.name,
+      started_at: (run.started_at ?? now).toISOString(),
+    });
+
     return { run, room_id: room.id, prompt };
   }
 
@@ -626,6 +644,13 @@ export class QaRunService {
    * double-dispatched.
    */
   async onRunFinalized(run: QaRun): Promise<void> {
+    // Live QA task removal (ticket 09ed8def): this run reached a terminal status
+    // — via completeRun (agent-driven) or the reaper (dead run) — so drop its
+    // live kind:'qa' entry from the executor agent's active_tasks. agent_id is
+    // omitted; AgentStatusService locates the owning agent by run id. Fires for
+    // batch AND non-batch runs, so it sits ABOVE the batch-only early return.
+    activityEvents.emit('qa_task_changed', { active: false, run_id: run.id });
+
     if (!run.batch_id || run.batch_index == null) return;
     const batch = await this.batchRepo.findOne({ where: { id: run.batch_id } });
     if (!batch || batch.status !== 'running') return;

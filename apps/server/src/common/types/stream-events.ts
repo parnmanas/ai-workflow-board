@@ -176,9 +176,13 @@ export interface AgentStatusPayload {
     role?: string;       // role slug the subagent was spawned for; undefined for older plugins
   };
   // Full live task list for concurrency N (max_concurrent_tickets_per_agent > 1).
-  // On this SSE wire it carries board-ticket tasks only (all kind:'ticket');
-  // QA-run tasks are merged into the REST /dashboard and /:id responses, not the
-  // live event (agent_status only fires on ticket-task changes). Absent/[] = idle.
+  // Carries board-ticket tasks (kind:'ticket') FOLLOWED BY in-progress QA-run
+  // tasks (kind:'qa'). The QA half is pushed live on QA run start/finalize
+  // (ticket 09ed8def) so the AI Agents view surfaces a QA run the instant it
+  // begins/ends, not just on the next REST refetch — every agent_status emit
+  // carries the full authoritative list, so clients replace active_tasks
+  // wholesale (no client-side QA preservation needed). The REST /dashboard and
+  // /:id responses merge the same two sources. Absent/[] = idle.
   active_tasks?: AgentActiveTask[];
 }
 

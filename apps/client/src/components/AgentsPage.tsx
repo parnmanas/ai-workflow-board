@@ -102,17 +102,14 @@ function mergeAgentStatus(
     is_online: !!update.is_online,
     last_seen_at: update.last_seen_at ?? existing.last_seen_at,
     current_task: update.current_task,
-    // The SSE agent_status wire carries board-ticket tasks only — QA runs are
-    // merged into the REST snapshot server-side, not this live event. Swap the
-    // ticket tasks for the fresh update but PRESERVE any REST-seeded kind:'qa'
-    // entries so an in-progress QA run doesn't blink out on the next ticket
-    // change. When the update omits active_tasks (old server), keep current.
+    // The SSE agent_status wire now carries the full authoritative list —
+    // board-ticket tasks (kind:'ticket') AND in-progress QA runs (kind:'qa'),
+    // pushed live on QA start/finalize (ticket 09ed8def). So trust it wholesale:
+    // QA runs appear and disappear live. When the update omits active_tasks
+    // (older server that only sends current_task), keep the current list.
     active_tasks:
       update.active_tasks !== undefined
-        ? [
-            ...update.active_tasks,
-            ...(existing.active_tasks || []).filter((t) => t.kind === 'qa'),
-          ]
+        ? update.active_tasks
         : existing.active_tasks,
   };
   return next;
@@ -201,6 +198,10 @@ export default function AgentsPage() {
       is_online: !!payload.is_online,
       last_seen_at: payload.last_seen_at ?? null,
       current_task: payload.current_task,
+      // Forward the live active_tasks list (ticket 09ed8def) — board-ticket
+      // tasks + in-progress QA runs. Previously omitted here, which froze the
+      // card's task list at the REST snapshot until a full refetch.
+      active_tasks: payload.active_tasks,
     };
     if (!agentsReadyRef.current) {
       pendingStatusRef.current.push(update);

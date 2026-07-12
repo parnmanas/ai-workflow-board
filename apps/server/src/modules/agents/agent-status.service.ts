@@ -13,10 +13,12 @@
 // (see 03-RESEARCH.md §Pitfall 7).
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
+import { Repository, DataSource, In } from 'typeorm';
 import { Agent } from '../../entities/Agent';
 import { Ticket } from '../../entities/Ticket';
 import { Workspace } from '../../entities/Workspace';
+import { QaRun } from '../../entities/QaRun';
+import { QaScenario } from '../../entities/QaScenario';
 import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
 import { MemoryMetricsRegistry } from '../../services/memory-metrics.registry';
@@ -38,6 +40,24 @@ interface ActiveTask {
   // or a workspace-custom slug). Optional because pre-v0.34 plugins do
   // not pin a role; the dashboard renders without it when undefined.
   role?: string;
+  // Task kind (ticket 09ed8def). Board-ticket tasks (the `active_tasks` Map)
+  // leave this undefined — treated as 'ticket' on the wire. QA-run tasks (the
+  // separate `qaTasks` registry) carry 'qa' so _emit tags them for the client.
+  kind?: 'ticket' | 'qa';
+}
+
+// Internal-only activityEvents signal (ticket 09ed8def), fired by QaRunService
+// when a QA run starts (active=true) or reaches a terminal status (active=false).
+// NOT an SSE event — it never enters the event-registry; AgentStatusService is
+// its sole consumer, translating it into a live `agent_status` broadcast. The
+// finalize half omits agent_id (the terminal choke point has the run, not the
+// scenario's target agent), so the handler locates the owner by run_id.
+interface QaTaskChangedEvent {
+  active: boolean;
+  run_id: string;
+  agent_id?: string;      // present when active=true (the QA scenario's target agent)
+  scenario_name?: string; // present when active=true
+  started_at?: string;    // ISO-8601; present when active=true
 }
 interface AgentStatus {
   agent_id: string;
@@ -124,6 +144,14 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
   // FLOOR so the pre-first-sweep window (and any workspace-query failure) is
   // safe — it never starts shorter than the historical fixed 6 h.
   private outputLivenessTtlMs: number = OUTPUT_LIVENESS_TTL_FLOOR_MS;
+  // QA live-task registry (ticket 09ed8def): agent_id → (run_id → QA ActiveTask,
+  // kind:'qa'). Kept DISTINCT from state.active_tasks (board tickets) so
+  // getActiveTasks / getActiveTicketIds (the concurrency gate) stay board-ticket
+  // only. _emit merges this into the wire active_tasks so an in-progress QA run
+  // rides the live agent_status event, not just the REST snapshot. Fed by the
+  // qa_task_changed signal (start→add, finalize→remove) + boot seed; bounded by
+  // the reaper's guaranteed finalize and deleted-agent sweep eviction.
+  private readonly qaTasks = new Map<string, Map<string, ActiveTask>>();
   private sweepHandle: NodeJS.Timeout | null = null;
 
   constructor(
@@ -147,6 +175,14 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
     // supervisor_stale_ms — and see it pinned at the CEILING under a
     // pathological value.
     metrics.register('agentStatus.outputLivenessTtlMs', () => this.outputLivenessTtlMs);
+    // QA live-task registry size gauge (ticket 09ed8def). At rest it tracks the
+    // number of in-progress QA runs across agents; a persistent climb means a
+    // qa_task_changed(active=false) removal path regressed (onRunFinalized).
+    metrics.register('agentStatus.qaTasks', () => {
+      let n = 0;
+      for (const m of this.qaTasks.values()) n += m.size;
+      return n;
+    });
   }
 
   async onModuleInit(): Promise<void> {
@@ -160,6 +196,13 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
         last_seen_at: a.last_seen_at,
       });
     }
+
+    // QA live-task wiring (ticket 09ed8def). Subscribe to the internal
+    // qa_task_changed signal QaRunService fires on run start/finalize, then seed
+    // any already-running runs so a mid-run server restart still surfaces them
+    // live (mirrors how the REST dashboard queries running QaRuns).
+    activityEvents.on('qa_task_changed', this._onQaTaskChanged);
+    await this._seedQaTasks();
 
     // Note: previously a `agent_trigger` listener auto-set current_task on
     // every trigger emit. That made "processing" indistinguishable from
@@ -186,6 +229,9 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
       clearInterval(this.sweepHandle);
       this.sweepHandle = null;
     }
+    // Detach the qa_task_changed listener so repeated module init/destroy (tests,
+    // hot reload) can't accumulate handlers on the process-global bus.
+    activityEvents.removeListener('qa_task_changed', this._onQaTaskChanged);
   }
 
   /** Snapshot accessor for REST endpoints (Plan 03-02 dashboard GET). */
@@ -327,14 +373,142 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
    */
   private _emit(status: AgentStatus): void {
     // Emit a fresh object: keep the Date-carrying singular current_task (the
-    // EventsController map() converts Date → ISO) AND attach the full non-stale
-    // task list (concurrency N) as an array. The stored `status` in `this.state`
-    // is untouched — its active_tasks stays a Map (the gate reads it). Board-
-    // ticket tasks only; QA runs are merged at the REST layer, not here.
+    // EventsController map() converts Date → ISO) AND attach the full task list
+    // (concurrency N) as an array. The stored `status` in `this.state` is
+    // untouched — its active_tasks stays a Map (the gate reads it).
+    //
+    // The wire list is board-ticket tasks (kind:'ticket') FOLLOWED BY in-progress
+    // QA-run tasks (kind:'qa') for this agent — same order the REST /dashboard
+    // assembly uses. Because EVERY emit path (setCurrentTask, clearCurrentTask,
+    // sweep, qa_task_changed) runs through here, the wire active_tasks is always
+    // the full authoritative picture, so a ticket-task change never blinks a
+    // live QA run out and QA start/finalize appear/disappear live (ticket
+    // 09ed8def). The event-registry map() tags each item's kind from t.kind.
     activityEvents.emit('agent_status', {
       ...status,
-      active_tasks: this._nonStaleTaskList(status.active_tasks),
+      active_tasks: [
+        ...this._nonStaleTaskList(status.active_tasks),
+        ...this._qaTaskList(status.agent_id),
+      ],
     });
+  }
+
+  /** In-progress QA-run tasks for this agent (kind:'qa'), newest-first. Empty
+   *  when the agent has none. Merged into the wire active_tasks by _emit. */
+  private _qaTaskList(agent_id: string): ActiveTask[] {
+    const m = this.qaTasks.get(agent_id);
+    if (!m || m.size === 0) return [];
+    return Array.from(m.values()).sort(
+      (a, b) => b.claimed_at.getTime() - a.claimed_at.getTime(),
+    );
+  }
+
+  /**
+   * Handle the internal qa_task_changed bus signal (ticket 09ed8def). On start
+   * (active=true) add/refresh the executor agent's QA task and broadcast; on
+   * finalize (active=false) locate the owning agent by run id, drop the task,
+   * and broadcast so the live entry disappears. Arrow-bound so it can be
+   * detached by reference in onModuleDestroy. Never throws (bus handler).
+   */
+  private _onQaTaskChanged = (e: QaTaskChangedEvent): void => {
+    try {
+      if (!e || !e.run_id) return;
+      if (e.active) {
+        if (!e.agent_id) return;
+        let m = this.qaTasks.get(e.agent_id);
+        if (!m) {
+          m = new Map<string, ActiveTask>();
+          this.qaTasks.set(e.agent_id, m);
+        }
+        m.set(e.run_id, {
+          ticket_id: e.run_id,           // QA run id — detail link target, not a board ticket
+          ticket_title: e.scenario_name || '(QA scenario)',
+          claimed_at: e.started_at ? new Date(e.started_at) : new Date(),
+          kind: 'qa',
+        });
+        void this._emitAgentById(e.agent_id);
+      } else {
+        // Finalize: agent_id is omitted — find whichever agent holds this run id.
+        let owner: string | undefined;
+        for (const [aid, m] of this.qaTasks) {
+          if (m.delete(e.run_id)) {
+            if (m.size === 0) this.qaTasks.delete(aid);
+            owner = aid;
+            break; // a run id maps to exactly one executor agent
+          }
+        }
+        if (owner) void this._emitAgentById(owner);
+      }
+    } catch (err) {
+      this.logService.warn('AgentStatus', 'qa_task_changed handler failed', { err: String(err) });
+    }
+  };
+
+  /**
+   * Broadcast an agent_status for one agent by id, resolving its live status
+   * from the in-memory map (or seeding it from the DB row when absent — a QA run
+   * can name an agent the sweep hasn't touched yet). Used by the QA task handler
+   * so a QA-only change carries the agent's real is_online/last_seen (never
+   * fabricated) plus the freshly-merged QA list.
+   */
+  private async _emitAgentById(agent_id: string): Promise<void> {
+    try {
+      let status = this.state.get(agent_id);
+      if (!status) {
+        const a = await this.agentRepo.findOne({ where: { id: agent_id } });
+        status = a
+          ? { agent_id, is_online: !!a.is_online, last_seen_at: a.last_seen_at }
+          : { agent_id, is_online: false, last_seen_at: null };
+        // Persist only a real agent's status; a phantom id stays transient and
+        // the sweep's deleted-agent eviction would drop it anyway.
+        if (a) this.state.set(agent_id, status);
+      }
+      this._emit(status);
+    } catch (err) {
+      this.logService.warn('AgentStatus', 'qa agent_status emit failed', { agent_id, err: String(err) });
+    }
+  }
+
+  /**
+   * Seed the QA registry from currently-'running' QaRuns at startup so a mid-run
+   * restart still surfaces them live (the in-memory registry is otherwise empty
+   * after a restart, exactly like ticket active_tasks). Two cheap queries — runs,
+   * then their scenarios by PK — deliberately AVOIDING a QaRun↔QaScenario JOIN
+   * whose scenario_id(varchar)=id(uuid) predicate crashes on Postgres (ticket
+   * ca31a6ea), mirroring AgentsController._qaActiveTasksByAgent. Never throws.
+   */
+  private async _seedQaTasks(): Promise<void> {
+    try {
+      const runs = await this.dataSource
+        .getRepository(QaRun)
+        .find({ where: { status: 'running' as QaRun['status'] } });
+      if (runs.length === 0) return;
+      const scenarioIds = Array.from(
+        new Set(runs.map((r) => r.scenario_id).filter((s): s is string => !!s)),
+      );
+      const scenarios = scenarioIds.length
+        ? await this.dataSource.getRepository(QaScenario).find({ where: { id: In(scenarioIds) } })
+        : [];
+      const scById = new Map(scenarios.map((s) => [s.id, s]));
+      for (const run of runs) {
+        const sc = scById.get(run.scenario_id);
+        if (!sc || !sc.target_agent_id) continue;
+        let m = this.qaTasks.get(sc.target_agent_id);
+        if (!m) {
+          m = new Map<string, ActiveTask>();
+          this.qaTasks.set(sc.target_agent_id, m);
+        }
+        m.set(run.id, {
+          ticket_id: run.id,
+          ticket_title: sc.name || '(QA scenario)',
+          claimed_at: run.started_at || run.created_at,
+          kind: 'qa',
+        });
+      }
+      this.logService.info('AgentStatus', 'seeded QA live tasks', { runs: runs.length });
+    } catch (e) {
+      this.logService.warn('AgentStatus', 'QA live-task seed failed', { err: String(e) });
+    }
   }
 
   /**
@@ -506,6 +680,12 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
     // that agent signals; only ids absent from the DB snapshot are dropped.)
     for (const id of this.state.keys()) {
       if (!seen.has(id)) this.state.delete(id);
+    }
+    // Same eviction for the QA registry (ticket 09ed8def) — an agent deleted
+    // mid-run would otherwise leave its QA task lingering. The reaper still
+    // finalizes the orphaned run, but this bounds the map even if that lags.
+    for (const id of this.qaTasks.keys()) {
+      if (!seen.has(id)) this.qaTasks.delete(id);
     }
 
     // Refresh the effective output-liveness retention TTL (ticket 47a72129)
