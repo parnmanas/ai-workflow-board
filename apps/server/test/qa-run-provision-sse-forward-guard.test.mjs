@@ -66,9 +66,13 @@ test('chat_room_message SSE map() forwards run_provision (regression: was droppe
 test('QaRunService dispatch hands a built RunProvision to sendMessage', () => {
   const code = stripComments(read('modules/qa/qa-run.service.ts'));
   assert.match(code, /buildRunProvision\(/, 'startQaRun must build a RunProvision');
+  // runProvision must be handed to sendMessage as an opts property. Allow extra
+  // keys after it — ticket acd24e5d added `{ runProvision, bypassContentLimit:
+  // true }`, so pinning `{ runProvision }` exactly is too strict (it silently
+  // regressed this guard until ticket 09ed8def).
   assert.match(
     code,
-    /\{\s*runProvision\s*\}/,
-    'startQaRun must pass { runProvision } to messaging.sendMessage',
+    /\{\s*runProvision\s*[,}]/,
+    'startQaRun must pass runProvision to messaging.sendMessage',
   );
 });
