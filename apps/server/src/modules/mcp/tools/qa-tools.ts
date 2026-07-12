@@ -154,7 +154,7 @@ const stepSchema = z.object({
 // scenario auto-files a fix ticket carrying the failure evidence. Pass null to
 // clear. Optional fields fall back at dispatch (board → run/scenario board,
 // column → "To Do", priority → "high", assignee → scenario.target_agent_id,
-// labels → ['qa-failure','auto'], dedupe → 'per_run').
+// labels → ['qa-failure','auto'], dedupe → 'per_open_ticket').
 const onFailureTicketSchema = z.object({
   enabled: z.boolean().describe('Master switch — when false (or the whole object null) no ticket is filed'),
   board_id: z.string().optional().describe('Board to file on; default run.board_id → scenario.board_id'),
@@ -162,7 +162,7 @@ const onFailureTicketSchema = z.object({
   priority: z.enum(['low', 'medium', 'high', 'critical']).optional().describe('Ticket priority (default high)'),
   assignee_id: z.string().optional().describe('Agent for all 3 roles (default scenario.target_agent_id)'),
   labels: z.array(z.string()).optional().describe("Ticket labels (default ['qa-failure','auto'])"),
-  dedupe: z.enum(['per_run', 'per_open_ticket']).optional().describe('per_run = 1 ticket per failed run (default); per_open_ticket = comment on the scenario\'s existing open ticket instead'),
+  dedupe: z.enum(['per_run', 'per_open_ticket']).optional().describe('per_open_ticket (DEFAULT) = comment on the scenario\'s existing open fix ticket instead of filing a new one, so a flaky scenario converges to ONE ticket (a green run then auto-closes it); per_run = opt back into 1 ticket per failed run'),
   title_template: z.string().optional().describe('Title override; {{scenario.name}} is substituted (default "QA 실패: {{scenario.name}}")'),
   rerun_on_fix: z.boolean().optional().describe('Opt-in: when the auto-filed fix ticket reaches Done, the server re-runs THIS scenario (QA→fix→QA closed loop). Default false. Scoped to tickets carrying the qa-failure/auto/qa-scenario markers.'),
   max_rerun_attempts: z.number().optional().describe('Convergence cap: max automatic reruns before the loop halts with a "human intervention needed" comment (default 3; 0 disables reruns)'),

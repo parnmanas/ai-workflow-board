@@ -27,6 +27,24 @@ const DEFAULT_LABELS = ['qa-failure', 'auto'];
 const DEFAULT_COLUMN = 'To Do';
 const DEFAULT_PRIORITY = 'high';
 
+// The marker labels that identify a ticket as an AUTO QA-failure fix ticket for
+// on-pass sibling auto-close (ticket 64b9cbaf). Mirrors
+// QaRerunOnFixService.REQUIRED_LABELS so the SAME class of tickets the rerun hook
+// fires on is the class a green run auto-closes — a human ticket that merely
+// carries the scenario marker is never touched. (Same documented coupling: a
+// scenario that customises cfg.labels and drops 'auto' opts out of both hooks.)
+const AUTO_TICKET_MARKER_LABELS = DEFAULT_LABELS;
+
+/** Parse a Ticket.labels JSON string into a string[]; [] on any malformed value. */
+function parseLabels(raw: string | null | undefined): string[] {
+  try {
+    const v = JSON.parse(raw || '[]');
+    return Array.isArray(v) ? v.filter((l): l is string => typeof l === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
 /**
  * QaFailureTicketService — files a fix ticket when a QaRun fails.
  *
@@ -80,8 +98,12 @@ export class QaFailureTicketService {
         return null;
       }
 
-      // per_open_ticket: reuse an existing open ticket if present.
-      if ((cfg.dedupe || 'per_run') === 'per_open_ticket') {
+      // Scenario-level dedupe is the DEFAULT (ticket 64b9cbaf): a flaky scenario
+      // converges to ONE open fix ticket instead of spawning a fresh critical
+      // ticket per failed run. Only an explicit `dedupe: 'per_run'` opts back into
+      // one-ticket-per-run. run.auto_ticket_id above still no-ops a re-finalize of
+      // the SAME run in both modes.
+      if ((cfg.dedupe || 'per_open_ticket') === 'per_open_ticket') {
         const existing = await this._findOpenFailureTicket(scenario, run.workspace_id);
         if (existing) {
           await this._appendRecurrenceComment(existing, run, scenario);
@@ -99,6 +121,70 @@ export class QaFailureTicketService {
       // Never let a side-effect failure abort run finalization.
       this.logService.error('QA', `on_failure_ticket failed for run ${run.id}: ${e?.message || e}`);
       return null;
+    }
+  }
+
+  /**
+   * On-pass sibling auto-close (ticket 64b9cbaf). When a scenario's run finalizes
+   * as `passed`, the scenario state is the SSOT that resolves the scenario's open
+   * QA-failure fix tickets — so a single green run closes EVERY open (non-terminal,
+   * non-archived) auto fix ticket for that scenario at once, instead of leaving
+   * each duplicate/flaky ticket to individual manual closure. Each is moved to its
+   * board's terminal column with a resolved comment. Returns the ids actually
+   * closed (for logging / tests). Never throws — a side-effect failure here must
+   * not abort the completeRun finalization that called it.
+   *
+   * Scope: only tickets carrying ALL of `qa-failure` + `auto` + `qa-scenario:<id>`
+   * (AUTO_TICKET_MARKER_LABELS, mirroring QaRerunOnFixService.REQUIRED_LABELS) —
+   * a human ticket that merely references the scenario is never auto-closed.
+   *
+   * Idempotency / concurrency: each close is an atomic conditional UPDATE guarded
+   * on the ticket STILL sitting in the (non-terminal) column we read it from, so a
+   * re-finalize of the same run, a duplicate pass, or two scenario runs passing at
+   * once can neither double-close nor double-comment; an already-terminal sibling
+   * is filtered out up front, making a re-finalize of a passed run a no-op.
+   *
+   * Rerun suppression: the close stamps qa_rerun_dispatched_at == terminal_entered_at,
+   * so QaRerunOnFixService's edge-claim (qa_rerun_dispatched_at < terminal_entered_at)
+   * can't fire — auto-closing a `rerun_on_fix` ticket here does NOT kick off a
+   * fresh (pointless) run off the synthetic Done move.
+   */
+  async maybeCloseSiblingsOnPass(run: QaRun, scenario: QaScenario): Promise<string[]> {
+    const cfg = scenario.on_failure_ticket;
+    // Gate on the same opt-in as creation: no policy → the scenario never filed
+    // auto tickets, so there is nothing to close (and we don't touch a board that
+    // opted out of QA automation).
+    if (!cfg?.enabled) return [];
+
+    try {
+      const open = await this._findOpenAutoFailureTickets(scenario, run.workspace_id);
+      if (open.length === 0) return [];
+
+      const closedIds: string[] = [];
+      for (const { ticket, column } of open) {
+        const done = await this._resolveDoneColumn(column.board_id);
+        if (!done) {
+          this.logService.warn(
+            'QA',
+            `on-pass auto-close: board ${column.board_id} has no terminal column — cannot close ticket ${ticket.id} (scenario ${scenario.id})`,
+          );
+          continue;
+        }
+        const closed = await this._closeTicketAsResolved(ticket, column, done, run, scenario);
+        if (closed) closedIds.push(ticket.id);
+      }
+
+      if (closedIds.length) {
+        this.logService.info(
+          'QA',
+          `on-pass auto-close: scenario ${scenario.id} passed (run ${run.id}) → closed ${closedIds.length} sibling fix ticket(s): ${closedIds.join(', ')}`,
+        );
+      }
+      return closedIds;
+    } catch (e: any) {
+      // Never let a side-effect failure abort run finalization.
+      this.logService.error('QA', `on-pass auto-close failed for run ${run.id} (scenario ${scenario.id}): ${e?.message || e}`);
+      return [];
     }
   }
 
@@ -136,6 +222,111 @@ export class QaFailureTicketService {
       if (col && !isTerminalColumn(col)) return t;
     }
     return null;
+  }
+
+  /**
+   * Every OPEN (non-terminal, non-archived) AUTO fix ticket for the scenario,
+   * paired with its current column. Same JSON-string `labels LIKE` the dedupe
+   * finder uses, PLUS the marker-label scope guard (AUTO_TICKET_MARKER_LABELS) so
+   * only genuine QA-filed fix tickets are eligible for auto-close — a human ticket
+   * that merely carries `qa-scenario:<id>` is skipped.
+   */
+  private async _findOpenAutoFailureTickets(
+    scenario: QaScenario,
+    workspaceId: string,
+  ): Promise<Array<{ ticket: Ticket; column: BoardColumn }>> {
+    const marker = `${SCENARIO_LABEL_PREFIX}${scenario.id}`;
+    const rows = await this.dataSource.getRepository(Ticket).createQueryBuilder('t')
+      .where('t.workspace_id = :ws', { ws: workspaceId })
+      .andWhere('t.depth = 0')
+      .andWhere('t.archived_at IS NULL')
+      .andWhere('t.labels LIKE :marker', { marker: `%${marker}%` })
+      .orderBy('t.created_at', 'ASC')
+      .getMany();
+    if (rows.length === 0) return [];
+    const colRepo = this.dataSource.getRepository(BoardColumn);
+    const out: Array<{ ticket: Ticket; column: BoardColumn }> = [];
+    for (const t of rows) {
+      if (!t.column_id) continue;
+      // Scope guard: only auto QA-failure fix tickets (belt-and-suspenders vs the
+      // scenario marker already matched by the LIKE above).
+      const labels = parseLabels(t.labels);
+      if (!AUTO_TICKET_MARKER_LABELS.every((l) => labels.includes(l))) continue;
+      const col = await colRepo.findOne({ where: { id: t.column_id } });
+      if (col && !isTerminalColumn(col)) out.push({ ticket: t, column: col });
+    }
+    return out;
+  }
+
+  /** First terminal column of the board (lowest position), or null if none. */
+  private async _resolveDoneColumn(boardId: string): Promise<BoardColumn | null> {
+    const cols = await this.dataSource.getRepository(BoardColumn).find({
+      where: { board_id: boardId },
+      order: { position: 'ASC' },
+    });
+    return cols.find((c) => isTerminalColumn(c)) || null;
+  }
+
+  /**
+   * Atomically close one open auto fix ticket: move it to `doneCol`, stamp the
+   * terminal entry, and — critically — stamp qa_rerun_dispatched_at to the SAME
+   * instant so the QaRerunOnFixService edge-claim can't fire off this synthetic
+   * Done move. The UPDATE is guarded on the ticket still sitting in `fromCol` so a
+   * concurrent close / manual move can't be clobbered and only the winner posts
+   * the resolved comment + `moved` activity. Returns true iff this call claimed
+   * the close.
+   */
+  private async _closeTicketAsResolved(
+    ticket: Ticket,
+    fromCol: BoardColumn,
+    doneCol: BoardColumn,
+    run: QaRun,
+    scenario: QaScenario,
+  ): Promise<boolean> {
+    const closeAt = new Date();
+    const claim = await this.dataSource.getRepository(Ticket)
+      .createQueryBuilder()
+      .update(Ticket)
+      .set({ column_id: doneCol.id, terminal_entered_at: closeAt, qa_rerun_dispatched_at: closeAt })
+      .where('id = :id', { id: ticket.id })
+      .andWhere('column_id = :from', { from: fromCol.id })
+      .andWhere('archived_at IS NULL')
+      .execute();
+    const claimed = claim.affected === undefined || claim.affected === null || claim.affected > 0;
+    if (!claimed) return false;
+
+    const body = [
+      `✅ **QA 시나리오 재통과 — 자동 종결**`,
+      ``,
+      `시나리오 \`${scenario.name}\` (\`${scenario.id}\`) 의 최신 run \`${run.id}\` 이 통과했습니다.`,
+      `이 자동 QA 실패 티켓은 더 이상 유효하지 않아 **${doneCol.name}** 로 자동 종결되었습니다.`,
+      ``,
+      `_시나리오 상태를 SSOT 로 삼아, green run 하나가 같은 \`${SCENARIO_LABEL_PREFIX}${scenario.id}\` 의 열린 형제 auto 티켓을 함께 닫습니다. 재작업이 필요하면 이 티켓을 다시 열어 진행하세요._`,
+    ].join('\n');
+    const commentRepo = this.dataSource.getRepository(Comment);
+    await commentRepo.save(commentRepo.create({
+      ticket_id: ticket.id,
+      author_type: 'system',
+      author_id: '',
+      author: 'QA',
+      content: body,
+      type: 'note',
+    }));
+
+    // Emit the same `moved` activity the production move path emits so the board
+    // live-updates. The rerun re-trigger this would normally invite is already
+    // defused by the qa_rerun_dispatched_at stamp set above.
+    await this.activityService.logActivity({
+      entity_type: 'ticket',
+      entity_id: ticket.id,
+      action: 'moved',
+      field_changed: 'column',
+      old_value: fromCol.name,
+      new_value: doneCol.name,
+      ticket_id: ticket.id,
+      actor_name: 'QA',
+    });
+    return true;
   }
 
   private async _createTicket(
@@ -218,9 +409,14 @@ export class QaFailureTicketService {
   }
 
   private async _appendRecurrenceComment(ticket: Ticket, run: QaRun, scenario: QaScenario): Promise<void> {
+    // Running fail count = every failed run that funnelled into this ticket. Each
+    // such run stamps QaRun.auto_ticket_id to it (the creating run included), and
+    // THIS run isn't stamped yet at comment time, so prior count + 1 is the total.
+    const priorFailures = await this.dataSource.getRepository(QaRun).count({ where: { auto_ticket_id: ticket.id } });
+    const failNumber = priorFailures + 1;
     const stepLines = this._failedStepLines(run);
     const body = [
-      `🔁 **QA 재실패** — 같은 시나리오가 다시 실패했습니다 (per_open_ticket dedupe).`,
+      `🔁 **QA 재실패 (누적 ${failNumber}회)** — 같은 시나리오(\`${scenario.id}\`)가 다시 실패했습니다 (scenario-dedupe: 이 티켓 하나로 수렴).`,
       ``,
       `- **Run:** \`${run.id}\` (status: ${run.status})`,
       run.summary ? `- **요약:** ${run.summary}` : null,

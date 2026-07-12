@@ -494,6 +494,20 @@ export class QaRunService {
       );
     }
 
+    // On-pass sibling auto-close (ticket 64b9cbaf) — a green run is the SSOT that
+    // resolves the scenario's open QA-failure fix tickets. Gate on `saved.status`
+    // (the POST-gate verdict) so a self-reported pass the gates downgraded to
+    // failed does NOT close anything. When THIS run genuinely passed, close every
+    // open sibling auto ticket for the scenario so one pass clears the whole
+    // duplicate/flaky cluster instead of leaving each to manual closure. No-op
+    // unless the scenario opts into on_failure_ticket; never throws (self-guarded).
+    if (saved.status === 'passed') {
+      const scenario = await this.scenarioRepo.findOne({ where: { id: saved.scenario_id } });
+      if (scenario) {
+        await this.failureTicketService.maybeCloseSiblingsOnPass(saved, scenario);
+      }
+    }
+
     // On-failure auto-ticket hook. completeRun is the single QaRun finalization
     // choke point, so the side-effect is called here directly (synchronous,
     // deterministic) rather than via the activity-event indirection. The

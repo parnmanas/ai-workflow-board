@@ -174,7 +174,7 @@ export interface QaScenarioStep {
  *   - priority    → "high"
  *   - assignee_id → scenario.target_agent_id (also reporter/reviewer)
  *   - labels      → ['qa-failure','auto']
- *   - dedupe      → 'per_run'
+ *   - dedupe      → 'per_open_ticket' (scenario-level; a flaky scenario converges to one ticket)
  */
 export interface QaOnFailureTicketConfig {
   enabled: boolean;
@@ -183,11 +183,16 @@ export interface QaOnFailureTicketConfig {
   priority?: 'low' | 'medium' | 'high' | 'critical';
   assignee_id?: string;
   labels?: string[];
-  // 'per_run'        — one ticket per failed run (default; the run_id idempotency
-  //                    guard already prevents a re-finalize from double-filing).
-  // 'per_open_ticket'— if an open qa-failure ticket for this scenario already
-  //                    exists, append a recurrence comment instead of filing a
-  //                    new one.
+  // Ticket-lifecycle dedupe (ticket 64b9cbaf). DEFAULT is 'per_open_ticket'.
+  // 'per_open_ticket'— (DEFAULT) if an open qa-failure fix ticket for this
+  //                    scenario already exists, append a recurrence comment (with
+  //                    a running fail count) instead of filing a new one, so a
+  //                    flaky scenario converges to ONE ticket. A subsequent green
+  //                    run then auto-closes it and every open sibling
+  //                    (QaFailureTicketService.maybeCloseSiblingsOnPass).
+  // 'per_run'        — opt back into one ticket per failed run. The run_id
+  //                    idempotency guard still prevents a re-finalize of the SAME
+  //                    run from double-filing.
   dedupe?: 'per_run' | 'per_open_ticket';
   // Optional title override. `{{scenario.name}}` is substituted. Default
   // 'QA 실패: {{scenario.name}}'.
