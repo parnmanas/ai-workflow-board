@@ -5,7 +5,7 @@ import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 import { useConfirm } from '../contexts/ConfirmContext';
-import type { Agent, AgentDetail, ActivityRow, AgentLiveSession, AgentManagerInstance, Credential } from '../types';
+import type { Agent, AgentDetail, ActivityRow, AgentLiveSession, AgentManagerInstance, Credential, AgentCurrentTask } from '../types';
 import { tokens } from '../tokens';
 import { formatAgentDisplayName } from '../utils/agentName';
 import AgentFileBrowser from './AgentFileBrowser';
@@ -416,6 +416,18 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
             is_online: !!payload.is_online,
             last_seen_at: payload.last_seen_at ?? prev.last_seen_at,
             current_task: payload.current_task,
+            // SSE agent_status carries board-ticket tasks only — QA runs are
+            // merged into the REST snapshot server-side, not this live event.
+            // Take the fresh ticket tasks but PRESERVE any REST-seeded kind:'qa'
+            // entry so an in-progress QA run doesn't blink out on the next
+            // ticket change. Omitted active_tasks (older server) → keep current.
+            active_tasks:
+              payload.active_tasks !== undefined
+                ? [
+                    ...payload.active_tasks,
+                    ...(prev.active_tasks || []).filter((t) => t.kind === 'qa'),
+                  ]
+                : prev.active_tasks,
           }
         : prev,
     );
@@ -465,7 +477,16 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
   }, [onClose]);
 
   const isOnline = !!detail?.is_online;
-  const hasTask = !!detail?.current_task;
+  // Concurrency-N + QA rollup. Prefer the full active_tasks list (max_concurrent
+  // > 1 puts several here, plus in-progress QA runs); fall back to the legacy
+  // singular current_task (older server) as a one-item list.
+  const tasks: AgentCurrentTask[] =
+    detail?.active_tasks && detail.active_tasks.length
+      ? detail.active_tasks
+      : detail?.current_task
+        ? [detail.current_task]
+        : [];
+  const hasTask = tasks.length > 0;
   const glyph = detail?.name?.[0]?.toUpperCase() || '?';
   const subtitleStatusColor = isOnline ? tokens.colors.success : tokens.colors.textMuted;
   const subtitleStatusLabel = isOnline ? 'ONLINE' : 'OFFLINE';
@@ -1238,44 +1259,68 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
             </div>
           </section>
 
-          {/* CURRENT TASK section */}
+          {/* CURRENT TASK(S) section — concurrency-N board tasks + in-progress QA runs */}
           <section>
-            <div style={sectionLabelStyle}>CURRENT TASK</div>
+            <div style={sectionLabelStyle}>
+              {tasks.length > 1 ? `CURRENT TASKS · ${tasks.length}` : 'CURRENT TASK'}
+            </div>
             <div style={cardStyle}>
-              {hasTask && detail?.current_task ? (
-                <>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                    <a
-                      onClick={() =>
-                        handleTaskClick(detail.current_task!.ticket_id)
+              {hasTask ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                  {tasks.map((t, i) => (
+                    <div
+                      key={`${t.ticket_id}-${i}`}
+                      style={
+                        i > 0
+                          ? { borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 12 }
+                          : undefined
                       }
-                      style={linkStyle}
                     >
-                      {detail.current_task.ticket_title}
-                    </a>
-                    {detail.current_task.role && (
-                      <span
-                        title={`Working as ${detail.current_task.role}`}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                        {t.kind === 'qa' ? (
+                          // QA run: ticket_title is a scenario name and ticket_id a
+                          // run id (not a board ticket) → render non-clickable.
+                          <span style={{ fontWeight: 400 }}>{t.ticket_title}</span>
+                        ) : (
+                          <a onClick={() => handleTaskClick(t.ticket_id)} style={linkStyle}>
+                            {t.ticket_title}
+                          </a>
+                        )}
+                        {t.kind === 'qa' && (
+                          <span
+                            title="In-progress QA run"
+                            style={{
+                              fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: tokens.radii.sm,
+                              border: `1px solid ${tokens.colors.border}`, color: tokens.colors.accentLight,
+                              textTransform: 'uppercase', letterSpacing: 0.4,
+                            }}
+                          >QA</span>
+                        )}
+                        {t.role && (
+                          <span
+                            title={`Working as ${t.role}`}
+                            style={{
+                              fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: tokens.radii.sm,
+                              border: `1px solid ${tokens.colors.border}`, color: tokens.colors.accentLight,
+                              textTransform: 'uppercase', letterSpacing: 0.4,
+                            }}
+                          >as {t.role}</span>
+                        )}
+                      </div>
+                      <div
                         style={{
-                          fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: tokens.radii.sm,
-                          border: `1px solid ${tokens.colors.border}`, color: tokens.colors.accentLight,
-                          textTransform: 'uppercase', letterSpacing: 0.4,
+                          fontSize: 11,
+                          fontWeight: 400,
+                          color: tokens.colors.textMuted,
+                          marginTop: 4,
                         }}
-                      >as {detail.current_task.role}</span>
-                    )}
-                  </div>
-                  <div
-                    style={{
-                      fontSize: 11,
-                      fontWeight: 400,
-                      color: tokens.colors.textMuted,
-                      marginTop: 4,
-                    }}
-                  >
-                    since {formatClaimedTime(detail.current_task.claimed_at)} ·{' '}
-                    {formatElapsed(detail.current_task.claimed_at)}
-                  </div>
-                </>
+                      >
+                        since {formatClaimedTime(t.claimed_at)} ·{' '}
+                        {formatElapsed(t.claimed_at)}
+                      </div>
+                    </div>
+                  ))}
+                </div>
               ) : (
                 <div style={{ color: tokens.colors.textMuted, fontSize: 13, fontWeight: 400 }}>
                   Idle

@@ -1393,6 +1393,11 @@ export interface AgentCurrentTask {
   // Role slug the subagent was spawned for (assignee/reporter/reviewer or
   // workspace-custom). Optional — older plugins don't pin a role.
   role?: string;
+  // Discriminates a board-ticket subagent task from a QA-run task. Absent on
+  // the legacy singular current_task — treat absent as 'ticket'. For 'qa',
+  // ticket_id is the QA run id (not a board ticket) and ticket_title the
+  // scenario name; the UI renders it non-clickable with a QA badge.
+  kind?: 'ticket' | 'qa';
 }
 
 export interface DashboardAgent {
@@ -1409,7 +1414,14 @@ export interface DashboardAgent {
   connected_at: string | null;
   workspace_id: string;
   pending_trigger_count: number;
+  // Legacy singular — most-recently-claimed task. Prefer active_tasks; kept for
+  // back-compat with the pre-multi-task server.
   current_task?: AgentCurrentTask;
+  // Full live task list for concurrency N + in-progress QA runs. On the SSE
+  // agent_status wire this carries board-ticket tasks only (kind:'ticket'); the
+  // REST /dashboard and /:id responses additionally merge kind:'qa' entries.
+  // Absent (old server) → clients fall back to current_task.
+  active_tasks?: AgentCurrentTask[];
 }
 
 export interface AgentDetail extends DashboardAgent {
@@ -1579,6 +1591,10 @@ export interface AgentStatusEnvelope {
     is_online: boolean;
     last_seen_at: string | null;
     current_task?: AgentCurrentTask;
+    // Full concurrency-N task list. On this SSE wire it carries board-ticket
+    // tasks only (all kind:'ticket'); QA runs are merged into the REST
+    // /dashboard and /:id responses, not the live event. Absent → idle/old server.
+    active_tasks?: AgentCurrentTask[];
   };
   timestamp: string;
 }

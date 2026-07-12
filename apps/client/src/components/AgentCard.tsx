@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import type { DashboardAgent, AgentManagerInstance } from '../types';
+import type { DashboardAgent, AgentManagerInstance, AgentCurrentTask } from '../types';
 import { tokens } from '../tokens';
 import { Badge } from './common';
 import { formatAgentDisplayName } from '../utils/agentName';
@@ -34,6 +34,10 @@ interface AgentCardProps {
    *  manager instances (real state still arrives via the next heartbeat). */
   onLifecycleDispatched?: () => void;
 }
+
+// Card is a summary tile — cap the visible task rows and roll the rest into a
+// "+N more" line. The full list lives in AgentDetailModal.
+const CARD_TASK_PREVIEW_LIMIT = 3;
 
 function formatClaimedTime(claimedAt: string | Date): string {
   const d = typeof claimedAt === 'string' ? new Date(claimedAt) : claimedAt;
@@ -82,7 +86,17 @@ export default function AgentCard({
   const [btnHover, setBtnHover] = useState(false);
 
   const isOnline = agent.is_online === true;
-  const hasTask = !!agent.current_task;
+  // Concurrency-N + QA rollup. Prefer the full active_tasks list (a board with
+  // max_concurrent_tickets_per_agent > 1 puts several entries here, plus any
+  // in-progress QA runs); fall back to the legacy singular current_task (older
+  // server) as a one-item list so the card keeps rendering.
+  const tasks: AgentCurrentTask[] =
+    agent.active_tasks && agent.active_tasks.length
+      ? agent.active_tasks
+      : agent.current_task
+        ? [agent.current_task]
+        : [];
+  const hasTask = tasks.length > 0;
   // Managed agents (spawned by an agent-manager) get the lifecycle control row.
   // Standalone / manager-identity agents have no owning manager to route
   // commands through, so the row is hidden for them.
@@ -197,6 +211,22 @@ export default function AgentCard({
     color: tokens.colors.textMuted,
   };
 
+  // Small leading pill on a QA-run task row (its title is a scenario name, not a
+  // clickable board ticket).
+  const qaBadgeStyle: React.CSSProperties = {
+    display: 'inline-block',
+    fontSize: 9,
+    fontWeight: 700,
+    padding: '0 4px',
+    marginRight: 5,
+    borderRadius: tokens.radii.sm,
+    border: `1px solid ${tokens.colors.border}`,
+    color: tokens.colors.accentLight,
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+    verticalAlign: 'middle',
+  };
+
   const buttonStyle: React.CSSProperties = {
     width: '100%',
     height: 32,
@@ -274,17 +304,33 @@ export default function AgentCard({
           minWidth: 0,
         }}
       >
-        <div style={sectionLabelStyle}>{hasTask ? 'CURRENT TASK' : 'STATUS'}</div>
-        {hasTask && agent.current_task ? (
-          <div>
-            <div style={taskTitleStyle}>{agent.current_task.ticket_title}</div>
-            <div style={taskMetaStyle}>
-              {agent.current_task.role ? (
-                <span style={{ textTransform: 'uppercase', letterSpacing: 0.4, marginRight: 6 }}>as {agent.current_task.role} ·</span>
-              ) : null}
-              since {formatClaimedTime(agent.current_task.claimed_at)} ·{' '}
-              {formatElapsed(agent.current_task.claimed_at)}
-            </div>
+        <div style={sectionLabelStyle}>
+          {hasTask
+            ? tasks.length > 1
+              ? `CURRENT TASKS · ${tasks.length}`
+              : 'CURRENT TASK'
+            : 'STATUS'}
+        </div>
+        {hasTask ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {tasks.slice(0, CARD_TASK_PREVIEW_LIMIT).map((t, i) => (
+              <div key={`${t.ticket_id}-${i}`}>
+                <div style={{ ...taskTitleStyle, WebkitLineClamp: tasks.length > 1 ? 1 : 2 }}>
+                  {t.kind === 'qa' ? <span style={qaBadgeStyle}>QA</span> : null}
+                  {t.ticket_title}
+                </div>
+                <div style={taskMetaStyle}>
+                  {t.role ? (
+                    <span style={{ textTransform: 'uppercase', letterSpacing: 0.4, marginRight: 6 }}>as {t.role} ·</span>
+                  ) : null}
+                  since {formatClaimedTime(t.claimed_at)} ·{' '}
+                  {formatElapsed(t.claimed_at)}
+                </div>
+              </div>
+            ))}
+            {tasks.length > CARD_TASK_PREVIEW_LIMIT ? (
+              <div style={taskMetaStyle}>+{tasks.length - CARD_TASK_PREVIEW_LIMIT} more</div>
+            ) : null}
           </div>
         ) : (
           <div style={idleValueStyle}>Idle</div>

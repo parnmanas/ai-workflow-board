@@ -85,6 +85,7 @@ interface StatusUpdate {
   is_online: boolean;
   last_seen_at: string | null;
   current_task?: AgentCurrentTask;
+  active_tasks?: AgentCurrentTask[];
 }
 
 function mergeAgentStatus(
@@ -101,6 +102,18 @@ function mergeAgentStatus(
     is_online: !!update.is_online,
     last_seen_at: update.last_seen_at ?? existing.last_seen_at,
     current_task: update.current_task,
+    // The SSE agent_status wire carries board-ticket tasks only — QA runs are
+    // merged into the REST snapshot server-side, not this live event. Swap the
+    // ticket tasks for the fresh update but PRESERVE any REST-seeded kind:'qa'
+    // entries so an in-progress QA run doesn't blink out on the next ticket
+    // change. When the update omits active_tasks (old server), keep current.
+    active_tasks:
+      update.active_tasks !== undefined
+        ? [
+            ...update.active_tasks,
+            ...(existing.active_tasks || []).filter((t) => t.kind === 'qa'),
+          ]
+        : existing.active_tasks,
   };
   return next;
 }
