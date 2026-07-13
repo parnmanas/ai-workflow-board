@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 
-import { adoptRemoteBranch } from '../dist/lib/self-update.js';
+import { adoptRemoteBranch, detectRepoRoot } from '../dist/lib/self-update.js';
 
 function git(cwd, args) {
   return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim();
@@ -141,5 +141,95 @@ test('adoptRemoteBranch surfaces a structured failure when the branch cannot be 
     assert.match(res.summary, /git fetch failed/);
   } finally {
     await c.cleanup();
+  }
+});
+
+// ─── detectRepoRoot false-positive hardening (ticket bc306b8d) ──────────────
+// A bare `.git` test used to accept ANY ancestor repo, so an `npm i -g`
+// install nested under a home dotfiles repo (or any git-tracked prefix) latched
+// onto that foreign checkout. The self-update fetch then failed against a repo
+// with no apps/agent-manager/package.json, and the admin badge showed a scary
+// "(update check failed)" on what is really a plain npm-global install that
+// should read "(manual updates only)". The guard now requires the `.git` dir to
+// be OUR monorepo (apps/agent-manager/package.json with name awb-agent-manager).
+
+// Write apps/agent-manager/package.json under `dir` with the given package name.
+async function writePkg(dir, name) {
+  await fsp.mkdir(join(dir, 'apps', 'agent-manager'), { recursive: true });
+  await fsp.writeFile(
+    join(dir, 'apps', 'agent-manager', 'package.json'),
+    JSON.stringify({ name, version: '9.9.9' }),
+  );
+}
+
+// Create `dir` with a `.git` marker — a directory (normal clone) or a file
+// (git worktree / submodule `gitdir:` pointer). Both must be accepted.
+async function makeGitMarker(dir, type /* 'dir' | 'file' */) {
+  await fsp.mkdir(dir, { recursive: true });
+  if (type === 'file') {
+    await fsp.writeFile(join(dir, '.git'), 'gitdir: /elsewhere/worktrees/x\n');
+  } else {
+    await fsp.mkdir(join(dir, '.git'), { recursive: true });
+  }
+}
+
+test('detectRepoRoot returns the checkout root for a real AWB tree (.git dir)', async () => {
+  const root = await fsp.mkdtemp(join(tmpdir(), 'awb-dr-'));
+  try {
+    const repo = join(root, 'ai-workflow-board');
+    await makeGitMarker(repo, 'dir');
+    await writePkg(repo, 'awb-agent-manager');
+    // Seed from where the running dist/ actually lives, deep under the repo.
+    const seed = join(repo, 'apps', 'agent-manager', 'dist', 'lib');
+    await fsp.mkdir(seed, { recursive: true });
+    assert.equal(detectRepoRoot(seed), repo);
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('detectRepoRoot returns null for an npm-global install under an unrelated dotfiles .git', async () => {
+  const root = await fsp.mkdtemp(join(tmpdir(), 'awb-dr-'));
+  try {
+    // Foreign dotfiles repo: has .git but NOT our apps/agent-manager/package.json.
+    const home = join(root, 'home');
+    await makeGitMarker(home, 'dir');
+    // Manager installed globally beneath it (npm prefix).
+    const seed = join(home, 'node_modules', 'awb-agent-manager', 'dist', 'lib');
+    await fsp.mkdir(seed, { recursive: true });
+    assert.equal(detectRepoRoot(seed), null);
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('detectRepoRoot rejects a foreign repo whose apps/agent-manager/package.json is a DIFFERENT package', async () => {
+  const root = await fsp.mkdtemp(join(tmpdir(), 'awb-dr-'));
+  try {
+    // A monorepo that happens to have the same subpath but is not us.
+    const other = join(root, 'someone-else');
+    await makeGitMarker(other, 'dir');
+    await writePkg(other, 'not-awb-agent-manager');
+    const seed = join(other, 'apps', 'agent-manager', 'dist', 'lib');
+    await fsp.mkdir(seed, { recursive: true });
+    assert.equal(detectRepoRoot(seed), null);
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('detectRepoRoot picks the nearest AWB root even when a foreign .git sits above it', async () => {
+  const root = await fsp.mkdtemp(join(tmpdir(), 'awb-dr-'));
+  try {
+    const home = join(root, 'home');
+    await makeGitMarker(home, 'dir'); // foreign dotfiles .git above the clone
+    const repo = join(home, 'ai-workflow-board');
+    await makeGitMarker(repo, 'file'); // AWB checkout with a worktree-style .git FILE
+    await writePkg(repo, 'awb-agent-manager');
+    const seed = join(repo, 'apps', 'agent-manager', 'dist', 'lib');
+    await fsp.mkdir(seed, { recursive: true });
+    assert.equal(detectRepoRoot(seed), repo);
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true });
   }
 });

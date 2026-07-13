@@ -23,6 +23,10 @@ import { fileURLToPath } from 'node:url';
 import { log } from './logging.js';
 
 const PACKAGE_JSON_REL = 'apps/agent-manager/package.json';
+// Our own npm package name. detectRepoRoot() uses this to tell an actual AWB
+// monorepo checkout apart from an *unrelated* ancestor `.git` (a home dotfiles
+// repo, a git-tracked prefix an `npm i -g` install happens to sit under).
+const MANAGER_PACKAGE_NAME = 'awb-agent-manager';
 const DEFAULT_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 30_000;
 const BUILD_TIMEOUT_MS = 10 * 60_000;
@@ -80,9 +84,42 @@ interface RunResult {
 }
 
 /**
- * Walk up from this file's location until a directory containing `.git`
- * shows up. Returns null when the manager isn't running from a checkout
- * (npm-global install, packaged binary, …).
+ * True when `dir` is the root of THIS monorepo — it carries
+ * `apps/agent-manager/package.json` whose name is our own package. This is
+ * the guard that keeps detectRepoRoot() from latching onto an *unrelated*
+ * ancestor `.git`: a home-dir dotfiles repo, or any git-tracked prefix an
+ * `npm i -g awb-agent-manager` install happens to sit beneath.
+ *
+ * Without it, a false-positive repo root feeds the self-update machinery
+ * someone else's checkout, where `git fetch` + `git show
+ * origin/<branch>:apps/agent-manager/package.json` both fail. That drives the
+ * admin badge to a scary "(update check failed)" on what is really a plain
+ * npm-global install that should read "(manual updates only)".
+ */
+function isAwbRepoRoot(dir: string): boolean {
+  try {
+    const pkgPath = join(dir, PACKAGE_JSON_REL);
+    if (!existsSync(pkgPath)) return false;
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
+    return pkg?.name === MANAGER_PACKAGE_NAME;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Walk up from this file's location until we hit the root of THIS monorepo —
+ * a directory that both contains `.git` AND carries our own
+ * `apps/agent-manager/package.json`. Returns null when the manager isn't
+ * running from an AWB checkout (npm-global install, packaged binary, or an
+ * install nested under an unrelated git repo).
+ *
+ * The `.git`-plus-package check is deliberate: a bare `.git` test alone
+ * false-positives on an ancestor dotfiles/monorepo `.git` above an
+ * `npm i -g` prefix, handing self-update a foreign checkout it can't fetch
+ * from (see isAwbRepoRoot). When a `.git` belongs to someone else's repo we
+ * keep walking up rather than returning it, so the traversal ends at null and
+ * the install is correctly reported as "manual updates only".
  */
 export function detectRepoRoot(startDir?: string): string | null {
   const seed = startDir || dirname(fileURLToPath(import.meta.url));
@@ -92,7 +129,10 @@ export function detectRepoRoot(startDir?: string): string | null {
     if (existsSync(join(dir, '.git'))) {
       try {
         const st = statSync(join(dir, '.git'));
-        if (st.isDirectory() || st.isFile()) return dir;
+        // A `.git` alone isn't enough — it must be OUR checkout. A foreign
+        // ancestor `.git` (dotfiles repo, git-tracked install prefix) is
+        // skipped so we keep walking up instead of adopting it.
+        if ((st.isDirectory() || st.isFile()) && isAwbRepoRoot(dir)) return dir;
       } catch {
         /* fall through to parent */
       }
