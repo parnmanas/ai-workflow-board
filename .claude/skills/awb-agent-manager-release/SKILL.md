@@ -14,6 +14,16 @@ description: Release procedure for changes under apps/agent-manager (SSE pipelin
 3. **Bump `version` in `apps/agent-manager/package.json`.**
 4. Commit + push.
 
+> **npm publish is automatic — do NOT hand-push a release tag.** When the version
+> bump lands on `main`, `.github/workflows/publish-agent-manager.yml` publishes
+> that exact version to npm (idempotent: a no-op if already published) and records
+> the `awb-agent-manager-v<version>` tag for you. Two preconditions live on the
+> Parn/infra side: the `NPM_TOKEN` repo secret must be a valid **Automation** token
+> with **2FA bypass enabled**, and the bump must actually reach `main` (the merge
+> is the release trigger). Skip the bump → npm silently falls behind the repo —
+> that is the exact 1.0.0-stuck failure of ticket bc306b8d (only 1.0.0 ever got a
+> tag, so 1.0.1–1.6.16 never published).
+
 ## SSE contract rule
 
 If you add or change an **SSE event type**, the server side (`apps/server/src/modules/agent-manager/`) must change **in the same PR**. The agent-manager and the AWB server consume the same contract; splitting the two halves across PRs ships a window where one side speaks a dialect the other doesn't understand.
@@ -21,7 +31,8 @@ If you add or change an **SSE event type**, the server side (`apps/server/src/mo
 ## Deployment reality check
 
 - The AWB server/client **auto-deploys** from the production branch.
-- The agent-manager does **not** auto-deploy — it runs from a local checkout on the host and is typically the lagging piece.
+- The **npm package** `awb-agent-manager` **auto-publishes** on every `main` version bump (workflow above) — `npm i -g awb-agent-manager` users get the release once the merge's publish job goes green.
+- The agent-manager running **on a host** does **not** auto-deploy — a git-checkout install self-updates from `origin/main` (Update button / `update_manager` SSE), but an npm-global install upgrades manually via `npm i -g awb-agent-manager@latest` (its admin badge reads "manual updates only": no git checkout to pull).
 - When debugging "the fix didn't take effect": grep the *running* agent-manager `dist/` on the host before blaming the new code.
 
 ## Field mapping reference (AWB SSE → handlers)

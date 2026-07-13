@@ -38,12 +38,20 @@ browser, instance heartbeats, and CLI lifecycle management.
 ### npm (recommended)
 
 ```bash
-npm i -g @awb/agent-manager
+npm i -g awb-agent-manager
 awb-agent-manager --version
 ```
 
-> The package is not yet published to the public npm registry. Until it ships,
-> install from a local checkout (see "Development").
+Published to the public npm registry as
+[`awb-agent-manager`](https://www.npmjs.com/package/awb-agent-manager) (unscoped);
+`npm i -g` always pulls the latest release. Every `version` bump that lands on
+`main` is published automatically by
+[`.github/workflows/publish-agent-manager.yml`](../../.github/workflows/publish-agent-manager.yml),
+so npm stays in lockstep with the repo.
+
+> A git-checkout install (see "Development") also self-updates from `origin/main`;
+> a plain `npm i -g` install upgrades via `npm i -g awb-agent-manager@latest` and
+> the admin badge reads "manual updates only" for it (no git checkout to pull).
 
 ### Docker
 
