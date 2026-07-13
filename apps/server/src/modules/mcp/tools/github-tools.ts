@@ -53,7 +53,8 @@ export function registerGitHubTools(server: McpServer, ctx: ToolContext): void {
     'Sync a GitHub repository into a resource. Fetches repo metadata, README, and file tree, ' +
     'stores them as resource content, and auto-embeds for vector search. ' +
     'If resource_id is provided, updates the existing resource; otherwise creates a new one. ' +
-    'Uses credential_id for auth if provided.',
+    'Auth precedence: explicit credential_id → (when updating) the target resource\'s stored ' +
+    'credential → the global GitHub token.',
     {
       workspace_id: z.string().describe('Workspace ID'),
       url: z.string().describe('GitHub repository URL'),
@@ -62,7 +63,24 @@ export function registerGitHubTools(server: McpServer, ctx: ToolContext): void {
       credential_id: z.string().optional().describe('Credential ID for GitHub auth (overrides global token)'),
     },
     async ({ workspace_id, url, resource_id, board_id, credential_id }) => {
-      if (!(await githubService.isEnabled(credential_id))) {
+      const resourceRepo = dataSource.getRepository(Resource);
+
+      // Load the target resource up front (when updating) so we can fall back
+      // to its stored credential, and fail fast if it's gone. A Resource with a
+      // Credential attached must sync using THAT credential — otherwise the
+      // connector silently falls back to the global GITHUB_TOKEN (commonly
+      // unset) and every sync fails with "token not configured" even though the
+      // resource is properly authenticated. (ticket c90653d9)
+      let existing: Resource | null = null;
+      if (resource_id) {
+        existing = await resourceRepo.findOne({ where: { id: resource_id, workspace_id } });
+        if (!existing) return err('Resource not found in workspace');
+      }
+      // Auth precedence: explicit param → the resource's stored credential →
+      // the global token (resolved inside the connector).
+      const authCredentialId = credential_id || existing?.credential_id || null;
+
+      if (!(await githubService.isEnabled(authCredentialId))) {
         return err('GitHub token not configured. Add a credential or set global token in Admin Settings.');
       }
       const parsed = parseGitHubUrl(url);
@@ -70,27 +88,26 @@ export function registerGitHubTools(server: McpServer, ctx: ToolContext): void {
 
       let info;
       try {
-        info = await githubService.fetchRepoInfo(parsed.owner, parsed.repo, credential_id);
+        info = await githubService.fetchRepoInfo(parsed.owner, parsed.repo, authCredentialId);
       } catch (e: any) {
         return err(`GitHub API error: ${e.message}`);
       }
 
-      const resourceRepo = dataSource.getRepository(Resource);
       const content = buildSyncContent(info);
       const tags = [...info.topics];
       if (info.language && !tags.includes(info.language.toLowerCase())) {
         tags.push(info.language.toLowerCase());
       }
 
-      if (resource_id) {
-        const existing = await resourceRepo.findOne({ where: { id: resource_id, workspace_id } });
-        if (!existing) return err('Resource not found in workspace');
+      if (existing) {
         existing.name = info.full_name;
         existing.description = info.description;
         existing.type = 'repository';
         existing.url = info.html_url;
         existing.content = content;
         existing.tags = JSON.stringify(tags);
+        // Only rewrite the stored credential when the caller passed one
+        // explicitly — a fallback sync must not disturb the resource's config.
         if (credential_id) existing.credential_id = credential_id;
         const saved = await resourceRepo.save(existing);
         embedResource(dataSource, logger, embeddingService, saved).catch(() => {});
