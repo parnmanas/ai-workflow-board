@@ -1,24 +1,42 @@
 # Publish awb-agent-manager to npm.
 #
-# Auth: NPM_TOKEN (Automation token) stored as a repo Actions secret.
+# Auth: NPM_TOKEN (npm *Automation* token — 2FA bypass must be enabled on the
+#   token, otherwise `npm publish` prompts for an OTP and the job hangs/fails)
+#   stored as a repo Actions secret:
 #   Settings → Secrets and variables → Actions → New repository secret → NPM_TOKEN
 #
-# Trigger: push a tag shaped `awb-agent-manager-v<version>` (must match the
-# version in apps/agent-manager/package.json), or run manually via the Actions
-# tab (workflow_dispatch). The tag→version guard fails fast on a mismatch so a
-# stale tag can never publish the wrong version.
+# Triggers (all converge on ONE idempotent publish job):
+#   1. push to `main` — the normal path. Whenever a commit bumps
+#      apps/agent-manager/package.json `version`, the job publishes that version
+#      and records an `awb-agent-manager-v<version>` git tag. Every OTHER main
+#      push is a fast no-op: the job resolves the version, sees it is already on
+#      npm, and exits before building or publishing. This is what keeps npm in
+#      lockstep with the repo. The old flow published only on a hand-pushed
+#      release tag per bump — that step was skipped for 1.0.1–1.6.16, so npm
+#      stayed frozen at 1.0.0 while the repo moved on (ticket bc306b8d).
+#   2. push a tag `awb-agent-manager-v<version>` — manual release path; a
+#      tag/version mismatch fails the run fast so a stale tag can't publish the
+#      wrong version.
+#   3. workflow_dispatch — manual "kick" (re-attempts the current ref's version;
+#      no-op if already published).
 #
-#   npm version <x> -w awb-agent-manager        # bump apps/agent-manager/package.json
-#   git commit -am "release(agent-manager): vX"
-#   git tag awb-agent-manager-vX && git push origin main --tags
+# Idempotency: the job checks `npm view awb-agent-manager@<version>` before
+# publishing, so re-runs and unrelated pushes never double-publish; `npm publish`
+# itself refuses to overwrite an existing version as a backstop.
 
 name: Publish agent-manager
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'awb-agent-manager-v*'
   workflow_dispatch:
+
+# The "Record release tag" step pushes a lightweight tag using GITHUB_TOKEN.
+permissions:
+  contents: write
 
 jobs:
   publish:
@@ -26,6 +44,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history so the tag-record step can see existing release tags.
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -33,24 +54,65 @@ jobs:
           cache: npm
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Guard — tag matches package version
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Resolve version + skip guard
+        id: resolve
         run: |
           PKG_VERSION="$(node -p "require('./apps/agent-manager/package.json').version")"
-          TAG_VERSION="${GITHUB_REF_NAME#awb-agent-manager-v}"
-          echo "package.json=$PKG_VERSION  tag=$TAG_VERSION"
-          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match package version $PKG_VERSION"
-            exit 1
+          echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
+          echo "package.json version = $PKG_VERSION"
+
+          # Tag-triggered runs must match the package version exactly — fail fast
+          # so a stale `awb-agent-manager-v*` tag can never publish the wrong code.
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG_VERSION="${GITHUB_REF_NAME#awb-agent-manager-v}"
+            echo "tag version = $TAG_VERSION"
+            if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+              echo "::error::Tag $GITHUB_REF_NAME does not match package version $PKG_VERSION"
+              exit 1
+            fi
           fi
 
+          # Idempotency gate: skip when this exact version is already on npm.
+          # `npm view X@Y version` prints Y when published, prints nothing (and
+          # exits non-zero, swallowed by `|| true`) when it is not.
+          PUBLISHED="$(npm view "awb-agent-manager@$PKG_VERSION" version 2>/dev/null || true)"
+          if [ "$PUBLISHED" = "$PKG_VERSION" ]; then
+            echo "awb-agent-manager@$PKG_VERSION already on npm — nothing to publish."
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "awb-agent-manager@$PKG_VERSION is not on npm — will build + publish."
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install dependencies
+        if: steps.resolve.outputs.should_publish == 'true'
+        run: npm ci
+
       - name: Build agent-manager
+        if: steps.resolve.outputs.should_publish == 'true'
         run: npm run build -w awb-agent-manager
 
       - name: Publish to npm
+        if: steps.resolve.outputs.should_publish == 'true'
         run: npm publish -w awb-agent-manager --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Record release tag
+        # Only on the main-branch auto-publish path (tag pushes already carry
+        # their tag). Non-fatal: the publish above already succeeded and the tag
+        # is just a historical marker. A GITHUB_TOKEN tag push does NOT
+        # re-trigger this workflow (Actions recursion guard), so there is no loop.
+        if: steps.resolve.outputs.should_publish == 'true' && startsWith(github.ref, 'refs/heads/')
+        continue-on-error: true
+        run: |
+          TAG="awb-agent-manager-v${{ steps.resolve.outputs.version }}"
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "Tag $TAG already exists — leaving it."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag "$TAG"
+            git push origin "$TAG"
+            echo "Recorded release tag $TAG"
+          fi
