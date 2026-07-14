@@ -278,6 +278,10 @@ export class WorktreeManager {
    *  concurrent triggers can't lease the same idle slot (규약 ⑥). Keyed by the
    *  normalized worktrees root; one chained promise per key. */
   #poolLocks = new Map<string, Promise<unknown>>();
+  /** Serialize git worktree registration changes per base repo. The lock is
+   *  held only while provisioning a per-ticket checkout; workers run outside
+   *  it, so different tickets remain fully concurrent after their cwd exists. */
+  #provisionLocks = new Map<string, Promise<unknown>>();
   /** Serialize first-clone attempts for agents sharing one working_dir. */
   #bootstrapLocks = new Map<string, Promise<boolean>>();
 
@@ -526,12 +530,10 @@ export class WorktreeManager {
     // Keep the nested worktrees out of `git status` (and out of Unity scans).
     await this.#ensureAwbIgnored(repoRoot, workSubpath);
 
-    // Drop stale registrations first so a worktree whose dir was manually
-    // removed doesn't block recreating it here.
-    await this.prune(baseWorkingDir);
-
     // ── shared: lease a warm-pool slot (규약 ⑥) ─────────────────────────────
     if (mode === 'shared') {
+      // Shared allocation has its own root-scoped registry mutex.
+      await this.prune(baseWorkingDir);
       return this.#acquireSharedSlot({
         baseWorkingDir,
         worktreesRoot,
@@ -546,28 +548,34 @@ export class WorktreeManager {
 
     // ── per_ticket: one dedicated worktree named `<ticket8>` ────────────────
     const wtPath = join(worktreesRoot, worktreeSlug(ticketId, mode));
-    const ens = await this.#ensureWorktree(baseWorkingDir, worktreesRoot, wtPath);
-    if (!ens.ok) {
-      if (ens.reason === 'add_failed') {
+    return this.#withProvisionLock(worktreesRoot, async () => {
+      // Prune + inspect + add is one atomic provisioning transaction. Without
+      // this, simultaneous triggers can both observe a missing registration;
+      // the loser then falls back to the shared base cwd and defeats isolation.
+      await this.prune(baseWorkingDir);
+      const ens = await this.#ensureWorktree(baseWorkingDir, worktreesRoot, wtPath);
+      if (!ens.ok) {
+        if (ens.reason === 'add_failed') {
+          log(
+            `[worktree] add failed for ticket=${String(ticketId).slice(0, 8)} role=${role} mode=${mode}: ${ens.detail ?? ''}`,
+          );
+        }
+        return fallback(ens.reason ?? 'worktree_unavailable');
+      }
+      if (ens.created) {
         log(
-          `[worktree] add failed for ticket=${String(ticketId).slice(0, 8)} role=${role} mode=${mode}: ${ens.detail ?? ''} — falling back to base cwd`,
+          `[worktree] created ${wtPath} for ticket=${String(ticketId).slice(0, 8)} role=${role} mode=${mode}${workSubpath ? ` subpath=${workSubpath}` : ''} (detached at base HEAD)`,
         );
       }
-      return fallback(ens.reason ?? 'worktree_unavailable');
-    }
-    if (ens.created) {
-      log(
-        `[worktree] created ${wtPath} for ticket=${String(ticketId).slice(0, 8)} role=${role} mode=${mode}${workSubpath ? ` subpath=${workSubpath}` : ''} (detached at base HEAD)`,
-      );
-    }
-    return {
-      cwd: withSub(wtPath),
-      isWorktree: true,
-      reused: !ens.created,
-      worktreePath: wtPath,
-      workSubpath,
-      mode,
-    };
+      return {
+        cwd: withSub(wtPath),
+        isWorktree: true,
+        reused: !ens.created,
+        worktreePath: wtPath,
+        workSubpath,
+        mode,
+      };
+    });
   }
 
   /**
@@ -1154,6 +1162,23 @@ export class WorktreeManager {
       return await fn();
     } finally {
       release();
+    }
+  }
+
+  /** Serialize per-ticket worktree provisioning per repository root. */
+  async #withProvisionLock<T>(worktreesRoot: string, fn: () => Promise<T>): Promise<T> {
+    const key = normPath(worktreesRoot);
+    const prev = this.#provisionLocks.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const tail = prev.then(() => gate);
+    this.#provisionLocks.set(key, tail);
+    await prev.catch(() => {});
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (this.#provisionLocks.get(key) === tail) this.#provisionLocks.delete(key);
     }
   }
 

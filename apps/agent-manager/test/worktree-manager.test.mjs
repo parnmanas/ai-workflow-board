@@ -429,6 +429,36 @@ test('resume reattaches to the same per-ticket worktree (branch + dirty tree int
   }
 });
 
+test('concurrent per-ticket provisioning is atomic and isolates branch/index/untracked files', async () => {
+  const { repo, cleanup } = await makeRepo();
+  try {
+    const wm = new WorktreeManager();
+    const [a, b] = await Promise.all([
+      wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_A, role: 'assignee' }),
+      wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_B, role: 'assignee' }),
+    ]);
+
+    assert.equal(a.isWorktree, true);
+    assert.equal(b.isWorktree, true);
+    assert.notEqual(a.cwd, b.cwd, 'different tickets never share a cwd');
+    git(a.cwd, ['checkout', '-q', '-b', 'ticket/concurrent-a']);
+    await fsp.writeFile(join(a.cwd, 'only-a.txt'), 'private to A\n');
+    assert.equal(git(b.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), 'HEAD', 'B remains detached');
+    await assert.rejects(fsp.access(join(b.cwd, 'only-a.txt')), 'A untracked file is invisible in B');
+
+    const [a1, a2] = await Promise.all([
+      wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_A, role: 'assignee' }),
+      wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_A, role: 'reviewer' }),
+    ]);
+    assert.equal(a1.cwd, a.cwd, 'same ticket reuses its stable path');
+    assert.equal(a2.cwd, a.cwd, 'simultaneous respawn resolves to the same registered worktree');
+    assert.equal(a1.isWorktree, true);
+    assert.equal(a2.isWorktree, true, 'no racing caller falls back to the shared base cwd');
+  } finally {
+    await cleanup();
+  }
+});
+
 // ── fallbacks ────────────────────────────────────────────────────────────────
 
 test('fallback to base cwd when not a git repo', async () => {
