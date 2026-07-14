@@ -32,6 +32,30 @@ test('Codex declares native MCP without claiming persistent-session support', ()
   assert.equal(adapter.has(ADAPTER_CAPABILITIES.PERSISTENT_SESSION), false);
 });
 
+test('listModels returns the visible account-aware Codex model cache', async () => {
+  const home = await freshDir();
+  process.env.CODEX_HOME = home;
+  await fsp.writeFile(join(home, 'models_cache.json'), JSON.stringify({
+    models: [
+      { slug: 'gpt-5.6-sol', visibility: 'list' },
+      { slug: 'gpt-5.6-terra', visibility: 'list' },
+      { slug: 'codex-auto-review', visibility: 'hide' },
+      { slug: 'gpt-5.6-sol', visibility: 'list' },
+    ],
+  }));
+
+  assert.deepEqual(await new CodexCliAdapter().listModels(), [
+    'gpt-5.6-sol',
+    'gpt-5.6-terra',
+  ]);
+});
+
+test('listModels degrades to free-text mode when Codex has no cache yet', async () => {
+  const home = await freshDir();
+  process.env.CODEX_HOME = home;
+  assert.deepEqual(await new CodexCliAdapter().listModels(), []);
+});
+
 test('buildOneshotSpawn adds ticket attribution as a TOML config override', () => {
   const adapter = new CodexCliAdapter();
   const descriptor = adapter.buildOneshotSpawn({
