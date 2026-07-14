@@ -49,7 +49,8 @@ Published to the public npm registry as
 [`.github/workflows/publish-agent-manager.yml`](../../.github/workflows/publish-agent-manager.yml),
 so npm stays in lockstep with the repo.
 
-> A git-checkout install (see "Development") also self-updates from `origin/main`;
+> A git-checkout launch migrates to the npm-global package on self-update and
+> never moves or stashes the source checkout; git update is fallback-only when npm is unavailable.
 > a plain `npm i -g` install upgrades via `npm i -g awb-agent-manager@latest` and
 > the admin badge reads "manual updates only" for it (no git checkout to pull).
 

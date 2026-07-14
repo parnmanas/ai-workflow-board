@@ -164,9 +164,9 @@ Legacy import:
 Signals:
   SIGTERM/SIGINT  graceful drain + exit
   SIGHUP          re-read config.json (delegation tunables hot-reload)
-  SIGUSR1         self-update: git pull + npm install + npm run build, then
-                  re-exec with --force so the new build adopts the lockfile.
-                  No-op when the manager is not running from a git checkout.
+  SIGUSR1         self-update: install the latest npm package and re-exec its
+                  global binary. Git checkout update is fallback-only when npm
+                  is unavailable.
 `);
 }
 

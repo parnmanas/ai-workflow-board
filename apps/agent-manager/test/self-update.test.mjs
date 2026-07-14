@@ -248,8 +248,8 @@ test('detectRepoRoot picks the nearest AWB root even when a foreign .git sits ab
 // (no git/npm spawn) so the git vs npm-global vs unknown decision is testable
 // deterministically; detectInstallMode wires the real detectors on top.
 
-test('classifyInstallMode: a repoRoot always wins → git (npm root ignored)', () => {
-  assert.equal(classifyInstallMode('/anywhere', '/repo', '/usr/lib/node_modules'), 'git');
+test('classifyInstallMode: npm wins over a legacy checkout when available', () => {
+  assert.equal(classifyInstallMode('/anywhere', '/repo', '/usr/lib/node_modules'), 'npm-global');
   assert.equal(classifyInstallMode('/repo/apps/agent-manager/dist/lib', '/repo', null), 'git');
 });
 
@@ -270,7 +270,7 @@ test('classifyInstallMode: no checkout and not under npm root → unknown', () =
   assert.equal(classifyInstallMode('/opt/app/dist/lib', null, null), 'unknown');
 });
 
-test('detectInstallMode: a real AWB checkout seed → git (no npm spawn needed)', async () => {
+test('detectInstallMode: a real AWB checkout seed prefers npm when npm is available', async () => {
   const root = await fsp.mkdtemp(join(tmpdir(), 'awb-im-'));
   try {
     const repo = join(root, 'ai-workflow-board');
@@ -278,7 +278,7 @@ test('detectInstallMode: a real AWB checkout seed → git (no npm spawn needed)'
     await writePkg(repo, 'awb-agent-manager');
     const seed = join(repo, 'apps', 'agent-manager', 'dist', 'lib');
     await fsp.mkdir(seed, { recursive: true });
-    assert.equal(detectInstallMode(seed), 'git');
+    assert.equal(detectInstallMode(seed), 'npm-global');
   } finally {
     await fsp.rm(root, { recursive: true, force: true });
   }
@@ -297,16 +297,16 @@ test('detectInstallMode: seed with no checkout and outside npm root → unknown'
   }
 });
 
-test('UpdateChecker constructed from the AWB dist reports install_mode=git', () => {
+test('UpdateChecker constructed from the AWB dist prefers npm-global updates', () => {
   // The real dist/lib/self-update.js sits under this checkout, so the checker's
   // constructor (detectRepoRoot from import.meta.url) must classify it as git —
   // proving the install-mode wiring reaches UpdateStatus. We never start() it,
   // so no timer/network is touched.
   const c = new UpdateChecker({ log: () => {} });
   const s = c.status();
-  assert.equal(s.install_mode, 'git');
+  assert.equal(s.install_mode, 'npm-global');
   assert.equal(typeof s.current_version, 'string');
-  assert.equal(s.repo_root === null, false, 'git mode must carry a non-null repo_root');
+  assert.equal(s.repo_root === null, false, 'checkout remains visible for observability');
   c.stop();
 });
 
