@@ -608,9 +608,9 @@ export class EventDispatcher {
     mode: WorktreeMode | undefined,
     poolSize: number | undefined,
     bootstrapRepo: { url: string; branch?: string; credential?: { username?: string; token: string } | null } | null,
-  ): Promise<void> {
-    if (!agentContext || !this.#worktreeManager || !ticketId || !role) return;
-    if ((this.#config as any)?.delegation?.worktreeIsolation === false) return;
+  ): Promise<{ ok: boolean; reason?: string }> {
+    if (!agentContext || !this.#worktreeManager || !ticketId || !role) return { ok: true };
+    if ((this.#config as any)?.delegation?.worktreeIsolation === false) return { ok: true };
     try {
       // worktree 규약 ②: the manager fixes the root at `<working_dir>/.awb/wt`
       // internally, so no worktreesRoot is passed. mode (per_ticket|shared) is
@@ -630,13 +630,18 @@ export class EventDispatcher {
           `[worktree] ticket=${ticketId.slice(0, 8)} role=${role} agent=${agentContext.agent_id.slice(0, 8)} mode=${res.mode ?? mode ?? 'per_ticket'} cwd=${res.cwd}${res.reused ? ' (reused)' : ' (new)'}`,
         );
         agentContext.cwd = res.cwd;
+        return { ok: true };
       } else if (res.reason && res.reason !== 'disabled') {
         log(
-          `[worktree] isolation skipped for ticket=${ticketId.slice(0, 8)} role=${role}: ${res.reason} — using shared cwd ${agentContext.cwd}`,
+          `[worktree] isolation provisioning failed for ticket=${ticketId.slice(0, 8)} role=${role}: ${res.reason}`,
         );
+        return { ok: false, reason: res.reason };
       }
+      return { ok: true };
     } catch (err: any) {
-      log(`[worktree] resolveCwd failed (${err?.message ?? err}); using shared cwd`);
+      const reason = err?.message ?? String(err);
+      log(`[worktree] resolveCwd failed (${reason})`);
+      return { ok: false, reason };
     }
   }
 
@@ -922,7 +927,7 @@ export class EventDispatcher {
     const repoCredential = selectedRepo?.resourceId && agentContext?.agent_id
       ? await fetchRepositoryCredential(this.#config, selectedRepo.resourceId, agentContext.agent_id)
       : null;
-    await this.#applyWorktreeCwd(
+    const worktreeProvision = await this.#applyWorktreeCwd(
       agentContext,
       ev.ticket_id,
       ev.action,
@@ -932,6 +937,21 @@ export class EventDispatcher {
         : undefined,
       selectedRepo ? { ...selectedRepo, credential: repoCredential } : null,
     );
+    if (!worktreeProvision.ok) {
+      if (ev.ticket_id) {
+        await fireAndForgetTool(this.#config, 'add_comment', {
+          ticket_id: ev.ticket_id,
+          content:
+            `⚠️ **티켓 worktree 프로비저닝 실패** — 공유 작업 폴더에서 에이전트를 실행하지 않고 디스패치를 중단했습니다.\n\n` +
+            `원인: \`${worktreeProvision.reason || 'unknown error'}\`\n\n` +
+            `agent working_dir, repository resource와 \`.awb/wt\` 경로를 확인한 뒤 다시 트리거하세요.`,
+        });
+      }
+      log(
+        `Trigger aborted — ticket worktree provisioning failed: ticket=${ev.ticket_id} reason=${worktreeProvision.reason || 'unknown'}`,
+      );
+      return;
+    }
 
     // worktree 규약 ④: name the ACTUAL work folder in the trigger prompt. The
     // server bakes a `{{AWB_WORK_FOLDER}}` placeholder into every non-merging
