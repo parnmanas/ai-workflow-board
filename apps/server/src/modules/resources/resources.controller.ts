@@ -201,7 +201,8 @@ export class ResourcesController {
       });
       return res.json({ branches, default_branch: resource.default_branch || '' });
     } catch (err: any) {
-      return res.status(502).json({ error: 'failed to list branches', detail: String(err?.message || err) });
+      const detail = String(err?.message || err);
+      return res.status(502).json({ error: 'failed_to_list_branches', message: `Failed to list branches: ${detail}`, detail });
     }
   }
 
@@ -223,7 +224,8 @@ export class ResourcesController {
       const branches = await listRepoBranches({ url, credential, defaultBranch });
       return res.json({ branches, default_branch: defaultBranch });
     } catch (err: any) {
-      return res.status(502).json({ error: 'failed to list branches', detail: String(err?.message || err) });
+      const detail = String(err?.message || err);
+      return res.status(502).json({ error: 'failed_to_list_branches', message: `Failed to list branches: ${detail}`, detail });
     }
   }
 

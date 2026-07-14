@@ -379,7 +379,9 @@ export default function ResourceDetailPanel({
           }}
         >
           브랜치를 불러오지 못했습니다: {branchError}
-          {'\n'}SSH 전용 URL 은 인증 키(credential)가 필요해 조회가 안 될 수 있습니다.
+          {/^(ssh:\/\/|git@)/i.test(resource.url || '') && (
+            <>{'\n'}SSH 전용 URL은 서버 측 SSH 키가 필요합니다. HTTPS URL + credential을 사용해 주세요.</>
+          )}
         </div>
       )}
 
