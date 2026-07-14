@@ -197,11 +197,11 @@ The server-side ack endpoint enforces:
 |----------------------|---------------------------------|
 | `set_working_dir`    | Real — registry update + heartbeat |
 | `reload_config`      | Real — re-reads `config.json`. URL/apiKey/cli changes flagged disruptive |
-| `spawn_agent`        | Real — provisions apiKey, writes mcp-config, registers context (ST-6) |
+| `spawn_agent`        | Real — provisions apiKey, writes mcp-config, writes native Codex `config.toml`, registers context (ST-6) |
 | `stop_agent`         | Real — drops context + erases on-disk secrets                          |
 | `restart_agent`      | Real — `stop` + `spawn` composition                                    |
 | `update_plugins`     | Real — `git pull --ff-only` on every claude marketplace under `<cli-home>/plugins/marketplaces/*` |
-| `refresh_mcp_config` | Real — rewrites `mcp-config.json` with current AWB url + existing apiKey |
+| `refresh_mcp_config` | Real — rewrites `mcp-config.json` and refreshes CLI-native MCP config (including Codex) with the current AWB URL + existing apiKey |
 | `pull_working_dir`   | Real — `git pull --ff-only` inside `Agent.working_dir` (30s timeout)    |
 | `update_manager`     | Real — `git pull` + `npm install` + build, then detached re-exec       |
 | `restart_manager`    | Real — re-exec in place (no pull/install/build); takes over the lockfile |

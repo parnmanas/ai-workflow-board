@@ -49,6 +49,8 @@ import type { CircuitBreaker } from './circuit-breaker.js';
 import {
   ensureManagedAgentDir,
   readApiKey,
+  readAgentCredential,
+  readManagedAgentConfig,
   writeApiKey,
   writeMcpConfig,
   writeManagedAgentConfig,
@@ -774,6 +776,18 @@ export class AgentManagerCommandHandler {
       );
     }
     const path = await writeMcpConfig(agentId, this.#config.url, rawApiKey);
+    const ctx = this.#deps.contextRegistry?.get(agentId);
+    const diskConfig = ctx ? null : await readManagedAgentConfig(agentId);
+    const cli = ctx?.cli ?? diskConfig?.cli;
+    if (cli) {
+      await ensureCliHomeDir(agentId);
+      await createAdapter(cli).prepareCliHome(
+        ctx?.cli_home_dir ?? cliHomeDirFor(agentId),
+        await readAgentCredential(agentId),
+        { url: this.#config.url, apiKey: rawApiKey },
+        ctx?.model ?? diskConfig?.model ?? null,
+      );
+    }
     return `refresh_mcp_config ok: agent=${agentId.slice(0, 8)} path=${path}`;
   }
 

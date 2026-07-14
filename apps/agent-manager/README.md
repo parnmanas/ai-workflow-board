@@ -126,6 +126,12 @@ After redeeming, the manager stores its API key and agent identity in
    on-disk config + mcp-config.json, and starts routing matching ticket /
    chat / mention events to subagents that run under that agent's identity.
 
+   Managed Codex agents also receive native MCP entries in their isolated
+   `CODEX_HOME/config.toml`. AWB is marked `required = true`, uses the
+   per-process `AWB_API_KEY` bearer token, and fails the Codex run if the MCP
+   endpoint cannot initialize. Manager restart/rehydrate and
+   `refresh_mcp_config` both repair this native config automatically.
+
    On manager restart, agents previously spawned this way auto-rehydrate
    from disk — no need to re-click Spawn.
 
