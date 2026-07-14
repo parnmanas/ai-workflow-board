@@ -14,7 +14,7 @@ import type { ChildProcess, StdioOptions } from 'node:child_process';
 export const ADAPTER_CAPABILITIES = Object.freeze({
   /** Bidirectional stream-json over stdin/stdout, multi-turn over one process. */
   PERSISTENT_SESSION: 'persistent_session' as const,
-  /** The spawned CLI itself can call AWB MCP tools (claude). When false, the
+  /** The spawned CLI itself can call AWB MCP tools (claude/codex). When false, the
    *  manager collects the CLI's stdout via collectOneshotResult() and posts the
    *  answer to AWB on the adapter's behalf. */
   NATIVE_MCP: 'native_mcp' as const,
@@ -207,6 +207,9 @@ export interface OneshotSpec {
   rolePrompt: string;
   taskText: string;
   mcpConfigPath: string | null;
+  /** Per-run AWB attribution for native MCP adapters whose MCP config is
+   *  loaded from their CLI home rather than a per-spawn JSON file. */
+  mcpAttribution?: McpAttribution;
   /** Per-agent default model to pass to the CLI (e.g. `--model <id>`). When
    *  empty/null the adapter omits the flag and the CLI uses its own default
    *  (current behaviour). Resolved from Agent.model at spawn time; a
@@ -223,6 +226,13 @@ export interface OneshotSpec {
    *  task text so the spawned Claude Code subagent enters multi-agent
    *  orchestration. NOT a flag. Ignored by non-claude adapters. */
   ultracode?: boolean;
+}
+
+export interface McpAttribution {
+  clientType?: 'managed-subagent' | 'subagent';
+  ticketId?: string;
+  role?: string;
+  triggerSource?: string;
 }
 
 export interface SessionSpec {

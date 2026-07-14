@@ -1,7 +1,7 @@
 // Codex CLI adapter — stateless one-shot, mirrors the Antigravity path.
-// Like Antigravity, codex doesn't speak AWB MCP tools natively, so the
-// manager collects codex's stdout via collectOneshotResult() and posts
-// the answer back through its own REST connection.
+// Codex loads AWB MCP natively from the per-agent CODEX_HOME/config.toml.
+// JSONL stdout remains available for progress/error monitoring, while
+// deliverables go through AWB MCP tools.
 //
 // configDirEnv returns CODEX_HOME so per-agent isolation puts codex's
 // settings / auth / history under <MANAGER_HOME>/agents/<id>/cli-home/
@@ -14,6 +14,7 @@ import { parse, stringify } from 'smol-toml';
 import { resolveCliBin } from '../cli-resolver.js';
 import { resolveSelfCommand } from '../self-path.js';
 import {
+  ADAPTER_CAPABILITIES,
   type AdapterCredential,
   type AdapterMcpContext,
   CliAdapter,
@@ -28,20 +29,48 @@ import {
 // provider preferences. Sessions / history / caches stay isolated.
 const SHARED_FROM_MAIN_HOME = ['auth.json', 'config.toml'];
 
+function inlineTomlStringMap(values: Record<string, string>): string {
+  return `{ ${Object.entries(values)
+    .map(([key, value]) => `${JSON.stringify(key)} = ${JSON.stringify(value)}`)
+    .join(', ')} }`;
+}
+
 export class CodexCliAdapter extends CliAdapter {
   static cliType = 'codex';
 
   constructor() {
     super();
-    this.capabilities = new Set();
+    this.capabilities = new Set([ADAPTER_CAPABILITIES.NATIVE_MCP]);
   }
 
   resolveBin(configured?: string | null): string {
     return resolveCliBin('codex', configured);
   }
 
-  buildOneshotSpawn({ rolePrompt, taskText, model }: OneshotSpec): SpawnDescriptor {
+  buildOneshotSpawn({ rolePrompt, taskText, model, mcpAttribution }: OneshotSpec): SpawnDescriptor {
     const fullPrompt = rolePrompt ? `${rolePrompt}\n\n${taskText}` : taskText || '';
+    const hasAttribution = !!(
+      mcpAttribution?.ticketId ||
+      mcpAttribution?.role ||
+      mcpAttribution?.triggerSource
+    );
+    const attributionArgs: string[] = [];
+    if (hasAttribution) {
+      const headers: Record<string, string> = {
+        'X-AWB-Client-Type': mcpAttribution?.clientType ?? 'managed-subagent',
+      };
+      if (mcpAttribution?.ticketId) {
+        headers['X-AWB-Subagent-Ticket-Id'] = mcpAttribution.ticketId;
+      }
+      if (mcpAttribution?.role) headers['X-AWB-Subagent-Role'] = mcpAttribution.role;
+      if (mcpAttribution?.triggerSource) {
+        headers['X-AWB-Subagent-Trigger-Source'] = mcpAttribution.triggerSource;
+      }
+      attributionArgs.push(
+        '-c',
+        `mcp_servers.awb.http_headers=${inlineTomlStringMap(headers)}`,
+      );
+    }
     // `codex` with no subcommand is the interactive TUI and refuses piped
     // stdin ("stdin is not a terminal"). `codex exec` is the non-interactive
     // counterpart and reads the prompt from stdin when none is passed as
@@ -55,6 +84,7 @@ export class CodexCliAdapter extends CliAdapter {
     return {
       args: [
         'exec',
+        ...attributionArgs,
         // Per-agent default model (Agent.model). Omitted when unset so codex
         // keeps its configured default — preserves prior behaviour.
         ...(model ? ['--model', model] : []),

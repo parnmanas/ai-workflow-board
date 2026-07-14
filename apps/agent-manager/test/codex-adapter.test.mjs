@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { parse } from 'smol-toml';
 
 import { CodexCliAdapter } from '../dist/lib/cli-adapters/codex.js';
+import { ADAPTER_CAPABILITIES } from '../dist/lib/cli-adapters/base.js';
 
 const tempDirs = [];
 
@@ -23,6 +24,48 @@ async function readConfig(home) {
 afterEach(async () => {
   delete process.env.CODEX_HOME;
   await Promise.all(tempDirs.splice(0).map((dir) => fsp.rm(dir, { recursive: true, force: true })));
+});
+
+test('Codex declares native MCP without claiming persistent-session support', () => {
+  const adapter = new CodexCliAdapter();
+  assert.equal(adapter.has(ADAPTER_CAPABILITIES.NATIVE_MCP), true);
+  assert.equal(adapter.has(ADAPTER_CAPABILITIES.PERSISTENT_SESSION), false);
+});
+
+test('buildOneshotSpawn adds ticket attribution as a TOML config override', () => {
+  const adapter = new CodexCliAdapter();
+  const descriptor = adapter.buildOneshotSpawn({
+    rolePrompt: 'role',
+    taskText: 'task',
+    mcpConfigPath: null,
+    mcpAttribution: {
+      ticketId: 'ticket-123',
+      role: 'reviewer',
+      triggerSource: 'ticket_done_review',
+    },
+  });
+  const configIndex = descriptor.args.indexOf('-c');
+  assert.ok(configIndex >= 0);
+  const override = descriptor.args[configIndex + 1];
+  const prefix = 'mcp_servers.awb.http_headers=';
+  assert.ok(override.startsWith(prefix));
+  const headers = parse(`headers = ${override.slice(prefix.length)}`).headers;
+  assert.deepEqual(headers, {
+    'X-AWB-Client-Type': 'managed-subagent',
+    'X-AWB-Subagent-Ticket-Id': 'ticket-123',
+    'X-AWB-Subagent-Role': 'reviewer',
+    'X-AWB-Subagent-Trigger-Source': 'ticket_done_review',
+  });
+});
+
+test('buildOneshotSpawn omits per-run MCP override for unattributed chat runs', () => {
+  const adapter = new CodexCliAdapter();
+  const descriptor = adapter.buildOneshotSpawn({
+    rolePrompt: 'role',
+    taskText: 'task',
+    mcpConfigPath: null,
+  });
+  assert.equal(descriptor.args.includes('-c'), false);
 });
 
 test('prepareCliHome writes required AWB and optional host MCP without persisting the API key', async () => {

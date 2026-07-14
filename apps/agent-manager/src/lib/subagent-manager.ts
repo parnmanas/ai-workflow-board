@@ -527,6 +527,7 @@ export class SubagentManager implements SubagentManagerContract {
         rolePrompt: spec.rolePrompt || '',
         taskText: spec.taskText,
         mcpConfigPath: null,
+        mcpAttribution: this.#mcpAttribution(spec, !!ctx),
         model: attemptModel,
         harness,
         effort: effortFlag,
@@ -589,6 +590,7 @@ export class SubagentManager implements SubagentManagerContract {
             rolePrompt: spec.rolePrompt || '',
             taskText: spec.taskText,
             mcpConfigPath: configPath,
+            mcpAttribution: this.#mcpAttribution(spec, !!ctx),
             model: attemptModel,
             harness,
             effort: effortFlag,
@@ -751,6 +753,16 @@ export class SubagentManager implements SubagentManagerContract {
       log(`Subagent spawn error: ${err?.message ?? err}`);
       return { spawned: false, reason: 'exception' };
     }
+  }
+
+  #mcpAttribution(spec: SubagentSpawnArgs, managed: boolean) {
+    if (!spec.ticketId && !spec.role && !spec.triggerSource) return undefined;
+    return {
+      clientType: managed ? 'managed-subagent' as const : 'subagent' as const,
+      ticketId: spec.ticketId || undefined,
+      role: spec.role || undefined,
+      triggerSource: spec.triggerSource || undefined,
+    };
   }
 
   #wireExitHandler(child: ChildProcess, pid: number): void {
