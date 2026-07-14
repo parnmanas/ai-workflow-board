@@ -176,6 +176,29 @@ export class CodexCliAdapter extends CliAdapter {
     return raw || null;
   }
 
+  /**
+   * Codex has no public `codex models` CLI command, but its official app-server
+   * protocol exposes `model/list` and persists the account-aware result in
+   * `$CODEX_HOME/models_cache.json`. Read that CLI-owned cache so the manager
+   * can report exactly the same visible model ids as Codex's own picker,
+   * without hardcoding a catalog or starting an interactive session at boot.
+   */
+  async listModels(): Promise<string[]> {
+    const codexHome = process.env.CODEX_HOME ?? join(homedir(), '.codex');
+    try {
+      const raw = await fsp.readFile(join(codexHome, 'models_cache.json'), 'utf8');
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed?.models)) return [];
+      const models: string[] = parsed.models
+        .filter((entry: any) => entry?.visibility !== 'hide')
+        .map((entry: any) => String(entry?.slug || entry?.model || '').trim())
+        .filter((model: string) => !!model);
+      return [...new Set<string>(models)];
+    } catch {
+      return [];
+    }
+  }
+
   configDirEnv(): string {
     return 'CODEX_HOME';
   }
