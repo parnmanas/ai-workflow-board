@@ -233,6 +233,10 @@ export interface ResolveCwdArgs {
    *  Ignored in per_ticket mode. Absent / ≤0 → 1 (a single reused slot, i.e. the
    *  pre-pool behavior). */
   poolSize?: number;
+  /** Repository used to bootstrap an empty working_dir before creating the
+   *  ticket worktree. Dispatch resolves this as ticket repo first, then the
+   *  board environment's first repository. */
+  bootstrapRepo?: { url: string; branch?: string } | null;
 }
 
 export interface ResolveCwdResult {
@@ -270,6 +274,8 @@ export class WorktreeManager {
    *  concurrent triggers can't lease the same idle slot (규약 ⑥). Keyed by the
    *  normalized worktrees root; one chained promise per key. */
   #poolLocks = new Map<string, Promise<unknown>>();
+  /** Serialize first-clone attempts for agents sharing one working_dir. */
+  #bootstrapLocks = new Map<string, Promise<boolean>>();
 
   constructor(opts: { enabled?: boolean } = {}) {
     this.#enabled = opts.enabled !== false;
@@ -308,6 +314,47 @@ export class WorktreeManager {
   async #isGitWorkTree(dir: string): Promise<boolean> {
     const r = await git(dir, ['rev-parse', '--is-inside-work-tree']);
     return r.ok && r.stdout.trim() === 'true';
+  }
+
+  async #bootstrapEmptyWorkingDir(
+    baseWorkingDir: string,
+    repo: { url: string; branch?: string } | null | undefined,
+  ): Promise<boolean> {
+    if (!repo?.url?.trim()) return false;
+    const key = baseWorkingDir;
+    const active = this.#bootstrapLocks.get(key);
+    if (active) return active;
+    const run = (async () => {
+      if (await this.#isGitWorkTree(baseWorkingDir)) return true;
+      await fsp.mkdir(baseWorkingDir, { recursive: true });
+      const entries = await fsp.readdir(baseWorkingDir);
+      if (entries.length > 0) {
+        log(`[worktree] cannot bootstrap non-empty non-git working_dir: ${baseWorkingDir}`);
+        return false;
+      }
+      const branch = (repo.branch || '').trim();
+      const cloneArgs = ['clone', ...(branch ? ['--branch', branch] : []), '--', repo.url.trim(), baseWorkingDir];
+      const cloned = await new Promise<GitResult>((resolve) => {
+        execFile(
+          'git',
+          cloneArgs,
+          { timeout: 20 * 60 * 1000, maxBuffer: 8 * 1024 * 1024, windowsHide: true },
+          (err, stdout, stderr) => resolve({
+            ok: !err,
+            stdout: (stdout ?? '').toString(),
+            stderr: (stderr ?? (err as any)?.message ?? '').toString(),
+          }),
+        );
+      });
+      if (!cloned.ok) {
+        log(`[worktree] working_dir bootstrap clone failed: ${cloned.stderr.trim()}`);
+        return false;
+      }
+      log(`[worktree] bootstrapped empty working_dir from ${repo.url}${branch ? ` branch=${branch}` : ''}: ${baseWorkingDir}`);
+      return true;
+    })().finally(() => this.#bootstrapLocks.delete(key));
+    this.#bootstrapLocks.set(key, run);
+    return run;
   }
 
   /**
@@ -420,6 +467,9 @@ export class WorktreeManager {
     // Both modes key a lease/slug on the ticket id, so it is required for either.
     if (!ticketId) return fallback('no_ticket');
 
+    if (!(await this.#isGitWorkTree(baseWorkingDir))) {
+      await this.#bootstrapEmptyWorkingDir(baseWorkingDir, args.bootstrapRepo);
+    }
     if (!(await this.#isGitWorkTree(baseWorkingDir))) {
       return fallback('not_a_git_repo');
     }

@@ -209,6 +209,25 @@ export function parseEnvironmentConfig(raw: unknown): ResolvedEnvironmentConfig 
   };
 }
 
+/** Select the checkout used to bootstrap an empty managed-agent working_dir.
+ * Ticket binding is authoritative; the board environment's first repository
+ * is the fallback when the ticket deliberately inherits board settings. */
+export function resolveBootstrapRepository(
+  baseRepo: unknown,
+  baseBranch: unknown,
+  environment: ResolvedEnvironmentConfig | null,
+): { url: string; branch: string } | null {
+  const repo = baseRepo && typeof baseRepo === 'object' ? baseRepo as any : null;
+  const ticketUrl = typeof repo?.url === 'string' ? repo.url.trim() : '';
+  if (ticketUrl) {
+    const branch = (typeof baseBranch === 'string' ? baseBranch.trim() : '')
+      || (typeof repo?.default_branch === 'string' ? repo.default_branch.trim() : '');
+    return { url: ticketUrl, branch };
+  }
+  const boardRepo = environment?.repositories[0];
+  return boardRepo ? { url: boardRepo.url, branch: boardRepo.branch } : null;
+}
+
 /**
  * Parse the board worktree placement mode off the flattened agent_trigger
  * event (worktree 규약 ②). Returns the concrete enum only for a recognized
@@ -586,6 +605,7 @@ export class EventDispatcher {
     role: string | undefined,
     mode: WorktreeMode | undefined,
     poolSize: number | undefined,
+    bootstrapRepo: { url: string; branch?: string } | null,
   ): Promise<void> {
     if (!agentContext || !this.#worktreeManager || !ticketId || !role) return;
     if ((this.#config as any)?.delegation?.worktreeIsolation === false) return;
@@ -601,6 +621,7 @@ export class EventDispatcher {
         role,
         mode,
         poolSize,
+        bootstrapRepo,
       });
       if (res.isWorktree) {
         log(
@@ -877,6 +898,7 @@ export class EventDispatcher {
     const selfAgentId = loadAgentInfo()?.agent_id || '';
     const eventAgentId = ev.actor_name || ev.agent_id || '';
     const agentContext = this.#resolveAgentContext(eventAgentId);
+    const envConfig = parseEnvironmentConfig(ev.environment_config);
     if (
       selfAgentId &&
       eventAgentId &&
@@ -902,6 +924,7 @@ export class EventDispatcher {
       typeof ev.max_concurrent_tickets_per_agent === 'number'
         ? ev.max_concurrent_tickets_per_agent
         : undefined,
+      resolveBootstrapRepository(ev.base_repo, ev.base_branch, envConfig),
     );
 
     // worktree 규약 ④: name the ACTUAL work folder in the trigger prompt. The
@@ -954,7 +977,6 @@ export class EventDispatcher {
     // of whether provisioning ran or was skipped. A provisioning FAILURE aborts
     // the dispatch (never start work in a broken environment) and surfaces the
     // error as a ticket comment.
-    const envConfig = parseEnvironmentConfig(ev.environment_config);
     const envVars = envConfig?.env_vars && Object.keys(envConfig.env_vars).length > 0
       ? envConfig.env_vars
       : undefined;
