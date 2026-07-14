@@ -108,6 +108,7 @@ export default function CredentialManager({ workspaceId, globalMode = false }: {
   const [formDescription, setFormDescription] = useState('');
   const [formProvider, setFormProvider] = useState('github');
   const [formFields, setFormFields] = useState<Record<string, string>>({});
+  const [storedFieldPreviews, setStoredFieldPreviews] = useState<Record<string, string>>({});
   const [formErrors, setFormErrors] = useState<{ name?: string }>({});
 
   const effectiveWsId = globalMode ? '' : (workspaceId || (getActiveWorkspaceId() || ''));
@@ -137,6 +138,7 @@ export default function CredentialManager({ workspaceId, globalMode = false }: {
     setFormDescription('');
     setFormProvider('github');
     setFormFields({});
+    setStoredFieldPreviews({});
     setFormErrors({});
     setEditCred(null);
     setShowForm(true);
@@ -146,7 +148,11 @@ export default function CredentialManager({ workspaceId, globalMode = false }: {
     setFormName(cred.name);
     setFormDescription(cred.description || '');
     setFormProvider(cred.provider);
-    setFormFields({ ...cred.credential_fields });
+    // Never put a stored preview inside the replacement input. Browsers and
+    // password managers re-mask password input values as ********, defeating
+    // the purpose of showing an identifying prefix/suffix.
+    setStoredFieldPreviews({ ...cred.credential_fields });
+    setFormFields({});
     setFormErrors({});
     setEditCred(cred);
     setShowForm(true);
@@ -390,7 +396,7 @@ export default function CredentialManager({ workspaceId, globalMode = false }: {
               <label style={{ fontSize: tokens.typography.fontSizeXs, fontWeight: tokens.typography.fontWeightSemibold, color: tokens.colors.textMuted, textTransform: 'uppercase', display: 'block', marginBottom: tokens.spacing.xs }}>Provider</label>
               <select
                 value={formProvider}
-                onChange={(e) => { setFormProvider(e.target.value); setFormFields({}); }}
+                onChange={(e) => { setFormProvider(e.target.value); setFormFields({}); setStoredFieldPreviews({}); }}
                 style={{ width: '100%', background: tokens.colors.surface, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md, padding: '8px 10px', color: tokens.colors.textStrong, fontSize: '12px', fontFamily: 'inherit', boxSizing: 'border-box' }}
               >
                 {PROVIDERS.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
@@ -405,23 +411,26 @@ export default function CredentialManager({ workspaceId, globalMode = false }: {
                 {fieldDef.label}
               </label>
               <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginBottom: 4 }}>Encrypted at rest (AES-256-GCM)</div>
+              {storedFieldPreviews[fieldKey] && (
+                <div style={{ fontSize: '12px', color: tokens.colors.textSecondary, marginBottom: 6 }}>
+                  Stored: <code style={{ color: tokens.colors.textStrong }}>{storedFieldPreviews[fieldKey]}</code>
+                </div>
+              )}
               {fieldDef.multiline ? (
                 <textarea
                   value={formFields[fieldKey] || ''}
                   onChange={(e) => setFormFields(prev => ({ ...prev, [fieldKey]: e.target.value }))}
-                  placeholder={fieldDef.placeholder}
+                  placeholder={editCred ? 'Leave blank to keep the stored value' : fieldDef.placeholder}
                   rows={8}
                   style={{ width: '100%', minHeight: 140, background: tokens.colors.surface, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md, padding: '8px 10px', color: tokens.colors.textStrong, fontSize: '12px', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', boxSizing: 'border-box', outline: 'none', resize: 'vertical' }}
                 />
               ) : (
                 <input
-                  // Existing values arrive already server-masked. Show that
-                  // safe preview so operators can identify the registered
-                  // token; as soon as they type a replacement, hide it.
-                  type={(formFields[fieldKey] || '').includes('••••') ? 'text' : 'password'}
+                  type="password"
+                  autoComplete="new-password"
                   value={formFields[fieldKey] || ''}
                   onChange={(e) => setFormFields(prev => ({ ...prev, [fieldKey]: e.target.value }))}
-                  placeholder={fieldDef.placeholder}
+                  placeholder={editCred ? 'Leave blank to keep the stored value' : fieldDef.placeholder}
                   style={{ width: '100%', background: tokens.colors.surface, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md, padding: '8px 10px', color: tokens.colors.textStrong, fontSize: '13px', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', boxSizing: 'border-box', outline: 'none' }}
                 />
               )}
