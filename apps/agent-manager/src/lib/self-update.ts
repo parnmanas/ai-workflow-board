@@ -29,6 +29,7 @@ import { dirname, resolve, join, relative, isAbsolute } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { log } from './logging.js';
+import { AGENT_MANAGER_HOME } from './constants.js';
 
 const PACKAGE_JSON_REL = 'apps/agent-manager/package.json';
 // Our own npm package name. detectRepoRoot() uses this to tell an actual AWB
@@ -42,6 +43,7 @@ const DEFAULT_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 30_000;
 const NPM_VIEW_TIMEOUT_MS = 30_000;
 const BUILD_TIMEOUT_MS = 10 * 60_000;
+const MANAGED_GIT_RUNTIME = join(AGENT_MANAGER_HOME, 'runtime');
 
 /**
  * How this manager binary was installed — decides the self-update strategy.
@@ -146,27 +148,12 @@ function isAwbRepoRoot(dir: string): boolean {
  * keep walking up rather than returning it, so the traversal ends at null and
  * the install is correctly reported as "manual updates only".
  */
-export function detectRepoRoot(startDir?: string): string | null {
-  const seed = startDir || dirname(fileURLToPath(import.meta.url));
-  let dir = resolve(seed);
-  // Hard cap on iterations so a pathological cwd can't loop forever.
-  for (let i = 0; i < 16; i++) {
-    if (existsSync(join(dir, '.git'))) {
-      try {
-        const st = statSync(join(dir, '.git'));
-        // A `.git` alone isn't enough — it must be OUR checkout. A foreign
-        // ancestor `.git` (dotfiles repo, git-tracked install prefix) is
-        // skipped so we keep walking up instead of adopting it.
-        if ((st.isDirectory() || st.isFile()) && isAwbRepoRoot(dir)) return dir;
-      } catch {
-        /* fall through to parent */
-      }
-    }
-    const parent = dirname(dir);
-    if (!parent || parent === dir) return null;
-    dir = parent;
-  }
-  return null;
+export function detectRepoRoot(_startDir?: string): string | null {
+  // Self-update must never infer ownership from the running script's parents.
+  // Only the manager-owned fallback runtime is disposable/updateable.
+  return existsSync(join(MANAGED_GIT_RUNTIME, '.git')) && isAwbRepoRoot(MANAGED_GIT_RUNTIME)
+    ? MANAGED_GIT_RUNTIME
+    : null;
 }
 
 /**
@@ -209,7 +196,7 @@ export function classifyInstallMode(
   // still launched from a source checkout. This prevents self-update from
   // moving/stashing the operator's repository. Git is fallback-only when npm
   // is genuinely unavailable.
-  if (repoRoot && npmGlobalRoot) return 'npm-global';
+  if (npmGlobalRoot) return 'npm-global';
   if (repoRoot) return 'git';
   if (npmGlobalRoot && isPathInside(npmGlobalRoot, runningDir)) return 'npm-global';
   return 'unknown';
@@ -876,7 +863,30 @@ async function runSelfUpdateLocked(
   }
 
   const branch = detectDefaultBranch(repoRoot);
-  out(`Self-update: starting (root=${repoRoot} branch=${branch})`);
+  out(`Self-update: git fallback in manager-owned runtime (root=${repoRoot} branch=${branch})`);
+
+  // The fallback runtime is disposable. Never preserve, merge, or stash its
+  // contents: fetch the selected ref, replace tracked state, and remove every
+  // untracked/ignored build artifact before rebuilding.
+  const fetched = await runAsync(
+    'git', ['-C', repoRoot, 'fetch', '--quiet', 'origin', branch], repoRoot, FETCH_TIMEOUT_MS,
+    (line) => out(`  [git] ${line}`),
+  );
+  if (!fetched.ok) {
+    const detail = fetched.stderr.trim() || fetched.stdout.trim() || 'unknown';
+    return { changed: false, summary: `git fallback fetch failed: ${detail.slice(0, 240)}` };
+  }
+  for (const args of [
+    ['checkout', '--detach', `origin/${branch}`],
+    ['reset', '--hard', `origin/${branch}`],
+    ['clean', '-fdx'],
+  ]) {
+    const replaced = await runAsync('git', ['-C', repoRoot, ...args], repoRoot, 30_000);
+    if (!replaced.ok) {
+      const detail = replaced.stderr.trim() || replaced.stdout.trim() || 'unknown';
+      return { changed: false, summary: `git fallback overwrite failed: ${detail.slice(0, 240)}` };
+    }
+  }
 
   // 0. Reset package-lock.json before adopting origin/<branch>.
   //

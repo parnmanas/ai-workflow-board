@@ -180,7 +180,7 @@ async function makeGitMarker(dir, type /* 'dir' | 'file' */) {
   }
 }
 
-test('detectRepoRoot returns the checkout root for a real AWB tree (.git dir)', async () => {
+test('detectRepoRoot never adopts an arbitrary AWB development checkout', async () => {
   const root = await fsp.mkdtemp(join(tmpdir(), 'awb-dr-'));
   try {
     const repo = join(root, 'ai-workflow-board');
@@ -189,7 +189,7 @@ test('detectRepoRoot returns the checkout root for a real AWB tree (.git dir)', 
     // Seed from where the running dist/ actually lives, deep under the repo.
     const seed = join(repo, 'apps', 'agent-manager', 'dist', 'lib');
     await fsp.mkdir(seed, { recursive: true });
-    assert.equal(detectRepoRoot(seed), repo);
+    assert.equal(detectRepoRoot(seed), null);
   } finally {
     await fsp.rm(root, { recursive: true, force: true });
   }
@@ -225,7 +225,7 @@ test('detectRepoRoot rejects a foreign repo whose apps/agent-manager/package.jso
   }
 });
 
-test('detectRepoRoot picks the nearest AWB root even when a foreign .git sits above it', async () => {
+test('detectRepoRoot ignores nested AWB development checkouts', async () => {
   const root = await fsp.mkdtemp(join(tmpdir(), 'awb-dr-'));
   try {
     const home = join(root, 'home');
@@ -235,7 +235,7 @@ test('detectRepoRoot picks the nearest AWB root even when a foreign .git sits ab
     await writePkg(repo, 'awb-agent-manager');
     const seed = join(repo, 'apps', 'agent-manager', 'dist', 'lib');
     await fsp.mkdir(seed, { recursive: true });
-    assert.equal(detectRepoRoot(seed), repo);
+    assert.equal(detectRepoRoot(seed), null);
   } finally {
     await fsp.rm(root, { recursive: true, force: true });
   }
@@ -261,11 +261,11 @@ test('classifyInstallMode: running file under `npm root -g` → npm-global', () 
   assert.equal(classifyInstallMode(npmRoot, null, npmRoot), 'npm-global');
 });
 
-test('classifyInstallMode: no checkout and not under npm root → unknown', () => {
+test('classifyInstallMode: npm availability selects npm regardless of script location', () => {
   const npmRoot = join('/usr', 'lib', 'node_modules');
   // A sibling that merely shares a string prefix must NOT be treated as inside.
-  assert.equal(classifyInstallMode('/usr/lib/node_modules-evil/x', null, npmRoot), 'unknown');
-  assert.equal(classifyInstallMode('/opt/app/dist/lib', null, npmRoot), 'unknown');
+  assert.equal(classifyInstallMode('/usr/lib/node_modules-evil/x', null, npmRoot), 'npm-global');
+  assert.equal(classifyInstallMode('/opt/app/dist/lib', null, npmRoot), 'npm-global');
   // No npm at all (detectNpmGlobalRoot returned null).
   assert.equal(classifyInstallMode('/opt/app/dist/lib', null, null), 'unknown');
 });
@@ -284,14 +284,14 @@ test('detectInstallMode: a real AWB checkout seed prefers npm when npm is availa
   }
 });
 
-test('detectInstallMode: seed with no checkout and outside npm root → unknown', async () => {
+test('detectInstallMode: vendored seed still prefers available npm', async () => {
   const root = await fsp.mkdtemp(join(tmpdir(), 'awb-im-'));
   try {
     // A vendored copy under tmp: no `.git` above it, and tmp is not under the
     // CI host's `npm root -g` — so neither git nor npm-global applies.
     const seed = join(root, 'vendor', 'awb-agent-manager', 'dist', 'lib');
     await fsp.mkdir(seed, { recursive: true });
-    assert.equal(detectInstallMode(seed), 'unknown');
+    assert.equal(detectInstallMode(seed), 'npm-global');
   } finally {
     await fsp.rm(root, { recursive: true, force: true });
   }
@@ -306,7 +306,7 @@ test('UpdateChecker constructed from the AWB dist prefers npm-global updates', (
   const s = c.status();
   assert.equal(s.install_mode, 'npm-global');
   assert.equal(typeof s.current_version, 'string');
-  assert.equal(s.repo_root === null, false, 'checkout remains visible for observability');
+  assert.equal(s.repo_root, null, 'development checkout is never adopted as update state');
   c.stop();
 });
 
@@ -335,14 +335,11 @@ test('embedded npm-global updater helper source is valid ESM (node --check)', as
 // live UpdateChecker MUST NOT null-root — guarding against a regression that
 // flips a real checkout back to manual-only after a restart / self-update
 // re-exec.
-test('UpdateChecker on a real checkout reports a non-null repo_root (never "manual updates only")', () => {
+test('UpdateChecker ignores the real development checkout and uses npm mode', () => {
   const status = new UpdateChecker().status();
-  assert.notEqual(
-    status.repo_root,
-    null,
-    'a manager running from an AWB checkout must resolve repo_root — auto-update stays enabled',
-  );
-  assert.notEqual(status.branch, null, 'the tracked default branch is detected (auto-update is armed)');
+  assert.equal(status.repo_root, null);
+  assert.equal(status.branch, null);
+  assert.equal(status.install_mode, 'npm-global');
   assert.equal(typeof status.current_version, 'string');
   assert.notEqual(status.current_version, '0.0.0', 'the bundled version resolves from dist/package.json');
 });
