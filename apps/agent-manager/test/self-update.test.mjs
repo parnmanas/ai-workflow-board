@@ -324,3 +324,25 @@ test('embedded npm-global updater helper source is valid ESM (node --check)', as
     await fsp.rm(dir, { recursive: true, force: true });
   }
 });
+
+// ─── "manual updates only" regression (ticket c555fbb6) ─────────────────────
+// A real AWB checkout must resolve repo_root, which lands it in git install-mode
+// (see the install-mode tests above) and keeps auto-update armed — the admin
+// "(manual updates only)" badge is only for a genuine non-checkout (npm-global /
+// unknown) install. The 2026-07-14 re-investigation confirmed a checkout-run
+// manager (Rolf, /mnt/data/repositories/ai-workflow-board) resolves its root and
+// auto-updates. This test runs from an actual checkout's compiled dist/, so the
+// live UpdateChecker MUST NOT null-root — guarding against a regression that
+// flips a real checkout back to manual-only after a restart / self-update
+// re-exec.
+test('UpdateChecker on a real checkout reports a non-null repo_root (never "manual updates only")', () => {
+  const status = new UpdateChecker().status();
+  assert.notEqual(
+    status.repo_root,
+    null,
+    'a manager running from an AWB checkout must resolve repo_root — auto-update stays enabled',
+  );
+  assert.notEqual(status.branch, null, 'the tracked default branch is detected (auto-update is armed)');
+  assert.equal(typeof status.current_version, 'string');
+  assert.notEqual(status.current_version, '0.0.0', 'the bundled version resolves from dist/package.json');
+});
