@@ -22,7 +22,8 @@
  *       임의의 두 ref 를 비교. CI(push→main)에서 github.event.before / github.sha 를,
  *       PR 에서 base / head sha 를 넘긴다.
  *   node check-version-bump.mjs --preflight
- *       로컬 머지 preflight. `git fetch origin main` 후 origin/main..HEAD 를 검사.
+ *       로컬 머지 preflight. `git fetch origin main` 후 브랜치가 실제로 바꾼 소스는
+ *       merge-base..HEAD 로, version 은 origin/main 대비 검사한다.
  *       board lesson #1 의 수동 확인을 대체한다 (AWB_NO_FETCH=1 이면 fetch 생략).
  *
  * 순수 Node(child_process + fs 불필요, git 만)만 사용 — 의존성/빌드 없음, 크로스플랫폼.
@@ -90,11 +91,13 @@ function versionAtRef(ref) {
 }
 
 /**
- * 핵심 게이트. before..after 가 agent-manager 소스를 건드렸는데 version 이 엄격히
+ * 핵심 게이트. touchedBefore..after 가 agent-manager 소스를 건드렸는데 version 이 엄격히
  * 커지지 않았으면 { ok:false }. 안전을 위해 ref 를 못 읽는 경우는 fail-open(skip)한다
  * — 이 게이트는 유일한 보증이 아니라 침묵형 실패용 백스톱이므로 false CI 실패가 더 해롭다.
+ * touchedBeforeRef 는 preflight 에서만 merge-base 로 주입한다. version 비교 기준은
+ * 항상 beforeRef(origin/main)라서 뒤처진 브랜치도 최신 main보다 큰 버전을 요구한다.
  */
-export function checkRange(beforeRef, afterRef) {
+export function checkRange(beforeRef, afterRef, touchedBeforeRef = beforeRef) {
   if (!beforeRef || ZERO_SHA.test(beforeRef)) {
     return { ok: true, skipped: `BEFORE ref 없음(${beforeRef || 'empty'}) — 최초 push/브랜치 생성으로 판단, 비교 skip` };
   }
@@ -102,7 +105,7 @@ export function checkRange(beforeRef, afterRef) {
     return { ok: true, skipped: `ref 를 로컬에서 못 찾음(before=${beforeRef}, after=${afterRef}) — 비교 skip (CI 라면 checkout fetch-depth:0 필요)` };
   }
 
-  const touched = git(`diff --name-only ${beforeRef} ${afterRef} -- ${SOURCE_PATHSPEC}`);
+  const touched = git(`diff --name-only ${touchedBeforeRef} ${afterRef} -- ${SOURCE_PATHSPEC}`);
   if (!touched) {
     return { ok: true, message: `agent-manager 소스(${SOURCE_PATHSPEC}/**) 변경 없음 — 버전 범프 불필요` };
   }
@@ -132,6 +135,7 @@ export function checkRange(beforeRef, afterRef) {
 export function main(argv) {
   let beforeRef;
   let afterRef;
+  let touchedBeforeRef;
 
   if (argv[0] === '--preflight') {
     if (process.env.AWB_NO_FETCH !== '1') {
@@ -143,6 +147,14 @@ export function main(argv) {
     }
     beforeRef = 'origin/main';
     afterRef = 'HEAD';
+    if (refResolvable(beforeRef) && refResolvable(afterRef)) {
+      try {
+        touchedBeforeRef = git(`merge-base ${beforeRef} ${afterRef}`);
+      } catch {
+        // 서로 무관한 히스토리 등 merge-base가 없으면 기존 before..after 판정으로 폴백한다.
+        touchedBeforeRef = beforeRef;
+      }
+    }
   } else {
     [beforeRef, afterRef] = argv;
     if (!beforeRef || !afterRef) {
@@ -151,7 +163,7 @@ export function main(argv) {
     }
   }
 
-  const res = checkRange(beforeRef, afterRef);
+  const res = checkRange(beforeRef, afterRef, touchedBeforeRef);
   const label = `[agent-manager version guard] ${beforeRef}..${afterRef}`;
   if (res.ok) {
     console.log(`✅ ${label} — ${res.skipped || res.message}`);

@@ -8,6 +8,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const { parseVersion, compareVersions, checkRange } = await import('../scripts/check-version-bump.mjs');
 
@@ -56,4 +60,42 @@ test('checkRange: BEFORE ref 가 비었거나 zero-SHA 면 git 없이 skip(pass)
   const zero = checkRange('0'.repeat(40), 'HEAD');
   assert.equal(zero.ok, true, '브랜치 최초 생성(before=0000…) 은 비교 불가 → skip');
   assert.ok(zero.skipped);
+});
+
+test('--preflight: main 보다 뒤처졌지만 브랜치가 src 를 안 건드리면 pass', () => {
+  const repo = mkdtempSync(join(process.cwd(), '.version-bump-check-'));
+  const script = fileURLToPath(new URL('../scripts/check-version-bump.mjs', import.meta.url));
+  const git = (...args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+
+  try {
+    git('init', '-q');
+    git('config', 'user.name', 'Version Guard Test');
+    git('config', 'user.email', 'version-guard@example.invalid');
+    mkdirSync(join(repo, 'apps/agent-manager/src'), { recursive: true });
+    writeFileSync(join(repo, 'apps/agent-manager/package.json'), '{"version":"1.0.0"}\n');
+    writeFileSync(join(repo, 'apps/agent-manager/src/index.ts'), 'export const value = 1;\n');
+    git('add', '.');
+    git('commit', '-qm', 'base');
+    const base = git('rev-parse', 'HEAD');
+
+    writeFileSync(join(repo, 'apps/agent-manager/src/index.ts'), 'export const value = 2;\n');
+    writeFileSync(join(repo, 'apps/agent-manager/package.json'), '{"version":"1.0.1"}\n');
+    git('add', '.');
+    git('commit', '-qm', 'main changes agent-manager');
+    git('update-ref', 'refs/remotes/origin/main', 'HEAD');
+
+    git('checkout', '-q', '-b', 'feature', base);
+    writeFileSync(join(repo, 'README.md'), 'unrelated feature\n');
+    git('add', 'README.md');
+    git('commit', '-qm', 'feature changes docs only');
+
+    const output = execFileSync(process.execPath, [script, '--preflight'], {
+      cwd: repo,
+      encoding: 'utf8',
+      env: { ...process.env, AWB_NO_FETCH: '1' },
+    });
+    assert.match(output, /소스.*변경 없음/);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
 });
