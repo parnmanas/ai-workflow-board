@@ -103,6 +103,47 @@ test('worktreesRootFor is always <working_dir>/.awb/wt', () => {
   assert.equal(worktreesRootFor('/x/y/z'), join('/x/y/z', '.awb', 'wt'));
 });
 
+test('empty working_dir is bootstrapped from the resolved repository before worktree creation', async () => {
+  const source = await makeRepoWithRemote();
+  const workingDir = join(source.root, 'empty-agent-dir');
+  try {
+    await fsp.mkdir(workingDir, { recursive: true });
+    const wm = new WorktreeManager();
+    const result = await wm.resolveCwd({
+      baseWorkingDir: workingDir,
+      ticketId: TICKET_A,
+      role: 'assignee',
+      bootstrapRepo: { url: source.remote, branch: 'main' },
+    });
+    assert.ok(result.isWorktree, 'bootstrap continues into ticket worktree creation');
+    assert.equal(git(workingDir, ['remote', 'get-url', 'origin']), source.remote);
+    assert.equal(await fsp.readFile(join(result.cwd, 'README.md'), 'utf8'), '# base\n');
+  } finally {
+    await source.cleanup();
+  }
+});
+
+test('bootstrap never overwrites a non-empty non-git working_dir', async () => {
+  const source = await makeRepoWithRemote();
+  const workingDir = join(source.root, 'occupied-agent-dir');
+  try {
+    await fsp.mkdir(workingDir, { recursive: true });
+    await fsp.writeFile(join(workingDir, 'keep.txt'), 'user data\n');
+    const wm = new WorktreeManager();
+    const result = await wm.resolveCwd({
+      baseWorkingDir: workingDir,
+      ticketId: TICKET_A,
+      role: 'assignee',
+      bootstrapRepo: { url: source.remote, branch: 'main' },
+    });
+    assert.equal(result.isWorktree, false);
+    assert.equal(result.reason, 'not_a_git_repo');
+    assert.equal(await fsp.readFile(join(workingDir, 'keep.txt'), 'utf8'), 'user data\n');
+  } finally {
+    await source.cleanup();
+  }
+});
+
 // ── placement: everything lands under <working_dir>/.awb/wt/ ─────────────────
 
 test('per_ticket: worktrees land under .awb/wt/<ticket8>, distinct per ticket', async () => {

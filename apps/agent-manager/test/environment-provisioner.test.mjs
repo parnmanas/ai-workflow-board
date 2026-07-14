@@ -21,7 +21,7 @@ import { join } from 'node:path';
 const HOME = mkdtempSync(join(tmpdir(), 'awb-envprov-'));
 process.env.AWB_AGENT_MANAGER_HOME = HOME;
 
-const { parseEnvironmentConfig } = await import('../dist/lib/event-dispatcher.js');
+const { parseEnvironmentConfig, resolveBootstrapRepository } = await import('../dist/lib/event-dispatcher.js');
 const { EnvironmentProvisioner, fingerprintEnvironment } = await import(
   '../dist/lib/environment-provisioner.js'
 );
@@ -68,6 +68,26 @@ test('parseEnvironmentConfig: drops repos without a usable url or target_dir', (
   // defaults applied
   assert.equal(parsed.setup_timeout_seconds, 600);
   assert.equal(parsed.version, 0);
+});
+
+test('resolveBootstrapRepository: ticket repo wins, board repo is fallback', () => {
+  const environment = {
+    repositories: [{ url: 'https://example.test/board.git', target_dir: 'repos/board', branch: 'develop', post_clone_commands: [] }],
+    env_vars: {}, setup_commands: [], setup_timeout_seconds: 600, version: 0,
+  };
+  assert.deepEqual(
+    resolveBootstrapRepository(
+      { url: 'https://example.test/ticket.git', default_branch: 'main' },
+      'release',
+      environment,
+    ),
+    { url: 'https://example.test/ticket.git', branch: 'release' },
+  );
+  assert.deepEqual(
+    resolveBootstrapRepository(null, '', environment),
+    { url: 'https://example.test/board.git', branch: 'develop' },
+  );
+  assert.equal(resolveBootstrapRepository(null, '', null), null);
 });
 
 test('fingerprintEnvironment: stable across key order, sensitive to content + version', () => {
