@@ -32,7 +32,7 @@ If you add or change an **SSE event type**, the server side (`apps/server/src/mo
 
 - The AWB server/client **auto-deploys** from the production branch.
 - The **npm package** `awb-agent-manager` **auto-publishes** on every `main` version bump (workflow above) — `npm i -g awb-agent-manager` users get the release once the merge's publish job goes green.
-- The agent-manager running **on a host** does **not** auto-deploy — a git-checkout install self-updates from `origin/main` (Update button / `update_manager` SSE), but an npm-global install upgrades manually via `npm i -g awb-agent-manager@latest` (its admin badge reads "manual updates only": no git checkout to pull).
+- The agent-manager running **on a host** does **not** auto-deploy, but the Update button works for **both** install modes (ticket 9c9b52eb): a git-checkout install self-updates from `origin/main` (git pull + build + re-exec), and an npm-global install self-updates from the npm registry (`npm view` for the version check, then a detached helper runs `npm i -g awb-agent-manager@latest` + restart). Only a vendored/`unknown` build still reads "manual updates only". Bootstrap caveat: a host must first be on the version that ships this feature (≥ the bump in this ticket) before its npm-global Update button appears — older npm-global installs still show "manual updates only" and need one manual `npm i -g awb-agent-manager@latest`.
 - When debugging "the fix didn't take effect": grep the *running* agent-manager `dist/` on the host before blaming the new code.
 
 ## Field mapping reference (AWB SSE → handlers)

@@ -1,35 +1,56 @@
 // Self-update for agent-manager.
 //
-// Cadence:
-//   - UpdateChecker (slow timer, default 5 min) runs `git fetch` + reads
-//     `origin/<branch>:apps/agent-manager/package.json` and caches the version
-//     so InstanceHeartbeat can attach a fresh `latest_version` /
-//     `update_available` snapshot to every payload without paying the network
-//     cost on each tick.
-//   - runSelfUpdate() (one-shot, fired by `update_manager` SSE command or
-//     SIGUSR1) does the heavy lifting: pull → install → build. On success it
-//     schedules a detached re-exec with `--force` so the new node process
-//     adopts the lockfile from the dying parent.
+// Two install modes, selected by detectInstallMode() (see InstallMode):
+//   - 'git'        — running from an AWB monorepo checkout. Version-check =
+//                    `git fetch` + read `origin/<branch>:.../package.json`;
+//                    self-update = fetch → detached checkout → npm build →
+//                    detached re-exec with `--force`.
+//   - 'npm-global' — installed via `npm i -g awb-agent-manager` (no checkout,
+//                    running file lives under `npm root -g`). Version-check =
+//                    `npm view awb-agent-manager version` (registry);
+//                    self-update = a detached temp helper that waits for this
+//                    process to exit, runs `npm install -g
+//                    awb-agent-manager@latest`, then relaunches the manager
+//                    (install-after-exit dodges the Windows self-overwrite
+//                    EBUSY/EPERM).
+//   - 'unknown'    — neither (packaged/vendored copy): auto-update impossible,
+//                    the admin UI shows a manual-upgrade hint.
 //
-// The whole pipeline is a no-op when the manager is running outside a git
-// checkout (e.g. installed via `npm i -g`). detectRepoRoot() returns null in
-// that case and every public method becomes a structured stub so callers can
-// keep the same control surface.
+// Cadence (both modes):
+//   - UpdateChecker (slow timer, default 5 min) refreshes the cached
+//     `latest_version` / `update_available` snapshot so InstanceHeartbeat can
+//     attach it to every payload without paying the network cost each tick.
+//   - runSelfUpdate() (one-shot, fired by `update_manager` SSE command or
+//     SIGUSR1) does the heavy lifting for the active install mode.
 
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, statSync, readFileSync } from 'node:fs';
-import { dirname, resolve, join } from 'node:path';
+import { existsSync, statSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, resolve, join, relative, isAbsolute } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { log } from './logging.js';
 
 const PACKAGE_JSON_REL = 'apps/agent-manager/package.json';
 // Our own npm package name. detectRepoRoot() uses this to tell an actual AWB
 // monorepo checkout apart from an *unrelated* ancestor `.git` (a home dotfiles
-// repo, a git-tracked prefix an `npm i -g` install happens to sit under).
+// repo, a git-tracked prefix an `npm i -g` install happens to sit under). It is
+// also the registry spec the npm-global mode reads / installs.
 const MANAGER_PACKAGE_NAME = 'awb-agent-manager';
+// `npm install -g <this>` / `npm view <pkg> version` target for npm-global mode.
+const NPM_GLOBAL_LATEST_SPEC = `${MANAGER_PACKAGE_NAME}@latest`;
 const DEFAULT_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 30_000;
+const NPM_VIEW_TIMEOUT_MS = 30_000;
 const BUILD_TIMEOUT_MS = 10 * 60_000;
+
+/**
+ * How this manager binary was installed — decides the self-update strategy.
+ *   - 'git'        — running from an AWB monorepo checkout (detectRepoRoot != null).
+ *   - 'npm-global' — no checkout, but the running file sits under `npm root -g`
+ *                    (installed via `npm i -g awb-agent-manager`).
+ *   - 'unknown'    — neither (packaged / vendored copy): auto-update impossible.
+ */
+export type InstallMode = 'git' | 'npm-global' | 'unknown';
 
 export interface RepoInfo {
   root: string;
@@ -46,6 +67,10 @@ export interface UpdateStatus {
   /** True when latest_version > current_version (semver-aware). False when
    *  equal or current is ahead (dev branch). */
   update_available: boolean;
+  /** How this manager was installed — the self-update strategy selector.
+   *  'git' checks a git remote; 'npm-global' checks the npm registry and can
+   *  auto-update via `npm i -g`; 'unknown' can only be upgraded manually. */
+  install_mode: InstallMode;
   /** Absolute repo root, or null when not running from a git checkout. */
   repo_root: string | null;
   /** Default-branch the checker is tracking ('main' typically). null when
@@ -142,6 +167,60 @@ export function detectRepoRoot(startDir?: string): string | null {
     dir = parent;
   }
   return null;
+}
+
+/**
+ * True when `child` is `parent` itself or nested beneath it. Path-segment safe
+ * (a `relative()` that stays within the tree has no leading `..` and isn't
+ * absolute) so `.../npm/node_modules` does NOT match `.../npm/node_modules-x`.
+ */
+function isPathInside(parent: string, child: string): boolean {
+  const rel = relative(resolve(parent), resolve(child));
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+}
+
+/**
+ * Absolute path of npm's GLOBAL `node_modules` (`npm root -g`), or null when
+ * npm can't be reached. Best-effort + bounded: a slow/absent npm just yields a
+ * null root → the caller falls back to install mode 'unknown', never throws.
+ */
+function detectNpmGlobalRoot(): string | null {
+  // shell:true on Windows so `npm` resolves the `npm.cmd` shim via PATH.
+  const r = runSyncShell('npm', ['root', '-g'], 10_000);
+  if (!r.ok) return null;
+  const root = r.stdout.split('\n').map((s) => s.trim()).filter(Boolean).pop();
+  return root ? resolve(root) : null;
+}
+
+/**
+ * Pure install-mode classifier — separated from the detectors so it can be
+ * unit-tested without spawning `git` / `npm`. See InstallMode for the meaning
+ * of each result.
+ *   - repoRoot present            → 'git'
+ *   - running file under npmRoot  → 'npm-global'
+ *   - otherwise                   → 'unknown'
+ */
+export function classifyInstallMode(
+  runningDir: string,
+  repoRoot: string | null,
+  npmGlobalRoot: string | null,
+): InstallMode {
+  if (repoRoot) return 'git';
+  if (npmGlobalRoot && isPathInside(npmGlobalRoot, runningDir)) return 'npm-global';
+  return 'unknown';
+}
+
+/**
+ * Classify how this manager was installed. Wires the real detectors into
+ * classifyInstallMode(): detectRepoRoot() for 'git', and `npm root -g` +
+ * a path-containment check for 'npm-global'. The `npm root -g` spawn is only
+ * paid when there's no checkout (git mode wins immediately and never needs it).
+ */
+export function detectInstallMode(startDir?: string): InstallMode {
+  const runningDir = resolve(startDir || dirname(fileURLToPath(import.meta.url)));
+  const repoRoot = detectRepoRoot(startDir);
+  const npmGlobalRoot = repoRoot ? null : detectNpmGlobalRoot();
+  return classifyInstallMode(runningDir, repoRoot, npmGlobalRoot);
 }
 
 /**
@@ -257,6 +336,29 @@ function runSync(cmd: string, args: string[], timeoutMs: number): RunResult {
 }
 
 /**
+ * Like runSync but with `shell:true` on Windows so `npm`/`npm.cmd` resolves via
+ * PATH (a bare `spawnSync('npm', …)` can't exec a `.cmd` shim without a shell).
+ * Used for the bounded npm lookups (`npm root -g`) that feed install-mode
+ * detection at construction time. Args here are fixed literals — no user input —
+ * so shell quoting is a non-issue.
+ */
+function runSyncShell(cmd: string, args: string[], timeoutMs: number): RunResult {
+  const r = spawnSync(cmd, args, {
+    encoding: 'utf8',
+    timeout: timeoutMs,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    shell: process.platform === 'win32',
+  });
+  return {
+    ok: r.status === 0 && !r.error,
+    stdout: r.stdout || '',
+    stderr: r.stderr || '',
+    exitCode: r.status,
+    signal: r.signal,
+  };
+}
+
+/**
  * Run a shell command asynchronously, capturing stdout / stderr with a
  * hard timeout. Used for the long-running self-update steps (npm install,
  * npm run build) where blocking the event loop would stall the heartbeat.
@@ -356,6 +458,11 @@ export class UpdateChecker {
     this.#intervalMs = opts.intervalMs ?? DEFAULT_CHECK_INTERVAL_MS;
     this.#log = opts.log ?? log;
     const repoRoot = detectRepoRoot();
+    // Classify the install once at boot. In git mode we skip the `npm root -g`
+    // spawn entirely; in the no-checkout case it decides npm-global vs unknown.
+    const runningDir = resolve(dirname(fileURLToPath(import.meta.url)));
+    const npmGlobalRoot = repoRoot ? null : detectNpmGlobalRoot();
+    const install_mode = classifyInstallMode(runningDir, repoRoot, npmGlobalRoot);
     const branch = repoRoot ? detectDefaultBranch(repoRoot) : null;
     // Prefer the build-time snapshot (dist/package.json) over the working-tree
     // file. On dev machines the repo root is also the running source tree, so
@@ -373,6 +480,7 @@ export class UpdateChecker {
       current_version,
       latest_version: null,
       update_available: false,
+      install_mode,
       repo_root: repoRoot,
       branch,
       last_checked_at: null,
@@ -388,8 +496,25 @@ export class UpdateChecker {
 
   start(): void {
     if (this.#stopped || this.#timer) return;
+    // npm-global mode polls the npm registry instead of a git remote — no
+    // repo_root, but still a live checker. Must be handled before the
+    // repo_root guard below or it would be misfiled as "auto-update disabled".
+    if (this.#status.install_mode === 'npm-global') {
+      this.#tick().catch(() => undefined);
+      this.#timer = setInterval(() => {
+        this.#tick().catch(() => undefined);
+      }, this.#intervalMs);
+      this.#timer.unref?.();
+      this.#log(
+        `UpdateChecker started (npm-global mode: npm view ${MANAGER_PACKAGE_NAME} ` +
+          `interval=${Math.round(this.#intervalMs / 1000)}s)`,
+      );
+      return;
+    }
     if (!this.#status.repo_root) {
-      this.#log('UpdateChecker: not running from a git checkout — auto-update disabled');
+      this.#log(
+        'UpdateChecker: not running from a git checkout or npm-global install — auto-update disabled',
+      );
       return;
     }
     // Fire once immediately (best-effort), then every interval.
@@ -421,6 +546,11 @@ export class UpdateChecker {
 
   async #tick(): Promise<void> {
     if (this.#stopped) return;
+    // npm-global mode reads the registry, not a git remote.
+    if (this.#status.install_mode === 'npm-global') {
+      await this.#tickNpmGlobal();
+      return;
+    }
     const repoRoot = this.#status.repo_root;
     const branch = this.#status.branch;
     if (!repoRoot || !branch) return;
@@ -506,6 +636,55 @@ export class UpdateChecker {
         ...this.#status,
         last_error: err?.message ?? String(err),
       };
+    }
+  }
+
+  /**
+   * npm-global mode tick: read the latest published version from the npm
+   * registry (`npm view awb-agent-manager version`) and refresh the cache.
+   * current_version is the build-time bundled version (dist/package.json) — the
+   * actually-installed build — so the semver compare is apples-to-apples.
+   */
+  async #tickNpmGlobal(): Promise<void> {
+    try {
+      // shell:true on Windows (npm.cmd). cwd is irrelevant for a registry read.
+      const r = await runAsync(
+        'npm',
+        ['view', MANAGER_PACKAGE_NAME, 'version'],
+        process.cwd(),
+        NPM_VIEW_TIMEOUT_MS,
+      );
+      if (!r.ok) {
+        const detail =
+          (r.stderr.trim() || r.stdout.trim() || 'unknown')
+            .split('\n')
+            .filter(Boolean)
+            .pop()
+            ?.slice(0, 240) || 'npm view failed';
+        this.#status = { ...this.#status, last_error: `npm view failed: ${detail}` };
+        return;
+      }
+      // `npm view <pkg> version` prints just the bare version (e.g. "1.6.18\n").
+      const latest =
+        r.stdout.split('\n').map((s) => s.trim()).filter(Boolean).pop() || '';
+      if (!/^\d+\.\d+\.\d+/.test(latest)) {
+        this.#status = {
+          ...this.#status,
+          last_error: `could not parse npm view output: ${latest.slice(0, 120)}`,
+        };
+        return;
+      }
+      const current = this.#status.current_version;
+      const update_available = compareSemver(latest, current) > 0;
+      this.#status = {
+        ...this.#status,
+        latest_version: latest,
+        update_available,
+        last_checked_at: new Date().toISOString(),
+        last_error: null,
+      };
+    } catch (err: any) {
+      this.#status = { ...this.#status, last_error: err?.message ?? String(err) };
     }
   }
 }
@@ -671,8 +850,16 @@ async function runSelfUpdateLocked(
 ): Promise<SelfUpdateResult> {
   const repoRoot = detectRepoRoot();
   if (!repoRoot) {
+    // No checkout — either an npm-global install (auto-updatable via
+    // `npm i -g`) or an unknown build (manual upgrade only). Reuse the already
+    // known repoRoot=null so we don't detectRepoRoot() a second time.
+    const runningDir = resolve(dirname(fileURLToPath(import.meta.url)));
+    const mode = classifyInstallMode(runningDir, null, detectNpmGlobalRoot());
+    if (mode === 'npm-global') {
+      return await runNpmGlobalSelfUpdate(opts, out);
+    }
     const summary =
-      'self-update skipped: not running from a git checkout (install upgrades via `npm i` in the AWB repo)';
+      'self-update skipped: not a git checkout or npm-global install (upgrade this build manually)';
     out(`Self-update: ${summary}`);
     return { changed: false, summary };
   }
@@ -843,6 +1030,191 @@ async function runSelfUpdateLocked(
   }, 1500).unref?.();
 
   return { changed: true, summary, willReExec: true };
+}
+
+/**
+ * Source of the detached temp helper that performs an npm-global self-update.
+ *
+ * It runs as its own throwaway node process from the OS temp dir, OUTSIDE the
+ * package being replaced. Sequence:
+ *   1. wait (bounded) for the manager pid to exit — running `npm i -g` only
+ *      after the manager is gone dodges the Windows self-overwrite EBUSY/EPERM
+ *      (a live node process holding files inside its own global package dir);
+ *   2. `npm install -g awb-agent-manager@latest`;
+ *   3. relaunch the manager (`node <main.js> … --force`) regardless of the
+ *      install outcome — on failure the prior build comes back, so the operator
+ *      is never left with no manager;
+ *   4. delete itself.
+ *
+ * Kept dependency-free (node builtins only) and free of backticks / `${…}` so
+ * it embeds cleanly in this template literal. argv:
+ *   [node, self, managerPid, npmSpec, nodePath, managerScript, ...restartArgs]
+ */
+const NPM_GLOBAL_UPDATER_SOURCE = `// Auto-generated by awb-agent-manager self-update (npm-global mode). Safe to delete.
+import { spawn, spawnSync } from 'node:child_process';
+import { unlinkSync } from 'node:fs';
+
+const [, selfPath, managerPidStr, npmSpec, nodePath, managerScript, ...restartArgs] = process.argv;
+const managerPid = Number.parseInt(managerPidStr, 10);
+const isWin = process.platform === 'win32';
+
+function managerAlive() {
+  if (!Number.isFinite(managerPid) || managerPid <= 0) return false;
+  try { process.kill(managerPid, 0); return true; } catch { return false; }
+}
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+(async () => {
+  // 1. Wait (bounded) for the manager to exit and release its files.
+  const deadline = Date.now() + 60000;
+  while (managerAlive() && Date.now() < deadline) await sleep(500);
+  // Small grace so the OS finishes releasing handles from the dying process.
+  await sleep(750);
+
+  // 2. Reinstall globally. shell:true on Windows resolves the npm.cmd shim.
+  const install = spawnSync('npm', ['install', '-g', npmSpec], {
+    stdio: 'ignore',
+    shell: isWin,
+    windowsHide: true,
+  });
+  const ok = install.status === 0 && !install.error;
+
+  // 3. Relaunch the manager. --force takes the agent lockfile without waiting.
+  if (managerScript) {
+    try {
+      const child = spawn(nodePath, [managerScript, ...restartArgs, '--force'], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+      child.unref();
+    } catch { /* nothing more the helper can do */ }
+  }
+
+  // 4. Best-effort self-cleanup of this temp helper file.
+  try { unlinkSync(selfPath); } catch { /* already gone */ }
+  process.exit(ok ? 0 : 1);
+})();
+`;
+
+/** Test-only accessor for the embedded helper source (so a test can `node
+ *  --check` it and catch syntax rot in the string). */
+export function _npmGlobalUpdaterSourceForTests(): string {
+  return NPM_GLOBAL_UPDATER_SOURCE;
+}
+
+/**
+ * Write the npm-global updater helper to the OS temp dir and return its path.
+ * The temp location is deliberate: it lives OUTSIDE the global package tree npm
+ * is about to replace, and node reads it fully into V8 at spawn (closing the fd)
+ * so a later package reinstall can't disturb the running helper.
+ */
+function writeNpmGlobalUpdater(out: (msg: string) => void): string {
+  const helperPath = join(tmpdir(), `awb-agent-manager-updater-${process.pid}.mjs`);
+  writeFileSync(helperPath, NPM_GLOBAL_UPDATER_SOURCE, 'utf8');
+  out(`Self-update: staged npm-global updater helper at ${helperPath}`);
+  return helperPath;
+}
+
+/**
+ * npm-global self-update: stage a detached helper, hand it our pid + restart
+ * command, then shut ourselves down so it can reinstall + relaunch. This is the
+ * npm-mode analogue of adoptRemoteBranch()+build+reExecManager(), split across a
+ * helper process specifically so the `npm i -g` runs AFTER we exit (Windows
+ * can't replace a running node process's own package dir — EBUSY/EPERM).
+ */
+async function runNpmGlobalSelfUpdate(
+  opts: SelfUpdateOpts,
+  out: (msg: string) => void,
+): Promise<SelfUpdateResult> {
+  const current = readBundledVersion();
+  out(`Self-update: npm-global mode (current v${current}) — target ${NPM_GLOBAL_LATEST_SPEC}`);
+
+  // Dry-run / test hook: report intent without spawning the helper or exiting.
+  if (opts.noReExec) {
+    const summary = `npm-global update: would run \`npm install -g ${NPM_GLOBAL_LATEST_SPEC}\` + restart (re-exec skipped)`;
+    out(`Self-update: ${summary}`);
+    return { changed: true, summary, willReExec: false };
+  }
+
+  let helperPath: string;
+  try {
+    helperPath = writeNpmGlobalUpdater(out);
+  } catch (err: any) {
+    const summary = `npm-global update failed: could not stage updater helper: ${err?.message ?? err}`;
+    out(`Self-update: ${summary}`);
+    return { changed: false, summary };
+  }
+
+  const nodePath = process.execPath;
+  const scriptPath = process.argv[1] || '';
+  // Strip any pre-existing --force / -f so the helper's appended --force doesn't
+  // accumulate across updates (mirrors reExecManager's argv hygiene).
+  const baseArgs = (process.argv.slice(2) || []).filter((a) => a !== '--force' && a !== '-f');
+  const helperArgs = [
+    helperPath,
+    String(process.pid),
+    NPM_GLOBAL_LATEST_SPEC,
+    nodePath,
+    scriptPath,
+    ...baseArgs,
+  ];
+
+  out(`Self-update: spawning detached npm-global updater (reinstalls after pid=${process.pid} exits)`);
+  try {
+    const child = spawn(nodePath, helperArgs, {
+      detached: true,
+      stdio: 'ignore',
+      // Run from tmp, NOT the package dir, so npm can freely replace the global
+      // node_modules/awb-agent-manager tree.
+      cwd: tmpdir(),
+      env: process.env,
+      shell: false,
+      windowsHide: true,
+    });
+    child.unref();
+  } catch (err: any) {
+    const summary = `npm-global update failed: could not spawn updater helper: ${err?.message ?? err}`;
+    out(`Self-update: ${summary}`);
+    return { changed: false, summary };
+  }
+
+  const summary = `npm-global update scheduled: detached helper runs \`npm install -g ${NPM_GLOBAL_LATEST_SPEC}\` after exit, then restarts`;
+  out(`Self-update: ${summary}`);
+
+  // Same 1.5s tail as the git path: let the caller finish its ack POST + log
+  // line, then shut down. The helper is already polling our pid. Keep the
+  // in-flight flag set across the grace window (see runSelfUpdate's finally).
+  _lastReExecScheduled = true;
+  setTimeout(() => {
+    try {
+      shutdownForNpmGlobalUpdate(out);
+    } catch (err: any) {
+      out(`Self-update: shutdown for npm-global update failed: ${err?.stack || err?.message || err}`);
+    }
+  }, 1500).unref?.();
+
+  return { changed: true, summary, willReExec: true };
+}
+
+/**
+ * Trigger a clean shutdown so the detached npm-global updater can reinstall +
+ * relaunch. Unlike reExecManager() we do NOT spawn a replacement here — the
+ * helper owns the relaunch AFTER `npm install -g` finishes. We just tear down
+ * sessions (SIGTERM self) and exit; the helper is waiting on our pid. A backstop
+ * force-exit fires well inside the helper's 60s wait window so a hung SIGTERM
+ * handler can't strand the update.
+ */
+function shutdownForNpmGlobalUpdate(out: (msg: string) => void): void {
+  out('Self-update: shutting down so the npm-global updater can reinstall + restart');
+  setTimeout(() => {
+    try {
+      process.kill(process.pid, 'SIGTERM');
+    } catch {
+      process.exit(0);
+    }
+    setTimeout(() => process.exit(0), 25_000).unref?.();
+  }, 250).unref?.();
 }
 
 /**

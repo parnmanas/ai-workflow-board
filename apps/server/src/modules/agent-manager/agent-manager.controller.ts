@@ -189,6 +189,12 @@ export class AgentManagerController {
       ? (typeof body.latest_version === 'string' ? body.latest_version : null)
       : undefined;
     const update_available = hasField('update_available') ? Boolean(body.update_available) : undefined;
+    // Install mode ('git' | 'npm-global' | 'unknown'). Passed through verbatim
+    // (string) so a newer manager reporting a mode this server doesn't enumerate
+    // still round-trips to the UI. Omitted by managers that predate it.
+    const install_mode = hasField('install_mode')
+      ? (typeof body.install_mode === 'string' ? body.install_mode : null)
+      : undefined;
     const repo_root = hasField('repo_root')
       ? (typeof body.repo_root === 'string' ? body.repo_root : null)
       : undefined;
@@ -270,6 +276,7 @@ export class AgentManagerController {
       available_models,
       latest_version,
       update_available,
+      install_mode,
       repo_root,
       default_branch,
       update_last_checked_at,

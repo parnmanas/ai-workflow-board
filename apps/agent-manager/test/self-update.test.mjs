@@ -12,7 +12,14 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 
-import { adoptRemoteBranch, detectRepoRoot } from '../dist/lib/self-update.js';
+import {
+  adoptRemoteBranch,
+  detectRepoRoot,
+  classifyInstallMode,
+  detectInstallMode,
+  UpdateChecker,
+  _npmGlobalUpdaterSourceForTests,
+} from '../dist/lib/self-update.js';
 
 function git(cwd, args) {
   return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim();
@@ -231,5 +238,89 @@ test('detectRepoRoot picks the nearest AWB root even when a foreign .git sits ab
     assert.equal(detectRepoRoot(seed), repo);
   } finally {
     await fsp.rm(root, { recursive: true, force: true });
+  }
+});
+
+// ─── install-mode detection (ticket 9c9b52eb) ───────────────────────────────
+// npm-global installs (repo_root === null but running under `npm root -g`) must
+// now be classified 'npm-global' so self-update works via `npm i -g` instead of
+// falling back to "manual updates only". classifyInstallMode is the pure core
+// (no git/npm spawn) so the git vs npm-global vs unknown decision is testable
+// deterministically; detectInstallMode wires the real detectors on top.
+
+test('classifyInstallMode: a repoRoot always wins → git (npm root ignored)', () => {
+  assert.equal(classifyInstallMode('/anywhere', '/repo', '/usr/lib/node_modules'), 'git');
+  assert.equal(classifyInstallMode('/repo/apps/agent-manager/dist/lib', '/repo', null), 'git');
+});
+
+test('classifyInstallMode: running file under `npm root -g` → npm-global', () => {
+  const npmRoot = join('/usr', 'lib', 'node_modules');
+  const here = join(npmRoot, 'awb-agent-manager', 'dist', 'lib');
+  assert.equal(classifyInstallMode(here, null, npmRoot), 'npm-global');
+  // The npm root dir itself counts as "inside".
+  assert.equal(classifyInstallMode(npmRoot, null, npmRoot), 'npm-global');
+});
+
+test('classifyInstallMode: no checkout and not under npm root → unknown', () => {
+  const npmRoot = join('/usr', 'lib', 'node_modules');
+  // A sibling that merely shares a string prefix must NOT be treated as inside.
+  assert.equal(classifyInstallMode('/usr/lib/node_modules-evil/x', null, npmRoot), 'unknown');
+  assert.equal(classifyInstallMode('/opt/app/dist/lib', null, npmRoot), 'unknown');
+  // No npm at all (detectNpmGlobalRoot returned null).
+  assert.equal(classifyInstallMode('/opt/app/dist/lib', null, null), 'unknown');
+});
+
+test('detectInstallMode: a real AWB checkout seed → git (no npm spawn needed)', async () => {
+  const root = await fsp.mkdtemp(join(tmpdir(), 'awb-im-'));
+  try {
+    const repo = join(root, 'ai-workflow-board');
+    await makeGitMarker(repo, 'dir');
+    await writePkg(repo, 'awb-agent-manager');
+    const seed = join(repo, 'apps', 'agent-manager', 'dist', 'lib');
+    await fsp.mkdir(seed, { recursive: true });
+    assert.equal(detectInstallMode(seed), 'git');
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('detectInstallMode: seed with no checkout and outside npm root → unknown', async () => {
+  const root = await fsp.mkdtemp(join(tmpdir(), 'awb-im-'));
+  try {
+    // A vendored copy under tmp: no `.git` above it, and tmp is not under the
+    // CI host's `npm root -g` — so neither git nor npm-global applies.
+    const seed = join(root, 'vendor', 'awb-agent-manager', 'dist', 'lib');
+    await fsp.mkdir(seed, { recursive: true });
+    assert.equal(detectInstallMode(seed), 'unknown');
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('UpdateChecker constructed from the AWB dist reports install_mode=git', () => {
+  // The real dist/lib/self-update.js sits under this checkout, so the checker's
+  // constructor (detectRepoRoot from import.meta.url) must classify it as git —
+  // proving the install-mode wiring reaches UpdateStatus. We never start() it,
+  // so no timer/network is touched.
+  const c = new UpdateChecker({ log: () => {} });
+  const s = c.status();
+  assert.equal(s.install_mode, 'git');
+  assert.equal(typeof s.current_version, 'string');
+  assert.equal(s.repo_root === null, false, 'git mode must carry a non-null repo_root');
+  c.stop();
+});
+
+test('embedded npm-global updater helper source is valid ESM (node --check)', async () => {
+  const src = _npmGlobalUpdaterSourceForTests();
+  assert.match(src, /npm.*install.*-g/s, 'helper must run `npm install -g`');
+  const dir = await fsp.mkdtemp(join(tmpdir(), 'awb-helper-'));
+  try {
+    const f = join(dir, 'updater.mjs');
+    await fsp.writeFile(f, src);
+    // `node --check` parses (does not execute) — throws on any syntax error,
+    // guarding the embedded string against silent rot.
+    execFileSync('node', ['--check', f], { encoding: 'utf8' });
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
   }
 });

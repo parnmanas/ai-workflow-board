@@ -43,9 +43,13 @@
  * and a server restart.
  *
  * Scope notes:
- *   - Only `mode === 'manager'` instances are considered. Daemon / proxy and
- *     binary (`npm i -g`, repo_root === null → checker is a no-op,
- *     update_available stays false) installs never trigger.
+ *   - Only `mode === 'manager'` instances are considered. Daemon / proxy don't
+ *     self-update at all.
+ *   - Install-mode aware (ticket 9c9b52eb): a 'git' checkout OR an 'npm-global'
+ *     install both run a live UpdateChecker and can report update_available ===
+ *     true, so both now participate in drift detection (npm-global self-updates
+ *     via `npm i -g` on the Update button). Only an 'unknown'/vendored build
+ *     (checker is a no-op, update_available stays false) never triggers.
  *   - A manager legitimately AHEAD of origin (dev branch, current > latest)
  *     has update_available === false → no false alert.
  */

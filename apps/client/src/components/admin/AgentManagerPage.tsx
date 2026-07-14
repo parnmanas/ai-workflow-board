@@ -420,15 +420,19 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
     }
   };
 
-  // Dispatch update_manager SSE command. The manager runs git pull + npm
-  // install + build, acks success, then re-execs with --force. We see the
-  // re-exec on the client side as an `agent_instance_update` event with the
-  // new plugin_version, so no extra polling is needed here.
+  // Dispatch update_manager SSE command. In a git checkout the manager runs
+  // git pull + npm install + build, acks success, then re-execs with --force;
+  // an npm-global install instead reinstalls via `npm i -g` (detached helper)
+  // and relaunches. Either way we see the restart on the client as an
+  // `agent_instance_update` event with the new plugin_version — no polling.
   const handleUpdate = async () => {
     if (updatePending) return;
     const ok = await confirm({
       title: 'Update manager',
-      message: 'Update this manager? It will pull the latest source, rebuild, and restart.',
+      message:
+        inst.install_mode === 'npm-global'
+          ? 'Update this manager? It will reinstall from npm (npm i -g awb-agent-manager@latest) and restart.'
+          : 'Update this manager? It will pull the latest source, rebuild, and restart.',
       confirmLabel: 'Update',
       danger: false,
     });
@@ -645,7 +649,11 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
                 cursor: updatePending ? 'wait' : 'pointer',
                 fontFamily: 'inherit',
               }}
-              title={`Update from v${inst.plugin_version} → v${inst.latest_version || '?'} (git pull + npm install + build, then re-exec).`}
+              title={
+                inst.install_mode === 'npm-global'
+                  ? `Update from v${inst.plugin_version} → v${inst.latest_version || '?'} (npm i -g awb-agent-manager@latest, then restart).`
+                  : `Update from v${inst.plugin_version} → v${inst.latest_version || '?'} (git pull + npm install + build, then re-exec).`
+              }
             >
               {updatePending
                 ? 'Updating…'
@@ -2012,14 +2020,16 @@ function ManagerVersionBadge({ inst }: { inst: AgentManagerInstance }) {
   // (silent fallback), false === checker ran and there's no update, true ===
   // checker ran and an update is on origin.
   if (inst.update_available === undefined) return null;
-  // No git checkout under the manager process — auto-update is structurally
-  // impossible. Distinct from "checker ran and failed" so operators don't
-  // chase a phantom network error on a binary install.
-  if (inst.repo_root === null) {
+  // No git checkout under the manager process. An npm-global install still
+  // auto-updates (via `npm i -g` on the Update button), so only fall back to
+  // the "manual updates only" hint when the install is genuinely un-updatable —
+  // 'unknown' mode, or a manager too old to report install_mode at all. For
+  // npm-global we drop through to the normal update/up-to-date/available badges.
+  if (inst.repo_root === null && inst.install_mode !== 'npm-global') {
     return (
       <span
         style={{ marginLeft: 8, fontSize: 11, color: tokens.colors.textMuted }}
-        title="Manager isn't running from a git checkout — install upgrades manually."
+        title="Manager isn't running from a git checkout — upgrade it manually (e.g. npm i -g awb-agent-manager@latest)."
       >
         (manual updates only)
       </span>
@@ -2053,7 +2063,11 @@ function ManagerVersionBadge({ inst }: { inst: AgentManagerInstance }) {
   return (
     <span
       style={{ marginLeft: 8, fontSize: 11, fontWeight: 600, color: tokens.colors.success }}
-      title={`Latest on ${inst.default_branch || 'main'}: v${inst.latest_version}. Use the Update button to pull + rebuild.`}
+      title={
+        inst.install_mode === 'npm-global'
+          ? `Latest on npm: v${inst.latest_version}. Use the Update button to reinstall (npm i -g) + restart.`
+          : `Latest on ${inst.default_branch || 'main'}: v${inst.latest_version}. Use the Update button to pull + rebuild.`
+      }
     >
       → v{inst.latest_version} available
     </span>

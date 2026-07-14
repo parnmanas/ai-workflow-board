@@ -1794,6 +1794,11 @@ export interface AgentManagerInstance {
   // version compare degrades to "no info" in that case.
   latest_version?: string | null;
   update_available?: boolean;
+  // How the manager was installed. 'npm-global' installs can auto-update via
+  // `npm i -g` (Update button works), so only 'unknown' (or a manager too old
+  // to report this) falls back to "manual updates only". Older managers that
+  // omit it are treated as git-checkout-or-unknown by the repo_root check.
+  install_mode?: 'git' | 'npm-global' | 'unknown';
   repo_root?: string | null;
   default_branch?: string | null;
   update_last_checked_at?: string | null;

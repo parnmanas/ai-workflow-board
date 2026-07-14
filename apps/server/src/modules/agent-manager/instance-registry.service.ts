@@ -60,9 +60,14 @@ export interface InstanceRecord {
   // Self-update fields — manager-mode only. Daemons/proxies leave undefined.
   // The manager's UpdateChecker fills these from `git fetch` + remote
   // package.json on a slow timer; older managers leave them undefined.
-  latest_version?: string | null;       // version on origin/<branch>
+  latest_version?: string | null;       // version on origin/<branch> or npm registry
   update_available?: boolean;           // latest > current (semver-aware)
-  repo_root?: string | null;            // absolute path of the manager's git checkout
+  // How the manager was installed: 'git' | 'npm-global' | 'unknown'. Passed
+  // through verbatim (typed as string for forward-compat with modes a newer
+  // manager might report). Drives the admin UI's Update-button vs
+  // "manual updates only" decision. Undefined from managers that predate it.
+  install_mode?: string | null;
+  repo_root?: string | null;            // absolute path of the manager's git checkout (null for npm-global)
   default_branch?: string | null;       // branch the checker is tracking ('main')
   update_last_checked_at?: string | null;
   update_last_error?: string | null;
