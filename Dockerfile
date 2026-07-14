@@ -16,9 +16,10 @@ COPY package.json package-lock.json* turbo.json ./
 # Copy workspace package.json files
 COPY apps/server/package.json apps/server/
 COPY apps/client/package.json apps/client/
+COPY apps/agent-manager/package.json apps/agent-manager/
 
 # Install all dependencies (hoisted to root node_modules)
-RUN npm install --frozen-lockfile || npm install
+RUN npm ci
 
 # ============================================
 # Stage 2: Build with Turborepo
