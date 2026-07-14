@@ -81,11 +81,11 @@ test('resolveBootstrapRepository: ticket repo wins, board repo is fallback', () 
       'release',
       environment,
     ),
-    { url: 'https://example.test/ticket.git', branch: 'release' },
+    { resourceId: '', url: 'https://example.test/ticket.git', branch: 'release' },
   );
   assert.deepEqual(
     resolveBootstrapRepository(null, '', environment),
-    { url: 'https://example.test/board.git', branch: 'develop' },
+    { resourceId: '', url: 'https://example.test/board.git', branch: 'develop' },
   );
   assert.equal(resolveBootstrapRepository(null, '', null), null);
 });

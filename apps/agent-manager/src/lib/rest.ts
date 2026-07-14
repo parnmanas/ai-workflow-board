@@ -257,6 +257,33 @@ export async function fetchAgentCredential(
   }
 }
 
+export async function fetchRepositoryCredential(
+  config: AwbConfig,
+  resourceId: string,
+  agentId: string,
+): Promise<{ username?: string; token: string } | null> {
+  if (!resourceId || !agentId) return null;
+  try {
+    const url = `${trimSlash(config.url)}/api/agent-manager/resources/${encodeURIComponent(resourceId)}/git-credential?agent_id=${encodeURIComponent(agentId)}`;
+    const resp = await fetch(url, {
+      headers: { 'X-Agent-Key': config.apiKey, Accept: 'application/json' },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (resp.status === 204) return null;
+    if (!resp.ok) {
+      log(`repository credential fetch failed: ${resp.status} (resource=${resourceId.slice(0, 8)})`);
+      return null;
+    }
+    const body = await resp.json() as any;
+    return typeof body?.token === 'string' && body.token
+      ? { username: typeof body.username === 'string' ? body.username : undefined, token: body.token }
+      : null;
+  } catch (err: any) {
+    log(`repository credential fetch error: ${err?.message ?? err} (resource=${resourceId.slice(0, 8)})`);
+    return null;
+  }
+}
+
 /**
  * Fetch a single chat attachment (with base64 body) for the agent-key holder.
  * Mirrors the user-session GET /api/chat-rooms/:roomId/attachments/:id but

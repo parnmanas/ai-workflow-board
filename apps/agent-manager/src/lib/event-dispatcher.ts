@@ -14,6 +14,7 @@ import {
   fetchTicketContext,
   fetchChatRoomHistory,
   fetchAgentRecord,
+  fetchRepositoryCredential,
   postFsResponse,
   postChatRoomMessage,
 } from './rest.js';
@@ -174,6 +175,7 @@ export function parseEnvironmentConfig(raw: unknown): ResolvedEnvironmentConfig 
       const target_dir = typeof r.target_dir === 'string' && r.target_dir.trim() ? r.target_dir.trim() : '';
       if (!target_dir) continue;
       repositories.push({
+        resource_id: typeof r.resource_id === 'string' ? r.resource_id.trim() : '',
         url,
         target_dir,
         branch: typeof r.branch === 'string' ? r.branch.trim() : '',
@@ -216,16 +218,16 @@ export function resolveBootstrapRepository(
   baseRepo: unknown,
   baseBranch: unknown,
   environment: ResolvedEnvironmentConfig | null,
-): { url: string; branch: string } | null {
+): { resourceId: string; url: string; branch: string } | null {
   const repo = baseRepo && typeof baseRepo === 'object' ? baseRepo as any : null;
   const ticketUrl = typeof repo?.url === 'string' ? repo.url.trim() : '';
   if (ticketUrl) {
     const branch = (typeof baseBranch === 'string' ? baseBranch.trim() : '')
       || (typeof repo?.default_branch === 'string' ? repo.default_branch.trim() : '');
-    return { url: ticketUrl, branch };
+    return { resourceId: typeof repo?.id === 'string' ? repo.id : '', url: ticketUrl, branch };
   }
   const boardRepo = environment?.repositories[0];
-  return boardRepo ? { url: boardRepo.url, branch: boardRepo.branch } : null;
+  return boardRepo ? { resourceId: boardRepo.resource_id || '', url: boardRepo.url, branch: boardRepo.branch } : null;
 }
 
 /**
@@ -605,7 +607,7 @@ export class EventDispatcher {
     role: string | undefined,
     mode: WorktreeMode | undefined,
     poolSize: number | undefined,
-    bootstrapRepo: { url: string; branch?: string } | null,
+    bootstrapRepo: { url: string; branch?: string; credential?: { username?: string; token: string } | null } | null,
   ): Promise<void> {
     if (!agentContext || !this.#worktreeManager || !ticketId || !role) return;
     if ((this.#config as any)?.delegation?.worktreeIsolation === false) return;
@@ -916,6 +918,10 @@ export class EventDispatcher {
     // server flattened onto the event. Both the persistent ticket-session and
     // one-shot subagent fallback below read agentContext.cwd, so one rewrite
     // covers both paths.
+    const selectedRepo = resolveBootstrapRepository(ev.base_repo, ev.base_branch, envConfig);
+    const repoCredential = selectedRepo?.resourceId && agentContext?.agent_id
+      ? await fetchRepositoryCredential(this.#config, selectedRepo.resourceId, agentContext.agent_id)
+      : null;
     await this.#applyWorktreeCwd(
       agentContext,
       ev.ticket_id,
@@ -924,7 +930,7 @@ export class EventDispatcher {
       typeof ev.max_concurrent_tickets_per_agent === 'number'
         ? ev.max_concurrent_tickets_per_agent
         : undefined,
-      resolveBootstrapRepository(ev.base_repo, ev.base_branch, envConfig),
+      selectedRepo ? { ...selectedRepo, credential: repoCredential } : null,
     );
 
     // worktree 규약 ④: name the ACTUAL work folder in the trigger prompt. The
@@ -1023,6 +1029,10 @@ export class EventDispatcher {
     if (delegationEnabled && persistentTicket && this.#ticketSessionManager) {
       try {
         const ticket = await fetchTicketContext(this.#config, ev.ticket_id);
+        if (ticket && selectedRepo) {
+          ticket.base_repo = { id: selectedRepo.resourceId, name: '', url: selectedRepo.url, default_branch: selectedRepo.branch };
+          ticket.base_branch = selectedRepo.branch;
+        }
         const rolePrompt = ev.role_prompt || '';
         const ticketPrompt = ev.ticket_prompt || '';
         const columnPrompt = ev.column_prompt || null;
@@ -1078,6 +1088,10 @@ export class EventDispatcher {
     if (canDelegate && this.#subagentManager) {
       try {
         const ticket = await fetchTicketContext(this.#config, ev.ticket_id);
+        if (ticket && selectedRepo) {
+          ticket.base_repo = { id: selectedRepo.resourceId, name: '', url: selectedRepo.url, default_branch: selectedRepo.branch };
+          ticket.base_branch = selectedRepo.branch;
+        }
         const rolePrompt = ev.role_prompt || '';
         const ticketPrompt = ev.ticket_prompt || '';
         const columnPrompt = ev.column_prompt || null;

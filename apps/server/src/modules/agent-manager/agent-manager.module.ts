@@ -4,6 +4,7 @@ import { Agent } from '../../entities/Agent';
 import { ApiKey } from '../../entities/ApiKey';
 import { Credential } from '../../entities/Credential';
 import { Ticket } from '../../entities/Ticket';
+import { Resource } from '../../entities/Resource';
 import { AgentsModule } from '../agents/agents.module';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { AuthGuard } from '../../common/guards/auth.guard';
@@ -29,7 +30,7 @@ import { ManagerDriftMonitorService } from './manager-drift-monitor.service';
   // (to inject InstanceRegistryService into AgentsController for live-data
   // enrichment of /api/agents). NestJS resolves the cycle via forwardRef on
   // both sides.
-  imports: [forwardRef(() => AgentsModule), TypeOrmModule.forFeature([Agent, ApiKey, Credential, Ticket])],
+  imports: [forwardRef(() => AgentsModule), TypeOrmModule.forFeature([Agent, ApiKey, Credential, Ticket, Resource])],
   controllers: [AgentManagerController],
   providers: [
     InstanceRegistryService,

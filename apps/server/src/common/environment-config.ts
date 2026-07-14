@@ -87,6 +87,7 @@ export type EnvironmentConfig = z.infer<typeof EnvironmentConfigSchema>;
 
 /** A repository entry after server-side resolution: url is always concrete. */
 export interface ResolvedEnvironmentRepository {
+  resource_id: string;
   url: string;
   target_dir: string;
   branch: string;
@@ -225,6 +226,7 @@ export function resolveEnvironmentConfig(
     const branch = (repo.branch || '').trim() || defaultBranch || '';
     const targetDir = (repo.target_dir || '').trim() || `repos/${deriveRepoDirName(url)}`;
     repositories.push({
+      resource_id: (repo.resource_id || '').trim(),
       url,
       target_dir: targetDir,
       branch,
