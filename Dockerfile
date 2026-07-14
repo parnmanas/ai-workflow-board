@@ -51,8 +51,11 @@ ENV PORT=7701
 # `git` is needed at runtime for `git ls-remote --heads` against repository
 # Resources (branch picker in the Ticket panel + Resource manager test) and the
 # bare cache clone behind Resource History. `wget` backs the HEALTHCHECK below.
-# node:22-slim(Debian bookworm) ships neither, so install both via apt.
-RUN apt-get update && apt-get install -y --no-install-recommends git wget \
+# `--no-install-recommends` does not guarantee Debian's CA bundle arrives with
+# git/wget, so install it explicitly; without it GitHub HTTPS fails with
+# "server certificate verification failed. CAfile: none".
+RUN apt-get update && apt-get install -y --no-install-recommends git wget ca-certificates \
+    && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy root package files for workspace resolution
