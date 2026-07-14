@@ -276,7 +276,10 @@ export default function CredentialManager({ workspaceId, globalMode = false }: {
                   ? 'Encryption key mismatch — re-enter credential'
                   : fieldKeys.length === 0
                   ? '—'
-                  : fieldKeys.map((k) => `${k}${c.credential_fields[k] ? '' : ' (empty)'}`).join(', ');
+                  : fieldKeys.map((k) => {
+                      const value = c.credential_fields[k];
+                      return value ? `${k}: ${value}` : `${k}: (empty)`;
+                    }).join(', ');
                 return (
                   <tr key={c.id} style={{ borderTop: `1px solid ${tokens.colors.border}` }}>
                     <td
@@ -412,7 +415,10 @@ export default function CredentialManager({ workspaceId, globalMode = false }: {
                 />
               ) : (
                 <input
-                  type="password"
+                  // Existing values arrive already server-masked. Show that
+                  // safe preview so operators can identify the registered
+                  // token; as soon as they type a replacement, hide it.
+                  type={(formFields[fieldKey] || '').includes('••••') ? 'text' : 'password'}
                   value={formFields[fieldKey] || ''}
                   onChange={(e) => setFormFields(prev => ({ ...prev, [fieldKey]: e.target.value }))}
                   placeholder={fieldDef.placeholder}
