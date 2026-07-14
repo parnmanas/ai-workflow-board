@@ -21,12 +21,16 @@
 
 import { existsSync, mkdirSync, writeFileSync, chmodSync, unlinkSync } from 'node:fs';
 import { dirname, resolve as pathResolve, join } from 'node:path';
-import { homedir, tmpdir, userInfo } from 'node:os';
+import { homedir, userInfo } from 'node:os';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { AGENT_MANAGER_HOME } from './constants.js';
 
 const SERVICE_NAME = 'awb-agent-manager';
 const LAUNCHD_LABEL = 'com.awb.agent-manager';
+const SERVICE_DIR = join(AGENT_MANAGER_HOME, 'service');
+const WINDOWS_LAUNCHER_PATH = join(SERVICE_DIR, 'launch-hidden.vbs');
+const WINDOWS_TASK_XML_PATH = join(SERVICE_DIR, 'task.xml');
 
 export type ServicePlatform =
   | 'systemd'
@@ -78,8 +82,18 @@ function which(bin: string): string | null {
 
 function detectExecPath(override?: string): string {
   if (override) return pathResolve(override);
-  // Walk up from this module to find dist/main.js. setup.ts compiled to
-  // dist/lib/setup.js; sibling main.js is dist/main.js.
+
+  // A service must not be pinned to whichever development checkout happened
+  // to invoke `service install`. Prefer the globally installed npm package;
+  // self-update replaces that package in place without involving an AWB repo.
+  const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  const npmRoot = spawnSync(npmBin, ['root', '-g'], { encoding: 'utf8' });
+  if (npmRoot.status === 0) {
+    const globalMain = join(npmRoot.stdout.trim(), SERVICE_NAME, 'dist', 'main.js');
+    if (existsSync(globalMain)) return pathResolve(globalMain);
+  }
+
+  // Package-local fallback for installations that do not have global npm.
   const here = dirname(fileURLToPath(import.meta.url));
   return pathResolve(here, '..', 'main.js');
 }
@@ -167,7 +181,7 @@ function logHeader(opts: { platform: ServicePlatform; mode: 'user' | 'system'; n
 
 // ─── systemd (linux) ──────────────────────────────────────────────────
 
-function systemdUnit(opts: { execPath: string; nodeBin: string; user: string; isSystem: boolean }): string {
+export function systemdUnit(opts: { execPath: string; nodeBin: string; user: string; isSystem: boolean }): string {
   const { execPath, nodeBin, user, isSystem } = opts;
   const envHome = process.env.AWB_AGENT_MANAGER_HOME;
   const userDirective = isSystem ? `User=${user}\n` : '';
@@ -180,12 +194,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=${nodeBin} ${execPath}
-# always (not on-failure): an external SIGTERM makes the manager exit 0
-# (clean shutdown), which on-failure treats as "done" and leaves the unit
-# inactive(dead) until a manual start. always respawns on any exit; a
-# deliberate stop is still honored because systemctl stop/restart suppresses
-# the restart. Self-update's exit-1 re-exec keeps working unchanged.
-Restart=always
+# Restart only after a crash/non-zero exit. A deliberate clean shutdown stays
+# stopped; self-update either launches the npm replacement or exits non-zero.
+Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
 ${userDirective}${envLines}KillSignal=SIGTERM
@@ -653,8 +664,27 @@ async function uninstallLaunchd(options: ServiceUninstallOptions): Promise<void>
 
 // ─── Windows Task Scheduler ───────────────────────────────────────────
 
-function windowsTaskXml(opts: { execPath: string; nodeBin: string; user: string; isSystem: boolean }): string {
-  const { execPath, nodeBin, user, isSystem } = opts;
+function xmlEscape(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&apos;');
+}
+
+function vbString(value: string): string {
+  return value.replaceAll('"', '""');
+}
+
+export function windowsHiddenLauncher(opts: { execPath: string; nodeBin: string }): string {
+  const nodeBin = vbString(opts.nodeBin);
+  const execPath = vbString(opts.execPath);
+  return `Option Explicit\r\nDim shell, rc, command\r\nSet shell = CreateObject("WScript.Shell")\r\ncommand = """${nodeBin}"" ""${execPath}"""\r\nrc = shell.Run(command, 0, True)\r\nWScript.Quit rc\r\n`;
+}
+
+export function windowsTaskXml(opts: { launcherPath: string; user: string; isSystem: boolean; wscriptPath?: string }): string {
+  const { launcherPath, user, isSystem } = opts;
   // Boot-time vs logon-time trigger — system mode runs as SYSTEM at boot,
   // user mode runs as the current user at logon. Windows Task Scheduler's
   // RestartOnFailure/Interval has a 1-minute minimum (PT1M) — sub-minute
@@ -667,7 +697,9 @@ function windowsTaskXml(opts: { execPath: string; nodeBin: string; user: string;
   // S-1-5-32-545 (BUILTIN\Users) are rejected by schtasks.
   const principalId = isSystem ? 'LocalSystem' : 'Author';
   const userDomain = process.env.USERDOMAIN || process.env.COMPUTERNAME || '';
-  const userAccount = userDomain ? `${userDomain}\\${user}` : user;
+  const userAccount = xmlEscape(userDomain ? `${userDomain}\\${user}` : user);
+  const wscriptPath = xmlEscape(opts.wscriptPath ?? 'wscript.exe');
+  const escapedLauncherPath = xmlEscape(launcherPath);
   const userBlock = isSystem
     ? `      <UserId>S-1-5-18</UserId>\n      <RunLevel>HighestAvailable</RunLevel>`
     : `      <UserId>${userAccount}</UserId>\n      <LogonType>InteractiveToken</LogonType>\n      <RunLevel>LeastPrivilege</RunLevel>`;
@@ -694,13 +726,13 @@ ${userBlock}
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
     <AllowHardTerminate>true</AllowHardTerminate>
     <StartWhenAvailable>true</StartWhenAvailable>
-    <Hidden>false</Hidden>
+    <Hidden>true</Hidden>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
   </Settings>
   <Actions Context="${principalId}">
     <Exec>
-      <Command>${nodeBin}</Command>
-      <Arguments>"${execPath}"</Arguments>
+      <Command>${wscriptPath}</Command>
+      <Arguments>"${escapedLauncherPath}"</Arguments>
     </Exec>
   </Actions>
 </Task>
@@ -729,19 +761,26 @@ async function installWindows(options: ServiceInstallOptions): Promise<ServiceIn
   }
 
   const taskName = SERVICE_NAME;
-  const xml = windowsTaskXml({ execPath, nodeBin, user, isSystem });
-  // schtasks needs an on-disk file path; we drop the XML into a temp
-  // location, register, then leave it for inspection (~25 KB, harmless).
-  const xmlPath = join(tmpdir(), `${SERVICE_NAME}-task.xml`);
+  const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
+  const systemWscript = systemRoot ? join(systemRoot, 'System32', 'wscript.exe') : 'wscript.exe';
+  const wscriptPath = existsSync(systemWscript) ? systemWscript : 'wscript.exe';
+  const launcher = windowsHiddenLauncher({ execPath, nodeBin });
+  const xml = windowsTaskXml({ launcherPath: WINDOWS_LAUNCHER_PATH, user, isSystem, wscriptPath });
+  const xmlPath = WINDOWS_TASK_XML_PATH;
 
   logHeader({ platform: 'windows', mode: isSystem ? 'system' : 'user', nodeBin, execPath, unitPath: `Task Scheduler\\${taskName}`, user });
 
   if (options.dryRun) {
-    process.stderr.write('  --dry-run: would write the following task XML and run schtasks /Create:\n\n');
+    process.stderr.write('  --dry-run: would write the hidden launcher and following task XML, then run schtasks /Create:\n\n');
+    process.stderr.write(launcher.split('\n').map((l) => `    ${l}`).join('\n'));
+    process.stderr.write('\n\n');
     process.stderr.write(xml.split('\n').map((l) => `    ${l}`).join('\n'));
     process.stderr.write('\n');
     return { ok: true, platform: 'windows', unitPath: xmlPath, mode: isSystem ? 'system' : 'user', enabled: false, started: false, notes: ['dry-run'] };
   }
+
+  writeFileWithDir(WINDOWS_LAUNCHER_PATH, launcher);
+  process.stderr.write(`  ✓ wrote ${WINDOWS_LAUNCHER_PATH}\n`);
 
   // Write the XML as UTF-16 LE + BOM so schtasks accepts it.
   mkdirSync(dirname(xmlPath), { recursive: true });
@@ -820,9 +859,9 @@ async function uninstallWindows(options: ServiceUninstallOptions): Promise<void>
     process.stderr.write('  warn: schtasks.exe not found — cannot remove the task.\n');
   }
 
-  // Best-effort: remove the on-disk XML we wrote at install time.
-  const xmlPath = join(tmpdir(), `${SERVICE_NAME}-task.xml`);
-  removeFile(xmlPath, false);
+  // Best-effort: remove the manager-owned service artifacts.
+  removeFile(WINDOWS_TASK_XML_PATH, false);
+  removeFile(WINDOWS_LAUNCHER_PATH, false);
   process.stderr.write('  ✓ done\n');
 }
 
