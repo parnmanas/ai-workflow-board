@@ -958,12 +958,18 @@ export class SubagentManager implements SubagentManagerContract {
         // CLI output", supervisor re-triggered ~2755×). Those never reached the
         // breaker because isTransientExit(null) === true, so the ticket never
         // pended and the loop ran forever. Count silent exits regardless of
-        // `code`: a real comment still takes the reset branch above, and
-        // manager-initiated reaps (restart_agent / stopForAgent) force-drop the
-        // record before this handler runs (see #wireExitHandler), so a `null`
-        // code reaching here is an unexpected death, not a benign reap. A
-        // genuine one-off transient kill is followed by a successful run that
-        // resets the counter, so only a persistent silent-exit loop pends.
+        // `code`: a real comment still takes the reset branch above, and the
+        // manager-initiated reaps that drop the record from #map BEFORE the exit
+        // handler runs — restart_agent / stopForAgent AND the TTL idle-timeout
+        // #sweep, all drop-first — never reach here at all (see #wireExitHandler's
+        // `if (!record) return`), so a `null` code reaching here is an unexpected
+        // death, not one of those benign reaps. A genuine one-off transient kill
+        // is followed by a successful run that resets the counter, so only a
+        // persistent silent-exit loop pends. (Known narrow gap: full manager
+        // shutdown stop() is not yet drop-first, so a shutdown SIGTERM can still
+        // reach here and be counted — tracked in follow-up 8436f96f; harmless in
+        // practice unless a key already sits at threshold-1 when the manager
+        // exits.)
         const tail = this.#collectTail(record);
         const { justOpened, entry } = this.circuitBreaker.record(cbKey, code, tail, {
           forceOpen: errClass.nonRetryable,
@@ -1302,6 +1308,21 @@ export class SubagentManager implements SubagentManagerContract {
       }
       if (now >= record.expected_completion_at) {
         log(`Sweep: pid=${pid} exceeded TTL, sending SIGTERM`);
+        // Drop-first, exactly like stopForAgent / restart_agent (ticket
+        // c555fbb6). Remove the record from #map BEFORE signalling so the
+        // per-child exit handler early-returns (see #wireExitHandler) instead
+        // of running _handleOneshotExit. A TTL idle timeout is a
+        // manager-initiated reap, NOT a delivery failure — the circuit-breaker
+        // contract classifies a SIGTERM idle-timeout as transient
+        // (circuit-breaker.ts TRANSIENT_EXIT_CODES). If we left the record in
+        // #map the SIGTERM would surface as code=null in _handleOneshotExit
+        // and, for a subagent that was simply slow and hadn't posted its
+        // comment yet (commentSent=false), get counted toward the breaker —
+        // falsely pending a healthy ticket after 5 idle timeouts. Because the
+        // exit handler no longer runs, we own the temp-cfg cleanup here in the
+        // grace timer (mirrors stopForAgent), using the same dir-rm as the
+        // ESRCH branch above so both sweep exit paths clean up identically.
+        this.#map.delete(pid);
         try {
           process.kill(pid, 'SIGTERM');
         } catch {
@@ -1318,6 +1339,9 @@ export class SubagentManager implements SubagentManagerContract {
             }
           } catch {
             /* already exited */
+          }
+          if (record.config_path && record.config_path_is_temp) {
+            fsp.rm(dirname(record.config_path), { recursive: true, force: true }).catch(() => {});
           }
         }, SIGTERM_GRACE_MS);
       }
@@ -1511,5 +1535,23 @@ export class SubagentManager implements SubagentManagerContract {
       out.push(serializable);
     }
     return out;
+  }
+
+  /**
+   * Test seam (ticket c555fbb6): register a record straight into #map and wire
+   * the REAL exit handler onto its process_handle, so a unit test can exercise
+   * the #wireExitHandler reap-vs-unexpected-death gating (a dropped record's
+   * exit early-returns and is NOT counted) without forking a real CLI. Mirrors
+   * the tail of spawn() — map.set + #wireExitHandler — for a caller-built record
+   * plus a (usually fake EventEmitter) child handle.
+   */
+  _trackForTest(record: SubagentRecord): void {
+    this.#map.set(record.pid, record);
+    this.#wireExitHandler(record.process_handle as ChildProcess, record.pid);
+  }
+
+  /** Test seam (ticket c555fbb6): run one TTL/idle #sweep pass synchronously. */
+  _sweepNow(): void {
+    this.#sweep();
   }
 }
