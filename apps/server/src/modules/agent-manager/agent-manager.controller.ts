@@ -7,6 +7,7 @@ import { randomBytes } from 'crypto';
 import { Agent } from '../../entities/Agent';
 import { Credential } from '../../entities/Credential';
 import { Ticket } from '../../entities/Ticket';
+import { Resource } from '../../entities/Resource';
 import { decrypt } from '../../services/encryption.service';
 import { TriggerLoopService } from '../agents/trigger-loop.service';
 import { AgentStatusService } from '../agents/agent-status.service';
@@ -71,6 +72,7 @@ export class AgentManagerController {
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     @InjectRepository(Credential) private readonly credentialRepo: Repository<Credential>,
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
+    @InjectRepository(Resource) private readonly resourceRepo: Repository<Resource>,
   ) {}
 
   // ─── Plugin / manager → Server ───────────────────────────────────────────
@@ -1182,6 +1184,40 @@ export class AgentManagerController {
       provider: cred.provider,
       fields,
     });
+  }
+
+  @ApiSecurity('agent-api-key')
+  @Get('api/agent-manager/resources/:id/git-credential')
+  @UseGuards(AgentAuthGuard)
+  async getRepositoryGitCredential(
+    @Param('id') resourceId: string,
+    @Query('agent_id') targetAgentId: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const callerAgentId = (req as any).currentAgentId as string | null;
+    const target = targetAgentId ? await this.agentRepo.findOne({ where: { id: targetAgentId } }) : null;
+    if (!callerAgentId || !target || target.manager_agent_id !== callerAgentId) {
+      return res.status(403).json({ error: 'caller is not the owning manager for this agent' });
+    }
+    if (!target.workspace_id) return res.status(403).json({ error: 'managed agent has no workspace' });
+    const resource = await this.resourceRepo.findOne({ where: { id: resourceId, workspace_id: target.workspace_id } });
+    if (!resource) return res.status(404).json({ error: 'repository resource not found in agent workspace' });
+    if (!resource.credential_id) return res.status(204).send();
+    const cred = await this.credentialRepo.findOne({ where: { id: resource.credential_id } });
+    if (!cred || (cred.workspace_id !== null && cred.workspace_id !== target.workspace_id)) {
+      return res.status(403).json({ error: 'repository credential is outside the agent workspace' });
+    }
+    const plaintext = decrypt(cred.encrypted_data || '');
+    if (!plaintext) return res.status(503).json({ error: 'credential_decrypt_failed' });
+    try {
+      const fields = JSON.parse(plaintext);
+      const token = fields.token || fields.api_key || '';
+      if (!token) return res.status(422).json({ error: 'repository credential has no token/api_key' });
+      return res.json({ username: fields.username || 'x-access-token', token });
+    } catch {
+      return res.status(503).json({ error: 'credential_payload_invalid' });
+    }
   }
 
   // Manager → server: immediately re-push agent_trigger(s) for the in-flight

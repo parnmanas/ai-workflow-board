@@ -236,7 +236,11 @@ export interface ResolveCwdArgs {
   /** Repository used to bootstrap an empty working_dir before creating the
    *  ticket worktree. Dispatch resolves this as ticket repo first, then the
    *  board environment's first repository. */
-  bootstrapRepo?: { url: string; branch?: string } | null;
+  bootstrapRepo?: {
+    url: string;
+    branch?: string;
+    credential?: { username?: string; token: string } | null;
+  } | null;
 }
 
 export interface ResolveCwdResult {
@@ -318,7 +322,7 @@ export class WorktreeManager {
 
   async #bootstrapEmptyWorkingDir(
     baseWorkingDir: string,
-    repo: { url: string; branch?: string } | null | undefined,
+    repo: ResolveCwdArgs['bootstrapRepo'],
   ): Promise<boolean> {
     if (!repo?.url?.trim()) return false;
     const key = baseWorkingDir;
@@ -333,7 +337,15 @@ export class WorktreeManager {
         return false;
       }
       const branch = (repo.branch || '').trim();
-      const cloneArgs = ['clone', ...(branch ? ['--branch', branch] : []), '--', repo.url.trim(), baseWorkingDir];
+      const cleanUrl = repo.url.trim();
+      let cloneUrl = cleanUrl;
+      if (repo.credential?.token && /^https?:\/\//i.test(cleanUrl)) {
+        const u = new URL(cleanUrl);
+        u.username = repo.credential.username || 'x-access-token';
+        u.password = repo.credential.token;
+        cloneUrl = u.toString();
+      }
+      const cloneArgs = ['clone', ...(branch ? ['--branch', branch] : []), '--', cloneUrl, baseWorkingDir];
       const cloned = await new Promise<GitResult>((resolve) => {
         execFile(
           'git',
@@ -347,14 +359,34 @@ export class WorktreeManager {
         );
       });
       if (!cloned.ok) {
-        log(`[worktree] working_dir bootstrap clone failed: ${cloned.stderr.trim()}`);
+        log(`[worktree] working_dir bootstrap clone failed: ${cloned.stderr.replace(cloneUrl, cleanUrl).trim()}`);
         return false;
       }
+      // Never leave the token embedded in origin. Persist it in the checkout's
+      // private credential-store file so later fetch/push from ticket worktrees
+      // authenticate without exposing it in `git remote -v` or process args.
+      await git(baseWorkingDir, ['remote', 'set-url', 'origin', cleanUrl]);
+      await this.#installRepoCredential(baseWorkingDir, repo);
       log(`[worktree] bootstrapped empty working_dir from ${repo.url}${branch ? ` branch=${branch}` : ''}: ${baseWorkingDir}`);
       return true;
     })().finally(() => this.#bootstrapLocks.delete(key));
     this.#bootstrapLocks.set(key, run);
     return run;
+  }
+
+  async #installRepoCredential(
+    baseWorkingDir: string,
+    repo: ResolveCwdArgs['bootstrapRepo'],
+  ): Promise<void> {
+    if (!repo?.credential?.token || !/^https?:\/\//i.test(repo.url || '')) return;
+    const gitDirResult = await git(baseWorkingDir, ['rev-parse', '--git-dir']);
+    if (!gitDirResult.ok) return;
+    const credentialFile = join(gitDirResult.stdout.trim(), 'awb-credentials');
+    const u = new URL(repo.url.trim());
+    u.username = repo.credential.username || 'x-access-token';
+    u.password = repo.credential.token;
+    await fsp.writeFile(credentialFile, `${u.toString()}\n`, { mode: 0o600 });
+    await git(baseWorkingDir, ['config', 'credential.helper', `store --file=${credentialFile}`]);
   }
 
   /**
@@ -473,6 +505,9 @@ export class WorktreeManager {
     if (!(await this.#isGitWorkTree(baseWorkingDir))) {
       return fallback('not_a_git_repo');
     }
+    // Existing checkouts need the Resource credential too; limiting this to
+    // fresh clone would leave resumed/private-repo tickets unable to fetch.
+    await this.#installRepoCredential(baseWorkingDir, args.bootstrapRepo);
 
     const repoCtx = await this.#resolveRepoContext(baseWorkingDir);
     if (!repoCtx) return fallback('no_repo_root');

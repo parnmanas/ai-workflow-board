@@ -30,6 +30,7 @@ import { log } from './logging.js';
  *  agent-manager keeps its own copy — it's a separate package and only consumes
  *  the wire shape (same pattern as HarnessSpec / ResolvedEffortPreset). */
 export interface ResolvedEnvironmentRepository {
+  resource_id?: string;
   url: string;
   target_dir: string;
   branch: string;
