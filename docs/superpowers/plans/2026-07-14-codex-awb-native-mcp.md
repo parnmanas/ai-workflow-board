@@ -47,7 +47,7 @@
 
 - [ ] **Step 2: Run the focused test and verify RED**
 
-  Run: `npm run build -w agent-manager; node --test apps/agent-manager/test/codex-adapter.test.mjs`
+  Run: `npm run build -w awb-agent-manager; node --test apps/agent-manager/test/codex-adapter.test.mjs`
 
   Expected: FAIL because Codex does not write native MCP config and does not expose native capability.
 
@@ -72,7 +72,7 @@
 
 - [ ] **Step 4: Run the focused test and verify GREEN**
 
-  Run: `npm run build -w agent-manager; node --test apps/agent-manager/test/codex-adapter.test.mjs`
+  Run: `npm run build -w awb-agent-manager; node --test apps/agent-manager/test/codex-adapter.test.mjs`
 
   Expected: all Codex adapter tests PASS.
 
@@ -102,7 +102,7 @@
 
 - [ ] **Step 2: Run focused tests and verify RED**
 
-  Run: `npm run build -w agent-manager; node --test apps/agent-manager/test/codex-adapter.test.mjs apps/agent-manager/test/chat-prompt-native-mcp.test.mjs`
+  Run: `npm run build -w awb-agent-manager; node --test apps/agent-manager/test/codex-adapter.test.mjs apps/agent-manager/test/chat-prompt-native-mcp.test.mjs`
 
   Expected: FAIL because Codex is non-native and ignores attribution.
 
@@ -124,7 +124,7 @@
 
 - [ ] **Step 4: Run focused tests and verify GREEN**
 
-  Run: `npm run build -w agent-manager; node --test apps/agent-manager/test/codex-adapter.test.mjs apps/agent-manager/test/chat-prompt-native-mcp.test.mjs`
+  Run: `npm run build -w awb-agent-manager; node --test apps/agent-manager/test/codex-adapter.test.mjs apps/agent-manager/test/chat-prompt-native-mcp.test.mjs`
 
   Expected: all focused tests PASS and native prompt selection prevents manager stdout reply instructions.
 
@@ -155,7 +155,7 @@
 
 - [ ] **Step 2: Run the command test and verify RED**
 
-  Run the single command-handler test through Node's test runner after `npm run build -w agent-manager`.
+  Run the single command-handler test through Node's test runner after `npm run build -w awb-agent-manager`.
 
   Expected: FAIL because refresh only rewrites manager `mcp-config.json`.
 
@@ -179,7 +179,7 @@
   Run:
 
   ```bash
-  npm test -w agent-manager
+  npm test -w awb-agent-manager
   npm run build
   ```
 
@@ -191,7 +191,7 @@
 
 - [ ] **Step 6: Bump and verify the Agent Manager release version**
 
-  Bump `apps/agent-manager/package.json` from `1.6.17` to `1.6.18`, synchronize `package-lock.json`, rerun `npm run build -w agent-manager` and `npm run build`, and confirm no server MCP schema file changed.
+  Bump `apps/agent-manager/package.json` from `1.6.17` to `1.6.18`, synchronize `package-lock.json`, rerun `npm run build -w awb-agent-manager` and `npm run build`, and confirm no server MCP schema file changed.
 
 - [ ] **Step 7: Commit release changes**
 
@@ -212,7 +212,7 @@
 
 - [ ] **Step 2: Merge into main**
 
-  In the primary checkout, fast-forward `main` to the feature branch. Re-run `npm test -w agent-manager` and `npm run build` on `main`.
+  In the primary checkout, fast-forward `main` to the feature branch. Re-run `npm test -w awb-agent-manager` and `npm run build` on `main`.
 
 - [ ] **Step 3: Push main and clean isolation**
 

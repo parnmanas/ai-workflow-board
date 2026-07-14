@@ -10,9 +10,12 @@
 import { promises as fsp } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { parse, stringify } from 'smol-toml';
 import { resolveCliBin } from '../cli-resolver.js';
+import { resolveSelfCommand } from '../self-path.js';
 import {
   type AdapterCredential,
+  type AdapterMcpContext,
   CliAdapter,
   PARSE_STAGE,
   type OneshotSpec,
@@ -152,20 +155,14 @@ export class CodexCliAdapter extends CliAdapter {
   async prepareCliHome(
     cliHomeDir: string,
     credential?: AdapterCredential | null,
+    mcp?: AdapterMcpContext | null,
   ): Promise<{ extraEnv: Record<string, string> }> {
     const mainHome = process.env.CODEX_HOME ?? join(homedir(), '.codex');
 
     // Always start from a clean slate so credential mode changes
     // (operator-default → subscription → api_key) take effect on the
     // next spawn without a leftover from the previous mode winning.
-    for (const name of SHARED_FROM_MAIN_HOME) {
-      const dst = join(cliHomeDir, name);
-      try {
-        await fsp.unlink(dst);
-      } catch (err: any) {
-        if (err?.code !== 'ENOENT') throw err;
-      }
-    }
+    await this.#unlinkIfPresent(join(cliHomeDir, 'auth.json'));
 
     if (credential && credential.provider === 'codex_subscription') {
       // Operator pasted the literal `auth.json` (and optionally `config.toml`)
@@ -176,9 +173,7 @@ export class CodexCliAdapter extends CliAdapter {
       if (authJson) {
         await fsp.writeFile(join(cliHomeDir, 'auth.json'), authJson, { mode: 0o600 });
       }
-      if (configToml) {
-        await fsp.writeFile(join(cliHomeDir, 'config.toml'), configToml, { mode: 0o600 });
-      }
+      await this.#prepareConfig(cliHomeDir, mainHome, configToml, 'replace', mcp);
       return { extraEnv: {} };
     }
 
@@ -189,11 +184,12 @@ export class CodexCliAdapter extends CliAdapter {
       // the API-key-mode operator probably doesn't want operator-side
       // model/provider tweaks bleeding into this agent.
       const apiKey = credential.fields?.api_key ?? '';
+      await this.#prepareConfig(cliHomeDir, mainHome, '', 'replace', mcp);
       return { extraEnv: apiKey ? { OPENAI_API_KEY: apiKey } : {} };
     }
 
     // No per-agent credential — fall back to operator HOME (legacy behaviour).
-    for (const name of SHARED_FROM_MAIN_HOME) {
+    for (const name of SHARED_FROM_MAIN_HOME.filter((entry) => entry !== 'config.toml')) {
       const src = join(mainHome, name);
       const dst = join(cliHomeDir, name);
       try {
@@ -211,6 +207,93 @@ export class CodexCliAdapter extends CliAdapter {
         }
       }
     }
+    await this.#prepareConfig(cliHomeDir, mainHome, '', 'inherit', mcp);
     return { extraEnv: {} };
+  }
+
+  async #prepareConfig(
+    cliHomeDir: string,
+    mainHome: string,
+    providedConfig: string,
+    mode: 'replace' | 'inherit',
+    mcp?: AdapterMcpContext | null,
+  ): Promise<void> {
+    const dst = join(cliHomeDir, 'config.toml');
+    const mainConfig = join(mainHome, 'config.toml');
+
+    if (!mcp?.url || !mcp?.apiKey) {
+      await this.#unlinkIfPresent(dst);
+      if (mode === 'replace') {
+        if (providedConfig) {
+          await fsp.writeFile(dst, providedConfig, { mode: 0o600 });
+        }
+        return;
+      }
+      try {
+        await fsp.access(mainConfig);
+      } catch {
+        return;
+      }
+      try {
+        await fsp.symlink(mainConfig, dst);
+      } catch (err: any) {
+        if (err?.code === 'EPERM' || err?.code === 'EACCES') {
+          await fsp.copyFile(mainConfig, dst);
+        } else {
+          throw err;
+        }
+      }
+      return;
+    }
+
+    let sourceText = providedConfig;
+    if (mode === 'inherit') {
+      sourceText = await this.#readIfPresent(dst);
+      if (!sourceText) sourceText = await this.#readIfPresent(mainConfig);
+    }
+
+    // Parse before touching dst. Invalid operator TOML remains intact and the
+    // preparation error reaches the caller instead of silently losing config.
+    const parsed = sourceText.trim() ? parse(sourceText) : {};
+    const config: Record<string, any> = { ...parsed };
+    const existingServers = config.mcp_servers;
+    const mcpServers: Record<string, any> =
+      existingServers && typeof existingServers === 'object' && !Array.isArray(existingServers)
+        ? { ...existingServers }
+        : {};
+    mcpServers.awb = {
+      url: `${mcp.url.replace(/\/$/, '')}/mcp`,
+      bearer_token_env_var: 'AWB_API_KEY',
+      http_headers: { 'X-AWB-Client-Type': 'managed-subagent' },
+      required: true,
+    };
+    const self = resolveSelfCommand();
+    mcpServers.host = {
+      command: self.command,
+      args: [...self.prefixArgs, 'mcp-host'],
+    };
+    config.mcp_servers = mcpServers;
+
+    // dst may point at the operator's global config. Replace only the agent
+    // path with a private regular file so managed MCP state cannot leak out.
+    await this.#unlinkIfPresent(dst);
+    await fsp.writeFile(dst, stringify(config), { mode: 0o600 });
+  }
+
+  async #readIfPresent(path: string): Promise<string> {
+    try {
+      return await fsp.readFile(path, 'utf8');
+    } catch (err: any) {
+      if (err?.code === 'ENOENT') return '';
+      throw err;
+    }
+  }
+
+  async #unlinkIfPresent(path: string): Promise<void> {
+    try {
+      await fsp.unlink(path);
+    } catch (err: any) {
+      if (err?.code !== 'ENOENT') throw err;
+    }
   }
 }
