@@ -207,6 +207,10 @@ export interface OneshotSpec {
   rolePrompt: string;
   taskText: string;
   mcpConfigPath: string | null;
+  /** Concrete process working directory selected for this run. Adapters with
+   *  their own workspace-root flag (notably Codex `--cd`) should pass the same
+   *  path explicitly so CLI-side root discovery cannot diverge from spawn cwd. */
+  cwd?: string | null;
   /** Per-run AWB attribution for native MCP adapters whose MCP config is
    *  loaded from their CLI home rather than a per-spawn JSON file. */
   mcpAttribution?: McpAttribution;

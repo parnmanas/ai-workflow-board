@@ -68,6 +68,30 @@ test('buildOneshotSpawn omits per-run MCP override for unattributed chat runs', 
   assert.equal(descriptor.args.includes('-c'), false);
 });
 
+test('buildOneshotSpawn pins Codex workspace root to the manager-selected cwd', () => {
+  const adapter = new CodexCliAdapter();
+  const cwd = '/repo/.awb/wt/12345678';
+  const descriptor = adapter.buildOneshotSpawn({
+    rolePrompt: 'role',
+    taskText: 'task',
+    mcpConfigPath: null,
+    cwd,
+  });
+  const cdIndex = descriptor.args.indexOf('--cd');
+  assert.ok(cdIndex >= 0, 'Codex must receive an explicit workspace root');
+  assert.equal(descriptor.args[cdIndex + 1], cwd);
+});
+
+test('buildOneshotSpawn omits --cd when no cwd was resolved', () => {
+  const adapter = new CodexCliAdapter();
+  const descriptor = adapter.buildOneshotSpawn({
+    rolePrompt: 'role',
+    taskText: 'task',
+    mcpConfigPath: null,
+  });
+  assert.equal(descriptor.args.includes('--cd'), false);
+});
+
 test('prepareCliHome writes required AWB and optional host MCP without persisting the API key', async () => {
   const adapter = new CodexCliAdapter();
   const home = await freshDir();

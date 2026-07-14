@@ -47,7 +47,7 @@ export class CodexCliAdapter extends CliAdapter {
     return resolveCliBin('codex', configured);
   }
 
-  buildOneshotSpawn({ rolePrompt, taskText, model, mcpAttribution }: OneshotSpec): SpawnDescriptor {
+  buildOneshotSpawn({ rolePrompt, taskText, model, mcpAttribution, cwd }: OneshotSpec): SpawnDescriptor {
     const fullPrompt = rolePrompt ? `${rolePrompt}\n\n${taskText}` : taskText || '';
     const hasAttribution = !!(
       mcpAttribution?.ticketId ||
@@ -85,6 +85,11 @@ export class CodexCliAdapter extends CliAdapter {
       args: [
         'exec',
         ...attributionArgs,
+        // Keep Codex's own workspace root identical to the OS process cwd.
+        // Relying on child_process.cwd alone lets Codex re-resolve a different
+        // project root, after which an assigned `.awb/wt/...` path appears to
+        // be missing even though the manager created and spawned inside it.
+        ...(cwd ? ['--cd', cwd] : []),
         // Per-agent default model (Agent.model). Omitted when unset so codex
         // keeps its configured default — preserves prior behaviour.
         ...(model ? ['--model', model] : []),
