@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import {
   GitCredentialResolutionError,
   resolveGitCredential,
+  sanitizeGitError,
 } from '../dist/modules/mcp/shared/git-branches.js';
 
 function repoWith(row) {
@@ -35,4 +36,14 @@ test('a registered credential with an empty token reports the real error', async
     }), 'cred-1', 'ws-1'),
     /has no token/,
   );
+});
+
+test('Git errors expose the cause without leaking registered credentials', () => {
+  const safe = sanitizeGitError(
+    "fatal: Authentication failed for 'https://x-access-token:ghp_secret_value@github.com/acme/private.git'",
+    { token: 'ghp_secret_value' },
+  );
+  assert.match(safe, /Authentication failed/);
+  assert.doesNotMatch(safe, /ghp_secret_value|x-access-token/);
+  assert.match(safe, /https:\/\/\*\*\*@github\.com/);
 });

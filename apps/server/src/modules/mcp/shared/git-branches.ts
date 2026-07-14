@@ -63,6 +63,21 @@ export interface ListRepoBranchesOptions {
   timeoutMs?: number;
 }
 
+export function sanitizeGitError(
+  message: string,
+  credential?: { username?: string; token?: string } | null,
+): string {
+  let safe = String(message || 'Git command failed');
+  const token = credential?.token || '';
+  if (token) {
+    safe = safe.split(token).join('***');
+    try { safe = safe.split(encodeURIComponent(token)).join('***'); } catch { /* noop */ }
+  }
+  // Git commonly echoes the complete failing remote URL. Strip any userinfo
+  // even if its encoding differs from the original token.
+  return safe.replace(/(https?:\/\/)[^/@\s]+@/gi, '$1***@');
+}
+
 /** Inject username/token into an https URL when credentials are supplied.
  *  Leaves ssh:// and git@ URLs untouched (those need a key, not a token). */
 function applyCredential(url: string, credential?: { username?: string; token?: string } | null): string {
@@ -113,7 +128,10 @@ export async function listRepoBranches(opts: ListRepoBranchesOptions): Promise<R
     child.on('close', (code) => {
       clearTimeout(timer);
       if (code === 0) resolve(out);
-      else reject(new Error(err.trim() || `git ls-remote exited with code ${code}`));
+      else reject(new Error(sanitizeGitError(
+        err.trim() || `git ls-remote exited with code ${code}`,
+        opts.credential,
+      )));
     });
   });
 
