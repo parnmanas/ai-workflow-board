@@ -32,6 +32,9 @@ dist/
 # TurboRepo
 .turbo/
 
+# Local git worktrees used for isolated feature development
+.worktrees/
+
 # OS
 .DS_Store
 Thumbs.db
