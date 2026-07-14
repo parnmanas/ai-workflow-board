@@ -14,11 +14,15 @@
 import { spawn } from 'child_process';
 import { Repository } from 'typeorm';
 import { Credential } from '../../../entities/Credential';
-import { decrypt } from '../../../services/encryption.service';
+import { decryptStrict } from '../../../services/encryption.service';
 
 export interface RepoBranch {
   name: string;
   sha: string;
+}
+
+export class GitCredentialResolutionError extends Error {
+  readonly code = 'credential_unavailable';
 }
 
 /** Decrypt a workspace Credential row into the `{username, token}` shape
@@ -34,15 +38,18 @@ export async function resolveGitCredential(
 ): Promise<{ username?: string; token?: string } | null> {
   if (!credentialId) return null;
   const cred = await credRepo.findOne({ where: { id: credentialId } });
-  if (!cred) return null;
-  if (cred.workspace_id !== null && cred.workspace_id !== workspaceId) return null;
+  if (!cred) throw new GitCredentialResolutionError(`Selected credential ${credentialId} does not exist`);
+  if (cred.workspace_id !== null && cred.workspace_id !== workspaceId) {
+    throw new GitCredentialResolutionError('Selected credential belongs to a different workspace');
+  }
   try {
-    const data = JSON.parse(decrypt(cred.encrypted_data));
-    const token = data.token || data.api_key || '';
-    if (!token) return null;
-    return { username: data.username || undefined, token };
-  } catch {
-    return null;
+    const data = JSON.parse(decryptStrict(cred.encrypted_data));
+    const token = String(data.token || data.api_key || '').trim();
+    if (!token) throw new GitCredentialResolutionError('Selected credential has no token');
+    return { username: data.username ? String(data.username).trim() : undefined, token };
+  } catch (err: any) {
+    if (err instanceof GitCredentialResolutionError) throw err;
+    throw new GitCredentialResolutionError(`Selected credential is unreadable: ${String(err?.message || err)}`);
   }
 }
 

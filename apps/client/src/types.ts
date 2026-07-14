@@ -842,6 +842,7 @@ export interface Credential {
   description: string;
   provider: string;
   credential_fields: Record<string, string>;
+  credential_status?: 'ok' | 'unreadable';
   created_at: string;
   updated_at: string;
 }

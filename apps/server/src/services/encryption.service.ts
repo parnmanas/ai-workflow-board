@@ -73,21 +73,35 @@ export function encrypt(plaintext: string): string {
   return 'enc:' + combined.toString('base64');
 }
 
-export function decrypt(ciphertext: string): string {
+export function decryptStrict(ciphertext: string): string {
   if (!ciphertext) return '';
   if (!ciphertext.startsWith('enc:')) return ciphertext;
 
-  try {
-    const key = getEncryptionKey();
-    const combined = Buffer.from(ciphertext.slice(4), 'base64');
-    const iv = combined.subarray(0, IV_LENGTH);
-    const authTag = combined.subarray(IV_LENGTH, IV_LENGTH + AUTH_TAG_LENGTH);
-    const encrypted = combined.subarray(IV_LENGTH + AUTH_TAG_LENGTH);
+  const key = getEncryptionKey();
+  const combined = Buffer.from(ciphertext.slice(4), 'base64');
+  if (combined.length <= IV_LENGTH + AUTH_TAG_LENGTH) {
+    throw new Error('Encrypted credential payload is truncated or corrupted');
+  }
+  const iv = combined.subarray(0, IV_LENGTH);
+  const authTag = combined.subarray(IV_LENGTH, IV_LENGTH + AUTH_TAG_LENGTH);
+  const encrypted = combined.subarray(IV_LENGTH + AUTH_TAG_LENGTH);
 
+  try {
     const decipher = createDecipheriv(ALGORITHM, key, iv, { authTagLength: AUTH_TAG_LENGTH });
     decipher.setAuthTag(authTag);
     const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
     return decrypted.toString('utf8');
+  } catch {
+    throw new Error(
+      'Credential cannot be decrypted with the current encryption key. ' +
+      'Restore the original ENCRYPTION_KEY/AWB_DATA_DIR key or re-enter this credential.',
+    );
+  }
+}
+
+export function decrypt(ciphertext: string): string {
+  try {
+    return decryptStrict(ciphertext);
   } catch {
     console.error('[Encryption] Failed to decrypt — key mismatch or corrupted data');
     return '';

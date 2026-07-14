@@ -7,7 +7,7 @@ import { Credential } from '../../entities/Credential';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { PERMISSIONS, hasPermission } from '../../common/types/permissions';
-import { encrypt, decrypt } from '../../services/encryption.service';
+import { encrypt, decrypt, decryptStrict } from '../../services/encryption.service';
 import { maskSecret } from '../../common/mask';
 import { findOrFail } from '../../common/find-or-fail';
 
@@ -60,6 +60,13 @@ function isMaskedValue(value: string): boolean {
 // apart from inherited global ones (global = read-only in a workspace view,
 // editable only from the Admin global page).
 function serializeCred(c: Credential) {
+  let credentialFields: Record<string, string> = {};
+  let credentialStatus: 'ok' | 'unreadable' = 'ok';
+  try {
+    credentialFields = maskCredentialData(decryptStrict(c.encrypted_data));
+  } catch {
+    credentialStatus = 'unreadable';
+  }
   return {
     id: c.id,
     workspace_id: c.workspace_id,
@@ -67,7 +74,8 @@ function serializeCred(c: Credential) {
     name: c.name,
     description: c.description,
     provider: c.provider,
-    credential_fields: maskCredentialData(decrypt(c.encrypted_data)),
+    credential_fields: credentialFields,
+    credential_status: credentialStatus,
     created_at: c.created_at,
     updated_at: c.updated_at,
   };
@@ -147,7 +155,11 @@ export class CredentialsController {
     if (!provider) return res.status(400).json({ error: 'provider is required' });
     if (!credData || typeof credData !== 'object') return res.status(400).json({ error: 'credentials object is required' });
 
-    const encrypted = encrypt(JSON.stringify(credData));
+    const plaintext = JSON.stringify(credData);
+    const encrypted = encrypt(plaintext);
+    if (decryptStrict(encrypted) !== plaintext) {
+      return res.status(500).json({ error: 'Credential encryption verification failed; credential was not saved' });
+    }
     const cred = await this.credRepo.save(this.credRepo.create({
       workspace_id: isGlobal ? null : workspace_id,
       name: name.trim(),

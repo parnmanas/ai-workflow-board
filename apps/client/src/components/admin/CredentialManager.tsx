@@ -272,7 +272,9 @@ export default function CredentialManager({ workspaceId, globalMode = false }: {
             <tbody>
               {credentials.map((c) => {
                 const fieldKeys = Object.keys(c.credential_fields);
-                const fieldsLabel = fieldKeys.length === 0
+                const fieldsLabel = c.credential_status === 'unreadable'
+                  ? 'Encryption key mismatch — re-enter credential'
+                  : fieldKeys.length === 0
                   ? '—'
                   : fieldKeys.map((k) => `${k}${c.credential_fields[k] ? '' : ' (empty)'}`).join(', ');
                 return (
