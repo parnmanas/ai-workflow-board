@@ -340,3 +340,61 @@ test('Codex native MCP add_comment completion suppresses the silent-exit fallbac
 
   assert.equal(silentExit(), undefined, 'no false system comment after Codex add_comment succeeds');
 });
+
+test('respawn-storm regression (ticket c555fbb6): silent exit_code=null opens the breaker + pends', async () => {
+  // The 2026-07-14 field incident: an antigravity one-shot (benchmark ticket
+  // 2c2c4eb1) died by signal every trigger — exit_code=null, no buffered CLI
+  // output, no ticket comment — and the supervisor re-fired it ~2755× because
+  // isTransientExit(null) === true kept it OUT of the circuit breaker forever,
+  // so the ticket never pended. A silent exit is a failure to deliver
+  // regardless of the (transient-looking) code, so N consecutive silent
+  // null-exits must now open the breaker and pend the ticket.
+  const cb = new CircuitBreaker(); // threshold 5
+  const mgr = new SubagentManager(makeConfig(), cb);
+  const key = CircuitBreaker.key('agent-antigravity', 'ticket-2c2c4eb1', 'assignee');
+
+  const makeSilentNullExit = () =>
+    makeCodexRecord({
+      cli_type: 'antigravity', // plain-text oneshot; empty output → no answer
+      captureOutput: true,
+      agent_id: 'agent-antigravity',
+      ticket_id: 'ticket-2c2c4eb1',
+      role: 'assignee',
+      outLines: [],
+      tailLines: [],
+      commentSent: false,
+    });
+
+  for (let i = 1; i <= 4; i++) {
+    await mgr._handleOneshotExit(makeSilentNullExit(), null);
+    assert.equal(cb.shouldBlock(key), null, `breaker still closed after ${i} silent null-exit(s)`);
+  }
+  assert.equal(mcpToolCalls.includes('pend_ticket'), false, 'no pend before the threshold');
+  assert.ok(silentExit(), 'each silent null-exit still posts the system silent-exit fallback');
+
+  await mgr._handleOneshotExit(makeSilentNullExit(), null);
+
+  assert.ok(cb.shouldBlock(key), 'breaker OPEN on the 5th consecutive silent null-exit (was: never)');
+  assert.ok(mcpToolCalls.includes('pend_ticket'), 'the storming ticket is finally pended → supervisor stops re-triggering');
+});
+
+test('one-off transient null-exit does NOT pend when a later run succeeds (reset)', async () => {
+  // Safety rail for the fix above: a single signal-death that is followed by a
+  // successful answered run must clear the counter, so a genuinely transient
+  // kill never accumulates toward a pend.
+  const cb = new CircuitBreaker();
+  const mgr = new SubagentManager(makeConfig(), cb);
+  const key = CircuitBreaker.key('agent-rolf', 'ticket-loop', 'assignee');
+
+  await mgr._handleOneshotExit(
+    makeCodexRecord({ cli_type: 'antigravity', captureOutput: true, outLines: [], tailLines: [], commentSent: false }),
+    null,
+  );
+  assert.equal(cb.size, 1, 'the silent null-exit is now tracked (previously it was invisible)');
+
+  const ok = makeCodexRecord({ outLines: codexCleanLines('Recovered and finished the work.') });
+  await mgr._handleOneshotExit(ok, 0);
+
+  assert.equal(cb.shouldBlock(key), null, 'a successful run reset the breaker — no pend for a one-off transient');
+  assert.equal(mcpToolCalls.includes('pend_ticket'), false, 'no pend after recovery');
+});

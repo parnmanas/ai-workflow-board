@@ -945,7 +945,25 @@ export class SubagentManager implements SubagentManagerContract {
       // (ticket ac958c06).
       if (record.commentSent && !errClass.nonRetryable) {
         this.circuitBreaker.reset(cbKey);
-      } else if (!CircuitBreaker.isTransientExit(code) || errClass.nonRetryable) {
+      } else if (
+        !record.commentSent ||
+        !CircuitBreaker.isTransientExit(code) ||
+        errClass.nonRetryable
+      ) {
+        // A SILENT exit (no comment-tool trace) is a failure to deliver even
+        // when `code` looks "transient". A one-shot that dies by signal
+        // (code === null) or a benign numeric signal code, yet left ZERO ticket
+        // activity, is exactly the respawn-storm signature (ticket c555fbb6 /
+        // benchmark ticket 2c2c4eb1: antigravity exit_code=null, "no buffered
+        // CLI output", supervisor re-triggered ~2755×). Those never reached the
+        // breaker because isTransientExit(null) === true, so the ticket never
+        // pended and the loop ran forever. Count silent exits regardless of
+        // `code`: a real comment still takes the reset branch above, and
+        // manager-initiated reaps (restart_agent / stopForAgent) force-drop the
+        // record before this handler runs (see #wireExitHandler), so a `null`
+        // code reaching here is an unexpected death, not a benign reap. A
+        // genuine one-off transient kill is followed by a successful run that
+        // resets the counter, so only a persistent silent-exit loop pends.
         const tail = this.#collectTail(record);
         const { justOpened, entry } = this.circuitBreaker.record(cbKey, code, tail, {
           forceOpen: errClass.nonRetryable,
