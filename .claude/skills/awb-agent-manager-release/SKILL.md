@@ -14,6 +14,18 @@ description: Release procedure for changes under apps/agent-manager (SSE pipelin
 3. **Bump `version` in `apps/agent-manager/package.json`.**
 4. Commit + push.
 
+> **버전 collapse 게이트 (ticket c17a8a40).** 동시 진행 티켓이 같은 다음 버전으로
+> 범프한 뒤 내 브랜치를 리베이스하면 git 이 그 범프를 충돌 없이 조용히 collapse
+> 시킨다(board lesson #1 — 3회 재발). 이제 자동 방어가 두 겹이다:
+> - **머지 preflight (권장, 랜딩 전 차단):** 리베이스 직후
+>   `node apps/agent-manager/scripts/check-version-bump.mjs --preflight` 를 실행하라.
+>   `origin/main` 을 fetch 한 뒤, agent-manager `src/` 를 건드린 브랜치인데 version 이
+>   `origin/main` 보다 크지 않으면 **exit 1** 로 막는다. 예전의 수동
+>   `git show origin/main:… | grep version` 눈대중을 대체한다.
+> - **CI 게이트 (백스톱, 랜딩 후 자동 검출):** `.github/workflows/ci.yml` 의
+>   `agent-manager version bump guard` 잡이 push→main / PR 마다 같은 검사를 돌려,
+>   collapse 가 랜딩하면 main 을 즉시 red 로 만든다 → 재범프로 해소.
+
 > **npm publish is automatic — do NOT hand-push a release tag.** When the version
 > bump lands on `main`, `.github/workflows/publish-agent-manager.yml` publishes
 > that exact version to npm (idempotent: a no-op if already published) and records
