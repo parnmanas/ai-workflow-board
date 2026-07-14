@@ -17,6 +17,7 @@
 
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 
 import { SubagentManager } from '../dist/lib/subagent-manager.js';
 import { CircuitBreaker } from '../dist/lib/circuit-breaker.js';
@@ -397,4 +398,108 @@ test('one-off transient null-exit does NOT pend when a later run succeeds (reset
 
   assert.equal(cb.shouldBlock(key), null, 'a successful run reset the breaker — no pend for a one-off transient');
   assert.equal(mcpToolCalls.includes('pend_ticket'), false, 'no pend after recovery');
+});
+
+test('gating regression (ticket c555fbb6): a #sweep TTL idle-timeout is dropped BEFORE the exit handler → NOT counted', async (t) => {
+  // Reviewer 🟡 gap: the storm tests above call _handleOneshotExit directly, so
+  // they only prove "a silent null REACHING the handler is counted" — never the
+  // safety core that keeps the storm fix from mis-firing: a manager-initiated
+  // reap drops the record from #map first, so its SIGTERM-driven exit
+  // early-returns in #wireExitHandler and is NEVER counted. The TTL/idle reaper
+  // #sweep is exactly such a reap (circuit-breaker contract: SIGTERM
+  // idle-timeout = transient, re-dispatched normally). Without the drop-first,
+  // a healthy-but-slow subagent (commentSent=false) TTL-killed at 15min every
+  // dispatch would count 5× and falsely pend a working ticket.
+  //
+  // This drives the REAL #sweep (via _sweepNow) and the REAL exit handler (wired
+  // by _trackForTest) with a fake child + a TTL already in the past. It has
+  // teeth on BOTH invariants: remove the `#map.delete(pid)` from #sweep and the
+  // drop assertion fails; let the exit reach _handleOneshotExit and cb.size flips
+  // to 1.
+  const cb = new CircuitBreaker();
+  const mgr = new SubagentManager(makeConfig(), cb);
+  const key = CircuitBreaker.key('agent-slow', 'ticket-slow', 'assignee');
+
+  // Fake child we fully control — an EventEmitter carrying a pid.
+  const child = new EventEmitter();
+  child.pid = ++pidSeq;
+
+  // A HEALTHY-but-slow trigger subagent: no comment yet (commentSent=false) and
+  // already past its TTL, so #sweep's TTL branch reaps it.
+  const record = {
+    pid: child.pid,
+    kind: 'trigger',
+    cli_type: 'claude',
+    trigger_id: 'trig-slow',
+    chat_request_id: null,
+    ticket_id: 'ticket-slow',
+    agent_id: 'agent-slow',
+    role: 'assignee',
+    room_id: null,
+    started_at: Date.now() - 60_000,
+    expected_completion_at: Date.now() - 1_000, // already past TTL
+    config_path: null,
+    config_path_is_temp: false,
+    process_handle: child,
+    captureOutput: false,
+    outLines: [],
+    tailLines: [],
+    commentSent: false,
+    tap: null,
+  };
+
+  // Stub process.kill so the sweep liveness-probe (signal 0) reports ALIVE — so
+  // the TTL branch runs, not the ESRCH-cleanup branch — and SIGTERM/SIGKILL are
+  // captured, never delivered to the fake pid. Delegate every other pid to the
+  // real implementation.
+  const originalKill = process.kill;
+  const realKill = originalKill.bind(process);
+  const killed = [];
+  process.kill = (pid, sig) => {
+    if (pid === child.pid) {
+      killed.push(sig);
+      return true;
+    }
+    return realKill(pid, sig);
+  };
+  // Mock only setTimeout so the 5s SIGKILL-grace timer #sweep schedules neither
+  // fires nor keeps the test process alive.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  try {
+    mgr._trackForTest(record);
+    assert.ok(
+      mgr._snapshot().some((r) => r.pid === child.pid),
+      'record is tracked before the sweep',
+    );
+
+    mgr._sweepNow();
+
+    // Drop-first proven: the record is gone from #map synchronously, BEFORE the
+    // exit event — which is exactly what makes the exit handler early-return.
+    assert.equal(
+      mgr._snapshot().some((r) => r.pid === child.pid),
+      false,
+      '#sweep dropped the record from #map before the exit lands',
+    );
+    assert.ok(
+      killed.includes('SIGTERM'),
+      'the TTL branch SIGTERM-reaped the pid (proves the TTL branch ran, not ESRCH-cleanup)',
+    );
+
+    // Now the SIGTERM lands: a signal death reports code=null.
+    child.emit('exit', null, 'SIGTERM');
+    await new Promise((r) => setImmediate(r)); // flush the async exit handler
+
+    // Gating proven: the exit handler found no record (dropped) and
+    // early-returned, so _handleOneshotExit never ran → breaker untouched, no
+    // false pend, no silent-exit fallback.
+    assert.equal(cb.size, 0, 'a TTL idle-timeout SIGTERM is NOT counted toward the breaker');
+    assert.equal(cb.shouldBlock(key), null, 'breaker stays closed after a TTL reap');
+    assert.equal(mcpToolCalls.includes('pend_ticket'), false, 'no false pend from a TTL reap');
+    assert.equal(silentExit(), undefined, 'no silent-exit fallback for a TTL reap');
+  } finally {
+    process.kill = originalKill;
+    t.mock.timers.reset();
+  }
 });
