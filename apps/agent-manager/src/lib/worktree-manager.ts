@@ -60,7 +60,7 @@
 // that case (and rely on the dispatch-level serialization for safety).
 
 import { promises as fsp } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join, resolve as pathResolve } from 'node:path';
 import { execFile } from 'node:child_process';
 import { log } from './logging.js';
 
@@ -379,14 +379,21 @@ export class WorktreeManager {
     repo: ResolveCwdArgs['bootstrapRepo'],
   ): Promise<void> {
     if (!repo?.credential?.token || !/^https?:\/\//i.test(repo.url || '')) return;
-    const gitDirResult = await git(baseWorkingDir, ['rev-parse', '--git-dir']);
+    const gitDirResult = await git(baseWorkingDir, ['rev-parse', '--absolute-git-dir']);
     if (!gitDirResult.ok) return;
-    const credentialFile = join(gitDirResult.stdout.trim(), 'awb-credentials');
+    const rawGitDir = gitDirResult.stdout.trim();
+    // credential.helper runs in the cwd of each future git invocation. A
+    // relative `.git/awb-credentials` therefore works in the primary checkout
+    // but breaks inside `.awb/wt/<ticket>` where `.git` is a pointer file.
+    // Persist an absolute path shared by the primary checkout and all linked
+    // worktrees so agent-run fetch/pull/push always use the Resource token.
+    const absoluteGitDir = isAbsolute(rawGitDir) ? rawGitDir : pathResolve(baseWorkingDir, rawGitDir);
+    const credentialFile = join(absoluteGitDir, 'awb-credentials');
     const u = new URL(repo.url.trim());
     u.username = repo.credential.username || 'x-access-token';
     u.password = repo.credential.token;
     await fsp.writeFile(credentialFile, `${u.toString()}\n`, { mode: 0o600 });
-    await git(baseWorkingDir, ['config', 'credential.helper', `store --file=${credentialFile}`]);
+    await git(baseWorkingDir, ['config', 'credential.helper', `store --file=${JSON.stringify(credentialFile)}`]);
   }
 
   /**

@@ -144,6 +144,36 @@ test('bootstrap never overwrites a non-empty non-git working_dir', async () => {
   }
 });
 
+test('repository credential helper uses one absolute store across ticket worktrees', async () => {
+  const source = await makeRepoWithRemote();
+  try {
+    const wm = new WorktreeManager();
+    const result = await wm.resolveCwd({
+      baseWorkingDir: source.repo,
+      ticketId: TICKET_A,
+      role: 'assignee',
+      bootstrapRepo: {
+        url: 'https://github.com/acme/private.git',
+        branch: 'main',
+        credential: { username: 'x-access-token', token: 'github-secret' },
+      },
+    });
+    assert.ok(result.isWorktree);
+
+    const helperFromBase = git(source.repo, ['config', '--get', 'credential.helper']);
+    const helperFromWorktree = git(result.cwd, ['config', '--get', 'credential.helper']);
+    assert.equal(helperFromWorktree, helperFromBase);
+    assert.match(helperFromBase, /^store --file="[/\\].+awb-credentials"$/);
+
+    const match = helperFromBase.match(/^store --file="(.+)"$/);
+    assert.ok(match);
+    const stored = await fsp.readFile(match[1], 'utf8');
+    assert.match(stored, /^https:\/\/x-access-token:github-secret@github\.com\/acme\/private\.git\/?$/m);
+  } finally {
+    await source.cleanup();
+  }
+});
+
 // ── placement: everything lands under <working_dir>/.awb/wt/ ─────────────────
 
 test('per_ticket: worktrees land under .awb/wt/<ticket8>, distinct per ticket', async () => {
