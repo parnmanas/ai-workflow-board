@@ -503,3 +503,52 @@ test('gating regression (ticket c555fbb6): a #sweep TTL idle-timeout is dropped 
     t.mock.timers.reset();
   }
 });
+
+test('shutdown regression (ticket 8436f96f): stop() drops children BEFORE SIGTERM → NOT counted', async (t) => {
+  const cb = new CircuitBreaker();
+  const mgr = new SubagentManager(makeConfig(), cb);
+  const key = CircuitBreaker.key('agent-shutdown', 'ticket-shutdown', 'assignee');
+  const child = new EventEmitter();
+  child.pid = ++pidSeq;
+  const killed = [];
+  const originalKill = process.kill;
+  const realKill = originalKill.bind(process);
+  process.kill = (pid, sig) => {
+    if (pid === child.pid) {
+      killed.push(sig);
+      return true;
+    }
+    return realKill(pid, sig);
+  };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  try {
+    mgr._trackForTest({
+      ...makeCodexRecord({
+        pid: child.pid,
+        agent_id: 'agent-shutdown',
+        ticket_id: 'ticket-shutdown',
+        process_handle: child,
+        commentSent: false,
+      }),
+    });
+
+    const stopping = mgr.stop();
+    assert.equal(mgr._snapshot().length, 0, 'stop dropped the record before waiting for SIGTERM exit');
+    assert.deepEqual(killed, ['SIGTERM'], 'stop sent SIGTERM after dropping the record');
+
+    child.emit('exit', null, 'SIGTERM');
+    await new Promise((r) => setImmediate(r));
+    assert.equal(cb.size, 0, 'shutdown SIGTERM was not counted toward the breaker');
+    assert.equal(cb.shouldBlock(key), null, 'breaker stayed closed during manager shutdown');
+    assert.equal(mcpToolCalls.includes('pend_ticket'), false, 'shutdown did not falsely pend the ticket');
+    assert.equal(silentExit(), undefined, 'shutdown emitted no silent-exit fallback');
+
+    t.mock.timers.tick(60_000);
+    await stopping;
+    assert.deepEqual(killed, ['SIGTERM', 'SIGKILL'], 'stop retained its grace-period escalation');
+  } finally {
+    process.kill = originalKill;
+    t.mock.timers.reset();
+  }
+});
