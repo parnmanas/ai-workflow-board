@@ -1113,7 +1113,7 @@ export class SubagentManager implements SubagentManagerContract {
             if (record.outLines.length < 10000) record.outLines.push(line);
           }
           this.#bufferTail(record, line);
-          this.#scanForCommentTool(record, line);
+          this._scanForCommentTool(record, line);
         }
         log(`${tagFor(record)} ${line}`);
       });
@@ -1149,12 +1149,10 @@ export class SubagentManager implements SubagentManagerContract {
     while (record.tailLines.length > TAIL_RING_MAX_LINES) record.tailLines.shift();
   }
 
-  /** Watch parsed stream-json lines for tool_use blocks whose name is one
-   *  of the comment-creating MCP tools. Marks `record.commentSent` true on
-   *  the first match. Best-effort: malformed JSON / non-Claude adapters
-   *  fall through silently and the silent-exit fallback still runs based
-   *  on exit code alone. */
-  #scanForCommentTool(record: SubagentRecord, line: string): void {
+  /** Watch parsed JSONL for successful Claude or Codex MCP calls that create
+   *  ticket comments. Kept as a test seam because a missed event causes a
+   *  misleading system fallback comment after otherwise successful work. */
+  _scanForCommentTool(record: SubagentRecord, line: string): void {
     if (record.commentSent) return;
     const trimmed = line.trim();
     if (!trimmed.startsWith('{')) return;
@@ -1164,13 +1162,22 @@ export class SubagentManager implements SubagentManagerContract {
     } catch {
       return;
     }
-    if (parsed?.type !== 'assistant') return;
-    const content = parsed?.message?.content;
-    if (!Array.isArray(content)) return;
-    for (const block of content) {
-      if (block?.type !== 'tool_use' || typeof block.name !== 'string') continue;
-      for (const suffix of TICKET_COMMENT_TOOL_SUFFIXES) {
-        if (block.name.endsWith(suffix)) {
+    const isCommentTool = (name: unknown): boolean =>
+      typeof name === 'string' && TICKET_COMMENT_TOOL_SUFFIXES.some((suffix) => name.endsWith(suffix));
+
+    if (parsed?.type === 'item.completed' && parsed?.item?.type === 'mcp_tool_call') {
+      const item = parsed.item;
+      if (item.server === 'awb' && item.error == null && isCommentTool(item.tool ?? item.name)) {
+        record.commentSent = true;
+      }
+      return;
+    }
+
+    if (parsed?.type === 'assistant') {
+      const content = parsed?.message?.content;
+      if (!Array.isArray(content)) return;
+      for (const block of content) {
+        if (block?.type === 'tool_use' && isCommentTool(block.name)) {
           record.commentSent = true;
           return;
         }

@@ -579,7 +579,8 @@ async function runRuntime(
       // the operator re-auths on the host, and rehydrate is the only
       // post-spawn point we know we'll hit before the next subagent
       // fork. Failures here are logged but non-fatal — the CLI itself
-      // will surface a clearer auth error if the symlink is broken.
+      // will surface a clearer auth error if the symlink is broken. Codex is
+      // stricter: native MCP config failures skip rehydration below.
       //
       // Per-agent credential is read from the on-disk snapshot rather
       // than re-fetched from AWB. Restart-time fetch would block boot on
@@ -602,7 +603,16 @@ async function runRuntime(
         );
         extraEnv = prep?.extraEnv ?? {};
       } catch (err: any) {
-        log(`rehydrate: cli-home prep failed for agent=${id.slice(0, 8)} cli=${cfg.cli}: ${err?.message ?? err}`);
+        const detail = `rehydrate: cli-home prep failed for agent=${id.slice(0, 8)} cli=${cfg.cli}: ${err?.message ?? err}`;
+        log(detail);
+        if (cfg.cli === 'codex') {
+          // Codex loads AWB exclusively from this native config. Do not route
+          // events to an agent that cannot satisfy its required MCP contract.
+          managedAgents.upsert({ agent_id: id, name: cfg.name, cli: cfg.cli, working_dir: cfg.working_dir });
+          managedAgents.markStopped(id, detail);
+          skipped++;
+          continue;
+        }
       }
       // Mirror the spawn-time `credential_kind` mapping (see
       // agent-manager-commands.ts → credentialKind). Rehydrate uses the

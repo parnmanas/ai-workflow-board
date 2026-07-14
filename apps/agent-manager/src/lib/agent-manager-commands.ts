@@ -410,8 +410,8 @@ export class AgentManagerCommandHandler {
       // Pass AWB URL + per-agent apiKey so adapters that consume MCP
       // servers via a static config file (antigravity → mcp_config.json) can
       // persist the `awb` server into cli-home at spawn_agent time.
-      // Claude / Codex ignore this and keep using `--mcp-config` for
-      // per-spawn role-pinning.
+      // Codex treats the generated native config as required; the catch
+      // branch below aborts registration if materialization fails.
       const prep = await createAdapter(cli).prepareCliHome(
         cliHomeDir,
         credential,
@@ -422,7 +422,12 @@ export class AgentManagerCommandHandler {
       );
       extraEnv = prep?.extraEnv ?? {};
     } catch (err: any) {
-      log(`spawn_agent: cli-home prep failed for agent=${agentId.slice(0, 8)} cli=${cli}: ${err?.message ?? err}`);
+      const detail = `spawn_agent: cli-home prep failed for agent=${agentId.slice(0, 8)} cli=${cli}: ${err?.message ?? err}`;
+      log(detail);
+      if (cli === 'codex') {
+        this.#deps.registry.markStopped(agentId, detail);
+        throw new Error(detail);
+      }
     }
 
     // 5. context registry — EventDispatcher reads this on every event

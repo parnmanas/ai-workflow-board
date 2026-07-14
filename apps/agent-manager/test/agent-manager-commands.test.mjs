@@ -121,3 +121,57 @@ test('refresh_mcp_config repairs an on-disk Codex agent before its context is re
   assert.equal(config.mcp_servers.awb.url, 'https://awb.disk.example/mcp');
   assert.ok(!configText.includes(apiKey));
 });
+
+test('spawn_agent rejects Codex when its required native MCP config cannot be prepared', async () => {
+  const agentId = 'codex-agent-invalid-config';
+  const apiKey = 'sk-invalid-config-secret';
+  await ensureCliHomeDir(agentId);
+  await writeApiKey(agentId, apiKey);
+  await fsp.writeFile(join(cliHomeDirFor(agentId), 'config.toml'), '[broken\n', 'utf8');
+
+  let record;
+  let markedRunning = false;
+  const registry = {
+    upsert(value) {
+      record = { ...value, status: 'stopped' };
+      return record;
+    },
+    markRunning() { markedRunning = true; },
+    markStopped(_id, reason) {
+      if (record) {
+        record.status = 'stopped';
+        record.last_error = reason;
+      }
+      return record;
+    },
+    setWorkingDir() {},
+    get() { return record; },
+  };
+  const handler = new AgentManagerCommandHandler(
+    { url: 'https://awb.spawn.example', apiKey: 'manager-key', delegation: {} },
+    {
+      getInstanceId: () => 'instance-1',
+      registry,
+      contextRegistry: { upsert() {}, get: () => null },
+    },
+  );
+
+  await handler.handle(JSON.stringify({
+    command_id: 'spawn-invalid-1',
+    instance_id: 'instance-1',
+    command: 'spawn_agent',
+    args: {
+      agent_id: agentId,
+      name: 'Broken Codex Agent',
+      cli: 'codex',
+      working_dir: tmpdir(),
+    },
+  }));
+
+  const ack = requests.find((request) => request.url.endsWith('/command/ack'));
+  assert.ok(ack);
+  assert.equal(JSON.parse(ack.init.body).status, 'error');
+  assert.equal(markedRunning, false, 'a Codex agent without required AWB MCP must not be marked running');
+  assert.equal(record.status, 'stopped');
+  assert.match(record.last_error, /cli-home prep failed/i);
+});

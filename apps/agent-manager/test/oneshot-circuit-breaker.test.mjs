@@ -74,6 +74,21 @@ function codexCleanLines(text) {
   ];
 }
 
+function codexMcpToolCompletedLine(tool) {
+  return JSON.stringify({
+    type: 'item.completed',
+    item: {
+      id: 'item-mcp-1',
+      type: 'mcp_tool_call',
+      server: 'awb',
+      tool,
+      arguments: { ticket_id: 'ticket-loop', content: 'work done' },
+      result: { content: [{ type: 'text', text: '{}' }] },
+      error: null,
+    },
+  });
+}
+
 let originalFetch;
 let mcpToolCalls; // names of tools/call invoked over /mcp
 let restPosts; // { url, body } for non-MCP REST endpoints
@@ -312,4 +327,16 @@ test('post-comment usage-limit (ticket 7e7e23bf): commentSent + non-retryable ta
 
   assert.equal(silentExit(), undefined, 'no silent-exit fallback — a comment was already surfaced');
   assert.ok(mcpToolCalls.includes('pend_ticket'), 'a hard external block still pends the ticket');
+});
+
+test('Codex native MCP add_comment completion suppresses the silent-exit fallback', async () => {
+  const mgr = new SubagentManager(makeConfig());
+  const rec = makeCodexRecord({ captureOutput: false, outLines: [], tailLines: [] });
+
+  mgr._scanForCommentTool(rec, codexMcpToolCompletedLine('add_comment'));
+  assert.equal(rec.commentSent, true, 'Codex mcp_tool_call completion counts as a persisted comment');
+
+  await mgr._handleOneshotExit(rec, 0);
+
+  assert.equal(silentExit(), undefined, 'no false system comment after Codex add_comment succeeds');
 });
