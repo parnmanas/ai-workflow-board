@@ -21,6 +21,7 @@ import { OUTPUT_LIVENESS_MIN_INTERVAL_MS } from './constants.js';
 import { CircuitBreaker } from './circuit-breaker.js';
 import { classifyCliError, isFallbackEligible } from './cli-error-signatures.js';
 import type {
+  DispatchReservation,
   TicketDispatchResult,
   TicketSessionManager as TicketSessionManagerContract,
   TicketTriggerArgs,
@@ -140,6 +141,47 @@ export class TicketSessionManager
     return `${ticketId}:${role || '_'}:${agentId || '_'}`;
   }
 
+  /** ticket 3d180f85 — authoritative provision-spanning single-flight.
+   *
+   *  `EventDispatcher.handleTrigger` calls this BEFORE it awaits worktree
+   *  provisioning, reserving the (ticket, role, agent) key in THIS manager's
+   *  AUTHORITATIVE `_inflight` map — the very registry `dispatchTrigger`
+   *  consults via `_getLiveSession`/`_inflight` right before spawning. So the
+   *  previously-unguarded provisioning window and the spawn window now share ONE
+   *  reservation in one pid-checked registry (no parallel process-local map),
+   *  and the hand-off to the spawn is atomic: the reservation is held
+   *  continuously from before provisioning until the dispatcher releases it
+   *  after the spawn outcome (with `dispatchTrigger({dispatchReserved:true})`
+   *  deferring `_inflight` ownership to the dispatcher).
+   *
+   *  Decision order (synchronous compare-and-set — no `await`, so it cannot
+   *  interleave with another dispatch under Node's single thread):
+   *   - a LIVE session already exists → `{acquired:true, live:true}`: proceed and
+   *     reuse it (a concurrent follow-up turn is allowed, matching the existing
+   *     reuse path); NO reservation placed, so the dispatcher must not release.
+   *   - a fresh spawn is already in flight (`_inflight.has`) → `{acquired:false}`:
+   *     the caller SUPPRESSES the twin.
+   *   - otherwise → reserve `_inflight[key]` and `{acquired:true, live:false}`. */
+  tryReserveDispatch(ticketId: string, role: string, agentId: string): DispatchReservation {
+    const key = this.#makeKey(ticketId, role || '', agentId || '');
+    // Live first: once a session is registered, a concurrent trigger should
+    // REUSE it (follow-up turn), not be dropped as a twin.
+    if (this._getLiveSession(key)) return { acquired: true, live: true };
+    // A fresh spawn (or an earlier provisioning reservation) already holds the
+    // key → this concurrent trigger is the twin; suppress it.
+    if (this._inflight.has(key)) return { acquired: false, live: false };
+    // Free → claim the whole provision→spawn window in the authoritative map.
+    this._inflight.set(key, { agentId: agentId || '', ticketId });
+    return { acquired: true, live: false };
+  }
+
+  /** Release a provisioning reservation placed by tryReserveDispatch
+   *  (`live===false`). Idempotent; only clears the `_inflight` reservation, never
+   *  a live `_sessions` entry. */
+  releaseDispatch(ticketId: string, role: string, agentId: string): void {
+    this._inflight.delete(this.#makeKey(ticketId, role || '', agentId || ''));
+  }
+
   async dispatchTrigger(spec: TicketTriggerArgs): Promise<TicketDispatchResult> {
     if (!spec.ticketId) return { dispatched: false, reason: 'no_ticket' };
     const role = spec.role || '';
@@ -204,7 +246,11 @@ export class TicketSessionManager
       // that set is only forgotten on child exit / drop, never after a
       // successful spawn, so a sessionKey entry there would wrongly reject
       // every later follow-up trigger for a live session as a "duplicate".)
-      if (this._inflight.has(sessionKey)) {
+      // When dispatchReserved (ticket 3d180f85), THIS reservation is the
+      // provision-spanning slot the dispatcher already placed for us via
+      // tryReserveDispatch — finding it here is expected, not a twin, so we
+      // proceed to spawn rather than self-drop.
+      if (this._inflight.has(sessionKey) && !spec.dispatchReserved) {
         log(
           `[ticket-session] dispatch dropped (spawn already in-flight for same key): ticket=${spec.ticketId.slice(0, 8)} role=${role} agent=${(spec.agentId || '').slice(0, 8) || '_'}`,
         );
@@ -327,10 +373,16 @@ export class TicketSessionManager
     // this slot before _spawnSession lands a SessionRecord in _sessions.
     // Cleared after the spawn outcome is known (success or failure) — the
     // session itself takes over the cap accounting from that point.
-    this._inflight.set(sessionKey, {
-      agentId: spec.agentId || '',
-      ticketId: spec.ticketId,
-    });
+    // When dispatchReserved (ticket 3d180f85), the dispatcher already reserved
+    // this key for the whole provision→spawn window and owns its release — don't
+    // double-manage it here (a re-set + our finally's delete would drop the
+    // dispatcher's reservation early, re-opening the twin window).
+    if (!spec.dispatchReserved) {
+      this._inflight.set(sessionKey, {
+        agentId: spec.agentId || '',
+        ticketId: spec.ticketId,
+      });
+    }
 
     const firstTurnText = composeTriggerPrompt(
       spec.ticket,
@@ -418,8 +470,10 @@ export class TicketSessionManager
       }
     } finally {
       // Spawn outcome resolved and identity stamped — _sessions takes over
-      // cap accounting from here.
-      this._inflight.delete(sessionKey);
+      // cap accounting from here. When dispatchReserved, the dispatcher's
+      // finally releases the reservation instead (ticket 3d180f85), keeping the
+      // key held continuously across a persistent→one-shot fallthrough.
+      if (!spec.dispatchReserved) this._inflight.delete(sessionKey);
     }
     if (!spawned) {
       if (dedupKey) this._forgetDedup(dedupKey);

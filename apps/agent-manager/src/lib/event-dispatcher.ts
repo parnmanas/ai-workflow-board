@@ -25,7 +25,7 @@ import type { ManagedAgentContextRegistry } from './managed-agent-context.js';
 import type { WorktreeManager, WorktreeMode } from './worktree-manager.js';
 import { prepareChatAttachments } from './chat-attachment-prep.js';
 import { injectWorkFolder } from './prompts.js';
-import { DispatchBlockerTracker, RoleSpawnSuppressor, classifyWorktreeOutcome, managedWorktreePath, provisioningPendReason } from './dispatch-preflight.js';
+import { DispatchBlockerTracker, InflightDispatchTracker, RoleSpawnSuppressor, classifyWorktreeOutcome, managedWorktreePath, provisioningPendReason } from './dispatch-preflight.js';
 import type { HarnessSpec, ResolvedEffortPreset, EffortLevel } from './cli-adapters/base.js';
 import { createAdapter, ADAPTER_CAPABILITIES } from './cli-adapters/index.js';
 import {
@@ -487,6 +487,24 @@ export interface TicketTriggerArgs {
    *  injected into the spawned CLI's environment at SESSION CREATION. A live
    *  session keeps the env it was born with. Absent → none. */
   envVars?: Record<string, string>;
+  /** ticket 3d180f85: handleTrigger already reserved this (ticket, role, agent)
+   *  key in the authoritative `_inflight` map for the whole provision→spawn
+   *  window (via tryReserveDispatch). When true, dispatchTrigger must NOT
+   *  re-drop on its own `_inflight.has` self-check, nor set/delete `_inflight`
+   *  itself — the dispatcher owns that reservation's lifecycle. Absent/false →
+   *  legacy behavior (dispatchTrigger manages its own spawn-window reservation). */
+  dispatchReserved?: boolean;
+}
+
+/** Outcome of `TicketSessionManager.tryReserveDispatch` (ticket 3d180f85). */
+export interface DispatchReservation {
+  /** false → a fresh spawn for this exact key is already in flight (provisioning
+   *  or spawning); the caller suppresses the twin. true → proceed. */
+  acquired: boolean;
+  /** true → a live session already exists for the key (no reservation placed;
+   *  the dispatch will reuse it as a follow-up turn). false → the provisioning→
+   *  spawn reservation was just placed and the caller MUST release it. */
+  live: boolean;
 }
 
 export interface TicketDispatchResult {
@@ -498,6 +516,15 @@ export interface TicketDispatchResult {
 
 export interface TicketSessionManager {
   dispatchTrigger(args: TicketTriggerArgs): Promise<TicketDispatchResult>;
+  /** ticket 3d180f85 — authoritative provision-spanning single-flight. Reserve
+   *  the (ticket, role, agent) key in the SAME `_inflight` registry the spawn
+   *  consults, BEFORE provisioning, so a concurrent supervisor re-send during a
+   *  provisioning stall is suppressed instead of twin-spawning. Optional so a
+   *  minimal/legacy TicketSessionManager (or a test fake) that omits it makes
+   *  the dispatcher fall back to a process-local slot. */
+  tryReserveDispatch?(ticketId: string, role: string, agentId: string): DispatchReservation;
+  /** Release a reservation placed by tryReserveDispatch (live===false). Idempotent. */
+  releaseDispatch?(ticketId: string, role: string, agentId: string): void;
   /** targetAgentId — comment_mention 이벤트의 수신 agent(per-agent 스코프).
    *  식별되면 그 agent 의 세션에만 주입하고, 라이브 세션이 없으면 false 를
    *  반환해 one-shot 스폰 경로를 살린다(멘션 swallow/오배달 방지, T7 리뷰 #3). */
@@ -576,6 +603,11 @@ export interface EventDispatcherDeps {
   managedAgentContexts?: ManagedAgentContextRegistry | null;
   // Required ticket checkout manager. Missing provisioning is fail-closed.
   worktreeManager?: WorktreeManager | null;
+  // ticket 3d180f85 — shared provision-spanning single-flight coordinator.
+  // Injected as a singleton (like circuitBreaker) so main.ts can read its
+  // suppression-reason metric for the instance heartbeat. Omitted → the
+  // dispatcher makes its own (fine for tests that don't inspect the metric).
+  inflightDispatchTracker?: InflightDispatchTracker | null;
 }
 
 export class EventDispatcher {
@@ -603,6 +635,22 @@ export class EventDispatcher {
   // always pass and a green preflight re-arms it. This is what actually stops
   // the repeated spawn/provision churn; the abort alone only skips the spawn.
   readonly #spawnSuppressor = new RoleSpawnSuppressor();
+  // ticket 3d180f85: provision-spanning single-flight coordinator. handleTrigger
+  // reserves the (ticket, role, agent) key in the AUTHORITATIVE
+  // TicketSessionManager._inflight registry (via tryReserveDispatch) BEFORE
+  // worktree provisioning and releases it after the spawn outcome, so a
+  // concurrent supervisor re-send during a provisioning stall is suppressed
+  // instead of twin-spawning past the spawn-window guards. This tracker owns the
+  // process-local fallback slot (persistent sessions off), the suppression-reason
+  // metric surfaced on the instance heartbeat, and the suppressed-force-respawn
+  // intent replayed once on release.
+  readonly #inflightDispatch: InflightDispatchTracker;
+  /** Per-reason dispatch-suppression counts for the instance-heartbeat metric
+   *  (ticket 3d180f85, mirrors circuitBreaker → open_breaker_count). Empty when
+   *  nothing has been suppressed. */
+  dispatchSuppressionCounts(): Record<string, number> {
+    return this.#inflightDispatch.suppressionCounts();
+  }
   // ticket e9d0e8bc: folder-keyed run-lifetime lock. One per manager process
   // (this dispatcher is a singleton), so it serializes same-scenario QA/security
   // runs across the whole provision→execute window. Keyed by the absolute run
@@ -619,6 +667,7 @@ export class EventDispatcher {
     this.#agentManagerCommandHandler = deps.agentManagerCommandHandler ?? null;
     this.#managedAgentContexts = deps.managedAgentContexts ?? null;
     this.#worktreeManager = deps.worktreeManager ?? null;
+    this.#inflightDispatch = deps.inflightDispatchTracker ?? new InflightDispatchTracker();
   }
 
   /**
@@ -993,6 +1042,139 @@ export class EventDispatcher {
       return;
     }
 
+    // ── ticket 3d180f85: provision-spanning single-flight gate ──
+    // Reserve the (ticket, role, agent) key BEFORE the worktree provisioning in
+    // #dispatchTriggerBody (the previously-unguarded window). A concurrent
+    // same-key trigger — a supervisor re-send arriving while the first dispatch
+    // is still provisioning/spawning — is suppressed here instead of double-
+    // provisioning and twin-spawning past the spawn-window guards. The
+    // reservation lives in the AUTHORITATIVE TicketSessionManager._inflight
+    // registry (the same pid-checked map the spawn consults) when persistent
+    // ticket sessions are on — the default and the config the twin incident was
+    // observed under; a process-local fallback slot covers the persistent-off
+    // (one-shot-only) config, whose spawn authority is findDuplicateSpawn.
+    const dispatchAgentId = ev.actor_name || '';
+    const inflightKey =
+      typeof ev.ticket_id === 'string' && ev.ticket_id
+        ? InflightDispatchTracker.key(ev.ticket_id, ev.action || '', dispatchAgentId)
+        : null;
+    const delegationCfg = (this.#config as any)?.delegation ?? {};
+    const canAuthoritative =
+      delegationCfg.enabled !== false &&
+      delegationCfg.persistentTicketSessions !== false &&
+      typeof this.#ticketSessionManager?.tryReserveDispatch === 'function';
+    let reservation: DispatchReservation | null = null;
+    if (inflightKey) {
+      if (canAuthoritative) {
+        reservation = this.#ticketSessionManager!.tryReserveDispatch!(
+          ev.ticket_id,
+          ev.action || '',
+          dispatchAgentId,
+        );
+      } else {
+        const acq = this.#inflightDispatch.tryAcquireFallback(inflightKey, {
+          ticketId: ev.ticket_id,
+          role: ev.action || '',
+          agentId: dispatchAgentId,
+        });
+        reservation = { acquired: acq.acquired, live: false };
+      }
+      if (!reservation.acquired) {
+        // A fresh spawn for this exact key is already provisioning/spawning →
+        // this is the twin. Bump the reason metric, capture a force-respawn
+        // intent to replay (blocker #1), and post at most one throttled note.
+        const isForce = ev.force_respawn === true;
+        const { surface } = this.#inflightDispatch.recordSuppression(
+          'inflight_dispatch',
+          inflightKey,
+          { force: isForce },
+        );
+        log(
+          `[dispatch] twin suppressed (inflight_dispatch): another dispatch is already ` +
+            `provisioning/spawning ticket=${ev.ticket_id.slice(0, 8)} role=${ev.action || '_'} ` +
+            `agent=${dispatchAgentId.slice(0, 8) || '_'} force_respawn=${isForce} ` +
+            `(suppressed_total=${this.#inflightDispatch.suppressedCount()})`,
+        );
+        if (surface) {
+          // Plain note (no @mention) → never re-triggers an agent. Throttled by
+          // the tracker to one post per storm-burst so a supervisor re-send
+          // flood doesn't spam the ticket.
+          fireAndForgetTool(this.#config, 'add_comment', {
+            ticket_id: ev.ticket_id,
+            content:
+              '⚠️ **중복 dispatch 억제 (동일 ticket-role live twin 방지)** — 이미 이 ' +
+              '(ticket, role) 에 대한 dispatch 가 프로비저닝/spawn 진행 중이라, ' +
+              'supervisor 재시도로 도착한 새 트리거를 spawn 전에 억제했습니다. ' +
+              '진행 중인 dispatch 가 세션을 새로 만들거나 재사용하며, 억제된 ' +
+              'force-respawn 요청은 완료 직후 1회 재실행됩니다. (ticket 3d180f85)',
+          });
+        }
+        return;
+      }
+    }
+    // We placed a reservation to release only when live===false (a fresh spawn);
+    // a live reuse placed nothing.
+    const reservedFresh = !!reservation && reservation.acquired && !reservation.live;
+    try {
+      await this.#dispatchTriggerBody(
+        ev,
+        agentContext,
+        envConfig,
+        canAuthoritative && reservedFresh,
+      );
+    } finally {
+      if (inflightKey) {
+        if (reservedFresh) {
+          if (canAuthoritative) {
+            this.#ticketSessionManager!.releaseDispatch!(ev.ticket_id, ev.action || '', dispatchAgentId);
+          } else {
+            this.#inflightDispatch.releaseFallback(inflightKey);
+          }
+        }
+        // Re-arm activity surfacing and replay a single suppressed force-respawn
+        // (blocker #1): a force_respawn that arrived while this dispatch held the
+        // slot had its fresh-session intent suppressed, and the server may not
+        // re-send it (a prior dispatch refreshing the live session can clear the
+        // stale supervisor condition). Replay it exactly once now, coalescing a
+        // whole burst into one fresh respawn. Re-parse the ORIGINAL raw (ev was
+        // mutated in the body) so the replayed event is clean.
+        const { pendingForceRespawn } = this.#inflightDispatch.onRelease(inflightKey);
+        if (pendingForceRespawn) {
+          log(
+            `[dispatch] replaying suppressed force_respawn after holder released: ` +
+              `ticket=${ev.ticket_id.slice(0, 8)} role=${ev.action || '_'}`,
+          );
+          let forcedRaw: string | null = null;
+          try {
+            forcedRaw = JSON.stringify({ ...JSON.parse(raw), force_respawn: true });
+          } catch {
+            forcedRaw = null;
+          }
+          if (forcedRaw) {
+            // Fire-and-forget so we don't extend this finally; the replay re-enters
+            // handleTrigger cleanly (re-acquires the slot, force-respawns fresh).
+            this.handleTrigger(forcedRaw).catch((err: any) =>
+              log(`[dispatch] force_respawn replay failed: ${err?.message ?? err}`),
+            );
+          }
+        }
+      }
+    }
+  }
+
+  /** Provision → spawn body of a ticket trigger (ticket 3d180f85), run under the
+   *  single-flight reservation handleTrigger acquired. Split out so one
+   *  try/finally in handleTrigger straddles the whole provisioning window —
+   *  every `return` / `throw` in here releases the slot. `dispatchReserved` is
+   *  true when handleTrigger holds the authoritative `_inflight` reservation for
+   *  this key, so the persistent dispatchTrigger below must defer `_inflight`
+   *  ownership to the dispatcher. */
+  async #dispatchTriggerBody(
+    ev: any,
+    agentContext: AgentExecutionContext | undefined,
+    envConfig: ResolvedEnvironmentConfig | null,
+    dispatchReserved: boolean,
+  ): Promise<void> {
     // ticket 9f26f091: route this ticket into its own git worktree so a branch
     // switch here can't contaminate another ticket sharing the agent's
     // working_dir. worktree 규약 ②: the worktree lands under
@@ -1205,6 +1387,11 @@ export class EventDispatcher {
           columnPrompt,
           ticket,
           forceRespawn: ev.force_respawn === true,
+          // ticket 3d180f85: handleTrigger holds the authoritative _inflight
+          // reservation for this key across the whole provision→spawn window;
+          // tell dispatchTrigger to defer _inflight ownership so it neither
+          // self-drops on its own reservation nor releases it early.
+          dispatchReserved,
           triggerSource: ev.trigger_source || '',
           agentContext,
           harness,
