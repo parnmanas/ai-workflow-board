@@ -103,7 +103,7 @@ test('worktreesRootFor is always <working_dir>/.awb/wt', () => {
   assert.equal(worktreesRootFor('/x/y/z'), join('/x/y/z', '.awb', 'wt'));
 });
 
-test('empty working_dir is bootstrapped from the resolved repository before worktree creation', async () => {
+test('empty non-git working_dir keeps its container root and clones under .awb', async () => {
   const source = await makeRepoWithRemote();
   const workingDir = join(source.root, 'empty-agent-dir');
   try {
@@ -115,15 +115,18 @@ test('empty working_dir is bootstrapped from the resolved repository before work
       role: 'assignee',
       bootstrapRepo: { url: source.remote, branch: 'main' },
     });
-    assert.ok(result.isWorktree, 'bootstrap continues into ticket worktree creation');
-    assert.equal(git(workingDir, ['remote', 'get-url', 'origin']), source.remote);
+    assert.ok(result.isWorktree, 'container clone continues into ticket worktree creation');
+    assert.equal(result.worktreePath, join(workingDir, '.awb', 'wt', 'aaaaaaaa'));
+    assert.equal(git(join(workingDir, '.awb', 'base'), ['remote', 'get-url', 'origin']), source.remote);
+    assert.equal(existsSync(join(workingDir, '.git')), false);
+    assert.throws(() => git(workingDir, ['status', '--short']), /not a git repository/);
     assert.equal(await fsp.readFile(join(result.cwd, 'README.md'), 'utf8'), '# base\n');
   } finally {
     await source.cleanup();
   }
 });
 
-test('bootstrap never overwrites a non-empty non-git working_dir', async () => {
+test('non-empty non-git working_dir provisions below .awb without touching container files', async () => {
   const source = await makeRepoWithRemote();
   const workingDir = join(source.root, 'occupied-agent-dir');
   try {
@@ -136,9 +139,24 @@ test('bootstrap never overwrites a non-empty non-git working_dir', async () => {
       role: 'assignee',
       bootstrapRepo: { url: source.remote, branch: 'main' },
     });
-    assert.equal(result.isWorktree, false);
-    assert.equal(result.reason, 'not_a_git_repo');
+    assert.equal(result.isWorktree, true);
+    assert.equal(result.worktreePath, join(workingDir, '.awb', 'wt', 'aaaaaaaa'));
+    assert.equal(existsSync(join(workingDir, '.git')), false, 'container root never becomes a repository');
     assert.equal(await fsp.readFile(join(workingDir, 'keep.txt'), 'utf8'), 'user data\n');
+    assert.equal(git(join(workingDir, '.awb', 'base'), ['remote', 'get-url', 'origin']), source.remote);
+
+    git(result.cwd, ['config', 'user.email', 'test@awb.local']);
+    git(result.cwd, ['config', 'user.name', 'AWB Test']);
+    git(result.cwd, ['switch', '-q', '-c', 'ticket/container-bootstrap']);
+    await fsp.writeFile(join(result.cwd, 'ticket.txt'), 'container worktree\n');
+    git(result.cwd, ['add', 'ticket.txt']);
+    git(result.cwd, ['commit', '-q', '-m', 'ticket change']);
+    git(result.cwd, ['push', '-q', '-u', 'origin', 'ticket/container-bootstrap']);
+    assert.equal(
+      git(source.remote, ['rev-parse', 'refs/heads/ticket/container-bootstrap']),
+      git(result.cwd, ['rev-parse', 'HEAD']),
+      'commit created in the ticket worktree reaches origin',
+    );
   } finally {
     await source.cleanup();
   }

@@ -54,10 +54,10 @@
 // (`.awb/wt/<slug>/gameclient/txiv`). resolveCwd returns that real work dir as
 // `cwd` and exposes the subpath separately (ticket ④ injects it into prompts).
 //
-// Fallback: when the base working_dir is not a git repo, or `git worktree`
-// fails (unsupported/old git, disk error), resolveCwd returns the shared base
-// cwd with isWorktree=false. Callers keep the legacy single-cwd behavior in
-// that case (and rely on the dispatch-level serialization for safety).
+// A non-git working_dir is a supported container: its repository is cloned at
+// `<working_dir>/.awb/base`, leaving the container root untouched. Fallback is
+// reserved for missing repository metadata or `git worktree` failures
+// (unsupported/old git, disk error).
 
 import { promises as fsp } from 'node:fs';
 import { isAbsolute, join, resolve as pathResolve } from 'node:path';
@@ -248,9 +248,9 @@ export interface ResolveCwdArgs {
    *  Ignored in per_ticket mode. Absent / ≤0 → 1 (a single reused slot, i.e. the
    *  pre-pool behavior). */
   poolSize?: number;
-  /** Repository used to bootstrap an empty working_dir before creating the
-   *  ticket worktree. Dispatch resolves this as ticket repo first, then the
-   *  board environment's first repository. */
+  /** Repository cloned under a non-git working_dir before creating the ticket
+   *  worktree. Dispatch resolves this as ticket repo first, then the board
+   *  environment's first repository. */
   bootstrapRepo?: {
     resourceId?: string;
     url: string;
@@ -303,7 +303,7 @@ export class WorktreeManager {
    *  it, so different tickets remain fully concurrent after their cwd exists. */
   #provisionLocks = new Map<string, Promise<unknown>>();
   /** Serialize first-clone attempts for agents sharing one working_dir. */
-  #bootstrapLocks = new Map<string, Promise<boolean>>();
+  #bootstrapLocks = new Map<string, Promise<string | null>>();
 
   constructor(opts: {
     enabled?: boolean;
@@ -355,22 +355,22 @@ export class WorktreeManager {
     return r.ok && r.stdout.trim() === 'true';
   }
 
-  async #bootstrapEmptyWorkingDir(
+  async #bootstrapContainerRepo(
     baseWorkingDir: string,
     repo: ResolveCwdArgs['bootstrapRepo'],
-  ): Promise<boolean> {
-    if (!repo?.url?.trim()) return false;
+  ): Promise<string | null> {
+    if (!repo?.url?.trim()) return null;
     const key = baseWorkingDir;
     const active = this.#bootstrapLocks.get(key);
     if (active) return active;
     const run = (async () => {
-      if (await this.#isGitWorkTree(baseWorkingDir)) return true;
       await fsp.mkdir(baseWorkingDir, { recursive: true });
-      const entries = await fsp.readdir(baseWorkingDir);
-      if (entries.length > 0) {
-        log(`[worktree] cannot bootstrap non-empty non-git working_dir: ${baseWorkingDir}`);
-        return false;
+      const cloneDir = join(baseWorkingDir, '.awb', 'base');
+      if (await this.#isGitWorkTree(cloneDir)) {
+        await this.#installRepoCredential(cloneDir, repo);
+        return cloneDir;
       }
+      await fsp.mkdir(join(baseWorkingDir, '.awb'), { recursive: true });
       const branch = (repo.branch || '').trim();
       const cleanUrl = repo.url.trim();
       let cloneUrl = cleanUrl;
@@ -380,7 +380,7 @@ export class WorktreeManager {
         u.password = repo.credential.token;
         cloneUrl = u.toString();
       }
-      const cloneArgs = ['clone', ...(branch ? ['--branch', branch] : []), '--', cloneUrl, baseWorkingDir];
+      const cloneArgs = ['clone', ...(branch ? ['--branch', branch] : []), '--', cloneUrl, cloneDir];
       const cloned = await new Promise<GitResult>((resolve) => {
         execFile(
           'git',
@@ -394,16 +394,16 @@ export class WorktreeManager {
         );
       });
       if (!cloned.ok) {
-        log(`[worktree] working_dir bootstrap clone failed: ${cloned.stderr.replace(cloneUrl, cleanUrl).trim()}`);
-        return false;
+        log(`[worktree] container base clone failed: ${cloned.stderr.replace(cloneUrl, cleanUrl).trim()}`);
+        return null;
       }
       // Never leave the token embedded in origin. Persist it in the checkout's
       // private credential-store file so later fetch/push from ticket worktrees
       // authenticate without exposing it in `git remote -v` or process args.
-      await git(baseWorkingDir, ['remote', 'set-url', 'origin', cleanUrl]);
-      await this.#installRepoCredential(baseWorkingDir, repo);
-      log(`[worktree] bootstrapped empty working_dir from ${repo.url}${branch ? ` branch=${branch}` : ''}: ${baseWorkingDir}`);
-      return true;
+      await git(cloneDir, ['remote', 'set-url', 'origin', cleanUrl]);
+      await this.#installRepoCredential(cloneDir, repo);
+      log(`[worktree] cloned container base from ${repo.url}${branch ? ` branch=${branch}` : ''}: ${cloneDir}`);
+      return cloneDir;
     })().finally(() => this.#bootstrapLocks.delete(key));
     this.#bootstrapLocks.set(key, run);
     return run;
@@ -541,17 +541,17 @@ export class WorktreeManager {
     // Both modes key a lease/slug on the ticket id, so it is required for either.
     if (!ticketId) return fallback('no_ticket');
 
-    if (!(await this.#isGitWorkTree(baseWorkingDir))) {
-      await this.#bootstrapEmptyWorkingDir(baseWorkingDir, args.bootstrapRepo);
-    }
-    if (!(await this.#isGitWorkTree(baseWorkingDir))) {
-      return fallback('not_a_git_repo');
-    }
+    const baseIsRepo = await this.#isGitWorkTree(baseWorkingDir);
+    const containerRepo = baseIsRepo
+      ? null
+      : await this.#bootstrapContainerRepo(baseWorkingDir, args.bootstrapRepo);
+    if (!baseIsRepo && !containerRepo) return fallback('not_a_git_repo');
+    const localBaseRepo = containerRepo ?? baseWorkingDir;
     // Existing checkouts need the Resource credential too; limiting this to
     // fresh clone would leave resumed/private-repo tickets unable to fetch.
-    await this.#installRepoCredential(baseWorkingDir, args.bootstrapRepo);
+    await this.#installRepoCredential(localBaseRepo, args.bootstrapRepo);
 
-    let provisioningBase = baseWorkingDir;
+    let provisioningBase = localBaseRepo;
     const resourceId = args.bootstrapRepo?.resourceId?.trim();
     const resourceSlug = resourceId?.replace(/[^A-Za-z0-9._-]/g, '_');
     const resourceRoot = resourceSlug
@@ -561,7 +561,7 @@ export class WorktreeManager {
     // owner alongside the resource-scoped checkout so a later dispatch from a
     // different agent clone asks the original repository to inspect/reattach
     // it instead of mistaking the existing directory for a path conflict.
-    if (mode === 'per_ticket' && resourceRoot) {
+    if (!containerRepo && mode === 'per_ticket' && resourceRoot) {
       const ownerPath = join(resourceRoot, '.repo-owner');
       try {
         const savedOwner = (await fsp.readFile(ownerPath, 'utf8')).trim();
@@ -587,13 +587,11 @@ export class WorktreeManager {
     const { repoRoot, workSubpath } = repoCtx;
     const withSub = (p: string) => (workSubpath ? join(p, workSubpath) : p);
 
-    // A per-ticket checkout must survive reassignment to another managed agent
-    // (and therefore another working_dir / CLI).  Repository resources are the
-    // stable identity shared by those dispatches, so keep their checkout under
-    // the manager home rather than under whichever agent happened to run first.
-    // Legacy triggers without a resource id retain the historical agent-local
-    // placement; explicit per_ticket dispatch rejects that omission upstream.
-    const worktreesRoot = mode === 'per_ticket' && resourceSlug
+    // Existing repo-backed agents keep resource-scoped placement so a ticket
+    // survives reassignment. Container working dirs deliberately keep both the
+    // base clone and ticket checkout below their own `.awb/` boundary; the
+    // container root must never become (or masquerade as) the repository.
+    const worktreesRoot = !containerRepo && mode === 'per_ticket' && resourceSlug
       ? join(this.#resourceWorktreesRoot, resourceSlug)
       : worktreesRootFor(baseWorkingDir);
 
@@ -603,9 +601,9 @@ export class WorktreeManager {
     // ── shared: lease a warm-pool slot (규약 ⑥) ─────────────────────────────
     if (mode === 'shared') {
       // Shared allocation has its own root-scoped registry mutex.
-      await this.prune(baseWorkingDir);
+      await this.prune(provisioningBase);
       return this.#acquireSharedSlot({
-        baseWorkingDir,
+        baseWorkingDir: provisioningBase,
         worktreesRoot,
         ticketId,
         role,
