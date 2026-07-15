@@ -71,6 +71,8 @@ export interface InstanceRecord {
   default_branch?: string | null;       // branch the checker is tracking ('main')
   update_last_checked_at?: string | null;
   update_last_error?: string | null;
+  // Live count reported by the manager's in-memory circuit breaker.
+  open_breaker_count?: number;
 }
 
 /**

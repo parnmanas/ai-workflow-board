@@ -36,6 +36,17 @@ import ManagedAgentDialog from './ManagedAgentDialog';
  */
 
 const REFRESH_FALLBACK_MS = 15_000;
+const RECENT_ERROR_WINDOW_MS = 10 * 60_000;
+
+function degradedReason(inst: AgentManagerInstance): string | null {
+  const breakerCount = inst.open_breaker_count ?? 0;
+  const errorAt = inst.last_error_upload_at ? new Date(inst.last_error_upload_at).getTime() : 0;
+  const recentError = Number.isFinite(errorAt) && errorAt > 0 && Date.now() - errorAt <= RECENT_ERROR_WINDOW_MS;
+  if (breakerCount > 0 && recentError) return `${breakerCount} open breaker(s); recent error upload`;
+  if (breakerCount > 0) return `${breakerCount} open circuit breaker(s)`;
+  if (recentError) return `recent error upload (${formatRelative(inst.last_error_upload_at)})`;
+  return null;
+}
 
 function formatRelative(ts: string | null | undefined): string {
   if (!ts) return '—';
@@ -237,6 +248,7 @@ interface InstanceRowProps {
 
 function InstanceRow({ inst, selected, onSelect }: InstanceRowProps) {
   const stale = Date.now() - new Date(inst.last_seen_at).getTime() > 60_000;
+  const degraded = degradedReason(inst);
   return (
     <button
       onClick={onSelect}
@@ -278,15 +290,23 @@ function InstanceRow({ inst, selected, onSelect }: InstanceRowProps) {
             {inst.agent_name || inst.hostname}
           </span>
         </div>
+        {degraded && (
+          <span
+            style={{ fontSize: 10, fontWeight: 700, color: tokens.colors.warning, textTransform: 'uppercase' }}
+            title={degraded}
+          >
+            degraded
+          </span>
+        )}
         <span
           style={{
             width: 8,
             height: 8,
             borderRadius: '50%',
-            background: stale ? tokens.colors.warning : tokens.colors.success,
+            background: stale || degraded ? tokens.colors.warning : tokens.colors.success,
             flexShrink: 0,
           }}
-          title={stale ? 'Heartbeat stale' : 'Heartbeating'}
+          title={stale ? 'Heartbeat stale' : degraded || 'Heartbeating'}
         />
       </div>
       <div style={{ marginTop: 4, fontSize: 11, color: tokens.colors.textMuted }}>
@@ -306,6 +326,7 @@ interface InstanceDetailProps {
 function InstanceDetail({ inst }: InstanceDetailProps) {
   const { showToast } = useToast();
   const confirm = useConfirm();
+  const degraded = degradedReason(inst);
   const [subagents, setSubagents] = useState<SubagentSummary[] | null>(null);
   const [logs, setLogs] = useState<any[] | null>(null);
   const [restartPending, setRestartPending] = useState(false);
@@ -492,6 +513,14 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
           <span style={{ fontSize: 12, color: tokens.colors.textMuted, fontFamily: 'monospace' }}>
             {inst.instance_id}
           </span>
+          {degraded && (
+            <span
+              style={{ fontSize: 11, fontWeight: 700, padding: '3px 8px', borderRadius: 4, color: tokens.colors.warning, background: tokens.colors.warningBg }}
+              title={degraded}
+            >
+              DEGRADED · {degraded}
+            </span>
+          )}
         </div>
         <dl
           style={{

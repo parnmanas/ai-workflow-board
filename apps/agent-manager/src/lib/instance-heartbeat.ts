@@ -57,6 +57,9 @@ export interface InstanceMeta {
   // means older servers see no change; newer ones render the "Live worktrees"
   // panel with the shared slot→task mapping.
   worktreeStatusProvider?: WorktreeStatusProvider | null;
+  // Per-tick count of currently-open dispatch circuit breakers. Kept as a
+  // provider so the heartbeat always reflects the live in-memory state.
+  openBreakerCountProvider?: (() => number) | null;
 }
 
 /** Tiny duck-typed read-only snapshot of ManagedAgentRegistry. */
@@ -155,6 +158,7 @@ export interface InstanceHeartbeatPayload {
   default_branch?: string | null;
   update_last_checked_at?: string | null;
   update_last_error?: string | null;
+  open_breaker_count?: number;
 }
 
 export class InstanceHeartbeat {
@@ -182,10 +186,17 @@ export class InstanceHeartbeat {
     const updateChecker = meta?.updateChecker ?? null;
     const credentialMetaProvider = meta?.agentCredentialMetaProvider ?? null;
     const worktreeStatusProvider = meta?.worktreeStatusProvider ?? null;
+    const openBreakerCountProvider = meta?.openBreakerCountProvider ?? null;
     this.#payloadFactory = async () => {
       const agentIds = managedSnapshot ? managedSnapshot.liveAgentIds() : [];
       const workingDirs = managedSnapshot ? managedSnapshot.workingDirs() : [];
       const updateStatus = updateChecker ? updateChecker.status() : null;
+      let openBreakerCount = 0;
+      try {
+        openBreakerCount = Math.max(0, Math.trunc(openBreakerCountProvider?.() ?? 0));
+      } catch (err: any) {
+        log(`Instance heartbeat: open-breaker provider failed: ${err?.message ?? err}`);
+      }
       // Best-effort: a provider that throws should never wedge the
       // heartbeat. Treat any failure as "no credentials this tick" and
       // let the next tick try again — the field is purely informational.
@@ -229,6 +240,7 @@ export class InstanceHeartbeat {
           : {}),
         ...(agentCredentials.length ? { agent_credentials: agentCredentials } : {}),
         ...(activeWorktrees.length ? { active_worktrees: activeWorktrees } : {}),
+        ...(openBreakerCountProvider ? { open_breaker_count: openBreakerCount } : {}),
         ...(updateStatus
           ? {
               latest_version: updateStatus.latest_version,
