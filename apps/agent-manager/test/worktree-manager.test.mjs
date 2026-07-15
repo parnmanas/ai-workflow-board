@@ -1085,3 +1085,75 @@ test('snapshotWorktrees: disabled manager and an empty .awb/wt root → [] (neve
     await cleanup();
   }
 });
+
+// ── dispatch preflight: worktree occupancy + push-credential readiness ───────
+// (ticket a3047a86)
+
+test('resolveCwd: a foreign directory occupying the ticket worktree path → path_conflict (never clobbers)', async () => {
+  // The per-ticket model's analog of "another ticket's dirty working folder":
+  // a non-worktree directory already sits at <working_dir>/.awb/wt/<ticket8>.
+  // The manager must refuse to clobber it and surface `path_conflict` so the
+  // dispatcher aborts instead of running the agent on a foreign checkout.
+  const { repo, cleanup } = await makeRepo();
+  try {
+    const wtPath = join(worktreesRootFor(repo), worktreeSlug(TICKET_A, 'per_ticket'));
+    await fsp.mkdir(wtPath, { recursive: true });
+    await fsp.writeFile(join(wtPath, 'stray.txt'), 'left behind by another ticket\n');
+    const wm = new WorktreeManager();
+    const r = await wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_A, role: 'assignee' });
+    assert.equal(r.isWorktree, false);
+    assert.equal(r.reason, 'path_conflict');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('verifyPushReadiness: no origin / non-https remote → ready (key/local auth, not this failure mode)', async () => {
+  const { repo, cleanup } = await makeRepo();
+  try {
+    const wm = new WorktreeManager();
+    assert.deepEqual(await wm.verifyPushReadiness(repo), { ok: true }, 'no origin remote → ready');
+    assert.deepEqual(
+      await wm.verifyPushReadiness(repo, 'git@github.com:example/repo.git'),
+      { ok: true },
+      'ssh remote → ready',
+    );
+    assert.deepEqual(
+      await wm.verifyPushReadiness(repo, '/srv/git/example.git'),
+      { ok: true },
+      'local path remote → ready',
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('verifyPushReadiness: disabled manager never blocks', async () => {
+  const { repo, cleanup } = await makeRepo();
+  try {
+    const wm = new WorktreeManager({ enabled: false });
+    assert.deepEqual(
+      await wm.verifyPushReadiness(repo, 'https://github.com/example/repo.git'),
+      { ok: true },
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('verifyPushReadiness: https, no resolvable credential, unreachable host → fails open (transient, never wedges)', async () => {
+  // With no repo-local credential.helper the check falls through to a live
+  // ls-remote probe. A reserved `.invalid` TLD makes git fail fast with a DNS
+  // error (NOT an auth error), which must be treated as transient → ready, so a
+  // network blip never wedges a ticket. (On a host that happens to carry an
+  // ambient credential.helper / token env the check short-circuits to ready
+  // before probing — same outcome, so this assertion holds either way.)
+  const { repo, cleanup } = await makeRepo();
+  try {
+    const wm = new WorktreeManager();
+    const r = await wm.verifyPushReadiness(repo, 'https://awb-nonexistent.invalid/example/repo.git');
+    assert.equal(r.ok, true);
+  } finally {
+    await cleanup();
+  }
+});

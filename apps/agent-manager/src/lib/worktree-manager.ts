@@ -65,8 +65,13 @@ import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { log } from './logging.js';
 import { AGENT_MANAGER_HOME } from './constants.js';
+import { decidePushReadiness, type PushReadinessDecision } from './dispatch-preflight.js';
 
 const GIT_TIMEOUT_MS = 20_000;
+// A non-interactive `git ls-remote` auth probe should fail fast (git prompts
+// are disabled), so a short timeout is a backstop against a hung askpass — well
+// under the git default so a network stall can't wedge a dispatch for long.
+const PUSH_PROBE_TIMEOUT_MS = 15_000;
 const PROVISION_LOCK_TIMEOUT_MS = 20_000;
 const PROVISION_LOCK_STALE_MS = 60_000;
 const PROVISION_LOCK_HEARTBEAT_MS = 10_000;
@@ -640,6 +645,73 @@ export class WorktreeManager {
         workSubpath,
         mode,
       };
+    });
+  }
+
+  /**
+   * Verify the ticket's worktree can authenticate to its https `origin` BEFORE
+   * a subagent is spawned, so a dispatch never burns a whole CLI session only
+   * to die at `git push` with `could not read Username for 'https://github.com'`
+   * — the failure that stalled ticket 8436f96f's Merging twice. Callers run
+   * this for the push role at dispatch, so a missing credential is caught at
+   * the latest before Merging (usually earlier, at In Progress's feature push).
+   *
+   * Ground truth is a live, non-interactive `git ls-remote`, NOT credential
+   * config inspection: an empty `credential.helper cache`/`store` is configured
+   * yet still fails push, so "a helper is set" would be a false positive in
+   * exactly the failure environment. A real installed token makes the probe
+   * succeed → ready; an empty/missing credential makes it auth-fail → blocked.
+   * We block SOLELY on an auth-signature rejection; a transient/network error
+   * fails OPEN so a blip never wedges a ticket. Non-https remotes use key/local
+   * auth we can't cheaply probe → ready. Best-effort: never throws.
+   */
+  async verifyPushReadiness(cwd: string, remoteUrl?: string): Promise<PushReadinessDecision> {
+    try {
+      if (!this.#enabled || !cwd) return { ok: true };
+      let url = (remoteUrl || '').trim();
+      if (!url) {
+        const r = await git(cwd, ['remote', 'get-url', 'origin']);
+        url = r.ok ? r.stdout.trim() : '';
+      }
+      const isHttps = /^https?:\/\//i.test(url);
+      if (!url || !isHttps) return decidePushReadiness({ isHttps: false });
+      const probe = await this.#lsRemoteProbe(cwd, url);
+      return decidePushReadiness({ isHttps, probe: { ran: true, ok: probe.ok, stderr: probe.stderr } });
+    } catch (err: any) {
+      // Never let a verification bug block dispatch — fail open, just log.
+      log(`[worktree] push-readiness check errored (${err?.message ?? err}); treating as ready`);
+      return { ok: true };
+    }
+  }
+
+  /** Non-interactive `git ls-remote --heads <url>` used to verify push auth.
+   *  `GIT_TERMINAL_PROMPT=0` + an empty `GIT_ASKPASS` force git to fail fast
+   *  (`could not read Username`) instead of hanging on a username prompt. git
+   *  still consults any configured credential.helper, so a valid installed
+   *  token authenticates and the probe succeeds. Never throws — a failure comes
+   *  back as { ok:false }. */
+  #lsRemoteProbe(cwd: string, url: string): Promise<GitResult> {
+    return new Promise((resolve) => {
+      execFile(
+        'git',
+        ['-C', cwd, 'ls-remote', '--heads', url],
+        {
+          timeout: PUSH_PROBE_TIMEOUT_MS,
+          maxBuffer: 8 * 1024 * 1024,
+          windowsHide: true,
+          env: {
+            ...process.env,
+            GIT_TERMINAL_PROMPT: '0',
+            GIT_ASKPASS: '',
+            GCM_INTERACTIVE: 'never',
+          },
+        },
+        (err, stdout, stderr) => resolve({
+          ok: !err,
+          stdout: (stdout ?? '').toString(),
+          stderr: (stderr ?? (err as any)?.message ?? '').toString(),
+        }),
+      );
     });
   }
 
