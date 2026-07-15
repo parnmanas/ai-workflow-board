@@ -5,8 +5,32 @@ import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { Agent } from '../../entities/Agent';
 import { User } from '../../entities/User';
-import { resolveAgentDisplayMap } from '../../utils/agent-name';
+import { Ticket } from '../../entities/Ticket';
+import { resolveAgentDisplayMap, resolveAgentDisplayName } from '../../utils/agent-name';
 import type { DefaultRoleAssignments } from '../../common/default-role-assignments-config';
+
+/**
+ * Builtin role slug → the flat legacy Ticket column(s) that mirror it. The
+ * normalized `ticket_role_assignments` table is the single source of truth
+ * (ticket da39d1da); these flat columns are a denormalized projection the
+ * service keeps in lockstep so the surfaces that still read them never
+ * disagree with the assignment table:
+ *   - board cards / MCP `get_board` (read `t.assignee`)
+ *   - MCP `get_board_summary` (`assignee: t.assignee || 'unassigned'`)
+ *   - MCP `get_my_tickets` (its SQL WHERE FILTERS on `assignee_id` /
+ *     `reporter_id` / `reviewer_id` — a normalized-only holder was excluded
+ *     from the assignee's own ticket list, the dispatch-loss red herring).
+ * Custom (non-builtin) slugs have no flat column. `reviewer` intentionally has
+ * only an id column — there is no `reviewer` display-name column.
+ */
+const LEGACY_SLUG_COLUMNS: Record<
+  string,
+  { id: 'assignee_id' | 'reporter_id' | 'reviewer_id'; name?: 'assignee' | 'reporter' }
+> = {
+  assignee: { id: 'assignee_id', name: 'assignee' },
+  reporter: { id: 'reporter_id', name: 'reporter' },
+  reviewer: { id: 'reviewer_id' },
+};
 
 export interface ResolvedAssignment {
   assignment: TicketRoleAssignment;
@@ -85,7 +109,48 @@ export class TicketRoleAssignmentService {
 
     @InjectRepository(User)
     private readonly userRepo: Repository<User>,
+
+    @InjectRepository(Ticket)
+    private readonly ticketRepo: Repository<Ticket>,
   ) {}
+
+  /**
+   * Re-project a builtin role's FIRST holder onto the ticket's flat legacy
+   * columns after a normalized write, so the two never diverge (ticket
+   * da39d1da). This is what makes `ticket_role_assignments` the single source
+   * of truth: every mutating write helper below calls this, and the flat
+   * columns become a materialized view of it — so board / summary / my_tickets
+   * (which all read the flat columns) always agree with the assignment table.
+   *
+   * Multi-holder: a flat column holds ONE id/name, so it mirrors the earliest-
+   * created holder — the same "first holder" single-holder consumers (trigger
+   * loop / allocation / mention) already read via `getOne`. A vacant role
+   * clears the columns to ''. Non-builtin slugs (no flat column) are a no-op.
+   *
+   * Display name matches the create/update write path and the REST role
+   * endpoint mirror: agents resolve to canonical `<Manager>/<Agent>` via
+   * `resolveAgentDisplayName`, users to `name || email`.
+   */
+  private async syncFlatColumnsForRole(ticketId: string, role: WorkspaceRole): Promise<void> {
+    const mirror = LEGACY_SLUG_COLUMNS[role.slug];
+    if (!mirror) return; // custom role — no flat column to keep in sync
+
+    const first = await this.getOne(ticketId, role.id);
+    let newId = '';
+    let newName = '';
+    if (first?.agent_id) {
+      newId = first.agent_id;
+      newName = (await resolveAgentDisplayName(this.agentRepo, first.agent_id)) ?? '';
+    } else if (first?.user_id) {
+      newId = first.user_id;
+      const u = await this.userRepo.findOne({ where: { id: first.user_id } });
+      newName = u ? (u.name || u.email) : '';
+    }
+
+    const update: Record<string, string> = { [mirror.id]: newId };
+    if (mirror.name) update[mirror.name] = newName;
+    await this.ticketRepo.update(ticketId, update);
+  }
 
   /** Raw assignment rows for a ticket. */
   async listForTicket(ticketId: string): Promise<TicketRoleAssignment[]> {
@@ -308,15 +373,21 @@ export class TicketRoleAssignmentService {
     // sidesteps the (ticket_id, role_id, holder_key) unique key when switching
     // between holders.
     await this.assignRepo.delete({ ticket_id: ticketId, role_id: roleId });
-    if (!agent_id && !user_id) return null;
-
-    return this.assignRepo.save(this.assignRepo.create({
-      ticket_id: ticketId,
-      role_id: roleId,
-      agent_id,
-      user_id,
-      holder_key: computeHolderKey({ agent_id, user_id }),
-    }));
+    let saved: TicketRoleAssignment | null = null;
+    if (agent_id || user_id) {
+      saved = await this.assignRepo.save(this.assignRepo.create({
+        ticket_id: ticketId,
+        role_id: roleId,
+        agent_id,
+        user_id,
+        holder_key: computeHolderKey({ agent_id, user_id }),
+      }));
+    }
+    // Keep the flat legacy columns in lockstep with the normalized write
+    // (ticket da39d1da) — role already loaded above, so no extra role query.
+    // Covers both set and clear (both null → columns blanked).
+    await this.syncFlatColumnsForRole(ticketId, role);
+    return saved;
   }
 
   /**
@@ -347,15 +418,20 @@ export class TicketRoleAssignmentService {
     const existing = await this.assignRepo.findOne({
       where: { ticket_id: ticketId, role_id: roleId, holder_key },
     });
-    if (existing) return existing;
+    if (existing) return existing; // no-op — first holder unchanged, flat already correct
 
-    return this.assignRepo.save(this.assignRepo.create({
+    const inserted = await this.assignRepo.save(this.assignRepo.create({
       ticket_id: ticketId,
       role_id: roleId,
       agent_id,
       user_id,
       holder_key,
     }));
+    // Adding the FIRST holder of a vacant role changes the flat projection;
+    // adding a later holder re-writes the same first-holder value (idempotent).
+    // Either way keep the flat legacy columns in sync (ticket da39d1da).
+    await this.syncFlatColumnsForRole(ticketId, role);
+    return inserted;
   }
 
   /**
@@ -374,7 +450,15 @@ export class TicketRoleAssignmentService {
     });
     if (!holder_key) return false;
     const res = await this.assignRepo.delete({ ticket_id: ticketId, role_id: roleId, holder_key });
-    return (res.affected || 0) > 0;
+    const removed = (res.affected || 0) > 0;
+    if (removed) {
+      // Removing a holder can promote a new first holder or empty the role —
+      // re-project the flat legacy columns (ticket da39d1da). role is not
+      // loaded on this path, so fetch it (cheap; only when something changed).
+      const role = await this.roleRepo.findOne({ where: { id: roleId } });
+      if (role) await this.syncFlatColumnsForRole(ticketId, role);
+    }
+    return removed;
   }
 
   /**
@@ -433,6 +517,14 @@ export class TicketRoleAssignmentService {
       }));
     }
     if (toInsert.length) await this.assignRepo.save(toInsert);
+
+    // Replacing the holder set can change the first holder — re-project the
+    // flat legacy columns (ticket da39d1da). role already loaded above. Only
+    // when the set actually changed (avoids a redundant write on a no-op
+    // replace); applyBoardDefaults reaches the flat columns through here.
+    if (toDelete.length || toInsert.length) {
+      await this.syncFlatColumnsForRole(ticketId, role);
+    }
 
     return this.getAll(ticketId, roleId);
   }
