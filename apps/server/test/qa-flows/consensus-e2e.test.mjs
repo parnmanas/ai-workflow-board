@@ -50,7 +50,7 @@ test('E2E: 2홀더 논의→object→재제안(표 리셋)→전원 agree→auto
   const { getDataSourceToken } = modules;
 
   step('씬: In Progress(→assignee) 에 A+B 공동 assignee, reviewer 지정');
-  const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'consensus-e2e' });
+  const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'consensus-e2e', envRepo: true });
   const trio = await createAgentTrio(app, getDataSourceToken, ws.id);
   const holderB = { agent: await createAgent(app, getDataSourceToken, ws.id, { name: 'assignee-b' }) };
   holderB.key = await createApiKey(app, getDataSourceToken, holderB.agent.id, {

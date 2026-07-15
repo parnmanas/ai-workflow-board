@@ -34,7 +34,7 @@ test('multi-holder fan-out: two assignee holders both get triggered', async (t) 
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
-  const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'mh-fanout' });
+  const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'mh-fanout', envRepo: true });
   const trio = await createAgentTrio(app, getDataSourceToken, ws.id);
 
   // Holder A = trio.assignee (seeded by createTicket). Holder B = a second
@@ -93,7 +93,7 @@ test('per-holder self-guard: actor holder is skipped, other holder still fans ou
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
-  const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'mh-selfguard' });
+  const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'mh-selfguard', envRepo: true });
   const trio = await createAgentTrio(app, getDataSourceToken, ws.id);
   const holderB = {
     agent: await createAgent(app, getDataSourceToken, ws.id, { name: 'assignee-b' }),

@@ -330,7 +330,7 @@ export async function addRoleHolder(
 export async function setupKanbanScene(
   app,
   getDataSourceToken,
-  { workspaceName = 'scene', maxConcurrent } = {},
+  { workspaceName = 'scene', maxConcurrent, envRepo = false } = {},
 ) {
   const ws = await createWorkspace(app, getDataSourceToken, workspaceName);
   const routing = {
@@ -382,11 +382,35 @@ export async function setupKanbanScene(
     kind: 'active',
     roleRouting: roleFor('Blocked'),
   });
+  // envRepo (opt-in): bind a repository Resource as the board's environment repo
+  // so the board models a real CODE board. Since ticket 8c3befa8 an assignee
+  // dispatched onto an active (branch-work) column with NO resolvable base repo
+  // is PENDED (the manager fails such a dispatch closed anyway), so any scene
+  // whose assignee actually expects an agent_trigger must declare a repo. Off by
+  // default: scenes that only exercise non-pushing roles/columns (or that
+  // deliberately test the no-repo pend) leave it unset.
+  let envRepoResource = null;
+  if (envRepo) {
+    const ds = app.get(getDataSourceToken());
+    envRepoResource = await ds.getRepository('Resource').save(
+      ds.getRepository('Resource').create({
+        workspace_id: ws.id,
+        name: 'scene repo',
+        type: 'repository',
+        url: 'https://github.com/parnmanas/ai-workflow-board.git',
+        default_branch: 'main',
+      }),
+    );
+    await ds.getRepository('Board').update(board.id, {
+      environment_config: JSON.stringify({ repositories: [{ resource_id: envRepoResource.id }] }),
+    });
+  }
   return {
     ws,
     board,
     columns: { todo, inProgress, review, done, blocked },
     routing,
+    envRepo: envRepoResource,
   };
 }
 

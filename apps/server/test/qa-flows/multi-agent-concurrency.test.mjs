@@ -56,6 +56,7 @@ test('5 assignees × 4 tickets each, cap=4: all N triggers land at the owning ag
   const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, {
     workspaceName: 'concurrency',
     maxConcurrent: TICKETS_PER_ASSIGNEE,
+    envRepo: true,
   });
   const user = await createUser(app, getDataSourceToken, { name: 'driver' });
 
@@ -185,6 +186,7 @@ test(`over-cap: 1 assignee owns ${OWNED_OVER_CAP} tickets, cap=${OVER_CAP} → e
   const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, {
     workspaceName: 'concurrency-overcap',
     maxConcurrent: OVER_CAP,
+    envRepo: true,
   });
   const user = await createUser(app, getDataSourceToken, { name: 'driver-overcap' });
 

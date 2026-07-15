@@ -41,6 +41,7 @@ test(`Large-data: ${N_TICKETS} tickets, ${N_TICKETS} moves — one focus trigger
 
   const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, {
     workspaceName: 'large',
+    envRepo: true,
   });
   const user = await createUser(app, getDataSourceToken, { name: 'bulk' });
   const workerAgent = await createAgent(app, getDataSourceToken, ws.id, { name: 'bulk-worker' });

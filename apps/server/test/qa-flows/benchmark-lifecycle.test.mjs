@@ -51,6 +51,7 @@ test('benchmark lifecycle: draft parks candidates, start dispatches, started run
 
   const { ws, board, columns } = await setupKanbanScene(app, getDataSourceToken, {
     workspaceName: 'bench-lifecycle',
+    envRepo: true,
   });
   const ds = app.get(getDataSourceToken());
   await ds.getRepository('Board').update(board.id, { benchmark_mode: 'on' });

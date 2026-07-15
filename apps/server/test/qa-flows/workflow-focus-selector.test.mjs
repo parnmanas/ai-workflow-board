@@ -83,6 +83,16 @@ test('WorkflowFocusSelector — emit gate + promotion gate + ranking + isolation
   const ticketRepo = ds.getRepository('Ticket');
   const activityLogRepo = ds.getRepository('ActivityLog');
 
+  // ticket 8c3befa8: an assignee dispatched onto an active column with no
+  // resolvable base repo is pended (emit returns ''), so the selector boards must
+  // declare a code repo for their assignee emits to return a trigger uuid.
+  const focusEnvRepo = await ds.getRepository('Resource').save(
+    ds.getRepository('Resource').create({
+      workspace_id: ws.id, name: 'focus repo', type: 'repository',
+      url: 'https://github.com/parnmanas/ai-workflow-board.git', default_branch: 'main',
+    }),
+  );
+
   // Five-column board with Backlog (intake) → To Do → In Progress →
   // Review → Merging → Done (terminal). Positions ascending so the
   // selector's `column.position DESC` rank picks Merging > Review >
@@ -92,6 +102,7 @@ test('WorkflowFocusSelector — emit gate + promotion gate + ranking + isolation
     const board = await boardRepo.save(boardRepo.create({
       name, description: '', workspace_id: ws.id,
       routing_config: JSON.stringify({}),
+      environment_config: JSON.stringify({ repositories: [{ resource_id: focusEnvRepo.id }] }),
       max_concurrent_tickets_per_agent: 1,
     }));
     const backlog = await createColumn(app, getDataSourceToken, board.id, {

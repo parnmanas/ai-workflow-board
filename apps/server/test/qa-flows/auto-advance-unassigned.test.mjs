@@ -44,6 +44,19 @@ test('Unheld routed column auto-advances ticket to next non-terminal column', as
       done: ['reporter'],
     },
   });
+  // Bind a board environment repo: since ticket 8c3befa8 an assignee dispatched
+  // onto an active column with no resolvable base repo is pended, so this board
+  // (whose assignee is expected to receive a trigger) must declare a code repo.
+  const envDs = app.get(getDataSourceToken());
+  const envRepo = await envDs.getRepository('Resource').save(
+    envDs.getRepository('Resource').create({
+      workspace_id: ws.id, name: 'auto-adv repo', type: 'repository',
+      url: 'https://github.com/parnmanas/ai-workflow-board.git', default_branch: 'main',
+    }),
+  );
+  await envDs.getRepository('Board').update(board.id, {
+    environment_config: JSON.stringify({ repositories: [{ resource_id: envRepo.id }] }),
+  });
   const todo = await createColumn(app, getDataSourceToken, board.id, {
     name: 'Todo', position: 0, workspaceId: ws.id, kind: 'intake',
     roleRouting: ['assignee'],

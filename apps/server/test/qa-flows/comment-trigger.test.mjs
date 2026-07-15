@@ -25,6 +25,7 @@ test('Comment on In Progress ticket triggers assignee (trigger_source=comment)',
 
   const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, {
     workspaceName: 'comment-trig',
+    envRepo: true,
   });
   const trio = await createAgentTrio(app, getDataSourceToken, ws.id);
   const user = await createUser(app, getDataSourceToken, { name: 'commenter' });
