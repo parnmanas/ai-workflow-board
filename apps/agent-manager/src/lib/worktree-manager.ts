@@ -1256,9 +1256,20 @@ export class WorktreeManager {
           try {
             const stat = await fsp.stat(lockDir);
             if (Date.now() - stat.mtimeMs > this.#provisionLockStaleMs) {
-              const current = JSON.parse(await fsp.readFile(ownerPath, 'utf8')) as ProvisionLockOwner;
+              let current: ProvisionLockOwner | undefined;
+              try {
+                const parsed = JSON.parse(await fsp.readFile(ownerPath, 'utf8')) as Partial<ProvisionLockOwner>;
+                if (typeof parsed.token === 'string' && parsed.token && Number.isInteger(parsed.pid)) {
+                  current = parsed as ProvisionLockOwner;
+                }
+              } catch {
+                // A crash can leave the directory behind before owner.json is
+                // written (or while it is being written). Once the directory
+                // itself is stale, missing/corrupt metadata cannot identify a
+                // live owner and is safe to quarantine via atomic rename.
+              }
               let ownerAlive = false;
-              if (Number.isInteger(current.pid) && current.pid > 0) {
+              if (current && current.pid > 0) {
                 try {
                   process.kill(current.pid, 0);
                   ownerAlive = true;

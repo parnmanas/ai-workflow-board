@@ -545,6 +545,41 @@ test('provision lease atomically reclaims a stale lock whose owner is dead', asy
   }
 });
 
+for (const ownerState of ['missing', 'malformed']) {
+  test(`provision lease recovers from stale lock with ${ownerState} owner metadata`, async () => {
+    const { root, repo, cleanup } = await makeRepo();
+    try {
+      const canonicalRoot = join(root, 'manager-worktrees');
+      const resourceId = `repo-resource-${ownerState}-owner`;
+      const lockDir = join(canonicalRoot, resourceId, '.provision.lock');
+      await fsp.mkdir(lockDir, { recursive: true });
+      if (ownerState === 'malformed') {
+        await fsp.writeFile(join(lockDir, 'owner.json'), '{not-json');
+      }
+      const old = new Date(Date.now() - 5_000);
+      await fsp.utimes(lockDir, old, old);
+
+      const wm = new WorktreeManager({
+        resourceWorktreesRoot: canonicalRoot,
+        provisionLockTimeoutMs: 500,
+        provisionLockStaleMs: 10,
+        provisionLockHeartbeatMs: 5,
+      });
+      const result = await wm.resolveCwd({
+        baseWorkingDir: repo,
+        ticketId: TICKET_A,
+        role: 'assignee',
+        mode: 'per_ticket',
+        bootstrapRepo: { resourceId, url: repo },
+      });
+      assert.equal(result.isWorktree, true);
+      assert.equal(existsSync(lockDir), false, 'recovered lease is released after provisioning');
+    } finally {
+      await cleanup();
+    }
+  });
+}
+
 test('repository resource ticket worktree is reclaimed through its canonical owner', async () => {
   const { root, repo, cleanup } = await makeRepo();
   try {
