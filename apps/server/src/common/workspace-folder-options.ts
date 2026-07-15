@@ -162,10 +162,26 @@ export function decideRunFreshness(input: RunFreshnessInput): RunFreshness {
  * A repo the agent-manager provisioner can clone for a run, after the server has
  * already expanded a `repo_ref` (resource_id / board-environment_config) into a
  * concrete url. `branch` omitted = the repo's default branch.
+ *
+ * `credential` (optional) carries the https auth the manager's run-provisioner
+ * feeds through its shared `repo-credential` helper to clone/fetch a PRIVATE
+ * repo — the exact `{ username?, token }` wire shape the worktree path's
+ * `bootstrapRepo.credential` uses. The server decrypts the repo Resource's
+ * Credential row here (`resolveRunRepo`) and ships it inline; the manager side
+ * (`RunRepoSpec.credential`, shipped forward-compat in ticket 622bc350) already
+ * consumes it, so this is the "서버측 wiring 잔여" that lights private-repo runs
+ * up with a SERVER-ONLY change — no manager redeploy needed. Absent = anonymous
+ * clone (a public repo / a Resource with no credential), byte-for-byte the old
+ * behavior. The token is transient (never persisted — see room-messaging
+ * sendMessage) and is stripped from non-agent SSE recipients in events.controller
+ * so it only ever reaches an agent (machine-key-authenticated) recipient — never
+ * a human's browser — matching the worktree path, where the credential likewise
+ * flows only to the run agent + its manager, never to a user surface.
  */
 export interface RunRepoSpec {
   url: string;
   branch?: string;
+  credential?: { username?: string; token: string } | null;
 }
 
 /**
