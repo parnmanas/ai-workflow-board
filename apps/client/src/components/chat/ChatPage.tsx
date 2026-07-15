@@ -140,6 +140,11 @@ export default function ChatPage() {
   const refreshActiveRoomParticipants = useCallback((roomId: string) => {
     api.getChatRoom(roomId, isObserverRef.current)
       .then((detail: any) => {
+        // Stale-response 가드: 재조회를 시작한 방이 응답 시점에도 여전히 활성 방일 때만
+        // 로스터를 반영한다. 참여자 추가/`participant_*` SSE 직후 사용자가 다른 방으로
+        // 전환하고 새 방 상세가 먼저 도착하면, 늦게 도착한 이전 방 응답이 현재 방
+        // 로스터/카운트를 덮어써 "현재 참여자"가 잘못 표시될 수 있어 이를 폐기한다.
+        if (activeRoomIdRef.current !== roomId) return;
         if (!detail?.participants) return;
         const mentionPs: MentionParticipant[] = detail.participants.map((p: any) => ({
           id: p.participant_id,
@@ -215,6 +220,10 @@ export default function ChatPage() {
     // would suppress the first older-page fetch.
     setHasMoreMessages(false);
     setLoadingOlderMessages(false);
+    // Stale-response 세대 플래그: 이 effect 가 정리(다른 방으로 전환/언마운트)되면
+    // 아래 메시지·상세 fetch 의 늦은 응답을 폐기해, 이전 방의 메시지/참여자/observer
+    // 상태가 새 방 화면을 덮어쓰지 않도록 한다.
+    let cancelled = false;
     if (!activeRoomId) {
       setMessages([]);
       setRoomParticipants([]);
@@ -229,6 +238,7 @@ export default function ChatPage() {
     setLoadingMessages(true);
     api.getChatRoomMessages(activeRoomId, MESSAGE_PAGE_SIZE, undefined, initialObserver)
       .then((msgs) => {
+        if (cancelled) return;
         setMessages(msgs);
         // A full page back implies there *might* be more older rows.
         // Server returns in chronological order capped at MESSAGE_PAGE_SIZE,
@@ -236,14 +246,19 @@ export default function ChatPage() {
         setHasMoreMessages(msgs.length >= MESSAGE_PAGE_SIZE);
       })
       .catch(() => {
+        if (cancelled) return;
         setMessages([]);
         setHasMoreMessages(false);
       })
-      .finally(() => setLoadingMessages(false));
+      .finally(() => {
+        // 이미 다른 방으로 전환했다면 loading 플래그는 새 effect 가 관리하므로 건드리지 않는다.
+        if (!cancelled) setLoadingMessages(false);
+      });
 
     // Fetch room detail to populate participants for @mention pill rendering
     api.getChatRoom(activeRoomId, initialObserver)
       .then((detail: any) => {
+        if (cancelled) return;
         if (detail?.participants) {
           const mentionPs: MentionParticipant[] = detail.participants.map((p: any) => ({
             id: p.participant_id,
@@ -270,6 +285,9 @@ export default function ChatPage() {
       })
       .catch(() => {});
 
+    return () => {
+      cancelled = true;
+    };
   }, [activeRoomId, showAllRooms, user?.id, markBadgeRead]);
 
   // Mark read on visibility change (tab regains focus)
