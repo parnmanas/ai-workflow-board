@@ -113,7 +113,7 @@ export interface WorktreeOutcome {
 
 export interface DispatchGateDecision {
   blocked: boolean;
-  /** Stable de-dup key for the blocker, e.g. `worktree:not_a_git_repo`. */
+  /** Stable de-dup key for the blocker, e.g. `worktree:repository_unavailable`. */
   kind?: string;
   reason?: string;
 }
@@ -121,8 +121,8 @@ export interface DispatchGateDecision {
 /** Map a worktree provisioning result onto a dispatch-abort decision. A real
  *  worktree is fine; a fallback with a reason OTHER than 'disabled' (isolation
  *  intentionally off, not a failure) is a blocker. This is the gate that stops
- *  an empty / non-git working_dir (`not_a_git_repo`) and a foreign/occupied
- *  checkout (`path_conflict`) before dispatch. */
+ *  a missing/unavailable managed repository or an occupied worktree path before
+ *  dispatch. The configured working_dir itself is only a storage container. */
 export function classifyWorktreeOutcome(res: WorktreeOutcome | null | undefined): DispatchGateDecision {
   if (res?.isWorktree) return { blocked: false };
   const reason = res?.reason;

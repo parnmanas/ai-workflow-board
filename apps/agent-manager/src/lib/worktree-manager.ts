@@ -42,20 +42,10 @@
 //         "shared" ticket+QA budget is enforced by the server concurrency gate.
 //         See #acquireSharedSlot + the on-disk lease registry (.pool-leases.json).
 //
-// This replaces the old `<MANAGER_HOME>/agents/<id>/worktrees/<ticket>-<role>`
-// root that scattered checkouts outside the repo tree. `.awb/` is a dot-prefix
-// dir (ignored by Unity-style asset scans) and is auto-registered in the repo's
-// `.gitignore` so the nested worktrees never pollute `git status`.
-//
-// repo-subdir working_dir: when working_dir is a SUBFOLDER of the repo (e.g.
-// `<repo>/gameclient/txiv`), a git worktree is always a full repo-root checkout,
-// so the worktree is added at `<working_dir>/.awb/wt/<slug>` but the agent's
-// actual work directory is that checkout PLUS the repo-root→working_dir subpath
-// (`.awb/wt/<slug>/gameclient/txiv`). resolveCwd returns that real work dir as
-// `cwd` and exposes the subpath separately (ticket ④ injects it into prompts).
-//
-// A non-git working_dir is a supported container: its repository is cloned at
-// `<working_dir>/.awb/base`, leaving the container root untouched. Fallback is
+// working_dir is storage only. AWB owns repository clones below
+// `<working_dir>/.awb/base/<resource>` and worktrees below
+// `<working_dir>/.awb/wt/<resource>`, leaving the container root untouched even
+// when somebody has placed an unrelated `.git` there. Fallback is
 // reserved for missing repository metadata or `git worktree` failures
 // (unsupported/old git, disk error).
 
@@ -64,7 +54,6 @@ import { isAbsolute, join, resolve as pathResolve } from 'node:path';
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { log } from './logging.js';
-import { AGENT_MANAGER_HOME } from './constants.js';
 import { decidePushReadiness, type PushReadinessDecision } from './dispatch-preflight.js';
 
 const GIT_TIMEOUT_MS = 20_000;
@@ -248,8 +237,8 @@ export interface ResolveCwdArgs {
    *  Ignored in per_ticket mode. Absent / ≤0 → 1 (a single reused slot, i.e. the
    *  pre-pool behavior). */
   poolSize?: number;
-  /** Repository cloned under a non-git working_dir before creating the ticket
-   *  worktree. Dispatch resolves this as ticket repo first, then the board
+  /** Repository cloned under the working_dir storage container before creating
+   *  the ticket worktree. Dispatch resolves this as ticket repo first, then the board
    *  environment's first repository. */
   bootstrapRepo?: {
     resourceId?: string;
@@ -260,8 +249,7 @@ export interface ResolveCwdArgs {
 }
 
 export interface ResolveCwdResult {
-  /** cwd the child should spawn under — the worktree checkout PLUS the
-   *  repo-root→working_dir subpath when working_dir is a repo subfolder. */
+  /** cwd the child should spawn under — the prepared repository worktree. */
   cwd: string;
   /** true when cwd is a dedicated worktree, false when it fell back to base. */
   isWorktree: boolean;
@@ -269,11 +257,9 @@ export interface ResolveCwdResult {
   reused?: boolean;
   /** populated on fallback so callers can log why isolation was skipped. */
   reason?: string;
-  /** the worktree checkout ROOT (`<working_dir>/.awb/wt/<slug>`); undefined on
-   *  fallback. Distinct from `cwd` in the repo-subdir case. */
+  /** the worktree checkout root; undefined on fallback. */
   worktreePath?: string;
-  /** repo-root→working_dir relative subpath ('' when working_dir IS the repo
-   *  root); undefined on fallback. Ticket ④ injects this into the prompt. */
+  /** Reserved relative work subpath; currently always empty. */
   workSubpath?: string;
   /** the effective mode used to pick the slug. */
   mode?: WorktreeMode;
@@ -290,7 +276,6 @@ export function worktreeSlug(ticketId: string, mode: WorktreeMode = DEFAULT_WORK
 
 export class WorktreeManager {
   #enabled: boolean;
-  #resourceWorktreesRoot: string;
   #provisionLockTimeoutMs: number;
   #provisionLockStaleMs: number;
   #provisionLockHeartbeatMs: number;
@@ -307,14 +292,11 @@ export class WorktreeManager {
 
   constructor(opts: {
     enabled?: boolean;
-    resourceWorktreesRoot?: string;
     provisionLockTimeoutMs?: number;
     provisionLockStaleMs?: number;
     provisionLockHeartbeatMs?: number;
   } = {}) {
     this.#enabled = opts.enabled !== false;
-    this.#resourceWorktreesRoot = opts.resourceWorktreesRoot
-      ?? join(AGENT_MANAGER_HOME, 'worktrees');
     this.#provisionLockTimeoutMs = opts.provisionLockTimeoutMs ?? PROVISION_LOCK_TIMEOUT_MS;
     this.#provisionLockStaleMs = opts.provisionLockStaleMs ?? PROVISION_LOCK_STALE_MS;
     this.#provisionLockHeartbeatMs = opts.provisionLockHeartbeatMs ?? PROVISION_LOCK_HEARTBEAT_MS;
@@ -349,7 +331,7 @@ export class WorktreeManager {
     }
   }
 
-  /** Is `dir` the top of (or inside) a git work tree we can add worktrees to? */
+  /** Validate an AWB-managed checkout below working_dir/.awb/base. */
   async #isGitWorkTree(dir: string): Promise<boolean> {
     const r = await git(dir, ['rev-parse', '--is-inside-work-tree']);
     return r.ok && r.stdout.trim() === 'true';
@@ -413,6 +395,26 @@ export class WorktreeManager {
     return run;
   }
 
+  /** Discover only repositories owned by AWB below the working container. */
+  async #managedRepos(baseWorkingDir: string, resourceId?: string): Promise<Array<{ repo: string; worktreesRoot: string }>> {
+    const baseRoot = join(baseWorkingDir, '.awb', 'base');
+    const wtRoot = worktreesRootFor(baseWorkingDir);
+    const wanted = resourceId?.trim().replace(/[^A-Za-z0-9._-]/g, '_');
+    let names: string[] = [];
+    try {
+      names = wanted ? [wanted] : await fsp.readdir(baseRoot);
+    } catch {
+      return [];
+    }
+    const out: Array<{ repo: string; worktreesRoot: string }> = [];
+    for (const name of names) {
+      if (!name || name === '.' || name === '..') continue;
+      const repo = join(baseRoot, name);
+      if (await this.#isGitWorkTree(repo)) out.push({ repo, worktreesRoot: join(wtRoot, name) });
+    }
+    return out;
+  }
+
   async #installRepoCredential(
     baseWorkingDir: string,
     repo: ResolveCwdArgs['bootstrapRepo'],
@@ -433,57 +435,6 @@ export class WorktreeManager {
     u.password = repo.credential.token;
     await fsp.writeFile(credentialFile, `${u.toString()}\n`, { mode: 0o600 });
     await git(baseWorkingDir, ['config', 'credential.helper', `store --file=${JSON.stringify(credentialFile)}`]);
-  }
-
-  /**
-   * Resolve the repo root + the working_dir's position within it, so a
-   * working_dir that is a repo SUBFOLDER still gets a repo-root checkout with
-   * the real work path computed on top. Returns null when not resolvable.
-   * `workSubpath` is forward-slash, no trailing slash, '' at the repo root.
-   */
-  async #resolveRepoContext(
-    baseWorkingDir: string,
-  ): Promise<{ repoRoot: string; workSubpath: string } | null> {
-    const top = await git(baseWorkingDir, ['rev-parse', '--show-toplevel']);
-    if (!top.ok || !top.stdout.trim()) return null;
-    const repoRoot = top.stdout.trim();
-    const pfx = await git(baseWorkingDir, ['rev-parse', '--show-prefix']);
-    const workSubpath = pfx.ok ? pfx.stdout.trim().replace(/[/\\]+$/, '') : '';
-    return { repoRoot, workSubpath };
-  }
-
-  /**
-   * Ensure `.awb/` is git-ignored in the repo so the nested worktrees under
-   * `<working_dir>/.awb/wt/` don't show up as untracked in `git status`.
-   * Idempotent: skips entirely when `.awb` is already ignored (committed
-   * `.gitignore`, global excludes, or a prior run's append). Appends `.awb/`
-   * (unanchored — matches at any depth, so it covers a repo-subdir working_dir)
-   * to the repo-root `.gitignore` otherwise. Best-effort; never throws.
-   */
-  async #ensureAwbIgnored(repoRoot: string, workSubpath: string): Promise<void> {
-    try {
-      // The actual `.awb` dir relative to the repo root — repo-subdir aware.
-      const rel = workSubpath ? `${workSubpath.replace(/\\/g, '/')}/.awb` : '.awb';
-      const check = await git(repoRoot, ['check-ignore', '-q', rel]);
-      if (check.ok) return; // already ignored — nothing to do
-      const giPath = join(repoRoot, '.gitignore');
-      let content = '';
-      try {
-        content = await fsp.readFile(giPath, 'utf8');
-      } catch {
-        // no .gitignore yet — we'll create it
-      }
-      const already = content.split(/\r?\n/).some((l) => {
-        const t = l.trim();
-        return t === '.awb' || t === '.awb/' || t === '/.awb' || t === '/.awb/';
-      });
-      if (already) return;
-      const sep = content.length > 0 && !content.endsWith('\n') ? '\n' : '';
-      await fsp.writeFile(giPath, `${content}${sep}.awb/\n`, 'utf8');
-      log(`[worktree] registered .awb/ in ${giPath} (worktree isolation dir)`);
-    } catch (err: any) {
-      log(`[worktree] could not ensure .awb/ ignored under ${repoRoot}: ${err?.message ?? err}`);
-    }
   }
 
   /** Parse `git worktree list --porcelain`. Returns [] on any failure. */
@@ -526,10 +477,9 @@ export class WorktreeManager {
   /**
    * Resolve the cwd a ticket's child should spawn under. Reattaches to an
    * existing worktree when present (preserving its branch + dirty tree),
-   * creates one otherwise, and falls back to the shared base cwd when worktree
-   * isolation is unavailable. The worktree always lands under
-   * `<working_dir>/.awb/wt/`; a repo-subdir working_dir gets the real work path
-   * (checkout + subpath) back as `cwd`.
+   * creates one otherwise. Repository clones and worktrees always land below
+   * the working_dir storage container; the container itself is never used as a
+   * checkout.
    */
   async resolveCwd(args: ResolveCwdArgs): Promise<ResolveCwdResult> {
     const { baseWorkingDir, ticketId, role } = args;
@@ -545,62 +495,25 @@ export class WorktreeManager {
     // Both modes key a lease/slug on the ticket id, so it is required for either.
     if (!ticketId) return fallback('no_ticket');
 
-    const baseIsRepo = await this.#isGitWorkTree(baseWorkingDir);
-    const containerRepo = baseIsRepo
-      ? null
-      : await this.#bootstrapContainerRepo(baseWorkingDir, args.bootstrapRepo);
-    if (!baseIsRepo && !containerRepo) return fallback('not_a_git_repo');
-    const localBaseRepo = containerRepo ?? baseWorkingDir;
+    // working_dir is ALWAYS a storage container, never a repository input.
+    // Even when an operator points it at a directory that happens to contain
+    // `.git`, leave that checkout untouched and create AWB's managed base below
+    // `.awb/base/<resource>`. This removes all behavior differences based on
+    // whether working_dir itself is a repo.
+    const localBaseRepo = await this.#bootstrapContainerRepo(baseWorkingDir, args.bootstrapRepo);
+    if (!localBaseRepo) return fallback('repository_unavailable');
     // Existing checkouts need the Resource credential too; limiting this to
     // fresh clone would leave resumed/private-repo tickets unable to fetch.
     await this.#installRepoCredential(localBaseRepo, args.bootstrapRepo);
 
-    let provisioningBase = localBaseRepo;
     const resourceId = args.bootstrapRepo?.resourceId?.trim();
-    const resourceSlug = resourceId?.replace(/[^A-Za-z0-9._-]/g, '_');
-    const resourceRoot = resourceSlug
-      ? join(this.#resourceWorktreesRoot, resourceSlug)
-      : null;
-    // Git records worktrees in the repository that created them. Persist that
-    // owner alongside the resource-scoped checkout so a later dispatch from a
-    // different agent clone asks the original repository to inspect/reattach
-    // it instead of mistaking the existing directory for a path conflict.
-    if (!containerRepo && mode === 'per_ticket' && resourceRoot) {
-      const ownerPath = join(resourceRoot, '.repo-owner');
-      try {
-        const savedOwner = (await fsp.readFile(ownerPath, 'utf8')).trim();
-        if (savedOwner && await this.#isGitWorkTree(savedOwner)) provisioningBase = savedOwner;
-      } catch {
-        await fsp.mkdir(resourceRoot, { recursive: true });
-        try {
-          await fsp.writeFile(ownerPath, `${baseWorkingDir}\n`, { encoding: 'utf8', flag: 'wx' });
-        } catch {
-          // Another manager/process won the first-owner race. Its durable
-          // choice is authoritative; never continue with this caller's clone.
-          const savedOwner = (await fsp.readFile(ownerPath, 'utf8')).trim();
-          if (savedOwner && await this.#isGitWorkTree(savedOwner)) provisioningBase = savedOwner;
-        }
-      }
-    }
-    if (provisioningBase !== baseWorkingDir) {
-      await this.#installRepoCredential(provisioningBase, args.bootstrapRepo);
-    }
-
-    const repoCtx = await this.#resolveRepoContext(provisioningBase);
-    if (!repoCtx) return fallback('no_repo_root');
-    const { repoRoot, workSubpath } = repoCtx;
-    const withSub = (p: string) => (workSubpath ? join(p, workSubpath) : p);
-
-    // Existing repo-backed agents keep resource-scoped placement so a ticket
-    // survives reassignment. Container working dirs deliberately keep both the
-    // base clone and ticket checkout below their own `.awb/` boundary; the
-    // container root must never become (or masquerade as) the repository.
-    const worktreesRoot = !containerRepo && mode === 'per_ticket' && resourceSlug
-      ? join(this.#resourceWorktreesRoot, resourceSlug)
-      : worktreesRootFor(baseWorkingDir);
-
-    // Keep the nested worktrees out of `git status` (and out of Unity scans).
-    await this.#ensureAwbIgnored(repoRoot, workSubpath);
+    const cleanUrl = args.bootstrapRepo?.url?.trim() || '';
+    const resourceSlug = resourceId?.replace(/[^A-Za-z0-9._-]/g, '_')
+      || `url-${createHash('sha256').update(cleanUrl).digest('hex').slice(0, 16)}`;
+    const provisioningBase = localBaseRepo;
+    const workSubpath = '';
+    const withSub = (p: string) => p;
+    const worktreesRoot = join(worktreesRootFor(baseWorkingDir), resourceSlug);
 
     // ── shared: lease a warm-pool slot (규약 ⑥) ─────────────────────────────
     if (mode === 'shared') {
@@ -973,8 +886,7 @@ export class WorktreeManager {
    * never depends on a tidy handback (workers die on exit-143 mid-work). No-op
    * (returns 0) when the ticket holds no active slot. Never throws.
    */
-  async #releaseSharedSlot(baseWorkingDir: string, ticketId: string): Promise<number> {
-    const worktreesRoot = worktreesRootFor(baseWorkingDir);
+  async #releaseSharedSlot(baseWorkingDir: string, worktreesRoot: string, ticketId: string): Promise<number> {
     return this.#withPoolLock(worktreesRoot, async () => {
       const reg = await this.#readRegistry(worktreesRoot);
       const key = Object.keys(reg.slots).find(
@@ -1035,7 +947,18 @@ export class WorktreeManager {
     if (!this.#enabled) return 0;
     const { baseWorkingDir, liveTicketIds } = opts;
     if (!baseWorkingDir) return 0;
-    const worktreesRoot = worktreesRootFor(baseWorkingDir);
+    let total = 0;
+    for (const managed of await this.#managedRepos(baseWorkingDir)) {
+      total += await this.#reconcilePoolLeasesForRepo(managed.repo, managed.worktreesRoot, liveTicketIds);
+    }
+    return total;
+  }
+
+  async #reconcilePoolLeasesForRepo(
+    baseRepo: string,
+    worktreesRoot: string,
+    liveTicketIds: Set<string>,
+  ): Promise<number> {
     return this.#withPoolLock(worktreesRoot, async () => {
       const reg = await this.#readRegistry(worktreesRoot);
       const now = Date.now();
@@ -1063,8 +986,8 @@ export class WorktreeManager {
       const liveCwds = (await this.#liveProcessCwds()).map(normPath);
       const inUse = (slotPath: string): boolean => {
         const p = normPath(slotPath);
-        // === covers working_dir==repo-root; startsWith covers a repo-subdir
-        // working_dir (child cwd is `<slot>/<subpath>`, strictly under the slot).
+        // Exact match covers a process at the checkout root; startsWith covers
+        // a process in any checkout subdirectory.
         return liveCwds.some((c) => c === p || c.startsWith(p + '/'));
       };
 
@@ -1138,7 +1061,22 @@ export class WorktreeManager {
     if (!this.#enabled) return [];
     const { baseWorkingDir, liveTicketIds } = opts;
     if (!baseWorkingDir) return [];
-    const worktreesRoot = worktreesRootFor(baseWorkingDir);
+    const out: WorktreeSnapshotEntry[] = [];
+    for (const managed of await this.#managedRepos(baseWorkingDir)) {
+      out.push(...await this.#snapshotWorktreesForRepo(managed.repo, managed.worktreesRoot, liveTicketIds));
+    }
+    out.sort((a, b) => {
+      if (a.mode !== b.mode) return a.mode === 'shared' ? -1 : 1;
+      return a.path.localeCompare(b.path, undefined, { numeric: true });
+    });
+    return out;
+  }
+
+  async #snapshotWorktreesForRepo(
+    baseRepo: string,
+    worktreesRoot: string,
+    liveTicketIds: Set<string>,
+  ): Promise<WorktreeSnapshotEntry[]> {
     try {
       // Read the lease registry under the pool lock so we never observe a
       // half-written file mid-acquire. listWorktrees is a read-only git call and
@@ -1146,7 +1084,7 @@ export class WorktreeManager {
       const reg = await this.#withPoolLock(worktreesRoot, () =>
         this.#readRegistry(worktreesRoot),
       );
-      const wts = await this.listWorktrees(baseWorkingDir);
+      const wts = await this.listWorktrees(baseRepo);
       // Keep only worktrees strictly under `.awb/wt` (drops the main checkout).
       const bySlot = new Map<string, WorktreeInfo>();
       for (const w of wts) {
@@ -1411,43 +1349,34 @@ export class WorktreeManager {
     repositoryResourceId?: string;
   }): Promise<number> {
     if (!this.#enabled) return 0;
-    let { baseWorkingDir } = opts;
+    const { baseWorkingDir } = opts;
     const { ticketId } = opts;
     if (!baseWorkingDir || !ticketId) return 0;
-    const resourceSlug = opts.repositoryResourceId?.trim().replace(/[^A-Za-z0-9._-]/g, '_');
-    const resourceRoot = resourceSlug ? join(this.#resourceWorktreesRoot, resourceSlug) : null;
-    if (resourceRoot) {
-      try {
-        const savedOwner = (await fsp.readFile(join(resourceRoot, '.repo-owner'), 'utf8')).trim();
-        if (savedOwner) baseWorkingDir = savedOwner;
-      } catch {}
-    }
-    if (!(await this.#isGitWorkTree(baseWorkingDir))) return 0;
-    const worktreesRoot = resourceRoot ?? worktreesRootFor(baseWorkingDir);
     const ticket8 = String(ticketId).slice(0, 8);
     const legacyPrefix = `${ticket8}-`;
-    await this.prune(baseWorkingDir);
-    const worktrees = await this.listWorktrees(baseWorkingDir);
     let removed = 0;
-    for (const w of worktrees) {
-      if (!isUnder(w.path, worktreesRoot)) continue; // never the main worktree
-      const seg = lastSegment(w.path);
-      if (isSharedSlotSeg(seg)) continue; // pool slot — released below, not removed
-      // per_ticket dir == <ticket8>; skip unrelated tickets.
-      if (seg !== ticket8 && !seg.startsWith(legacyPrefix)) continue;
-      const r = await git(baseWorkingDir, ['worktree', 'remove', '--force', w.path]);
-      if (r.ok || /is not a working tree|No such file/i.test(r.stderr)) {
-        removed++;
-        log(`[worktree] removed terminal-ticket worktree ${w.path}`);
-      } else {
-        log(`[worktree] terminal remove failed ${w.path}: ${r.stderr.trim()}`);
+    const managed = await this.#managedRepos(baseWorkingDir, opts.repositoryResourceId);
+    for (const entry of managed) {
+      await this.prune(entry.repo);
+      const worktrees = await this.listWorktrees(entry.repo);
+      let removedHere = 0;
+      for (const w of worktrees) {
+        if (!isUnder(w.path, entry.worktreesRoot)) continue;
+        const seg = lastSegment(w.path);
+        if (isSharedSlotSeg(seg)) continue;
+        if (seg !== ticket8 && !seg.startsWith(legacyPrefix)) continue;
+        const r = await git(entry.repo, ['worktree', 'remove', '--force', w.path]);
+        if (r.ok || /is not a working tree|No such file/i.test(r.stderr)) {
+          removed++;
+          removedHere++;
+          log(`[worktree] removed terminal-ticket worktree ${w.path}`);
+        } else {
+          log(`[worktree] terminal remove failed ${w.path}: ${r.stderr.trim()}`);
+        }
       }
+      if (removedHere > 0) await this.prune(entry.repo);
+      await this.#releaseSharedSlot(entry.repo, entry.worktreesRoot, ticketId).catch(() => {});
     }
-    if (removed > 0) await this.prune(baseWorkingDir);
-    // Shared mode: this ticket held a warm-pool slot (not a per_ticket dir) —
-    // release it (idle-mark) so the next lease can reset + reuse it. No-op for a
-    // per_ticket ticket (no matching lease → empty registry read, nothing written).
-    await this.#releaseSharedSlot(baseWorkingDir, ticketId).catch(() => {});
     return removed;
   }
 
@@ -1510,26 +1439,27 @@ export class WorktreeManager {
   }): Promise<number> {
     if (!this.#enabled) return 0;
     const { baseWorkingDir, activeKeys } = opts;
-    if (!baseWorkingDir || !(await this.#isGitWorkTree(baseWorkingDir))) return 0;
-    const worktreesRoot = worktreesRootFor(baseWorkingDir);
-    await this.prune(baseWorkingDir);
-    const worktrees = await this.listWorktrees(baseWorkingDir);
+    if (!baseWorkingDir) return 0;
     let removed = 0;
-    for (const w of worktrees) {
-      if (!isUnder(w.path, worktreesRoot)) continue; // never the main worktree
-      const slug = lastSegment(w.path);
-      if (isSharedSlotSeg(slug)) continue; // warm-pool slot — never sweep (규약 ⑥)
-      if (activeKeys.has(slug)) continue; // a live session owns this worktree
-      const status = await git(w.path, ['status', '--porcelain']);
-      if (!status.ok) continue;
-      if (status.stdout.trim() !== '') continue; // dirty → preserve pended work
-      const r = await git(baseWorkingDir, ['worktree', 'remove', '--force', w.path]);
-      if (r.ok) {
-        removed++;
-        log(`[worktree] swept idle clean worktree ${w.path}`);
+    for (const entry of await this.#managedRepos(baseWorkingDir)) {
+      await this.prune(entry.repo);
+      const worktrees = await this.listWorktrees(entry.repo);
+      let removedHere = 0;
+      for (const w of worktrees) {
+        if (!isUnder(w.path, entry.worktreesRoot)) continue;
+        const slug = lastSegment(w.path);
+        if (isSharedSlotSeg(slug) || activeKeys.has(slug)) continue;
+        const status = await git(w.path, ['status', '--porcelain']);
+        if (!status.ok || status.stdout.trim() !== '') continue;
+        const r = await git(entry.repo, ['worktree', 'remove', '--force', w.path]);
+        if (r.ok) {
+          removed++;
+          removedHere++;
+          log(`[worktree] swept idle clean worktree ${w.path}`);
+        }
       }
+      if (removedHere > 0) await this.prune(entry.repo);
     }
-    if (removed > 0) await this.prune(baseWorkingDir);
     return removed;
   }
 }

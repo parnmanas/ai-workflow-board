@@ -986,7 +986,7 @@ export class EventDispatcher {
           content:
             `⚠️ **티켓 worktree 프로비저닝 실패** — 공유 작업 폴더에서 에이전트를 실행하지 않고 디스패치를 중단했습니다.\n\n` +
             `원인: \`${worktreeProvision.reason || 'unknown error'}\`\n\n` +
-            `agent working_dir, repository resource와 \`.awb/wt\` 경로를 확인한 뒤 다시 트리거하세요.`,
+            `repository resource, credential과 working_dir 아래 AWB 관리 폴더(\`.awb/base\`, \`.awb/wt\`)를 확인한 뒤 다시 트리거하세요.`,
         });
       }
       log(

@@ -478,9 +478,8 @@ async function runRuntime(
   // managed-agent-targeted events under the right identity.
   const managedAgentContexts = new ManagedAgentContextRegistry();
   // ticket 9f26f091 — per-(ticket,role) git worktree isolation. Gated by
-  // delegation.worktreeIsolation (default true); when a managed agent's
-  // working_dir is a git repo, each (ticket,role) trigger spawns under its own
-  // worktree so focus flips can't cross-contaminate branches.
+  // delegation.worktreeIsolation (default true); each agent working_dir is a
+  // storage container for AWB-managed base clones and isolated worktrees.
   const worktreeManager = new WorktreeManager({
     enabled: (config as any)?.delegation?.worktreeIsolation !== false,
   });

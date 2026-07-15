@@ -63,8 +63,8 @@ interface BaseRepoLike {
 /** Append a "Base repository" block to the trigger prompt when the ticket has
  *  a configured base_repo / base_branch. Tells the spawned subagent to fetch
  *  + check out that branch and cut its working branch from there, so every
- *  ticket starts from the latest known-good base instead of whatever the
- *  agent's working_dir happens to be on. Skipped silently when neither field
+ *  ticket starts from the latest known-good base instead of an unrelated
+ *  checkout. Skipped silently when neither field
  *  is set, so non-code tickets don't carry git instructions they can't
  *  satisfy. */
 function appendBaseRepoBlock(
@@ -79,7 +79,7 @@ function appendBaseRepoBlock(
   if (baseRepo?.name) lines.push(`- Name: ${baseRepo.name}`);
   if (baseRepo?.url) lines.push(`- URL: ${baseRepo.url}`);
   if (branch) lines.push(`- Base branch: ${branch}`);
-  lines.push('- Before editing code, ensure your working_dir is a clone of this repository, then `git fetch` and check out the base branch (creating a fresh feature branch off it for your changes).');
+  lines.push('- The current work folder is the checkout prepared for this repository. Run `git fetch` there and check out the base branch (creating a fresh feature branch off it for your changes).');
 }
 
 /**
