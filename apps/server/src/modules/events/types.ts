@@ -42,6 +42,7 @@ export interface SubscriberIdentity {
  */
 export interface EventMapContext {
   resolveBoardId(ticketId: string, entityId: string): Promise<string | null>;
+  resolveTicketRepositoryResourceId(ticketId: string): Promise<string>;
 }
 
 /**

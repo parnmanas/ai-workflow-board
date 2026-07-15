@@ -72,6 +72,7 @@ export const EVENT_TYPES: EventDefinition[] = [
       if (!boardId) return null;
       const payload: BoardUpdatePayload = {
         ticket_id: activity.ticket_id,
+        repository_resource_id: await ctx.resolveTicketRepositoryResourceId(activity.ticket_id),
         entity_type: activity.entity_type,
         action: activity.action,
         field_changed: activity.field_changed || '',
@@ -88,6 +89,7 @@ export const EVENT_TYPES: EventDefinition[] = [
         board_id: env.scope.board_id || '',
         event_type: 'board_update',
         ticket_id: p.ticket_id,
+        repository_resource_id: p.repository_resource_id || '',
         entity_type: p.entity_type,
         action: p.action,
         field_changed: p.field_changed || '',

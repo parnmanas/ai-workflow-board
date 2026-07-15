@@ -1433,7 +1433,7 @@ export class EventDispatcher {
       // tickets archived straight from a non-terminal column. Fire-and-forget so
       // the live-session forward below stays synchronous.
       if (ev.entity_type === 'ticket' && ev.action === 'archived' && ev.ticket_id) {
-        void this.#cleanupArchivedTicketWorkspace(ev.ticket_id, ev.base_repo?.id);
+        void this.#cleanupArchivedTicketWorkspace(ev.ticket_id, ev.repository_resource_id);
       }
 
       if (this.#ticketSessionManager && ev.ticket_id) {
