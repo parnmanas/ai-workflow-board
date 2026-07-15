@@ -434,6 +434,92 @@ function readRemoteVersion(repoRoot: string, branch: string): string | null {
   return null;
 }
 
+export interface GitUpdateState {
+  /** True when `origin/<branch>` carries commits this build's checkout lacks. */
+  update_available: boolean;
+  /** Running checkout's HEAD sha, or null when it couldn't be read. */
+  head_sha: string | null;
+  /** `origin/<branch>` tip sha, or null when the ref is missing. */
+  remote_sha: string | null;
+  /** Number of commits in `origin/<branch>` not reachable from HEAD (0 when
+   *  converged or when HEAD is ahead). null when it couldn't be computed. */
+  ahead: number | null;
+  /** Set when git couldn't answer (no HEAD, missing origin ref, spawn error). */
+  error?: string;
+}
+
+/**
+ * Determine git-mode update availability by REMOTE COMMIT DIFFERENCE — NOT by
+ * comparing package.json versions.
+ *
+ * Why not version compare: under publish-time versioning (ticket 433f6cbd) the
+ * source `apps/agent-manager/package.json` version is frozen at the seed floor
+ * (nobody hand-bumps it anymore; the real version is computed at `npm publish`
+ * time and lives only in the npm tarball + git tag). So `origin/<branch>`'s
+ * package.json version stays equal to the running build's version forever, and
+ * a `compareSemver(remoteVersion, current)` would report "no update available"
+ * even after arbitrarily many code changes landed on the branch. That silently
+ * freezes the git fallback channel (the exact regression this replaces).
+ *
+ * The honest git-mode signal is "origin/<branch> advanced past the commit this
+ * build was built from". After a git self-update (fetch → `checkout --detach
+ * origin/<branch>` → build → re-exec) HEAD == origin/<branch>, so this returns
+ * update_available=false — i.e. it CONVERGES on rebuild, unlike the frozen
+ * version compare.
+ *
+ * Assumes the caller already ran `git fetch` (this only reads local refs), so
+ * it also yields a best-effort answer against the stale cached ref when a fetch
+ * fails. Pure git, no registry dependency — correct for git mode, which is
+ * selected precisely when the npm channel is unavailable.
+ */
+export function computeGitUpdateState(repoRoot: string, branch: string): GitUpdateState {
+  const head = runSync('git', ['-C', repoRoot, 'rev-parse', 'HEAD'], 5_000);
+  if (!head.ok) {
+    const detail = (head.stderr.trim() || head.stdout.trim() || 'git rev-parse HEAD failed')
+      .split('\n')
+      .filter(Boolean)
+      .pop();
+    return { update_available: false, head_sha: null, remote_sha: null, ahead: null, error: detail };
+  }
+  const headSha = head.stdout.trim();
+  const remote = runSync('git', ['-C', repoRoot, 'rev-parse', `origin/${branch}`], 5_000);
+  if (!remote.ok) {
+    const detail = (remote.stderr.trim() || remote.stdout.trim() || `origin/${branch} ref missing`)
+      .split('\n')
+      .filter(Boolean)
+      .pop();
+    return { update_available: false, head_sha: headSha, remote_sha: null, ahead: null, error: detail };
+  }
+  const remoteSha = remote.stdout.trim();
+  if (headSha === remoteSha) {
+    // Converged: running the branch tip. (Also the post-self-update steady state.)
+    return { update_available: false, head_sha: headSha, remote_sha: remoteSha, ahead: 0 };
+  }
+  // Count commits reachable from origin/<branch> but not from HEAD. >0 means the
+  // remote is strictly ahead (an update to adopt); 0 with differing shas means
+  // HEAD is ahead / diverged (local dev commit) → no update.
+  const revList = runSync(
+    'git',
+    ['-C', repoRoot, 'rev-list', '--count', `HEAD..origin/${branch}`],
+    5_000,
+  );
+  if (!revList.ok) {
+    const detail = (revList.stderr.trim() || revList.stdout.trim() || 'git rev-list failed')
+      .split('\n')
+      .filter(Boolean)
+      .pop();
+    return { update_available: false, head_sha: headSha, remote_sha: remoteSha, ahead: null, error: detail };
+  }
+  const ahead = Number.parseInt(revList.stdout.trim(), 10);
+  const aheadN = Number.isFinite(ahead) ? ahead : null;
+  return {
+    update_available: aheadN != null && aheadN > 0,
+    head_sha: headSha,
+    remote_sha: remoteSha,
+    ahead: aheadN,
+  };
+}
+
 /**
  * Periodically refresh the remote version cache so the heartbeat can
  * advertise an up-to-date `latest_version` without paying the round-trip
@@ -446,23 +532,38 @@ export class UpdateChecker {
   #intervalMs: number;
   #log: (msg: string) => void;
 
-  constructor(opts: { intervalMs?: number; log?: (msg: string) => void } = {}) {
+  constructor(
+    opts: {
+      intervalMs?: number;
+      log?: (msg: string) => void;
+      /** Test-only injection: drive #tick against a fixture repo without real
+       *  detection. Production callers pass none of these — everything below is
+       *  auto-detected. */
+      repoRoot?: string | null;
+      branch?: string | null;
+      installMode?: InstallMode;
+      currentVersion?: string;
+    } = {},
+  ) {
     this.#intervalMs = opts.intervalMs ?? DEFAULT_CHECK_INTERVAL_MS;
     this.#log = opts.log ?? log;
-    const repoRoot = detectRepoRoot();
+    const repoRoot = opts.repoRoot !== undefined ? opts.repoRoot : detectRepoRoot();
     // Classify the install once at boot. In git mode we skip the `npm root -g`
     // spawn entirely; in the no-checkout case it decides npm-global vs unknown.
     const runningDir = resolve(dirname(fileURLToPath(import.meta.url)));
-    const npmGlobalRoot = detectNpmGlobalRoot();
-    const install_mode = classifyInstallMode(runningDir, repoRoot, npmGlobalRoot);
-    const branch = repoRoot ? detectDefaultBranch(repoRoot) : null;
+    const install_mode =
+      opts.installMode ?? classifyInstallMode(runningDir, repoRoot, detectNpmGlobalRoot());
+    const branch =
+      opts.branch !== undefined ? opts.branch : repoRoot ? detectDefaultBranch(repoRoot) : null;
     // Prefer the build-time snapshot (dist/package.json) over the working-tree
     // file. On dev machines the repo root is also the running source tree, so
     // `readWorkingTreeVersion(repoRoot)` returns whatever version the working
     // tree currently has — which drifts ahead of the actually-running dist
     // after a `git pull` that wasn't followed by a rebuild. The bundled
     // version is frozen at build time and always matches the running code.
-    const current_version = readBundledVersion() || (repoRoot && readWorkingTreeVersion(repoRoot)) || '0.0.0';
+    const current_version =
+      opts.currentVersion ??
+      (readBundledVersion() || (repoRoot && readWorkingTreeVersion(repoRoot)) || '0.0.0');
     // last_error is reserved for actionable failures (fetch couldn't reach
     // the remote, package.json couldn't be read, …). The "not running from
     // a git checkout" case is signalled via repo_root === null + a one-line
@@ -556,72 +657,45 @@ export class UpdateChecker {
         repoRoot,
         FETCH_TIMEOUT_MS,
       );
-      if (!fetchResult.ok) {
-        // Fetch failed (SSH key unavailable in systemd context, network
-        // down, …). Still try reading the existing `origin/<branch>` ref —
-        // it may be stale but is far more useful than showing "check failed"
-        // with no version info at all. Only set last_error if the fallback
-        // read also fails.
-        const stale = readRemoteVersion(repoRoot, branch);
-        if (stale) {
-          const current = this.#status.current_version;
-          const update_available = compareSemver(stale, current) > 0;
-          const detail = (fetchResult.stderr.trim() || fetchResult.stdout.trim() || 'unknown')
+      const fetchDetail = fetchResult.ok
+        ? null
+        : (fetchResult.stderr.trim() || fetchResult.stdout.trim() || 'unknown')
             .split('\n')
             .filter(Boolean)
             .pop()
             ?.slice(0, 240) || 'fetch failed';
-          this.#status = {
-            ...this.#status,
-            current_version: current,
-            latest_version: stale,
-            update_available,
-            // Keep the existing last_checked_at — the data is stale, not fresh.
-            last_error: `git fetch failed (using cached ref): ${detail}`,
-          };
-          return;
-        }
-        const detail = (fetchResult.stderr.trim() || fetchResult.stdout.trim() || 'unknown')
-          .split('\n')
-          .filter(Boolean)
-          .pop()
-          ?.slice(0, 240) || 'fetch failed';
+
+      // Update availability is by COMMIT DIFFERENCE against origin/<branch>, not
+      // a package.json version compare. Under publish-time versioning the source
+      // version is frozen at seed (see computeGitUpdateState) so a version
+      // compare would report "no update" forever and silently freeze the git
+      // fallback channel. This reads local refs, so it still yields a best-effort
+      // answer against the stale cached ref when the fetch above failed.
+      const git = computeGitUpdateState(repoRoot, branch);
+      if (git.error && git.head_sha == null) {
+        // Couldn't even read our own HEAD — nothing trustworthy to report.
         this.#status = {
           ...this.#status,
-          last_error: `git fetch failed: ${detail}`,
+          last_error: fetchDetail ? `git fetch failed: ${fetchDetail}` : git.error,
         };
         return;
       }
+
+      // latest_version is informational only now (the source version is frozen,
+      // so it typically equals current). The update signal is commit-diff. Keep
+      // showing the remote package.json version when readable; otherwise leave
+      // the prior value untouched.
       const latest = readRemoteVersion(repoRoot, branch);
-      if (!latest) {
-        this.#status = {
-          ...this.#status,
-          last_error: `could not read ${PACKAGE_JSON_REL} from origin/${branch}`,
-        };
-        return;
-      }
-      // current_version is the in-memory snapshot captured at process start
-      // (constructor: readWorkingTreeVersion → readBundledVersion). We do NOT
-      // re-read working tree each tick: the working tree only matters at boot,
-      // when it must equal the running binary's version. Re-reading was a bug
-      // — on hosts where the operator git-pulls in the same checkout (dev
-      // machines, manager + dev share a workspace) it pulled the working tree
-      // ahead of the actually-running process, making `latest == current ==
-      // working_tree_future_version` and silently hiding the Update button
-      // while the running code was still stale.
-      //
-      // Self-update doesn't need the re-read either: it ends in detached
-      // re-exec, so the post-update new process re-runs the constructor
-      // against the just-pulled tree and the cache restarts fresh.
-      const current = this.#status.current_version;
-      const update_available = compareSemver(latest, current) > 0;
       this.#status = {
         ...this.#status,
-        current_version: current,
-        latest_version: latest,
-        update_available,
-        last_checked_at: new Date().toISOString(),
-        last_error: null,
+        latest_version: latest ?? this.#status.latest_version,
+        update_available: git.update_available,
+        // Fresh timestamp only when the fetch actually reached the remote; a
+        // commit-diff computed off a stale ref is not a fresh check.
+        last_checked_at: fetchResult.ok ? new Date().toISOString() : this.#status.last_checked_at,
+        last_error: fetchResult.ok
+          ? git.error ?? null
+          : `git fetch failed (using cached ref): ${fetchDetail}`,
       };
     } catch (err: any) {
       this.#status = {

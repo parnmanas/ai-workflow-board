@@ -129,19 +129,19 @@ jobs:
           npm pack --dry-run -w awb-agent-manager
 
       # publish 직전 존재 재확인 (guard #1 백스톱): build 도중 누군가 같은 버전을
-      # 올렸으면 덮어쓰지 않고 실패. (--json 없이 조회 — 성공 시 버전만, 404 시 빈
-      # 출력. E404 메시지에 버전 문자열이 섞여 false-match 하는 걸 피한다.)
+      # 올렸으면 덮어쓰지 않고 실패. **fail-closed** — compute 의 classifyNpmView 를
+      # 재사용하는 `probe-exists` 서브커맨드가 E404(미존재)와 기타 오류(E401/네트워크/
+      # 5xx/빈출력)를 엄격히 구분한다:
+      #   exit 0 → 명시적 E404 = 아직 미존재 → publish 진행
+      #   exit 3 → 이미 존재 = 선점 실패 → job fail (덮어쓰기 금지)
+      #   exit 2 → E404 아닌 오류 = fail-closed → job fail (애매한 오류로 강행 금지)
+      # (예전 `npm view … 2>/dev/null || true` 는 E401/네트워크 오류도 '미존재'로
+      #  오인해 publish 를 진행할 수 있었다 — 이 step 이 그 fail-open 구멍을 닫는다.)
       - name: Guard — version still unpublished
         if: steps.plan.outputs.action == 'publish'
         env:
           V: ${{ steps.plan.outputs.version }}
-        run: |
-          PUBLISHED="$(npm view "awb-agent-manager@$V" version 2>/dev/null || true)"
-          if [ "$PUBLISHED" = "$V" ]; then
-            echo "::error::awb-agent-manager@$V appeared on npm during build — refusing to overwrite (idempotency)."
-            exit 1
-          fi
-          echo "awb-agent-manager@$V still unpublished — proceeding."
+        run: node apps/agent-manager/scripts/compute-publish-version.mjs probe-exists "$V"
 
       - name: Publish to npm
         if: steps.plan.outputs.action == 'publish'

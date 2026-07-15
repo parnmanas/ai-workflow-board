@@ -14,9 +14,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-const { parseVersion, compareVersions, bumpPatch, classifyNpmView, decideVersion } = await import(
-  '../scripts/compute-publish-version.mjs'
-);
+const { parseVersion, compareVersions, bumpPatch, classifyNpmView, classifyPublishGuard, decideVersion } =
+  await import('../scripts/compute-publish-version.mjs');
 
 // ─── semver ───────────────────────────────────────────────────────────────
 
@@ -31,6 +30,22 @@ test('parseVersion: 형식 어긋나면 throw', () => {
   assert.throws(() => parseVersion('1.6'), /파싱 불가/);
   assert.throws(() => parseVersion('1.6.x'), /파싱 불가/);
   assert.throws(() => parseVersion(''), /파싱 불가/);
+});
+
+test('parseVersion: strict semver core — parseInt 느슨함 거부 (오염 태그 방어)', () => {
+  // 예전 parseInt 구현은 앞 숫자만 읽어 아래 값들을 조용히 통과시켰다.
+  assert.throws(() => parseVersion('1x.2.3'), /파싱 불가/, 'major 에 붙은 잡문자 거부');
+  assert.throws(() => parseVersion('1.2.3foo'), /파싱 불가/, 'patch 뒤 -/+ 없는 잡문자 거부');
+  assert.throws(() => parseVersion('1.2.3.4'), /파싱 불가/, '식별자 4개 거부');
+  assert.throws(() => parseVersion('v1.2.3'), /파싱 불가/, '접두 v 거부');
+  assert.throws(() => parseVersion('01.2.3'), /파싱 불가/, 'leading zero 거부 (semver)');
+  assert.throws(() => parseVersion('1.02.3'), /파싱 불가/, 'leading zero(minor) 거부');
+  // 유효한 형태는 계속 통과.
+  assert.deepEqual(parseVersion('1.2.3'), [1, 2, 3]);
+  assert.deepEqual(parseVersion('10.20.30'), [10, 20, 30]);
+  assert.deepEqual(parseVersion('1.2.3-rc.1'), [1, 2, 3]);
+  assert.deepEqual(parseVersion('1.2.3+build.5'), [1, 2, 3]);
+  assert.deepEqual(parseVersion('0.0.0'), [0, 0, 0]);
 });
 
 test('compareVersions: 두 자리 수는 숫자로 비교 (문자열 함정 방지)', () => {
@@ -113,6 +128,62 @@ test('classifyNpmView: JSON 없는 네트워크 실패 → error (fail-closed)',
 test('classifyNpmView: exit 0 인데 빈 출력 → error (조용한 seed 폴백 금지)', () => {
   const r = classifyNpmView({ status: 0, stdout: '\n', stderr: '' });
   assert.equal(r.kind, 'error');
+});
+
+// ─── classifyPublishGuard (publish 직전 존재 재확인 게이트) ───────────────────
+//
+// fail-closed 계약: '미존재'는 오직 명시적 E404 로만 성립. E401/네트워크/5xx 는
+// 절대 '미존재'로 오인해 publish 를 강행하지 않는다. exit 0=진행 / 2=fail-closed /
+// 3=선점. (probe-exists 서브커맨드가 이 판정을 그대로 exit 코드로 쓴다.)
+
+test('classifyPublishGuard: E404 not_found → proceed (code 0, 아직 미존재 → publish)', () => {
+  const d = classifyPublishGuard({ kind: 'not_found' }, '1.6.29');
+  assert.equal(d.proceed, true);
+  assert.equal(d.code, 0);
+});
+
+test('classifyPublishGuard: found → 선점 실패 (code 3, 덮어쓰기 거부)', () => {
+  const d = classifyPublishGuard({ kind: 'found', value: '1.6.29' }, '1.6.29');
+  assert.equal(d.proceed, false);
+  assert.equal(d.code, 3);
+  assert.match(d.message, /덮어쓰기 거부|idempotency/);
+});
+
+test('classifyPublishGuard: E401 인증 오류 → fail-closed (code 2, publish 진행 안 함)', () => {
+  // 예전 `npm view … 2>/dev/null || true` 는 이걸 '미존재'로 오인했다 — 여기서 막는다.
+  const cls = classifyNpmView({
+    status: 1,
+    stdout: JSON.stringify({ error: { code: 'E401', summary: 'Unauthorized' } }),
+    stderr: '',
+  });
+  const d = classifyPublishGuard(cls, '1.6.29');
+  assert.equal(d.proceed, false, 'E401 은 절대 publish 진행으로 새면 안 된다');
+  assert.equal(d.code, 2);
+  assert.match(d.message, /fail-closed/);
+});
+
+test('classifyPublishGuard: 네트워크 실패(ETIMEDOUT) → fail-closed (code 2)', () => {
+  const cls = classifyNpmView({
+    status: 1,
+    stdout: '',
+    stderr: 'npm error network request to https://registry.npmjs.org failed, reason: ETIMEDOUT',
+  });
+  const d = classifyPublishGuard(cls, '1.6.29');
+  assert.equal(d.proceed, false, '네트워크 오류를 미존재로 오인하면 안 된다');
+  assert.equal(d.code, 2);
+});
+
+test('classifyPublishGuard: 5xx/빈출력(성공했지만 빈 출력) → fail-closed (code 2)', () => {
+  const cls = classifyNpmView({ status: 0, stdout: '\n', stderr: '' });
+  const d = classifyPublishGuard(cls, '1.6.29');
+  assert.equal(d.proceed, false);
+  assert.equal(d.code, 2);
+});
+
+test('classifyPublishGuard: classification 자체가 없으면 → fail-closed (code 2)', () => {
+  const d = classifyPublishGuard(undefined, '1.6.29');
+  assert.equal(d.proceed, false);
+  assert.equal(d.code, 2);
 });
 
 // ─── decideVersion ──────────────────────────────────────────────────────────

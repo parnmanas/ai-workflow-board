@@ -55,14 +55,22 @@ const MAX_BUMP_ATTEMPTS = 8;
 
 // ─── 순수 semver ──────────────────────────────────────────────────────────
 
+/**
+ * strict semver core 정규식: `major.minor.patch` 세 숫자 식별자(leading-zero 금지)
+ * 뒤에 선택적 `-prerelease` / `+build` 만 허용한다. 입력원이 npm 레지스트리뿐이면
+ * 느슨해도 되지만, HEAD 태그(`awb-agent-manager-v*`)는 손으로/오염되어 들어올 수 있는
+ * 경로다 — `parseInt` 느슨함(`1x.2.3`, `1.2.3foo` 통과)을 여기서 좁혀 그런 값이
+ * 버전으로 채택되지 않게 막는다 (reviewer 비차단 권고).
+ */
+const SEMVER_CORE_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:[-+].*)?$/;
+
 /** 'x.y.z' (+ 선택적 -prerelease/+build) 의 숫자 코어를 [major, minor, patch] 로. */
 export function parseVersion(v) {
-  const core = String(v).trim().split('-')[0].split('+')[0];
-  const parts = core.split('.').map((n) => Number.parseInt(n, 10));
-  if (parts.length !== 3 || parts.some((n) => Number.isNaN(n))) {
+  const m = SEMVER_CORE_RE.exec(String(v).trim());
+  if (!m) {
     throw new Error(`파싱 불가한 버전 문자열: "${v}"`);
   }
-  return parts;
+  return [Number(m[1]), Number(m[2]), Number(m[3])];
 }
 
 /** a > b → 1, a < b → -1, a === b → 0 (숫자 비교 — 1.6.9 < 1.6.10). */
@@ -125,6 +133,44 @@ export function classifyNpmView({ status, stdout, stderr }) {
   }
   const tail = (stderr || out || 'unknown').split('\n').filter(Boolean).pop();
   return { kind: 'error', detail: (tail || 'npm view 실패').slice(0, 240) };
+}
+
+// ─── 순수 publish-guard 판정 ─────────────────────────────────────────────
+
+/**
+ * publish 직전 존재 재확인(guard)의 순수 판정: classifyNpmView 결과를 exit 코드로
+ * 매핑한다. fail-closed 계약의 핵심 — '미존재'는 **오직 명시적 E404** 로만 성립하고,
+ * E401/네트워크/5xx/빈출력 등 애매한 오류는 절대 '미존재'로 오인해 publish 를 강행하지
+ * 않는다.
+ *
+ *   - not_found (E404)          → { code: 0, proceed: true }  아직 npm 에 없음 → publish 진행
+ *   - found                     → { code: 3 }  build 도중 누가 같은 버전을 선점 → 덮어쓰기 거부
+ *   - error (E401/네트워크/5xx…) → { code: 2 }  fail-closed (애매한 오류로 publish 금지)
+ *
+ * (예전 워크플로 step 은 `npm view … 2>/dev/null || true` 로 E404 와 기타 오류를
+ *  구분하지 못해, E401/네트워크 오류를 모두 '미존재'로 취급하고 publish 를 진행할 수
+ *  있었다 — 이 판정이 그 fail-open 구멍을 닫는다.)
+ */
+export function classifyPublishGuard(classification, version) {
+  if (!classification || classification.kind === 'error') {
+    return {
+      code: 2,
+      proceed: false,
+      message: `${PACKAGE_NAME}@${version} 존재 확인 실패 (fail-closed): ${classification?.detail || 'unknown'}`,
+    };
+  }
+  if (classification.kind === 'not_found') {
+    return {
+      code: 0,
+      proceed: true,
+      message: `${PACKAGE_NAME}@${version} 아직 npm 에 없음 — publish 진행.`,
+    };
+  }
+  return {
+    code: 3,
+    proceed: false,
+    message: `${PACKAGE_NAME}@${version} 이(가) build 도중 npm 에 나타남 — 덮어쓰기 거부 (idempotency, fail-closed).`,
+  };
 }
 
 // ─── 순수 결정 코어 ───────────────────────────────────────────────────────
@@ -247,6 +293,27 @@ function resolveAction(version, reason, headSha, tagVersionOnHeadValue) {
   return tagVersionOnHeadValue === version ? 'noop' : 'recover-tag';
 }
 
+/**
+ * `probe-exists <version>` 서브커맨드: publish 직전 존재 재확인 게이트.
+ * classifyNpmView 를 재사용해 `npm view <pkg>@<ver> version --json` 결과를 분류하고,
+ * classifyPublishGuard 로 exit 코드를 정한다 (0=진행 / 2=fail-closed / 3=선점).
+ * 워크플로의 `Guard — version still unpublished` step 이 이걸 호출한다.
+ */
+function probeExists(version) {
+  if (!version) throw new Error('probe-exists 는 <version> 인자가 필요합니다');
+  parseVersion(version); // 오염된 인자 방어 (strict semver)
+  const classification = npmView(`${PACKAGE_NAME}@${version}`, 'version');
+  const decision = classifyPublishGuard(classification, version);
+  if (decision.proceed) {
+    console.log(`✅ [compute-publish-version] ${decision.message}`);
+  } else {
+    // GitHub Actions annotation + 사람이 읽는 로그. 둘 다 job 을 fail 시킨다(code≠0).
+    console.error(`::error::${decision.message}`);
+    console.error(`❌ [compute-publish-version] ${decision.message}`);
+  }
+  return decision.code;
+}
+
 function emitOutputs(fields) {
   const lines = Object.entries(fields).map(([k, v]) => `${k}=${v}`);
   for (const l of lines) console.log(`[compute-publish-version] ${l}`);
@@ -312,7 +379,11 @@ export function main() {
 
 // CLI 직접 실행 시에만 동작. import(단위 테스트) 시에는 순수 함수만 노출.
 if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
+  const subcommand = process.argv[2];
   try {
+    if (subcommand === 'probe-exists') {
+      process.exit(probeExists(process.argv[3]));
+    }
     process.exit(main());
   } catch (err) {
     console.error(`❌ [compute-publish-version] ${err?.message || err}`);
