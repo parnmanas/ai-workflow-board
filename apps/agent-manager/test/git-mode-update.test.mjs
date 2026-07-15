@@ -117,6 +117,43 @@ test('computeGitUpdateState: HEAD 가 앞서면(로컬 dev commit) update_availa
   }
 });
 
+test('computeGitUpdateState: HEAD 와 origin 이 diverged 면 update_available=false (로컬 커밋 보존)', () => {
+  const { base, remote, runtime } = setupRepo();
+  try {
+    // A(seed) 를 공통 조상으로 두고 HEAD 와 origin 이 각각 고유 커밋을 갖도록 분기시킨다.
+    //   A ─ B(remote-only, origin/main tip)
+    //     └ C(local-only, HEAD)
+    // origin 에 B 를 올린다 (clone 으로 push — runtime HEAD 는 건드리지 않음).
+    const clone = join(base, 'diverger');
+    execFileSync('git', ['clone', '-b', 'main', remote, clone], { env: GIT_ENV });
+    writePkg(clone, '1.6.28', 'remote-b.txt');
+    git(clone, 'add', '-A');
+    git(clone, 'commit', '-m', 'B: remote-only');
+    git(clone, 'push', 'origin', 'main'); // origin/main = B
+
+    // runtime 은 여전히 A. 로컬 커밋 C 를 쌓아 HEAD 를 A→C 로 전진 (origin 과 diverge).
+    writePkg(runtime, '1.6.28', 'local-c.txt');
+    git(runtime, 'add', '-A');
+    git(runtime, 'commit', '-m', 'C: local-only');
+    git(runtime, 'fetch', 'origin'); // origin/main = B 를 로컬 ref 로 당겨온다.
+
+    // 독립 재확인: 실제로 diverged 상태인지 (양쪽 고유 커밋 존재).
+    const counts = git(runtime, 'rev-list', '--left-right', '--count', 'HEAD...origin/main');
+    const [localOnly, remoteOnly] = counts.split(/\s+/).map((n) => Number.parseInt(n, 10));
+    assert.ok(localOnly > 0 && remoteOnly > 0, `diverged 전제 성립해야 함: got ${counts}`);
+
+    const s = computeGitUpdateState(runtime, 'main');
+    assert.equal(
+      s.update_available,
+      false,
+      'diverged(HEAD·origin 각자 고유 커밋) 면 update 아님 — checkout --detach 로 로컬 커밋을 버리면 안 됨',
+    );
+    assert.notEqual(s.head_sha, s.remote_sha);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test('computeGitUpdateState: origin/<branch> ref 없으면 error + update_available=false', () => {
   const { base, runtime } = setupRepo();
   try {

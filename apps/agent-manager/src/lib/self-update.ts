@@ -495,12 +495,23 @@ export function computeGitUpdateState(repoRoot: string, branch: string): GitUpda
     // Converged: running the branch tip. (Also the post-self-update steady state.)
     return { update_available: false, head_sha: headSha, remote_sha: remoteSha, ahead: 0 };
   }
-  // Count commits reachable from origin/<branch> but not from HEAD. >0 means the
-  // remote is strictly ahead (an update to adopt); 0 with differing shas means
-  // HEAD is ahead / diverged (local dev commit) → no update.
+  // Symmetric-difference counts: `left` = commits reachable from HEAD but not
+  // origin/<branch> (local-only), `right` = commits reachable from origin but
+  // not HEAD (remote-only). `--left-right --count HEAD...origin` prints them as
+  // "left<TAB>right" in a single call.
+  //
+  // We only adopt when the remote is a *fast-forward descendant* of HEAD — i.e.
+  // local-only == 0 && remote-only > 0. Requiring local-only == 0 is the crux:
+  //   • remote strictly ahead (A→B on origin, HEAD at A): 0<TAB>N → update
+  //   • HEAD strictly ahead (local dev commit): N<TAB>0 → no update
+  //   • DIVERGED (HEAD and origin each carry unique commits): N<TAB>M, N>0 → no
+  //     update. A plain `HEAD..origin` count would be M>0 here and wrongly claim
+  //     an update, and self-update's `checkout --detach origin/<branch>` would
+  //     then abandon the local-only commits. Gating on local-only == 0 keeps
+  //     the "diverged → no update" contract honest.
   const revList = runSync(
     'git',
-    ['-C', repoRoot, 'rev-list', '--count', `HEAD..origin/${branch}`],
+    ['-C', repoRoot, 'rev-list', '--left-right', '--count', `HEAD...origin/${branch}`],
     5_000,
   );
   if (!revList.ok) {
@@ -510,13 +521,24 @@ export function computeGitUpdateState(repoRoot: string, branch: string): GitUpda
       .pop();
     return { update_available: false, head_sha: headSha, remote_sha: remoteSha, ahead: null, error: detail };
   }
-  const ahead = Number.parseInt(revList.stdout.trim(), 10);
-  const aheadN = Number.isFinite(ahead) ? ahead : null;
+  const [localRaw, remoteRaw] = revList.stdout.trim().split(/\s+/);
+  const localOnly = Number.parseInt(localRaw, 10);
+  const remoteOnly = Number.parseInt(remoteRaw, 10);
+  if (!Number.isFinite(localOnly) || !Number.isFinite(remoteOnly)) {
+    return {
+      update_available: false,
+      head_sha: headSha,
+      remote_sha: remoteSha,
+      ahead: null,
+      error: `unparseable rev-list output: ${JSON.stringify(revList.stdout.trim())}`,
+    };
+  }
   return {
-    update_available: aheadN != null && aheadN > 0,
+    // Fast-forward only: remote ahead AND no local-only commits (not diverged).
+    update_available: localOnly === 0 && remoteOnly > 0,
     head_sha: headSha,
     remote_sha: remoteSha,
-    ahead: aheadN,
+    ahead: remoteOnly,
   };
 }
 
