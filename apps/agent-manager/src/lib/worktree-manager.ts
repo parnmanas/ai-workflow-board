@@ -63,6 +63,7 @@ import { promises as fsp } from 'node:fs';
 import { isAbsolute, join, resolve as pathResolve } from 'node:path';
 import { execFile } from 'node:child_process';
 import { log } from './logging.js';
+import { AGENT_MANAGER_HOME } from './constants.js';
 
 const GIT_TIMEOUT_MS = 20_000;
 
@@ -237,6 +238,7 @@ export interface ResolveCwdArgs {
    *  ticket worktree. Dispatch resolves this as ticket repo first, then the
    *  board environment's first repository. */
   bootstrapRepo?: {
+    resourceId?: string;
     url: string;
     branch?: string;
     credential?: { username?: string; token: string } | null;
@@ -274,6 +276,7 @@ export function worktreeSlug(ticketId: string, mode: WorktreeMode = DEFAULT_WORK
 
 export class WorktreeManager {
   #enabled: boolean;
+  #resourceWorktreesRoot: string;
   /** Per-worktree-root serialization for warm-pool acquire/release so two
    *  concurrent triggers can't lease the same idle slot (규약 ⑥). Keyed by the
    *  normalized worktrees root; one chained promise per key. */
@@ -285,8 +288,10 @@ export class WorktreeManager {
   /** Serialize first-clone attempts for agents sharing one working_dir. */
   #bootstrapLocks = new Map<string, Promise<boolean>>();
 
-  constructor(opts: { enabled?: boolean } = {}) {
+  constructor(opts: { enabled?: boolean; resourceWorktreesRoot?: string } = {}) {
     this.#enabled = opts.enabled !== false;
+    this.#resourceWorktreesRoot = opts.resourceWorktreesRoot
+      ?? join(AGENT_MANAGER_HOME, 'worktrees');
   }
 
   get enabled(): boolean {
@@ -520,12 +525,45 @@ export class WorktreeManager {
     // fresh clone would leave resumed/private-repo tickets unable to fetch.
     await this.#installRepoCredential(baseWorkingDir, args.bootstrapRepo);
 
-    const repoCtx = await this.#resolveRepoContext(baseWorkingDir);
+    let provisioningBase = baseWorkingDir;
+    const resourceId = args.bootstrapRepo?.resourceId?.trim();
+    const resourceSlug = resourceId?.replace(/[^A-Za-z0-9._-]/g, '_');
+    const resourceRoot = resourceSlug
+      ? join(this.#resourceWorktreesRoot, resourceSlug)
+      : null;
+    // Git records worktrees in the repository that created them. Persist that
+    // owner alongside the resource-scoped checkout so a later dispatch from a
+    // different agent clone asks the original repository to inspect/reattach
+    // it instead of mistaking the existing directory for a path conflict.
+    if (mode === 'per_ticket' && resourceRoot) {
+      const ownerPath = join(resourceRoot, '.repo-owner');
+      try {
+        const savedOwner = (await fsp.readFile(ownerPath, 'utf8')).trim();
+        if (savedOwner && await this.#isGitWorkTree(savedOwner)) provisioningBase = savedOwner;
+      } catch {
+        await fsp.mkdir(resourceRoot, { recursive: true });
+        await fsp.writeFile(ownerPath, `${baseWorkingDir}\n`, { encoding: 'utf8', flag: 'wx' })
+          .catch(() => {});
+      }
+    }
+    if (provisioningBase !== baseWorkingDir) {
+      await this.#installRepoCredential(provisioningBase, args.bootstrapRepo);
+    }
+
+    const repoCtx = await this.#resolveRepoContext(provisioningBase);
     if (!repoCtx) return fallback('no_repo_root');
     const { repoRoot, workSubpath } = repoCtx;
     const withSub = (p: string) => (workSubpath ? join(p, workSubpath) : p);
 
-    const worktreesRoot = worktreesRootFor(baseWorkingDir);
+    // A per-ticket checkout must survive reassignment to another managed agent
+    // (and therefore another working_dir / CLI).  Repository resources are the
+    // stable identity shared by those dispatches, so keep their checkout under
+    // the manager home rather than under whichever agent happened to run first.
+    // Legacy triggers without a resource id retain the historical agent-local
+    // placement; explicit per_ticket dispatch rejects that omission upstream.
+    const worktreesRoot = mode === 'per_ticket' && resourceSlug
+      ? join(this.#resourceWorktreesRoot, resourceSlug)
+      : worktreesRootFor(baseWorkingDir);
 
     // Keep the nested worktrees out of `git status` (and out of Unity scans).
     await this.#ensureAwbIgnored(repoRoot, workSubpath);
@@ -552,8 +590,8 @@ export class WorktreeManager {
       // Prune + inspect + add is one atomic provisioning transaction. Without
       // this, simultaneous triggers can both observe a missing registration;
       // the loser then falls back to the shared base cwd and defeats isolation.
-      await this.prune(baseWorkingDir);
-      const ens = await this.#ensureWorktree(baseWorkingDir, worktreesRoot, wtPath);
+      await this.prune(provisioningBase);
+      const ens = await this.#ensureWorktree(provisioningBase, worktreesRoot, wtPath);
       if (!ens.ok) {
         if (ens.reason === 'add_failed') {
           log(

@@ -240,6 +240,26 @@ export function parseWorktreeMode(raw: unknown): WorktreeMode | undefined {
   return raw === 'per_ticket' || raw === 'shared' ? raw : undefined;
 }
 
+/** Explicit per_ticket boards are fail-closed: every input needed to produce
+ * an isolated cwd must exist before dispatch is allowed to reach a spawn site.
+ * Older events with no worktree_mode keep their legacy best-effort behavior. */
+export function validateWorktreeProvisioningInputs(args: {
+  mode: WorktreeMode | undefined;
+  hasAgentContext: boolean;
+  hasManager: boolean;
+  ticketId?: string;
+  role?: string;
+  repositoryResourceId?: string;
+}): string | null {
+  if (args.mode !== 'per_ticket') return null;
+  if (!args.hasAgentContext) return 'missing_agent_context';
+  if (!args.hasManager) return 'missing_worktree_manager';
+  if (!args.ticketId) return 'missing_ticket_id';
+  if (!args.role) return 'missing_role';
+  if (!args.repositoryResourceId) return 'missing_repository_resource';
+  return null;
+}
+
 // Hard cap on consecutive agent-to-agent turns within a single chat room.
 // Server stamps `agent_chain_depth` on every chat_room_message; when the depth
 // reaches the cap we record into history but stop delegating — the chain
@@ -607,8 +627,17 @@ export class EventDispatcher {
     role: string | undefined,
     mode: WorktreeMode | undefined,
     poolSize: number | undefined,
-    bootstrapRepo: { url: string; branch?: string; credential?: { username?: string; token: string } | null } | null,
+    bootstrapRepo: { resourceId?: string; url: string; branch?: string; credential?: { username?: string; token: string } | null } | null,
   ): Promise<{ ok: boolean; reason?: string }> {
+    const requiredError = validateWorktreeProvisioningInputs({
+      mode,
+      hasAgentContext: Boolean(agentContext),
+      hasManager: Boolean(this.#worktreeManager),
+      ticketId,
+      role,
+      repositoryResourceId: bootstrapRepo?.resourceId,
+    });
+    if (requiredError) return { ok: false, reason: requiredError };
     if (!agentContext || !this.#worktreeManager || !ticketId || !role) return { ok: true };
     if ((this.#config as any)?.delegation?.worktreeIsolation === false) return { ok: true };
     try {

@@ -21,7 +21,7 @@ import { join } from 'node:path';
 const HOME = mkdtempSync(join(tmpdir(), 'awb-envprov-'));
 process.env.AWB_AGENT_MANAGER_HOME = HOME;
 
-const { parseEnvironmentConfig, resolveBootstrapRepository } = await import('../dist/lib/event-dispatcher.js');
+const { parseEnvironmentConfig, resolveBootstrapRepository, validateWorktreeProvisioningInputs } = await import('../dist/lib/event-dispatcher.js');
 const { EnvironmentProvisioner, fingerprintEnvironment } = await import(
   '../dist/lib/environment-provisioner.js'
 );
@@ -88,6 +88,25 @@ test('resolveBootstrapRepository: ticket repo wins, board repo is fallback', () 
     { resourceId: '', url: 'https://example.test/board.git', branch: 'develop' },
   );
   assert.equal(resolveBootstrapRepository(null, '', null), null);
+});
+
+test('explicit per_ticket provisioning fails closed when required dispatch inputs are absent', () => {
+  const complete = {
+    mode: 'per_ticket', hasAgentContext: true, hasManager: true,
+    ticketId: 'ticket-1', role: 'assignee', repositoryResourceId: 'repo-1',
+  };
+  assert.equal(validateWorktreeProvisioningInputs(complete), null);
+  for (const [field, expected] of [
+    ['hasAgentContext', 'missing_agent_context'],
+    ['hasManager', 'missing_worktree_manager'],
+    ['ticketId', 'missing_ticket_id'],
+    ['role', 'missing_role'],
+    ['repositoryResourceId', 'missing_repository_resource'],
+  ]) {
+    assert.equal(validateWorktreeProvisioningInputs({ ...complete, [field]: field.startsWith('has') ? false : '' }), expected);
+  }
+  assert.equal(validateWorktreeProvisioningInputs({ ...complete, mode: undefined, hasAgentContext: false }), null,
+    'legacy events remain best-effort compatible');
 });
 
 test('fingerprintEnvironment: stable across key order, sensitive to content + version', () => {

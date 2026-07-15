@@ -429,6 +429,35 @@ test('resume reattaches to the same per-ticket worktree (branch + dirty tree int
   }
 });
 
+test('repository resource keeps a ticket worktree stable across agent working dirs and managers', async () => {
+  const { root, repo, cleanup } = await makeRepo();
+  try {
+    const otherAgentRepo = join(root, 'other-agent');
+    git(root, ['clone', '-q', repo, otherAgentRepo]);
+    const canonicalRoot = join(root, 'manager-worktrees');
+    const bootstrapRepo = { resourceId: 'repo-resource-1', url: repo };
+    const firstManager = new WorktreeManager({ resourceWorktreesRoot: canonicalRoot });
+    const first = await firstManager.resolveCwd({
+      baseWorkingDir: repo, ticketId: TICKET_A, role: 'assignee',
+      mode: 'per_ticket', bootstrapRepo,
+    });
+    git(first.cwd, ['checkout', '-q', '-b', 'ticket/reassigned']);
+    await fsp.writeFile(join(first.cwd, 'wip.txt'), 'preserved across reassignment\n');
+
+    const secondManager = new WorktreeManager({ resourceWorktreesRoot: canonicalRoot });
+    const second = await secondManager.resolveCwd({
+      baseWorkingDir: otherAgentRepo, ticketId: TICKET_A, role: 'reviewer',
+      mode: 'per_ticket', bootstrapRepo,
+    });
+    assert.equal(second.cwd, first.cwd, 'agent and manager instance do not affect canonical cwd');
+    assert.equal(second.reused, true);
+    assert.equal(git(second.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), 'ticket/reassigned');
+    assert.equal(await fsp.readFile(join(second.cwd, 'wip.txt'), 'utf8'), 'preserved across reassignment\n');
+  } finally {
+    await cleanup();
+  }
+});
+
 test('concurrent per-ticket provisioning is atomic and isolates branch/index/untracked files', async () => {
   const { repo, cleanup } = await makeRepo();
   try {
