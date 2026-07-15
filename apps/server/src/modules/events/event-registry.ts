@@ -220,6 +220,16 @@ export const EVENT_TYPES: EventDefinition[] = [
         // this, ev.column_prompt stays undefined on the proxy side and the
         // column workflow guide never reaches the agent.
         column_prompt: p.column_prompt,
+        // ticket 8c3befa8: the resolved base repo (ticket's own, or backfilled
+        // from the board environment). agent-manager's event-dispatcher reads
+        // ev.base_repo / ev.base_branch off the FLATTENED event
+        // (resolveBootstrapRepository) to pick the ticket's repo for the
+        // worktree checkout. Same flatten rule as column_prompt/harness_config:
+        // without these lines the fields never leave the envelope, so the
+        // manager silently falls back to environment.repositories[0] and the
+        // ticket's own base repo is ignored on the wire.
+        base_repo: p.base_repo ?? null,
+        base_branch: p.base_branch || '',
         // e9c7a896: resolved workspace+board harness — agent-manager's
         // handleTrigger reads ev.harness_config off the flattened event and
         // maps the keys onto subagent CLI flags at spawn. Same flatten rule
