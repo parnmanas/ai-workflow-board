@@ -107,6 +107,33 @@ function findInTree(root: Ticket, id: string): Ticket | null {
   return null;
 }
 
+// 클립보드 복사 헬퍼 — HTTPS 컨텍스트에선 navigator.clipboard 를 쓰고,
+// 그것이 없는 비-HTTPS/구형 브라우저에선 execCommand fallback 으로 복사한다.
+// 성공 여부를 boolean 으로 돌려줘 호출부가 성공/실패 피드백을 분기하게 한다.
+async function copyTextToClipboard(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    /* fallback 으로 진행 */
+  }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 const priorityColors: Record<string, string> = {
   // tag/label palette — not tokenized
   low: '#94a3b8',
@@ -571,6 +598,21 @@ export default function TicketPanel({
 
   // Derive active ticket from the root ticket tree
   const activeTicket = findInTree(ticket, activePanelId) || ticket;
+
+  // 헤더의 Ticket ID pill 클릭 → 현재 활성 티켓의 전체 ID 를 클립보드에 복사.
+  // 성공 시 success toast + pill 을 잠깐 초록으로 강조하고, 실패 시 error toast.
+  // idCopied 는 1.5s 뒤 자동 해제해 원래 스타일로 되돌린다.
+  const [idCopied, setIdCopied] = useState(false);
+  const handleCopyId = useCallback(async () => {
+    const ok = await copyTextToClipboard(activeTicket.id);
+    if (ok) {
+      setIdCopied(true);
+      showToast('Ticket ID가 클립보드에 복사되었습니다', 'success');
+      setTimeout(() => setIdCopied(false), 1500);
+    } else {
+      showToast('복사에 실패했습니다 — 클립보드 권한을 확인하세요', 'error');
+    }
+  }, [activeTicket.id, showToast]);
 
   // ─── 코멘트 동적 로딩 (커서 페이지네이션) ────────────────────────
   // 서버 detail GET 은 노드별 최신 N개 코멘트만 싣는다(OOM 방지). 더 오래된
@@ -2238,10 +2280,23 @@ export default function TicketPanel({
               padding: '4px 10px', fontSize: '12px', cursor: 'pointer',
             }}>&#8592; Back</button>
           )}
-          <span style={{
-            fontSize: '11px', padding: '3px 8px', borderRadius: 4,
-            background: tokens.colors.surfaceCard, color: tokens.colors.textMuted, fontWeight: 500,
-          }}>#{activeTicket.id}</span>
+          <span
+            role="button"
+            tabIndex={0}
+            onClick={handleCopyId}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleCopyId(); }
+            }}
+            title={idCopied ? '복사됨!' : '클릭하여 Ticket ID 복사'}
+            aria-label={`Ticket ID ${activeTicket.id}, 클릭하여 클립보드에 복사`}
+            style={{
+              fontSize: '11px', padding: '3px 8px', borderRadius: 4,
+              background: idCopied ? tokens.colors.successBg : tokens.colors.surfaceCard,
+              color: idCopied ? tokens.colors.successLight : tokens.colors.textMuted, fontWeight: 500,
+              cursor: 'pointer', userSelect: 'none',
+              transition: 'background 0.15s ease, color 0.15s ease',
+            }}
+          >#{activeTicket.id}</span>
           <span style={{
             fontSize: '11px', padding: '3px 8px', borderRadius: 4,
             background: tokens.colors.surfaceCard, color: tokens.colors.textMuted,
