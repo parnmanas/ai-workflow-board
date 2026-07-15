@@ -1000,7 +1000,7 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
                 )}
                 {canEdit && (
                   <div style={{ marginTop: 12, fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.5 }}>
-                    Click <b>Edit</b> in the header to open the managed-agent form (same as the AgentManager admin page). CLI is fixed once an identity is created.
+                    Click <b>Edit</b> in the header to open the managed-agent form (same as the AgentManager admin page). Changing the CLI takes effect after you restart the agent.
                   </div>
                 )}
               </div>
