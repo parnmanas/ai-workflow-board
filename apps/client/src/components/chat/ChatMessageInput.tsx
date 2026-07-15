@@ -5,6 +5,7 @@ import type { ChatRoomMessageItem } from '../../types';
 import { MentionTextarea, MentionCandidate, MentionTextareaHandle } from '../common/MentionTextarea';
 import { formatAgentDisplayName } from '../../utils/agentName';
 import { formatBytes, isImageMime, readFileAsBase64 } from './utils/attachments';
+import { completeComposerSend } from './utils/composerSend';
 
 // ─── Style constants (mirror ChatPage.tsx COLORS) ────────────────────────────
 
@@ -59,6 +60,10 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
   const [isDragOver, setIsDragOver] = useState(false);
   const dragCounterRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  // Composer root — lets handleSend decide whether focus is still "inside the
+  // composer" when an async send settles (accessibility: don't yank focus back
+  // if the user deliberately Tab'd/clicked to a control outside it).
+  const rootRef = useRef<HTMLDivElement | null>(null);
   // Imperative focus handle on the composer textarea — drives auto-focus on
   // room open and refocus after send (see effects/handleSend below).
   const inputHandleRef = useRef<MentionTextareaHandle | null>(null);
@@ -226,43 +231,40 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
     // Drop any errored entries; they have no attachment_id and would 400.
     const ready = cur.filter((p) => p.status === 'done' && p.attachmentId);
     const attachmentIds = ready.map((p) => p.attachmentId!) as string[];
+    // Snapshot the attachments this send owns. Anything added after this point
+    // (a file pasted/dropped during a slow send) is NOT in this set and must
+    // survive the success clear below — otherwise its preview URL is revoked and
+    // the already-uploaded server row is orphaned.
+    const sentLocalIds = new Set(cur.map((p) => p.localId));
 
     setSending(true);
     setSendError(null);
+    // Drop the draft optimistically (restored on failure if still empty). Server
+    // accepts empty content when attachment_ids carries the payload.
     setText('');
 
-    try {
-      // Server accepts empty content when attachment_ids carries the payload
-      // (attachment-only screenshot/file share). Drop the previous ' '
-      // placeholder so the rendered bubble doesn't carry a stray space.
-      const msg = await api.sendChatRoomMessage(
-        roomId,
-        content,
-        undefined,
-        attachmentIds.length > 0 ? attachmentIds : undefined,
-      );
-      // Only release the strip after the server has bound the attachments
-      // to a message id. Clearing optimistically would discard the user's
-      // uploaded files on any send failure (network, 409 race, etc.).
-      setPendingAttachments((prev) => {
-        prev.forEach((p) => p.previewUrl && URL.revokeObjectURL(p.previewUrl));
-        return [];
-      });
-      onSent(msg);
-    } catch (err: any) {
-      setSendError(err?.message || 'Message not sent. Check your connection.');
-      // Restore the failed draft — but only if the composer is still empty.
-      // With the textarea kept editable during send (no disable, so focus/keyboard
-      // stay put), a fast typist may have already started the next message; don't
-      // clobber it. pendingAttachments are preserved for retry.
-      setText((cur) => (cur.length === 0 ? content : cur));
-    } finally {
-      setSending(false);
-      // Return focus to the composer so the user can keep typing without a click —
-      // covers the mouse-click Send path (focus moved to the button) and acts as a
-      // safety net for the Enter path (requirements 2 & 3).
-      inputHandleRef.current?.focus();
-    }
+    // Orchestration (send → settle only this send's attachments → restore focus
+    // unless the user moved it away) lives in completeComposerSend so the race /
+    // accessibility paths are unit-testable without a DOM. The component only
+    // injects the live setters, the send call, and the focus read/restore.
+    await completeComposerSend<PendingAttachment>({
+      content,
+      attachmentIds,
+      sentLocalIds,
+      send: (c, ids) => api.sendChatRoomMessage(roomId, c, undefined, ids),
+      onSent,
+      setPendingAttachments,
+      revokeObjectURL: (u) => URL.revokeObjectURL(u),
+      setSendError,
+      setText,
+      setSending,
+      readFocus: () => ({
+        active: document.activeElement,
+        composerRoot: rootRef.current,
+        body: document.body,
+      }),
+      restoreFocus: () => inputHandleRef.current?.focus(),
+    });
   }
 
   function handleDragEnter(e: React.DragEvent<HTMLDivElement>) {
@@ -314,6 +316,7 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
 
   return (
     <div
+      ref={rootRef}
       onDragEnter={handleDragEnter}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
