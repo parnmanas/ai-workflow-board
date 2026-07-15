@@ -1338,13 +1338,6 @@ const MAINTENANCE_BUTTONS: {
       'Rewrite the agent\'s mcp-config.json with the current AWB url + existing ' +
       'apiKey. Use after changing the AWB server URL. Does not rotate the key.',
   },
-  {
-    kind: 'pull_working_dir',
-    label: 'Pull repo',
-    title:
-      'git pull --ff-only inside the agent\'s working_dir. Best-effort — non-' +
-      'fast-forward / unclean repos are reported as failure but never reset.',
-  },
 ];
 
 function ManagedAgentsSection({ inst }: ManagedAgentsSectionProps) {
@@ -1622,15 +1615,9 @@ function ManagedAgentsSection({ inst }: ManagedAgentsSectionProps) {
                     Maintenance:
                   </span>
                   {MAINTENANCE_BUTTONS.map((btn) => {
-                    const requiresWorkingDir = btn.kind === 'pull_working_dir';
-                    const requiresSupervised = btn.kind !== 'pull_working_dir';
-                    const blocked =
-                      (requiresWorkingDir && !a.working_dir) ||
-                      (requiresSupervised && !supervised);
+                    const blocked = !supervised;
                     const blockedTitle = blocked
-                      ? requiresWorkingDir && !a.working_dir
-                        ? 'Set working_dir first.'
-                        : 'Spawn the agent first so the manager owns its cli-home.'
+                      ? 'Spawn the agent first so the manager owns its cli-home.'
                       : btn.title;
                     return (
                       <Button

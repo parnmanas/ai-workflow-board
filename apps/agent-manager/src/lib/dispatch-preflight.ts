@@ -119,14 +119,13 @@ export interface DispatchGateDecision {
 }
 
 /** Map a worktree provisioning result onto a dispatch-abort decision. A real
- *  worktree is fine; a fallback with a reason OTHER than 'disabled' (isolation
- *  intentionally off, not a failure) is a blocker. This is the gate that stops
+ *  worktree is required; every fallback reason is a blocker. This gate stops
  *  a missing/unavailable managed repository or an occupied worktree path before
  *  dispatch. The configured working_dir itself is only a storage container. */
 export function classifyWorktreeOutcome(res: WorktreeOutcome | null | undefined): DispatchGateDecision {
   if (res?.isWorktree) return { blocked: false };
   const reason = res?.reason;
-  if (!reason || reason === 'disabled') return { blocked: false };
+  if (!reason) return { blocked: true, kind: 'worktree:unavailable', reason: 'unavailable' };
   return { blocked: true, kind: `worktree:${reason}`, reason };
 }
 

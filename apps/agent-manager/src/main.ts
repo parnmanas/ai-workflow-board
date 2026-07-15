@@ -37,7 +37,6 @@ import { promptComposer } from './lib/prompts.js';
 import { ManagedAgentRegistry } from './lib/managed-agents.js';
 import { ManagedAgentContextRegistry } from './lib/managed-agent-context.js';
 import { WorktreeManager, worktreeSlug } from './lib/worktree-manager.js';
-import { EnvironmentProvisioner } from './lib/environment-provisioner.js';
 import { AgentManagerCommandHandler } from './lib/agent-manager-commands.js';
 import {
   listManagedAgentDirs,
@@ -477,16 +476,8 @@ async function runRuntime(
   // spawn_agent, drained by stop_agent, read by EventDispatcher to route
   // managed-agent-targeted events under the right identity.
   const managedAgentContexts = new ManagedAgentContextRegistry();
-  // ticket 9f26f091 — per-(ticket,role) git worktree isolation. Gated by
-  // delegation.worktreeIsolation (default true); each agent working_dir is a
-  // storage container for AWB-managed base clones and isolated worktrees.
-  const worktreeManager = new WorktreeManager({
-    enabled: (config as any)?.delegation?.worktreeIsolation !== false,
-  });
-  // ticket 354d336b — board environment provisioner. Clones/updates the repos
-  // a board's environment_config declares under the agent home and runs its
-  // setup commands once per (agent, config-fingerprint) before the spawn.
-  const environmentProvisioner = new EnvironmentProvisioner();
+  // Ticket execution always uses an isolated checkout below the storage root.
+  const worktreeManager = new WorktreeManager();
   // Construct the session managers BEFORE the command handler so stop_agent /
   // restart_agent can force-kill an agent's live chat / ticket children
   // through them. Without this wiring, a credential rotation only rewrote
@@ -667,7 +658,6 @@ async function runRuntime(
       agentManagerCommandHandler: commandHandler,
       managedAgentContexts,
       worktreeManager,
-      environmentProvisioner,
     },
     pluginVersion: version,
     onConnect: kickPresencePing,
@@ -686,7 +676,6 @@ async function runRuntime(
   let worktreeSweepTimer: NodeJS.Timeout | null = null;
   let poolReclaimTimer: NodeJS.Timeout | null = null;
   const sweepWorktrees = async (): Promise<void> => {
-    if (!worktreeManager.enabled) return;
     try {
       // worktree 규약 ②: a worktree dir's slug is now the ticket's <ticket8>
       // (per_ticket) — role is no longer part of the path, and the 'shared'
@@ -737,7 +726,6 @@ async function runRuntime(
     return live;
   };
   const reconcilePoolLeasesAll = async (trigger: string): Promise<void> => {
-    if (!worktreeManager.enabled) return;
     try {
       const liveTicketIds = computeLiveTicketIds();
       let total = 0;
@@ -887,7 +875,6 @@ async function runRuntime(
       // sweep/reconcile use (computeLiveTicketIds) so an 'orphaned' entry here is
       // the exact lease reconcilePoolLeases would reclaim. Deduped per working_dir.
       worktreeStatusProvider: async (): Promise<WorktreeStatusEntry[]> => {
-        if (!worktreeManager.enabled) return [];
         const liveTicketIds = computeLiveTicketIds();
         const out: WorktreeStatusEntry[] = [];
         const seenDirs = new Set<string>();

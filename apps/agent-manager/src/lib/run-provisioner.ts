@@ -21,8 +21,7 @@
 // Responsibility boundary (agreed with ticket 3): this provisioner does SOURCE
 // SYNC only (checkout). Build/test stays the agent's job, kept in the prompt.
 //
-// Unlike environment-provisioner.ts (board environment_config, fingerprint-marker
-// idempotent → skips work on a repeat dispatch), a run must pull on EVERY reuse
+// A run must pull on EVERY reuse
 // dispatch so a warm run picks up new commits. Hence no marker here — the cost is
 // one fetch+ff-pull per run, which is the whole point.
 

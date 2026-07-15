@@ -1887,7 +1887,6 @@ export type AgentManagerCommandKind =
   | 'reload_config'
   | 'update_plugins'
   | 'refresh_mcp_config'
-  | 'pull_working_dir'
   | 'update_manager'
   | 'restart_manager';
 

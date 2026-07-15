@@ -37,7 +37,6 @@ const ALLOWED_COMMANDS: ReadonlySet<AgentManagerCommand> = new Set([
   'reload_config',
   'update_plugins',
   'refresh_mcp_config',
-  'pull_working_dir',
   'update_manager',
   'restart_manager',
 ] as const);
@@ -805,15 +804,6 @@ export class AgentManagerController {
       }
     }
 
-    // pull_working_dir: enrich with the canonical Agent.working_dir so the
-    // manager doesn't have to /api/agent-manager/managed-agents/:id round-trip
-    // before running git pull. Same pattern as spawn_agent above.
-    if (command === 'pull_working_dir' && typeof args.agent_id === 'string' && args.agent_id) {
-      if (!args.working_dir) {
-        const target = await this.agentRepo.findOne({ where: { id: args.agent_id } });
-        if (target?.working_dir) args.working_dir = target.working_dir;
-      }
-    }
     const command_id = randomBytes(8).toString('hex');
     const issued_at = new Date().toISOString();
 
