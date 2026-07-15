@@ -12,8 +12,10 @@
 //       the move succeeds and those refs are cleared.
 //   (A) manager-type agents are workspace-less → the move is refused outright.
 //
-// Run isolated: bootApp uses sqlite; set a unique PORT so it never collides
-// with sibling qa-flows.
+// 독립 실행: bootApp 은 sqlite 사용. 각 top-level 서브테스트는 서로 다른 포트
+// (BASE_PORT + N) 로 부팅한다 — 직전 서브테스트의 app.close() 가 아직 반납하지
+// 못한 소켓이 다음 부팅과 충돌(EADDRINUSE)하는 것을 막기 위함. BASE_PORT 자체는
+// sibling qa-flows 파일들과 겹치지 않는다.
 
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -29,7 +31,12 @@ import {
   createApiKey,
 } from '../helpers/fixtures.mjs';
 
-process.env.PORT = process.env.QA_WS_MOVE_AGENT_PORT || '7843';
+// 각 서브테스트는 자체 app 을 부팅한다. 직전 서브테스트의 fire-and-forget close
+// 가 아직 붙들고 있는 리스너와 충돌하지 않도록, 이 base 에서 서브테스트별 고유
+// 포트를 부여한다. consensus-gate / consensus-record-agreement /
+// comment-mention-self-exclusion 등 멀티부팅 파일의 관용구(BASE_PORT + N)와 동일.
+const BASE_PORT = parseInt(process.env.QA_WS_MOVE_AGENT_PORT || '7843', 10);
+process.env.PORT = String(BASE_PORT);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.join(__dirname, '..', '..', 'dist');
@@ -76,7 +83,7 @@ async function buildScene(app, getDataSourceToken, sourceWs, label) {
 }
 
 test('agent cross-workspace move: credential carry + api-key migrate + cross-ref block/clear', async (t) => {
-  const { app, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
+  const { app, modules } = await bootApp({ port: BASE_PORT });
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
   const { mover, WorkspaceMoveBlockedError, ds } = await loadMover(app, getDataSourceToken);
@@ -159,7 +166,7 @@ test('agent cross-workspace move: credential carry + api-key migrate + cross-ref
 });
 
 test('agent move remedies: unassign_from_tickets + clear_credential clear blockers (ticket 9efa643b)', async (t) => {
-  const { app, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
+  const { app, modules } = await bootApp({ port: BASE_PORT + 1 });
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
   const { mover, ds } = await loadMover(app, getDataSourceToken);
@@ -207,7 +214,7 @@ test('agent move remedies: unassign_from_tickets + clear_credential clear blocke
 });
 
 test('agent move: manager-type agents are workspace-less → refused', async (t) => {
-  const { app, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
+  const { app, modules } = await bootApp({ port: BASE_PORT + 2 });
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
   const { mover, ds } = await loadMover(app, getDataSourceToken);
