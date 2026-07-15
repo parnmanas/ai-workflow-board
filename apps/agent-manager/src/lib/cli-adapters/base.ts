@@ -279,6 +279,24 @@ export interface TurnImage {
   data: string;
 }
 
+/** Normalized "what the CLI is doing right now" signal, extracted from a single
+ *  one-shot stdout event by {@link CliAdapter.parseProgressEvent}. The subagent
+ *  manager renders these into `type='progress'` chat-room heartbeats for chat
+ *  one-shots (ticket c47194d9 — Codex), the one-shot twin of the persistent
+ *  Claude session's tool_use progress. `status` is the three user-visible states
+ *  the chat window must tell apart: 'start' (작업 중), 'success' (완료),
+ *  'error' (실패). */
+export interface CliProgressEvent {
+  /** Action family — selects the leading icon on a 'start' heartbeat. */
+  kind: 'command' | 'tool' | 'file' | 'search' | 'task' | 'other';
+  /** Short human label (e.g. '명령', 'awb:add_comment', '파일 변경'). */
+  label: string;
+  /** Optional detail rendered after the label (command text, query, paths). */
+  detail?: string;
+  /** Lifecycle state this event represents. */
+  status: 'start' | 'success' | 'error';
+}
+
 export abstract class CliAdapter {
   static cliType = 'base';
 
@@ -317,6 +335,24 @@ export abstract class CliAdapter {
   abstract parseStdoutLine(line: string): ParseResult;
 
   collectOneshotResult(_lines: string[]): string | null {
+    return null;
+  }
+
+  /**
+   * Extract a normalized progress signal from a single already-parsed one-shot
+   * stdout event (the object `parseStdoutLine` put on `ParseResult.raw`, or a
+   * freshly `JSON.parse`d line). The subagent manager calls this for CHAT
+   * one-shots and posts the result as a `type='progress'` chat heartbeat — the
+   * one-shot twin of the persistent Claude session's tool_use progress, so a
+   * Codex chat shows its in-flight work in the chat window like Claude does.
+   *
+   * Default returns null (no progress surface — Claude chat takes the
+   * persistent path, antigravity/custom CLIs opt in by overriding). Codex maps
+   * its `item.started` / `item.completed` / `turn.failed` thread events onto the
+   * three user-visible states. MUST be pure + best-effort: return null on
+   * anything unrecognized and NEVER throw (it runs inside a stdout line handler).
+   */
+  parseProgressEvent(_raw: any): CliProgressEvent | null {
     return null;
   }
 
