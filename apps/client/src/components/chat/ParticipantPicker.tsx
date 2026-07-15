@@ -4,6 +4,7 @@ import { useAuth } from '../../contexts/AuthContext';
 import { tokens } from '../../tokens';
 import type { ChatRoomDetail } from '../../types';
 import { formatAgentDisplayName } from '../../utils/agentName';
+import { buildAddPeopleCandidates } from './utils/participantFlow';
 
 // ─── Style constants (mirror ChatPage.tsx COLORS) ────────────────────────────
 
@@ -58,12 +59,15 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
       api.getUsers().catch(() => [] as any[]),
       api.getAgents().catch(() => [] as any[]),
     ]).then(([users, agents]) => {
-      const excludeIds = new Set([...existingParticipantIds, currentUser?.id].filter(Boolean));
-      const list: PickerParticipant[] = [
-        ...users.map((u: any) => ({ id: u.id, name: u.name, type: 'user' as const })),
-        // Agent Manager(type='manager')는 chat 참가자가 될 수 없다 (ticket 941c72d3) — 후보에서 숨김.
-        ...agents.filter((a: any) => a.type !== 'manager').map((a: any) => ({ id: a.id, name: formatAgentDisplayName(a), type: 'agent' as const })),
-      ].filter((p) => !excludeIds.has(p.id));
+      // 후보 빌더(기존 참여자·본인·Agent Manager 제외)는 participantFlow 로 뽑아,
+      // 회귀 테스트가 같은 코드를 구동한다 (apps/client/test/chat-participants.test.mjs).
+      const list = buildAddPeopleCandidates({
+        users,
+        agents,
+        existingParticipantIds,
+        currentUserId: currentUser?.id,
+        formatAgentName: formatAgentDisplayName,
+      });
       setParticipants(list);
     });
 
