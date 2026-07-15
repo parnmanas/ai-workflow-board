@@ -1049,6 +1049,12 @@ export class EventDispatcher {
           agentId: provisionAgentId,
           config: envConfig,
           ticketId: ev.ticket_id,
+          // Resolve each repo's git credential at clone time so a PRIVATE repo
+          // in environment_config authenticates (same token endpoint the
+          // per-ticket worktree clone uses). Bound to this manager's AwbConfig;
+          // the token stays out of the SSE payload / fingerprint / marker.
+          resolveCredential: (resourceId, credAgentId) =>
+            fetchRepositoryCredential(this.#config, resourceId, credAgentId),
         });
         if (!result.ok) {
           if (!result.reported && ev.ticket_id) {
