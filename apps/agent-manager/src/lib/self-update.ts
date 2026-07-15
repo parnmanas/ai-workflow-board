@@ -1262,6 +1262,36 @@ async function runNpmGlobalSelfUpdate(
     return { changed: true, summary, willReExec: false };
   }
 
+  // POSIX can replace the package files while Node has the old modules mapped.
+  // Install FIRST and restart only after npm succeeds. The previous universal
+  // exit-first helper raced systemd's Restart=always: systemd relaunched the old
+  // package after five seconds while the detached helper was still waiting or
+  // installing, yet the command had already reported success.
+  if (process.platform !== 'win32') {
+    out(`Self-update: npm install -g ${NPM_GLOBAL_LATEST_SPEC}`);
+    const installed = await runAsync(
+      'npm',
+      ['install', '-g', NPM_GLOBAL_LATEST_SPEC],
+      tmpdir(),
+      BUILD_TIMEOUT_MS,
+      (line) => out(`  [npm-global] ${line}`),
+    );
+    if (!installed.ok) {
+      const detail = (installed.stderr.trim() || installed.stdout.trim())
+        .split('\n').filter(Boolean).pop() || `exit=${installed.exitCode}`;
+      const summary = `npm-global update failed: ${detail.slice(0, 240)}`;
+      out(`Self-update: ${summary}`);
+      return { changed: false, summary };
+    }
+    const summary = `npm-global update installed ${NPM_GLOBAL_LATEST_SPEC}; restarting manager`;
+    out(`Self-update: ${summary}`);
+    _lastReExecScheduled = true;
+    setTimeout(() => reExecManager(out), 1500).unref?.();
+    return { changed: true, summary, willReExec: true };
+  }
+
+  // Windows cannot replace files in the running package tree. Keep the
+  // exit-first helper there, where no systemd restart race exists.
   let helperPath: string;
   try {
     helperPath = writeNpmGlobalUpdater(out);
