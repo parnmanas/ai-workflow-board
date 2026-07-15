@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { api, getActiveWorkspaceId } from '../../api';
 import { tokens } from '../../tokens';
 import type { ChatRoomMessageItem } from '../../types';
-import { MentionTextarea, MentionCandidate } from '../common/MentionTextarea';
+import { MentionTextarea, MentionCandidate, MentionTextareaHandle } from '../common/MentionTextarea';
 import { formatAgentDisplayName } from '../../utils/agentName';
 import { formatBytes, isImageMime, readFileAsBase64 } from './utils/attachments';
 
@@ -59,6 +59,9 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
   const [isDragOver, setIsDragOver] = useState(false);
   const dragCounterRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  // Imperative focus handle on the composer textarea — drives auto-focus on
+  // room open and refocus after send (see effects/handleSend below).
+  const inputHandleRef = useRef<MentionTextareaHandle | null>(null);
   const [mentionCandidates, setMentionCandidates] = useState<MentionCandidate[]>([]);
   // Stable ref so async upload callbacks (started from one render) can still
   // mutate the latest pendingAttachments without stale-closure footguns.
@@ -79,6 +82,18 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
     setSendError(null);
     setText('');
   }, [roomId]);
+
+  // Auto-focus the composer whenever a room is opened or switched so the user
+  // can start typing immediately without a click (requirements 1 & 3). Desktop
+  // only: on mobile a programmatic focus forces the soft keyboard up every time
+  // a room is viewed, which is intrusive and reads as the keyboard "repeatedly
+  // popping up" (requirement 4) — mobile users tap the field to open it. Runs on
+  // mount (first room) and on every roomId change (room switch). preventScroll
+  // (handle default) keeps focus from perturbing the message list scroll.
+  useEffect(() => {
+    if (isMobile) return;
+    inputHandleRef.current?.focus();
+  }, [roomId, isMobile]);
 
   // Pull workspace-wide mention candidates once. Role shortcuts require a
   // ticket context we don't have in a free-form chat room, so they're
@@ -236,9 +251,17 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
       onSent(msg);
     } catch (err: any) {
       setSendError(err?.message || 'Message not sent. Check your connection.');
-      setText(content); // restore draft; pendingAttachments are preserved for retry
+      // Restore the failed draft — but only if the composer is still empty.
+      // With the textarea kept editable during send (no disable, so focus/keyboard
+      // stay put), a fast typist may have already started the next message; don't
+      // clobber it. pendingAttachments are preserved for retry.
+      setText((cur) => (cur.length === 0 ? content : cur));
     } finally {
       setSending(false);
+      // Return focus to the composer so the user can keep typing without a click —
+      // covers the mouse-click Send path (focus moved to the button) and acts as a
+      // safety net for the Enter path (requirements 2 & 3).
+      inputHandleRef.current?.focus();
     }
   }
 
@@ -392,12 +415,18 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
             📎
           </button>
           <MentionTextarea
+            ref={inputHandleRef}
             value={text}
             onChange={setText}
             candidates={mentionCandidates}
             onSubmit={handleSend}
             rows={1}
-            disabled={sending}
+            // Intentionally NOT disabled during send: disabling a focused
+            // textarea blurs it, which on mobile dismisses the soft keyboard and
+            // then reopening it after send reads as a flicker/"keyboard keeps
+            // popping up" (requirement 4). Double-submit is already guarded in
+            // handleSend (`|| sending` early-return) and by the Send button's
+            // canSend gate, so keeping the field editable is safe.
             ariaLabel="Message"
             placeholder="Type a message… (@ to tag · paste / drop files to attach)"
             style={{
