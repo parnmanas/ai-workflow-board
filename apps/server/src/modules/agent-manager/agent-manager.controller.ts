@@ -214,7 +214,11 @@ export class AgentManagerController {
     // ticket 3d180f85 — per-reason dispatch-suppression counts (provision-
     // spanning twin guard). Defensive: coerce a plain {reason: count} object to
     // non-negative ints; ignore non-objects / arrays so a malformed heartbeat
-    // never poisons the record. Undefined leaves the prior value untouched.
+    // never poisons the record. When the field is absent (nothing suppressed)
+    // this stays undefined and upsert's whole-record replace (registry {...input})
+    // clears it — benign because the manager counter is cumulative (never reset),
+    // so once non-zero every heartbeat re-sends it and only a manager restart
+    // zeroes it. Same replace-not-merge semantics as open_breaker_count.
     let dispatch_suppression_counts: Record<string, number> | undefined;
     if (
       hasField('dispatch_suppression_counts') &&
