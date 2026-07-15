@@ -25,6 +25,7 @@ import type { ManagedAgentContextRegistry } from './managed-agent-context.js';
 import type { WorktreeManager, WorktreeMode } from './worktree-manager.js';
 import { prepareChatAttachments } from './chat-attachment-prep.js';
 import { injectWorkFolder } from './prompts.js';
+import { DispatchBlockerTracker, classifyWorktreeOutcome } from './dispatch-preflight.js';
 import type { HarnessSpec, ResolvedEffortPreset, EffortLevel } from './cli-adapters/base.js';
 import { createAdapter, ADAPTER_CAPABILITIES } from './cli-adapters/index.js';
 import { EnvironmentProvisioner } from './environment-provisioner.js';
@@ -591,6 +592,13 @@ export class EventDispatcher {
   #managedAgentContexts: ManagedAgentContextRegistry | null;
   #worktreeManager: WorktreeManager | null;
   #environmentProvisioner: EnvironmentProvisioner | null;
+  // ticket a3047a86: per-ticket de-dup for dispatch-preflight blocker comments
+  // (broken worktree / missing push credential). The abort already suppresses
+  // the spawn; this keeps the SAME blocker from re-posting a ticket comment on
+  // every re-trigger, while a different blocker or a post-recovery failure still
+  // posts once. Singleton dispatcher → one tracker covers all this manager's
+  // tickets; cleared on a fully-green preflight.
+  readonly #dispatchBlockers = new DispatchBlockerTracker();
   // ticket e9d0e8bc: folder-keyed run-lifetime lock. One per manager process
   // (this dispatcher is a singleton), so it serializes same-scenario QA/security
   // runs across the whole provision→execute window. Keyed by the absolute run
@@ -628,7 +636,7 @@ export class EventDispatcher {
     mode: WorktreeMode | undefined,
     poolSize: number | undefined,
     bootstrapRepo: { resourceId?: string; url: string; branch?: string; credential?: { username?: string; token: string } | null } | null,
-  ): Promise<{ ok: boolean; reason?: string }> {
+  ): Promise<{ ok: boolean; reason?: string; blockerKind?: string }> {
     const requiredError = validateWorktreeProvisioningInputs({
       mode,
       hasAgentContext: Boolean(agentContext),
@@ -637,7 +645,7 @@ export class EventDispatcher {
       role,
       repositoryResourceId: bootstrapRepo?.resourceId,
     });
-    if (requiredError) return { ok: false, reason: requiredError };
+    if (requiredError) return { ok: false, reason: requiredError, blockerKind: `worktree:${requiredError}` };
     if (!agentContext || !this.#worktreeManager || !ticketId || !role) return { ok: true };
     if ((this.#config as any)?.delegation?.worktreeIsolation === false) return { ok: true };
     try {
@@ -660,17 +668,19 @@ export class EventDispatcher {
         );
         agentContext.cwd = res.cwd;
         return { ok: true };
-      } else if (res.reason && res.reason !== 'disabled') {
+      }
+      const gate = classifyWorktreeOutcome(res);
+      if (gate.blocked) {
         log(
-          `[worktree] isolation provisioning failed for ticket=${ticketId.slice(0, 8)} role=${role}: ${res.reason}`,
+          `[worktree] isolation provisioning failed for ticket=${ticketId.slice(0, 8)} role=${role}: ${gate.reason}`,
         );
-        return { ok: false, reason: res.reason };
+        return { ok: false, reason: gate.reason, blockerKind: gate.kind };
       }
       return { ok: true };
     } catch (err: any) {
       const reason = err?.message ?? String(err);
       log(`[worktree] resolveCwd failed (${reason})`);
-      return { ok: false, reason };
+      return { ok: false, reason, blockerKind: 'worktree:error' };
     }
   }
 
@@ -969,7 +979,8 @@ export class EventDispatcher {
       selectedRepo ? { ...selectedRepo, credential: repoCredential } : null,
     );
     if (!worktreeProvision.ok) {
-      if (ev.ticket_id) {
+      const blockerKind = worktreeProvision.blockerKind || `worktree:${worktreeProvision.reason || 'unknown'}`;
+      if (ev.ticket_id && this.#dispatchBlockers.shouldComment(ev.ticket_id, blockerKind)) {
         await fireAndForgetTool(this.#config, 'add_comment', {
           ticket_id: ev.ticket_id,
           content:
@@ -979,10 +990,48 @@ export class EventDispatcher {
         });
       }
       log(
-        `Trigger aborted — ticket worktree provisioning failed: ticket=${ev.ticket_id} reason=${worktreeProvision.reason || 'unknown'}`,
+        `Trigger aborted — ticket worktree provisioning failed: ticket=${ev.ticket_id} reason=${worktreeProvision.reason || 'unknown'} blocker=${blockerKind}`,
       );
       return;
     }
+
+    // ticket a3047a86: push-credential readiness. A repo with no usable
+    // credential fails `git push` with `could not read Username for
+    // 'https://github.com'` — after the agent already did all the work (this
+    // stalled ticket 8436f96f's Merging twice). Scoped to the assignee role,
+    // the only role that pushes (feature branch at In Progress, main at
+    // Merging); reviewer/planner never push, so gating them would wedge review.
+    // The assignee's In Progress push means this catches the failure at the
+    // latest before Merging (usually earlier). verifyPushReadiness fails open
+    // on anything but a confirmed auth rejection.
+    if (
+      ev.action === 'assignee'
+      && ev.ticket_id && selectedRepo?.url && this.#worktreeManager && agentContext?.cwd
+    ) {
+      const readiness = await this.#worktreeManager.verifyPushReadiness(agentContext.cwd, selectedRepo.url);
+      if (!readiness.ok) {
+        const blockerKind = readiness.reason || 'push_credential_unavailable';
+        if (this.#dispatchBlockers.shouldComment(ev.ticket_id, blockerKind)) {
+          await fireAndForgetTool(this.#config, 'add_comment', {
+            ticket_id: ev.ticket_id,
+            content:
+              `⚠️ **Git push 자격 증명 미확인** — 원격 인증이 준비되지 않아 작업을 시작하지 않고 디스패치를 중단했습니다.\n\n` +
+              `원격: \`${selectedRepo.url}\`\n` +
+              `원인: \`${readiness.detail || 'push credential unavailable'}\`\n\n` +
+              `이 repository resource 에 GitHub 자격 증명(토큰)을 설정하거나 push 가능한 환경으로 전환한 뒤 다시 트리거하세요. ` +
+              `(Merging 단계의 push 실패로 CLI 세션을 낭비하지 않도록 dispatch 전에 검증합니다.)`,
+          });
+        }
+        log(
+          `Trigger aborted — push credential unavailable: ticket=${ev.ticket_id} detail=${readiness.detail || ''}`,
+        );
+        return;
+      }
+    }
+
+    // Preflight fully green (worktree + push credential): clear any recorded
+    // blocker so a later failure after recovery posts fresh and retries run.
+    if (ev.ticket_id) this.#dispatchBlockers.clear(ev.ticket_id);
 
     // worktree 규약 ④: name the ACTUAL work folder in the trigger prompt. The
     // server bakes a `{{AWB_WORK_FOLDER}}` placeholder into every non-merging
