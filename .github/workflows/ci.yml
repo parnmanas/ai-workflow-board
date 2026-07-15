@@ -42,38 +42,13 @@ jobs:
         working-directory: apps/server
         run: node --test --test-force-exit test/chat-room-join-cast-guard.test.mjs
 
-  # Version-collapse guard (ticket c17a8a40). agent-manager 소스(apps/agent-manager/
-  # src/**)가 바뀐 push/PR 은 apps/agent-manager/package.json version 이 반드시
-  # 올라가야 한다. 동시 진행 티켓이 같은 버전으로 범프한 뒤 리베이스하면 git 이 그
-  # 범프를 충돌 없이 조용히 collapse 시켜(board lesson #1) 빌드가 앞 빌드와
-  # version-identical 이 되고, publish-agent-manager.yml 이 "이미 npm 에 있음" 으로
-  # no-op 하여 코드 변경이 npm 에 안 실린다. tsc·테스트로 안 잡히는 침묵형 실패라,
-  # 그동안 수동 preflight 눈대중에만 의존하던 것을 여기서 결정적으로 막는다.
-  agent-manager-version-guard:
-    name: agent-manager version bump guard
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # before..after diff 와 양쪽 ref 의 package.json 을 읽어야 하므로 전체 히스토리.
-          fetch-depth: 0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - name: Resolve compare range
-        id: range
-        run: |
-          # push→main: 직전 tip(before) vs 새 tip(after). PR: base 브랜치 vs head sha.
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            git fetch --quiet origin "${{ github.base_ref }}"
-            echo "before=origin/${{ github.base_ref }}" >> "$GITHUB_OUTPUT"
-            echo "after=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "before=${{ github.event.before }}" >> "$GITHUB_OUTPUT"
-            echo "after=${{ github.sha }}" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Check agent-manager version bump
-        run: node apps/agent-manager/scripts/check-version-bump.mjs "${{ steps.range.outputs.before }}" "${{ steps.range.outputs.after }}"
+  # (ticket 433f6cbd) 예전엔 여기 `agent-manager version bump guard` 잡이 있어
+  # agent-manager 소스가 바뀐 push/PR 은 package.json version 을 손으로 올리도록
+  # 강제하고, 리베이스가 그 범프를 조용히 collapse 시킨 경우(board lesson #1)를
+  # 사후 검출했다. 이제 버전을 **publish 시점에 레지스트리+patch 로 자동 계산**하므로
+  # (publish-agent-manager.yml + scripts/compute-publish-version.mjs) 손으로 범프할
+  # 값 자체가 없다 → collapse 될 것도 없어 이 가드는 목적을 잃었다(오히려 정상
+  # 변경마다 CI 를 red 로 만든다). 그래서 잡·check-version-bump.mjs·그 테스트를 제거.
 
   # Dialect matrix — the actual pre-deploy safety net. Boots the contract flows
   # against Postgres 16 (matching the prod image) so uuid/varchar mismatches and

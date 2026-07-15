@@ -11,30 +11,27 @@ description: Release procedure for changes under apps/agent-manager (SSE pipelin
 
 1. Modify `apps/agent-manager/src/`.
 2. Verify `npm run build` passes **from the workspace root** (turbo builds the whole monorepo — a green agent-manager-only build is not enough).
-3. **Bump `version` in `apps/agent-manager/package.json`.**
-4. Commit + push.
+3. Commit + push. **버전을 손으로 범프하지 마라** — publish 시점에 자동 계산된다(아래).
 
-> **버전 collapse 게이트 (ticket c17a8a40).** 동시 진행 티켓이 같은 다음 버전으로
-> 범프한 뒤 내 브랜치를 리베이스하면 git 이 그 범프를 충돌 없이 조용히 collapse
-> 시킨다(board lesson #1 — 3회 재발). 이제 자동 방어가 두 겹이다:
-> - **머지 preflight (권장, 랜딩 전 차단):** 리베이스 직후
->   `node apps/agent-manager/scripts/check-version-bump.mjs --preflight` 를 실행하라.
->   `origin/main` 을 fetch 한 뒤, agent-manager `src/` 를 건드린 브랜치인데 version 이
->   `origin/main` 보다 크지 않으면 **exit 1** 로 막는다. 예전의 수동
->   `git show origin/main:… | grep version` 눈대중을 대체한다.
-> - **CI 게이트 (백스톱, 랜딩 후 자동 검출):** `.github/workflows/ci.yml` 의
->   `agent-manager version bump guard` 잡이 push→main / PR 마다 같은 검사를 돌려,
->   collapse 가 랜딩하면 main 을 즉시 red 로 만든다 → 재범프로 해소.
+> **버전은 publish 시점에 자동 계산된다 (ticket 433f6cbd, source c17a8a40).**
+> 변경이 `main` 에 랜딩하면 `.github/workflows/publish-agent-manager.yml` 이
+> `scripts/compute-publish-version.mjs` 로 **레지스트리 최신값 + patch** 를 계산해
+> 그 버전으로 npm publish 하고 `awb-agent-manager-v<version>` 태그를 남긴다.
+> `apps/agent-manager/package.json` 의 `version` 은 이제 **'최초 배포 seed floor'**
+> 로만 쓰이고(이미 npm 에 올라간 뒤엔 참조 안 됨) 손으로 올릴 필요가 없다.
+> 손 범프가 없으니 board lesson #1 의 collapse 클래스(리베이스가 동시 티켓의 동일
+> 범프를 충돌 없이 조용히 뭉개 npm 이 stale 해지던 침묵형 실패)도 **구조적으로**
+> 사라졌다 — 예전의 `check-version-bump.mjs` preflight/CI 잡은 그래서 제거됐다.
 
-> **npm publish is automatic — do NOT hand-push a release tag.** When the version
-> bump lands on `main`, `.github/workflows/publish-agent-manager.yml` publishes
-> that exact version to npm (idempotent: a no-op if already published) and records
-> the `awb-agent-manager-v<version>` tag for you. Two preconditions live on the
-> Parn/infra side: the `NPM_TOKEN` repo secret must be a valid **Automation** token
-> with **2FA bypass enabled**, and the bump must actually reach `main` (the merge
-> is the release trigger). Skip the bump → npm silently falls behind the repo —
-> that is the exact 1.0.0-stuck failure of ticket bc306b8d (only 1.0.0 ever got a
-> tag, so 1.0.1–1.6.16 never published).
+> **npm publish 는 자동이고, 릴리스 태그·버전을 손으로 밀지 마라.** 변경이 `main`
+> 에 랜딩하는 게 릴리스 트리거다(트리거는 version diff 가 아니라 agent-manager
+> 산출물/publish 기계 변경 — `paths` 필터). 계산된 버전은 main 에 **되커밋하지
+> 않고** 태그/tarball 에만 담으므로 봇 push→재트리거 루프가 없다. 두 전제는
+> Parn/infra 쪽: `NPM_TOKEN` repo secret 이 **2FA bypass** 켜진 **Automation**
+> 토큰이어야 하고, 변경이 실제로 `main` 에 닿아야 한다(bc306b8d 의 1.0.0-stuck
+> 은 트리거 자체가 없던 경우). 재실행은 **멱등**하다 — 이미 올라간 버전이면 태그만
+> 보장하고, 부분 실패(publish 됐는데 태그만 실패)는 다음 run 이 npm 의 gitHead
+> provenance(배포 당시 커밋 SHA)로 복구한다.
 
 ## SSE contract rule
 
