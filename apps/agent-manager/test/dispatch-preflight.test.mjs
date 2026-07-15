@@ -473,13 +473,19 @@ test('note(): escalates to pend exactly when the abort count reaches the thresho
   assert.deepEqual(third, { count: 3, shouldPend: true }, 'abort 3 → durable → pend');
 });
 
-test('note(): shouldPend stays true PAST the threshold (unpend-without-fix re-pends, not resumes)', () => {
+test('note(): pend fires on EXACTLY the crossing abort, not past it (one pend per episode, no dup audit rows)', () => {
   const s = new RoleSpawnSuppressor(1000, 2);
-  s.note('t', 'assignee', 'k', 0);            // count 1
-  assert.equal(s.note('t', 'assignee', 'k', 1).shouldPend, true, 'count 2 pends');
-  // Operator unpends without fixing → the very next re-abort must pend again
-  // (count keeps climbing ≥ threshold) rather than let the storm resume.
-  assert.deepEqual(s.note('t', 'assignee', 'k', 2), { count: 3, shouldPend: true });
+  assert.equal(s.note('t', 'assignee', 'k', 0).shouldPend, false, 'abort 1: backoff only');
+  assert.equal(s.note('t', 'assignee', 'k', 1).shouldPend, true, 'abort 2: crosses threshold → pend once');
+  // Past the crossing, note() no longer signals a pend — the server-side pending
+  // gate (not a manager re-pend) keeps the supervisor stopped, so pend_ticket and
+  // its audit row happen exactly once per durable episode.
+  assert.deepEqual(s.note('t', 'assignee', 'k', 2), { count: 3, shouldPend: false }, 'abort 3: already pended, no duplicate');
+  // A green preflight (reprovision success) re-arms: a brand-new break pends
+  // afresh from the start of a new episode.
+  s.clear('t', 'assignee');
+  assert.equal(s.note('t', 'assignee', 'k', 3).shouldPend, false, 'fresh episode abort 1');
+  assert.equal(s.note('t', 'assignee', 'k', 4).shouldPend, true, 'fresh episode crosses again → pend');
 });
 
 test('note(): clear() resets the episode so a reprovision-then-rebreak backs off afresh (no instant re-pend)', () => {
