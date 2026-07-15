@@ -62,12 +62,19 @@
 import { promises as fsp } from 'node:fs';
 import { isAbsolute, join, resolve as pathResolve } from 'node:path';
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { log } from './logging.js';
 import { AGENT_MANAGER_HOME } from './constants.js';
 
 const GIT_TIMEOUT_MS = 20_000;
 const PROVISION_LOCK_TIMEOUT_MS = 20_000;
 const PROVISION_LOCK_STALE_MS = 60_000;
+const PROVISION_LOCK_HEARTBEAT_MS = 10_000;
+
+interface ProvisionLockOwner {
+  token: string;
+  pid: number;
+}
 
 /** Board worktree placement mode (mirrors the server's worktree-config enum —
  *  kept as a local literal so agent-manager doesn't depend on the server pkg). */
@@ -279,6 +286,9 @@ export function worktreeSlug(ticketId: string, mode: WorktreeMode = DEFAULT_WORK
 export class WorktreeManager {
   #enabled: boolean;
   #resourceWorktreesRoot: string;
+  #provisionLockTimeoutMs: number;
+  #provisionLockStaleMs: number;
+  #provisionLockHeartbeatMs: number;
   /** Per-worktree-root serialization for warm-pool acquire/release so two
    *  concurrent triggers can't lease the same idle slot (규약 ⑥). Keyed by the
    *  normalized worktrees root; one chained promise per key. */
@@ -290,10 +300,19 @@ export class WorktreeManager {
   /** Serialize first-clone attempts for agents sharing one working_dir. */
   #bootstrapLocks = new Map<string, Promise<boolean>>();
 
-  constructor(opts: { enabled?: boolean; resourceWorktreesRoot?: string } = {}) {
+  constructor(opts: {
+    enabled?: boolean;
+    resourceWorktreesRoot?: string;
+    provisionLockTimeoutMs?: number;
+    provisionLockStaleMs?: number;
+    provisionLockHeartbeatMs?: number;
+  } = {}) {
     this.#enabled = opts.enabled !== false;
     this.#resourceWorktreesRoot = opts.resourceWorktreesRoot
       ?? join(AGENT_MANAGER_HOME, 'worktrees');
+    this.#provisionLockTimeoutMs = opts.provisionLockTimeoutMs ?? PROVISION_LOCK_TIMEOUT_MS;
+    this.#provisionLockStaleMs = opts.provisionLockStaleMs ?? PROVISION_LOCK_STALE_MS;
+    this.#provisionLockHeartbeatMs = opts.provisionLockHeartbeatMs ?? PROVISION_LOCK_HEARTBEAT_MS;
   }
 
   get enabled(): boolean {
@@ -1221,30 +1240,60 @@ export class WorktreeManager {
     this.#provisionLocks.set(key, tail);
     await prev.catch(() => {});
     const lockDir = join(worktreesRoot, '.provision.lock');
-    const deadline = Date.now() + PROVISION_LOCK_TIMEOUT_MS;
+    const ownerPath = join(lockDir, 'owner.json');
+    const owner: ProvisionLockOwner = { token: randomUUID(), pid: process.pid };
+    const deadline = Date.now() + this.#provisionLockTimeoutMs;
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
     try {
       await fsp.mkdir(worktreesRoot, { recursive: true });
       for (;;) {
         try {
           await fsp.mkdir(lockDir);
+          await fsp.writeFile(ownerPath, JSON.stringify(owner), { flag: 'wx' });
           break;
         } catch (err: any) {
           if (err?.code !== 'EEXIST') throw err;
           try {
             const stat = await fsp.stat(lockDir);
-            if (Date.now() - stat.mtimeMs > PROVISION_LOCK_STALE_MS) {
-              await fsp.rm(lockDir, { recursive: true, force: true });
-              continue;
+            if (Date.now() - stat.mtimeMs > this.#provisionLockStaleMs) {
+              const current = JSON.parse(await fsp.readFile(ownerPath, 'utf8')) as ProvisionLockOwner;
+              let ownerAlive = false;
+              if (Number.isInteger(current.pid) && current.pid > 0) {
+                try {
+                  process.kill(current.pid, 0);
+                  ownerAlive = true;
+                } catch (signalErr: any) {
+                  ownerAlive = signalErr?.code === 'EPERM';
+                }
+              }
+              if (!ownerAlive) {
+                const staleDir = `${lockDir}.stale-${randomUUID()}`;
+                await fsp.rename(lockDir, staleDir);
+                await fsp.rm(staleDir, { recursive: true, force: true });
+                continue;
+              }
             }
           } catch {}
           if (Date.now() >= deadline) throw new Error(`provision lock timeout: ${lockDir}`);
           await new Promise((resolve) => setTimeout(resolve, 25));
         }
       }
+      heartbeat = setInterval(() => {
+        void fsp.utimes(lockDir, new Date(), new Date()).catch(() => {});
+      }, this.#provisionLockHeartbeatMs);
+      heartbeat.unref?.();
       try {
         return await fn();
       } finally {
-        await fsp.rm(lockDir, { recursive: true, force: true });
+        if (heartbeat) clearInterval(heartbeat);
+        try {
+          const current = JSON.parse(await fsp.readFile(ownerPath, 'utf8')) as ProvisionLockOwner;
+          if (current.token === owner.token) {
+            const releasedDir = `${lockDir}.released-${owner.token}`;
+            await fsp.rename(lockDir, releasedDir);
+            await fsp.rm(releasedDir, { recursive: true, force: true });
+          }
+        } catch {}
       }
     } finally {
       release();

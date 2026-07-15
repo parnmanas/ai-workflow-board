@@ -484,6 +484,67 @@ test('repository resource serializes concurrent first resolve across manager ins
   }
 });
 
+test('provision lease never steals a stale-looking lock from a live owner', async () => {
+  const { root, repo, cleanup } = await makeRepo();
+  try {
+    const canonicalRoot = join(root, 'manager-worktrees');
+    const resourceRoot = join(canonicalRoot, 'repo-resource-live-lock');
+    const lockDir = join(resourceRoot, '.provision.lock');
+    await fsp.mkdir(lockDir, { recursive: true });
+    await fsp.writeFile(join(lockDir, 'owner.json'), JSON.stringify({ token: 'live-owner', pid: process.pid }));
+    const old = new Date(Date.now() - 5_000);
+    await fsp.utimes(lockDir, old, old);
+
+    const wm = new WorktreeManager({
+      resourceWorktreesRoot: canonicalRoot,
+      provisionLockTimeoutMs: 100,
+      provisionLockStaleMs: 10,
+      provisionLockHeartbeatMs: 5,
+    });
+    await assert.rejects(wm.resolveCwd({
+      baseWorkingDir: repo,
+      ticketId: TICKET_A,
+      role: 'assignee',
+      mode: 'per_ticket',
+      bootstrapRepo: { resourceId: 'repo-resource-live-lock', url: repo },
+    }), /provision lock timeout/);
+    assert.equal(JSON.parse(await fsp.readFile(join(lockDir, 'owner.json'), 'utf8')).token, 'live-owner');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('provision lease atomically reclaims a stale lock whose owner is dead', async () => {
+  const { root, repo, cleanup } = await makeRepo();
+  try {
+    const canonicalRoot = join(root, 'manager-worktrees');
+    const resourceRoot = join(canonicalRoot, 'repo-resource-dead-lock');
+    const lockDir = join(resourceRoot, '.provision.lock');
+    await fsp.mkdir(lockDir, { recursive: true });
+    await fsp.writeFile(join(lockDir, 'owner.json'), JSON.stringify({ token: 'dead-owner', pid: 2147483647 }));
+    const old = new Date(Date.now() - 5_000);
+    await fsp.utimes(lockDir, old, old);
+
+    const wm = new WorktreeManager({
+      resourceWorktreesRoot: canonicalRoot,
+      provisionLockTimeoutMs: 500,
+      provisionLockStaleMs: 10,
+      provisionLockHeartbeatMs: 5,
+    });
+    const result = await wm.resolveCwd({
+      baseWorkingDir: repo,
+      ticketId: TICKET_A,
+      role: 'assignee',
+      mode: 'per_ticket',
+      bootstrapRepo: { resourceId: 'repo-resource-dead-lock', url: repo },
+    });
+    assert.equal(result.isWorktree, true);
+    assert.equal(existsSync(lockDir), false, 'the current owner releases only its own lease');
+  } finally {
+    await cleanup();
+  }
+});
+
 test('repository resource ticket worktree is reclaimed through its canonical owner', async () => {
   const { root, repo, cleanup } = await makeRepo();
   try {
