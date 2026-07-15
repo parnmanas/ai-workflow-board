@@ -21,6 +21,7 @@ import {
   countUserParticipants,
   makeRefreshActiveRoomParticipants,
   reflectParticipantChange,
+  dispatchChatRoomUpdate,
 } from './utils/participantFlow';
 import NewChatModal from './ParticipantPicker';
 import ChatRoomListPanel from './RoomListPanel';
@@ -437,44 +438,24 @@ export default function ChatPage() {
     return () => clearTimeout(timer);
   }, [typingAgents]);
 
-  // SSE: chat_room_update
+  // SSE: chat_room_update — 봉투 unwrap + update_type 분기(renamed/participant_*/read)
+  // 디스패치는 participantFlow.dispatchChatRoomUpdate 에 있고, 회귀 테스트
+  // (apps/client/test/chat-participants.test.mjs)가 실제 이벤트 페이로드로 그 코드를
+  // 직접 구동한다. 여기선 ChatPage 의 ref/세터/스코프만 주입한다.
+  // participant_added/left 는 방 목록 + (열려 있으면) 활성 방 로스터를 함께 갱신 —
+  // 다른 사용자의 추가/이탈까지 실시간 반영. read(본인)은 defensive 하게
+  // participant_type === 'user' 로 걸러 badge 오염을 막는다(dispatch 내부).
   useBoardStreamEvent('chat_room_update', useCallback((data: any) => {
-    if (!data) return;
-    // Server emits envelope: { event_type, payload, scope, timestamp }; handle both shapes
-    const payload = data.payload ?? data;
-    if (payload.update_type === 'renamed' && payload.room_id && payload.new_name) {
-      setRooms((prev) =>
-        prev.map((r) => (r.id === payload.room_id ? { ...r, name: payload.new_name } : r)),
-      );
-    } else if (
-      payload.update_type === 'participant_added' ||
-      payload.update_type === 'participant_left'
-    ) {
-      // 방 목록(현재 스코프 그대로) + 열려 있는 방의 로스터를 함께 갱신한다 —
-      // 다른 사용자의 추가/이탈까지 실시간 반영 (participantFlow.reflectParticipantChange).
-      reflectParticipantChange(
-        {
-          listChatRooms: () => api.listChatRooms(showAllRooms ? 'workspace' : undefined),
-          setRooms,
-          getActiveRoomId: () => activeRoomIdRef.current,
-          refreshActiveRoomParticipants,
-        },
-        payload.room_id,
-      );
-    } else if (
-      payload.update_type === 'read' &&
-      payload.room_id &&
-      payload.participant_type === 'user' &&
-      payload.participant_id === user?.id
-    ) {
-      // B3: same user read in another tab/device → sync local unread to 0.
-      // Filter by participant_type === 'user' so an agent in the same room
-      // that happens to share a UUID with our user_id (won't in practice, but
-      // defensive) doesn't clobber our badge.
-      setRooms((prev) =>
-        prev.map((r) => (r.id === payload.room_id ? { ...r, unread_count: 0 } : r)),
-      );
-    }
+    dispatchChatRoomUpdate(
+      {
+        currentUserId: user?.id,
+        getActiveRoomId: () => activeRoomIdRef.current,
+        listChatRooms: () => api.listChatRooms(showAllRooms ? 'workspace' : undefined),
+        setRooms,
+        refreshActiveRoomParticipants,
+      },
+      data,
+    );
   }, [user?.id, showAllRooms, refreshActiveRoomParticipants]));
 
   function selectRoom(roomId: string) {

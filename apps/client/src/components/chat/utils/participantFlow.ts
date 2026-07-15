@@ -154,3 +154,110 @@ export function buildAddPeopleCandidates(
       .map((a) => ({ id: a.id, name: src.formatAgentName(a), type: 'agent' as const })),
   ].filter((p) => !excludeIds.has(p.id));
 }
+
+/**
+ * "Add People"/"New Chat" 후보를 서버에서 로드해 세터에 넣는다. ParticipantPicker 의
+ * open effect 가 실제로 구동하던 fetch→build→set 배선을 그대로 옮긴 것 — 회귀 테스트가
+ * (컴포넌트 미러가 아니라) 이 함수를 직접 구동해 "후보 목록을 잘못 set 하는" 오배선을
+ * 잡는다. users/agents 조회는 개별적으로 실패해도 빈 배열로 폴백한다(네트워크 방어).
+ */
+export function loadAddPeopleCandidates(
+  deps: LoadAddPeopleCandidatesDeps,
+): Promise<void> {
+  return Promise.all([
+    deps.getUsers().catch(() => [] as Array<{ id: string; name: string }>),
+    deps.getAgents().catch(() => [] as Array<{ id: string; type?: string }>),
+  ]).then(([users, agents]) => {
+    deps.setParticipants(
+      buildAddPeopleCandidates({
+        users,
+        agents,
+        existingParticipantIds: deps.existingParticipantIds,
+        currentUserId: deps.currentUserId,
+        formatAgentName: deps.formatAgentName,
+      }),
+    );
+  });
+}
+
+export interface LoadAddPeopleCandidatesDeps {
+  /** 사용자 목록 조회 (ParticipantPicker 는 api.getUsers). */
+  getUsers: () => Promise<Array<{ id: string; name: string }>>;
+  /** 에이전트 목록 조회 (ParticipantPicker 는 api.getAgents). */
+  getAgents: () => Promise<Array<{ id: string; type?: string; [key: string]: unknown }>>;
+  existingParticipantIds?: string[];
+  currentUserId?: string | null;
+  formatAgentName: (agent: any) => string;
+  setParticipants: (candidates: ChatParticipantCandidate[]) => void;
+}
+
+// ─── chat_room_update SSE 디스패치 (봉투 unwrap + update_type 분기) ─────────────
+
+/** rooms 상태 세터 — React useState 세터처럼 값 또는 updater 함수를 받는다. */
+export type ChatRoomListSetter = (
+  update: ChatRoomListItem[] | ((prev: ChatRoomListItem[]) => ChatRoomListItem[]),
+) => void;
+
+export interface ChatRoomUpdateDispatchDeps {
+  /** 본인 user id — read 이벤트가 내 것인지 판별 (ChatPage 는 user?.id). */
+  currentUserId: string | null | undefined;
+  /** 응답 시점 활성 방 id (ChatPage 는 activeRoomIdRef.current). */
+  getActiveRoomId: () => string | null;
+  /** 현재 스코프 그대로 방 목록 재조회 (ChatPage 는 showAllRooms 반영 클로저). */
+  listChatRooms: () => Promise<ChatRoomListItem[]>;
+  setRooms: ChatRoomListSetter;
+  /** makeRefreshActiveRoomParticipants 가 만든 활성 방 로스터 재조회 함수. */
+  refreshActiveRoomParticipants: (roomId: string) => void;
+}
+
+/**
+ * `chat_room_update` SSE 를 처리한다. ChatPage 의 useBoardStreamEvent 콜백 본문을
+ * 그대로 옮긴 것 — 컴포넌트는 이제 ref/세터만 주입해 이 함수에 위임하므로, 회귀
+ * 테스트가 **실제 이벤트 페이로드**로 이 디스패치(봉투 unwrap + update_type 분기)를
+ * 직접 구동한다. 그래서 참여자 추가/이탈 분기를 지우거나 다른 분기로 오배선하면
+ * 테스트가 실패한다(원본 티켓 141b7414 P2 경합의 연결부 회귀 커버).
+ *
+ * 서버는 `{ event_type, payload, scope, timestamp }` 봉투 또는 평평한 payload 를
+ * 보낸다 — 두 shape 모두 지원한다. 분기(동작 보존):
+ *  - renamed          → 방 목록의 해당 방 이름만 갱신
+ *  - participant_added/left → reflectParticipantChange (방 목록 + 활성 방 로스터)
+ *  - read(본인)       → 해당 방 unread 를 0 으로 (다른 탭/기기 동기화)
+ */
+export function dispatchChatRoomUpdate(
+  deps: ChatRoomUpdateDispatchDeps,
+  rawData: any,
+): void {
+  if (!rawData) return;
+  // 서버 봉투({ payload }) 또는 평평한 payload 양쪽 지원.
+  const payload = rawData.payload ?? rawData;
+  if (payload.update_type === 'renamed' && payload.room_id && payload.new_name) {
+    deps.setRooms((prev) =>
+      prev.map((r) => (r.id === payload.room_id ? { ...r, name: payload.new_name } : r)),
+    );
+  } else if (
+    payload.update_type === 'participant_added' ||
+    payload.update_type === 'participant_left'
+  ) {
+    // 방 목록(현재 스코프 그대로) + 열려 있는 방의 로스터를 함께 갱신 —
+    // 다른 사용자의 추가/이탈까지 실시간 반영.
+    reflectParticipantChange(
+      {
+        listChatRooms: deps.listChatRooms,
+        setRooms: deps.setRooms,
+        getActiveRoomId: deps.getActiveRoomId,
+        refreshActiveRoomParticipants: deps.refreshActiveRoomParticipants,
+      },
+      payload.room_id,
+    );
+  } else if (
+    payload.update_type === 'read' &&
+    payload.room_id &&
+    payload.participant_type === 'user' &&
+    payload.participant_id === deps.currentUserId
+  ) {
+    // B3: 같은 사용자가 다른 탭/기기에서 읽음 → 로컬 unread 를 0 으로 동기화.
+    deps.setRooms((prev) =>
+      prev.map((r) => (r.id === payload.room_id ? { ...r, unread_count: 0 } : r)),
+    );
+  }
+}
