@@ -27,6 +27,7 @@ import { SubagentManager } from './lib/subagent-manager.js';
 import { ChatSessionManager } from './lib/chat-session-manager.js';
 import { TicketSessionManager } from './lib/ticket-session-manager.js';
 import { CircuitBreaker } from './lib/circuit-breaker.js';
+import { InflightDispatchTracker } from './lib/dispatch-preflight.js';
 import { uploadIfNewErrors } from './lib/error-log-uploader.js';
 import { onFlushThreshold } from './lib/event-log-recorder.js';
 import { cleanupOrphanSubagents } from './lib/orphan-cleanup.js';
@@ -459,6 +460,10 @@ async function runRuntime(
   // that keeps failing — whichever path spawned it — counts toward one
   // threshold, and restart_agent's resetAgent clears both at once.
   const circuitBreaker = new CircuitBreaker();
+  // ticket 3d180f85 — shared provision-spanning single-flight coordinator.
+  // Created here (like circuitBreaker) so its suppression-reason metric can ride
+  // the instance heartbeat, and injected into the EventDispatcher via deps.
+  const inflightDispatchTracker = new InflightDispatchTracker();
 
   const subagentManager = new SubagentManager(config, circuitBreaker);
   // Capture the init promise so the boot-time warm-pool lease reclaim can wait
@@ -658,6 +663,7 @@ async function runRuntime(
       agentManagerCommandHandler: commandHandler,
       managedAgentContexts,
       worktreeManager,
+      inflightDispatchTracker,
     },
     pluginVersion: version,
     onConnect: kickPresencePing,
@@ -785,6 +791,10 @@ async function runRuntime(
       // reports the currently-supervised agent_ids and their working dirs.
       managedAgents,
       openBreakerCountProvider: () => circuitBreaker.getOpenBreakers().length,
+      // ticket 3d180f85 — per-reason dispatch-suppression counts (provision-
+      // spanning twin guard). Rides the heartbeat exactly like open_breaker_count
+      // so an operator can see suppressed-twin volume without log access.
+      dispatchSuppressionCountsProvider: () => inflightDispatchTracker.suppressionCounts(),
       // Self-update tracker; lets the heartbeat carry latest_version +
       // update_available so the admin UI can render an Update button.
       updateChecker,

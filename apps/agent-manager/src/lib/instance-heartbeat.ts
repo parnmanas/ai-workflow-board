@@ -60,6 +60,10 @@ export interface InstanceMeta {
   // Per-tick count of currently-open dispatch circuit breakers. Kept as a
   // provider so the heartbeat always reflects the live in-memory state.
   openBreakerCountProvider?: (() => number) | null;
+  // ticket 3d180f85 — per-reason count of dispatches suppressed by the
+  // provision-spanning twin guard (e.g. { inflight_dispatch: 3 }). Provider so
+  // the heartbeat reflects live in-memory counts, like openBreakerCountProvider.
+  dispatchSuppressionCountsProvider?: (() => Record<string, number>) | null;
 }
 
 /** Tiny duck-typed read-only snapshot of ManagedAgentRegistry. */
@@ -159,6 +163,9 @@ export interface InstanceHeartbeatPayload {
   update_last_checked_at?: string | null;
   update_last_error?: string | null;
   open_breaker_count?: number;
+  // ticket 3d180f85 — per-reason dispatch-suppression counts from the
+  // provision-spanning twin guard. Omitted when nothing was suppressed.
+  dispatch_suppression_counts?: Record<string, number>;
 }
 
 export class InstanceHeartbeat {
@@ -187,6 +194,7 @@ export class InstanceHeartbeat {
     const credentialMetaProvider = meta?.agentCredentialMetaProvider ?? null;
     const worktreeStatusProvider = meta?.worktreeStatusProvider ?? null;
     const openBreakerCountProvider = meta?.openBreakerCountProvider ?? null;
+    const dispatchSuppressionCountsProvider = meta?.dispatchSuppressionCountsProvider ?? null;
     this.#payloadFactory = async () => {
       const agentIds = managedSnapshot ? managedSnapshot.liveAgentIds() : [];
       const workingDirs = managedSnapshot ? managedSnapshot.workingDirs() : [];
@@ -196,6 +204,19 @@ export class InstanceHeartbeat {
         openBreakerCount = Math.max(0, Math.trunc(openBreakerCountProvider?.() ?? 0));
       } catch (err: any) {
         log(`Instance heartbeat: open-breaker provider failed: ${err?.message ?? err}`);
+      }
+      // Best-effort like the breaker count: a throwing provider must never
+      // wedge the heartbeat. Coerce to a clean {reason: non-negative-int} map.
+      let dispatchSuppressionCounts: Record<string, number> = {};
+      try {
+        const raw = dispatchSuppressionCountsProvider?.() ?? {};
+        for (const [reason, n] of Object.entries(raw)) {
+          const v = Math.max(0, Math.trunc(Number(n) || 0));
+          if (v > 0) dispatchSuppressionCounts[reason] = v;
+        }
+      } catch (err: any) {
+        log(`Instance heartbeat: dispatch-suppression provider failed: ${err?.message ?? err}`);
+        dispatchSuppressionCounts = {};
       }
       // Best-effort: a provider that throws should never wedge the
       // heartbeat. Treat any failure as "no credentials this tick" and
@@ -241,6 +262,9 @@ export class InstanceHeartbeat {
         ...(agentCredentials.length ? { agent_credentials: agentCredentials } : {}),
         ...(activeWorktrees.length ? { active_worktrees: activeWorktrees } : {}),
         ...(openBreakerCountProvider ? { open_breaker_count: openBreakerCount } : {}),
+        ...(dispatchSuppressionCountsProvider && Object.keys(dispatchSuppressionCounts).length > 0
+          ? { dispatch_suppression_counts: dispatchSuppressionCounts }
+          : {}),
         ...(updateStatus
           ? {
               latest_version: updateStatus.latest_version,
