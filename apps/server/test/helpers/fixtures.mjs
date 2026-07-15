@@ -162,7 +162,7 @@ export async function createColumn(
   app,
   getDataSourceToken,
   boardId,
-  { name, position, isTerminal = false, workspaceId = '', kind, roleRouting } = {},
+  { name, position, isTerminal = false, workspaceId = '', kind, roleRouting, unassignedPolicy = 'halt' } = {},
 ) {
   const ds = app.get(getDataSourceToken());
   const repo = ds.getRepository('BoardColumn');
@@ -188,6 +188,7 @@ export async function createColumn(
       is_terminal: isTerminal,
       kind: resolvedKind,
       role_routing: JSON.stringify(Array.isArray(roleRouting) ? roleRouting : []),
+      unassigned_policy: unassignedPolicy,
     }),
   );
   traceEvent('fixture', {

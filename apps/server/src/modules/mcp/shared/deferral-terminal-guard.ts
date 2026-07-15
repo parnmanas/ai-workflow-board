@@ -169,7 +169,7 @@ export async function detectDeferralToTerminal(
 export function formatDeferralTerminalWarning(targets: DeferralTargetResolution[]): string {
   if (targets.length === 0) return '';
   const lines = targets.map((t) => {
-    const state = t.archived ? 'archived' : `terminal (${t.columnName ?? 'Done'})`;
+    const state = t.archived ? 'archived' : (t.columnName ? `terminal (${t.columnName})` : 'terminal');
     return `  • ${t.id} "${t.title}" — ${state}`;
   });
   return (

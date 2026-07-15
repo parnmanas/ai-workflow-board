@@ -373,6 +373,7 @@ export interface WorkspaceFolderRepoRef {
 export interface QaOnFailureTicketConfig {
   enabled: boolean;
   board_id?: string;
+  column_id?: string;
   column_name?: string;
   priority?: 'low' | 'medium' | 'high' | 'critical';
   assignee_id?: string;
@@ -380,7 +381,7 @@ export interface QaOnFailureTicketConfig {
   dedupe?: 'per_run' | 'per_open_ticket';
   title_template?: string;
   // QA → fix → QA closed loop (ticket 467dbc7a). When rerun_on_fix is on, the
-  // server re-runs this scenario once its auto-filed fix ticket reaches Done,
+  // server re-runs this scenario once its auto-filed fix ticket reaches a terminal column,
   // capped at max_rerun_attempts (default 3) reruns. rerun_delay_seconds defers
   // each rerun so a main→prod deploy can land first (deploy-timing gate).
   rerun_on_fix?: boolean;
@@ -669,6 +670,7 @@ export interface SecurityChecklistItem {
 export interface SecurityOnFailureTicketConfig {
   enabled: boolean;
   board_id?: string;
+  column_id?: string;
   column_name?: string;
   priority?: 'low' | 'medium' | 'high' | 'critical';
   assignee_id?: string;
@@ -1110,6 +1112,9 @@ export interface Column {
   color: string;
   description: string;
   is_terminal: boolean;
+  kind?: '' | 'intake' | 'active' | 'review' | 'merging' | 'terminal';
+  role_routing?: string;
+  unassigned_policy: 'halt' | 'skip' | 'skip_if_ticket_staffed';
   tickets: Ticket[];
   created_at: string;
 }

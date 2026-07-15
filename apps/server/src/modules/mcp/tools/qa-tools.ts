@@ -153,18 +153,20 @@ const stepSchema = z.object({
 // On-failure auto-ticket policy. When enabled, a failed/errored QaRun of the
 // scenario auto-files a fix ticket carrying the failure evidence. Pass null to
 // clear. Optional fields fall back at dispatch (board → run/scenario board,
-// column → "To Do", priority → "high", assignee → scenario.target_agent_id,
+// column → first active non-terminal column, priority → "high",
+// assignee → scenario.target_agent_id,
 // labels → ['qa-failure','auto'], dedupe → 'per_open_ticket').
 const onFailureTicketSchema = z.object({
   enabled: z.boolean().describe('Master switch — when false (or the whole object null) no ticket is filed'),
   board_id: z.string().optional().describe('Board to file on; default run.board_id → scenario.board_id'),
-  column_name: z.string().optional().describe('Target column (default "To Do" — an active assignee-routed column)'),
+  column_id: z.string().optional().describe('Rename-safe target column id (preferred over column_name)'),
+  column_name: z.string().optional().describe('Target column name; when omitted, the first active non-terminal column is used'),
   priority: z.enum(['low', 'medium', 'high', 'critical']).optional().describe('Ticket priority (default high)'),
   assignee_id: z.string().optional().describe('Agent for all 3 roles (default scenario.target_agent_id)'),
   labels: z.array(z.string()).optional().describe("Ticket labels (default ['qa-failure','auto'])"),
   dedupe: z.enum(['per_run', 'per_open_ticket']).optional().describe('per_open_ticket (DEFAULT) = comment on the scenario\'s existing open fix ticket instead of filing a new one, so a flaky scenario converges to ONE ticket (a green run then auto-closes it); per_run = opt back into 1 ticket per failed run'),
   title_template: z.string().optional().describe('Title override; {{scenario.name}} is substituted (default "QA 실패: {{scenario.name}}")'),
-  rerun_on_fix: z.boolean().optional().describe('Opt-in: when the auto-filed fix ticket reaches Done, the server re-runs THIS scenario (QA→fix→QA closed loop). Default false. Scoped to tickets carrying the qa-failure/auto/qa-scenario markers.'),
+  rerun_on_fix: z.boolean().optional().describe('Opt-in: when the auto-filed fix ticket reaches a terminal column, the server re-runs THIS scenario (QA→fix→QA closed loop). Default false. Scoped to tickets carrying the qa-failure/auto/qa-scenario markers.'),
   max_rerun_attempts: z.number().optional().describe('Convergence cap: max automatic reruns before the loop halts with a "human intervention needed" comment (default 3; 0 disables reruns)'),
   rerun_delay_seconds: z.number().optional().describe('Deploy-timing gate: delay each rerun by N seconds (best-effort, in-process) so a main→prod auto-deploy can land before re-validating. Default 0 (immediate). See docs/qa-rerun-on-fix.md.'),
   deployment_gate: z.boolean().optional().describe('Deployment-FACT gate (ticket 8ce72b18): when true AND the scenario has a target_environment, a rerun waits until that environment actually deploys the fix commit (deployed_commit includes it, or deployed_at ≥ the fix Done when no fix-commit label) and fires the instant a matching report_deployment lands — instead of a fixed time delay. rerun_delay_seconds still applies as a best-effort fallback cap. Default false.'),

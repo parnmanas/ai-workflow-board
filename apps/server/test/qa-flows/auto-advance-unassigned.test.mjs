@@ -63,7 +63,7 @@ test('Unheld routed column auto-advances ticket to next non-terminal column', as
   });
   const plan = await createColumn(app, getDataSourceToken, board.id, {
     name: 'Plan', position: 1, workspaceId: ws.id, kind: 'active',
-    roleRouting: ['planner'],
+    roleRouting: ['planner'], unassignedPolicy: 'skip',
   });
   const inProgress = await createColumn(app, getDataSourceToken, board.id, {
     name: 'In Progress', position: 2, workspaceId: ws.id, kind: 'active',

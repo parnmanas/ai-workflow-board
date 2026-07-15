@@ -49,13 +49,13 @@ test('auto-advance cascades through active columns but HALTS before review/mergi
   step('build a board with review + merging gates downstream of the active stages');
   const board = await createBoard(app, getDataSourceToken, ws.id, { name: 'gate-halt-board' });
   const todo = await createColumn(app, getDataSourceToken, board.id, {
-    name: 'To Do', position: 0, workspaceId: ws.id, kind: 'active', roleRouting: ['assignee'],
+    name: 'To Do', position: 0, workspaceId: ws.id, kind: 'active', roleRouting: ['assignee'], unassignedPolicy: 'skip',
   });
   const plan = await createColumn(app, getDataSourceToken, board.id, {
-    name: 'Plan', position: 1, workspaceId: ws.id, kind: 'active', roleRouting: ['planner'],
+    name: 'Plan', position: 1, workspaceId: ws.id, kind: 'active', roleRouting: ['planner'], unassignedPolicy: 'skip',
   });
   const inProgress = await createColumn(app, getDataSourceToken, board.id, {
-    name: 'In Progress', position: 2, workspaceId: ws.id, kind: 'active', roleRouting: ['assignee'],
+    name: 'In Progress', position: 2, workspaceId: ws.id, kind: 'active', roleRouting: ['assignee'], unassignedPolicy: 'skip',
   });
   const review = await createColumn(app, getDataSourceToken, board.id, {
     name: 'Review', position: 3, workspaceId: ws.id, kind: 'review', roleRouting: ['reviewer'],
@@ -88,27 +88,25 @@ test('auto-advance cascades through active columns but HALTS before review/mergi
 
   await settle();
 
-  step('ticket cascaded through active stages and HALTED at In Progress (one short of Review)');
+  step('ticket cascaded through skippable stages and HALTED in the configured halt column');
   const row = await ds.getRepository('Ticket').findOne({ where: { id: ticket.id } });
   assert.equal(
-    row.column_id, inProgress.id,
-    `ticket must halt at the last active column In Progress (${inProgress.id}); got ${row.column_id}`,
+    row.column_id, review.id,
+    `ticket must halt in Review (${review.id}); got ${row.column_id}`,
   );
-  assert.notEqual(row.column_id, review.id, 'ticket must NOT enter the Review gate');
   assert.notEqual(row.column_id, merging.id, 'ticket must NOT reach the Merging gate');
   assert.notEqual(row.column_id, done.id, 'ticket must NOT reach Done');
 
   step('a gate-halt flag was written and no move crossed into a gate column');
   const logs = await ds.getRepository('ActivityLog').find({ where: { ticket_id: ticket.id } });
-  const gateHalt = logs.find((l) => l.action === 'auto_advance_halted_gate');
+  const gateHalt = logs.find((l) => l.action === 'auto_advance_halted_policy');
   assert.ok(
     gateHalt,
-    `expected an auto_advance_halted_gate row; got actions ${JSON.stringify(logs.map((l) => l.action))}`,
+    `expected an auto_advance_halted_policy row; got actions ${JSON.stringify(logs.map((l) => l.action))}`,
   );
   assert.equal(gateHalt.trigger_source, 'auto_advance');
 
-  // The cascade should have produced auto-advance moves into Plan and In Progress
-  // (active stages) but never into Review or Merging.
+  // The cascade enters the configured halt column, then stops there.
   const autoMoves = logs.filter((l) => l.action === 'moved' && l.actor_id === 'auto-advance');
   const movedNewValues = autoMoves.map((l) => l.new_value);
   assert.ok(
@@ -116,8 +114,8 @@ test('auto-advance cascades through active columns but HALTS before review/mergi
     `expected an auto-advance into In Progress; got ${JSON.stringify(movedNewValues)}`,
   );
   assert.ok(
-    !movedNewValues.includes('Review') && !movedNewValues.includes('Merging'),
-    `auto-advance must never move into a gate column; got ${JSON.stringify(movedNewValues)}`,
+    movedNewValues.includes('Review') && !movedNewValues.includes('Merging'),
+    `auto-advance must enter the halt column but never cross it; got ${JSON.stringify(movedNewValues)}`,
   );
 
   exitAfterTests(0);

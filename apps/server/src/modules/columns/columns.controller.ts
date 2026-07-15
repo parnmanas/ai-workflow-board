@@ -13,6 +13,7 @@ import { computeRoleRoutingForNewColumn } from '../boards/routing-config.helper'
 // Kept here as a plain string set so the REST surface validates body input
 // without dragging in zod for a single check.
 const COLUMN_KINDS = new Set(['', 'intake', 'active', 'review', 'merging', 'terminal']);
+const UNASSIGNED_POLICIES = new Set(['halt', 'skip', 'skip_if_ticket_staffed']);
 
 @ApiBearerAuth('user-session')
 @ApiTags('columns')
@@ -26,11 +27,12 @@ export class ColumnsController {
 
   @Post('boards/:boardId/columns')
   async create(@Param('boardId') boardId: string, @Body() body: any, @Res() res: Response) {
-    const { name, color = '#e2e8f0', description = '', kind, role_routing, is_terminal } = body;
+    const { name, color = '#e2e8f0', description = '', kind, role_routing, is_terminal, unassigned_policy = 'halt' } = body;
     if (!name) return res.status(400).json({ error: 'name is required' });
     if (kind !== undefined && !COLUMN_KINDS.has(kind)) {
       return res.status(400).json({ error: `kind must be one of ${[...COLUMN_KINDS].filter(k => k).join('|')} (or omit)` });
     }
+    if (!UNASSIGNED_POLICIES.has(unassigned_policy)) return res.status(400).json({ error: 'unassigned_policy must be halt|skip|skip_if_ticket_staffed' });
 
     const maxResult = await this.repo
       .createQueryBuilder('col')
@@ -78,22 +80,25 @@ export class ColumnsController {
       kind: resolvedKind,
       role_routing: roleRoutingJson,
       is_terminal: resolvedTerminal,
+      unassigned_policy,
     }));
     return res.status(201).json(column);
   }
 
   @Patch('columns/:id')
   async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
-    const { name, color, position, description, is_terminal, kind, role_routing } = body;
+    const { name, color, position, description, is_terminal, kind, role_routing, unassigned_policy } = body;
     const col = await findOrFail(this.repo, { where: { id } }, 'Column not found');
 
     if (kind !== undefined && !COLUMN_KINDS.has(kind)) {
       return res.status(400).json({ error: `kind must be one of ${[...COLUMN_KINDS].filter(k => k).join('|')} (or omit)` });
     }
+    if (unassigned_policy !== undefined && !UNASSIGNED_POLICIES.has(unassigned_policy)) return res.status(400).json({ error: 'unassigned_policy must be halt|skip|skip_if_ticket_staffed' });
 
     if (name !== undefined) col.name = name;
     if (color !== undefined) col.color = color;
     if (description !== undefined) col.description = description;
+    if (unassigned_policy !== undefined) col.unassigned_policy = unassigned_policy;
     if (role_routing !== undefined) {
       const slugs = Array.isArray(role_routing)
         ? role_routing.filter((s: unknown): s is string => typeof s === 'string')

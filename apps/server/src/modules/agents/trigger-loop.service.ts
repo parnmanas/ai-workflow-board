@@ -295,22 +295,12 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
 
     const columnHasHolder = resolved.some((r) => r.targetAgentIds.length > 0);
     if (triggerSource === 'column_move' && !columnHasHolder) {
-      if (this._isGateColumn(col)) {
-        // GATE COLUMN (review / merging) with no holder — never auto-advance a
-        // gate, in OR out (ticket cc48f06f). The benchmark short-circuit at the
-        // top of this method already parks a `benchmark-candidate` on a review
-        // column rather than letting it auto-advance past; this generalizes that
-        // to every review/merging gate and every ticket. A reviewer/merger seat
-        // must be staffed by a human — silently skipping it produces a
-        // "ready to merge" ticket with zero review (a3d25202 live repro). Halt
-        // in place + flag regardless of whether the ticket is staffed elsewhere.
-        await this._flagGateHalt(ticket, col, col);
-      } else if (await this._ticketHasAnyHolder(ticket.id)) {
-        // Staffed somewhere else — this empty stage is an intended skip.
+      const shouldSkip = col.unassigned_policy === 'skip'
+        || (col.unassigned_policy === 'skip_if_ticket_staffed' && await this._ticketHasAnyHolder(ticket.id));
+      if (shouldSkip) {
         await this._autoAdvanceUnassigned(ticket, col);
       } else {
-        // Orphan ticket — halt where it sits and flag; do not cascade to Done.
-        await this._flagUnassignedHalt(ticket, col);
+        await this._flagPolicyHalt(ticket, col, col);
       }
       return;
     }
@@ -526,19 +516,6 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    // GATE GUARD (ticket cc48f06f): never auto-advance an unstaffed ticket INTO
-    // a review/merging gate column. Cascading through active stages (Plan, In
-    // Progress) is fine, but a gate must be staffed by a human — auto-passing it
-    // silently produces a "ready to merge" ticket with zero work/review
-    // (a3d25202 live repro). Halt at the current (last active) column + flag,
-    // leaving the ticket one short of the gate for a human to staff. NOTE this
-    // checks the IMMEDIATE next non-terminal column only — we never skip OVER a
-    // gate to land on a later active column, which would bypass the gate entirely.
-    if (this._isGateColumn(nextCol)) {
-      await this._flagGateHalt(ticket, currentCol, nextCol);
-      return;
-    }
-
     const fromPosition = ticket.position;
     const fromColumnId = currentCol.id;
 
@@ -607,26 +584,7 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  /**
-   * Does this ticket have a holder on ANY role — agent OR user, across every
-   * role on the ticket, not just the current column's routed roles? Drives the
-   * auto-advance-vs-halt split (ticket c5951280): a ticket staffed somewhere
-   * legitimately skips an unservable stage and advances, while a ticket with no
-   * holder anywhere is an orphan that must halt in place and be flagged rather
-   * than cascade silently to Done.
-   *
-   * Both `agent_id` and `user_id` count as a holder. A ticket whose only
-   * holders are humans still has an owner who can act, so the empty agent-routed
-   * stage is a legitimate skip — not the orphan case.
-   *
-   * The reporter IS counted (ticket cc48f06f / 519fad18): a reporter-only ticket
-   * — the common shape of an agent-created follow-up, since create_ticket
-   * auto-fills the reporter to the caller — is treated as "staffed enough" to
-   * cascade through ACTIVE stages, but the gate guard (`_isGateColumn` /
-   * `_flagGateHalt`) still halts it one short of the first review/merging gate so
-   * it never silently skips to Done. The completely-unassigned (zero-holder)
-   * orphan is the only case that halts on the spot via `_flagUnassignedHalt`.
-   */
+  /** True when the ticket has any assigned agent or user in any role. */
   private async _ticketHasAnyHolder(ticketId: string): Promise<boolean> {
     const count = await this.dataSource
       .getRepository(TicketRoleAssignment)
@@ -640,47 +598,24 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Is this a review/merging GATE column? Gate columns require a human-staffed
-   * holder (reviewer / merger) and must never be crossed by the auto-advance
-   * cascade — neither entered nor exited while unstaffed (ticket cc48f06f).
-   * Distinct from active columns, where an empty seat is a legitimate skip:
-   * a gate's empty seat means "a human still has to staff this review", not
-   * "nobody routed here, move along". Kept in one place so the caller-side
-   * (cascade-OUT) and `_autoAdvanceUnassigned`-side (cascade-IN) guards agree.
+   * Halt and leave an audit flag when the current or next column explicitly
+   * declares `unassigned_policy=halt`.
    */
-  private _isGateColumn(col: BoardColumn): boolean {
-    const kind = (col as any).kind;
-    return kind === 'review' || kind === 'merging';
-  }
-
-  /**
-   * Halt + flag an unstaffed GATE-column crossing (ticket cc48f06f). The
-   * auto-advance cascade reached a review/merging gate with no holder — either
-   * the ticket sits ON the gate (`col === gateCol`, cascade-OUT, e.g. an empty
-   * Review with only the assignee set) or the next forward column IS the gate
-   * (`col` is the last active column before it, cascade-IN). Unlike
-   * `_autoAdvanceUnassigned` we must NOT push through: a gate has to be staffed
-   * by a human (assign a reviewer / merger), so the ticket halts in place and we
-   * write a grepable `auto_advance_halted_gate` flag so the UI activity feed and
-   * operator greps surface "stuck: gate needs staffing". `system` actor so the
-   * row does NOT re-enter `_handleActivity` (it is not a move and carries no
-   * holder to wake). Failing the write must not change the halt outcome.
-   */
-  private async _flagGateHalt(
+  private async _flagPolicyHalt(
     ticket: Ticket,
     col: BoardColumn,
     gateCol: BoardColumn,
   ): Promise<void> {
     this.logService.warn(
       'MCP',
-      'auto_advance halted at gate (review/merging requires a staffed holder)',
+      'auto_advance halted by column unassigned policy',
       {
         ticket_id: ticket.id,
         column_id: col.id,
         column_name: col.name,
         gate_column_id: gateCol.id,
         gate_column_name: gateCol.name,
-        gate_kind: (gateCol as any).kind,
+        unassigned_policy: gateCol.unassigned_policy,
       },
     );
     try {
@@ -692,59 +627,14 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
           ticket_id: ticket.id,
           actor_id: 'system',
           actor_name: 'TriggerLoopService',
-          action: 'auto_advance_halted_gate',
-          new_value: `column=${col.id} gate=${gateCol.id} gate_kind=${(gateCol as any).kind} reason=gate_requires_staffing`,
+          action: 'auto_advance_halted_policy',
+          new_value: `column=${col.id} blocked_column=${gateCol.id} reason=column_unassigned_policy_halt`,
           role: '',
           trigger_source: 'auto_advance',
         }),
       );
     } catch (e) {
       this.logService.warn('MCP', 'auto_advance gate-halt flag write failed (halt still applied)', {
-        err: String(e), ticket_id: ticket.id,
-      });
-    }
-  }
-
-  /**
-   * Halt + flag an ORPHAN ticket (ticket c5951280). The current non-terminal
-   * column can't be served (no holder for any routed role) AND the ticket has
-   * no holder on any role at all. Unlike `_autoAdvanceUnassigned` we must NOT
-   * push it forward — a completely unassigned ticket cascading to Done is the
-   * silent-flow bug (case ①) this ticket fixes. Leave it where it sits and
-   * write a grepable warning flag so the UI activity feed and operator greps
-   * surface "stuck: nobody assigned".
-   *
-   * The flag is an ActivityLog row with action `auto_advance_halted_unassigned`
-   * and a `system` actor — `system` so the row does NOT re-enter
-   * `_handleActivity` (it is not a move and carries no holder to wake; it's a
-   * pure audit flag). Failing the write must not change the halt outcome.
-   */
-  private async _flagUnassignedHalt(
-    ticket: Ticket,
-    col: BoardColumn,
-  ): Promise<void> {
-    this.logService.warn(
-      'MCP',
-      'auto_advance halted (ticket fully unassigned — no holder on any role)',
-      { ticket_id: ticket.id, column_id: col.id, column_name: col.name },
-    );
-    try {
-      const activityLogRepo = this.dataSource.getRepository(ActivityLog);
-      await activityLogRepo.save(
-        activityLogRepo.create({
-          entity_type: 'ticket',
-          entity_id: ticket.id,
-          ticket_id: ticket.id,
-          actor_id: 'system',
-          actor_name: 'TriggerLoopService',
-          action: 'auto_advance_halted_unassigned',
-          new_value: `column=${col.id} reason=no_holder_on_any_role`,
-          role: '',
-          trigger_source: 'auto_advance',
-        }),
-      );
-    } catch (e) {
-      this.logService.warn('MCP', 'auto_advance halt flag write failed (halt still applied)', {
         err: String(e), ticket_id: ticket.id,
       });
     }

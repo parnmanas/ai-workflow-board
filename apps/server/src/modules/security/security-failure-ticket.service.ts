@@ -20,7 +20,6 @@ import { isTerminalColumn } from '../mcp/shared/archive-helpers';
 // QA's `qa-scenario:<id>` back-ref.
 const PROFILE_LABEL_PREFIX = 'security-profile:';
 const DEFAULT_LABELS = ['security', 'auto'];
-const DEFAULT_COLUMN = 'To Do';
 const DEFAULT_PRIORITY = 'high';
 const DEFAULT_MIN_SEVERITY: SecuritySeverity = 'high';
 
@@ -95,7 +94,7 @@ export class SecurityFailureTicketService {
         return null;
       }
 
-      const column = await this._resolveColumn(boardId, cfg.column_name || DEFAULT_COLUMN);
+      const column = await this._resolveColumn(boardId, cfg.column_id, cfg.column_name);
       if (!column) {
         this.logService.warn('Security', `on_failure_ticket: no usable column in board ${boardId} for profile ${profile.id} — skipping`);
         return null;
@@ -138,16 +137,24 @@ export class SecurityFailureTicketService {
       .sort((a, b) => (SEVERITY_RANK[b.severity] ?? 0) - (SEVERITY_RANK[a.severity] ?? 0));
   }
 
-  /** "To Do" (or configured) column → first non-terminal → first column. */
-  private async _resolveColumn(boardId: string, columnName: string): Promise<BoardColumn | null> {
-    const byName = await findColumnByName(this.dataSource, boardId, columnName);
-    if (byName) return byName;
+  /** Explicit column id/name → first active non-terminal → first non-terminal. */
+  private async _resolveColumn(boardId: string, columnId?: string, columnName?: string): Promise<BoardColumn | null> {
+    if (columnId) {
+      const byId = await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: columnId, board_id: boardId } });
+      if (byId) return byId;
+    }
+    if (columnName) {
+      const byName = await findColumnByName(this.dataSource, boardId, columnName);
+      if (byName) return byName;
+    }
     const cols = await this.dataSource.getRepository(BoardColumn).find({
       where: { board_id: boardId },
       order: { position: 'ASC' },
     });
     if (cols.length === 0) return null;
-    return cols.find((c) => !isTerminalColumn(c)) || cols[0];
+    return cols.find((c) => c.kind === 'active' && !isTerminalColumn(c))
+      || cols.find((c) => !isTerminalColumn(c))
+      || cols[0];
   }
 
   private async _findOpenFailureTicket(profile: SecurityProfile, workspaceId: string): Promise<Ticket | null> {

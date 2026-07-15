@@ -1188,6 +1188,7 @@ function ProfileEditor({ profile, workspaceId, boardId, agents, onClose, onSaved
   const [oftPriority, setOftPriority] = useState<SecurityOnFailureTicketConfig['priority']>(oft?.priority ?? 'high');
   const [oftMinSeverity, setOftMinSeverity] = useState<SecuritySeverity>(oft?.min_severity ?? 'high');
   const [oftAssigneeId, setOftAssigneeId] = useState(oft?.assignee_id ?? '');
+  const [oftColumnId, setOftColumnId] = useState(oft?.column_id ?? '');
   const [oftColumn, setOftColumn] = useState(oft?.column_name ?? '');
   const [oftDedupe, setOftDedupe] = useState<SecurityOnFailureTicketConfig['dedupe']>(oft?.dedupe ?? 'per_run');
   const [oftBoardId, setOftBoardId] = useState(oft?.board_id ?? '');
@@ -1209,6 +1210,7 @@ function ProfileEditor({ profile, workspaceId, boardId, agents, onClose, onSaved
           min_severity: oftMinSeverity,
           dedupe: oftDedupe,
           ...(oftAssigneeId ? { assignee_id: oftAssigneeId } : {}),
+          ...(oftColumnId.trim() ? { column_id: oftColumnId.trim() } : {}),
           ...(oftColumn.trim() ? { column_name: oftColumn.trim() } : {}),
           ...(oftBoardId.trim() ? { board_id: oftBoardId.trim() } : {}),
           ...(oftLabels.trim() ? { labels: oftLabels.split(',').map((l) => l.trim()).filter(Boolean) } : {}),
@@ -1365,7 +1367,8 @@ function ProfileEditor({ profile, workspaceId, boardId, agents, onClose, onSaved
                 options={agents.map((a) => ({ value: a.id, label: formatAgentDisplayName(a) }))}
                 onChange={(e) => setOftAssigneeId((e.target as HTMLSelectElement).value)}
               />
-              <Input label='컬럼 (비우면 "To Do")' value={oftColumn} onChange={(e) => setOftColumn((e.target as HTMLInputElement).value)} />
+              <Input label="컬럼 ID (권장, 이름 변경에 안전)" value={oftColumnId} onChange={(e) => setOftColumnId((e.target as HTMLInputElement).value)} />
+              <Input label="컬럼 이름 (호환용, 비우면 첫 active 컬럼)" value={oftColumn} onChange={(e) => setOftColumn((e.target as HTMLInputElement).value)} />
               <Input label="Board ID (비우면 run/프로파일 보드)" value={oftBoardId} onChange={(e) => setOftBoardId((e.target as HTMLInputElement).value)} />
               <Input label="Labels (comma — 비우면 기본값)" value={oftLabels} onChange={(e) => setOftLabels((e.target as HTMLInputElement).value)} />
             </div>

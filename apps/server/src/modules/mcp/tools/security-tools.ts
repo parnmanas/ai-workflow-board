@@ -126,7 +126,8 @@ const checklistItemSchema = z.object({
 const onFailureTicketSchema = z.object({
   enabled: z.boolean().describe('Master switch for the on-failure auto-ticket policy'),
   board_id: z.string().optional().describe('Board to file the fix ticket on (falls back to run.board_id → profile.board_id)'),
-  column_name: z.string().optional().describe('Target column (default "To Do" → first non-terminal → first column)'),
+  column_id: z.string().optional().describe('Rename-safe target column id (preferred over column_name)'),
+  column_name: z.string().optional().describe('Target column name; when omitted, the first active non-terminal column is used'),
   priority: z.enum(['low', 'medium', 'high', 'critical']).optional().describe('Fix ticket priority (default high)'),
   assignee_id: z.string().optional().describe('Assignee for the fix ticket (falls back to the profile target agent)'),
   labels: z.array(z.string()).optional().describe('Extra labels (security-profile:<id> back-ref is always added)'),

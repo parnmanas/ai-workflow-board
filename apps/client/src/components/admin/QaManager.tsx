@@ -1143,6 +1143,7 @@ function ScenarioEditor({ scenario, workspaceId, boardId, agents, onClose, onSav
   const [oftEnabled, setOftEnabled] = useState(!!oft?.enabled);
   const [oftPriority, setOftPriority] = useState<QaOnFailureTicketConfig['priority']>(oft?.priority ?? 'high');
   const [oftAssigneeId, setOftAssigneeId] = useState(oft?.assignee_id ?? '');
+  const [oftColumnId, setOftColumnId] = useState(oft?.column_id ?? '');
   const [oftColumn, setOftColumn] = useState(oft?.column_name ?? '');
   const [oftDedupe, setOftDedupe] = useState<QaOnFailureTicketConfig['dedupe']>(oft?.dedupe ?? 'per_run');
   const [oftBoardId, setOftBoardId] = useState(oft?.board_id ?? '');
@@ -1187,6 +1188,7 @@ function ScenarioEditor({ scenario, workspaceId, boardId, agents, onClose, onSav
           priority: oftPriority,
           dedupe: oftDedupe,
           ...(oftAssigneeId ? { assignee_id: oftAssigneeId } : {}),
+          ...(oftColumnId.trim() ? { column_id: oftColumnId.trim() } : {}),
           ...(oftColumn.trim() ? { column_name: oftColumn.trim() } : {}),
           ...(oftBoardId.trim() ? { board_id: oftBoardId.trim() } : {}),
           ...(oftLabels.trim() ? { labels: oftLabels.split(',').map((l) => l.trim()).filter(Boolean) } : {}),
@@ -1399,7 +1401,8 @@ function ScenarioEditor({ scenario, workspaceId, boardId, agents, onClose, onSav
                 options={agents.map((a) => ({ value: a.id, label: formatAgentDisplayName(a) }))}
                 onChange={(e) => setOftAssigneeId((e.target as HTMLSelectElement).value)}
               />
-              <Input label='컬럼 (비우면 "To Do")' value={oftColumn} onChange={(e) => setOftColumn((e.target as HTMLInputElement).value)} />
+              <Input label="컬럼 ID (권장, 이름 변경에 안전)" value={oftColumnId} onChange={(e) => setOftColumnId((e.target as HTMLInputElement).value)} />
+              <Input label="컬럼 이름 (호환용, 비우면 첫 active 컬럼)" value={oftColumn} onChange={(e) => setOftColumn((e.target as HTMLInputElement).value)} />
               <Input label="Board ID (비우면 run/시나리오 보드)" value={oftBoardId} onChange={(e) => setOftBoardId((e.target as HTMLInputElement).value)} />
               <Input label="Labels (comma — 비우면 qa-failure, auto)" value={oftLabels} onChange={(e) => setOftLabels((e.target as HTMLInputElement).value)} />
 
@@ -1410,7 +1413,7 @@ function ScenarioEditor({ scenario, workspaceId, boardId, agents, onClose, onSav
                   수정 티켓 Done 시 → 시나리오 자동 재실행
                 </label>
                 <div style={{ fontSize: 12, color: tokens.colors.textMuted, margin: '4px 0 0 24px' }}>
-                  자동 생성된 수정 티켓이 Done 컬럼에 들어가면 서버가 같은 시나리오를 결정적으로 재실행합니다.
+                  자동 생성된 수정 티켓이 terminal 컬럼에 들어가면 서버가 같은 시나리오를 결정적으로 재실행합니다.
                   pass 면 종료(새 티켓 없음), 재실패면 새 수정 티켓 + 세대 카운터 증가, max 도달 시 중단 코멘트.
                   {' '}⚠️ QA 는 <b>돌고 있는 서버</b>를 검증합니다 — main→prod auto-deploy 지연이 있으면 재실행 지연(초)을 배포 시간만큼 주세요.
                 </div>

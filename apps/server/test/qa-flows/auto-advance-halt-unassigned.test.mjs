@@ -111,10 +111,10 @@ test('auto-advance halts fully-unassigned tickets and advances staffed ones', as
   const orphanLogs = await ds
     .getRepository('ActivityLog')
     .find({ where: { ticket_id: orphan.id } });
-  const haltFlag = orphanLogs.find((l) => l.action === 'auto_advance_halted_unassigned');
+  const haltFlag = orphanLogs.find((l) => l.action === 'auto_advance_halted_policy');
   assert.ok(
     haltFlag,
-    `expected an auto_advance_halted_unassigned row; got actions ${JSON.stringify(orphanLogs.map((l) => l.action))}`,
+    `expected an auto_advance_halted_policy row; got actions ${JSON.stringify(orphanLogs.map((l) => l.action))}`,
   );
   assert.equal(haltFlag.trigger_source, 'auto_advance');
   const orphanAutoMove = orphanLogs.find(
@@ -176,10 +176,10 @@ test('auto-advance halts fully-unassigned tickets and advances staffed ones', as
     !reviewLogs.some((l) => l.action === 'moved' && l.actor_id === 'auto-advance'),
     'gate must NOT produce an auto-advance moved row',
   );
-  const gateHalt = reviewLogs.find((l) => l.action === 'auto_advance_halted_gate');
+  const gateHalt = reviewLogs.find((l) => l.action === 'auto_advance_halted_policy');
   assert.ok(
     gateHalt,
-    `expected an auto_advance_halted_gate row; got actions ${JSON.stringify(reviewLogs.map((l) => l.action))}`,
+    `expected an auto_advance_halted_policy row; got actions ${JSON.stringify(reviewLogs.map((l) => l.action))}`,
   );
   assert.equal(gateHalt.trigger_source, 'auto_advance');
 
@@ -194,7 +194,7 @@ test('auto-advance halts fully-unassigned tickets and advances staffed ones', as
   });
   const cGhost = await createColumn(app, getDataSourceToken, boardC.id, {
     name: 'Ghost', position: 1, workspaceId: ws.id, kind: 'active',
-    roleRouting: ['role-that-does-not-exist'],
+    roleRouting: ['role-that-does-not-exist'], unassignedPolicy: 'skip',
   });
   const cWork = await createColumn(app, getDataSourceToken, boardC.id, {
     name: 'Work', position: 2, workspaceId: ws.id, kind: 'active', roleRouting: ['assignee'],
@@ -245,7 +245,7 @@ test('auto-advance halts fully-unassigned tickets and advances staffed ones', as
     name: 'Todo', position: 0, workspaceId: ws.id, kind: 'intake', roleRouting: ['assignee'],
   });
   const dPlan = await createColumn(app, getDataSourceToken, boardD.id, {
-    name: 'Plan', position: 1, workspaceId: ws.id, kind: 'active', roleRouting: ['planner'],
+    name: 'Plan', position: 1, workspaceId: ws.id, kind: 'active', roleRouting: ['planner'], unassignedPolicy: 'skip',
   });
   const dWork = await createColumn(app, getDataSourceToken, boardD.id, {
     name: 'Work', position: 2, workspaceId: ws.id, kind: 'active', roleRouting: ['reporter'],
