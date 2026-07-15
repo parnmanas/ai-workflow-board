@@ -13,7 +13,7 @@ import { useConfirm } from '../contexts/ConfirmContext';
  * The whole control channel already exists end-to-end:
  *   • server: POST /api/admin/agent-manager/instances/:id/command emits the
  *     `agent_manager_command` SSE (all 11 verbs, arg hydration for
- *     spawn_agent / pull_working_dir).
+ *     spawn_agent).
  *   • agent-manager: AgentManagerCommandHandler executes each verb and reports
  *     the outcome via POST /api/agent-manager/command/ack.
  *   • running-state source: the manager's instance heartbeat carries
@@ -42,7 +42,7 @@ const HEARTBEAT_STALE_MS = 60_000;
 
 interface AgentLifecycleControlsProps {
   agentId: string;
-  /** Agent.working_dir — gates pull_working_dir + seeds the set-working-dir input. */
+  /** Agent storage directory — seeds the set-working-dir input. */
   workingDir?: string | null;
   /** Owning manager's live instance, or null/undefined when the manager is
    *  not currently heartbeating (then every command is disabled). */
@@ -196,10 +196,7 @@ export default function AgentLifecycleControls({
 
       {layout === 'full' && (
         <>
-          {/* Maintenance verbs — reach into the agent's cli-home / working_dir
-              from the manager. update_plugins / refresh_mcp_config need the
-              agent to be spawned (running); pull_working_dir needs a
-              working_dir. Mirrors AgentManagerPage's MAINTENANCE_BUTTONS. */}
+          {/* Maintenance verbs operate only on the agent's isolated cli-home. */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
             <span style={{ fontSize: 11, fontWeight: 600, color: tokens.colors.textMuted, marginRight: 2 }}>
               유지보수:
@@ -229,19 +226,6 @@ export default function AgentLifecycleControls({
               }
             >
               Refresh MCP
-            </Button>
-            <Button
-              size="sm"
-              variant="ghost"
-              disabled={!managerOnline || !workingDir || pending !== null}
-              onClick={() => dispatch('pull_working_dir')}
-              title={
-                !managerOnline ? managerOfflineTitle
-                  : !workingDir ? '먼저 working_dir 를 설정하세요.'
-                  : 'pull_working_dir — 에이전트 working_dir 에서 git pull --ff-only. best-effort(비 fast-forward/더러운 트리는 실패 보고, reset 안 함).'
-              }
-            >
-              Pull repo
             </Button>
             {/* reload_config is manager-scoped (no agent_id) — re-reads the
                 manager's config.json. Kept here for completeness per the

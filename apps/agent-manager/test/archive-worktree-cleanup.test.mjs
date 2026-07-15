@@ -22,7 +22,7 @@ test('archive board_update forwards repository resource id to worktree cleanup',
     },
   };
   const dispatcher = new EventDispatcher(
-    { delegation: { worktreeIsolation: true } },
+    { delegation: {} },
     { worktreeManager, managedAgentContexts },
   );
 

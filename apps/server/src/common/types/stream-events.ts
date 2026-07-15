@@ -495,7 +495,6 @@ export type AgentManagerCommand =
   | 'reload_config'      // re-read config.json (e.g., after admin edits delegation tunables)
   | 'update_plugins'     // git pull every plugin marketplace under the managed agent's cli-home
   | 'refresh_mcp_config' // rewrite mcp-config.json so spawned subagents see the current AWB url
-  | 'pull_working_dir'   // git -C <agent.working_dir> pull --ff-only (best-effort, non-fatal)
   | 'update_manager'     // pull + install + build the manager itself, then re-exec
   | 'restart_manager';   // re-exec the manager in place (no git pull / build) so a fresh process takes over the lockfile
 

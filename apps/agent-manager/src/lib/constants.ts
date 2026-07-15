@@ -57,11 +57,6 @@ export const DELEGATION_DEFAULTS = Object.freeze({
   persistentTicketSessions: true,
   idleMinutes: 10,
   maxTurnsPerSession: 30,
-  // ticket 9f26f091: isolate each (ticket,role) session in its own git
-  // worktree so a branch switch in one ticket can't bleed into another that
-  // shares the agent's working_dir. Set false to keep the legacy single-cwd
-  // behavior (e.g. on hosts with an old git that lacks `worktree`).
-  worktreeIsolation: true,
   // ticket e9d0e8bc: hold a folder-keyed lock across a QA/security run's whole
   // provision→execute lifetime so two runs of the SAME scenario never execute
   // concurrently in the shared `.awb/qa/<scenario>` folder and clobber each

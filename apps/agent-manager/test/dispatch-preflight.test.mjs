@@ -122,14 +122,17 @@ test('classifyWorktreeOutcome: a foreign/occupied checkout (path_conflict) is bl
   });
 });
 
-test('classifyWorktreeOutcome: intentionally-disabled isolation is NOT a blocker', () => {
-  assert.deepEqual(classifyWorktreeOutcome({ isWorktree: false, reason: 'disabled' }), { blocked: false });
+test('classifyWorktreeOutcome: disabled isolation remains blocked', () => {
+  assert.deepEqual(classifyWorktreeOutcome({ isWorktree: false, reason: 'disabled' }), {
+    blocked: true, kind: 'worktree:disabled', reason: 'disabled',
+  });
 });
 
-test('classifyWorktreeOutcome: missing/empty result is not a blocker (fail open)', () => {
-  assert.deepEqual(classifyWorktreeOutcome({ isWorktree: false }), { blocked: false });
-  assert.deepEqual(classifyWorktreeOutcome(null), { blocked: false });
-  assert.deepEqual(classifyWorktreeOutcome(undefined), { blocked: false });
+test('classifyWorktreeOutcome: missing/empty result is blocked', () => {
+  const blocked = { blocked: true, kind: 'worktree:unavailable', reason: 'unavailable' };
+  assert.deepEqual(classifyWorktreeOutcome({ isWorktree: false }), blocked);
+  assert.deepEqual(classifyWorktreeOutcome(null), blocked);
+  assert.deepEqual(classifyWorktreeOutcome(undefined), blocked);
 });
 
 // ── DispatchBlockerTracker (criterion #3: suppress dup, retry after recovery) ─

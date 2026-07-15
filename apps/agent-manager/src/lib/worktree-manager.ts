@@ -275,7 +275,6 @@ export function worktreeSlug(ticketId: string, mode: WorktreeMode = DEFAULT_WORK
 }
 
 export class WorktreeManager {
-  #enabled: boolean;
   #provisionLockTimeoutMs: number;
   #provisionLockStaleMs: number;
   #provisionLockHeartbeatMs: number;
@@ -291,19 +290,13 @@ export class WorktreeManager {
   #bootstrapLocks = new Map<string, Promise<string | null>>();
 
   constructor(opts: {
-    enabled?: boolean;
     provisionLockTimeoutMs?: number;
     provisionLockStaleMs?: number;
     provisionLockHeartbeatMs?: number;
   } = {}) {
-    this.#enabled = opts.enabled !== false;
     this.#provisionLockTimeoutMs = opts.provisionLockTimeoutMs ?? PROVISION_LOCK_TIMEOUT_MS;
     this.#provisionLockStaleMs = opts.provisionLockStaleMs ?? PROVISION_LOCK_STALE_MS;
     this.#provisionLockHeartbeatMs = opts.provisionLockHeartbeatMs ?? PROVISION_LOCK_HEARTBEAT_MS;
-  }
-
-  get enabled(): boolean {
-    return this.#enabled;
   }
 
   /**
@@ -470,7 +463,6 @@ export class WorktreeManager {
   /** Best-effort `git worktree prune` — drops registrations whose dir vanished.
    *  Safe to call often; never throws. */
   async prune(baseWorkingDir: string): Promise<void> {
-    if (!this.#enabled) return;
     await git(baseWorkingDir, ['worktree', 'prune']).catch(() => {});
   }
 
@@ -490,7 +482,6 @@ export class WorktreeManager {
       reason,
     });
 
-    if (!this.#enabled) return fallback('disabled');
     if (!baseWorkingDir) return fallback('no_base_dir');
     // Both modes key a lease/slug on the ticket id, so it is required for either.
     if (!ticketId) return fallback('no_ticket');
@@ -582,7 +573,7 @@ export class WorktreeManager {
    */
   async verifyPushReadiness(cwd: string, remoteUrl?: string): Promise<PushReadinessDecision> {
     try {
-      if (!this.#enabled || !cwd) return { ok: true };
+      if (!cwd) return { ok: true };
       let url = (remoteUrl || '').trim();
       if (!url) {
         const r = await git(cwd, ['remote', 'get-url', 'origin']);
@@ -944,7 +935,6 @@ export class WorktreeManager {
     baseWorkingDir: string;
     liveTicketIds: Set<string>;
   }): Promise<number> {
-    if (!this.#enabled) return 0;
     const { baseWorkingDir, liveTicketIds } = opts;
     if (!baseWorkingDir) return 0;
     let total = 0;
@@ -1058,7 +1048,6 @@ export class WorktreeManager {
     baseWorkingDir: string;
     liveTicketIds: Set<string>;
   }): Promise<WorktreeSnapshotEntry[]> {
-    if (!this.#enabled) return [];
     const { baseWorkingDir, liveTicketIds } = opts;
     if (!baseWorkingDir) return [];
     const out: WorktreeSnapshotEntry[] = [];
@@ -1348,7 +1337,6 @@ export class WorktreeManager {
     ticketId: string;
     repositoryResourceId?: string;
   }): Promise<number> {
-    if (!this.#enabled) return 0;
     const { baseWorkingDir } = opts;
     const { ticketId } = opts;
     if (!baseWorkingDir || !ticketId) return 0;
@@ -1399,7 +1387,6 @@ export class WorktreeManager {
     baseWorkingDir: string;
     ticketId: string;
   }): Promise<boolean> {
-    if (!this.#enabled) return false;
     const { baseWorkingDir, ticketId } = opts;
     if (!baseWorkingDir || !ticketId) return false;
     const runRoot = runWorkspaceRootFor(baseWorkingDir);
@@ -1437,7 +1424,6 @@ export class WorktreeManager {
     baseWorkingDir: string;
     activeKeys: Set<string>;
   }): Promise<number> {
-    if (!this.#enabled) return 0;
     const { baseWorkingDir, activeKeys } = opts;
     if (!baseWorkingDir) return 0;
     let removed = 0;

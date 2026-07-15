@@ -71,9 +71,6 @@ export interface SessionDelegationConfig {
   claudeBin?: string;
   persistentChatSessions?: boolean;
   persistentTicketSessions?: boolean;
-  /** ticket 9f26f091: per-(ticket,role) git worktree isolation. Default true
-   *  (DELEGATION_DEFAULTS); false reverts to the shared single-cwd behavior. */
-  worktreeIsolation?: boolean;
   /** ticket e9d0e8bc: hold a folder-keyed lock across a QA/security run's whole
    *  provision→execute lifetime (not just git provisioning) so same-scenario
    *  runs never execute concurrently in the shared folder. Default true

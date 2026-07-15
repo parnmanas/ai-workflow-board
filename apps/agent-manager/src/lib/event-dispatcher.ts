@@ -28,14 +28,20 @@ import { injectWorkFolder } from './prompts.js';
 import { DispatchBlockerTracker, classifyWorktreeOutcome } from './dispatch-preflight.js';
 import type { HarnessSpec, ResolvedEffortPreset, EffortLevel } from './cli-adapters/base.js';
 import { createAdapter, ADAPTER_CAPABILITIES } from './cli-adapters/index.js';
-import { EnvironmentProvisioner } from './environment-provisioner.js';
-import type { ResolvedEnvironmentConfig } from './environment-provisioner.js';
 import {
   parseRunProvision,
   provisionRunWorkspace,
   reconcileRunBaseWorkingDir,
   resolveRunFolder,
 } from './run-provisioner.js';
+
+interface ResolvedEnvironmentConfig {
+  repositories: Array<{ resource_id?: string; url: string; target_dir: string; branch: string; post_clone_commands: string[] }>;
+  env_vars: Record<string, string>;
+  setup_commands: string[];
+  setup_timeout_seconds: number;
+  version: number;
+}
 import { FolderMutex } from './run-execution-lock.js';
 import type { RunLockHandle } from './run-execution-lock.js';
 import { fireAndForgetTool } from './mcp-client.js';
@@ -241,9 +247,8 @@ export function parseWorktreeMode(raw: unknown): WorktreeMode | undefined {
   return raw === 'per_ticket' || raw === 'shared' ? raw : undefined;
 }
 
-/** Explicit per_ticket boards are fail-closed: every input needed to produce
- * an isolated cwd must exist before dispatch is allowed to reach a spawn site.
- * Older events with no worktree_mode keep their legacy best-effort behavior. */
+/** Every ticket dispatch is fail-closed until an isolated checkout can be
+ * produced. Old events never fall back to the storage container. */
 export function validateWorktreeProvisioningInputs(args: {
   mode: WorktreeMode | undefined;
   hasAgentContext: boolean;
@@ -252,7 +257,6 @@ export function validateWorktreeProvisioningInputs(args: {
   role?: string;
   repositoryResourceId?: string;
 }): string | null {
-  if (args.mode !== 'per_ticket') return null;
   if (!args.hasAgentContext) return 'missing_agent_context';
   if (!args.hasManager) return 'missing_worktree_manager';
   if (!args.ticketId) return 'missing_ticket_id';
@@ -272,7 +276,8 @@ const AGENT_CHAIN_DEPTH_CAP = 3;
 // dispatcher resolves that agent's runtime context (cwd, on-disk
 // mcp-config path, raw apiKey) and threads it through to every spawn site
 // so child claude/codex/antigravity processes:
-//   - run with cwd = the agent's working_dir (project root)
+//   - run ticket work in a prepared WT checkout; non-ticket chat uses the
+//     configured storage directory without treating it as a repository
 //   - authenticate to AWB MCP under the agent's own apiKey (not the
 //     manager's), so tool-call attribution lands on the agent
 //   - reuse the manager's pre-written mcp-config.json instead of a fresh
@@ -569,16 +574,8 @@ export interface EventDispatcherDeps {
   // managed agent's apiKey + cwd + mcp-config (instead of the manager's
   // defaults).
   managedAgentContexts?: ManagedAgentContextRegistry | null;
-  // ticket 9f26f091 — per-(ticket,role) git worktree isolation. When set, a
-  // trigger for a managed agent runs under a dedicated worktree cwd instead
-  // of the agent's shared working_dir, so branch switches can't bleed across
-  // tickets on focus transitions. Optional/null reverts to shared-cwd.
+  // Required ticket checkout manager. Missing provisioning is fail-closed.
   worktreeManager?: WorktreeManager | null;
-  // ticket 354d336b — board environment provisioner. When set, a trigger that
-  // carries a resolved environment_config provisions the agent's working
-  // environment (clone/update repos, run setup commands) before the spawn.
-  // Optional/null reverts to no provisioning (current behaviour).
-  environmentProvisioner?: EnvironmentProvisioner | null;
 }
 
 export class EventDispatcher {
@@ -591,7 +588,6 @@ export class EventDispatcher {
   #agentManagerCommandHandler: AgentManagerCommandSink | null;
   #managedAgentContexts: ManagedAgentContextRegistry | null;
   #worktreeManager: WorktreeManager | null;
-  #environmentProvisioner: EnvironmentProvisioner | null;
   // ticket a3047a86: per-ticket de-dup for dispatch-preflight blocker comments
   // (broken worktree / missing push credential). The abort already suppresses
   // the spawn; this keeps the SAME blocker from re-posting a ticket comment on
@@ -615,7 +611,6 @@ export class EventDispatcher {
     this.#agentManagerCommandHandler = deps.agentManagerCommandHandler ?? null;
     this.#managedAgentContexts = deps.managedAgentContexts ?? null;
     this.#worktreeManager = deps.worktreeManager ?? null;
-    this.#environmentProvisioner = deps.environmentProvisioner ?? null;
   }
 
   /**
@@ -625,9 +620,7 @@ export class EventDispatcher {
    * reattaches to the SAME tree (branch + uncommitted work intact) — the
    * follow-up reuse path doesn't re-spawn, so it stays in the worktree the live
    * child already holds. Mutates the passed context object in place (it is a
-   * fresh literal from #resolveAgentContext, never the registry record). No-op
-   * when worktree isolation is disabled, the agent isn't managed, or git
-   * worktree is unavailable (falls back to the shared working_dir).
+   * fresh literal from #resolveAgentContext, never the registry record).
    */
   async #applyWorktreeCwd(
     agentContext: AgentExecutionContext | undefined,
@@ -647,7 +640,6 @@ export class EventDispatcher {
     });
     if (requiredError) return { ok: false, reason: requiredError, blockerKind: `worktree:${requiredError}` };
     if (!agentContext || !this.#worktreeManager || !ticketId || !role) return { ok: true };
-    if ((this.#config as any)?.delegation?.worktreeIsolation === false) return { ok: true };
     try {
       // worktree 규약 ②: the manager fixes the root at `<working_dir>/.awb/wt`
       // internally, so no worktreesRoot is passed. mode (per_ticket|shared) is
@@ -697,8 +689,7 @@ export class EventDispatcher {
    * fire-and-forget; never throws.
    */
   async #cleanupTerminalTicketWorktrees(ticketId: string): Promise<void> {
-    if (!this.#worktreeManager || !this.#worktreeManager.enabled) return;
-    if ((this.#config as any)?.delegation?.worktreeIsolation === false) return;
+    if (!this.#worktreeManager) return;
     if (!this.#managedAgentContexts) return;
     try {
       const ticket = await fetchTicketContext(this.#config, ticketId);
@@ -756,8 +747,7 @@ export class EventDispatcher {
    * fire-and-forget; never throws.
    */
   async #cleanupArchivedTicketWorkspace(ticketId: string, repositoryResourceId?: string): Promise<void> {
-    if (!this.#worktreeManager || !this.#worktreeManager.enabled) return;
-    if ((this.#config as any)?.delegation?.worktreeIsolation === false) return;
+    if (!this.#worktreeManager) return;
     if (!this.#managedAgentContexts) return;
     try {
       let worktrees = 0;
@@ -1074,59 +1064,11 @@ export class EventDispatcher {
       );
     }
 
-    // Board environment setup (ticket 354d336b). The server ships the resolved
-    // environment_config (repos with concrete urls, env_vars, setup_commands).
-    // Provision the agent's working environment BEFORE either spawn path runs —
-    // clone/update repos under the agent home and run setup commands, once per
-    // (agent, config-fingerprint). env_vars apply on EVERY dispatch (process
-    // env, not persisted on disk) so they're threaded to the spawn regardless
-    // of whether provisioning ran or was skipped. A provisioning FAILURE aborts
-    // the dispatch (never start work in a broken environment) and surfaces the
-    // error as a ticket comment.
+    // Board environment variables are process-only. Repository checkout is
+    // exclusively owned by WT/QA provisioning and never happens here.
     const envVars = envConfig?.env_vars && Object.keys(envConfig.env_vars).length > 0
       ? envConfig.env_vars
       : undefined;
-    if (envConfig && this.#environmentProvisioner) {
-      const provisionAgentId = agentContext?.agent_id || selfAgentId;
-      if (!provisionAgentId) {
-        log(`[env-provision] no agent id resolvable for ticket=${ev.ticket_id} — skipping provisioning`);
-      } else {
-        log(
-          `Trigger carries environment_config: ticket=${ev.ticket_id} repos=${envConfig.repositories.length} setup=${envConfig.setup_commands.length} env_vars=${Object.keys(envConfig.env_vars).length}`,
-        );
-        const result = await this.#environmentProvisioner.provision({
-          agentId: provisionAgentId,
-          config: envConfig,
-          ticketId: ev.ticket_id,
-          // Resolve each repo's git credential at clone time so a PRIVATE repo
-          // in environment_config authenticates (same token endpoint the
-          // per-ticket worktree clone uses). Bound to this manager's AwbConfig;
-          // the token stays out of the SSE payload / fingerprint / marker.
-          resolveCredential: (resourceId, credAgentId) =>
-            fetchRepositoryCredential(this.#config, resourceId, credAgentId),
-        });
-        if (!result.ok) {
-          if (!result.reported && ev.ticket_id) {
-            const detail = (result.steps.length > 0 ? `\n\n실행 단계:\n${result.steps.map((s) => `- ${s}`).join('\n')}` : '');
-            await fireAndForgetTool(this.#config, 'add_comment', {
-              ticket_id: ev.ticket_id,
-              content:
-                `⚠️ **환경 프로비저닝 실패** — 작업을 시작하지 않고 디스패치를 중단했습니다.\n\n` +
-                `\`\`\`\n${result.error || 'unknown error'}\n\`\`\`${detail}\n\n` +
-                `Board 환경설정(repositories / setup_commands)을 확인한 뒤 다시 트리거하세요. ` +
-                `(fingerprint=\`${result.fingerprint.slice(0, 12)}\`, 약 5분 동안 재시도/재알림을 억제합니다.)`,
-            });
-          }
-          log(
-            `Trigger aborted — environment provisioning failed: ticket=${ev.ticket_id} fp=${result.fingerprint.slice(0, 8)} reported=${result.reported === true}`,
-          );
-          return;
-        }
-        if (!result.skipped) {
-          log(`Environment provisioned for ticket=${ev.ticket_id} fp=${result.fingerprint.slice(0, 8)}`);
-        }
-      }
-    }
 
     const delegation = (this.#config as any)?.delegation ?? {};
     const delegationEnabled = delegation.enabled !== false;

@@ -81,7 +81,7 @@ function agentTypeBadgeVariant(type: string): 'info' | 'success' | 'neutral' {
  *  COMMAND_BUTTONS list in AgentManagerPage's ManagedAgentsSection so the
  *  two surfaces agree on what an operator can do with a managed agent.
  *  Spawn / Stop / Restart only — maintenance commands (update_plugins,
- *  refresh_mcp_config, pull_working_dir) stay on the per-manager page
+ *  refresh_mcp_config) stay on the per-manager page
  *  because they're rarely used from the workspace AI Agents view. */
 const MANAGED_COMMAND_BUTTONS: {
   kind: AgentManagerCommandKind;

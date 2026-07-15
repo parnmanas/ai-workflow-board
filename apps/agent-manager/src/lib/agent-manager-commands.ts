@@ -9,7 +9,7 @@
 //     command:      'spawn_agent' | 'stop_agent' | 'restart_agent'
 //                 | 'restart_all_agents'
 //                 | 'set_working_dir' | 'reload_config'
-//                 | 'update_plugins' | 'refresh_mcp_config' | 'pull_working_dir'
+//                 | 'update_plugins' | 'refresh_mcp_config'
 //                 | 'update_manager' | 'restart_manager',
 //     args:         Record<string, any>,   // command-specific (e.g. { working_dir })
 //     issued_by:    string,            // user id of the admin
@@ -76,7 +76,6 @@ type CommandKind =
   | 'reload_config'
   | 'update_plugins'
   | 'refresh_mcp_config'
-  | 'pull_working_dir'
   | 'update_manager'
   | 'restart_manager';
 
@@ -107,7 +106,6 @@ const KNOWN_COMMANDS: ReadonlySet<CommandKind> = new Set<CommandKind>([
   'reload_config',
   'update_plugins',
   'refresh_mcp_config',
-  'pull_working_dir',
   'update_manager',
   'restart_manager',
 ]);
@@ -233,8 +231,6 @@ export class AgentManagerCommandHandler {
         return this.#updatePlugins(payload);
       case 'refresh_mcp_config':
         return this.#refreshMcpConfig(payload);
-      case 'pull_working_dir':
-        return this.#pullWorkingDir(payload);
       case 'update_manager':
         return this.#updateManager();
       case 'restart_manager':
@@ -829,28 +825,6 @@ export class AgentManagerCommandHandler {
     );
   }
 
-  /**
-   * Best-effort `git -C <agent.working_dir> pull --ff-only` — useful when an
-   * operator wants the managed agent's repo brought up to date before the
-   * next ticket lands. The manager owns the working_dir for cwd routing but
-   * is otherwise hands-off; a long-running git operation here can stall the
-   * dispatch loop, so the call is bounded by a short timeout. Working_dir is
-   * taken from args.working_dir (server-enriched from Agent.working_dir).
-   */
-  async #pullWorkingDir(payload: AgentManagerCommandPayload): Promise<string> {
-    const agentId = this.#targetAgentId(payload, 'pull_working_dir');
-    const workingDir = String(payload.args?.working_dir ?? '').trim();
-    if (!workingDir) {
-      throw new Error('pull_working_dir: working_dir is required (server should enrich it)');
-    }
-    const result = await runGitPull(workingDir);
-    if (!result.ok) {
-      throw new Error(
-        `pull_working_dir failed: agent=${agentId.slice(0, 8)} cwd=${workingDir} — ${result.detail}`,
-      );
-    }
-    return `pull_working_dir ok: agent=${agentId.slice(0, 8)} cwd=${workingDir} — ${result.detail}`;
-  }
 }
 
 // ─── helpers (kept module-scoped to avoid bloating the class API) ───────
@@ -952,30 +926,8 @@ async function runGitPull(
     return { ok: false, detail: `directory does not exist: ${dir}` };
   }
 
-  // ticket 9f26f091 — a managed agent's base working_dir is intentionally left
-  // on a DETACHED HEAD by worktree isolation (so the base branch is free for
-  // ticket worktrees to check out). `git pull --ff-only` can't run on a
-  // detached HEAD (no upstream branch) and would fail with a confusing "not
-  // currently on a branch" error. Detect that and `git fetch` instead: the
-  // ticket worktrees branch off origin/<base>, so refreshing the remote refs
-  // is exactly the useful work here — fast-forwarding the (detached) base tree
-  // is not. Marketplace plugin repos (the other caller) are always on a branch,
-  // so this branch never changes their behavior.
-  const detached = await new Promise<boolean>((resolve) => {
-    try {
-      const probe = spawn('git', ['-C', dir, 'symbolic-ref', '-q', 'HEAD'], {
-        stdio: 'ignore',
-      });
-      probe.on('error', () => resolve(false));
-      probe.on('close', (code) => resolve(code !== 0));
-    } catch {
-      resolve(false);
-    }
-  });
-  const gitArgs = detached ? ['fetch', '--all', '--prune'] : ['pull', '--ff-only'];
-
   return new Promise((resolve) => {
-    const child = spawn('git', ['-C', dir, ...gitArgs], {
+    const child = spawn('git', ['-C', dir, 'pull', '--ff-only'], {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '';
@@ -1009,10 +961,7 @@ async function runGitPull(
       clearTimeout(timer);
       const lastLine = (stderr.trim() || stdout.trim()).split('\n').filter(Boolean).pop() || '';
       if (code === 0) {
-        const detail = detached
-          ? `base HEAD detached for worktree isolation — fetched origin refs${lastLine ? ` (${lastLine.slice(0, 160)})` : ''}`
-          : lastLine.slice(0, 200) || 'up-to-date';
-        resolve({ ok: true, detail });
+        resolve({ ok: true, detail: lastLine.slice(0, 200) || 'up-to-date' });
       } else {
         resolve({
           ok: false,
