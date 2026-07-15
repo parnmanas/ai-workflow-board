@@ -241,3 +241,68 @@ test('container base clone credential store is inherited by its ticket worktree'
     await source.cleanup();
   }
 });
+
+// ── verifyCheckout (ticket feaa7ab0, completion criterion #1/#4) ──────────────
+// Drive the real git probe against throwaway trees so the three named
+// regression scenarios — valid checkout, wrong path (not a git repo), and an
+// incomplete checkout — are covered end-to-end, plus the foreign-repo defense.
+
+test('verifyCheckout: a provisioned worktree is a valid checkout of its expected repo', async () => {
+  const source = await makeRepoWithRemote();
+  const workingDir = join(source.root, 'verify-agent-dir');
+  try {
+    const wm = new WorktreeManager();
+    const result = await wm.resolveCwd({
+      baseWorkingDir: workingDir,
+      ticketId: TICKET_A,
+      role: 'assignee',
+      bootstrapRepo: { resourceId: 'repo-verify', url: source.remote, branch: 'main' },
+    });
+    assert.ok(result.isWorktree, 'provisioning succeeds');
+    // The freshly-provisioned worktree passes verification against its repo url —
+    // proving the new gate never blocks a legitimately-provisioned tree.
+    assert.deepEqual(await wm.verifyCheckout(result.cwd, source.remote), { ok: true });
+    // With no expectation the origin match is skipped but the tree is still valid.
+    assert.deepEqual(await wm.verifyCheckout(result.cwd), { ok: true });
+    // Claiming it should be a DIFFERENT repo is caught as wrong_repository.
+    const wrong = await wm.verifyCheckout(result.cwd, 'https://github.com/acme/not-this.git');
+    assert.equal(wrong.ok, false);
+    assert.equal(wrong.reason, 'wrong_repository');
+    assert.match(wrong.detail, /does not match/);
+  } finally {
+    await source.cleanup();
+  }
+});
+
+test('verifyCheckout: an empty / missing / non-git path → not_a_git_repo (wrong path, blocked)', async () => {
+  const root = await fsp.mkdtemp(join(tmpdir(), 'awb-verify-empty-'));
+  try {
+    const wm = new WorktreeManager();
+    const empty = join(root, 'not-a-repo');
+    await fsp.mkdir(empty, { recursive: true });
+    assert.equal((await wm.verifyCheckout(empty, 'https://github.com/acme/widget.git')).reason, 'not_a_git_repo');
+    // A path that does not exist at all is likewise not a work tree.
+    assert.equal((await wm.verifyCheckout(join(root, 'nope'), 'https://github.com/acme/widget.git')).reason, 'not_a_git_repo');
+    // Defensive: no cwd at all.
+    assert.equal((await wm.verifyCheckout('')).reason, 'not_a_git_repo');
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('verifyCheckout: an initialized-but-unpopulated checkout → incomplete_checkout (blocked)', async () => {
+  const root = await fsp.mkdtemp(join(tmpdir(), 'awb-verify-incomplete-'));
+  try {
+    const wm = new WorktreeManager();
+    const half = join(root, 'half');
+    await fsp.mkdir(half, { recursive: true });
+    // A work tree whose HEAD does not resolve — mirrors an interrupted clone/add.
+    git(half, ['init', '-q', '-b', 'main']);
+    const d = await wm.verifyCheckout(half, 'https://github.com/acme/widget.git');
+    assert.equal(d.ok, false);
+    assert.equal(d.reason, 'incomplete_checkout');
+    assert.match(d.detail, /HEAD does not resolve/);
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true });
+  }
+});

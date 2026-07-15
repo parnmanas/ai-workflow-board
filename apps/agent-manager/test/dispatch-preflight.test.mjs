@@ -16,7 +16,11 @@ import {
   isGitAuthFailure,
   decidePushReadiness,
   classifyWorktreeOutcome,
+  classifyWorktreeCheckout,
+  normalizeRemoteUrl,
+  redactRemoteUrl,
   DispatchBlockerTracker,
+  RoleSpawnSuppressor,
   firstLine,
 } from '../dist/lib/dispatch-preflight.js';
 
@@ -182,4 +186,195 @@ test('firstLine: returns the first non-empty trimmed line', () => {
   assert.equal(firstLine(''), '');
   assert.equal(firstLine(undefined), '');
   assert.equal(firstLine(null), '');
+});
+
+// ── classifyWorktreeCheckout (ticket feaa7ab0, completion criterion #1/#4) ────
+// The three named regression cases: wrong path (not a git repo), incomplete
+// checkout, and a valid checkout — plus the foreign-repo defense and the
+// fail-open guards so a legitimately-provisioned tree is never wrongly blocked.
+
+const EXPECTED = { url: 'https://github.com/acme/widget.git' };
+
+test('classifyWorktreeCheckout: wrong path — not inside a work tree → not_a_git_repo (blocked)', () => {
+  const d = classifyWorktreeCheckout({ insideWorkTree: false }, EXPECTED);
+  assert.equal(d.ok, false);
+  assert.equal(d.reason, 'not_a_git_repo');
+  assert.match(d.detail, /not a git work tree/);
+});
+
+test('classifyWorktreeCheckout: incomplete checkout — HEAD unresolved → incomplete_checkout (blocked)', () => {
+  const d = classifyWorktreeCheckout(
+    { insideWorkTree: true, headResolved: false, originUrl: EXPECTED.url },
+    EXPECTED,
+  );
+  assert.equal(d.ok, false);
+  assert.equal(d.reason, 'incomplete_checkout');
+  assert.match(d.detail, /HEAD does not resolve/);
+});
+
+test('classifyWorktreeCheckout: valid checkout of the expected repo → ok', () => {
+  const d = classifyWorktreeCheckout(
+    { insideWorkTree: true, headResolved: true, originUrl: EXPECTED.url },
+    EXPECTED,
+  );
+  assert.deepEqual(d, { ok: true });
+});
+
+test('classifyWorktreeCheckout: a checkout of a DIFFERENT repo → wrong_repository (blocked)', () => {
+  const d = classifyWorktreeCheckout(
+    { insideWorkTree: true, headResolved: true, originUrl: 'https://github.com/acme/OTHER.git' },
+    EXPECTED,
+  );
+  assert.equal(d.ok, false);
+  assert.equal(d.reason, 'wrong_repository');
+  assert.match(d.detail, /does not match/);
+  assert.match(d.detail, /github\.com\/acme\/OTHER/);
+});
+
+test('classifyWorktreeCheckout: origin equivalence ignores scheme/creds/.git/case (no false block)', () => {
+  // A worktree whose origin carries an embedded token and scp/.git form still
+  // matches the expected https clone url — must NOT be flagged wrong_repository.
+  for (const originUrl of [
+    'https://x-access-token:ghs_SECRET@github.com/acme/widget.git',
+    'git@github.com:acme/widget.git',
+    'https://GitHub.com/ACME/Widget',
+    'https://github.com/acme/widget/',
+  ]) {
+    const d = classifyWorktreeCheckout({ insideWorkTree: true, headResolved: true, originUrl }, EXPECTED);
+    assert.deepEqual(d, { ok: true }, `should match expected: ${originUrl}`);
+  }
+});
+
+test('classifyWorktreeCheckout: fail open when origin or expectation is unknown', () => {
+  // Can't prove a mismatch → never block (mirrors decidePushReadiness).
+  assert.deepEqual(
+    classifyWorktreeCheckout({ insideWorkTree: true, headResolved: true, originUrl: '' }, EXPECTED),
+    { ok: true },
+    'origin unset → ok',
+  );
+  assert.deepEqual(
+    classifyWorktreeCheckout({ insideWorkTree: true, headResolved: true, originUrl: EXPECTED.url }, undefined),
+    { ok: true },
+    'no expectation → ok',
+  );
+  assert.deepEqual(
+    classifyWorktreeCheckout({ insideWorkTree: true, headResolved: true, originUrl: 'https://x/y' }, { url: '' }),
+    { ok: true },
+    'empty expected url → ok',
+  );
+});
+
+test('classifyWorktreeCheckout: HEAD not probed (undefined) is not treated as incomplete', () => {
+  // Only an explicit headResolved:false blocks; undefined (not probed) passes.
+  const d = classifyWorktreeCheckout({ insideWorkTree: true, originUrl: EXPECTED.url }, EXPECTED);
+  assert.deepEqual(d, { ok: true });
+});
+
+// ── normalizeRemoteUrl / redactRemoteUrl ─────────────────────────────────────
+
+test('normalizeRemoteUrl: reduces to host/path, stripping scheme/creds/.git/slash/case', () => {
+  const canon = 'github.com/acme/widget';
+  assert.equal(normalizeRemoteUrl('https://github.com/acme/widget.git'), canon);
+  assert.equal(normalizeRemoteUrl('https://user:tok@github.com/acme/widget.git/'), canon);
+  assert.equal(normalizeRemoteUrl('git@github.com:acme/widget.git'), canon);
+  assert.equal(normalizeRemoteUrl('ssh://git@github.com/acme/widget'), canon);
+  assert.equal(normalizeRemoteUrl('HTTPS://GitHub.com/ACME/Widget'), canon);
+  assert.equal(normalizeRemoteUrl(''), '');
+  assert.equal(normalizeRemoteUrl(undefined), '');
+  assert.equal(normalizeRemoteUrl(null), '');
+});
+
+test('redactRemoteUrl: removes user:pass@ credentials but keeps scheme+host (no token leak)', () => {
+  assert.equal(
+    redactRemoteUrl('https://x-access-token:ghs_SECRET@github.com/acme/widget.git'),
+    'https://github.com/acme/widget.git',
+  );
+  assert.equal(redactRemoteUrl('https://github.com/acme/widget.git'), 'https://github.com/acme/widget.git');
+  assert.equal(redactRemoteUrl('git@github.com:acme/widget.git'), 'git@github.com:acme/widget.git');
+  assert.equal(redactRemoteUrl(''), '');
+  assert.equal(redactRemoteUrl(undefined), '');
+});
+
+// ── RoleSpawnSuppressor (ticket feaa7ab0, completion criterion #3/#4) ─────────
+// Suppress the automated supervisor re-dispatch storm per (ticket,role) while
+// never blocking a human/state-changed trigger, with a cooldown escape and
+// re-arm on recovery.
+
+const SUP = { fromSupervisor: true };
+const HUMAN = { fromSupervisor: false };
+
+test('RoleSpawnSuppressor: no recorded blocker → never suppress (first trigger runs)', () => {
+  const s = new RoleSpawnSuppressor(1000);
+  assert.deepEqual(s.shouldSuppress('t', 'assignee', { now: 0, ...SUP }), { suppress: false });
+});
+
+test('RoleSpawnSuppressor: a supervisor repeat within cooldown is suppressed', () => {
+  const s = new RoleSpawnSuppressor(1000);
+  s.note('t', 'assignee', 'worktree:not_a_git_repo', 0);
+  const d = s.shouldSuppress('t', 'assignee', { now: 200, ...SUP });
+  assert.equal(d.suppress, true);
+  assert.equal(d.kind, 'worktree:not_a_git_repo');
+  assert.equal(d.count, 1);
+  assert.equal(d.sinceMs, 200);
+});
+
+test('RoleSpawnSuppressor: human/state-changed triggers ALWAYS pass (operator recovery)', () => {
+  const s = new RoleSpawnSuppressor(1000);
+  s.note('t', 'assignee', 'worktree:not_a_git_repo', 0);
+  // Same instant a supervisor trigger would be suppressed, a human one passes.
+  assert.equal(s.shouldSuppress('t', 'assignee', { now: 200, ...SUP }).suppress, true);
+  assert.equal(s.shouldSuppress('t', 'assignee', { now: 200, ...HUMAN }).suppress, false);
+});
+
+test('RoleSpawnSuppressor: cooldown escape lets exactly one supervisor probe through per window', () => {
+  const s = new RoleSpawnSuppressor(1000);
+  s.note('t', 'assignee', 'worktree:not_a_git_repo', 0);
+  assert.equal(s.shouldSuppress('t', 'assignee', { now: 500, ...SUP }).suppress, true, 'within window → drop');
+  assert.equal(s.shouldSuppress('t', 'assignee', { now: 1000, ...SUP }).suppress, false, 'window elapsed → one probe passes');
+  assert.equal(s.shouldSuppress('t', 'assignee', { now: 1200, ...SUP }).suppress, true, 'probe consumed → drop again');
+  assert.equal(s.shouldSuppress('t', 'assignee', { now: 2000, ...SUP }).suppress, false, 'next window → probe passes');
+});
+
+test('RoleSpawnSuppressor: clear() re-arms so a recovered ticket-role backs off afresh', () => {
+  const s = new RoleSpawnSuppressor(1000);
+  s.note('t', 'assignee', 'worktree:not_a_git_repo', 0);
+  assert.equal(s.shouldSuppress('t', 'assignee', { now: 100, ...SUP }).suppress, true);
+  s.clear('t', 'assignee'); // green preflight
+  assert.equal(s.activeKind('t', 'assignee'), undefined);
+  assert.equal(s.shouldSuppress('t', 'assignee', { now: 200, ...SUP }).suppress, false, 're-armed → runs');
+});
+
+test('RoleSpawnSuppressor: a DIFFERENT blocker kind resets the episode', () => {
+  const s = new RoleSpawnSuppressor(1000);
+  s.note('t', 'assignee', 'worktree:not_a_git_repo', 0);
+  assert.equal(s.shouldSuppress('t', 'assignee', { now: 500, ...SUP }).count, 1);
+  s.note('t', 'assignee', 'push_credential_unavailable', 600); // situation changed
+  const d = s.shouldSuppress('t', 'assignee', { now: 700, ...SUP });
+  assert.equal(d.kind, 'push_credential_unavailable');
+  assert.equal(d.count, 1, 'count reset on kind change');
+  assert.equal(d.sinceMs, 100, 'episode clock restarted at the new kind');
+});
+
+test('RoleSpawnSuppressor: same-kind repeats increment the abort count', () => {
+  const s = new RoleSpawnSuppressor(1000);
+  s.note('t', 'assignee', 'worktree:not_a_git_repo', 0);
+  s.note('t', 'assignee', 'worktree:not_a_git_repo', 10);
+  assert.equal(s.shouldSuppress('t', 'assignee', { now: 20, ...SUP }).count, 2);
+});
+
+test('RoleSpawnSuppressor: (ticket,role) pairs are independent; missing id/role never suppress', () => {
+  const s = new RoleSpawnSuppressor(1000);
+  s.note('t', 'assignee', 'k', 0);
+  // Same ticket, different role → independent (reviewer has no record).
+  assert.equal(s.shouldSuppress('t', 'reviewer', { now: 100, ...SUP }).suppress, false);
+  // Different ticket, same role → independent.
+  assert.equal(s.shouldSuppress('other', 'assignee', { now: 100, ...SUP }).suppress, false);
+  // The recorded pair still suppresses.
+  assert.equal(s.shouldSuppress('t', 'assignee', { now: 100, ...SUP }).suppress, true);
+  // Missing ids never suppress and never throw.
+  assert.equal(s.shouldSuppress(undefined, 'assignee', { now: 100, ...SUP }).suppress, false);
+  assert.equal(s.shouldSuppress('t', undefined, { now: 100, ...SUP }).suppress, false);
+  s.note(undefined, 'assignee', 'k', 0); // no-op, must not throw
+  s.clear(undefined, undefined); // no-op, must not throw
+  assert.equal(s.activeKind(undefined, undefined), undefined);
 });
