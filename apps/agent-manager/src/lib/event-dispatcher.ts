@@ -25,7 +25,7 @@ import type { ManagedAgentContextRegistry } from './managed-agent-context.js';
 import type { WorktreeManager, WorktreeMode } from './worktree-manager.js';
 import { prepareChatAttachments } from './chat-attachment-prep.js';
 import { injectWorkFolder } from './prompts.js';
-import { DispatchBlockerTracker, RoleSpawnSuppressor, classifyWorktreeOutcome } from './dispatch-preflight.js';
+import { DispatchBlockerTracker, RoleSpawnSuppressor, classifyWorktreeOutcome, managedWorktreePath } from './dispatch-preflight.js';
 import type { HarnessSpec, ResolvedEffortPreset, EffortLevel } from './cli-adapters/base.js';
 import { createAdapter, ADAPTER_CAPABILITIES } from './cli-adapters/index.js';
 import {
@@ -637,7 +637,7 @@ export class EventDispatcher {
     mode: WorktreeMode | undefined,
     poolSize: number | undefined,
     bootstrapRepo: { resourceId?: string; url: string; branch?: string; credential?: { username?: string; token: string } | null } | null,
-  ): Promise<{ ok: boolean; reason?: string; blockerKind?: string; detail?: string }> {
+  ): Promise<{ ok: boolean; reason?: string; blockerKind?: string; detail?: string; path?: string }> {
     const requiredError = validateWorktreeProvisioningInputs({
       mode,
       hasAgentContext: Boolean(agentContext),
@@ -674,10 +674,15 @@ export class EventDispatcher {
         const checkout = await this.#worktreeManager.verifyCheckout(res.cwd, bootstrapRepo?.url);
         if (!checkout.ok) {
           const reason = checkout.reason || 'invalid_checkout';
+          // Report WHICH checkout path failed (completion criterion #5). The cwd
+          // is credential-free, but reduce it to the working_dir-relative managed
+          // form (`.awb/wt/…`) when possible so we never echo an absolute host
+          // layout into the ticket comment/activity.
+          const path = managedWorktreePath(agentContext.cwd, res.cwd);
           log(
-            `[worktree] checkout verification failed for ticket=${ticketId.slice(0, 8)} role=${role}: ${reason}${checkout.detail ? ` (${checkout.detail})` : ''}`,
+            `[worktree] checkout verification failed for ticket=${ticketId.slice(0, 8)} role=${role}: ${reason}${checkout.detail ? ` (${checkout.detail})` : ''} path=${path}`,
           );
-          return { ok: false, reason, blockerKind: `worktree:${reason}`, detail: checkout.detail };
+          return { ok: false, reason, blockerKind: `worktree:${reason}`, detail: checkout.detail, path };
         }
         agentContext.cwd = res.cwd;
         return { ok: true };
@@ -1016,17 +1021,20 @@ export class EventDispatcher {
       this.#spawnSuppressor.note(ev.ticket_id, ev.action, blockerKind, Date.now());
       if (ev.ticket_id && this.#dispatchBlockers.shouldComment(ev.ticket_id, blockerKind)) {
         const detailLine = worktreeProvision.detail ? `\n세부: \`${worktreeProvision.detail}\`` : '';
+        // Managed, working_dir-relative (credential-free) checkout path that
+        // failed verification — completion criterion #5 ("실패 경로").
+        const pathLine = worktreeProvision.path ? `\n경로: \`${worktreeProvision.path}\`` : '';
         await fireAndForgetTool(this.#config, 'add_comment', {
           ticket_id: ev.ticket_id,
           content:
             `⚠️ **티켓 worktree 준비 실패** — 유효한 Git 체크아웃을 확보하지 못해 에이전트를 실행하지 않고 디스패치를 중단했습니다.\n\n` +
-            `원인: \`${worktreeProvision.reason || 'unknown error'}\`${detailLine}\n\n` +
+            `원인: \`${worktreeProvision.reason || 'unknown error'}\`${detailLine}${pathLine}\n\n` +
             `repository resource, credential과 working_dir 아래 AWB 관리 폴더(\`.awb/base\`, \`.awb/wt\`)를 확인한 뒤 다시 트리거하세요.\n\n` +
             `_동일 오류로 인한 supervisor 자동 재트리거는 백오프로 억제됩니다 — 환경을 고친 뒤 코멘트/수동 트리거로 재개하세요._`,
         });
       }
       log(
-        `Trigger aborted — ticket worktree verification failed: ticket=${ev.ticket_id} role=${ev.action} reason=${worktreeProvision.reason || 'unknown'} blocker=${blockerKind}`,
+        `Trigger aborted — ticket worktree verification failed: ticket=${ev.ticket_id} role=${ev.action} reason=${worktreeProvision.reason || 'unknown'} blocker=${blockerKind}${worktreeProvision.path ? ` path=${worktreeProvision.path}` : ''}`,
       );
       return;
     }

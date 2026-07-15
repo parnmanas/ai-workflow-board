@@ -197,14 +197,25 @@ export function normalizeRemoteUrl(raw: string | undefined | null): string {
   return u.toLowerCase();
 }
 
-/** Strip `user:pass@` credentials from a URL for safe display, keeping scheme
- *  and host so the operator can still identify the wrong remote. Never emits a
- *  token. */
+/** Reduce a git remote URL to a safe-to-display form, keeping scheme+host+path
+ *  so the operator can still identify the wrong remote while NEVER emitting a
+ *  secret. Removes three secret carriers:
+ *    - a `?query` or `#fragment` (e.g. `?access_token=…`, `#token=…`) — dropped
+ *      wholesale, since a token can hide in either and neither is needed to
+ *      identify a repo;
+ *    - `scheme://user:pass@` userinfo (PAT-as-username / basic-auth password).
+ *  The query/fragment MUST be stripped before the userinfo regex so a
+ *  `…@host/path?token=…` can't slip its token through on the tail. */
 export function redactRemoteUrl(raw: string | undefined | null): string {
-  const u = (raw ?? '').trim();
+  let u = (raw ?? '').trim();
   if (!u) return '';
-  // scheme://user:pass@host/… → scheme://host/…
-  return u.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/@]+@/i, '$1');
+  // Drop fragment first, then query — either can carry a secret, and nothing
+  // downstream needs them to identify the remote. (`.` excludes newlines, but a
+  // remote URL is single-line; a stray newline just ends the stripped span.)
+  u = u.replace(/#.*$/, '').replace(/\?.*$/, '');
+  // scheme://user[:pass]@host/… → scheme://host/…  (userinfo can be a token)
+  u = u.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/@]+@/i, '$1');
+  return u;
 }
 
 /** Decide whether a provisioned worktree is a valid checkout of the expected
@@ -235,6 +246,28 @@ export function classifyWorktreeCheckout(
     };
   }
   return { ok: true };
+}
+
+/** Reduce a resolved worktree cwd to the form that is safe to write into a
+ *  ticket comment / activity log: the path RELATIVE to the agent's working_dir
+ *  when the worktree lives under it (the normal `.awb/wt/…` / `.awb/base/…`
+ *  managed layout), else the absolute path unchanged (e.g. the resource-worktree
+ *  path outside working_dir). A filesystem path carries no credential, but the
+ *  working_dir-relative form also avoids echoing an absolute host layout and is
+ *  what completion criterion #5 ("실패 경로") asks for. Pure string logic (no
+ *  path/fs I/O) so it stays unit-testable alongside the other preflight helpers.
+ *  A missing cwd yields '' so callers can omit the line entirely. */
+export function managedWorktreePath(
+  baseWorkingDir: string | undefined | null,
+  cwd: string | undefined | null,
+): string {
+  const abs = (cwd ?? '').trim();
+  if (!abs) return '';
+  const base = (baseWorkingDir ?? '').trim().replace(/\/+$/, '');
+  if (base && abs.startsWith(base + '/')) {
+    return abs.slice(base.length + 1);
+  }
+  return abs;
 }
 
 /** In-memory, per-ticket dispatch-blocker de-duplicator.

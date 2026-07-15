@@ -19,6 +19,7 @@ import {
   classifyWorktreeCheckout,
   normalizeRemoteUrl,
   redactRemoteUrl,
+  managedWorktreePath,
   DispatchBlockerTracker,
   RoleSpawnSuppressor,
   firstLine,
@@ -293,6 +294,75 @@ test('redactRemoteUrl: removes user:pass@ credentials but keeps scheme+host (no 
   assert.equal(redactRemoteUrl('git@github.com:acme/widget.git'), 'git@github.com:acme/widget.git');
   assert.equal(redactRemoteUrl(''), '');
   assert.equal(redactRemoteUrl(undefined), '');
+});
+
+test('redactRemoteUrl: strips ?query and #fragment secrets (no token leak via tail)', () => {
+  // A token can hide in the query or fragment — both must be dropped wholesale.
+  assert.equal(
+    redactRemoteUrl('https://github.com/acme/other.git?access_token=SECRET'),
+    'https://github.com/acme/other.git',
+  );
+  assert.equal(
+    redactRemoteUrl('https://github.com/acme/other.git#token=SECRET'),
+    'https://github.com/acme/other.git',
+  );
+  // Fragment is stripped even when it precedes a `?` — no `SECRET` survives.
+  assert.equal(
+    redactRemoteUrl('https://github.com/acme/other.git#a=1?access_token=SECRET'),
+    'https://github.com/acme/other.git',
+  );
+  // Userinfo AND a query token together: both are removed.
+  assert.equal(
+    redactRemoteUrl('https://u:ghs_SECRET@github.com/acme/other.git?access_token=ALSO_SECRET'),
+    'https://github.com/acme/other.git',
+  );
+  // The redacted output never contains the secret marker.
+  for (const raw of [
+    'https://github.com/acme/other.git?access_token=SECRET',
+    'https://github.com/acme/other.git#token=SECRET',
+    'https://u:SECRET@github.com/acme/other.git?x=SECRET#y=SECRET',
+  ]) {
+    assert.ok(!redactRemoteUrl(raw).includes('SECRET'), `leaked secret from ${raw}`);
+  }
+});
+
+// ── managedWorktreePath (ticket feaa7ab0, completion criterion #5) ────────────
+// The failed checkout path recorded in the abort comment/activity must be
+// credential-free and prefer the working_dir-relative managed form.
+
+test('managedWorktreePath: reduces a path under working_dir to the managed relative form', () => {
+  assert.equal(
+    managedWorktreePath('/home/agent/work', '/home/agent/work/.awb/wt/feaa7ab0/repo'),
+    '.awb/wt/feaa7ab0/repo',
+  );
+  // Trailing slash on working_dir is tolerated.
+  assert.equal(
+    managedWorktreePath('/home/agent/work/', '/home/agent/work/.awb/base/repo'),
+    '.awb/base/repo',
+  );
+});
+
+test('managedWorktreePath: keeps an absolute path that is NOT under working_dir', () => {
+  // e.g. the resource-worktree path lives outside working_dir — return as-is
+  // (still credential-free; it's a filesystem path).
+  assert.equal(
+    managedWorktreePath('/home/agent/work', '/home/agent/.config/awb-agent-manager/worktrees/res/feaa7ab0'),
+    '/home/agent/.config/awb-agent-manager/worktrees/res/feaa7ab0',
+  );
+  // A sibling that merely shares a prefix string is NOT treated as inside.
+  assert.equal(
+    managedWorktreePath('/home/agent/work', '/home/agent/work-other/x'),
+    '/home/agent/work-other/x',
+  );
+});
+
+test('managedWorktreePath: empty/missing cwd yields empty string (line omitted by caller)', () => {
+  assert.equal(managedWorktreePath('/home/agent/work', ''), '');
+  assert.equal(managedWorktreePath('/home/agent/work', undefined), '');
+  assert.equal(managedWorktreePath('/home/agent/work', null), '');
+  // No working_dir → fall back to the absolute path unchanged.
+  assert.equal(managedWorktreePath('', '/abs/path'), '/abs/path');
+  assert.equal(managedWorktreePath(undefined, '/abs/path'), '/abs/path');
 });
 
 // ── RoleSpawnSuppressor (ticket feaa7ab0, completion criterion #3/#4) ─────────
