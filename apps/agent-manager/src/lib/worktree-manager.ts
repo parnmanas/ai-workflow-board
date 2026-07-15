@@ -54,17 +54,32 @@
 // (`.awb/wt/<slug>/gameclient/txiv`). resolveCwd returns that real work dir as
 // `cwd` and exposes the subpath separately (ticket ④ injects it into prompts).
 //
-// Fallback: when the base working_dir is not a git repo, or `git worktree`
-// fails (unsupported/old git, disk error), resolveCwd returns the shared base
-// cwd with isWorktree=false. Callers keep the legacy single-cwd behavior in
-// that case (and rely on the dispatch-level serialization for safety).
+// A non-git working_dir is a supported container: its repository is cloned at
+// `<working_dir>/.awb/base`, leaving the container root untouched. Fallback is
+// reserved for missing repository metadata or `git worktree` failures
+// (unsupported/old git, disk error).
 
 import { promises as fsp } from 'node:fs';
 import { isAbsolute, join, resolve as pathResolve } from 'node:path';
 import { execFile } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
 import { log } from './logging.js';
+import { AGENT_MANAGER_HOME } from './constants.js';
+import { decidePushReadiness, type PushReadinessDecision } from './dispatch-preflight.js';
 
 const GIT_TIMEOUT_MS = 20_000;
+// A non-interactive `git ls-remote` auth probe should fail fast (git prompts
+// are disabled), so a short timeout is a backstop against a hung askpass — well
+// under the git default so a network stall can't wedge a dispatch for long.
+const PUSH_PROBE_TIMEOUT_MS = 15_000;
+const PROVISION_LOCK_TIMEOUT_MS = 20_000;
+const PROVISION_LOCK_STALE_MS = 60_000;
+const PROVISION_LOCK_HEARTBEAT_MS = 10_000;
+
+interface ProvisionLockOwner {
+  token: string;
+  pid: number;
+}
 
 /** Board worktree placement mode (mirrors the server's worktree-config enum —
  *  kept as a local literal so agent-manager doesn't depend on the server pkg). */
@@ -233,10 +248,11 @@ export interface ResolveCwdArgs {
    *  Ignored in per_ticket mode. Absent / ≤0 → 1 (a single reused slot, i.e. the
    *  pre-pool behavior). */
   poolSize?: number;
-  /** Repository used to bootstrap an empty working_dir before creating the
-   *  ticket worktree. Dispatch resolves this as ticket repo first, then the
-   *  board environment's first repository. */
+  /** Repository cloned under a non-git working_dir before creating the ticket
+   *  worktree. Dispatch resolves this as ticket repo first, then the board
+   *  environment's first repository. */
   bootstrapRepo?: {
+    resourceId?: string;
     url: string;
     branch?: string;
     credential?: { username?: string; token: string } | null;
@@ -274,15 +290,34 @@ export function worktreeSlug(ticketId: string, mode: WorktreeMode = DEFAULT_WORK
 
 export class WorktreeManager {
   #enabled: boolean;
+  #resourceWorktreesRoot: string;
+  #provisionLockTimeoutMs: number;
+  #provisionLockStaleMs: number;
+  #provisionLockHeartbeatMs: number;
   /** Per-worktree-root serialization for warm-pool acquire/release so two
    *  concurrent triggers can't lease the same idle slot (규약 ⑥). Keyed by the
    *  normalized worktrees root; one chained promise per key. */
   #poolLocks = new Map<string, Promise<unknown>>();
+  /** Serialize git worktree registration changes per base repo. The lock is
+   *  held only while provisioning a per-ticket checkout; workers run outside
+   *  it, so different tickets remain fully concurrent after their cwd exists. */
+  #provisionLocks = new Map<string, Promise<unknown>>();
   /** Serialize first-clone attempts for agents sharing one working_dir. */
-  #bootstrapLocks = new Map<string, Promise<boolean>>();
+  #bootstrapLocks = new Map<string, Promise<string | null>>();
 
-  constructor(opts: { enabled?: boolean } = {}) {
+  constructor(opts: {
+    enabled?: boolean;
+    resourceWorktreesRoot?: string;
+    provisionLockTimeoutMs?: number;
+    provisionLockStaleMs?: number;
+    provisionLockHeartbeatMs?: number;
+  } = {}) {
     this.#enabled = opts.enabled !== false;
+    this.#resourceWorktreesRoot = opts.resourceWorktreesRoot
+      ?? join(AGENT_MANAGER_HOME, 'worktrees');
+    this.#provisionLockTimeoutMs = opts.provisionLockTimeoutMs ?? PROVISION_LOCK_TIMEOUT_MS;
+    this.#provisionLockStaleMs = opts.provisionLockStaleMs ?? PROVISION_LOCK_STALE_MS;
+    this.#provisionLockHeartbeatMs = opts.provisionLockHeartbeatMs ?? PROVISION_LOCK_HEARTBEAT_MS;
   }
 
   get enabled(): boolean {
@@ -320,24 +355,28 @@ export class WorktreeManager {
     return r.ok && r.stdout.trim() === 'true';
   }
 
-  async #bootstrapEmptyWorkingDir(
+  async #bootstrapContainerRepo(
     baseWorkingDir: string,
     repo: ResolveCwdArgs['bootstrapRepo'],
-  ): Promise<boolean> {
-    if (!repo?.url?.trim()) return false;
-    const key = baseWorkingDir;
+  ): Promise<string | null> {
+    if (!repo?.url?.trim()) return null;
+    const cleanUrl = repo.url.trim();
+    const resourceSlug = repo.resourceId?.trim().replace(/[^A-Za-z0-9._-]/g, '_');
+    // Legacy URL-only bootstraps still need stable isolation without leaking
+    // credentials, query strings, or filesystem-hostile characters into paths.
+    const repoSlug = resourceSlug || `url-${createHash('sha256').update(cleanUrl).digest('hex').slice(0, 16)}`;
+    const key = `${baseWorkingDir}\0${repoSlug}`;
     const active = this.#bootstrapLocks.get(key);
     if (active) return active;
     const run = (async () => {
-      if (await this.#isGitWorkTree(baseWorkingDir)) return true;
       await fsp.mkdir(baseWorkingDir, { recursive: true });
-      const entries = await fsp.readdir(baseWorkingDir);
-      if (entries.length > 0) {
-        log(`[worktree] cannot bootstrap non-empty non-git working_dir: ${baseWorkingDir}`);
-        return false;
+      const cloneDir = join(baseWorkingDir, '.awb', 'base', repoSlug);
+      if (await this.#isGitWorkTree(cloneDir)) {
+        await this.#installRepoCredential(cloneDir, repo);
+        return cloneDir;
       }
+      await fsp.mkdir(join(baseWorkingDir, '.awb', 'base'), { recursive: true });
       const branch = (repo.branch || '').trim();
-      const cleanUrl = repo.url.trim();
       let cloneUrl = cleanUrl;
       if (repo.credential?.token && /^https?:\/\//i.test(cleanUrl)) {
         const u = new URL(cleanUrl);
@@ -345,7 +384,7 @@ export class WorktreeManager {
         u.password = repo.credential.token;
         cloneUrl = u.toString();
       }
-      const cloneArgs = ['clone', ...(branch ? ['--branch', branch] : []), '--', cloneUrl, baseWorkingDir];
+      const cloneArgs = ['clone', ...(branch ? ['--branch', branch] : []), '--', cloneUrl, cloneDir];
       const cloned = await new Promise<GitResult>((resolve) => {
         execFile(
           'git',
@@ -359,16 +398,16 @@ export class WorktreeManager {
         );
       });
       if (!cloned.ok) {
-        log(`[worktree] working_dir bootstrap clone failed: ${cloned.stderr.replace(cloneUrl, cleanUrl).trim()}`);
-        return false;
+        log(`[worktree] container base clone failed: ${cloned.stderr.replace(cloneUrl, cleanUrl).trim()}`);
+        return null;
       }
       // Never leave the token embedded in origin. Persist it in the checkout's
       // private credential-store file so later fetch/push from ticket worktrees
       // authenticate without exposing it in `git remote -v` or process args.
-      await git(baseWorkingDir, ['remote', 'set-url', 'origin', cleanUrl]);
-      await this.#installRepoCredential(baseWorkingDir, repo);
-      log(`[worktree] bootstrapped empty working_dir from ${repo.url}${branch ? ` branch=${branch}` : ''}: ${baseWorkingDir}`);
-      return true;
+      await git(cloneDir, ['remote', 'set-url', 'origin', cleanUrl]);
+      await this.#installRepoCredential(cloneDir, repo);
+      log(`[worktree] cloned container base from ${repo.url}${branch ? ` branch=${branch}` : ''}: ${cloneDir}`);
+      return cloneDir;
     })().finally(() => this.#bootstrapLocks.delete(key));
     this.#bootstrapLocks.set(key, run);
     return run;
@@ -506,34 +545,69 @@ export class WorktreeManager {
     // Both modes key a lease/slug on the ticket id, so it is required for either.
     if (!ticketId) return fallback('no_ticket');
 
-    if (!(await this.#isGitWorkTree(baseWorkingDir))) {
-      await this.#bootstrapEmptyWorkingDir(baseWorkingDir, args.bootstrapRepo);
-    }
-    if (!(await this.#isGitWorkTree(baseWorkingDir))) {
-      return fallback('not_a_git_repo');
-    }
+    const baseIsRepo = await this.#isGitWorkTree(baseWorkingDir);
+    const containerRepo = baseIsRepo
+      ? null
+      : await this.#bootstrapContainerRepo(baseWorkingDir, args.bootstrapRepo);
+    if (!baseIsRepo && !containerRepo) return fallback('not_a_git_repo');
+    const localBaseRepo = containerRepo ?? baseWorkingDir;
     // Existing checkouts need the Resource credential too; limiting this to
     // fresh clone would leave resumed/private-repo tickets unable to fetch.
-    await this.#installRepoCredential(baseWorkingDir, args.bootstrapRepo);
+    await this.#installRepoCredential(localBaseRepo, args.bootstrapRepo);
 
-    const repoCtx = await this.#resolveRepoContext(baseWorkingDir);
+    let provisioningBase = localBaseRepo;
+    const resourceId = args.bootstrapRepo?.resourceId?.trim();
+    const resourceSlug = resourceId?.replace(/[^A-Za-z0-9._-]/g, '_');
+    const resourceRoot = resourceSlug
+      ? join(this.#resourceWorktreesRoot, resourceSlug)
+      : null;
+    // Git records worktrees in the repository that created them. Persist that
+    // owner alongside the resource-scoped checkout so a later dispatch from a
+    // different agent clone asks the original repository to inspect/reattach
+    // it instead of mistaking the existing directory for a path conflict.
+    if (!containerRepo && mode === 'per_ticket' && resourceRoot) {
+      const ownerPath = join(resourceRoot, '.repo-owner');
+      try {
+        const savedOwner = (await fsp.readFile(ownerPath, 'utf8')).trim();
+        if (savedOwner && await this.#isGitWorkTree(savedOwner)) provisioningBase = savedOwner;
+      } catch {
+        await fsp.mkdir(resourceRoot, { recursive: true });
+        try {
+          await fsp.writeFile(ownerPath, `${baseWorkingDir}\n`, { encoding: 'utf8', flag: 'wx' });
+        } catch {
+          // Another manager/process won the first-owner race. Its durable
+          // choice is authoritative; never continue with this caller's clone.
+          const savedOwner = (await fsp.readFile(ownerPath, 'utf8')).trim();
+          if (savedOwner && await this.#isGitWorkTree(savedOwner)) provisioningBase = savedOwner;
+        }
+      }
+    }
+    if (provisioningBase !== baseWorkingDir) {
+      await this.#installRepoCredential(provisioningBase, args.bootstrapRepo);
+    }
+
+    const repoCtx = await this.#resolveRepoContext(provisioningBase);
     if (!repoCtx) return fallback('no_repo_root');
     const { repoRoot, workSubpath } = repoCtx;
     const withSub = (p: string) => (workSubpath ? join(p, workSubpath) : p);
 
-    const worktreesRoot = worktreesRootFor(baseWorkingDir);
+    // Existing repo-backed agents keep resource-scoped placement so a ticket
+    // survives reassignment. Container working dirs deliberately keep both the
+    // base clone and ticket checkout below their own `.awb/` boundary; the
+    // container root must never become (or masquerade as) the repository.
+    const worktreesRoot = !containerRepo && mode === 'per_ticket' && resourceSlug
+      ? join(this.#resourceWorktreesRoot, resourceSlug)
+      : worktreesRootFor(baseWorkingDir);
 
     // Keep the nested worktrees out of `git status` (and out of Unity scans).
     await this.#ensureAwbIgnored(repoRoot, workSubpath);
 
-    // Drop stale registrations first so a worktree whose dir was manually
-    // removed doesn't block recreating it here.
-    await this.prune(baseWorkingDir);
-
     // ── shared: lease a warm-pool slot (규약 ⑥) ─────────────────────────────
     if (mode === 'shared') {
+      // Shared allocation has its own root-scoped registry mutex.
+      await this.prune(provisioningBase);
       return this.#acquireSharedSlot({
-        baseWorkingDir,
+        baseWorkingDir: provisioningBase,
         worktreesRoot,
         ticketId,
         role,
@@ -546,28 +620,101 @@ export class WorktreeManager {
 
     // ── per_ticket: one dedicated worktree named `<ticket8>` ────────────────
     const wtPath = join(worktreesRoot, worktreeSlug(ticketId, mode));
-    const ens = await this.#ensureWorktree(baseWorkingDir, worktreesRoot, wtPath);
-    if (!ens.ok) {
-      if (ens.reason === 'add_failed') {
+    return this.#withProvisionLock(worktreesRoot, async () => {
+      // Prune + inspect + add is one atomic provisioning transaction. Without
+      // this, simultaneous triggers can both observe a missing registration;
+      // the loser then falls back to the shared base cwd and defeats isolation.
+      await this.prune(provisioningBase);
+      const ens = await this.#ensureWorktree(provisioningBase, worktreesRoot, wtPath);
+      if (!ens.ok) {
+        if (ens.reason === 'add_failed') {
+          log(
+            `[worktree] add failed for ticket=${String(ticketId).slice(0, 8)} role=${role} mode=${mode}: ${ens.detail ?? ''}`,
+          );
+        }
+        return fallback(ens.reason ?? 'worktree_unavailable');
+      }
+      if (ens.created) {
         log(
-          `[worktree] add failed for ticket=${String(ticketId).slice(0, 8)} role=${role} mode=${mode}: ${ens.detail ?? ''} — falling back to base cwd`,
+          `[worktree] created ${wtPath} for ticket=${String(ticketId).slice(0, 8)} role=${role} mode=${mode}${workSubpath ? ` subpath=${workSubpath}` : ''} (detached at base HEAD)`,
         );
       }
-      return fallback(ens.reason ?? 'worktree_unavailable');
+      return {
+        cwd: withSub(wtPath),
+        isWorktree: true,
+        reused: !ens.created,
+        worktreePath: wtPath,
+        workSubpath,
+        mode,
+      };
+    });
+  }
+
+  /**
+   * Verify the ticket's worktree can authenticate to its https `origin` BEFORE
+   * a subagent is spawned, so a dispatch never burns a whole CLI session only
+   * to die at `git push` with `could not read Username for 'https://github.com'`
+   * — the failure that stalled ticket 8436f96f's Merging twice. Callers run
+   * this for the push role at dispatch, so a missing credential is caught at
+   * the latest before Merging (usually earlier, at In Progress's feature push).
+   *
+   * Ground truth is a live, non-interactive `git ls-remote`, NOT credential
+   * config inspection: an empty `credential.helper cache`/`store` is configured
+   * yet still fails push, so "a helper is set" would be a false positive in
+   * exactly the failure environment. A real installed token makes the probe
+   * succeed → ready; an empty/missing credential makes it auth-fail → blocked.
+   * We block SOLELY on an auth-signature rejection; a transient/network error
+   * fails OPEN so a blip never wedges a ticket. Non-https remotes use key/local
+   * auth we can't cheaply probe → ready. Best-effort: never throws.
+   */
+  async verifyPushReadiness(cwd: string, remoteUrl?: string): Promise<PushReadinessDecision> {
+    try {
+      if (!this.#enabled || !cwd) return { ok: true };
+      let url = (remoteUrl || '').trim();
+      if (!url) {
+        const r = await git(cwd, ['remote', 'get-url', 'origin']);
+        url = r.ok ? r.stdout.trim() : '';
+      }
+      const isHttps = /^https?:\/\//i.test(url);
+      if (!url || !isHttps) return decidePushReadiness({ isHttps: false });
+      const probe = await this.#lsRemoteProbe(cwd, url);
+      return decidePushReadiness({ isHttps, probe: { ran: true, ok: probe.ok, stderr: probe.stderr } });
+    } catch (err: any) {
+      // Never let a verification bug block dispatch — fail open, just log.
+      log(`[worktree] push-readiness check errored (${err?.message ?? err}); treating as ready`);
+      return { ok: true };
     }
-    if (ens.created) {
-      log(
-        `[worktree] created ${wtPath} for ticket=${String(ticketId).slice(0, 8)} role=${role} mode=${mode}${workSubpath ? ` subpath=${workSubpath}` : ''} (detached at base HEAD)`,
+  }
+
+  /** Non-interactive `git ls-remote --heads <url>` used to verify push auth.
+   *  `GIT_TERMINAL_PROMPT=0` + an empty `GIT_ASKPASS` force git to fail fast
+   *  (`could not read Username`) instead of hanging on a username prompt. git
+   *  still consults any configured credential.helper, so a valid installed
+   *  token authenticates and the probe succeeds. Never throws — a failure comes
+   *  back as { ok:false }. */
+  #lsRemoteProbe(cwd: string, url: string): Promise<GitResult> {
+    return new Promise((resolve) => {
+      execFile(
+        'git',
+        ['-C', cwd, 'ls-remote', '--heads', url],
+        {
+          timeout: PUSH_PROBE_TIMEOUT_MS,
+          maxBuffer: 8 * 1024 * 1024,
+          windowsHide: true,
+          env: {
+            ...process.env,
+            GIT_TERMINAL_PROMPT: '0',
+            GIT_ASKPASS: '',
+            GCM_INTERACTIVE: 'never',
+          },
+        },
+        (err, stdout, stderr) => resolve({
+          ok: !err,
+          stdout: (stdout ?? '').toString(),
+          stderr: (stderr ?? (err as any)?.message ?? '').toString(),
+        }),
       );
-    }
-    return {
-      cwd: withSub(wtPath),
-      isWorktree: true,
-      reused: !ens.created,
-      worktreePath: wtPath,
-      workSubpath,
-      mode,
-    };
+    });
   }
 
   /**
@@ -1157,6 +1304,88 @@ export class WorktreeManager {
     }
   }
 
+  /** Serialize per-ticket worktree provisioning per repository root. */
+  async #withProvisionLock<T>(worktreesRoot: string, fn: () => Promise<T>): Promise<T> {
+    const key = normPath(worktreesRoot);
+    const prev = this.#provisionLocks.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const tail = prev.then(() => gate);
+    this.#provisionLocks.set(key, tail);
+    await prev.catch(() => {});
+    const lockDir = join(worktreesRoot, '.provision.lock');
+    const ownerPath = join(lockDir, 'owner.json');
+    const owner: ProvisionLockOwner = { token: randomUUID(), pid: process.pid };
+    const deadline = Date.now() + this.#provisionLockTimeoutMs;
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    try {
+      await fsp.mkdir(worktreesRoot, { recursive: true });
+      for (;;) {
+        try {
+          await fsp.mkdir(lockDir);
+          await fsp.writeFile(ownerPath, JSON.stringify(owner), { flag: 'wx' });
+          break;
+        } catch (err: any) {
+          if (err?.code !== 'EEXIST') throw err;
+          try {
+            const stat = await fsp.stat(lockDir);
+            if (Date.now() - stat.mtimeMs > this.#provisionLockStaleMs) {
+              let current: ProvisionLockOwner | undefined;
+              try {
+                const parsed = JSON.parse(await fsp.readFile(ownerPath, 'utf8')) as Partial<ProvisionLockOwner>;
+                if (typeof parsed.token === 'string' && parsed.token && Number.isInteger(parsed.pid)) {
+                  current = parsed as ProvisionLockOwner;
+                }
+              } catch {
+                // A crash can leave the directory behind before owner.json is
+                // written (or while it is being written). Once the directory
+                // itself is stale, missing/corrupt metadata cannot identify a
+                // live owner and is safe to quarantine via atomic rename.
+              }
+              let ownerAlive = false;
+              if (current && current.pid > 0) {
+                try {
+                  process.kill(current.pid, 0);
+                  ownerAlive = true;
+                } catch (signalErr: any) {
+                  ownerAlive = signalErr?.code === 'EPERM';
+                }
+              }
+              if (!ownerAlive) {
+                const staleDir = `${lockDir}.stale-${randomUUID()}`;
+                await fsp.rename(lockDir, staleDir);
+                await fsp.rm(staleDir, { recursive: true, force: true });
+                continue;
+              }
+            }
+          } catch {}
+          if (Date.now() >= deadline) throw new Error(`provision lock timeout: ${lockDir}`);
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+      }
+      heartbeat = setInterval(() => {
+        void fsp.utimes(lockDir, new Date(), new Date()).catch(() => {});
+      }, this.#provisionLockHeartbeatMs);
+      heartbeat.unref?.();
+      try {
+        return await fn();
+      } finally {
+        if (heartbeat) clearInterval(heartbeat);
+        try {
+          const current = JSON.parse(await fsp.readFile(ownerPath, 'utf8')) as ProvisionLockOwner;
+          if (current.token === owner.token) {
+            const releasedDir = `${lockDir}.released-${owner.token}`;
+            await fsp.rename(lockDir, releasedDir);
+            await fsp.rm(releasedDir, { recursive: true, force: true });
+          }
+        } catch {}
+      }
+    } finally {
+      release();
+      if (this.#provisionLocks.get(key) === tail) this.#provisionLocks.delete(key);
+    }
+  }
+
   /**
    * Force-remove a ticket's worktree, regardless of dirty state. This is the
    * terminal-ticket reclamation path (ticket 9f26f091 acceptance (d)): once a
@@ -1179,12 +1408,22 @@ export class WorktreeManager {
   async removeTicketWorktrees(opts: {
     baseWorkingDir: string;
     ticketId: string;
+    repositoryResourceId?: string;
   }): Promise<number> {
     if (!this.#enabled) return 0;
-    const { baseWorkingDir, ticketId } = opts;
+    let { baseWorkingDir } = opts;
+    const { ticketId } = opts;
     if (!baseWorkingDir || !ticketId) return 0;
+    const resourceSlug = opts.repositoryResourceId?.trim().replace(/[^A-Za-z0-9._-]/g, '_');
+    const resourceRoot = resourceSlug ? join(this.#resourceWorktreesRoot, resourceSlug) : null;
+    if (resourceRoot) {
+      try {
+        const savedOwner = (await fsp.readFile(join(resourceRoot, '.repo-owner'), 'utf8')).trim();
+        if (savedOwner) baseWorkingDir = savedOwner;
+      } catch {}
+    }
     if (!(await this.#isGitWorkTree(baseWorkingDir))) return 0;
-    const worktreesRoot = worktreesRootFor(baseWorkingDir);
+    const worktreesRoot = resourceRoot ?? worktreesRootFor(baseWorkingDir);
     const ticket8 = String(ticketId).slice(0, 8);
     const legacyPrefix = `${ticket8}-`;
     await this.prune(baseWorkingDir);

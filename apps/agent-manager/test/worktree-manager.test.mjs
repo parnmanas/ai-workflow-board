@@ -103,7 +103,7 @@ test('worktreesRootFor is always <working_dir>/.awb/wt', () => {
   assert.equal(worktreesRootFor('/x/y/z'), join('/x/y/z', '.awb', 'wt'));
 });
 
-test('empty working_dir is bootstrapped from the resolved repository before worktree creation', async () => {
+test('empty non-git working_dir keeps its container root and clones under .awb', async () => {
   const source = await makeRepoWithRemote();
   const workingDir = join(source.root, 'empty-agent-dir');
   try {
@@ -113,17 +113,20 @@ test('empty working_dir is bootstrapped from the resolved repository before work
       baseWorkingDir: workingDir,
       ticketId: TICKET_A,
       role: 'assignee',
-      bootstrapRepo: { url: source.remote, branch: 'main' },
+      bootstrapRepo: { resourceId: 'repo-empty', url: source.remote, branch: 'main' },
     });
-    assert.ok(result.isWorktree, 'bootstrap continues into ticket worktree creation');
-    assert.equal(git(workingDir, ['remote', 'get-url', 'origin']), source.remote);
+    assert.ok(result.isWorktree, 'container clone continues into ticket worktree creation');
+    assert.equal(result.worktreePath, join(workingDir, '.awb', 'wt', 'aaaaaaaa'));
+    assert.equal(git(join(workingDir, '.awb', 'base', 'repo-empty'), ['remote', 'get-url', 'origin']), source.remote);
+    assert.equal(existsSync(join(workingDir, '.git')), false);
+    assert.throws(() => git(workingDir, ['status', '--short']), /not a git repository/);
     assert.equal(await fsp.readFile(join(result.cwd, 'README.md'), 'utf8'), '# base\n');
   } finally {
     await source.cleanup();
   }
 });
 
-test('bootstrap never overwrites a non-empty non-git working_dir', async () => {
+test('non-empty non-git working_dir provisions below .awb without touching container files', async () => {
   const source = await makeRepoWithRemote();
   const workingDir = join(source.root, 'occupied-agent-dir');
   try {
@@ -134,12 +137,107 @@ test('bootstrap never overwrites a non-empty non-git working_dir', async () => {
       baseWorkingDir: workingDir,
       ticketId: TICKET_A,
       role: 'assignee',
-      bootstrapRepo: { url: source.remote, branch: 'main' },
+      bootstrapRepo: { resourceId: 'repo-occupied', url: source.remote, branch: 'main' },
     });
-    assert.equal(result.isWorktree, false);
-    assert.equal(result.reason, 'not_a_git_repo');
+    assert.equal(result.isWorktree, true);
+    assert.equal(result.worktreePath, join(workingDir, '.awb', 'wt', 'aaaaaaaa'));
+    assert.equal(existsSync(join(workingDir, '.git')), false, 'container root never becomes a repository');
     assert.equal(await fsp.readFile(join(workingDir, 'keep.txt'), 'utf8'), 'user data\n');
+    assert.equal(git(join(workingDir, '.awb', 'base', 'repo-occupied'), ['remote', 'get-url', 'origin']), source.remote);
+
+    git(result.cwd, ['config', 'user.email', 'test@awb.local']);
+    git(result.cwd, ['config', 'user.name', 'AWB Test']);
+    git(result.cwd, ['switch', '-q', '-c', 'ticket/container-bootstrap']);
+    await fsp.writeFile(join(result.cwd, 'ticket.txt'), 'container worktree\n');
+    git(result.cwd, ['add', 'ticket.txt']);
+    git(result.cwd, ['commit', '-q', '-m', 'ticket change']);
+    git(result.cwd, ['push', '-q', '-u', 'origin', 'ticket/container-bootstrap']);
+    assert.equal(
+      git(source.remote, ['rev-parse', 'refs/heads/ticket/container-bootstrap']),
+      git(result.cwd, ['rev-parse', 'HEAD']),
+      'commit created in the ticket worktree reaches origin',
+    );
   } finally {
+    await source.cleanup();
+  }
+});
+
+test('one non-git container isolates base clones for different repository resources', async () => {
+  const first = await makeRepoWithRemote();
+  const second = await makeRepoWithRemote();
+  const workingDir = join(first.root, 'multi-repo-agent-dir');
+  try {
+    await fsp.writeFile(join(second.repo, 'SECOND.md'), 'second repository\n');
+    git(second.repo, ['add', 'SECOND.md']);
+    git(second.repo, ['commit', '-q', '-m', 'identify second repo']);
+    git(second.repo, ['push', '-q', 'origin', 'main']);
+    await fsp.mkdir(workingDir, { recursive: true });
+    const wm = new WorktreeManager();
+    const a = await wm.resolveCwd({
+      baseWorkingDir: workingDir,
+      ticketId: TICKET_A,
+      role: 'assignee',
+      bootstrapRepo: { resourceId: 'repo/A', url: first.remote, branch: 'main' },
+    });
+    const b = await wm.resolveCwd({
+      baseWorkingDir: workingDir,
+      ticketId: TICKET_B,
+      role: 'assignee',
+      bootstrapRepo: { resourceId: 'repo/B', url: second.remote, branch: 'main' },
+    });
+    assert.ok(a.isWorktree && b.isWorktree);
+    assert.equal(git(join(workingDir, '.awb', 'base', 'repo_A'), ['remote', 'get-url', 'origin']), first.remote);
+    assert.equal(git(join(workingDir, '.awb', 'base', 'repo_B'), ['remote', 'get-url', 'origin']), second.remote);
+    assert.equal(existsSync(join(a.cwd, 'SECOND.md')), false);
+    assert.equal(await fsp.readFile(join(b.cwd, 'SECOND.md'), 'utf8'), 'second repository\n');
+  } finally {
+    await first.cleanup();
+    await second.cleanup();
+  }
+});
+
+test('container base clone credential store is inherited by its ticket worktree', async () => {
+  const source = await makeRepoWithRemote();
+  const workingDir = join(source.root, 'credential-container');
+  const remoteUrl = 'https://git.example.test/acme/private.git';
+  const previous = {
+    count: process.env.GIT_CONFIG_COUNT,
+    key: process.env.GIT_CONFIG_KEY_0,
+    value: process.env.GIT_CONFIG_VALUE_0,
+  };
+  try {
+    process.env.GIT_CONFIG_COUNT = '1';
+    process.env.GIT_CONFIG_KEY_0 = `url.${source.remote}.insteadOf`;
+    process.env.GIT_CONFIG_VALUE_0 = 'https://token-user:container-secret@git.example.test/acme/private.git';
+    const wm = new WorktreeManager();
+    const result = await wm.resolveCwd({
+      baseWorkingDir: workingDir,
+      ticketId: TICKET_C,
+      role: 'assignee',
+      bootstrapRepo: {
+        resourceId: 'private-resource',
+        url: remoteUrl,
+        branch: 'main',
+        credential: { username: 'token-user', token: 'container-secret' },
+      },
+    });
+    assert.ok(result.isWorktree);
+    const baseClone = join(workingDir, '.awb', 'base', 'private-resource');
+    assert.equal(git(baseClone, ['remote', 'get-url', 'origin']), remoteUrl);
+    const baseHelper = git(baseClone, ['config', '--get', 'credential.helper']);
+    assert.equal(git(result.cwd, ['config', '--get', 'credential.helper']), baseHelper);
+    const match = baseHelper.match(/^store --file="(.+)"$/);
+    assert.ok(match);
+    assert.match(await fsp.readFile(match[1], 'utf8'), /token-user:container-secret@git\.example\.test/);
+  } finally {
+    for (const [name, value] of Object.entries({
+      GIT_CONFIG_COUNT: previous.count,
+      GIT_CONFIG_KEY_0: previous.key,
+      GIT_CONFIG_VALUE_0: previous.value,
+    })) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
     await source.cleanup();
   }
 });
@@ -424,6 +522,212 @@ test('resume reattaches to the same per-ticket worktree (branch + dirty tree int
     assert.equal(second.reused, true);
     assert.equal(git(second.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), 'mybranch');
     assert.equal(await fsp.readFile(join(second.cwd, 'wip.txt'), 'utf8'), 'in progress\n');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('repository resource keeps a ticket worktree stable across agent working dirs and managers', async () => {
+  const { root, repo, cleanup } = await makeRepo();
+  try {
+    const otherAgentRepo = join(root, 'other-agent');
+    git(root, ['clone', '-q', repo, otherAgentRepo]);
+    const canonicalRoot = join(root, 'manager-worktrees');
+    const bootstrapRepo = { resourceId: 'repo-resource-1', url: repo };
+    const firstManager = new WorktreeManager({ resourceWorktreesRoot: canonicalRoot });
+    const first = await firstManager.resolveCwd({
+      baseWorkingDir: repo, ticketId: TICKET_A, role: 'assignee',
+      mode: 'per_ticket', bootstrapRepo,
+    });
+    git(first.cwd, ['checkout', '-q', '-b', 'ticket/reassigned']);
+    await fsp.writeFile(join(first.cwd, 'wip.txt'), 'preserved across reassignment\n');
+
+    const secondManager = new WorktreeManager({ resourceWorktreesRoot: canonicalRoot });
+    const second = await secondManager.resolveCwd({
+      baseWorkingDir: otherAgentRepo, ticketId: TICKET_A, role: 'reviewer',
+      mode: 'per_ticket', bootstrapRepo,
+    });
+    assert.equal(second.cwd, first.cwd, 'agent and manager instance do not affect canonical cwd');
+    assert.equal(second.reused, true);
+    assert.equal(git(second.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), 'ticket/reassigned');
+    assert.equal(await fsp.readFile(join(second.cwd, 'wip.txt'), 'utf8'), 'preserved across reassignment\n');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('repository resource serializes concurrent first resolve across manager instances', async () => {
+  const { root, repo, cleanup } = await makeRepo();
+  try {
+    const otherAgentRepo = join(root, 'other-agent');
+    git(root, ['clone', '-q', repo, otherAgentRepo]);
+    const canonicalRoot = join(root, 'manager-worktrees');
+    const bootstrapRepo = { resourceId: 'repo-resource-race', url: repo };
+    const [first, second] = await Promise.all([
+      new WorktreeManager({ resourceWorktreesRoot: canonicalRoot }).resolveCwd({
+        baseWorkingDir: repo, ticketId: TICKET_A, role: 'assignee', mode: 'per_ticket', bootstrapRepo,
+      }),
+      new WorktreeManager({ resourceWorktreesRoot: canonicalRoot }).resolveCwd({
+        baseWorkingDir: otherAgentRepo, ticketId: TICKET_A, role: 'reviewer', mode: 'per_ticket', bootstrapRepo,
+      }),
+    ]);
+    assert.equal(first.isWorktree, true);
+    assert.equal(second.isWorktree, true, 'loser never falls back to its shared agent cwd');
+    assert.equal(second.cwd, first.cwd, 'both managers resolve the single canonical ticket cwd');
+    const owner = (await fsp.readFile(join(canonicalRoot, 'repo-resource-race', '.repo-owner'), 'utf8')).trim();
+    assert.ok(owner === repo || owner === otherAgentRepo, 'one durable repository owner wins');
+    assert.equal(git(owner, ['worktree', 'list', '--porcelain']).match(/worktree /g)?.length, 2);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('provision lease never steals a stale-looking lock from a live owner', async () => {
+  const { root, repo, cleanup } = await makeRepo();
+  try {
+    const canonicalRoot = join(root, 'manager-worktrees');
+    const resourceRoot = join(canonicalRoot, 'repo-resource-live-lock');
+    const lockDir = join(resourceRoot, '.provision.lock');
+    await fsp.mkdir(lockDir, { recursive: true });
+    await fsp.writeFile(join(lockDir, 'owner.json'), JSON.stringify({ token: 'live-owner', pid: process.pid }));
+    const old = new Date(Date.now() - 5_000);
+    await fsp.utimes(lockDir, old, old);
+
+    const wm = new WorktreeManager({
+      resourceWorktreesRoot: canonicalRoot,
+      provisionLockTimeoutMs: 100,
+      provisionLockStaleMs: 10,
+      provisionLockHeartbeatMs: 5,
+    });
+    await assert.rejects(wm.resolveCwd({
+      baseWorkingDir: repo,
+      ticketId: TICKET_A,
+      role: 'assignee',
+      mode: 'per_ticket',
+      bootstrapRepo: { resourceId: 'repo-resource-live-lock', url: repo },
+    }), /provision lock timeout/);
+    assert.equal(JSON.parse(await fsp.readFile(join(lockDir, 'owner.json'), 'utf8')).token, 'live-owner');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('provision lease atomically reclaims a stale lock whose owner is dead', async () => {
+  const { root, repo, cleanup } = await makeRepo();
+  try {
+    const canonicalRoot = join(root, 'manager-worktrees');
+    const resourceRoot = join(canonicalRoot, 'repo-resource-dead-lock');
+    const lockDir = join(resourceRoot, '.provision.lock');
+    await fsp.mkdir(lockDir, { recursive: true });
+    await fsp.writeFile(join(lockDir, 'owner.json'), JSON.stringify({ token: 'dead-owner', pid: 2147483647 }));
+    const old = new Date(Date.now() - 5_000);
+    await fsp.utimes(lockDir, old, old);
+
+    const wm = new WorktreeManager({
+      resourceWorktreesRoot: canonicalRoot,
+      provisionLockTimeoutMs: 500,
+      provisionLockStaleMs: 10,
+      provisionLockHeartbeatMs: 5,
+    });
+    const result = await wm.resolveCwd({
+      baseWorkingDir: repo,
+      ticketId: TICKET_A,
+      role: 'assignee',
+      mode: 'per_ticket',
+      bootstrapRepo: { resourceId: 'repo-resource-dead-lock', url: repo },
+    });
+    assert.equal(result.isWorktree, true);
+    assert.equal(existsSync(lockDir), false, 'the current owner releases only its own lease');
+  } finally {
+    await cleanup();
+  }
+});
+
+for (const ownerState of ['missing', 'malformed']) {
+  test(`provision lease recovers from stale lock with ${ownerState} owner metadata`, async () => {
+    const { root, repo, cleanup } = await makeRepo();
+    try {
+      const canonicalRoot = join(root, 'manager-worktrees');
+      const resourceId = `repo-resource-${ownerState}-owner`;
+      const lockDir = join(canonicalRoot, resourceId, '.provision.lock');
+      await fsp.mkdir(lockDir, { recursive: true });
+      if (ownerState === 'malformed') {
+        await fsp.writeFile(join(lockDir, 'owner.json'), '{not-json');
+      }
+      const old = new Date(Date.now() - 5_000);
+      await fsp.utimes(lockDir, old, old);
+
+      const wm = new WorktreeManager({
+        resourceWorktreesRoot: canonicalRoot,
+        provisionLockTimeoutMs: 500,
+        provisionLockStaleMs: 10,
+        provisionLockHeartbeatMs: 5,
+      });
+      const result = await wm.resolveCwd({
+        baseWorkingDir: repo,
+        ticketId: TICKET_A,
+        role: 'assignee',
+        mode: 'per_ticket',
+        bootstrapRepo: { resourceId, url: repo },
+      });
+      assert.equal(result.isWorktree, true);
+      assert.equal(existsSync(lockDir), false, 'recovered lease is released after provisioning');
+    } finally {
+      await cleanup();
+    }
+  });
+}
+
+test('repository resource ticket worktree is reclaimed through its canonical owner', async () => {
+  const { root, repo, cleanup } = await makeRepo();
+  try {
+    const otherAgentRepo = join(root, 'other-agent');
+    git(root, ['clone', '-q', repo, otherAgentRepo]);
+    const canonicalRoot = join(root, 'manager-worktrees');
+    const bootstrapRepo = { resourceId: 'repo-resource-cleanup', url: repo };
+    const wm = new WorktreeManager({ resourceWorktreesRoot: canonicalRoot });
+    const resolved = await wm.resolveCwd({
+      baseWorkingDir: repo, ticketId: TICKET_A, role: 'assignee', mode: 'per_ticket', bootstrapRepo,
+    });
+    await fsp.writeFile(join(resolved.cwd, 'dirty.txt'), 'terminal dirty state\n');
+    const removed = await wm.removeTicketWorktrees({
+      baseWorkingDir: otherAgentRepo,
+      ticketId: TICKET_A,
+      repositoryResourceId: bootstrapRepo.resourceId,
+    });
+    assert.equal(removed, 1);
+    assert.equal(existsSync(resolved.worktreePath), false, 'resource-scoped checkout directory is removed');
+    assert.equal(git(repo, ['worktree', 'list', '--porcelain']).includes(resolved.worktreePath), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('concurrent per-ticket provisioning is atomic and isolates branch/index/untracked files', async () => {
+  const { repo, cleanup } = await makeRepo();
+  try {
+    const wm = new WorktreeManager();
+    const [a, b] = await Promise.all([
+      wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_A, role: 'assignee' }),
+      wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_B, role: 'assignee' }),
+    ]);
+
+    assert.equal(a.isWorktree, true);
+    assert.equal(b.isWorktree, true);
+    assert.notEqual(a.cwd, b.cwd, 'different tickets never share a cwd');
+    git(a.cwd, ['checkout', '-q', '-b', 'ticket/concurrent-a']);
+    await fsp.writeFile(join(a.cwd, 'only-a.txt'), 'private to A\n');
+    assert.equal(git(b.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), 'HEAD', 'B remains detached');
+    await assert.rejects(fsp.access(join(b.cwd, 'only-a.txt')), 'A untracked file is invisible in B');
+
+    const [a1, a2] = await Promise.all([
+      wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_A, role: 'assignee' }),
+      wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_A, role: 'reviewer' }),
+    ]);
+    assert.equal(a1.cwd, a.cwd, 'same ticket reuses its stable path');
+    assert.equal(a2.cwd, a.cwd, 'simultaneous respawn resolves to the same registered worktree');
+    assert.equal(a1.isWorktree, true);
+    assert.equal(a2.isWorktree, true, 'no racing caller falls back to the shared base cwd');
   } finally {
     await cleanup();
   }
@@ -875,6 +1179,78 @@ test('snapshotWorktrees: disabled manager and an empty .awb/wt root → [] (neve
       [],
       'an untouched repo has no live worktrees',
     );
+  } finally {
+    await cleanup();
+  }
+});
+
+// ── dispatch preflight: worktree occupancy + push-credential readiness ───────
+// (ticket a3047a86)
+
+test('resolveCwd: a foreign directory occupying the ticket worktree path → path_conflict (never clobbers)', async () => {
+  // The per-ticket model's analog of "another ticket's dirty working folder":
+  // a non-worktree directory already sits at <working_dir>/.awb/wt/<ticket8>.
+  // The manager must refuse to clobber it and surface `path_conflict` so the
+  // dispatcher aborts instead of running the agent on a foreign checkout.
+  const { repo, cleanup } = await makeRepo();
+  try {
+    const wtPath = join(worktreesRootFor(repo), worktreeSlug(TICKET_A, 'per_ticket'));
+    await fsp.mkdir(wtPath, { recursive: true });
+    await fsp.writeFile(join(wtPath, 'stray.txt'), 'left behind by another ticket\n');
+    const wm = new WorktreeManager();
+    const r = await wm.resolveCwd({ baseWorkingDir: repo, ticketId: TICKET_A, role: 'assignee' });
+    assert.equal(r.isWorktree, false);
+    assert.equal(r.reason, 'path_conflict');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('verifyPushReadiness: no origin / non-https remote → ready (key/local auth, not this failure mode)', async () => {
+  const { repo, cleanup } = await makeRepo();
+  try {
+    const wm = new WorktreeManager();
+    assert.deepEqual(await wm.verifyPushReadiness(repo), { ok: true }, 'no origin remote → ready');
+    assert.deepEqual(
+      await wm.verifyPushReadiness(repo, 'git@github.com:example/repo.git'),
+      { ok: true },
+      'ssh remote → ready',
+    );
+    assert.deepEqual(
+      await wm.verifyPushReadiness(repo, '/srv/git/example.git'),
+      { ok: true },
+      'local path remote → ready',
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('verifyPushReadiness: disabled manager never blocks', async () => {
+  const { repo, cleanup } = await makeRepo();
+  try {
+    const wm = new WorktreeManager({ enabled: false });
+    assert.deepEqual(
+      await wm.verifyPushReadiness(repo, 'https://github.com/example/repo.git'),
+      { ok: true },
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('verifyPushReadiness: https, no resolvable credential, unreachable host → fails open (transient, never wedges)', async () => {
+  // With no repo-local credential.helper the check falls through to a live
+  // ls-remote probe. A reserved `.invalid` TLD makes git fail fast with a DNS
+  // error (NOT an auth error), which must be treated as transient → ready, so a
+  // network blip never wedges a ticket. (On a host that happens to carry an
+  // ambient credential.helper / token env the check short-circuits to ready
+  // before probing — same outcome, so this assertion holds either way.)
+  const { repo, cleanup } = await makeRepo();
+  try {
+    const wm = new WorktreeManager();
+    const r = await wm.verifyPushReadiness(repo, 'https://awb-nonexistent.invalid/example/repo.git');
+    assert.equal(r.ok, true);
   } finally {
     await cleanup();
   }

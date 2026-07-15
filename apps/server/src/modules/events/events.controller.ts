@@ -128,6 +128,7 @@ export class EventsController implements OnModuleDestroy {
     // One loop replaces the 9 hand-written listener blocks that previously lived here.
     const mapCtx: EventMapContext = {
       resolveBoardId: (ticketId, entityId) => this.resolveBoardId(ticketId, entityId),
+      resolveTicketRepositoryResourceId: (ticketId) => this.resolveTicketRepositoryResourceId(ticketId),
     };
 
     for (const def of EVENT_TYPES) {
@@ -225,6 +226,12 @@ export class EventsController implements OnModuleDestroy {
     }
 
     return null;
+  }
+
+  private async resolveTicketRepositoryResourceId(ticketId: string): Promise<string> {
+    if (!ticketId) return '';
+    const ticket = await this.ticketRepo.findOne({ where: { id: ticketId } });
+    return ticket?.base_repo_resource_id || '';
   }
 
   @Sse('stream')

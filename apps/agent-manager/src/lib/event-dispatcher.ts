@@ -25,6 +25,7 @@ import type { ManagedAgentContextRegistry } from './managed-agent-context.js';
 import type { WorktreeManager, WorktreeMode } from './worktree-manager.js';
 import { prepareChatAttachments } from './chat-attachment-prep.js';
 import { injectWorkFolder } from './prompts.js';
+import { DispatchBlockerTracker, classifyWorktreeOutcome } from './dispatch-preflight.js';
 import type { HarnessSpec, ResolvedEffortPreset, EffortLevel } from './cli-adapters/base.js';
 import { createAdapter, ADAPTER_CAPABILITIES } from './cli-adapters/index.js';
 import { EnvironmentProvisioner } from './environment-provisioner.js';
@@ -238,6 +239,26 @@ export function resolveBootstrapRepository(
  */
 export function parseWorktreeMode(raw: unknown): WorktreeMode | undefined {
   return raw === 'per_ticket' || raw === 'shared' ? raw : undefined;
+}
+
+/** Explicit per_ticket boards are fail-closed: every input needed to produce
+ * an isolated cwd must exist before dispatch is allowed to reach a spawn site.
+ * Older events with no worktree_mode keep their legacy best-effort behavior. */
+export function validateWorktreeProvisioningInputs(args: {
+  mode: WorktreeMode | undefined;
+  hasAgentContext: boolean;
+  hasManager: boolean;
+  ticketId?: string;
+  role?: string;
+  repositoryResourceId?: string;
+}): string | null {
+  if (args.mode !== 'per_ticket') return null;
+  if (!args.hasAgentContext) return 'missing_agent_context';
+  if (!args.hasManager) return 'missing_worktree_manager';
+  if (!args.ticketId) return 'missing_ticket_id';
+  if (!args.role) return 'missing_role';
+  if (!args.repositoryResourceId) return 'missing_repository_resource';
+  return null;
 }
 
 // Hard cap on consecutive agent-to-agent turns within a single chat room.
@@ -571,6 +592,13 @@ export class EventDispatcher {
   #managedAgentContexts: ManagedAgentContextRegistry | null;
   #worktreeManager: WorktreeManager | null;
   #environmentProvisioner: EnvironmentProvisioner | null;
+  // ticket a3047a86: per-ticket de-dup for dispatch-preflight blocker comments
+  // (broken worktree / missing push credential). The abort already suppresses
+  // the spawn; this keeps the SAME blocker from re-posting a ticket comment on
+  // every re-trigger, while a different blocker or a post-recovery failure still
+  // posts once. Singleton dispatcher → one tracker covers all this manager's
+  // tickets; cleared on a fully-green preflight.
+  readonly #dispatchBlockers = new DispatchBlockerTracker();
   // ticket e9d0e8bc: folder-keyed run-lifetime lock. One per manager process
   // (this dispatcher is a singleton), so it serializes same-scenario QA/security
   // runs across the whole provision→execute window. Keyed by the absolute run
@@ -607,10 +635,19 @@ export class EventDispatcher {
     role: string | undefined,
     mode: WorktreeMode | undefined,
     poolSize: number | undefined,
-    bootstrapRepo: { url: string; branch?: string; credential?: { username?: string; token: string } | null } | null,
-  ): Promise<void> {
-    if (!agentContext || !this.#worktreeManager || !ticketId || !role) return;
-    if ((this.#config as any)?.delegation?.worktreeIsolation === false) return;
+    bootstrapRepo: { resourceId?: string; url: string; branch?: string; credential?: { username?: string; token: string } | null } | null,
+  ): Promise<{ ok: boolean; reason?: string; blockerKind?: string }> {
+    const requiredError = validateWorktreeProvisioningInputs({
+      mode,
+      hasAgentContext: Boolean(agentContext),
+      hasManager: Boolean(this.#worktreeManager),
+      ticketId,
+      role,
+      repositoryResourceId: bootstrapRepo?.resourceId,
+    });
+    if (requiredError) return { ok: false, reason: requiredError, blockerKind: `worktree:${requiredError}` };
+    if (!agentContext || !this.#worktreeManager || !ticketId || !role) return { ok: true };
+    if ((this.#config as any)?.delegation?.worktreeIsolation === false) return { ok: true };
     try {
       // worktree 규약 ②: the manager fixes the root at `<working_dir>/.awb/wt`
       // internally, so no worktreesRoot is passed. mode (per_ticket|shared) is
@@ -630,13 +667,20 @@ export class EventDispatcher {
           `[worktree] ticket=${ticketId.slice(0, 8)} role=${role} agent=${agentContext.agent_id.slice(0, 8)} mode=${res.mode ?? mode ?? 'per_ticket'} cwd=${res.cwd}${res.reused ? ' (reused)' : ' (new)'}`,
         );
         agentContext.cwd = res.cwd;
-      } else if (res.reason && res.reason !== 'disabled') {
-        log(
-          `[worktree] isolation skipped for ticket=${ticketId.slice(0, 8)} role=${role}: ${res.reason} — using shared cwd ${agentContext.cwd}`,
-        );
+        return { ok: true };
       }
+      const gate = classifyWorktreeOutcome(res);
+      if (gate.blocked) {
+        log(
+          `[worktree] isolation provisioning failed for ticket=${ticketId.slice(0, 8)} role=${role}: ${gate.reason}`,
+        );
+        return { ok: false, reason: gate.reason, blockerKind: gate.kind };
+      }
+      return { ok: true };
     } catch (err: any) {
-      log(`[worktree] resolveCwd failed (${err?.message ?? err}); using shared cwd`);
+      const reason = err?.message ?? String(err);
+      log(`[worktree] resolveCwd failed (${reason})`);
+      return { ok: false, reason, blockerKind: 'worktree:error' };
     }
   }
 
@@ -675,6 +719,7 @@ export class EventDispatcher {
         total += await this.#worktreeManager.removeTicketWorktrees({
           baseWorkingDir: ctx.working_dir,
           ticketId,
+          repositoryResourceId: ticket.base_repo?.id,
         });
       }
       if (total > 0) {
@@ -710,7 +755,7 @@ export class EventDispatcher {
    * dirs are already gone (e.g. the worktree was reclaimed at Done). Best-effort,
    * fire-and-forget; never throws.
    */
-  async #cleanupArchivedTicketWorkspace(ticketId: string): Promise<void> {
+  async #cleanupArchivedTicketWorkspace(ticketId: string, repositoryResourceId?: string): Promise<void> {
     if (!this.#worktreeManager || !this.#worktreeManager.enabled) return;
     if ((this.#config as any)?.delegation?.worktreeIsolation === false) return;
     if (!this.#managedAgentContexts) return;
@@ -728,6 +773,7 @@ export class EventDispatcher {
         worktrees += await this.#worktreeManager.removeTicketWorktrees({
           baseWorkingDir: ctx.working_dir,
           ticketId,
+          repositoryResourceId,
         });
         if (
           await this.#worktreeManager.removeTicketRunWorkspace({
@@ -922,7 +968,7 @@ export class EventDispatcher {
     const repoCredential = selectedRepo?.resourceId && agentContext?.agent_id
       ? await fetchRepositoryCredential(this.#config, selectedRepo.resourceId, agentContext.agent_id)
       : null;
-    await this.#applyWorktreeCwd(
+    const worktreeProvision = await this.#applyWorktreeCwd(
       agentContext,
       ev.ticket_id,
       ev.action,
@@ -932,6 +978,60 @@ export class EventDispatcher {
         : undefined,
       selectedRepo ? { ...selectedRepo, credential: repoCredential } : null,
     );
+    if (!worktreeProvision.ok) {
+      const blockerKind = worktreeProvision.blockerKind || `worktree:${worktreeProvision.reason || 'unknown'}`;
+      if (ev.ticket_id && this.#dispatchBlockers.shouldComment(ev.ticket_id, blockerKind)) {
+        await fireAndForgetTool(this.#config, 'add_comment', {
+          ticket_id: ev.ticket_id,
+          content:
+            `⚠️ **티켓 worktree 프로비저닝 실패** — 공유 작업 폴더에서 에이전트를 실행하지 않고 디스패치를 중단했습니다.\n\n` +
+            `원인: \`${worktreeProvision.reason || 'unknown error'}\`\n\n` +
+            `agent working_dir, repository resource와 \`.awb/wt\` 경로를 확인한 뒤 다시 트리거하세요.`,
+        });
+      }
+      log(
+        `Trigger aborted — ticket worktree provisioning failed: ticket=${ev.ticket_id} reason=${worktreeProvision.reason || 'unknown'} blocker=${blockerKind}`,
+      );
+      return;
+    }
+
+    // ticket a3047a86: push-credential readiness. A repo with no usable
+    // credential fails `git push` with `could not read Username for
+    // 'https://github.com'` — after the agent already did all the work (this
+    // stalled ticket 8436f96f's Merging twice). Scoped to the assignee role,
+    // the only role that pushes (feature branch at In Progress, main at
+    // Merging); reviewer/planner never push, so gating them would wedge review.
+    // The assignee's In Progress push means this catches the failure at the
+    // latest before Merging (usually earlier). verifyPushReadiness fails open
+    // on anything but a confirmed auth rejection.
+    if (
+      ev.action === 'assignee'
+      && ev.ticket_id && selectedRepo?.url && this.#worktreeManager && agentContext?.cwd
+    ) {
+      const readiness = await this.#worktreeManager.verifyPushReadiness(agentContext.cwd, selectedRepo.url);
+      if (!readiness.ok) {
+        const blockerKind = readiness.reason || 'push_credential_unavailable';
+        if (this.#dispatchBlockers.shouldComment(ev.ticket_id, blockerKind)) {
+          await fireAndForgetTool(this.#config, 'add_comment', {
+            ticket_id: ev.ticket_id,
+            content:
+              `⚠️ **Git push 자격 증명 미확인** — 원격 인증이 준비되지 않아 작업을 시작하지 않고 디스패치를 중단했습니다.\n\n` +
+              `원격: \`${selectedRepo.url}\`\n` +
+              `원인: \`${readiness.detail || 'push credential unavailable'}\`\n\n` +
+              `이 repository resource 에 GitHub 자격 증명(토큰)을 설정하거나 push 가능한 환경으로 전환한 뒤 다시 트리거하세요. ` +
+              `(Merging 단계의 push 실패로 CLI 세션을 낭비하지 않도록 dispatch 전에 검증합니다.)`,
+          });
+        }
+        log(
+          `Trigger aborted — push credential unavailable: ticket=${ev.ticket_id} detail=${readiness.detail || ''}`,
+        );
+        return;
+      }
+    }
+
+    // Preflight fully green (worktree + push credential): clear any recorded
+    // blocker so a later failure after recovery posts fresh and retries run.
+    if (ev.ticket_id) this.#dispatchBlockers.clear(ev.ticket_id);
 
     // worktree 규약 ④: name the ACTUAL work folder in the trigger prompt. The
     // server bakes a `{{AWB_WORK_FOLDER}}` placeholder into every non-merging
@@ -998,6 +1098,12 @@ export class EventDispatcher {
           agentId: provisionAgentId,
           config: envConfig,
           ticketId: ev.ticket_id,
+          // Resolve each repo's git credential at clone time so a PRIVATE repo
+          // in environment_config authenticates (same token endpoint the
+          // per-ticket worktree clone uses). Bound to this manager's AwbConfig;
+          // the token stays out of the SSE payload / fingerprint / marker.
+          resolveCredential: (resourceId, credAgentId) =>
+            fetchRepositoryCredential(this.#config, resourceId, credAgentId),
         });
         if (!result.ok) {
           if (!result.reported && ev.ticket_id) {
@@ -1382,7 +1488,7 @@ export class EventDispatcher {
       // tickets archived straight from a non-terminal column. Fire-and-forget so
       // the live-session forward below stays synchronous.
       if (ev.entity_type === 'ticket' && ev.action === 'archived' && ev.ticket_id) {
-        void this.#cleanupArchivedTicketWorkspace(ev.ticket_id);
+        void this.#cleanupArchivedTicketWorkspace(ev.ticket_id, ev.repository_resource_id);
       }
 
       if (this.#ticketSessionManager && ev.ticket_id) {

@@ -44,10 +44,25 @@ export interface ResolvedEnvironmentConfig {
   version: number;
 }
 
+/** Resolves a repository Resource's git credential (token) just before a
+ *  clone/fetch so PRIVATE repos authenticate. Injected by the caller (the
+ *  dispatcher binds it to fetchRepositoryCredential + AwbConfig) so this module
+ *  stays decoupled from REST/config and is unit-testable with a stub. Returns
+ *  null for a public repo / missing credential — the provisioner then clones
+ *  plainly, exactly as before. */
+export type RepositoryCredentialResolver = (
+  resourceId: string,
+  agentId: string,
+) => Promise<{ username?: string; token: string } | null>;
+
 export interface ProvisionArgs {
   agentId: string;
   config: ResolvedEnvironmentConfig;
   ticketId?: string;
+  /** See RepositoryCredentialResolver. The resolved token is used transiently
+   *  (clone-URL userinfo + a 0600 credential-store file inside the clone's .git)
+   *  and is NEVER written to the fingerprint, success/failure marker, or steps. */
+  resolveCredential?: RepositoryCredentialResolver;
 }
 
 export interface ProvisionResult {
@@ -189,7 +204,7 @@ export class EnvironmentProvisioner {
     try {
       await fsp.mkdir(envDir, { recursive: true });
       for (const repo of args.config.repositories || []) {
-        await this.#prepareRepo(repo, agentDir, env, timeoutMs, steps);
+        await this.#prepareRepo(repo, agentDir, env, timeoutMs, steps, args.agentId, args.resolveCredential);
       }
       for (const cmd of args.config.setup_commands || []) {
         log(`[env-provision] setup: ${cmd} (agent=${args.agentId.slice(0, 8)})`);
@@ -233,35 +248,62 @@ export class EnvironmentProvisioner {
     env: Record<string, string>,
     timeoutMs: number,
     steps: string[],
+    agentId: string,
+    resolveCredential?: RepositoryCredentialResolver,
   ): Promise<void> {
     const dest = join(agentDir, repo.target_dir);
     const gitDir = join(dest, '.git');
     let fresh = false;
 
+    // Resolve the repository credential ONCE up front — a private repo needs it
+    // for BOTH the fresh clone and a later fetch/pull. null → public repo / no
+    // credential → clone plainly (prior behaviour). The token is used only to
+    // build the clone URL and a 0600 credential-store file; it is redacted from
+    // every step/log line and never persisted in the fingerprint or marker.
+    const cred = repo.resource_id && resolveCredential
+      ? await resolveCredential(repo.resource_id, agentId)
+      : null;
+    const token = cred?.token;
+
     if (await pathExists(gitDir)) {
       // Existing clone — update non-destructively: fetch, then ff-only pull.
+      // (Re)install the credential store first so a private-repo fetch/pull
+      // authenticates. This also self-heals a clone made by a pre-credential
+      // manager (plain origin, no helper) and picks up a rotated token.
+      await this.#installCloneCredential(dest, repo.url, cred, timeoutMs);
       const fetched = await gitRaw(['-C', dest, 'fetch', '--all', '--prune'], undefined, timeoutMs);
-      steps.push(`fetch ${repo.target_dir} → ${fetched.ok ? 'ok' : `FAIL: ${tail(fetched.stderr)}`}`);
+      steps.push(`fetch ${repo.target_dir} → ${fetched.ok ? 'ok' : `FAIL: ${redactToken(tail(fetched.stderr), token)}`}`);
       if (!fetched.ok) {
-        throw new Error(`git fetch failed for ${repo.target_dir}: ${tail(fetched.stderr)}`);
+        throw new Error(`git fetch failed for ${repo.target_dir}: ${redactToken(tail(fetched.stderr), token)}`);
       }
       if (repo.branch) {
         const co = await gitRaw(['-C', dest, 'checkout', repo.branch], undefined, timeoutMs);
-        steps.push(`checkout ${repo.branch} in ${repo.target_dir} → ${co.ok ? 'ok' : `skip: ${tail(co.stderr)}`}`);
+        steps.push(`checkout ${repo.branch} in ${repo.target_dir} → ${co.ok ? 'ok' : `skip: ${redactToken(tail(co.stderr), token)}`}`);
       }
       // ff-only so we never clobber local commits; a diverged tree stays usable.
       const pulled = await gitRaw(['-C', dest, 'pull', '--ff-only'], undefined, timeoutMs);
-      steps.push(`pull --ff-only ${repo.target_dir} → ${pulled.ok ? 'ok' : `non-ff (left as-is): ${tail(pulled.stderr)}`}`);
+      steps.push(`pull --ff-only ${repo.target_dir} → ${pulled.ok ? 'ok' : `non-ff (left as-is): ${redactToken(tail(pulled.stderr), token)}`}`);
     } else {
       await fsp.mkdir(dirname(dest), { recursive: true });
+      // Inject `x-access-token:<token>@` into the clone URL for a private repo
+      // (mirrors worktree-manager). The step/log line keeps the CLEAN url so the
+      // token never surfaces there.
+      const cloneUrl = authenticatedUrl(repo.url, cred);
       const args = ['clone'];
       if (repo.branch) args.push('--branch', repo.branch);
-      args.push(repo.url, dest);
+      args.push('--', cloneUrl, dest);
       log(`[env-provision] clone ${repo.url} → ${repo.target_dir}`);
       const cloned = await gitRaw(args, undefined, timeoutMs);
-      steps.push(`clone ${repo.url} → ${repo.target_dir} ${cloned.ok ? 'ok' : `FAIL: ${tail(cloned.stderr)}`}`);
+      steps.push(`clone ${repo.url} → ${repo.target_dir} ${cloned.ok ? 'ok' : `FAIL: ${redactToken(tail(cloned.stderr), token)}`}`);
       if (!cloned.ok) {
-        throw new Error(`git clone failed for ${repo.url}: ${tail(cloned.stderr)}`);
+        throw new Error(`git clone failed for ${repo.url}: ${redactToken(tail(cloned.stderr), token)}`);
+      }
+      // Scrub the token from origin (so `git remote -v` / the subagent never see
+      // it) and persist it in a private 0600 credential store so later fetch /
+      // pull still authenticate. Mirrors worktree-manager's clone handling.
+      if (token) {
+        await gitRaw(['-C', dest, 'remote', 'set-url', 'origin', repo.url], undefined, timeoutMs);
+        await this.#installCloneCredential(dest, repo.url, cred, timeoutMs);
       }
       fresh = true;
     }
@@ -276,6 +318,39 @@ export class EnvironmentProvisioner {
           throw new Error(`post_clone command failed (exit ${r.code}) in ${repo.target_dir}: ${cmd}\n${tail(r.stderr)}`);
         }
       }
+    }
+  }
+
+  /** Persist the Resource token in the clone's private credential-store file so
+   *  later fetch/pull authenticate WITHOUT the token appearing in `git remote
+   *  -v` or process args. Written 0600 inside the clone's own git dir, keyed by
+   *  protocol+host so `git fetch origin` (clean url) matches it. Mirrors
+   *  worktree-manager.#installRepoCredential. No-op for a public repo /
+   *  non-http url; best-effort — a real auth failure still surfaces on the
+   *  fetch/clone step. */
+  async #installCloneCredential(
+    dest: string,
+    url: string,
+    cred: { username?: string; token: string } | null,
+    timeoutMs: number,
+  ): Promise<void> {
+    if (!cred?.token || !/^https?:\/\//i.test(url)) return;
+    try {
+      const gitDirRes = await gitRaw(['-C', dest, 'rev-parse', '--absolute-git-dir'], undefined, timeoutMs);
+      const gitDir = gitDirRes.ok ? gitDirRes.stdout.trim() : '';
+      if (!gitDir) return;
+      const credentialFile = join(gitDir, 'awb-credentials');
+      const u = new URL(url);
+      u.username = cred.username || 'x-access-token';
+      u.password = cred.token;
+      await fsp.writeFile(credentialFile, `${u.toString()}\n`, { mode: 0o600 });
+      await gitRaw(
+        ['-C', dest, 'config', 'credential.helper', `store --file=${JSON.stringify(credentialFile)}`],
+        undefined,
+        timeoutMs,
+      );
+    } catch {
+      // best-effort — leave the clone as-is; the git step reports any real failure
     }
   }
 
@@ -296,4 +371,33 @@ export class EnvironmentProvisioner {
 function tail(s: string, n = 1500): string {
   const t = (s || '').trim();
   return t.length > n ? `…${t.slice(-n)}` : t;
+}
+
+/** Build a clone URL with the Resource credential injected as HTTPS userinfo
+ *  (`https://x-access-token:<token>@host/...`). No-op — returns the url
+ *  unchanged — for a public repo (no token) or a non-http(s) url (git/ssh/file),
+ *  where userinfo is meaningless. Mirrors worktree-manager's URL handling so the
+ *  two clone paths authenticate identically. */
+export function authenticatedUrl(
+  url: string,
+  cred: { username?: string; token: string } | null | undefined,
+): string {
+  if (!cred?.token || !/^https?:\/\//i.test(url)) return url;
+  try {
+    const u = new URL(url);
+    u.username = cred.username || 'x-access-token';
+    u.password = cred.token;
+    return u.toString();
+  } catch {
+    return url; // unparseable url — clone plainly and let git report it
+  }
+}
+
+/** Replace every occurrence of the secret token with a mask so it can never
+ *  leak into a step line, a log line, or a thrown error message (git may echo a
+ *  token-bearing url back in clone stderr on auth failure). No-op when there is
+ *  no token. */
+export function redactToken(text: string, token?: string): string {
+  if (!token) return text;
+  return text.split(token).join('***');
 }

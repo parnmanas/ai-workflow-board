@@ -1804,6 +1804,9 @@ export interface AgentManagerInstance {
   default_branch?: string | null;
   update_last_checked_at?: string | null;
   update_last_error?: string | null;
+  open_breaker_count?: number;
+  /** Latest error-log upload among the manager identity and its managed agents. */
+  last_error_upload_at?: string | null;
 }
 
 /**

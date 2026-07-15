@@ -797,6 +797,7 @@ async function runRuntime(
       // ST-5b — pass the registry as a snapshot source so each heartbeat
       // reports the currently-supervised agent_ids and their working dirs.
       managedAgents,
+      openBreakerCountProvider: () => circuitBreaker.getOpenBreakers().length,
       // Self-update tracker; lets the heartbeat carry latest_version +
       // update_available so the admin UI can render an Update button.
       updateChecker,

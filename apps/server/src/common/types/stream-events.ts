@@ -53,6 +53,7 @@ export interface StreamEvent<P = unknown> {
 
 export interface BoardUpdatePayload {
   ticket_id: string;
+  repository_resource_id?: string;
   entity_type: string;
   action: string;
   field_changed?: string;

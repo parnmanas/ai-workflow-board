@@ -967,11 +967,7 @@ export class SubagentManager implements SubagentManagerContract {
         // `if (!record) return`), so a `null` code reaching here is an unexpected
         // death, not one of those benign reaps. A genuine one-off transient kill
         // is followed by a successful run that resets the counter, so only a
-        // persistent silent-exit loop pends. (Known narrow gap: full manager
-        // shutdown stop() is not yet drop-first, so a shutdown SIGTERM can still
-        // reach here and be counted — tracked in follow-up 8436f96f; harmless in
-        // practice unless a key already sits at threshold-1 when the manager
-        // exits.)
+        // persistent silent-exit loop pends.
         const tail = this.#collectTail(record);
         const { justOpened, entry } = this.circuitBreaker.record(cbKey, code, tail, {
           forceOpen: errClass.nonRetryable,
@@ -1494,35 +1490,42 @@ export class SubagentManager implements SubagentManagerContract {
       clearInterval(this.#sweepTimer);
       this.#sweepTimer = null;
     }
-    const pids: number[] = [];
+    const victims: SubagentRecord[] = [];
     for (const [pid, rec] of this.#map.entries()) {
       if (rec.kind === 'reservation') continue;
-      pids.push(pid);
+      victims.push(rec);
+      this.#map.delete(pid);
+    }
+    // Reservations have no child process or exit handler. Drop them before any
+    // child is signalled too, so shutdown exposes an empty manager immediately.
+    this.#map.clear();
+    for (const rec of victims) {
       try {
-        process.kill(pid, 'SIGTERM');
+        process.kill(rec.pid, 'SIGTERM');
       } catch {
         /* dead */
       }
     }
-    if (pids.length === 0) {
-      this.#map.clear();
-      return;
-    }
+    if (victims.length === 0) return;
     await new Promise((r) => setTimeout(r, STOP_GRACE_MS));
-    for (const pid of pids) {
+    for (const rec of victims) {
       try {
-        process.kill(pid, 'SIGKILL');
+        process.kill(rec.pid, 'SIGKILL');
       } catch {
         /* gone */
       }
+      // Drop-first makes the per-child exit handler return before its normal
+      // cleanup. Preserve temp-config hygiene explicitly, as stopForAgent does.
+      if (rec.config_path && rec.config_path_is_temp) {
+        await fsp.unlink(rec.config_path).catch(() => {});
+      }
     }
-    this.#map.clear();
     try {
       await fsp.writeFile(this.#persistPath, JSON.stringify({ pids: [] }, null, 2));
     } catch {
       /* best-effort */
     }
-    log(`SubagentManager stopped (terminated ${pids.length} children)`);
+    log(`SubagentManager stopped (terminated ${victims.length} children)`);
   }
 
   _snapshot(): any[] {

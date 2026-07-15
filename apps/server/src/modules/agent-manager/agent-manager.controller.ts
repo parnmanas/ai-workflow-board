@@ -209,6 +209,9 @@ export class AgentManagerController {
     const update_last_error = hasField('update_last_error')
       ? (typeof body.update_last_error === 'string' ? body.update_last_error : null)
       : undefined;
+    const open_breaker_count = hasField('open_breaker_count') && Number.isFinite(body.open_breaker_count)
+      ? Math.max(0, Math.trunc(Number(body.open_breaker_count)))
+      : undefined;
 
     // Self-heal: a manager heartbeat that authenticates with a valid apiKey
     // (apiKey.agent_id is the heartbeat's authoritative agent_id) but whose
@@ -283,6 +286,7 @@ export class AgentManagerController {
       default_branch,
       update_last_checked_at,
       update_last_error,
+      open_breaker_count,
     });
 
     // Mark every managed agent the manager is supervising as alive. Managed
@@ -532,11 +536,15 @@ export class AgentManagerController {
     // under "Edit Identity") instead of the OS hostname. Fallback to
     // hostname when the Agent row is missing or has no name set — keeps
     // the previous default behavior for stale rows.
-    const agentIds = Array.from(new Set(data.map((i) => i.agent_id).filter(Boolean)));
+    const agentIds = Array.from(new Set(data.flatMap((i) => [i.agent_id, ...(i.agent_ids ?? [])]).filter(Boolean)));
     const nameMap = new Map<string, string>();
+    const errorUploadMap = new Map<string, string>();
     if (agentIds.length > 0) {
       const agents = await this.agentRepo.find({ where: { id: In(agentIds) } });
-      for (const a of agents) if (a.name) nameMap.set(a.id, a.name);
+      for (const a of agents) {
+        if (a.name) nameMap.set(a.id, a.name);
+        if (a.last_error_upload_at) errorUploadMap.set(a.id, new Date(a.last_error_upload_at).toISOString());
+      }
     }
     // Join each worktree entry's ticket_id → title so the admin "Live worktrees"
     // panel can show "slot → #ticket8 <title>" (ticket 72fc244f). Same enrich
@@ -561,6 +569,11 @@ export class AgentManagerController {
     const enriched = data.map((inst) => ({
       ...inst,
       agent_name: nameMap.get(inst.agent_id) || null,
+      last_error_upload_at: [inst.agent_id, ...(inst.agent_ids ?? [])]
+        .map((id) => errorUploadMap.get(id))
+        .filter((ts): ts is string => !!ts)
+        .sort()
+        .at(-1) ?? null,
       ...(inst.active_worktrees
         ? {
             active_worktrees: inst.active_worktrees.map((w) => ({
