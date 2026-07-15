@@ -257,7 +257,7 @@ This ticket is in the In Progress column. Implement the work on a feature branch
 1. **Create or reuse the feature branch — always start from the latest tip**
    - \`git fetch origin\` — **always**, every trigger. Never start work against a stale local ref.
    - Resolve the base branch:
-     - If the trigger prompt includes a **Base repository** block, use the \`Base branch\` listed there. Verify your \`working_dir\` is a clone of the listed URL — if it isn't, stop and ask in a comment instead of guessing.
+     - If the trigger prompt includes a **Base repository** block, use the \`Base branch\` listed there. The current work folder is the checkout prepared for that repository; do not inspect or reinterpret the agent's configured storage directory.
      - Otherwise, fall back to the repository's default branch (\`origin/HEAD\`).
    - Pull the base branch to the latest tip: \`git checkout <base-branch> && git pull --ff-only origin <base-branch>\`. Do this **every time** — for a brand-new branch *and* before reusing an existing one. Work always begins on the current tip of the base, never on a stale snapshot.
    - **New branch** — from that up-to-date base, \`git checkout -b ticket/{ticket_id_short}-{slug}\` where:

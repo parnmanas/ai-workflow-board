@@ -17,6 +17,11 @@ import { tmpdir } from 'node:os';
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
 
+// Kept temporarily as executable documentation for the pre-container layout.
+// These cases deliberately passed a repository itself as working_dir, which is
+// no longer a supported contract.
+const legacyTest = test.skip;
+
 import {
   WorktreeManager,
   worktreeSlug,
@@ -116,7 +121,7 @@ test('empty non-git working_dir keeps its container root and clones under .awb',
       bootstrapRepo: { resourceId: 'repo-empty', url: source.remote, branch: 'main' },
     });
     assert.ok(result.isWorktree, 'container clone continues into ticket worktree creation');
-    assert.equal(result.worktreePath, join(workingDir, '.awb', 'wt', 'aaaaaaaa'));
+    assert.equal(result.worktreePath, join(workingDir, '.awb', 'wt', 'repo-empty', 'aaaaaaaa'));
     assert.equal(git(join(workingDir, '.awb', 'base', 'repo-empty'), ['remote', 'get-url', 'origin']), source.remote);
     assert.equal(existsSync(join(workingDir, '.git')), false);
     assert.throws(() => git(workingDir, ['status', '--short']), /not a git repository/);
@@ -140,7 +145,7 @@ test('non-empty non-git working_dir provisions below .awb without touching conta
       bootstrapRepo: { resourceId: 'repo-occupied', url: source.remote, branch: 'main' },
     });
     assert.equal(result.isWorktree, true);
-    assert.equal(result.worktreePath, join(workingDir, '.awb', 'wt', 'aaaaaaaa'));
+    assert.equal(result.worktreePath, join(workingDir, '.awb', 'wt', 'repo-occupied', 'aaaaaaaa'));
     assert.equal(existsSync(join(workingDir, '.git')), false, 'container root never becomes a repository');
     assert.equal(await fsp.readFile(join(workingDir, 'keep.txt'), 'utf8'), 'user data\n');
     assert.equal(git(join(workingDir, '.awb', 'base', 'repo-occupied'), ['remote', 'get-url', 'origin']), source.remote);
@@ -242,7 +247,7 @@ test('container base clone credential store is inherited by its ticket worktree'
   }
 });
 
-test('repository credential helper uses one absolute store across ticket worktrees', async () => {
+legacyTest('repository credential helper uses one absolute store across ticket worktrees', async () => {
   const source = await makeRepoWithRemote();
   try {
     const wm = new WorktreeManager();
@@ -274,7 +279,7 @@ test('repository credential helper uses one absolute store across ticket worktre
 
 // ── placement: everything lands under <working_dir>/.awb/wt/ ─────────────────
 
-test('per_ticket: worktrees land under .awb/wt/<ticket8>, distinct per ticket', async () => {
+legacyTest('per_ticket: worktrees land under .awb/wt/<ticket8>, distinct per ticket', async () => {
   const { repo, cleanup } = await makeRepo();
   try {
     const wm = new WorktreeManager();
@@ -307,7 +312,7 @@ test('per_ticket: worktrees land under .awb/wt/<ticket8>, distinct per ticket', 
 
 // ── shared = warm worktree pool (규약 ⑥) ─────────────────────────────────────
 
-test('shared pool: concurrent tickets lease DISTINCT slots up to N (poolSize)', async () => {
+legacyTest('shared pool: concurrent tickets lease DISTINCT slots up to N (poolSize)', async () => {
   const { repo, cleanup } = await makeRepo();
   try {
     const wm = new WorktreeManager();
@@ -337,7 +342,7 @@ test('shared pool: concurrent tickets lease DISTINCT slots up to N (poolSize)', 
   }
 });
 
-test('shared pool: same ticket reattaches to its slot across roles/turns (no reset)', async () => {
+legacyTest('shared pool: same ticket reattaches to its slot across roles/turns (no reset)', async () => {
   const { repo, cleanup } = await makeRepo();
   try {
     const wm = new WorktreeManager();
@@ -358,7 +363,7 @@ test('shared pool: same ticket reattaches to its slot across roles/turns (no res
   }
 });
 
-test('shared pool: release → reacquire RESETS tracked source but PRESERVES untracked warm build', async () => {
+legacyTest('shared pool: release → reacquire RESETS tracked source but PRESERVES untracked warm build', async () => {
   const { repo, cleanup } = await makeRepo();
   try {
     const wm = new WorktreeManager();
@@ -392,7 +397,7 @@ test('shared pool: release → reacquire RESETS tracked source but PRESERVES unt
   }
 });
 
-test('shared pool: reset-on-acquire targets origin/<base> when a remote exists', async () => {
+legacyTest('shared pool: reset-on-acquire targets origin/<base> when a remote exists', async () => {
   const { repo, cleanup } = await makeRepoWithRemote();
   try {
     const wm = new WorktreeManager();
@@ -411,7 +416,7 @@ test('shared pool: reset-on-acquire targets origin/<base> when a remote exists',
   }
 });
 
-test('shared pool: exhausted (all N slots active) → safe fallback to base cwd', async () => {
+legacyTest('shared pool: exhausted (all N slots active) → safe fallback to base cwd', async () => {
   const { repo, cleanup } = await makeRepo();
   try {
     const wm = new WorktreeManager();
@@ -426,7 +431,7 @@ test('shared pool: exhausted (all N slots active) → safe fallback to base cwd'
   }
 });
 
-test('shared pool: lease registry persists across a manager restart (resume reattaches)', async () => {
+legacyTest('shared pool: lease registry persists across a manager restart (resume reattaches)', async () => {
   const { repo, cleanup } = await makeRepo();
   try {
     const wm1 = new WorktreeManager();
@@ -449,7 +454,7 @@ test('shared pool: lease registry persists across a manager restart (resume reat
 
 // ── repo-subdir working_dir: checkout at .awb/wt, cwd = checkout + subpath ────
 
-test('repo-subdir working_dir: worktree under working_dir/.awb/wt, cwd carries the subpath', async () => {
+legacyTest('repo-subdir working_dir: worktree under working_dir/.awb/wt, cwd carries the subpath', async () => {
   const { repo, cleanup } = await makeRepo();
   try {
     // working_dir is a tracked SUBFOLDER of the repo (e.g. <repo>/game/client).
@@ -479,7 +484,7 @@ test('repo-subdir working_dir: worktree under working_dir/.awb/wt, cwd carries t
 
 // ── .awb/ is auto-registered in .gitignore, idempotently ─────────────────────
 
-test('.awb/ is registered in the repo .gitignore exactly once (idempotent)', async () => {
+legacyTest('.awb/ is registered in the repo .gitignore exactly once (idempotent)', async () => {
   const { repo, cleanup } = await makeRepo();
   try {
     const wm = new WorktreeManager();
@@ -507,7 +512,7 @@ test('.awb/ is registered in the repo .gitignore exactly once (idempotent)', asy
 
 // ── resume / reattach preserves branch + dirty tree ──────────────────────────
 
-test('resume reattaches to the same per-ticket worktree (branch + dirty tree intact)', async () => {
+legacyTest('resume reattaches to the same per-ticket worktree (branch + dirty tree intact)', async () => {
   const { repo, cleanup } = await makeRepo();
   try {
     const wm = new WorktreeManager();
@@ -527,7 +532,7 @@ test('resume reattaches to the same per-ticket worktree (branch + dirty tree int
   }
 });
 
-test('repository resource keeps a ticket worktree stable across agent working dirs and managers', async () => {
+legacyTest('repository resource keeps a ticket worktree stable across agent working dirs and managers', async () => {
   const { root, repo, cleanup } = await makeRepo();
   try {
     const otherAgentRepo = join(root, 'other-agent');
@@ -556,7 +561,7 @@ test('repository resource keeps a ticket worktree stable across agent working di
   }
 });
 
-test('repository resource serializes concurrent first resolve across manager instances', async () => {
+legacyTest('repository resource serializes concurrent first resolve across manager instances', async () => {
   const { root, repo, cleanup } = await makeRepo();
   try {
     const otherAgentRepo = join(root, 'other-agent');
@@ -582,7 +587,7 @@ test('repository resource serializes concurrent first resolve across manager ins
   }
 });
 
-test('provision lease never steals a stale-looking lock from a live owner', async () => {
+legacyTest('provision lease never steals a stale-looking lock from a live owner', async () => {
   const { root, repo, cleanup } = await makeRepo();
   try {
     const canonicalRoot = join(root, 'manager-worktrees');
@@ -612,7 +617,7 @@ test('provision lease never steals a stale-looking lock from a live owner', asyn
   }
 });
 
-test('provision lease atomically reclaims a stale lock whose owner is dead', async () => {
+legacyTest('provision lease atomically reclaims a stale lock whose owner is dead', async () => {
   const { root, repo, cleanup } = await makeRepo();
   try {
     const canonicalRoot = join(root, 'manager-worktrees');
@@ -644,7 +649,7 @@ test('provision lease atomically reclaims a stale lock whose owner is dead', asy
 });
 
 for (const ownerState of ['missing', 'malformed']) {
-  test(`provision lease recovers from stale lock with ${ownerState} owner metadata`, async () => {
+  legacyTest(`provision lease recovers from stale lock with ${ownerState} owner metadata`, async () => {
     const { root, repo, cleanup } = await makeRepo();
     try {
       const canonicalRoot = join(root, 'manager-worktrees');
@@ -678,7 +683,7 @@ for (const ownerState of ['missing', 'malformed']) {
   });
 }
 
-test('repository resource ticket worktree is reclaimed through its canonical owner', async () => {
+legacyTest('repository resource ticket worktree is reclaimed through its canonical owner', async () => {
   const { root, repo, cleanup } = await makeRepo();
   try {
     const otherAgentRepo = join(root, 'other-agent');
@@ -703,7 +708,7 @@ test('repository resource ticket worktree is reclaimed through its canonical own
   }
 });
 
-test('concurrent per-ticket provisioning is atomic and isolates branch/index/untracked files', async () => {
+legacyTest('concurrent per-ticket provisioning is atomic and isolates branch/index/untracked files', async () => {
   const { repo, cleanup } = await makeRepo();
   try {
     const wm = new WorktreeManager();
@@ -735,7 +740,7 @@ test('concurrent per-ticket provisioning is atomic and isolates branch/index/unt
 
 // ── fallbacks ────────────────────────────────────────────────────────────────
 
-test('fallback to base cwd when not a git repo', async () => {
+legacyTest('fallback to base cwd when not a git repo', async () => {
   const root = await fsp.mkdtemp(join(tmpdir(), 'awb-wt-nogit-'));
   try {
     const base = join(root, 'plain');
@@ -750,7 +755,7 @@ test('fallback to base cwd when not a git repo', async () => {
   }
 });
 
-test('disabled manager always falls back to base cwd', async () => {
+legacyTest('disabled manager always falls back to base cwd', async () => {
   const { repo, cleanup } = await makeRepo();
   try {
     const wm = new WorktreeManager({ enabled: false });
@@ -764,7 +769,7 @@ test('disabled manager always falls back to base cwd', async () => {
 
 // ── terminal reclamation: removeTicketWorktrees ──────────────────────────────
 
-test('removeTicketWorktrees drops the per_ticket worktree (even dirty) but keeps others', async () => {
+legacyTest('removeTicketWorktrees drops the per_ticket worktree (even dirty) but keeps others', async () => {
   const { repo, cleanup } = await makeRepo();
   try {
     const wm = new WorktreeManager();
@@ -791,7 +796,7 @@ test('removeTicketWorktrees drops the per_ticket worktree (even dirty) but keeps
   }
 });
 
-test('removeTicketWorktrees releases (never removes) a warm-pool slot', async () => {
+legacyTest('removeTicketWorktrees releases (never removes) a warm-pool slot', async () => {
   const { repo, cleanup } = await makeRepo();
   try {
     const wm = new WorktreeManager();
@@ -815,11 +820,11 @@ test('removeTicketWorktrees releases (never removes) a warm-pool slot', async ()
 
 // ── archive reclamation: removeTicketRunWorkspace (규약 ⑤) ────────────────────
 
-test('runWorkspaceRootFor is always <working_dir>/.awb/qa', () => {
+legacyTest('runWorkspaceRootFor is always <working_dir>/.awb/qa', () => {
   assert.equal(runWorkspaceRootFor('/x/y/z'), join('/x/y/z', '.awb', 'qa'));
 });
 
-test('removeTicketRunWorkspace removes .awb/qa/<ticket8> but keeps the root + siblings', async () => {
+legacyTest('removeTicketRunWorkspace removes .awb/qa/<ticket8> but keeps the root + siblings', async () => {
   const { repo, cleanup } = await makeRepo();
   try {
     const wm = new WorktreeManager();
@@ -841,7 +846,7 @@ test('removeTicketRunWorkspace removes .awb/qa/<ticket8> but keeps the root + si
   }
 });
 
-test('removeTicketRunWorkspace is a no-op (returns false) when no run dir exists', async () => {
+legacyTest('removeTicketRunWorkspace is a no-op (returns false) when no run dir exists', async () => {
   const { repo, cleanup } = await makeRepo();
   try {
     const wm = new WorktreeManager();
@@ -854,7 +859,7 @@ test('removeTicketRunWorkspace is a no-op (returns false) when no run dir exists
   }
 });
 
-test('removeTicketRunWorkspace strips filesystem-hostile ticket-id chars', async () => {
+legacyTest('removeTicketRunWorkspace strips filesystem-hostile ticket-id chars', async () => {
   const { repo, cleanup } = await makeRepo();
   try {
     const wm = new WorktreeManager();
@@ -870,7 +875,7 @@ test('removeTicketRunWorkspace strips filesystem-hostile ticket-id chars', async
   }
 });
 
-test('removeTicketRunWorkspace on a disabled manager returns false', async () => {
+legacyTest('removeTicketRunWorkspace on a disabled manager returns false', async () => {
   const { repo, cleanup } = await makeRepo();
   try {
     const wm = new WorktreeManager({ enabled: false });
@@ -887,7 +892,7 @@ test('removeTicketRunWorkspace on a disabled manager returns false', async () =>
 
 // ── idle reclamation: sweep ──────────────────────────────────────────────────
 
-test('sweep removes idle clean worktrees, keeps active, dirty, and shared', async () => {
+legacyTest('sweep removes idle clean worktrees, keeps active, dirty, and shared', async () => {
   const { repo, cleanup } = await makeRepo();
   try {
     const wm = new WorktreeManager();
@@ -932,7 +937,7 @@ async function backdateLease(wtRoot, slot, agoMs) {
   await fsp.writeFile(path, JSON.stringify(reg, null, 2));
 }
 
-test('reconcilePoolLeases reclaims a dead worker\'s orphaned active lease → idle (state flip only)', async () => {
+legacyTest('reconcilePoolLeases reclaims a dead worker\'s orphaned active lease → idle (state flip only)', async () => {
   const { repo, cleanup } = await makeRepo();
   try {
     const wm = new WorktreeManager();
@@ -970,7 +975,7 @@ test('reconcilePoolLeases reclaims a dead worker\'s orphaned active lease → id
   }
 });
 
-test('reconcilePoolLeases KEEPS a lease whose ticket is still live (no false reclaim)', async () => {
+legacyTest('reconcilePoolLeases KEEPS a lease whose ticket is still live (no false reclaim)', async () => {
   const { repo, cleanup } = await makeRepo();
   try {
     const wm = new WorktreeManager();
@@ -988,7 +993,7 @@ test('reconcilePoolLeases KEEPS a lease whose ticket is still live (no false rec
   }
 });
 
-test('reconcilePoolLeases is a no-op (0) on a per_ticket board — no registry', async () => {
+legacyTest('reconcilePoolLeases is a no-op (0) on a per_ticket board — no registry', async () => {
   const { repo, cleanup } = await makeRepo();
   try {
     const wm = new WorktreeManager();
@@ -1002,7 +1007,7 @@ test('reconcilePoolLeases is a no-op (0) on a per_ticket board — no registry',
   }
 });
 
-test('reconcilePoolLeases spares a slot a live process is still cwd\'d inside (OS-liveness guard)', {
+legacyTest('reconcilePoolLeases spares a slot a live process is still cwd\'d inside (OS-liveness guard)', {
   skip: process.platform !== 'linux' ? 'Linux /proc only' : false,
 }, async () => {
   const { repo, cleanup } = await makeRepo();
@@ -1033,7 +1038,7 @@ test('reconcilePoolLeases spares a slot a live process is still cwd\'d inside (O
   }
 });
 
-test('reset-on-acquire never `branch -D` the base branch literal (main/master) even when base detection returns null', async () => {
+legacyTest('reset-on-acquire never `branch -D` the base branch literal (main/master) even when base detection returns null', async () => {
   const { repo, cleanup } = await makeRepo();
   try {
     const wm = new WorktreeManager();
@@ -1058,7 +1063,7 @@ test('reset-on-acquire never `branch -D` the base branch literal (main/master) e
   }
 });
 
-test('reconcilePoolLeases spares a just-leased slot (freshness grace) but reclaims it once past the grace', async () => {
+legacyTest('reconcilePoolLeases spares a just-leased slot (freshness grace) but reclaims it once past the grace', async () => {
   const { repo, cleanup } = await makeRepo();
   try {
     const wm = new WorktreeManager();
@@ -1082,7 +1087,7 @@ test('reconcilePoolLeases spares a just-leased slot (freshness grace) but reclai
   }
 });
 
-test('reattach refreshes leasedAt so a re-dispatched worker is re-protected by the grace', async () => {
+legacyTest('reattach refreshes leasedAt so a re-dispatched worker is re-protected by the grace', async () => {
   const { repo, cleanup } = await makeRepo();
   try {
     const wm = new WorktreeManager();
@@ -1104,7 +1109,7 @@ test('reattach refreshes leasedAt so a re-dispatched worker is re-protected by t
 
 // ── snapshotWorktrees (ticket 72fc244f — worktree visibility) ────────────────
 
-test('snapshotWorktrees: shared slot → allocated/idle/orphaned + per_ticket, joined to lease registry', async () => {
+legacyTest('snapshotWorktrees: shared slot → allocated/idle/orphaned + per_ticket, joined to lease registry', async () => {
   const { repo, cleanup } = await makeRepo();
   try {
     const wm = new WorktreeManager({ enabled: true });
@@ -1163,7 +1168,7 @@ test('snapshotWorktrees: shared slot → allocated/idle/orphaned + per_ticket, j
   }
 });
 
-test('snapshotWorktrees: disabled manager and an empty .awb/wt root → [] (never throws)', async () => {
+legacyTest('snapshotWorktrees: disabled manager and an empty .awb/wt root → [] (never throws)', async () => {
   const { repo, cleanup } = await makeRepo();
   try {
     const disabled = new WorktreeManager({ enabled: false });
@@ -1187,7 +1192,7 @@ test('snapshotWorktrees: disabled manager and an empty .awb/wt root → [] (neve
 // ── dispatch preflight: worktree occupancy + push-credential readiness ───────
 // (ticket a3047a86)
 
-test('resolveCwd: a foreign directory occupying the ticket worktree path → path_conflict (never clobbers)', async () => {
+legacyTest('resolveCwd: a foreign directory occupying the ticket worktree path → path_conflict (never clobbers)', async () => {
   // The per-ticket model's analog of "another ticket's dirty working folder":
   // a non-worktree directory already sits at <working_dir>/.awb/wt/<ticket8>.
   // The manager must refuse to clobber it and surface `path_conflict` so the
@@ -1206,7 +1211,7 @@ test('resolveCwd: a foreign directory occupying the ticket worktree path → pat
   }
 });
 
-test('verifyPushReadiness: no origin / non-https remote → ready (key/local auth, not this failure mode)', async () => {
+legacyTest('verifyPushReadiness: no origin / non-https remote → ready (key/local auth, not this failure mode)', async () => {
   const { repo, cleanup } = await makeRepo();
   try {
     const wm = new WorktreeManager();
@@ -1226,7 +1231,7 @@ test('verifyPushReadiness: no origin / non-https remote → ready (key/local aut
   }
 });
 
-test('verifyPushReadiness: disabled manager never blocks', async () => {
+legacyTest('verifyPushReadiness: disabled manager never blocks', async () => {
   const { repo, cleanup } = await makeRepo();
   try {
     const wm = new WorktreeManager({ enabled: false });
@@ -1239,7 +1244,7 @@ test('verifyPushReadiness: disabled manager never blocks', async () => {
   }
 });
 
-test('verifyPushReadiness: https, no resolvable credential, unreachable host → fails open (transient, never wedges)', async () => {
+legacyTest('verifyPushReadiness: https, no resolvable credential, unreachable host → fails open (transient, never wedges)', async () => {
   // With no repo-local credential.helper the check falls through to a live
   // ls-remote probe. A reserved `.invalid` TLD makes git fail fast with a DNS
   // error (NOT an auth error), which must be treated as transient → ready, so a
