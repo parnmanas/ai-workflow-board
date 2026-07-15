@@ -25,7 +25,7 @@ import type { ManagedAgentContextRegistry } from './managed-agent-context.js';
 import type { WorktreeManager, WorktreeMode } from './worktree-manager.js';
 import { prepareChatAttachments } from './chat-attachment-prep.js';
 import { injectWorkFolder } from './prompts.js';
-import { DispatchBlockerTracker, RoleSpawnSuppressor, classifyWorktreeOutcome, managedWorktreePath } from './dispatch-preflight.js';
+import { DispatchBlockerTracker, RoleSpawnSuppressor, classifyWorktreeOutcome, managedWorktreePath, provisioningPendReason } from './dispatch-preflight.js';
 import type { HarnessSpec, ResolvedEffortPreset, EffortLevel } from './cli-adapters/base.js';
 import { createAdapter, ADAPTER_CAPABILITIES } from './cli-adapters/index.js';
 import {
@@ -1018,7 +1018,7 @@ export class EventDispatcher {
       const blockerKind = worktreeProvision.blockerKind || `worktree:${worktreeProvision.reason || 'unknown'}`;
       // Record the abort per (ticket,role) so the next supervisor re-trigger is
       // suppressed at the gate above — even when the comment below is de-duped.
-      this.#spawnSuppressor.note(ev.ticket_id, ev.action, blockerKind, Date.now());
+      const provisionBlock = this.#spawnSuppressor.note(ev.ticket_id, ev.action, blockerKind, Date.now());
       if (ev.ticket_id && this.#dispatchBlockers.shouldComment(ev.ticket_id, blockerKind)) {
         const detailLine = worktreeProvision.detail ? `\n세부: \`${worktreeProvision.detail}\`` : '';
         // Managed, working_dir-relative (credential-free) checkout path that
@@ -1032,6 +1032,32 @@ export class EventDispatcher {
             `repository resource, credential과 working_dir 아래 AWB 관리 폴더(\`.awb/base\`, \`.awb/wt\`)를 확인한 뒤 다시 트리거하세요.\n\n` +
             `_동일 오류로 인한 supervisor 자동 재트리거는 백오프로 억제됩니다 — 환경을 고친 뒤 코멘트/수동 트리거로 재개하세요._`,
         });
+      }
+      // ticket 52eedadf: the cooldown backoff above thins the supervisor storm
+      // but never STOPS it — a durable blocker keeps getting one probe per window
+      // forever, and each probe is a fresh live-twin window. A pre-spawn
+      // provisioning abort never reaches an exit handler, so it never fed the
+      // circuit-breaker that would otherwise pend (the hole that looped ticket
+      // c47194d9 for ~6h). On the single abort that confirms the episode durable,
+      // pend the ticket: getAllocatedTickets then skips it and the supervisor
+      // stops re-emitting BOTH normal and forced triggers, so no strand can spawn
+      // until an operator unpends (explicit retry) or a later green preflight
+      // (reprovision success) clears the suppressor below. `shouldPend` is true on
+      // exactly ONE abort per episode, so we pend once — no duplicate pended-audit
+      // rows — and rely on the server pending gate (not repeated pends) to hold.
+      if (ev.ticket_id && provisionBlock.shouldPend) {
+        await fireAndForgetTool(this.#config, 'pend_ticket', {
+          ticket_id: ev.ticket_id,
+          reason: provisioningPendReason({
+            kind: blockerKind,
+            reason: worktreeProvision.reason,
+            detail: worktreeProvision.detail,
+            count: provisionBlock.count,
+          }),
+        });
+        log(
+          `[worktree] durable provisioning block — pended ticket=${ev.ticket_id} role=${ev.action} blocker=${blockerKind} aborts=${provisionBlock.count}`,
+        );
       }
       log(
         `Trigger aborted — ticket worktree verification failed: ticket=${ev.ticket_id} role=${ev.action} reason=${worktreeProvision.reason || 'unknown'} blocker=${blockerKind}${worktreeProvision.path ? ` path=${worktreeProvision.path}` : ''}`,
@@ -1057,7 +1083,7 @@ export class EventDispatcher {
         const blockerKind = readiness.reason || 'push_credential_unavailable';
         // Same durable-blocker backoff as the worktree path: record so the next
         // supervisor re-trigger for this ticket-role is dropped at the gate.
-        this.#spawnSuppressor.note(ev.ticket_id, ev.action, blockerKind, Date.now());
+        const provisionBlock = this.#spawnSuppressor.note(ev.ticket_id, ev.action, blockerKind, Date.now());
         if (this.#dispatchBlockers.shouldComment(ev.ticket_id, blockerKind)) {
           await fireAndForgetTool(this.#config, 'add_comment', {
             ticket_id: ev.ticket_id,
@@ -1068,6 +1094,23 @@ export class EventDispatcher {
               `이 repository resource 에 GitHub 자격 증명(토큰)을 설정하거나 push 가능한 환경으로 전환한 뒤 다시 트리거하세요. ` +
               `(Merging 단계의 push 실패로 CLI 세션을 낭비하지 않도록 dispatch 전에 검증합니다.)`,
           });
+        }
+        // ticket 52eedadf: a missing push credential is likewise durable (an
+        // operator must add it) — escalate the same way as the worktree path so
+        // the supervisor stops re-triggering once the episode is confirmed durable.
+        if (provisionBlock.shouldPend) {
+          await fireAndForgetTool(this.#config, 'pend_ticket', {
+            ticket_id: ev.ticket_id,
+            reason: provisioningPendReason({
+              kind: blockerKind,
+              reason: readiness.reason,
+              detail: readiness.detail,
+              count: provisionBlock.count,
+            }),
+          });
+          log(
+            `[push-credential] durable provisioning block — pended ticket=${ev.ticket_id} role=${ev.action} blocker=${blockerKind} aborts=${provisionBlock.count}`,
+          );
         }
         log(
           `Trigger aborted — push credential unavailable: ticket=${ev.ticket_id} detail=${readiness.detail || ''}`,

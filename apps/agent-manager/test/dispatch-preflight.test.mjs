@@ -22,6 +22,8 @@ import {
   managedWorktreePath,
   DispatchBlockerTracker,
   RoleSpawnSuppressor,
+  DEFAULT_PEND_AFTER_ABORTS,
+  provisioningPendReason,
   firstLine,
 } from '../dist/lib/dispatch-preflight.js';
 
@@ -447,4 +449,95 @@ test('RoleSpawnSuppressor: (ticket,role) pairs are independent; missing id/role 
   s.note(undefined, 'assignee', 'k', 0); // no-op, must not throw
   s.clear(undefined, undefined); // no-op, must not throw
   assert.equal(s.activeKind(undefined, undefined), undefined);
+});
+
+// ── RoleSpawnSuppressor durable-pend escalation (ticket 52eedadf) ─────────────
+// The cooldown backoff above only THINS the supervisor storm (one probe per
+// window, forever). A durable blocker that never self-heals must eventually be
+// pended so the supervisor stops entirely — note() signals that escalation once
+// the episode has re-aborted `pendAfterAborts` times.
+
+test('note(): returns the running count and does NOT pend below the threshold', () => {
+  const s = new RoleSpawnSuppressor(1000, 3);
+  const a = s.note('t', 'assignee', 'worktree:not_a_git_repo', 0);
+  assert.deepEqual(a, { count: 1, shouldPend: false });
+  const b = s.note('t', 'assignee', 'worktree:not_a_git_repo', 10);
+  assert.deepEqual(b, { count: 2, shouldPend: false }, 'still backoff-only at count 2');
+});
+
+test('note(): escalates to pend exactly when the abort count reaches the threshold', () => {
+  const s = new RoleSpawnSuppressor(1000, 3);
+  assert.equal(s.note('t', 'assignee', 'k', 0).shouldPend, false, 'abort 1');
+  assert.equal(s.note('t', 'assignee', 'k', 1).shouldPend, false, 'abort 2');
+  const third = s.note('t', 'assignee', 'k', 2);
+  assert.deepEqual(third, { count: 3, shouldPend: true }, 'abort 3 → durable → pend');
+});
+
+test('note(): shouldPend stays true PAST the threshold (unpend-without-fix re-pends, not resumes)', () => {
+  const s = new RoleSpawnSuppressor(1000, 2);
+  s.note('t', 'assignee', 'k', 0);            // count 1
+  assert.equal(s.note('t', 'assignee', 'k', 1).shouldPend, true, 'count 2 pends');
+  // Operator unpends without fixing → the very next re-abort must pend again
+  // (count keeps climbing ≥ threshold) rather than let the storm resume.
+  assert.deepEqual(s.note('t', 'assignee', 'k', 2), { count: 3, shouldPend: true });
+});
+
+test('note(): clear() resets the episode so a reprovision-then-rebreak backs off afresh (no instant re-pend)', () => {
+  const s = new RoleSpawnSuppressor(1000, 3);
+  s.note('t', 'assignee', 'k', 0);
+  s.note('t', 'assignee', 'k', 1);
+  s.note('t', 'assignee', 'k', 2); // pended
+  s.clear('t', 'assignee');        // green preflight (reprovision success)
+  const fresh = s.note('t', 'assignee', 'k', 3);
+  assert.deepEqual(fresh, { count: 1, shouldPend: false }, 'a fresh break starts a new backoff, not an instant pend');
+});
+
+test('note(): a DIFFERENT blocker kind restarts the count (no cross-kind pend carryover)', () => {
+  const s = new RoleSpawnSuppressor(1000, 2);
+  s.note('t', 'assignee', 'worktree:not_a_git_repo', 0);
+  assert.equal(s.note('t', 'assignee', 'worktree:not_a_git_repo', 1).shouldPend, true, 'same kind reaches 2 → pend');
+  const changed = s.note('t', 'assignee', 'push_credential_unavailable', 2);
+  assert.deepEqual(changed, { count: 1, shouldPend: false }, 'kind change resets to a fresh backoff');
+});
+
+test('note(): (ticket,role) episodes are independent for the pend decision', () => {
+  const s = new RoleSpawnSuppressor(1000, 2);
+  s.note('t', 'assignee', 'k', 0);
+  // A different role on the same ticket is a separate episode — one abort only.
+  assert.equal(s.note('t', 'reviewer', 'k', 0).shouldPend, false);
+  // The assignee episode reaching the threshold pends only itself.
+  assert.equal(s.note('t', 'assignee', 'k', 1).shouldPend, true);
+});
+
+test('note(): missing id/role never escalates and never throws', () => {
+  const s = new RoleSpawnSuppressor(1000, 1);
+  assert.deepEqual(s.note(undefined, 'assignee', 'k', 0), { count: 0, shouldPend: false });
+  assert.deepEqual(s.note('t', undefined, 'k', 0), { count: 0, shouldPend: false });
+});
+
+test('DEFAULT_PEND_AFTER_ABORTS is the small, >1 default (self-heal once, then hard stop)', () => {
+  assert.equal(typeof DEFAULT_PEND_AFTER_ABORTS, 'number');
+  assert.ok(DEFAULT_PEND_AFTER_ABORTS > 1, 'a one-off transient still gets a cooldown self-heal before any pend');
+  // The dispatcher constructs RoleSpawnSuppressor() with no threshold arg, so the
+  // default is what actually gates production pends.
+  const s = new RoleSpawnSuppressor();
+  let last;
+  for (let i = 0; i < DEFAULT_PEND_AFTER_ABORTS; i++) last = s.note('t', 'assignee', 'k', i);
+  assert.equal(last.shouldPend, true, 'the default threshold pends after DEFAULT_PEND_AFTER_ABORTS aborts');
+});
+
+// ── provisioningPendReason (User-tab durable-block copy) ──────────────────────
+
+test('provisioningPendReason: names the cause + count and both recovery paths', () => {
+  const r = provisioningPendReason({ kind: 'worktree:not_a_git_repo', reason: 'not_a_git_repo', count: 3 });
+  assert.match(r, /not_a_git_repo/, 'names the concrete cause');
+  assert.match(r, /3회/, 'states how many consecutive aborts');
+  assert.match(r, /unpend/, 'tells the operator how to explicitly retry');
+  assert.match(r, /자동으로 재개/, 'documents the reprovision-success auto-recovery path');
+});
+
+test('provisioningPendReason: falls back to the blocker kind when no reason, appends detail', () => {
+  const r = provisioningPendReason({ kind: 'push_credential_unavailable', detail: 'could not read Username', count: 5 });
+  assert.match(r, /push_credential_unavailable/);
+  assert.match(r, /could not read Username/, 'surfaces the secret-free detail');
 });
