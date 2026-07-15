@@ -24,7 +24,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, existsSync, writeFileSync, readFileSync, utimesSync } from 'node:fs';
+import { mkdtempSync, existsSync, writeFileSync, readFileSync, utimesSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -311,4 +311,115 @@ test('fresh index.lock actively blocking a git op is reclaimed reactively and re
     (second.notes || []).some((n) => n.includes('index.lock') && /차단/.test(n)),
     'reactive (blocking) recovery reason surfaced',
   );
+});
+
+// ── credential 주입 (ticket 622bc350: run-provisioner 도 공유 헬퍼 경유) ──────────
+//
+// 공유 repo-credential 헬퍼를 태워 fresh clone / reuse fetch 양쪽에서 private repo
+// 를 인증하되, 토큰은 steps/log/origin 에 노출되지 않고 `.git/awb-credentials`(owner
+// 전용)에만 남는지 검증한다. 실제 원격 대신 로컬 bare repo 를 쓰고, 서버가 실어보낼
+// 인증 URL 을 GIT_CONFIG insteadOf 로 그 로컬 원격에 매핑한다(worktree 크리덴셜
+// 회귀 테스트와 동일 기법). clean URL 도 매핑해 scrub 후 fetch 가 로컬 원격에 닿게 한다.
+
+test('provisionRunWorkspace: credential 주입 — fresh clone origin scrub + awb-credentials, reuse fetch 인증, 토큰 비노출', async () => {
+  const remote = makeRemote();
+  const workingDir = mkdtempSync(join(tmpdir(), 'awb-runprov-cred-'));
+  const cleanUrl = 'https://git.example.test/acme/priv.git';
+  const authedUrl = 'https://tok-user:sekret@git.example.test/acme/priv.git';
+  const prev = {
+    count: process.env.GIT_CONFIG_COUNT,
+    k0: process.env.GIT_CONFIG_KEY_0,
+    v0: process.env.GIT_CONFIG_VALUE_0,
+    k1: process.env.GIT_CONFIG_KEY_1,
+    v1: process.env.GIT_CONFIG_VALUE_1,
+  };
+  try {
+    // authed URL(clone 이 사용)과 clean URL(scrub 후 fetch 가 사용) 모두 로컬 bare 원격에 매핑.
+    process.env.GIT_CONFIG_COUNT = '2';
+    process.env.GIT_CONFIG_KEY_0 = `url.${remote.url}.insteadOf`;
+    process.env.GIT_CONFIG_VALUE_0 = authedUrl;
+    process.env.GIT_CONFIG_KEY_1 = `url.${remote.url}.insteadOf`;
+    process.env.GIT_CONFIG_VALUE_1 = cleanUrl;
+
+    const p = {
+      kind: 'qa',
+      run_id: 'cred1',
+      workspace_id: 'w1',
+      workspace_folder: '.awb/qa/cred-priv',
+      checkout_mode: 'reuse',
+      repo: { url: cleanUrl, branch: 'main', credential: { username: 'tok-user', token: 'sekret' } },
+    };
+
+    // 1) fresh clone
+    const res1 = await provisionRunWorkspace(p, workingDir);
+    assert.equal(res1.ok, true, `fresh clone 실패: ${res1.error || ''}`);
+    const dir = res1.dir;
+    // origin 에 토큰이 남지 않는다 (clean scrub).
+    const origin = git(dir, ['remote', 'get-url', 'origin']).trim();
+    assert.ok(!origin.includes('sekret') && !origin.includes('tok-user@'), `origin 토큰 노출: ${origin}`);
+    // awb-credentials(owner 전용) + credential.helper=store 설치. (--local: 호스트 전역
+    // credential.helper=cache 가 있어도 이 repo 가 설치한 값만 본다.)
+    const helper = git(dir, ['config', '--local', '--get', 'credential.helper']).trim();
+    const m = helper.match(/^store --file="(.+)"$/);
+    assert.ok(m, `helper 형식 불일치: ${helper}`);
+    assert.match(readFileSync(m[1], 'utf8'), /tok-user:sekret@git\.example\.test/);
+    assert.equal(statSync(m[1]).mode & 0o077, 0, 'awb-credentials 는 owner 전용');
+    // steps/notes 어디에도 토큰이 노출되지 않는다.
+    assert.ok(!res1.steps.join('\n').includes('sekret'), 'steps 토큰 노출');
+    assert.ok(!(res1.notes || []).join('\n').includes('sekret'), 'notes 토큰 노출');
+
+    // 2) reuse fetch — 새 커밋을 인증된 origin 으로 당겨온다.
+    remote.pushFile('CRED_NEW.md', 'x\n');
+    const res2 = await provisionRunWorkspace(p, workingDir);
+    assert.equal(res2.ok, true, `reuse fetch 실패: ${res2.error || ''}`);
+    assert.ok(existsSync(join(dir, 'CRED_NEW.md')), 'reuse fetch 가 새 커밋을 인증해 당겨오지 못함');
+    assert.ok(!res2.steps.join('\n').includes('sekret'), 'reuse steps 토큰 노출');
+  } finally {
+    for (const [name, value] of Object.entries({
+      GIT_CONFIG_COUNT: prev.count,
+      GIT_CONFIG_KEY_0: prev.k0,
+      GIT_CONFIG_VALUE_0: prev.v0,
+      GIT_CONFIG_KEY_1: prev.k1,
+      GIT_CONFIG_VALUE_1: prev.v1,
+    })) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
+test('parseRunProvision: repo.credential 파싱 (유효 / 토큰 없음 / username 생략)', () => {
+  const withCred = parseRunProvision({
+    kind: 'qa',
+    run_id: 'r',
+    workspace_id: 'w',
+    workspace_folder: '.awb/qa/s',
+    checkout_mode: 'reuse',
+    repo: { url: 'https://x/r.git', credential: { username: 'u', token: 't' } },
+  });
+  assert.deepEqual(withCred.repo.credential, { username: 'u', token: 't' });
+
+  // username 생략 → token 만.
+  const tokenOnly = parseRunProvision({
+    kind: 'qa',
+    run_id: 'r',
+    workspace_id: 'w',
+    workspace_folder: '.awb/qa/s',
+    checkout_mode: 'reuse',
+    repo: { url: 'https://x/r.git', credential: { token: 't' } },
+  });
+  assert.deepEqual(tokenOnly.repo.credential, { token: 't' });
+
+  // 토큰 없음/빈 문자열/비객체 → credential 미설정.
+  for (const bad of [{ username: 'u' }, { token: '' }, null, 'nope', 42]) {
+    const r = parseRunProvision({
+      kind: 'qa',
+      run_id: 'r',
+      workspace_id: 'w',
+      workspace_folder: '.awb/qa/s',
+      checkout_mode: 'reuse',
+      repo: { url: 'https://x/r.git', credential: bad },
+    });
+    assert.equal(r.repo.credential, undefined, `credential 이 설정되면 안 됨: ${JSON.stringify(bad)}`);
+  }
 });
