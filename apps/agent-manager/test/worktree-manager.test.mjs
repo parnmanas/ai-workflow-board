@@ -458,6 +458,57 @@ test('repository resource keeps a ticket worktree stable across agent working di
   }
 });
 
+test('repository resource serializes concurrent first resolve across manager instances', async () => {
+  const { root, repo, cleanup } = await makeRepo();
+  try {
+    const otherAgentRepo = join(root, 'other-agent');
+    git(root, ['clone', '-q', repo, otherAgentRepo]);
+    const canonicalRoot = join(root, 'manager-worktrees');
+    const bootstrapRepo = { resourceId: 'repo-resource-race', url: repo };
+    const [first, second] = await Promise.all([
+      new WorktreeManager({ resourceWorktreesRoot: canonicalRoot }).resolveCwd({
+        baseWorkingDir: repo, ticketId: TICKET_A, role: 'assignee', mode: 'per_ticket', bootstrapRepo,
+      }),
+      new WorktreeManager({ resourceWorktreesRoot: canonicalRoot }).resolveCwd({
+        baseWorkingDir: otherAgentRepo, ticketId: TICKET_A, role: 'reviewer', mode: 'per_ticket', bootstrapRepo,
+      }),
+    ]);
+    assert.equal(first.isWorktree, true);
+    assert.equal(second.isWorktree, true, 'loser never falls back to its shared agent cwd');
+    assert.equal(second.cwd, first.cwd, 'both managers resolve the single canonical ticket cwd');
+    const owner = (await fsp.readFile(join(canonicalRoot, 'repo-resource-race', '.repo-owner'), 'utf8')).trim();
+    assert.ok(owner === repo || owner === otherAgentRepo, 'one durable repository owner wins');
+    assert.equal(git(owner, ['worktree', 'list', '--porcelain']).match(/worktree /g)?.length, 2);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('repository resource ticket worktree is reclaimed through its canonical owner', async () => {
+  const { root, repo, cleanup } = await makeRepo();
+  try {
+    const otherAgentRepo = join(root, 'other-agent');
+    git(root, ['clone', '-q', repo, otherAgentRepo]);
+    const canonicalRoot = join(root, 'manager-worktrees');
+    const bootstrapRepo = { resourceId: 'repo-resource-cleanup', url: repo };
+    const wm = new WorktreeManager({ resourceWorktreesRoot: canonicalRoot });
+    const resolved = await wm.resolveCwd({
+      baseWorkingDir: repo, ticketId: TICKET_A, role: 'assignee', mode: 'per_ticket', bootstrapRepo,
+    });
+    await fsp.writeFile(join(resolved.cwd, 'dirty.txt'), 'terminal dirty state\n');
+    const removed = await wm.removeTicketWorktrees({
+      baseWorkingDir: otherAgentRepo,
+      ticketId: TICKET_A,
+      repositoryResourceId: bootstrapRepo.resourceId,
+    });
+    assert.equal(removed, 1);
+    assert.equal(existsSync(resolved.worktreePath), false, 'resource-scoped checkout directory is removed');
+    assert.equal(git(repo, ['worktree', 'list', '--porcelain']).includes(resolved.worktreePath), false);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('concurrent per-ticket provisioning is atomic and isolates branch/index/untracked files', async () => {
   const { repo, cleanup } = await makeRepo();
   try {

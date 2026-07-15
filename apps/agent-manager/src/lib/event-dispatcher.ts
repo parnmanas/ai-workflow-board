@@ -709,6 +709,7 @@ export class EventDispatcher {
         total += await this.#worktreeManager.removeTicketWorktrees({
           baseWorkingDir: ctx.working_dir,
           ticketId,
+          repositoryResourceId: ticket.base_repo?.id,
         });
       }
       if (total > 0) {
@@ -744,7 +745,7 @@ export class EventDispatcher {
    * dirs are already gone (e.g. the worktree was reclaimed at Done). Best-effort,
    * fire-and-forget; never throws.
    */
-  async #cleanupArchivedTicketWorkspace(ticketId: string): Promise<void> {
+  async #cleanupArchivedTicketWorkspace(ticketId: string, repositoryResourceId?: string): Promise<void> {
     if (!this.#worktreeManager || !this.#worktreeManager.enabled) return;
     if ((this.#config as any)?.delegation?.worktreeIsolation === false) return;
     if (!this.#managedAgentContexts) return;
@@ -762,6 +763,7 @@ export class EventDispatcher {
         worktrees += await this.#worktreeManager.removeTicketWorktrees({
           baseWorkingDir: ctx.working_dir,
           ticketId,
+          repositoryResourceId,
         });
         if (
           await this.#worktreeManager.removeTicketRunWorkspace({
@@ -1431,7 +1433,7 @@ export class EventDispatcher {
       // tickets archived straight from a non-terminal column. Fire-and-forget so
       // the live-session forward below stays synchronous.
       if (ev.entity_type === 'ticket' && ev.action === 'archived' && ev.ticket_id) {
-        void this.#cleanupArchivedTicketWorkspace(ev.ticket_id);
+        void this.#cleanupArchivedTicketWorkspace(ev.ticket_id, ev.base_repo?.id);
       }
 
       if (this.#ticketSessionManager && ev.ticket_id) {

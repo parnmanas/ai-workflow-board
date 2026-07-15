@@ -66,6 +66,8 @@ import { log } from './logging.js';
 import { AGENT_MANAGER_HOME } from './constants.js';
 
 const GIT_TIMEOUT_MS = 20_000;
+const PROVISION_LOCK_TIMEOUT_MS = 20_000;
+const PROVISION_LOCK_STALE_MS = 60_000;
 
 /** Board worktree placement mode (mirrors the server's worktree-config enum —
  *  kept as a local literal so agent-manager doesn't depend on the server pkg). */
@@ -542,8 +544,14 @@ export class WorktreeManager {
         if (savedOwner && await this.#isGitWorkTree(savedOwner)) provisioningBase = savedOwner;
       } catch {
         await fsp.mkdir(resourceRoot, { recursive: true });
-        await fsp.writeFile(ownerPath, `${baseWorkingDir}\n`, { encoding: 'utf8', flag: 'wx' })
-          .catch(() => {});
+        try {
+          await fsp.writeFile(ownerPath, `${baseWorkingDir}\n`, { encoding: 'utf8', flag: 'wx' });
+        } catch {
+          // Another manager/process won the first-owner race. Its durable
+          // choice is authoritative; never continue with this caller's clone.
+          const savedOwner = (await fsp.readFile(ownerPath, 'utf8')).trim();
+          if (savedOwner && await this.#isGitWorkTree(savedOwner)) provisioningBase = savedOwner;
+        }
       }
     }
     if (provisioningBase !== baseWorkingDir) {
@@ -1212,8 +1220,32 @@ export class WorktreeManager {
     const tail = prev.then(() => gate);
     this.#provisionLocks.set(key, tail);
     await prev.catch(() => {});
+    const lockDir = join(worktreesRoot, '.provision.lock');
+    const deadline = Date.now() + PROVISION_LOCK_TIMEOUT_MS;
     try {
-      return await fn();
+      await fsp.mkdir(worktreesRoot, { recursive: true });
+      for (;;) {
+        try {
+          await fsp.mkdir(lockDir);
+          break;
+        } catch (err: any) {
+          if (err?.code !== 'EEXIST') throw err;
+          try {
+            const stat = await fsp.stat(lockDir);
+            if (Date.now() - stat.mtimeMs > PROVISION_LOCK_STALE_MS) {
+              await fsp.rm(lockDir, { recursive: true, force: true });
+              continue;
+            }
+          } catch {}
+          if (Date.now() >= deadline) throw new Error(`provision lock timeout: ${lockDir}`);
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+      }
+      try {
+        return await fn();
+      } finally {
+        await fsp.rm(lockDir, { recursive: true, force: true });
+      }
     } finally {
       release();
       if (this.#provisionLocks.get(key) === tail) this.#provisionLocks.delete(key);
@@ -1242,12 +1274,22 @@ export class WorktreeManager {
   async removeTicketWorktrees(opts: {
     baseWorkingDir: string;
     ticketId: string;
+    repositoryResourceId?: string;
   }): Promise<number> {
     if (!this.#enabled) return 0;
-    const { baseWorkingDir, ticketId } = opts;
+    let { baseWorkingDir } = opts;
+    const { ticketId } = opts;
     if (!baseWorkingDir || !ticketId) return 0;
+    const resourceSlug = opts.repositoryResourceId?.trim().replace(/[^A-Za-z0-9._-]/g, '_');
+    const resourceRoot = resourceSlug ? join(this.#resourceWorktreesRoot, resourceSlug) : null;
+    if (resourceRoot) {
+      try {
+        const savedOwner = (await fsp.readFile(join(resourceRoot, '.repo-owner'), 'utf8')).trim();
+        if (savedOwner) baseWorkingDir = savedOwner;
+      } catch {}
+    }
     if (!(await this.#isGitWorkTree(baseWorkingDir))) return 0;
-    const worktreesRoot = worktreesRootFor(baseWorkingDir);
+    const worktreesRoot = resourceRoot ?? worktreesRootFor(baseWorkingDir);
     const ticket8 = String(ticketId).slice(0, 8);
     const legacyPrefix = `${ticket8}-`;
     await this.prune(baseWorkingDir);
