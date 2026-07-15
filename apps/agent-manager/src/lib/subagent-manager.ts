@@ -315,7 +315,10 @@ export class SubagentManager implements SubagentManagerContract {
   /** Per-pid chat-progress emit state (ticket c47194d9). Keyed by the child pid
    *  (unique per spawn) so a chat one-shot gets its own rate-limit window + cap.
    *  Dropped on the child's exit (including drop-first kill paths). */
-  #progressMeta = new Map<number, { lastEmitMs: number; count: number }>();
+  #progressMeta = new Map<
+    number,
+    { lastEmitMs: number; count: number; errorEmitted: boolean }
+  >();
 
   /** Circuit-breaker for the one-shot path. Blocks re-spawn to an (agent,
    *  ticket, role) that repeatedly exits with non-transient errors and pends
@@ -1336,25 +1339,37 @@ export class SubagentManager implements SubagentManagerContract {
   /** Post one coalesced, capped progress heartbeat for a chat one-shot. Mirrors
    *  ChatSessionManager#emitProgress: rate-limited per pid so a burst of item.*
    *  events doesn't flood the room, and hard-capped per session (progress is a
-   *  heartbeat, the agent's actual reply is what the user waits for). Failures
-   *  bypass the interval so a meaningful 실패 transition is never coalesced away.
+   *  heartbeat, the agent's actual reply is what the user waits for). A terminal
+   *  실패 (`ev.status === 'error'`) bypasses BOTH the interval and the cap so the
+   *  failure is never coalesced or dropped — but only the first one per pid
+   *  (dedupe via meta.errorEmitted) so repeated error lines can't flood the room
+   *  once the cap is otherwise exhausted.
    *  Fire-and-forget — postChatRoomMessage swallows + logs its own errors. */
   #emitChatProgress(record: SubagentRecord, ev: CliProgressEvent): void {
     const pid = record.pid;
     let meta = this.#progressMeta.get(pid);
     if (!meta) {
-      meta = { lastEmitMs: 0, count: 0 };
+      meta = { lastEmitMs: 0, count: 0, errorEmitted: false };
       this.#progressMeta.set(pid, meta);
     }
-    if (meta.count >= CHAT_PROGRESS_MAX_PER_SESSION) return;
     const now = Date.now();
-    if (ev.status !== 'error' && now - meta.lastEmitMs < CHAT_PROGRESS_MIN_INTERVAL_MS) {
-      return;
+    const isError = ev.status === 'error';
+    if (isError) {
+      // 완료 기준: 실패는 항상 명확히 구분되어야 하므로 terminal 실패는 heartbeat
+      // interval 과 per-session cap 을 모두 우회한다. 단, cap 소진 후 반복되는
+      // error 라인이 방을 도배하지 않도록 pid 당 terminal error 슬롯을 하나만
+      // 예약(dedupe)한다 — 첫 실패만 방출하고 이후 error 는 무시.
+      if (meta.errorEmitted) return;
+    } else {
+      // 일반 heartbeat: item.* 버스트가 방을 도배하지 않도록 rate-limit + hard-cap.
+      if (meta.count >= CHAT_PROGRESS_MAX_PER_SESSION) return;
+      if (now - meta.lastEmitMs < CHAT_PROGRESS_MIN_INTERVAL_MS) return;
     }
     const message = this.#formatChatProgressLine(ev);
     if (!message) return;
     meta.lastEmitMs = now;
     meta.count += 1;
+    if (isError) meta.errorEmitted = true;
     const agentId = record.agent_id || '';
     // type='progress' → server stamps the discriminator so the chat UI renders a
     // muted italic heartbeat and agent history replays exclude it.

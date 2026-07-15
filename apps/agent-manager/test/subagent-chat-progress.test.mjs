@@ -180,3 +180,87 @@ test('a burst of start events coalesces, but a failure always surfaces', async (
   assert.match(progress[0].body.content, /💻/);
   assert.match(progress[1].body.content, /실패/);
 });
+
+// Write one JSONL line and let readline's async 'line' event + the POST
+// microtask flush. Used by the fake-clock tests below, which advance time
+// per-event so nothing is coalesced by the min-interval.
+async function feedOne(child, obj) {
+  child.stdout.write(JSON.stringify(obj) + '\n');
+  await new Promise((r) => setTimeout(r, 8));
+}
+
+test('a failure surfaces even after the per-session cap is exhausted (spaced, non-coalesced events)', async () => {
+  const mgr = new SubagentManager(makeConfig());
+  const child = makeChild();
+  mgr._wireStdioForTest(makeChatRecord(child));
+
+  // Fake clock so 30 heartbeats can be spaced past the 1500ms min-interval
+  // without a ~45s real-time wait — each is a genuine, non-coalesced emit.
+  const realDateNow = Date.now;
+  let clock = 1_000_000;
+  Date.now = () => clock;
+  try {
+    // Exhaust the hard cap (CHAT_PROGRESS_MAX_PER_SESSION = 30) with 30 distinct
+    // start heartbeats, each advancing the clock past the min-interval.
+    for (let i = 0; i < 30; i++) {
+      clock += 2000;
+      await feedOne(child, {
+        type: 'item.started',
+        item: { type: 'command_execution', command: `cmd-${i}`, status: 'in_progress' },
+      });
+    }
+    // The cap is now exhausted → a further *start* must be dropped …
+    clock += 2000;
+    await feedOne(child, {
+      type: 'item.started',
+      item: { type: 'command_execution', command: 'over-cap', status: 'in_progress' },
+    });
+    // … but the terminal 실패 must STILL surface (완료 기준: 실패가 명확히 구분).
+    clock += 2000;
+    child.stdout.write(JSON.stringify({ type: 'turn.failed', error: { message: 'post-cap boom' } }) + '\n');
+    await new Promise((r) => setTimeout(r, 40));
+  } finally {
+    Date.now = realDateNow;
+  }
+
+  const progress = progressPosts.filter((p) => p.body.type === 'progress');
+  const starts = progress.filter((p) => /💻/.test(p.body.content));
+  const failures = progress.filter((p) => /실패/.test(p.body.content));
+
+  assert.equal(starts.length, 30, 'exactly the cap worth of start heartbeats — the 31st start is dropped');
+  assert.equal(failures.length, 1, 'the failure bypasses the exhausted cap and still surfaces');
+  assert.match(failures[0].body.content, /post-cap boom/);
+});
+
+test('repeated failures after the cap flood do not — only one terminal 실패 slot per pid', async () => {
+  const mgr = new SubagentManager(makeConfig());
+  const child = makeChild();
+  mgr._wireStdioForTest(makeChatRecord(child));
+
+  const realDateNow = Date.now;
+  let clock = 2_000_000;
+  Date.now = () => clock;
+  try {
+    for (let i = 0; i < 30; i++) {
+      clock += 2000;
+      await feedOne(child, {
+        type: 'item.started',
+        item: { type: 'command_execution', command: `cmd-${i}`, status: 'in_progress' },
+      });
+    }
+    // Three terminal failures after the cap — only the first may surface, the
+    // reserved error slot dedupes the rest so a repeated-error stream can't
+    // flood the room.
+    for (const msg of ['boom-1', 'boom-2', 'boom-3']) {
+      clock += 2000;
+      await feedOne(child, { type: 'turn.failed', error: { message: msg } });
+    }
+  } finally {
+    Date.now = realDateNow;
+  }
+
+  const progress = progressPosts.filter((p) => p.body.type === 'progress');
+  const failures = progress.filter((p) => /실패/.test(p.body.content));
+  assert.equal(failures.length, 1, 'the terminal error slot dedupes repeated failures');
+  assert.match(failures[0].body.content, /boom-1/);
+});
