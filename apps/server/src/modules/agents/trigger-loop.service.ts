@@ -25,6 +25,7 @@ import { resolveEffortPreset, ResolvedEffortPreset } from '../../common/effort-p
 import { mergeEnvironmentConfig, resolveEnvironmentConfig, ResolvedEnvironmentConfig } from '../../common/environment-config';
 import { resolveBoardUsePr, resolveBoardWorktreeMode, resolveWorktreeRelPath, renderUsePrTemplate, WorktreeMode } from '../../common/worktree-config';
 import { appendBoardLessons, MAX_INJECTED_LESSONS } from '../../common/board-lessons';
+import { pickBaseRepoResourceId, shouldBlockDispatchForMissingRepo } from '../../common/base-repo-binding';
 import { BoardLesson } from '../../entities/BoardLesson';
 import { isConsensusVoteComment } from '../../common/consensus-meta';
 
@@ -1698,9 +1699,16 @@ candidate's branch or move the ticket.
     // Workspace-scoped lookup (defense-in-depth — writes are guarded too):
     // a stale id pointing at another workspace's Resource never gets its
     // url/name shipped out to the assignee here.
-    const baseRepoId = freshTicket?.base_repo_resource_id || ticket.base_repo_resource_id || '';
-    const baseBranch = freshTicket?.base_branch || ticket.base_branch || '';
+    // `let` (not `const`): when the ticket carries no base repo, the board
+    // environment repo is backfilled in below (goal 1, ticket 8c3befa8) after
+    // the merged environment_config is resolved.
+    let baseRepoId = freshTicket?.base_repo_resource_id || ticket.base_repo_resource_id || '';
+    let baseBranch = freshTicket?.base_branch || ticket.base_branch || '';
     const baseRepoWorkspaceId = freshTicket?.workspace_id || ticket.workspace_id || '';
+    // Did the TICKET itself declare a base repo? Captured before the board-env
+    // backfill can reassign baseRepoId — feeds the goal-2 guard's "a repo was
+    // expected" gate (ticket 8c3befa8).
+    const ticketDeclaredBaseRepo = !!baseRepoId;
     let baseRepo: { id: string; name: string; url: string; default_branch: string } | null = null;
     if (baseRepoId && baseRepoWorkspaceId) {
       try {
@@ -1789,6 +1797,10 @@ candidate's branch or move the ticket.
     // provisioning" and spawns exactly as before. Reuses the same board/
     // workspace rows loaded for harness so there's no extra round-trip.
     let environmentConfig: ResolvedEnvironmentConfig | null = null;
+    // Merged board+workspace environment repositories, captured for the base_repo
+    // backfill below (goal 1, ticket 8c3befa8). Populated inside the resolve
+    // try so a base-repo-less ticket can inherit the board's default repo.
+    let boardEnvRepositories: { resource_id?: string }[] = [];
     // Resolved board worktree placement mode (worktree 규약 ②, board option ①).
     // Null-safe read via the shared resolver — a missing/malformed column falls
     // back to DEFAULT_WORKTREE_MODE ('per_ticket'). Shipped on the trigger payload
@@ -1828,6 +1840,7 @@ candidate's branch or move the ticket.
         boardForHarness?.environment_config,
       );
       if (mergedEnv) {
+        boardEnvRepositories = mergedEnv.repositories || [];
         const resourceIds = (mergedEnv.repositories || [])
           .map((r) => (r.resource_id || '').trim())
           .filter((id) => id.length > 0);
@@ -1859,6 +1872,66 @@ candidate's branch or move the ticket.
       this.logService.warn('MCP', 'harness_config / effort_preset / environment_config resolve failed (continuing without)', {
         err: String(e), ticket_id: ticket.id, board_id: boardId,
       });
+    }
+
+    // ── base repo binding (ticket 8c3befa8) ──────────────────────────────────
+    // Goal 1 — auto-bind the board environment repo as the DEFAULT base repo.
+    // When the ticket carries no base repo of its own, fall back to the merged
+    // environment's first repository (its resource_id → the Resource's url +
+    // default_branch). This gives the SERVER the same repo agent-manager would
+    // otherwise resolve via its own env fallback, so the base_repo shipped on
+    // the wire is authoritative AND the guard below can pend accurately when
+    // nothing resolves. Only runs when the ticket has no base repo — a
+    // ticket-set repo always wins.
+    if (!baseRepoId && baseRepoWorkspaceId) {
+      const picked = pickBaseRepoResourceId('', boardEnvRepositories);
+      if (picked.resourceId) {
+        try {
+          const r = await this.dataSource.getRepository(Resource).findOne({
+            where: { id: picked.resourceId, workspace_id: baseRepoWorkspaceId },
+          });
+          if (r) {
+            baseRepoId = r.id;
+            baseRepo = { id: r.id, name: r.name, url: r.url || '', default_branch: r.default_branch || '' };
+            if (!baseBranch) baseBranch = baseRepo.default_branch;
+            this.logService.info('MCP', 'base_repo backfilled from board environment (ticket 8c3befa8)', {
+              ticket_id: ticket.id, base_repo_id: baseRepoId, base_branch: baseBranch, source: picked.source,
+            });
+          }
+        } catch (e) {
+          this.logService.warn('MCP', 'base_repo backfill lookup failed (continuing without)', {
+            err: String(e), ticket_id: ticket.id, base_repo_id: picked.resourceId,
+          });
+        }
+      }
+    }
+
+    // Goal 2 — force a base repo (guard). An assignee dispatched onto an active
+    // (branch-work) column that EXPECTED a repo (the ticket declared one, or the
+    // board environment configured one) but resolved NONE would land in a
+    // worktree it can't push from (credential install early-returns on a null
+    // repo → `git push` dies with `could not read Username`, and the manager's
+    // fail-closed provisioning aborts every cycle — the "worktree 프로비저닝
+    // 실패" comment spam this ticket targets). Rather than emit into that
+    // guaranteed downstream abort, pend the ticket for human attention and skip
+    // the emit. No repo guessing — fail closed. Subsequent dispatches
+    // short-circuit at the pending gate above.
+    //
+    // The "repo was expected" gate matters: a board with no repo intent anywhere
+    // is not doing isolated git work, so a missing repo must NOT pend it (that
+    // would strand generic/non-code dispatches). Only a configured-but-
+    // unresolvable repo is a misconfiguration worth blocking.
+    const repoWasExpected = ticketDeclaredBaseRepo || boardEnvRepositories.length > 0;
+    if (
+      shouldBlockDispatchForMissingRepo({
+        role,
+        columnKind: (col as any)?.kind,
+        repoWasExpected,
+        hasResolvedBaseRepo: !!baseRepo,
+      })
+    ) {
+      await this._pendForMissingBaseRepo(ticket, agentId, role, triggerSource);
+      return '';
     }
 
     // Board Lessons / Runbook (ticket 9d0d6ac4). Append the board's ACTIVE
@@ -2035,6 +2108,91 @@ candidate's branch or move the ticket.
     }
 
     return triggerId;
+  }
+
+  /**
+   * Goal 2 guard (ticket 8c3befa8): pend a ticket whose assignee dispatch has
+   * no resolvable base repo (neither on the ticket nor on the board
+   * environment). Pending drops all future triggers at the gate above, so the
+   * assignee stops looping into a worktree it can't push from. Idempotent — a
+   * ticket already pending is left untouched (no duplicate comment/audit), and
+   * the pending gate means this fires at most once per stuck cycle.
+   */
+  private async _pendForMissingBaseRepo(
+    ticket: Ticket,
+    agentId: string,
+    role: string,
+    triggerSource: string,
+  ): Promise<void> {
+    const reason =
+      'base repo 미해결 — assignee 가 push 할 저장소를 확정할 수 없습니다. 티켓 base repo 또는 보드 ' +
+      'environment_config repository 가 설정돼 있으나 해결되지 않았습니다(Resource 삭제/타 workspace, ' +
+      '또는 credential 없는 url-only 항목). 유효한 repository Resource 를 지정한 뒤 pending 을 해제하세요.';
+
+    // Re-read fresh before flipping — an operator/parallel pend could race us,
+    // and we must not clobber or re-comment an already-pending ticket.
+    const fresh = await this.dataSource.getRepository(Ticket).findOne({
+      where: { id: ticket.id },
+    });
+    if (!fresh || fresh.pending_user_action || fresh.pending_on_tickets || fresh.archived_at) {
+      this.logService.info('MCP', 'base_repo guard: dispatch skipped, ticket already parked (ticket 8c3befa8)', {
+        ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource,
+      });
+      return;
+    }
+
+    fresh.pending_user_action = true;
+    fresh.pending_reason = reason;
+    fresh.pending_set_at = new Date();
+    fresh.pending_set_by = 'TriggerLoopService';
+    await this.dataSource.getRepository(Ticket).save(fresh);
+
+    this.logService.warn('MCP', 'base_repo guard: dispatch blocked, ticket pended (ticket 8c3befa8)', {
+      ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource,
+    });
+
+    // Audit row — same shape pend_ticket emits (drives the ticket_pended SSE).
+    try {
+      await this.activityService.logActivity({
+        entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
+        field_changed: 'pending_user_action',
+        old_value: 'false', new_value: 'true',
+        ticket_id: ticket.id,
+        actor_id: 'system',
+        actor_name: 'TriggerLoopService',
+      });
+    } catch (e) {
+      this.logService.warn('MCP', 'base_repo guard: pend audit write failed (pend still applied)', {
+        err: String(e), ticket_id: ticket.id,
+      });
+    }
+
+    // Visible comment so the block is discoverable from the thread, not just
+    // the User tab. Deliberately no role mention — pending drops triggers, and
+    // the pend_reason on the User tab is the human-facing surface.
+    try {
+      const commentRepo = this.dataSource.getRepository(Comment);
+      const content = [
+        '🚫 **Dispatch 차단 — base repo 미해결 (ticket 8c3befa8 guard)**',
+        '',
+        reason,
+        '',
+        `_role=${role} · agent=${agentId} · source=${triggerSource}_`,
+      ].join('\n');
+      await commentRepo.save(commentRepo.create({
+        ticket_id: ticket.id,
+        workspace_id: fresh.workspace_id || ticket.workspace_id || '',
+        author_type: 'system',
+        author_id: '',
+        author: 'TriggerLoopService',
+        content,
+        type: 'note',
+      }));
+    } catch (e) {
+      this.logService.warn('MCP', 'base_repo guard: pend comment write failed (pend still applied)', {
+        err: String(e), ticket_id: ticket.id,
+      });
+    }
   }
 
   /**
