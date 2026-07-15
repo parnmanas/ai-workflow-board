@@ -113,11 +113,11 @@ test('empty non-git working_dir keeps its container root and clones under .awb',
       baseWorkingDir: workingDir,
       ticketId: TICKET_A,
       role: 'assignee',
-      bootstrapRepo: { url: source.remote, branch: 'main' },
+      bootstrapRepo: { resourceId: 'repo-empty', url: source.remote, branch: 'main' },
     });
     assert.ok(result.isWorktree, 'container clone continues into ticket worktree creation');
     assert.equal(result.worktreePath, join(workingDir, '.awb', 'wt', 'aaaaaaaa'));
-    assert.equal(git(join(workingDir, '.awb', 'base'), ['remote', 'get-url', 'origin']), source.remote);
+    assert.equal(git(join(workingDir, '.awb', 'base', 'repo-empty'), ['remote', 'get-url', 'origin']), source.remote);
     assert.equal(existsSync(join(workingDir, '.git')), false);
     assert.throws(() => git(workingDir, ['status', '--short']), /not a git repository/);
     assert.equal(await fsp.readFile(join(result.cwd, 'README.md'), 'utf8'), '# base\n');
@@ -137,13 +137,13 @@ test('non-empty non-git working_dir provisions below .awb without touching conta
       baseWorkingDir: workingDir,
       ticketId: TICKET_A,
       role: 'assignee',
-      bootstrapRepo: { url: source.remote, branch: 'main' },
+      bootstrapRepo: { resourceId: 'repo-occupied', url: source.remote, branch: 'main' },
     });
     assert.equal(result.isWorktree, true);
     assert.equal(result.worktreePath, join(workingDir, '.awb', 'wt', 'aaaaaaaa'));
     assert.equal(existsSync(join(workingDir, '.git')), false, 'container root never becomes a repository');
     assert.equal(await fsp.readFile(join(workingDir, 'keep.txt'), 'utf8'), 'user data\n');
-    assert.equal(git(join(workingDir, '.awb', 'base'), ['remote', 'get-url', 'origin']), source.remote);
+    assert.equal(git(join(workingDir, '.awb', 'base', 'repo-occupied'), ['remote', 'get-url', 'origin']), source.remote);
 
     git(result.cwd, ['config', 'user.email', 'test@awb.local']);
     git(result.cwd, ['config', 'user.name', 'AWB Test']);
@@ -158,6 +158,86 @@ test('non-empty non-git working_dir provisions below .awb without touching conta
       'commit created in the ticket worktree reaches origin',
     );
   } finally {
+    await source.cleanup();
+  }
+});
+
+test('one non-git container isolates base clones for different repository resources', async () => {
+  const first = await makeRepoWithRemote();
+  const second = await makeRepoWithRemote();
+  const workingDir = join(first.root, 'multi-repo-agent-dir');
+  try {
+    await fsp.writeFile(join(second.repo, 'SECOND.md'), 'second repository\n');
+    git(second.repo, ['add', 'SECOND.md']);
+    git(second.repo, ['commit', '-q', '-m', 'identify second repo']);
+    git(second.repo, ['push', '-q', 'origin', 'main']);
+    await fsp.mkdir(workingDir, { recursive: true });
+    const wm = new WorktreeManager();
+    const a = await wm.resolveCwd({
+      baseWorkingDir: workingDir,
+      ticketId: TICKET_A,
+      role: 'assignee',
+      bootstrapRepo: { resourceId: 'repo/A', url: first.remote, branch: 'main' },
+    });
+    const b = await wm.resolveCwd({
+      baseWorkingDir: workingDir,
+      ticketId: TICKET_B,
+      role: 'assignee',
+      bootstrapRepo: { resourceId: 'repo/B', url: second.remote, branch: 'main' },
+    });
+    assert.ok(a.isWorktree && b.isWorktree);
+    assert.equal(git(join(workingDir, '.awb', 'base', 'repo_A'), ['remote', 'get-url', 'origin']), first.remote);
+    assert.equal(git(join(workingDir, '.awb', 'base', 'repo_B'), ['remote', 'get-url', 'origin']), second.remote);
+    assert.equal(existsSync(join(a.cwd, 'SECOND.md')), false);
+    assert.equal(await fsp.readFile(join(b.cwd, 'SECOND.md'), 'utf8'), 'second repository\n');
+  } finally {
+    await first.cleanup();
+    await second.cleanup();
+  }
+});
+
+test('container base clone credential store is inherited by its ticket worktree', async () => {
+  const source = await makeRepoWithRemote();
+  const workingDir = join(source.root, 'credential-container');
+  const remoteUrl = 'https://git.example.test/acme/private.git';
+  const previous = {
+    count: process.env.GIT_CONFIG_COUNT,
+    key: process.env.GIT_CONFIG_KEY_0,
+    value: process.env.GIT_CONFIG_VALUE_0,
+  };
+  try {
+    process.env.GIT_CONFIG_COUNT = '1';
+    process.env.GIT_CONFIG_KEY_0 = `url.${source.remote}.insteadOf`;
+    process.env.GIT_CONFIG_VALUE_0 = 'https://token-user:container-secret@git.example.test/acme/private.git';
+    const wm = new WorktreeManager();
+    const result = await wm.resolveCwd({
+      baseWorkingDir: workingDir,
+      ticketId: TICKET_C,
+      role: 'assignee',
+      bootstrapRepo: {
+        resourceId: 'private-resource',
+        url: remoteUrl,
+        branch: 'main',
+        credential: { username: 'token-user', token: 'container-secret' },
+      },
+    });
+    assert.ok(result.isWorktree);
+    const baseClone = join(workingDir, '.awb', 'base', 'private-resource');
+    assert.equal(git(baseClone, ['remote', 'get-url', 'origin']), remoteUrl);
+    const baseHelper = git(baseClone, ['config', '--get', 'credential.helper']);
+    assert.equal(git(result.cwd, ['config', '--get', 'credential.helper']), baseHelper);
+    const match = baseHelper.match(/^store --file="(.+)"$/);
+    assert.ok(match);
+    assert.match(await fsp.readFile(match[1], 'utf8'), /token-user:container-secret@git\.example\.test/);
+  } finally {
+    for (const [name, value] of Object.entries({
+      GIT_CONFIG_COUNT: previous.count,
+      GIT_CONFIG_KEY_0: previous.key,
+      GIT_CONFIG_VALUE_0: previous.value,
+    })) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
     await source.cleanup();
   }
 });

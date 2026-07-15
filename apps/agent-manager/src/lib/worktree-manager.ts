@@ -62,7 +62,7 @@
 import { promises as fsp } from 'node:fs';
 import { isAbsolute, join, resolve as pathResolve } from 'node:path';
 import { execFile } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { log } from './logging.js';
 import { AGENT_MANAGER_HOME } from './constants.js';
 import { decidePushReadiness, type PushReadinessDecision } from './dispatch-preflight.js';
@@ -360,19 +360,23 @@ export class WorktreeManager {
     repo: ResolveCwdArgs['bootstrapRepo'],
   ): Promise<string | null> {
     if (!repo?.url?.trim()) return null;
-    const key = baseWorkingDir;
+    const cleanUrl = repo.url.trim();
+    const resourceSlug = repo.resourceId?.trim().replace(/[^A-Za-z0-9._-]/g, '_');
+    // Legacy URL-only bootstraps still need stable isolation without leaking
+    // credentials, query strings, or filesystem-hostile characters into paths.
+    const repoSlug = resourceSlug || `url-${createHash('sha256').update(cleanUrl).digest('hex').slice(0, 16)}`;
+    const key = `${baseWorkingDir}\0${repoSlug}`;
     const active = this.#bootstrapLocks.get(key);
     if (active) return active;
     const run = (async () => {
       await fsp.mkdir(baseWorkingDir, { recursive: true });
-      const cloneDir = join(baseWorkingDir, '.awb', 'base');
+      const cloneDir = join(baseWorkingDir, '.awb', 'base', repoSlug);
       if (await this.#isGitWorkTree(cloneDir)) {
         await this.#installRepoCredential(cloneDir, repo);
         return cloneDir;
       }
-      await fsp.mkdir(join(baseWorkingDir, '.awb'), { recursive: true });
+      await fsp.mkdir(join(baseWorkingDir, '.awb', 'base'), { recursive: true });
       const branch = (repo.branch || '').trim();
-      const cleanUrl = repo.url.trim();
       let cloneUrl = cleanUrl;
       if (repo.credential?.token && /^https?:\/\//i.test(cleanUrl)) {
         const u = new URL(cleanUrl);
