@@ -34,6 +34,9 @@ export interface ChatRoomListPanelProps {
   // isn't a participant in. Optional so legacy callers compile unchanged.
   showAllRooms?: boolean;
   onToggleShowAllRooms?: (next: boolean) => void;
+  // 방 목록의 참여자 요약에서 "본인"을 제외하기 위한 현재 사용자 id. 없으면 제외 없이
+  // 모든 참여자 이름을 보여준다(옵셔널이라 기존 호출부는 그대로 컴파일된다).
+  currentUserId?: string;
 }
 
 export default function ChatRoomListPanel({
@@ -47,6 +50,7 @@ export default function ChatRoomListPanel({
   onNavigateToMessage,
   showAllRooms,
   onToggleShowAllRooms,
+  currentUserId,
 }: ChatRoomListPanelProps) {
   const [isSearching, setIsSearching] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -410,6 +414,7 @@ export default function ChatRoomListPanel({
                     room={room}
                     isActive={room.id === activeRoomId}
                     onClick={() => onSelectRoom(room.id)}
+                    currentUserId={currentUserId}
                   />
                 ))}
               </ul>
@@ -563,9 +568,35 @@ interface RoomListRowProps {
   room: ChatRoomListItem;
   isActive: boolean;
   onClick: () => void;
+  currentUserId?: string;
 }
 
-function RoomListRow({ room, isActive, onClick }: RoomListRowProps) {
+// 서버가 방 목록에 실어 주는 participants 프로젝션은 스코프별로 필드명이 다르다:
+//  - 내 방(listRooms):        { participant_type, participant_id, name }
+//  - 워크스페이스(observer):  { type, id, name }
+// 두 형태를 모두 안전하게 읽어 (id, name) 로 정규화한다.
+function normalizeMember(p: any): { id: string; name: string } {
+  return { id: p?.participant_id ?? p?.id ?? '', name: p?.name ?? '' };
+}
+
+// 방 참여자 이름을 "본인 제외"하고 최대 MAX 명까지, 초과분은 "+N" 으로 요약한다.
+const MAX_SUMMARY_NAMES = 3;
+function buildParticipantSummary(
+  participants: ChatRoomListItem['participants'],
+  currentUserId?: string,
+): string | null {
+  if (!participants || participants.length === 0) return null;
+  const names = participants
+    .map(normalizeMember)
+    .filter((m) => m.id !== currentUserId && m.name)
+    .map((m) => m.name);
+  if (names.length === 0) return null;
+  const shown = names.slice(0, MAX_SUMMARY_NAMES);
+  const overflow = names.length - shown.length;
+  return overflow > 0 ? `${shown.join(', ')} +${overflow}` : shown.join(', ');
+}
+
+function RoomListRow({ room, isActive, onClick, currentUserId }: RoomListRowProps) {
   const [hovered, setHovered] = useState(false);
 
   // Custom room name wins (DMs may be renamed now too — see ticket 1ae77f55);
@@ -575,6 +606,18 @@ function RoomListRow({ room, isActive, onClick }: RoomListRowProps) {
     room.type === 'dm'
       ? (room.name || room.dm_partner_name || 'Direct Message')
       : (room.name || 'Unnamed Group');
+
+  // 참여자 요약 라인. 그룹은 항상 노출한다(제목이 자동 조합/커스텀 이름이라 "누가 있는지"를
+  // 따로 보여줄 가치가 있다). DM 은 요약이 제목과 다를 때만 노출한다 — 미변경 DM 은 제목=상대라
+  // 중복이므로 숨기고, 이름이 바뀐 DM 은 상대가 누구인지 드러내 유용하다.
+  const memberCount = room.participants?.length ?? 0;
+  const rawSummary = buildParticipantSummary(room.participants, currentUserId);
+  const participantSummary =
+    room.type === 'group'
+      ? rawSummary
+      : rawSummary && rawSummary !== displayName
+        ? rawSummary
+        : null;
 
   const initials = displayName
     .split(' ')
@@ -605,8 +648,9 @@ function RoomListRow({ room, isActive, onClick }: RoomListRowProps) {
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       style={{
-        height: 64,
-        padding: '0 16px',
+        // 참여자 요약 라인이 추가돼 행 높이가 가변이므로 고정 height 대신 minHeight 사용.
+        minHeight: 64,
+        padding: '8px 16px',
         display: 'flex',
         alignItems: 'center',
         gap: 8,
@@ -637,18 +681,55 @@ function RoomListRow({ room, isActive, onClick }: RoomListRowProps) {
 
       {/* Text content */}
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div
-          style={{
-            fontSize: 13,
-            fontWeight: 600,
-            color: COLORS.textPrimary,
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-          }}
-        >
-          {displayName}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+          <span
+            style={{
+              fontSize: 13,
+              fontWeight: 600,
+              color: COLORS.textPrimary,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {displayName}
+          </span>
+          {/* 그룹 방 참여자 수 뱃지 — 한눈에 인원 규모를 보여준다 */}
+          {room.type === 'group' && memberCount > 0 && (
+            <span
+              aria-label={`${memberCount} participants`}
+              style={{
+                flexShrink: 0,
+                fontSize: 10,
+                fontWeight: 600,
+                color: COLORS.textSecondary,
+                background: COLORS.dominant,
+                border: `1px solid ${COLORS.border}`,
+                borderRadius: tokens.radii.lg,
+                padding: '0 6px',
+                lineHeight: '16px',
+              }}
+            >
+              {memberCount}
+            </span>
+          )}
         </div>
+        {/* 참여자 이름 요약 라인 (그룹 전용, 본인 제외) */}
+        {participantSummary && (
+          <div
+            title={participantSummary}
+            style={{
+              fontSize: 11,
+              color: COLORS.textSecondary,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              marginTop: 2,
+            }}
+          >
+            {participantSummary}
+          </div>
+        )}
         {room.last_message_preview && (
           <div
             style={{

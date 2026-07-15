@@ -134,6 +134,24 @@ export default function ChatPage() {
     messagesRef.current = messages;
   }, [messages]);
 
+  // 활성 방의 참여자 로스터(roomParticipants/participantCount)를 서버 최신값으로 재조회한다.
+  // 참여자 추가/이탈 직후 대화 화면 상단 로스터가 곧바로 반영되도록 호출한다 (모달 콜백 + SSE 양쪽에서 사용).
+  // observer 여부는 ref 로 읽어 워크스페이스 관찰 모드의 방도 안전하게 재조회한다.
+  const refreshActiveRoomParticipants = useCallback((roomId: string) => {
+    api.getChatRoom(roomId, isObserverRef.current)
+      .then((detail: any) => {
+        if (!detail?.participants) return;
+        const mentionPs: MentionParticipant[] = detail.participants.map((p: any) => ({
+          id: p.participant_id,
+          name: p.name,
+          type: p.participant_type,
+        }));
+        setRoomParticipants(mentionPs);
+        setParticipantCount(mentionPs.filter((p) => p.type === 'user').length);
+      })
+      .catch(() => {});
+  }, []);
+
   // Workspace-wide observer toggle (v0.32+) — when on, the room list
   // includes every active room in the workspace, including agent-to-agent
   // DMs the current user isn't a participant in. Off by default; persisted
@@ -417,8 +435,12 @@ export default function ChatPage() {
       payload.update_type === 'participant_added' ||
       payload.update_type === 'participant_left'
     ) {
-      // Refresh room list
-      api.listChatRooms().then(setRooms).catch(() => {});
+      // 방 목록(참여자 프로젝션)을 현재 스코프 그대로 갱신한다.
+      api.listChatRooms(showAllRooms ? 'workspace' : undefined).then(setRooms).catch(() => {});
+      // 열려 있는 방의 참여자가 바뀌면 상단 로스터도 즉시 재조회 — 다른 사용자의 추가/이탈까지 실시간 반영.
+      if (payload.room_id && payload.room_id === activeRoomIdRef.current) {
+        refreshActiveRoomParticipants(payload.room_id);
+      }
     } else if (
       payload.update_type === 'read' &&
       payload.room_id &&
@@ -433,7 +455,7 @@ export default function ChatPage() {
         prev.map((r) => (r.id === payload.room_id ? { ...r, unread_count: 0 } : r)),
       );
     }
-  }, [user?.id]));
+  }, [user?.id, showAllRooms, refreshActiveRoomParticipants]));
 
   function selectRoom(roomId: string) {
     setActiveRoomId(roomId);
@@ -541,9 +563,13 @@ export default function ChatPage() {
     markBadgeRead('chat', roomId);
   }
 
-  function handleParticipantsAdded(_roomId: string) {
-    // Refresh rooms to pick up new participant info
-    api.listChatRooms().then(setRooms).catch(() => {});
+  function handleParticipantsAdded(roomId: string) {
+    // 방 목록의 참여자 프로젝션을 현재 스코프 그대로 갱신한다.
+    api.listChatRooms(showAllRooms ? 'workspace' : undefined).then(setRooms).catch(() => {});
+    // 추가가 일어난 방이 지금 열려 있으면 상단 참여자 로스터를 즉시 재조회해 반영한다 (완료 조건: 즉시 반영).
+    if (roomId === activeRoomIdRef.current) {
+      refreshActiveRoomParticipants(roomId);
+    }
   }
 
   function handleNewChatCreated(room: ChatRoomDetail | null) {
@@ -604,6 +630,7 @@ export default function ChatPage() {
             onNavigateToMessage={handleNavigateToMessage}
             showAllRooms={showAllRooms}
             onToggleShowAllRooms={setShowAllRooms}
+            currentUserId={user?.id}
           />
         ) : (
           <ChatRoomView
@@ -655,6 +682,7 @@ export default function ChatPage() {
             onNavigateToMessage={handleNavigateToMessage}
             showAllRooms={showAllRooms}
             onToggleShowAllRooms={setShowAllRooms}
+            currentUserId={user?.id}
           />
         </Panel>
         <Separator style={{ background: COLORS.border, width: 1, cursor: 'col-resize' }} />

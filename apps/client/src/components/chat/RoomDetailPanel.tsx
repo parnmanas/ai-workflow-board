@@ -189,6 +189,10 @@ const LOAD_OLDER_THRESHOLD = 120;
 // and we never drag them down.
 const NEAR_BOTTOM_THRESHOLD = 80;
 
+// 대화 화면 상단 참여자 로스터에서 칩으로 보여줄 최대 인원. 초과분은 "+N more" 로 접는다
+// (그룹 방은 최대 50명이라 전부 칩으로 깔면 헤더가 지나치게 커진다).
+const MAX_VISIBLE_PARTICIPANT_CHIPS = 8;
+
 export default function ChatRoomView({
   room,
   messages,
@@ -484,6 +488,76 @@ export default function ChatRoomView({
         />
       )}
 
+      {/* 참여자 로스터 — 현재 방의 참여자 목록을 대화 화면 상단에 표시한다 (ticket 141b7414).
+          participants 는 부모(ChatPage)가 방 상세를 조회해 내려주며, 참여자 추가/이탈 시
+          즉시 재조회되어 이 로스터가 곧바로 갱신된다. */}
+      {participants.length > 0 && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: 6,
+            padding: '8px 16px',
+            borderBottom: `1px solid ${COLORS.border}`,
+            background: COLORS.secondary,
+            flexShrink: 0,
+          }}
+        >
+          <span style={{ fontSize: 11, fontWeight: 600, color: COLORS.textSecondary, marginRight: 2 }}>
+            Participants · {participants.length}
+          </span>
+          {participants.slice(0, MAX_VISIBLE_PARTICIPANT_CHIPS).map((p) => (
+            <span
+              key={`${p.type}:${p.id}`}
+              style={{
+                fontSize: 11,
+                color: COLORS.textPrimary,
+                background: COLORS.dominant,
+                border: `1px solid ${COLORS.border}`,
+                borderRadius: tokens.radii.xl,
+                padding: '2px 8px',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {p.name}
+              {p.type === 'agent' && (
+                <span style={{ color: COLORS.textSecondary, marginLeft: 4, fontSize: 10 }}>agent</span>
+              )}
+            </span>
+          ))}
+          {participants.length > MAX_VISIBLE_PARTICIPANT_CHIPS && (
+            <span
+              title={participants.map((p) => p.name).join(', ')}
+              style={{ fontSize: 11, color: COLORS.textSecondary, padding: '2px 4px', whiteSpace: 'nowrap' }}
+            >
+              +{participants.length - MAX_VISIBLE_PARTICIPANT_CHIPS} more
+            </span>
+          )}
+          {/* 대화 도중 참여자 추가 진입점 — 그룹 방 전용 (DM 은 서버가 추가를 거부한다).
+              헤더의 "Add People" 버튼과 동일한 모달을 연다. */}
+          {room.type === 'group' && (
+            <button
+              onClick={() => setShowAddPeople(true)}
+              aria-label="Add participant"
+              style={{
+                fontSize: 11,
+                fontWeight: 600,
+                color: COLORS.accent,
+                background: 'transparent',
+                border: `1px dashed ${COLORS.accent}`,
+                borderRadius: tokens.radii.xl,
+                padding: '2px 8px',
+                cursor: 'pointer',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              + Add
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Older-message loading banner — sits OUTSIDE the scroll viewport so
           its appearance/disappearance doesn't perturb scrollHeight and break
           the prepend scroll-anchor math in useLayoutEffect above. */}
@@ -584,6 +658,8 @@ export default function ChatRoomView({
           onParticipantsAdded(room.id);
         }}
         addToRoomId={room.id}
+        // 이미 방에 있는 참여자는 피커 후보에서 제외해 중복 선택을 막는다.
+        existingParticipantIds={participants.map((p) => p.id)}
       />
     </div>
   );
