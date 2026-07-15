@@ -87,33 +87,34 @@ test('non-pushing roles/columns are never blocked by the guard', () => {
   assert.equal(requiresBaseRepo('', 'active'), false);
 });
 
-// ── 2b. shouldBlockDispatchForMissingRepo — the repoWasExpected gate ───────────
+// ── 2b. shouldBlockDispatchForMissingRepo — the literal branch-work guard ──────
 
-test('block: assignee+active, a repo was expected, but none resolved', () => {
-  // ticket declared a repo that did not resolve (deleted Resource)…
+test('block: assignee+active with no resolved repo — pend regardless of what was (not) declared', () => {
+  // Both failure shapes collapse to the same input under the literal guard: a
+  // ticket that declared a repo which did not resolve (deleted Resource), AND the
+  // acceptance scenario where the ticket AND the board env are both empty. Ticket
+  // 8c3befa8 goal 2 / verification ("보드에 environment repo 가 없는 상태로
+  // base_repo 미지정 → 추정 없이 pend/차단") demands the block be UNCONDITIONAL on
+  // prior declaration — mirroring agent-manager's own missing_repository_resource
+  // fail-closed. The removed `repoWasExpected` gate is exactly what let the
+  // both-empty acceptance scenario slip through and emit (the reviewer's P1).
   assert.equal(shouldBlockDispatchForMissingRepo({
-    role: 'assignee', columnKind: 'active', repoWasExpected: true, hasResolvedBaseRepo: false,
+    role: 'assignee', columnKind: 'active', hasResolvedBaseRepo: false,
   }), true);
-});
-
-test('NO block: no repo was expected anywhere (generic / non-code dispatch)', () => {
-  // The crux fix — a board with no repo intent must NOT be pended, or every
-  // generic assignee dispatch (and the whole VirtualAgent wiring suite) breaks.
-  assert.equal(shouldBlockDispatchForMissingRepo({
-    role: 'assignee', columnKind: 'active', repoWasExpected: false, hasResolvedBaseRepo: false,
-  }), false);
 });
 
 test('NO block: a repo resolved (ticket or env backfill)', () => {
   assert.equal(shouldBlockDispatchForMissingRepo({
-    role: 'assignee', columnKind: 'active', repoWasExpected: true, hasResolvedBaseRepo: true,
+    role: 'assignee', columnKind: 'active', hasResolvedBaseRepo: true,
   }), false);
 });
 
-test('NO block: non-pushing role/column even when a repo was expected & missing', () => {
-  for (const [role, columnKind] of [['reviewer', 'active'], ['planner', 'active'], ['assignee', 'review'], ['assignee', 'merging']]) {
+test('NO block: non-pushing role/column even when no repo resolved', () => {
+  // requiresBaseRepo scopes the guard to the sole branch-work pairing; planner /
+  // reviewer / QA / chat dispatches never push, so a missing repo never pends them.
+  for (const [role, columnKind] of [['reviewer', 'active'], ['planner', 'active'], ['assignee', 'review'], ['assignee', 'merging'], ['assignee', 'terminal']]) {
     assert.equal(shouldBlockDispatchForMissingRepo({
-      role, columnKind, repoWasExpected: true, hasResolvedBaseRepo: false,
+      role, columnKind, hasResolvedBaseRepo: false,
     }), false, `${role}/${columnKind} must not be blocked`);
   }
 });
@@ -129,12 +130,14 @@ test('_emitTrigger backfills base_repo from the board environment (goal 1)', () 
   assert.match(src, /if \(!baseBranch\) baseBranch = baseRepo\.default_branch/, 'empty base_branch must fall back to default_branch');
 });
 
-test('_emitTrigger pends (does not emit) when an EXPECTED repo does not resolve (goal 2)', () => {
+test('_emitTrigger pends (does not emit) when a branch-work dispatch has no resolved repo (goal 2)', () => {
   const src = code('modules/agents/trigger-loop.service.ts');
   assert.match(src, /shouldBlockDispatchForMissingRepo\(\{/, 'must gate on the shouldBlockDispatchForMissingRepo predicate');
-  // "repo was expected" = the ticket declared one OR the board env has repos.
-  assert.match(src, /const repoWasExpected = ticketDeclaredBaseRepo \|\| boardEnvRepositories\.length > 0/, 'must compute repoWasExpected from ticket + board env');
   assert.match(src, /hasResolvedBaseRepo: !!baseRepo/, 'must pass the resolved-repo state');
+  // The literal guard must NOT gate on a "repo was expected" heuristic — that gate
+  // is what let the both-empty acceptance scenario slip through (reviewer P1). It
+  // must be gone so a branch-work dispatch with no repo always pends.
+  assert.doesNotMatch(src, /repoWasExpected/, 'the repoWasExpected gate must be removed (literal block)');
   // The guard must SKIP the emit — pend then return before activityEvents.emit.
   assert.match(src, /await this\._pendForMissingBaseRepo\(ticket, agentId, role, triggerSource\);\s*return '';/, 'guard must pend and return without emitting');
 });

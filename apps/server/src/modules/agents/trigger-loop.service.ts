@@ -1705,10 +1705,6 @@ candidate's branch or move the ticket.
     let baseRepoId = freshTicket?.base_repo_resource_id || ticket.base_repo_resource_id || '';
     let baseBranch = freshTicket?.base_branch || ticket.base_branch || '';
     const baseRepoWorkspaceId = freshTicket?.workspace_id || ticket.workspace_id || '';
-    // Did the TICKET itself declare a base repo? Captured before the board-env
-    // backfill can reassign baseRepoId — feeds the goal-2 guard's "a repo was
-    // expected" gate (ticket 8c3befa8).
-    const ticketDeclaredBaseRepo = !!baseRepoId;
     let baseRepo: { id: string; name: string; url: string; default_branch: string } | null = null;
     if (baseRepoId && baseRepoWorkspaceId) {
       try {
@@ -1907,26 +1903,29 @@ candidate's branch or move the ticket.
     }
 
     // Goal 2 — force a base repo (guard). An assignee dispatched onto an active
-    // (branch-work) column that EXPECTED a repo (the ticket declared one, or the
-    // board environment configured one) but resolved NONE would land in a
-    // worktree it can't push from (credential install early-returns on a null
-    // repo → `git push` dies with `could not read Username`, and the manager's
-    // fail-closed provisioning aborts every cycle — the "worktree 프로비저닝
-    // 실패" comment spam this ticket targets). Rather than emit into that
-    // guaranteed downstream abort, pend the ticket for human attention and skip
-    // the emit. No repo guessing — fail closed. Subsequent dispatches
-    // short-circuit at the pending gate above.
+    // (branch-work) column with NO resolvable repo (neither the ticket's own id
+    // nor the board-env backfill above) would land in a worktree it can't push
+    // from: credential install early-returns on a null repo → `git push` dies
+    // with `could not read Username`, and agent-manager's fail-closed
+    // provisioning aborts every cycle with "worktree 프로비저닝 실패" (the comment
+    // spam this ticket targets). Rather than emit into that guaranteed downstream
+    // abort, pend the ticket for human attention and skip the emit — no repo
+    // guessing, fail closed. Subsequent dispatches short-circuit at the pending
+    // gate above.
     //
-    // The "repo was expected" gate matters: a board with no repo intent anywhere
-    // is not doing isolated git work, so a missing repo must NOT pend it (that
-    // would strand generic/non-code dispatches). Only a configured-but-
-    // unresolvable repo is a misconfiguration worth blocking.
-    const repoWasExpected = ticketDeclaredBaseRepo || boardEnvRepositories.length > 0;
+    // Deliberately UNCONDITIONAL on whether a repo was pre-declared: the ticket's
+    // acceptance blocks even when the ticket AND the board env are both empty
+    // ("보드에 environment repo 가 없는 상태로 base_repo 미지정 → 추정 없이
+    // pend/차단"). This also mirrors the manager, which already fails such a
+    // dispatch closed with `missing_repository_resource` — there is no branch-work
+    // dispatch that legitimately runs without a repo, so blocking here just moves
+    // that inevitable failure earlier as a clean pend. `requiresBaseRepo` (inside
+    // the predicate) scopes the block to assignee+active, so planner / reviewer /
+    // QA / chat dispatches never trip it.
     if (
       shouldBlockDispatchForMissingRepo({
         role,
         columnKind: (col as any)?.kind,
-        repoWasExpected,
         hasResolvedBaseRepo: !!baseRepo,
       })
     ) {

@@ -82,31 +82,35 @@ export function requiresBaseRepo(
 
 /**
  * Goal 2 guard decision: should this dispatch be BLOCKED (pended) because a
- * base repo was expected but none resolved?
+ * base repo is REQUIRED (branch-work role/column) but none resolved?
  *
- * Fires only when ALL hold:
- *  - the role/column pushes (`requiresBaseRepo`);
- *  - a repo was actually EXPECTED — the ticket declared a base_repo_resource_id,
- *    OR the board/workspace environment configured ≥1 repository;
- *  - yet NO usable base repo resolved (ticket's own or the env backfill).
+ * Fires when BOTH hold:
+ *  - the role/column pushes (`requiresBaseRepo` — assignee on an active column);
+ *  - NO usable base repo resolved, from the ticket's own id OR the board-env
+ *    backfill (`pickBaseRepoResourceId`).
  *
- * The `repoWasExpected` gate is deliberate: a board with no repo intent anywhere
- * is not doing isolated git work (e.g. a generic / non-code board, or a
- * wiring-only dispatch), so a missing repo must NOT pend it. When a repo WAS
- * configured but can't be resolved (deleted Resource, url-only env entry with no
- * credential), we refuse to guess a random repo — "임의 저장소 추정 금지" — and
- * pend for human attention instead of dispatching into a guaranteed push
- * failure that loops every cycle.
+ * DELIBERATELY unconditional on whether a repo was "configured" anywhere. Ticket
+ * 8c3befa8's acceptance is literal: "보드에 environment repo 가 없는 상태로
+ * base_repo 미지정 티켓 dispatch → 추정 없이 pend/차단". Gating the block on a
+ * repo being pre-declared (the earlier `repoWasExpected` heuristic) let exactly
+ * that scenario — ticket AND board-env both empty — slip through and emit, the
+ * opposite of the requirement.
+ *
+ * This also mirrors the authoritative manager behaviour: agent-manager's
+ * `validateWorktreeProvisioningInputs` fails an assignee ticket dispatch closed
+ * with `missing_repository_resource` whenever the bootstrap repo has no
+ * resource_id — there is no "non-code" branch-work dispatch on the manager side.
+ * Blocking here just moves that inevitable failure earlier, as a clean server
+ * pend with a human-actionable reason, instead of letting the assignee loop into
+ * the manager's per-cycle "worktree 프로비저닝 실패" abort (the comment spam this
+ * ticket exists to end). No repo guessing — fail closed. `requiresBaseRepo`
+ * already scopes this to the sole branch-work pairing, so planner / reviewer /
+ * QA / chat dispatches (which never push) are untouched.
  */
 export function shouldBlockDispatchForMissingRepo(args: {
   role: string | null | undefined;
   columnKind: string | null | undefined;
-  repoWasExpected: boolean;
   hasResolvedBaseRepo: boolean;
 }): boolean {
-  return (
-    requiresBaseRepo(args.role, args.columnKind) &&
-    args.repoWasExpected &&
-    !args.hasResolvedBaseRepo
-  );
+  return requiresBaseRepo(args.role, args.columnKind) && !args.hasResolvedBaseRepo;
 }
