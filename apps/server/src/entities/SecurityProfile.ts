@@ -194,7 +194,9 @@ export interface SecurityOnFailureTicketConfig {
   enabled: boolean;
   /** Board to file on. Falls back to run.board_id → profile.board_id. */
   board_id?: string;
-  /** Target column (default 'To Do' → first non-terminal → first column). */
+  /** Stable target column identifier. Preferred over column_name. */
+  column_id?: string;
+  /** Legacy/user-friendly target selector; otherwise the first active column is used. */
   column_name?: string;
   priority?: 'low' | 'medium' | 'high' | 'critical';
   /** Assignee for the fix ticket; falls back to the profile's target agent. */

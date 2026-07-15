@@ -245,7 +245,7 @@ export function useBoard(boardId: string = '') {
     await withLocalAction(() => api.createColumn(boardId, { name, color }));
   };
 
-  const updateColumn = async (columnId: string, data: { name?: string; color?: string; position?: number }) => {
+  const updateColumn = async (columnId: string, data: { name?: string; color?: string; position?: number; description?: string; is_terminal?: boolean; unassigned_policy?: 'halt' | 'skip' | 'skip_if_ticket_staffed' }) => {
     await withLocalAction(() => api.updateColumn(columnId, data));
   };
 

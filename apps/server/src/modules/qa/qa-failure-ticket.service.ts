@@ -24,7 +24,6 @@ const SCENARIO_LABEL_PREFIX = 'qa-scenario:';
 // max_rerun_attempts). Exported so the rerun hook parses the same prefix.
 export const RERUN_LABEL_PREFIX = 'qa-rerun:';
 const DEFAULT_LABELS = ['qa-failure', 'auto'];
-const DEFAULT_COLUMN = 'To Do';
 const DEFAULT_PRIORITY = 'high';
 
 // The marker labels that identify a ticket as an AUTO QA-failure fix ticket for
@@ -92,7 +91,7 @@ export class QaFailureTicketService {
         return null;
       }
 
-      const column = await this._resolveColumn(boardId, cfg.column_name || DEFAULT_COLUMN);
+      const column = await this._resolveColumn(boardId, cfg.column_id, cfg.column_name);
       if (!column) {
         this.logService.warn('QA', `on_failure_ticket: no usable column in board ${boardId} for scenario ${scenario.id} — skipping`);
         return null;
@@ -190,16 +189,24 @@ export class QaFailureTicketService {
 
   // ── Internals ──────────────────────────────────────────────────────────────
 
-  /** "To Do" (or configured) column → first non-terminal → first column. */
-  private async _resolveColumn(boardId: string, columnName: string): Promise<BoardColumn | null> {
-    const byName = await findColumnByName(this.dataSource, boardId, columnName);
-    if (byName) return byName;
+  /** Explicit column id/name → first active non-terminal → first non-terminal. */
+  private async _resolveColumn(boardId: string, columnId?: string, columnName?: string): Promise<BoardColumn | null> {
+    if (columnId) {
+      const byId = await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: columnId, board_id: boardId } });
+      if (byId) return byId;
+    }
+    if (columnName) {
+      const byName = await findColumnByName(this.dataSource, boardId, columnName);
+      if (byName) return byName;
+    }
     const cols = await this.dataSource.getRepository(BoardColumn).find({
       where: { board_id: boardId },
       order: { position: 'ASC' },
     });
     if (cols.length === 0) return null;
-    return cols.find((c) => !isTerminalColumn(c)) || cols[0];
+    return cols.find((c) => c.kind === 'active' && !isTerminalColumn(c))
+      || cols.find((c) => !isTerminalColumn(c))
+      || cols[0];
   }
 
   private async _findOpenFailureTicket(scenario: QaScenario, workspaceId: string): Promise<Ticket | null> {

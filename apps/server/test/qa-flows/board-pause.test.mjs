@@ -34,6 +34,7 @@ test('Paused board drops agent triggers; resume restores them', async (t) => {
 
   const { ws, board, columns } = await setupKanbanScene(app, getDataSourceToken, {
     workspaceName: 'pause',
+    envRepo: true,
   });
   const trio = await createAgentTrio(app, getDataSourceToken, ws.id);
   const user = await createUser(app, getDataSourceToken, { name: 'pauser' });

@@ -34,7 +34,7 @@ async function mcpFor(port, apiKey) {
 
 /** 두 assignee 홀더(A+B) + reporter 를 가진 In Progress 티켓 씬. */
 async function twoHolderScene(app, getDataSourceToken, name) {
-  const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: name });
+  const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: name, envRepo: true });
   const trio = await createAgentTrio(app, getDataSourceToken, ws.id);
   const holderB = { agent: await createAgent(app, getDataSourceToken, ws.id, { name: 'assignee-b' }) };
   holderB.key = await createApiKey(app, getDataSourceToken, holderB.agent.id, {

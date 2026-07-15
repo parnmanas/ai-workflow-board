@@ -16,6 +16,7 @@ import type { ToolContext } from './context';
 // Empty-string is allowed and treated as 'active' at runtime — it's the
 // back-compat default for columns that predate v0.41.
 const COLUMN_KIND_VALUES = ['', 'intake', 'active', 'review', 'merging', 'terminal'] as const;
+const UNASSIGNED_POLICY_VALUES = ['halt', 'skip', 'skip_if_ticket_staffed'] as const;
 
 export function registerColumnTools(server: McpServer, ctx: ToolContext): void {
   const { dataSource } = ctx;
@@ -33,8 +34,10 @@ export function registerColumnTools(server: McpServer, ctx: ToolContext): void {
         .describe("Role slugs to wake when a ticket lands on this column (e.g. ['assignee']). Omit to inherit from the parent board's routing_config under the (lowercased) column name."),
       is_terminal: z.boolean().optional()
         .describe('Whether tickets in this column are workflow end-state. Auto-syncs with `kind` (kind="terminal" implies is_terminal=true).'),
+      unassigned_policy: z.enum(UNASSIGNED_POLICY_VALUES).optional().default('halt')
+        .describe('When no routed role has a holder: halt, always skip, or skip only when the ticket has another holder'),
     },
-    async ({ board_id, name, color, kind, role_routing, is_terminal }) => {
+    async ({ board_id, name, color, kind, role_routing, is_terminal, unassigned_policy }) => {
       const repo = dataSource.getRepository(BoardColumn);
       const maxResult = await repo
         .createQueryBuilder('col')
@@ -79,6 +82,7 @@ export function registerColumnTools(server: McpServer, ctx: ToolContext): void {
         kind: resolvedKind,
         role_routing: roleRoutingJson,
         is_terminal: resolvedTerminal,
+        unassigned_policy,
       }));
       return ok(column);
     }
@@ -99,8 +103,10 @@ export function registerColumnTools(server: McpServer, ctx: ToolContext): void {
         .describe("Workflow kind used by runtime dispatch (intake|active|review|merging|terminal). Set to '' to clear / treat as legacy 'active'. Auto-syncs with `is_terminal` — kind='terminal' implies is_terminal=true."),
       role_routing: z.array(z.string()).optional()
         .describe('Role slugs to wake when a ticket lands on this column. Replaces the legacy lowercased-name lookup against Board.routing_config.'),
+      unassigned_policy: z.enum(UNASSIGNED_POLICY_VALUES).optional()
+        .describe('When no routed role has a holder: halt, always skip, or skip only when the ticket has another holder'),
     },
-    async ({ column_id, name, color, description, position, is_terminal, kind, role_routing }) => {
+    async ({ column_id, name, color, description, position, is_terminal, kind, role_routing, unassigned_policy }) => {
       const repo = dataSource.getRepository(BoardColumn);
       const col = await repo.findOne({ where: { id: column_id } });
       if (!col) return err('Column not found');
@@ -108,6 +114,7 @@ export function registerColumnTools(server: McpServer, ctx: ToolContext): void {
       if (name !== undefined) col.name = name;
       if (color !== undefined) col.color = color;
       if (description !== undefined) col.description = description;
+      if (unassigned_policy !== undefined) col.unassigned_policy = unassigned_policy;
       if (role_routing !== undefined) {
         // Storage shape is JSON-stringified array; mirrors the migration
         // backfill format and the writeRoutingConfigThrough helper.

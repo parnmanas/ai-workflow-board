@@ -25,6 +25,7 @@ import { resolveEffortPreset, ResolvedEffortPreset } from '../../common/effort-p
 import { mergeEnvironmentConfig, resolveEnvironmentConfig, ResolvedEnvironmentConfig } from '../../common/environment-config';
 import { resolveBoardUsePr, resolveBoardWorktreeMode, resolveWorktreeRelPath, renderUsePrTemplate, WorktreeMode } from '../../common/worktree-config';
 import { appendBoardLessons, MAX_INJECTED_LESSONS } from '../../common/board-lessons';
+import { pickBaseRepoResourceId, shouldBlockDispatchForMissingRepo } from '../../common/base-repo-binding';
 import { BoardLesson } from '../../entities/BoardLesson';
 import { isConsensusVoteComment } from '../../common/consensus-meta';
 
@@ -294,22 +295,12 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
 
     const columnHasHolder = resolved.some((r) => r.targetAgentIds.length > 0);
     if (triggerSource === 'column_move' && !columnHasHolder) {
-      if (this._isGateColumn(col)) {
-        // GATE COLUMN (review / merging) with no holder — never auto-advance a
-        // gate, in OR out (ticket cc48f06f). The benchmark short-circuit at the
-        // top of this method already parks a `benchmark-candidate` on a review
-        // column rather than letting it auto-advance past; this generalizes that
-        // to every review/merging gate and every ticket. A reviewer/merger seat
-        // must be staffed by a human — silently skipping it produces a
-        // "ready to merge" ticket with zero review (a3d25202 live repro). Halt
-        // in place + flag regardless of whether the ticket is staffed elsewhere.
-        await this._flagGateHalt(ticket, col, col);
-      } else if (await this._ticketHasAnyHolder(ticket.id)) {
-        // Staffed somewhere else — this empty stage is an intended skip.
+      const shouldSkip = col.unassigned_policy === 'skip'
+        || (col.unassigned_policy === 'skip_if_ticket_staffed' && await this._ticketHasAnyHolder(ticket.id));
+      if (shouldSkip) {
         await this._autoAdvanceUnassigned(ticket, col);
       } else {
-        // Orphan ticket — halt where it sits and flag; do not cascade to Done.
-        await this._flagUnassignedHalt(ticket, col);
+        await this._flagPolicyHalt(ticket, col, col);
       }
       return;
     }
@@ -525,19 +516,6 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    // GATE GUARD (ticket cc48f06f): never auto-advance an unstaffed ticket INTO
-    // a review/merging gate column. Cascading through active stages (Plan, In
-    // Progress) is fine, but a gate must be staffed by a human — auto-passing it
-    // silently produces a "ready to merge" ticket with zero work/review
-    // (a3d25202 live repro). Halt at the current (last active) column + flag,
-    // leaving the ticket one short of the gate for a human to staff. NOTE this
-    // checks the IMMEDIATE next non-terminal column only — we never skip OVER a
-    // gate to land on a later active column, which would bypass the gate entirely.
-    if (this._isGateColumn(nextCol)) {
-      await this._flagGateHalt(ticket, currentCol, nextCol);
-      return;
-    }
-
     const fromPosition = ticket.position;
     const fromColumnId = currentCol.id;
 
@@ -606,26 +584,7 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  /**
-   * Does this ticket have a holder on ANY role — agent OR user, across every
-   * role on the ticket, not just the current column's routed roles? Drives the
-   * auto-advance-vs-halt split (ticket c5951280): a ticket staffed somewhere
-   * legitimately skips an unservable stage and advances, while a ticket with no
-   * holder anywhere is an orphan that must halt in place and be flagged rather
-   * than cascade silently to Done.
-   *
-   * Both `agent_id` and `user_id` count as a holder. A ticket whose only
-   * holders are humans still has an owner who can act, so the empty agent-routed
-   * stage is a legitimate skip — not the orphan case.
-   *
-   * The reporter IS counted (ticket cc48f06f / 519fad18): a reporter-only ticket
-   * — the common shape of an agent-created follow-up, since create_ticket
-   * auto-fills the reporter to the caller — is treated as "staffed enough" to
-   * cascade through ACTIVE stages, but the gate guard (`_isGateColumn` /
-   * `_flagGateHalt`) still halts it one short of the first review/merging gate so
-   * it never silently skips to Done. The completely-unassigned (zero-holder)
-   * orphan is the only case that halts on the spot via `_flagUnassignedHalt`.
-   */
+  /** True when the ticket has any assigned agent or user in any role. */
   private async _ticketHasAnyHolder(ticketId: string): Promise<boolean> {
     const count = await this.dataSource
       .getRepository(TicketRoleAssignment)
@@ -639,47 +598,24 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Is this a review/merging GATE column? Gate columns require a human-staffed
-   * holder (reviewer / merger) and must never be crossed by the auto-advance
-   * cascade — neither entered nor exited while unstaffed (ticket cc48f06f).
-   * Distinct from active columns, where an empty seat is a legitimate skip:
-   * a gate's empty seat means "a human still has to staff this review", not
-   * "nobody routed here, move along". Kept in one place so the caller-side
-   * (cascade-OUT) and `_autoAdvanceUnassigned`-side (cascade-IN) guards agree.
+   * Halt and leave an audit flag when the current or next column explicitly
+   * declares `unassigned_policy=halt`.
    */
-  private _isGateColumn(col: BoardColumn): boolean {
-    const kind = (col as any).kind;
-    return kind === 'review' || kind === 'merging';
-  }
-
-  /**
-   * Halt + flag an unstaffed GATE-column crossing (ticket cc48f06f). The
-   * auto-advance cascade reached a review/merging gate with no holder — either
-   * the ticket sits ON the gate (`col === gateCol`, cascade-OUT, e.g. an empty
-   * Review with only the assignee set) or the next forward column IS the gate
-   * (`col` is the last active column before it, cascade-IN). Unlike
-   * `_autoAdvanceUnassigned` we must NOT push through: a gate has to be staffed
-   * by a human (assign a reviewer / merger), so the ticket halts in place and we
-   * write a grepable `auto_advance_halted_gate` flag so the UI activity feed and
-   * operator greps surface "stuck: gate needs staffing". `system` actor so the
-   * row does NOT re-enter `_handleActivity` (it is not a move and carries no
-   * holder to wake). Failing the write must not change the halt outcome.
-   */
-  private async _flagGateHalt(
+  private async _flagPolicyHalt(
     ticket: Ticket,
     col: BoardColumn,
     gateCol: BoardColumn,
   ): Promise<void> {
     this.logService.warn(
       'MCP',
-      'auto_advance halted at gate (review/merging requires a staffed holder)',
+      'auto_advance halted by column unassigned policy',
       {
         ticket_id: ticket.id,
         column_id: col.id,
         column_name: col.name,
         gate_column_id: gateCol.id,
         gate_column_name: gateCol.name,
-        gate_kind: (gateCol as any).kind,
+        unassigned_policy: gateCol.unassigned_policy,
       },
     );
     try {
@@ -691,59 +627,14 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
           ticket_id: ticket.id,
           actor_id: 'system',
           actor_name: 'TriggerLoopService',
-          action: 'auto_advance_halted_gate',
-          new_value: `column=${col.id} gate=${gateCol.id} gate_kind=${(gateCol as any).kind} reason=gate_requires_staffing`,
+          action: 'auto_advance_halted_policy',
+          new_value: `column=${col.id} blocked_column=${gateCol.id} reason=column_unassigned_policy_halt`,
           role: '',
           trigger_source: 'auto_advance',
         }),
       );
     } catch (e) {
       this.logService.warn('MCP', 'auto_advance gate-halt flag write failed (halt still applied)', {
-        err: String(e), ticket_id: ticket.id,
-      });
-    }
-  }
-
-  /**
-   * Halt + flag an ORPHAN ticket (ticket c5951280). The current non-terminal
-   * column can't be served (no holder for any routed role) AND the ticket has
-   * no holder on any role at all. Unlike `_autoAdvanceUnassigned` we must NOT
-   * push it forward — a completely unassigned ticket cascading to Done is the
-   * silent-flow bug (case ①) this ticket fixes. Leave it where it sits and
-   * write a grepable warning flag so the UI activity feed and operator greps
-   * surface "stuck: nobody assigned".
-   *
-   * The flag is an ActivityLog row with action `auto_advance_halted_unassigned`
-   * and a `system` actor — `system` so the row does NOT re-enter
-   * `_handleActivity` (it is not a move and carries no holder to wake; it's a
-   * pure audit flag). Failing the write must not change the halt outcome.
-   */
-  private async _flagUnassignedHalt(
-    ticket: Ticket,
-    col: BoardColumn,
-  ): Promise<void> {
-    this.logService.warn(
-      'MCP',
-      'auto_advance halted (ticket fully unassigned — no holder on any role)',
-      { ticket_id: ticket.id, column_id: col.id, column_name: col.name },
-    );
-    try {
-      const activityLogRepo = this.dataSource.getRepository(ActivityLog);
-      await activityLogRepo.save(
-        activityLogRepo.create({
-          entity_type: 'ticket',
-          entity_id: ticket.id,
-          ticket_id: ticket.id,
-          actor_id: 'system',
-          actor_name: 'TriggerLoopService',
-          action: 'auto_advance_halted_unassigned',
-          new_value: `column=${col.id} reason=no_holder_on_any_role`,
-          role: '',
-          trigger_source: 'auto_advance',
-        }),
-      );
-    } catch (e) {
-      this.logService.warn('MCP', 'auto_advance halt flag write failed (halt still applied)', {
         err: String(e), ticket_id: ticket.id,
       });
     }
@@ -1698,8 +1589,11 @@ candidate's branch or move the ticket.
     // Workspace-scoped lookup (defense-in-depth — writes are guarded too):
     // a stale id pointing at another workspace's Resource never gets its
     // url/name shipped out to the assignee here.
-    const baseRepoId = freshTicket?.base_repo_resource_id || ticket.base_repo_resource_id || '';
-    const baseBranch = freshTicket?.base_branch || ticket.base_branch || '';
+    // `let` (not `const`): when the ticket carries no base repo, the board
+    // environment repo is backfilled in below (goal 1, ticket 8c3befa8) after
+    // the merged environment_config is resolved.
+    let baseRepoId = freshTicket?.base_repo_resource_id || ticket.base_repo_resource_id || '';
+    let baseBranch = freshTicket?.base_branch || ticket.base_branch || '';
     const baseRepoWorkspaceId = freshTicket?.workspace_id || ticket.workspace_id || '';
     let baseRepo: { id: string; name: string; url: string; default_branch: string } | null = null;
     if (baseRepoId && baseRepoWorkspaceId) {
@@ -1789,6 +1683,10 @@ candidate's branch or move the ticket.
     // provisioning" and spawns exactly as before. Reuses the same board/
     // workspace rows loaded for harness so there's no extra round-trip.
     let environmentConfig: ResolvedEnvironmentConfig | null = null;
+    // Merged board+workspace environment repositories, captured for the base_repo
+    // backfill below (goal 1, ticket 8c3befa8). Populated inside the resolve
+    // try so a base-repo-less ticket can inherit the board's default repo.
+    let boardEnvRepositories: { resource_id?: string }[] = [];
     // Resolved board worktree placement mode (worktree 규약 ②, board option ①).
     // Null-safe read via the shared resolver — a missing/malformed column falls
     // back to DEFAULT_WORKTREE_MODE ('per_ticket'). Shipped on the trigger payload
@@ -1828,6 +1726,7 @@ candidate's branch or move the ticket.
         boardForHarness?.environment_config,
       );
       if (mergedEnv) {
+        boardEnvRepositories = mergedEnv.repositories || [];
         const resourceIds = (mergedEnv.repositories || [])
           .map((r) => (r.resource_id || '').trim())
           .filter((id) => id.length > 0);
@@ -1859,6 +1758,69 @@ candidate's branch or move the ticket.
       this.logService.warn('MCP', 'harness_config / effort_preset / environment_config resolve failed (continuing without)', {
         err: String(e), ticket_id: ticket.id, board_id: boardId,
       });
+    }
+
+    // ── base repo binding (ticket 8c3befa8) ──────────────────────────────────
+    // Goal 1 — auto-bind the board environment repo as the DEFAULT base repo.
+    // When the ticket carries no base repo of its own, fall back to the merged
+    // environment's first repository (its resource_id → the Resource's url +
+    // default_branch). This gives the SERVER the same repo agent-manager would
+    // otherwise resolve via its own env fallback, so the base_repo shipped on
+    // the wire is authoritative AND the guard below can pend accurately when
+    // nothing resolves. Only runs when the ticket has no base repo — a
+    // ticket-set repo always wins.
+    if (!baseRepoId && baseRepoWorkspaceId) {
+      const picked = pickBaseRepoResourceId('', boardEnvRepositories);
+      if (picked.resourceId) {
+        try {
+          const r = await this.dataSource.getRepository(Resource).findOne({
+            where: { id: picked.resourceId, workspace_id: baseRepoWorkspaceId },
+          });
+          if (r) {
+            baseRepoId = r.id;
+            baseRepo = { id: r.id, name: r.name, url: r.url || '', default_branch: r.default_branch || '' };
+            if (!baseBranch) baseBranch = baseRepo.default_branch;
+            this.logService.info('MCP', 'base_repo backfilled from board environment (ticket 8c3befa8)', {
+              ticket_id: ticket.id, base_repo_id: baseRepoId, base_branch: baseBranch, source: picked.source,
+            });
+          }
+        } catch (e) {
+          this.logService.warn('MCP', 'base_repo backfill lookup failed (continuing without)', {
+            err: String(e), ticket_id: ticket.id, base_repo_id: picked.resourceId,
+          });
+        }
+      }
+    }
+
+    // Goal 2 — force a base repo (guard). An assignee dispatched onto an active
+    // (branch-work) column with NO resolvable repo (neither the ticket's own id
+    // nor the board-env backfill above) would land in a worktree it can't push
+    // from: credential install early-returns on a null repo → `git push` dies
+    // with `could not read Username`, and agent-manager's fail-closed
+    // provisioning aborts every cycle with "worktree 프로비저닝 실패" (the comment
+    // spam this ticket targets). Rather than emit into that guaranteed downstream
+    // abort, pend the ticket for human attention and skip the emit — no repo
+    // guessing, fail closed. Subsequent dispatches short-circuit at the pending
+    // gate above.
+    //
+    // Deliberately UNCONDITIONAL on whether a repo was pre-declared: the ticket's
+    // acceptance blocks even when the ticket AND the board env are both empty
+    // ("보드에 environment repo 가 없는 상태로 base_repo 미지정 → 추정 없이
+    // pend/차단"). This also mirrors the manager, which already fails such a
+    // dispatch closed with `missing_repository_resource` — there is no branch-work
+    // dispatch that legitimately runs without a repo, so blocking here just moves
+    // that inevitable failure earlier as a clean pend. `requiresBaseRepo` (inside
+    // the predicate) scopes the block to assignee+active, so planner / reviewer /
+    // QA / chat dispatches never trip it.
+    if (
+      shouldBlockDispatchForMissingRepo({
+        role,
+        columnKind: (col as any)?.kind,
+        hasResolvedBaseRepo: !!baseRepo,
+      })
+    ) {
+      await this._pendForMissingBaseRepo(ticket, agentId, role, triggerSource);
+      return '';
     }
 
     // Board Lessons / Runbook (ticket 9d0d6ac4). Append the board's ACTIVE
@@ -2035,6 +1997,91 @@ candidate's branch or move the ticket.
     }
 
     return triggerId;
+  }
+
+  /**
+   * Goal 2 guard (ticket 8c3befa8): pend a ticket whose assignee dispatch has
+   * no resolvable base repo (neither on the ticket nor on the board
+   * environment). Pending drops all future triggers at the gate above, so the
+   * assignee stops looping into a worktree it can't push from. Idempotent — a
+   * ticket already pending is left untouched (no duplicate comment/audit), and
+   * the pending gate means this fires at most once per stuck cycle.
+   */
+  private async _pendForMissingBaseRepo(
+    ticket: Ticket,
+    agentId: string,
+    role: string,
+    triggerSource: string,
+  ): Promise<void> {
+    const reason =
+      'base repo 미해결 — assignee 가 push 할 저장소를 확정할 수 없습니다. 티켓 base repo 또는 보드 ' +
+      'environment_config repository 가 설정돼 있으나 해결되지 않았습니다(Resource 삭제/타 workspace, ' +
+      '또는 credential 없는 url-only 항목). 유효한 repository Resource 를 지정한 뒤 pending 을 해제하세요.';
+
+    // Re-read fresh before flipping — an operator/parallel pend could race us,
+    // and we must not clobber or re-comment an already-pending ticket.
+    const fresh = await this.dataSource.getRepository(Ticket).findOne({
+      where: { id: ticket.id },
+    });
+    if (!fresh || fresh.pending_user_action || fresh.pending_on_tickets || fresh.archived_at) {
+      this.logService.info('MCP', 'base_repo guard: dispatch skipped, ticket already parked (ticket 8c3befa8)', {
+        ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource,
+      });
+      return;
+    }
+
+    fresh.pending_user_action = true;
+    fresh.pending_reason = reason;
+    fresh.pending_set_at = new Date();
+    fresh.pending_set_by = 'TriggerLoopService';
+    await this.dataSource.getRepository(Ticket).save(fresh);
+
+    this.logService.warn('MCP', 'base_repo guard: dispatch blocked, ticket pended (ticket 8c3befa8)', {
+      ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource,
+    });
+
+    // Audit row — same shape pend_ticket emits (drives the ticket_pended SSE).
+    try {
+      await this.activityService.logActivity({
+        entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
+        field_changed: 'pending_user_action',
+        old_value: 'false', new_value: 'true',
+        ticket_id: ticket.id,
+        actor_id: 'system',
+        actor_name: 'TriggerLoopService',
+      });
+    } catch (e) {
+      this.logService.warn('MCP', 'base_repo guard: pend audit write failed (pend still applied)', {
+        err: String(e), ticket_id: ticket.id,
+      });
+    }
+
+    // Visible comment so the block is discoverable from the thread, not just
+    // the User tab. Deliberately no role mention — pending drops triggers, and
+    // the pend_reason on the User tab is the human-facing surface.
+    try {
+      const commentRepo = this.dataSource.getRepository(Comment);
+      const content = [
+        '🚫 **Dispatch 차단 — base repo 미해결 (ticket 8c3befa8 guard)**',
+        '',
+        reason,
+        '',
+        `_role=${role} · agent=${agentId} · source=${triggerSource}_`,
+      ].join('\n');
+      await commentRepo.save(commentRepo.create({
+        ticket_id: ticket.id,
+        workspace_id: fresh.workspace_id || ticket.workspace_id || '',
+        author_type: 'system',
+        author_id: '',
+        author: 'TriggerLoopService',
+        content,
+        type: 'note',
+      }));
+    } catch (e) {
+      this.logService.warn('MCP', 'base_repo guard: pend comment write failed (pend still applied)', {
+        err: String(e), ticket_id: ticket.id,
+      });
+    }
   }
 
   /**

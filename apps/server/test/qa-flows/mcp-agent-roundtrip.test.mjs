@@ -23,6 +23,7 @@ test('Virtual agent reacts to agent_trigger by calling MCP move_ticket + add_com
 
   const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, {
     workspaceName: 'roundtrip',
+    envRepo: true,
   });
   const worker = await createAgent(app, getDataSourceToken, ws.id, { name: 'worker' });
   const workerKey = await createApiKey(app, getDataSourceToken, worker.id, {

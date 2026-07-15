@@ -125,9 +125,9 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
     steps: [
       step(0, 'Create a root ticket in the To Do column with an assignee set', 'Ticket created in To Do, status=todo', 'create_ticket', { workspace_id: '{{workspace_id}}', column_id: '{{todo_column_id}}', title: 'QA lifecycle probe', assignee_id: '{{assignee_agent_id}}' }),
       step(1, 'Read the ticket back', 'column_id == To Do, assignee resolved', 'get_ticket', { ticket_id: '{{ticket_id}}' }),
-      step(2, 'Move the ticket To Do → In Progress', 'Move succeeds; assignee receives an agent_trigger for In Progress', 'move_ticket', { ticket_id: '{{ticket_id}}', target_column_name: 'In Progress', board_id: '{{board_id}}' }),
-      step(3, 'Move In Progress → Review', 'reviewer (not assignee) is the role woken on the Review column', 'move_ticket', { ticket_id: '{{ticket_id}}', target_column_name: 'Review', board_id: '{{board_id}}' }),
-      step(4, 'Move Review → Done (terminal)', 'Ticket lands in Done, terminal_entered_at stamped, status=done', 'move_ticket', { ticket_id: '{{ticket_id}}', target_column_name: 'Done', board_id: '{{board_id}}' }),
+      step(2, 'Move the ticket to the assignee-routed active column', 'Move succeeds; assignee receives an agent_trigger', 'move_ticket', { ticket_id: '{{ticket_id}}', target_column_id: '{{in_progress_column_id}}' }),
+      step(3, 'Move the ticket to the reviewer-routed column', 'reviewer (not assignee) is the role woken', 'move_ticket', { ticket_id: '{{ticket_id}}', target_column_id: '{{review_column_id}}' }),
+      step(4, 'Move the ticket to the terminal column', 'Ticket lands in a terminal column, terminal_entered_at stamped, status=done', 'move_ticket', { ticket_id: '{{ticket_id}}', target_column_id: '{{done_column_id}}' }),
       step(5, 'Confirm final state', 'get_ticket shows column=Done and status=done', 'get_ticket', { ticket_id: '{{ticket_id}}' }),
     ],
   },
@@ -194,7 +194,7 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
     steps: [
       step(0, 'Create a ticket in To Do assigned to a live QA agent', 'Ticket exists, assignee online', 'create_ticket', { workspace_id: '{{workspace_id}}', column_id: '{{todo_column_id}}', title: 'QA roundtrip probe', prompt_text: 'Advance me to Review and leave a note.', assignee_id: '{{assignee_agent_id}}' }),
       step(1, 'Subscribe to events so the trigger and the agent reaction are observable', 'SSE stream open', 'subscribe_events', { workspace_id: '{{workspace_id}}' }),
-      step(2, 'Move the ticket To Do → In Progress to fire the assignee trigger', 'agent_trigger delivered to the assignee within a few seconds', 'move_ticket', { ticket_id: '{{ticket_id}}', target_column_name: 'In Progress', board_id: '{{board_id}}' }),
+      step(2, 'Move the ticket to the assignee-routed active column', 'agent_trigger delivered to the assignee within a few seconds', 'move_ticket', { ticket_id: '{{ticket_id}}', target_column_id: '{{in_progress_column_id}}' }),
       step(3, 'Wait for the agent to react via MCP', 'A new comment from the agent appears AND the ticket moves forward (SSE→MCP loop closed)', 'get_ticket', { ticket_id: '{{ticket_id}}' }),
     ],
   },
@@ -325,9 +325,9 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
     steps: [
       step(0, 'Create a board whose Plan column routes to "planner"', 'Board + columns created', 'create_board', { workspace_id: '{{workspace_id}}', name: 'QA policy probe' }),
       step(1, 'Set Plan column role_routing to a role no agent holds', 'update_column persists role_routing=["planner"]', 'update_column', { column_id: '{{plan_column_id}}', role_routing: ['planner'] }),
-      step(2, 'Move a ticket WITH an assignee (but no planner) onto Plan', 'Ticket auto-advances past the unservable Plan column to In Progress; assignee woken', 'move_ticket', { ticket_id: '{{staffed_ticket_id}}', target_column_name: 'Plan', board_id: '{{policy_board_id}}' }),
+      step(2, 'Move a staffed ticket onto the unservable planner-routed column', 'Ticket auto-advances to the next servable column; assignee woken', 'move_ticket', { ticket_id: '{{staffed_ticket_id}}', target_column_id: '{{plan_column_id}}' }),
       step(3, 'Strip the auto-filled reporter off the orphan ticket so it has ZERO role holders (create_ticket auto-defaults reporter→caller, so a fresh ticket is NOT a true orphan)', 'Reporter slot cleared via role_assignments — the ticket now holds no agent/user on any role (assignee/reporter/reviewer all empty)', 'update_ticket', { ticket_id: '{{orphan_ticket_id}}', role_assignments: [{ role_slug: 'reporter', agent_id: '' }] }),
-      step(4, 'Move the now truly-unassigned ticket onto Plan', 'Ticket HALTS in place on Plan with an auto_advance_halted_unassigned activity marker (no auto-advance, no silent skip to Done)', 'move_ticket', { ticket_id: '{{orphan_ticket_id}}', target_column_name: 'Plan', board_id: '{{policy_board_id}}' }),
+      step(4, 'Move the now truly-unassigned ticket onto the planner-routed column', 'The column follows its configured no-holder policy', 'move_ticket', { ticket_id: '{{orphan_ticket_id}}', target_column_id: '{{plan_column_id}}' }),
     ],
   },
 
@@ -344,10 +344,10 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
     tags: ['backlog', 'promotion', 'focus', 'chain'],
     steps: [
       step(0, 'Create a board with max_concurrent_tickets_per_agent = 1', 'Board created with focus cap', 'create_board', { workspace_id: '{{workspace_id}}', name: 'QA backlog probe', max_concurrent_tickets_per_agent: 1 }),
-      step(1, 'Put one ticket in In Progress (fills the focus slot)', 'Focus slot occupied', 'move_ticket', { ticket_id: '{{active_ticket_id}}', target_column_name: 'In Progress', board_id: '{{backlog_board_id}}' }),
+      step(1, 'Put one ticket in the assignee-routed active column (fills the focus slot)', 'Focus slot occupied', 'move_ticket', { ticket_id: '{{active_ticket_id}}', target_column_id: '{{in_progress_column_id}}' }),
       step(2, 'Add a chain successor (low priority) + an unrelated outsider (high priority) to Backlog', 'Two backlog candidates exist', 'create_ticket', { workspace_id: '{{workspace_id}}', column_id: '{{backlog_column_id}}', title: 'QA chain successor', priority: 'low' }),
       step(3, 'While focus is full, observe no promotion', 'get_board_summary shows backlog unchanged (focus-held gate)', 'get_board_summary', { board_id: '{{backlog_board_id}}' }),
-      step(4, 'Finish the active ticket (move to Done) to free the focus slot', 'Exactly one backlog ticket promotes — the chain successor wins over the outsider', 'move_ticket', { ticket_id: '{{active_ticket_id}}', target_column_name: 'Done', board_id: '{{backlog_board_id}}' }),
+      step(4, 'Finish the active ticket by moving it to the terminal column', 'Exactly one intake ticket promotes — the chain successor wins over the outsider', 'move_ticket', { ticket_id: '{{active_ticket_id}}', target_column_id: '{{done_column_id}}' }),
       step(5, 'Confirm the promotion', 'get_board_summary shows the chain successor promoted into the active column', 'get_board_summary', { board_id: '{{backlog_board_id}}' }),
     ],
   },

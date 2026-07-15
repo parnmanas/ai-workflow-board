@@ -509,7 +509,7 @@ export const api = {
   // ─── Columns ──────────────────────────────────────────
   createColumn: (boardId: string, data: { name: string; color?: string; description?: string }) =>
     request<any>(`/boards/${boardId}/columns`, { method: 'POST', body: JSON.stringify(data) }),
-  updateColumn: (id: string, data: { name?: string; color?: string; position?: number; description?: string; is_terminal?: boolean }) =>
+  updateColumn: (id: string, data: { name?: string; color?: string; position?: number; description?: string; is_terminal?: boolean; unassigned_policy?: 'halt' | 'skip' | 'skip_if_ticket_staffed' }) =>
     request<any>(`/columns/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteColumn: (id: string) =>
     request<any>(`/columns/${id}`, { method: 'DELETE' }),

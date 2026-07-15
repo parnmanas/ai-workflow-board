@@ -170,7 +170,7 @@ export interface QaScenarioStep {
  * Every field except `enabled` is optional and resolved with a fallback chain
  * in QaFailureTicketService:
  *   - board_id    → run.board_id → scenario.board_id
- *   - column_name → "To Do" → the board's first non-terminal column
+ *   - column_id/name → the board's first active non-terminal column
  *   - priority    → "high"
  *   - assignee_id → scenario.target_agent_id (also reporter/reviewer)
  *   - labels      → ['qa-failure','auto']
@@ -179,6 +179,9 @@ export interface QaScenarioStep {
 export interface QaOnFailureTicketConfig {
   enabled: boolean;
   board_id?: string;
+  /** Stable target column identifier. Preferred over column_name. */
+  column_id?: string;
+  /** Legacy/user-friendly target selector; column_id is rename-safe. */
   column_name?: string;
   priority?: 'low' | 'medium' | 'high' | 'critical';
   assignee_id?: string;
@@ -200,7 +203,7 @@ export interface QaOnFailureTicketConfig {
 
   // ── QA → fix → QA closed-loop (ticket 467dbc7a) ──────────────────────────
   // Opt-in: when true, a fix ticket auto-filed by this policy that later reaches
-  // a terminal (Done) column triggers QaRerunOnFixService to deterministically
+  // a terminal column triggers QaRerunOnFixService to deterministically
   // re-run the SAME scenario (server-side startQaRun — no agent prompt parsing).
   // Default false (historic behaviour: filing the ticket is the end of the
   // loop). The rerun is strictly scoped to tickets carrying this policy's

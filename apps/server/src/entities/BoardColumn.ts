@@ -28,6 +28,8 @@ export type ColumnKind =
   | 'merging'
   | 'terminal';
 
+export type UnassignedColumnPolicy = 'halt' | 'skip' | 'skip_if_ticket_staffed';
+
 @Entity('columns')
 export class BoardColumn {
   @PrimaryGeneratedColumn('uuid')
@@ -82,6 +84,10 @@ export class BoardColumn {
    */
   @Column({ type: 'text', default: '[]' })
   role_routing: string;
+
+  /** What to do when none of this column's routed roles has a holder. */
+  @Column({ type: 'varchar', default: 'halt' })
+  unassigned_policy: UnassignedColumnPolicy;
 
   @CreateDateColumn()
   created_at: Date;

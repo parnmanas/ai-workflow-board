@@ -34,6 +34,7 @@ test('Ticket lifecycle: Todo → In Progress → Review → Done routes triggers
   step('Seed kanban scene (workspace + board + 5 columns + routing_config)');
   const { ws, board: _board, columns } = await setupKanbanScene(app, getDataSourceToken, {
     workspaceName: 'lifecycle',
+    envRepo: true,
   });
   step('Create assignee/reporter/reviewer agent trio with API keys');
   const trio = await createAgentTrio(app, getDataSourceToken, ws.id);

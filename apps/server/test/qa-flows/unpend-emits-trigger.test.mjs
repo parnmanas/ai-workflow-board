@@ -57,6 +57,7 @@ test('Unpending a ticket emits an agent_trigger to the current column role holde
   step('Seed workspace + assignee-routed kanban + ticket parked on In Progress');
   const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, {
     workspaceName: 'unpend-trig',
+    envRepo: true,
   });
   const ticketRepo = app.get(getDataSourceToken()).getRepository('Ticket');
 

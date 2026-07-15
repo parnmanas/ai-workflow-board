@@ -50,6 +50,7 @@ test('benchmark dispatch: create_benchmark_run wakes candidates; review landing 
 
   const { ws, board, columns } = await setupKanbanScene(app, getDataSourceToken, {
     workspaceName: 'bench-dispatch',
+    envRepo: true,
   });
   const ds = app.get(getDataSourceToken());
   await ds.getRepository('Board').update(board.id, { benchmark_mode: 'on' });

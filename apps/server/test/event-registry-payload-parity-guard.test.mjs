@@ -312,6 +312,12 @@ test('agent_trigger flatten() forwards every manager-consumed field', () => {
   // worktree_rel_path to fill the `{{AWB_WORK_FOLDER}}` column-prompt placeholder
   // with the real spawn cwd. Drop either from flatten() and the worktree lands in
   // the wrong place / the work-folder rule silently loses its path.
+  //
+  // base_repo / base_branch (ticket 8c3befa8): the manager reads them off the
+  // FLATTENED event (resolveBootstrapRepository) to pick the ticket's own repo
+  // for the worktree checkout. flatten() dropped them historically, so the
+  // manager always fell back to environment.repositories[0] and the ticket's
+  // base repo was ignored on the wire — locked down here.
   const code = read(REGISTRY_REL);
   const flat = code.slice(code.indexOf("eventType: 'agent_trigger'"));
   for (const field of [
@@ -320,6 +326,8 @@ test('agent_trigger flatten() forwards every manager-consumed field', () => {
     'environment_config',
     'force_respawn',
     'column_prompt',
+    'base_repo',
+    'base_branch',
     'max_concurrent_tickets_per_agent',
     'worktree_mode',
     'worktree_rel_path',

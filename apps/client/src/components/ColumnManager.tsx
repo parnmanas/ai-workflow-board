@@ -21,7 +21,7 @@ interface ColumnManagerProps {
   promptTemplates: PromptTemplate[];
   workspaceRoles?: RoleOption[];
   onCreateColumn: (boardId: string, name: string, color?: string) => Promise<void>;
-  onUpdateColumn: (columnId: string, data: { name?: string; color?: string; position?: number; description?: string; is_terminal?: boolean }) => Promise<void>;
+  onUpdateColumn: (columnId: string, data: { name?: string; color?: string; position?: number; description?: string; is_terminal?: boolean; unassigned_policy?: 'halt' | 'skip' | 'skip_if_ticket_staffed' }) => Promise<void>;
   onDeleteColumn: (columnId: string) => Promise<void>;
   onUpdateRoutingConfig: (config: Record<string, string[]>) => Promise<void>;
   onUpdateColumnPrompts: (config: Record<string, string>) => Promise<void>;
@@ -247,6 +247,19 @@ export default function ColumnManager({
                               </div>
 
                               {/* Prompt template selector — attached to agent_trigger when a ticket enters this column */}
+                              <div style={{ paddingLeft: 28, display: 'flex', alignItems: 'center', gap: 8 }}>
+                                <span style={{ fontSize: '10px', color: tokens.colors.borderStrong, fontWeight: 600, textTransform: 'uppercase' }}>No holder</span>
+                                <select
+                                  value={col.unassigned_policy || 'halt'}
+                                  onChange={(e) => onUpdateColumn(col.id, { unassigned_policy: e.target.value as 'halt' | 'skip' | 'skip_if_ticket_staffed' })}
+                                  style={{ padding: '3px 8px', borderRadius: tokens.radii.sm, fontSize: '12px', border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surfaceCard, color: tokens.colors.textStrong }}
+                                >
+                                  <option value="halt">Halt in this column</option>
+                                  <option value="skip">Skip to next column</option>
+                                  <option value="skip_if_ticket_staffed">Skip only if ticket has another holder</option>
+                                </select>
+                              </div>
+
                               <div style={{ paddingLeft: 28, display: 'flex', alignItems: 'center', gap: 8 }}>
                                 <span style={{ fontSize: '10px', color: tokens.colors.borderStrong, fontWeight: 600, textTransform: 'uppercase', flexShrink: 0 }}>
                                   Prompt
