@@ -23,6 +23,7 @@ import {
   scrubOriginUrl,
   maskCredential,
 } from '../dist/lib/repo-credential.js';
+import { URL as NodeURL } from 'node:url';
 
 function git(cwd, args) {
   return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim();
@@ -83,6 +84,37 @@ test('maskCredential: 토큰 문자열을 *** 로 치환, 무토큰이면 원문
   assert.ok(masked.includes('***'));
   assert.equal(maskCredential('nothing here', null), 'nothing here');
   assert.equal(maskCredential('nothing here', { token: '' }), 'nothing here');
+});
+
+test('maskCredential: URL 예약문자 토큰의 percent-encoded 형태도 clone 실패 stderr 에서 제거', () => {
+  // 토큰에 URL 예약문자(`:` `?` `#`)가 있으면 authenticatedCloneUrl 은 이를
+  // percent-encode 해 심는다 → raw 토큰 치환만으로는 encoded 형태가 새어나간다.
+  const token = 'tok:with?reserved#chars';
+  // 실제 git 이 보게 될 인증 URL: authenticatedCloneUrl 과 동일 경로(URL.password)로 생성.
+  const authUrl = authenticatedCloneUrl('https://git.example.test/acme/private.git', { token });
+  const encoded = new NodeURL('https://x@h.invalid');
+  encoded.password = token;
+  // sanity: 인코딩이 실제로 일어났고 raw 토큰과 다르다.
+  assert.ok(authUrl.includes(encoded.password), 'clone URL 에 encoded 토큰이 포함돼야 함');
+  assert.notEqual(encoded.password, token, '예약문자 토큰은 percent-encode 되어야 함');
+
+  const stderr =
+    `Cloning into 'private'...\n` +
+    `fatal: unable to access '${authUrl}/': The requested URL returned error: 403`;
+  const masked = maskCredential(stderr, { token });
+
+  // raw 형태·encoded 형태·전체 userinfo 어느 것도 남지 않아야 한다.
+  assert.ok(!masked.includes(token), 'raw 토큰 노출');
+  assert.ok(!masked.includes(encoded.password), 'percent-encoded 토큰 노출');
+  assert.ok(!masked.includes('x-access-token:'), 'userinfo(username:token) 노출');
+  assert.ok(masked.includes('***@git.example.test'), 'userinfo 가 *** 로 redact 되어야 함');
+});
+
+test('maskCredential: 무토큰이어도 URL userinfo 는 redact (구조적 방어선)', () => {
+  const leaked = "fatal: unable to access 'https://x-access-token:leaked-token@h/r.git/': 403";
+  const masked = maskCredential(leaked, null);
+  assert.ok(!masked.includes('leaked-token'), 'userinfo 토큰 노출');
+  assert.ok(masked.includes('https://***@h/r.git'), 'userinfo 가 *** 로 redact 되어야 함');
 });
 
 // ── installRepoCredential + scrubOriginUrl (실제 git repo) ────────────────────

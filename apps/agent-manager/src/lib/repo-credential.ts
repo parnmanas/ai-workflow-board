@@ -116,13 +116,39 @@ export async function installRepoCredential(
 }
 
 /**
- * 로그/steps 출력에서 토큰 문자열을 마스킹한다. clone/fetch 실패 stderr 에 인증
- * URL 이 섞여 나오는 경우를 대비한 방어적 문자열 치환 — best-effort(순수). 토큰이
- * 없으면 원문 그대로 반환한다.
+ * 로그/steps 출력에서 credential 을 마스킹한다. clone/fetch 실패 stderr 에 인증
+ * URL 이 섞여 나오는 경우를 대비한 방어적 치환 — best-effort(순수).
+ *
+ * 주의: `authenticatedCloneUrl`/`installRepoCredential` 은 토큰을 WHATWG `URL`
+ * (`u.password`) 로 심으므로, 토큰에 URL 예약문자(`:` `?` `#` `/` `@` …)가 있으면
+ * git stderr 에는 **percent-encoded** 형태(`tok%3A…`)로 나온다. raw 토큰만 치환하면
+ * 이 인코딩 형태가 그대로 노출되므로, 인코딩에 의존하지 않는 구조적 마스킹을 1차
+ * 방어선으로 둔다:
+ *   1. https(s) URL 의 userinfo(`user:pass@`) 전체를 redact — 토큰이 어떻게
+ *      인코딩되든 확실히 사라진다.
+ *   2. URL 밖(bare)에 노출된 raw 토큰과, URL 이 실제로 만들어내는 encoded 표현을
+ *      둘 다 치환 — 1번을 빠져나간 잔여 커버.
+ * 토큰이 없어도 1번(userinfo redact)은 수행한다.
  */
 export function maskCredential(text: string, cred?: RepoCredential | null): string {
-  const out = text || '';
+  let out = text || '';
+  if (!out) return out;
+  // 1. userinfo 를 통째로 redact. userinfo 안의 예약문자는 전부 percent-encode 되므로
+  //    literal `/` `@` `공백` 이 없다 → `[^/\s@]+@` 로 안전하게 `@` 앞까지 잡는다.
+  out = out.replace(/(https?:\/\/)[^/\s@]+@/gi, '$1***@');
   const token = cred?.token?.trim();
-  if (!out || !token) return out;
-  return out.split(token).join('***');
+  if (!token) return out;
+  // 2. raw 토큰 + URL 이 심는 encoded 표현(= u.password 게터가 돌려주는 값) 둘 다 제거.
+  const forms = new Set<string>([token]);
+  try {
+    const u = new URL('https://x@h.invalid');
+    u.password = token;
+    if (u.password) forms.add(u.password);
+  } catch {
+    /* URL 생성 실패는 무시 — raw 치환만 수행 */
+  }
+  for (const form of forms) {
+    if (form) out = out.split(form).join('***');
+  }
+  return out;
 }
