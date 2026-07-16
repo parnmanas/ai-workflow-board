@@ -542,6 +542,14 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
    *      lock-TTL sweep to the liveness window; a live successor's fresh claim
    *      (recent locked_at) is left intact.
    *
+   * Recovery bound — NOT instant for a leak. This runs only once absentStrand is
+   * true, and hasLiveRoleStrand keeps counting a leaked current_task as LIVE
+   * until its TTL (CURRENT_TASK_STALE_MS) expires. So a REGISTRY-ABSENT seat
+   * (never spawned, or manager-cleared on a clean exit / release) is reclaimed +
+   * re-dispatched within the liveness floor, whereas a LEAKED current_task /
+   * claim is only reclaimed after CURRENT_TASK_STALE_MS (+ up to one tick) —
+   * exactly the split the cadence diagnostic's recovery_bounds_ms surfaces.
+   *
    * Both steps are best-effort — a failure must not block the re-dispatch. It
    * writes NO ticket activity: a claim release is intentionally excluded from
    * my_last_update_at (allocation.service), and resetting the staleness clock

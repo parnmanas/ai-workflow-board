@@ -48,8 +48,12 @@ test('supervisor-cadence diagnostic: exposes per-workspace configured/default/ef
   assert.equal(inc.supervisor_stale_ms.effective, FOUR_H, 'effective = the value the tick uses');
   assert.equal(inc.supervisor_stale_ms.is_default, false, 'NOT the default (a custom/incident value)');
   assert.equal(inc.elevated, true, 'flagged elevated (far above the sane-max)');
-  assert.equal(inc.absent_strand_recovery_ms, 120_000, 'a DEAD strand still recovers within the 2 min floor, not 4 h');
-  assert.equal(inc.present_strand_recovery_ms, FOUR_H, 'a PRESENT-but-quiet strand is paced off the 4 h window (the observable harm)');
+  // Recovery bounds split by death-mode (reviewer AC): a single "absent" number
+  // conflated two very different guarantees. registry-absent = fast floor;
+  // leaked current_task = the 15 min TTL, NOT the floor.
+  assert.equal(inc.recovery_bounds_ms.registry_absent, 120_000, 'registry-absent (never spawned / clean release) recovers within the 2 min floor, not 4 h');
+  assert.equal(inc.recovery_bounds_ms.leaked_current_task, 900_000, 'a LEAKED current_task recovers after the 15 min TTL — NOT the 2 min floor (the split the reviewer required)');
+  assert.equal(inc.recovery_bounds_ms.present_strand, FOUR_H, 'a PRESENT-but-quiet strand is paced off the 4 h window (the observable harm)');
 
   // Default workspace: effective = default, not elevated.
   const def = byId[wsDefault.id];
@@ -57,7 +61,8 @@ test('supervisor-cadence diagnostic: exposes per-workspace configured/default/ef
   assert.equal(def.supervisor_stale_ms.effective, 1_800_000);
   assert.equal(def.supervisor_stale_ms.is_default, true, 'default value flagged as default');
   assert.equal(def.elevated, false, 'a default-cadence workspace is never elevated');
-  assert.equal(def.absent_strand_recovery_ms, 120_000, 'dead-strand recovery is the floor under a 30 min window too');
+  assert.equal(def.recovery_bounds_ms.registry_absent, 120_000, 'registry-absent recovery is the floor under a 30 min window too');
+  assert.equal(def.recovery_bounds_ms.leaked_current_task, 900_000, 'leaked-current_task recovery = the 15 min TTL (TTL < the 30 min stale window)');
 
   assert.equal(body.elevated_count >= 1, true, 'at least the incident workspace is counted elevated');
 });

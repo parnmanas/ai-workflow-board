@@ -206,36 +206,47 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
         }
       }
 
-      await wsRepo.save(ws);
-
       // Config-change audit (ticket 1fcba693): one grep-able config_changed row
       // per changed cadence knob, actor from the MCP session, source=mcp. In
       // standalone mode getCallerAgent returns undefined (empty actor), but the
-      // row still records the change + source. Best-effort.
+      // row still records the change + source.
       const caller = getCallerAgent(extra);
       const auditFields = ['supervisor_stale_ms', 'supervisor_resend_ms', 'dispatch_queue_depth', 'claim_verification_grace_ms'];
-      for (const field of auditFields) {
-        const oldVal = (cadenceBefore as any)[field];
-        const newVal = (ws as any)[field];
-        if (oldVal === newVal) continue;
-        try {
-          await activityService.logActivity({
-            entity_type: 'workspace',
-            entity_id: ws.id,
-            workspace_id: ws.id,
-            ticket_id: '',
-            action: 'config_changed',
-            field_changed: field,
-            old_value: String(oldVal),
-            new_value: String(newVal),
-            actor_id: caller?.agentId || '',
-            actor_name: caller?.agentName || '',
-            trigger_source: 'mcp',
-          });
-        } catch {
-          /* best-effort audit — never block the config write */
-        }
+
+      // Persist the settings change + its config_changed rows ATOMICALLY
+      // (reviewer AC): ONE transaction, so an audit-write failure rolls the
+      // cadence save back and the tool returns an error — a cadence value can
+      // never persist without its trail (audit-or-nothing), which a best-effort
+      // swallowed audit could not guarantee. SSE emit deferred until commit.
+      let auditRows;
+      try {
+        auditRows = await dataSource.transaction(async (manager) => {
+          await manager.save(ws);
+          const rows: any[] = [];
+          for (const field of auditFields) {
+            const oldVal = (cadenceBefore as any)[field];
+            const newVal = (ws as any)[field];
+            if (oldVal === newVal) continue;
+            rows.push(await activityService.logActivityTx(manager, {
+              entity_type: 'workspace',
+              entity_id: ws.id,
+              workspace_id: ws.id,
+              ticket_id: '',
+              action: 'config_changed',
+              field_changed: field,
+              old_value: String(oldVal),
+              new_value: String(newVal),
+              actor_id: caller?.agentId || '',
+              actor_name: caller?.agentName || '',
+              trigger_source: 'mcp',
+            }));
+          }
+          return rows;
+        });
+      } catch (e: any) {
+        return err(`Failed to persist workspace settings: ${e?.message || String(e)}`);
       }
+      activityService.emitLogged(auditRows);
 
       return ok(ws);
     }

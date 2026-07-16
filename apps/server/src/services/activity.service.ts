@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, EntityManager } from 'typeorm';
 import { EventEmitter } from 'events';
 import { ActivityLog } from '../entities/ActivityLog';
 import { Agent } from '../entities/Agent';
@@ -75,8 +75,10 @@ export class ActivityService {
     });
   }
 
-  async logActivity(params: LogActivityParams): Promise<ActivityLog> {
-    const log = this.repo.create({
+  /** Build the (unsaved) row from params — shared by the immediate and the
+   *  transaction-scoped write paths so both stamp identical fields. */
+  private _buildLog(params: LogActivityParams): ActivityLog {
+    return this.repo.create({
       entity_type: params.entity_type,
       entity_id: String(params.entity_id),
       action: params.action,
@@ -90,13 +92,43 @@ export class ActivityService {
       role: params.role || '',
       trigger_source: params.trigger_source || '',
     });
-    const saved = await this.repo.save(log);
+  }
+
+  /** Emit the live SSE 'activity' event for a persisted row. Split out so the
+   *  immediate and the deferred (post-commit) write paths share one emit. */
+  private _emitActivity(saved: ActivityLog): void {
     const listenerCount = activityEvents.listenerCount('activity');
     this.logService.info('Activity', `Emitting "${saved.action}" on ${saved.entity_type} #${saved.entity_id}`, {
       ticket_id: saved.ticket_id, listeners: listenerCount,
     });
     activityEvents.emit('activity', saved);
+  }
+
+  async logActivity(params: LogActivityParams): Promise<ActivityLog> {
+    const saved = await this.repo.save(this._buildLog(params));
+    this._emitActivity(saved);
     return saved;
+  }
+
+  /**
+   * Transaction-scoped write (ticket 1fcba693). Persists the row via the
+   * caller's EntityManager so it commits — or rolls back — ATOMICALLY with the
+   * caller's other writes, and returns it WITHOUT emitting the live SSE event.
+   * The caller must call emitLogged() once the enclosing transaction commits, so
+   * a row that ends up rolled back never rides the activity stream. Used by the
+   * workspace config-change audit, which must be atomic with the settings save:
+   * a cadence value (e.g. the incident's 4 h supervisor_stale_ms) can never
+   * persist without its audit row — best-effort swallowing would re-open exactly
+   * the "changed with no trail" gap this audit closes.
+   */
+  async logActivityTx(manager: EntityManager, params: LogActivityParams): Promise<ActivityLog> {
+    return manager.save(this._buildLog(params));
+  }
+
+  /** Emit the deferred SSE 'activity' events for rows persisted via
+   *  logActivityTx, after their transaction committed. No-op on []. */
+  emitLogged(rows: ActivityLog[]): void {
+    for (const row of rows) this._emitActivity(row);
   }
 
   async getTicketActivity(ticketId: string, limit = 50): Promise<ActivityLog[]> {
