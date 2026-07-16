@@ -138,18 +138,31 @@ test('supervisor liveness reclaim: live strand protected, killed strand reclaime
   await sleep(150);
   assert.equal(va.triggersFor(ticket.id).length, 1, 'after a supervisor restart, a live strand is left alone (durable exactly-once)');
 
-  // ── Phase 4: restart did NOT wedge recovery — a later death recovers again ─
-  // Wipe the dedup memory (restart), then the strand dies (clean silent-exit +
-  // output aged out of the gate). The fresh supervisor re-derives absence and
-  // recovers it via the first-push reclaim path — exactly one MORE re-dispatch.
+  // ── Phase 4: exit→clear→reclaim (ticket 1fcba693 root fix, reviewer item 2) ──
+  // The Phase-2 strand is still registered (current_task + fresh output from the
+  // "healthy re-spawn"). Model its SILENT EXIT: the manager fires clearCurrentTask
+  // on the seat release, which now ALSO drops the output-liveness badge. Before
+  // this fix the badge lingered — keeping the seat counted as a live producer
+  // (non-absent) for up to min(stale, retention) = 4 h — so recovery waited ~4 h,
+  // NOT the floor. We prove the release makes the seat absent IMMEDIATELY (with
+  // NO manual output aging, unlike the old workaround) and role-precisely, so the
+  // fresh supervisor recovers it at the fast floor: exactly one MORE re-dispatch.
   supervisor.state.clear();
-  agentStatus.clearCurrentTask(agent.id, ticket.id); // clean silent-exit
-  agentStatus.outputLiveness.set(outputKey, Date.now() - FOUR_H_MS - MIN); // age output out of the gate
-  assert.equal(agentStatus.hasLiveRoleStrand(agent.id, ticket.id, role), false, 'strand gone after clear');
+  // A sibling seat for a DIFFERENT role on the SAME ticket must survive the
+  // assignee release — the clear is role-precise, not ticket-wide.
+  const reviewerOutputKey = `${agent.id}:${ticket.id}:reviewer`;
+  agentStatus.outputLiveness.set(reviewerOutputKey, Date.now());
+  assert.notEqual(agentStatus.outputLiveness.get(outputKey), undefined, 'assignee output badge present just before the exit (produced right up to the end)');
+
+  agentStatus.clearCurrentTask(agent.id, ticket.id); // clean/silent exit → seat release
+
+  assert.equal(agentStatus.outputLiveness.get(outputKey), undefined, 'clearCurrentTask ALSO cleared the assignee output-liveness badge (the root fix) — no lingering producer signal');
+  assert.notEqual(agentStatus.outputLiveness.get(reviewerOutputKey), undefined, 'a sibling reviewer-seat badge on the same ticket is NOT cleared by the assignee release (role-precise)');
+  assert.equal(agentStatus.hasLiveRoleStrand(agent.id, ticket.id, role), false, 'the released seat reads absent immediately — NOT held for the 4 h output gate');
 
   await supervisor._tick();
   const gotTwo = await waitFor(() => va.triggersFor(ticket.id).length === 2);
-  assert.equal(gotTwo, true, 'after restart, a later death is recovered again — exactly one MORE re-dispatch');
+  assert.equal(gotTwo, true, 'a released seat is recovered at the fast floor — exactly one MORE re-dispatch, not after the 4 h output gate');
   await sleep(200);
   assert.equal(va.triggersFor(ticket.id).length, 2, 'still exactly two total (no respawn storm)');
 });

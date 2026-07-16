@@ -593,16 +593,36 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
     if (!status?.active_tasks || status.active_tasks.size === 0) return;
 
     const tasks = new Map(status.active_tasks);
+    // Seats whose output-liveness badge we must ALSO release (ticket 1fcba693).
+    // clearCurrentTask is the seat-release signal the agent-manager fires on
+    // session exit (clean completion, agent_idle, and — via the 3 sealed leak
+    // paths — SIGTERM/self-update drain, respawn-child release, reap-without-
+    // exit). Dropping ONLY current_task leaves the output-liveness timestamp,
+    // which the supervisor's absentStrand gate honors for up to
+    // min(supervisor_stale_ms, retention TTL) — so a strand that emitted output
+    // right before dying stays counted as a live producer (leaked_with_output)
+    // and its seat is NOT reclaimed at the fast floor. Clearing the badge here,
+    // on the release, lets a properly-released seat go absent immediately so the
+    // supervisor recovers it within the floor, not the stale window (the
+    // reviewer's root fix). Role-precise: only the released seat's badge is
+    // dropped, never a live sibling strand's (e.g. this agent's reviewer seat).
+    const releasedSeats: Array<{ ticketId: string; role: string }> = [];
     if (expectedTicketId) {
       // Targeted clear: drop just this ticket's entry. No-op if a newer
       // setCurrentTask already replaced it (which on a Map means the same
       // key is still present but with a fresher claimed_at — caller's
       // intent was to clear THIS task, so we still drop it; the manager
       // would call setCurrentTask again on the next session anyway).
+      const t = tasks.get(expectedTicketId);
       if (!tasks.delete(expectedTicketId)) return;
+      releasedSeats.push({ ticketId: expectedTicketId, role: t?.role || '' });
     } else {
       // Force-clear all (agent shutdown). Mirrors pre-multi-task behavior.
+      for (const [tid, t] of tasks) releasedSeats.push({ ticketId: tid, role: t?.role || '' });
       tasks.clear();
+    }
+    for (const s of releasedSeats) {
+      this.outputLiveness.delete(this._outputLivenessKey(agent_id, s.ticketId, s.role));
     }
 
     const updated: AgentStatus = {
