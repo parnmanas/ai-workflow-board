@@ -23,6 +23,7 @@ import {
   DispatchBlockerTracker,
   RoleSpawnSuppressor,
   DEFAULT_PEND_AFTER_ABORTS,
+  isDurableProvisioningBlocker,
   provisioningPendReason,
   firstLine,
 } from '../dist/lib/dispatch-preflight.js';
@@ -457,11 +458,13 @@ test('RoleSpawnSuppressor: (ticket,role) pairs are independent; missing id/role 
 // pended so the supervisor stops entirely — note() signals that escalation once
 // the episode has re-aborted `pendAfterAborts` times.
 
-test('note(): returns the running count and does NOT pend below the threshold', () => {
+test('note(): a TRANSIENT blocker returns the running count and does NOT pend below the threshold', () => {
   const s = new RoleSpawnSuppressor(1000, 3);
-  const a = s.note('t', 'assignee', 'worktree:not_a_git_repo', 0);
+  // path_conflict is transient (a sibling ticket may free the path) so it keeps
+  // the cooldown self-heal and pends only after the threshold, not on abort 1.
+  const a = s.note('t', 'assignee', 'worktree:path_conflict', 0);
   assert.deepEqual(a, { count: 1, shouldPend: false });
-  const b = s.note('t', 'assignee', 'worktree:not_a_git_repo', 10);
+  const b = s.note('t', 'assignee', 'worktree:path_conflict', 10);
   assert.deepEqual(b, { count: 2, shouldPend: false }, 'still backoff-only at count 2');
 });
 
@@ -500,9 +503,11 @@ test('note(): clear() resets the episode so a reprovision-then-rebreak backs off
 
 test('note(): a DIFFERENT blocker kind restarts the count (no cross-kind pend carryover)', () => {
   const s = new RoleSpawnSuppressor(1000, 2);
-  s.note('t', 'assignee', 'worktree:not_a_git_repo', 0);
-  assert.equal(s.note('t', 'assignee', 'worktree:not_a_git_repo', 1).shouldPend, true, 'same kind reaches 2 → pend');
-  const changed = s.note('t', 'assignee', 'push_credential_unavailable', 2);
+  // Two TRANSIENT kinds so the threshold (not the durable-first-pend) governs the
+  // crossing being tested here.
+  s.note('t', 'assignee', 'worktree:path_conflict', 0);
+  assert.equal(s.note('t', 'assignee', 'worktree:path_conflict', 1).shouldPend, true, 'same kind reaches 2 → pend');
+  const changed = s.note('t', 'assignee', 'worktree:unavailable', 2);
   assert.deepEqual(changed, { count: 1, shouldPend: false }, 'kind change resets to a fresh backoff');
 });
 
@@ -532,14 +537,71 @@ test('DEFAULT_PEND_AFTER_ABORTS is the small, >1 default (self-heal once, then h
   assert.equal(last.shouldPend, true, 'the default threshold pends after DEFAULT_PEND_AFTER_ABORTS aborts');
 });
 
+// ── isDurableProvisioningBlocker + durable-first-pend (ticket 52eedadf review) ─
+// Review blocker #1: a DURABLE blocker (empty/foreign checkout, missing push
+// credential) must pend on the FIRST abort so the supervisor stops immediately
+// — `provisioning failure → 반복 trigger 없음` — instead of being re-probed
+// DEFAULT_PEND_AFTER_ABORTS times. A TRANSIENT/ambiguous blocker keeps the
+// cooldown self-heal and pends only after the threshold.
+
+test('isDurableProvisioningBlocker: checkout + push-credential kinds are durable (worktree: prefix optional)', () => {
+  for (const k of [
+    'not_a_git_repo', 'worktree:not_a_git_repo',
+    'incomplete_checkout', 'worktree:incomplete_checkout',
+    'wrong_repository', 'worktree:wrong_repository',
+    'push_credential_unavailable',
+  ]) {
+    assert.equal(isDurableProvisioningBlocker(k), true, `should be durable: ${k}`);
+  }
+});
+
+test('isDurableProvisioningBlocker: self-healing / ambiguous / unknown kinds are transient (fail-safe)', () => {
+  for (const k of [
+    'worktree:path_conflict', 'path_conflict',            // a sibling ticket may free the path
+    'worktree:unavailable', 'worktree:repository_unavailable', // resource may come back
+    'worktree:disabled',
+    'something_unrecognised', '', undefined, null,
+  ]) {
+    assert.equal(isDurableProvisioningBlocker(k), false, `should be transient: ${String(k)}`);
+  }
+});
+
+test('note(): a DURABLE blocker pends on the FIRST abort (does not wait out the cooldown threshold)', () => {
+  // Default threshold is 3, but a durable blocker must NOT be probed 3× — it
+  // pends on abort 1 so the supervisor stops at once (review blocker #1).
+  const s = new RoleSpawnSuppressor(1000, 3);
+  const first = s.note('t', 'assignee', 'worktree:not_a_git_repo', 0);
+  assert.deepEqual(first, { count: 1, shouldPend: true }, 'durable → pend on abort 1');
+});
+
+test('note(): a durable episode pends EXACTLY once — later aborts do not re-pend; clear() re-arms', () => {
+  const s = new RoleSpawnSuppressor(1000, 3);
+  assert.equal(s.note('t', 'assignee', 'push_credential_unavailable', 0).shouldPend, true, 'abort 1 pends');
+  assert.equal(s.note('t', 'assignee', 'push_credential_unavailable', 1).shouldPend, false, 'abort 2: no re-pend');
+  assert.equal(s.note('t', 'assignee', 'push_credential_unavailable', 2).shouldPend, false, 'abort 3: no re-pend');
+  // A green preflight (reprovision success) re-arms: a fresh durable break pends again.
+  s.clear('t', 'assignee');
+  assert.equal(s.note('t', 'assignee', 'push_credential_unavailable', 3).shouldPend, true, 'fresh episode pends on abort 1 again');
+});
+
+test('note(): durable vs transient — same threshold, opposite first-abort behavior', () => {
+  const durable = new RoleSpawnSuppressor(1000, 3);
+  const transient = new RoleSpawnSuppressor(1000, 3);
+  assert.equal(durable.note('t', 'assignee', 'worktree:wrong_repository', 0).shouldPend, true, 'durable: pend immediately');
+  assert.equal(transient.note('t', 'assignee', 'worktree:path_conflict', 0).shouldPend, false, 'transient abort 1');
+  assert.equal(transient.note('t', 'assignee', 'worktree:path_conflict', 1).shouldPend, false, 'transient abort 2');
+  assert.equal(transient.note('t', 'assignee', 'worktree:path_conflict', 2).shouldPend, true, 'transient abort 3 → pend');
+});
+
 // ── provisioningPendReason (User-tab durable-block copy) ──────────────────────
 
-test('provisioningPendReason: names the cause + count and both recovery paths', () => {
+test('provisioningPendReason: names the cause + count and the unpend-only recovery path', () => {
   const r = provisioningPendReason({ kind: 'worktree:not_a_git_repo', reason: 'not_a_git_repo', count: 3 });
   assert.match(r, /not_a_git_repo/, 'names the concrete cause');
-  assert.match(r, /3회/, 'states how many consecutive aborts');
-  assert.match(r, /unpend/, 'tells the operator how to explicitly retry');
-  assert.match(r, /자동으로 재개/, 'documents the reprovision-success auto-recovery path');
+  assert.match(r, /3회/, 'states how many aborts accumulated');
+  assert.match(r, /unpend/, 'tells the operator to explicitly retry via unpend');
+  assert.match(r, /unpend 가 유일한 재개 방법/, 'documents that unpend is the ONLY resume path (no auto-retry while pended)');
+  assert.match(r, /자동 해제/, 'documents that a post-unpend green provisioning clears the block');
 });
 
 test('provisioningPendReason: falls back to the blocker kind when no reason, appends detail', () => {
