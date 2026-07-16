@@ -1038,13 +1038,19 @@ export class EventDispatcher {
       // forever, and each probe is a fresh live-twin window. A pre-spawn
       // provisioning abort never reaches an exit handler, so it never fed the
       // circuit-breaker that would otherwise pend (the hole that looped ticket
-      // c47194d9 for ~6h). On the single abort that confirms the episode durable,
-      // pend the ticket: getAllocatedTickets then skips it and the supervisor
-      // stops re-emitting BOTH normal and forced triggers, so no strand can spawn
-      // until an operator unpends (explicit retry) or a later green preflight
-      // (reprovision success) clears the suppressor below. `shouldPend` is true on
-      // exactly ONE abort per episode, so we pend once — no duplicate pended-audit
-      // rows — and rely on the server pending gate (not repeated pends) to hold.
+      // c47194d9 for ~6h). So pend the ticket the moment the block is confirmed
+      // durable: a DURABLE blocker (empty/foreign checkout, missing push
+      // credential — isDurableProvisioningBlocker) pends on the FIRST abort so the
+      // supervisor stops AT ONCE (`provisioning failure → 반복 trigger 없음`); a
+      // transient/ambiguous one (path_conflict, resource unavailable) pends only
+      // after it re-aborts DEFAULT_PEND_AFTER_ABORTS times, keeping a cooldown
+      // self-heal window. Once pended, getAllocatedTickets skips it and the
+      // supervisor stops re-emitting BOTH normal and forced triggers, so no strand
+      // can spawn until an operator unpends (explicit retry) or a post-unpend green
+      // preflight (reprovision success) clears the suppressor below. `shouldPend`
+      // is true on exactly ONE abort per episode, so we pend once — no duplicate
+      // pended-audit rows — and rely on the server pending gate (not repeated
+      // pends) to hold.
       if (ev.ticket_id && provisionBlock.shouldPend) {
         await fireAndForgetTool(this.#config, 'pend_ticket', {
           ticket_id: ev.ticket_id,

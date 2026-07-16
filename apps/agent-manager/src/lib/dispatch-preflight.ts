@@ -317,19 +317,51 @@ export class DispatchBlockerTracker {
 export const DEFAULT_SPAWN_SUPPRESS_COOLDOWN_MS = 10 * 60_000;
 
 /** Consecutive preflight aborts of ONE episode (same ticket-role + blocker
- *  kind) after which RoleSpawnSuppressor escalates from cooldown backoff to a
- *  DURABLE pend (ticket 52eedadf). The cooldown already thins the supervisor
- *  re-dispatch storm to one probe per window, but a genuinely broken
- *  environment (not_a_git_repo / broken checkout / missing push credential)
- *  never self-heals — it just keeps getting probed forever, and each probe is a
- *  fresh live-twin window. Once the episode has re-aborted this many times it is
- *  confirmed durable: the caller pends the ticket so `getAllocatedTickets` skips
- *  it and the supervisor stops re-emitting BOTH normal and forced triggers,
- *  until an operator unpends (explicit retry) or a later green preflight
- *  (reprovision success) clears the suppressor. Small so the hard stop lands
- *  minutes — not the observed ~6h (ticket c47194d9) — into a durable failure,
- *  yet > 1 so a one-off transient still self-heals via the cooldown probe first. */
+ *  kind) after which RoleSpawnSuppressor escalates a TRANSIENT/ambiguous blocker
+ *  from cooldown backoff to a durable pend (ticket 52eedadf). DURABLE blockers
+ *  (see {@link isDurableProvisioningBlocker}) do NOT wait for this count — they
+ *  pend on the FIRST abort so a genuinely broken environment (not_a_git_repo /
+ *  broken checkout / missing push credential) stops the supervisor IMMEDIATELY
+ *  (`provisioning failure → 반복 trigger 없음`) instead of being re-probed once
+ *  per window forever, each probe a fresh live-twin window (the ~6h loop of
+ *  ticket c47194d9). This threshold only governs blockers that MIGHT self-heal —
+ *  a `path_conflict` frees when the occupying ticket finishes, a
+ *  `repository_unavailable` resource may come back: the cooldown lets one probe
+ *  per window through, and only after the episode has re-aborted this many times
+ *  is even a transient blocker declared durable and pended. > 1 so a one-off
+ *  transient still self-heals via the cooldown probe first; small so a persistent
+ *  transient still hard-stops in minutes. Once pended, `getAllocatedTickets`
+ *  skips the ticket and the supervisor stops re-emitting BOTH normal and forced
+ *  triggers until an operator unpends (explicit retry) or a post-unpend green
+ *  preflight (reprovision success) clears the suppressor. */
 export const DEFAULT_PEND_AFTER_ABORTS = 3;
+
+/** Dispatch blocker `kind`s that an operator MUST fix by hand — a broken/empty/
+ *  foreign checkout or a missing push credential never self-heals, so re-probing
+ *  it only burns another CLI session and re-opens the live-twin window. Compared
+ *  after stripping an optional `worktree:` prefix so both the `worktree:<reason>`
+ *  checkout kinds and the bare `push_credential_unavailable` kind map. */
+const DURABLE_BLOCKER_REASONS = new Set<string>([
+  'not_a_git_repo',              // empty / clobbered work folder
+  'incomplete_checkout',         // half-written clone — HEAD unresolved
+  'wrong_repository',            // stale/foreign checkout — working_dir mis-pointed
+  'push_credential_unavailable', // remote auth rejected — operator must add a token
+]);
+
+/** True when a dispatch blocker `kind` is a DURABLE provisioning failure (needs
+ *  operator action, never self-heals) versus a TRANSIENT/ambiguous one that may
+ *  clear on its own (a `path_conflict` frees when the occupying ticket finishes;
+ *  an `unavailable` / `repository_unavailable` resource may come back). Durable
+ *  blockers pend on the FIRST abort so the supervisor stops at once; transient
+ *  ones keep the cooldown-probe self-heal and pend only after the episode
+ *  re-aborts `pendAfterAborts` times. Unknown kinds are treated as transient —
+ *  fail-safe: back off rather than instantly park a ticket on a blocker we don't
+ *  recognise. */
+export function isDurableProvisioningBlocker(kind: string | undefined | null): boolean {
+  if (!kind) return false;
+  const reason = kind.startsWith('worktree:') ? kind.slice('worktree:'.length) : kind;
+  return DURABLE_BLOCKER_REASONS.has(reason);
+}
 
 export interface SpawnSuppressDecision {
   suppress: boolean;
@@ -384,15 +416,18 @@ export class RoleSpawnSuppressor {
   /** Record that a preflight abort just happened for (ticketId, role) with
    *  `kind`. A changed kind resets the episode (fresh firstAt/count/probe).
    *  Returns the running abort `count` and whether THIS abort is the one that
-   *  crosses the durable-pend threshold (`count === pendAfterAborts`) — true on
-   *  exactly ONE abort per episode, so the caller pends the ticket exactly once
-   *  (no duplicate/misleading audit rows; once pended the server-side pending
-   *  gate — not a manager re-pend — is what keeps the supervisor stopped). A
-   *  changed kind, or a clear() on a green preflight (reprovision success),
-   *  re-arms the episode so a future durable break pends afresh. `note()` is
-   *  synchronous, so even concurrently-processed triggers each increment `count`
-   *  atomically and only one observes the exact crossing. Missing id/role never
-   *  escalates. */
+   *  crosses the pend threshold for the blocker's durability class — a DURABLE
+   *  blocker ({@link isDurableProvisioningBlocker}) crosses on the FIRST abort
+   *  (`count === 1`) so a broken environment pends immediately, a TRANSIENT one
+   *  only after `pendAfterAborts` cooldown-probed re-aborts. `shouldPend` is true
+   *  on exactly ONE abort per episode either way, so the caller pends the ticket
+   *  exactly once (no duplicate/misleading audit rows; once pended the
+   *  server-side pending gate — not a manager re-pend — is what keeps the
+   *  supervisor stopped). A changed kind, or a clear() on a green preflight
+   *  (reprovision success), re-arms the episode so a future break pends afresh.
+   *  `note()` is synchronous, so even concurrently-processed triggers each
+   *  increment `count` atomically and only one observes the exact crossing.
+   *  Missing id/role never escalates. */
   note(
     ticketId: string | undefined,
     role: string | undefined,
@@ -411,7 +446,14 @@ export class RoleSpawnSuppressor {
       prev.count += 1;
       count = prev.count;
     }
-    return { count, shouldPend: count === this.#pendAfterAborts };
+    // Durable blockers (operator must fix, never self-heal) pend on the FIRST
+    // abort so the supervisor stops immediately (`provisioning failure → 반복
+    // trigger 없음`); transient/ambiguous blockers keep the cooldown-probe
+    // self-heal and pend only once the episode has re-aborted `pendAfterAborts`
+    // times. Either way the crossing is a single count value, so shouldPend is
+    // true on exactly one abort per episode.
+    const pendThreshold = isDurableProvisioningBlocker(kind) ? 1 : this.#pendAfterAborts;
+    return { count, shouldPend: count === pendThreshold };
   }
 
   /** Decide whether to DROP an incoming trigger before provisioning. Only a
@@ -456,10 +498,12 @@ export class RoleSpawnSuppressor {
 
 /** Operator-facing reason for a DURABLE provisioning-block pend (ticket
  *  52eedadf), rendered verbatim on the ticket detail panel's "User" tab. Names
- *  the blocker cause and both recovery paths — fix the environment then unpend
- *  (explicit retry), or let a later green preflight (reprovision success) resume
- *  it automatically. Pure string logic so it stays unit-testable alongside the
- *  other preflight helpers. */
+ *  the blocker cause and the recovery path: because a pended ticket receives NO
+ *  supervisor triggers (normal or forced), an explicit operator `unpend` is the
+ *  ONLY way to resume — there is no unattended auto-retry while pended. Once
+ *  unpended and re-dispatched, a green preflight (reprovision success) then
+ *  clears the durable block automatically. Pure string logic so it stays
+ *  unit-testable alongside the other preflight helpers. */
 export function provisioningPendReason(args: {
   kind: string;
   reason?: string;
@@ -469,11 +513,12 @@ export function provisioningPendReason(args: {
   const cause = (args.reason || args.kind || 'unknown').trim();
   const detail = args.detail ? ` (${args.detail})` : '';
   return (
-    `티켓 디스패치 준비(preflight)가 ${args.count}회 연속 실패해 durable block 상태로 전환했습니다.\n` +
+    `프로비저닝 preflight 가 durable blocker 로 실패해 이 티켓을 durable block 상태로 전환했습니다 (누적 실패 ${args.count}회).\n` +
     `원인: \`${cause}\`${detail}\n\n` +
     `supervisor 의 자동 재트리거(normal·forced)를 멈춥니다. repository resource·credential 과 ` +
-    `working_dir 아래 AWB 관리 폴더(\`.awb/base\`·\`.awb/wt\`)를 점검해 고친 뒤 이 티켓을 unpend 하면 ` +
-    `다시 시도합니다. (환경을 고친 뒤 다음 프로비저닝이 성공하면 자동으로 재개됩니다.)`
+    `working_dir 아래 AWB 관리 폴더(\`.awb/base\`·\`.awb/wt\`)를 점검해 고친 뒤 이 티켓을 unpend 하세요. ` +
+    `pend 상태에서는 supervisor 가 트리거를 보내지 않으므로 unpend 가 유일한 재개 방법이며, ` +
+    `unpend 후 재디스패치의 프로비저닝이 성공하면 durable block 이 자동 해제되어 정상 흐름으로 복귀합니다.`
   );
 }
 
