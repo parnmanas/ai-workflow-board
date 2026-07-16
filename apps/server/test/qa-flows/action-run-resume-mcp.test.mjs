@@ -7,6 +7,13 @@
 //   • 실행 실패 → 자동 재시도(bounded) → 소진 시 surfacing+재개
 //   • 멱등성(고영향 안전장치) — 이미 완료된 run 재-complete 는 no-op, 이중 재개 없음
 //
+// 스코프 5 실행 전 승인 게이트 (reviewer 4차 blocker — approved_by_user_id 위조 차단):
+//   • 고영향 run 은 사람 인증(admin 세션) REST 엔드포인트로 만든 승인 grant 없이는 거부+park
+//   • agent run_action 에는 승인자 파라미터가 없음 — 서버가 (action,ticket)-결합 grant 를 원자 소비
+//   • grant 는 1회용(재사용 거부) + (action,ticket) 결합(다른 티켓/액션 미인가)
+//   • 승인 생성은 admin 세션만 — 비-admin 세션 403, 미인증 401, agent(MCP)는 아예 경로 없음
+//   • 감사 actor/time 은 caller 가 아니라 grant record(실 사람) 에서 복사
+//
 // "재개"의 관측 가능한 신호:
 //   1. complete_action_run 응답의 resumed=true + resume_emitted>=1
 //      (dispatchCurrentColumn 이 원 티켓의 현재 컬럼 role holder 를 재-dispatch)
@@ -40,7 +47,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   t.after(() => {
     void app.close().catch(() => {});
   });
-  const { getDataSourceToken, ActionsService } = modules;
+  const { getDataSourceToken, ActionsService, AuthService } = modules;
   const ds = app.get(getDataSourceToken());
 
   const ws = await createWorkspace(app, getDataSourceToken, 'actresume');
@@ -60,8 +67,32 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   await mcp.initialize();
 
   // Admin user who can approve high-impact runs; a non-admin used to prove the
-  // approval authority check (scope-5 approval gate, CASEs 6/8/9/10/11).
+  // approval authority check (scope-5 approval gate, CASEs 6/8/9/10/11/12/13).
   const admin = await createUser(app, getDataSourceToken, { name: 'approver', role: 'admin' });
+  // Admin session token so tests hit the HUMAN-authenticated approval endpoint
+  // exactly as an admin's browser would (session Bearer, NOT an agent API key).
+  // The approver identity is derived from this session server-side — the request
+  // body carries no approver field. THAT is the trust boundary: an agent (MCP API
+  // key, no session) can never mint an approval grant.
+  const authService = app.get(AuthService);
+  const adminToken = authService.createSession(admin.id);
+
+  // POST /api/actions/:id/approvals as a human. `token=null` omits the
+  // Authorization header (unauthenticated). Returns { status, body }.
+  async function approveViaRest({ actionId, workspaceId, sourceTicketId, token, ttlMinutes }) {
+    const res = await fetch(`http://localhost:${port}/api/actions/${actionId}/approvals`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify({
+        workspace_id: workspaceId,
+        source_ticket_id: sourceTicketId,
+        ...(ttlMinutes ? { ttl_minutes: ttlMinutes } : {}),
+      }),
+    });
+    let body = null;
+    try { body = await res.json(); } catch { /* no body */ }
+    return { status: res.status, body };
+  }
 
   // ─────────────────────────────────────────────────────────────────────────
   // CASE 1 — 기존 Action 실행 → 완료(succeeded) → 동일 티켓 자동 재개
@@ -305,12 +336,16 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   const ticket6 = await createTicket(app, getDataSourceToken, {
     columnId: col.id, workspaceId: ws.id, title: 'blocked on release', assigneeId: agent.id,
   });
-  // High-impact ⇒ the run needs an admin approver (gate covered in CASE 8-11);
-  // here we approve it so we can exercise the no-auto-retry-on-failure path.
+  // High-impact ⇒ the run needs a human approval grant (gate covered in CASE
+  // 8-13); here an admin approves via the HUMAN REST path, then the agent runs
+  // (no approver param) and the server consumes the grant — so we can exercise
+  // the no-auto-retry-on-failure path on an actually-executed run.
+  const appr6 = await approveViaRest({ actionId: hi.id, workspaceId: ws.id, sourceTicketId: ticket6.id, token: adminToken });
+  assert.equal(appr6.status, 201, 'admin approval grant created via the human endpoint');
   const run6 = await mcp.callTool('run_action', {
-    action_id: hi.id, source_ticket_id: ticket6.id, approved_by_user_id: admin.id,
+    action_id: hi.id, source_ticket_id: ticket6.id,
   });
-  assert.ok(!run6.isError, 'approved high-impact run is dispatched');
+  assert.ok(!run6.isError, 'approved high-impact run is dispatched (server consumed the grant)');
   // The run carries a minted idempotency key surfaced in the prompt contract.
   const runs6 = await mcp.callTool('list_action_runs', { workspace_id: ws.id, action_id: hi.id });
   const row6 = findRun(runs6, run6.run_id);
@@ -383,52 +418,83 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   assert.ok(parkActs.length >= 1, 'park-for-approval writes an audit row');
 
   // ─────────────────────────────────────────────────────────────────────────
-  // CASE 9 — high-impact run WITH admin approval executes + records approver
-  // (reviewer req: approved execution + auditable approver/time).
+  // CASE 9 — human approval GRANT (session endpoint) → agent run consumes it →
+  // executes + records the approver FROM the grant (reviewer 4차 req: the caller
+  // cannot assert the approver; approval evidence is a server-side record).
   // ─────────────────────────────────────────────────────────────────────────
-  step('CASE 9 — admin-approved high-impact run executes + records the approver');
+  step('CASE 9 — admin session grants approval → agent run consumes it → executes + records approver');
   const ticket9 = await createTicket(app, getDataSourceToken, {
     columnId: col.id, workspaceId: ws.id, title: 'blocked on approved ship', assigneeId: agent.id,
   });
-  const approvedRun = await mcp.callTool('run_action', {
-    action_id: gated.id, source_ticket_id: ticket9.id, approved_by_user_id: admin.id,
+  // (a) Unapproved agent run is rejected + parks the ticket (no grant yet).
+  const preRun9 = await mcp.callTool('run_action', { action_id: gated.id, source_ticket_id: ticket9.id });
+  assert.equal(preRun9.isError, true, 'an unapproved high-impact run is rejected');
+  const t9parked = await mcp.callTool('get_ticket', { ticket_id: ticket9.id });
+  assert.equal(t9parked.pending_user_action, true, 'the unapproved run parks the ticket');
+
+  // (b) An admin approves via the SESSION-authenticated endpoint. The approver is
+  // taken from the session — the request body has no approver field — so this is
+  // evidence an agent cannot forge.
+  const appr9 = await approveViaRest({ actionId: gated.id, workspaceId: ws.id, sourceTicketId: ticket9.id, token: adminToken });
+  assert.equal(appr9.status, 201, 'admin session creates the approval grant');
+  assert.equal(appr9.body.approved_by, admin.id, 'the grant records the SESSION admin as approver (not a body value)');
+  assert.equal(appr9.body.status, 'pending', 'a fresh grant is pending (unconsumed)');
+  assert.equal(appr9.body.source_ticket_id, ticket9.id, 'the grant is bound to the ticket');
+  // Grant creation is itself audited to the real human.
+  const grantActs = await ds.getRepository('ActivityLog').find({
+    where: { ticket_id: ticket9.id, action: 'action_run_approval_granted' },
   });
-  assert.ok(!approvedRun.isError, 'an admin-approved high-impact run IS dispatched');
+  assert.ok(grantActs.length >= 1, 'grant creation writes an audit row');
+  assert.equal(grantActs[0].actor_id, admin.id, 'the grant audit records the approving admin');
+  // Creating the grant released the approval park so the loop can resume.
+  const t9released = await mcp.callTool('get_ticket', { ticket_id: ticket9.id });
+  assert.equal(t9released.pending_user_action, false, 'approval releases the ticket park');
+
+  // (c) The agent re-runs (no approver param exists) → the server consumes the grant.
+  const approvedRun = await mcp.callTool('run_action', { action_id: gated.id, source_ticket_id: ticket9.id });
+  assert.ok(!approvedRun.isError, 'the run executes once a matching grant exists');
   assert.ok(approvedRun.run_id, 'the approved run has an id');
   const runs9 = await mcp.callTool('list_action_runs', { workspace_id: ws.id, action_id: gated.id });
   const row9 = findRun(runs9, approvedRun.run_id);
-  assert.equal(row9.approved_by, admin.id, 'the run records the approving user id');
+  assert.equal(row9.approved_by, admin.id, 'the run copies the approver id FROM the grant');
   assert.ok(row9.approved_at, 'the run records the approval time');
   const apprActs = await ds.getRepository('ActivityLog').find({
     where: { ticket_id: ticket9.id, action: 'action_run_approved' },
   });
-  assert.ok(apprActs.length >= 1, 'approval writes an auditable activity row');
-  assert.equal(apprActs[0].actor_id, admin.id, 'the approval audit records the approver');
-  const t9 = await mcp.callTool('get_ticket', { ticket_id: ticket9.id });
-  assert.equal(t9.pending_user_action, false, 'an approved run does NOT park the ticket');
+  assert.ok(apprActs.length >= 1, 'consuming the grant writes an approved audit row');
+  assert.equal(apprActs[0].actor_id, admin.id, 'the approved-audit actor is the real approver from the grant');
+  // The grant is now consumed and stamped with the run that used it.
+  const grant9 = await ds.getRepository('ActionApproval').findOne({ where: { id: appr9.body.id } });
+  assert.equal(grant9.status, 'consumed', 'the grant is marked consumed after the run');
+  assert.equal(grant9.consumed_by_run_id, approvedRun.run_id, 'the grant records the consuming run');
 
   // ─────────────────────────────────────────────────────────────────────────
-  // CASE 10 — unauthorized approval attempts are rejected (reviewer req:
-  // 권한 없는 승인 시도). A non-admin user and a non-user (agent) id both fail.
+  // CASE 10 — only an admin SESSION can create a grant (reviewer req: 권한 없는
+  // 승인 시도 거부). A non-admin session → 403, no session → 401, and the agent
+  // (MCP, no session, no approver param) can never mint one.
   // ─────────────────────────────────────────────────────────────────────────
-  step('CASE 10 — non-admin / non-user approver is rejected');
+  step('CASE 10 — non-admin session / unauthenticated / agent cannot create an approval');
   const member = await createUser(app, getDataSourceToken, { name: 'member', role: 'user' });
+  const memberToken = authService.createSession(member.id);
   const ticket10 = await createTicket(app, getDataSourceToken, {
     columnId: col.id, workspaceId: ws.id, title: 'blocked unauth approve', assigneeId: agent.id,
   });
-  const memberRun = await mcp.callTool('run_action', {
-    action_id: gated.id, source_ticket_id: ticket10.id, approved_by_user_id: member.id,
-  });
-  assert.equal(memberRun.isError, true, 'a non-admin user cannot approve a high-impact run');
-  assert.match(JSON.stringify(memberRun.error), /authorized|admin/i, 'rejection names the missing authority');
-  // An agent id is not a user → cannot self-approve.
-  const selfApprove = await mcp.callTool('run_action', {
-    action_id: gated.id, source_ticket_id: ticket10.id, approved_by_user_id: agent.id,
-  });
-  assert.equal(selfApprove.isError, true, 'an agent id is not a valid approver (no self-approval)');
-  // Only the CASE-9 approved run exists on `gated`; the unauthorized attempts made none.
+  // A non-admin authenticated user cannot approve.
+  const memberAppr = await approveViaRest({ actionId: gated.id, workspaceId: ws.id, sourceTicketId: ticket10.id, token: memberToken });
+  assert.equal(memberAppr.status, 403, 'a non-admin session cannot create an approval');
+  // No Authorization header at all → unauthenticated.
+  const anonAppr = await approveViaRest({ actionId: gated.id, workspaceId: ws.id, sourceTicketId: ticket10.id, token: null });
+  assert.equal(anonAppr.status, 401, 'an unauthenticated request cannot create an approval');
+  // The agent (MCP) still cannot self-run: there is no approver parameter and no
+  // grant exists, so a high-impact run is rejected + parks the ticket.
+  const agentTry = await mcp.callTool('run_action', { action_id: gated.id, source_ticket_id: ticket10.id });
+  assert.equal(agentTry.isError, true, 'an agent cannot self-run a high-impact action (no forgeable approver)');
+  // None of the rejected attempts created a grant …
+  const grants10 = await ds.getRepository('ActionApproval').find({ where: { source_ticket_id: ticket10.id } });
+  assert.equal(grants10.length, 0, 'no approval grant exists after the rejected attempts');
+  // … and no run row beyond CASE 9's single approved run on `gated`.
   const gatedRuns2 = await mcp.callTool('list_action_runs', { workspace_id: ws.id, action_id: gated.id });
-  assert.equal(gatedRuns2.length, 1, 'unauthorized approvals created no ActionRun row');
+  assert.equal(gatedRuns2.length, 1, 'unauthorized approval attempts created no ActionRun row');
 
   // ─────────────────────────────────────────────────────────────────────────
   // CASE 11 — misclassification cannot bypass the gate (reviewer req 3). An
@@ -449,6 +515,83 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   assert.match(JSON.stringify(miscRun.error), /approval/i, 'the name heuristic escalates it to the approval gate');
   const t11 = await mcp.callTool('get_ticket', { ticket_id: ticket11.id });
   assert.equal(t11.pending_user_action, true, 'a misclassified high-impact run parks the ticket too');
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // CASE 12 — a grant is ONE-TIME (reviewer req: 재사용 거부). Consuming it once
+  // executes; a second run for the same (action, ticket) finds no pending grant.
+  // ─────────────────────────────────────────────────────────────────────────
+  step('CASE 12 — an approval grant is one-time: a reused grant is rejected');
+  const ticket12 = await createTicket(app, getDataSourceToken, {
+    columnId: col.id, workspaceId: ws.id, title: 'blocked one-time', assigneeId: agent.id,
+  });
+  const appr12 = await approveViaRest({ actionId: gated.id, workspaceId: ws.id, sourceTicketId: ticket12.id, token: adminToken });
+  assert.equal(appr12.status, 201, 'grant created for (gated, ticket12)');
+  // First run consumes the grant and executes.
+  const run12a = await mcp.callTool('run_action', { action_id: gated.id, source_ticket_id: ticket12.id });
+  assert.ok(!run12a.isError, 'first run consumes the grant and executes');
+  const grant12 = await ds.getRepository('ActionApproval').findOne({ where: { id: appr12.body.id } });
+  assert.equal(grant12.status, 'consumed', 'the grant is consumed by the first run');
+  assert.equal(grant12.consumed_by_run_id, run12a.run_id, 'the grant records the consuming run');
+  // A second run for the same pair has no pending grant → rejected + re-parked.
+  const run12b = await mcp.callTool('run_action', { action_id: gated.id, source_ticket_id: ticket12.id });
+  assert.equal(run12b.isError, true, 'a second run cannot reuse the consumed grant');
+  assert.match(JSON.stringify(run12b.error), /approval/i, 'the reuse rejection names the approval requirement');
+  const t12 = await mcp.callTool('get_ticket', { ticket_id: ticket12.id });
+  assert.equal(t12.pending_user_action, true, 'the reused-grant rejection re-parks the ticket');
+  const runs12 = await mcp.callTool('list_action_runs', { workspace_id: ws.id, action_id: gated.id });
+  assert.equal(runs12.filter((r) => r.source_ticket_id === ticket12.id).length, 1, 'exactly one run executed under the one-time grant');
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // CASE 13 — a grant is BOUND to one (action, ticket) (reviewer req: 다른
+  // ticket·action 전용 거부). It does not authorize a different ticket or action.
+  // ─────────────────────────────────────────────────────────────────────────
+  step('CASE 13 — a grant is bound: another ticket or another action is not authorized');
+  const ticket13a = await createTicket(app, getDataSourceToken, {
+    columnId: col.id, workspaceId: ws.id, title: 'blocked bound approved', assigneeId: agent.id,
+  });
+  const ticket13b = await createTicket(app, getDataSourceToken, {
+    columnId: col.id, workspaceId: ws.id, title: 'blocked bound unapproved', assigneeId: agent.id,
+  });
+  // A second high-impact action to prove action-binding.
+  const otherHi = await mcp.callTool('save_action', {
+    workspace_id: ws.id, name: 'Publish to production', prompt: 'publish', target_agent_id: agent.id, high_impact: true,
+  });
+  const appr13 = await approveViaRest({ actionId: gated.id, workspaceId: ws.id, sourceTicketId: ticket13a.id, token: adminToken });
+  assert.equal(appr13.status, 201, 'grant created for (gated, ticket13a)');
+  // Same action, DIFFERENT ticket → not authorized.
+  const wrongTicket = await mcp.callTool('run_action', { action_id: gated.id, source_ticket_id: ticket13b.id });
+  assert.equal(wrongTicket.isError, true, 'the grant does not authorize a different ticket');
+  // DIFFERENT action, the approved ticket → not authorized.
+  const wrongAction = await mcp.callTool('run_action', { action_id: otherHi.id, source_ticket_id: ticket13a.id });
+  assert.equal(wrongAction.isError, true, 'the grant does not authorize a different action');
+  // Neither mismatched attempt consumed the bound grant — it is still pending.
+  const grant13 = await ds.getRepository('ActionApproval').findOne({ where: { id: appr13.body.id } });
+  assert.equal(grant13.status, 'pending', 'a mismatched attempt does not consume the bound grant');
+  // The exact (action, ticket) pair consumes it and runs.
+  const rightRun = await mcp.callTool('run_action', { action_id: gated.id, source_ticket_id: ticket13a.id });
+  assert.ok(!rightRun.isError, 'the exact (action, ticket) pair consumes the grant and runs');
+  const grant13b = await ds.getRepository('ActionApproval').findOne({ where: { id: appr13.body.id } });
+  assert.equal(grant13b.status, 'consumed', 'the bound grant is consumed only by its exact pair');
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // CASE 14 — an EXPIRED grant does not authorize a run (reviewer req: 미사용·
+  // 미만료 record only). A grant past expires_at is treated as absent + retired.
+  // ─────────────────────────────────────────────────────────────────────────
+  step('CASE 14 — an expired approval grant is rejected + retired');
+  const ticket14 = await createTicket(app, getDataSourceToken, {
+    columnId: col.id, workspaceId: ws.id, title: 'blocked expired grant', assigneeId: agent.id,
+  });
+  const appr14 = await approveViaRest({ actionId: gated.id, workspaceId: ws.id, sourceTicketId: ticket14.id, token: adminToken });
+  assert.equal(appr14.status, 201, 'grant created for (gated, ticket14)');
+  // Age it into the past (a real standing approval that timed out before use).
+  await ds.getRepository('ActionApproval').update({ id: appr14.body.id }, { expires_at: new Date(Date.now() - 60_000) });
+  const run14 = await mcp.callTool('run_action', { action_id: gated.id, source_ticket_id: ticket14.id });
+  assert.equal(run14.isError, true, 'an expired grant does not authorize a run');
+  assert.match(JSON.stringify(run14.error), /approval/i, 'the expired-grant rejection names the approval requirement');
+  const grant14 = await ds.getRepository('ActionApproval').findOne({ where: { id: appr14.body.id } });
+  assert.equal(grant14.status, 'expired', 'the gate retires the expired grant');
+  const t14 = await mcp.callTool('get_ticket', { ticket_id: ticket14.id });
+  assert.equal(t14.pending_user_action, true, 'an expired-grant run parks the ticket');
 
   await mcp.close();
   exitAfterTests(0);
