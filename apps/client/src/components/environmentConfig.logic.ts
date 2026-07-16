@@ -20,17 +20,23 @@ export interface ParsedEnvironmentRaw {
    *  url/branch/target_dir/…, EXTRA repositories beyond the first, or a url-only
    *  repository. All of it is dropped the next time the board is saved. */
   hasLegacy: boolean;
-  /** True when the config's ONLY worktree source is a url-only (resource-less)
-   *  repository: it keeps resolving/executing on the read path until Save, but
-   *  saving through the repo picker removes it and leaves the board with no
-   *  provisioning source. Drives a stronger, explicit warning. */
+  /** True when the provisioned repository (repositories[0]) is a url-only
+   *  (resource-less) entry: it keeps resolving/executing on the read path until
+   *  Save, but saving through the repo picker removes it and leaves the board with
+   *  no provisioning source unless the operator first picks a Resource. Set purely
+   *  off index 0, so a later resource-backed row does NOT suppress it. Drives a
+   *  stronger, explicit warning. */
   losesWorktreeSourceOnSave: boolean;
 }
 
-// Tolerant parse: keep the first repository's resource_id, ignore every other
-// key. Anything else present in the stored JSON — legacy keys, extra repos, or a
-// url-only repo — is flagged as legacy-to-be-dropped so the editor can render a
-// non-destructive "will be dropped on save" note.
+// Tolerant parse. Only repositories[0] is ever provisioned (agent-manager
+// resolveBootstrapRepository reads env.repositories[0]), so the editable selection
+// is STRICTLY array index 0 — never a later resource-backed row. Keying off the
+// first row that merely HAS a resource_id would, for a mixed
+// [{url-only}, {resource_id}] config, show the operator a repo the board is NOT
+// running and, on Save, silently switch the live worktree source to it. Everything
+// else in the stored JSON — legacy top-level keys, extra repos, per-repo url/…, or
+// a url-only first repo — is flagged legacy-to-be-dropped so the editor can warn.
 export function parseEnvironmentConfigRaw(raw: string | null | undefined): ParsedEnvironmentRaw {
   const empty: ParsedEnvironmentRaw = { resourceId: '', hasLegacy: false, losesWorktreeSourceOnSave: false };
   if (!raw) return empty;
@@ -48,27 +54,31 @@ export function parseEnvironmentConfigRaw(raw: string | null | undefined): Parse
   }
 
   const repos = Array.isArray(obj.repositories) ? obj.repositories : [];
-  const resourceIds: string[] = [];
-  let urlOnlyCount = 0;
-  for (const r of repos) {
-    if (!r || typeof r !== 'object') continue;
-    for (const k of Object.keys(r)) {
+  // Any repository beyond the first is never provisioned → dead config the
+  // single-selector save drops (covers a later repo's own legacy keys too).
+  if (repos.length > 1) hasLegacy = true;
+
+  // The selection is repositories[0] and nothing else — the repo the worktree
+  // bootstrap actually consumes.
+  const first = repos.length > 0 && repos[0] && typeof repos[0] === 'object' ? repos[0] : null;
+  let resourceId = '';
+  let losesWorktreeSourceOnSave = false;
+  if (first) {
+    for (const k of Object.keys(first)) {
       if (k !== 'resource_id') hasLegacy = true; // url / target_dir / branch / …
     }
-    const id = typeof r.resource_id === 'string' ? r.resource_id.trim() : '';
-    if (id) resourceIds.push(id);
-    else {
-      urlOnlyCount++;
-      hasLegacy = true; // url-only repo — can't be shown as a Resource pick
+    const id = typeof first.resource_id === 'string' ? first.resource_id.trim() : '';
+    const url = typeof first.url === 'string' ? first.url.trim() : '';
+    if (id) {
+      resourceId = id;
+    } else {
+      // The provisioned repo (index 0) is not resource-backed, so it can't be
+      // shown as a Resource pick and Save drops it. When it carries a url it is a
+      // LIVE worktree source whose loss on Save must be called out loudly.
+      hasLegacy = true;
+      if (url) losesWorktreeSourceOnSave = true;
     }
   }
-  // Only the first resource-backed repo is provisioned; any extra beyond it is
-  // dead configuration that the single-selector save drops.
-  if (resourceIds.length > 1) hasLegacy = true;
-  const resourceId = resourceIds[0] || '';
-  // The board loses its worktree source on Save only when there is NO
-  // resource-backed repo left to keep but there IS a url-only one Save removes.
-  const losesWorktreeSourceOnSave = resourceIds.length === 0 && urlOnlyCount > 0;
   return { resourceId, hasLegacy, losesWorktreeSourceOnSave };
 }
 

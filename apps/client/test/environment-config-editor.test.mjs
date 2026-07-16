@@ -85,7 +85,9 @@ test('parse: a url-only (resource-less) repo → losesWorktreeSourceOnSave, no e
   });
 });
 
-test('parse: url-only repo ALONGSIDE a Resource repo → no source loss (Resource survives)', () => {
+test('parse: Resource repo FIRST + url-only second → index 0 (Resource) wins, no source loss', () => {
+  // Reverse of the blocker order. repositories[0] is the Resource → it is the
+  // selection and stays provisioned; the trailing url-only repo is dropped legacy.
   const raw = JSON.stringify({
     repositories: [{ resource_id: 'a' }, { url: 'https://github.com/x/y.git' }],
   });
@@ -93,6 +95,19 @@ test('parse: url-only repo ALONGSIDE a Resource repo → no source loss (Resourc
   assert.equal(p.resourceId, 'a');
   assert.equal(p.hasLegacy, true);
   assert.equal(p.losesWorktreeSourceOnSave, false, 'the Resource repo is kept, so the source is not lost');
+});
+
+test('parse: url-only repo FIRST + Resource second → index 0 (url-only) wins → source loss (review blocker)', () => {
+  // The exact review blocker: execution uses repositories[0] (the url-only repo),
+  // so the editor must NOT show the later res-2 as selected, and saving through the
+  // picker WOULD drop the live worktree source → the danger warning must fire.
+  const raw = JSON.stringify({
+    repositories: [{ url: 'https://example.com/legacy.git' }, { resource_id: 'res-2' }],
+  });
+  const p = parseEnvironmentConfigRaw(raw);
+  assert.equal(p.resourceId, '', 'index 0 is url-only → nothing selectable (never the later res-2)');
+  assert.equal(p.hasLegacy, true, 'the trailing res-2 + the url-only index 0 are both legacy');
+  assert.equal(p.losesWorktreeSourceOnSave, true, 'saving drops the live index-0 worktree source');
 });
 
 // ── SAVE (build) ─────────────────────────────────────────────────────────────
