@@ -857,30 +857,46 @@ export class ActionsService {
     runId: string,
   ): Promise<{ userId: string; userName: string; at: Date } | null> {
     const now = new Date();
-    const candidate = await this.approvalRepo.findOne({
-      where: { action_id: actionId, workspace_id: workspaceId, source_ticket_id: sourceTicketId, status: 'pending' },
-      order: { created_at: 'ASC' },
-    });
-    if (!candidate) return null;
-    if (candidate.expires_at && candidate.expires_at.getTime() <= now.getTime()) {
-      // Expired: retire it so it stops being a candidate, then report no approval.
-      await this.approvalRepo.update(
-        { id: candidate.id, status: 'pending' },
-        { status: 'expired' },
-      );
-      return null;
+    // Walk pending grants oldest-first, but an expired grant must NOT shadow a
+    // newer still-valid one (reviewer blocker, ticket 524bb434). The previous
+    // code fetched only the single OLDEST pending grant and, if it was expired,
+    // retired it and gave up — so `expired A + valid B` on the same
+    // (action, ticket) rejected a legitimately-approved run and re-parked the
+    // ticket (the admin issuing B had already un-parked it, only for it to bounce
+    // straight back). Instead we retire each expired candidate and keep scanning
+    // in the SAME call until we consume a valid grant or run out. Every iteration
+    // strictly shrinks the pending set — a candidate is retired, consumed, or a
+    // racing dispatch already moved it off 'pending' — so the bounded loop always
+    // terminates.
+    const MAX_GRANT_SCAN = 100; // safety bound; a real (action,ticket) pair has very few grants
+    for (let i = 0; i < MAX_GRANT_SCAN; i++) {
+      const candidate = await this.approvalRepo.findOne({
+        where: { action_id: actionId, workspace_id: workspaceId, source_ticket_id: sourceTicketId, status: 'pending' },
+        order: { created_at: 'ASC' },
+      });
+      if (!candidate) return null; // no pending grant left → unapproved
+      if (candidate.expires_at && candidate.expires_at.getTime() <= now.getTime()) {
+        // Expired: retire it (guarded) so it stops being a candidate, then keep
+        // scanning for a newer, still-valid grant rather than giving up here.
+        await this.approvalRepo.update(
+          { id: candidate.id, status: 'pending' },
+          { status: 'expired' },
+        );
+        continue;
+      }
+      const claim = await this.approvalRepo
+        .createQueryBuilder()
+        .update(ActionApproval)
+        .set({ status: 'consumed', consumed_at: now, consumed_by_run_id: runId })
+        .where('id = :id', { id: candidate.id })
+        .andWhere("status = 'pending'")
+        .execute();
+      if ((claim.affected ?? 0) <= 0) continue; // lost the race → this grant is no longer pending; try the next
+      // Attribution comes FROM the grant record (the real human), not the caller:
+      // the audit/time can never be forged by whoever triggered the dispatch.
+      return { userId: candidate.approved_by, userName: candidate.approved_by_name, at: candidate.created_at };
     }
-    const claim = await this.approvalRepo
-      .createQueryBuilder()
-      .update(ActionApproval)
-      .set({ status: 'consumed', consumed_at: now, consumed_by_run_id: runId })
-      .where('id = :id', { id: candidate.id })
-      .andWhere("status = 'pending'")
-      .execute();
-    if ((claim.affected ?? 0) <= 0) return null; // lost the race → treat as unapproved
-    // Attribution comes FROM the grant record (the real human), not the caller:
-    // the audit/time can never be forged by whoever triggered the dispatch.
-    return { userId: candidate.approved_by, userName: candidate.approved_by_name, at: candidate.created_at };
+    return null; // scan bound exhausted → fail-closed (treat as unapproved)
   }
 
   /**
@@ -953,6 +969,17 @@ export class ActionsService {
         );
       }
     }
+
+    // Recovery semantics for a post-consume dispatch failure (reviewer non-blocker
+    // observation, ticket 524bb434): the grant is consumed ABOVE, before the room /
+    // ActionRun / first-message side effects below. This ordering is deliberate and
+    // fail-CLOSED — for an irreversible high-impact operation we never want to risk
+    // double-consuming a grant or silently re-running the op, so consume happens
+    // first and stays committed. If any step below throws, the grant remains
+    // `consumed` (not auto-reverted) and the run never starts: the next attempt
+    // finds no pending grant and re-parks the ticket, so a human must issue a FRESH
+    // approval to retry. That "burned grant ⇒ re-approval required" recovery is the
+    // same path CASE 12 pins (a consumed grant cannot be reused → rejected + re-park).
 
     // Build a render context the user can interpolate against. Resolve the
     // optional pieces best-effort — missing fields render as empty string in
