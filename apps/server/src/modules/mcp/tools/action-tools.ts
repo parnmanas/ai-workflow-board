@@ -174,12 +174,16 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
     'you are working: the run is linked back to that ticket, the target agent is told ' +
     'to report its outcome via `complete_action_run`, and on success the ticket ' +
     'AUTO-RESUMES in place (no Pending, no manual re-dispatch). Omit it for ' +
-    'cron/manual/standalone runs that have no ticket to resume.',
+    'cron/manual/standalone runs that have no ticket to resume. ' +
+    'HIGH-IMPACT Actions (deploy/publish/release, or any Action saved high_impact=true) ' +
+    'CANNOT be auto-run by an agent for a ticket: the call is rejected and the ticket is ' +
+    'parked pending_user_action unless `approved_by_user_id` names a workspace admin who approved it.',
     {
       action_id: z.string().describe('Action ID'),
       source_ticket_id: z.string().optional().describe('Ticket that this run should resume on completion. When set, the run carries the linkage and `complete_action_run` re-dispatches this ticket. Omit for runs with no originating ticket.'),
+      approved_by_user_id: z.string().optional().describe('Only for high-impact Actions: the id of the workspace ADMIN user who approved this run. Without it a high-impact ticket-driven run is rejected and the ticket is parked for human approval. An agent cannot self-approve.'),
     },
-    async ({ action_id, source_ticket_id }, extra: { sessionId?: string }) => {
+    async ({ action_id, source_ticket_id, approved_by_user_id }, extra: { sessionId?: string }) => {
       if (!actionsService) return err('Actions service unavailable in this MCP context');
       // Triggering identity: an authenticated agent caller (MCP session bound
       // to an agentId) is attributed as 'agent' with that agent's id. Without
@@ -192,6 +196,7 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
           triggeredByType: caller?.agentId ? 'agent' : 'system',
           triggeredById: caller?.agentId ?? '',
           sourceTicketId: source_ticket_id,
+          approvedByUserId: approved_by_user_id,
         });
         return ok({
           run_id: result.run.id,
@@ -295,6 +300,8 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
           prompt_rendered: r.prompt_rendered,
           source_ticket_id: r.source_ticket_id || '',
           idempotency_key: r.idempotency_key || '',
+          approved_by: r.approved_by || '',
+          approved_at: r.approved_at ?? null,
           status: r.status || 'running',
           result_summary: r.result_summary || '',
           attempt: r.attempt ?? 1,
