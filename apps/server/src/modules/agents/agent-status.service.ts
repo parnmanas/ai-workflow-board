@@ -44,6 +44,18 @@ interface ActiveTask {
   // leave this undefined — treated as 'ticket' on the wire. QA-run tasks (the
   // separate `qaTasks` registry) carry 'qa' so _emit tags them for the client.
   kind?: 'ticket' | 'qa';
+  // Generation token (ticket 1fcba693). A per-session nonce the agent-manager
+  // stamps on set_current_task and echoes back on clear_current_task, so the
+  // seat-release is a compare-and-swap: because active_tasks is keyed by
+  // ticket_id ALONE, a respawn (session B) that re-stamps the same (agent,
+  // ticket, role) seat overwrites session A's entry. If A's LATE exit-clear then
+  // arrived it would wipe live B's task AND — since fdc69c13's exit-clear also
+  // drops the output-liveness badge — B's liveness evidence, false-flagging B as
+  // absent and triggering a duplicate re-dispatch. clearCurrentTask only
+  // releases the seat/badge when the caller's token matches this stored one, so
+  // A's stale clear is a no-op against B. Undefined for a pre-token (legacy)
+  // set — the clear then falls back to the tokenless, badge-preserving path.
+  task_token?: string;
 }
 
 // Internal-only activityEvents signal (ticket 09ed8def), fired by QaRunService
@@ -547,7 +559,7 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
    * last_seen_at so the dashboard reflects "in progress" the instant the
    * subagent process is alive — not when the trigger was queued.
    */
-  async setCurrentTask(agent_id: string, ticket_id: string, role?: string): Promise<void> {
+  async setCurrentTask(agent_id: string, ticket_id: string, role?: string, taskToken?: string): Promise<void> {
     if (!agent_id || !ticket_id) return;
 
     const ticket = await this.dataSource
@@ -565,6 +577,11 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
       ticket_title: ticket?.title ?? '(unknown ticket)',
       claimed_at: new Date(),
       role: role || undefined,
+      // Generation nonce (ticket 1fcba693) — stamped so a later clear_current_task
+      // can prove it owns THIS session's seat before releasing it. Re-setting the
+      // same (agent,ticket) seat (respawn / heartbeat) overwrites the token, so
+      // the newest live session is always the one a matching clear can release.
+      task_token: taskToken || undefined,
     };
     tasks.set(ticket_id, task);
     const updated: AgentStatus = {
@@ -586,8 +603,15 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
    * `expectedTicketId` lets the caller assert intent — if a newer task
    * already overwrote current_task we must not clobber it. Pass undefined to
    * force-clear unconditionally (e.g. agent shutdown).
+   *
+   * `taskToken` (ticket 1fcba693) is the generation nonce the caller stamped on
+   * set_current_task. Because active_tasks is keyed by ticket_id ALONE, a
+   * respawn (session B) that re-sets the same (agent,ticket,role) seat overwrites
+   * session A's entry. A generation-verified clear (matching token) is the ONLY
+   * one that releases the output-liveness badge, so session A's stale/late exit
+   * can never wipe live session B's task or liveness evidence.
    */
-  clearCurrentTask(agent_id: string, expectedTicketId?: string): void {
+  clearCurrentTask(agent_id: string, expectedTicketId?: string, taskToken?: string): void {
     if (!agent_id) return;
     const status = this.state.get(agent_id);
     if (!status?.active_tasks || status.active_tasks.size === 0) return;
@@ -608,16 +632,28 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
     // dropped, never a live sibling strand's (e.g. this agent's reviewer seat).
     const releasedSeats: Array<{ ticketId: string; role: string }> = [];
     if (expectedTicketId) {
-      // Targeted clear: drop just this ticket's entry. No-op if a newer
-      // setCurrentTask already replaced it (which on a Map means the same
-      // key is still present but with a fresher claimed_at — caller's
-      // intent was to clear THIS task, so we still drop it; the manager
-      // would call setCurrentTask again on the next session anyway).
       const t = tasks.get(expectedTicketId);
-      if (!tasks.delete(expectedTicketId)) return;
-      releasedSeats.push({ ticketId: expectedTicketId, role: t?.role || '' });
+      if (!t) return; // already released — nothing to clear
+      // Generation compare-and-swap (ticket 1fcba693). If the caller identifies
+      // its generation (taskToken) and the seat now stores a DIFFERENT token, a
+      // newer set_current_task(B) replaced this session's entry → a live
+      // successor owns the seat → skip ENTIRELY: never drop B's task nor its
+      // badge. This is the fix for the set(A)→set(B)→late-clear(A) race that a
+      // ticket-id-only clear can't see.
+      if (taskToken && t.task_token && t.task_token !== taskToken) return;
+      // Release the output badge ONLY on a generation-verified clear (token
+      // present AND matching the stored one). A tokenless legacy clear — or a
+      // task set before tokens existed — can't prove there is no live successor,
+      // so it drops just the current_task entry (dashboard release, unchanged)
+      // and LEAVES the badge for the supervisor's output-liveness TTL /
+      // leaked_with_output diagnostic to reclaim, rather than risk a live
+      // worker's liveness evidence.
+      const tokenVerified = !!(taskToken && t.task_token && t.task_token === taskToken);
+      tasks.delete(expectedTicketId);
+      if (tokenVerified) releasedSeats.push({ ticketId: expectedTicketId, role: t.role || '' });
     } else {
-      // Force-clear all (agent shutdown). Mirrors pre-multi-task behavior.
+      // Force-clear all (agent shutdown/teardown): the whole agent is gone, so no
+      // live successor exists on any seat — release every task AND badge.
       for (const [tid, t] of tasks) releasedSeats.push({ ticketId: tid, role: t?.role || '' });
       tasks.clear();
     }

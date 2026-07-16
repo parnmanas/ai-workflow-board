@@ -119,7 +119,11 @@ test('supervisor liveness reclaim: live strand protected, killed strand reclaime
   // Past the resend cooldown the supervisor must NOT re-emit — the non-force
   // nudge is dropped by the REAL in-flight-strand gate and fresh output
   // suppresses any force escalation (no false restart of long work).
-  await agentStatus.setCurrentTask(agent.id, ticket.id, role);
+  // Token'd set — the real (new) manager stamps a per-session generation nonce so
+  // the matching clear can prove it owns THIS generation of the seat (ticket
+  // 1fcba693 CAS). Phase 4 releases with this same token.
+  const LIVE_TOKEN = 'gen-live-1';
+  await agentStatus.setCurrentTask(agent.id, ticket.id, role, LIVE_TOKEN);
   agentStatus.recordOutputLiveness(agent.id, ticket.id, role);
   const e2 = supervisor.state.get(key3);
   if (e2) e2.lastEmitAt = 0; // elapse the resend cooldown deterministically
@@ -154,9 +158,12 @@ test('supervisor liveness reclaim: live strand protected, killed strand reclaime
   agentStatus.outputLiveness.set(reviewerOutputKey, Date.now());
   assert.notEqual(agentStatus.outputLiveness.get(outputKey), undefined, 'assignee output badge present just before the exit (produced right up to the end)');
 
-  agentStatus.clearCurrentTask(agent.id, ticket.id); // clean/silent exit → seat release
+  // Generation-verified clear: same token the live session was set with (the new
+  // manager threads its per-session nonce to the seat release). Only a matching
+  // token releases the output badge (ticket 1fcba693 CAS).
+  agentStatus.clearCurrentTask(agent.id, ticket.id, LIVE_TOKEN); // clean/silent exit → seat release
 
-  assert.equal(agentStatus.outputLiveness.get(outputKey), undefined, 'clearCurrentTask ALSO cleared the assignee output-liveness badge (the root fix) — no lingering producer signal');
+  assert.equal(agentStatus.outputLiveness.get(outputKey), undefined, 'a matching-token clearCurrentTask ALSO cleared the assignee output-liveness badge (the root fix) — no lingering producer signal');
   assert.notEqual(agentStatus.outputLiveness.get(reviewerOutputKey), undefined, 'a sibling reviewer-seat badge on the same ticket is NOT cleared by the assignee release (role-precise)');
   assert.equal(agentStatus.hasLiveRoleStrand(agent.id, ticket.id, role), false, 'the released seat reads absent immediately — NOT held for the 4 h output gate');
 
@@ -165,4 +172,47 @@ test('supervisor liveness reclaim: live strand protected, killed strand reclaime
   assert.equal(gotTwo, true, 'a released seat is recovered at the fast floor — exactly one MORE re-dispatch, not after the 4 h output gate');
   await sleep(200);
   assert.equal(va.triggersFor(ticket.id).length, 2, 'still exactly two total (no respawn storm)');
+
+  // ── Phase 5: generation CAS — set(A)→set(B same seat)→late clear(A) is a no-op
+  //    against live B (ticket 1fcba693, reviewer item 2). active_tasks is keyed by
+  //    ticket_id ALONE, so a respawn (B) overwrites A's entry in place; A's stale
+  //    exit-clear must NOT wipe B's task OR its output badge — otherwise the live
+  //    replacement is false-flagged absent on both signals and duplicate-re-
+  //    dispatched, breaking the exactly-once / no-respawn-storm guarantee. Only
+  //    B's OWN token'd clear releases the seat. This is the exact race the
+  //    reviewer required a regression for. ──
+  supervisor.state.clear();
+  const TOKEN_A = 'gen-A';
+  const TOKEN_B = 'gen-B';
+  await agentStatus.setCurrentTask(agent.id, ticket.id, role, TOKEN_A); // session A claims the seat
+  await agentStatus.setCurrentTask(agent.id, ticket.id, role, TOKEN_B); // respawn B overwrites the SAME (ticket,role) seat
+  agentStatus.recordOutputLiveness(agent.id, ticket.id, role);          // B is producing output → live
+  assert.equal(activeTask()?.task_token, TOKEN_B, 'the seat now stores the newest generation token (B overwrote A)');
+
+  // A's LATE exit-clear arrives carrying A's (now-stale) token — must be a full no-op.
+  agentStatus.clearCurrentTask(agent.id, ticket.id, TOKEN_A);
+  assert.notEqual(activeTask(), undefined, "live B's task survives A's late clear (CAS skip on token mismatch)");
+  assert.equal(activeTask()?.task_token, TOKEN_B, "B's task is untouched — still generation B");
+  assert.notEqual(agentStatus.outputLiveness.get(outputKey), undefined, "live B's output badge survives A's late clear");
+  assert.equal(agentStatus.hasLiveRoleStrand(agent.id, ticket.id, role), true, 'B is still counted live — no false-absent');
+
+  // A fresh supervisor must therefore NOT re-dispatch while B is live.
+  supervisor.state.clear();
+  await supervisor._tick();
+  await sleep(150);
+  assert.equal(va.triggersFor(ticket.id).length, 2, "no extra re-dispatch while B is live (A's stale clear caused no duplicate) — still exactly two");
+
+  // B's OWN token'd clear (its real exit) releases the task + badge → absent →
+  // recovered exactly once more at the floor.
+  agentStatus.clearCurrentTask(agent.id, ticket.id, TOKEN_B);
+  assert.equal(activeTask(), undefined, "B's matching-token clear releases the task");
+  assert.equal(agentStatus.outputLiveness.get(outputKey), undefined, "B's matching-token clear releases the output badge too");
+  assert.equal(agentStatus.hasLiveRoleStrand(agent.id, ticket.id, role), false, "seat is absent after B's own release");
+
+  supervisor.state.clear();
+  await supervisor._tick();
+  const gotThree = await waitFor(() => va.triggersFor(ticket.id).length === 3);
+  assert.equal(gotThree, true, "after B's real release the seat is recovered at the floor — exactly one more (third) re-dispatch");
+  await sleep(200);
+  assert.equal(va.triggersFor(ticket.id).length, 3, 'still exactly three total (no respawn storm)');
 });
