@@ -70,6 +70,29 @@ const WORK_FOLDER_RULE = `> 🗂️ **작업 폴더 규약 (worktree 규약 ④)
 > repo 트리 밖 · 홈 디렉터리 · \`/tmp\` · 다른 드라이브(예: \`D:\\...\`)에 worktree/체크아웃을 **새로 만들지 마라** — AWB 가 이미 폴더를 정해 배정했다.
 > 작업이 끝나면 이 폴더 안에서 정리하라.`;
 
+/**
+ * Action-우선(before-Pending) 정책 블록 — pend 결정을 다루는 워크플로 가이드
+ * (todo / plan / in_progress)에 주입된다. 에이전트가 "배포가 필요하다" 같은
+ * 이유로 곧장 Pending 하지 않고, 먼저 등록된 Action 을 탐색·실행(없으면 안전
+ * 범위 내에서 등록)한 뒤 같은 티켓에서 흐름을 이어가도록 유도하는 안내다.
+ * 서버측 pend_ticket 게이트(`modules/mcp/shared/pend-action-gate.ts`)가 이 규칙을
+ * 실제로 강제한다 — 실행 가능한 Action 이 있으면 `no_action_reason` 없이는 pend 가
+ * 거부된다. 단일 소스로 두어 세 워크플로에 byte-identical 하게 주입한다.
+ */
+const ACTIONS_BEFORE_PENDING_RULE = `## Actions — run a registered Action before you Pending
+
+Before you \`pend_ticket\` for something an automated operation could do — a deploy, a publish, a merge-to-production, kicking a pipeline, running a scripted task — first check whether a registered **Action** already does it. The server enforces this: \`pend_ticket\` is **rejected while runnable Actions exist** unless you pass \`no_action_reason\` explaining why none apply.
+
+An **Action** is a saved, named prompt pinned to a target agent; running one dispatches that work to the agent and returns a run you can watch. "A deploy is needed" is almost always a *run an Action* situation (this board already carries a \`Merge To Production.Private and PUSH\` deploy Action), not a *park for a human* one.
+
+1. **Discover** — \`mcp__awb__list_actions(workspace_id)\`, \`search_actions\` by keyword, \`get_action\` for the full prompt. Match names/descriptions against the blocker you hit.
+2. **Run an existing Action** — if one fits, \`mcp__awb__run_action(action_id)\` → \`{run_id, room_id}\`. Watch it with \`list_action_runs(workspace_id, action_id)\` and read the run's chat room for the target agent's result, then **resume this ticket in place** — keep going on the current workflow; do not park.
+3. **Register a new Action** — nothing fits but the operation is safe and well-defined? \`mcp__awb__save_action(workspace_id, name, prompt, target_agent_id, …)\`, then \`run_action\`, then resume. Keep the prompt idempotent and narrowly scoped.
+4. **Handle failure / retry** — run reports a failure? Read the room, fix the inputs, and \`run_action\` again (a fresh, idempotent retry). Record what failed. Escalate to a human only after the Action genuinely cannot succeed without one.
+5. **High-impact Actions** (deploy / push-to-production / anything outward-facing) — honour the Action's own approval + idempotency guards, never run one you cannot attribute, and comment what you ran and its outcome so the audit trail is complete.
+
+**Then, and only then, Pending** — reserve \`pend_ticket\` for what an Action cannot resolve: a human decision, a credential/secret you cannot obtain, an approval only a person can grant, or a missing requirement only the reporter can supply. When you pend past runnable Actions, pass \`no_action_reason\` with the *specific* reason none apply (e.g. \`"prod approval needs a human signer — no Action covers the sign-off"\`); it is recorded on the ticket's audit trail.`;
+
 export const DEFAULT_PROMPT_TEMPLATES: DefaultPromptTemplateDef[] = [
   {
     name: 'backlog_workflow',
@@ -153,6 +176,8 @@ To advance a co-held ticket:
 
 The reporter may \`record_agreement(..., override=true)\` to force-pass a deadlock — honored only while holding the reporter role, and audit-logged. \`move_ticket(force=true)\` also bypasses the gate (any caller — no reporter check — and it skips the terminal-reopen and review-approval guards too); it is a human/operator escape hatch, never an agent's way around consensus.
 
+${ACTIONS_BEFORE_PENDING_RULE}
+
 ## Notes
 
 - If you already have **3 or more in-progress tickets**, finish one before starting a new one. Context-switch cost outweighs concurrency.
@@ -225,6 +250,8 @@ To advance a co-held ticket:
 4. **Server auto-moves** — the instant every required holder has agreed on the current proposal, the server performs the move itself (actor \`Consensus\`). Nobody calls \`move_ticket\`. Unanimous signals without an open proposal never auto-move — open the proposal first.
 
 The reporter may \`record_agreement(..., override=true)\` to force-pass a deadlock — honored only while holding the reporter role, and audit-logged. \`move_ticket(force=true)\` also bypasses the gate (any caller — no reporter check — and it skips the terminal-reopen and review-approval guards too); it is a human/operator escape hatch, never an agent's way around consensus.
+
+${ACTIONS_BEFORE_PENDING_RULE}
 
 ## Notes
 
@@ -300,6 +327,8 @@ To advance a co-held ticket:
 4. **Server auto-moves** — the instant every required holder has agreed on the current proposal, the server performs the move itself (actor \`Consensus\`). Nobody calls \`move_ticket\`. Unanimous signals without an open proposal never auto-move — open the proposal first.
 
 The reporter may \`record_agreement(..., override=true)\` to force-pass a deadlock — honored only while holding the reporter role, and audit-logged. \`move_ticket(force=true)\` also bypasses the gate (any caller — no reporter check — and it skips the terminal-reopen and review-approval guards too); it is a human/operator escape hatch, never an agent's way around consensus.
+
+${ACTIONS_BEFORE_PENDING_RULE}
 
 ## When to park instead of bouncing back
 
