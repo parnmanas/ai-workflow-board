@@ -34,6 +34,42 @@ export class ActionRun {
   @Column({ type: 'text', default: '' })
   prompt_rendered: string;
 
+  // ── Auto-resume linkage (ticket 524bb434) ────────────────────────────────
+  // The ticket that dispatched this run because it hit an Action-resolvable
+  // blocker (a deploy, a publish, …) instead of parking for a human. '' when
+  // the run came from cron / manual / on-ticket-done and has no ticket to
+  // resume. On completion, `complete_action_run` uses this to re-dispatch the
+  // source ticket's current-column role holders — the "동일 티켓에서 계속"
+  // completion criterion. Kept as a plain id (no FK) to mirror the other
+  // denormalized id columns on this table and survive source-ticket deletion.
+  @Column({ type: 'varchar', default: '' })
+  source_ticket_id: string;
+
+  // Run lifecycle: 'running' (dispatched, agent working) → 'succeeded' |
+  // 'failed', set once by `complete_action_run`. The terminal transition is
+  // idempotent — a second completion is a no-op so a re-invoked agent can't
+  // double-resume the source ticket or double-count a retry. Legacy rows
+  // predating this column read as 'running'; they are never auto-completed,
+  // so the default is inert for historical data.
+  @Column({ type: 'varchar', default: 'running' })
+  status: string;
+
+  // Free-text result the completing agent hands back: a success summary or a
+  // failure reason. Mirrored into the source ticket's audit comment so the
+  // outcome is reconstructable from the ticket alone.
+  @Column({ type: 'text', default: '' })
+  result_summary: string;
+
+  // 1-based attempt counter. A failed run under the retry cap re-dispatches a
+  // fresh run with attempt+1; the cap (ActionsService.MAX_RUN_ATTEMPTS) bounds
+  // the loop so a persistently-failing high-impact Action can't retry forever.
+  @Column({ type: 'int', default: 1 })
+  attempt: number;
+
+  // Set when status leaves 'running'. NULL while the run is still in flight.
+  @Column({ type: Date, nullable: true, default: null })
+  completed_at: Date | null;
+
   @CreateDateColumn()
   created_at: Date;
 }
