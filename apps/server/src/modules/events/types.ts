@@ -43,6 +43,15 @@ export interface SubscriberIdentity {
 export interface EventMapContext {
   resolveBoardId(ticketId: string, entityId: string): Promise<string | null>;
   resolveTicketRepositoryResourceId(ticketId: string): Promise<string>;
+  /**
+   * Canonical `<Manager>/<Agent>` display for an actor id, so a live
+   * `board_update` SSE frame carries the SAME name the durable read path
+   * (ActivityService.getTicketActivity) projects — without this the realtime
+   * consumer sees the bare leaf `actor_name` the write path stamped until it
+   * refetches. Returns null when the id is empty or resolves to a non-agent
+   * (user, system label) so the caller keeps the stored `actor_name` verbatim.
+   */
+  resolveActorDisplayName(actorId: string): Promise<string | null>;
 }
 
 /**

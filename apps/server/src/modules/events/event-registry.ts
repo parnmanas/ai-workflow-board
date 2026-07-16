@@ -70,13 +70,24 @@ export const EVENT_TYPES: EventDefinition[] = [
     async map(activity: any, ctx) {
       const boardId = await ctx.resolveBoardId(activity.ticket_id, activity.entity_id);
       if (!boardId) return null;
+      // Project the actor to the canonical `<Manager>/<Agent>` display keyed by
+      // actor_id — the SAME rule ActivityService applies on the durable read
+      // path — so a realtime consumer and a later refetch never disagree on the
+      // name. Several write paths stamp the bare leaf `actor_name`; resolving
+      // here (rather than mutating the emitted ActivityLog) keeps every other
+      // internal 'activity' listener on the untouched persisted entity. Falls
+      // back to the stored name for non-agent actors (user / system labels,
+      // whose actor_id is empty or resolves to no Agent row).
+      const canonicalActor = activity.actor_id
+        ? await ctx.resolveActorDisplayName(activity.actor_id)
+        : null;
       const payload: BoardUpdatePayload = {
         ticket_id: activity.ticket_id,
         repository_resource_id: await ctx.resolveTicketRepositoryResourceId(activity.ticket_id),
         entity_type: activity.entity_type,
         action: activity.action,
         field_changed: activity.field_changed || '',
-        actor_name: activity.actor_name || '',
+        actor_name: canonicalActor || activity.actor_name || '',
       };
       return { payload, scope: { board_id: boardId } };
     },

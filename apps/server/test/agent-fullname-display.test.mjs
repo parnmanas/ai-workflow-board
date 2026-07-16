@@ -31,6 +31,7 @@ import {
   createTicket,
 } from './helpers/fixtures.mjs';
 import { McpClient } from './helpers/mcp-client.mjs';
+import { openSseStream } from './helpers/sse-listener.mjs';
 
 const BASE_PORT = parseInt(process.env.QA_AGENT_FULLNAME_PORT || '7881', 10);
 
@@ -143,6 +144,87 @@ test('User tab: pend_ticket stamps pending_set_by as <Manager>/<Agent>', async (
   const stored = await ds.getRepository('Ticket').findOne({ where: { id: pendTicket.id } });
   assert.equal(stored.pending_set_by, MANAGED_DISPLAY, 'persisted pending_set_by must be canonical too');
   assert.equal(stored.pending_user_action, true, 'ticket must be parked');
+});
+
+// ─── User (pending) tab: the OTHER write path — update_ticket toggle ─────────
+// pend_ticket is not the only stamp site: update_ticket's
+// `pending_user_action: false→true` branch (ticket-crud-tools.ts) also writes
+// pending_set_by via resolveCallerDisplayName. Exercise it end-to-end through
+// the real /mcp transport so the API-key → caller.agentId → Manager/Agent chain
+// is what the assertion covers, and assert BOTH the returned ticket and the
+// persisted row carry the canonical name.
+test('User tab: update_ticket pending toggle stamps pending_set_by as <Manager>/<Agent>', async () => {
+  const key = await createApiKey(app, getDataSourceToken, managed.id, { workspaceId: ws.id, label: 'upd-pend' });
+  const client = new McpClient({ baseUrl: `http://127.0.0.1:${BASE_PORT}`, apiKey: key.raw_key });
+  after(() => { void client.close().catch(() => {}); });
+
+  const updTicket = await createTicket(app, getDataSourceToken, {
+    columnId: columns.todo.id,
+    workspaceId: ws.id,
+    title: 'park via update_ticket',
+    assigneeId: managed.id,
+  });
+
+  const result = await client.callTool('update_ticket', {
+    ticket_id: updTicket.id,
+    pending_user_action: true,
+    pending_reason: 'blocked on a human decision',
+  });
+  assert.ok(result && !result.isError, `update_ticket must succeed, got ${JSON.stringify(result)}`);
+  // Returned ticket (loadTicketFull) must already reflect the canonical stamp.
+  assert.equal(result.pending_set_by, MANAGED_DISPLAY,
+    `returned pending_set_by must be "${MANAGED_DISPLAY}", got "${result.pending_set_by}"`);
+  assert.ok(String(result.pending_set_by).includes('/'), 'returned pending_set_by must carry the manager prefix');
+
+  const stored = await ds.getRepository('Ticket').findOne({ where: { id: updTicket.id } });
+  assert.equal(stored.pending_user_action, true, 'ticket must be parked via update_ticket');
+  assert.equal(stored.pending_set_by, MANAGED_DISPLAY,
+    `persisted pending_set_by must be canonical too, got "${stored.pending_set_by}"`);
+});
+
+// ─── Activity tab: REALTIME path (SSE board_update), not just the read ───────
+// getTicketActivity canonicalizes on read, but the ticket completion condition
+// also demands the *realtime* path stay consistent — otherwise a live consumer
+// sees the bare leaf until it refetches. logActivity emits 'activity', the
+// event-registry board_update.map projects actor_id→canonical, and the frame
+// lands on the SSE wire. Drive it truly end-to-end through /api/events/stream.
+test('Realtime board_update SSE: actor_name is canonical <Manager>/<Agent>', async () => {
+  const key = await createApiKey(app, getDataSourceToken, standalone.id, { workspaceId: ws.id, label: 'sse-sub' });
+  // No boardId → the board_update filter (`!id.boardId || …`) delivers all.
+  const sse = await openSseStream(BASE_PORT, key.raw_key, {});
+  after(() => sse.close());
+
+  const activityService = app.get(ActivityService);
+  // Stamp the BARE leaf name at write time — the realtime frame must still
+  // arrive canonicalized, exactly like the durable read path.
+  await activityService.logActivity({
+    entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, action: 'updated',
+    field_changed: 'sse-managed', actor_id: managed.id, actor_name: 'Coder-bare-leaf',
+  });
+
+  const frame = await sse.waitFor(
+    'board_update',
+    (d) => d.ticket_id === ticket.id && d.field_changed === 'sse-managed',
+    8000,
+  );
+  assert.equal(frame.data.actor_name, MANAGED_DISPLAY,
+    `realtime board_update.actor_name must be canonical "${MANAGED_DISPLAY}", got "${frame.data.actor_name}"`);
+  assert.ok(String(frame.data.actor_name).includes('/'),
+    'realtime actor_name must carry the manager prefix');
+
+  // Non-agent actor (system label, no actor_id) must ride the wire verbatim —
+  // the projection only touches ids that resolve to an Agent row.
+  await activityService.logActivity({
+    entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, action: 'moved',
+    field_changed: 'sse-system', actor_id: '', actor_name: 'BacklogPromotionService',
+  });
+  const sysFrame = await sse.waitFor(
+    'board_update',
+    (d) => d.ticket_id === ticket.id && d.field_changed === 'sse-system',
+    8000,
+  );
+  assert.equal(sysFrame.data.actor_name, 'BacklogPromotionService',
+    'system label (no actor_id) must survive the realtime path verbatim');
 });
 
 exitAfterTests();
