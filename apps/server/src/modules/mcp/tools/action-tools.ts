@@ -38,6 +38,7 @@ function actionToJson(a: Action) {
     trigger: a.trigger,
     trigger_label: a.trigger_label,
     enabled: a.enabled,
+    high_impact: a.high_impact,
     max_runs: a.max_runs,
     last_run_at: a.last_run_at,
     created_at: a.created_at,
@@ -102,9 +103,10 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
       trigger: z.string().optional().describe("Lifecycle trigger: '' (cron/manual, default) or 'on_ticket_done' (run when a ticket reaches a terminal column)"),
       trigger_label: z.string().optional().describe("For trigger='on_ticket_done': only fire when the finished ticket carries this label. Empty = any label."),
       enabled: z.boolean().optional().describe('When false, scheduler/hook skips this action (manual run still works)'),
+      high_impact: z.boolean().optional().describe('Mark deploy/publish/release Actions whose failure may mean a partial external effect. High-impact ticket-driven runs are NOT auto-retried on failure — the failure surfaces to the source ticket for a human decision (bounded retry is not operation idempotency).'),
       max_runs: z.number().optional().describe('FIFO prune budget (default 10)'),
     },
-    async ({ workspace_id, id, board_id, name, description, prompt, target_agent_id, schedule_cron, trigger, trigger_label, enabled, max_runs }) => {
+    async ({ workspace_id, id, board_id, name, description, prompt, target_agent_id, schedule_cron, trigger, trigger_label, enabled, high_impact, max_runs }) => {
       if (!actionsService) return err('Actions service unavailable in this MCP context');
       try {
         if (id) {
@@ -118,6 +120,7 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
             trigger,
             trigger_label,
             enabled,
+            high_impact,
             max_runs,
           } as any);
           return ok(actionToJson(updated));
@@ -134,6 +137,7 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
           trigger: trigger ?? '',
           trigger_label: trigger_label ?? '',
           enabled: enabled !== false,
+          high_impact: high_impact === true,
           max_runs: typeof max_runs === 'number' ? max_runs : 10,
         } as any);
         return ok(actionToJson(created));
@@ -290,6 +294,7 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
           triggered_by_id: r.triggered_by_id,
           prompt_rendered: r.prompt_rendered,
           source_ticket_id: r.source_ticket_id || '',
+          idempotency_key: r.idempotency_key || '',
           status: r.status || 'running',
           result_summary: r.result_summary || '',
           attempt: r.attempt ?? 1,
