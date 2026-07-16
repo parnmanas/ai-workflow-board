@@ -39,7 +39,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   t.after(() => {
     void app.close().catch(() => {});
   });
-  const { getDataSourceToken } = modules;
+  const { getDataSourceToken, ActionsService } = modules;
   const ds = app.get(getDataSourceToken());
 
   const ws = await createWorkspace(app, getDataSourceToken, 'actresume');
@@ -118,6 +118,9 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   });
   assert.ok(acts1.length >= 1, 'action_run_completed audit row written on the source ticket');
   assert.match(acts1[0].new_value, /succeeded/, 'audit row records the succeeded outcome');
+  // Reviewer req 3 — the audit row is stamped with the source workspace so the
+  // workspace-scoped activity feed surfaces it (previously defaulted to '').
+  assert.equal(acts1[0].workspace_id, ws.id, 'audit row records the source workspace_id');
 
   // Idempotency (scope-5 safety) — re-completing is a no-op, no second resume.
   step('CASE 1b — idempotency: re-completing a terminal run is a no-op');
@@ -217,6 +220,127 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
     (t3full.comments || []).some((c) => /failed after 3 attempt/i.test(c.content)),
     'exhaustion is surfaced as a ticket comment naming the attempt count',
   );
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // CASE 4 — source_ticket_id workspace boundary (reviewer req 1)
+  // ─────────────────────────────────────────────────────────────────────────
+  step('CASE 4 — run_action rejects nonexistent + cross-workspace source_ticket_id');
+  // Nonexistent ticket id → 404-shaped rejection, no run created.
+  const badRun = await mcp.callTool('run_action', {
+    action_id: existing.id,
+    source_ticket_id: '00000000-0000-0000-0000-000000000000',
+  });
+  assert.equal(badRun.isError, true, 'run_action rejects a nonexistent source ticket');
+
+  // A ticket in a DIFFERENT workspace must be rejected — otherwise one
+  // workspace's Action run could be linked to another workspace's ticket and,
+  // via complete_action_run, drive cross-workspace comments / re-dispatch.
+  const otherWs = await createWorkspace(app, getDataSourceToken, 'foreignws');
+  const otherBoard = await createBoard(app, getDataSourceToken, otherWs.id, { name: 'ob' });
+  const otherCol = await createColumn(app, getDataSourceToken, otherBoard.id, {
+    name: 'In Progress', position: 1, workspaceId: otherWs.id, roleRouting: ['assignee'],
+  });
+  const foreignTicket = await createTicket(app, getDataSourceToken, {
+    columnId: otherCol.id, workspaceId: otherWs.id, title: 'foreign ticket',
+  });
+  const crossRun = await mcp.callTool('run_action', {
+    action_id: existing.id,            // action lives in `ws`
+    source_ticket_id: foreignTicket.id, // ticket lives in `otherWs`
+  });
+  assert.equal(crossRun.isError, true, 'run_action rejects a cross-workspace source ticket');
+  assert.match(JSON.stringify(crossRun.error), /different workspace/i, 'rejection names the workspace boundary');
+  // No run row leaked for `existing` beyond the legitimate CASE-1 run.
+  const existingRuns = await mcp.callTool('list_action_runs', { workspace_id: ws.id, action_id: existing.id });
+  assert.equal(existingRuns.length, 1, 'rejected dispatches created no ActionRun row');
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // CASE 5 — concurrent complete_action_run: single atomic winner (reviewer req 2)
+  // Two genuinely-concurrent completions must not both audit / resume / retry.
+  // Driven at the service layer so the race is real (not serialized by the MCP
+  // session), directly exercising the `WHERE status='running'` guard.
+  // ─────────────────────────────────────────────────────────────────────────
+  step('CASE 5 — concurrent completion is atomic (exactly-once audit + resume)');
+  const svc = app.get(ActionsService);
+  const conc = await mcp.callTool('save_action', {
+    workspace_id: ws.id, name: 'Concurrent deploy', prompt: 'x', target_agent_id: agent.id,
+  });
+  const ticket5 = await createTicket(app, getDataSourceToken, {
+    columnId: col.id, workspaceId: ws.id, title: 'blocked concurrent', assigneeId: agent.id,
+  });
+  const run5 = await mcp.callTool('run_action', { action_id: conc.id, source_ticket_id: ticket5.id });
+  const [c1, c2] = await Promise.all([
+    svc.completeRun(run5.run_id, ws.id, { status: 'succeeded', summary: 'winner A' }),
+    svc.completeRun(run5.run_id, ws.id, { status: 'succeeded', summary: 'winner B' }),
+  ]);
+  const winners = [c1, c2].filter((r) => r.previouslyCompleted === false);
+  const noops = [c1, c2].filter((r) => r.previouslyCompleted === true);
+  assert.equal(winners.length, 1, 'exactly one concurrent completion wins the transition');
+  assert.equal(noops.length, 1, 'the other concurrent completion is a no-op');
+  assert.equal(winners[0].shouldResume, true, 'the winner drives the resume');
+  assert.equal(noops[0].shouldResume, false, 'the no-op does not resume again');
+  const acts5 = await ds.getRepository('ActivityLog').find({
+    where: { ticket_id: ticket5.id, action: 'action_run_completed' },
+  });
+  assert.equal(acts5.length, 1, 'exactly one audit row from two concurrent completions');
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // CASE 6 — high-impact Action: no auto-retry on failure (reviewer req 4 / scope 5)
+  // A deploy/publish whose failure may mean partial external effect must NOT be
+  // blindly re-run by the server; it surfaces to the ticket for a human.
+  // ─────────────────────────────────────────────────────────────────────────
+  step('CASE 6 — high-impact failure surfaces (no auto-retry) + stable idempotency key');
+  const hi = await mcp.callTool('save_action', {
+    workspace_id: ws.id, name: 'Prod release', prompt: 'release', target_agent_id: agent.id, high_impact: true,
+  });
+  assert.ok(!hi.isError && hi.id, 'high-impact Action registered');
+  assert.equal(hi.high_impact, true, 'high_impact flag round-trips through save_action');
+  const ticket6 = await createTicket(app, getDataSourceToken, {
+    columnId: col.id, workspaceId: ws.id, title: 'blocked on release', assigneeId: agent.id,
+  });
+  const run6 = await mcp.callTool('run_action', { action_id: hi.id, source_ticket_id: ticket6.id });
+  // The run carries a minted idempotency key surfaced in the prompt contract.
+  const runs6 = await mcp.callTool('list_action_runs', { workspace_id: ws.id, action_id: hi.id });
+  const row6 = findRun(runs6, run6.run_id);
+  assert.ok(row6.idempotency_key, 'ticket-driven run mints a run-level idempotency key');
+  assert.match(row6.prompt_rendered, /Idempotency key/, 'prompt surfaces the idempotency key');
+  assert.match(row6.prompt_rendered, /HIGH-IMPACT/, 'prompt tells the agent the server will not auto-retry');
+  // First failure is NOT retried — surfaced + resumed immediately.
+  const f6 = await mcp.callTool('complete_action_run', {
+    run_id: run6.run_id, workspace_id: ws.id, status: 'failed', summary: 'deploy 500',
+  });
+  assert.equal(f6.retried, false, 'high-impact failure is NOT auto-retried');
+  assert.equal(f6.exhausted, true, 'high-impact failure is surfaced immediately');
+  assert.equal(f6.resumed, true, 'high-impact failure resumes the ticket for a human decision');
+  const runs6b = await mcp.callTool('list_action_runs', { workspace_id: ws.id, action_id: hi.id });
+  assert.equal(runs6b.length, 1, 'no retry run was spawned for the high-impact Action');
+  const t6full = await mcp.callTool('get_ticket', { ticket_id: ticket6.id });
+  assert.ok(
+    (t6full.comments || []).some((c) => /HIGH-IMPACT/.test(c.content) && /NOT auto-retried/i.test(c.content)),
+    'high-impact failure surfaced with a no-auto-retry explanation',
+  );
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // CASE 7 — idempotency key is STABLE across bounded retries (reviewer req 4)
+  // A non-high-impact retry chain must reuse ONE key so the target can dedupe.
+  // ─────────────────────────────────────────────────────────────────────────
+  step('CASE 7 — idempotency key stable across the retry chain');
+  const keyed = await mcp.callTool('save_action', {
+    workspace_id: ws.id, name: 'Keyed retry', prompt: 'x', target_agent_id: agent.id,
+  });
+  const ticket7 = await createTicket(app, getDataSourceToken, {
+    columnId: col.id, workspaceId: ws.id, title: 'blocked keyed', assigneeId: agent.id,
+  });
+  const r7a = await mcp.callTool('run_action', { action_id: keyed.id, source_ticket_id: ticket7.id });
+  const runs7a = await mcp.callTool('list_action_runs', { workspace_id: ws.id, action_id: keyed.id });
+  const key7 = findRun(runs7a, r7a.run_id).idempotency_key;
+  assert.ok(key7, 'attempt 1 has an idempotency key');
+  const f7 = await mcp.callTool('complete_action_run', {
+    run_id: r7a.run_id, workspace_id: ws.id, status: 'failed', summary: 'retry me',
+  });
+  assert.equal(f7.retried, true, 'non-high-impact failure retries');
+  const runs7b = await mcp.callTool('list_action_runs', { workspace_id: ws.id, action_id: keyed.id });
+  const retryKey = findRun(runs7b, f7.retry_run_id).idempotency_key;
+  assert.equal(retryKey, key7, 'the retry run reuses the same idempotency key');
 
   await mcp.close();
   exitAfterTests(0);
