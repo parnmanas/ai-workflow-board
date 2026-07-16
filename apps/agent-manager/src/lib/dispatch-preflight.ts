@@ -581,10 +581,18 @@ export class InflightDispatchTracker {
    *  so a supervisor re-send flood posts one activity per storm-burst rather
    *  than one per dropped trigger. Cleared on the holder's release. */
   #surfaced = new Set<string>();
-  /** Keys for which a `force_respawn` trigger was SUPPRESSED while the slot was
-   *  held. The fresh-session intent must not be silently dropped (blocker #1):
-   *  the holder replays it exactly once on release. */
-  #pendingForce = new Set<string>();
+  /** Suppressed `force_respawn` triggers to replay once the holder releases
+   *  (blocker #1). Maps the single-flight key → the RAW payload of the suppressed
+   *  force event ITSELF, so the release-time replay carries THAT event's own
+   *  trigger identity (`field_changed`) — never the holder's. Replaying the
+   *  holder's identity would collide with the `trigger:<holder>` entry the holder
+   *  already recorded in the dedup set (kept until child exit, not cleared on a
+   *  successful spawn) and be dropped as `duplicate_trigger`, silently losing the
+   *  fresh-session intent — the exact regression the reviewer caught. One entry
+   *  per key: a burst of suppressed forces coalesces to a single replay, keyed on
+   *  the FIRST arrival (every force in the storm means the same "fresh session"
+   *  ask, so one replay satisfies them all). */
+  #pendingForce = new Map<string, string>();
 
   /** Single-flight key. Mirrors TicketSessionManager.#makeKey / the
    *  SubagentManager (ticketId, role, agentId) dedup so the guard keys on the
@@ -617,28 +625,36 @@ export class InflightDispatchTracker {
   }
 
   /** Record a suppressed twin trigger: bump the reason metric, capture a
-   *  force-respawn intent to replay, and decide whether to surface an activity
-   *  (throttled to one per hold-burst). Called for BOTH the authoritative and
-   *  the fallback reservation paths — the metric/intent are backend-agnostic. */
+   *  suppressed force-respawn's own payload to replay, and decide whether to
+   *  surface an activity (throttled to one per hold-burst). Called for BOTH the
+   *  authoritative and the fallback reservation paths — the metric/intent are
+   *  backend-agnostic. `opts.raw` is the suppressed event's raw JSON (the caller
+   *  passes the trigger it is dropping); it is stored ONLY for force triggers and
+   *  ONLY for the first of a burst, so the replay re-enters with the force
+   *  event's real, un-deduped identity rather than the holder's. */
   recordSuppression(
     reason: DispatchSuppressReason,
     key: string,
-    opts: { force: boolean },
+    opts: { force: boolean; raw?: string },
   ): { surface: boolean } {
     this.#suppressCounts.set(reason, (this.#suppressCounts.get(reason) ?? 0) + 1);
-    if (opts.force) this.#pendingForce.add(key);
+    if (opts.force && opts.raw !== undefined && !this.#pendingForce.has(key)) {
+      this.#pendingForce.set(key, opts.raw);
+    }
     const surface = !this.#surfaced.has(key);
     this.#surfaced.add(key);
     return { surface };
   }
 
   /** Settle the holder's release: re-arm activity surfacing for the next storm
-   *  on this key, and hand back (clearing) any suppressed force-respawn intent
-   *  so the caller replays a single fresh respawn. Idempotent per key. */
-  onRelease(key: string): { pendingForceRespawn: boolean } {
+   *  on this key, and hand back (clearing) the RAW payload of any suppressed
+   *  force-respawn so the caller replays that exact event once. `null` when no
+   *  force was suppressed during the hold. Idempotent per key. */
+  onRelease(key: string): { pendingForceRaw: string | null } {
     this.#surfaced.delete(key);
-    const pendingForceRespawn = this.#pendingForce.delete(key);
-    return { pendingForceRespawn };
+    const pendingForceRaw = this.#pendingForce.get(key) ?? null;
+    this.#pendingForce.delete(key);
+    return { pendingForceRaw };
   }
 
   /** Suppression-reason metric. With no arg, the total across reasons. */

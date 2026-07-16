@@ -1081,13 +1081,15 @@ export class EventDispatcher {
       }
       if (!reservation.acquired) {
         // A fresh spawn for this exact key is already provisioning/spawning →
-        // this is the twin. Bump the reason metric, capture a force-respawn
-        // intent to replay (blocker #1), and post at most one throttled note.
+        // this is the twin. Bump the reason metric, capture THIS suppressed
+        // force event's own raw payload to replay (blocker #1 — replaying the
+        // holder's identity instead would be deduped away), and post at most one
+        // throttled note.
         const isForce = ev.force_respawn === true;
         const { surface } = this.#inflightDispatch.recordSuppression(
           'inflight_dispatch',
           inflightKey,
-          { force: isForce },
+          { force: isForce, raw },
         );
         log(
           `[dispatch] twin suppressed (inflight_dispatch): another dispatch is already ` +
@@ -1136,17 +1138,22 @@ export class EventDispatcher {
         // slot had its fresh-session intent suppressed, and the server may not
         // re-send it (a prior dispatch refreshing the live session can clear the
         // stale supervisor condition). Replay it exactly once now, coalescing a
-        // whole burst into one fresh respawn. Re-parse the ORIGINAL raw (ev was
-        // mutated in the body) so the replayed event is clean.
-        const { pendingForceRespawn } = this.#inflightDispatch.onRelease(inflightKey);
-        if (pendingForceRespawn) {
+        // whole burst into one fresh respawn. Re-parse the SUPPRESSED FORCE
+        // event's OWN payload (captured at suppression time), NOT the holder's
+        // `raw`: the holder already recorded `trigger:<its field_changed>` in the
+        // dedup set (kept until child exit), so replaying the holder identity here
+        // is dropped as `duplicate_trigger` and the respawn silently never
+        // happens. The suppressed force never reached dispatchTrigger, so its own
+        // identity is un-deduped and re-enters cleanly to force-respawn.
+        const { pendingForceRaw } = this.#inflightDispatch.onRelease(inflightKey);
+        if (pendingForceRaw) {
           log(
             `[dispatch] replaying suppressed force_respawn after holder released: ` +
               `ticket=${ev.ticket_id.slice(0, 8)} role=${ev.action || '_'}`,
           );
           let forcedRaw: string | null = null;
           try {
-            forcedRaw = JSON.stringify({ ...JSON.parse(raw), force_respawn: true });
+            forcedRaw = JSON.stringify({ ...JSON.parse(pendingForceRaw), force_respawn: true });
           } catch {
             forcedRaw = null;
           }

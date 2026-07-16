@@ -18,7 +18,9 @@
 //   #4 metric — dispatchSuppressionCounts() feeds the instance-heartbeat field.
 //
 // Non-vacuous: deleting the gate makes 'concurrent supervisor tick' spawn twice;
-// dropping the force replay makes 'force_respawn preserved' spawn once.
+// replaying the HOLDER's identity instead of the suppressed force's own payload
+// (the pre-fix bug the reviewer caught) makes the holder-H/force-F replay drop as
+// duplicate_trigger, spawning once instead of twice.
 //
 // Compiled JS — agent-manager builds via `npm run build`; run with
 //   node --test test/dispatch-inflight-guard.test.mjs
@@ -434,30 +436,106 @@ test('no ticket_id → gate is a no-op (never suppresses, never wedges)', async 
 
 // ───────────── Part B/#1: suppressed force-respawn is preserved (real SIGTERM) ─────────────
 
-test('force_respawn suppressed while a dispatch holds the slot is REPLAYED once (real force-respawn SIGTERM)', async () => {
+test('holder(field_changed=H) + suppressed force(field_changed=F): replay carries the FORCE identity → real SIGTERM, spawnCount 2', async () => {
   const gate = deferred();
   const mgr = new RealTicketMgrStub(makeConfig(), { spawnGate: gate });
   const { dispatcher, tracker } = makeDispatcher({ ticketMgr: mgr });
 
-  // Holder A (normal) reserves + holds inside _spawnSession.
-  const pA = dispatcher.handleTrigger(evJson());
-  // Force-respawn F arrives while A holds the slot → its fresh-session intent is
-  // suppressed here (would be silently lost without blocker #1).
-  await dispatcher.handleTrigger(evJson({ force_respawn: true, field_changed: 'trig-force' }));
+  // Holder H carries a REAL trigger identity (field_changed=H), so its dispatch
+  // records `trigger:H` in the dedup set — kept until child exit, NOT cleared on
+  // a successful spawn. THIS is the case the reviewer flagged: the pre-fix replay
+  // reused the holder's own raw, so it re-entered as `trigger:H`, hit the
+  // remembered dedup entry, and dropped as duplicate_trigger — the fresh-session
+  // intent silently lost. (The old test used a holder with no field_changed, so
+  // `trigger:H` was never remembered and the bug never surfaced — vacuous.)
+  const pH = dispatcher.handleTrigger(evJson({ field_changed: 'trig-holder-H' }));
+  // Force-respawn F with a DISTINCT identity (field_changed=F) arrives while H
+  // holds the slot → suppressed here, its OWN payload captured for the replay.
+  await dispatcher.handleTrigger(evJson({ force_respawn: true, field_changed: 'trig-force-F' }));
   assert.equal(tracker.suppressedCount('inflight_dispatch'), 1, 'the force-respawn was suppressed');
 
-  // A finishes → spawns session S_A (real child), releases the slot.
+  // H finishes → spawns session S_H (real child), releases the slot.
   gate.resolve();
-  await pA;
-  assert.equal(mgr.spawnCount, 1, 'holder A spawned once');
+  await pH;
+  assert.equal(mgr.spawnCount, 1, 'holder H spawned once');
+  const sH = mgr._getLiveSession(KEY('t1', 'assignee', 'a1'));
+  assert.ok(sH, 'holder session is live after H completes');
 
-  // The suppressed force-respawn is now replayed EXACTLY once — it force-respawns
-  // the live session: a real SIGTERM kills S_A and a fresh S_B spawns.
+  // The suppressed force replays with F's OWN (never-dispatched, so un-deduped)
+  // identity → it force-respawns the live session: a REAL SIGTERM kills S_H and a
+  // fresh S_F spawns. With the pre-fix holder-identity replay this stays at 1
+  // (dropped as duplicate_trigger) — so this pair of assertions is the
+  // non-vacuous regression guard for blocker #1.
   const replayed = await waitFor(() => mgr.spawnCount === 2, { timeoutMs: 4000 });
-  assert.equal(replayed, true, 'suppressed force_respawn was replayed → a fresh respawn occurred');
-  // Exactly once — no runaway replay loop.
+  assert.equal(replayed, true, 'the suppressed force_respawn replayed → a fresh respawn occurred');
   await delay(150);
-  assert.equal(mgr.spawnCount, 2, 'replayed exactly once (burst coalesced)');
+  assert.equal(mgr.spawnCount, 2, 'replayed exactly once (burst coalesced) — no runaway loop');
+  const sF = mgr._getLiveSession(KEY('t1', 'assignee', 'a1'));
+  assert.ok(sF && sF.pid !== sH.pid, 'the surviving session is the fresh force-respawn, not the killed holder');
+});
+
+test('provisioning window: a BURST of suppressed forces coalesces to exactly ONE replay', async () => {
+  const gate = deferred();
+  const mgr = new RealTicketMgrStub(makeConfig(), { spawnGate: gate });
+  const { dispatcher, tracker } = makeDispatcher({ ticketMgr: mgr });
+
+  // Holder H holds the slot across its provisioning+spawn window.
+  const pH = dispatcher.handleTrigger(evJson({ field_changed: 'trig-holder-H' }));
+  // THREE distinct force-respawns arrive during the hold → all suppressed, but
+  // #pendingForce keeps only the first (one per key). onRelease hands back a
+  // single payload → a single replay, no matter the burst size.
+  await dispatcher.handleTrigger(evJson({ force_respawn: true, field_changed: 'trig-f1' }));
+  await dispatcher.handleTrigger(evJson({ force_respawn: true, field_changed: 'trig-f2' }));
+  await dispatcher.handleTrigger(evJson({ force_respawn: true, field_changed: 'trig-f3' }));
+  assert.equal(tracker.suppressedCount('inflight_dispatch'), 3, 'all three forces were suppressed');
+
+  gate.resolve();
+  await pH;
+  // Exactly one respawn from the coalesced burst: 1 (holder) → 2 (single replay).
+  const replayed = await waitFor(() => mgr.spawnCount === 2, { timeoutMs: 4000 });
+  assert.equal(replayed, true, 'the burst produced a respawn');
+  await delay(200);
+  assert.equal(mgr.spawnCount, 2, 'three suppressed forces coalesced into exactly ONE replay');
+});
+
+test('LIVE session + two concurrent force-respawns → exactly ONE respawn, the second drops as inflight_spawn (no twin)', async () => {
+  // Reviewer (b): on a LIVE session tryReserveDispatch returns {live:true} for
+  // BOTH forces — NO gate-level reservation, so neither is suppressed at the
+  // handleTrigger gate (correcting the earlier "1 holder + pending" claim). The
+  // twin is instead prevented at the spawn seam: the first force force-respawns
+  // (kills the live session, reserves _inflight, holds in _spawnSession) and the
+  // second, arriving mid-respawn, is dropped by the REAL
+  // `_inflight.has && !dispatchReserved` guard → exactly one fresh session.
+  const mgr = new RealTicketMgrStub(makeConfig());
+  const { dispatcher, tracker } = makeDispatcher({ ticketMgr: mgr });
+
+  // Establish the live session S0.
+  await dispatcher.handleTrigger(evJson({ field_changed: 'trig-0' }));
+  assert.equal(mgr.spawnCount, 1, 'baseline: one live session');
+  const s0 = mgr._getLiveSession(KEY('t1', 'assignee', 'a1'));
+  assert.ok(s0, 'S0 is live');
+
+  // Hold the NEXT spawn (the respawn) so the two forces race across the window.
+  const gate = deferred();
+  mgr.spawnGate = gate;
+
+  const pF1 = dispatcher.handleTrigger(evJson({ force_respawn: true, field_changed: 'trig-f1' }));
+  const pF2 = dispatcher.handleTrigger(evJson({ force_respawn: true, field_changed: 'trig-f2' }));
+
+  // One force wins and holds at the spawn gate (spawnCount → 2); the other is
+  // dropped at the spawn seam. Neither is suppressed at the gate (live reuse).
+  await waitFor(() => mgr.spawnCount === 2, { timeoutMs: 3000 });
+  assert.equal(tracker.suppressedCount('inflight_dispatch'), 0, 'live forces are NOT gate-suppressed (both saw live)');
+
+  gate.resolve();
+  await Promise.all([pF1, pF2]);
+  await delay(150);
+
+  // Exactly one respawn — never a twin. spawnCount stays 2 (S0 killed, one fresh).
+  assert.equal(mgr.spawnCount, 2, 'the second concurrent force did NOT spawn a twin');
+  const live = mgr._getLiveSession(KEY('t1', 'assignee', 'a1'));
+  assert.ok(live, 'a single live session remains');
+  assert.notEqual(live.pid, s0.pid, 'the live session is the fresh respawn, not the killed S0');
 });
 
 // ───────────── Part C/#3: REAL SIGTERM/idle-reap seam (board lesson c555fbb6) ─────────────
