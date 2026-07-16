@@ -25,6 +25,43 @@ interface RegisteredListener {
   handler: (rawEvent: any) => void;
 }
 
+/**
+ * Credential firewall for the run-dispatch SSE frame. A QA/security run
+ * `chat_room_message` carries the repo git credential at
+ * `run_provision.repo.credential` so the agent-manager can clone a PRIVATE repo
+ * (ticket 622bc350 server wiring). That token must reach ONLY an agent (machine-
+ * key-authenticated) SSE stream — never a human's browser, even one that happens
+ * to be a member of the run room. Given the frame about to be serialized and the
+ * recipient's
+ * identity type, return the frame to send: unchanged for an agent recipient (or
+ * any frame with no run_provision credential), and a credential-stripped copy
+ * for a non-agent recipient.
+ *
+ * Rebuilds the nested object rather than deleting in place: `flatten()` shallow-
+ * spreads the shared envelope's payload, so `dataObj.run_provision` is the SAME
+ * reference every other subscriber's frame holds — including the manager's. An
+ * in-place delete would blank the credential for the real consumer. `undefined`
+ * drops out of `JSON.stringify`, so the wire simply omits the field.
+ */
+export function redactRunProvisionCredential(
+  dataObj: any,
+  eventType: string,
+  recipientType: 'user' | 'agent' | string,
+): any {
+  if (
+    recipientType === 'agent' ||
+    eventType !== 'chat_room_message' ||
+    !dataObj?.run_provision?.repo?.credential
+  ) {
+    return dataObj;
+  }
+  const rp = dataObj.run_provision;
+  return {
+    ...dataObj,
+    run_provision: { ...rp, repo: { ...rp.repo, credential: undefined } },
+  };
+}
+
 interface SseSessionDetail {
   // Discriminator for unified SESSIONS panel rendering. 'proxy' rows are real
   // SSE buckets owned by a proxy.mjs process; 'manager' rows are synthesized
@@ -490,7 +527,11 @@ export class EventsController implements OnModuleDestroy {
           const def = registry.get(event.event_type);
           // Legacy types flatten payload fields up for proxy.mjs; newer types ship the
           // envelope natively (no flatten fn → envelope as-is).
-          const dataObj = def?.flatten ? def.flatten(event) : event;
+          const rawDataObj = def?.flatten ? def.flatten(event) : event;
+          // Credential firewall: never ship run_provision.repo.credential to a
+          // non-agent (human) SSE recipient — the git token is for an agent
+          // recipient's clone only. See redactRunProvisionCredential (module scope).
+          const dataObj = redactRunProvisionCredential(rawDataObj, event.event_type, identity.type);
           return {
             data: JSON.stringify(dataObj),
             type: event.event_type,

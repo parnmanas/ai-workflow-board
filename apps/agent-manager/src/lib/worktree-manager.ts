@@ -50,11 +50,22 @@
 // (unsupported/old git, disk error).
 
 import { promises as fsp } from 'node:fs';
-import { isAbsolute, join, resolve as pathResolve } from 'node:path';
+import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { log } from './logging.js';
-import { decidePushReadiness, type PushReadinessDecision } from './dispatch-preflight.js';
+import {
+  decidePushReadiness,
+  classifyWorktreeCheckout,
+  type PushReadinessDecision,
+  type WorktreeCheckoutDecision,
+} from './dispatch-preflight.js';
+import {
+  authenticatedCloneUrl,
+  installRepoCredential,
+  scrubOriginUrl,
+  maskCredential,
+} from './repo-credential.js';
 
 const GIT_TIMEOUT_MS = 20_000;
 // A non-interactive `git ls-remote` auth probe should fail fast (git prompts
@@ -347,18 +358,12 @@ export class WorktreeManager {
       await fsp.mkdir(baseWorkingDir, { recursive: true });
       const cloneDir = join(baseWorkingDir, '.awb', 'base', repoSlug);
       if (await this.#isGitWorkTree(cloneDir)) {
-        await this.#installRepoCredential(cloneDir, repo);
+        await installRepoCredential(cloneDir, cleanUrl, repo.credential);
         return cloneDir;
       }
       await fsp.mkdir(join(baseWorkingDir, '.awb', 'base'), { recursive: true });
       const branch = (repo.branch || '').trim();
-      let cloneUrl = cleanUrl;
-      if (repo.credential?.token && /^https?:\/\//i.test(cleanUrl)) {
-        const u = new URL(cleanUrl);
-        u.username = repo.credential.username || 'x-access-token';
-        u.password = repo.credential.token;
-        cloneUrl = u.toString();
-      }
+      const cloneUrl = authenticatedCloneUrl(cleanUrl, repo.credential);
       const cloneArgs = ['clone', ...(branch ? ['--branch', branch] : []), '--', cloneUrl, cloneDir];
       const cloned = await new Promise<GitResult>((resolve) => {
         execFile(
@@ -373,14 +378,14 @@ export class WorktreeManager {
         );
       });
       if (!cloned.ok) {
-        log(`[worktree] container base clone failed: ${cloned.stderr.replace(cloneUrl, cleanUrl).trim()}`);
+        log(`[worktree] container base clone failed: ${maskCredential(cloned.stderr, repo.credential).trim()}`);
         return null;
       }
       // Never leave the token embedded in origin. Persist it in the checkout's
       // private credential-store file so later fetch/push from ticket worktrees
       // authenticate without exposing it in `git remote -v` or process args.
-      await git(cloneDir, ['remote', 'set-url', 'origin', cleanUrl]);
-      await this.#installRepoCredential(cloneDir, repo);
+      await scrubOriginUrl(cloneDir, cleanUrl);
+      await installRepoCredential(cloneDir, cleanUrl, repo.credential);
       log(`[worktree] cloned container base from ${repo.url}${branch ? ` branch=${branch}` : ''}: ${cloneDir}`);
       return cloneDir;
     })().finally(() => this.#bootstrapLocks.delete(key));
@@ -406,28 +411,6 @@ export class WorktreeManager {
       if (await this.#isGitWorkTree(repo)) out.push({ repo, worktreesRoot: join(wtRoot, name) });
     }
     return out;
-  }
-
-  async #installRepoCredential(
-    baseWorkingDir: string,
-    repo: ResolveCwdArgs['bootstrapRepo'],
-  ): Promise<void> {
-    if (!repo?.credential?.token || !/^https?:\/\//i.test(repo.url || '')) return;
-    const gitDirResult = await git(baseWorkingDir, ['rev-parse', '--absolute-git-dir']);
-    if (!gitDirResult.ok) return;
-    const rawGitDir = gitDirResult.stdout.trim();
-    // credential.helper runs in the cwd of each future git invocation. A
-    // relative `.git/awb-credentials` therefore works in the primary checkout
-    // but breaks inside `.awb/wt/<ticket>` where `.git` is a pointer file.
-    // Persist an absolute path shared by the primary checkout and all linked
-    // worktrees so agent-run fetch/pull/push always use the Resource token.
-    const absoluteGitDir = isAbsolute(rawGitDir) ? rawGitDir : pathResolve(baseWorkingDir, rawGitDir);
-    const credentialFile = join(absoluteGitDir, 'awb-credentials');
-    const u = new URL(repo.url.trim());
-    u.username = repo.credential.username || 'x-access-token';
-    u.password = repo.credential.token;
-    await fsp.writeFile(credentialFile, `${u.toString()}\n`, { mode: 0o600 });
-    await git(baseWorkingDir, ['config', 'credential.helper', `store --file=${JSON.stringify(credentialFile)}`]);
   }
 
   /** Parse `git worktree list --porcelain`. Returns [] on any failure. */
@@ -495,7 +478,7 @@ export class WorktreeManager {
     if (!localBaseRepo) return fallback('repository_unavailable');
     // Existing checkouts need the Resource credential too; limiting this to
     // fresh clone would leave resumed/private-repo tickets unable to fetch.
-    await this.#installRepoCredential(localBaseRepo, args.bootstrapRepo);
+    await installRepoCredential(localBaseRepo, args.bootstrapRepo?.url ?? '', args.bootstrapRepo?.credential);
 
     const resourceId = args.bootstrapRepo?.resourceId?.trim();
     const cleanUrl = args.bootstrapRepo?.url?.trim() || '';
@@ -586,6 +569,43 @@ export class WorktreeManager {
     } catch (err: any) {
       // Never let a verification bug block dispatch — fail open, just log.
       log(`[worktree] push-readiness check errored (${err?.message ?? err}); treating as ready`);
+      return { ok: true };
+    }
+  }
+
+  /**
+   * ticket feaa7ab0: verify a freshly-resolved worktree is actually a valid git
+   * checkout of the EXPECTED repository BEFORE a subagent is spawned into it. A
+   * successful `git worktree add` is NOT proof: the cwd can be an empty/clobbered
+   * dir (`not_a_git_repo`), a half-written clone whose HEAD does not resolve
+   * (`incomplete_checkout`), or a stale checkout of a DIFFERENT repo when the
+   * working_dir was re-pointed (`wrong_repository`). Spawning there just burns a
+   * CLI session and invites a supervisor re-dispatch storm (ticket 965e6229
+   * failed `not_a_git_repo` 4×).
+   *
+   * Probes are non-mutating (`git rev-parse` / `remote get-url`) and the git()
+   * helper never throws; the classification lives in the pure
+   * `classifyWorktreeCheckout`. The expected/observed origin is credential-
+   * stripped before it reaches a log or comment, so no token leaks. A truly
+   * unexpected JS fault fails OPEN — better to spawn than to wedge a
+   * legitimately-provisioned tree on a probe bug.
+   */
+  async verifyCheckout(cwd: string, expectedUrl?: string): Promise<WorktreeCheckoutDecision> {
+    try {
+      if (!cwd) return { ok: false, reason: 'not_a_git_repo', detail: 'no worktree path' };
+      const inside = await git(cwd, ['rev-parse', '--is-inside-work-tree']);
+      const insideWorkTree = inside.ok && inside.stdout.trim() === 'true';
+      let headResolved: boolean | undefined;
+      let originUrl: string | undefined;
+      if (insideWorkTree) {
+        const head = await git(cwd, ['rev-parse', '--verify', 'HEAD']);
+        headResolved = head.ok && /^[0-9a-f]{7,}$/i.test(head.stdout.trim());
+        const origin = await git(cwd, ['remote', 'get-url', 'origin']);
+        originUrl = origin.ok ? origin.stdout.trim() : '';
+      }
+      return classifyWorktreeCheckout({ insideWorkTree, headResolved, originUrl }, { url: expectedUrl });
+    } catch (err: any) {
+      log(`[worktree] checkout verification errored (${err?.message ?? err}); treating as valid (fail open)`);
       return { ok: true };
     }
   }

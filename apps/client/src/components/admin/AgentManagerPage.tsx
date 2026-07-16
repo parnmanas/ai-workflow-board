@@ -1547,7 +1547,7 @@ function ManagedAgentsSection({ inst }: ManagedAgentsSectionProps) {
                       size="sm"
                       variant="ghost"
                       onClick={() => setEditAgent(a)}
-                      title="Edit name / working_dir / description. CLI is fixed."
+                      title="Edit name / CLI / working_dir / description. A CLI change takes effect after restart_agent."
                     >
                       Edit
                     </Button>

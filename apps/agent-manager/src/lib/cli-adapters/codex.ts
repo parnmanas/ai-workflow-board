@@ -18,6 +18,7 @@ import {
   type AdapterCredential,
   type AdapterMcpContext,
   CliAdapter,
+  type CliProgressEvent,
   PARSE_STAGE,
   type OneshotSpec,
   type ParseResult,
@@ -174,6 +175,119 @@ export class CodexCliAdapter extends CliAdapter {
     // happened on the ticket instead of silently posting nothing.
     const raw = (Array.isArray(lines) ? lines : []).join('\n').replace(/^\s+|\s+$/g, '');
     return raw || null;
+  }
+
+  /**
+   * Map a single `codex exec --json` thread event onto a normalized progress
+   * signal so the subagent manager can surface a Codex chat one-shot's in-flight
+   * work as `type='progress'` chat heartbeats (ticket c47194d9). Recognized:
+   *   - item.started  <substantive item>          → 'start'   (작업 중)
+   *   - item.completed <substantive item> ok        → 'success' (완료)
+   *   - item.completed <substantive item> failed    → 'error'   (실패)
+   *   - turn.failed / error                        → 'error'   (실패)
+   * The reply itself (`agent_message`, and the `send_chat_room_message` MCP call
+   * that delivers it) plus pure reasoning / todo noise return null so the
+   * heartbeat stream never echoes the final answer. Defensive on field names
+   * (Codex's item schema varies across builds) and never throws.
+   */
+  parseProgressEvent(raw: any): CliProgressEvent | null {
+    if (!raw || typeof raw !== 'object') return null;
+    const t = raw.type;
+    if (t === 'turn.failed' || t === 'error') {
+      const msg =
+        (raw.error && typeof raw.error.message === 'string' && raw.error.message) ||
+        (typeof raw.message === 'string' && raw.message) ||
+        '';
+      return { kind: 'other', label: '작업', detail: msg, status: 'error' };
+    }
+    if (t !== 'item.started' && t !== 'item.completed') return null;
+    const item = raw.item;
+    if (!item || typeof item !== 'object') return null;
+    const itemType = typeof item.type === 'string' ? item.type : '';
+    // The reply text and pure thinking / planning items are not "progress".
+    if (itemType === 'agent_message' || itemType === 'reasoning' || itemType === 'todo_list') {
+      return null;
+    }
+    // The final answer is delivered via the send_chat_room_message MCP tool —
+    // that's the reply, not progress (mirrors ChatSessionManager's exclusion of
+    // send_chat_room_message from Claude tool_use progress). Drop it for both
+    // success and failure; a failed reply is surfaced by the manager's own
+    // "응답하지 못했습니다" fallback instead.
+    if (itemType === 'mcp_tool_call' && this.#isReplyTool(item)) return null;
+
+    const failed = this.#codexItemFailed(item);
+    const status: CliProgressEvent['status'] =
+      t === 'item.started' ? 'start' : failed ? 'error' : 'success';
+    const shaped = this.#codexProgressShape(itemType, item);
+    if (!shaped) {
+      // Unknown / unlabelable item type: surface only a failure, skip
+      // start/success noise for shapes we can't describe meaningfully.
+      return failed ? { kind: 'other', label: itemType || 'step', detail: '', status } : null;
+    }
+    return { ...shaped, status };
+  }
+
+  #isReplyTool(item: any): boolean {
+    const name =
+      (typeof item.tool === 'string' && item.tool) ||
+      (typeof item.name === 'string' && item.name) ||
+      '';
+    return name.includes('send_chat_room_message');
+  }
+
+  #codexItemFailed(item: any): boolean {
+    if (item.error != null) return true;
+    if (typeof item.status === 'string' && item.status.toLowerCase() === 'failed') return true;
+    if (typeof item.exit_code === 'number' && item.exit_code !== 0) return true;
+    return false;
+  }
+
+  #codexProgressShape(
+    itemType: string,
+    item: any,
+  ): { kind: CliProgressEvent['kind']; label: string; detail: string } | null {
+    switch (itemType) {
+      case 'command_execution': {
+        const cmd =
+          typeof item.command === 'string'
+            ? item.command
+            : Array.isArray(item.command)
+              ? item.command.join(' ')
+              : '';
+        return { kind: 'command', label: '명령', detail: cmd };
+      }
+      case 'mcp_tool_call': {
+        const server = typeof item.server === 'string' ? item.server : '';
+        const tool =
+          typeof item.tool === 'string'
+            ? item.tool
+            : typeof item.name === 'string'
+              ? item.name
+              : '';
+        const label = server && tool ? `${server}:${tool}` : tool || server || 'MCP';
+        return { kind: 'tool', label, detail: '' };
+      }
+      case 'file_change':
+      case 'patch_apply': {
+        return { kind: 'file', label: '파일 변경', detail: this.#codexFileDetail(item) };
+      }
+      case 'web_search': {
+        const q = typeof item.query === 'string' ? item.query : '';
+        return { kind: 'search', label: '웹 검색', detail: q };
+      }
+      default:
+        return null;
+    }
+  }
+
+  #codexFileDetail(item: any): string {
+    const changes = Array.isArray(item.changes) ? item.changes : [];
+    const paths = changes
+      .map((c: any) => (c && typeof c.path === 'string' ? c.path : ''))
+      .filter((p: string) => !!p);
+    if (paths.length === 0) return typeof item.path === 'string' ? item.path : '';
+    if (paths.length === 1) return paths[0];
+    return `${paths[0]} 외 ${paths.length - 1}건`;
   }
 
   /**

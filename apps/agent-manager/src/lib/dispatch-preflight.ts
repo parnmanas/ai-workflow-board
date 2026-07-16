@@ -129,6 +129,147 @@ export function classifyWorktreeOutcome(res: WorktreeOutcome | null | undefined)
   return { blocked: true, kind: `worktree:${reason}`, reason };
 }
 
+// ── worktree checkout verification (ticket feaa7ab0) ─────────────────────────
+//
+// classifyWorktreeOutcome above trusts the provisioning RESULT (`isWorktree`).
+// But `git worktree add` can report success while leaving a cwd that is NOT a
+// usable checkout of the expected repo: an empty/clobbered dir, a half-written
+// clone whose HEAD does not resolve, or a stale checkout of a DIFFERENT repo
+// (when working_dir was re-pointed). Spawning there burns a whole CLI session
+// and invites a supervisor re-dispatch storm — ticket 965e6229 failed
+// `not_a_git_repo` four times this way. This decision layer turns an observed,
+// non-mutating git probe into a spawn/abort verdict. It is PURE (no I/O):
+// `WorktreeManager.verifyCheckout` runs git and feeds the facts here, so the
+// classification is unit-testable without a repo.
+
+/** Facts observed about a provisioned worktree by the I/O shell
+ *  (`WorktreeManager.verifyCheckout`) via `git rev-parse` / `git remote
+ *  get-url`. `originUrl` may carry embedded credentials — it is normalized /
+ *  redacted here and never surfaced raw. */
+export interface WorktreeCheckoutProbe {
+  /** `git rev-parse --is-inside-work-tree` printed exactly "true". */
+  insideWorkTree: boolean;
+  /** HEAD resolves to a commit — the checkout finished, not a half-written
+   *  clone/add. undefined when not probed (e.g. not a work tree at all). */
+  headResolved?: boolean;
+  /** `origin` remote URL, or '' when unset. */
+  originUrl?: string;
+}
+
+/** What the worktree SHOULD be a checkout of — the ticket/board repository
+ *  resource's clone url. When unknown, the origin match is skipped (fail open)
+ *  so a legitimately-provisioned tree is never wrongly blocked. */
+export interface WorktreeCheckoutExpectation {
+  url?: string;
+}
+
+export type WorktreeCheckoutReason =
+  | 'not_a_git_repo'
+  | 'incomplete_checkout'
+  | 'wrong_repository';
+
+export interface WorktreeCheckoutDecision {
+  ok: boolean;
+  /** Set when blocked; becomes the dispatch blocker de-dup key suffix. */
+  reason?: WorktreeCheckoutReason;
+  /** Secret-free, human-readable detail for the ticket comment / log. */
+  detail?: string;
+}
+
+/** Reduce a git remote URL to a comparable `host/path` identity: drop the
+ *  scheme, any `user:pass@` / `user@` credentials, a trailing `.git`, and
+ *  trailing slashes; lowercase. Handles scp-style `git@host:org/repo` too.
+ *  Lowercasing can only cause a false MATCH (→ fail open), never a false block. */
+export function normalizeRemoteUrl(raw: string | undefined | null): string {
+  let u = (raw ?? '').trim();
+  if (!u) return '';
+  const scp = u.match(/^[^/@]+@([^:/]+):(.+)$/); // git@host:org/repo (no scheme)
+  if (scp) {
+    u = `${scp[1]}/${scp[2]}`;
+  } else {
+    u = u.replace(/^[a-z][a-z0-9+.-]*:\/\//i, ''); // strip scheme://
+    u = u.replace(/^[^/@]+@/, ''); // strip user[:pass]@
+  }
+  // Strip trailing slashes BEFORE `.git` so `…/repo.git/` reduces to `…/repo`
+  // (order matters — a trailing slash otherwise shields the `.git` suffix and
+  // yields a spurious mismatch).
+  u = u.replace(/\/+$/, '').replace(/\.git$/i, '').replace(/\/+$/, '');
+  return u.toLowerCase();
+}
+
+/** Reduce a git remote URL to a safe-to-display form, keeping scheme+host+path
+ *  so the operator can still identify the wrong remote while NEVER emitting a
+ *  secret. Removes three secret carriers:
+ *    - a `?query` or `#fragment` (e.g. `?access_token=…`, `#token=…`) — dropped
+ *      wholesale, since a token can hide in either and neither is needed to
+ *      identify a repo;
+ *    - `scheme://user:pass@` userinfo (PAT-as-username / basic-auth password).
+ *  The query/fragment MUST be stripped before the userinfo regex so a
+ *  `…@host/path?token=…` can't slip its token through on the tail. */
+export function redactRemoteUrl(raw: string | undefined | null): string {
+  let u = (raw ?? '').trim();
+  if (!u) return '';
+  // Drop fragment first, then query — either can carry a secret, and nothing
+  // downstream needs them to identify the remote. (`.` excludes newlines, but a
+  // remote URL is single-line; a stray newline just ends the stripped span.)
+  u = u.replace(/#.*$/, '').replace(/\?.*$/, '');
+  // scheme://user[:pass]@host/… → scheme://host/…  (userinfo can be a token)
+  u = u.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/@]+@/i, '$1');
+  return u;
+}
+
+/** Decide whether a provisioned worktree is a valid checkout of the expected
+ *  repository, BEFORE a subagent is spawned into it. Blocks on three concrete,
+ *  observed conditions and fails OPEN on everything ambiguous:
+ *    - not inside a git work tree        → `not_a_git_repo`     (empty/clobbered dir)
+ *    - inside, but HEAD does not resolve  → `incomplete_checkout` (half-written clone)
+ *    - both origins known and DIFFERENT   → `wrong_repository`    (stale/foreign checkout)
+ *  An unknown expected url or unknown origin never blocks (can't prove a
+ *  mismatch → don't wedge a legitimate tree), consistent with decidePushReadiness. */
+export function classifyWorktreeCheckout(
+  probe: WorktreeCheckoutProbe,
+  expected?: WorktreeCheckoutExpectation,
+): WorktreeCheckoutDecision {
+  if (!probe.insideWorkTree) {
+    return { ok: false, reason: 'not_a_git_repo', detail: 'worktree path is not a git work tree' };
+  }
+  if (probe.headResolved === false) {
+    return { ok: false, reason: 'incomplete_checkout', detail: 'git HEAD does not resolve — checkout is incomplete' };
+  }
+  const want = normalizeRemoteUrl(expected?.url);
+  const have = normalizeRemoteUrl(probe.originUrl);
+  if (want && have && want !== have) {
+    return {
+      ok: false,
+      reason: 'wrong_repository',
+      detail: `origin ${redactRemoteUrl(probe.originUrl) || '(unset)'} does not match the expected repository`,
+    };
+  }
+  return { ok: true };
+}
+
+/** Reduce a resolved worktree cwd to the form that is safe to write into a
+ *  ticket comment / activity log: the path RELATIVE to the agent's working_dir
+ *  when the worktree lives under it (the normal `.awb/wt/…` / `.awb/base/…`
+ *  managed layout), else the absolute path unchanged (e.g. the resource-worktree
+ *  path outside working_dir). A filesystem path carries no credential, but the
+ *  working_dir-relative form also avoids echoing an absolute host layout and is
+ *  what completion criterion #5 ("실패 경로") asks for. Pure string logic (no
+ *  path/fs I/O) so it stays unit-testable alongside the other preflight helpers.
+ *  A missing cwd yields '' so callers can omit the line entirely. */
+export function managedWorktreePath(
+  baseWorkingDir: string | undefined | null,
+  cwd: string | undefined | null,
+): string {
+  const abs = (cwd ?? '').trim();
+  if (!abs) return '';
+  const base = (baseWorkingDir ?? '').trim().replace(/\/+$/, '');
+  if (base && abs.startsWith(base + '/')) {
+    return abs.slice(base.length + 1);
+  }
+  return abs;
+}
+
 /** In-memory, per-ticket dispatch-blocker de-duplicator.
  *
  *  Purpose: when a dispatch keeps aborting for the same environment blocker
@@ -165,6 +306,112 @@ export class DispatchBlockerTracker {
   /** The active blocker kind for a ticket, or undefined. Test/observability. */
   activeKind(ticketId: string | undefined): string | undefined {
     return ticketId ? this.#byTicket.get(ticketId) : undefined;
+  }
+}
+
+/** Default cooldown for RoleSpawnSuppressor: how long a durable blocker
+ *  suppresses supervisor re-dispatch before letting ONE probe through. Sized to
+ *  comfortably span a supervisor force-respawn burst (ticket 965e6229 re-fired
+ *  every ~5 min) yet expire well before an operator would expect a manual retry
+ *  to be honored — and manual/comment triggers bypass it entirely regardless. */
+export const DEFAULT_SPAWN_SUPPRESS_COOLDOWN_MS = 10 * 60_000;
+
+export interface SpawnSuppressDecision {
+  suppress: boolean;
+  /** The active blocker kind (when suppressing). */
+  kind?: string;
+  /** Consecutive recorded aborts of this episode (observability). */
+  count?: number;
+  /** ms since the first abort of this episode (observability). */
+  sinceMs?: number;
+}
+
+/** Per-(ticket,role) suppressor for the automated supervisor re-dispatch storm
+ *  (ticket feaa7ab0).
+ *
+ *  When a dispatch keeps aborting at preflight for a durable environment blocker
+ *  (broken/foreign worktree, missing push credential), the abort already stops
+ *  THIS spawn — but the server-side supervisor keeps force-respawning the same
+ *  ticket-role every few minutes (ticket 965e6229 emitted ~15 force_respawn
+ *  triggers before its circuit opened). Each re-trigger re-runs the whole
+ *  provision→verify→abort cycle: wasted git I/O plus a window in which an
+ *  inconsistently-succeeding provision can spawn a live twin.
+ *
+ *  This dampens the storm on the manager side: once a ticket-role has aborted, a
+ *  SUPERVISOR-sourced re-trigger for the SAME ticket-role is dropped BEFORE
+ *  provisioning while inside the cooldown window. Human / state-changed triggers
+ *  (comment, manual, manager_restart, column_move — `fromSupervisor:false`)
+ *  ALWAYS pass, so an operator who fixes the environment recovers immediately.
+ *  A cooldown escape lets one supervisor probe through per window so a
+ *  self-healed transient recovers without human action. `clear()` on a green
+ *  preflight re-arms the ticket-role.
+ *
+ *  In-memory like DispatchBlockerTracker: one manager owns a ticket-role's
+ *  triggers, and a manager restart harmlessly re-arms. `now` is injected so the
+ *  policy is unit-testable without a real clock. */
+export class RoleSpawnSuppressor {
+  #byKey = new Map<string, { kind: string; firstAt: number; lastAt: number; count: number; lastProbeAt: number }>();
+  #cooldownMs: number;
+
+  constructor(cooldownMs: number = DEFAULT_SPAWN_SUPPRESS_COOLDOWN_MS) {
+    this.#cooldownMs = cooldownMs > 0 ? cooldownMs : DEFAULT_SPAWN_SUPPRESS_COOLDOWN_MS;
+  }
+
+  #key(ticketId: string, role: string): string {
+    return `${ticketId} ${role}`;
+  }
+
+  /** Record that a preflight abort just happened for (ticketId, role) with
+   *  `kind`. A changed kind resets the episode (fresh firstAt/count/probe). */
+  note(ticketId: string | undefined, role: string | undefined, kind: string, now: number): void {
+    if (!ticketId || !role) return;
+    const key = this.#key(ticketId, role);
+    const prev = this.#byKey.get(key);
+    if (!prev || prev.kind !== kind) {
+      this.#byKey.set(key, { kind, firstAt: now, lastAt: now, count: 1, lastProbeAt: now });
+    } else {
+      prev.lastAt = now;
+      prev.count += 1;
+    }
+  }
+
+  /** Decide whether to DROP an incoming trigger before provisioning. Only a
+   *  supervisor-sourced re-trigger with an active blocker, still inside the
+   *  cooldown window, is suppressed; the first per-window supervisor probe and
+   *  every non-supervisor trigger pass. Mutates lastProbeAt when it lets a
+   *  supervisor probe through (mirrors DispatchBlockerTracker.shouldComment's
+   *  record-on-query style). */
+  shouldSuppress(
+    ticketId: string | undefined,
+    role: string | undefined,
+    opts: { now: number; fromSupervisor: boolean },
+  ): SpawnSuppressDecision {
+    if (!ticketId || !role) return { suppress: false };
+    const rec = this.#byKey.get(this.#key(ticketId, role));
+    if (!rec) return { suppress: false };                 // no active blocker → run preflight
+    if (!opts.fromSupervisor) return { suppress: false };  // humans / state changes always pass
+    if (opts.now - rec.lastProbeAt >= this.#cooldownMs) {
+      rec.lastProbeAt = opts.now;                          // let one probe through per window
+      return { suppress: false };
+    }
+    return {
+      suppress: true,
+      kind: rec.kind,
+      count: rec.count,
+      sinceMs: Math.max(0, opts.now - rec.firstAt),
+    };
+  }
+
+  /** Drop a ticket-role's active blocker (call on a fully-green preflight).
+   *  Idempotent. */
+  clear(ticketId: string | undefined, role: string | undefined): void {
+    if (ticketId && role) this.#byKey.delete(this.#key(ticketId, role));
+  }
+
+  /** The active blocker kind for a ticket-role, or undefined. Test/observability. */
+  activeKind(ticketId: string | undefined, role: string | undefined): string | undefined {
+    if (!ticketId || !role) return undefined;
+    return this.#byKey.get(this.#key(ticketId, role))?.kind;
   }
 }
 

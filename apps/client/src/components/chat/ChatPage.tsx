@@ -16,6 +16,13 @@ import { useMediaQuery } from '../../hooks/useMediaQuery';
 import { tokens } from '../../tokens';
 import type { ChatRoomListItem, ChatRoomDetail, ChatRoomMessageItem } from '../../types';
 import { type MentionParticipant } from './utils/markdown';
+import {
+  projectParticipants,
+  countUserParticipants,
+  makeRefreshActiveRoomParticipants,
+  reflectParticipantChange,
+  dispatchChatRoomUpdate,
+} from './utils/participantFlow';
 import NewChatModal from './ParticipantPicker';
 import ChatRoomListPanel from './RoomListPanel';
 import ChatRoomView from './RoomDetailPanel';
@@ -136,26 +143,21 @@ export default function ChatPage() {
 
   // 활성 방의 참여자 로스터(roomParticipants/participantCount)를 서버 최신값으로 재조회한다.
   // 참여자 추가/이탈 직후 대화 화면 상단 로스터가 곧바로 반영되도록 호출한다 (모달 콜백 + SSE 양쪽에서 사용).
-  // observer 여부는 ref 로 읽어 워크스페이스 관찰 모드의 방도 안전하게 재조회한다.
-  const refreshActiveRoomParticipants = useCallback((roomId: string) => {
-    api.getChatRoom(roomId, isObserverRef.current)
-      .then((detail: any) => {
-        // Stale-response 가드: 재조회를 시작한 방이 응답 시점에도 여전히 활성 방일 때만
-        // 로스터를 반영한다. 참여자 추가/`participant_*` SSE 직후 사용자가 다른 방으로
-        // 전환하고 새 방 상세가 먼저 도착하면, 늦게 도착한 이전 방 응답이 현재 방
-        // 로스터/카운트를 덮어써 "현재 참여자"가 잘못 표시될 수 있어 이를 폐기한다.
-        if (activeRoomIdRef.current !== roomId) return;
-        if (!detail?.participants) return;
-        const mentionPs: MentionParticipant[] = detail.participants.map((p: any) => ({
-          id: p.participant_id,
-          name: p.name,
-          type: p.participant_type,
-        }));
-        setRoomParticipants(mentionPs);
-        setParticipantCount(mentionPs.filter((p) => p.type === 'user').length);
-      })
-      .catch(() => {});
-  }, []);
+  // 실제 로직(P2 stale-response 가드 포함)은 participantFlow.makeRefreshActiveRoomParticipants
+  // 에 있고 회귀 테스트(apps/client/test/chat-participants.test.mjs)가 그 코드를 직접 구동한다.
+  // 여기선 ChatPage 의 ref/상태 세터만 주입한다 — activeRoomId·observer 는 ref 로 읽어
+  // 응답 시점 최신값을 본다.
+  const refreshActiveRoomParticipants = useMemo(
+    () =>
+      makeRefreshActiveRoomParticipants({
+        getChatRoom: (roomId, observer) => api.getChatRoom(roomId, observer),
+        getActiveRoomId: () => activeRoomIdRef.current,
+        isObserver: () => isObserverRef.current,
+        setRoomParticipants,
+        setParticipantCount,
+      }),
+    [],
+  );
 
   // Workspace-wide observer toggle (v0.32+) — when on, the room list
   // includes every active room in the workspace, including agent-to-agent
@@ -260,13 +262,9 @@ export default function ChatPage() {
       .then((detail: any) => {
         if (cancelled) return;
         if (detail?.participants) {
-          const mentionPs: MentionParticipant[] = detail.participants.map((p: any) => ({
-            id: p.participant_id,
-            name: p.name,
-            type: p.participant_type,
-          }));
+          const mentionPs = projectParticipants(detail);
           setRoomParticipants(mentionPs);
-          setParticipantCount(mentionPs.filter((p) => p.type === 'user').length);
+          setParticipantCount(countUserParticipants(mentionPs));
           const isMember = detail.participants.some(
             (p: any) => p.participant_id === user?.id && p.participant_type === 'user',
           );
@@ -440,39 +438,24 @@ export default function ChatPage() {
     return () => clearTimeout(timer);
   }, [typingAgents]);
 
-  // SSE: chat_room_update
+  // SSE: chat_room_update — 봉투 unwrap + update_type 분기(renamed/participant_*/read)
+  // 디스패치는 participantFlow.dispatchChatRoomUpdate 에 있고, 회귀 테스트
+  // (apps/client/test/chat-participants.test.mjs)가 실제 이벤트 페이로드로 그 코드를
+  // 직접 구동한다. 여기선 ChatPage 의 ref/세터/스코프만 주입한다.
+  // participant_added/left 는 방 목록 + (열려 있으면) 활성 방 로스터를 함께 갱신 —
+  // 다른 사용자의 추가/이탈까지 실시간 반영. read(본인)은 defensive 하게
+  // participant_type === 'user' 로 걸러 badge 오염을 막는다(dispatch 내부).
   useBoardStreamEvent('chat_room_update', useCallback((data: any) => {
-    if (!data) return;
-    // Server emits envelope: { event_type, payload, scope, timestamp }; handle both shapes
-    const payload = data.payload ?? data;
-    if (payload.update_type === 'renamed' && payload.room_id && payload.new_name) {
-      setRooms((prev) =>
-        prev.map((r) => (r.id === payload.room_id ? { ...r, name: payload.new_name } : r)),
-      );
-    } else if (
-      payload.update_type === 'participant_added' ||
-      payload.update_type === 'participant_left'
-    ) {
-      // 방 목록(참여자 프로젝션)을 현재 스코프 그대로 갱신한다.
-      api.listChatRooms(showAllRooms ? 'workspace' : undefined).then(setRooms).catch(() => {});
-      // 열려 있는 방의 참여자가 바뀌면 상단 로스터도 즉시 재조회 — 다른 사용자의 추가/이탈까지 실시간 반영.
-      if (payload.room_id && payload.room_id === activeRoomIdRef.current) {
-        refreshActiveRoomParticipants(payload.room_id);
-      }
-    } else if (
-      payload.update_type === 'read' &&
-      payload.room_id &&
-      payload.participant_type === 'user' &&
-      payload.participant_id === user?.id
-    ) {
-      // B3: same user read in another tab/device → sync local unread to 0.
-      // Filter by participant_type === 'user' so an agent in the same room
-      // that happens to share a UUID with our user_id (won't in practice, but
-      // defensive) doesn't clobber our badge.
-      setRooms((prev) =>
-        prev.map((r) => (r.id === payload.room_id ? { ...r, unread_count: 0 } : r)),
-      );
-    }
+    dispatchChatRoomUpdate(
+      {
+        currentUserId: user?.id,
+        getActiveRoomId: () => activeRoomIdRef.current,
+        listChatRooms: () => api.listChatRooms(showAllRooms ? 'workspace' : undefined),
+        setRooms,
+        refreshActiveRoomParticipants,
+      },
+      data,
+    );
   }, [user?.id, showAllRooms, refreshActiveRoomParticipants]));
 
   function selectRoom(roomId: string) {
@@ -582,12 +565,16 @@ export default function ChatPage() {
   }
 
   function handleParticipantsAdded(roomId: string) {
-    // 방 목록의 참여자 프로젝션을 현재 스코프 그대로 갱신한다.
-    api.listChatRooms(showAllRooms ? 'workspace' : undefined).then(setRooms).catch(() => {});
-    // 추가가 일어난 방이 지금 열려 있으면 상단 참여자 로스터를 즉시 재조회해 반영한다 (완료 조건: 즉시 반영).
-    if (roomId === activeRoomIdRef.current) {
-      refreshActiveRoomParticipants(roomId);
-    }
+    // 방 목록 + (열려 있으면) 활성 방 로스터를 함께 갱신 — SSE 경로와 동일 반응.
+    reflectParticipantChange(
+      {
+        listChatRooms: () => api.listChatRooms(showAllRooms ? 'workspace' : undefined),
+        setRooms,
+        getActiveRoomId: () => activeRoomIdRef.current,
+        refreshActiveRoomParticipants,
+      },
+      roomId,
+    );
   }
 
   function handleNewChatCreated(room: ChatRoomDetail | null) {

@@ -178,23 +178,42 @@ export default function ManagedAgentDialog({
     try {
       if (mode === 'edit') {
         if (!agent) throw new Error('edit mode without agent');
-        // Only send fields the user can actually change here. CLI (`type`)
-        // is intentionally locked — changing the underlying binary on a
-        // live agent identity would invalidate its on-disk per-agent CLI
-        // home dir and confuse routing, so it stays a create-time decision.
+        // CLI (`type`) is editable here. Changing it repoints the agent to a
+        // different underlying binary; the DB row updates immediately, but a
+        // running agent keeps its current CLI until the operator restarts it
+        // (restart_agent re-fetches `type` from AWB and re-provisions the
+        // per-agent cli-home + adapter from the new CLI). Same
+        // take-effect-on-restart contract as `model` below.
         // Per-agent credential is only meaningful when an adapter consumes it
         // (claude / codex / antigravity); for `custom` we always send null so a
-        // stale id doesn't linger after the operator switched CLI.
+        // stale id doesn't linger after the operator switched CLI. Switching CLI
+        // also clears the credential selection (see the CLI onChange) so we
+        // never persist a credential whose provider prefix mismatches the new
+        // CLI — the manager validates `${cli}_…` and would reject it, silently
+        // falling back to operator-HOME auth.
         const supportsCredential = cli !== 'custom';
         await api.updateAgent(agent.id, {
           name: trimmedName,
           description,
+          type: cli,
           working_dir: trimmedWorkingDir,
           credential_id: supportsCredential && credentialId ? credentialId : null,
           // null clears (CLI default); custom CLIs have no model concept.
           model: cli !== 'custom' && model.trim() ? model.trim() : null,
         });
         showToast(`Agent "${trimmedName}" updated`, 'success');
+
+        // CLI change only lands in the DB above; the running agent must be
+        // restarted to actually switch binaries. Surface this like the
+        // working_dir hint below so the operator isn't surprised the agent
+        // keeps using the old CLI until restart_agent.
+        const cliChanged = (agent.type || '') !== cli;
+        if (cliChanged) {
+          showToast(
+            `CLI changed to "${cli}" — restart the agent (restart_agent) to run under the new CLI.`,
+            'success',
+          );
+        }
 
         // Working_dir change on a running agent: ping the manager so its
         // in-memory registry reflects the new cwd immediately. Without this
@@ -308,15 +327,17 @@ export default function ManagedAgentDialog({
             options={MANAGED_CLI_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
             onChange={(e: React.ChangeEvent<HTMLSelectElement>) => {
               setCli(e.target.value as any);
-              // Model candidates are per-CLI; a value valid for the old CLI is
-              // usually meaningless for the new one, so clear it.
+              // Model candidates AND the per-agent credential are per-CLI: a
+              // value valid for the old CLI is meaningless (and, for the
+              // credential, actively rejected by the manager's `${cli}_…`
+              // provider check) under the new one, so clear both on switch.
               setModel('');
+              setCredentialId('');
             }}
-            disabled={isEdit}
           />
           {isEdit && (
-            <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2 }}>
-              CLI is fixed once the agent identity is created — make a new agent if you need a different CLI.
+            <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2, lineHeight: 1.5 }}>
+              Changing the CLI updates the agent identity now, but a running agent keeps its current CLI until you restart it (restart_agent) — the manager re-provisions the cli-home and adapter from the new CLI on restart. Pick a matching credential above if the new CLI needs one.
             </div>
           )}
         </div>

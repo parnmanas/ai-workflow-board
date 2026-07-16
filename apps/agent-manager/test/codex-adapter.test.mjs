@@ -183,6 +183,129 @@ test('prepareCliHome rejects invalid TOML without overwriting it', async () => {
   assert.equal(await fsp.readFile(configPath, 'utf8'), invalid);
 });
 
+// ── parseProgressEvent — chat one-shot heartbeats (ticket c47194d9) ─────────
+// Real `codex exec --json` thread events → normalized {kind,label,detail,status}.
+
+test('parseProgressEvent maps command_execution start → 작업 중 (start)', () => {
+  const ev = new CodexCliAdapter().parseProgressEvent({
+    type: 'item.started',
+    item: { id: 'i0', type: 'command_execution', command: 'bash -lc ls', status: 'in_progress' },
+  });
+  assert.deepEqual(ev, { kind: 'command', label: '명령', detail: 'bash -lc ls', status: 'start' });
+});
+
+test('parseProgressEvent maps a clean command_execution completion → 완료 (success)', () => {
+  const ev = new CodexCliAdapter().parseProgressEvent({
+    type: 'item.completed',
+    item: { id: 'i0', type: 'command_execution', command: 'git status', exit_code: 0, status: 'completed' },
+  });
+  assert.deepEqual(ev, { kind: 'command', label: '명령', detail: 'git status', status: 'success' });
+});
+
+test('parseProgressEvent maps a non-zero command_execution completion → 실패 (error)', () => {
+  const ev = new CodexCliAdapter().parseProgressEvent({
+    type: 'item.completed',
+    item: { id: 'i0', type: 'command_execution', command: 'npm test', exit_code: 1, status: 'completed' },
+  });
+  assert.equal(ev.status, 'error');
+  assert.equal(ev.kind, 'command');
+  assert.equal(ev.detail, 'npm test');
+});
+
+test('parseProgressEvent labels an MCP tool call by server:tool', () => {
+  const ev = new CodexCliAdapter().parseProgressEvent({
+    type: 'item.started',
+    item: { id: 'i1', type: 'mcp_tool_call', server: 'awb', tool: 'add_comment', status: 'in_progress' },
+  });
+  assert.deepEqual(ev, { kind: 'tool', label: 'awb:add_comment', detail: '', status: 'start' });
+});
+
+test('parseProgressEvent marks an MCP tool call with error → 실패', () => {
+  const ev = new CodexCliAdapter().parseProgressEvent({
+    type: 'item.completed',
+    item: { id: 'i1', type: 'mcp_tool_call', server: 'awb', tool: 'get_ticket', error: 'boom' },
+  });
+  assert.equal(ev.status, 'error');
+  assert.equal(ev.label, 'awb:get_ticket');
+});
+
+test('parseProgressEvent EXCLUDES send_chat_room_message (the reply itself)', () => {
+  const adapter = new CodexCliAdapter();
+  for (const type of ['item.started', 'item.completed']) {
+    assert.equal(
+      adapter.parseProgressEvent({
+        type,
+        item: { type: 'mcp_tool_call', server: 'awb', tool: 'send_chat_room_message', error: null },
+      }),
+      null,
+    );
+  }
+});
+
+test('parseProgressEvent EXCLUDES agent_message / reasoning / todo_list noise', () => {
+  const adapter = new CodexCliAdapter();
+  assert.equal(
+    adapter.parseProgressEvent({ type: 'item.completed', item: { type: 'agent_message', text: 'hi' } }),
+    null,
+  );
+  assert.equal(
+    adapter.parseProgressEvent({ type: 'item.completed', item: { type: 'reasoning', text: '...' } }),
+    null,
+  );
+  assert.equal(
+    adapter.parseProgressEvent({ type: 'item.started', item: { type: 'todo_list', items: [] } }),
+    null,
+  );
+});
+
+test('parseProgressEvent summarizes a file_change with multiple paths', () => {
+  const ev = new CodexCliAdapter().parseProgressEvent({
+    type: 'item.completed',
+    item: {
+      type: 'file_change',
+      status: 'completed',
+      changes: [{ path: 'src/a.ts', kind: 'update' }, { path: 'src/b.ts', kind: 'add' }],
+    },
+  });
+  assert.equal(ev.kind, 'file');
+  assert.equal(ev.label, '파일 변경');
+  assert.equal(ev.detail, 'src/a.ts 외 1건');
+  assert.equal(ev.status, 'success');
+});
+
+test('parseProgressEvent maps web_search → 웹 검색 with the query', () => {
+  const ev = new CodexCliAdapter().parseProgressEvent({
+    type: 'item.started',
+    item: { type: 'web_search', query: 'nestjs sse' },
+  });
+  assert.deepEqual(ev, { kind: 'search', label: '웹 검색', detail: 'nestjs sse', status: 'start' });
+});
+
+test('parseProgressEvent maps turn.failed / error → 실패 with the message', () => {
+  const adapter = new CodexCliAdapter();
+  const a = adapter.parseProgressEvent({ type: 'turn.failed', error: { message: 'usage limit' } });
+  assert.equal(a.status, 'error');
+  assert.equal(a.detail, 'usage limit');
+  const b = adapter.parseProgressEvent({ type: 'error', message: 'stream broke' });
+  assert.equal(b.status, 'error');
+  assert.equal(b.detail, 'stream broke');
+});
+
+test('parseProgressEvent returns null for envelope/noise/garbage events', () => {
+  const adapter = new CodexCliAdapter();
+  for (const raw of [
+    { type: 'thread.started' },
+    { type: 'turn.started' },
+    { type: 'turn.completed' },
+    { type: 'item.completed' }, // no item
+    null,
+    'not-an-object',
+    { type: 'item.started', item: null },
+  ]) {
+    assert.equal(adapter.parseProgressEvent(raw), null);
+  }
+});
+
 test('prepareCliHome replaces an inherited config symlink without modifying the operator target', async (t) => {
   const adapter = new CodexCliAdapter();
   const operatorHome = await freshDir('awb-codex-operator-');

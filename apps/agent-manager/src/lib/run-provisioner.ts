@@ -30,6 +30,13 @@ import { join, dirname, resolve, sep } from 'node:path';
 import { execFile } from 'node:child_process';
 import { AGENT_MANAGER_HOME } from './constants.js';
 import { log } from './logging.js';
+import {
+  authenticatedCloneUrl,
+  installRepoCredential,
+  scrubOriginUrl,
+  maskCredential,
+  type RepoCredential,
+} from './repo-credential.js';
 
 export type RunCheckoutMode = 'reuse' | 'fresh';
 
@@ -37,6 +44,14 @@ export type RunCheckoutMode = 'reuse' | 'fresh';
 export interface RunRepoSpec {
   url: string;
   branch?: string;
+  /**
+   * https 인증 자격(선택). worktree 경로의 `bootstrapRepo.credential` 과 동일한 wire
+   * 형태 — 서버가 Resource 토큰을 복호화해 `run_provision.repo.credential` 로
+   * 실어보내면 clone/fetch/pull 이 공유 헬퍼(repo-credential)를 통해 인증된다.
+   * 없으면(현재 서버 동작) 무인증 clone 이라 기존과 100% 동일하고, private repo
+   * 커버는 서버측 wiring(후속 티켓)이 이 필드를 채우는 순간 구조적으로 활성화된다.
+   */
+  credential?: RepoCredential | null;
 }
 
 /** Wire shape of the `run_provision` hint (mirror of the server's RunProvision —
@@ -111,6 +126,18 @@ function tail(s: string, n = 1500): string {
   return t.length > n ? `…${t.slice(-n)}` : t;
 }
 
+/** Defensively parse a wire `repo.credential` → RepoCredential (or null when
+ *  absent/malformed). Mirrors worktree's `{ username?, token }` shape; drops
+ *  anything without a non-empty string token. Never throws. */
+function parseRepoCredential(raw: unknown): RepoCredential | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const c = raw as Record<string, unknown>;
+  if (typeof c.token !== 'string' || !c.token.trim()) return null;
+  const cred: RepoCredential = { token: c.token };
+  if (typeof c.username === 'string' && c.username.trim()) cred.username = c.username;
+  return cred;
+}
+
 /**
  * Defensively parse a wire `run_provision` value into a RunProvision (or null
  * when absent/malformed — an ordinary chat turn carries no such field). Mirrors
@@ -131,6 +158,8 @@ export function parseRunProvision(raw: unknown): RunProvision | null {
   if (r && typeof r === 'object' && typeof r.url === 'string' && r.url.trim()) {
     repo = { url: r.url.trim() };
     if (typeof r.branch === 'string' && r.branch.trim()) repo.branch = r.branch.trim();
+    const cred = parseRepoCredential(r.credential);
+    if (cred) repo.credential = cred;
   }
 
   return { kind, run_id, workspace_id, workspace_folder: folderRaw, checkout_mode, repo };
@@ -397,24 +426,32 @@ export async function provisionRunWorkspace(
         return { ok: true, dir, steps, notes };
       }
 
+      // 인증이 필요한 private repo 를 위해 clone/fetch/pull 을 공유 repo-credential
+      // 헬퍼로 경유시킨다. credential 이 없으면 헬퍼가 전부 no-op → 기존과 동일한
+      // 무인증 동작이라, 이 경로는 구조적으로 credential-blind 될 수 없다.
+      const cred = p.repo.credential ?? null;
+      const mask = (s: string) => tail(maskCredential(s, cred));
       const haveClone = p.checkout_mode === 'reuse' && (await pathExists(gitDir));
       if (haveClone) {
         // Proactively clear a stale index.lock a prior crashed run may have left,
         // so the first index-writing op below doesn't trip over a crash remnant.
         await recoverStaleIndexLock(gitDir, steps, notes);
+        // 기존 clone 에도 Resource credential 을 idempotent 하게 (재)설치 — 토큰
+        // 회전이나 이 기능 이전에 만들어진 clone 의 fetch/pull 인증을 보장한다.
+        await installRepoCredential(dir, p.repo.url, cred);
         // Existing clone — update non-destructively: fetch, then ff-only pull.
         // Each index-writing op self-recovers a stale index.lock and retries once.
         const fetched = await gitWithLockRecovery(['-C', dir, 'fetch', '--all', '--prune'], gitDir, steps, notes);
-        steps.push(`fetch ${rel} → ${fetched.ok ? 'ok' : `FAIL: ${tail(fetched.stderr)}`}`);
-        if (!fetched.ok) throw new Error(`git fetch failed for ${rel}: ${tail(fetched.stderr)}`);
+        steps.push(`fetch ${rel} → ${fetched.ok ? 'ok' : `FAIL: ${mask(fetched.stderr)}`}`);
+        if (!fetched.ok) throw new Error(`git fetch failed for ${rel}: ${mask(fetched.stderr)}`);
         if (p.repo.branch) {
           const co = await gitWithLockRecovery(['-C', dir, 'checkout', p.repo.branch], gitDir, steps, notes);
-          steps.push(`checkout ${p.repo.branch} → ${co.ok ? 'ok' : `FAIL: ${tail(co.stderr)}`}`);
-          if (!co.ok) throw new Error(`git checkout ${p.repo.branch} failed in ${rel}: ${tail(co.stderr)}`);
+          steps.push(`checkout ${p.repo.branch} → ${co.ok ? 'ok' : `FAIL: ${mask(co.stderr)}`}`);
+          if (!co.ok) throw new Error(`git checkout ${p.repo.branch} failed in ${rel}: ${mask(co.stderr)}`);
         }
         // ff-only so a diverged local tree stays usable rather than getting clobbered.
         const pulled = await gitWithLockRecovery(['-C', dir, 'pull', '--ff-only'], gitDir, steps, notes);
-        steps.push(`pull --ff-only ${rel} → ${pulled.ok ? 'ok' : `non-ff (left as-is): ${tail(pulled.stderr)}`}`);
+        steps.push(`pull --ff-only ${rel} → ${pulled.ok ? 'ok' : `non-ff (left as-is): ${mask(pulled.stderr)}`}`);
       } else {
         // Clone — folder is absent (reuse first run), was just wiped (fresh), or
         // exists without a .git. In the last case the leftover would make clone
@@ -424,13 +461,19 @@ export async function provisionRunWorkspace(
           steps.push(`clear non-git ${rel} before clone → ok`);
         }
         await fsp.mkdir(dirname(dir), { recursive: true });
+        // 토큰을 URL 에 주입해 clone 하되(로그/steps 에는 항상 clean url 만 노출),
+        // clone 직후 origin 을 clean url 로 scrub + credential.helper 설치 → 토큰이
+        // `git remote -v`/on-disk 에 남지 않고 이후 fetch/pull 이 인증된다.
+        const cloneUrl = authenticatedCloneUrl(p.repo.url, cred);
         const args = ['clone'];
         if (p.repo.branch) args.push('--branch', p.repo.branch);
-        args.push(p.repo.url, dir);
+        args.push(cloneUrl, dir);
         log(`[run-provision] ${p.kind} run=${p.run_id.slice(0, 8)} clone ${p.repo.url} → ${dir}`);
         const cloned = await git(args, RUN_GIT_TIMEOUT_MS);
-        steps.push(`clone ${p.repo.url} → ${rel} ${cloned.ok ? 'ok' : `FAIL: ${tail(cloned.stderr)}`}`);
-        if (!cloned.ok) throw new Error(`git clone failed for ${p.repo.url}: ${tail(cloned.stderr)}`);
+        steps.push(`clone ${p.repo.url} → ${rel} ${cloned.ok ? 'ok' : `FAIL: ${mask(cloned.stderr)}`}`);
+        if (!cloned.ok) throw new Error(`git clone failed for ${p.repo.url}: ${mask(cloned.stderr)}`);
+        await scrubOriginUrl(dir, p.repo.url);
+        await installRepoCredential(dir, p.repo.url, cred);
       }
 
       log(`[run-provision] ${p.kind} run=${p.run_id.slice(0, 8)} ready: ${dir}`);

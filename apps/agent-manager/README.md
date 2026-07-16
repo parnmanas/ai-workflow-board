@@ -44,10 +44,16 @@ awb-agent-manager --version
 
 Published to the public npm registry as
 [`awb-agent-manager`](https://www.npmjs.com/package/awb-agent-manager) (unscoped);
-`npm i -g` always pulls the latest release. Every `version` bump that lands on
-`main` is published automatically by
-[`.github/workflows/publish-agent-manager.yml`](../../.github/workflows/publish-agent-manager.yml),
-so npm stays in lockstep with the repo.
+`npm i -g` always pulls the latest release. Publishing is automated by
+[`.github/workflows/publish-agent-manager.yml`](../../.github/workflows/publish-agent-manager.yml):
+a push to `main` that touches the agent-manager **source** triggers a publish
+whose version is **computed at publish time** as the npm registry `latest` +
+patch (see [`scripts/compute-publish-version.mjs`](scripts/compute-publish-version.mjs)),
+and that version is stamped into the tarball but **not committed back to
+`main`**. So the `version` field in this `package.json` is only a *seed floor*
+for the first-ever publish and is expected to trail npm's `latest` — a lower
+value here is **by design, not drift** (ticket 433f6cbd removed the old
+manual-bump model).
 
 > A git-checkout launch migrates to the npm-global package on self-update and
 > never moves or stashes the source checkout; git update is fallback-only when npm is unavailable.

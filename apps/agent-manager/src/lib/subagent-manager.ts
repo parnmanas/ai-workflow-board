@@ -26,6 +26,7 @@ import { createAdapter } from './cli-adapters/index.js';
 import {
   ADAPTER_CAPABILITIES,
   type CliAdapter,
+  type CliProgressEvent,
   buildModelChain,
   describeHarness,
   partitionHarness,
@@ -67,6 +68,13 @@ const SILENT_EXIT_TAIL_MAX_CHARS = 4096;
  *  (ticket 55d3063f). Mirrors ChatSessionManager's ORPHAN_SUMMARY_MAX_DETAIL —
  *  the full pid list is always included; this only caps the cmd detail. */
 const ORPHAN_SUMMARY_MAX_DETAIL = 5;
+/** Chat one-shot progress heartbeats (ticket c47194d9 — Codex). Values mirror
+ *  ChatSessionManager's PROGRESS_* constants so a Codex chat and a Claude chat
+ *  coalesce + cap their progress identically. */
+const CHAT_PROGRESS_MIN_INTERVAL_MS = 1500;
+const CHAT_PROGRESS_MAX_PER_SESSION = 30;
+const CHAT_PROGRESS_DETAIL_MAX = 80;
+const CHAT_PROGRESS_LABEL_MAX = 40;
 /** MCP tool name suffixes that count as the subagent leaving a real
  *  ticket comment. Matched by suffix so a future MCP prefix rename
  *  doesn't break detection. Keep aligned with the ticket-session list. */
@@ -304,6 +312,13 @@ export class SubagentManager implements SubagentManagerContract {
   #pidDir: string;
   #initialized = false;
   #monitor: SubagentMonitor | null = null;
+  /** Per-pid chat-progress emit state (ticket c47194d9). Keyed by the child pid
+   *  (unique per spawn) so a chat one-shot gets its own rate-limit window + cap.
+   *  Dropped on the child's exit (including drop-first kill paths). */
+  #progressMeta = new Map<
+    number,
+    { lastEmitMs: number; count: number; errorEmitted: boolean }
+  >();
 
   /** Circuit-breaker for the one-shot path. Blocks re-spawn to an (agent,
    *  ticket, role) that repeatedly exits with non-transient errors and pends
@@ -783,6 +798,10 @@ export class SubagentManager implements SubagentManagerContract {
           /* ignore — lock release must never break exit cleanup */
         }
       }
+      // Chat-progress state is per-pid; drop it on ANY exit, including the
+      // drop-first kill paths (restart_agent / stopForAgent / TTL #sweep) that
+      // remove the record first and make the lookup below early-return.
+      this.#progressMeta.delete(pid);
       const record = this.#map.get(pid);
       if (!record || record.kind === 'reservation') return;
       const durationSec = Math.round((Date.now() - record.started_at) / 1000);
@@ -1136,6 +1155,7 @@ export class SubagentManager implements SubagentManagerContract {
           }
           this.#bufferTail(record, line);
           this._scanForCommentTool(record, line);
+          this.#maybeEmitChatProgress(record, line);
         }
         log(`${tagFor(record)} ${line}`);
       });
@@ -1286,6 +1306,114 @@ export class SubagentManager implements SubagentManagerContract {
     log(
       `Subagent posted chat answer to room=${record.room_id} agent=${agentId.slice(0, 8)} (cli=${record.cli_type}, ${trimmed.length} chars)`,
     );
+  }
+
+  /**
+   * ticket c47194d9 — surface a CHAT one-shot's in-flight work as
+   * `type='progress'` chat heartbeats so a Codex chat shows what it's doing in
+   * the chat window, like Claude's persistent session already does. Only chat
+   * spawns (room_id set) qualify — ticket work reports through comments, not the
+   * chat window. The adapter (`parseProgressEvent`) decides what, if anything, a
+   * given stdout line means: Codex maps its `item.*` / `turn.failed` events;
+   * claude/antigravity default to null here (claude chat takes the persistent
+   * ChatSessionManager route). Best-effort — a bad line never breaks capture. */
+  #maybeEmitChatProgress(record: SubagentRecord, line: string): void {
+    if (!record.room_id) return;
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('{')) return;
+    let obj: any;
+    try {
+      obj = JSON.parse(trimmed);
+    } catch {
+      return;
+    }
+    let ev: CliProgressEvent | null = null;
+    try {
+      ev = this.#adapterFor(record.cli_type).parseProgressEvent(obj);
+    } catch {
+      return;
+    }
+    if (ev) this.#emitChatProgress(record, ev);
+  }
+
+  /** Post one coalesced, capped progress heartbeat for a chat one-shot. Mirrors
+   *  ChatSessionManager#emitProgress: rate-limited per pid so a burst of item.*
+   *  events doesn't flood the room, and hard-capped per session (progress is a
+   *  heartbeat, the agent's actual reply is what the user waits for). A terminal
+   *  실패 (`ev.status === 'error'`) bypasses BOTH the interval and the cap so the
+   *  failure is never coalesced or dropped — but only the first one per pid
+   *  (dedupe via meta.errorEmitted) so repeated error lines can't flood the room
+   *  once the cap is otherwise exhausted.
+   *  Fire-and-forget — postChatRoomMessage swallows + logs its own errors. */
+  #emitChatProgress(record: SubagentRecord, ev: CliProgressEvent): void {
+    const pid = record.pid;
+    let meta = this.#progressMeta.get(pid);
+    if (!meta) {
+      meta = { lastEmitMs: 0, count: 0, errorEmitted: false };
+      this.#progressMeta.set(pid, meta);
+    }
+    const now = Date.now();
+    const isError = ev.status === 'error';
+    if (isError) {
+      // 완료 기준: 실패는 항상 명확히 구분되어야 하므로 terminal 실패는 heartbeat
+      // interval 과 per-session cap 을 모두 우회한다. 단, cap 소진 후 반복되는
+      // error 라인이 방을 도배하지 않도록 pid 당 terminal error 슬롯을 하나만
+      // 예약(dedupe)한다 — 첫 실패만 방출하고 이후 error 는 무시.
+      if (meta.errorEmitted) return;
+    } else {
+      // 일반 heartbeat: item.* 버스트가 방을 도배하지 않도록 rate-limit + hard-cap.
+      if (meta.count >= CHAT_PROGRESS_MAX_PER_SESSION) return;
+      if (now - meta.lastEmitMs < CHAT_PROGRESS_MIN_INTERVAL_MS) return;
+    }
+    const message = this.#formatChatProgressLine(ev);
+    if (!message) return;
+    meta.lastEmitMs = now;
+    meta.count += 1;
+    if (isError) meta.errorEmitted = true;
+    const agentId = record.agent_id || '';
+    // type='progress' → server stamps the discriminator so the chat UI renders a
+    // muted italic heartbeat and agent history replays exclude it.
+    void postChatRoomMessage(this.#config, record.room_id!, agentId, message, {
+      type: 'progress',
+    });
+  }
+
+  /** Render a normalized progress event into the italic `_..._` line the chat
+   *  UI expects (the client strips the wrapper). The three states are visually
+   *  distinct: 작업 중 → kind icon; 완료 → ✅; 실패 → ⚠️. */
+  #formatChatProgressLine(ev: CliProgressEvent): string {
+    const label = this.#clipProgress(ev.label || '', CHAT_PROGRESS_LABEL_MAX) || '작업';
+    const detail = this.#clipProgress(ev.detail || '', CHAT_PROGRESS_DETAIL_MAX);
+    const tail = detail ? ` · ${detail}` : '';
+    if (ev.status === 'error') return `_⚠️ ${label} 실패${tail}_`;
+    if (ev.status === 'success') return `_✅ ${label} 완료${tail}_`;
+    return `_${this.#progressKindIcon(ev.kind)} ${label}${tail}_`;
+  }
+
+  #progressKindIcon(kind: CliProgressEvent['kind']): string {
+    switch (kind) {
+      case 'command':
+        return '💻';
+      case 'tool':
+        return '📋';
+      case 'file':
+        return '✏️';
+      case 'search':
+        return '🌐';
+      case 'task':
+        return '🤖';
+      default:
+        return '🔧';
+    }
+  }
+
+  /** Collapse whitespace, truncate, and neutralize markdown so a backtick /
+   *  underscore in a command or path can't break the italic `_..._` wrapper. */
+  #clipProgress(s: string, max: number): string {
+    let out = String(s ?? '').replace(/\s+/g, ' ').trim();
+    if (!out) return '';
+    if (out.length > max) out = out.slice(0, max - 1) + '…';
+    return out.replace(/[`_*]/g, (c) => `\\${c}`);
   }
 
   #sweep(): void {
@@ -1558,5 +1686,17 @@ export class SubagentManager implements SubagentManagerContract {
   /** Test seam (ticket c555fbb6): run one TTL/idle #sweep pass synchronously. */
   _sweepNow(): void {
     this.#sweep();
+  }
+
+  /**
+   * Test seam (ticket c47194d9): register a record and wire the REAL stdout /
+   * stderr capture — including the chat-progress heartbeat path — onto its
+   * process_handle, so a unit test can feed `codex exec --json` JSONL lines
+   * through the true #wireStdioCapture → parseProgressEvent → postChatRoomMessage
+   * chain without forking a CLI. The stdio twin of _trackForTest.
+   */
+  _wireStdioForTest(record: SubagentRecord): void {
+    this.#map.set(record.pid, record);
+    this.#wireStdioCapture(record.process_handle as ChildProcess, record.pid);
   }
 }

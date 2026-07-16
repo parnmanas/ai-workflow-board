@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { tokens } from '../../tokens';
 
@@ -68,6 +68,16 @@ interface MentionTextareaProps {
 }
 
 /**
+ * Imperative handle a parent can hold via ref to focus the underlying textarea.
+ * Used by the chat composer to keep the input focused across room switches and
+ * after a send without reaching into the DOM. `preventScroll` (default true)
+ * avoids the focus-into-view scroll jump when focusing programmatically.
+ */
+export interface MentionTextareaHandle {
+  focus: (opts?: { preventScroll?: boolean }) => void;
+}
+
+/**
  * Textarea (or single-line input) with an @-mention autocomplete dropdown.
  *
  * When the user types `@` the dropdown opens anchored to the bottom-left of
@@ -75,7 +85,7 @@ interface MentionTextareaProps {
  * replaces the in-progress `@query` with the structured token
  * `@[type:id|name] ` which is what the backend parses for dispatch.
  */
-export function MentionTextarea({
+export const MentionTextarea = forwardRef<MentionTextareaHandle, MentionTextareaProps>(function MentionTextarea({
   value,
   onChange,
   candidates,
@@ -86,8 +96,14 @@ export function MentionTextarea({
   disabled = false,
   ariaLabel,
   style,
-}: MentionTextareaProps) {
+}: MentionTextareaProps, ref) {
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  // Expose focus() to the parent (see MentionTextareaHandle). preventScroll
+  // defaults to true so focusing the composer never yanks the message list.
+  useImperativeHandle(ref, () => ({
+    focus: (opts?: { preventScroll?: boolean }) =>
+      inputRef.current?.focus({ preventScroll: opts?.preventScroll ?? true }),
+  }), []);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [triggerIdx, setTriggerIdx] = useState<number | null>(null);
@@ -356,4 +372,4 @@ export function MentionTextarea({
       )}
     </div>
   );
-}
+});

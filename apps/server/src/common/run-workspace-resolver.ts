@@ -14,11 +14,21 @@
 // When none resolves the run still gets a `RunProvision` with `repo: null` —
 // the manager just ensures the folder exists and the rendered prompt (ticket 3)
 // still tells the agent what to do.
+//
+// A Resource-sourced repo (paths 2 & 3) additionally ships its decrypted git
+// `credential` so the manager can clone/fetch a PRIVATE repo — the server-side
+// half of ticket 622bc350's run-provisioner credential wiring. A direct url
+// (path 1, or a direct env-config url) stays anonymous by design: no Resource →
+// no Credential row to decrypt, and any auth is the url author's to embed.
+// Credential resolution is availability-first — any failure degrades to an
+// anonymous clone rather than wedging the run (see `resolveRepoCredential`).
 
 import { DataSource } from 'typeorm';
 import { Resource } from '../entities/Resource';
 import { Board } from '../entities/Board';
 import { Workspace } from '../entities/Workspace';
+import { Credential } from '../entities/Credential';
+import { resolveGitCredential } from '../modules/mcp/shared/git-branches';
 import { mergeEnvironmentConfig } from './environment-config';
 import {
   RunProvision,
@@ -87,7 +97,14 @@ async function resolveRunRepo(
       where: { id: ref.resource_id, workspace_id: input.workspaceId },
     });
     const url = (r?.url || '').trim();
-    if (url) return { url, branch: ref.branch || (r?.default_branch || '').trim() || undefined };
+    if (url) {
+      const credential = await resolveRepoCredential(ds, r?.credential_id, input.workspaceId);
+      return {
+        url,
+        branch: ref.branch || (r?.default_branch || '').trim() || undefined,
+        ...(credential ? { credential } : {}),
+      };
+    }
     return null; // unresolvable resource → no repo
   }
 
@@ -102,13 +119,46 @@ async function resolveRunRepo(
 
   let url = (first.url || '').trim();
   let branch = (first.branch || '').trim();
+  // Only a Resource-sourced repo carries auth: a direct env-config `url` (like
+  // the direct-url escape hatch above) stays anonymous — its credential, if any,
+  // is expected to be embedded in the url by whoever configured it.
+  let credentialId: string | null = null;
   if (!url && first.resource_id) {
     const r = await ds.getRepository(Resource).findOne({
       where: { id: first.resource_id.trim(), workspace_id: input.workspaceId },
     });
     url = (r?.url || '').trim();
     if (!branch) branch = (r?.default_branch || '').trim();
+    credentialId = r?.credential_id || null;
   }
   if (!url) return null;
-  return { url, branch: branch || undefined };
+  const credential = await resolveRepoCredential(ds, credentialId, input.workspaceId);
+  return { url, branch: branch || undefined, ...(credential ? { credential } : {}) };
+}
+
+/**
+ * Resolve the https git credential for a repo Resource (its `credential_id` →
+ * decrypted `{ username?, token }`), degrading to null on ANY failure so a
+ * missing / foreign-workspace / undecryptable Credential never wedges the run —
+ * the provisioner just falls back to an anonymous clone (the pre-wiring
+ * behavior). Mirrors the availability-first stance the rest of this resolver
+ * takes: `resolveGitCredential` THROWS on a foreign-workspace / tokenless /
+ * unreadable credential, and we swallow that to null here (the run still
+ * dispatches — only auth is skipped, exactly as today for a public repo).
+ */
+async function resolveRepoCredential(
+  ds: DataSource,
+  credentialId: string | null | undefined,
+  workspaceId: string,
+): Promise<{ username?: string; token: string } | null> {
+  if (!credentialId) return null;
+  try {
+    const cred = await resolveGitCredential(ds.getRepository(Credential), credentialId, workspaceId);
+    if (cred && cred.token) {
+      return cred.username ? { username: cred.username, token: cred.token } : { token: cred.token };
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
