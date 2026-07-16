@@ -32,6 +32,13 @@
 export const DEFAULT_SUPERVISOR_STALE_MS = 30 * 60_000; // 30 min
 
 /**
+ * Entity / migration default for Workspace.supervisor_resend_ms (5 min) — the
+ * cooldown between supervisor re-pushes. Centralized here alongside the stale
+ * default so the supervisor tick and the cadence diagnostic share ONE value.
+ */
+export const DEFAULT_SUPERVISOR_RESEND_MS = 5 * 60_000; // 5 min
+
+/**
  * Default fast liveness-based re-dispatch floor (ms). When a stale allocation
  * has NO live strand (current_task absent / TTL-expired) AND NO recent
  * output-liveness — i.e. nobody is actually working it — the supervisor's FIRST

@@ -13,22 +13,30 @@ export interface LogActivityParams {
   // 'board' | 'agent' added for cross-workspace move (WorkspaceMoveService):
   // a board/agent move is not tied to a single ticket, so entity_type widens
   // beyond the ticket/comment pair and `ticket_id` is passed as '' for them.
-  entity_type: 'ticket' | 'comment' | 'board' | 'agent';
+  // 'workspace' added (ticket 1fcba693) for the workspace config-change audit —
+  // a settings PATCH (e.g. supervisor_stale_ms) is workspace-scoped, not tied to
+  // a ticket, so `ticket_id` is '' and `workspace_id` carries the scope.
+  entity_type: 'ticket' | 'comment' | 'board' | 'agent' | 'workspace';
   entity_id: string | number;
   // The three `respawn_*` actions are first-class events written by
   // RespawnStormDetectorService (ticket ab06eac2). ActivityLog.action is a bare
   // varchar (no DB constraint) and the event-registry `board_update` entry
   // forwards `action` verbatim, so widening this union is the only step needed
   // for them to persist AND ride the live SSE stream like any other activity.
+  // 'config_changed' (ticket 1fcba693) is the grep-able workspace settings-change
+  // audit action (actor + old→new + source), so a value like the 4 h
+  // supervisor_stale_ms band-aid can never again be applied without a trail.
   action:
     | 'created' | 'updated' | 'moved' | 'deleted' | 'status_changed' | 'archived' | 'unarchived'
-    | 'respawn_storm_halted' | 'respawn_twin_detected' | 'respawn_twin_autostop_intent';
+    | 'respawn_storm_halted' | 'respawn_twin_detected' | 'respawn_twin_autostop_intent'
+    | 'config_changed';
   field_changed?: string;
   old_value?: string;
   new_value?: string;
   actor_id?: string;
   actor_name?: string;
   ticket_id: string;
+  workspace_id?: string;   // scope for non-ticket entities (workspace config); '' if omitted
   role?: string;           // agent role; written as '' if omitted
   trigger_source?: string; // 'agent_trigger' | 'manual' | ''; written as '' if omitted
 }
@@ -78,6 +86,7 @@ export class ActivityService {
       actor_id: params.actor_id || '',
       actor_name: params.actor_name || '',
       ticket_id: params.ticket_id,
+      workspace_id: params.workspace_id || '',
       role: params.role || '',
       trigger_source: params.trigger_source || '',
     });

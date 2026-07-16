@@ -12,6 +12,9 @@ import { Agent } from '../../entities/Agent';
 import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { AuthGuard } from '../../common/guards/auth.guard';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import type { CurrentUserData } from '../../common/decorators/current-user.decorator';
+import { ActivityService } from '../../services/activity.service';
 import { DEFAULT_COLUMNS } from '../../database/database.module';
 import { DEFAULT_BOARD_ROUTING } from '../../db';
 import { WorkspaceRolesService } from '../workspace-roles/workspace-roles.service';
@@ -41,6 +44,7 @@ export class WorkspacesController {
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly workspaceRolesService: WorkspaceRolesService,
     private readonly promptTemplatesService: PromptTemplatesService,
+    private readonly activityService: ActivityService,
   ) {}
 
   @Get()
@@ -133,8 +137,24 @@ export class WorkspacesController {
   }
 
   @Patch(':id')
-  async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
+  async update(
+    @Param('id') id: string,
+    @Body() body: any,
+    @Res() res: Response,
+    @CurrentUser() user: CurrentUserData,
+  ) {
     const ws = await findOrFail(this.wsRepo, { where: { id } }, 'Workspace not found');
+
+    // Snapshot the cadence/liveness knobs BEFORE mutating so a config-change
+    // audit can record old→new (ticket 1fcba693). These are the settings that
+    // pace the supervisor backstop — the incident was a 4 h supervisor_stale_ms
+    // applied with no trail. Audit written after a successful save below.
+    const cadenceBefore = {
+      supervisor_stale_ms: ws.supervisor_stale_ms,
+      supervisor_resend_ms: ws.supervisor_resend_ms,
+      dispatch_queue_depth: ws.dispatch_queue_depth,
+      claim_verification_grace_ms: ws.claim_verification_grace_ms,
+    };
 
     const {
       name, description,
@@ -207,7 +227,58 @@ export class WorkspacesController {
     }
 
     await this.wsRepo.save(ws);
+
+    // Config-change audit (ticket 1fcba693): one grep-able row per changed
+    // cadence/liveness knob with actor + old→new + source=rest. Best-effort —
+    // the PATCH still succeeds if the audit write fails.
+    await this._auditCadenceChanges(ws.id, cadenceBefore, ws, {
+      actorId: user?.id || '',
+      actorName: user?.name || '',
+      source: 'rest',
+    });
+
     return res.json(ws);
+  }
+
+  /**
+   * Write a `config_changed` ActivityLog row for each supervisor/dispatch
+   * cadence field that actually changed (ticket 1fcba693). Workspace-scoped
+   * (entity_type='workspace', ticket_id=''), carrying actor + old→new + source
+   * so a value like the incident's 4 h supervisor_stale_ms can never again land
+   * without a trail. Shared by the REST PATCH and (via ActivityService) any
+   * future write path. Never throws.
+   */
+  private async _auditCadenceChanges(
+    workspaceId: string,
+    before: { supervisor_stale_ms: number; supervisor_resend_ms: number; dispatch_queue_depth: number; claim_verification_grace_ms: number },
+    after: Workspace,
+    actor: { actorId: string; actorName: string; source: string },
+  ): Promise<void> {
+    const fields: Array<keyof typeof before> = [
+      'supervisor_stale_ms', 'supervisor_resend_ms', 'dispatch_queue_depth', 'claim_verification_grace_ms',
+    ];
+    for (const field of fields) {
+      const oldVal = before[field];
+      const newVal = (after as any)[field];
+      if (oldVal === newVal) continue;
+      try {
+        await this.activityService.logActivity({
+          entity_type: 'workspace',
+          entity_id: workspaceId,
+          workspace_id: workspaceId,
+          ticket_id: '',
+          action: 'config_changed',
+          field_changed: field,
+          old_value: String(oldVal),
+          new_value: String(newVal),
+          actor_id: actor.actorId,
+          actor_name: actor.actorName,
+          trigger_source: actor.source,
+        });
+      } catch {
+        /* best-effort audit — never block the config write */
+      }
+    }
   }
 
   @Delete(':id')

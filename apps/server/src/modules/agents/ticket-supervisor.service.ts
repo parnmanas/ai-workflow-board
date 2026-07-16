@@ -37,6 +37,7 @@ import { AllocationService, AllocatedTicketRow } from './allocation.service';
 import { TriggerLoopService } from './trigger-loop.service';
 import {
   DEFAULT_SUPERVISOR_STALE_MS,
+  DEFAULT_SUPERVISOR_RESEND_MS,
   SUPERVISOR_STALE_MS_SANE_MAX,
   resolveSupervisorLivenessFloorMs,
   resolveFirstPushThresholdMs,
@@ -63,9 +64,9 @@ const SUPERVISOR_TICK_MS = 60_000;
 // Workspace.supervisor_resend_ms (v0.41 makes these runtime settings).
 // The constants live here only as the in-code fallback for workspaces
 // whose row hasn't been backfilled yet, or when a settings lookup errors.
-// DEFAULT_SUPERVISOR_STALE_MS is imported from common/supervisor-liveness so
-// the sane-max classification and this tick fallback share one source of truth.
-const DEFAULT_SUPERVISOR_RESEND_MS = 5 * 60_000;
+// DEFAULT_SUPERVISOR_STALE_MS and DEFAULT_SUPERVISOR_RESEND_MS are imported from
+// common/supervisor-liveness so the sane-max classification, this tick fallback,
+// and the cadence diagnostic all share one source of truth.
 // Fast liveness-based re-dispatch floor (ticket 1fcba693). Resolved once at
 // module load (honors the SUPERVISOR_LIVENESS_FLOOR_MS env override). Caps the
 // FIRST-re-push threshold for a stale allocation nobody is working (no live
