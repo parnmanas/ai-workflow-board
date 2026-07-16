@@ -560,10 +560,10 @@ export class BoardsController {
       }
     }
 
-    // Per-board environment setup override (ticket 354d336b). null clears the
-    // board override; an object is zod-validated (strict keys + each repository
-    // needs a resource_id or url) so a typo'd field 400s instead of being
-    // silently stored. Empty configs collapse to null via the serializer.
+    // Per-board environment setup override (ticket 354d336b; simplified to a
+    // repository-Resource picker in 8fbe90e9). null clears the board override; an
+    // object is normalised to repositories[].resource_id only (legacy keys are
+    // dropped; a repository missing resource_id 400s). Empty → null via serializer.
     if (environment_config !== undefined) {
       if (environment_config === null) {
         board.environment_config = null;

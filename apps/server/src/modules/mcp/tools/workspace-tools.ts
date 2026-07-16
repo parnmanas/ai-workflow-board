@@ -163,7 +163,7 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
       harness_config: HarnessConfigSchema.nullable().optional()
         .describe('Workspace-wide default agent harness: { system_prompt_append?, allowed_tools?, disallowed_tools?, model?, permission_mode? }. Boards override it per key via their own harness_config. Pass null to clear.'),
       environment_config: EnvironmentConfigSchema.nullable().optional()
-        .describe('Workspace-wide default environment setup: { repositories?, env_vars?, setup_commands?, setup_timeout_seconds?, version? }. Boards override it per top-level key via their own environment_config. Pass null to clear.'),
+        .describe('Workspace-wide default environment setup — a repository-Resource picker: { repositories?: [{ resource_id }] }. Only repositories[].resource_id is used (server expands it to url / default_branch / credential); legacy keys (per-repo url/branch/target_dir/post_clone_commands, and top-level env_vars/setup_commands/setup_timeout_seconds/version) are accepted for backward compatibility but ignored on save. Boards override this per top-level key via their own environment_config. Pass null to clear.'),
     },
     async ({ workspace_id, name, description, supervisor_stale_ms, supervisor_resend_ms, dispatch_queue_depth, claim_verification_enabled, claim_verification_grace_ms, harness_config, environment_config }) => {
       const wsRepo = dataSource.getRepository(Workspace);
@@ -183,9 +183,9 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
       // Default harness (ticket 7122600c) — strict-validated by the arg
       // schema; empty objects collapse to null via the serializer.
       if (harness_config !== undefined) ws.harness_config = serializeHarnessConfig(harness_config);
-      // Default environment setup (ticket 354d336b) — strict-validated by the
-      // arg schema; re-run the validator for the cross-field repository
-      // invariant, then serialize (empty configs collapse to null).
+      // Default environment setup (ticket 354d336b) — validateEnvironmentConfig-
+      // Input normalises to repositories[].resource_id only; legacy keys are
+      // accepted but dropped (8fbe90e9), then serialize (empty configs → null).
       if (environment_config !== undefined) {
         if (environment_config === null) {
           ws.environment_config = null;

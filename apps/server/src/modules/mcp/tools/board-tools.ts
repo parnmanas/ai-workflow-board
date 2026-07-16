@@ -250,7 +250,7 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
       language: z.string().nullable().optional()
         .describe('Per-board output language: a human-readable language name (e.g. "Korean", "English", "日本語"). Agents dispatched on this board write comments, chat, commit messages, and code comments in this language. Empty string or null clears the override (agents fall back to their default, English).'),
       environment_config: EnvironmentConfigSchema.nullable().optional()
-        .describe('Per-board environment setup: { repositories?: [{ resource_id? | url?, target_dir?, branch?, post_clone_commands?: [] }], env_vars?: { KEY: value }, setup_commands?: [], setup_timeout_seconds?, version? }. When set, agent-manager provisions the working environment (clone/update repos under the agent home, run setup commands, inject non-secret env_vars) once per (agent,board) before the first dispatch, re-running only when the config fingerprint changes. Keys set here override the workspace default per top-level key. Pass null to clear the board override.'),
+        .describe('Per-board environment setup — a repository-Resource picker: { repositories?: [{ resource_id }] }. Only repositories[].resource_id is used: the server expands it to the repo url / default_branch / credential, and agent-manager checks the FIRST repository out as the ticket worktree when the ticket has no base_repo binding. Legacy keys (per-repo url/branch/target_dir/post_clone_commands, and top-level env_vars/setup_commands/setup_timeout_seconds/version) are still ACCEPTED for backward compatibility but IGNORED on save (dropped, not stored). Keys set here override the workspace default per top-level key. Pass null to clear the board override.'),
       paused: z.boolean().optional()
         .describe('Board-wide soft pause. true sets paused_at=now — every agent_trigger for tickets on this board is dropped (TriggerLoopService gate) and backlog promotion short-circuits; humans can still read/comment/drag. false clears paused_at to resume dispatch. Mirrors REST POST /api/boards/:id/pause|resume so the awb-mcp agent driver can engage the gate. Omit to leave the pause state untouched.'),
       liveness_policy: LivenessPolicySchema.nullable().optional()
@@ -333,10 +333,10 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
         }
       }
       // Environment setup override (ticket 354d336b). null clears the board
-      // override (workspace default, if any, then applies). Args already passed
-      // the strict EnvironmentConfigSchema; re-run the validator for the
-      // cross-field repository invariant (each repo needs a resource_id or url)
-      // then serialize (empty configs collapse to null).
+      // override (workspace default, if any, then applies). validateEnvironment-
+      // ConfigInput normalises to repositories[].resource_id only — legacy keys
+      // (env_vars / setup_commands / url / branch / …) are accepted but dropped
+      // (8fbe90e9); a repo missing resource_id errors. Then serialize (empty → null).
       if (environment_config !== undefined) {
         if (environment_config === null) {
           board.environment_config = null;
