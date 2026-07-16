@@ -383,6 +383,32 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Evict output-liveness entries for an exited seat (ticket ea4adc71). Invoked
+   * from clearCurrentTask — the manager's subagent-EXIT signal — so a strand's
+   * per-(agent,ticket,role) output-liveness stamp does not outlive the strand
+   * itself (its only other removal is the 6h+ TTL sweep). Prefix-keyed delete:
+   * keys are `${agent}:${ticket}:${role}` with colon-free UUID segments, so
+   * `${agent}:${ticket}:` uniquely spans EVERY role recorded for that
+   * (agent, ticket) — the manager's clear_current_task carries no role — and
+   * `${agent}:` spans every entry for the agent (the force-clear / shutdown
+   * path, expectedTicketId omitted).
+   *
+   * A LIVE strand never reaches here: clearCurrentTask fires only on real exit,
+   * never on the 15-min active_tasks stale-sweep. So the e9c8e1d6 signal — a
+   * producing-but-quiet strand past the current_task TTL stays live via fresh
+   * output-liveness (path 2 of hasLiveRoleStrand) — is preserved; the entry is
+   * evicted only once the strand actually exits. A same-seat respawn that races
+   * this eviction re-stamps output-liveness on its next throttled output post
+   * (≤ OUTPUT_LIVENESS_MIN_INTERVAL_MS), so the clear is self-healing.
+   */
+  private _evictOutputLivenessForExit(agentId: string, ticketId?: string): void {
+    const prefix = ticketId ? `${agentId}:${ticketId}:` : `${agentId}:`;
+    for (const key of this.outputLiveness.keys()) {
+      if (key.startsWith(prefix)) this.outputLiveness.delete(key);
+    }
+  }
+
+  /**
    * Effective output-liveness retention TTL (ms window) currently in force
    * (ticket 47a72129). TicketSupervisorService clamps its force-gate comparison
    * window to this so the window can never exceed what the map actually retains
@@ -586,6 +612,22 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
    */
   clearCurrentTask(agent_id: string, expectedTicketId?: string): void {
     if (!agent_id) return;
+
+    // Evict output-liveness for the exited seat (ticket ea4adc71) BEFORE the
+    // active_tasks early-returns below. clearCurrentTask is the manager's
+    // subagent-EXIT signal, so a strand's per-(agent,ticket,role) output-liveness
+    // stamp must not outlive the strand. Placed ahead of the early-returns on
+    // purpose: the eviction has to run even when the active_tasks entry was
+    // already swept (a strand that ran past CURRENT_TASK_STALE_MS), never
+    // registered, or belongs to a different current ticket — cases where the
+    // guards below `return` early. Without it, output-liveness (which has NO
+    // other clear signal and is only dropped on the 6h+ TTL sweep) keeps
+    // hasLiveRoleStrand's path-2 reporting a just-exited strand as "live" for up
+    // to CURRENT_TASK_STALE_MS, so the next transition trigger onto the same seat
+    // (e.g. a Review→To Do bounce re-waking the assignee) is dropped by the
+    // in-flight-strand gate and only recovers ~30 min later via the supervisor.
+    this._evictOutputLivenessForExit(agent_id, expectedTicketId);
+
     const status = this.state.get(agent_id);
     if (!status?.active_tasks || status.active_tasks.size === 0) return;
 
