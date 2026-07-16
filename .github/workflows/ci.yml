@@ -42,6 +42,14 @@ jobs:
         working-directory: apps/server
         run: node --test --test-force-exit test/chat-room-join-cast-guard.test.mjs
 
+  # (ticket 433f6cbd) 예전엔 여기 `agent-manager version bump guard` 잡이 있어
+  # agent-manager 소스가 바뀐 push/PR 은 package.json version 을 손으로 올리도록
+  # 강제하고, 리베이스가 그 범프를 조용히 collapse 시킨 경우(board lesson #1)를
+  # 사후 검출했다. 이제 버전을 **publish 시점에 레지스트리+patch 로 자동 계산**하므로
+  # (publish-agent-manager.yml + scripts/compute-publish-version.mjs) 손으로 범프할
+  # 값 자체가 없다 → collapse 될 것도 없어 이 가드는 목적을 잃었다(오히려 정상
+  # 변경마다 CI 를 red 로 만든다). 그래서 잡·check-version-bump.mjs·그 테스트를 제거.
+
   # Dialect matrix — the actual pre-deploy safety net. Boots the contract flows
   # against Postgres 16 (matching the prod image) so uuid/varchar mismatches and
   # other Postgres-only failures are caught here, not on the live server.

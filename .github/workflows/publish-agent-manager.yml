@@ -1,28 +1,40 @@
-# Publish awb-agent-manager to npm.
+# Publish awb-agent-manager to npm — version computed at publish time.
 #
-# Auth: NPM_TOKEN (npm *Automation* token — 2FA bypass must be enabled on the
-#   token, otherwise `npm publish` prompts for an OTP and the job hangs/fails)
-#   stored as a repo Actions secret:
-#   Settings → Secrets and variables → Actions → New repository secret → NPM_TOKEN
+# 근본안 (ticket 433f6cbd, source c17a8a40, board lesson #1/#3):
+#   예전엔 feature 브랜치가 apps/agent-manager/package.json version 을 손으로
+#   범프하고, 이 워크플로가 그 version diff 를 보고 publish 했다. 동시 진행 티켓이
+#   같은 다음 값으로 범프한 뒤 리베이스하면 git 이 그 범프를 충돌 없이 조용히
+#   collapse 시켜(board lesson #1) 코드가 npm 에 영영 안 실리는 침묵형 실패가
+#   3회 재발했다.
 #
-# Triggers (all converge on ONE idempotent publish job):
-#   1. push to `main` — the normal path. Whenever a commit bumps
-#      apps/agent-manager/package.json `version`, the job publishes that version
-#      and records an `awb-agent-manager-v<version>` git tag. Every OTHER main
-#      push is a fast no-op: the job resolves the version, sees it is already on
-#      npm, and exits before building or publishing. This is what keeps npm in
-#      lockstep with the repo. The old flow published only on a hand-pushed
-#      release tag per bump — that step was skipped for 1.0.1–1.6.16, so npm
-#      stayed frozen at 1.0.0 while the repo moved on (ticket bc306b8d).
-#   2. push a tag `awb-agent-manager-v<version>` — manual release path; a
-#      tag/version mismatch fails the run fast so a stale tag can't publish the
-#      wrong version.
-#   3. workflow_dispatch — manual "kick" (re-attempts the current ref's version;
-#      no-op if already published).
+#   이제 **버전을 소스에 안 적는다.** publish 시점에 레지스트리 최신값 + patch 로
+#   계산한다(scripts/compute-publish-version.mjs). 손으로 범프할 값이 없으니
+#   collapse 될 것도 없다. package.json 의 version 은 '최초 배포 seed floor' 로만
+#   남는다(이미 npm 에 올라간 뒤에는 참조되지 않음).
 #
-# Idempotency: the job checks `npm view awb-agent-manager@<version>` before
-# publishing, so re-runs and unrelated pushes never double-publish; `npm publish`
-# itself refuses to overwrite an existing version as a backstop.
+# Auth: NPM_TOKEN (npm *Automation* token — 2FA bypass 필수, 아니면 publish 가
+#   OTP 를 물어 hang) 을 repo Actions secret 으로 저장.
+#
+# 트리거 (loop 방지 — reviewer guard #4):
+#   - push to `main` 이되 **agent-manager 산출물/publish 기계**를 건드린 push 로만
+#     한정(paths 필터). version diff 가 아니라 '소스 변경'이 트리거다. 계산된 버전은
+#     **main 에 되커밋하지 않고** 태그/tarball 에만 담으므로 봇 push→재트리거 루프가
+#     구조적으로 없다. (production.private 미러도 이 워크플로가 건드리지 않는다 —
+#     그건 웹앱 전용 별도 배포 경로다.)
+#   - workflow_dispatch — 수동 재시도(부분 실패 복구/재실행). 멱등.
+#   수동 릴리스 태그 트리거(`awb-agent-manager-v*`)는 제거했다 — 버전의 단일
+#   출처는 '레지스트리 + patch' 하나뿐이다(봇이 미는 마커 태그는 recursion guard +
+#   이 paths 필터로 재트리거되지 않는다).
+#
+# 멱등성 & 부분 실패 복구 (reviewer guard #3): compute 단계가 순서대로
+#   ① HEAD 태그 → ② E404 seed → ③ latest.gitHead==HEAD provenance 복구 → ④ latest+patch
+#   로 버전을 정하고, 이미 npm 에 있고 '이 커밋 산출물'로 증명되면(태그/gitHead)
+#   publish 를 건너뛰고 태그만 보장한다("npm 엔 있고 tag 만 없음" 복구). 증명 안 되면
+#   무조건 성공 처리하지 않고 fail-closed.
+#
+# 동시 실행 직렬화 (reviewer guard #1): concurrency group 으로 run 을 큐잉하고,
+#   각 run 은 슬롯을 잡은 뒤 최신 버전을 새로 읽어 계산한다. publish 직전 존재
+#   확인이 idempotency 백스톱(그 사이 누가 같은 버전을 올렸으면 덮어쓰지 않고 실패).
 
 name: Publish agent-manager
 
@@ -30,22 +42,35 @@ on:
   push:
     branches:
       - main
-    tags:
-      - 'awb-agent-manager-v*'
+    paths:
+      # tarball 에 실리는 산출물(dist 는 src/tsconfig 로 빌드됨) + publish 기계.
+      # test/README/그 외 scripts 만 바뀐 push 는 트리거하지 않는다(배포물 무변).
+      - 'apps/agent-manager/src/**'
+      - 'apps/agent-manager/package.json'
+      - 'apps/agent-manager/tsconfig.json'
+      - 'apps/agent-manager/scripts/compute-publish-version.mjs'
+      - '.github/workflows/publish-agent-manager.yml'
   workflow_dispatch:
 
-# The "Record release tag" step pushes a lightweight tag using GITHUB_TOKEN.
+# "Record release tag" 단계가 GITHUB_TOKEN 으로 경량 태그를 push 한다.
 permissions:
   contents: write
 
+# 같은 레지스트리 최신값을 읽은 두 run 이 동일 patch 를 밀지 않도록 직렬화.
+# cancel-in-progress:false — 진행 중 run 을 죽이지 않는다(선형 main 에서 뒤 run 이
+# 앞 커밋을 포함하므로 큐잉이 안전하고, publish 를 중간에 끊지 않는다).
+concurrency:
+  group: publish-agent-manager
+  cancel-in-progress: false
+
 jobs:
   publish:
-    name: build + npm publish
+    name: compute version + npm publish
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          # Full history so the tag-record step can see existing release tags.
+          # gitHead provenance 복구 + 태그 조회/기록에 전체 히스토리·태그 필요.
           fetch-depth: 0
 
       - uses: actions/setup-node@v4
@@ -54,65 +79,110 @@ jobs:
           cache: npm
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Resolve version + skip guard
-        id: resolve
-        run: |
-          PKG_VERSION="$(node -p "require('./apps/agent-manager/package.json').version")"
-          echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
-          echo "package.json version = $PKG_VERSION"
+      # 버전 계산 + 액션 결정 (순수 로직은 단위 테스트, 여기선 npm/git 실호출).
+      # 출력: version, action(publish|recover-tag|noop), reason.
+      - name: Compute publish version
+        id: plan
+        run: node apps/agent-manager/scripts/compute-publish-version.mjs
 
-          # Tag-triggered runs must match the package version exactly — fail fast
-          # so a stale `awb-agent-manager-v*` tag can never publish the wrong code.
-          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            TAG_VERSION="${GITHUB_REF_NAME#awb-agent-manager-v}"
-            echo "tag version = $TAG_VERSION"
-            if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
-              echo "::error::Tag $GITHUB_REF_NAME does not match package version $PKG_VERSION"
-              exit 1
-            fi
-          fi
-
-          # Idempotency gate: skip when this exact version is already on npm.
-          # `npm view X@Y version` prints Y when published, prints nothing (and
-          # exits non-zero, swallowed by `|| true`) when it is not.
-          PUBLISHED="$(npm view "awb-agent-manager@$PKG_VERSION" version 2>/dev/null || true)"
-          if [ "$PUBLISHED" = "$PKG_VERSION" ]; then
-            echo "awb-agent-manager@$PKG_VERSION already on npm — nothing to publish."
-            echo "should_publish=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "awb-agent-manager@$PKG_VERSION is not on npm — will build + publish."
-            echo "should_publish=true" >> "$GITHUB_OUTPUT"
-          fi
-
+      # npm ci 는 **stamp 전에** 돈다: ci 는 package.json ↔ package-lock.json 버전
+      # 동기화를 강제하는데, lockfile 은 seed(1.6.28)를 기록하고 있으므로 먼저
+      # 계산 버전을 적으면 sync 에러가 난다. 원본(seed) 상태에서 ci → 그 다음 stamp.
       - name: Install dependencies
-        if: steps.resolve.outputs.should_publish == 'true'
+        if: steps.plan.outputs.action == 'publish'
         run: npm ci
 
+      # 계산된 버전을 package.json 에 기록 → build 가 dist/package.json 으로 복사
+      # → tarball 의 UpdateChecker current_version == 실제 publish 버전 (npm-global
+      # self-update 가 수렴하려면 이 3자가 반드시 일치). version 필드만 바꾸므로 이미
+      # 끝난 npm ci 의 의존성 설치에는 영향이 없다. main 에는 커밋하지 않는다(작업
+      # 트리에만; loop 방지). publish 가 트리거하는 prepublishOnly(=build)도 이 stamp
+      # 된 package.json 을 그대로 복사한다.
+      - name: Stamp computed version into package.json
+        if: steps.plan.outputs.action == 'publish'
+        env:
+          V: ${{ steps.plan.outputs.version }}
+        run: |
+          node -e "const fs=require('fs');const p='apps/agent-manager/package.json';const j=JSON.parse(fs.readFileSync(p,'utf8'));j.version=process.env.V;fs.writeFileSync(p,JSON.stringify(j,null,2)+'\n')"
+          echo "package.json version → $(node -p "require('./apps/agent-manager/package.json').version")"
+
       - name: Build agent-manager
-        if: steps.resolve.outputs.should_publish == 'true'
+        if: steps.plan.outputs.action == 'publish'
         run: npm run build -w awb-agent-manager
 
+      # tarball 검증 (publish 전): dist/package.json.version == 계산 버전 이고
+      # dist/main.js 가 있는지. files:["dist"] 라 tarball == dist + package.json.
+      - name: Verify build artifact
+        if: steps.plan.outputs.action == 'publish'
+        env:
+          V: ${{ steps.plan.outputs.version }}
+        run: |
+          node -e "
+            const fs=require('fs');
+            const V=process.env.V;
+            const dp=JSON.parse(fs.readFileSync('apps/agent-manager/dist/package.json','utf8'));
+            if(dp.version!==V){console.error('::error::dist/package.json version '+dp.version+' != computed '+V);process.exit(1);}
+            if(!fs.existsSync('apps/agent-manager/dist/main.js')){console.error('::error::dist/main.js missing');process.exit(1);}
+            console.log('artifact ok: dist/package.json.version='+dp.version+', dist/main.js present');
+          "
+          echo "--- npm pack --dry-run (tarball 내용 확인) ---"
+          npm pack --dry-run -w awb-agent-manager
+
+      # publish 직전 존재 재확인 (guard #1 백스톱): build 도중 누군가 같은 버전을
+      # 올렸으면 덮어쓰지 않고 실패. **fail-closed** — compute 의 classifyNpmView 를
+      # 재사용하는 `probe-exists` 서브커맨드가 E404(미존재)와 기타 오류(E401/네트워크/
+      # 5xx/빈출력)를 엄격히 구분한다:
+      #   exit 0 → 명시적 E404 = 아직 미존재 → publish 진행
+      #   exit 3 → 이미 존재 = 선점 실패 → job fail (덮어쓰기 금지)
+      #   exit 2 → E404 아닌 오류 = fail-closed → job fail (애매한 오류로 강행 금지)
+      # (예전 `npm view … 2>/dev/null || true` 는 E401/네트워크 오류도 '미존재'로
+      #  오인해 publish 를 진행할 수 있었다 — 이 step 이 그 fail-open 구멍을 닫는다.)
+      - name: Guard — version still unpublished
+        if: steps.plan.outputs.action == 'publish'
+        env:
+          V: ${{ steps.plan.outputs.version }}
+        run: node apps/agent-manager/scripts/compute-publish-version.mjs probe-exists "$V"
+
       - name: Publish to npm
-        if: steps.resolve.outputs.should_publish == 'true'
+        if: steps.plan.outputs.action == 'publish'
         run: npm publish -w awb-agent-manager --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      # 릴리스 태그 기록 — publish 직후(fresh) 또는 "npm 엔 있고 tag 만 없음" 복구
+      # (recover-tag). HEAD 를 가리키는 경량 태그. GITHUB_TOKEN 태그 push 는 이
+      # 워크플로를 재트리거하지 않는다(Actions recursion guard + paths 필터). 태그
+      # push 실패는 치명적이지 않다 — npm 엔 이미 올라갔고, 다음 run 이 gitHead
+      # provenance 로 복구한다(그래서 warning 으로만 남긴다).
       - name: Record release tag
-        # Only on the main-branch auto-publish path (tag pushes already carry
-        # their tag). Non-fatal: the publish above already succeeded and the tag
-        # is just a historical marker. A GITHUB_TOKEN tag push does NOT
-        # re-trigger this workflow (Actions recursion guard), so there is no loop.
-        if: steps.resolve.outputs.should_publish == 'true' && startsWith(github.ref, 'refs/heads/')
-        continue-on-error: true
+        if: steps.plan.outputs.action == 'publish' || steps.plan.outputs.action == 'recover-tag'
+        env:
+          V: ${{ steps.plan.outputs.version }}
         run: |
-          TAG="awb-agent-manager-v${{ steps.resolve.outputs.version }}"
+          TAG="awb-agent-manager-v$V"
           if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
-            echo "Tag $TAG already exists — leaving it."
+            echo "Tag $TAG already exists locally — ensuring it is on origin."
+            git push origin "$TAG" || echo "::warning::tag push failed (likely already on remote); gitHead provenance still covers recovery."
           else
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git tag "$TAG"
-            git push origin "$TAG"
-            echo "Recorded release tag $TAG"
+            if git push origin "$TAG"; then
+              echo "Recorded release tag $TAG → $(git rev-parse HEAD)"
+            else
+              echo "::warning::tag push failed for $TAG; npm already has @$V and the next run recovers the tag via gitHead provenance."
+            fi
           fi
+
+      - name: Summary
+        env:
+          V: ${{ steps.plan.outputs.version }}
+          ACTION: ${{ steps.plan.outputs.action }}
+          REASON: ${{ steps.plan.outputs.reason }}
+        run: |
+          echo "version=$V action=$ACTION reason=$REASON" >> "$GITHUB_STEP_SUMMARY"
+          case "$ACTION" in
+            publish)     echo "Published awb-agent-manager@$V and recorded tag." >> "$GITHUB_STEP_SUMMARY" ;;
+            recover-tag) echo "@$V already on npm (this commit's artifact) — recovered the missing release tag only." >> "$GITHUB_STEP_SUMMARY" ;;
+            noop)        echo "@$V already on npm and tagged — nothing to do." >> "$GITHUB_STEP_SUMMARY" ;;
+          esac
