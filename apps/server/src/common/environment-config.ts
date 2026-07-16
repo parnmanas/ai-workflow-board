@@ -87,13 +87,20 @@ export type EnvironmentConfig = z.infer<typeof EnvironmentConfigSchema>;
 
 /**
  * WRITE-path schema (ticket 8fbe90e9). Board Settings > Environment Setup is now
- * a repository-Resource picker only — the single field an operator sets is each
+ * a SINGLE repository-Resource picker — the one field an operator sets is the
  * repository's `resource_id`. Everything the old surface carried is either
  * derived from the Resource + server defaults (url / branch / target_dir), never
  * executed by agent-manager (setup_commands / post_clone_commands /
  * setup_timeout_seconds are parsed but never run — "checkout is exclusively owned
  * by WT/QA provisioning"), or non-essential process-only config (env_vars /
  * version). So the write contract accepts ONLY repositories[].resource_id.
+ *
+ * At most ONE repository is accepted. Only env.repositories[0] is ever consumed
+ * (agent-manager resolveBootstrapRepository), so a second+ entry was dead config
+ * the operator believed was provisioned — the write path now REJECTS it rather
+ * than silently persisting a lie. Existing multi-entry rows already stored stay
+ * readable (EnvironmentConfigSchema below is unbounded) and collapse to the first
+ * repo the next time the board is saved.
  *
  * Unknown keys are STRIPPED, not rejected (zod object default): a not-yet-reloaded
  * client bundle or a legacy MCP caller that still POSTs the full shape during a
@@ -107,7 +114,10 @@ const EnvironmentRepositoryInputSchema = z.object({
 });
 
 export const EnvironmentConfigInputSchema = z.object({
-  repositories: z.array(EnvironmentRepositoryInputSchema).optional(),
+  repositories: z
+    .array(EnvironmentRepositoryInputSchema)
+    .max(1, 'at most one repository can be provisioned (only the first is ever used)')
+    .optional(),
 });
 
 /** A repository entry after server-side resolution: url is always concrete. */

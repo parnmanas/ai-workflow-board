@@ -4,38 +4,40 @@ import { tokens } from '../tokens';
 import { Button, Select } from './common';
 import { buildEnvironmentConfig, parseEnvironmentConfigRaw } from './environmentConfig.logic';
 
-// Board environment setup editor (ticket 354d336b; simplified to a repository-
-// Resource picker in 8fbe90e9). The only field an operator sets is which
-// repository Resource(s) the board provisions — the server derives the clone
+// Board environment setup editor (ticket 354d336b; simplified to a SINGLE
+// repository-Resource picker in 8fbe90e9). The only field an operator sets is
+// which repository Resource the board provisions — the server derives the clone
 // url / default_branch / credential from the Resource and owns the worktree
 // checkout, so URL / branch / target dir / post-clone commands / env_vars /
-// setup_commands / timeout / version are no longer entered here. The raw JSON
-// from the server is parsed tolerantly: a board saved before this change may
-// still carry those legacy keys; they are surfaced as a "will be dropped on
-// save" note and removed the next time the board is saved. Saving hands the
+// setup_commands / timeout / version are no longer entered here. Only the first
+// repository is ever provisioned (agent-manager reads env.repositories[0]), so
+// the picker edits exactly one selection rather than a multi-row list. The raw
+// JSON from the server is parsed tolerantly: a board saved before this change may
+// still carry legacy keys, extra repositories, or a url-only repo; they keep
+// resolving/executing until the next Save, which removes them. Saving hands the
 // caller { repositories: [{ resource_id }] } (or null when nothing is selected).
 
 interface EnvironmentConfigEditorProps {
   /** Raw environment_config JSON string from the Board row. */
   raw: string | null | undefined;
-  /** Repository resources (type='repository') for the per-repo dropdown. */
+  /** Repository resources (type='repository') for the picker dropdown. */
   repoOptions: Resource[];
   onSave(next: EnvironmentConfig | null): Promise<void>;
 }
 
 export default function EnvironmentConfigEditor({ raw, repoOptions, onSave }: EnvironmentConfigEditorProps) {
   const parsed = useMemo(() => parseEnvironmentConfigRaw(raw), [raw]);
-  const [repos, setRepos] = useState<string[]>(parsed.resourceIds);
+  const [repo, setRepo] = useState<string>(parsed.resourceId);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
 
   useEffect(() => {
-    setRepos(parsed.resourceIds);
+    setRepo(parsed.resourceId);
     setErr('');
   }, [parsed]);
 
-  // Only selected repositories are written; blank rows collapse. Empty → null.
-  const buildConfig = (): EnvironmentConfig | null => buildEnvironmentConfig(repos);
+  // Only the selected repository is written; empty selection → null.
+  const buildConfig = (): EnvironmentConfig | null => buildEnvironmentConfig(repo);
 
   const fieldLabelStyle: React.CSSProperties = {
     display: 'block',
@@ -46,20 +48,15 @@ export default function EnvironmentConfigEditor({ raw, repoOptions, onSave }: En
     fontWeight: 600,
   };
 
-  const updateRepo = (idx: number, value: string) =>
-    setRepos((prev) => prev.map((r, i) => (i === idx ? value : r)));
-  const removeRepo = (idx: number) => setRepos((prev) => prev.filter((_, i) => i !== idx));
-  const addRepo = () => setRepos((prev) => [...prev, '']);
-
   const baseOptions = [
-    { value: '', label: '— Select a repository —' },
+    { value: '', label: '— No repository (no provisioning) —' },
     ...repoOptions.map((r) => ({ value: r.id, label: r.name })),
   ];
-  // Preserve a resource_id whose Resource is missing from the list (deleted /
-  // not yet loaded) so editing another row can't silently drop it.
-  const optionsFor = (id: string) =>
-    id && !repoOptions.some((r) => r.id === id)
-      ? [...baseOptions, { value: id, label: `(unknown resource ${id.slice(0, 8)})` }]
+  // Preserve a selected resource_id whose Resource is missing from the list
+  // (deleted / not yet loaded) so re-selecting can't silently drop it.
+  const options =
+    repo && !repoOptions.some((r) => r.id === repo)
+      ? [...baseOptions, { value: repo, label: `(unknown resource ${repo.slice(0, 8)})` }]
       : baseOptions;
 
   return (
@@ -76,49 +73,40 @@ export default function EnvironmentConfigEditor({ raw, repoOptions, onSave }: En
         Environment Setup (board)
       </h3>
       <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, marginBottom: 12 }}>
-        Pick the repository Resource(s) this board provisions. The server derives the clone{' '}
+        Pick the repository Resource this board provisions. The server derives the clone{' '}
         <code>url</code>, default <code>branch</code>, and <code>credential</code> from the selected
-        Resource, and checks the <strong>first</strong> repository out as each ticket's worktree when
-        the ticket has no repository of its own. Leave empty for no provisioning (current behaviour).
+        Resource, and checks it out as each ticket's worktree when the ticket has no repository of its
+        own. Leave empty for no provisioning (current behaviour).
       </div>
 
       <div>
-        <label style={fieldLabelStyle}>Repositories</label>
-        {repos.length === 0 && (
-          <div style={{ fontSize: 12, color: tokens.colors.textMuted, marginBottom: 8 }}>
-            No repositories configured.
-          </div>
-        )}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {repos.map((id, idx) => (
-            <div key={idx} style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
-              <div style={{ flex: 1, minWidth: 220 }}>
-                <Select
-                  label={idx === 0 ? 'Repository resource (worktree bootstrap)' : `Repository resource #${idx + 1}`}
-                  value={id}
-                  options={optionsFor(id)}
-                  onChange={(e) => updateRepo(idx, e.target.value)}
-                />
-              </div>
-              <Button variant="ghost" size="sm" onClick={() => removeRepo(idx)}>
-                Remove
-              </Button>
-            </div>
-          ))}
-        </div>
-        <div style={{ marginTop: 8 }}>
-          <Button variant="secondary" size="sm" onClick={addRepo}>
-            + Add repository
-          </Button>
+        <label style={fieldLabelStyle}>Repository</label>
+        <div style={{ maxWidth: 420 }}>
+          <Select
+            label="Repository resource (worktree bootstrap)"
+            value={repo}
+            options={options}
+            onChange={(e) => setRepo(e.target.value)}
+          />
         </div>
       </div>
 
-      {parsed.hasLegacy && (
-        <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 12 }}>
-          ⚠️ This board's saved config still holds legacy fields (env vars, setup/post-clone commands,
-          per-repo url/branch/target dir, timeout, or version). They no longer affect execution and
-          will be dropped the next time you Save.
+      {parsed.losesWorktreeSourceOnSave ? (
+        <div style={{ fontSize: 11, color: tokens.colors.danger, marginTop: 12 }}>
+          ⚠️ This board's only worktree source is a legacy <strong>url-only</strong> repository (no
+          Resource). It stays active until you Save — but saving through this picker removes it, and
+          with no Resource selected the board would be left with <strong>no provisioning source</strong>.
+          Select a repository Resource before saving to keep worktree bootstrap working.
         </div>
+      ) : (
+        parsed.hasLegacy && (
+          <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 12 }}>
+            ⚠️ This board's saved config still holds legacy fields (env vars, setup/post-clone
+            commands, per-repo url/branch/target dir, timeout, version, or extra repositories). They
+            remain active until you Save; saving removes them and provisions only the selected
+            repository.
+          </div>
+        )
       )}
 
       <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginTop: 16 }}>

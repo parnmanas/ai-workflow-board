@@ -77,6 +77,23 @@ test('write: rejects a whitespace-only resource_id', () => {
   assert.equal(r.ok, false);
 });
 
+test('write: rejects more than one repository (only the first is ever provisioned)', () => {
+  // The old surface let operators "Add repository" for a 2nd+ row that agent-manager
+  // (env.repositories[0]) never consumed — dead config. The single-picker write path
+  // now 400s it instead of silently persisting a lie.
+  const r = validateEnvironmentConfigInput({
+    repositories: [{ resource_id: 'res-1' }, { resource_id: 'res-2' }],
+  });
+  assert.equal(r.ok, false, 'a 2nd repository is rejected, not silently dropped');
+  assert.match(r.error, /repositories/i, 'error names the repositories path');
+});
+
+test('write: accepts exactly one repository (the boundary)', () => {
+  const r = validateEnvironmentConfigInput({ repositories: [{ resource_id: 'res-1' }] });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.value, { repositories: [{ resource_id: 'res-1' }] });
+});
+
 test('write: empty / repo-less config serializes back to null', () => {
   for (const input of [{}, { repositories: [] }, { env_vars: { A: '1' }, setup_commands: ['x'] }]) {
     const r = validateEnvironmentConfigInput(input);
@@ -150,6 +167,64 @@ test('resolve output satisfies the agent-manager parse + bootstrap invariants', 
   assert.ok(repo0.target_dir && repo0.target_dir.length > 0, 'agent-manager requires a non-empty target_dir');
   const bootstrap = { resourceId: repo0.resource_id || '', url: repo0.url, branch: repo0.branch };
   assert.deepEqual(bootstrap, { resourceId: 'res-1', url: REPO_URL, branch: 'main' });
+});
+
+test('single select → save → the (only) repo is what worktree bootstrap uses', () => {
+  // Full chain the reviewer asked to prove, starting at the UI write path:
+  //   picker selection → validateEnvironmentConfigInput (write) → serialize (store)
+  //   → parseEnvironmentConfig (read) → resolveEnvironmentConfig (SSE) →
+  //   resolveBootstrapRepository(env.repositories[0]).
+  const written = validateEnvironmentConfigInput({ repositories: [{ resource_id: 'res-1' }] });
+  assert.equal(written.ok, true);
+  const stored = serializeEnvironmentConfig(written.value);
+  assert.ok(stored, 'a repo-only config serializes to a non-null column');
+  const resolved = resolveEnvironmentConfig(parseEnvironmentConfig(stored), lookup);
+  assert.ok(resolved, 'the stored config resolves for the SSE payload');
+  // Mirror resolveBootstrapRepository(baseRepo=null, baseBranch=null, env): with no
+  // ticket-level repo it falls to env.repositories[0].
+  const wire = JSON.parse(JSON.stringify(resolved));
+  const boardRepo = wire.repositories[0];
+  const bootstrap = boardRepo
+    ? { resourceId: boardRepo.resource_id || '', url: boardRepo.url, branch: boardRepo.branch }
+    : null;
+  assert.deepEqual(
+    bootstrap,
+    { resourceId: 'res-1', url: REPO_URL, branch: 'main' },
+    'the single selected repo drives worktree bootstrap (url/branch from the Resource)',
+  );
+});
+
+test('change selection → save → bootstrap follows the newly-picked repo', () => {
+  // Operator changes the single dropdown to a different Resource and re-saves.
+  const lookup2 = (id) =>
+    id === 'res-2' ? { url: 'https://github.com/parnmanas/other.git', default_branch: 'develop' } : null;
+  const written = validateEnvironmentConfigInput({ repositories: [{ resource_id: 'res-2' }] });
+  assert.equal(written.ok, true);
+  const resolved = resolveEnvironmentConfig(
+    parseEnvironmentConfig(serializeEnvironmentConfig(written.value)),
+    lookup2,
+  );
+  const repo0 = resolved.repositories[0];
+  assert.equal(repo0.resource_id, 'res-2', 'bootstrap now uses the changed selection');
+  assert.equal(repo0.url, 'https://github.com/parnmanas/other.git');
+  assert.equal(repo0.branch, 'develop');
+});
+
+test('backcompat read: a stored MULTI-repo array still resolves, bootstrap takes the first', () => {
+  // Already-stored legacy arrays (written before the max-1 write cap) must keep
+  // working on the READ path — resolve iterates all, bootstrap consumes [0].
+  const legacyMulti = JSON.stringify({
+    repositories: [{ resource_id: 'res-1' }, { resource_id: 'res-2' }],
+  });
+  const resolved = resolveEnvironmentConfig(parseEnvironmentConfig(legacyMulti), (id) =>
+    id === 'res-1'
+      ? { url: REPO_URL, default_branch: 'main' }
+      : id === 'res-2'
+        ? { url: 'https://github.com/parnmanas/other.git', default_branch: 'develop' }
+        : null,
+  );
+  assert.ok(resolved, 'a stored multi-repo array is NOT dropped on read');
+  assert.equal(resolved.repositories[0].resource_id, 'res-1', 'bootstrap [0] is the first stored repo');
 });
 
 test('resolve: a resource_id that fails lookup and has no url is dropped (not shipped un-cloneable)', () => {
