@@ -23,6 +23,7 @@ import {
   createColumn,
   createTicket,
   createApiKey,
+  createUser,
 } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
@@ -58,14 +59,21 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   const mcp = new McpClient({ baseUrl: `http://localhost:${port}`, apiKey: key.raw_key });
   await mcp.initialize();
 
+  // Admin user who can approve high-impact runs; a non-admin used to prove the
+  // approval authority check (scope-5 approval gate, CASEs 6/8/9/10/11).
+  const admin = await createUser(app, getDataSourceToken, { name: 'approver', role: 'admin' });
+
   // ─────────────────────────────────────────────────────────────────────────
   // CASE 1 — 기존 Action 실행 → 완료(succeeded) → 동일 티켓 자동 재개
   // ─────────────────────────────────────────────────────────────────────────
   step('CASE 1 — existing Action: run(source_ticket_id) → complete succeeded → resume');
+  // Benign (low-impact) Action — the everyday "an Action clears the blocker,
+  // ticket auto-resumes" path. Deliberately NOT named deploy/publish/release so
+  // it is not escalated by the high-impact name heuristic (that path is CASE 6+).
   const existing = await mcp.callTool('save_action', {
     workspace_id: ws.id,
-    name: 'Deploy prod',
-    prompt: 'deploy {{workspace.name}}',
+    name: 'Reindex search',
+    prompt: 'reindex {{workspace.name}}',
     target_agent_id: agent.id,
   });
   assert.ok(!existing.isError, 'save_action (existing) succeeds');
@@ -97,7 +105,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
     run_id: run1.run_id,
     workspace_id: ws.id,
     status: 'succeeded',
-    summary: 'deployed build 42 to prod',
+    summary: 'reindexed 1.2M docs',
   });
   assert.ok(!done1.isError, 'complete_action_run succeeds');
   assert.equal(done1.status, 'succeeded', 'run recorded as succeeded');
@@ -111,7 +119,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
 
   // Result reflected on the ticket audit trail — comment + activity row.
   const t1full = await mcp.callTool('get_ticket', { ticket_id: ticket1.id });
-  const successComment = (t1full.comments || []).find((c) => /succeeded/i.test(c.content) && /deployed build 42/.test(c.content));
+  const successComment = (t1full.comments || []).find((c) => /succeeded/i.test(c.content) && /reindexed 1\.2M docs/.test(c.content));
   assert.ok(successComment, 'success outcome posted as a ticket comment');
   const acts1 = await ds.getRepository('ActivityLog').find({
     where: { ticket_id: ticket1.id, action: 'action_run_completed' },
@@ -144,8 +152,8 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   step('CASE 2 — newly registered Action: register → run → complete → resume');
   const fresh = await mcp.callTool('save_action', {
     workspace_id: ws.id,
-    name: 'Publish package',
-    prompt: 'publish',
+    name: 'Regenerate sitemap',
+    prompt: 'regenerate',
     target_agent_id: agent.id,
   });
   assert.ok(!fresh.isError && fresh.id, 'new Action registered');
@@ -160,12 +168,12 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
     run_id: run2.run_id,
     workspace_id: ws.id,
     status: 'succeeded',
-    summary: 'published v1.2.3',
+    summary: 'regenerated sitemap',
   });
   assert.equal(done2.resumed, true, 'newly-registered Action run also auto-resumes the source ticket');
   assert.ok(done2.resume_emitted >= 1, 'new-Action resume re-dispatched the assignee');
   const t2full = await mcp.callTool('get_ticket', { ticket_id: ticket2.id });
-  assert.ok((t2full.comments || []).some((c) => /published v1\.2\.3/.test(c.content)), 'new-Action outcome on ticket');
+  assert.ok((t2full.comments || []).some((c) => /regenerated sitemap/.test(c.content)), 'new-Action outcome on ticket');
 
   // ─────────────────────────────────────────────────────────────────────────
   // CASE 3 — 실행 실패 → 자동 재시도(bounded) → 소진 시 surfacing + 재개
@@ -173,8 +181,8 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   step('CASE 3 — failure: bounded auto-retry, then surface + resume at the cap');
   const flaky = await mcp.callTool('save_action', {
     workspace_id: ws.id,
-    name: 'Flaky deploy',
-    prompt: 'deploy-maybe',
+    name: 'Flaky sync',
+    prompt: 'sync-maybe',
     target_agent_id: agent.id,
   });
   const ticket3 = await createTicket(app, getDataSourceToken, {
@@ -262,7 +270,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   step('CASE 5 — concurrent completion is atomic (exactly-once audit + resume)');
   const svc = app.get(ActionsService);
   const conc = await mcp.callTool('save_action', {
-    workspace_id: ws.id, name: 'Concurrent deploy', prompt: 'x', target_agent_id: agent.id,
+    workspace_id: ws.id, name: 'Concurrent sync', prompt: 'x', target_agent_id: agent.id,
   });
   const ticket5 = await createTicket(app, getDataSourceToken, {
     columnId: col.id, workspaceId: ws.id, title: 'blocked concurrent', assigneeId: agent.id,
@@ -297,7 +305,12 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   const ticket6 = await createTicket(app, getDataSourceToken, {
     columnId: col.id, workspaceId: ws.id, title: 'blocked on release', assigneeId: agent.id,
   });
-  const run6 = await mcp.callTool('run_action', { action_id: hi.id, source_ticket_id: ticket6.id });
+  // High-impact ⇒ the run needs an admin approver (gate covered in CASE 8-11);
+  // here we approve it so we can exercise the no-auto-retry-on-failure path.
+  const run6 = await mcp.callTool('run_action', {
+    action_id: hi.id, source_ticket_id: ticket6.id, approved_by_user_id: admin.id,
+  });
+  assert.ok(!run6.isError, 'approved high-impact run is dispatched');
   // The run carries a minted idempotency key surfaced in the prompt contract.
   const runs6 = await mcp.callTool('list_action_runs', { workspace_id: ws.id, action_id: hi.id });
   const row6 = findRun(runs6, run6.run_id);
@@ -341,6 +354,101 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   const runs7b = await mcp.callTool('list_action_runs', { workspace_id: ws.id, action_id: keyed.id });
   const retryKey = findRun(runs7b, f7.retry_run_id).idempotency_key;
   assert.equal(retryKey, key7, 'the retry run reuses the same idempotency key');
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // CASE 8 — high-impact run WITHOUT approval is rejected + parks the ticket
+  // (scope 5 pre-execution approval gate — reviewer req: unapproved rejection).
+  // ─────────────────────────────────────────────────────────────────────────
+  step('CASE 8 — unapproved high-impact ticket-driven run is rejected + parks the ticket');
+  const gated = await mcp.callTool('save_action', {
+    workspace_id: ws.id, name: 'Ship release to production', prompt: 'ship', target_agent_id: agent.id, high_impact: true,
+  });
+  assert.ok(!gated.isError && gated.id, 'high-impact Action registered');
+  const ticket8 = await createTicket(app, getDataSourceToken, {
+    columnId: col.id, workspaceId: ws.id, title: 'blocked on ship', assigneeId: agent.id,
+  });
+  const gatedRun = await mcp.callTool('run_action', { action_id: gated.id, source_ticket_id: ticket8.id });
+  assert.equal(gatedRun.isError, true, 'high-impact run without approval is rejected BEFORE execution');
+  assert.match(JSON.stringify(gatedRun.error), /approval/i, 'rejection explains approval is required');
+  // No run row — the reject happens before any dispatch/side effect.
+  const gatedRuns = await mcp.callTool('list_action_runs', { workspace_id: ws.id, action_id: gated.id });
+  assert.equal(gatedRuns.length, 0, 'no ActionRun row created for the rejected high-impact run');
+  // The source ticket is parked for a human (완료 기준: 승인 필요 → Pending).
+  const t8 = await mcp.callTool('get_ticket', { ticket_id: ticket8.id });
+  assert.equal(t8.pending_user_action, true, 'the source ticket is parked pending_user_action');
+  assert.match(t8.pending_reason, /approval/i, 'the pending reason names the approval requirement');
+  const parkActs = await ds.getRepository('ActivityLog').find({
+    where: { ticket_id: ticket8.id, action: 'action_run_pending_approval' },
+  });
+  assert.ok(parkActs.length >= 1, 'park-for-approval writes an audit row');
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // CASE 9 — high-impact run WITH admin approval executes + records approver
+  // (reviewer req: approved execution + auditable approver/time).
+  // ─────────────────────────────────────────────────────────────────────────
+  step('CASE 9 — admin-approved high-impact run executes + records the approver');
+  const ticket9 = await createTicket(app, getDataSourceToken, {
+    columnId: col.id, workspaceId: ws.id, title: 'blocked on approved ship', assigneeId: agent.id,
+  });
+  const approvedRun = await mcp.callTool('run_action', {
+    action_id: gated.id, source_ticket_id: ticket9.id, approved_by_user_id: admin.id,
+  });
+  assert.ok(!approvedRun.isError, 'an admin-approved high-impact run IS dispatched');
+  assert.ok(approvedRun.run_id, 'the approved run has an id');
+  const runs9 = await mcp.callTool('list_action_runs', { workspace_id: ws.id, action_id: gated.id });
+  const row9 = findRun(runs9, approvedRun.run_id);
+  assert.equal(row9.approved_by, admin.id, 'the run records the approving user id');
+  assert.ok(row9.approved_at, 'the run records the approval time');
+  const apprActs = await ds.getRepository('ActivityLog').find({
+    where: { ticket_id: ticket9.id, action: 'action_run_approved' },
+  });
+  assert.ok(apprActs.length >= 1, 'approval writes an auditable activity row');
+  assert.equal(apprActs[0].actor_id, admin.id, 'the approval audit records the approver');
+  const t9 = await mcp.callTool('get_ticket', { ticket_id: ticket9.id });
+  assert.equal(t9.pending_user_action, false, 'an approved run does NOT park the ticket');
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // CASE 10 — unauthorized approval attempts are rejected (reviewer req:
+  // 권한 없는 승인 시도). A non-admin user and a non-user (agent) id both fail.
+  // ─────────────────────────────────────────────────────────────────────────
+  step('CASE 10 — non-admin / non-user approver is rejected');
+  const member = await createUser(app, getDataSourceToken, { name: 'member', role: 'user' });
+  const ticket10 = await createTicket(app, getDataSourceToken, {
+    columnId: col.id, workspaceId: ws.id, title: 'blocked unauth approve', assigneeId: agent.id,
+  });
+  const memberRun = await mcp.callTool('run_action', {
+    action_id: gated.id, source_ticket_id: ticket10.id, approved_by_user_id: member.id,
+  });
+  assert.equal(memberRun.isError, true, 'a non-admin user cannot approve a high-impact run');
+  assert.match(JSON.stringify(memberRun.error), /authorized|admin/i, 'rejection names the missing authority');
+  // An agent id is not a user → cannot self-approve.
+  const selfApprove = await mcp.callTool('run_action', {
+    action_id: gated.id, source_ticket_id: ticket10.id, approved_by_user_id: agent.id,
+  });
+  assert.equal(selfApprove.isError, true, 'an agent id is not a valid approver (no self-approval)');
+  // Only the CASE-9 approved run exists on `gated`; the unauthorized attempts made none.
+  const gatedRuns2 = await mcp.callTool('list_action_runs', { workspace_id: ws.id, action_id: gated.id });
+  assert.equal(gatedRuns2.length, 1, 'unauthorized approvals created no ActionRun row');
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // CASE 11 — misclassification cannot bypass the gate (reviewer req 3). An
+  // Action saved high_impact=false but NAMED like a deploy is still escalated
+  // by the name heuristic → gated + parked (safe default / fail-closed).
+  // ─────────────────────────────────────────────────────────────────────────
+  step('CASE 11 — a deploy-named Action with high_impact=false is still gated');
+  const misclassified = await mcp.callTool('save_action', {
+    workspace_id: ws.id, name: 'Deploy to production', prompt: 'deploy', target_agent_id: agent.id,
+  });
+  assert.ok(!misclassified.isError, 'misclassified action saves (high_impact omitted → false)');
+  assert.equal(misclassified.high_impact, false, 'it is stored NOT explicitly flagged high_impact');
+  const ticket11 = await createTicket(app, getDataSourceToken, {
+    columnId: col.id, workspaceId: ws.id, title: 'blocked on misclassified deploy', assigneeId: agent.id,
+  });
+  const miscRun = await mcp.callTool('run_action', { action_id: misclassified.id, source_ticket_id: ticket11.id });
+  assert.equal(miscRun.isError, true, 'a deploy-named action is gated even when high_impact=false');
+  assert.match(JSON.stringify(miscRun.error), /approval/i, 'the name heuristic escalates it to the approval gate');
+  const t11 = await mcp.callTool('get_ticket', { ticket_id: ticket11.id });
+  assert.equal(t11.pending_user_action, true, 'a misclassified high-impact run parks the ticket too');
 
   await mcp.close();
   exitAfterTests(0);
