@@ -25,6 +25,7 @@ import {
   refreshTicketWorkspaceId,
   resolveAgentId,
   resolveAgentIdAndName,
+  resolveCallerDisplayName,
   shiftTicketPositions,
   deleteCommentAttachmentsForTicket,
   validateNextTicketId,
@@ -533,7 +534,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           ticket.pending_user_action = next;
           if (next) {
             ticket.pending_set_at = new Date();
-            ticket.pending_set_by = caller?.agentName || '';
+            ticket.pending_set_by = await resolveCallerDisplayName(dataSource, caller);
             if (pending_reason !== undefined) {
               ticket.pending_reason = pending_reason || '';
             }
@@ -656,7 +657,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       ticket.pending_reason = reason || '';
       if (!wasPending) {
         ticket.pending_set_at = new Date();
-        ticket.pending_set_by = caller?.agentName || '';
+        ticket.pending_set_by = await resolveCallerDisplayName(dataSource, caller);
       }
       await ticketRepo.save(ticket);
       await activityService.logActivity({
