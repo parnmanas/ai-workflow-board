@@ -31,6 +31,7 @@ import {
   AgentStatusService,
   OUTPUT_LIVENESS_TTL_FLOOR_MS,
   OUTPUT_LIVENESS_TTL_CEILING_MS,
+  CURRENT_TASK_STALE_MS,
 } from './agent-status.service';
 import { AllocationService, AllocatedTicketRow } from './allocation.service';
 import { TriggerLoopService } from './trigger-loop.service';
@@ -400,13 +401,16 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
         // For such a ticket the FIRST re-push fires after the short liveness
         // floor (SUPERVISOR_LIVENESS_FLOOR_MS) instead of the full stale window
         // (up to 4 h on a mis-set workspace — the incident this ticket fixes).
-        // It is still the ordinary non-force nudge and funnels through
-        // _emitTrigger's in-flight-strand + provisioning single-flight gates, so
-        // if a strand IS live (or mid-provision) the nudge is simply dropped —
-        // no double-spawn, no respawn storm, no branch collision. A PRESENT /
-        // producing strand (hasLiveStrand || hasRecentOutput) and a stuck-flagged
-        // ticket keep the full stale window, so the exit-143 deathloop fix and
-        // the stuck-detector throttle are untouched.
+        // It is still the ordinary non-force nudge and funnels through the
+        // server's in-flight-strand gate (_emitTrigger drops it when
+        // hasLiveRoleStrand is true) AND, downstream, the agent-manager's
+        // provision-spanning single-flight (one session per ticket:role:agent
+        // key). So if a strand IS live (or mid-provision) the nudge is dropped
+        // by one of those two layers — no double-spawn, no respawn storm, no
+        // branch collision. A PRESENT / producing strand (hasLiveStrand ||
+        // hasRecentOutput) and a stuck-flagged ticket keep the full stale
+        // window, so the exit-143 deathloop fix and the stuck-detector throttle
+        // are untouched.
         const hasLiveStrand = this.agentStatus.hasLiveRoleStrand(agent.id, row.ticket_id, row.role);
         const absentStrand = !hasLiveStrand && !hasRecentOutput;
         const firstPushThresholdMs = resolveFirstPushThresholdMs({
@@ -424,6 +428,19 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
         const entry = this.state.get(key);
 
         if (!entry) {
+          // Atomic dead-strand slot reclaim (ticket 1fcba693). This is the FIRST
+          // re-push of a stale allocation NOBODY is working. Before nudging,
+          // reclaim the seat the dead strand leaked — the agent-manager is meant
+          // to clear_current_task + release_ticket on exit, but a SIGTERM
+          // self-update (no drain), a respawn child (no release listener), or a
+          // reap-without-exit can skip it, stranding current_task ≤15 min and the
+          // claim ≤30 min. Reclaiming here makes active-count / the claim correct
+          // at re-dispatch instead of waiting a sweep. Successor-safe: a live
+          // strand that grabbed the seat is never evicted. present/producing
+          // strands never reach here (absentStrand=false → full stale window).
+          if (absentStrand) {
+            await this._reclaimStaleSlot(row.ticket_id, agent.id, now);
+          }
           // First re-push after crossing the stale threshold is ALWAYS non-force
           // (a gentle nudge), regardless of output-liveness. Escalation to force
           // only happens on later ticks if silence persists.
@@ -453,6 +470,14 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
           } else if (decision.circuitOpen && !entry.circuitOpen) {
             entry.circuitOpen = true;
             await this._flagCircuitOpen(row, agent.id, entry.forceCount);
+          }
+          // Reclaim on the resend path too (ticket 1fcba693): a strand can die
+          // AFTER its state entry was created (its own first nudge, or a nudge
+          // dropped while it was briefly live), so the absent-strand seat cleanup
+          // must not be exclusive to the first-push branch. Successor-safe and a
+          // no-op when nothing is stale.
+          if (absentStrand) {
+            await this._reclaimStaleSlot(row.ticket_id, agent.id, now);
           }
           await this._emit(row, agent.id, decision.forceRespawn, now);
           entry.lastEmitAt = now;
@@ -496,6 +521,66 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
     } catch (e: unknown) {
       this.logService.error('TicketSupervisor', 'emit failed', {
         err: e, ticket_id: row.ticket_id, agent_id: agentId, role: row.role,
+      });
+    }
+  }
+
+  /**
+   * Atomic dead-strand slot reclaim (ticket 1fcba693). Called just before the
+   * FIRST supervisor re-push of a stale allocation with NO live strand and NO
+   * recent output — a ticket whose session died / was killed on a manager
+   * restart (exit 143) / never spawned. Frees BOTH halves of the seat the dead
+   * strand leaked so a fresh strand starts clean and observability is correct:
+   *   1. current_task (in-memory, AgentStatusService): compare-and-clear the
+   *      ghost entry — successor-safe, never evicts a live re-stamp.
+   *   2. ticket claim (DB lock): an atomic conditional UPDATE clearing
+   *      locked_by_agent_id / locked_at ONLY while still held by THIS (dead)
+   *      agent AND acquired before the reclaim grace (CURRENT_TASK_STALE_MS),
+   *      mirroring AgentConnectionService.sweepExpiredLocks' query-builder idiom
+   *      (bypasses @VersionColumn). Tightens claim recovery from the 30-min
+   *      lock-TTL sweep to the liveness window; a live successor's fresh claim
+   *      (recent locked_at) is left intact.
+   *
+   * Both steps are best-effort — a failure must not block the re-dispatch. It
+   * writes NO ticket activity: a claim release is intentionally excluded from
+   * my_last_update_at (allocation.service), and resetting the staleness clock
+   * here would suppress the very resend cadence we depend on.
+   */
+  private async _reclaimStaleSlot(ticketId: string, agentId: string, now: number): Promise<void> {
+    // 1. current_task ghost (in-memory).
+    try {
+      const cleared = this.agentStatus.reclaimStaleStrand(agentId, ticketId, CURRENT_TASK_STALE_MS);
+      if (cleared) {
+        this.logService.info('TicketSupervisor', 'reclaimed stale current_task at re-dispatch', {
+          ticket_id: ticketId, agent_id: agentId,
+        });
+      }
+    } catch (e) {
+      this.logService.warn('TicketSupervisor', 'current_task reclaim failed (non-fatal)', {
+        err: String(e), ticket_id: ticketId, agent_id: agentId,
+      });
+    }
+    // 2. stale claim / lock (DB) — successor-safe atomic conditional UPDATE.
+    try {
+      const cutoff = new Date(now - CURRENT_TASK_STALE_MS);
+      const res = await this.dataSource
+        .getRepository(Ticket)
+        .createQueryBuilder()
+        .update(Ticket)
+        .set({ locked_by_agent_id: null, locked_at: null })
+        .where(
+          'id = :ticketId AND locked_by_agent_id = :agentId AND (locked_at IS NULL OR locked_at < :cutoff)',
+          { ticketId, agentId, cutoff },
+        )
+        .execute();
+      if ((res.affected ?? 0) > 0) {
+        this.logService.info('TicketSupervisor', 'released stale claim at re-dispatch', {
+          ticket_id: ticketId, agent_id: agentId,
+        });
+      }
+    } catch (e) {
+      this.logService.warn('TicketSupervisor', 'stale-claim reclaim failed (non-fatal)', {
+        err: String(e), ticket_id: ticketId, agent_id: agentId,
       });
     }
   }

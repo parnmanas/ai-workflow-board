@@ -36,10 +36,12 @@ export const DEFAULT_SUPERVISOR_STALE_MS = 30 * 60_000; // 30 min
  * has NO live strand (current_task absent / TTL-expired) AND NO recent
  * output-liveness — i.e. nobody is actually working it — the supervisor's FIRST
  * re-push fires after this floor instead of the full supervisor_stale_ms
- * window. The re-push is the ordinary non-force nudge and funnels through
- * _emitTrigger's in-flight-strand + provisioning single-flight gates, so a
- * strand that IS live (or mid-provision) simply drops the nudge — no
- * double-spawn, no respawn storm, no branch collision.
+ * window. The re-push is the ordinary non-force nudge and funnels through the
+ * server's in-flight-strand gate (_emitTrigger drops it while hasLiveRoleStrand
+ * is true) and, downstream, the agent-manager's provision-spanning single-flight
+ * (one session per ticket:role:agent key), so a strand that IS live (or
+ * mid-provision) simply drops the nudge — no double-spawn, no respawn storm, no
+ * branch collision.
  */
 export const DEFAULT_SUPERVISOR_LIVENESS_FLOOR_MS = 2 * 60_000; // 2 min
 

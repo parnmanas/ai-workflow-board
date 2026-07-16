@@ -83,7 +83,10 @@ const OFFLINE_THRESHOLD_MS = 90_000;
 // the sweep auto-clears any task older than this so the dashboard recovers
 // without manual intervention. Tuned long enough that legitimate long-running
 // reviews don't flap, short enough that crashes self-heal within ~one sweep.
-const CURRENT_TASK_STALE_MS = 15 * 60_000;
+// Exported (ticket 1fcba693) so the TicketSupervisor's stale-slot reclaim and
+// the cadence diagnostic share ONE definition of "a current_task this old is a
+// dead strand's ghost, not a live worker".
+export const CURRENT_TASK_STALE_MS = 15 * 60_000;
 // Output-liveness eviction TTL (ticket fdc69c13, hardened by 47a72129). A
 // per-(agent,ticket,role) output timestamp has nobody to clear it once the
 // session ends; the 30s sweep drops entries older than the *effective* TTL so
@@ -622,6 +625,55 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
       remaining_active_count: tasks.size,
       timestamp: new Date().toISOString(),
     });
+  }
+
+  /**
+   * Reclaim a confirmed-dead strand's current_task slot (ticket 1fcba693).
+   *
+   * The TicketSupervisor calls this when it has independently determined that
+   * NOBODY is working a stale allocation (no live strand AND no recent
+   * output-liveness) and is about to re-dispatch it. The agent-manager is
+   * SUPPOSED to clear_current_task on session exit, but three known leaks (SIGTERM
+   * self-update with no drain, respawn children with no release listener, and
+   * reap-without-exit) can strand the entry until the 30 s sweep or the 15 min
+   * TTL. This lets the server reclaim it AT re-dispatch so active-count / the
+   * dashboard badge are correct immediately instead of lagging a sweep.
+   *
+   * Successor-safe compare-and-clear: the entry is dropped ONLY if its
+   * claimed_at is older than `staleMs`. If a live successor strand re-stamped
+   * current_task in the meantime (fresh claimed_at) it is left untouched — we
+   * never evict a working strand's seat (the stale-lease successor-deletion
+   * hazard). Because hasLiveRoleStrand already treats a >CURRENT_TASK_STALE_MS
+   * entry as not-live, a caller passing CURRENT_TASK_STALE_MS clears exactly the
+   * ghost it just classified absent, and no fresher entry.
+   *
+   * Unlike clearCurrentTask this does NOT emit the 'agent_idle' broadcast: the
+   * supervisor emits its own single non-force nudge for this ticket right after,
+   * and driving re-dispatch through BOTH the agent_idle→transition-replay drain
+   * and the supervisor nudge would double-emit. It still refreshes the dashboard
+   * status (_emit) so the freed seat is visible. Returns true iff it cleared a
+   * stale entry.
+   */
+  reclaimStaleStrand(agent_id: string, ticket_id: string, staleMs: number): boolean {
+    if (!agent_id || !ticket_id) return false;
+    const status = this.state.get(agent_id);
+    if (!status?.active_tasks || status.active_tasks.size === 0) return false;
+    const task = status.active_tasks.get(ticket_id);
+    if (!task) return false;
+    const cutoff = new Date(Date.now() - staleMs);
+    // Live successor re-stamped the seat — never evict it.
+    if (task.claimed_at >= cutoff) return false;
+
+    const tasks = new Map(status.active_tasks);
+    tasks.delete(ticket_id);
+    const updated: AgentStatus = {
+      ...status,
+      active_tasks: tasks.size > 0 ? tasks : undefined,
+      current_task: tasks.size > 0 ? pickMostRecent(tasks) : undefined,
+    };
+    this.state.set(agent_id, updated);
+    this._emit(updated);
+    return true;
   }
 
   /**

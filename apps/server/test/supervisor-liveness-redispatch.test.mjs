@@ -37,7 +37,7 @@ const ago = (ms) => new Date(Date.now() - ms).toISOString();
 const KEY = 'A:t1:assignee';
 
 // ── Fakes ────────────────────────────────────────────────────────────────
-function fakeDataSource({ workspace = null, stuckIds = [], activitySink } = {}) {
+function fakeDataSource({ workspace = null, stuckIds = [], activitySink, lockReleaseSink } = {}) {
   return {
     getRepository(entity) {
       const name = entity?.name || '';
@@ -49,7 +49,21 @@ function fakeDataSource({ workspace = null, stuckIds = [], activitySink } = {}) 
           },
         };
       }
-      if (name === 'Ticket') return { async findOne({ where }) { return { id: where.id }; } };
+      if (name === 'Ticket') {
+        return {
+          async findOne({ where }) { return { id: where.id }; },
+          // Capture the successor-safe stale-claim reclaim UPDATE (ticket 1fcba693).
+          createQueryBuilder() {
+            const qb = {
+              update() { return qb; },
+              set(v) { qb._set = v; return qb; },
+              where(_clause, params) { qb._params = params; return qb; },
+              async execute() { lockReleaseSink?.push({ set: qb._set, params: qb._params }); return { affected: 1 }; },
+            };
+            return qb;
+          },
+        };
+      }
       if (name === 'ActivityLog') {
         return { create(x) { return x; }, async save(x) { activitySink?.push(x); return x; } };
       }
@@ -77,27 +91,41 @@ async function makeSupervisor({
     async find() { return [{ id: 'A', last_seen_at: new Date(), workspace_id: 'ws1' }]; },
   };
   const activitySink = [];
+  const lockReleaseSink = [];
   const dataSource = fakeDataSource({
     workspace: { id: 'ws1', supervisor_stale_ms: staleMs },
     stuckIds,
     activitySink,
+    lockReleaseSink,
   });
   const allocationService = { async getAllocatedTickets() { return [allocRow]; } };
   const emitted = [];
+  const emitOrder = [];
   const triggerLoop = {
     async emitAgentTrigger(ticket, agentId, role, _source, _by, opts) {
+      emitOrder.push('emit');
       emitted.push({ ticketId: ticket.id, agentId, role, forceRespawn: !!(opts && opts.forceRespawn) });
     },
   };
+  const reclaimed = [];
   const agentStatus = {
     getOutputLivenessAt: () => (outputAgoMs == null ? undefined : Date.now() - outputAgoMs),
     getOutputLivenessTtlMs: () => ttlMs,
     hasLiveRoleStrand: () => liveStrand,
+    // Compare-and-clear reclaim (ticket 1fcba693). The real impl only clears a
+    // TTL-stale entry; here we record the call so a test can assert the
+    // supervisor reclaims the seat BEFORE it nudges. Return liveStrand===false
+    // (a ghost exists to clear only when no live strand).
+    reclaimStaleStrand(agentId, ticketId) {
+      emitOrder.push('reclaim');
+      reclaimed.push({ agentId, ticketId });
+      return !liveStrand;
+    },
   };
   const service = new TicketSupervisorService(
     agentRepo, dataSource, allocationService, triggerLoop, agentStatus, noopLog, new MemoryMetricsRegistry(),
   );
-  return { service, emitted, activitySink };
+  return { service, emitted, activitySink, reclaimed, lockReleaseSink, emitOrder };
 }
 
 // ── Unit: pure helpers ─────────────────────────────────────────────────────
@@ -138,10 +166,13 @@ test('unit resolveSupervisorLivenessFloorMs: default 2 min, positive env overrid
 
 // ── Integration: drive _tick() ─────────────────────────────────────────────
 
-test('DoD: a DEAD/absent strand under a 4 h stale window is re-dispatched within minutes, EXACTLY once', async () => {
+test('DoD: a DEAD/absent strand under a 4 h stale window is re-dispatched within minutes, EXACTLY once, and its seat is reclaimed FIRST', async () => {
   // Ticket last written 5 min ago; supervisor_stale_ms = 4 h (the incident).
   // No live strand, no output → nobody is working it. Old behavior: wait ~4 h.
-  const { service, emitted } = await makeSupervisor({
+  // (Decision-level coverage with fakes; the REAL AgentStatus reclaim + real
+  // in-flight emit gate + restart are proven in
+  // qa-flows/supervisor-liveness-reclaim.test.mjs.)
+  const { service, emitted, reclaimed, lockReleaseSink, emitOrder } = await makeSupervisor({
     allocRow: { ticket_id: 't1', role: 'assignee', my_last_update_at: ago(5 * MIN) },
     liveStrand: false,
     outputAgoMs: null,
@@ -152,11 +183,37 @@ test('DoD: a DEAD/absent strand under a 4 h stale window is re-dispatched within
   assert.equal(emitted.length, 1, 'absent strand re-dispatched on the first tick (floor 2 min < 5 min staleness), not after 4 h');
   assert.equal(emitted[0].forceRespawn, false, 'first re-push is a NON-force nudge (funnels through the in-flight gate — no kill)');
 
+  // Slot reclaim (ticket 1fcba693): the dead strand's current_task ghost and
+  // its stale claim are reclaimed BEFORE the nudge, so active-count/claim are
+  // correct at re-dispatch (not a sweep later).
+  assert.deepEqual(reclaimed, [{ agentId: 'A', ticketId: 't1' }], 'reclaimStaleStrand called once for the dead seat');
+  assert.equal(emitOrder[0], 'reclaim', 'reclaim happens BEFORE emit');
+  assert.equal(emitOrder[1], 'emit');
+  assert.equal(lockReleaseSink.length, 1, 'the stale claim/lock is released once');
+  assert.equal(lockReleaseSink[0].params.agentId, 'A', 'lock release is scoped to the dead agent');
+  assert.deepEqual(lockReleaseSink[0].set, { locked_by_agent_id: null, locked_at: null }, 'lock columns cleared');
+
   // Exactly once: a second tick inside the resend cooldown must NOT re-emit
   // (no respawn storm — the completion condition's "정확히 1회 재-dispatch").
   await service._tick();
   assert.equal(emitted.length, 1, 'no re-emit within the resend cooldown — exactly one re-dispatch');
+  assert.equal(reclaimed.length, 1, 'no second reclaim within the cooldown (entry exists → not first-push)');
   assert.equal(service.state.size, 1, 'one live state entry (the key it just nudged)');
+});
+
+test('DoD: a PRESENT live strand is never reclaimed (successor-safe — no seat eviction)', async () => {
+  // A live strand holds the seat (liveStrand=true) and the ticket is well past
+  // even a small stale window. absentStrand=false → no fast floor, no reclaim.
+  const { service, emitted, reclaimed, lockReleaseSink } = await makeSupervisor({
+    allocRow: { ticket_id: 't1', role: 'assignee', my_last_update_at: ago(20 * MIN) },
+    liveStrand: true,
+    outputAgoMs: null,
+    staleMs: FOUR_H_MS,
+  });
+  await service._tick();
+  assert.equal(reclaimed.length, 0, 'a live strand is NEVER reclaimed (never evict a working seat)');
+  assert.equal(lockReleaseSink.length, 0, 'a live strand’s claim is never released');
+  assert.equal(emitted.length, 0, 'and no false re-dispatch');
 });
 
 test('DoD: a PRESENT live strand under a 4 h window is left alone — no false restart of long normal work', async () => {
