@@ -66,6 +66,16 @@ export class ActionRun {
   @Column({ type: 'int', default: 1 })
   attempt: number;
 
+  // Run-level idempotency key (ticket 524bb434, scope 5). Minted once at the
+  // first ticket-driven dispatch and carried VERBATIM across every bounded
+  // retry re-dispatch of the same source-ticket→action chain, so the target
+  // operation can dedupe repeated external effects (a redelivered deploy under
+  // the same key is a no-op on the target side). Surfaced in the completion
+  // contract appended to the run prompt. '' for cron / manual / on-ticket-done
+  // runs that carry no ticket linkage.
+  @Column({ type: 'varchar', default: '' })
+  idempotency_key: string;
+
   // Set when status leaves 'running'. NULL while the run is still in flight.
   @Column({ type: Date, nullable: true, default: null })
   completed_at: Date | null;

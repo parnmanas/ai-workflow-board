@@ -70,6 +70,18 @@ export class Action {
   @Column({ type: 'boolean', default: true })
   enabled: boolean;
 
+  // High-impact classification (ticket 524bb434, scope 5). Marks an Action
+  // whose failure does NOT reliably mean "the external operation did not run"
+  // — deploy, publish, release. For these the server does NOT auto-retry a
+  // failed ticket-driven run (a bounded retry is not operation idempotency; a
+  // blind re-run of a half-completed deploy can double the external effect).
+  // Instead the failure surfaces immediately back to the source ticket so a
+  // human decides whether the operation actually landed. Non-high-impact
+  // Actions keep the bounded auto-retry. Pairs with ActionRun.idempotency_key,
+  // which is carried verbatim across retries so the target operation can dedupe.
+  @Column({ type: 'boolean', default: false })
+  high_impact: boolean;
+
   // FIFO-prune budget: how many rooms (Runs) to keep per action. When a new
   // Run is dispatched and the count exceeds this, the oldest rooms (by
   // created_at) are deleted. Default 10 per ticket-locked decision (Q2=b).
