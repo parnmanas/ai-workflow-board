@@ -89,6 +89,12 @@ const SESSION_SPLIT_REASON_MAX_CHARS = 280;
  *  Counted via SessionRecord.unhealthyRespawnCount, carried across respawns. */
 const UNHEALTHY_RESPAWN_MAX = 2;
 
+/** Bound on the SIGTERM / self-update seat-release drain (ticket 1fcba693 leak
+ *  a). stop() awaits the release POSTs so process.exit doesn't cut them off, but
+ *  a hung/unreachable server must not block shutdown indefinitely — cap the
+ *  wait, then exit anyway (the server sweeps as the backstop). */
+const SLOT_RELEASE_DRAIN_MS = 2_000;
+
 export class TicketSessionManager
   extends BaseSessionManager
   implements TicketSessionManagerContract
@@ -463,6 +469,11 @@ export class TicketSessionManager
             s._effectiveApiKey = spec.agentContext?.api_key || this._config.apiKey;
             s._fallbackRespawn = respawnWithModel;
             if (spec.triggerId) this.#lastTriggerId.set(s.pid, spec.triggerId);
+            // Every respawn child holds the seat too — attach the release listener
+            // so its exit frees current_task + the claim (ticket 1fcba693 leak b).
+            // This closure IS _fallbackRespawn, so the watchdog respawn path
+            // (which calls _fallbackRespawn) is covered by this single attach.
+            this.#attachSlotRelease(s, spec.ticketId);
           }
           return s;
         };
@@ -488,33 +499,88 @@ export class TicketSessionManager
       });
     }
 
-    spawned.child.once('exit', () => {
+    this.#attachSlotRelease(spawned, spec.ticketId, dedupKey);
+
+    return { dispatched: true, pid: spawned.pid, firstTurn: true };
+  }
+
+  /**
+   * Attach the seat-release exit listener to a (re)spawned child (ticket
+   * 1fcba693). On child exit it clears current_task and releases the ticket
+   * claim so a child that died mid-turn (MCP init fail, SIGKILL, idle timeout,
+   * CLI crash after a successful claim_ticket, …) does not leave
+   * locked_by_agent_id / current_task set until the server sweeps.
+   *
+   * MUST be attached to EVERY child that holds the seat — the initial dispatch
+   * child AND every model-fallback / watchdog respawn child. Before ticket
+   * 1fcba693 only the initial child got it, so a respawned child's exit leaked
+   * the seat (leak b). Server enforces ownership on release_ticket (lock owner
+   * == agent_id), so this is a clean no-op when the child never claimed. The
+   * releases are fire-and-forget for the normal mid-run exit; the SIGTERM /
+   * self-update path drains them explicitly via _onStopDrain.
+   *
+   * `dedupKey` is forgotten too (initial dispatch only).
+   */
+  #attachSlotRelease(sess: SessionRecord, ticketId: string, dedupKey?: string | null): void {
+    sess.child.once('exit', () => {
       if (dedupKey) this._forgetDedup(dedupKey);
-      if (spawned.agentId) {
+      if (sess.agentId) {
         fireAndForgetTool(this._config, 'clear_current_task', {
-          agent_id: spawned.agentId,
-          ticket_id: spec.ticketId,
+          agent_id: sess.agentId,
+          ticket_id: ticketId,
         });
-        // Release any lock the subagent acquired via claim_ticket. Without
-        // this, a child that died mid-turn (MCP init fail, SIGKILL, idle
-        // timeout, claude CLI crash after a successful claim_ticket call,
-        // …) leaves locked_by_agent_id set until the server-side 30-min
-        // sweep fires. The WorkflowFocusSelector then keeps picking that
-        // (now-stuck) ticket as the agent's focus, cap=1 blocks every
-        // other To Do ticket on the board, and nothing moves until an
-        // operator manually clears the lock — exactly the GameClient A-5
-        // failure we observed on 2026-05-14. Server enforces ownership on
-        // release_ticket (lock owner == agent_id), so this is a clean
-        // no-op when the child never claimed and only frees the specific
-        // ticket lock the agent holds.
         fireAndForgetTool(this._config, 'release_ticket', {
-          ticket_id: spec.ticketId,
-          agent_id: spawned.agentId,
+          ticket_id: ticketId,
+          agent_id: sess.agentId,
         });
       }
     });
+  }
 
-    return { dispatched: true, pid: spawned.pid, firstTurn: true };
+  /**
+   * Release a reaped session's seat (ticket 1fcba693 leak c). Overrides the base
+   * hook: when _getLiveSession purges a record whose child was reaped without an
+   * 'exit' event, its exit-listener slot-release never ran — release here so the
+   * claim / current_task don't linger until the server sweeps. Idempotent
+   * (ownership-checked), so a rare late exit double-release is harmless.
+   */
+  protected override _onSessionReaped(sess: SessionRecord): void {
+    if (!sess.agentId || !sess.ticketId) return;
+    fireAndForgetTool(this._config, 'clear_current_task', {
+      agent_id: sess.agentId,
+      ticket_id: sess.ticketId,
+    });
+    fireAndForgetTool(this._config, 'release_ticket', {
+      ticket_id: sess.ticketId,
+      agent_id: sess.agentId,
+    });
+  }
+
+  /**
+   * Drain seat releases before the process exits (ticket 1fcba693 leak a).
+   * Overrides the base hook: stop() calls this with every live session on
+   * SIGTERM / self-update. A plain fire-and-forget release POST is cut off by
+   * process.exit, so we collect the release promises and AWAIT them, bounded by
+   * SLOT_RELEASE_DRAIN_MS so a hung server can't block shutdown.
+   */
+  protected override async _onStopDrain(sessions: SessionRecord[]): Promise<void> {
+    const releases: Promise<unknown>[] = [];
+    for (const sess of sessions) {
+      if (!sess.agentId || !sess.ticketId) continue;
+      releases.push(fireAndForgetTool(this._config, 'clear_current_task', {
+        agent_id: sess.agentId,
+        ticket_id: sess.ticketId,
+      }));
+      releases.push(fireAndForgetTool(this._config, 'release_ticket', {
+        ticket_id: sess.ticketId,
+        agent_id: sess.agentId,
+      }));
+    }
+    if (releases.length === 0) return;
+    await Promise.race([
+      Promise.allSettled(releases),
+      new Promise((r) => setTimeout(r, SLOT_RELEASE_DRAIN_MS)),
+    ]);
   }
 
   #sessionsForTicket(ticketId: string): SessionRecord[] {
@@ -893,6 +959,9 @@ export class TicketSessionManager
             // server would see the agent as idle while the respawned child is
             // actively working the ticket — freeing the per-agent cap slot to a
             // DIFFERENT ticket. set_current_task is idempotent + fire-and-forget.
+            // (The respawned child `s` carries its OWN seat-release listener,
+            // attached in respawnWithModel per ticket 1fcba693 leak b, so ITS
+            // exit frees the seat too.)
             if (s.agentId) {
               fireAndForgetTool(this._config, 'set_current_task', {
                 agent_id: s.agentId,

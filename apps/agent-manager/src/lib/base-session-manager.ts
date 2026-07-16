@@ -380,8 +380,34 @@ export class BaseSessionManager {
       sess.idleTimer = null;
     }
     this.#endTurn(sess);
+    // Reaped WITHOUT firing 'exit' → the child's exit-listener slot-release
+    // never ran (ticket 1fcba693 leak c). Release the server-side seat here so
+    // current_task + the claim don't linger until the server sweeps. No-op for
+    // managers that hold no seat (one-shot subagents).
+    this._onSessionReaped(sess);
     this._sessions.delete(sessionKey);
     return undefined;
+  }
+
+  /**
+   * Hook (ticket 1fcba693): a session record was purged because its child was
+   * reaped WITHOUT firing the 'exit' event, so the exit-listener slot-release
+   * never ran. A subclass that holds a server-side seat (current_task + claim)
+   * overrides this to release it. No-op in the base / for one-shot subagents.
+   */
+  protected _onSessionReaped(_sess: SessionRecord): void {
+    /* no-op — overridden by ticket-session-manager */
+  }
+
+  /**
+   * Hook (ticket 1fcba693): called from stop() with all live sessions so a
+   * subclass can DRAIN its fire-and-forget seat releases (clear_current_task +
+   * release_ticket) before the process exits. A plain fire-and-forget POST is
+   * cut off by process.exit on SIGTERM / self-update (leak a); a subclass awaits
+   * (bounded) here so the releases land. No-op in the base.
+   */
+  protected async _onStopDrain(_sessions: SessionRecord[]): Promise<void> {
+    /* no-op — overridden by ticket-session-manager */
   }
 
   protected _ensureCapacity(): boolean {
@@ -1144,6 +1170,12 @@ export class BaseSessionManager {
       this._sessions.clear();
       return;
     }
+    // Drain seat releases (clear_current_task + release_ticket) IN PARALLEL with
+    // the SIGTERM grace so a SIGTERM / self-update shutdown doesn't leave the
+    // seats leaked to the server sweeps (ticket 1fcba693 leak a). The subclass
+    // bounds this; awaiting it below guarantees the release POSTs are attempted
+    // before stop() resolves and the caller calls process.exit.
+    const drain = this._onStopDrain(sessions).catch(() => {});
     await new Promise((r) => setTimeout(r, STOP_GRACE_MS));
     for (const sess of sessions) {
       try {
@@ -1153,6 +1185,7 @@ export class BaseSessionManager {
       }
     }
     this._sessions.clear();
+    await drain;
     log(`${this.constructor.name} stopped (terminated ${sessions.length} sessions)`);
   }
 }
