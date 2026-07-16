@@ -94,7 +94,10 @@ const TRANSITION_TRIGGER_SOURCES = new Set<string>([
 // `agent_idle` to drain it. Set well above the strand TTL (CURRENT_TASK_STALE_MS
 // = 15 min) so the blocking strand's own stale-sweep idle always fires first;
 // the drain prunes anything older on every pass, so the map stays bounded even
-// for an agent that goes fully silent.
+// for an agent that goes fully silent. A pruned entry is NOT dropped silently:
+// the drain writes a terminal `agent_trigger_replay_failed` row with
+// reason=ttl_expired (ticket 1bcb0899 reviewer BLOCKER #2) so an abandoned
+// transition stays observable, exactly like the attempt-exhaustion give-up.
 const TRANSITION_REPLAY_TTL_MS = 30 * 60_000;
 
 // Max times a single queued transition is re-attempted before the drain gives
@@ -103,9 +106,12 @@ const TRANSITION_REPLAY_TTL_MS = 30 * 60_000;
 // returns '' — board paused / ticket pending / focus window / a fresh strand
 // re-grabbed the seat between the idle and the emit) or THROWS (transient
 // DB/SSE fault) is NOT consumed: it is re-queued so the NEXT `agent_idle`
-// (or explicit retry) attempts it again, rather than vanishing while the audit
-// falsely claims recovery. This counter is the loop-guard that pairs with the
-// TTL prune so a permanently-ungateable entry can't retry forever.
+// attempts it again, rather than vanishing while the audit falsely claims
+// recovery. (There is no separate explicit-retry entry point — the drain's only
+// caller is the `agent_idle` subscription — so "next agent_idle" is the retry.)
+// This counter is the loop-guard that pairs with the TTL prune: whichever bound
+// trips first, the entry ends on a terminal `agent_trigger_replay_failed` row
+// (reason=attempts_exhausted vs ttl_expired), never a silent delete.
 const MAX_TRANSITION_REPLAY_ATTEMPTS = 5;
 
 // Outcome of one `_replayTransitionTrigger` pass, telling the drain whether the
@@ -1230,7 +1236,11 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
    *
    * Safety / loop-freedom:
    *   - Prunes entries older than TRANSITION_REPLAY_TTL_MS on every pass so the
-   *     map is bounded even if an agent stops idling.
+   *     map is bounded even if an agent stops idling. A prune is a TERMINAL
+   *     give-up, not a silent drop: it writes an `agent_trigger_replay_failed`
+   *     row (reason=ttl_expired) so an abandoned transition stays observable
+   *     (ticket 1bcb0899 reviewer BLOCKER #2). Pruning spans ALL agents, not
+   *     just the one that idled, so a silent agent's stale entry is still reaped.
    *   - Re-checks `hasLiveRoleStrand` per entry: if a FRESH strand grabbed the
    *     same seat between the idle signal and now (or this idle was for another
    *     of the agent's tickets), the entry is LEFT queued — that strand's own
@@ -1248,13 +1258,34 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
     if (!agentId || this._pendingTransitionReplays.size === 0) return;
     const now = Date.now();
     const candidates: Array<{ key: string; entry: PendingTransitionReplay }> = [];
+    const expired: Array<{ entry: PendingTransitionReplay; ageMs: number }> = [];
     for (const [key, entry] of this._pendingTransitionReplays) {
       if (now - entry.queuedAt > TRANSITION_REPLAY_TTL_MS) {
+        // TTL give-up. Dequeue now (bounds the map), but DO NOT drop silently —
+        // a lapsed transition is exactly the stranded-ticket bug this ticket
+        // exists to eliminate (1bcb0899 reviewer BLOCKER #2). Record it for a
+        // terminal failed audit below, written outside this iteration since the
+        // audit is async.
         this._pendingTransitionReplays.delete(key);
+        expired.push({ entry, ageMs: now - entry.queuedAt });
         continue;
       }
       if (entry.agentId !== agentId) continue;
       candidates.push({ key, entry });
+    }
+    for (const { entry, ageMs } of expired) {
+      this.logService.warn('MCP', 'transition-replay TTL-expired (giving up — transition NOT recovered)', {
+        ticket_id: entry.ticketId, agent_id: entry.agentId, role: entry.role,
+        dropped_source: entry.triggerSource, attempts: entry.attempts, age_ms: ageMs,
+      });
+      await this._writeReplayLifecycleAudit(
+        entry,
+        'agent_trigger_replay_failed',
+        entry.attempts,
+        clearedTicketId,
+        'ttl_expired',
+        ageMs,
+      );
     }
     for (const { key, entry } of candidates) {
       // A concurrent drain (rapid successive agent_idle for this same agent)
@@ -1296,7 +1327,9 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
    *     write a terminal `agent_trigger_replay_failed` row so the stranded
    *     transition stays greppable (the original bug hid it entirely).
    *   - the original `queuedAt` is preserved, so the TTL prune in the drain
-   *     still bounds total lifetime regardless of idle cadence.
+   *     still bounds total lifetime regardless of idle cadence — and that prune
+   *     is itself a terminal `agent_trigger_replay_failed` (reason=ttl_expired),
+   *     so neither give-up path ends in a silent delete.
    * A fresh drop that re-queued this exact seat while we awaited is NOT
    * clobbered — it already carries the newer intent for the same recovery.
    */
@@ -1316,6 +1349,8 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
         'agent_trigger_replay_failed',
         attempts,
         clearedTicketId,
+        'attempts_exhausted',
+        Date.now() - entry.queuedAt,
       );
       return;
     }
@@ -1337,18 +1372,30 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
    * Best-effort audit row for a deferred / failed replay lifecycle transition
    * (ticket 1bcb0899). Kept distinct from `agent_trigger_replayed_inflight_strand`
    * (which is written ONLY after a real emit) so a post-mortem can tell an
-   * actual recovery from a retry-in-progress or a give-up. actor_id='system'
-   * keeps it out of `_handleActivity`'s self-echo guard, like every other
-   * TriggerLoopService audit row. A write failure never gates the retry.
+   * actual recovery from a retry-in-progress or a give-up. For a terminal
+   * `agent_trigger_replay_failed` row the `reason` distinguishes the two
+   * give-up paths — `attempts_exhausted` (emit kept gating/throwing) vs
+   * `ttl_expired` (the entry aged out before its seat ever freed) — and `ageMs`
+   * records how long it was owed, so the abandoned transition is diagnosable,
+   * not just visible. actor_id='system' keeps it out of `_handleActivity`'s
+   * self-echo guard, like every other TriggerLoopService audit row. A write
+   * failure never gates the retry.
    */
   private async _writeReplayLifecycleAudit(
     entry: PendingTransitionReplay,
     action: 'agent_trigger_replay_deferred' | 'agent_trigger_replay_failed',
     attempts: number,
     clearedTicketId?: string,
+    reason?: 'attempts_exhausted' | 'ttl_expired',
+    ageMs?: number,
   ): Promise<void> {
     try {
       const activityLogRepo = this.dataSource.getRepository(ActivityLog);
+      const newValue =
+        `agent=${entry.agentId} role=${entry.role} dropped_source=${entry.triggerSource} attempts=${attempts}` +
+        (reason !== undefined ? ` reason=${reason}` : '') +
+        (ageMs !== undefined ? ` age_ms=${ageMs}` : '') +
+        ` cleared_ticket=${clearedTicketId || ''}`;
       await activityLogRepo.save(activityLogRepo.create({
         entity_type: 'ticket',
         entity_id: entry.ticketId,
@@ -1356,7 +1403,7 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
         actor_id: 'system',
         actor_name: 'TriggerLoopService',
         action,
-        new_value: `agent=${entry.agentId} role=${entry.role} dropped_source=${entry.triggerSource} attempts=${attempts} cleared_ticket=${clearedTicketId || ''}`,
+        new_value: newValue,
         role: entry.role,
         trigger_source: 'inflight_strand_replay',
       }));
@@ -1431,7 +1478,7 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
       if (!emittedId) {
         // Gated by a fresh-state check (pause/pending/focus) or lost the seat
         // to a racing strand. Do NOT write a success audit; report 'deferred'
-        // so the drain re-queues for the next agent_idle / explicit retry.
+        // so the drain re-queues for the next agent_idle to retry.
         this.logService.info('MCP', 'transition-replay emit gated (deferring — no success audit written)', {
           ticket_id: ticket.id, agent_id: entry.agentId, role: slug,
           dropped_source: entry.triggerSource, attempts: entry.attempts,

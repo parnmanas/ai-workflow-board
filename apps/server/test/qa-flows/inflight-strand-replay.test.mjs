@@ -37,6 +37,12 @@
 //      (re-queued with a `agent_trigger_replay_deferred` row), and the NEXT
 //      lifecycle signal (once the board resumes) finally lands the emit and
 //      writes the success row. A gated emit must stay recoverable, not vanish.
+//   5. TTL-expiry (ticket 1bcb0899 reviewer BLOCKER #2): a queued replay that
+//      ages past TRANSITION_REPLAY_TTL_MS (e.g. a board pause longer than the
+//      TTL) is NOT deleted silently — the drain reaps it as a terminal give-up,
+//      writing an `agent_trigger_replay_failed` row (reason=ttl_expired, with
+//      the age) so the abandoned transition stays observable rather than
+//      re-stranding the ticket with no trace.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -75,6 +81,13 @@ test('Transition-trigger preservation: a dropped column_move is replayed when th
     'file://' + path.join(DIST_ROOT, 'modules', 'mcp', 'shared', 'ticket-move.js')
   );
   const { performColumnMove } = ticketMoveModule;
+  // Phase 7 drives the private TTL-prune path directly (reviewer-endorsed:
+  // "private drain 직접 구동"), so pull the live singleton whose in-memory
+  // replay map + drain we exercise.
+  const triggerLoopModule = await import(
+    'file://' + path.join(DIST_ROOT, 'modules', 'agents', 'trigger-loop.service.js')
+  );
+  const triggerLoop = app.get(triggerLoopModule.TriggerLoopService);
 
   step('Seed scene; add a Merging column routing to assignee; worker holds all roles');
   const { ws, board, columns } = await setupKanbanScene(app, getDataSourceToken, {
@@ -275,6 +288,83 @@ test('Transition-trigger preservation: a dropped column_move is replayed when th
     (await replayRows2()).length,
     1,
     'phase6: the success audit is written ONLY now, after the real emit landed',
+  );
+
+  // ── Phase 7: reviewer BLOCKER #2 — a TTL-expired entry must NOT be deleted ──
+  //    silently. When a queued replay ages past TRANSITION_REPLAY_TTL_MS (e.g. a
+  //    board pause longer than the TTL), the drain must reap it as a TERMINAL
+  //    give-up: a `agent_trigger_replay_failed` row (reason=ttl_expired, with
+  //    the age) — not a silent `delete` that re-strands the ticket with no trace.
+  const ticket3 = await createTicket(app, getDataSourceToken, {
+    columnId: columns.review.id,
+    workspaceId: ws.id,
+    title: 'Preserve-transition ticket (TTL-expiry path)',
+    assigneeId: worker.id,
+    reporterId: worker.id,
+    reviewerId: worker.id,
+  });
+  const failedRows3 = async () =>
+    activityLogRepo.find({
+      where: { ticket_id: ticket3.id, action: 'agent_trigger_replay_failed' },
+    });
+  const replayRows3 = async () =>
+    activityLogRepo.find({
+      where: { ticket_id: ticket3.id, action: 'agent_trigger_replayed_inflight_strand' },
+    });
+
+  step('PHASE 7: a live assignee strand drops ticket3 Review→Merging column_move, queued for replay');
+  await agentStatus.setCurrentTask(worker.id, ticket3.id, 'assignee');
+  const freshTicket3 = await ds.getRepository('Ticket').findOne({ where: { id: ticket3.id } });
+  await performColumnMove(ds, activityService, {
+    ticket: freshTicket3,
+    destColumnId: merging.id,
+    actorId: user.id,
+    actorName: user.name,
+  });
+  await new Promise((r) => setTimeout(r, 700));
+  const replayKey3 = triggerLoop._transitionReplayKey(worker.id, ticket3.id, 'assignee');
+  assert.ok(
+    triggerLoop._pendingTransitionReplays.has(replayKey3),
+    'phase7: the dropped column_move is queued in the in-memory replay map',
+  );
+
+  step('PHASE 7: backdate the queued entry past its TTL, then drive the drain');
+  // Age the entry well past TRANSITION_REPLAY_TTL_MS (30 min) — 2h is robust to
+  // the exact constant. Then invoke the private drain directly (its only real
+  // caller is the agent_idle subscription; here we drive it deterministically).
+  const stale = triggerLoop._pendingTransitionReplays.get(replayKey3);
+  stale.queuedAt = Date.now() - 2 * 60 * 60 * 1000;
+  await triggerLoop._drainTransitionReplays(worker.id);
+
+  assert.ok(
+    !triggerLoop._pendingTransitionReplays.has(replayKey3),
+    'phase7: the TTL-expired entry is removed from the map (bounded), not left to linger',
+  );
+  assert.equal(
+    va.triggersFor(ticket3.id).length,
+    0,
+    'phase7: an expired entry does NOT emit — it is a give-up, not a recovery',
+  );
+  assert.equal(
+    (await replayRows3()).length,
+    0,
+    'phase7: NO success audit for an expired entry',
+  );
+  const failed3 = await failedRows3();
+  assert.equal(
+    failed3.length,
+    1,
+    'phase7: the TTL prune writes exactly one terminal agent_trigger_replay_failed row (NOT a silent delete)',
+  );
+  assert.match(
+    String(failed3[0].new_value || ''),
+    /reason=ttl_expired/,
+    'phase7: the failed row records reason=ttl_expired (vs attempts_exhausted)',
+  );
+  assert.match(
+    String(failed3[0].new_value || ''),
+    /age_ms=\d+/,
+    'phase7: the failed row records how long the transition was owed (age_ms)',
   );
 
   exitAfterTests(0);
