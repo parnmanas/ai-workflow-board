@@ -97,6 +97,28 @@ const TRANSITION_TRIGGER_SOURCES = new Set<string>([
 // for an agent that goes fully silent.
 const TRANSITION_REPLAY_TTL_MS = 30 * 60_000;
 
+// Max times a single queued transition is re-attempted before the drain gives
+// up and writes a terminal `agent_trigger_replay_failed` audit row (ticket
+// 1bcb0899 reviewer BLOCKER). A replay whose emit is GATED (`_emitTrigger`
+// returns '' — board paused / ticket pending / focus window / a fresh strand
+// re-grabbed the seat between the idle and the emit) or THROWS (transient
+// DB/SSE fault) is NOT consumed: it is re-queued so the NEXT `agent_idle`
+// (or explicit retry) attempts it again, rather than vanishing while the audit
+// falsely claims recovery. This counter is the loop-guard that pairs with the
+// TTL prune so a permanently-ungateable entry can't retry forever.
+const MAX_TRANSITION_REPLAY_ATTEMPTS = 5;
+
+// Outcome of one `_replayTransitionTrigger` pass, telling the drain whether the
+// dequeued entry is truly done or must be re-queued for the next lifecycle
+// signal:
+//   - 'emitted'  — `_emitTrigger` returned a real (non-empty) event id; the
+//                  recovery landed and the success audit row is now written.
+//   - 'skipped'  — nothing is owed (ticket gone / on a terminal column / the
+//                  agent no longer holds a routed role); consume, do not retry.
+//   - 'deferred' — the emit was gated ('') or threw; re-queue and retry on the
+//                  next `agent_idle` (bounded by MAX_TRANSITION_REPLAY_ATTEMPTS).
+type TransitionReplayOutcome = 'emitted' | 'skipped' | 'deferred';
+
 // One queued transition trigger awaiting the freeing of its (agent, ticket,
 // role) seat. Held in memory only — same fire-and-forget philosophy as the rest
 // of the dispatch path (no AgentTrigger table since v0.25.0); a process restart
@@ -109,6 +131,10 @@ interface PendingTransitionReplay {
   triggerSource: string;
   triggeredBy: string;
   queuedAt: number;
+  // How many times the drain has already tried (and had gated/threw) to replay
+  // this seat. 0 at first enqueue; incremented each deferral. Bounded by
+  // MAX_TRANSITION_REPLAY_ATTEMPTS so a permanently-ungateable entry can't loop.
+  attempts: number;
 }
 
 @Injectable()
@@ -1212,6 +1238,11 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
    *     served, so replaying now would just re-drop.
    *   - Dequeues BEFORE awaiting the replay, so a concurrent drain can't
    *     double-replay the same entry.
+   *   - A replay whose emit is GATED ('') or THROWS returns 'deferred' and is
+   *     RE-QUEUED (attempt-bounded) so the transition is not lost when the emit
+   *     transiently drops — the fix for the reviewer BLOCKER on ticket 1bcb0899
+   *     (a success audit must never precede a real emit; a gated emit must stay
+   *     recoverable). Only 'emitted' / 'skipped' consume the entry for good.
    */
   private async _drainTransitionReplays(agentId?: string, clearedTicketId?: string): Promise<void> {
     if (!agentId || this._pendingTransitionReplays.size === 0) return;
@@ -1237,13 +1268,102 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
         continue;
       }
       this._pendingTransitionReplays.delete(key);
+      let outcome: TransitionReplayOutcome;
       try {
-        await this._replayTransitionTrigger(entry, clearedTicketId);
+        outcome = await this._replayTransitionTrigger(entry, clearedTicketId);
       } catch (e) {
-        this.logService.warn('MCP', 'transition-replay dispatch failed (continuing)', {
+        // A THROW (transient DB/SSE fault) is NOT a successful recovery — treat
+        // it exactly like a gated emit and re-queue so the next idle retries,
+        // rather than dropping the one-shot transition on the floor.
+        this.logService.warn('MCP', 'transition-replay dispatch threw (will retry on next idle)', {
           err: String(e), ticket_id: entry.ticketId, agent_id: entry.agentId, role: entry.role,
         });
+        outcome = 'deferred';
       }
+      if (outcome === 'deferred') {
+        await this._requeueDeferredReplay(key, entry, clearedTicketId);
+      }
+    }
+  }
+
+  /**
+   * Re-queue a transition replay whose emit was GATED (`_emitTrigger` → '') or
+   * THREW (ticket 1bcb0899 reviewer BLOCKER). The entry was already dequeued by
+   * the drain; putting it back — with an incremented attempt count — is what
+   * makes the recovery survive a transient drop instead of vanishing while the
+   * audit falsely reads success. Loop-freedom is double-bounded:
+   *   - MAX_TRANSITION_REPLAY_ATTEMPTS caps re-tries; on exhaustion we STOP and
+   *     write a terminal `agent_trigger_replay_failed` row so the stranded
+   *     transition stays greppable (the original bug hid it entirely).
+   *   - the original `queuedAt` is preserved, so the TTL prune in the drain
+   *     still bounds total lifetime regardless of idle cadence.
+   * A fresh drop that re-queued this exact seat while we awaited is NOT
+   * clobbered — it already carries the newer intent for the same recovery.
+   */
+  private async _requeueDeferredReplay(
+    key: string,
+    entry: PendingTransitionReplay,
+    clearedTicketId?: string,
+  ): Promise<void> {
+    const attempts = entry.attempts + 1;
+    if (attempts >= MAX_TRANSITION_REPLAY_ATTEMPTS) {
+      this.logService.warn('MCP', 'transition-replay exhausted retries (giving up — transition NOT recovered)', {
+        ticket_id: entry.ticketId, agent_id: entry.agentId, role: entry.role,
+        dropped_source: entry.triggerSource, attempts,
+      });
+      await this._writeReplayLifecycleAudit(
+        entry,
+        'agent_trigger_replay_failed',
+        attempts,
+        clearedTicketId,
+      );
+      return;
+    }
+    if (this._pendingTransitionReplays.has(key)) return;
+    this._pendingTransitionReplays.set(key, { ...entry, attempts });
+    this.logService.info('MCP', 'transition-replay deferred (emit gated/threw — re-queued for next idle)', {
+      ticket_id: entry.ticketId, agent_id: entry.agentId, role: entry.role,
+      dropped_source: entry.triggerSource, attempts,
+    });
+    await this._writeReplayLifecycleAudit(
+      entry,
+      'agent_trigger_replay_deferred',
+      attempts,
+      clearedTicketId,
+    );
+  }
+
+  /**
+   * Best-effort audit row for a deferred / failed replay lifecycle transition
+   * (ticket 1bcb0899). Kept distinct from `agent_trigger_replayed_inflight_strand`
+   * (which is written ONLY after a real emit) so a post-mortem can tell an
+   * actual recovery from a retry-in-progress or a give-up. actor_id='system'
+   * keeps it out of `_handleActivity`'s self-echo guard, like every other
+   * TriggerLoopService audit row. A write failure never gates the retry.
+   */
+  private async _writeReplayLifecycleAudit(
+    entry: PendingTransitionReplay,
+    action: 'agent_trigger_replay_deferred' | 'agent_trigger_replay_failed',
+    attempts: number,
+    clearedTicketId?: string,
+  ): Promise<void> {
+    try {
+      const activityLogRepo = this.dataSource.getRepository(ActivityLog);
+      await activityLogRepo.save(activityLogRepo.create({
+        entity_type: 'ticket',
+        entity_id: entry.ticketId,
+        ticket_id: entry.ticketId,
+        actor_id: 'system',
+        actor_name: 'TriggerLoopService',
+        action,
+        new_value: `agent=${entry.agentId} role=${entry.role} dropped_source=${entry.triggerSource} attempts=${attempts} cleared_ticket=${clearedTicketId || ''}`,
+        role: entry.role,
+        trigger_source: 'inflight_strand_replay',
+      }));
+    } catch (e) {
+      this.logService.warn('MCP', 'transition-replay lifecycle audit write failed (retry state still applied)', {
+        err: String(e), ticket_id: entry.ticketId, agent_id: entry.agentId, action,
+      });
     }
   }
 
@@ -1266,35 +1386,63 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
   private async _replayTransitionTrigger(
     entry: PendingTransitionReplay,
     clearedTicketId?: string,
-  ): Promise<void> {
+  ): Promise<TransitionReplayOutcome> {
     const ticket = await this.dataSource.getRepository(Ticket).findOne({ where: { id: entry.ticketId } });
     if (!ticket || !ticket.column_id) {
       this.logService.info('MCP', 'transition-replay skipped (ticket missing / no column)', {
         ticket_id: entry.ticketId, agent_id: entry.agentId,
       });
-      return;
+      return 'skipped';
     }
     const col = await this.dataSource
       .getRepository(BoardColumn)
       .findOne({ where: { id: ticket.column_id } });
-    if (!col) return;
+    if (!col) return 'skipped';
     const isTerminal = (col as any).is_terminal === true || (col as any).kind === 'terminal';
     if (isTerminal) {
       this.logService.info('MCP', 'transition-replay skipped (ticket already on terminal column)', {
         ticket_id: entry.ticketId, agent_id: entry.agentId, column_id: col.id,
       });
-      return;
+      return 'skipped';
     }
 
     const slugs = safeJsonParse<string[]>((col as any).role_routing, []);
-    if (!Array.isArray(slugs) || slugs.length === 0) return;
+    if (!Array.isArray(slugs) || slugs.length === 0) return 'skipped';
     for (const slug of slugs) {
       const holders = await this._resolveRoleHolders(ticket, slug);
       if (!holders || !holders.agentIds.includes(entry.agentId)) continue;
 
-      // Observability (ticket 1bcb0899): a system-actor audit row ties the
-      // automatic recovery back to the earlier queued drop. actor_id='system'
-      // keeps it out of _handleActivity (self-echo guard), like the drop rows.
+      // Emit FIRST — only a real (non-empty) event id proves the recovery
+      // actually landed (ticket 1bcb0899 reviewer BLOCKER). The emit funnels
+      // back through `_emitTrigger`, which re-applies the pause / archived /
+      // pending / focus / in-flight gates against fresh state and returns ''
+      // when any of them drops it — OR a fresh strand may have re-grabbed the
+      // seat between the drain's hasLiveRoleStrand check and this emit. Writing
+      // the replay-success audit BEFORE the emit (as the pre-fix code did)
+      // would falsely mark recovery in exactly those drop paths, re-losing the
+      // one-shot transition while the audit claims success.
+      this.logService.info('MCP', 'agent_trigger replay attempt (strand freed)', {
+        ticket_id: ticket.id, agent_id: entry.agentId, role: slug,
+        dropped_source: entry.triggerSource, attempts: entry.attempts,
+      });
+      const emittedId = await this._emitTrigger(
+        ticket, entry.agentId, slug, 'inflight_strand_replay', entry.triggeredBy,
+      );
+      if (!emittedId) {
+        // Gated by a fresh-state check (pause/pending/focus) or lost the seat
+        // to a racing strand. Do NOT write a success audit; report 'deferred'
+        // so the drain re-queues for the next agent_idle / explicit retry.
+        this.logService.info('MCP', 'transition-replay emit gated (deferring — no success audit written)', {
+          ticket_id: ticket.id, agent_id: entry.agentId, role: slug,
+          dropped_source: entry.triggerSource, attempts: entry.attempts,
+        });
+        return 'deferred';
+      }
+
+      // Real emit — the recovery is now genuinely observable. Tie the audit
+      // back to the earlier queued drop; carry the emitted trigger id so the
+      // row can be correlated to the actual dispatch. actor_id='system' keeps
+      // it out of _handleActivity (self-echo guard), like the drop rows.
       try {
         const activityLogRepo = this.dataSource.getRepository(ActivityLog);
         await activityLogRepo.save(activityLogRepo.create({
@@ -1304,12 +1452,12 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
           actor_id: 'system',
           actor_name: 'TriggerLoopService',
           action: 'agent_trigger_replayed_inflight_strand',
-          new_value: `agent=${entry.agentId} role=${slug} dropped_source=${entry.triggerSource} cleared_ticket=${clearedTicketId || ''}`,
+          new_value: `agent=${entry.agentId} role=${slug} dropped_source=${entry.triggerSource} attempts=${entry.attempts} trigger_id=${emittedId} cleared_ticket=${clearedTicketId || ''}`,
           role: slug,
           trigger_source: 'inflight_strand_replay',
         }));
       } catch (e) {
-        this.logService.warn('MCP', 'transition-replay audit write failed (replay still attempted)', {
+        this.logService.warn('MCP', 'transition-replay success audit write failed (emit already landed)', {
           err: String(e), ticket_id: ticket.id, agent_id: entry.agentId,
         });
       }
@@ -1318,13 +1466,13 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
         ticket_id: ticket.id, agent_id: entry.agentId, role: slug,
         dropped_source: entry.triggerSource,
       });
-      await this._emitTrigger(ticket, entry.agentId, slug, 'inflight_strand_replay', entry.triggeredBy);
-      return; // one wake per agent (dedup mirrors the fan-out loop)
+      return 'emitted'; // one wake per agent (dedup mirrors the fan-out loop)
     }
 
     this.logService.info('MCP', 'transition-replay skipped (agent holds no routed role on current column)', {
       ticket_id: entry.ticketId, agent_id: entry.agentId, column_id: col.id,
     });
+    return 'skipped';
   }
 
   /**
@@ -1760,7 +1908,7 @@ candidate's branch or move the ticket.
       if (queuedForReplay) {
         this._pendingTransitionReplays.set(
           this._transitionReplayKey(agentId, ticket.id, role),
-          { agentId, ticketId: ticket.id, role, triggerSource, triggeredBy, queuedAt: Date.now() },
+          { agentId, ticketId: ticket.id, role, triggerSource, triggeredBy, queuedAt: Date.now(), attempts: 0 },
         );
       }
       this.logService.info('MCP', 'agent_trigger dropped (live same-role strand in flight)', {

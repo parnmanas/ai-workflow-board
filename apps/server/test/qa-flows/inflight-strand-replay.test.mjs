@@ -29,6 +29,14 @@
 //      (automatically recoverable, and observable).
 //   3. The queue is consumed once: a later strand exit does NOT double-replay
 //      (loop-free — a re-drop by a fresh strand does not re-queue).
+//   4. Deferred-then-recovered (ticket 1bcb0899 reviewer BLOCKER): if the
+//      replay's FIRST emit is itself dropped by a fresh-state gate (here: the
+//      board is paused between the drop and the strand exit), the recovery is
+//      NOT falsely marked done — no `agent_trigger_replayed_inflight_strand`
+//      row is written before a real emit, the queued entry is PRESERVED
+//      (re-queued with a `agent_trigger_replay_deferred` row), and the NEXT
+//      lifecycle signal (once the board resumes) finally lands the emit and
+//      writes the success row. A gated emit must stay recoverable, not vanish.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -181,6 +189,93 @@ test('Transition-trigger preservation: a dropped column_move is replayed when th
     'phase3: no second replay — the queued entry was consumed exactly once (loop-free)',
   );
   assert.equal((await replayRows()).length, 1, 'phase3: still exactly one replay audit row');
+
+  // ── Phase 4-6: reviewer BLOCKER — the replay's first emit is GATED, so the ─
+  //    transition must DEFER (no false success audit) and recover on the next
+  //    lifecycle signal, not vanish. A fresh ticket keeps the state isolated.
+  const boardRepo = ds.getRepository('Board');
+  // ticket1 now sits on Merging (non-terminal) and occupies the agent's single
+  // default focus slot, which would drop ticket2's emit SILENTLY at the focus
+  // gate (before the inflight-strand gate we are exercising). Widen the focus
+  // window so both tickets are in play and the drop we assert on is the
+  // inflight-strand one, not a focus-cap artefact.
+  await boardRepo.update({ id: board.id }, { max_concurrent_tickets_per_agent: 5 });
+  const ticket2 = await createTicket(app, getDataSourceToken, {
+    columnId: columns.review.id,
+    workspaceId: ws.id,
+    title: 'Preserve-transition ticket (deferred path)',
+    assigneeId: worker.id,
+    reporterId: worker.id,
+    reviewerId: worker.id,
+  });
+  const dropRows2 = async () =>
+    activityLogRepo.find({
+      where: { ticket_id: ticket2.id, action: 'agent_trigger_dropped_inflight_strand' },
+    });
+  const replayRows2 = async () =>
+    activityLogRepo.find({
+      where: { ticket_id: ticket2.id, action: 'agent_trigger_replayed_inflight_strand' },
+    });
+  const deferredRows2 = async () =>
+    activityLogRepo.find({
+      where: { ticket_id: ticket2.id, action: 'agent_trigger_replay_deferred' },
+    });
+
+  step('PHASE 4: a live assignee strand drops ticket2 Review→Merging column_move, queued for replay');
+  await agentStatus.setCurrentTask(worker.id, ticket2.id, 'assignee');
+  const freshTicket2 = await ds.getRepository('Ticket').findOne({ where: { id: ticket2.id } });
+  await performColumnMove(ds, activityService, {
+    ticket: freshTicket2,
+    destColumnId: merging.id,
+    actorId: user.id,
+    actorName: user.name,
+  });
+  await new Promise((r) => setTimeout(r, 700));
+  assert.equal(va.triggersFor(ticket2.id).length, 0, 'phase4: Merging trigger dropped while strand in flight');
+  assert.equal((await dropRows2()).length, 1, 'phase4: exactly one inflight-strand drop audit row for ticket2');
+  assert.match(String((await dropRows2())[0].new_value || ''), /queued_for_replay=true/, 'phase4: queued for replay');
+
+  step('PHASE 5: pause the board, then exit the strand — the replay emit is GATED and must DEFER');
+  await boardRepo.update({ id: board.id }, { paused_at: new Date() });
+  agentStatus.clearCurrentTask(worker.id, ticket2.id);
+  // Let the drain run: it dequeues, attempts the emit, the pause gate returns
+  // '' → the entry is re-queued and a deferred row is written. NO trigger, and
+  // crucially NO success audit before a real emit.
+  await new Promise((r) => setTimeout(r, 900));
+  assert.equal(
+    va.triggersFor(ticket2.id).length,
+    0,
+    'phase5: the gated replay emits NO trigger while the board is paused',
+  );
+  assert.equal(
+    (await replayRows2()).length,
+    0,
+    'phase5: NO agent_trigger_replayed_inflight_strand row — a success audit must never precede a real emit',
+  );
+  assert.ok(
+    (await deferredRows2()).length >= 1,
+    'phase5: a agent_trigger_replay_deferred row records the retry-in-progress (observable, recoverable)',
+  );
+
+  step('PHASE 6: resume the board; the next strand exit replays the PRESERVED transition to success');
+  await boardRepo.update({ id: board.id }, { paused_at: null });
+  await agentStatus.setCurrentTask(worker.id, ticket2.id, 'assignee');
+  agentStatus.clearCurrentTask(worker.id, ticket2.id);
+  const replayed2 = await va.waitForTrigger(
+    (tr) => tr.ticket_id === ticket2.id && tr.role === 'assignee',
+    4000,
+  );
+  assert.equal(
+    replayed2.trigger_source,
+    'inflight_strand_replay',
+    'phase6: the deferred transition finally emits on the next lifecycle signal',
+  );
+  assert.equal(va.triggersFor(ticket2.id).length, 1, 'phase6: exactly one trigger — the recovered replay');
+  assert.equal(
+    (await replayRows2()).length,
+    1,
+    'phase6: the success audit is written ONLY now, after the real emit landed',
+  );
 
   exitAfterTests(0);
 });
