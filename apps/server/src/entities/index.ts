@@ -28,6 +28,7 @@ export { Subagent } from './Subagent';
 export { SubagentLogLine } from './SubagentLogLine';
 export { Action } from './Action';
 export { ActionRun } from './ActionRun';
+export { ActionApproval } from './ActionApproval';
 export { StuckTicketAlert } from './StuckTicketAlert';
 export { ColumnRolePolicy } from './ColumnRolePolicy';
 export { TicketPrerequisite } from './TicketPrerequisite';
