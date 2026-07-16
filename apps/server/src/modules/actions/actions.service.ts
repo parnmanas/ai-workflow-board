@@ -4,6 +4,7 @@ import { Repository } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { Action } from '../../entities/Action';
 import { ActionRun } from '../../entities/ActionRun';
+import { ActionApproval } from '../../entities/ActionApproval';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
@@ -123,12 +124,29 @@ export interface DispatchActionArgs {
   // the target operation can dedupe. Undefined on a first ticket-driven
   // dispatch, where `dispatch` mints a fresh key.
   idempotencyKey?: string;
-  // Human approval evidence for a high-impact Action (ticket 524bb434, scope 5,
-  // reviewer req). A high-impact Action dispatched by an agent to clear a ticket
-  // blocker may only run when a real workspace ADMIN approved it — this is that
-  // approver's user id. Undefined otherwise; the gate in `dispatch` rejects an
-  // unapproved high-impact ticket-driven run before any external side effect.
-  approvedByUserId?: string;
+  // NOTE: there is deliberately NO `approvedByUserId` here. High-impact approval
+  // is NOT something a dispatch caller (an agent) may assert (ticket 524bb434,
+  // scope 5, reviewer req). `dispatch` instead atomically consumes a human-made
+  // ActionApproval grant bound to (actionId, sourceTicketId). The only way to
+  // create that grant is the human-authenticated `createApproval` path, so an
+  // agent cannot forge approval by naming an admin's id.
+}
+
+// Human approval GRANT creation (ticket 524bb434, scope 5). Called ONLY from the
+// session-authenticated REST path (ActionsController), where `approverUserId` /
+// `approverRole` come from the authenticated User (req.currentUser) — never from
+// agent/request input. An agent has no session, so it cannot reach this path.
+export interface CreateApprovalArgs {
+  actionId: string;
+  workspaceId: string;
+  // The ticket the grant authorises the Action to run for (the binding).
+  sourceTicketId: string;
+  // Identity of the authenticated approver, taken from the session.
+  approverUserId: string;
+  approverName: string;
+  approverRole: string;
+  // Standing-approval validity window. Defaults to APPROVAL_TTL_MINUTES.
+  ttlMinutes?: number;
 }
 
 export interface DispatchActionResult {
@@ -199,9 +217,16 @@ export class ActionsService {
   // transition in `completeRun`.
   static readonly MAX_RUN_ATTEMPTS = 3;
 
+  // Default validity window for a human approval grant (ticket 524bb434, scope
+  // 5). A standing approval past this age is treated as absent by the gate so a
+  // stale grant can't authorise a much-later, unrelated deploy. Callers may
+  // override per-grant via `ttlMinutes`.
+  static readonly APPROVAL_TTL_MINUTES = 60;
+
   constructor(
     @InjectRepository(Action) private readonly actionRepo: Repository<Action>,
     @InjectRepository(ActionRun) private readonly runRepo: Repository<ActionRun>,
+    @InjectRepository(ActionApproval) private readonly approvalRepo: Repository<ActionApproval>,
     @InjectRepository(ChatRoom) private readonly roomRepo: Repository<ChatRoom>,
     @InjectRepository(ChatRoomParticipant) private readonly participantRepo: Repository<ChatRoomParticipant>,
     @InjectRepository(ChatRoomMessage) private readonly messageRepo: Repository<ChatRoomMessage>,
@@ -641,8 +666,8 @@ export class ActionsService {
   private async _parkForApproval(ticketId: string, action: Action, byAgentId: string): Promise<void> {
     const reason =
       `High-impact Action "${action.name}" requires human approval before it can run. ` +
-      `A workspace admin must approve it (re-run the Action with approved_by_user_id) or perform the ` +
-      `operation manually — the server will not let an agent auto-execute a deploy/publish/release.`;
+      `A workspace admin must approve it via POST /api/actions/${action.id}/approvals (or the Actions UI), ` +
+      `or perform the operation manually — the server will not let an agent auto-execute a deploy/publish/release.`;
     try {
       await this.ticketRepo.update(
         { id: ticketId },
@@ -697,6 +722,167 @@ export class ActionsService {
     }
   }
 
+  // ── Approval grants (ticket 524bb434, scope 5) ───────────────────────────
+
+  /**
+   * Create a human approval GRANT for a high-impact Action run.
+   *
+   * This is the ONLY way an approval comes into existence, and it is reachable
+   * only from the session-authenticated REST endpoint. The approver identity is
+   * supplied by the CALLER from the authenticated session (`req.currentUser`),
+   * NOT read from any request body — the controller passes `approverUserId` /
+   * `approverRole` straight off the session. An agent authenticates with an MCP
+   * API key and never has a session, so it cannot reach this method: that is the
+   * trust boundary the reviewer required (caller-claims-approver ≠ real
+   * approval evidence).
+   *
+   * The grant is bound to a single (action, source ticket) pair and is one-time
+   * — `dispatch` atomically consumes it. Creating a grant also clears any
+   * pending_user_action park the gate placed on the ticket, so the standing loop
+   * can resume and re-run the Action (which now finds & consumes this grant).
+   */
+  async createApproval(args: CreateApprovalArgs): Promise<ActionApproval> {
+    if (!args.workspaceId) throw makeError(400, 'workspace_id is required');
+    if (!args.sourceTicketId) throw makeError(400, 'source_ticket_id is required');
+    // Defence in depth: the REST guard already requires an admin session, but we
+    // re-assert here so no future caller of the service can mint a grant as a
+    // non-admin. Approval authority = admin role (workspace-scoped membership /
+    // per-Action RBAC is an explicit follow-up, per the reviewer).
+    if (!args.approverUserId) throw makeError(401, 'an authenticated approver is required');
+    if (args.approverRole !== 'admin') {
+      throw makeError(403, 'only an admin may approve a high-impact action run');
+    }
+
+    const action = await findOrFail(
+      this.actionRepo,
+      { where: { id: args.actionId, workspace_id: args.workspaceId } },
+      'Action not found in workspace',
+    );
+    // Only high-impact Actions are gated, so only they need a grant. Rejecting an
+    // approval for a benign Action keeps the surface honest (no dangling grants
+    // that would never be consumed) and matches the same effective classification
+    // the gate uses (explicit flag OR name heuristic).
+    if (!isHighImpactAction(action)) {
+      throw makeError(400, 'this action is not high-impact and does not require approval to run');
+    }
+
+    // Bind to a real ticket in the same workspace (mirrors the dispatch boundary).
+    const ticket = await this.ticketRepo.findOne({ where: { id: args.sourceTicketId } });
+    if (!ticket) throw makeError(404, 'source ticket not found');
+    if (ticket.workspace_id !== action.workspace_id) {
+      throw makeError(400, 'source ticket belongs to a different workspace than the action');
+    }
+
+    const ttl = typeof args.ttlMinutes === 'number' && args.ttlMinutes > 0
+      ? Math.floor(args.ttlMinutes)
+      : ActionsService.APPROVAL_TTL_MINUTES;
+    const now = new Date();
+    const grant = await this.approvalRepo.save(this.approvalRepo.create({
+      workspace_id: action.workspace_id,
+      action_id: action.id,
+      source_ticket_id: args.sourceTicketId,
+      approved_by: args.approverUserId,
+      approved_by_name: args.approverName || '',
+      status: 'pending',
+      consumed_by_run_id: '',
+      consumed_at: null,
+      expires_at: new Date(now.getTime() + ttl * 60_000),
+    }));
+
+    // Audit the grant creation on the source ticket, attributed to the real human
+    // approver, so "an admin approved X for ticket Y at T" is reconstructable.
+    try {
+      await this.activityRepo.save(this.activityRepo.create({
+        workspace_id: action.workspace_id,
+        entity_type: 'ticket',
+        entity_id: args.sourceTicketId,
+        ticket_id: args.sourceTicketId,
+        actor_id: args.approverUserId,
+        actor_name: args.approverName || 'Approver',
+        action: 'action_run_approval_granted',
+        field_changed: 'action_approval',
+        old_value: action.id,
+        new_value: `grant:${grant.id}:by=${args.approverUserId}`,
+        trigger_source: 'action_approval_gate',
+      }));
+    } catch (e: any) {
+      this.logService.warn('Actions', `approval-grant audit write failed for ticket ${args.sourceTicketId}: ${e?.message || e}`);
+    }
+
+    // Release the approval park (if the gate placed one) so the ticket's standing
+    // loop resumes and the assignee re-runs the Action — which now finds and
+    // consumes this grant. Only clear a park the approval gate itself set, so we
+    // don't stomp an unrelated human pend.
+    try {
+      if (ticket.pending_user_action && ticket.pending_set_by === 'action_approval_gate') {
+        await this.ticketRepo.update(
+          { id: args.sourceTicketId },
+          { pending_user_action: false, pending_reason: '', pending_set_at: null, pending_set_by: '' },
+        );
+      }
+    } catch (e: any) {
+      this.logService.warn('Actions', `approval unpend failed for ticket ${args.sourceTicketId}: ${e?.message || e}`);
+    }
+
+    this.logService.info('Actions', `approval grant ${grant.id} created for action ${action.id} ticket ${args.sourceTicketId} by ${args.approverUserId}`);
+    return grant;
+  }
+
+  /** List approval grants for an action (most recent first) — audit visibility. */
+  async listApprovals(actionId: string, workspaceId: string, limit = 20): Promise<ActionApproval[]> {
+    if (!workspaceId) throw makeError(400, 'workspace_id is required');
+    await findOrFail(this.actionRepo, { where: { id: actionId, workspace_id: workspaceId } }, 'Action not found in workspace');
+    return this.approvalRepo.find({
+      where: { action_id: actionId, workspace_id: workspaceId },
+      order: { created_at: 'DESC' },
+      take: Math.min(limit, 100),
+    });
+  }
+
+  /**
+   * Atomically consume a pending, unexpired approval grant bound to
+   * (actionId, sourceTicketId), stamping the run that consumed it. Returns the
+   * approver attribution to copy onto the run, or null when no usable grant
+   * exists (→ the gate rejects + parks).
+   *
+   * Consume is a find-candidate-then-guarded-UPDATE-by-id: two racing dispatches
+   * for the same grant both target the same id, but the `WHERE status='pending'`
+   * guard lets exactly one win (affected=1); the loser sees affected=0 and is
+   * treated as unapproved — the one-time-use guarantee under concurrency.
+   */
+  private async _consumeApproval(
+    actionId: string,
+    workspaceId: string,
+    sourceTicketId: string,
+    runId: string,
+  ): Promise<{ userId: string; userName: string; at: Date } | null> {
+    const now = new Date();
+    const candidate = await this.approvalRepo.findOne({
+      where: { action_id: actionId, workspace_id: workspaceId, source_ticket_id: sourceTicketId, status: 'pending' },
+      order: { created_at: 'ASC' },
+    });
+    if (!candidate) return null;
+    if (candidate.expires_at && candidate.expires_at.getTime() <= now.getTime()) {
+      // Expired: retire it so it stops being a candidate, then report no approval.
+      await this.approvalRepo.update(
+        { id: candidate.id, status: 'pending' },
+        { status: 'expired' },
+      );
+      return null;
+    }
+    const claim = await this.approvalRepo
+      .createQueryBuilder()
+      .update(ActionApproval)
+      .set({ status: 'consumed', consumed_at: now, consumed_by_run_id: runId })
+      .where('id = :id', { id: candidate.id })
+      .andWhere("status = 'pending'")
+      .execute();
+    if ((claim.affected ?? 0) <= 0) return null; // lost the race → treat as unapproved
+    // Attribution comes FROM the grant record (the real human), not the caller:
+    // the audit/time can never be forged by whoever triggered the dispatch.
+    return { userId: candidate.approved_by, userName: candidate.approved_by_name, at: candidate.created_at };
+  }
+
   /**
    * Dispatch a Run: create the room, add participants, FIFO-prune, render the
    * prompt, send it as the triggering user's first message. The agent reply
@@ -725,42 +911,47 @@ export class ActionsService {
       }
     }
 
+    // Pre-allocate the run's UUID up front (ticket 524bb434): the approval gate
+    // below stamps it onto the consumed grant, {{run.id}} resolves before any DB
+    // write, and we save the ActionRun row exactly once with every field
+    // populated. The previous flow saved a half-empty scaffold first (room_id:
+    // '', prompt_rendered: '') to grab tempRun.id, then patched those two columns
+    // in a second save. That broke on production.private after commit d971fa1
+    // widened action_runs.room_id from varchar to uuid — Postgres rejects '' with
+    // `invalid input syntax for type uuid: ""`. Generating the id here lets us
+    // write a complete row up front and avoid the empty-string sentinel entirely.
+    const runId = randomUUID();
+
     // ── High-impact pre-execution approval gate (ticket 524bb434, scope 5) ──
     // A high-impact Action (explicit flag OR name heuristic) has irreversible
     // external effects, so an AGENT clearing a ticket blocker may NOT auto-run
-    // it — a real workspace admin must approve first. Only the ticket-driven
+    // it — a real workspace admin must have approved it. Only the ticket-driven
     // agent/system path is gated: a human-clicked UI run (type='user') is itself
-    // the approval, and standing scheduler/hook runs carry no source ticket. An
-    // unapproved high-impact ticket-driven run is rejected BEFORE any external
-    // side effect and its source ticket is parked (pending_user_action) with a
-    // concrete reason, so approval — not silent auto-execution — is what unblocks
-    // it (completion criterion: "승인이 반드시 필요한 경우만 Pending").
+    // the approval, and standing scheduler/hook runs carry no source ticket.
+    //
+    // Crucially the dispatch caller does NOT get to assert who approved. The
+    // server atomically CONSUMES a human-created ActionApproval grant bound to
+    // this exact (action, source ticket) pair — a grant that only exists via the
+    // session-authenticated `createApproval` path an agent can never reach. No
+    // usable grant ⇒ the run is rejected BEFORE any external side effect and the
+    // source ticket is parked (pending_user_action) so approval — not silent
+    // auto-execution — is what unblocks it (completion criterion: "승인이 반드시
+    // 필요한 경우만 Pending"). On consume, the run's approver/time are copied FROM
+    // the grant (the real human), so the audit attribution can't be forged.
     const highImpact = isHighImpactAction(action);
     let approval: { userId: string; userName: string; at: Date } | null = null;
     if (sourceTicketId && highImpact && args.triggeredByType !== 'user') {
-      const approverId = (args.approvedByUserId || '').trim();
-      if (!approverId) {
+      approval = await this._consumeApproval(action.id, action.workspace_id, sourceTicketId, runId);
+      if (!approval) {
         await this._parkForApproval(sourceTicketId, action, args.triggeredById);
         throw makeError(
           403,
           `Action "${action.name}" is high-impact and requires explicit human approval before it can run. ` +
-          `The source ticket has been set to pending_user_action — a workspace admin must approve it ` +
-          `(re-run with approved_by_user_id set to their user id) or handle the operation manually. ` +
-          `An agent cannot auto-execute a deploy/publish/release.`,
+          `The source ticket has been set to pending_user_action — a workspace admin must approve it via ` +
+          `POST /api/actions/${action.id}/approvals (or the Actions UI) or handle the operation manually. ` +
+          `An agent cannot approve its own high-impact deploy/publish/release.`,
         );
       }
-      // Approval authority: a real, active ADMIN user. An agent id / random uuid
-      // is not a user (findOne → null) so an agent cannot self-approve; a
-      // non-admin user is rejected as unauthorized. Approver/time are recorded on
-      // the run + an audit row so the approval is reconstructable.
-      const approver = await this.userRepo.findOne({ where: { id: approverId } });
-      if (!approver || approver.status !== 'active') {
-        throw makeError(403, 'high-impact approval must reference a real, active user (approved_by_user_id not found)');
-      }
-      if (approver.role !== 'admin') {
-        throw makeError(403, `user "${approver.name}" is not authorized to approve high-impact actions (admin role required)`);
-      }
-      approval = { userId: approver.id, userName: approver.name, at: new Date() };
     }
 
     // Build a render context the user can interpolate against. Resolve the
@@ -773,17 +964,6 @@ export class ActionsService {
     const user = args.triggeredByType === 'user' && args.triggeredById
       ? await this.userRepo.findOne({ where: { id: args.triggeredById } })
       : null;
-
-    // Pre-allocate the run's UUID up front so {{run.id}} resolves before any
-    // DB write, and so we can save the ActionRun row exactly once with every
-    // field populated. The previous flow saved a half-empty scaffold first
-    // (room_id: '', prompt_rendered: '') to grab tempRun.id, then patched
-    // those two columns in a second save. That broke on production.private
-    // after commit d971fa1 widened action_runs.room_id from varchar to uuid
-    // — Postgres rejects '' with `invalid input syntax for type uuid: ""`.
-    // Generating the id here lets us write a complete row up front and
-    // avoid the empty-string sentinel entirely.
-    const runId = randomUUID();
 
     const ctx = buildRenderContext({
       workspace: workspace ? { id: workspace.id, name: workspace.name } : null,
@@ -807,7 +987,7 @@ export class ActionsService {
       ? (args.idempotencyKey || '').trim() || randomUUID()
       : '';
     const rendered = sourceTicketId
-      ? `${withLanguage}${renderCompletionContract(runId, action.workspace_id, sourceTicketId, idempotencyKey, !!action.high_impact)}`
+      ? `${withLanguage}${renderCompletionContract(runId, action.workspace_id, sourceTicketId, idempotencyKey, highImpact)}`
       : withLanguage;
 
     // Create the room. We use 'group' as the underlying type so the chat

@@ -177,18 +177,23 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
     'cron/manual/standalone runs that have no ticket to resume. ' +
     'HIGH-IMPACT Actions (deploy/publish/release, or any Action saved high_impact=true) ' +
     'CANNOT be auto-run by an agent for a ticket: the call is rejected and the ticket is ' +
-    'parked pending_user_action unless `approved_by_user_id` names a workspace admin who approved it.',
+    'parked pending_user_action until a workspace ADMIN approves this exact (action, ticket) ' +
+    'pair through the human approval endpoint (POST /api/actions/{id}/approvals) or the Actions UI. ' +
+    'You cannot approve your own run — there is no approver parameter here; the server consumes a ' +
+    'human-created approval grant. After an admin approves, the ticket auto-resumes and re-running ' +
+    'this tool for the same ticket executes the run once.',
     {
       action_id: z.string().describe('Action ID'),
       source_ticket_id: z.string().optional().describe('Ticket that this run should resume on completion. When set, the run carries the linkage and `complete_action_run` re-dispatches this ticket. Omit for runs with no originating ticket.'),
-      approved_by_user_id: z.string().optional().describe('Only for high-impact Actions: the id of the workspace ADMIN user who approved this run. Without it a high-impact ticket-driven run is rejected and the ticket is parked for human approval. An agent cannot self-approve.'),
     },
-    async ({ action_id, source_ticket_id, approved_by_user_id }, extra: { sessionId?: string }) => {
+    async ({ action_id, source_ticket_id }, extra: { sessionId?: string }) => {
       if (!actionsService) return err('Actions service unavailable in this MCP context');
       // Triggering identity: an authenticated agent caller (MCP session bound
       // to an agentId) is attributed as 'agent' with that agent's id. Without
       // an authenticated agent the run is attributed to 'system' so the chat
-      // history still shows where it came from.
+      // history still shows where it came from. NOTE: there is deliberately no
+      // approver parameter — high-impact approval is a human-only grant the
+      // server consumes (ticket 524bb434, scope 5); an agent cannot assert it.
       const caller = getCallerAgent(extra);
       try {
         const result = await actionsService.dispatch({
@@ -196,7 +201,6 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
           triggeredByType: caller?.agentId ? 'agent' : 'system',
           triggeredById: caller?.agentId ?? '',
           sourceTicketId: source_ticket_id,
-          approvedByUserId: approved_by_user_id,
         });
         return ok({
           run_id: result.run.id,
