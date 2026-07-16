@@ -29,6 +29,30 @@ function makeError(status: number, message: string): Error & { status: number } 
   return err;
 }
 
+// Names/descriptions that clearly denote an irreversible external operation.
+// Used as a SAFE-DEFAULT escalator (ticket 524bb434, reviewer req 3): even an
+// Action a caller saved with high_impact=false is treated as high-impact when
+// its name/description names a deploy/publish/release/… so a missing or wrong
+// classification fails CLOSED (still gated) rather than open. Escalate-only —
+// it never downgrades an Action explicitly flagged high_impact.
+const HIGH_IMPACT_NAME_RE =
+  /\b(deploy|deployment|publish|release|rollout|roll-out|ship\s+to\s+prod|promote|production|\bprod\b|payment|charge|refund|invoice|terraform\s+apply|helm\s+(?:install|upgrade)|kubectl\s+(?:apply|delete)|drop\s+(?:database|table)|migrate\s+prod)\b/i;
+
+/**
+ * Effective high-impact classification for an Action (ticket 524bb434, scope 5).
+ * True when the Action is explicitly flagged high_impact OR its name/description
+ * matches the high-impact heuristic. Both the pre-execution approval gate
+ * (`dispatch`) and the no-auto-retry rule (`completeRun`) key on this so a
+ * misclassified deploy/publish cannot slip past either safeguard.
+ */
+export function isHighImpactAction(
+  action: { high_impact?: boolean; name?: string; description?: string } | null | undefined,
+): boolean {
+  if (!action) return false;
+  if (action.high_impact) return true;
+  return HIGH_IMPACT_NAME_RE.test(`${action.name || ''} ${action.description || ''}`);
+}
+
 /**
  * Completion contract appended to a ticket-driven run's prompt (ticket
  * 524bb434). Tells the target agent how to close the loop so the source ticket
@@ -99,6 +123,12 @@ export interface DispatchActionArgs {
   // the target operation can dedupe. Undefined on a first ticket-driven
   // dispatch, where `dispatch` mints a fresh key.
   idempotencyKey?: string;
+  // Human approval evidence for a high-impact Action (ticket 524bb434, scope 5,
+  // reviewer req). A high-impact Action dispatched by an agent to clear a ticket
+  // blocker may only run when a real workspace ADMIN approved it — this is that
+  // approver's user id. Undefined otherwise; the gate in `dispatch` rejects an
+  // unapproved high-impact ticket-driven run before any external side effect.
+  approvedByUserId?: string;
 }
 
 export interface DispatchActionResult {
@@ -401,13 +431,15 @@ export class ActionsService {
       .andWhere('workspace_id = :ws', { ws: workspaceId })
       .andWhere("status = 'running'")
       .execute();
-    // Postgres + sql.js both populate UpdateResult.affected. If a future driver
-    // leaves it undefined, fall back to the pre-transition status check so we
-    // still reject an already-terminal run rather than double-processing it.
-    const won =
-      claim.affected === undefined || claim.affected === null
-        ? run.status === 'running'
-        : claim.affected > 0;
+    // Fail-closed single-winner (reviewer non-blocker note): only a positive
+    // affected-row count proves we won the guarded UPDATE. Postgres + sql.js
+    // both populate `affected`; if a future driver ever leaves it undefined we
+    // treat the call as LOST rather than guessing from our stale pre-read
+    // `run.status` — the earlier fallback let two racing callers who both read
+    // 'running' both become winners, breaking the single-winner guarantee. The
+    // worst case here is a stalled resume (recoverable), never a double external
+    // effect (the scope-5 hazard this guard exists to prevent).
+    const won = (claim.affected ?? 0) > 0;
 
     if (!won) {
       // Lost the race (or a sequential duplicate on an already-terminal run).
@@ -481,7 +513,9 @@ export class ActionsService {
     // effect. bounded retry ≠ operation idempotency. Surface it to the ticket
     // for a human decision instead. Non-high-impact Actions keep the bounded
     // auto-retry, carrying the run's idempotency key so the target can dedupe.
-    const highImpact = !!action?.high_impact;
+    // Uses the same effective classification as the approval gate (explicit flag
+    // OR name heuristic) so a misclassified deploy/publish is not auto-retried.
+    const highImpact = isHighImpactAction(action);
     if (!highImpact && run.attempt < ActionsService.MAX_RUN_ATTEMPTS) {
       const nextAttempt = run.attempt + 1;
       let retryRunId = '';
@@ -596,6 +630,74 @@ export class ActionsService {
   }
 
   /**
+   * Park the source ticket for human approval (ticket 524bb434, scope 5) when an
+   * agent tried to auto-run a high-impact Action without an approver. Sets
+   * `pending_user_action` with a concrete reason and writes an audit row so the
+   * pend is attributable to the approval gate (not a generic agent pend). This
+   * is the "승인이 반드시 필요한 경우만 Pending" path — the ticket parks precisely
+   * because a human decision (approval) is required. Best-effort: a failed park
+   * must still surface the rejection error to the caller.
+   */
+  private async _parkForApproval(ticketId: string, action: Action, byAgentId: string): Promise<void> {
+    const reason =
+      `High-impact Action "${action.name}" requires human approval before it can run. ` +
+      `A workspace admin must approve it (re-run the Action with approved_by_user_id) or perform the ` +
+      `operation manually — the server will not let an agent auto-execute a deploy/publish/release.`;
+    try {
+      await this.ticketRepo.update(
+        { id: ticketId },
+        {
+          pending_user_action: true,
+          pending_reason: reason,
+          pending_set_at: new Date(),
+          pending_set_by: 'action_approval_gate',
+        },
+      );
+      await this.activityRepo.save(this.activityRepo.create({
+        workspace_id: action.workspace_id,
+        entity_type: 'ticket',
+        entity_id: ticketId,
+        ticket_id: ticketId,
+        actor_id: byAgentId || 'system',
+        actor_name: 'Action Approval Gate',
+        action: 'action_run_pending_approval',
+        field_changed: 'pending_user_action',
+        old_value: action.id,
+        new_value: `high_impact:${action.name}`,
+        trigger_source: 'action_approval_gate',
+      }));
+    } catch (e: any) {
+      this.logService.warn('Actions', `park-for-approval failed for ticket ${ticketId}: ${e?.message || e}`);
+    }
+  }
+
+  /** Audit row recording who approved a high-impact run and when (scope 5). */
+  private async _logApprovalActivity(
+    ticketId: string,
+    action: Action,
+    run: ActionRun,
+    approval: { userId: string; userName: string; at: Date },
+  ): Promise<void> {
+    try {
+      await this.activityRepo.save(this.activityRepo.create({
+        workspace_id: action.workspace_id,
+        entity_type: 'ticket',
+        entity_id: ticketId,
+        ticket_id: ticketId,
+        actor_id: approval.userId,
+        actor_name: approval.userName || 'Approver',
+        action: 'action_run_approved',
+        field_changed: 'action_run',
+        old_value: action.id,
+        new_value: `approved:${run.id}:by=${approval.userId}`,
+        trigger_source: 'action_approval_gate',
+      }));
+    } catch (e: any) {
+      this.logService.warn('Actions', `approval audit write failed for ticket ${ticketId}: ${e?.message || e}`);
+    }
+  }
+
+  /**
    * Dispatch a Run: create the room, add participants, FIFO-prune, render the
    * prompt, send it as the triggering user's first message. The agent reply
    * arrives later via the existing chat_room_message → agent-manager pipeline.
@@ -621,6 +723,44 @@ export class ActionsService {
       if (sourceTicket.workspace_id !== action.workspace_id) {
         throw makeError(400, 'source ticket belongs to a different workspace than the action');
       }
+    }
+
+    // ── High-impact pre-execution approval gate (ticket 524bb434, scope 5) ──
+    // A high-impact Action (explicit flag OR name heuristic) has irreversible
+    // external effects, so an AGENT clearing a ticket blocker may NOT auto-run
+    // it — a real workspace admin must approve first. Only the ticket-driven
+    // agent/system path is gated: a human-clicked UI run (type='user') is itself
+    // the approval, and standing scheduler/hook runs carry no source ticket. An
+    // unapproved high-impact ticket-driven run is rejected BEFORE any external
+    // side effect and its source ticket is parked (pending_user_action) with a
+    // concrete reason, so approval — not silent auto-execution — is what unblocks
+    // it (completion criterion: "승인이 반드시 필요한 경우만 Pending").
+    const highImpact = isHighImpactAction(action);
+    let approval: { userId: string; userName: string; at: Date } | null = null;
+    if (sourceTicketId && highImpact && args.triggeredByType !== 'user') {
+      const approverId = (args.approvedByUserId || '').trim();
+      if (!approverId) {
+        await this._parkForApproval(sourceTicketId, action, args.triggeredById);
+        throw makeError(
+          403,
+          `Action "${action.name}" is high-impact and requires explicit human approval before it can run. ` +
+          `The source ticket has been set to pending_user_action — a workspace admin must approve it ` +
+          `(re-run with approved_by_user_id set to their user id) or handle the operation manually. ` +
+          `An agent cannot auto-execute a deploy/publish/release.`,
+        );
+      }
+      // Approval authority: a real, active ADMIN user. An agent id / random uuid
+      // is not a user (findOne → null) so an agent cannot self-approve; a
+      // non-admin user is rejected as unauthorized. Approver/time are recorded on
+      // the run + an audit row so the approval is reconstructable.
+      const approver = await this.userRepo.findOne({ where: { id: approverId } });
+      if (!approver || approver.status !== 'active') {
+        throw makeError(403, 'high-impact approval must reference a real, active user (approved_by_user_id not found)');
+      }
+      if (approver.role !== 'admin') {
+        throw makeError(403, `user "${approver.name}" is not authorized to approve high-impact actions (admin role required)`);
+      }
+      approval = { userId: approver.id, userName: approver.name, at: new Date() };
     }
 
     // Build a render context the user can interpolate against. Resolve the
@@ -695,9 +835,19 @@ export class ActionsService {
       prompt_rendered: rendered,
       source_ticket_id: sourceTicketId,
       idempotency_key: idempotencyKey,
+      // Approval evidence for a high-impact run (scope 5). Empty/null unless the
+      // approval gate above authorized it via a real admin approver.
+      approved_by: approval?.userId || '',
+      approved_at: approval?.at || null,
       status: 'running',
       attempt: typeof args.attempt === 'number' && args.attempt > 0 ? Math.floor(args.attempt) : 1,
     }));
+
+    // Audit the approval on the source ticket so who/when is reconstructable
+    // (reviewer req: approval status/approver/time auditable).
+    if (approval) {
+      await this._logApprovalActivity(sourceTicketId, action, tempRun, approval);
+    }
 
     // Add participants directly (bypassing addParticipants' "caller must be a
     // member" check, which doesn't apply for system-initiated rooms).
