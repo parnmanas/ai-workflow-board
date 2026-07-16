@@ -13,6 +13,8 @@
 //   • grant 는 1회용(재사용 거부) + (action,ticket) 결합(다른 티켓/액션 미인가)
 //   • 승인 생성은 admin 세션만 — 비-admin 세션 403, 미인증 401, agent(MCP)는 아예 경로 없음
 //   • 감사 actor/time 은 caller 가 아니라 grant record(실 사람) 에서 복사
+//   • 만료 grant 는 뒤의 유효 grant 를 가리지 않는다 — expired A + valid B 는 단일 run 이
+//     A 를 retire 하고 B 를 소비해 실행(재-park 없음). (reviewer 5차 blocker)
 //
 // "재개"의 관측 가능한 신호:
 //   1. complete_action_run 응답의 resumed=true + resume_emitted>=1
@@ -592,6 +594,59 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   assert.equal(grant14.status, 'expired', 'the gate retires the expired grant');
   const t14 = await mcp.callTool('get_ticket', { ticket_id: ticket14.id });
   assert.equal(t14.pending_user_action, true, 'an expired-grant run parks the ticket');
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // CASE 15 — an expired grant must NOT shadow a newer VALID grant (reviewer 5차
+  // blocker). With `expired A + valid B` on the same (action, ticket), the old
+  // consume query hit the oldest grant A, retired it, and gave up — rejecting a
+  // legitimately-approved run and re-parking the ticket. A SINGLE agent run must
+  // now retire A, consume B, execute, and leave the ticket un-parked.
+  // ─────────────────────────────────────────────────────────────────────────
+  step('CASE 15 — expired grant does not shadow a newer valid grant (single run consumes B)');
+  const ticket15 = await createTicket(app, getDataSourceToken, {
+    columnId: col.id, workspaceId: ws.id, title: 'blocked expired-then-valid', assigneeId: agent.id,
+  });
+  // Grant A — created first, then forced into the past (expired) AND back-dated so
+  // it is unambiguously the OLDEST pending grant the ASC-ordered consume sees first.
+  // (created_at is second-precision on sqlite, so without back-dating A and B could
+  // tie and the buggy path would flake instead of failing deterministically.)
+  const apprA = await approveViaRest({ actionId: gated.id, workspaceId: ws.id, sourceTicketId: ticket15.id, token: adminToken });
+  assert.equal(apprA.status, 201, 'grant A created for (gated, ticket15)');
+  await ds.getRepository('ActionApproval').update(
+    { id: apprA.body.id },
+    { expires_at: new Date(Date.now() - 60_000), created_at: new Date(Date.now() - 120_000) },
+  );
+  // Grant B — a fresh, still-valid approval for the SAME (action, ticket) pair (the
+  // admin re-approved after A timed out). Newer than A, so the old query never
+  // reached it.
+  const apprB = await approveViaRest({ actionId: gated.id, workspaceId: ws.id, sourceTicketId: ticket15.id, token: adminToken });
+  assert.equal(apprB.status, 201, 'valid grant B created for the same (action, ticket)');
+  // Guard the test's own premise: A must be strictly older than B (so the buggy
+  // path really did hit the expired A first and bail).
+  const gA = await ds.getRepository('ActionApproval').findOne({ where: { id: apprA.body.id } });
+  const gB = await ds.getRepository('ActionApproval').findOne({ where: { id: apprB.body.id } });
+  assert.ok(
+    new Date(gA.created_at).getTime() < new Date(gB.created_at).getTime(),
+    'grant A is unambiguously older than B',
+  );
+  // Issuing B released the approval park — the ticket is not pending going in.
+  const t15pre = await mcp.callTool('get_ticket', { ticket_id: ticket15.id });
+  assert.equal(t15pre.pending_user_action, false, 'a fresh valid grant leaves the ticket un-parked');
+  // A SINGLE run must succeed: retire A, consume B, execute — no re-park.
+  const run15 = await mcp.callTool('run_action', { action_id: gated.id, source_ticket_id: ticket15.id });
+  assert.ok(!run15.isError, 'a single run consumes the valid grant B despite the older expired A');
+  assert.ok(run15.run_id, 'the approved run has an id');
+  // A is retired, B is the one consumed by this exact run.
+  const grantA15 = await ds.getRepository('ActionApproval').findOne({ where: { id: apprA.body.id } });
+  assert.equal(grantA15.status, 'expired', 'the older expired grant A is retired');
+  const grantB15 = await ds.getRepository('ActionApproval').findOne({ where: { id: apprB.body.id } });
+  assert.equal(grantB15.status, 'consumed', 'the newer valid grant B is the one consumed');
+  assert.equal(grantB15.consumed_by_run_id, run15.run_id, 'grant B records the consuming run');
+  const runs15 = await mcp.callTool('list_action_runs', { workspace_id: ws.id, action_id: gated.id });
+  assert.equal(findRun(runs15, run15.run_id).approved_by, admin.id, 'the run copies the approver id from the consumed grant');
+  // The (retired) expired grant did NOT re-park the ticket — the whole point.
+  const t15 = await mcp.callTool('get_ticket', { ticket_id: ticket15.id });
+  assert.equal(t15.pending_user_action, false, 'the valid run does NOT re-park the ticket');
 
   await mcp.close();
   exitAfterTests(0);
