@@ -34,6 +34,13 @@ import {
 } from './agent-status.service';
 import { AllocationService, AllocatedTicketRow } from './allocation.service';
 import { TriggerLoopService } from './trigger-loop.service';
+import {
+  DEFAULT_SUPERVISOR_STALE_MS,
+  SUPERVISOR_STALE_MS_SANE_MAX,
+  resolveSupervisorLivenessFloorMs,
+  resolveFirstPushThresholdMs,
+  classifySupervisorStaleMs,
+} from '../../common/supervisor-liveness';
 
 // Minimum resend cadence for tickets flagged as stuck (ticket b55e4421).
 // Prevents force_respawn spam on BLOCKED tickets that the stuck detector
@@ -55,8 +62,17 @@ const SUPERVISOR_TICK_MS = 60_000;
 // Workspace.supervisor_resend_ms (v0.41 makes these runtime settings).
 // The constants live here only as the in-code fallback for workspaces
 // whose row hasn't been backfilled yet, or when a settings lookup errors.
-const DEFAULT_SUPERVISOR_STALE_MS = 30 * 60_000;
+// DEFAULT_SUPERVISOR_STALE_MS is imported from common/supervisor-liveness so
+// the sane-max classification and this tick fallback share one source of truth.
 const DEFAULT_SUPERVISOR_RESEND_MS = 5 * 60_000;
+// Fast liveness-based re-dispatch floor (ticket 1fcba693). Resolved once at
+// module load (honors the SUPERVISOR_LIVENESS_FLOOR_MS env override). Caps the
+// FIRST-re-push threshold for a stale allocation nobody is working (no live
+// strand AND no recent output), so a dead / killed / never-spawned strand is
+// re-dispatched in minutes instead of waiting the full — operator-tunable,
+// historically mis-set to 4 h — stale window. Present-but-quiet strands are
+// untouched (they keep the full stale window + output-liveness gate).
+const SUPERVISOR_LIVENESS_FLOOR_MS = resolveSupervisorLivenessFloorMs();
 // Match AgentStatusService.OFFLINE_THRESHOLD_MS. Agents whose last_seen_at is
 // older than this are considered offline and skipped — no point pushing
 // triggers to a proxy that isn't listening.
@@ -115,6 +131,13 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
   // be observable" DoD. Membership == currently-misconfigured set: added on
   // detection, removed when the value drops back within the floor.
   private readonly staleMsExceedsTtlWorkspaces = new Set<string>();
+  // Workspaces whose supervisor_stale_ms exceeds the sane-max (ticket 1fcba693)
+  // — 4× the default. Catches values that sit BELOW the 6 h retention floor and
+  // so never trip staleMsExceedsTtlWorkspaces, yet are far larger than any
+  // reasonable cadence (the incident's 4 h value). Drives a once-per-workspace
+  // warn + the ticketSupervisor.staleMsElevated gauge so a mis-set / units-bug /
+  // stale-band-aid value is observable in /api/diagnostics/memory.
+  private readonly staleMsElevatedWorkspaces = new Set<string>();
   private tickHandle: NodeJS.Timeout | null = null;
 
   constructor(
@@ -138,6 +161,11 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
     // should know the window grew (and, past the CEILING, that the gate is
     // capped). Pairs with the once-per-workspace warn in resolveCadence.
     metrics.register('ticketSupervisor.staleMsExceedsTtl', () => this.staleMsExceedsTtlWorkspaces.size);
+    // Elevated-stale gauge (ticket 1fcba693). Non-zero means at least one
+    // workspace carries a supervisor_stale_ms above the sane-max (4× default) —
+    // the observable surface for "why is recovery paced so slowly". Pairs with
+    // the once-per-workspace warn in resolveCadence.
+    metrics.register('ticketSupervisor.staleMsElevated', () => this.staleMsElevatedWorkspaces.size);
   }
 
   onModuleInit(): void {
@@ -212,6 +240,30 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
       }
     } else {
       this.staleMsExceedsTtlWorkspaces.delete(workspaceId);
+    }
+
+    // Sane-max flag (ticket 1fcba693). Independent of the floor/ceiling logic
+    // above: a value can sit BELOW the 6 h retention floor yet still be far
+    // above any reasonable cadence (the 4 h incident band-aid). Classify →
+    // once-per-workspace warn + gauge so it is observable at the source.
+    const { elevated } = classifySupervisorStaleMs(staleMs);
+    if (elevated) {
+      if (!this.staleMsElevatedWorkspaces.has(workspaceId)) {
+        this.staleMsElevatedWorkspaces.add(workspaceId);
+        this.logService.warn(
+          'TicketSupervisor',
+          'supervisor_stale_ms is far above the default — stalled-ticket recovery for a PRESENT-but-wedged strand is paced off this window; verify it is intentional (not a units bug or a stale incident band-aid). Dead/absent strands are unaffected (fast liveness floor).',
+          {
+            workspace_id: workspaceId,
+            supervisor_stale_ms: staleMs,
+            default_supervisor_stale_ms: DEFAULT_SUPERVISOR_STALE_MS,
+            sane_max_ms: SUPERVISOR_STALE_MS_SANE_MAX,
+            liveness_floor_ms: SUPERVISOR_LIVENESS_FLOOR_MS,
+          },
+        );
+      }
+    } else {
+      this.staleMsElevatedWorkspaces.delete(workspaceId);
     }
   }
 
@@ -307,11 +359,6 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
         const lastUpdateMs = row.my_last_update_at ? Date.parse(row.my_last_update_at) : 0;
         const stalenessMs = lastUpdateMs > 0 ? (now - lastUpdateMs) : Infinity;
 
-        if (stalenessMs < staleMs) {
-          this.state.delete(key);
-          continue;
-        }
-
         // Stuck-ticket throttle (ticket b55e4421): if the stuck detector
         // has already flagged this ticket, suppress force_respawn and
         // extend the resend cadence to STUCK_TICKET_MIN_RESEND_MS. Each
@@ -344,6 +391,35 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
         const gateWindowMs = Math.min(staleMs, this.agentStatus.getOutputLivenessTtlMs());
         const lastOutputMs = this.agentStatus.getOutputLivenessAt(agent.id, row.ticket_id, row.role);
         const hasRecentOutput = lastOutputMs !== undefined && (now - lastOutputMs) < gateWindowMs;
+
+        // Fast liveness-based re-dispatch floor (ticket 1fcba693). A stale
+        // allocation with NO live strand (current_task absent / TTL-expired)
+        // AND NO recent output-liveness is one NOBODY is working — its strand
+        // died / was killed on a manager restart (exit 143) / never spawned, and
+        // nothing re-fires its column (the edge-trigger was already consumed).
+        // For such a ticket the FIRST re-push fires after the short liveness
+        // floor (SUPERVISOR_LIVENESS_FLOOR_MS) instead of the full stale window
+        // (up to 4 h on a mis-set workspace — the incident this ticket fixes).
+        // It is still the ordinary non-force nudge and funnels through
+        // _emitTrigger's in-flight-strand + provisioning single-flight gates, so
+        // if a strand IS live (or mid-provision) the nudge is simply dropped —
+        // no double-spawn, no respawn storm, no branch collision. A PRESENT /
+        // producing strand (hasLiveStrand || hasRecentOutput) and a stuck-flagged
+        // ticket keep the full stale window, so the exit-143 deathloop fix and
+        // the stuck-detector throttle are untouched.
+        const hasLiveStrand = this.agentStatus.hasLiveRoleStrand(agent.id, row.ticket_id, row.role);
+        const absentStrand = !hasLiveStrand && !hasRecentOutput;
+        const firstPushThresholdMs = resolveFirstPushThresholdMs({
+          staleMs,
+          livenessFloorMs: SUPERVISOR_LIVENESS_FLOOR_MS,
+          absentStrand,
+          isStuck,
+        });
+
+        if (stalenessMs < firstPushThresholdMs) {
+          this.state.delete(key);
+          continue;
+        }
 
         const entry = this.state.get(key);
 
