@@ -142,34 +142,61 @@ test('unit resolveFirstPushThresholdMs: absent strand drops to the floor; presen
   assert.equal(resolveFirstPushThresholdMs({ staleMs: 30_000, livenessFloorMs: floor, absentStrand: true, isStuck: false }), 30_000);
 });
 
-test('unit resolveRecoveryModeMs: leaked = TTL (NOT min(stale,TTL)); bounds = threshold + one tick', async () => {
+test('unit resolveRecoveryModeMs: leaked=TTL, leaked_with_output=max(TTL,min(stale,outputTtl)); bounds = threshold + one tick', async () => {
   const { resolveRecoveryModeMs, SUPERVISOR_TICK_MS } = await loadDist(['common', 'supervisor-liveness.js']);
-  const floor = 2 * MIN, ttl = 15 * MIN, tick = SUPERVISOR_TICK_MS;
+  const floor = 2 * MIN, ttl = 15 * MIN, outputTtl = 6 * HOUR, tick = SUPERVISOR_TICK_MS;
   assert.equal(tick, MIN, 'shared tick constant = 60 s');
 
   // Large stale window (4 h): floor/TTL win over the window; present = window.
-  const big = resolveRecoveryModeMs({ staleMs: FOUR_H_MS, livenessFloorMs: floor, currentTaskStaleMs: ttl });
-  assert.deepEqual(big.thresholds, { registry_absent: floor, leaked_current_task: ttl, present_strand: FOUR_H_MS });
+  // leaked_with_output = max(15 min TTL, min(4 h stale, 6 h retention)) = 4 h — a
+  // leaked seat that emitted output before dying recovers off the OUTPUT gate
+  // (~stale), NOT the 15 min TTL. The old single leaked value (TTL) under-
+  // reported this common silent-exit path (the reviewer's correctness fix).
+  const big = resolveRecoveryModeMs({ staleMs: FOUR_H_MS, livenessFloorMs: floor, currentTaskStaleMs: ttl, outputLivenessTtlMs: outputTtl });
+  assert.deepEqual(big.thresholds, {
+    registry_absent: floor,
+    leaked_current_task: ttl,
+    leaked_with_output: FOUR_H_MS,
+    present_strand: FOUR_H_MS,
+  });
   assert.deepEqual(big.bounds, {
     registry_absent: floor + tick,
     leaked_current_task: ttl + tick,
+    leaked_with_output: FOUR_H_MS + tick,
     present_strand: FOUR_H_MS + tick,
   });
+  assert.notEqual(big.thresholds.leaked_with_output, ttl, 'leaked_with_output is NOT the bare 15 min TTL under a 4 h window (the under-report the reviewer caught)');
 
   // REGRESSION: stale window (5 min) SMALLER than the 15 min TTL. The leaked
   // threshold must stay the TTL — a leaked current_task is live until its TTL,
   // so a small stale window cannot reclaim the seat sooner. min(stale,TTL) would
-  // wrongly report 5 min.
-  const short = resolveRecoveryModeMs({ staleMs: 5 * MIN, livenessFloorMs: floor, currentTaskStaleMs: ttl });
+  // wrongly report 5 min. leaked_with_output ALSO stays the TTL here: the output
+  // gate min(5 min, 6 h) = 5 min < 15 min TTL, so the TTL dominates the max().
+  const short = resolveRecoveryModeMs({ staleMs: 5 * MIN, livenessFloorMs: floor, currentTaskStaleMs: ttl, outputLivenessTtlMs: outputTtl });
   assert.equal(short.thresholds.leaked_current_task, ttl, 'leaked stays 15 min TTL, not min(5 min, 15 min)');
   assert.notEqual(short.thresholds.leaked_current_task, 5 * MIN, 'guards the old under-reporting min() bug');
+  assert.equal(short.thresholds.leaked_with_output, ttl, 'leaked_with_output = max(TTL, min(5 min, 6 h)) = 15 min TTL (output gate < TTL)');
   assert.equal(short.thresholds.registry_absent, floor, 'floor < 5 min stale → floor wins');
   assert.equal(short.thresholds.present_strand, 5 * MIN, 'present = the small window');
   assert.equal(short.bounds.leaked_current_task, ttl + tick);
+  assert.equal(short.bounds.leaked_with_output, ttl + tick);
   assert.equal(short.bounds.present_strand, 5 * MIN + tick);
 
+  // MID window (2 h) — between the TTL and the retention floor. This is where
+  // leaked_with_output visibly diverges from leaked_current_task: the output
+  // gate min(2 h, 6 h) = 2 h wins the max() over the 15 min TTL.
+  const mid = resolveRecoveryModeMs({ staleMs: 2 * HOUR, livenessFloorMs: floor, currentTaskStaleMs: ttl, outputLivenessTtlMs: outputTtl });
+  assert.equal(mid.thresholds.leaked_current_task, ttl, 'leaked-no-output is still the 15 min TTL');
+  assert.equal(mid.thresholds.leaked_with_output, 2 * HOUR, 'leaked_with_output = the 2 h output gate, NOT the 15 min TTL');
+
+  // Pathological stale window past the retention ceiling: the output gate clamps
+  // to the retention TTL, not the (unbounded) stale window.
+  const huge = resolveRecoveryModeMs({ staleMs: 48 * HOUR, livenessFloorMs: floor, currentTaskStaleMs: ttl, outputLivenessTtlMs: 24 * HOUR });
+  assert.equal(huge.thresholds.leaked_with_output, 24 * HOUR, 'output gate capped at the retention ceiling (24 h), not the 48 h window');
+  assert.equal(huge.thresholds.present_strand, 48 * HOUR, 'present strand still paced off the full window');
+
   // tickMs override is honored.
-  const noTick = resolveRecoveryModeMs({ staleMs: 5 * MIN, livenessFloorMs: floor, currentTaskStaleMs: ttl, tickMs: 0 });
+  const noTick = resolveRecoveryModeMs({ staleMs: 5 * MIN, livenessFloorMs: floor, currentTaskStaleMs: ttl, outputLivenessTtlMs: outputTtl, tickMs: 0 });
   assert.deepEqual(noTick.bounds, noTick.thresholds, 'tickMs=0 → bounds equal thresholds');
 });
 
@@ -272,6 +299,47 @@ test('DoD: a quiet-but-PRODUCING strand (recent output, no live current_task) is
   });
   await service._tick();
   assert.equal(emitted.length, 0, 'fresh output-liveness protects a producing worker from the fast floor');
+});
+
+test('DoD/reviewer: a LEAKED current_task whose strand left OUTPUT before dying is NOT reclaimed at the 15 min TTL — the output gate paces it off the stale window', async () => {
+  // The reviewer's leaked_with_output correctness case. stale = 4 h. The
+  // current_task is LEAKED (liveStrand=false → past its 15 min TTL). BUT the
+  // strand emitted output right before it silently exited — the COMMON shape —
+  // so its last output is 20 min old: OLDER than the 15 min current_task TTL,
+  // YOUNGER than the 4 h output gate (min(stale=4 h, retention=6 h)). So
+  // hasRecentOutput=true → absentStrand=false → NO fast floor, NO reclaim at the
+  // TTL. The bare leaked_current_task number (15 min) does NOT govern here; the
+  // real recovery is leaked_with_output (paced off the stale window). Ticket is
+  // 20 min stale (< the 4 h window), so nothing fires yet.
+  const { service, emitted, reclaimed, lockReleaseSink } = await makeSupervisor({
+    allocRow: { ticket_id: 't1', role: 'assignee', my_last_update_at: ago(20 * MIN) },
+    liveStrand: false,
+    outputAgoMs: 20 * MIN, // > 15 min TTL, < 4 h output gate → still "recent"
+    staleMs: FOUR_H_MS,
+    ttlMs: 6 * HOUR,
+  });
+  await service._tick();
+  assert.equal(emitted.length, 0, 'leaked-with-output seat is NOT re-dispatched past the 15 min TTL — the output gate holds it to the stale window, matching recovery_bounds_ms.leaked_with_output (NOT leaked_current_task)');
+  assert.equal(reclaimed.length, 0, 'the seat is NOT reclaimed at the TTL (reclaim runs only when absentStrand)');
+  assert.equal(lockReleaseSink.length, 0, 'and its claim is not released while the output gate still holds it');
+});
+
+test('DoD/reviewer: once the OUTPUT ages past the gate, the same leaked seat becomes absent and IS reclaimed + re-dispatched exactly once', async () => {
+  // Same seat, later: output is now 5 h old (> the 4 h output gate) and the
+  // ticket is 5 h stale (> the 4 h window). BOTH absentStrand gates now clear →
+  // one reclaim + one nudge, proving recovery does land (at ~the leaked_with_
+  // output bound / output gate), and not sooner and not never.
+  const { service, emitted, reclaimed, emitOrder } = await makeSupervisor({
+    allocRow: { ticket_id: 't1', role: 'assignee', my_last_update_at: ago(5 * HOUR) },
+    liveStrand: false,
+    outputAgoMs: 5 * HOUR, // > the 4 h output gate → no longer "recent"
+    staleMs: FOUR_H_MS,
+    ttlMs: 6 * HOUR,
+  });
+  await service._tick();
+  assert.equal(emitted.length, 1, 'after the output gate clears, the now-absent leaked seat is re-dispatched');
+  assert.equal(reclaimed.length, 1, 'and its seat is reclaimed exactly once');
+  assert.equal(emitOrder[0], 'reclaim', 'reclaim happens BEFORE the nudge');
 });
 
 test('DoD: a stuck-flagged ticket keeps the full window even when absent (no fast-floor respawn of a WAIT loop)', async () => {

@@ -148,12 +148,30 @@ export function resolveFirstPushThresholdMs(opts: {
  *     exceeds the workspace's own (possibly smaller) stale window.
  *   - leaked_current_task — a current_task LEAKED by a dirty death (SIGTERM
  *     self-update with no drain, respawn child with no release listener,
- *     reap-without-exit). hasLiveRoleStrand keeps counting it as LIVE until its
- *     TTL (`currentTaskStaleMs`) expires, so `absentStrand` — and the reclaim —
- *     only flip at that TTL. The gate is the TTL, NOT `min(stale, TTL)`: a stale
- *     window SMALLER than the TTL cannot reclaim a leaked seat any sooner, so
- *     clamping by stale would UNDER-report (e.g. stale=5 min still recovers a
- *     leak in 15 min, not 5).
+ *     reap-without-exit) WITHOUT any recent output-liveness. hasLiveRoleStrand
+ *     keeps counting it as LIVE until its TTL (`currentTaskStaleMs`) expires, so
+ *     `absentStrand` — and the reclaim — only flip at that TTL. The gate is the
+ *     TTL, NOT `min(stale, TTL)`: a stale window SMALLER than the TTL cannot
+ *     reclaim a leaked seat any sooner, so clamping by stale would UNDER-report
+ *     (e.g. stale=5 min still recovers a leak in 15 min, not 5).
+ *   - leaked_with_output — a leaked current_task whose strand emitted model
+ *     output RIGHT BEFORE dying (the COMMON silent-exit shape — a subagent
+ *     almost always produces tokens up to the moment it is killed). This is the
+ *     reviewer's correctness case, because `absentStrand = !hasLiveStrand &&
+ *     !hasRecentOutput` needs BOTH gates to clear:
+ *       · `!hasLiveStrand`   — current_task AND output both older than the TTL
+ *         (hasLiveRoleStrand honors output-liveness within the TTL too), and
+ *       · `!hasRecentOutput` — output older than `min(staleMs, outputTtl)`.
+ *     So the seat is held NON-absent (un-reclaimed) until output ages past
+ *     `max(currentTaskStaleMs, min(staleMs, outputLivenessTtlMs))` — NOT the
+ *     bare 15 min TTL. On a large stale window this collapses to ~stale (a leak
+ *     at 15 min that left output is only recovered ~stale later, not at the
+ *     TTL). Reporting the TTL here (the old single leaked value) UNDER-reported
+ *     this common path. Clearing output-liveness on a clean/sealed exit
+ *     (AgentStatusService.clearCurrentTask) is what lets a properly-released
+ *     seat skip this gate and recover at the fast floor / registry_absent
+ *     instead — the value shrinks to the floor exactly when the manager can
+ *     release the seat.
  *   - present_strand — a present / producing strand is paced off the full
  *     effective stale window (the output-liveness gate keeps a live-but-quiet
  *     worker safe), so this is the value's real observable harm.
@@ -163,6 +181,7 @@ export function resolveFirstPushThresholdMs(opts: {
 export interface RecoveryModeNumbers {
   registry_absent: number;
   leaked_current_task: number;
+  leaked_with_output: number;
   present_strand: number;
 }
 
@@ -170,12 +189,22 @@ export function resolveRecoveryModeMs(opts: {
   staleMs: number;
   livenessFloorMs: number;
   currentTaskStaleMs: number;
+  outputLivenessTtlMs: number;
   tickMs?: number;
 }): { thresholds: RecoveryModeNumbers; bounds: RecoveryModeNumbers } {
   const tick = opts.tickMs ?? SUPERVISOR_TICK_MS;
+  // The output-liveness half of the absentStrand gate: hasRecentOutput compares
+  // the last output age against min(staleMs, retention TTL). A leaked seat whose
+  // strand left output before dying stays non-absent until this clears, so its
+  // real recovery is max(TTL, this) — the current_task TTL never wins alone once
+  // there is recent output. Retention is derived >= staleMs (resolveOutput-
+  // LivenessTtlMs), so this equals staleMs in normal configs and only caps a
+  // pathological staleMs past the retention ceiling.
+  const outputGate = Math.min(opts.staleMs, opts.outputLivenessTtlMs);
   const thresholds: RecoveryModeNumbers = {
     registry_absent: Math.min(opts.staleMs, opts.livenessFloorMs),
     leaked_current_task: opts.currentTaskStaleMs,
+    leaked_with_output: Math.max(opts.currentTaskStaleMs, outputGate),
     present_strand: opts.staleMs,
   };
   return {
@@ -183,6 +212,7 @@ export function resolveRecoveryModeMs(opts: {
     bounds: {
       registry_absent: thresholds.registry_absent + tick,
       leaked_current_task: thresholds.leaked_current_task + tick,
+      leaked_with_output: thresholds.leaked_with_output + tick,
       present_strand: thresholds.present_strand + tick,
     },
   };

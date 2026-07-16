@@ -21,7 +21,7 @@ import {
   classifySupervisorStaleMs,
   resolveRecoveryModeMs,
 } from '../../common/supervisor-liveness';
-import { CURRENT_TASK_STALE_MS } from '../../modules/agents/agent-status.service';
+import { CURRENT_TASK_STALE_MS, resolveOutputLivenessTtlMs } from '../../modules/agents/agent-status.service';
 
 /**
  * Resolve one cadence field the same way TicketSupervisorService.resolveCadence
@@ -92,6 +92,20 @@ export class PublicDiagnosticsController {
     const livenessFloorSource =
       livenessFloorMs === DEFAULT_SUPERVISOR_LIVENESS_FLOOR_MS ? 'default' : 'env';
 
+    // Effective output-liveness retention TTL, derived the same way the runtime
+    // sweep does (AgentStatusService._resolveOutputLivenessTtlMs): from the
+    // LARGEST effective supervisor_stale_ms across workspaces, floored at 6 h.
+    // The leaked_with_output recovery bound needs it because the absentStrand
+    // gate clamps the output-liveness window to min(staleMs, this) — so a leaked
+    // seat with recent output recovers off that gate, not the 15 min TTL
+    // (ticket 1fcba693, reviewer AC). Derived here (pure) rather than injecting
+    // AgentStatusService: the diagnostic reports what the NEXT sweep will use.
+    const maxStaleMs = workspaces.reduce(
+      (m, w) => Math.max(m, resolveCadenceField(w.supervisor_stale_ms, DEFAULT_SUPERVISOR_STALE_MS).effective),
+      DEFAULT_SUPERVISOR_STALE_MS,
+    );
+    const outputLivenessTtlMs = resolveOutputLivenessTtlMs(maxStaleMs);
+
     return {
       timestamp: new Date().toISOString(),
       units: 'ms',
@@ -108,6 +122,12 @@ export class PublicDiagnosticsController {
         // recovery_thresholds_ms vs recovery_bounds_ms can see where the gap
         // comes from.
         supervisor_tick_ms: SUPERVISOR_TICK_MS,
+        // Effective output-liveness retention (>= 6 h floor). The absentStrand
+        // gate clamps the output window to min(supervisor_stale_ms, this), so a
+        // leaked seat that left output before dying is held non-absent — and
+        // un-reclaimed — for up to that gate. Surfaced so the leaked_with_output
+        // recovery number below is traceable to its inputs.
+        output_liveness_ttl_ms: outputLivenessTtlMs,
       },
       liveness_floor: { effective_ms: livenessFloorMs, source: livenessFloorSource },
       elevated_count: workspaces.filter(
@@ -130,6 +150,7 @@ export class PublicDiagnosticsController {
           staleMs: stale.effective,
           livenessFloorMs,
           currentTaskStaleMs: CURRENT_TASK_STALE_MS,
+          outputLivenessTtlMs,
           tickMs: SUPERVISOR_TICK_MS,
         });
         return {
