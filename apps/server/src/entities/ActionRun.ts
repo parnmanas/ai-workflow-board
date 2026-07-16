@@ -76,6 +76,18 @@ export class ActionRun {
   @Column({ type: 'varchar', default: '' })
   idempotency_key: string;
 
+  // Human approval evidence for a high-impact run (ticket 524bb434, scope 5).
+  // A high-impact Action dispatched by an agent to clear a ticket blocker only
+  // runs when a real workspace admin approved it; `approved_by` is that user id
+  // and `approved_at` the approval time, recorded on the run so who/when is
+  // reconstructable. '' / NULL for low-impact runs and for human-initiated
+  // (UI) or scheduler/hook runs that never pass through the approval gate.
+  @Column({ type: 'varchar', default: '' })
+  approved_by: string;
+
+  @Column({ type: Date, nullable: true, default: null })
+  approved_at: Date | null;
+
   // Set when status leaves 'running'. NULL while the run is still in flight.
   @Column({ type: Date, nullable: true, default: null })
   completed_at: Date | null;
