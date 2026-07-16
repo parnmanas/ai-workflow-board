@@ -14,6 +14,7 @@ import { Workspace } from '../../entities/Workspace';
 import { User } from '../../entities/User';
 import { Comment } from '../../entities/Comment';
 import { ActivityLog } from '../../entities/ActivityLog';
+import { Ticket } from '../../entities/Ticket';
 import { RoomMembershipService } from '../chat-rooms/room-membership.service';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { LogService } from '../../services/log.service';
@@ -34,7 +35,23 @@ function makeError(status: number, message: string): Error & { status: number } 
  * resumes automatically — the "Action 등록 → 실행 → 결과 반영 → 티켓 재개"
  * chain. Server-injected so it holds regardless of what the Action author wrote.
  */
-function renderCompletionContract(runId: string, workspaceId: string, sourceTicketId: string): string {
+function renderCompletionContract(
+  runId: string,
+  workspaceId: string,
+  sourceTicketId: string,
+  idempotencyKey: string,
+  highImpact: boolean,
+): string {
+  const idempotencyBlock = idempotencyKey
+    ? `\n\n**Idempotency key:** \`${idempotencyKey}\` — pass this to the external system (deploy/publish/release) as the operation's dedupe key. ` +
+      `A retry of this run carries the SAME key, so a redelivered operation under this key must be a no-op on the target side. ` +
+      `Do NOT re-run the external effect if that key was already applied.`
+    : '';
+  const failureLine = highImpact
+    ? `- **failed** → this is a HIGH-IMPACT action, so the server does NOT auto-retry (a blind re-run could double the external effect). ` +
+      `The failure is surfaced to the ticket for a human decision. Report **failed** only if the external operation did NOT take effect; ` +
+      `if you are unsure whether it partially landed, say so in \`summary\`.`
+    : `- **failed** → the run is retried automatically (bounded, same idempotency key); after the retry cap the failure is surfaced back to the ticket.`;
   return (
     `\n\n---\n` +
     `## Report your result (required — a ticket is waiting on this run)\n\n` +
@@ -49,8 +66,9 @@ function renderCompletionContract(runId: string, workspaceId: string, sourceTick
     `)\n` +
     '```\n\n' +
     `- **succeeded** → the source ticket auto-resumes in place and your summary is posted to its audit trail.\n` +
-    `- **failed** → the run is retried automatically (bounded); after the retry cap the failure is surfaced back to the ticket.\n` +
-    `- Do this exactly once. A second call on the same run is ignored (the outcome is already recorded).`
+    `${failureLine}\n` +
+    `- Do this exactly once. A second call on the same run is ignored (the outcome is already recorded).` +
+    idempotencyBlock
   );
 }
 
@@ -76,6 +94,11 @@ export interface DispatchActionArgs {
   // 1-based attempt number. `completeRun`'s retry path re-dispatches with
   // attempt+1; the default 1 covers the first, agent-initiated dispatch.
   attempt?: number;
+  // Run-level idempotency key (ticket 524bb434, scope 5). `completeRun`'s retry
+  // path passes the FAILED run's key so the whole retry chain shares one key —
+  // the target operation can dedupe. Undefined on a first ticket-driven
+  // dispatch, where `dispatch` mints a fresh key.
+  idempotencyKey?: string;
 }
 
 export interface DispatchActionResult {
@@ -159,6 +182,7 @@ export class ActionsService {
     @InjectRepository(User) private readonly userRepo: Repository<User>,
     @InjectRepository(Comment) private readonly commentRepo: Repository<Comment>,
     @InjectRepository(ActivityLog) private readonly activityRepo: Repository<ActivityLog>,
+    @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
     private readonly membership: RoomMembershipService,
     private readonly messaging: RoomMessagingService,
     private readonly logService: LogService,
@@ -225,6 +249,7 @@ export class ActionsService {
       target_agent_id: input.target_agent_id,
       schedule_cron: input.schedule_cron ?? '',
       enabled: input.enabled !== false,
+      high_impact: input.high_impact === true,
       max_runs: typeof input.max_runs === 'number' && input.max_runs > 0 ? input.max_runs : 10,
       trigger: input.trigger ?? '',
       trigger_label: input.trigger_label ?? '',
@@ -268,6 +293,7 @@ export class ActionsService {
       existing.schedule_cron = next;
     }
     if (patch.enabled !== undefined) existing.enabled = !!patch.enabled;
+    if (patch.high_impact !== undefined) existing.high_impact = !!patch.high_impact;
     if (patch.max_runs !== undefined) {
       const n = Number(patch.max_runs);
       if (Number.isFinite(n) && n > 0) existing.max_runs = Math.floor(n);
@@ -355,15 +381,45 @@ export class ActionsService {
       'Run not found in workspace',
     );
 
-    // ── Idempotency guard ────────────────────────────────────────────────
-    // Only a 'running' run transitions. A second completion returns the
-    // recorded state without re-posting, re-triggering, or re-counting.
-    if (run.status && run.status !== 'running') {
-      this.logService.info('Actions', `completeRun no-op — run ${run.id} already ${run.status}`);
+    const summary = (args.summary || '').trim();
+
+    // ── Atomic idempotent terminal transition (reviewer req 2) ────────────
+    // The transition is a single UPDATE guarded on `status = 'running'`, so
+    // exactly one caller flips running → terminal. Two concurrent
+    // `complete_action_run` calls that both read 'running' can no longer both
+    // proceed: the DB serialises the guarded UPDATE and only the winner's
+    // affected-row count is > 0. The loser (and any later sequential dup)
+    // takes the no-op branch below — no double audit row, no double
+    // resume/retry, no double retry-count. This is the scope-5 idempotency
+    // lever for high-impact Actions where a duplicated re-dispatch is unsafe.
+    const completedAt = new Date();
+    const claim = await this.runRepo
+      .createQueryBuilder()
+      .update(ActionRun)
+      .set({ status: args.status, result_summary: summary, completed_at: completedAt })
+      .where('id = :id', { id: run.id })
+      .andWhere('workspace_id = :ws', { ws: workspaceId })
+      .andWhere("status = 'running'")
+      .execute();
+    // Postgres + sql.js both populate UpdateResult.affected. If a future driver
+    // leaves it undefined, fall back to the pre-transition status check so we
+    // still reject an already-terminal run rather than double-processing it.
+    const won =
+      claim.affected === undefined || claim.affected === null
+        ? run.status === 'running'
+        : claim.affected > 0;
+
+    if (!won) {
+      // Lost the race (or a sequential duplicate on an already-terminal run).
+      // Report the recorded state without any side effect. Re-read so the
+      // status reflects the winner's outcome, not our stale 'running' snapshot.
+      const current = await this.runRepo.findOne({ where: { id: run.id, workspace_id: workspaceId } });
+      const settled = current || run;
+      this.logService.info('Actions', `completeRun no-op — run ${run.id} already ${settled.status}`);
       return {
-        run,
-        sourceTicketId: run.source_ticket_id || '',
-        status: run.status as CompleteRunResult['status'],
+        run: settled,
+        sourceTicketId: settled.source_ticket_id || '',
+        status: (settled.status || 'running') as CompleteRunResult['status'],
         previouslyCompleted: true,
         retried: false,
         retryRunId: '',
@@ -372,11 +428,11 @@ export class ActionsService {
       };
     }
 
-    const summary = (args.summary || '').trim();
+    // We own the transition — reflect it on the in-memory row for the rest of
+    // this method (audit comment, activity, retry/resume decision).
     run.status = args.status;
     run.result_summary = summary;
-    run.completed_at = new Date();
-    await this.runRepo.save(run);
+    run.completed_at = completedAt;
 
     const action = await this.actionRepo.findOne({ where: { id: run.action_id } });
     const actionName = action?.name || run.action_id;
@@ -419,7 +475,14 @@ export class ActionsService {
 
     // ── Failure ──────────────────────────────────────────────────────────
     await this._logRunActivity(sourceTicketId, run, actor, 'failed', summary);
-    if (run.attempt < ActionsService.MAX_RUN_ATTEMPTS) {
+    // High-impact Actions (deploy/publish/release) are NOT auto-retried
+    // (reviewer req 4 / scope 5). A failure here may mean the external
+    // operation partially landed; a blind bounded re-run could double the
+    // effect. bounded retry ≠ operation idempotency. Surface it to the ticket
+    // for a human decision instead. Non-high-impact Actions keep the bounded
+    // auto-retry, carrying the run's idempotency key so the target can dedupe.
+    const highImpact = !!action?.high_impact;
+    if (!highImpact && run.attempt < ActionsService.MAX_RUN_ATTEMPTS) {
       const nextAttempt = run.attempt + 1;
       let retryRunId = '';
       try {
@@ -429,6 +492,9 @@ export class ActionsService {
           triggeredById: actor.id,
           sourceTicketId,
           attempt: nextAttempt,
+          // Carry the same idempotency key across the retry chain so the
+          // target operation can dedupe a redelivered external effect.
+          idempotencyKey: run.idempotency_key || undefined,
         });
         retryRunId = retry.run.id;
       } catch (e: any) {
@@ -451,13 +517,17 @@ export class ActionsService {
       }
     }
 
-    // Retry cap reached (or re-dispatch could not launch): surface + resume.
-    await this._postRunComment(
-      sourceTicketId, run.workspace_id, actor,
-      `❌ Action **${actionName}** run \`${run.id.slice(0, 8)}\` failed after ${run.attempt} attempt(s)` +
-      `${summary ? ` — ${summary}` : ''}. Resuming this ticket so the assignee can fix the inputs and retry, ` +
-      `or \`pend_ticket\` with a specific \`no_action_reason\` if it genuinely needs a human.`,
-    );
+    // High-impact failure (no auto-retry) or the retry cap reached (or a
+    // re-dispatch that could not launch): surface + resume so a human decides.
+    const surface = highImpact
+      ? `❌ HIGH-IMPACT Action **${actionName}** run \`${run.id.slice(0, 8)}\` failed` +
+        `${summary ? ` — ${summary}` : ''}. NOT auto-retried (a blind re-run could double a deploy/publish effect). ` +
+        `Resuming this ticket: verify whether the external operation actually landed, then re-run **${actionName}** ` +
+        `(idempotency key \`${run.idempotency_key || 'n/a'}\`) or \`pend_ticket\` with a specific \`no_action_reason\` if it needs a human.`
+      : `❌ Action **${actionName}** run \`${run.id.slice(0, 8)}\` failed after ${run.attempt} attempt(s)` +
+        `${summary ? ` — ${summary}` : ''}. Resuming this ticket so the assignee can fix the inputs and retry, ` +
+        `or \`pend_ticket\` with a specific \`no_action_reason\` if it genuinely needs a human.`;
+    await this._postRunComment(sourceTicketId, run.workspace_id, actor, surface);
     return {
       run, sourceTicketId, status: 'failed',
       previouslyCompleted: false, retried: false, retryRunId: '', exhausted: true,
@@ -504,6 +574,11 @@ export class ActionsService {
   ): Promise<void> {
     try {
       await this.activityRepo.save(this.activityRepo.create({
+        // Source workspace (reviewer req 3) — the run's workspace is the source
+        // ticket's workspace (enforced at dispatch), so the audit row is visible
+        // in the workspace activity feed instead of defaulting to '' (which hid
+        // it from every workspace-scoped query).
+        workspace_id: run.workspace_id,
         entity_type: 'ticket',
         entity_id: ticketId,
         ticket_id: ticketId,
@@ -531,6 +606,22 @@ export class ActionsService {
 
     const agent = await this.agentRepo.findOne({ where: { id: action.target_agent_id } });
     if (!agent) throw makeError(400, 'target agent not found');
+
+    // Source-ticket workspace boundary (ticket 524bb434, reviewer req 1). When
+    // a ticket dispatches this run, the ticket MUST exist and live in the same
+    // workspace as the Action. Without this a caller could link an Action run
+    // to a ticket in another workspace and, via `complete_action_run`, drive
+    // cross-workspace comments / re-dispatch. Validated here at dispatch so the
+    // persisted `source_ticket_id` is always trustworthy — `completeRun` reads
+    // it back off the run row and never re-derives it from caller input.
+    const sourceTicketId = (args.sourceTicketId || '').trim();
+    if (sourceTicketId) {
+      const sourceTicket = await this.ticketRepo.findOne({ where: { id: sourceTicketId } });
+      if (!sourceTicket) throw makeError(404, 'source ticket not found');
+      if (sourceTicket.workspace_id !== action.workspace_id) {
+        throw makeError(400, 'source ticket belongs to a different workspace than the action');
+      }
+    }
 
     // Build a render context the user can interpolate against. Resolve the
     // optional pieces best-effort — missing fields render as empty string in
@@ -569,9 +660,14 @@ export class ActionsService {
     // target agent reports its outcome via `complete_action_run` — that call is
     // what re-dispatches (resumes) the source ticket. Server-injected (not left
     // to the Action author) so every ticket-driven run closes the loop reliably.
-    const sourceTicketId = (args.sourceTicketId || '').trim();
+    // Mint a run-level idempotency key on the first dispatch; retries pass the
+    // failed run's key so the whole chain shares one (scope 5). Only ticket-
+    // driven runs get a key — cron/manual runs have nothing to resume or dedupe.
+    const idempotencyKey = sourceTicketId
+      ? (args.idempotencyKey || '').trim() || randomUUID()
+      : '';
     const rendered = sourceTicketId
-      ? `${withLanguage}${renderCompletionContract(runId, action.workspace_id, sourceTicketId)}`
+      ? `${withLanguage}${renderCompletionContract(runId, action.workspace_id, sourceTicketId, idempotencyKey, !!action.high_impact)}`
       : withLanguage;
 
     // Create the room. We use 'group' as the underlying type so the chat
@@ -598,6 +694,7 @@ export class ActionsService {
       triggered_by_id: args.triggeredById || '',
       prompt_rendered: rendered,
       source_ticket_id: sourceTicketId,
+      idempotency_key: idempotencyKey,
       status: 'running',
       attempt: typeof args.attempt === 'number' && args.attempt > 0 ? Math.floor(args.attempt) : 1,
     }));
