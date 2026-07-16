@@ -67,6 +67,82 @@ const AUTO_ADVANCE_ACTOR_NAME = 'Auto-Advance';
 const COMMENT_ACTION = 'created';
 const COMMENT_ENTITY = 'comment';
 
+// Transition-trigger preservation (ticket 1bcb0899). Trigger sources that
+// represent a ONE-SHOT workflow-state transition: they fire exactly once on a
+// move / chain hand-off / prerequisite unblock and are NOT re-fired by any
+// later organic event. If the in-flight-strand gate in `_emitTrigger` drops
+// one of these while a conflicting same-(agent, ticket, role) strand is still
+// live, the transition is lost forever — nothing re-fires it, so the ticket
+// strands until an unrelated event (the ~2.9h prereq-waiter rescue in the
+// source incident) happens to re-dispatch its column. Those sources are queued
+// for replay on the next `agent_idle`; every OTHER source is deliberately
+// excluded because it self-corrects:
+//   - 'comment' / 'ticket_update' re-fire on the next comment / field edit,
+//   - 'supervisor' re-fires every 60s tick (and escalates to force_respawn),
+//   - 'manual' is a deliberate user button press they can repeat,
+//   - 'inflight_strand_replay' is EXCLUDED on purpose so a replay that itself
+//     re-drops does not re-queue — that keeps the drain loop-free (a re-drop by
+//     the in-flight gate means a fresh strand now holds the seat, i.e. the
+//     ticket is being served, so there is nothing left to strand).
+const TRANSITION_TRIGGER_SOURCES = new Set<string>([
+  'column_move',
+  'next_ticket',
+  'prerequisite_resolved',
+]);
+
+// Upper bound a queued replay lingers if its owning agent never emits another
+// `agent_idle` to drain it. Set well above the strand TTL (CURRENT_TASK_STALE_MS
+// = 15 min) so the blocking strand's own stale-sweep idle always fires first;
+// the drain prunes anything older on every pass, so the map stays bounded even
+// for an agent that goes fully silent. A pruned entry is NOT dropped silently:
+// the drain writes a terminal `agent_trigger_replay_failed` row with
+// reason=ttl_expired (ticket 1bcb0899 reviewer BLOCKER #2) so an abandoned
+// transition stays observable, exactly like the attempt-exhaustion give-up.
+const TRANSITION_REPLAY_TTL_MS = 30 * 60_000;
+
+// Max times a single queued transition is re-attempted before the drain gives
+// up and writes a terminal `agent_trigger_replay_failed` audit row (ticket
+// 1bcb0899 reviewer BLOCKER). A replay whose emit is GATED (`_emitTrigger`
+// returns '' — board paused / ticket pending / focus window / a fresh strand
+// re-grabbed the seat between the idle and the emit) or THROWS (transient
+// DB/SSE fault) is NOT consumed: it is re-queued so the NEXT `agent_idle`
+// attempts it again, rather than vanishing while the audit falsely claims
+// recovery. (There is no separate explicit-retry entry point — the drain's only
+// caller is the `agent_idle` subscription — so "next agent_idle" is the retry.)
+// This counter is the loop-guard that pairs with the TTL prune: whichever bound
+// trips first, the entry ends on a terminal `agent_trigger_replay_failed` row
+// (reason=attempts_exhausted vs ttl_expired), never a silent delete.
+const MAX_TRANSITION_REPLAY_ATTEMPTS = 5;
+
+// Outcome of one `_replayTransitionTrigger` pass, telling the drain whether the
+// dequeued entry is truly done or must be re-queued for the next lifecycle
+// signal:
+//   - 'emitted'  — `_emitTrigger` returned a real (non-empty) event id; the
+//                  recovery landed and the success audit row is now written.
+//   - 'skipped'  — nothing is owed (ticket gone / on a terminal column / the
+//                  agent no longer holds a routed role); consume, do not retry.
+//   - 'deferred' — the emit was gated ('') or threw; re-queue and retry on the
+//                  next `agent_idle` (bounded by MAX_TRANSITION_REPLAY_ATTEMPTS).
+type TransitionReplayOutcome = 'emitted' | 'skipped' | 'deferred';
+
+// One queued transition trigger awaiting the freeing of its (agent, ticket,
+// role) seat. Held in memory only — same fire-and-forget philosophy as the rest
+// of the dispatch path (no AgentTrigger table since v0.25.0); a process restart
+// drops the queue, and the TicketSupervisor 60s re-push remains the crash-safe
+// backstop.
+interface PendingTransitionReplay {
+  agentId: string;
+  ticketId: string;
+  role: string;
+  triggerSource: string;
+  triggeredBy: string;
+  queuedAt: number;
+  // How many times the drain has already tried (and had gated/threw) to replay
+  // this seat. 0 at first enqueue; incremented each deferral. Bounded by
+  // MAX_TRANSITION_REPLAY_ATTEMPTS so a permanently-ungateable entry can't loop.
+  attempts: number;
+}
+
 @Injectable()
 export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
   // Stored reference so OnModuleDestroy can detach the listener. In
@@ -76,6 +152,17 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
   // EventEmitter's MaxListenersExceededWarning fires. Finding-004 in
   // docs/audit/2026-05-system-cascade-audit.md.
   private _activityListener?: (log: ActivityLog) => void;
+
+  // Transition-trigger preservation (ticket 1bcb0899). Detached in
+  // onModuleDestroy for the same per-spec listener-leak reason as
+  // _activityListener above.
+  private _agentIdleListener?: (payload: { agent_id?: string; cleared_ticket_id?: string }) => void;
+
+  // Queued one-shot transition triggers dropped by the in-flight-strand gate,
+  // keyed by `${agentId}::${ticketId}::${role}` (the exact busy seat). Drained
+  // and replayed when that seat's strand frees (agent_idle). At most one entry
+  // per seat — a re-drop refreshes it rather than stacking.
+  private readonly _pendingTransitionReplays = new Map<string, PendingTransitionReplay>();
 
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
@@ -93,12 +180,30 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
       });
     };
     activityEvents.on('activity', this._activityListener);
+
+    // Transition-trigger preservation (ticket 1bcb0899). A strand freeing its
+    // seat is exactly when a transition trigger dropped by the in-flight gate
+    // becomes replayable, so we listen for the same `agent_idle` signal
+    // BacklogPromotionService uses. Fired by clearCurrentTask (normal exit,
+    // carries cleared_ticket_id) AND the AgentStatusService stale-sweep (crash /
+    // TTL, cleared_ticket_id undefined) — so both graceful and crashed strands
+    // trigger a drain.
+    this._agentIdleListener = (payload) => {
+      this._drainTransitionReplays(payload?.agent_id, payload?.cleared_ticket_id).catch((e: unknown) => {
+        this.logService.error('MCP', 'TriggerLoop error draining transition replays', { err: e });
+      });
+    };
+    activityEvents.on('agent_idle', this._agentIdleListener);
   }
 
   onModuleDestroy() {
     if (this._activityListener) {
       activityEvents.removeListener('activity', this._activityListener);
       this._activityListener = undefined;
+    }
+    if (this._agentIdleListener) {
+      activityEvents.removeListener('agent_idle', this._agentIdleListener);
+      this._agentIdleListener = undefined;
     }
   }
 
@@ -1117,6 +1222,306 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
     return { emitted };
   }
 
+  /** Map key for a queued transition replay — the exact busy (agent, ticket, role) seat. */
+  private _transitionReplayKey(agentId: string, ticketId: string, role: string): string {
+    return `${agentId}::${ticketId}::${role || ''}`;
+  }
+
+  /**
+   * Transition-trigger preservation drain (ticket 1bcb0899). Invoked on every
+   * `agent_idle` — a strand for `agentId` just freed its seat (normal
+   * clearCurrentTask names `clearedTicketId`; the stale-sweep leaves it
+   * undefined). Replay each queued transition trigger for this agent whose seat
+   * is now actually free.
+   *
+   * Safety / loop-freedom:
+   *   - Prunes entries older than TRANSITION_REPLAY_TTL_MS on every pass so the
+   *     map is bounded even if an agent stops idling. A prune is a TERMINAL
+   *     give-up, not a silent drop: it writes an `agent_trigger_replay_failed`
+   *     row (reason=ttl_expired) so an abandoned transition stays observable
+   *     (ticket 1bcb0899 reviewer BLOCKER #2). Pruning spans ALL agents, not
+   *     just the one that idled, so a silent agent's stale entry is still reaped.
+   *   - Re-checks `hasLiveRoleStrand` per entry: if a FRESH strand grabbed the
+   *     same seat between the idle signal and now (or this idle was for another
+   *     of the agent's tickets), the entry is LEFT queued — that strand's own
+   *     later idle retries it. A still-live seat means the ticket is being
+   *     served, so replaying now would just re-drop.
+   *   - Dequeues BEFORE awaiting the replay, so a concurrent drain can't
+   *     double-replay the same entry.
+   *   - A replay whose emit is GATED ('') or THROWS returns 'deferred' and is
+   *     RE-QUEUED (attempt-bounded) so the transition is not lost when the emit
+   *     transiently drops — the fix for the reviewer BLOCKER on ticket 1bcb0899
+   *     (a success audit must never precede a real emit; a gated emit must stay
+   *     recoverable). Only 'emitted' / 'skipped' consume the entry for good.
+   */
+  private async _drainTransitionReplays(agentId?: string, clearedTicketId?: string): Promise<void> {
+    if (!agentId || this._pendingTransitionReplays.size === 0) return;
+    const now = Date.now();
+    const candidates: Array<{ key: string; entry: PendingTransitionReplay }> = [];
+    const expired: Array<{ entry: PendingTransitionReplay; ageMs: number }> = [];
+    for (const [key, entry] of this._pendingTransitionReplays) {
+      if (now - entry.queuedAt > TRANSITION_REPLAY_TTL_MS) {
+        // TTL give-up. Dequeue now (bounds the map), but DO NOT drop silently —
+        // a lapsed transition is exactly the stranded-ticket bug this ticket
+        // exists to eliminate (1bcb0899 reviewer BLOCKER #2). Record it for a
+        // terminal failed audit below, written outside this iteration since the
+        // audit is async.
+        this._pendingTransitionReplays.delete(key);
+        expired.push({ entry, ageMs: now - entry.queuedAt });
+        continue;
+      }
+      if (entry.agentId !== agentId) continue;
+      candidates.push({ key, entry });
+    }
+    for (const { entry, ageMs } of expired) {
+      this.logService.warn('MCP', 'transition-replay TTL-expired (giving up — transition NOT recovered)', {
+        ticket_id: entry.ticketId, agent_id: entry.agentId, role: entry.role,
+        dropped_source: entry.triggerSource, attempts: entry.attempts, age_ms: ageMs,
+      });
+      await this._writeReplayLifecycleAudit(
+        entry,
+        'agent_trigger_replay_failed',
+        entry.attempts,
+        clearedTicketId,
+        'ttl_expired',
+        ageMs,
+      );
+    }
+    for (const { key, entry } of candidates) {
+      // A concurrent drain (rapid successive agent_idle for this same agent)
+      // may have already claimed this snapshotted entry — the has-check +
+      // delete below are synchronous-adjacent, so they act atomically across
+      // the await boundary and guarantee exactly-once replay.
+      if (!this._pendingTransitionReplays.has(key)) continue;
+      // Seat re-taken by a fresh strand (or this idle was for a sibling ticket)
+      // → leave queued; that strand's exit fires another agent_idle to retry.
+      if (this.agentStatus.hasLiveRoleStrand(entry.agentId, entry.ticketId, entry.role)) {
+        continue;
+      }
+      this._pendingTransitionReplays.delete(key);
+      let outcome: TransitionReplayOutcome;
+      try {
+        outcome = await this._replayTransitionTrigger(entry, clearedTicketId);
+      } catch (e) {
+        // A THROW (transient DB/SSE fault) is NOT a successful recovery — treat
+        // it exactly like a gated emit and re-queue so the next idle retries,
+        // rather than dropping the one-shot transition on the floor.
+        this.logService.warn('MCP', 'transition-replay dispatch threw (will retry on next idle)', {
+          err: String(e), ticket_id: entry.ticketId, agent_id: entry.agentId, role: entry.role,
+        });
+        outcome = 'deferred';
+      }
+      if (outcome === 'deferred') {
+        await this._requeueDeferredReplay(key, entry, clearedTicketId);
+      }
+    }
+  }
+
+  /**
+   * Re-queue a transition replay whose emit was GATED (`_emitTrigger` → '') or
+   * THREW (ticket 1bcb0899 reviewer BLOCKER). The entry was already dequeued by
+   * the drain; putting it back — with an incremented attempt count — is what
+   * makes the recovery survive a transient drop instead of vanishing while the
+   * audit falsely reads success. Loop-freedom is double-bounded:
+   *   - MAX_TRANSITION_REPLAY_ATTEMPTS caps re-tries; on exhaustion we STOP and
+   *     write a terminal `agent_trigger_replay_failed` row so the stranded
+   *     transition stays greppable (the original bug hid it entirely).
+   *   - the original `queuedAt` is preserved, so the TTL prune in the drain
+   *     still bounds total lifetime regardless of idle cadence — and that prune
+   *     is itself a terminal `agent_trigger_replay_failed` (reason=ttl_expired),
+   *     so neither give-up path ends in a silent delete.
+   * A fresh drop that re-queued this exact seat while we awaited is NOT
+   * clobbered — it already carries the newer intent for the same recovery.
+   */
+  private async _requeueDeferredReplay(
+    key: string,
+    entry: PendingTransitionReplay,
+    clearedTicketId?: string,
+  ): Promise<void> {
+    const attempts = entry.attempts + 1;
+    if (attempts >= MAX_TRANSITION_REPLAY_ATTEMPTS) {
+      this.logService.warn('MCP', 'transition-replay exhausted retries (giving up — transition NOT recovered)', {
+        ticket_id: entry.ticketId, agent_id: entry.agentId, role: entry.role,
+        dropped_source: entry.triggerSource, attempts,
+      });
+      await this._writeReplayLifecycleAudit(
+        entry,
+        'agent_trigger_replay_failed',
+        attempts,
+        clearedTicketId,
+        'attempts_exhausted',
+        Date.now() - entry.queuedAt,
+      );
+      return;
+    }
+    if (this._pendingTransitionReplays.has(key)) return;
+    this._pendingTransitionReplays.set(key, { ...entry, attempts });
+    this.logService.info('MCP', 'transition-replay deferred (emit gated/threw — re-queued for next idle)', {
+      ticket_id: entry.ticketId, agent_id: entry.agentId, role: entry.role,
+      dropped_source: entry.triggerSource, attempts,
+    });
+    await this._writeReplayLifecycleAudit(
+      entry,
+      'agent_trigger_replay_deferred',
+      attempts,
+      clearedTicketId,
+    );
+  }
+
+  /**
+   * Best-effort audit row for a deferred / failed replay lifecycle transition
+   * (ticket 1bcb0899). Kept distinct from `agent_trigger_replayed_inflight_strand`
+   * (which is written ONLY after a real emit) so a post-mortem can tell an
+   * actual recovery from a retry-in-progress or a give-up. For a terminal
+   * `agent_trigger_replay_failed` row the `reason` distinguishes the two
+   * give-up paths — `attempts_exhausted` (emit kept gating/throwing) vs
+   * `ttl_expired` (the entry aged out before its seat ever freed) — and `ageMs`
+   * records how long it was owed, so the abandoned transition is diagnosable,
+   * not just visible. actor_id='system' keeps it out of `_handleActivity`'s
+   * self-echo guard, like every other TriggerLoopService audit row. A write
+   * failure never gates the retry.
+   */
+  private async _writeReplayLifecycleAudit(
+    entry: PendingTransitionReplay,
+    action: 'agent_trigger_replay_deferred' | 'agent_trigger_replay_failed',
+    attempts: number,
+    clearedTicketId?: string,
+    reason?: 'attempts_exhausted' | 'ttl_expired',
+    ageMs?: number,
+  ): Promise<void> {
+    try {
+      const activityLogRepo = this.dataSource.getRepository(ActivityLog);
+      const newValue =
+        `agent=${entry.agentId} role=${entry.role} dropped_source=${entry.triggerSource} attempts=${attempts}` +
+        (reason !== undefined ? ` reason=${reason}` : '') +
+        (ageMs !== undefined ? ` age_ms=${ageMs}` : '') +
+        ` cleared_ticket=${clearedTicketId || ''}`;
+      await activityLogRepo.save(activityLogRepo.create({
+        entity_type: 'ticket',
+        entity_id: entry.ticketId,
+        ticket_id: entry.ticketId,
+        actor_id: 'system',
+        actor_name: 'TriggerLoopService',
+        action,
+        new_value: newValue,
+        role: entry.role,
+        trigger_source: 'inflight_strand_replay',
+      }));
+    } catch (e) {
+      this.logService.warn('MCP', 'transition-replay lifecycle audit write failed (retry state still applied)', {
+        err: String(e), ticket_id: entry.ticketId, agent_id: entry.agentId, action,
+      });
+    }
+  }
+
+  /**
+   * Replay one queued transition trigger now that its seat is free. Re-resolves
+   * the ticket's CURRENT column so an intervening move can't replay a stale
+   * role, and only re-emits to the specific agent whose seat freed — and only
+   * for a role that agent still holds on the current column. Silent skips (one
+   * info log each) when there is nothing left owed:
+   *   - ticket vanished / detached from a column
+   *   - ticket already landed on a terminal column
+   *   - the agent no longer holds any routed role on the current column
+   *
+   * Emits with trigger_source 'inflight_strand_replay' (deliberately NOT a
+   * TRANSITION_TRIGGER_SOURCE, so a re-drop does not re-queue) and writes a
+   * system-actor audit row so the automatic recovery is observable / greppable.
+   * The emit funnels back through `_emitTrigger`, which re-applies the
+   * pause / archived / pending / focus / in-flight gates against fresh state.
+   */
+  private async _replayTransitionTrigger(
+    entry: PendingTransitionReplay,
+    clearedTicketId?: string,
+  ): Promise<TransitionReplayOutcome> {
+    const ticket = await this.dataSource.getRepository(Ticket).findOne({ where: { id: entry.ticketId } });
+    if (!ticket || !ticket.column_id) {
+      this.logService.info('MCP', 'transition-replay skipped (ticket missing / no column)', {
+        ticket_id: entry.ticketId, agent_id: entry.agentId,
+      });
+      return 'skipped';
+    }
+    const col = await this.dataSource
+      .getRepository(BoardColumn)
+      .findOne({ where: { id: ticket.column_id } });
+    if (!col) return 'skipped';
+    const isTerminal = (col as any).is_terminal === true || (col as any).kind === 'terminal';
+    if (isTerminal) {
+      this.logService.info('MCP', 'transition-replay skipped (ticket already on terminal column)', {
+        ticket_id: entry.ticketId, agent_id: entry.agentId, column_id: col.id,
+      });
+      return 'skipped';
+    }
+
+    const slugs = safeJsonParse<string[]>((col as any).role_routing, []);
+    if (!Array.isArray(slugs) || slugs.length === 0) return 'skipped';
+    for (const slug of slugs) {
+      const holders = await this._resolveRoleHolders(ticket, slug);
+      if (!holders || !holders.agentIds.includes(entry.agentId)) continue;
+
+      // Emit FIRST — only a real (non-empty) event id proves the recovery
+      // actually landed (ticket 1bcb0899 reviewer BLOCKER). The emit funnels
+      // back through `_emitTrigger`, which re-applies the pause / archived /
+      // pending / focus / in-flight gates against fresh state and returns ''
+      // when any of them drops it — OR a fresh strand may have re-grabbed the
+      // seat between the drain's hasLiveRoleStrand check and this emit. Writing
+      // the replay-success audit BEFORE the emit (as the pre-fix code did)
+      // would falsely mark recovery in exactly those drop paths, re-losing the
+      // one-shot transition while the audit claims success.
+      this.logService.info('MCP', 'agent_trigger replay attempt (strand freed)', {
+        ticket_id: ticket.id, agent_id: entry.agentId, role: slug,
+        dropped_source: entry.triggerSource, attempts: entry.attempts,
+      });
+      const emittedId = await this._emitTrigger(
+        ticket, entry.agentId, slug, 'inflight_strand_replay', entry.triggeredBy,
+      );
+      if (!emittedId) {
+        // Gated by a fresh-state check (pause/pending/focus) or lost the seat
+        // to a racing strand. Do NOT write a success audit; report 'deferred'
+        // so the drain re-queues for the next agent_idle to retry.
+        this.logService.info('MCP', 'transition-replay emit gated (deferring — no success audit written)', {
+          ticket_id: ticket.id, agent_id: entry.agentId, role: slug,
+          dropped_source: entry.triggerSource, attempts: entry.attempts,
+        });
+        return 'deferred';
+      }
+
+      // Real emit — the recovery is now genuinely observable. Tie the audit
+      // back to the earlier queued drop; carry the emitted trigger id so the
+      // row can be correlated to the actual dispatch. actor_id='system' keeps
+      // it out of _handleActivity (self-echo guard), like the drop rows.
+      try {
+        const activityLogRepo = this.dataSource.getRepository(ActivityLog);
+        await activityLogRepo.save(activityLogRepo.create({
+          entity_type: 'ticket',
+          entity_id: ticket.id,
+          ticket_id: ticket.id,
+          actor_id: 'system',
+          actor_name: 'TriggerLoopService',
+          action: 'agent_trigger_replayed_inflight_strand',
+          new_value: `agent=${entry.agentId} role=${slug} dropped_source=${entry.triggerSource} attempts=${entry.attempts} trigger_id=${emittedId} cleared_ticket=${clearedTicketId || ''}`,
+          role: slug,
+          trigger_source: 'inflight_strand_replay',
+        }));
+      } catch (e) {
+        this.logService.warn('MCP', 'transition-replay success audit write failed (emit already landed)', {
+          err: String(e), ticket_id: ticket.id, agent_id: entry.agentId,
+        });
+      }
+
+      this.logService.info('MCP', 'agent_trigger replayed (strand freed, transition recovered)', {
+        ticket_id: ticket.id, agent_id: entry.agentId, role: slug,
+        dropped_source: entry.triggerSource,
+      });
+      return 'emitted'; // one wake per agent (dedup mirrors the fan-out loop)
+    }
+
+    this.logService.info('MCP', 'transition-replay skipped (agent holds no routed role on current column)', {
+      ticket_id: entry.ticketId, agent_id: entry.agentId, column_id: col.id,
+    });
+    return 'skipped';
+  }
+
   /**
    * Static self-improvement analysis prompt injected as `column_prompt` on
    * `ticket_done_review` triggers. Kept inline (not table-driven) so the
@@ -1537,8 +1942,25 @@ candidate's branch or move the ticket.
     // manager-side by the same defensive cap that guards the per-ticket limit
     // (stream-events.ts AgentTriggerPayload.max_concurrent_tickets_per_agent).
     if (opts?.forceRespawn !== true && this.agentStatus.hasLiveRoleStrand(agentId, ticket.id, role)) {
+      // Transition-trigger preservation (ticket 1bcb0899). Queue a one-shot
+      // transition (column_move / next_ticket / prerequisite_resolved) so the
+      // agent_idle drain replays it the instant the blocking strand frees,
+      // instead of leaving the ticket stranded until an unrelated event happens
+      // to re-dispatch its column. Enqueue SYNCHRONOUSLY (before any await) so a
+      // same-tick clearCurrentTask can't emit agent_idle between this gate check
+      // and the enqueue and miss it — single-threaded, so the check + set are
+      // atomic. Non-transition sources self-correct (see TRANSITION_TRIGGER_SOURCES)
+      // and are left unqueued.
+      const queuedForReplay = TRANSITION_TRIGGER_SOURCES.has(triggerSource);
+      if (queuedForReplay) {
+        this._pendingTransitionReplays.set(
+          this._transitionReplayKey(agentId, ticket.id, role),
+          { agentId, ticketId: ticket.id, role, triggerSource, triggeredBy, queuedAt: Date.now(), attempts: 0 },
+        );
+      }
       this.logService.info('MCP', 'agent_trigger dropped (live same-role strand in flight)', {
         ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource,
+        queued_for_replay: queuedForReplay,
       });
       try {
         const activityLogRepo = this.dataSource.getRepository(ActivityLog);
@@ -1549,7 +1971,7 @@ candidate's branch or move the ticket.
           actor_id: 'system',
           actor_name: 'TriggerLoopService',
           action: 'agent_trigger_dropped_inflight_strand',
-          new_value: `agent=${agentId} role=${role} source=${triggerSource}`,
+          new_value: `agent=${agentId} role=${role} source=${triggerSource} queued_for_replay=${queuedForReplay}`,
           role,
           trigger_source: triggerSource,
         }));

@@ -193,8 +193,9 @@ export class WorkspacesController {
       }
     }
 
-    // Workspace-wide default environment setup (ticket 354d336b). Same contract
-    // as the board PATCH: null clears, objects are strict-zod-validated → 400.
+    // Workspace-wide default environment setup (ticket 354d336b; simplified in
+    // 8fbe90e9). Same contract as the board PATCH: null clears; objects are
+    // normalised to repositories[].resource_id only (legacy keys dropped).
     if (environment_config !== undefined) {
       if (environment_config === null) {
         ws.environment_config = null;

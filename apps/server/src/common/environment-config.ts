@@ -85,6 +85,41 @@ export const EnvironmentConfigSchema = z
 export type EnvironmentRepository = z.infer<typeof EnvironmentRepositorySchema>;
 export type EnvironmentConfig = z.infer<typeof EnvironmentConfigSchema>;
 
+/**
+ * WRITE-path schema (ticket 8fbe90e9). Board Settings > Environment Setup is now
+ * a SINGLE repository-Resource picker — the one field an operator sets is the
+ * repository's `resource_id`. Everything the old surface carried is either
+ * derived from the Resource + server defaults (url / branch / target_dir), never
+ * executed by agent-manager (setup_commands / post_clone_commands /
+ * setup_timeout_seconds are parsed but never run — "checkout is exclusively owned
+ * by WT/QA provisioning"), or non-essential process-only config (env_vars /
+ * version). So the write contract accepts ONLY repositories[].resource_id.
+ *
+ * At most ONE repository is accepted. Only env.repositories[0] is ever consumed
+ * (agent-manager resolveBootstrapRepository), so a second+ entry was dead config
+ * the operator believed was provisioned — the write path now REJECTS it rather
+ * than silently persisting a lie. Existing multi-entry rows already stored stay
+ * readable (EnvironmentConfigSchema below is unbounded) and collapse to the first
+ * repo the next time the board is saved.
+ *
+ * Unknown keys are STRIPPED, not rejected (zod object default): a not-yet-reloaded
+ * client bundle or a legacy MCP caller that still POSTs the full shape during a
+ * deploy window is NORMALISED to the repo-only shape rather than 400'd. The
+ * STORED/READ schema (EnvironmentConfigSchema above) stays permissive so configs
+ * already saved with the legacy keys keep resolving + executing unchanged — this
+ * asymmetry (write-narrow, read-wide) is the backward-compat contract.
+ */
+const EnvironmentRepositoryInputSchema = z.object({
+  resource_id: z.string().trim().min(1, 'each repository needs a resource_id'),
+});
+
+export const EnvironmentConfigInputSchema = z.object({
+  repositories: z
+    .array(EnvironmentRepositoryInputSchema)
+    .max(1, 'at most one repository can be provisioned (only the first is ever used)')
+    .optional(),
+});
+
 /** A repository entry after server-side resolution: url is always concrete. */
 export interface ResolvedEnvironmentRepository {
   resource_id: string;
@@ -138,14 +173,16 @@ export function parseEnvironmentConfig(raw: string | null | undefined): Environm
 }
 
 /**
- * Validate write-path input (REST PATCH body / MCP tool arg). Unlike
- * parseEnvironmentConfig this REJECTS bad input so the caller can 400 — silent
- * null-coercion on a write would make a typo'd key vanish without feedback.
+ * Validate write-path input (REST PATCH body / MCP tool arg). Normalises to the
+ * repository-Resource-only shape (EnvironmentConfigInputSchema): the returned
+ * value carries at most `repositories: [{ resource_id }]` — every legacy key is
+ * dropped. A repository entry missing a non-empty resource_id is REJECTED so the
+ * caller can 400 (a genuinely malformed write, not a removed-field carry-over).
  */
 export function validateEnvironmentConfigInput(
   input: unknown,
 ): { ok: true; value: EnvironmentConfig } | { ok: false; error: string } {
-  const parsed = EnvironmentConfigSchema.safeParse(input);
+  const parsed = EnvironmentConfigInputSchema.safeParse(input);
   if (!parsed.success) {
     const issues = parsed.error.issues
       .map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`)

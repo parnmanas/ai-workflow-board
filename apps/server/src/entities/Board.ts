@@ -50,17 +50,19 @@ export class Board {
   @Column({ type: 'text', nullable: true, default: null })
   effort_presets: string | null;
 
-  // Per-board environment setup override (ticket 354d336b). JSON text of
-  // EnvironmentConfig (see common/environment-config.ts): { repositories?,
-  // env_vars?, setup_commands?, setup_timeout_seconds?, version? }. Resolved
-  // against the workspace-level default via mergeEnvironmentConfig — board
-  // keys override per top-level key, unset keys inherit. At dispatch
-  // TriggerLoopService expands each repository's resource_id into a concrete
-  // url/branch and ships the resolved config on the agent_trigger SSE payload;
-  // agent-manager provisions the environment (clone/update repos, run setup
-  // commands, inject env_vars, fingerprint marker) just before spawning the
-  // subagent. null = no override (and with the workspace also null, dispatch
-  // behaves exactly as before — no provisioning step).
+  // Per-board environment setup override (ticket 354d336b; write surface
+  // simplified to a repository-Resource picker in 8fbe90e9). JSON text of
+  // EnvironmentConfig (see common/environment-config.ts). NEW writes store only
+  // { repositories?: [{ resource_id }] }; configs already saved with the legacy
+  // keys (env_vars, setup_commands, per-repo url/branch/target_dir/…) still parse
+  // and resolve unchanged for backward compatibility. Resolved against the
+  // workspace-level default via mergeEnvironmentConfig — board keys override per
+  // top-level key, unset keys inherit. At dispatch TriggerLoopService expands
+  // each repository's resource_id into a concrete url/branch and ships the
+  // resolved config on the agent_trigger SSE payload; agent-manager checks the
+  // first repository out as the ticket worktree (resolveBootstrapRepository) and
+  // injects any stored env_vars into the subagent process. null = no override
+  // (and with the workspace also null, dispatch behaves exactly as before).
   @Column({ type: 'text', nullable: true, default: null })
   environment_config: string | null;
 

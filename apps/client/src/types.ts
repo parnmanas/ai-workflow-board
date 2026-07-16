@@ -1196,32 +1196,21 @@ export interface Board {
 }
 
 // Stored JSON-encoded in Board.environment_config (per-board override) and
-// Workspace.environment_config (workspace default); resolution is key-level
-// (board overrides workspace per top-level key) at dispatch.
+// Workspace.environment_config (workspace default). Simplified in ticket
+// 8fbe90e9 to a repository-Resource picker: the ONLY field an operator sets is
+// each repository's resource_id; the server derives url / default_branch /
+// credential from the Resource and owns worktree checkout. Older boards may
+// still have legacy keys stored (env_vars, setup_commands, per-repo url/branch/
+// target_dir/post_clone_commands, setup_timeout_seconds, version) — the editor
+// tolerates and ignores them on load, and re-saving drops them. This TS shape
+// is the WRITE shape only; the read/resolve path stays permissive server-side.
 export interface EnvironmentRepository {
   // Repository Resource id (type='repository'); the server expands it to a
-  // concrete url/default_branch at dispatch. Either resource_id or url required.
-  resource_id?: string;
-  // Direct clone url (used when no resource_id, or to override the resource).
-  url?: string;
-  // Clone destination RELATIVE to the agent home (e.g. "repos/my-app").
-  target_dir?: string;
-  // Branch to checkout; falls back to the resource's default_branch.
-  branch?: string;
-  // Commands run once inside this repo's dir right after a fresh clone.
-  post_clone_commands?: string[];
+  // concrete url / default_branch / credential at dispatch.
+  resource_id: string;
 }
 export interface EnvironmentConfig {
   repositories?: EnvironmentRepository[];
-  // Non-secret env vars injected into the subagent process. string→string.
-  env_vars?: Record<string, string>;
-  // Bootstrap commands run once (in the agent home) after repos are placed.
-  setup_commands?: string[];
-  // Per-command timeout for clone + setup steps (1..3600s, default 600).
-  setup_timeout_seconds?: number;
-  // Operator-bumped marker to force re-provisioning even when nothing else
-  // changed (folded into the fingerprint).
-  version?: number;
 }
 
 // ─── Effort presets (abstract effort → per-CLI options) ─────────
