@@ -311,20 +311,47 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
    * are legitimately distinct strands on a single-agent multi-role board).
    * Same-role match → there's already a live strand serving this seat → the
    * caller drops the redundant emit.
+   *
+   * Second signal — OUTPUT-liveness (ticket e9c8e1d6). set_current_task is
+   * stamped ONCE at spawn and never refreshed, so a strand that produces tokens
+   * for longer than CURRENT_TASK_STALE_MS WITHOUT a ticket-write ages the
+   * current_task entry out and looks dead to path 1 — even though it is plainly
+   * alive. We therefore ALSO honor a fresh per-(agent,ticket,role) output-liveness
+   * timestamp within the same horizon (rationale on the branch below).
    */
   hasLiveRoleStrand(agent_id: string, ticket_id: string, role: string): boolean {
     if (!agent_id || !ticket_id) return false;
-    const status = this.state.get(agent_id);
-    const task = status?.active_tasks?.get(ticket_id);
-    if (!task) return false;
-    // Stale entry (plugin crashed before clearing) — treat as no live strand
-    // so a re-trigger can recover, mirroring getActiveTicketIds' cutoff.
-    const cutoff = new Date(Date.now() - CURRENT_TASK_STALE_MS);
-    if (task.claimed_at < cutoff) return false;
-    // Role must match the live strand's seat. An undefined role on the live
-    // task (pre-v0.34 plugin that didn't pin a role) is treated as matching
-    // any role — conservative: better to serialize than to race.
-    return !task.role || task.role === role;
+    const cutoff = Date.now() - CURRENT_TASK_STALE_MS;
+
+    // Path 1 — fresh current_task. A role-matching active_tasks entry newer than
+    // the stale cutoff means a live strand holds this seat. A stale entry (plugin
+    // crashed before clearing) is treated as no live strand so a re-trigger can
+    // recover, mirroring getActiveTicketIds' cutoff. An undefined role on the
+    // live task (pre-v0.34 plugin that didn't pin a role) matches any role —
+    // conservative: better to serialize than to race.
+    const task = this.state.get(agent_id)?.active_tasks?.get(ticket_id);
+    if (task && task.claimed_at.getTime() >= cutoff && (!task.role || task.role === role)) {
+      return true;
+    }
+
+    // Path 2 — fresh OUTPUT-liveness (ticket e9c8e1d6). output-liveness IS
+    // refreshed on every model-output post (throttled manager-side to
+    // OUTPUT_LIVENESS_MIN_INTERVAL_MS), so it is the missing "still actively
+    // working THIS seat" evidence a spawn-only current_task lacks. Fresh within
+    // the SAME CURRENT_TASK_STALE_MS horizon → a live strand → drop the
+    // supervisor's redundant non-force nudge (which the manager would otherwise
+    // collapse into a wasteful follow-up turn every resend tick). A genuinely
+    // idle-but-finished or wedged strand emits no output, ages past the horizon
+    // on BOTH paths, and still gets the nudge — the "wake a stalled session"
+    // recovery is preserved (force_respawn bypasses this gate entirely and is
+    // unaffected). No eviction race with _sweep: output-liveness retention
+    // (>= 6 h floor, ticket 47a72129) far exceeds this 15-min window, so an
+    // in-window entry is never swept early. output-liveness is already role-keyed,
+    // so a live ASSIGNEE strand's output never marks a REVIEWER seat live.
+    const lastOutputMs = this.getOutputLivenessAt(agent_id, ticket_id, role);
+    if (lastOutputMs !== undefined && lastOutputMs >= cutoff) return true;
+
+    return false;
   }
 
   private _outputLivenessKey(agentId: string, ticketId: string, role: string): string {
