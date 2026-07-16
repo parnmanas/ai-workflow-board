@@ -39,6 +39,7 @@ import {
   DEFAULT_SUPERVISOR_STALE_MS,
   DEFAULT_SUPERVISOR_RESEND_MS,
   SUPERVISOR_STALE_MS_SANE_MAX,
+  SUPERVISOR_TICK_MS,
   resolveSupervisorLivenessFloorMs,
   resolveFirstPushThresholdMs,
   classifySupervisorStaleMs,
@@ -59,7 +60,8 @@ const STUCK_TICKET_MIN_RESEND_MS = 60 * 60_000; // 1 hour
 // dropped) or the session shows fresh output-liveness.
 const SUPERVISOR_FORCE_RESPAWN_MAX = 5;
 
-const SUPERVISOR_TICK_MS = 60_000;
+// SUPERVISOR_TICK_MS is defined in ../../common/supervisor-liveness (shared with
+// the cadence diagnostic so both report the SAME tick) and imported above.
 // Defaults — overridable per Workspace via Workspace.supervisor_stale_ms /
 // Workspace.supervisor_resend_ms (v0.41 makes these runtime settings).
 // The constants live here only as the in-code fallback for workspaces

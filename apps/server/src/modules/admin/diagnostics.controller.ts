@@ -16,8 +16,10 @@ import {
   DEFAULT_SUPERVISOR_RESEND_MS,
   DEFAULT_SUPERVISOR_LIVENESS_FLOOR_MS,
   SUPERVISOR_STALE_MS_SANE_MAX,
+  SUPERVISOR_TICK_MS,
   resolveSupervisorLivenessFloorMs,
   classifySupervisorStaleMs,
+  resolveRecoveryModeMs,
 } from '../../common/supervisor-liveness';
 import { CURRENT_TASK_STALE_MS } from '../../modules/agents/agent-status.service';
 
@@ -101,6 +103,11 @@ export class PublicDiagnosticsController {
         liveness_floor_ms: DEFAULT_SUPERVISOR_LIVENESS_FLOOR_MS,
         sane_max_ms: SUPERVISOR_STALE_MS_SANE_MAX,
         current_task_stale_ms: CURRENT_TASK_STALE_MS,
+        // The supervisor re-evaluates once per tick, so every recovery bound is
+        // `threshold + up to one tick`. Exposed so an operator reading
+        // recovery_thresholds_ms vs recovery_bounds_ms can see where the gap
+        // comes from.
+        supervisor_tick_ms: SUPERVISOR_TICK_MS,
       },
       liveness_floor: { effective_ms: livenessFloorMs, source: livenessFloorSource },
       elevated_count: workspaces.filter(
@@ -110,34 +117,30 @@ export class PublicDiagnosticsController {
         const stale = resolveCadenceField(w.supervisor_stale_ms, DEFAULT_SUPERVISOR_STALE_MS);
         const resend = resolveCadenceField(w.supervisor_resend_ms, DEFAULT_SUPERVISOR_RESEND_MS);
         const { elevated } = classifySupervisorStaleMs(stale.effective);
+        // Recovery numbers this cadence implies, split by HOW the strand died so
+        // an operator reads the REAL guarantee for each case (ticket 1fcba693,
+        // reviewer AC — a single "absent" bound conflated two very different
+        // numbers). `thresholds` are the detection thresholds (tick-exclusive);
+        // `bounds` add one supervisor tick for the actual observed upper bound,
+        // so a field named `*_bounds_ms` equals the value it claims. A LEAKED
+        // current_task is gated by its TTL (current_task_stale_ms), NOT
+        // min(stale, TTL) — a stale window smaller than the TTL cannot reclaim a
+        // leaked seat any sooner (the reviewer's stale<15 min correctness fix).
+        const recovery = resolveRecoveryModeMs({
+          staleMs: stale.effective,
+          livenessFloorMs,
+          currentTaskStaleMs: CURRENT_TASK_STALE_MS,
+          tickMs: SUPERVISOR_TICK_MS,
+        });
         return {
           workspace_id: w.id,
           name: w.name,
           supervisor_stale_ms: stale,
           supervisor_resend_ms: resend,
           liveness_floor_ms: livenessFloorMs,
-          // Recovery bounds this cadence implies, split by HOW the strand died
-          // so an operator reads the REAL guarantee for each case (ticket
-          // 1fcba693, reviewer AC — a single "absent" bound conflated two very
-          // different numbers). All clamped by the effective stale window.
-          recovery_bounds_ms: {
-            // No current_task at all — the strand never spawned, or the manager
-            // cleared it on a clean exit / release. The supervisor sees no live
-            // strand immediately, so the FIRST re-push fires at the fast liveness
-            // floor + up to one 60 s supervisor tick.
-            registry_absent: Math.min(stale.effective, livenessFloorMs),
-            // current_task LEAKED by a dirty death (SIGTERM self-update with no
-            // drain, respawn child with no release listener, reap-without-exit).
-            // hasLiveRoleStrand still counts it as live until its TTL
-            // (current_task_stale_ms) expires, so the seat is only reclaimed +
-            // re-dispatched AFTER that TTL — NOT the 2 min floor — + up to one tick.
-            leaked_current_task: Math.min(stale.effective, CURRENT_TASK_STALE_MS),
-            // A PRESENT / producing strand is paced off the (possibly large)
-            // effective stale window — the output-liveness gate keeps a
-            // live-but-quiet worker safe, so this is the value's real observable
-            // harm (slow recovery for a wedged-but-present strand).
-            present_strand: stale.effective,
-          },
+          supervisor_tick_ms: SUPERVISOR_TICK_MS,
+          recovery_thresholds_ms: recovery.thresholds,
+          recovery_bounds_ms: recovery.bounds,
           elevated,
         };
       }),

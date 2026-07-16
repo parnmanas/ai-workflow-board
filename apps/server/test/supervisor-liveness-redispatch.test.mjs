@@ -142,6 +142,37 @@ test('unit resolveFirstPushThresholdMs: absent strand drops to the floor; presen
   assert.equal(resolveFirstPushThresholdMs({ staleMs: 30_000, livenessFloorMs: floor, absentStrand: true, isStuck: false }), 30_000);
 });
 
+test('unit resolveRecoveryModeMs: leaked = TTL (NOT min(stale,TTL)); bounds = threshold + one tick', async () => {
+  const { resolveRecoveryModeMs, SUPERVISOR_TICK_MS } = await loadDist(['common', 'supervisor-liveness.js']);
+  const floor = 2 * MIN, ttl = 15 * MIN, tick = SUPERVISOR_TICK_MS;
+  assert.equal(tick, MIN, 'shared tick constant = 60 s');
+
+  // Large stale window (4 h): floor/TTL win over the window; present = window.
+  const big = resolveRecoveryModeMs({ staleMs: FOUR_H_MS, livenessFloorMs: floor, currentTaskStaleMs: ttl });
+  assert.deepEqual(big.thresholds, { registry_absent: floor, leaked_current_task: ttl, present_strand: FOUR_H_MS });
+  assert.deepEqual(big.bounds, {
+    registry_absent: floor + tick,
+    leaked_current_task: ttl + tick,
+    present_strand: FOUR_H_MS + tick,
+  });
+
+  // REGRESSION: stale window (5 min) SMALLER than the 15 min TTL. The leaked
+  // threshold must stay the TTL — a leaked current_task is live until its TTL,
+  // so a small stale window cannot reclaim the seat sooner. min(stale,TTL) would
+  // wrongly report 5 min.
+  const short = resolveRecoveryModeMs({ staleMs: 5 * MIN, livenessFloorMs: floor, currentTaskStaleMs: ttl });
+  assert.equal(short.thresholds.leaked_current_task, ttl, 'leaked stays 15 min TTL, not min(5 min, 15 min)');
+  assert.notEqual(short.thresholds.leaked_current_task, 5 * MIN, 'guards the old under-reporting min() bug');
+  assert.equal(short.thresholds.registry_absent, floor, 'floor < 5 min stale → floor wins');
+  assert.equal(short.thresholds.present_strand, 5 * MIN, 'present = the small window');
+  assert.equal(short.bounds.leaked_current_task, ttl + tick);
+  assert.equal(short.bounds.present_strand, 5 * MIN + tick);
+
+  // tickMs override is honored.
+  const noTick = resolveRecoveryModeMs({ staleMs: 5 * MIN, livenessFloorMs: floor, currentTaskStaleMs: ttl, tickMs: 0 });
+  assert.deepEqual(noTick.bounds, noTick.thresholds, 'tickMs=0 → bounds equal thresholds');
+});
+
 test('unit classifySupervisorStaleMs: default is normal, the 4 h incident value is elevated, boundary is exclusive', async () => {
   const { classifySupervisorStaleMs, SUPERVISOR_STALE_MS_SANE_MAX, DEFAULT_SUPERVISOR_STALE_MS } =
     await loadDist(['common', 'supervisor-liveness.js']);

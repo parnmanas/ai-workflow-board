@@ -53,6 +53,16 @@ export const DEFAULT_SUPERVISOR_RESEND_MS = 5 * 60_000; // 5 min
 export const DEFAULT_SUPERVISOR_LIVENESS_FLOOR_MS = 2 * 60_000; // 2 min
 
 /**
+ * The TicketSupervisor tick interval (ms). The supervisor is edge-agnostic: it
+ * only re-evaluates every stale allocation once per tick, so a recovery
+ * *threshold* being crossed is not observed until the NEXT tick — every real
+ * recovery bound is therefore `threshold + up to one tick`. Exported as a shared
+ * policy constant (single source of truth) so the tick loop and the cadence
+ * diagnostic report the SAME number instead of a hard-coded 60_000 in each.
+ */
+export const SUPERVISOR_TICK_MS = 60_000; // 60 s
+
+/**
  * Resolve the liveness floor, honoring the SUPERVISOR_LIVENESS_FLOOR_MS env
  * override for ops tuning (same pattern as StuckTicketDetectorService's env
  * knobs). Non-positive / non-finite → the default.
@@ -120,4 +130,60 @@ export function resolveFirstPushThresholdMs(opts: {
     return Math.min(opts.staleMs, opts.livenessFloorMs);
   }
   return opts.staleMs;
+}
+
+/**
+ * Per-death-mode recovery numbers the current cadence implies (ticket 1fcba693).
+ *
+ * `thresholds` are the DETECTION thresholds — the staleness a stale allocation
+ * must accrue before the supervisor's first re-push can fire for that death
+ * mode, tick-EXCLUSIVE. `bounds` add `SUPERVISOR_TICK_MS` (the supervisor only
+ * looks once per tick, so detection lags the threshold by up to one tick) to
+ * give the actual OBSERVED upper bound. Splitting the two is the reviewer AC: a
+ * field literally named `*_bounds_ms` must equal the value it claims.
+ *
+ *   - registry_absent  — no current_task at all (never spawned, or the manager
+ *     cleared it on a clean exit / release). `absentStrand` is true immediately,
+ *     so the first re-push fires at the fast liveness floor, clamped so it never
+ *     exceeds the workspace's own (possibly smaller) stale window.
+ *   - leaked_current_task — a current_task LEAKED by a dirty death (SIGTERM
+ *     self-update with no drain, respawn child with no release listener,
+ *     reap-without-exit). hasLiveRoleStrand keeps counting it as LIVE until its
+ *     TTL (`currentTaskStaleMs`) expires, so `absentStrand` — and the reclaim —
+ *     only flip at that TTL. The gate is the TTL, NOT `min(stale, TTL)`: a stale
+ *     window SMALLER than the TTL cannot reclaim a leaked seat any sooner, so
+ *     clamping by stale would UNDER-report (e.g. stale=5 min still recovers a
+ *     leak in 15 min, not 5).
+ *   - present_strand — a present / producing strand is paced off the full
+ *     effective stale window (the output-liveness gate keeps a live-but-quiet
+ *     worker safe), so this is the value's real observable harm.
+ *
+ * Pure — unit tested like resolveFirstPushThresholdMs.
+ */
+export interface RecoveryModeNumbers {
+  registry_absent: number;
+  leaked_current_task: number;
+  present_strand: number;
+}
+
+export function resolveRecoveryModeMs(opts: {
+  staleMs: number;
+  livenessFloorMs: number;
+  currentTaskStaleMs: number;
+  tickMs?: number;
+}): { thresholds: RecoveryModeNumbers; bounds: RecoveryModeNumbers } {
+  const tick = opts.tickMs ?? SUPERVISOR_TICK_MS;
+  const thresholds: RecoveryModeNumbers = {
+    registry_absent: Math.min(opts.staleMs, opts.livenessFloorMs),
+    leaked_current_task: opts.currentTaskStaleMs,
+    present_strand: opts.staleMs,
+  };
+  return {
+    thresholds,
+    bounds: {
+      registry_absent: thresholds.registry_absent + tick,
+      leaked_current_task: thresholds.leaked_current_task + tick,
+      present_strand: thresholds.present_strand + tick,
+    },
+  };
 }
