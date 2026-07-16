@@ -12,6 +12,8 @@ import { Workspace } from '../../entities/Workspace';
 import { User } from '../../entities/User';
 import { Ticket } from '../../entities/Ticket';
 import { BoardColumn } from '../../entities/BoardColumn';
+import { Comment } from '../../entities/Comment';
+import { ActivityLog } from '../../entities/ActivityLog';
 import { ActionsController } from './actions.controller';
 import { ActionsService } from './actions.service';
 import { ActionSchedulerService } from './action-scheduler.service';
@@ -23,7 +25,7 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Action, ActionRun, ChatRoom, ChatRoomParticipant, ChatRoomMessage, TicketAttachment, Agent, Board, Workspace, User, Ticket, BoardColumn]),
+    TypeOrmModule.forFeature([Action, ActionRun, ChatRoom, ChatRoomParticipant, ChatRoomMessage, TicketAttachment, Agent, Board, Workspace, User, Ticket, BoardColumn, Comment, ActivityLog]),
     ChatRoomsModule,
     SharedServicesModule,
   ],

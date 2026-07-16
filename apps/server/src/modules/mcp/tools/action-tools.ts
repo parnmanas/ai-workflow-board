@@ -46,7 +46,7 @@ function actionToJson(a: Action) {
 }
 
 export function registerActionTools(server: McpServer, ctx: ToolContext): void {
-  const { dataSource, actionsService } = ctx;
+  const { dataSource, actionsService, triggerLoopService, logger } = ctx;
 
   server.tool(
     'list_actions',
@@ -165,11 +165,17 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
     'run_action',
     'Dispatch a Run for an action. Creates a new chat room with the target agent, ' +
     'sends the rendered prompt, and FIFO-prunes older rooms past Action.max_runs. ' +
-    'Returns the run id + room id so the caller can monitor the conversation.',
+    'Returns the run id + room id so the caller can monitor the conversation. ' +
+    'Pass `source_ticket_id` when you run an Action to clear a blocker on a ticket ' +
+    'you are working: the run is linked back to that ticket, the target agent is told ' +
+    'to report its outcome via `complete_action_run`, and on success the ticket ' +
+    'AUTO-RESUMES in place (no Pending, no manual re-dispatch). Omit it for ' +
+    'cron/manual/standalone runs that have no ticket to resume.',
     {
       action_id: z.string().describe('Action ID'),
+      source_ticket_id: z.string().optional().describe('Ticket that this run should resume on completion. When set, the run carries the linkage and `complete_action_run` re-dispatches this ticket. Omit for runs with no originating ticket.'),
     },
-    async ({ action_id }, extra: { sessionId?: string }) => {
+    async ({ action_id, source_ticket_id }, extra: { sessionId?: string }) => {
       if (!actionsService) return err('Actions service unavailable in this MCP context');
       // Triggering identity: an authenticated agent caller (MCP session bound
       // to an agentId) is attributed as 'agent' with that agent's id. Without
@@ -181,10 +187,84 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
           actionId: action_id,
           triggeredByType: caller?.agentId ? 'agent' : 'system',
           triggeredById: caller?.agentId ?? '',
+          sourceTicketId: source_ticket_id,
         });
-        return ok({ run_id: result.run.id, room_id: result.room_id, prompt: result.prompt });
+        return ok({
+          run_id: result.run.id,
+          room_id: result.room_id,
+          prompt: result.prompt,
+          source_ticket_id: result.run.source_ticket_id || '',
+        });
       } catch (e: any) {
         return err(e?.message || 'Failed to run action');
+      }
+    },
+  );
+
+  server.tool(
+    'complete_action_run',
+    'Report the outcome of an Action Run and close the loop back to the ticket that ' +
+    'dispatched it. The target agent that performed the Run calls this ONCE when done. ' +
+    'On `succeeded`, the run\'s `source_ticket_id` (if any) is AUTO-RESUMED — the ticket\'s ' +
+    'current-column role holders are re-dispatched so work continues on the same ticket — ' +
+    'and the summary is posted to the ticket\'s audit trail. On `failed`, the run is retried ' +
+    'automatically up to a bounded cap (fresh run, same source ticket); once the cap is ' +
+    'reached the failure is surfaced and the ticket is resumed so the assignee can decide. ' +
+    'Idempotent: a second call on an already-completed run is a no-op (no double resume/retry).',
+    {
+      run_id: z.string().describe('Run ID (from run_action / list_action_runs)'),
+      workspace_id: z.string().describe('Workspace ID (scope boundary)'),
+      status: z.enum(['succeeded', 'failed']).describe("'succeeded' → resume the source ticket; 'failed' → retry (bounded), then surface + resume"),
+      summary: z.string().optional().describe('What you did and the outcome, or why it failed. Mirrored into the source ticket audit comment.'),
+    },
+    async ({ run_id, workspace_id, status, summary }, extra: { sessionId?: string }) => {
+      if (!actionsService) return err('Actions service unavailable in this MCP context');
+      const caller = getCallerAgent(extra);
+      try {
+        const result = await actionsService.completeRun(run_id, workspace_id, {
+          status,
+          summary,
+          actorType: caller?.agentId ? 'agent' : 'system',
+          actorId: caller?.agentId ?? '',
+          actorName: caller?.agentName ?? '',
+        });
+
+        // Auto-resume: re-dispatch the source ticket's current-column role
+        // holders so work continues in place. Only when the service says so
+        // (success, or a failure that exhausted retries) — a retry defers the
+        // resume to the retry run. Goes through the focus/pending/strand gates
+        // in _emitTrigger, so it stays silent if the ticket isn't the holder's
+        // current focus. Best-effort: a resume miss must not fail the call —
+        // the outcome is already recorded on the run + ticket audit trail.
+        let resumeEmitted = 0;
+        if (result.shouldResume && result.sourceTicketId && triggerLoopService) {
+          try {
+            const dispatched = await triggerLoopService.dispatchCurrentColumn(
+              result.sourceTicketId,
+              status === 'succeeded' ? 'action_run_succeeded' : 'action_run_failed',
+              caller?.agentId || '',
+            );
+            resumeEmitted = dispatched?.emitted ?? 0;
+          } catch (e: any) {
+            logger?.warn?.('MCP', 'complete_action_run resume dispatch failed (continuing)', {
+              err: String(e), ticket_id: result.sourceTicketId, run_id,
+            });
+          }
+        }
+
+        return ok({
+          run_id: result.run.id,
+          status: result.status,
+          source_ticket_id: result.sourceTicketId,
+          previously_completed: result.previouslyCompleted,
+          retried: result.retried,
+          retry_run_id: result.retryRunId,
+          exhausted: result.exhausted,
+          resumed: result.shouldResume,
+          resume_emitted: resumeEmitted,
+        });
+      } catch (e: any) {
+        return err(e?.message || 'Failed to complete action run');
       }
     },
   );
@@ -209,6 +289,11 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
           triggered_by_type: r.triggered_by_type,
           triggered_by_id: r.triggered_by_id,
           prompt_rendered: r.prompt_rendered,
+          source_ticket_id: r.source_ticket_id || '',
+          status: r.status || 'running',
+          result_summary: r.result_summary || '',
+          attempt: r.attempt ?? 1,
+          completed_at: r.completed_at ?? null,
           created_at: r.created_at,
         })));
       } catch (e: any) {

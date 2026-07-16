@@ -12,6 +12,8 @@ import { Agent } from '../../entities/Agent';
 import { Board } from '../../entities/Board';
 import { Workspace } from '../../entities/Workspace';
 import { User } from '../../entities/User';
+import { Comment } from '../../entities/Comment';
+import { ActivityLog } from '../../entities/ActivityLog';
 import { RoomMembershipService } from '../chat-rooms/room-membership.service';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { LogService } from '../../services/log.service';
@@ -26,6 +28,32 @@ function makeError(status: number, message: string): Error & { status: number } 
   return err;
 }
 
+/**
+ * Completion contract appended to a ticket-driven run's prompt (ticket
+ * 524bb434). Tells the target agent how to close the loop so the source ticket
+ * resumes automatically — the "Action 등록 → 실행 → 결과 반영 → 티켓 재개"
+ * chain. Server-injected so it holds regardless of what the Action author wrote.
+ */
+function renderCompletionContract(runId: string, workspaceId: string, sourceTicketId: string): string {
+  return (
+    `\n\n---\n` +
+    `## Report your result (required — a ticket is waiting on this run)\n\n` +
+    `Ticket \`${sourceTicketId}\` dispatched this run and is paused until you report back. ` +
+    `When you finish, call:\n\n` +
+    '```\n' +
+    `mcp__awb__complete_action_run(\n` +
+    `  run_id="${runId}",\n` +
+    `  workspace_id="${workspaceId}",\n` +
+    `  status="succeeded" | "failed",\n` +
+    `  summary="<what you did and the outcome, or why it failed>"\n` +
+    `)\n` +
+    '```\n\n' +
+    `- **succeeded** → the source ticket auto-resumes in place and your summary is posted to its audit trail.\n` +
+    `- **failed** → the run is retried automatically (bounded); after the retry cap the failure is surfaced back to the ticket.\n` +
+    `- Do this exactly once. A second call on the same run is ignored (the outcome is already recorded).`
+  );
+}
+
 export interface DispatchActionArgs {
   actionId: string;
   // 'user' = web UI clicked Run; 'system' = scheduler; 'agent' = MCP-authenticated
@@ -38,12 +66,53 @@ export interface DispatchActionArgs {
   // prompt as `{{ticket.*}}`. Only OnTicketDoneActionService sets this; cron /
   // manual / UI runs leave it undefined so those tokens render empty.
   ticketContext?: ActionTicketContext;
+  // Auto-resume linkage (ticket 524bb434): the ticket that dispatched this run
+  // because it hit an Action-resolvable blocker instead of parking. Persisted
+  // on the ActionRun so `completeRun` can re-dispatch it once the run finishes.
+  // Undefined for cron / manual / on-ticket-done runs that have nothing to
+  // resume. When set, a completion contract is appended to the rendered prompt
+  // so the target agent reports its outcome via `complete_action_run`.
+  sourceTicketId?: string;
+  // 1-based attempt number. `completeRun`'s retry path re-dispatches with
+  // attempt+1; the default 1 covers the first, agent-initiated dispatch.
+  attempt?: number;
 }
 
 export interface DispatchActionResult {
   run: ActionRun;
   room_id: string;
   prompt: string;
+}
+
+export interface CompleteRunArgs {
+  status: 'succeeded' | 'failed';
+  // The completing agent's outcome text — a success summary or a failure
+  // reason. Mirrored into the source ticket's audit comment.
+  summary?: string;
+  // Attribution for the audit comment / activity + the retry re-dispatch.
+  actorType?: 'user' | 'system' | 'agent';
+  actorId?: string;
+  actorName?: string;
+}
+
+export interface CompleteRunResult {
+  run: ActionRun;
+  // The ticket to resume (echoed from the run) — '' when the run had no source.
+  sourceTicketId: string;
+  status: 'succeeded' | 'failed' | 'running';
+  // true when the run was ALREADY terminal on entry — the call was a no-op
+  // (idempotency guard). The caller must NOT resume the source ticket again.
+  previouslyCompleted: boolean;
+  // A failed run under the retry cap re-dispatched a fresh run — its id here.
+  // The source ticket is NOT resumed yet; the retry run owns the next outcome.
+  retried: boolean;
+  retryRunId: string;
+  // A failed run that exhausted the retry cap. The source ticket IS resumed so
+  // the assignee can decide (fix + retry, or pend with a genuine reason).
+  exhausted: boolean;
+  // Whether the caller should resume the source ticket now (succeeded, or a
+  // failure that exhausted retries). False on a retry (wait for the retry run).
+  shouldResume: boolean;
 }
 
 /**
@@ -69,6 +138,14 @@ export interface DispatchActionResult {
  */
 @Injectable()
 export class ActionsService {
+  // Retry cap for a failed run whose source ticket dispatched it (ticket
+  // 524bb434). A failure under this cap re-dispatches with attempt+1; at the
+  // cap the run is surfaced back to the source ticket instead. Bounds the loop
+  // so a persistently-failing high-impact Action (deploy, publish) cannot retry
+  // forever — a scope-5 safety lever alongside the idempotent terminal
+  // transition in `completeRun`.
+  static readonly MAX_RUN_ATTEMPTS = 3;
+
   constructor(
     @InjectRepository(Action) private readonly actionRepo: Repository<Action>,
     @InjectRepository(ActionRun) private readonly runRepo: Repository<ActionRun>,
@@ -80,6 +157,8 @@ export class ActionsService {
     @InjectRepository(Board) private readonly boardRepo: Repository<Board>,
     @InjectRepository(Workspace) private readonly workspaceRepo: Repository<Workspace>,
     @InjectRepository(User) private readonly userRepo: Repository<User>,
+    @InjectRepository(Comment) private readonly commentRepo: Repository<Comment>,
+    @InjectRepository(ActivityLog) private readonly activityRepo: Repository<ActivityLog>,
     private readonly membership: RoomMembershipService,
     private readonly messaging: RoomMessagingService,
     private readonly logService: LogService,
@@ -238,6 +317,210 @@ export class ActionsService {
   }
 
   /**
+   * Close out a Run and drive the source ticket's auto-resume (ticket 524bb434).
+   *
+   * The target agent calls this from the run's chat room once the dispatched
+   * work (a deploy, a publish, …) is done. This is the server-side half of the
+   * "run finished → resume the original ticket" contract — the missing piece
+   * the reviewer flagged: prior to this the run was fire-and-forget with no
+   * link back to the ticket that needed it.
+   *
+   * Guarantees:
+   *   - **Idempotent terminal transition.** A run already in a terminal state
+   *     is a no-op (`previouslyCompleted`) — a re-invoked / duplicated agent
+   *     turn cannot resume the ticket twice or double-count a retry. This is a
+   *     scope-5 safety lever for high-impact Actions.
+   *   - **Result reflected on the ticket.** Success and failure both post an
+   *     audit comment + an `action_run_completed` ActivityLog row on the source
+   *     ticket, so the outcome is reconstructable from the ticket alone.
+   *   - **Bounded retry.** A failure under `MAX_RUN_ATTEMPTS` re-dispatches a
+   *     fresh run (attempt+1, same source ticket) and does NOT resume yet — the
+   *     retry run owns the next outcome. At the cap the failure is surfaced and
+   *     the ticket IS resumed so the assignee decides.
+   *
+   * The actual re-dispatch of the source ticket's role holders
+   * (`dispatchCurrentColumn`) lives in the MCP `complete_action_run` tool,
+   * which already holds `TriggerLoopService` — keeping this service free of a
+   * cross-module trigger dependency. This method returns `shouldResume` telling
+   * the caller whether to fire that resume.
+   */
+  async completeRun(runId: string, workspaceId: string, args: CompleteRunArgs): Promise<CompleteRunResult> {
+    if (!workspaceId) throw makeError(400, 'workspace_id is required');
+    if (args.status !== 'succeeded' && args.status !== 'failed') {
+      throw makeError(400, "status must be 'succeeded' or 'failed'");
+    }
+    const run = await findOrFail(
+      this.runRepo,
+      { where: { id: runId, workspace_id: workspaceId } },
+      'Run not found in workspace',
+    );
+
+    // ── Idempotency guard ────────────────────────────────────────────────
+    // Only a 'running' run transitions. A second completion returns the
+    // recorded state without re-posting, re-triggering, or re-counting.
+    if (run.status && run.status !== 'running') {
+      this.logService.info('Actions', `completeRun no-op — run ${run.id} already ${run.status}`);
+      return {
+        run,
+        sourceTicketId: run.source_ticket_id || '',
+        status: run.status as CompleteRunResult['status'],
+        previouslyCompleted: true,
+        retried: false,
+        retryRunId: '',
+        exhausted: false,
+        shouldResume: false,
+      };
+    }
+
+    const summary = (args.summary || '').trim();
+    run.status = args.status;
+    run.result_summary = summary;
+    run.completed_at = new Date();
+    await this.runRepo.save(run);
+
+    const action = await this.actionRepo.findOne({ where: { id: run.action_id } });
+    const actionName = action?.name || run.action_id;
+    const sourceTicketId = (run.source_ticket_id || '').trim();
+
+    // No source ticket → this was a cron / manual / on-ticket-done run. Record
+    // the terminal state and stop; there is nothing to resume or annotate.
+    if (!sourceTicketId) {
+      return {
+        run,
+        sourceTicketId: '',
+        status: args.status,
+        previouslyCompleted: false,
+        retried: false,
+        retryRunId: '',
+        exhausted: false,
+        shouldResume: false,
+      };
+    }
+
+    const actor = {
+      type: args.actorType || 'agent',
+      id: args.actorId || '',
+      name: args.actorName || 'Action Runner',
+    };
+
+    if (args.status === 'succeeded') {
+      await this._postRunComment(
+        sourceTicketId, run.workspace_id, actor,
+        `✅ Action **${actionName}** run \`${run.id.slice(0, 8)}\` succeeded` +
+        `${summary ? ` — ${summary}` : ''}. Resuming this ticket.`,
+      );
+      await this._logRunActivity(sourceTicketId, run, actor, 'succeeded', summary);
+      return {
+        run, sourceTicketId, status: 'succeeded',
+        previouslyCompleted: false, retried: false, retryRunId: '', exhausted: false,
+        shouldResume: true,
+      };
+    }
+
+    // ── Failure ──────────────────────────────────────────────────────────
+    await this._logRunActivity(sourceTicketId, run, actor, 'failed', summary);
+    if (run.attempt < ActionsService.MAX_RUN_ATTEMPTS) {
+      const nextAttempt = run.attempt + 1;
+      let retryRunId = '';
+      try {
+        const retry = await this.dispatch({
+          actionId: run.action_id,
+          triggeredByType: actor.type,
+          triggeredById: actor.id,
+          sourceTicketId,
+          attempt: nextAttempt,
+        });
+        retryRunId = retry.run.id;
+      } catch (e: any) {
+        // Re-dispatch failed (e.g. the Action was deleted mid-flight). Treat it
+        // as exhaustion so the ticket is still surfaced rather than silently
+        // stuck waiting on a retry that never launched.
+        this.logService.warn('Actions', `retry re-dispatch failed for run ${run.id}: ${e?.message || e}`);
+      }
+      if (retryRunId) {
+        await this._postRunComment(
+          sourceTicketId, run.workspace_id, actor,
+          `⚠️ Action **${actionName}** run \`${run.id.slice(0, 8)}\` failed` +
+          `${summary ? ` — ${summary}` : ''}. Retrying (attempt ${nextAttempt}/${ActionsService.MAX_RUN_ATTEMPTS}, run \`${retryRunId.slice(0, 8)}\`).`,
+        );
+        return {
+          run, sourceTicketId, status: 'failed',
+          previouslyCompleted: false, retried: true, retryRunId, exhausted: false,
+          shouldResume: false,
+        };
+      }
+    }
+
+    // Retry cap reached (or re-dispatch could not launch): surface + resume.
+    await this._postRunComment(
+      sourceTicketId, run.workspace_id, actor,
+      `❌ Action **${actionName}** run \`${run.id.slice(0, 8)}\` failed after ${run.attempt} attempt(s)` +
+      `${summary ? ` — ${summary}` : ''}. Resuming this ticket so the assignee can fix the inputs and retry, ` +
+      `or \`pend_ticket\` with a specific \`no_action_reason\` if it genuinely needs a human.`,
+    );
+    return {
+      run, sourceTicketId, status: 'failed',
+      previouslyCompleted: false, retried: false, retryRunId: '', exhausted: true,
+      shouldResume: true,
+    };
+  }
+
+  /** Post a `note` comment on the source ticket recording a run outcome. */
+  private async _postRunComment(
+    ticketId: string,
+    workspaceId: string,
+    actor: { type: string; id: string; name: string },
+    content: string,
+  ): Promise<void> {
+    try {
+      await this.commentRepo.save(this.commentRepo.create({
+        workspace_id: workspaceId,
+        ticket_id: ticketId,
+        author_type: actor.type === 'user' ? 'user' : 'agent',
+        author_id: actor.id || '',
+        author: actor.name || 'Action Runner',
+        content,
+        type: 'note',
+        metadata: JSON.stringify({ source: 'action_run' }),
+      }));
+    } catch (e: any) {
+      // Best-effort audit surface — a missed comment must not block the resume.
+      this.logService.warn('Actions', `run-outcome comment failed for ticket ${ticketId}: ${e?.message || e}`);
+    }
+  }
+
+  /**
+   * Audit row for a run completion. Written directly (not via ActivityService)
+   * with a bespoke `action` string so it does NOT re-enter the trigger loop as
+   * a comment/update event — the explicit `dispatchCurrentColumn` resume is the
+   * single, deliberate wake, and this row is audit-only.
+   */
+  private async _logRunActivity(
+    ticketId: string,
+    run: ActionRun,
+    actor: { id: string; name: string },
+    status: string,
+    summary: string,
+  ): Promise<void> {
+    try {
+      await this.activityRepo.save(this.activityRepo.create({
+        entity_type: 'ticket',
+        entity_id: ticketId,
+        ticket_id: ticketId,
+        actor_id: actor.id || 'system',
+        actor_name: actor.name || 'Action Runner',
+        action: 'action_run_completed',
+        field_changed: 'action_run',
+        old_value: run.action_id,
+        new_value: `${status}:${run.id}:attempt=${run.attempt}${summary ? `:${summary.slice(0, 200)}` : ''}`,
+        trigger_source: 'action_run',
+      }));
+    } catch (e: any) {
+      this.logService.warn('Actions', `run-completion audit write failed for ticket ${ticketId}: ${e?.message || e}`);
+    }
+  }
+
+  /**
    * Dispatch a Run: create the room, add participants, FIFO-prune, render the
    * prompt, send it as the triggering user's first message. The agent reply
    * arrives later via the existing chat_room_message → agent-manager pipeline.
@@ -281,7 +564,15 @@ export class ActionsService {
       ticket: args.ticketContext ?? null,
     });
     const renderedPrompt = renderActionPrompt(action.prompt || '', ctx);
-    const rendered = prependBoardLanguageInstruction(renderedPrompt, board?.language);
+    const withLanguage = prependBoardLanguageInstruction(renderedPrompt, board?.language);
+    // When a ticket dispatched this run, append the completion contract so the
+    // target agent reports its outcome via `complete_action_run` — that call is
+    // what re-dispatches (resumes) the source ticket. Server-injected (not left
+    // to the Action author) so every ticket-driven run closes the loop reliably.
+    const sourceTicketId = (args.sourceTicketId || '').trim();
+    const rendered = sourceTicketId
+      ? `${withLanguage}${renderCompletionContract(runId, action.workspace_id, sourceTicketId)}`
+      : withLanguage;
 
     // Create the room. We use 'group' as the underlying type so the chat
     // controller's existing rules (rename, multi-participant, etc.) apply.
@@ -306,6 +597,9 @@ export class ActionsService {
       triggered_by_type: args.triggeredByType,
       triggered_by_id: args.triggeredById || '',
       prompt_rendered: rendered,
+      source_ticket_id: sourceTicketId,
+      status: 'running',
+      attempt: typeof args.attempt === 'number' && args.attempt > 0 ? Math.floor(args.attempt) : 1,
     }));
 
     // Add participants directly (bypassing addParticipants' "caller must be a
