@@ -241,6 +241,15 @@ export interface SessionRecord {
    *  Armed on the result line, cancelled when a new turn begins or the child
    *  exits. Mirrors the `idleTimer` lifecycle idiom. */
   _orphanSweepTimer?: NodeJS.Timeout | null;
+  /** ticket 1fcba693 — per-session generation nonce for the server's current_task
+   *  compare-and-swap. Stamped once when this session's set_current_task fires and
+   *  passed verbatim to EVERY clear_current_task for the session (child-exit,
+   *  reap, stop-drain). The server keys active_tasks by ticket_id alone, so a
+   *  respawn re-stamps the same seat with a fresh token; a matching clear is then
+   *  the only one allowed to release the seat + its output-liveness badge, so this
+   *  session's late/stale exit can never wipe a live successor (the
+   *  set(A)→set(B)→late-clear(A) race). */
+  taskToken?: string;
 }
 
 /** Reservation placed on `_inflight` from the moment a dispatcher commits to

@@ -159,7 +159,13 @@ test('leak b: a model-fallback RESPAWN child’s exit releases the seat (current
   assert.ok(rel, 'respawn child exit RELEASES the ticket claim (leak b fixed)');
   assert.equal(rel.body.params.arguments.ticket_id, 't-b');
   assert.equal(rel.body.params.arguments.agent_id, 'agent-b');
-  assert.ok(findToolCall('clear_current_task'), 'respawn child exit clears current_task');
+  const clr = findToolCall('clear_current_task');
+  assert.ok(clr, 'respawn child exit clears current_task');
+  // Generation CAS (ticket 1fcba693): the respawn carries its OWN token, so its
+  // clear echoes the respawn session's nonce — not the initial child's.
+  assert.ok(respawned.taskToken, 'the respawn session got a fresh generation token');
+  assert.equal(clr.body.params.arguments.task_token, respawned.taskToken,
+    'respawn child-exit clear carries the respawn session’s generation token');
 
   await mgr.stop();
 });
@@ -186,7 +192,12 @@ test('leak c: a session reaped WITHOUT an exit event releases the seat when _get
   const rel = findToolCall('release_ticket');
   assert.ok(rel, 'stale-reap RELEASES the claim on purge (leak c fixed)');
   assert.equal(rel.body.params.arguments.ticket_id, 't-c');
-  assert.ok(findToolCall('clear_current_task'), 'stale-reap clears current_task');
+  const clr = findToolCall('clear_current_task');
+  assert.ok(clr, 'stale-reap clears current_task');
+  // Reap path carries the reaped session's own generation token (ticket 1fcba693).
+  assert.ok(sess.taskToken, 'the reaped session had a generation token from its set');
+  assert.equal(clr.body.params.arguments.task_token, sess.taskToken,
+    'reap-without-exit clear carries the session’s generation token');
 
   await mgr.stop();
 });
@@ -209,5 +220,40 @@ test('leak a: stop() DRAINS the seat release from the session record (survives S
   assert.ok(rel, 'stop() drained the claim release with the exit closure disabled (leak a fixed)');
   assert.equal(rel.body.params.arguments.ticket_id, 't-a');
   assert.equal(rel.body.params.arguments.agent_id, 'agent-a');
-  assert.ok(findToolCall('clear_current_task'), 'stop() drained the current_task clear');
+  const clr = findToolCall('clear_current_task');
+  assert.ok(clr, 'stop() drained the current_task clear');
+  // SIGTERM/self-update drain carries the session's generation token (ticket 1fcba693).
+  assert.ok(sess.taskToken, 'the drained session had a generation token from its set');
+  assert.equal(clr.body.params.arguments.task_token, sess.taskToken,
+    'stop()-drain clear carries the session’s generation token');
+});
+
+// ── ticket 1fcba693: set + clear carry the SAME per-session generation token ──
+// Reviewer item 3 — the manager's termination paths must thread the token the
+// server needs for its compare-and-swap. Prove the clean child-exit path end to
+// end: set_current_task ISSUES a per-session token and the child-exit clear
+// ECHOES it, so the server releases exactly this generation's seat and a stale
+// sibling's clear (a different token) is a no-op.
+test('generation token: set_current_task issues a per-session token that the seat-release clear echoes back', async () => {
+  const mgr = new RealTicketMgrStub(makeConfig());
+  await mgr.dispatchTrigger(baseSpec({ ticketId: 't-tok', agentId: 'agent-tok', triggerId: 'trig-tok' }));
+  const sess = mgr._sessions.get('t-tok:assignee:agent-tok');
+
+  await waitFor(() => !!findToolCall('set_current_task'));
+  const setCall = findToolCall('set_current_task');
+  const setToken = setCall.body.params.arguments.task_token;
+  assert.equal(typeof setToken, 'string', 'set_current_task carries a task_token');
+  assert.ok(setToken.length > 0, 'the task_token is a non-empty nonce');
+  assert.equal(setToken, sess.taskToken, 'the token is the session record’s generation nonce');
+
+  recordedRequests.length = 0;
+  sess.child.kill('SIGKILL'); // clean child exit → #attachSlotRelease releases the seat
+  await waitFor(() => !!findToolCall('clear_current_task'));
+
+  const clearCall = findToolCall('clear_current_task');
+  assert.equal(clearCall.body.params.arguments.ticket_id, 't-tok');
+  assert.equal(clearCall.body.params.arguments.task_token, setToken,
+    'the child-exit clear echoes the SAME token set at spawn → server CAS releases exactly this generation');
+
+  await mgr.stop();
 });

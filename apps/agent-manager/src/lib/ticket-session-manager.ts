@@ -7,6 +7,7 @@
 // 못 해 합의가 데드락된다 — ChatSessionManager 의 `${roomId}|${agentId}` 키와
 // 같은 이유로 agent 차원을 키에 포함한다.
 
+import { randomUUID } from 'node:crypto';
 import {
   BaseSessionManager,
   type SessionAwareConfig,
@@ -469,10 +470,18 @@ export class TicketSessionManager
             s._effectiveApiKey = spec.agentContext?.api_key || this._config.apiKey;
             s._fallbackRespawn = respawnWithModel;
             if (spec.triggerId) this.#lastTriggerId.set(s.pid, spec.triggerId);
+            // Fresh generation token for the respawn (ticket 1fcba693). The
+            // killed session's exit-clear carries ITS OWN (older) token, so once
+            // the watchdog re-asserts set_current_task with THIS token the server
+            // holds the successor's generation and the dead session's late clear
+            // is a CAS no-op — the successor's seat/badge survive the race.
+            s.taskToken = randomUUID();
             // Every respawn child holds the seat too — attach the release listener
             // so its exit frees current_task + the claim (ticket 1fcba693 leak b).
             // This closure IS _fallbackRespawn, so the watchdog respawn path
             // (which calls _fallbackRespawn) is covered by this single attach.
+            // The listener reads s.taskToken at exit, so the token stamped above
+            // is the one the release carries.
             this.#attachSlotRelease(s, spec.ticketId);
           }
           return s;
@@ -492,10 +501,16 @@ export class TicketSessionManager
     }
 
     if (spawned.agentId) {
+      // Generation nonce for the server's current_task compare-and-swap (ticket
+      // 1fcba693). Stamped on the session and reused verbatim by #attachSlotRelease
+      // so this session's set + clear carry the SAME token — a later respawn gets
+      // a fresh token and this stale session's exit-clear can't wipe its seat.
+      spawned.taskToken = randomUUID();
       fireAndForgetTool(this._config, 'set_current_task', {
         agent_id: spawned.agentId,
         ticket_id: spec.ticketId,
         role,
+        task_token: spawned.taskToken,
       });
     }
 
@@ -525,9 +540,13 @@ export class TicketSessionManager
     sess.child.once('exit', () => {
       if (dedupKey) this._forgetDedup(dedupKey);
       if (sess.agentId) {
+        // Pass this session's generation token so the server only releases the
+        // seat/badge if it still owns it — a respawn that already re-stamped the
+        // seat (fresh token) is left untouched (ticket 1fcba693 CAS).
         fireAndForgetTool(this._config, 'clear_current_task', {
           agent_id: sess.agentId,
           ticket_id: ticketId,
+          task_token: sess.taskToken,
         });
         fireAndForgetTool(this._config, 'release_ticket', {
           ticket_id: ticketId,
@@ -549,6 +568,7 @@ export class TicketSessionManager
     fireAndForgetTool(this._config, 'clear_current_task', {
       agent_id: sess.agentId,
       ticket_id: sess.ticketId,
+      task_token: sess.taskToken, // generation CAS (ticket 1fcba693)
     });
     fireAndForgetTool(this._config, 'release_ticket', {
       ticket_id: sess.ticketId,
@@ -570,6 +590,7 @@ export class TicketSessionManager
       releases.push(fireAndForgetTool(this._config, 'clear_current_task', {
         agent_id: sess.agentId,
         ticket_id: sess.ticketId,
+        task_token: sess.taskToken, // generation CAS (ticket 1fcba693)
       }));
       releases.push(fireAndForgetTool(this._config, 'release_ticket', {
         ticket_id: sess.ticketId,
@@ -962,11 +983,18 @@ export class TicketSessionManager
             // (The respawned child `s` carries its OWN seat-release listener,
             // attached in respawnWithModel per ticket 1fcba693 leak b, so ITS
             // exit frees the seat too.)
+            //
+            // Carry the respawn's OWN generation token (ticket 1fcba693). This is
+            // the seat-overwrite half of the race: the killed session's late
+            // clear_current_task carries the OLDER token, so once this set lands
+            // the server stores s.taskToken and that stale clear is a CAS no-op —
+            // the live respawn is never false-flagged absent + re-dispatched.
             if (s.agentId) {
               fireAndForgetTool(this._config, 'set_current_task', {
                 agent_id: s.agentId,
                 ticket_id: ticketId,
                 role,
+                task_token: s.taskToken,
               });
             }
             return; // fresh session took over — skip suppression + silent-exit
