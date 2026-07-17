@@ -211,6 +211,28 @@ export class AgentManagerController {
     const open_breaker_count = hasField('open_breaker_count') && Number.isFinite(body.open_breaker_count)
       ? Math.max(0, Math.trunc(Number(body.open_breaker_count)))
       : undefined;
+    // ticket 3d180f85 — per-reason dispatch-suppression counts (provision-
+    // spanning twin guard). Defensive: coerce a plain {reason: count} object to
+    // non-negative ints; ignore non-objects / arrays so a malformed heartbeat
+    // never poisons the record. When the field is absent (nothing suppressed)
+    // this stays undefined and upsert's whole-record replace (registry {...input})
+    // clears it — benign because the manager counter is cumulative (never reset),
+    // so once non-zero every heartbeat re-sends it and only a manager restart
+    // zeroes it. Same replace-not-merge semantics as open_breaker_count.
+    let dispatch_suppression_counts: Record<string, number> | undefined;
+    if (
+      hasField('dispatch_suppression_counts') &&
+      body.dispatch_suppression_counts &&
+      typeof body.dispatch_suppression_counts === 'object' &&
+      !Array.isArray(body.dispatch_suppression_counts)
+    ) {
+      const out: Record<string, number> = {};
+      for (const [k, v] of Object.entries(body.dispatch_suppression_counts as Record<string, unknown>)) {
+        const n = Math.max(0, Math.trunc(Number(v) || 0));
+        if (n > 0) out[k] = n;
+      }
+      dispatch_suppression_counts = out;
+    }
 
     // Self-heal: a manager heartbeat that authenticates with a valid apiKey
     // (apiKey.agent_id is the heartbeat's authoritative agent_id) but whose
@@ -286,6 +308,7 @@ export class AgentManagerController {
       update_last_checked_at,
       update_last_error,
       open_breaker_count,
+      dispatch_suppression_counts,
     });
 
     // Mark every managed agent the manager is supervising as alive. Managed

@@ -64,3 +64,26 @@ export async function resolveAgentDisplayName(
   const map = await resolveAgentDisplayMap(agentRepo, [agent]);
   return map.get(agent.id) ?? agent.name;
 }
+
+/**
+ * Batched (actorId → canonical display) for an arbitrary set of ids that MAY
+ * or MAY NOT be agents. Loads the ids that resolve to an Agent row, then their
+ * managers, and returns the `<Manager>/<Agent>` (or bare-name) display keyed by
+ * agent id. Ids that are not agents — user ids, system labels, deleted rows —
+ * are simply ABSENT from the map, so a caller reading a denormalized snapshot
+ * can do `map.get(actor_id) ?? storedName` and leave non-agent actors
+ * untouched. Used by the read side (ActivityService) to re-canonicalize
+ * `actor_name` without a backfill on the high-churn activity_logs table.
+ */
+export async function resolveAgentDisplayNamesByIds(
+  agentRepo: Repository<Agent>,
+  ids: Array<string | null | undefined>,
+): Promise<Map<string, string>> {
+  const distinct = Array.from(new Set(ids.filter((id): id is string => !!id)));
+  if (distinct.length === 0) return new Map();
+  const agents = await agentRepo.find({
+    where: { id: In(distinct) } as any,
+    select: { id: true, name: true, manager_agent_id: true } as any,
+  });
+  return resolveAgentDisplayMap(agentRepo, agents);
+}

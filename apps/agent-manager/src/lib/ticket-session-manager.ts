@@ -7,6 +7,7 @@
 // 못 해 합의가 데드락된다 — ChatSessionManager 의 `${roomId}|${agentId}` 키와
 // 같은 이유로 agent 차원을 키에 포함한다.
 
+import { randomUUID } from 'node:crypto';
 import {
   BaseSessionManager,
   type SessionAwareConfig,
@@ -21,6 +22,7 @@ import { OUTPUT_LIVENESS_MIN_INTERVAL_MS } from './constants.js';
 import { CircuitBreaker } from './circuit-breaker.js';
 import { classifyCliError, isFallbackEligible } from './cli-error-signatures.js';
 import type {
+  DispatchReservation,
   TicketDispatchResult,
   TicketSessionManager as TicketSessionManagerContract,
   TicketTriggerArgs,
@@ -88,6 +90,12 @@ const SESSION_SPLIT_REASON_MAX_CHARS = 280;
  *  Counted via SessionRecord.unhealthyRespawnCount, carried across respawns. */
 const UNHEALTHY_RESPAWN_MAX = 2;
 
+/** Bound on the SIGTERM / self-update seat-release drain (ticket 1fcba693 leak
+ *  a). stop() awaits the release POSTs so process.exit doesn't cut them off, but
+ *  a hung/unreachable server must not block shutdown indefinitely — cap the
+ *  wait, then exit anyway (the server sweeps as the backstop). */
+const SLOT_RELEASE_DRAIN_MS = 2_000;
+
 export class TicketSessionManager
   extends BaseSessionManager
   implements TicketSessionManagerContract
@@ -138,6 +146,47 @@ export class TicketSessionManager
 
   #makeKey(ticketId: string, role: string, agentId: string): string {
     return `${ticketId}:${role || '_'}:${agentId || '_'}`;
+  }
+
+  /** ticket 3d180f85 — authoritative provision-spanning single-flight.
+   *
+   *  `EventDispatcher.handleTrigger` calls this BEFORE it awaits worktree
+   *  provisioning, reserving the (ticket, role, agent) key in THIS manager's
+   *  AUTHORITATIVE `_inflight` map — the very registry `dispatchTrigger`
+   *  consults via `_getLiveSession`/`_inflight` right before spawning. So the
+   *  previously-unguarded provisioning window and the spawn window now share ONE
+   *  reservation in one pid-checked registry (no parallel process-local map),
+   *  and the hand-off to the spawn is atomic: the reservation is held
+   *  continuously from before provisioning until the dispatcher releases it
+   *  after the spawn outcome (with `dispatchTrigger({dispatchReserved:true})`
+   *  deferring `_inflight` ownership to the dispatcher).
+   *
+   *  Decision order (synchronous compare-and-set — no `await`, so it cannot
+   *  interleave with another dispatch under Node's single thread):
+   *   - a LIVE session already exists → `{acquired:true, live:true}`: proceed and
+   *     reuse it (a concurrent follow-up turn is allowed, matching the existing
+   *     reuse path); NO reservation placed, so the dispatcher must not release.
+   *   - a fresh spawn is already in flight (`_inflight.has`) → `{acquired:false}`:
+   *     the caller SUPPRESSES the twin.
+   *   - otherwise → reserve `_inflight[key]` and `{acquired:true, live:false}`. */
+  tryReserveDispatch(ticketId: string, role: string, agentId: string): DispatchReservation {
+    const key = this.#makeKey(ticketId, role || '', agentId || '');
+    // Live first: once a session is registered, a concurrent trigger should
+    // REUSE it (follow-up turn), not be dropped as a twin.
+    if (this._getLiveSession(key)) return { acquired: true, live: true };
+    // A fresh spawn (or an earlier provisioning reservation) already holds the
+    // key → this concurrent trigger is the twin; suppress it.
+    if (this._inflight.has(key)) return { acquired: false, live: false };
+    // Free → claim the whole provision→spawn window in the authoritative map.
+    this._inflight.set(key, { agentId: agentId || '', ticketId });
+    return { acquired: true, live: false };
+  }
+
+  /** Release a provisioning reservation placed by tryReserveDispatch
+   *  (`live===false`). Idempotent; only clears the `_inflight` reservation, never
+   *  a live `_sessions` entry. */
+  releaseDispatch(ticketId: string, role: string, agentId: string): void {
+    this._inflight.delete(this.#makeKey(ticketId, role || '', agentId || ''));
   }
 
   async dispatchTrigger(spec: TicketTriggerArgs): Promise<TicketDispatchResult> {
@@ -204,7 +253,11 @@ export class TicketSessionManager
       // that set is only forgotten on child exit / drop, never after a
       // successful spawn, so a sessionKey entry there would wrongly reject
       // every later follow-up trigger for a live session as a "duplicate".)
-      if (this._inflight.has(sessionKey)) {
+      // When dispatchReserved (ticket 3d180f85), THIS reservation is the
+      // provision-spanning slot the dispatcher already placed for us via
+      // tryReserveDispatch — finding it here is expected, not a twin, so we
+      // proceed to spawn rather than self-drop.
+      if (this._inflight.has(sessionKey) && !spec.dispatchReserved) {
         log(
           `[ticket-session] dispatch dropped (spawn already in-flight for same key): ticket=${spec.ticketId.slice(0, 8)} role=${role} agent=${(spec.agentId || '').slice(0, 8) || '_'}`,
         );
@@ -327,10 +380,16 @@ export class TicketSessionManager
     // this slot before _spawnSession lands a SessionRecord in _sessions.
     // Cleared after the spawn outcome is known (success or failure) — the
     // session itself takes over the cap accounting from that point.
-    this._inflight.set(sessionKey, {
-      agentId: spec.agentId || '',
-      ticketId: spec.ticketId,
-    });
+    // When dispatchReserved (ticket 3d180f85), the dispatcher already reserved
+    // this key for the whole provision→spawn window and owns its release — don't
+    // double-manage it here (a re-set + our finally's delete would drop the
+    // dispatcher's reservation early, re-opening the twin window).
+    if (!spec.dispatchReserved) {
+      this._inflight.set(sessionKey, {
+        agentId: spec.agentId || '',
+        ticketId: spec.ticketId,
+      });
+    }
 
     const firstTurnText = composeTriggerPrompt(
       spec.ticket,
@@ -411,6 +470,19 @@ export class TicketSessionManager
             s._effectiveApiKey = spec.agentContext?.api_key || this._config.apiKey;
             s._fallbackRespawn = respawnWithModel;
             if (spec.triggerId) this.#lastTriggerId.set(s.pid, spec.triggerId);
+            // Fresh generation token for the respawn (ticket 1fcba693). The
+            // killed session's exit-clear carries ITS OWN (older) token, so once
+            // the watchdog re-asserts set_current_task with THIS token the server
+            // holds the successor's generation and the dead session's late clear
+            // is a CAS no-op — the successor's seat/badge survive the race.
+            s.taskToken = randomUUID();
+            // Every respawn child holds the seat too — attach the release listener
+            // so its exit frees current_task + the claim (ticket 1fcba693 leak b).
+            // This closure IS _fallbackRespawn, so the watchdog respawn path
+            // (which calls _fallbackRespawn) is covered by this single attach.
+            // The listener reads s.taskToken at exit, so the token stamped above
+            // is the one the release carries.
+            this.#attachSlotRelease(s, spec.ticketId);
           }
           return s;
         };
@@ -418,8 +490,10 @@ export class TicketSessionManager
       }
     } finally {
       // Spawn outcome resolved and identity stamped — _sessions takes over
-      // cap accounting from here.
-      this._inflight.delete(sessionKey);
+      // cap accounting from here. When dispatchReserved, the dispatcher's
+      // finally releases the reservation instead (ticket 3d180f85), keeping the
+      // key held continuously across a persistent→one-shot fallthrough.
+      if (!spec.dispatchReserved) this._inflight.delete(sessionKey);
     }
     if (!spawned) {
       if (dedupKey) this._forgetDedup(dedupKey);
@@ -427,40 +501,107 @@ export class TicketSessionManager
     }
 
     if (spawned.agentId) {
+      // Generation nonce for the server's current_task compare-and-swap (ticket
+      // 1fcba693). Stamped on the session and reused verbatim by #attachSlotRelease
+      // so this session's set + clear carry the SAME token — a later respawn gets
+      // a fresh token and this stale session's exit-clear can't wipe its seat.
+      spawned.taskToken = randomUUID();
       fireAndForgetTool(this._config, 'set_current_task', {
         agent_id: spawned.agentId,
         ticket_id: spec.ticketId,
         role,
+        task_token: spawned.taskToken,
       });
     }
 
-    spawned.child.once('exit', () => {
+    this.#attachSlotRelease(spawned, spec.ticketId, dedupKey);
+
+    return { dispatched: true, pid: spawned.pid, firstTurn: true };
+  }
+
+  /**
+   * Attach the seat-release exit listener to a (re)spawned child (ticket
+   * 1fcba693). On child exit it clears current_task and releases the ticket
+   * claim so a child that died mid-turn (MCP init fail, SIGKILL, idle timeout,
+   * CLI crash after a successful claim_ticket, …) does not leave
+   * locked_by_agent_id / current_task set until the server sweeps.
+   *
+   * MUST be attached to EVERY child that holds the seat — the initial dispatch
+   * child AND every model-fallback / watchdog respawn child. Before ticket
+   * 1fcba693 only the initial child got it, so a respawned child's exit leaked
+   * the seat (leak b). Server enforces ownership on release_ticket (lock owner
+   * == agent_id), so this is a clean no-op when the child never claimed. The
+   * releases are fire-and-forget for the normal mid-run exit; the SIGTERM /
+   * self-update path drains them explicitly via _onStopDrain.
+   *
+   * `dedupKey` is forgotten too (initial dispatch only).
+   */
+  #attachSlotRelease(sess: SessionRecord, ticketId: string, dedupKey?: string | null): void {
+    sess.child.once('exit', () => {
       if (dedupKey) this._forgetDedup(dedupKey);
-      if (spawned.agentId) {
+      if (sess.agentId) {
+        // Pass this session's generation token so the server only releases the
+        // seat/badge if it still owns it — a respawn that already re-stamped the
+        // seat (fresh token) is left untouched (ticket 1fcba693 CAS).
         fireAndForgetTool(this._config, 'clear_current_task', {
-          agent_id: spawned.agentId,
-          ticket_id: spec.ticketId,
+          agent_id: sess.agentId,
+          ticket_id: ticketId,
+          task_token: sess.taskToken,
         });
-        // Release any lock the subagent acquired via claim_ticket. Without
-        // this, a child that died mid-turn (MCP init fail, SIGKILL, idle
-        // timeout, claude CLI crash after a successful claim_ticket call,
-        // …) leaves locked_by_agent_id set until the server-side 30-min
-        // sweep fires. The WorkflowFocusSelector then keeps picking that
-        // (now-stuck) ticket as the agent's focus, cap=1 blocks every
-        // other To Do ticket on the board, and nothing moves until an
-        // operator manually clears the lock — exactly the GameClient A-5
-        // failure we observed on 2026-05-14. Server enforces ownership on
-        // release_ticket (lock owner == agent_id), so this is a clean
-        // no-op when the child never claimed and only frees the specific
-        // ticket lock the agent holds.
         fireAndForgetTool(this._config, 'release_ticket', {
-          ticket_id: spec.ticketId,
-          agent_id: spawned.agentId,
+          ticket_id: ticketId,
+          agent_id: sess.agentId,
         });
       }
     });
+  }
 
-    return { dispatched: true, pid: spawned.pid, firstTurn: true };
+  /**
+   * Release a reaped session's seat (ticket 1fcba693 leak c). Overrides the base
+   * hook: when _getLiveSession purges a record whose child was reaped without an
+   * 'exit' event, its exit-listener slot-release never ran — release here so the
+   * claim / current_task don't linger until the server sweeps. Idempotent
+   * (ownership-checked), so a rare late exit double-release is harmless.
+   */
+  protected override _onSessionReaped(sess: SessionRecord): void {
+    if (!sess.agentId || !sess.ticketId) return;
+    fireAndForgetTool(this._config, 'clear_current_task', {
+      agent_id: sess.agentId,
+      ticket_id: sess.ticketId,
+      task_token: sess.taskToken, // generation CAS (ticket 1fcba693)
+    });
+    fireAndForgetTool(this._config, 'release_ticket', {
+      ticket_id: sess.ticketId,
+      agent_id: sess.agentId,
+    });
+  }
+
+  /**
+   * Drain seat releases before the process exits (ticket 1fcba693 leak a).
+   * Overrides the base hook: stop() calls this with every live session on
+   * SIGTERM / self-update. A plain fire-and-forget release POST is cut off by
+   * process.exit, so we collect the release promises and AWAIT them, bounded by
+   * SLOT_RELEASE_DRAIN_MS so a hung server can't block shutdown.
+   */
+  protected override async _onStopDrain(sessions: SessionRecord[]): Promise<void> {
+    const releases: Promise<unknown>[] = [];
+    for (const sess of sessions) {
+      if (!sess.agentId || !sess.ticketId) continue;
+      releases.push(fireAndForgetTool(this._config, 'clear_current_task', {
+        agent_id: sess.agentId,
+        ticket_id: sess.ticketId,
+        task_token: sess.taskToken, // generation CAS (ticket 1fcba693)
+      }));
+      releases.push(fireAndForgetTool(this._config, 'release_ticket', {
+        ticket_id: sess.ticketId,
+        agent_id: sess.agentId,
+      }));
+    }
+    if (releases.length === 0) return;
+    await Promise.race([
+      Promise.allSettled(releases),
+      new Promise((r) => setTimeout(r, SLOT_RELEASE_DRAIN_MS)),
+    ]);
   }
 
   #sessionsForTicket(ticketId: string): SessionRecord[] {
@@ -839,11 +980,21 @@ export class TicketSessionManager
             // server would see the agent as idle while the respawned child is
             // actively working the ticket — freeing the per-agent cap slot to a
             // DIFFERENT ticket. set_current_task is idempotent + fire-and-forget.
+            // (The respawned child `s` carries its OWN seat-release listener,
+            // attached in respawnWithModel per ticket 1fcba693 leak b, so ITS
+            // exit frees the seat too.)
+            //
+            // Carry the respawn's OWN generation token (ticket 1fcba693). This is
+            // the seat-overwrite half of the race: the killed session's late
+            // clear_current_task carries the OLDER token, so once this set lands
+            // the server stores s.taskToken and that stale clear is a CAS no-op —
+            // the live respawn is never false-flagged absent + re-dispatched.
             if (s.agentId) {
               fireAndForgetTool(this._config, 'set_current_task', {
                 agent_id: s.agentId,
                 ticket_id: ticketId,
                 role,
+                task_token: s.taskToken,
               });
             }
             return; // fresh session took over — skip suppression + silent-exit

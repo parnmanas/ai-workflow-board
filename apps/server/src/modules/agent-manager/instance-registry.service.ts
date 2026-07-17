@@ -73,6 +73,10 @@ export interface InstanceRecord {
   update_last_error?: string | null;
   // Live count reported by the manager's in-memory circuit breaker.
   open_breaker_count?: number;
+  // ticket 3d180f85 — per-reason count of dispatches suppressed by the manager's
+  // provision-spanning twin guard (e.g. { inflight_dispatch: 3 }). Auto-served
+  // by the GET /api/admin/agent-manager/instances `{ ...inst }` spread.
+  dispatch_suppression_counts?: Record<string, number>;
 }
 
 /**

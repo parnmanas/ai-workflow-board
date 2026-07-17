@@ -44,6 +44,18 @@ interface ActiveTask {
   // leave this undefined — treated as 'ticket' on the wire. QA-run tasks (the
   // separate `qaTasks` registry) carry 'qa' so _emit tags them for the client.
   kind?: 'ticket' | 'qa';
+  // Generation token (ticket 1fcba693). A per-session nonce the agent-manager
+  // stamps on set_current_task and echoes back on clear_current_task, so the
+  // seat-release is a compare-and-swap: because active_tasks is keyed by
+  // ticket_id ALONE, a respawn (session B) that re-stamps the same (agent,
+  // ticket, role) seat overwrites session A's entry. If A's LATE exit-clear then
+  // arrived it would wipe live B's task AND — since fdc69c13's exit-clear also
+  // drops the output-liveness badge — B's liveness evidence, false-flagging B as
+  // absent and triggering a duplicate re-dispatch. clearCurrentTask only
+  // releases the seat/badge when the caller's token matches this stored one, so
+  // A's stale clear is a no-op against B. Undefined for a pre-token (legacy)
+  // set — the clear then falls back to the tokenless, badge-preserving path.
+  task_token?: string;
 }
 
 // Internal-only activityEvents signal (ticket 09ed8def), fired by QaRunService
@@ -83,7 +95,10 @@ const OFFLINE_THRESHOLD_MS = 90_000;
 // the sweep auto-clears any task older than this so the dashboard recovers
 // without manual intervention. Tuned long enough that legitimate long-running
 // reviews don't flap, short enough that crashes self-heal within ~one sweep.
-const CURRENT_TASK_STALE_MS = 15 * 60_000;
+// Exported (ticket 1fcba693) so the TicketSupervisor's stale-slot reclaim and
+// the cadence diagnostic share ONE definition of "a current_task this old is a
+// dead strand's ghost, not a live worker".
+export const CURRENT_TASK_STALE_MS = 15 * 60_000;
 // Output-liveness eviction TTL (ticket fdc69c13, hardened by 47a72129). A
 // per-(agent,ticket,role) output timestamp has nobody to clear it once the
 // session ends; the 30s sweep drops entries older than the *effective* TTL so
@@ -311,20 +326,47 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
    * are legitimately distinct strands on a single-agent multi-role board).
    * Same-role match → there's already a live strand serving this seat → the
    * caller drops the redundant emit.
+   *
+   * Second signal — OUTPUT-liveness (ticket e9c8e1d6). set_current_task is
+   * stamped ONCE at spawn and never refreshed, so a strand that produces tokens
+   * for longer than CURRENT_TASK_STALE_MS WITHOUT a ticket-write ages the
+   * current_task entry out and looks dead to path 1 — even though it is plainly
+   * alive. We therefore ALSO honor a fresh per-(agent,ticket,role) output-liveness
+   * timestamp within the same horizon (rationale on the branch below).
    */
   hasLiveRoleStrand(agent_id: string, ticket_id: string, role: string): boolean {
     if (!agent_id || !ticket_id) return false;
-    const status = this.state.get(agent_id);
-    const task = status?.active_tasks?.get(ticket_id);
-    if (!task) return false;
-    // Stale entry (plugin crashed before clearing) — treat as no live strand
-    // so a re-trigger can recover, mirroring getActiveTicketIds' cutoff.
-    const cutoff = new Date(Date.now() - CURRENT_TASK_STALE_MS);
-    if (task.claimed_at < cutoff) return false;
-    // Role must match the live strand's seat. An undefined role on the live
-    // task (pre-v0.34 plugin that didn't pin a role) is treated as matching
-    // any role — conservative: better to serialize than to race.
-    return !task.role || task.role === role;
+    const cutoff = Date.now() - CURRENT_TASK_STALE_MS;
+
+    // Path 1 — fresh current_task. A role-matching active_tasks entry newer than
+    // the stale cutoff means a live strand holds this seat. A stale entry (plugin
+    // crashed before clearing) is treated as no live strand so a re-trigger can
+    // recover, mirroring getActiveTicketIds' cutoff. An undefined role on the
+    // live task (pre-v0.34 plugin that didn't pin a role) matches any role —
+    // conservative: better to serialize than to race.
+    const task = this.state.get(agent_id)?.active_tasks?.get(ticket_id);
+    if (task && task.claimed_at.getTime() >= cutoff && (!task.role || task.role === role)) {
+      return true;
+    }
+
+    // Path 2 — fresh OUTPUT-liveness (ticket e9c8e1d6). output-liveness IS
+    // refreshed on every model-output post (throttled manager-side to
+    // OUTPUT_LIVENESS_MIN_INTERVAL_MS), so it is the missing "still actively
+    // working THIS seat" evidence a spawn-only current_task lacks. Fresh within
+    // the SAME CURRENT_TASK_STALE_MS horizon → a live strand → drop the
+    // supervisor's redundant non-force nudge (which the manager would otherwise
+    // collapse into a wasteful follow-up turn every resend tick). A genuinely
+    // idle-but-finished or wedged strand emits no output, ages past the horizon
+    // on BOTH paths, and still gets the nudge — the "wake a stalled session"
+    // recovery is preserved (force_respawn bypasses this gate entirely and is
+    // unaffected). No eviction race with _sweep: output-liveness retention
+    // (>= 6 h floor, ticket 47a72129) far exceeds this 15-min window, so an
+    // in-window entry is never swept early. output-liveness is already role-keyed,
+    // so a live ASSIGNEE strand's output never marks a REVIEWER seat live.
+    const lastOutputMs = this.getOutputLivenessAt(agent_id, ticket_id, role);
+    if (lastOutputMs !== undefined && lastOutputMs >= cutoff) return true;
+
+    return false;
   }
 
   private _outputLivenessKey(agentId: string, ticketId: string, role: string): string {
@@ -517,7 +559,7 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
    * last_seen_at so the dashboard reflects "in progress" the instant the
    * subagent process is alive — not when the trigger was queued.
    */
-  async setCurrentTask(agent_id: string, ticket_id: string, role?: string): Promise<void> {
+  async setCurrentTask(agent_id: string, ticket_id: string, role?: string, taskToken?: string): Promise<void> {
     if (!agent_id || !ticket_id) return;
 
     const ticket = await this.dataSource
@@ -535,6 +577,11 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
       ticket_title: ticket?.title ?? '(unknown ticket)',
       claimed_at: new Date(),
       role: role || undefined,
+      // Generation nonce (ticket 1fcba693) — stamped so a later clear_current_task
+      // can prove it owns THIS session's seat before releasing it. Re-setting the
+      // same (agent,ticket) seat (respawn / heartbeat) overwrites the token, so
+      // the newest live session is always the one a matching clear can release.
+      task_token: taskToken || undefined,
     };
     tasks.set(ticket_id, task);
     const updated: AgentStatus = {
@@ -556,23 +603,62 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
    * `expectedTicketId` lets the caller assert intent — if a newer task
    * already overwrote current_task we must not clobber it. Pass undefined to
    * force-clear unconditionally (e.g. agent shutdown).
+   *
+   * `taskToken` (ticket 1fcba693) is the generation nonce the caller stamped on
+   * set_current_task. Because active_tasks is keyed by ticket_id ALONE, a
+   * respawn (session B) that re-sets the same (agent,ticket,role) seat overwrites
+   * session A's entry. A generation-verified clear (matching token) is the ONLY
+   * one that releases the output-liveness badge, so session A's stale/late exit
+   * can never wipe live session B's task or liveness evidence.
    */
-  clearCurrentTask(agent_id: string, expectedTicketId?: string): void {
+  clearCurrentTask(agent_id: string, expectedTicketId?: string, taskToken?: string): void {
     if (!agent_id) return;
     const status = this.state.get(agent_id);
     if (!status?.active_tasks || status.active_tasks.size === 0) return;
 
     const tasks = new Map(status.active_tasks);
+    // Seats whose output-liveness badge we must ALSO release (ticket 1fcba693).
+    // clearCurrentTask is the seat-release signal the agent-manager fires on
+    // session exit (clean completion, agent_idle, and — via the 3 sealed leak
+    // paths — SIGTERM/self-update drain, respawn-child release, reap-without-
+    // exit). Dropping ONLY current_task leaves the output-liveness timestamp,
+    // which the supervisor's absentStrand gate honors for up to
+    // min(supervisor_stale_ms, retention TTL) — so a strand that emitted output
+    // right before dying stays counted as a live producer (leaked_with_output)
+    // and its seat is NOT reclaimed at the fast floor. Clearing the badge here,
+    // on the release, lets a properly-released seat go absent immediately so the
+    // supervisor recovers it within the floor, not the stale window (the
+    // reviewer's root fix). Role-precise: only the released seat's badge is
+    // dropped, never a live sibling strand's (e.g. this agent's reviewer seat).
+    const releasedSeats: Array<{ ticketId: string; role: string }> = [];
     if (expectedTicketId) {
-      // Targeted clear: drop just this ticket's entry. No-op if a newer
-      // setCurrentTask already replaced it (which on a Map means the same
-      // key is still present but with a fresher claimed_at — caller's
-      // intent was to clear THIS task, so we still drop it; the manager
-      // would call setCurrentTask again on the next session anyway).
-      if (!tasks.delete(expectedTicketId)) return;
+      const t = tasks.get(expectedTicketId);
+      if (!t) return; // already released — nothing to clear
+      // Generation compare-and-swap (ticket 1fcba693). If the caller identifies
+      // its generation (taskToken) and the seat now stores a DIFFERENT token, a
+      // newer set_current_task(B) replaced this session's entry → a live
+      // successor owns the seat → skip ENTIRELY: never drop B's task nor its
+      // badge. This is the fix for the set(A)→set(B)→late-clear(A) race that a
+      // ticket-id-only clear can't see.
+      if (taskToken && t.task_token && t.task_token !== taskToken) return;
+      // Release the output badge ONLY on a generation-verified clear (token
+      // present AND matching the stored one). A tokenless legacy clear — or a
+      // task set before tokens existed — can't prove there is no live successor,
+      // so it drops just the current_task entry (dashboard release, unchanged)
+      // and LEAVES the badge for the supervisor's output-liveness TTL /
+      // leaked_with_output diagnostic to reclaim, rather than risk a live
+      // worker's liveness evidence.
+      const tokenVerified = !!(taskToken && t.task_token && t.task_token === taskToken);
+      tasks.delete(expectedTicketId);
+      if (tokenVerified) releasedSeats.push({ ticketId: expectedTicketId, role: t.role || '' });
     } else {
-      // Force-clear all (agent shutdown). Mirrors pre-multi-task behavior.
+      // Force-clear all (agent shutdown/teardown): the whole agent is gone, so no
+      // live successor exists on any seat — release every task AND badge.
+      for (const [tid, t] of tasks) releasedSeats.push({ ticketId: tid, role: t?.role || '' });
       tasks.clear();
+    }
+    for (const s of releasedSeats) {
+      this.outputLiveness.delete(this._outputLivenessKey(agent_id, s.ticketId, s.role));
     }
 
     const updated: AgentStatus = {
@@ -595,6 +681,55 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
       remaining_active_count: tasks.size,
       timestamp: new Date().toISOString(),
     });
+  }
+
+  /**
+   * Reclaim a confirmed-dead strand's current_task slot (ticket 1fcba693).
+   *
+   * The TicketSupervisor calls this when it has independently determined that
+   * NOBODY is working a stale allocation (no live strand AND no recent
+   * output-liveness) and is about to re-dispatch it. The agent-manager is
+   * SUPPOSED to clear_current_task on session exit, but three known leaks (SIGTERM
+   * self-update with no drain, respawn children with no release listener, and
+   * reap-without-exit) can strand the entry until the 30 s sweep or the 15 min
+   * TTL. This lets the server reclaim it AT re-dispatch so active-count / the
+   * dashboard badge are correct immediately instead of lagging a sweep.
+   *
+   * Successor-safe compare-and-clear: the entry is dropped ONLY if its
+   * claimed_at is older than `staleMs`. If a live successor strand re-stamped
+   * current_task in the meantime (fresh claimed_at) it is left untouched — we
+   * never evict a working strand's seat (the stale-lease successor-deletion
+   * hazard). Because hasLiveRoleStrand already treats a >CURRENT_TASK_STALE_MS
+   * entry as not-live, a caller passing CURRENT_TASK_STALE_MS clears exactly the
+   * ghost it just classified absent, and no fresher entry.
+   *
+   * Unlike clearCurrentTask this does NOT emit the 'agent_idle' broadcast: the
+   * supervisor emits its own single non-force nudge for this ticket right after,
+   * and driving re-dispatch through BOTH the agent_idle→transition-replay drain
+   * and the supervisor nudge would double-emit. It still refreshes the dashboard
+   * status (_emit) so the freed seat is visible. Returns true iff it cleared a
+   * stale entry.
+   */
+  reclaimStaleStrand(agent_id: string, ticket_id: string, staleMs: number): boolean {
+    if (!agent_id || !ticket_id) return false;
+    const status = this.state.get(agent_id);
+    if (!status?.active_tasks || status.active_tasks.size === 0) return false;
+    const task = status.active_tasks.get(ticket_id);
+    if (!task) return false;
+    const cutoff = new Date(Date.now() - staleMs);
+    // Live successor re-stamped the seat — never evict it.
+    if (task.claimed_at >= cutoff) return false;
+
+    const tasks = new Map(status.active_tasks);
+    tasks.delete(ticket_id);
+    const updated: AgentStatus = {
+      ...status,
+      active_tasks: tasks.size > 0 ? tasks : undefined,
+      current_task: tasks.size > 0 ? pickMostRecent(tasks) : undefined,
+    };
+    this.state.set(agent_id, updated);
+    this._emit(updated);
+    return true;
   }
 
   /**

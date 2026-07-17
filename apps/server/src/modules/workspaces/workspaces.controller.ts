@@ -2,8 +2,9 @@ import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { Controller, Get, Post, Patch, Delete, Body, Param, Query, Res, UseGuards } from '@nestjs/common';
 import { Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, IsNull, Repository } from 'typeorm';
+import { In, IsNull, Repository, EntityManager } from 'typeorm';
 import { Workspace } from '../../entities/Workspace';
+import { ActivityLog } from '../../entities/ActivityLog';
 import { Board } from '../../entities/Board';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { Ticket } from '../../entities/Ticket';
@@ -12,6 +13,9 @@ import { Agent } from '../../entities/Agent';
 import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { AuthGuard } from '../../common/guards/auth.guard';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import type { CurrentUserData } from '../../common/decorators/current-user.decorator';
+import { ActivityService } from '../../services/activity.service';
 import { DEFAULT_COLUMNS } from '../../database/database.module';
 import { DEFAULT_BOARD_ROUTING } from '../../db';
 import { WorkspaceRolesService } from '../workspace-roles/workspace-roles.service';
@@ -41,6 +45,7 @@ export class WorkspacesController {
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly workspaceRolesService: WorkspaceRolesService,
     private readonly promptTemplatesService: PromptTemplatesService,
+    private readonly activityService: ActivityService,
   ) {}
 
   @Get()
@@ -133,8 +138,24 @@ export class WorkspacesController {
   }
 
   @Patch(':id')
-  async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
+  async update(
+    @Param('id') id: string,
+    @Body() body: any,
+    @Res() res: Response,
+    @CurrentUser() user: CurrentUserData,
+  ) {
     const ws = await findOrFail(this.wsRepo, { where: { id } }, 'Workspace not found');
+
+    // Snapshot the cadence/liveness knobs BEFORE mutating so a config-change
+    // audit can record old→new (ticket 1fcba693). These are the settings that
+    // pace the supervisor backstop — the incident was a 4 h supervisor_stale_ms
+    // applied with no trail. Audit written after a successful save below.
+    const cadenceBefore = {
+      supervisor_stale_ms: ws.supervisor_stale_ms,
+      supervisor_resend_ms: ws.supervisor_resend_ms,
+      dispatch_queue_depth: ws.dispatch_queue_depth,
+      claim_verification_grace_ms: ws.claim_verification_grace_ms,
+    };
 
     const {
       name, description,
@@ -206,8 +227,72 @@ export class WorkspacesController {
       }
     }
 
-    await this.wsRepo.save(ws);
+    // Persist the settings change and its config-change audit ATOMICALLY
+    // (ticket 1fcba693, reviewer AC). The cadence save and the config_changed
+    // rows share ONE transaction, so if the audit write fails the whole PATCH
+    // rolls back and returns 500 — a cadence value (e.g. the incident's 4 h
+    // supervisor_stale_ms) can never land "with no trail" again, which a
+    // best-effort/swallowed audit could not guarantee. The live SSE emit is
+    // deferred until after commit so a rolled-back row never rides the stream.
+    let auditRows: ActivityLog[];
+    try {
+      auditRows = await this.dataSource.transaction(async (manager) => {
+        await manager.save(ws);
+        return this._auditCadenceChangesTx(manager, ws.id, cadenceBefore, ws, {
+          actorId: user?.id || '',
+          actorName: user?.name || '',
+          source: 'rest',
+        });
+      });
+    } catch (e: any) {
+      return res.status(500).json({ error: `Failed to persist workspace settings: ${e?.message || String(e)}` });
+    }
+    this.activityService.emitLogged(auditRows);
+
     return res.json(ws);
+  }
+
+  /**
+   * Write a `config_changed` ActivityLog row for each supervisor/dispatch
+   * cadence field that actually changed (ticket 1fcba693), via the caller's
+   * transaction `manager` so the rows commit — or roll back — atomically with
+   * the workspace save. Workspace-scoped (entity_type='workspace',
+   * ticket_id=''), carrying actor + old→new + source so a value like the
+   * incident's 4 h supervisor_stale_ms can never again land without a trail.
+   * Returns the persisted (not-yet-emitted) rows; the caller emits them after
+   * commit. Deliberately does NOT swallow — a write failure propagates so the
+   * transaction rolls the settings change back too (audit-or-nothing).
+   */
+  private async _auditCadenceChangesTx(
+    manager: EntityManager,
+    workspaceId: string,
+    before: { supervisor_stale_ms: number; supervisor_resend_ms: number; dispatch_queue_depth: number; claim_verification_grace_ms: number },
+    after: Workspace,
+    actor: { actorId: string; actorName: string; source: string },
+  ): Promise<ActivityLog[]> {
+    const fields: Array<keyof typeof before> = [
+      'supervisor_stale_ms', 'supervisor_resend_ms', 'dispatch_queue_depth', 'claim_verification_grace_ms',
+    ];
+    const rows: ActivityLog[] = [];
+    for (const field of fields) {
+      const oldVal = before[field];
+      const newVal = (after as any)[field];
+      if (oldVal === newVal) continue;
+      rows.push(await this.activityService.logActivityTx(manager, {
+        entity_type: 'workspace',
+        entity_id: workspaceId,
+        workspace_id: workspaceId,
+        ticket_id: '',
+        action: 'config_changed',
+        field_changed: field,
+        old_value: String(oldVal),
+        new_value: String(newVal),
+        actor_id: actor.actorId,
+        actor_name: actor.actorName,
+        trigger_source: actor.source,
+      }));
+    }
+    return rows;
   }
 
   @Delete(':id')

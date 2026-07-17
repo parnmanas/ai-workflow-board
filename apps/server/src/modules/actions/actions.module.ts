@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Action } from '../../entities/Action';
 import { ActionRun } from '../../entities/ActionRun';
+import { ActionApproval } from '../../entities/ActionApproval';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
@@ -12,6 +13,8 @@ import { Workspace } from '../../entities/Workspace';
 import { User } from '../../entities/User';
 import { Ticket } from '../../entities/Ticket';
 import { BoardColumn } from '../../entities/BoardColumn';
+import { Comment } from '../../entities/Comment';
+import { ActivityLog } from '../../entities/ActivityLog';
 import { ActionsController } from './actions.controller';
 import { ActionsService } from './actions.service';
 import { ActionSchedulerService } from './action-scheduler.service';
@@ -23,7 +26,7 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Action, ActionRun, ChatRoom, ChatRoomParticipant, ChatRoomMessage, TicketAttachment, Agent, Board, Workspace, User, Ticket, BoardColumn]),
+    TypeOrmModule.forFeature([Action, ActionRun, ActionApproval, ChatRoom, ChatRoomParticipant, ChatRoomMessage, TicketAttachment, Agent, Board, Workspace, User, Ticket, BoardColumn, Comment, ActivityLog]),
     ChatRoomsModule,
     SharedServicesModule,
   ],

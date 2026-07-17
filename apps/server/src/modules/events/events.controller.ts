@@ -11,6 +11,7 @@ import { BoardColumn } from '../../entities/BoardColumn';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { Agent } from '../../entities/Agent';
 import { activityEvents } from '../../services/activity.service';
+import { resolveAgentDisplayName } from '../../utils/agent-name';
 import { AuthService } from '../../services/auth.service';
 import { ApiKeyService } from '../../services/api-key.service';
 import { LogService } from '../../services/log.service';
@@ -166,6 +167,10 @@ export class EventsController implements OnModuleDestroy {
     const mapCtx: EventMapContext = {
       resolveBoardId: (ticketId, entityId) => this.resolveBoardId(ticketId, entityId),
       resolveTicketRepositoryResourceId: (ticketId) => this.resolveTicketRepositoryResourceId(ticketId),
+      // Same (id → canonical display) resolver ActivityService uses on read, so
+      // the realtime board_update frame and a later refetch never disagree.
+      resolveActorDisplayName: (actorId) =>
+        actorId ? resolveAgentDisplayName(this.agentRepo, actorId) : Promise.resolve(null),
     };
 
     for (const def of EVENT_TYPES) {

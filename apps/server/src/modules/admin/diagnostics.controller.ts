@@ -1,5 +1,7 @@
 import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { Controller, Get, Post, UseGuards } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import { join } from 'node:path';
 import * as v8 from 'node:v8';
 import { AuthGuard } from '../../common/guards/auth.guard';
@@ -8,6 +10,39 @@ import { RequirePermission } from '../../common/decorators/require-permission.de
 import { PERMISSIONS } from '../../common/types/permissions';
 import { LogService } from '../../services/log.service';
 import { MemoryMetricsRegistry } from '../../services/memory-metrics.registry';
+import { Workspace } from '../../entities/Workspace';
+import {
+  DEFAULT_SUPERVISOR_STALE_MS,
+  DEFAULT_SUPERVISOR_RESEND_MS,
+  DEFAULT_SUPERVISOR_LIVENESS_FLOOR_MS,
+  SUPERVISOR_STALE_MS_SANE_MAX,
+  SUPERVISOR_TICK_MS,
+  resolveSupervisorLivenessFloorMs,
+  classifySupervisorStaleMs,
+  resolveRecoveryModeMs,
+} from '../../common/supervisor-liveness';
+import { CURRENT_TASK_STALE_MS, resolveOutputLivenessTtlMs } from '../../modules/agents/agent-status.service';
+
+/**
+ * Resolve one cadence field the same way TicketSupervisorService.resolveCadence
+ * does: a positive finite configured value wins, otherwise the default. Returns
+ * both so the diagnostic can show configured-vs-default-vs-effective + source.
+ */
+function resolveCadenceField(configured: unknown, def: number): {
+  configured: number | null; effective: number; source: 'configured' | 'default'; is_default: boolean;
+} {
+  const n = Number(configured);
+  if (Number.isFinite(n) && n > 0) {
+    const v = Math.floor(n);
+    // `is_default` is the operator-meaningful signal: the column is NOT NULL and
+    // backfilled, so `source` is almost always 'configured' — what matters is
+    // whether the configured value EQUALS the in-code default or is a custom
+    // (possibly incident) value like the 4 h supervisor_stale_ms.
+    return { configured: v, effective: v, source: 'configured', is_default: v === def };
+  }
+  // Null/0/garbage row → the tick falls back to the default (source='default').
+  return { configured: null, effective: def, source: 'default', is_default: true };
+}
 
 /**
  * Public memory diagnostics — intentionally NOT guarded by Auth/Permission.
@@ -29,7 +64,109 @@ import { MemoryMetricsRegistry } from '../../services/memory-metrics.registry';
 @ApiTags('diagnostics')
 @Controller('api/diagnostics')
 export class PublicDiagnosticsController {
-  constructor(private readonly metricsRegistry: MemoryMetricsRegistry) {}
+  constructor(
+    private readonly metricsRegistry: MemoryMetricsRegistry,
+    @InjectRepository(Workspace) private readonly wsRepo: Repository<Workspace>,
+  ) {}
+
+  /**
+   * Per-workspace supervisor cadence / liveness diagnostic (ticket 1fcba693).
+   *
+   * The `ticketSupervisor.staleMsElevated` gauge on `GET memory` only counts how
+   * MANY workspaces are mis-set — it can't tell you WHICH one or by how much.
+   * This endpoint answers "why is recovery paced slowly here": for every
+   * workspace it shows the configured value, the in-code default, the EFFECTIVE
+   * value the supervisor tick actually uses, and the source (configured vs
+   * default) for supervisor_stale_ms / supervisor_resend_ms, plus the liveness
+   * floor, the sane-max, and the `elevated` flag. So a value like the incident's
+   * 4 h supervisor_stale_ms is visible at the source, with its provenance —
+   * exactly the "출처·effective value가 진단에서 확인 가능" DoD.
+   *
+   * Same public/read posture and risk profile as `GET memory` (cadence numbers +
+   * workspace name; no user/ticket/credential content).
+   */
+  @Get('supervisor-cadence')
+  async getSupervisorCadence() {
+    const workspaces = await this.wsRepo.find({ order: { created_at: 'ASC' } });
+    const livenessFloorMs = resolveSupervisorLivenessFloorMs();
+    const livenessFloorSource =
+      livenessFloorMs === DEFAULT_SUPERVISOR_LIVENESS_FLOOR_MS ? 'default' : 'env';
+
+    // Effective output-liveness retention TTL, derived the same way the runtime
+    // sweep does (AgentStatusService._resolveOutputLivenessTtlMs): from the
+    // LARGEST effective supervisor_stale_ms across workspaces, floored at 6 h.
+    // The leaked_with_output recovery bound needs it because the absentStrand
+    // gate clamps the output-liveness window to min(staleMs, this) — so a leaked
+    // seat with recent output recovers off that gate, not the 15 min TTL
+    // (ticket 1fcba693, reviewer AC). Derived here (pure) rather than injecting
+    // AgentStatusService: the diagnostic reports what the NEXT sweep will use.
+    const maxStaleMs = workspaces.reduce(
+      (m, w) => Math.max(m, resolveCadenceField(w.supervisor_stale_ms, DEFAULT_SUPERVISOR_STALE_MS).effective),
+      DEFAULT_SUPERVISOR_STALE_MS,
+    );
+    const outputLivenessTtlMs = resolveOutputLivenessTtlMs(maxStaleMs);
+
+    return {
+      timestamp: new Date().toISOString(),
+      units: 'ms',
+      // Policy constants the supervisor derives from — the "reasonable defaults"
+      // half of the DoD, so the diagnostic is self-documenting.
+      defaults: {
+        supervisor_stale_ms: DEFAULT_SUPERVISOR_STALE_MS,
+        supervisor_resend_ms: DEFAULT_SUPERVISOR_RESEND_MS,
+        liveness_floor_ms: DEFAULT_SUPERVISOR_LIVENESS_FLOOR_MS,
+        sane_max_ms: SUPERVISOR_STALE_MS_SANE_MAX,
+        current_task_stale_ms: CURRENT_TASK_STALE_MS,
+        // The supervisor re-evaluates once per tick, so every recovery bound is
+        // `threshold + up to one tick`. Exposed so an operator reading
+        // recovery_thresholds_ms vs recovery_bounds_ms can see where the gap
+        // comes from.
+        supervisor_tick_ms: SUPERVISOR_TICK_MS,
+        // Effective output-liveness retention (>= 6 h floor). The absentStrand
+        // gate clamps the output window to min(supervisor_stale_ms, this), so a
+        // leaked seat that left output before dying is held non-absent — and
+        // un-reclaimed — for up to that gate. Surfaced so the leaked_with_output
+        // recovery number below is traceable to its inputs.
+        output_liveness_ttl_ms: outputLivenessTtlMs,
+      },
+      liveness_floor: { effective_ms: livenessFloorMs, source: livenessFloorSource },
+      elevated_count: workspaces.filter(
+        (w) => classifySupervisorStaleMs(resolveCadenceField(w.supervisor_stale_ms, DEFAULT_SUPERVISOR_STALE_MS).effective).elevated,
+      ).length,
+      workspaces: workspaces.map((w) => {
+        const stale = resolveCadenceField(w.supervisor_stale_ms, DEFAULT_SUPERVISOR_STALE_MS);
+        const resend = resolveCadenceField(w.supervisor_resend_ms, DEFAULT_SUPERVISOR_RESEND_MS);
+        const { elevated } = classifySupervisorStaleMs(stale.effective);
+        // Recovery numbers this cadence implies, split by HOW the strand died so
+        // an operator reads the REAL guarantee for each case (ticket 1fcba693,
+        // reviewer AC — a single "absent" bound conflated two very different
+        // numbers). `thresholds` are the detection thresholds (tick-exclusive);
+        // `bounds` add one supervisor tick for the actual observed upper bound,
+        // so a field named `*_bounds_ms` equals the value it claims. A LEAKED
+        // current_task is gated by its TTL (current_task_stale_ms), NOT
+        // min(stale, TTL) — a stale window smaller than the TTL cannot reclaim a
+        // leaked seat any sooner (the reviewer's stale<15 min correctness fix).
+        const recovery = resolveRecoveryModeMs({
+          staleMs: stale.effective,
+          livenessFloorMs,
+          currentTaskStaleMs: CURRENT_TASK_STALE_MS,
+          outputLivenessTtlMs,
+          tickMs: SUPERVISOR_TICK_MS,
+        });
+        return {
+          workspace_id: w.id,
+          name: w.name,
+          supervisor_stale_ms: stale,
+          supervisor_resend_ms: resend,
+          liveness_floor_ms: livenessFloorMs,
+          supervisor_tick_ms: SUPERVISOR_TICK_MS,
+          recovery_thresholds_ms: recovery.thresholds,
+          recovery_bounds_ms: recovery.bounds,
+          elevated,
+        };
+      }),
+    };
+  }
 
   @Get('memory')
   getMemory() {

@@ -76,6 +76,11 @@ async function makeSupervisor(SupervisorClass, RegistryClass, { allocRow, output
   const agentStatus = {
     getOutputLivenessAt: outputAtFor || (() => undefined),
     getOutputLivenessTtlMs: () => ttlMs,
+    // ticket 1fcba693 added the fast-liveness floor, which reads
+    // hasLiveRoleStrand for every row. These cases model output-liveness only
+    // (no live current_task), so a stub reporting "no live strand" preserves the
+    // original semantics: the force-escalation gate still turns on hasRecentOutput.
+    hasLiveRoleStrand: () => false,
   };
   const service = new SupervisorClass(
     agentRepo, dataSource, allocationService, triggerLoop, agentStatus, noopLog, new RegistryClass(),

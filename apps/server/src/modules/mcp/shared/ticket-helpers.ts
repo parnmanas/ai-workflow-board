@@ -83,6 +83,34 @@ export async function formatAgentDisplayName(
 }
 
 /**
+ * Canonical `<Manager>/<Agent>` display for the current MCP caller. Resolves
+ * the caller's agentId through the same `formatAgentDisplayName` TicketCard /
+ * activity log use, so denormalized snapshots the UI reads back carry the full
+ * name instead of the bare API-key leaf that `caller.agentName` holds
+ * (mcp.controller sets it to `ak.agent?.name`, no manager prefix).
+ *
+ * Needed where the stored snapshot has NO companion id to re-resolve on read —
+ * `Ticket.pending_set_by` (User tab "Parked by …") is a lone display string.
+ * Activity `actor_name` carries an `actor_id`, so that path is fixed on read
+ * instead; this helper is for the id-less write paths.
+ *
+ * Falls back to the bare leaf when the id is absent or unresolvable (env-key
+ * callers with no agentId, deleted agent row) so the field is never blanked.
+ */
+export async function resolveCallerDisplayName(
+  scope: RepoScope,
+  caller: { agentId?: string; agentName?: string } | null | undefined,
+): Promise<string> {
+  if (caller?.agentId) {
+    const agent = await scope.getRepository(Agent)
+      .findOne({ where: { id: caller.agentId } })
+      .catch(() => null);
+    if (agent) return formatAgentDisplayName(scope, agent);
+  }
+  return caller?.agentName || '';
+}
+
+/**
  * Resolve an agent UUID from either a raw ID (passthrough) or a display name.
  * Returns the empty string when neither yields a match.
  *

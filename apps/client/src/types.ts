@@ -1799,6 +1799,10 @@ export interface AgentManagerInstance {
   update_last_checked_at?: string | null;
   update_last_error?: string | null;
   open_breaker_count?: number;
+  /** ticket 3d180f85 — per-reason count of dispatches suppressed by the manager's
+   *  provision-spanning twin guard (e.g. { inflight_dispatch: 3 }). Informational
+   *  (the guard working as intended), not a degraded-state signal. */
+  dispatch_suppression_counts?: Record<string, number>;
   /** Latest error-log upload among the manager identity and its managed agents. */
   last_error_upload_at?: string | null;
 }

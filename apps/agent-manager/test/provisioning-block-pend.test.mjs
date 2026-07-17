@@ -254,8 +254,19 @@ test('concurrent recovery triggers spawn EXACTLY ONE strand via the real (ticket
   ]);
 
   assert.equal(state.spawns.length, 1, 'concurrent recovery spawned exactly one strand (정확히 한 strand)');
-  assert.equal(state.dedups.length, 1, 'the twin was deduped by the real findDuplicateSpawn');
-  assert.equal(state.dedups[0].reason, 'duplicate_trigger', 'deduped on (ticket,role,agent), not exact trigger id');
+  // ticket 3d180f85: the provision-spanning single-flight gate now collapses the
+  // concurrent-recovery twin ONE LAYER EARLIER than findDuplicateSpawn — it is
+  // suppressed at the gate (before it re-provisions or reaches spawn), so it never
+  // reaches the spawn-dedup here. findDuplicateSpawn stays the defense-in-depth
+  // backstop (exercised directly in dispatch-inflight-guard.test.mjs and its own
+  // unit tests). The core invariant is unchanged and now enforced sooner: EXACTLY
+  // one strand, with the twin collapsed by the authoritative single-flight.
+  assert.equal(state.dedups.length, 0, 'twin suppressed at the gate, before the spawn-dedup layer runs');
+  assert.deepEqual(
+    d.dispatchSuppressionCounts(),
+    { inflight_dispatch: 1 },
+    'the recovery twin was collapsed by the provision-spanning single-flight gate',
+  );
 });
 
 // ── (4) transient blocker keeps the cooldown self-heal (contrast to durable) ───

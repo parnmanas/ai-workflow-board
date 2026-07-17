@@ -192,6 +192,7 @@ export function createStandaloneContext(dataSource: DataSource): ToolContext {
 
   const activityService = new ActivityService(
     dataSource.getRepository(ActivityLog),
+    dataSource.getRepository(Agent),
     logService,
   );
   const apiKeyService = new ApiKeyService(dataSource.getRepository(ApiKey));

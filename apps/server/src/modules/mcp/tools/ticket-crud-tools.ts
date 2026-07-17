@@ -18,6 +18,8 @@ import { Resource } from '../../../entities/Resource';
 import { Ticket } from '../../../entities/Ticket';
 import { WorkspaceRole } from '../../../entities/WorkspaceRole';
 import { ok, err, safeJsonParse, sanitizeHarnessMarkers } from '../shared/helpers';
+import { evaluatePendActionGate, type PendActionCandidate } from '../shared/pend-action-gate';
+import { loadPendActionCandidates } from '../shared/pend-action-scope';
 import { loadTicketFull } from '../shared/ticket-parsing';
 import {
   findColumnByName,
@@ -25,6 +27,7 @@ import {
   refreshTicketWorkspaceId,
   resolveAgentId,
   resolveAgentIdAndName,
+  resolveCallerDisplayName,
   shiftTicketPositions,
   deleteCommentAttachmentsForTicket,
   validateNextTicketId,
@@ -533,7 +536,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           ticket.pending_user_action = next;
           if (next) {
             ticket.pending_set_at = new Date();
-            ticket.pending_set_by = caller?.agentName || '';
+            ticket.pending_set_by = await resolveCallerDisplayName(dataSource, caller);
             if (pending_reason !== undefined) {
               ticket.pending_reason = pending_reason || '';
             }
@@ -639,24 +642,47 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
 
   server.tool(
     'pend_ticket',
-    'Use ONLY when human input is required. For waiting on another ticket, use `add_ticket_prerequisites` instead (it auto-resumes when the blocker finishes — no human needed). ' +
-    'Parks a ticket for user intervention: sets `pending_user_action=true` plus a `reason` rendered on the ticket detail panel\'s "User" tab. While pending, the trigger loop drops every agent_trigger for this ticket, the focus selector skips it (so the agent\'s focus moves to another ticket), and BacklogPromotionService refuses to promote into this column slot. Use when a decision genuinely needs a human — typically because the ticket would otherwise loop between System and Agent columns, or because the work has to be split into a follow-up ticket. Pair with `create_ticket` when the right move is to spin up a separate ticket for a scoped follow-up.',
+    'Use ONLY when human input is required AND no registered Action can resolve the blocker. ' +
+    'Before parking for something an Action could do (deploy, publish, merge-to-production, run a scripted task), discover + run an Action instead (`list_actions` → `run_action`, or `save_action` → `run_action`) and resume the ticket in place. ' +
+    'For waiting on another ticket, use `add_ticket_prerequisites` instead (it auto-resumes when the blocker finishes — no human needed). ' +
+    'Parks a ticket for user intervention: sets `pending_user_action=true` plus a `reason` rendered on the ticket detail panel\'s "User" tab. While pending, the trigger loop drops every agent_trigger for this ticket, the focus selector skips it (so the agent\'s focus moves to another ticket), and BacklogPromotionService refuses to promote into this column slot. Use when a decision genuinely needs a human — typically because the ticket would otherwise loop between System and Agent columns, or because the work has to be split into a follow-up ticket. Pair with `create_ticket` when the right move is to spin up a separate ticket for a scoped follow-up. ' +
+    'ACTION GATE (ticket 524bb434): while runnable Actions exist in this ticket\'s scope, the call is REJECTED unless `no_action_reason` is supplied — the error lists the candidate Actions so you run/register one instead of parking.',
     {
       ticket_id: z.string().describe('Ticket ID to park'),
       reason: z.string().describe('Why human intervention is needed. Surfaced verbatim on the User tab so the user can act without reading the comment log. Keep it specific (e.g. "credentials needed for prod DB migration" beats "stuck").'),
+      no_action_reason: z.string().optional().describe('Why no registered Action can resolve this blocker (e.g. "prod approval needs a human signer — no Action covers the sign-off"). REQUIRED when runnable Actions exist in the ticket\'s scope — the server otherwise rejects the pend and lists the candidate Actions so you can run/register one. Recorded on the ticket audit trail.'),
     },
-    async ({ ticket_id, reason }, extra: { sessionId?: string }) => {
+    async ({ ticket_id, reason, no_action_reason }, extra: { sessionId?: string }) => {
       const ticketRepo = dataSource.getRepository(Ticket);
       const ticket = await ticketRepo.findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Ticket not found');
       if (ticket.archived_at) return err(new TicketArchivedError(ticket.id).message);
       const caller = getCallerAgent(extra);
+
+      // ── Action gate (ticket 524bb434) ───────────────────────────────────
+      // Pending is for what an Action cannot do. Gather the ticket-scoped
+      // runnable Actions (enabled + workspace-level OR this ticket's board)
+      // and force the caller to justify (`no_action_reason`) parking past
+      // them. Scope resolution failing fails OPEN — the gate is an
+      // enhancement, never a reason a legitimate pend cannot land.
+      let candidates: PendActionCandidate[] = [];
+      try {
+        candidates = await loadPendActionCandidates(dataSource, ticket);
+      } catch (e) {
+        logger.warn('MCP', 'pend_ticket action-gate scope resolution failed (failing open)', {
+          err: String(e), ticket_id: ticket.id,
+        });
+        candidates = [];
+      }
+      const gate = evaluatePendActionGate(candidates, no_action_reason);
+      if (!gate.allowed) return err(gate.message!);
+
       const wasPending = !!ticket.pending_user_action;
       ticket.pending_user_action = true;
       ticket.pending_reason = reason || '';
       if (!wasPending) {
         ticket.pending_set_at = new Date();
-        ticket.pending_set_by = caller?.agentName || '';
+        ticket.pending_set_by = await resolveCallerDisplayName(dataSource, caller);
       }
       await ticketRepo.save(ticket);
       await activityService.logActivity({
@@ -666,6 +692,18 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
         ticket_id: ticket.id,
         actor_id: caller?.agentId, actor_name: caller?.agentName,
       });
+      // Audit the "no Action applies" justification when the caller parked past
+      // runnable Actions, so scope-6 (구체적 이유 기록) stays reconstructable.
+      const noActionReason = (no_action_reason ?? '').trim();
+      if (gate.candidateCount > 0 && noActionReason) {
+        await activityService.logActivity({
+          entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
+          field_changed: 'pend_no_action_reason',
+          old_value: '', new_value: noActionReason,
+          ticket_id: ticket.id,
+          actor_id: caller?.agentId, actor_name: caller?.agentName,
+        });
+      }
       const updated = await loadTicketFull(dataSource, ticket.id);
       return ok(updated);
     }

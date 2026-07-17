@@ -20,10 +20,11 @@ import { ok, err } from '../shared/helpers';
 import { HarnessConfigSchema, serializeHarnessConfig } from '../../../common/harness-config';
 import { EnvironmentConfigSchema, validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../../../common/environment-config';
 import { writeRoutingConfigThrough } from '../../boards/routing-config.helper';
+import { getCallerAgent } from '../shared/session-auth';
 import type { ToolContext } from './context';
 
 export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): void {
-  const { dataSource } = ctx;
+  const { dataSource, activityService } = ctx;
 
   server.tool(
     'list_workspaces',
@@ -165,10 +166,19 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
       environment_config: EnvironmentConfigSchema.nullable().optional()
         .describe('Workspace-wide default environment setup — a repository-Resource picker: { repositories?: [{ resource_id }] }. Only repositories[].resource_id is used (server expands it to url / default_branch / credential); legacy keys (per-repo url/branch/target_dir/post_clone_commands, and top-level env_vars/setup_commands/setup_timeout_seconds/version) are accepted for backward compatibility but ignored on save. Boards override this per top-level key via their own environment_config. Pass null to clear.'),
     },
-    async ({ workspace_id, name, description, supervisor_stale_ms, supervisor_resend_ms, dispatch_queue_depth, claim_verification_enabled, claim_verification_grace_ms, harness_config, environment_config }) => {
+    async ({ workspace_id, name, description, supervisor_stale_ms, supervisor_resend_ms, dispatch_queue_depth, claim_verification_enabled, claim_verification_grace_ms, harness_config, environment_config }, extra: { sessionId?: string }) => {
       const wsRepo = dataSource.getRepository(Workspace);
       const ws = await wsRepo.findOne({ where: { id: workspace_id } });
       if (!ws) return err('Workspace not found');
+
+      // Snapshot cadence knobs before mutating for the config-change audit
+      // (ticket 1fcba693) — old→new + actor + source=mcp.
+      const cadenceBefore = {
+        supervisor_stale_ms: ws.supervisor_stale_ms,
+        supervisor_resend_ms: ws.supervisor_resend_ms,
+        dispatch_queue_depth: ws.dispatch_queue_depth,
+        claim_verification_grace_ms: ws.claim_verification_grace_ms,
+      };
 
       if (name !== undefined) ws.name = name;
       if (description !== undefined) ws.description = description;
@@ -196,7 +206,48 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
         }
       }
 
-      await wsRepo.save(ws);
+      // Config-change audit (ticket 1fcba693): one grep-able config_changed row
+      // per changed cadence knob, actor from the MCP session, source=mcp. In
+      // standalone mode getCallerAgent returns undefined (empty actor), but the
+      // row still records the change + source.
+      const caller = getCallerAgent(extra);
+      const auditFields = ['supervisor_stale_ms', 'supervisor_resend_ms', 'dispatch_queue_depth', 'claim_verification_grace_ms'];
+
+      // Persist the settings change + its config_changed rows ATOMICALLY
+      // (reviewer AC): ONE transaction, so an audit-write failure rolls the
+      // cadence save back and the tool returns an error — a cadence value can
+      // never persist without its trail (audit-or-nothing), which a best-effort
+      // swallowed audit could not guarantee. SSE emit deferred until commit.
+      let auditRows;
+      try {
+        auditRows = await dataSource.transaction(async (manager) => {
+          await manager.save(ws);
+          const rows: any[] = [];
+          for (const field of auditFields) {
+            const oldVal = (cadenceBefore as any)[field];
+            const newVal = (ws as any)[field];
+            if (oldVal === newVal) continue;
+            rows.push(await activityService.logActivityTx(manager, {
+              entity_type: 'workspace',
+              entity_id: ws.id,
+              workspace_id: ws.id,
+              ticket_id: '',
+              action: 'config_changed',
+              field_changed: field,
+              old_value: String(oldVal),
+              new_value: String(newVal),
+              actor_id: caller?.agentId || '',
+              actor_name: caller?.agentName || '',
+              trigger_source: 'mcp',
+            }));
+          }
+          return rows;
+        });
+      } catch (e: any) {
+        return err(`Failed to persist workspace settings: ${e?.message || String(e)}`);
+      }
+      activityService.emitLogged(auditRows);
+
       return ok(ws);
     }
   );

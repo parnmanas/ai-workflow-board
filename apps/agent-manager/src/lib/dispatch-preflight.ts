@@ -522,6 +522,158 @@ export function provisioningPendReason(args: {
   );
 }
 
+/** Identity a ticket dispatch holds while it provisions + spawns. Mirrors the
+ *  (ticketId, role, agentId) triple the downstream spawn methods key on. */
+export interface InflightDispatchMeta {
+  ticketId: string;
+  role: string;
+  agentId: string;
+}
+
+/** Why a dispatch was suppressed by the provision-spanning single-flight guard.
+ *  Kept a stable string so the metric / log / activity can key on it (and so a
+ *  future second suppression cause slots in without churn). */
+export type DispatchSuppressReason = 'inflight_dispatch';
+
+/** Provision-spanning single-flight coordinator for ticket triggers (ticket 3d180f85).
+ *
+ *  The twin bug it closes: `EventDispatcher.handleTrigger` awaits worktree
+ *  provisioning (`#applyWorktreeCwd`) + ticket fetch BEFORE it reaches either
+ *  spawn method, and SSE events dispatch fire-and-forget (event-stream.ts — the
+ *  dispatch promise is only `.catch()`'d, never awaited). So same-(ticket, role,
+ *  agent) triggers run `handleTrigger` CONCURRENTLY. During a provisioning-
+ *  failure storm the server's supervisor re-sends the trigger; once provisioning
+ *  recovers, the accumulated concurrent triggers ALL pass provisioning and each
+ *  spawns → up to `live_count=3` live twins. The existing spawn-window guards
+ *  (SubagentManager.findDuplicateSpawn + `#map`; TicketSessionManager `_inflight`
+ *  + `_getLiveSession`) only engage INSIDE the spawn methods, AFTER the
+ *  previously-unguarded provisioning window, so they miss this race.
+ *
+ *  ── authoritative single-flight (ticket blocker #2) ──
+ *  The RESERVATION itself is NOT held here. When persistent ticket sessions are
+ *  on (the default, and the config the twin incident was observed under),
+ *  handleTrigger reserves the (ticket, role, agent) key directly in the
+ *  TicketSessionManager's AUTHORITATIVE `_inflight` map (see
+ *  `TicketSessionManager.tryReserveDispatch`), the same pid-checked registry the
+ *  spawn consults via `_getLiveSession`/`_inflight` — so the provisioning window
+ *  and the spawn window share ONE authoritative reservation with no parallel
+ *  map and an atomic hand-off. This coordinator only OWNS the process-local
+ *  fallback slot used when persistent sessions are OFF (one-shot-only config,
+ *  where the equivalent authority is SubagentManager.findDuplicateSpawn), plus
+ *  the two purely-in-process bookkeeping concerns that belong to no registry:
+ *  the suppression-reason metric and the suppressed-force-respawn intent.
+ *
+ *  Cross-manager / duplicate-manager is deliberately out of scope: one manager
+ *  owns an agent (the agent lockfile guarantees it), and the server's
+ *  `claim_ticket` lock is AGENT-keyed (`locked_by_agent_id`) so it cannot even
+ *  distinguish two twins of the SAME (ticket, role, agent) — the exact case
+ *  here. The authoritative source for a same-agent twin is therefore the owning
+ *  manager's own live-session registry, which is what we reserve in. */
+export class InflightDispatchTracker {
+  /** Process-local fallback reservation table — used ONLY when the authoritative
+   *  TicketSessionManager._inflight registry is unavailable (persistent sessions
+   *  disabled). Keyed identically to the authoritative registry. */
+  #fallback = new Map<string, InflightDispatchMeta>();
+  /** Per-reason suppression counter — the production-observable metric
+   *  (surfaced on the instance heartbeat, mirroring `open_breaker_count`). */
+  #suppressCounts = new Map<DispatchSuppressReason, number>();
+  /** Keys that already surfaced a suppression activity DURING the current hold,
+   *  so a supervisor re-send flood posts one activity per storm-burst rather
+   *  than one per dropped trigger. Cleared on the holder's release. */
+  #surfaced = new Set<string>();
+  /** Suppressed `force_respawn` triggers to replay once the holder releases
+   *  (blocker #1). Maps the single-flight key → the RAW payload of the suppressed
+   *  force event ITSELF, so the release-time replay carries THAT event's own
+   *  trigger identity (`field_changed`) — never the holder's. Replaying the
+   *  holder's identity would collide with the `trigger:<holder>` entry the holder
+   *  already recorded in the dedup set (kept until child exit, not cleared on a
+   *  successful spawn) and be dropped as `duplicate_trigger`, silently losing the
+   *  fresh-session intent — the exact regression the reviewer caught. One entry
+   *  per key: a burst of suppressed forces coalesces to a single replay, keyed on
+   *  the FIRST arrival (every force in the storm means the same "fresh session"
+   *  ask, so one replay satisfies them all). */
+  #pendingForce = new Map<string, string>();
+
+  /** Single-flight key. Mirrors TicketSessionManager.#makeKey / the
+   *  SubagentManager (ticketId, role, agentId) dedup so the guard keys on the
+   *  SAME identity the spawn does; empty role/agent collapse to `_` (so an
+   *  unknown-agent trigger still single-flights instead of twinning), and a
+   *  distinct non-empty agentId (다중담당자 co-holder) gets a distinct key. */
+  static key(ticketId: string, role: string, agentId: string): string {
+    return `${ticketId}:${role || '_'}:${agentId || '_'}`;
+  }
+
+  /** Atomically claim the process-local FALLBACK slot for `key` (persistent
+   *  sessions off). Free → records the holder, returns acquired. Held → returns
+   *  not-acquired; the caller suppresses. Pure/synchronous: no `await` between
+   *  the `has` and the `set`, so under Node's single thread the check-and-set
+   *  cannot interleave with another dispatch. */
+  tryAcquireFallback(key: string, meta: InflightDispatchMeta): { acquired: boolean } {
+    if (this.#fallback.has(key)) return { acquired: false };
+    this.#fallback.set(key, meta);
+    return { acquired: true };
+  }
+
+  /** Release the process-local fallback slot. Idempotent. */
+  releaseFallback(key: string): void {
+    this.#fallback.delete(key);
+  }
+
+  /** True while the fallback slot holds `key`. Test / observability. */
+  isFallbackInflight(key: string): boolean {
+    return this.#fallback.has(key);
+  }
+
+  /** Record a suppressed twin trigger: bump the reason metric, capture a
+   *  suppressed force-respawn's own payload to replay, and decide whether to
+   *  surface an activity (throttled to one per hold-burst). Called for BOTH the
+   *  authoritative and the fallback reservation paths — the metric/intent are
+   *  backend-agnostic. `opts.raw` is the suppressed event's raw JSON (the caller
+   *  passes the trigger it is dropping); it is stored ONLY for force triggers and
+   *  ONLY for the first of a burst, so the replay re-enters with the force
+   *  event's real, un-deduped identity rather than the holder's. */
+  recordSuppression(
+    reason: DispatchSuppressReason,
+    key: string,
+    opts: { force: boolean; raw?: string },
+  ): { surface: boolean } {
+    this.#suppressCounts.set(reason, (this.#suppressCounts.get(reason) ?? 0) + 1);
+    if (opts.force && opts.raw !== undefined && !this.#pendingForce.has(key)) {
+      this.#pendingForce.set(key, opts.raw);
+    }
+    const surface = !this.#surfaced.has(key);
+    this.#surfaced.add(key);
+    return { surface };
+  }
+
+  /** Settle the holder's release: re-arm activity surfacing for the next storm
+   *  on this key, and hand back (clearing) the RAW payload of any suppressed
+   *  force-respawn so the caller replays that exact event once. `null` when no
+   *  force was suppressed during the hold. Idempotent per key. */
+  onRelease(key: string): { pendingForceRaw: string | null } {
+    this.#surfaced.delete(key);
+    const pendingForceRaw = this.#pendingForce.get(key) ?? null;
+    this.#pendingForce.delete(key);
+    return { pendingForceRaw };
+  }
+
+  /** Suppression-reason metric. With no arg, the total across reasons. */
+  suppressedCount(reason?: DispatchSuppressReason): number {
+    if (reason) return this.#suppressCounts.get(reason) ?? 0;
+    let total = 0;
+    for (const v of this.#suppressCounts.values()) total += v;
+    return total;
+  }
+
+  /** Per-reason snapshot for the instance-heartbeat metric field. Empty object
+   *  when nothing has been suppressed (so the heartbeat omits a noise field). */
+  suppressionCounts(): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const [reason, n] of this.#suppressCounts) if (n > 0) out[reason] = n;
+    return out;
+  }
+}
+
 /** First non-empty line of a multi-line string, trimmed. */
 export function firstLine(text: string | undefined | null): string {
   if (!text) return '';
