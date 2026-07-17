@@ -221,7 +221,7 @@ export const api = {
   getWorkspace: (id: string) => request<any>(`/workspaces/${id}`),
   createWorkspace: (data: { name: string; description?: string; board_name?: string }) =>
     request<any>('/workspaces', { method: 'POST', body: JSON.stringify(data) }),
-  updateWorkspace: (id: string, data: { name?: string; description?: string; harness_config?: HarnessConfig | null }) =>
+  updateWorkspace: (id: string, data: { name?: string; description?: string; harness_config?: HarnessConfig | null; assistant_agent_id?: string | null }) =>
     request<any>(`/workspaces/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteWorkspace: (id: string) =>
     request<any>(`/workspaces/${id}`, { method: 'DELETE' }),

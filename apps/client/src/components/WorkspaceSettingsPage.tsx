@@ -7,6 +7,7 @@ import { useToast } from '../contexts/ToastContext';
 import PageHeader from './PageHeader';
 import HarnessConfigEditor from './HarnessConfigEditor';
 import WorkspaceSchedulesEditor from './WorkspaceSchedulesEditor';
+import AssistantAgentSetting from './chat/AssistantAgentSetting';
 import { tokens } from '../tokens';
 
 // Workspace Settings (ticket 7122600c). Currently hosts the workspace-wide
@@ -62,6 +63,7 @@ export default function WorkspaceSettingsPage() {
           <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>Loading…</div>
         ) : (
           <>
+            <AssistantAgentSetting workspace={workspace} onSaved={load} />
             <HarnessConfigEditor
               raw={workspace.harness_config}
               title="Agent Harness (workspace default)"
