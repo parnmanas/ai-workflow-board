@@ -18,6 +18,7 @@ import { ActivityService, activityEvents } from '../../services/activity.service
 import { GitHubConnectorService, parseGitHubUrl } from '../../services/github-connector.service';
 import { AgentWorkloadService } from './agent-workload.service';
 import { AgentStatusService } from './agent-status.service';
+import { DispatchIntentService, DISPATCH_RECONCILE_SOURCE } from './dispatch-intent.service';
 import { TicketPrerequisitesService } from '../tickets/ticket-prerequisites.service';
 import { priorityIndex } from './priority';
 import { appendBoardLanguageInstruction, resolveHarnessConfig, HarnessConfig } from '../../common/harness-config';
@@ -171,6 +172,12 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
     private readonly agentStatus: AgentStatusService,
     private readonly activityService: ActivityService,
     private readonly ticketPrerequisites: TicketPrerequisitesService,
+    // Durable dispatch outbox (ticket e7c87517). `_emitTrigger` records a
+    // durable intent on every landed dispatch and on the capacity/serialization
+    // gate drops, so a lost/gated trigger is re-derived by DispatchReconciler
+    // instead of evaporating. DispatchIntentService depends only on the
+    // DataSource (never on TriggerLoopService), so this injection is cycle-free.
+    private readonly dispatchIntents: DispatchIntentService,
   ) {}
 
   onModuleInit() {
@@ -1913,6 +1920,19 @@ candidate's branch or move the ticket.
           ticket_id: ticket.id, agent_id: agentId, role,
           source: triggerSource, cap, focus_window: focusWindow,
         });
+        // Durable recovery pointer (ticket e7c87517). A focus/capacity drop is
+        // the exact "starvation" shape that left 30603ce6 idle — the trigger is
+        // OWED but capacity-gated. Record a durable `pending` intent so the
+        // reconciler re-dispatches the instant an active slot frees, instead of
+        // relying on a later organic event to happen to re-fire this column.
+        // Skip the reconciler's OWN re-dispatch (it manages the intent via
+        // claimForDispatch) so we don't double-touch the row it just claimed.
+        if (triggerSource !== DISPATCH_RECONCILE_SOURCE) {
+          await this.dispatchIntents.recordOwed({
+            workspaceId: ticket.workspace_id || '', boardId, ticketId: ticket.id,
+            role, agentId, triggerSource, reason: `focus_window_capacity cap=${cap}`,
+          });
+        }
         return '';
       }
     }
@@ -1981,6 +2001,21 @@ candidate's branch or move the ticket.
         // pause / pending / archived drop audit error handling above).
         this.logService.warn('MCP', 'inflight-strand-drop audit write failed (drop still applied)', {
           err: String(e), ticket_id: ticket.id, agent_id: agentId,
+        });
+      }
+      // Durable recovery pointer (ticket e7c87517). The transition-replay queue
+      // above is IN-MEMORY, so a crash between this gate and the agent_idle
+      // drain loses the queued replay. Record a durable `pending` intent as the
+      // crash-safe backstop: even if the in-memory replay is lost, the
+      // reconciler re-dispatches once the live strand frees (resolved the moment
+      // that strand actually makes forward progress). Non-transition sources get
+      // the same durability instead of the old "self-correct" assumption. Skip
+      // the reconciler's own re-dispatch (it owns the intent lifecycle).
+      if (triggerSource !== DISPATCH_RECONCILE_SOURCE) {
+        await this.dispatchIntents.recordOwed({
+          workspaceId: ticket.workspace_id || '', boardId, ticketId: ticket.id,
+          role, agentId, triggerSource,
+          reason: `inflight_strand_serialization queued_for_replay=${queuedForReplay}`,
         });
       }
       return '';
@@ -2415,6 +2450,25 @@ candidate's branch or move the ticket.
         this.logService.warn('MCP', 'claim-verification snapshot failed (non-fatal)', {
           err: String(e), ticket_id: ticket.id, agent_id: agentId,
         });
+      });
+    }
+
+    // Durable dispatch record (ticket e7c87517). This trigger LANDED — mark the
+    // (ticket, role) intent `in_flight` with the fresh trigger_id and a
+    // processing-grace deadline. CRITICAL: a landed dispatch is NOT resolution.
+    // If the spawned strand dies silently (no comment / move / claim / output),
+    // the reconciler re-dispatches once the grace elapses; only real forward
+    // progress or a terminal/parked/unstaffed ticket resolves the intent. The
+    // manager's `processed` ack (if it arrives) just extends the grace — spawn
+    // success never closes the loop. Best-effort: recording never blocks/faults
+    // the emit (the method swallows its own errors; the reconciler seeder is the
+    // backstop if it somehow doesn't run). Skip the reconciler's own re-dispatch
+    // — it already claimed + bumped the intent generation via claimForDispatch,
+    // so re-recording here would double-count attempts and drop its lease.
+    if (triggerSource !== DISPATCH_RECONCILE_SOURCE) {
+      await this.dispatchIntents.recordDispatched({
+        workspaceId: ticket.workspace_id || '', boardId, ticketId: ticket.id,
+        role, agentId, triggerSource, triggerId,
       });
     }
 
