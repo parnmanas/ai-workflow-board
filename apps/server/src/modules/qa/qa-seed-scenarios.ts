@@ -415,6 +415,53 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
       step(4, 'Stop recording, encode mp4, and record it as THIS step\'s artifact', 'Journey saved as a Resource (file_mimetype=video/mp4) and recorded via record_qa_step on this step so the inline-video tile renders (per-step, not run-level)', 'browser_stop_video', { name: 'ticket-journey.mp4', mimetype: 'video/mp4', record_on_step: 4 }),
     ],
   },
+
+  // 15 ───────────────────────────────────────────────────────────────────────
+  {
+    key: 'dispatch-liveness-slot-reclaim',
+    name: 'Dispatch liveness & per-agent concurrency slot reclaim',
+    description:
+      'Regression for ticket 1fcba693 (티켓 처리 지연·병렬 dispatch·liveness 근본 수정). Validates the four '
+      + "root-cause fixes on AWB's own dispatch/liveness surface, end-to-end via MCP + ActivityLog:\n"
+      + '(1) POLICY — the effective supervisor-liveness policy is a sane 30-min default surfaced in the '
+      + 'workspace read; the observed 14,400,000ms (4h) value is gone and NO code path hardcodes a 4h '
+      + 'fallback (RCA: the 4h was a runtime PATCH into the DB row, never a literal — git log --all -S '
+      + '14400000 = 0).\n'
+      + '(2) CONCURRENCY — the per-agent focus window admits concurrency=cap parallel emits, so >=3 '
+      + 'independent strands on ONE assignee dispatch together; a ghost/process slot can never choke the '
+      + 'server emit path (getAgentFocusTicketIds top-N, N=max_concurrent_tickets_per_agent).\n'
+      + '(3) GENERATION-CAS — a per-session task_token makes the current_task seat a compare-and-swap: a '
+      + "stale/dead session's late clear_current_task can NEVER wipe a live successor's seat + "
+      + 'output-liveness badge.\n'
+      + '(4) EXACTLY-ONCE — single-flight suppresses respawn storms (agent_trigger_dropped_inflight_strand) '
+      + 'while a genuinely dropped column-move is preserved (queued_for_replay) and replays EXACTLY ONCE '
+      + '(inflight_strand_replay) on seat release, with zero twins (respawn_twin_detected -> 0 live).\n'
+      + 'The heavy process-level parts (3 real concurrent subagents, hard-kill reclaim SLA, '
+      + 'supervisor-restart rehydrate) are proven by the deterministic suites this mirrors — server: '
+      + 'inflight-strand-output-liveness / supervisor-output-liveness(-decision) / '
+      + 'supervisor-liveness-redispatch / supervisor-stale-ttl-guard / agent-status-supervisor-eviction; '
+      + 'manager: ticket-session-slot-lifecycle / dispatch-inflight-guard / watchdog-liveness / '
+      + 'restart-reap-resume. This scenario asserts the SERVER-observable contract so a regression that '
+      + 'reintroduces the 4h stall, serial dispatch, or a ghost-slot wipe is caught live.',
+    qa_driver: AWB_MCP_DRIVER,
+    qa_driver_config: driverConfig(),
+    tags: ['dispatch', 'liveness', 'concurrency', 'slot-reclaim', 'focus', 'generation-cas', 'exactly-once', 'regression', 'self-improvement'],
+    steps: [
+      step(0, 'Read the effective supervisor-liveness policy and its source', 'The AWB workspace shows supervisor_stale_ms == 1800000 (30 min) and supervisor_resend_ms == 300000 (5 min) — the sane defaults; the observed 14,400,000 (4h) band-aid is ABSENT and no code path hardcodes a 4h fallback (the 4h was a runtime PATCH into the DB row, not a literal — git log --all -S 14400000 = 0). Effective value + source are diagnosable from the workspace read (DoD item 6)', 'list_workspaces', {}),
+      step(1, 'Create a throwaway probe board with a per-agent focus cap of 3', 'Board created with max_concurrent_tickets_per_agent=3 so the focus window can admit 3 concurrent tickets for one agent; capture {{probe_board_id}} + its To Do / In Progress column ids', 'create_board', { workspace_id: '{{workspace_id}}', name: 'QA dispatch-liveness probe', max_concurrent_tickets_per_agent: 3 }),
+      step(2, 'Create a fresh INERT sink agent to own all three probes (no manager -> triggers emit as ActivityLog rows but spawn no subagent, isolating the SERVER focus/dispatch/seat contract)', 'Agent created; capture {{sink_agent_id}}', 'create_agent', { name: 'QA dispatch sink (inert)', type: 'custom', description: 'Throwaway inert assignee for the dispatch-liveness QA probe — no manager attached, so emitted triggers leave ActivityLog rows but spawn no subagent.' }),
+      step(3, 'Create THREE independent probe tickets in To Do, all assigned to the same sink agent (repeat for n=1,2,3 -> {{probe1}},{{probe2}},{{probe3}})', 'Three tickets, one assignee, on the cap=3 board', 'create_ticket', { workspace_id: '{{workspace_id}}', column_id: '{{probe_todo_column_id}}', title: 'QA concurrency strand {{n}}', assignee_id: '{{sink_agent_id}}' }),
+      step(4, 'Move all three probes To Do -> In Progress to fire the assignee triggers together (repeat for probe1..3)', 'Each move fires an assignee trigger for the sink; because cap=3 the focus window (getAgentFocusTicketIds, N=3) admits ALL THREE — none held back by a per-agent concurrency/focus gate', 'move_ticket', { ticket_id: '{{probeN}}', target_column_name: 'In Progress', board_id: '{{probe_board_id}}' }),
+      step(5, 'Assert concurrency = cap: three parallel emits, none focus-dropped', 'Exactly THREE trigger_emitted rows for the sink\'s three probes within the window, and ZERO agent_trigger_dropped_* rows attributable to a concurrency/focus cap — server-observable proof that >=3 independent strands on one assignee dispatch concurrently (the "no parallelism / 3~4h gap" symptom is gone; a ghost/process slot cannot throttle the emit path)', 'get_recent_activity', { limit: 200 }),
+      step(6, 'Claim probe1 seat with a generation nonce (simulate live session A)', 'current_task seat for (sink, probe1, assignee) is set at generation genA with its output-liveness badge on (verify via get_agent -> current_task)', 'set_current_task', { agent_id: '{{sink_agent_id}}', ticket_id: '{{probe1}}', role: 'assignee', task_token: 'genA' }),
+      step(7, 'A respawn re-claims the SAME seat (session B) — the token is overwritten', 'The seat generation advances to genB; genA is now stale (a respawn that re-sets the same (agent,ticket,role) seat overwrites the token)', 'set_current_task', { agent_id: '{{sink_agent_id}}', ticket_id: '{{probe1}}', role: 'assignee', task_token: 'genB' }),
+      step(8, 'Session A LATE clear (stale token genA) must NOT wipe the live successor', "The clear is a NO-OP — compare-and-swap fails because the stored generation is genB, so session B's live seat + badge SURVIVE (get_agent still shows probe1 at genB). Core anti-wipe fix: a dead session can never clear a live successor", 'clear_current_task', { agent_id: '{{sink_agent_id}}', ticket_id: '{{probe1}}', task_token: 'genA' }),
+      step(9, 'Session B own clear (matching token genB) releases exactly its seat', 'The seat + output-liveness badge are released (token matches the current generation) — a generation-safe, exactly-once release; get_agent no longer shows probe1 as current_task', 'clear_current_task', { agent_id: '{{sink_agent_id}}', ticket_id: '{{probe1}}', task_token: 'genB' }),
+      step(10, 'Single-flight + exactly-once replay on an in-flight strand: (a) set_current_task {{probe2}} to hold the seat, (b) fire a redundant trigger (move/comment on probe2), (c) clear the seat, then read activity', 'While in-flight, the redundant same-strand trigger is dropped as agent_trigger_dropped_inflight_strand (single-flight -> no respawn storm / no same-branch collision) and the dropped column-move is preserved (queued_for_replay=true); on seat release it replays EXACTLY ONCE as inflight_strand_replay — no lost trigger, no duplicate, zero respawn_twin_detected that yields a second live seat (successor=1, twin=0)', 'get_recent_activity', { limit: 200 }),
+      step(11, 'No ghost slot / no false restart after the reclaim', "get_agent({{sink_agent_id}}) + get_board_summary({{probe_board_id}}) show only genuinely-live seats — no ghost slot lingering from the cleared strand, and the other probes' seats are untouched (healthy long strands are NOT false-restarted). With the sane 30-min stale policy (step 0) a dead strand is reclaimed by output-liveness in a short deterministic window (not after the 3–4h stale wait), while a healthy strand is never oscillated; supervisor-restart rehydrate without ghost leak is covered by agent-status-supervisor-eviction / restart-reap-resume", 'get_agent', { agent_id: '{{sink_agent_id}}' }),
+      step(12, 'Clean up the probe fixtures', 'Archive the three probe tickets off the throwaway board (repeat for probe1..3); the throwaway board + inert sink carry no live manager, so no probe residue affects real dispatch', 'archive_ticket', { ticket_id: '{{probeN}}' }),
+    ],
+  },
 ];
 
 export interface BuildScenarioOptions {
