@@ -135,6 +135,48 @@ export async function postCommandAck(
 }
 
 /**
+ * ticket e7c87517 — manager → server ack for an `agent_trigger` dispatch,
+ * closing the durable dispatch outbox loop. Called right after the manager
+ * spawns the subagent (`outcome='processed'`) or aborts the spawn
+ * (`outcome='nack'` — worktree pool_exhausted / missing repo / push credential).
+ * `triggerId` echoes the value received on the trigger payload (SSE
+ * `field_changed`) so the server matches the ack to THAT dispatch and drops a
+ * stale one. Fire-and-log: a dropped ack just means the server's reconciler
+ * falls back to its processing-grace timeout before re-dispatching — the
+ * durability guarantee never depends on this POST landing.
+ */
+export async function postDispatchAck(
+  config: AwbConfig,
+  body: { ticket_id: string; role: string; trigger_id: string; outcome: 'processed' | 'nack'; reason?: string },
+): Promise<void> {
+  if (!body.ticket_id || !body.role) return;
+  try {
+    const url = `${trimSlash(config.url)}/api/agent-manager/dispatch/ack`;
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'X-Agent-Key': config.apiKey,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({
+        ticket_id: body.ticket_id,
+        role: body.role,
+        trigger_id: body.trigger_id || '',
+        outcome: body.outcome,
+        reason: body.reason ?? '',
+      }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!resp.ok) {
+      log(`dispatch ack POST failed: ${resp.status} ${resp.statusText} (ticket=${body.ticket_id.slice(0, 8)} outcome=${body.outcome})`);
+    }
+  } catch (err: any) {
+    log(`dispatch ack POST error: ${err?.message ?? err} (ticket=${body.ticket_id.slice(0, 8)} outcome=${body.outcome})`);
+  }
+}
+
+/**
  * ticket fdc69c13 — manager → server output-liveness heartbeat. Called
  * (throttled by OUTPUT_LIVENESS_MIN_INTERVAL_MS) whenever a ticket subagent
  * emits model output, so the server's TicketSupervisor knows the

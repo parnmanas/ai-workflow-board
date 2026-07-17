@@ -11,6 +11,7 @@ import { Resource } from '../../entities/Resource';
 import { decrypt } from '../../services/encryption.service';
 import { TriggerLoopService } from '../agents/trigger-loop.service';
 import { AgentStatusService } from '../agents/agent-status.service';
+import { DispatchIntentService } from '../agents/dispatch-intent.service';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { WorkspaceGuard } from '../../common/guards/workspace.guard';
@@ -68,6 +69,9 @@ export class AgentManagerController {
     private readonly commandLedger: CommandLedgerService,
     private readonly triggerLoop: TriggerLoopService,
     private readonly agentStatus: AgentStatusService,
+    // Durable dispatch outbox ack sink (ticket e7c87517). From AgentsModule
+    // (exported), reachable here via the existing forwardRef(AgentsModule).
+    private readonly dispatchIntents: DispatchIntentService,
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     @InjectRepository(Credential) private readonly credentialRepo: Repository<Credential>,
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
@@ -506,6 +510,56 @@ export class AgentManagerController {
       { command_id, status, detail, command: record.command, agent_id: callerAgentId },
     );
     return res.json({ ok: true });
+  }
+
+  // ─── Durable dispatch outbox — agent_trigger ack (ticket e7c87517) ────────
+
+  /**
+   * Manager → server: report the outcome of an `agent_trigger` SSE dispatch,
+   * closing the durable dispatch loop (ticket e7c87517). The manager POSTs this
+   * after it either spawns the subagent (`outcome='processed'`) or aborts the
+   * spawn (`outcome='nack'` — worktree `pool_exhausted`, missing repo, push
+   * credential, …). The `trigger_id` echoes the value the manager received on
+   * the trigger payload (SSE `field_changed`), so DispatchIntentService matches
+   * the ack to THAT exact dispatch and ignores a stale ack for a superseded one.
+   *
+   * CRITICAL (reviewer): `processed` is NOT resolution — it only extends the
+   * retry deadline (spawn started, give the strand time to show real progress).
+   * A `nack` re-opens the intent for a backoff re-dispatch. Only observed
+   * forward progress / a terminal ticket resolves an intent — that decision
+   * lives in DispatchReconcilerService, never here.
+   *
+   * Auth: AgentAuthGuard (X-Agent-Key), same open-trust model as
+   * /api/agent-manager/output-liveness — a bogus ack for a trigger_id that
+   * doesn't match the intent's current dispatch is simply ignored (stale-ack
+   * guard), so it cannot corrupt another manager's dispatch. Fire-and-forget on
+   * the manager side; the server-side reconciler backstops a lost ack via the
+   * processing-grace timeout regardless.
+   */
+  @ApiSecurity('agent-api-key')
+  @Post('api/agent-manager/dispatch/ack')
+  @UseGuards(AgentAuthGuard)
+  @ApiOperation({ summary: 'Manager → server: ack an agent_trigger dispatch (processed|nack)' })
+  async dispatchAck(@Body() body: any, @Req() req: Request, @Res() res: Response) {
+    const callerAgentId = (req as any).currentAgentId || (req as any).apiKey?.agent_id || null;
+    const ticket_id = String(body?.ticket_id || '').trim();
+    const role = String(body?.role || '').trim();
+    const trigger_id = String(body?.trigger_id || '').trim();
+    const outcome = body?.outcome === 'processed' ? 'processed' : body?.outcome === 'nack' ? 'nack' : null;
+    const reason = typeof body?.reason === 'string' ? body.reason.slice(0, 500) : '';
+    if (!ticket_id || !role || !outcome) {
+      return res.status(400).json({ error: 'ticket_id, role and outcome (processed|nack) are required' });
+    }
+
+    const result = await this.dispatchIntents.applyManagerAck({ ticketId: ticket_id, role, triggerId: trigger_id, outcome, reason });
+    this.logService.info(
+      'AgentManager',
+      `Dispatch ack ticket=${ticket_id.slice(0, 8)} role=${role} outcome=${outcome} matched=${result.matched} agent=${callerAgentId}`,
+      { ticket_id, role, outcome, trigger_id, reason, matched: result.matched, status: result.status, agent_id: callerAgentId },
+    );
+    // 200 even when unmatched — a stale/duplicate ack is a no-op, not a client
+    // error the manager should retry. The body reports whether it applied.
+    return res.status(200).json({ ok: true, applied: result.applied, matched: result.matched, status: result.status ?? null });
   }
 
   /**
