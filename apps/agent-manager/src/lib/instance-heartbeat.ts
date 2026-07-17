@@ -64,6 +64,11 @@ export interface InstanceMeta {
   // provision-spanning twin guard (e.g. { inflight_dispatch: 3 }). Provider so
   // the heartbeat reflects live in-memory counts, like openBreakerCountProvider.
   dispatchSuppressionCountsProvider?: (() => Record<string, number>) | null;
+  // ticket d34075b5 — per-reason count of dispatches BLOCKED at the worktree /
+  // push-credential preflight gate (e.g. { 'worktree:pool_exhausted': 2 }). The
+  // durable, server-visible signal for a dropped dispatch. Provider so the
+  // heartbeat reflects live in-memory counts, like dispatchSuppressionCountsProvider.
+  dispatchBlockCountsProvider?: (() => Record<string, number>) | null;
 }
 
 /** Tiny duck-typed read-only snapshot of ManagedAgentRegistry. */
@@ -166,6 +171,10 @@ export interface InstanceHeartbeatPayload {
   // ticket 3d180f85 — per-reason dispatch-suppression counts from the
   // provision-spanning twin guard. Omitted when nothing was suppressed.
   dispatch_suppression_counts?: Record<string, number>;
+  // ticket d34075b5 — per-reason dispatch-BLOCK counts from the worktree /
+  // push-credential preflight gate (incl. shared-pool 'worktree:pool_exhausted').
+  // Omitted when nothing has been blocked.
+  dispatch_block_counts?: Record<string, number>;
 }
 
 export class InstanceHeartbeat {
@@ -195,6 +204,7 @@ export class InstanceHeartbeat {
     const worktreeStatusProvider = meta?.worktreeStatusProvider ?? null;
     const openBreakerCountProvider = meta?.openBreakerCountProvider ?? null;
     const dispatchSuppressionCountsProvider = meta?.dispatchSuppressionCountsProvider ?? null;
+    const dispatchBlockCountsProvider = meta?.dispatchBlockCountsProvider ?? null;
     this.#payloadFactory = async () => {
       const agentIds = managedSnapshot ? managedSnapshot.liveAgentIds() : [];
       const workingDirs = managedSnapshot ? managedSnapshot.workingDirs() : [];
@@ -217,6 +227,18 @@ export class InstanceHeartbeat {
       } catch (err: any) {
         log(`Instance heartbeat: dispatch-suppression provider failed: ${err?.message ?? err}`);
         dispatchSuppressionCounts = {};
+      }
+      // Same best-effort contract for the dispatch-BLOCK counter (ticket d34075b5).
+      let dispatchBlockCounts: Record<string, number> = {};
+      try {
+        const raw = dispatchBlockCountsProvider?.() ?? {};
+        for (const [reason, n] of Object.entries(raw)) {
+          const v = Math.max(0, Math.trunc(Number(n) || 0));
+          if (v > 0) dispatchBlockCounts[reason] = v;
+        }
+      } catch (err: any) {
+        log(`Instance heartbeat: dispatch-block provider failed: ${err?.message ?? err}`);
+        dispatchBlockCounts = {};
       }
       // Best-effort: a provider that throws should never wedge the
       // heartbeat. Treat any failure as "no credentials this tick" and
@@ -264,6 +286,9 @@ export class InstanceHeartbeat {
         ...(openBreakerCountProvider ? { open_breaker_count: openBreakerCount } : {}),
         ...(dispatchSuppressionCountsProvider && Object.keys(dispatchSuppressionCounts).length > 0
           ? { dispatch_suppression_counts: dispatchSuppressionCounts }
+          : {}),
+        ...(dispatchBlockCountsProvider && Object.keys(dispatchBlockCounts).length > 0
+          ? { dispatch_block_counts: dispatchBlockCounts }
           : {}),
         ...(updateStatus
           ? {

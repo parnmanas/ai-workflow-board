@@ -26,7 +26,7 @@ import type { ManagedAgentContextRegistry } from './managed-agent-context.js';
 import type { WorktreeManager, WorktreeMode } from './worktree-manager.js';
 import { prepareChatAttachments } from './chat-attachment-prep.js';
 import { injectWorkFolder } from './prompts.js';
-import { DispatchBlockerTracker, InflightDispatchTracker, RoleSpawnSuppressor, classifyWorktreeOutcome, managedWorktreePath, provisioningPendReason } from './dispatch-preflight.js';
+import { DispatchBlockerTracker, DispatchBlockTracker, InflightDispatchTracker, RoleSpawnSuppressor, classifyWorktreeOutcome, managedWorktreePath, provisioningPendReason } from './dispatch-preflight.js';
 import type { HarnessSpec, ResolvedEffortPreset, EffortLevel } from './cli-adapters/base.js';
 import { createAdapter, ADAPTER_CAPABILITIES } from './cli-adapters/index.js';
 import {
@@ -609,6 +609,18 @@ export interface EventDispatcherDeps {
   // suppression-reason metric for the instance heartbeat. Omitted → the
   // dispatcher makes its own (fine for tests that don't inspect the metric).
   inflightDispatchTracker?: InflightDispatchTracker | null;
+  // ticket d34075b5 — cumulative per-reason dispatch-BLOCK counter. Injected as a
+  // singleton so main.ts can surface it on the instance heartbeat
+  // (`dispatch_block_counts`), mirroring inflightDispatchTracker. Omitted → the
+  // dispatcher makes its own (fine for tests that don't inspect the metric).
+  dispatchBlockTracker?: DispatchBlockTracker | null;
+  // ticket d34075b5 — on-demand warm-pool lease reclaim. Invoked the instant a
+  // shared-mode dispatch hits `pool_exhausted` so a leaked lease is reclaimed
+  // immediately (accelerated reconciliation) instead of waiting up to the periodic
+  // reconcile tick + a lucky server re-push. Returns the number of leases
+  // reclaimed. Wired in main.ts to reconcilePoolLeasesAll; omitted in tests /
+  // per_ticket-only setups → the fast-path degrades to the legacy abort.
+  poolReclaimTrigger?: (() => Promise<number>) | null;
 }
 
 export class EventDispatcher {
@@ -652,6 +664,21 @@ export class EventDispatcher {
   dispatchSuppressionCounts(): Record<string, number> {
     return this.#inflightDispatch.suppressionCounts();
   }
+  // ticket d34075b5: cumulative per-reason dispatch-BLOCK counter (worktree /
+  // push-credential preflight aborts, incl. shared-pool `pool_exhausted`). A
+  // singleton injected from main.ts so its counts ride the instance heartbeat as
+  // `dispatch_block_counts` — the durable, server-visible signal that a dispatch
+  // was dropped. Own instance for tests that don't inject one.
+  readonly #dispatchBlockTracker: DispatchBlockTracker;
+  // ticket d34075b5: on-demand warm-pool lease reclaim, invoked when a shared-mode
+  // dispatch hits `pool_exhausted` (accelerated reconciliation). null when unwired.
+  readonly #poolReclaimTrigger: (() => Promise<number>) | null;
+  /** Per-reason dispatch-BLOCK counts for the instance-heartbeat metric (ticket
+   *  d34075b5, mirrors dispatchSuppressionCounts). Empty when nothing has been
+   *  blocked. */
+  dispatchBlockCounts(): Record<string, number> {
+    return this.#dispatchBlockTracker.counts();
+  }
   // ticket e9d0e8bc: folder-keyed run-lifetime lock. One per manager process
   // (this dispatcher is a singleton), so it serializes same-scenario QA/security
   // runs across the whole provision→execute window. Keyed by the absolute run
@@ -669,6 +696,8 @@ export class EventDispatcher {
     this.#managedAgentContexts = deps.managedAgentContexts ?? null;
     this.#worktreeManager = deps.worktreeManager ?? null;
     this.#inflightDispatch = deps.inflightDispatchTracker ?? new InflightDispatchTracker();
+    this.#dispatchBlockTracker = deps.dispatchBlockTracker ?? new DispatchBlockTracker();
+    this.#poolReclaimTrigger = deps.poolReclaimTrigger ?? null;
   }
 
   /**
@@ -1194,7 +1223,7 @@ export class EventDispatcher {
     const repoCredential = selectedRepo?.resourceId && agentContext?.agent_id
       ? await fetchRepositoryCredential(this.#config, selectedRepo.resourceId, agentContext.agent_id)
       : null;
-    const worktreeProvision = await this.#applyWorktreeCwd(
+    const applyWorktree = () => this.#applyWorktreeCwd(
       agentContext,
       ev.ticket_id,
       ev.action,
@@ -1204,8 +1233,52 @@ export class EventDispatcher {
         : undefined,
       selectedRepo ? { ...selectedRepo, credential: repoCredential } : null,
     );
+    let worktreeProvision = await applyWorktree();
+
+    // ── ticket d34075b5: shared warm-pool exhaustion fast-path ──────────────
+    // A `pool_exhausted` fallback almost always means a LEAKED lease — a worker
+    // that died uncleanly (exit-143) before releasing its slot — because the
+    // server concurrency gate holds concurrent ticket sessions ≤ N == pool size,
+    // so a legitimately-full pool is unreachable in normal single-board operation.
+    // The legacy behavior aborted here and waited for the periodic reconcile (≤ its
+    // interval) PLUS a lucky server re-push to recover — the invisible drop
+    // e7c87517 could only catch 24h later. Instead:
+    //   (1) record the exhaustion on the durable, server-visible heartbeat metric
+    //       so an operator sees a leaking / starved pool without log access;
+    //   (2) kick an ON-DEMAND lease reclaim immediately (accelerated
+    //       reconciliation) — it reuses the SAME live-worker + /proc guards as the
+    //       periodic pass, so it never false-reclaims a live worker; and
+    //   (3) if that freed a slot, retry provisioning INLINE so THIS dispatch
+    //       recovers autonomously (no server re-push needed).
+    // If nothing was reclaimable (a lease still inside the reclaim grace, or
+    // genuine cross-board contention) the retry is skipped and we fall through to
+    // the normal blocker path below, which posts a pool-specific comment and lets
+    // the transient-blocker backoff pend after the threshold.
+    if (!worktreeProvision.ok && worktreeProvision.reason === 'pool_exhausted') {
+      this.#dispatchBlockTracker.record(worktreeProvision.blockerKind || 'worktree:pool_exhausted');
+      const reclaimed = this.#poolReclaimTrigger
+        ? await this.#poolReclaimTrigger().catch((err: any) => {
+            log(`[worktree] on-demand pool reclaim failed: ${err?.message ?? err}`);
+            return 0;
+          })
+        : 0;
+      log(
+        `[worktree] pool_exhausted for ticket=${String(ev.ticket_id).slice(0, 8)} role=${ev.action} — ` +
+          `on-demand reclaim freed ${reclaimed} orphaned lease(s)` +
+          (reclaimed > 0 ? '; retrying provisioning inline' : ' (no reclaimable lease — likely a within-grace or genuine contention)'),
+      );
+      if (reclaimed > 0) worktreeProvision = await applyWorktree();
+    }
+
     if (!worktreeProvision.ok) {
       const blockerKind = worktreeProvision.blockerKind || `worktree:${worktreeProvision.reason || 'unknown'}`;
+      // ticket d34075b5: durable server-visible signal — count every provisioning
+      // block by kind for the instance-heartbeat metric. `pool_exhausted` was
+      // already counted in the fast-path above (a fall-through here is the SAME
+      // block), so guard against double-counting it; all other kinds count here.
+      if (worktreeProvision.reason !== 'pool_exhausted') {
+        this.#dispatchBlockTracker.record(blockerKind);
+      }
       // Record the abort per (ticket,role) so the next supervisor re-trigger is
       // suppressed at the gate above — even when the comment below is de-duped.
       const provisionBlock = this.#spawnSuppressor.note(ev.ticket_id, ev.action, blockerKind, Date.now());
@@ -1214,13 +1287,21 @@ export class EventDispatcher {
         // Managed, working_dir-relative (credential-free) checkout path that
         // failed verification — completion criterion #5 ("실패 경로").
         const pathLine = worktreeProvision.path ? `\n경로: \`${worktreeProvision.path}\`` : '';
-        await fireAndForgetTool(this.#config, 'add_comment', {
-          ticket_id: ev.ticket_id,
-          content:
-            `⚠️ **티켓 worktree 준비 실패** — 유효한 Git 체크아웃을 확보하지 못해 에이전트를 실행하지 않고 디스패치를 중단했습니다.\n\n` +
+        // ticket d34075b5: pool_exhausted is NOT a broken checkout — an on-demand
+        // reclaim already ran above and couldn't free a slot (a lease still inside
+        // the reclaim grace, or genuine cross-board contention). Use an accurate,
+        // pool-specific message instead of the misleading "Git 체크아웃 실패" one.
+        const content = worktreeProvision.reason === 'pool_exhausted'
+          ? `⚠️ **shared worktree 풀 고갈 (pool_exhausted)** — 공유 warm-pool 의 모든 슬롯이 활성 lease 라 에이전트를 실행하지 않고 디스패치를 중단했습니다.\n\n` +
+            `이미 on-demand lease 재조정을 시도했지만 회수 가능한 슬롯이 없었습니다 (reclaim grace 이내의 lease 이거나, 같은 working_dir 를 공유하는 다른 보드와의 실제 경합).\n\n` +
+            `주기적 재조정이 leaked lease 를 회수하면(또는 활성 티켓이 끝나 슬롯을 반납하면) 자동으로 복구됩니다. 매니저 재시작 없이 계속 고갈 상태라면 max_concurrent_tickets_per_agent(풀 크기 N)와 이 working_dir 를 공유하는 보드 구성을 점검하세요.`
+          : `⚠️ **티켓 worktree 준비 실패** — 유효한 Git 체크아웃을 확보하지 못해 에이전트를 실행하지 않고 디스패치를 중단했습니다.\n\n` +
             `원인: \`${worktreeProvision.reason || 'unknown error'}\`${detailLine}${pathLine}\n\n` +
             `repository resource, credential과 working_dir 아래 AWB 관리 폴더(\`.awb/base\`, \`.awb/wt\`)를 확인한 뒤 다시 트리거하세요.\n\n` +
-            `_동일 오류로 인한 supervisor 자동 재트리거는 백오프로 억제됩니다 — 환경을 고친 뒤 코멘트/수동 트리거로 재개하세요._`,
+            `_동일 오류로 인한 supervisor 자동 재트리거는 백오프로 억제됩니다 — 환경을 고친 뒤 코멘트/수동 트리거로 재개하세요._`;
+        await fireAndForgetTool(this.#config, 'add_comment', {
+          ticket_id: ev.ticket_id,
+          content,
         });
       }
       // ticket 52eedadf: the cooldown backoff above thins the supervisor storm
@@ -1282,6 +1363,9 @@ export class EventDispatcher {
       const readiness = await this.#worktreeManager.verifyPushReadiness(agentContext.cwd, selectedRepo.url);
       if (!readiness.ok) {
         const blockerKind = readiness.reason || 'push_credential_unavailable';
+        // ticket d34075b5: durable server-visible signal — count the push-credential
+        // block for the instance-heartbeat metric (mirrors the worktree path).
+        this.#dispatchBlockTracker.record(blockerKind);
         // Same durable-blocker backoff as the worktree path: record so the next
         // supervisor re-trigger for this ticket-role is dropped at the gate.
         const provisionBlock = this.#spawnSuppressor.note(ev.ticket_id, ev.action, blockerKind, Date.now());

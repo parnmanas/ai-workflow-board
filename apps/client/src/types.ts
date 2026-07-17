@@ -1836,6 +1836,11 @@ export interface AgentManagerInstance {
    *  provision-spanning twin guard (e.g. { inflight_dispatch: 3 }). Informational
    *  (the guard working as intended), not a degraded-state signal. */
   dispatch_suppression_counts?: Record<string, number>;
+  /** ticket d34075b5 — per-reason count of dispatches BLOCKED at the manager's
+   *  worktree / push-credential preflight gate (e.g. { 'worktree:pool_exhausted': 2 }).
+   *  Unlike dispatch_suppression_counts this IS a degraded-state signal — a dropped
+   *  dispatch — so `degradedReason` surfaces it (esp. shared-pool exhaustion). */
+  dispatch_block_counts?: Record<string, number>;
   /** Latest error-log upload among the manager identity and its managed agents. */
   last_error_upload_at?: string | null;
 }

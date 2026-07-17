@@ -77,6 +77,12 @@ export interface InstanceRecord {
   // provision-spanning twin guard (e.g. { inflight_dispatch: 3 }). Auto-served
   // by the GET /api/admin/agent-manager/instances `{ ...inst }` spread.
   dispatch_suppression_counts?: Record<string, number>;
+  // ticket d34075b5 — per-reason count of dispatches BLOCKED at the manager's
+  // worktree / push-credential preflight gate (e.g. { 'worktree:pool_exhausted': 2 }).
+  // The durable, server-visible signal that a dispatch was dropped (a shared-pool
+  // starvation was previously invisible until e7c87517's 24h no-progress backstop).
+  // Auto-served by the GET /api/admin/agent-manager/instances `{ ...inst }` spread.
+  dispatch_block_counts?: Record<string, number>;
 }
 
 /**

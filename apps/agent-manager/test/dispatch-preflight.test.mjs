@@ -21,6 +21,7 @@ import {
   redactRemoteUrl,
   managedWorktreePath,
   DispatchBlockerTracker,
+  DispatchBlockTracker,
   RoleSpawnSuppressor,
   DEFAULT_PEND_AFTER_ABORTS,
   isDurableProvisioningBlocker,
@@ -608,4 +609,41 @@ test('provisioningPendReason: falls back to the blocker kind when no reason, app
   const r = provisioningPendReason({ kind: 'push_credential_unavailable', detail: 'could not read Username', count: 5 });
   assert.match(r, /push_credential_unavailable/);
   assert.match(r, /could not read Username/, 'surfaces the secret-free detail');
+});
+
+// ── DispatchBlockTracker (durable server-visible signal, ticket d34075b5) ─────
+
+test('DispatchBlockTracker: counts per-reason and starts empty (heartbeat omits the field)', () => {
+  const t = new DispatchBlockTracker();
+  assert.deepEqual(t.counts(), {}, 'no blocks → empty object → heartbeat omits dispatch_block_counts');
+  assert.equal(t.total(), 0);
+  t.record('worktree:pool_exhausted');
+  t.record('worktree:pool_exhausted');
+  t.record('push_credential_unavailable');
+  assert.deepEqual(
+    t.counts(),
+    { 'worktree:pool_exhausted': 2, 'push_credential_unavailable': 1 },
+    'per-reason cumulative counts',
+  );
+  assert.equal(t.total(), 3, 'total across reasons');
+  assert.equal(t.total('worktree:pool_exhausted'), 2, 'per-reason total');
+});
+
+test('DispatchBlockTracker: is cumulative (never auto-resets) — mirrors the suppression metric', () => {
+  const t = new DispatchBlockTracker();
+  t.record('worktree:pool_exhausted');
+  // Reading counts does NOT reset — the manager keeps re-sending until restart, so
+  // the server's replace-not-merge upsert stays non-zero heartbeat over heartbeat.
+  assert.deepEqual(t.counts(), { 'worktree:pool_exhausted': 1 });
+  assert.deepEqual(t.counts(), { 'worktree:pool_exhausted': 1 }, 'second read is unchanged');
+});
+
+test('DispatchBlockTracker: ignores blank / missing kinds (call site never has to guard)', () => {
+  const t = new DispatchBlockTracker();
+  t.record('');
+  t.record('   ');
+  t.record(undefined);
+  t.record(null);
+  assert.deepEqual(t.counts(), {}, 'blank/missing kinds are no-ops');
+  assert.equal(t.total(), 0);
 });

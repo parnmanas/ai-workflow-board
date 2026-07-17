@@ -239,6 +239,25 @@ export class AgentManagerController {
       }
       dispatch_suppression_counts = out;
     }
+    // ticket d34075b5 — per-reason dispatch-BLOCK counts (worktree / push-credential
+    // preflight aborts, incl. shared-pool `pool_exhausted`). Same defensive coercion
+    // + replace-not-merge semantics as dispatch_suppression_counts above: the manager
+    // counter is cumulative (never reset), so once non-zero every heartbeat re-sends
+    // it and only a manager restart zeroes it.
+    let dispatch_block_counts: Record<string, number> | undefined;
+    if (
+      hasField('dispatch_block_counts') &&
+      body.dispatch_block_counts &&
+      typeof body.dispatch_block_counts === 'object' &&
+      !Array.isArray(body.dispatch_block_counts)
+    ) {
+      const out: Record<string, number> = {};
+      for (const [k, v] of Object.entries(body.dispatch_block_counts as Record<string, unknown>)) {
+        const n = Math.max(0, Math.trunc(Number(v) || 0));
+        if (n > 0) out[k] = n;
+      }
+      dispatch_block_counts = out;
+    }
 
     // Self-heal: a manager heartbeat that authenticates with a valid apiKey
     // (apiKey.agent_id is the heartbeat's authoritative agent_id) but whose
@@ -315,6 +334,7 @@ export class AgentManagerController {
       update_last_error,
       open_breaker_count,
       dispatch_suppression_counts,
+      dispatch_block_counts,
     });
 
     // Mark every managed agent the manager is supervising as alive. Managed

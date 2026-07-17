@@ -637,6 +637,47 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
                   )}
                 </dd>
               </div>
+              {/* ticket d34075b5 — durable, server-visible dispatch-block signal.
+                  Cumulative per-reason count of dispatches dropped at the manager's
+                  worktree / push-credential preflight gate (a shared-pool
+                  `pool_exhausted` starvation was previously invisible until
+                  e7c87517's 24h no-progress backstop). Shown only when non-empty;
+                  pool exhaustion is highlighted since it self-recovers via the
+                  manager's on-demand reclaim but signals a leaking / undersized pool. */}
+              {inst.dispatch_block_counts && Object.keys(inst.dispatch_block_counts).length > 0 && (
+                <div style={{ gridColumn: '1 / -1' }}>
+                  <dt style={{ color: tokens.colors.textMuted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                    Dispatch blocks (cumulative since boot)
+                  </dt>
+                  <dd style={{ margin: '4px 0 0', display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                    {Object.entries(inst.dispatch_block_counts)
+                      .sort((a, b) => b[1] - a[1])
+                      .map(([kind, n]) => {
+                        const isPool = kind === 'worktree:pool_exhausted';
+                        return (
+                          <span
+                            key={kind}
+                            title={
+                              isPool
+                                ? 'Shared warm-pool exhausted — every slot was an active lease (usually a leaked lease from a worker that died uncleanly). The manager reclaims on-demand + on a 5-min tick; a persistent count signals a leaking or undersized pool.'
+                                : 'Dispatch dropped at the worktree / push-credential preflight gate.'
+                            }
+                            style={{
+                              fontSize: 11,
+                              fontFamily: 'monospace',
+                              padding: '2px 8px',
+                              borderRadius: 4,
+                              color: isPool ? tokens.colors.warning : tokens.colors.textStrong,
+                              background: isPool ? tokens.colors.warningBg : tokens.colors.surfaceSubtle,
+                            }}
+                          >
+                            {kind} ×{n}
+                          </span>
+                        );
+                      })}
+                  </dd>
+                </div>
+              )}
             </>
           )}
         </dl>

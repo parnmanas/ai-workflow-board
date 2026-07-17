@@ -674,6 +674,54 @@ export class InflightDispatchTracker {
   }
 }
 
+/** Cumulative per-reason counter of dispatch-time provisioning BLOCKS (ticket
+ *  d34075b5) — the durable, server-visible signal for a dropped dispatch.
+ *
+ *  Motivation: when `EventDispatcher` aborts a trigger at the worktree /
+ *  push-credential preflight gate (a bare `return`), the only trace was one
+ *  de-duplicated ticket comment — no structured signal the SERVER could see, so a
+ *  shared-pool `pool_exhausted` starvation was invisible until e7c87517's 24h
+ *  no-progress backstop fired. This tracker counts every block by its stable
+ *  `kind` (`worktree:pool_exhausted`, `push_credential_unavailable`,
+ *  `worktree:not_a_git_repo`, …) and is surfaced on the instance heartbeat as
+ *  `dispatch_block_counts`, exactly mirroring
+ *  {@link InflightDispatchTracker.suppressionCounts} (the twin-guard metric) and
+ *  `open_breaker_count` — an operator sees a leaking / starved pool without log
+ *  access.
+ *
+ *  Cumulative and never reset (only a manager restart zeroes it), so once a kind
+ *  is non-zero every heartbeat re-sends it — the same replace-not-merge contract
+ *  the server applies to `dispatch_suppression_counts`. In-memory like the other
+ *  dispatch trackers: one manager owns a ticket's triggers and losing the count
+ *  on restart is harmless. */
+export class DispatchBlockTracker {
+  #counts = new Map<string, number>();
+
+  /** Record one dispatch block of `kind`. A blank / missing kind is ignored so a
+   *  caller never has to guard the call site. */
+  record(kind: string | undefined | null): void {
+    const k = (kind ?? '').trim();
+    if (!k) return;
+    this.#counts.set(k, (this.#counts.get(k) ?? 0) + 1);
+  }
+
+  /** Per-reason snapshot for the instance-heartbeat field. Empty object when
+   *  nothing has been blocked (so the heartbeat omits a noise field). */
+  counts(): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const [k, n] of this.#counts) if (n > 0) out[k] = n;
+    return out;
+  }
+
+  /** Total across reasons (with an arg, that reason's count). Test / observability. */
+  total(reason?: string): number {
+    if (reason) return this.#counts.get(reason) ?? 0;
+    let t = 0;
+    for (const n of this.#counts.values()) t += n;
+    return t;
+  }
+}
+
 /** First non-empty line of a multi-line string, trimmed. */
 export function firstLine(text: string | undefined | null): string {
   if (!text) return '';
