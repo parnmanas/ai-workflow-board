@@ -36,41 +36,41 @@ style.textContent = `
     flex: 1;
     overflow-y: auto;
   }
-  .awb-sidebar-backdrop { display: none; }
-  .awb-topbar { display: none; }
-
-  @media (max-width: 767px) {
-    .awb-sidebar {
-      position: fixed;
-      top: 0;
-      left: 0;
-      bottom: 0;
-      width: 220px;
-      z-index: 1100;
-      transform: translateX(-100%);
-      transition: transform 200ms ease-out;
-      box-shadow: none;
-    }
-    .awb-sidebar.awb-sidebar--open {
-      transform: translateX(0);
-      box-shadow: 4px 0 20px rgba(0, 0, 0, 0.5);
-    }
-    .awb-sidebar-backdrop {
-      display: block;
-      position: fixed;
-      inset: 0;
-      background: rgba(0, 0, 0, 0.4);
-      z-index: 1099;
-    }
-    .awb-topbar {
-      display: flex;
-      align-items: center;
-      padding: 0 16px;
-      height: 48px;
-      background: ${tokens.colors.surfaceCard};
-      border-bottom: 1px solid ${tokens.colors.border};
-      gap: 12px;
-    }
+  /* Off-canvas(드로어) 사이드바 — 모바일 상시 + 데스크톱 Chat-first (에픽 bf65ca00 S1).
+     AppLayout 이 drawerMode 일 때 .awb-sidebar--overlay 를 부여하므로 미디어쿼리에
+     의존하지 않고 데스크톱에서도 동일한 햄버거 드로어를 재사용한다. Advanced 데스크톱은
+     이 클래스가 없어 기존 상시 사이드바 그대로다. */
+  .awb-sidebar--overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 220px;
+    z-index: 1100;
+    transform: translateX(-100%);
+    transition: transform 200ms ease-out;
+    box-shadow: none;
+  }
+  .awb-sidebar--overlay.awb-sidebar--open {
+    transform: translateX(0);
+    box-shadow: 4px 0 20px rgba(0, 0, 0, 0.5);
+  }
+  /* backdrop / topbar 는 drawerMode 에서만 JSX 로 렌더되므로 기본 display 를 노출로 둔다. */
+  .awb-sidebar-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    z-index: 1099;
+  }
+  .awb-topbar {
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    height: 48px;
+    background: ${tokens.colors.surfaceCard};
+    border-bottom: 1px solid ${tokens.colors.border};
+    gap: 12px;
+    flex-shrink: 0;
   }
 `;
 document.head.appendChild(style);

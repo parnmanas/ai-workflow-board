@@ -3,6 +3,9 @@ import { Outlet, useNavigate, useParams, useLocation } from 'react-router-dom';
 import Sidebar from './Sidebar';
 import WorkspaceSelector from './WorkspaceSelector';
 import ViewModeToggle from './ViewModeToggle';
+import { useViewMode } from '../contexts/ViewModeContext';
+import { ArtifactPanelProvider } from '../contexts/ArtifactPanelContext';
+import ArtifactPanel, { ArtifactToggleButton } from './ArtifactPanel';
 import { useMediaQuery } from '../hooks/useMediaQuery';
 import { useWorkspaces } from '../hooks/useBoard';
 import { api, setActiveWorkspaceId } from '../api';
@@ -28,10 +31,16 @@ import { tokens } from '../tokens';
  */
 export default function AppLayout() {
   const isMobile = useMediaQuery('(max-width: 767px)');
-  const [mobileOpen, setMobileOpen] = useState(false);
+  const { mode } = useViewMode();
+  // 드로어 모드: 모바일(항상) + 데스크톱 Chat-first. 이때 사이드바는 햄버거로 여는
+  // off-canvas 오버레이가 되어 Chat-first 에 깔끔한 대화 캔버스를 준다. Advanced
+  // 데스크톱은 drawerMode=false → 기존 상시 사이드바 그대로(회귀 0).
+  const drawerMode = isMobile || mode === 'chat';
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const navigate = useNavigate();
   const params = useParams<{ wsId?: string }>();
   const location = useLocation();
+  const isAdminRoute = location.pathname.startsWith('/admin');
 
   // Workspace state — AppLayout is the single writer to localStorage.currentWorkspaceId.
   // Workspace changes navigate to /ws/:wsId/boards via React Router instead of
@@ -181,80 +190,99 @@ export default function AppLayout() {
     if (data.name) setCurrentBoardName(data.name);
   }, []);
 
-  // Reset mobile open state whenever we cross the breakpoint
+  // 드로어 모드를 벗어나면(Chat→Advanced 전환, 데스크톱 확대 등) 열린 드로어를 닫는다.
   useEffect(() => {
-    if (!isMobile) setMobileOpen(false);
-  }, [isMobile]);
+    if (!drawerMode) setDrawerOpen(false);
+  }, [drawerMode]);
 
-  // Escape closes the mobile drawer
+  // Escape 로 드로어 닫기
   useEffect(() => {
-    if (!isMobile || !mobileOpen) return;
+    if (!drawerMode || !drawerOpen) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setMobileOpen(false);
+      if (e.key === 'Escape') setDrawerOpen(false);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [isMobile, mobileOpen]);
+  }, [drawerMode, drawerOpen]);
 
   return (
     // BoardStreamProvider wraps the whole authenticated shell (Sidebar + main)
     // because Sidebar now subscribes to `user_mention` SSE events for the unread
     // badge. The provider itself is a singleton — moving it up does NOT add an
-    // extra EventSource connection.
+    // extra EventSource connection. ArtifactPanelProvider(에픽 bf65ca00 S1)는 셸
+    // 하나만 마운트해 채팅 카드(S2/S3)가 우측 패널을 구동하게 한다.
     <BoardStreamProvider>
     <NotificationProvider>
+    <ArtifactPanelProvider>
     <div className="awb-shell">
       <Sidebar
-        isMobile={isMobile}
-        isOpen={mobileOpen}
-        onClose={() => setMobileOpen(false)}
+        overlay={drawerMode}
+        isOpen={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
         wsId={urlWsId}
         boards={sidebarBoards}
       />
-      {isMobile && mobileOpen && (
+      {drawerMode && drawerOpen && (
         <div
           className="awb-sidebar-backdrop"
-          onClick={() => setMobileOpen(false)}
+          onClick={() => setDrawerOpen(false)}
           aria-hidden="true"
         />
       )}
       <div className="awb-main">
-        {/* Mobile top bar — visible only < 768px via media query display rules */}
-        <div className="awb-topbar">
-          <button
-            onClick={() => setMobileOpen(true)}
-            aria-label="Open navigation"
-            style={{
-              width: 44,
-              height: 44,
-              background: 'transparent',
-              border: 'none',
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              padding: 0,
-            }}
-          >
-            {/* Three horizontal bars */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <div style={{ width: 20, height: 2, background: tokens.colors.textSecondary, borderRadius: 1 }} />
-              <div style={{ width: 20, height: 2, background: tokens.colors.textSecondary, borderRadius: 1 }} />
-              <div style={{ width: 20, height: 2, background: tokens.colors.textSecondary, borderRadius: 1 }} />
-            </div>
-          </button>
-          <div style={{ fontSize: '15px', fontWeight: 700, color: tokens.colors.textPrimary }}>AWB</div>
-          <div style={{ flex: 1 }} />
-          <ViewModeToggle />
-        </div>
+        {/* 드로어 모드 톱바(모바일 상시 + 데스크톱 Chat-first) — 햄버거로 사이드바의
+            기존 전체 네비 인벤토리(Boards/Chat/Agents/…)를 오버레이로 연다. */}
+        {drawerMode && (
+          <div className="awb-topbar">
+            <button
+              onClick={() => setDrawerOpen(true)}
+              aria-label="Open navigation"
+              aria-expanded={drawerOpen}
+              style={{
+                width: 44,
+                height: 44,
+                background: 'transparent',
+                border: 'none',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: 0,
+              }}
+            >
+              {/* Three horizontal bars */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <div style={{ width: 20, height: 2, background: tokens.colors.textSecondary, borderRadius: 1 }} />
+                <div style={{ width: 20, height: 2, background: tokens.colors.textSecondary, borderRadius: 1 }} />
+                <div style={{ width: 20, height: 2, background: tokens.colors.textSecondary, borderRadius: 1 }} />
+              </div>
+            </button>
+            <div style={{ fontSize: '15px', fontWeight: 700, color: tokens.colors.textPrimary }}>AWB</div>
+            <div style={{ flex: 1 }} />
+            {/* 데스크톱 Chat-first 는 상시 톱스트립이 없으므로 여기서 워크스페이스 전환을
+                유지한다. 모바일은 폭 절약을 위해 기존대로 셀렉터를 톱바에 넣지 않는다. */}
+            {!isMobile && !isAdminRoute && (
+              <WorkspaceSelector
+                workspaces={workspaces}
+                currentWorkspaceId={currentWorkspaceId}
+                currentBoardName={currentBoardName}
+                currentBoardId={currentBoardId}
+                onSelect={handleSelectWorkspace}
+                onCreate={handleCreateWorkspace}
+                onDelete={handleDeleteWorkspace}
+                onUpdate={handleUpdateWorkspace}
+                onUpdateBoard={handleUpdateBoard}
+              />
+            )}
+            {mode === 'chat' && <ArtifactToggleButton />}
+            <ViewModeToggle />
+          </div>
+        )}
 
-        {/* Desktop-only global top strip — owns WorkspaceSelector (writer).
-            Lives OUTSIDE BoardStreamProvider so workspace switching does not
-            tear down the SSE stream (the provider manages its own per-board
-            subscription logic). Hidden on /admin/* routes since those pages
-            are not workspace-scoped — switching workspaces from the admin
-            UI was misleading (no ws context to switch from). */}
-        {!isMobile && !location.pathname.startsWith('/admin') && (
+        {/* Advanced 데스크톱 상시 톱스트립 — WorkspaceSelector(writer)를 소유. admin
+            라우트에선 숨김(ws 컨텍스트 없음). Chat-first·모바일에선 위 드로어 톱바가
+            대신하므로 여기선 렌더하지 않는다(!drawerMode). */}
+        {!drawerMode && !isAdminRoute && (
           <div
             style={{
               display: 'flex',
@@ -286,7 +314,11 @@ export default function AppLayout() {
           <Outlet />
         </main>
       </div>
+      {/* 우측 Artifact 패널 — 데스크톱은 본문 옆 영역, 모바일은 오버레이 시트.
+          닫혀 있으면 null 을 반환해 레이아웃에 영향 없음. */}
+      <ArtifactPanel isMobile={isMobile} />
     </div>
+    </ArtifactPanelProvider>
     </NotificationProvider>
     </BoardStreamProvider>
   );
