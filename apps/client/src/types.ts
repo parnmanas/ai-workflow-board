@@ -1350,6 +1350,10 @@ export interface Workspace {
   // Workspace-wide default agent harness. Raw JSON string of HarnessConfig;
   // boards override it per key via Board.harness_config.
   harness_config?: string | null;
+  // AWB 어시스턴트 에이전트 id (에픽 bf65ca00 · S2). null/미포함 = 미지정 —
+  // Chat-first 랜딩은 임의 에이전트를 고르지 않고 관리자에게 지정을 안내하는 empty
+  // state 를 렌더한다. 설정은 관리자 전용 workspace PATCH 로만 가능.
+  assistant_agent_id?: string | null;
   created_at: string;
   updated_at: string;
 }

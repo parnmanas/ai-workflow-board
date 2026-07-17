@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { tokens } from '../../../tokens';
+import TicketRefCard from '../TicketRefCard';
 
 // ─── renderMarkdown — XSS-safe inline markdown ───────────────────────────────
 // T-07-12: No dangerouslySetInnerHTML. React JSX element construction only.
@@ -7,9 +8,12 @@ import { tokens } from '../../../tokens';
 // Mentions: structured tokens `@[user|agent|role:id|display]` render as pills
 // (authoritative — id is attached). Bare `@name` tokens render as plain text;
 // they are no longer a dispatch surface server-side.
+// Ticket refs (에픽 bf65ca00 · S2): `@[ticket:id|title]` render as interactive
+// cards (TicketRefCard) — click opens the ticket in the right Artifact panel.
+// Same content-token mechanism as mentions (마이그레이션 0, 확장 not 분기 복제).
 
 const ROLE_SHORTCUTS = new Set(['reviewer', 'assignee', 'reporter']);
-const STRUCTURED_MENTION_RE = /@\[(user|agent|role):([\w-]+)(?:\|([^\]]*))?\]/g;
+const STRUCTURED_TOKEN_RE = /@\[(user|agent|role|ticket):([\w-]+)(?:\|([^\]]*))?\]/g;
 
 export interface MentionParticipant {
   id: string;
@@ -105,17 +109,27 @@ export function renderMarkdown(text: string, participants?: MentionParticipant[]
       // Step 1a: First, split out structured mention tokens. These are
       // authoritative (they ship an ID), so they render as pills regardless
       // of whether the name collides with another entity.
-      const structuredParts: Array<{ token: string; pill?: { variant: 'agent' | 'user' | 'role'; display: string } }> = [];
+      const structuredParts: Array<{
+        token: string;
+        pill?: { variant: 'agent' | 'user' | 'role'; display: string };
+        ticket?: { id: string; title: string };
+      }> = [];
       let cursor = 0;
-      STRUCTURED_MENTION_RE.lastIndex = 0;
+      STRUCTURED_TOKEN_RE.lastIndex = 0;
       let m: RegExpExecArray | null;
-      while ((m = STRUCTURED_MENTION_RE.exec(part)) !== null) {
+      while ((m = STRUCTURED_TOKEN_RE.exec(part)) !== null) {
         if (m.index > cursor) {
           structuredParts.push({ token: part.slice(cursor, m.index) });
         }
-        const variant = m[1] as 'user' | 'agent' | 'role';
-        const name = m[3] || m[2];
-        structuredParts.push({ token: m[0], pill: { variant, display: `@${name}` } });
+        const type = m[1] as 'user' | 'agent' | 'role' | 'ticket';
+        const rawId = m[2];
+        const display = m[3];
+        if (type === 'ticket') {
+          // 티켓 참조 → 인터랙티브 카드. title 이 없으면 id 를 라벨로 폴백.
+          structuredParts.push({ token: m[0], ticket: { id: rawId, title: display || rawId } });
+        } else {
+          structuredParts.push({ token: m[0], pill: { variant: type, display: `@${display || rawId}` } });
+        }
         cursor = m.index + m[0].length;
       }
       if (cursor < part.length) {
@@ -124,6 +138,10 @@ export function renderMarkdown(text: string, participants?: MentionParticipant[]
       if (structuredParts.length === 0) structuredParts.push({ token: part });
 
       for (const sp of structuredParts) {
+        if (sp.ticket) {
+          nodes.push(<TicketRefCard key={keyIdx++} id={sp.ticket.id} title={sp.ticket.title} />);
+          continue;
+        }
         if (sp.pill) {
           nodes.push(renderMentionPill(sp.pill.display, sp.pill.variant, keyIdx++, sp.token));
           continue;

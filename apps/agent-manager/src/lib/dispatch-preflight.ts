@@ -410,7 +410,7 @@ export class RoleSpawnSuppressor {
   }
 
   #key(ticketId: string, role: string): string {
-    return `${ticketId} ${role}`;
+    return `${ticketId}:${role}`;
   }
 
   /** Record that a preflight abort just happened for (ticketId, role) with

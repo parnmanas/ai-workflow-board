@@ -71,6 +71,24 @@ export class Workspace {
   @Column({ type: 'varchar', nullable: true, default: null })
   alerts_chat_room_id: string | null;
 
+  /**
+   * AWB 어시스턴트 에이전트 (에픽 bf65ca00 · S2). Chat-first 기본 진입 화면이 이
+   * 에이전트와의 DM 프리셋으로 연결되어, 기존 chat-rooms DM auto-route
+   * (`_handleDmAgentRequest`) 로 사용자 발화가 멘션 없이 어시스턴트에게 라우팅된다.
+   *
+   * null = 미지정. 기존 workspace 는 전부 null 로 시작하며(마이그레이션 0 — nullable
+   * default null), Advanced/Board 흐름에는 어떤 동작 변화도 없다. 미지정일 때 클라이언트는
+   * 임의 에이전트를 자동 선택하지 않고 "관리자가 어시스턴트를 지정" 하도록 안내하는 명시적
+   * empty state 를 렌더한다.
+   *
+   * `alerts_chat_room_id` 와 동일한 soft pointer — FK 제약 없음. 지정된 에이전트가
+   * 삭제·비활성·다른 workspace 로 이동해 유효하지 않으면 클라이언트가 동일한 안전
+   * fallback(empty state)로 처리한다. 값 설정은 workspace PATCH 에서 관리자 권한 +
+   * workspace 경계(활성 에이전트, 매니저 제외) 검증을 거친다.
+   */
+  @Column({ type: 'varchar', nullable: true, default: null })
+  assistant_agent_id: string | null;
+
   // Workspace-wide default agent harness (ticket 7122600c). Same JSON shape
   // as Board.harness_config; boards override it per key via
   // resolveHarnessConfig (common/harness-config.ts). null = no default —

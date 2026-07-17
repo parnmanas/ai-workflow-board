@@ -8,7 +8,12 @@ import { NotificationSettingsPanel } from './common/NotificationSettingsPanel';
 import { useNotifications } from '../contexts/NotificationContext';
 
 interface SidebarProps {
-  isMobile: boolean;
+  /**
+   * true → off-canvas 드로어(햄버거로 여닫음), false → 본문 옆 상시 사이드바.
+   * AppLayout 이 drawerMode(모바일 상시 + 데스크톱 Chat-first)일 때 true 로 넘긴다
+   * (에픽 bf65ca00 · S1). Advanced 데스크톱은 false → 기존 상시 사이드바 그대로.
+   */
+  overlay: boolean;
   isOpen: boolean;
   onClose: () => void;
   wsId: string | null;
@@ -18,8 +23,9 @@ interface SidebarProps {
 /**
  * Responsive left sidebar — Phase 1 FOUND-03 / D-12 / D-13.
  *
- * Desktop (>=768px): fixed 220px width alongside content.
- * Mobile (<768px): off-canvas drawer; open state controlled by parent via isOpen prop.
+ * overlay=false (Advanced 데스크톱): 본문 옆 상시 220px 사이드바.
+ * overlay=true (모바일 · Chat-first 데스크톱): off-canvas 드로어; open 상태는
+ * 부모(AppLayout)가 isOpen 으로 제어하고, 항목 클릭 시 onClose 로 접힌다.
  *
  * Three sections:
  *  - BOARDS: collapsible list of workspace boards with active board sub-entry
@@ -29,7 +35,7 @@ interface SidebarProps {
  * CRITICAL: This component MUST NOT import any real-time stream client or activity-bus
  * subscription per UI-SPEC §"SSE Reconnect Contract".
  */
-export default function Sidebar({ isMobile, isOpen, onClose, wsId, boards }: SidebarProps) {
+export default function Sidebar({ overlay, isOpen, onClose, wsId, boards }: SidebarProps) {
   const { user, logout, hasPermission } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
@@ -47,11 +53,17 @@ export default function Sidebar({ isMobile, isOpen, onClose, wsId, boards }: Sid
 
   const handleNavClick = (path: string) => {
     navigate(path);
-    if (isMobile) onClose();
+    if (overlay) onClose();
   };
 
-  const sidebarClassName = `awb-sidebar${isMobile && isOpen ? ' awb-sidebar--open' : ''}`;
-  const desktopStyle: React.CSSProperties = {
+  // .awb-sidebar--overlay 가 붙으면 off-canvas 위치/transform 은 main.tsx 의 클래스
+  // 규칙이 담당한다(미디어쿼리 비의존 → 데스크톱 Chat-first 에서도 동일 동작).
+  const sidebarClassName = [
+    'awb-sidebar',
+    overlay ? 'awb-sidebar--overlay' : '',
+    overlay && isOpen ? 'awb-sidebar--open' : '',
+  ].filter(Boolean).join(' ');
+  const persistentStyle: React.CSSProperties = {
     width: 220,
     flexShrink: 0,
     background: tokens.colors.surfaceCard,
@@ -59,8 +71,8 @@ export default function Sidebar({ isMobile, isOpen, onClose, wsId, boards }: Sid
     display: 'flex',
     flexDirection: 'column',
   };
-  const mobileStyle: React.CSSProperties = {
-    // Position / transform / transition handled by .awb-sidebar @media rules in main.tsx.
+  const overlayStyle: React.CSSProperties = {
+    // 위치/transform/transition/width 은 .awb-sidebar--overlay(main.tsx)가 담당.
     background: tokens.colors.surfaceCard,
     borderRight: `1px solid ${tokens.colors.border}`,
     display: 'flex',
@@ -183,7 +195,7 @@ export default function Sidebar({ isMobile, isOpen, onClose, wsId, boards }: Sid
   );
 
   return (
-    <aside className={sidebarClassName} style={isMobile ? mobileStyle : desktopStyle}>
+    <aside className={sidebarClassName} style={overlay ? overlayStyle : persistentStyle}>
       {/* Header */}
       <div style={{ padding: '20px 16px 16px', borderBottom: `1px solid ${tokens.colors.border}` }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
@@ -228,8 +240,8 @@ export default function Sidebar({ isMobile, isOpen, onClose, wsId, boards }: Sid
           <span
             role="link"
             tabIndex={0}
-            onClick={() => { navigate(`/ws/${wsId}/boards`); if (isMobile) onClose(); }}
-            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { navigate(`/ws/${wsId}/boards`); if (isMobile) onClose(); } }}
+            onClick={() => { navigate(`/ws/${wsId}/boards`); if (overlay) onClose(); }}
+            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { navigate(`/ws/${wsId}/boards`); if (overlay) onClose(); } }}
             style={{ cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 6 }}
           >
             BOARDS
@@ -259,7 +271,7 @@ export default function Sidebar({ isMobile, isOpen, onClose, wsId, boards }: Sid
                 return (
                   <React.Fragment key={b.id}>
                     <button
-                      onClick={() => { navigate(`/ws/${wsId}/boards/${b.id}`); if (isMobile) onClose(); }}
+                      onClick={() => { navigate(`/ws/${wsId}/boards/${b.id}`); if (overlay) onClose(); }}
                       style={{
                         width: '100%',
                         padding: '8px 16px',
@@ -327,7 +339,7 @@ export default function Sidebar({ isMobile, isOpen, onClose, wsId, boards }: Sid
                           return (
                             <button
                               key={sub.path}
-                              onClick={() => { navigate(sub.path); if (isMobile) onClose(); }}
+                              onClick={() => { navigate(sub.path); if (overlay) onClose(); }}
                               style={{
                                 width: '100%',
                                 padding: '6px 16px 6px 32px',

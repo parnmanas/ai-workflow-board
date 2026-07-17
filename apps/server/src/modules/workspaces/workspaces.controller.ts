@@ -26,6 +26,8 @@ import { parseComments, expandCommentAttachments } from '../mcp/shared/ticket-pa
 import { writeRoutingConfigThrough } from '../boards/routing-config.helper';
 import { validateHarnessConfigInput, serializeHarnessConfig } from '../../common/harness-config';
 import { validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../../common/environment-config';
+import { hasPermission } from '../../common/types/permissions';
+import { PERMISSIONS } from '../../common/types/permissions';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 
@@ -161,7 +163,7 @@ export class WorkspacesController {
       name, description,
       supervisor_stale_ms, supervisor_resend_ms, dispatch_queue_depth,
       claim_verification_enabled, claim_verification_grace_ms,
-      harness_config, environment_config,
+      harness_config, environment_config, assistant_agent_id,
     } = body;
     if (name !== undefined) ws.name = name;
     if (description !== undefined) ws.description = description;
@@ -224,6 +226,32 @@ export class WorkspacesController {
         const checked = validateEnvironmentConfigInput(environment_config);
         if (!checked.ok) return res.status(400).json({ error: checked.error });
         ws.environment_config = serializeEnvironmentConfig(checked.value);
+      }
+    }
+
+    // AWB 어시스턴트 지정 (에픽 bf65ca00 · S2). Chat-first 진입이 연결할 DM 프리셋의
+    // 에이전트. 다른 workspace 설정과 달리 이 필드는 관리자 전용(planner 결정 a):
+    //   1) 권한 게이트 — MANAGE_AGENTS 를 가진 사용자만 지정/해제 가능. 필드가 body 에
+    //      실제로 존재할 때만 검사하므로 name/description/cadence 등 기존 PATCH 경로의
+    //      권한 요건은 그대로 유지된다(회귀 0).
+    //   2) workspace 경계 + 유효성 — null 은 해제. 값이 있으면 이 workspace 소속의
+    //      활성 에이전트여야 하며(manager 는 DM auto-route 대상이 아니라 제외, line
+    //      _handleDmAgentRequest), 그렇지 않으면 400. 미지정/무효는 클라가 안전한
+    //      empty state 로 처리하므로 서버는 잘못된 지정만 막는다.
+    if (assistant_agent_id !== undefined) {
+      if (!hasPermission(user?.role || '', user?.permissions || [], PERMISSIONS.MANAGE_AGENTS)) {
+        return res.status(403).json({ error: 'Assistant agent can only be set by an admin (admin.agents permission required)' });
+      }
+      if (assistant_agent_id === null || assistant_agent_id === '') {
+        ws.assistant_agent_id = null;
+      } else if (typeof assistant_agent_id !== 'string') {
+        return res.status(400).json({ error: 'assistant_agent_id must be an agent id string or null' });
+      } else {
+        const agent = await this.agentRepo.findOne({ where: { id: assistant_agent_id } });
+        if (!agent || agent.is_active !== 1 || agent.type === 'manager' || agent.workspace_id !== id) {
+          return res.status(400).json({ error: 'assistant_agent_id must reference an active agent in this workspace' });
+        }
+        ws.assistant_agent_id = agent.id;
       }
     }
 
