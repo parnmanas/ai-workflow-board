@@ -22,6 +22,8 @@ import {
   managedWorktreePath,
   DispatchBlockerTracker,
   DispatchBlockTracker,
+  PendingDispatchRetry,
+  InflightDispatchTracker,
   RoleSpawnSuppressor,
   DEFAULT_PEND_AFTER_ABORTS,
   isDurableProvisioningBlocker,
@@ -646,4 +648,172 @@ test('DispatchBlockTracker: ignores blank / missing kinds (call site never has t
   t.record(null);
   assert.deepEqual(t.counts(), {}, 'blank/missing kinds are no-ops');
   assert.equal(t.total(), 0);
+});
+
+// ── PendingDispatchRetry (manager-owned pool_exhausted backoff, ticket d34075b5) ─
+// The bounded-backoff retry queue that recovers a pool_exhausted dispatch WITHOUT a
+// server re-push (review follow-up). A manual scheduler makes the backoff and the
+// slot-free wake deterministic; onRetry/verify are stubbed so we assert the queue's
+// control flow (single-flight, escalation, give-up, cancel, wake) in isolation.
+
+const settle = () => new Promise((r) => setImmediate(r));
+
+function manualScheduler() {
+  const timers = new Map();
+  let id = 0;
+  return {
+    api: {
+      set(fn, ms) { const h = ++id; timers.set(h, { fn, ms }); return h; },
+      clear(h) { timers.delete(h); },
+    },
+    armed: () => timers.size,
+    delays: () => [...timers.values()].map((t) => t.ms),
+    // Fire every currently-armed timer once (a re-arm lands as a NEW timer), then let
+    // the async #attempt (verify/onRetry await chain) settle.
+    async fire() {
+      const snap = [...timers.values()];
+      timers.clear();
+      for (const t of snap) t.fn();
+      await settle();
+      await settle();
+    },
+  };
+}
+
+const META = { ticketId: 'tk-1', role: 'assignee', agentId: 'ag-1' };
+const KEY = InflightDispatchTracker.key(META.ticketId, META.role, META.agentId);
+
+function makeRetry(overrides = {}) {
+  const calls = { retries: [], giveUps: [], verifies: [] };
+  const s = manualScheduler();
+  const q = new PendingDispatchRetry({
+    scheduler: s.api,
+    baseDelayMs: 1000,
+    maxDelayMs: 8000,
+    maxAttempts: overrides.maxAttempts ?? 8,
+    onRetry: overrides.onRetry ?? ((raw) => { calls.retries.push(raw); }),
+    onGiveUp: overrides.onGiveUp ?? ((e) => { calls.giveUps.push(e); }),
+    verify: overrides.verify ?? ((e) => { calls.verifies.push(e); return true; }),
+  });
+  return { q, s, calls };
+}
+
+test('PendingDispatchRetry: register creates once; a duplicate key dedupes (no twin) and refreshes raw', async () => {
+  const { q, s, calls } = makeRetry();
+  assert.deepEqual(q.register(META, 'raw-a'), { created: true }, 'first register creates the episode');
+  assert.equal(q.size(), 1);
+  assert.equal(q.has(KEY), true);
+  assert.equal(s.armed(), 1, 'exactly one backoff timer armed');
+  // A duplicate trigger for the SAME (ticket, role, agent) while queued must NOT
+  // stack a second entry or timer (that would spawn a twin) — it only refreshes raw.
+  assert.deepEqual(q.register(META, 'raw-b'), { created: false }, 'duplicate dedupes');
+  assert.equal(q.size(), 1, 'still one entry');
+  assert.equal(s.armed(), 1, 'still one timer — no twin');
+  await s.fire();
+  assert.deepEqual(calls.retries, ['raw-b'], 'the retry replays the FRESHEST trigger payload');
+});
+
+test('PendingDispatchRetry: backoff escalates geometrically and caps at maxDelayMs', async () => {
+  const { q, s } = makeRetry(); // base 1000, cap 8000, onRetry never resolves → keeps escalating
+  q.register(META, 'r');
+  assert.deepEqual(s.delays(), [1000], 'first attempt at base delay');
+  await s.fire();
+  assert.deepEqual(s.delays(), [2000]);
+  await s.fire();
+  assert.deepEqual(s.delays(), [4000]);
+  await s.fire();
+  assert.deepEqual(s.delays(), [8000]);
+  await s.fire();
+  assert.deepEqual(s.delays(), [8000], 'capped at maxDelayMs');
+});
+
+test('PendingDispatchRetry: a retry that resolves() stops the loop (recovery is silent)', async () => {
+  // Model recovery: the attempt "succeeds", so its replay path calls resolve() —
+  // exactly what the dispatcher does at its green-preflight point.
+  let q;
+  const s = manualScheduler();
+  q = new PendingDispatchRetry({
+    scheduler: s.api,
+    baseDelayMs: 1000,
+    onRetry: () => { q.resolve(META); },
+    onGiveUp: () => {},
+    verify: () => true,
+  });
+  q.register(META, 'r');
+  assert.equal(q.size(), 1);
+  await s.fire();
+  assert.equal(q.size(), 0, 'resolved → entry dropped');
+  assert.equal(s.armed(), 0, 'no further timer armed after recovery');
+});
+
+test('PendingDispatchRetry: gives up after maxAttempts and pends exactly once', async () => {
+  const { q, s, calls } = makeRetry({ maxAttempts: 3 }); // onRetry never resolves → sustained exhaustion
+  q.register(META, 'r');
+  await s.fire(); // attempt 1
+  assert.equal(calls.giveUps.length, 0, 'no give-up at attempt 1');
+  assert.equal(q.size(), 1);
+  await s.fire(); // attempt 2
+  assert.equal(calls.giveUps.length, 0, 'no give-up at attempt 2');
+  await s.fire(); // attempt 3 → bound reached
+  assert.equal(calls.giveUps.length, 1, 'gives up exactly on the bound');
+  assert.equal(calls.giveUps[0].attempts, 3, 'give-up entry carries the attempt count');
+  assert.equal(q.size(), 0, 'entry removed on give-up');
+  assert.equal(s.armed(), 0, 'no timer left armed after give-up');
+  assert.equal(calls.retries.length, 3, 'onRetry ran once per attempt');
+});
+
+test('PendingDispatchRetry: wake() re-drives queued retries immediately (slot-free path)', async () => {
+  const { q, s, calls } = makeRetry();
+  q.register(META, 'r');
+  assert.equal(calls.retries.length, 0, 'nothing fired yet — backoff timer still pending');
+  // A slot freed (terminal move / reconcile) → wake fires the attempt NOW without
+  // waiting out the backoff.
+  q.wake('slot_release:test');
+  await settle();
+  await settle();
+  assert.equal(calls.retries.length, 1, 'wake drove the retry immediately');
+  assert.equal(s.armed(), 1, 're-armed for the next backoff (still exhausted)');
+});
+
+test('PendingDispatchRetry: verify=false cancels the queued retry before it replays (moved/pended/terminal)', async () => {
+  const { q, s, calls } = makeRetry({ verify: () => false });
+  q.register(META, 'r');
+  assert.equal(q.size(), 1);
+  await s.fire();
+  assert.equal(calls.retries.length, 0, 'an ineligible ticket never replays');
+  assert.equal(q.size(), 0, 'the queued retry is cancelled');
+  assert.equal(s.armed(), 0, 'no timer left armed');
+});
+
+test('PendingDispatchRetry: a throwing verify fails OPEN (never abandons a live ticket on a REST hiccup)', async () => {
+  const { q, s, calls } = makeRetry({ verify: () => { throw new Error('REST 503'); } });
+  q.register(META, 'r');
+  await s.fire();
+  assert.equal(calls.retries.length, 1, 'verify error → proceed with the retry, do not cancel');
+  assert.equal(q.size(), 1, 'entry retained');
+});
+
+test('PendingDispatchRetry: cancel() and cancelByTicket() drop entries and clear timers', async () => {
+  const { q, s } = makeRetry();
+  q.register({ ticketId: 'tk-1', role: 'assignee', agentId: 'ag-1' }, 'r1');
+  q.register({ ticketId: 'tk-1', role: 'reviewer', agentId: 'ag-1' }, 'r2');
+  q.register({ ticketId: 'tk-2', role: 'assignee', agentId: 'ag-1' }, 'r3');
+  assert.equal(q.size(), 3);
+  assert.equal(s.armed(), 3);
+  // cancelByTicket drops EVERY role/agent entry for a ticket (terminal/archive/move).
+  q.cancelByTicket('tk-1', 'moved');
+  assert.equal(q.size(), 1, 'both tk-1 entries removed, tk-2 remains');
+  assert.equal(s.armed(), 1, 'their timers were cleared too');
+  q.cancel(InflightDispatchTracker.key('tk-2', 'assignee', 'ag-1'), 'test');
+  assert.equal(q.size(), 0);
+  assert.equal(s.armed(), 0);
+  // Idempotent — cancelling an absent key is a no-op.
+  q.cancel('nope', 'test');
+  q.cancelByTicket('gone', 'test');
+});
+
+test('PendingDispatchRetry: resolve() is a no-op when nothing is queued (inline-recovered first dispatch)', () => {
+  const { q } = makeRetry();
+  q.resolve(META); // never registered → must not throw
+  assert.equal(q.size(), 0);
 });

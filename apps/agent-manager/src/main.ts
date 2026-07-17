@@ -765,6 +765,15 @@ async function runRuntime(
       }
       if (total > 0) {
         log(`[worktree] pool reclaim (${trigger}) reclaimed ${total} orphaned lease(s)`);
+        // ticket d34075b5 (review follow-up) — a periodic/boot reconcile just freed
+        // slot(s); re-drive any queued pool_exhausted retries so a starved dispatch
+        // recovers WITHOUT a server re-push ("periodic reconcile succeeded → re-run
+        // the pending dispatch"). Skip the on-demand 'pool_exhausted' trigger: that
+        // path is the dispatcher's OWN fast-path, which already retries the freed
+        // slot inline (and waking here would just re-block on the slot it just took).
+        if (trigger !== 'pool_exhausted') {
+          eventStream.wakePoolRetries(`reconcile:${trigger}`);
+        }
       }
       return total;
     } catch (err: any) {

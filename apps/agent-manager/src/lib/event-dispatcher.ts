@@ -26,7 +26,8 @@ import type { ManagedAgentContextRegistry } from './managed-agent-context.js';
 import type { WorktreeManager, WorktreeMode } from './worktree-manager.js';
 import { prepareChatAttachments } from './chat-attachment-prep.js';
 import { injectWorkFolder } from './prompts.js';
-import { DispatchBlockerTracker, DispatchBlockTracker, InflightDispatchTracker, RoleSpawnSuppressor, classifyWorktreeOutcome, managedWorktreePath, provisioningPendReason } from './dispatch-preflight.js';
+import { DispatchBlockerTracker, DispatchBlockTracker, InflightDispatchTracker, PendingDispatchRetry, RoleSpawnSuppressor, classifyWorktreeOutcome, managedWorktreePath, provisioningPendReason } from './dispatch-preflight.js';
+import type { PendingRetryEntry, RetryScheduler } from './dispatch-preflight.js';
 import type { HarnessSpec, ResolvedEffortPreset, EffortLevel } from './cli-adapters/base.js';
 import { createAdapter, ADAPTER_CAPABILITIES } from './cli-adapters/index.js';
 import {
@@ -271,6 +272,17 @@ export function validateWorktreeProvisioningInputs(args: {
 // reaches the cap we record into history but stop delegating — the chain
 // resets when a user sends the next message.
 const AGENT_CHAIN_DEPTH_CAP = 3;
+
+// ticket d34075b5 — one-time comment posted when a shared warm-pool `pool_exhausted`
+// dispatch is queued for the manager-owned backoff retry (the on-demand reclaim
+// couldn't free a slot). Deliberately NOT the "유효한 Git 체크아웃" broken-checkout
+// copy: pool exhaustion is a transient, self-healing condition, so this states that
+// recovery is autonomous (no operator action needed unless it persists).
+const POOL_EXHAUSTED_RETRY_COMMENT =
+  `⚠️ **shared worktree 풀 고갈 (pool_exhausted)** — 공유 warm-pool 의 모든 슬롯이 활성 lease 라 에이전트를 실행하지 않고 디스패치를 보류했습니다.\n\n` +
+  `on-demand lease 재조정을 즉시 시도했지만 회수 가능한 슬롯이 없었습니다 (reclaim grace(20분) 이내의 lease 이거나, 같은 working_dir 를 공유하는 다른 보드와의 일시적 경합).\n\n` +
+  `매니저가 이 트리거를 **자동 재시도 큐**에 넣었습니다 — 백오프로 재시도하며, 활성 티켓이 끝나 슬롯을 반납하거나(또는 주기/부팅 재조정이 leaked lease 를 회수하는) 즉시 재프로비저닝합니다. **서버 재푸시가 필요 없습니다.**\n\n` +
+  `재시도 한도까지 계속 고갈이면 운영자 확인을 위해 자동으로 pend 되며, max_concurrent_tickets_per_agent(풀 크기 N)와 이 working_dir 를 공유하는 보드 구성을 점검하세요.`;
 
 // ─── ST-6 per-call agent execution context ──────────────────────────────
 // Manager-side multi-tenancy. When an event targets a managed agent the
@@ -621,6 +633,15 @@ export interface EventDispatcherDeps {
   // reclaimed. Wired in main.ts to reconcilePoolLeasesAll; omitted in tests /
   // per_ticket-only setups → the fast-path degrades to the legacy abort.
   poolReclaimTrigger?: (() => Promise<number>) | null;
+  // ticket d34075b5 review follow-up — injectable timer surface for the
+  // manager-owned pool_exhausted retry queue, so the integration harness drives the
+  // backoff deterministically. Omitted → real unref'd setTimeout/clearTimeout.
+  poolRetryScheduler?: RetryScheduler | null;
+  // ticket d34075b5 review follow-up — attempt bound for the pool_exhausted retry
+  // queue before it gives up and pends for the operator. Omitted → production
+  // default (8, ≈22.5 min of backoff spanning the 20-min reclaim grace). Tests
+  // shrink it for a fast give-up assertion.
+  poolRetryMaxAttempts?: number | null;
 }
 
 export class EventDispatcher {
@@ -679,6 +700,22 @@ export class EventDispatcher {
   dispatchBlockCounts(): Record<string, number> {
     return this.#dispatchBlockTracker.counts();
   }
+  // ticket d34075b5 review follow-up: manager-owned bounded-backoff retry queue for
+  // shared warm-pool `pool_exhausted` dispatches. A dispatch that can't provision a
+  // pool slot (and whose on-demand reclaim freed nothing) is queued here and
+  // re-driven autonomously — no lucky server re-push required. Constructed in the
+  // ctor so its callbacks can close over `this` (handleTrigger / config).
+  readonly #poolRetry: PendingDispatchRetry;
+  /** A slot is known to have freed — re-drive every queued pool_exhausted retry now
+   *  (ticket d34075b5). Called by the terminal/archive cleanup and by main.ts's
+   *  periodic/boot reconcile (via EventStream) when a lease is reclaimed. */
+  wakePoolRetries(reason: string): void {
+    this.#poolRetry.wake(reason);
+  }
+  /** Queued pool_exhausted retry count — test / observability. */
+  pendingPoolRetryCount(): number {
+    return this.#poolRetry.size();
+  }
   // ticket e9d0e8bc: folder-keyed run-lifetime lock. One per manager process
   // (this dispatcher is a singleton), so it serializes same-scenario QA/security
   // runs across the whole provision→execute window. Keyed by the absolute run
@@ -698,6 +735,18 @@ export class EventDispatcher {
     this.#inflightDispatch = deps.inflightDispatchTracker ?? new InflightDispatchTracker();
     this.#dispatchBlockTracker = deps.dispatchBlockTracker ?? new DispatchBlockTracker();
     this.#poolReclaimTrigger = deps.poolReclaimTrigger ?? null;
+    // ticket d34075b5 review follow-up: the pool_exhausted retry queue replays via
+    // handleTrigger (the same idempotent unit the force_respawn replay uses), pends
+    // for the operator on give-up, and pre-checks ticket eligibility so a pended /
+    // terminal ticket's queued retry is dropped before it fires.
+    this.#poolRetry = new PendingDispatchRetry({
+      onRetry: (raw) => this.handleTrigger(raw),
+      onGiveUp: (entry) => this.#pendExhaustedPoolRetry(entry),
+      verify: (entry) => this.#isPoolRetryEligible(entry),
+      scheduler: deps.poolRetryScheduler ?? undefined,
+      maxAttempts: deps.poolRetryMaxAttempts ?? undefined,
+      log,
+    });
   }
 
   /**
@@ -781,6 +830,42 @@ export class EventDispatcher {
     }
   }
 
+  /** ticket d34075b5 — pre-retry eligibility for a queued pool_exhausted trigger.
+   *  Returns false the moment the ticket leaves the active flow so the queued retry
+   *  is dropped instead of replayed: a human/give-up PEND (no inbound SSE, so this
+   *  is the ONLY signal for it) or a TERMINAL column (work finished). A failed fetch
+   *  returns true (fail OPEN) — a transient REST hiccup must never abandon a live
+   *  ticket; the terminal/archive/move board_update path cancels proactively anyway. */
+  async #isPoolRetryEligible(entry: PendingRetryEntry): Promise<boolean> {
+    const ticket = await fetchTicketContext(this.#config, entry.ticketId);
+    if (!ticket) return true;
+    if (ticket.pending_user_action) return false;
+    if (ticket.terminal_entered_at) return false;
+    return true;
+  }
+
+  /** ticket d34075b5 — the pool_exhausted retry queue gave up after its attempt
+   *  bound: the pool stayed exhausted with no reclaimable lease across the whole
+   *  backoff window, i.e. genuine sustained over-subscription (not a leaked lease).
+   *  Pend for operator attention — the same operator-exposure guarantee the legacy
+   *  transient-blocker backoff gave, now decoupled from lucky server re-pushes.
+   *  e7c87517's 24h no-progress backstop remains the ultimate net. */
+  async #pendExhaustedPoolRetry(entry: PendingRetryEntry): Promise<void> {
+    if (!entry.ticketId) return;
+    const reason =
+      `shared worktree 풀 고갈(pool_exhausted)이 매니저 자동 재시도 ${entry.attempts}회(약 20분 이상) 후에도 지속 — ` +
+      `회수 가능한 leaked lease 가 없어 실제 풀 과다구독으로 판단됩니다. max_concurrent_tickets_per_agent(풀 크기 N)와 이 working_dir 를 공유하는 보드 구성을 점검하고 unpend 로 재개하세요.`;
+    await fireAndForgetTool(this.#config, 'pend_ticket', { ticket_id: entry.ticketId, reason });
+    await fireAndForgetTool(this.#config, 'add_comment', {
+      ticket_id: entry.ticketId,
+      content:
+        `⛔ **shared worktree 풀 고갈 지속 — 자동 재시도 한도 초과, pend** — 매니저가 ${entry.attempts}회 자동 재시도했지만 슬롯이 반납/회수되지 않아 디스패치를 pend 했습니다.\n\n` +
+        `leaked lease 는 이미 회수 grace(20분) 를 넘겨 재조정 대상이었으므로, 남은 원인은 이 working_dir 를 공유하는 보드들의 실제 동시 실행 수가 풀 크기 N 을 초과하는 과다구독입니다.\n\n` +
+        `**조치:** max_concurrent_tickets_per_agent 를 늘리거나, 이 working_dir 를 공유하는 보드/에이전트 구성을 분리한 뒤 unpend 하세요. (원인-불문 no-progress 백스톱: e7c87517)`,
+    });
+    log(`[pool-retry] pended ticket=${entry.ticketId.slice(0, 8)} role=${entry.role} after ${entry.attempts} exhausted retries`);
+  }
+
   /**
    * ticket 9f26f091: when a ticket lands in a terminal column (done/merged),
    * force-remove its per-(ticket,role) worktrees across every managed agent
@@ -822,6 +907,10 @@ export class EventDispatcher {
         log(
           `[worktree] terminal ticket=${ticketId.slice(0, 8)} reclaimed ${total} worktree(s)`,
         );
+        // ticket d34075b5: a terminal move just released this ticket's shared pool
+        // slot — re-drive any pool_exhausted retry starved on a full pool now,
+        // instead of waiting out its backoff (the "slot release → re-dispatch" path).
+        this.#poolRetry.wake(`slot_release:terminal:${ticketId.slice(0, 8)}`);
       }
     } catch (err: any) {
       log(
@@ -883,6 +972,11 @@ export class EventDispatcher {
         log(
           `[worktree] archived ticket=${ticketId.slice(0, 8)} reclaimed ${worktrees} worktree(s) + ${runDirs} run workspace(s)`,
         );
+      }
+      if (worktrees > 0) {
+        // ticket d34075b5: an archive released this ticket's shared pool slot —
+        // re-drive any starved pool_exhausted retry now (slot release → re-dispatch).
+        this.#poolRetry.wake(`slot_release:archived:${ticketId.slice(0, 8)}`);
       }
     } catch (err: any) {
       log(
@@ -1153,6 +1247,7 @@ export class EventDispatcher {
         agentContext,
         envConfig,
         canAuthoritative && reservedFresh,
+        raw,
       );
     } finally {
       if (inflightKey) {
@@ -1211,6 +1306,7 @@ export class EventDispatcher {
     agentContext: AgentExecutionContext | undefined,
     envConfig: ResolvedEnvironmentConfig | null,
     dispatchReserved: boolean,
+    raw: string,
   ): Promise<void> {
     // ticket 9f26f091: route this ticket into its own git worktree so a branch
     // switch here can't contaminate another ticket sharing the agent's
@@ -1240,20 +1336,27 @@ export class EventDispatcher {
     // that died uncleanly (exit-143) before releasing its slot — because the
     // server concurrency gate holds concurrent ticket sessions ≤ N == pool size,
     // so a legitimately-full pool is unreachable in normal single-board operation.
-    // The legacy behavior aborted here and waited for the periodic reconcile (≤ its
-    // interval) PLUS a lucky server re-push to recover — the invisible drop
-    // e7c87517 could only catch 24h later. Instead:
+    // The legacy behavior aborted here and waited for the periodic reconcile PLUS a
+    // lucky server re-push to recover — the invisible drop e7c87517 could only catch
+    // 24h later. Instead:
     //   (1) record the exhaustion on the durable, server-visible heartbeat metric
     //       so an operator sees a leaking / starved pool without log access;
     //   (2) kick an ON-DEMAND lease reclaim immediately (accelerated
     //       reconciliation) — it reuses the SAME live-worker + /proc guards as the
-    //       periodic pass, so it never false-reclaims a live worker; and
+    //       periodic pass, so it never false-reclaims a live worker;
     //   (3) if that freed a slot, retry provisioning INLINE so THIS dispatch
-    //       recovers autonomously (no server re-push needed).
-    // If nothing was reclaimable (a lease still inside the reclaim grace, or
-    // genuine cross-board contention) the retry is skipped and we fall through to
-    // the normal blocker path below, which posts a pool-specific comment and lets
-    // the transient-blocker backoff pend after the threshold.
+    //       recovers autonomously (no server re-push needed); and
+    //   (4) if nothing was reclaimable (a lease still inside the 20-min reclaim
+    //       grace, or a genuine transient cross-board contention), hand the trigger
+    //       to the manager-owned bounded-backoff RETRY QUEUE and return. The queue
+    //       re-drives the dispatch on a backoff AND the instant a slot frees (a
+    //       ticket goes terminal, or a periodic/boot reconcile reclaims a leaked
+    //       lease), so recovery no longer needs a lucky server re-push — the exact
+    //       dependency this ticket removes (review follow-up). This REPLACES the
+    //       legacy fall-through to the durable-blocker path (spawnSuppressor.note →
+    //       pend-after-3): pool_exhausted is a TRANSIENT, self-healing blocker and
+    //       must not be treated like a durable env blocker (bad credential /
+    //       not-a-git-repo), which still pends via the path below.
     if (!worktreeProvision.ok && worktreeProvision.reason === 'pool_exhausted') {
       this.#dispatchBlockTracker.record(worktreeProvision.blockerKind || 'worktree:pool_exhausted');
       const reclaimed = this.#poolReclaimTrigger
@@ -1265,17 +1368,42 @@ export class EventDispatcher {
       log(
         `[worktree] pool_exhausted for ticket=${String(ev.ticket_id).slice(0, 8)} role=${ev.action} — ` +
           `on-demand reclaim freed ${reclaimed} orphaned lease(s)` +
-          (reclaimed > 0 ? '; retrying provisioning inline' : ' (no reclaimable lease — likely a within-grace or genuine contention)'),
+          (reclaimed > 0 ? '; retrying provisioning inline' : ' (no reclaimable lease — within-grace or genuine contention; queuing retry)'),
       );
       if (reclaimed > 0) worktreeProvision = await applyWorktree();
+
+      if (!worktreeProvision.ok && ev.ticket_id) {
+        // Still exhausted after the on-demand reclaim → queue the manager-owned
+        // bounded-backoff retry, keyed single-flight on (ticket, role, agent) so a
+        // duplicate trigger just refreshes it (no twin). Post the pool-specific
+        // comment only for a NEW episode (never the misleading "Git 체크아웃 실패"
+        // copy). No pend on the first abort — the queue pends only if it gives up
+        // after its attempt bound (genuine sustained contention → operator). Then
+        // RETURN: do NOT fall into the durable-blocker path below.
+        const meta = { ticketId: ev.ticket_id, role: ev.action || '', agentId: ev.actor_name || '' };
+        const { created } = this.#poolRetry.register(meta, raw);
+        if (created) {
+          await fireAndForgetTool(this.#config, 'add_comment', {
+            ticket_id: ev.ticket_id,
+            content: POOL_EXHAUSTED_RETRY_COMMENT,
+          });
+        }
+        log(
+          `[worktree] pool_exhausted — queued manager-owned retry ticket=${String(ev.ticket_id).slice(0, 8)} ` +
+            `role=${ev.action} (new_episode=${created}, queued=${this.#poolRetry.size()})`,
+        );
+        return;
+      }
     }
 
     if (!worktreeProvision.ok) {
       const blockerKind = worktreeProvision.blockerKind || `worktree:${worktreeProvision.reason || 'unknown'}`;
       // ticket d34075b5: durable server-visible signal — count every provisioning
-      // block by kind for the instance-heartbeat metric. `pool_exhausted` was
-      // already counted in the fast-path above (a fall-through here is the SAME
-      // block), so guard against double-counting it; all other kinds count here.
+      // block by kind for the instance-heartbeat metric. A `pool_exhausted` block
+      // with a ticket_id is fully handled (recorded + queued + returned) in the
+      // fast-path above, so this path is durable-blocker-only; the guard covers the
+      // degenerate no-ticket_id pool_exhausted case (already counted above → don't
+      // double-count).
       if (worktreeProvision.reason !== 'pool_exhausted') {
         this.#dispatchBlockTracker.record(blockerKind);
       }
@@ -1287,18 +1415,14 @@ export class EventDispatcher {
         // Managed, working_dir-relative (credential-free) checkout path that
         // failed verification — completion criterion #5 ("실패 경로").
         const pathLine = worktreeProvision.path ? `\n경로: \`${worktreeProvision.path}\`` : '';
-        // ticket d34075b5: pool_exhausted is NOT a broken checkout — an on-demand
-        // reclaim already ran above and couldn't free a slot (a lease still inside
-        // the reclaim grace, or genuine cross-board contention). Use an accurate,
-        // pool-specific message instead of the misleading "Git 체크아웃 실패" one.
-        const content = worktreeProvision.reason === 'pool_exhausted'
-          ? `⚠️ **shared worktree 풀 고갈 (pool_exhausted)** — 공유 warm-pool 의 모든 슬롯이 활성 lease 라 에이전트를 실행하지 않고 디스패치를 중단했습니다.\n\n` +
-            `이미 on-demand lease 재조정을 시도했지만 회수 가능한 슬롯이 없었습니다 (reclaim grace 이내의 lease 이거나, 같은 working_dir 를 공유하는 다른 보드와의 실제 경합).\n\n` +
-            `주기적 재조정이 leaked lease 를 회수하면(또는 활성 티켓이 끝나 슬롯을 반납하면) 자동으로 복구됩니다. 매니저 재시작 없이 계속 고갈 상태라면 max_concurrent_tickets_per_agent(풀 크기 N)와 이 working_dir 를 공유하는 보드 구성을 점검하세요.`
-          : `⚠️ **티켓 worktree 준비 실패** — 유효한 Git 체크아웃을 확보하지 못해 에이전트를 실행하지 않고 디스패치를 중단했습니다.\n\n` +
-            `원인: \`${worktreeProvision.reason || 'unknown error'}\`${detailLine}${pathLine}\n\n` +
-            `repository resource, credential과 working_dir 아래 AWB 관리 폴더(\`.awb/base\`, \`.awb/wt\`)를 확인한 뒤 다시 트리거하세요.\n\n` +
-            `_동일 오류로 인한 supervisor 자동 재트리거는 백오프로 억제됩니다 — 환경을 고친 뒤 코멘트/수동 트리거로 재개하세요._`;
+        // Durable env blocker (empty/foreign checkout, not-a-git-repo, …). A
+        // transient pool_exhausted never reaches here — it self-heals via the
+        // retry queue above — so this copy is unambiguously about a broken checkout.
+        const content =
+          `⚠️ **티켓 worktree 준비 실패** — 유효한 Git 체크아웃을 확보하지 못해 에이전트를 실행하지 않고 디스패치를 중단했습니다.\n\n` +
+          `원인: \`${worktreeProvision.reason || 'unknown error'}\`${detailLine}${pathLine}\n\n` +
+          `repository resource, credential과 working_dir 아래 AWB 관리 폴더(\`.awb/base\`, \`.awb/wt\`)를 확인한 뒤 다시 트리거하세요.\n\n` +
+          `_동일 오류로 인한 supervisor 자동 재트리거는 백오프로 억제됩니다 — 환경을 고친 뒤 코멘트/수동 트리거로 재개하세요._`;
         await fireAndForgetTool(this.#config, 'add_comment', {
           ticket_id: ev.ticket_id,
           content,
@@ -1414,6 +1538,11 @@ export class EventDispatcher {
     if (ev.ticket_id) {
       this.#dispatchBlockers.clear(ev.ticket_id);
       this.#spawnSuppressor.clear(ev.ticket_id, ev.action);
+      // ticket d34075b5: the pool recovered for this (ticket, role, agent) — drop
+      // any queued pool_exhausted retry. Covers all recovery routes: inline (reclaim
+      // >0), a retry attempt that succeeded, and a server re-push that happened to
+      // land after the pool freed on its own. A no-op when nothing was queued.
+      this.#poolRetry.resolve({ ticketId: ev.ticket_id, role: ev.action || '', agentId: ev.actor_name || '' });
     }
 
     // worktree 규약 ④: name the ACTUAL work folder in the trigger prompt. The
@@ -1844,6 +1973,12 @@ export class EventDispatcher {
       // be reclaimed and worktrees would accumulate unbounded. Fire-and-forget
       // so the live-session forward below stays synchronous.
       if (ev.entity_type === 'ticket' && ev.action === 'moved' && ev.ticket_id) {
+        // ticket d34075b5: a move (to ANY column) invalidates a queued
+        // pool_exhausted retry for THIS ticket — the trigger targeted the pre-move
+        // column. Cancel it synchronously here (covers "이동" incl. lateral moves,
+        // for which there's no terminal_entered_at). Slots freed by a terminal move
+        // wake OTHER tickets' retries from inside #cleanupTerminalTicketWorktrees.
+        this.#poolRetry.cancelByTicket(ev.ticket_id, 'ticket moved');
         void this.#cleanupTerminalTicketWorktrees(ev.ticket_id);
       }
 
@@ -1856,6 +1991,8 @@ export class EventDispatcher {
       // tickets archived straight from a non-terminal column. Fire-and-forget so
       // the live-session forward below stays synchronous.
       if (ev.entity_type === 'ticket' && ev.action === 'archived' && ev.ticket_id) {
+        // ticket d34075b5: an archived ticket's queued pool_exhausted retry is moot.
+        this.#poolRetry.cancelByTicket(ev.ticket_id, 'ticket archived');
         void this.#cleanupArchivedTicketWorkspace(ev.ticket_id, ev.repository_resource_id);
       }
 
