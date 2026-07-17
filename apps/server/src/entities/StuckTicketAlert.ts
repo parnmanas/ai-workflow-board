@@ -38,6 +38,20 @@ export class StuckTicketAlert {
   @Column({ type: 'varchar', default: '' })
   last_comment_id: string;
 
+  // Durable delivery state (ticket e7c87517, reviewer blocker #3). The row is
+  // persisted BEFORE the chat post is attempted (crash-safe recovery pointer),
+  // and `delivered_at` is stamped ONLY after a chat post actually succeeds. The
+  // no-progress re-alert cooldown keys off `delivered_at`, NOT `last_alerted_at`
+  // — so a first delivery that fails (no alerts room / send throws) is retried
+  // every sweep instead of being silenced for a full REALERT window. `null` =
+  // an alert is owed but has never been delivered. `delivery_attempts` counts
+  // attempts for observability / debugging a persistently-undeliverable alert.
+  @Column({ type: Date, nullable: true, default: null })
+  delivered_at: Date | null;
+
+  @Column({ type: 'int', default: 0 })
+  delivery_attempts: number;
+
   @CreateDateColumn()
   created_at: Date;
 

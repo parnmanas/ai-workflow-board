@@ -65,6 +65,16 @@ const DEFAULTS = {
   MIN_AGE_MS: 2 * 60 * 60_000,       // 2 h — brand-new ticket grace period
   REALERT_MS: 24 * 60 * 60_000,      // 24 h — cooldown between re-alerts
   NO_PROGRESS_MS: 3 * 60 * 60_000,   // 3 h — cause-agnostic hard-stall threshold
+  // Lock is trusted as "an agent is actively working, skip evaluation" only
+  // while `locked_at` is within this window (ticket e7c87517, reviewer blocker
+  // #2). Mirrors agent-connection.service's LOCK_TTL_MS (30 min) — the same
+  // threshold its lock sweep uses to clear an abandoned lock. Beyond it a lock
+  // is STALE (agent crashed / never refreshed), so the ticket is evaluated for
+  // no-progress rather than blindly skipped. A stale lock is NOT a false-flag
+  // hazard: evaluation still requires NO_PROGRESS_MS of zero forward progress,
+  // and a genuinely-alive-but-quiet owner is caught by the output-liveness
+  // suppression in `_matchNoProgress`.
+  STALE_LOCK_MS: 30 * 60_000,        // 30 min — lock freshness TTL
 } as const;
 
 // Cause-agnostic no-progress hard-stall bounds (ticket e7c87517). A candidate
@@ -88,6 +98,7 @@ export interface StuckDetectorConfig {
   minAgeMs: number;
   realertMs: number;
   noProgressMs: number;
+  staleLockMs: number;
 }
 
 /**
@@ -95,8 +106,9 @@ export interface StuckDetectorConfig {
  * threshold logic is deterministically unit-testable without a DataSource
  * (mirrors decideForceRespawn / decideRunFreshness). Given the newest
  * forward-progress signal for a candidate ticket:
- *   - lastProgressAtMs → MAX(updated_at, latest real comment, latest lifecycle
- *                        activity, latest output-liveness) in epoch ms
+ *   - lastProgressAtMs → MAX(created_at floor, latest real comment, latest
+ *                        lifecycle activity, latest output-liveness) in epoch ms
+ *                        — explicit forward-progress signals only; NOT updated_at
  *   - nowMs            → sweep clock
  *   - noProgressMs     → clamped hard-stall threshold
  *   - pending          → ticket parked for a human / prereq (never a stall)
@@ -140,6 +152,7 @@ function readConfigFromEnv(env: NodeJS.ProcessEnv = process.env): StuckDetectorC
     minAgeMs:     parseInt(env.STUCK_DETECTOR_MIN_AGE_MS,   DEFAULTS.MIN_AGE_MS),
     realertMs:    parseInt(env.STUCK_DETECTOR_REALERT_MS,   DEFAULTS.REALERT_MS),
     noProgressMs: clampNoProgress(parseInt(env.STUCK_DETECTOR_NO_PROGRESS_MS, DEFAULTS.NO_PROGRESS_MS)),
+    staleLockMs:  parseInt(env.STUCK_DETECTOR_STALE_LOCK_MS, DEFAULTS.STALE_LOCK_MS),
   };
 }
 
@@ -218,8 +231,10 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
 
     // Step 1 — candidate ticket set. Restrict to active / intake
     // columns up front via an IN-clause so we don't read every ticket
-    // in the database. The grace-period guard (ticket.updated_at older
-    // than MIN_AGE_MS) is also applied here.
+    // in the database. The grace-period guard is keyed off the IMMUTABLE
+    // `created_at` (ticket e7c87517, reviewer blocker #5) — NOT `updated_at`:
+    // a non-progress field write (label / assignee / metadata edit) must not
+    // slip a stalled ticket out of the candidate set and delay its detection.
     const candidateCols = await colRepo
       .createQueryBuilder('c')
       .where("c.kind IN (:...kinds)", { kinds: ['active', 'intake'] })
@@ -231,7 +246,7 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     const tickets = await ticketRepo
       .createQueryBuilder('t')
       .where('t.column_id IN (:...colIds)', { colIds })
-      .andWhere('t.updated_at < :ageThreshold', { ageThreshold })
+      .andWhere('t.created_at < :ageThreshold', { ageThreshold })
       // Archive exclusion (ticket 9b44526b): manual archive is permitted on
       // non-terminal columns, so an archived ticket can still match the
       // active/intake candidate filter. Without this clause the detector would
@@ -249,14 +264,19 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     for (const ticket of tickets) {
       stats.scanned += 1;
       const existing = alertByTicketId.get(ticket.id) ?? null;
-      // Locked tickets are deliberately excluded FROM NEW FLAGS — the
-      // lock alone is "someone is actively working on it", even if
-      // their last comment was a WAIT. But if there's an existing
-      // alert and the ticket just got locked (claim landed AFTER the
-      // alert), that IS the unstuck signal — fall through to
-      // _evaluateTicket so the row gets cleaned up and the operator
-      // sees the resolution message.
-      if (ticket.locked_by_agent_id && !existing) continue;
+      // A LIVE lock is "someone is actively working on it" — excluded from new
+      // flags even if the last comment was a WAIT. But a STALE lock (ticket
+      // e7c87517, reviewer blocker #2) — one whose `locked_at` is older than the
+      // lock TTL because the owning agent crashed / never refreshed — must NOT
+      // buy the ticket permanent immunity: an agent that dies right after
+      // claiming would otherwise leave a leaked lock that hides a 25h no-progress
+      // stall forever. So skip only when the lock is LIVE. A stale-locked ticket
+      // falls through to `_evaluateTicket`; the no-progress path then decides it
+      // on real progress (and a genuinely-alive-but-quiet owner is still spared
+      // by the output-liveness suppression there). The `!existing` clause is
+      // preserved: an existing alert + a fresh live lock (claim landed AFTER the
+      // alert) still falls through so the row is cleaned up as unstuck.
+      if (ticket.locked_by_agent_id && this._isLockLive(ticket, now) && !existing) continue;
       try {
         await this._evaluateTicket(ticket, existing, now, stats);
       } catch (e) {
@@ -273,17 +293,18 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     //       about — the audit trail is the only consumer. Silent prune.
     //
     //   (b) Ticket still exists but no longer matches the candidate
-    //       filter — typically because the candidate filter is keyed
-    //       off `ticket.updated_at` and an operator move / claim /
-    //       reassign just bumped it. That bump is exactly the signal
-    //       the spec wants to surface as "ticket_unstuck", so emit
-    //       the resolution message before pruning.
+    //       filter — since the candidate gate is now the immutable
+    //       `created_at` (blocker #5), this happens when a move lands the
+    //       ticket in a column whose `kind` is no longer active/intake
+    //       (e.g. Review / Done). That transition is itself the signal
+    //       the spec wants surfaced as "ticket_unstuck", so emit the
+    //       resolution message before pruning.
     //
-    // Note: this is the primary unstuck path for column-move
-    // resolutions, since the move itself bumps updated_at and pushes
-    // the ticket below the MIN_AGE_MS threshold. `_evaluateTicket`
-    // covers the in-window resolution cases (fresh non-agent comment,
-    // claim that left the ticket old enough to still be a candidate).
+    // Note: a move that keeps the ticket on an active/intake column now
+    // leaves it IN the candidate set (created_at is unchanged), so its
+    // unstuck is handled in-window by `_evaluateTicket` (the lifecycle-
+    // after-alert fast path) rather than here. Both paths emit exactly one
+    // unstuck message and delete the row.
     const scannedIds = new Set(tickets.map(t => t.id));
     for (const alert of allAlerts) {
       if (scannedIds.has(alert.ticket_id)) continue;
@@ -343,8 +364,11 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
       // Lock state change also counts: an in-process claim that
       // bypassed the activity log (defensive — the canonical path
       // writes one, but a future code path that doesn't would
-      // otherwise leave the row sticky).
-      if (recentLifecycle > 0 || ticket.locked_by_agent_id) {
+      // otherwise leave the row sticky). Only a LIVE lock counts as the
+      // "someone picked it up" unstuck signal (ticket e7c87517, blocker #2):
+      // a STALE leaked lock is not progress, so it must not silently resolve
+      // an existing no-progress alert — the ticket stays flagged.
+      if (recentLifecycle > 0 || (ticket.locked_by_agent_id && this._isLockLive(ticket, now))) {
         await this._emitUnstuck(ticket, existingAlert, now, stats, 'lifecycle_after_alert');
         return;
       }
@@ -475,13 +499,15 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
 
   /**
    * Evaluate the cause-agnostic no-progress shape (ticket e7c87517). "Forward
-   * progress" = the NEWEST of: ticket.updated_at (any field write / move /
-   * claim), the latest real (non-system) comment by ANY author, the latest
-   * lifecycle activity (move / claim / release), and the latest output-liveness
-   * across any strand on the ticket — a worker producing tokens but not writing
-   * the ticket is alive, not stalled (the same fdc69c13 signal the supervisor's
-   * force-gate uses, generalized to the ticket). A ticket parked for a human /
-   * prereq is intentionally idle, never a stall. The pure threshold call is
+   * progress" = the NEWEST of: the latest real (non-system) comment by ANY
+   * author, the latest lifecycle activity (move / claim / release), and the
+   * latest output-liveness across any strand on the ticket — a worker producing
+   * tokens but not writing the ticket is alive, not stalled (the same fdc69c13
+   * signal the supervisor's force-gate uses, generalized to the ticket).
+   * Deliberately EXCLUDES ticket.updated_at (reviewer blocker #5): a non-progress
+   * field write must not reset the stall clock. created_at is the floor so a
+   * never-touched ticket's age counts from creation. A ticket parked for a human
+   * / prereq is intentionally idle, never a stall. The pure threshold call is
    * `decideNoProgress`. `recentComments` is the shared stale-WAIT fetch so no
    * extra comment query is issued.
    */
@@ -498,11 +524,15 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
 
     const latestLifecycleMs = await this._latestLifecycleAtMs(ticket.id);
     const outputMs = this.agentStatus?.getLatestOutputLivenessForTicket(ticket.id) ?? 0;
-    const updatedMs = new Date(
-      (ticket as any).updated_at || (ticket as any).created_at || now,
-    ).getTime();
-
-    const lastProgressAtMs = Math.max(updatedMs, latestCommentMs, latestLifecycleMs, outputMs);
+    // Baseline is the IMMUTABLE created_at (ticket e7c87517, reviewer blocker
+    // #5) — NOT updated_at. A label / assignee / metadata write bumps updated_at
+    // without advancing the actual work, so folding it in would reset the
+    // hard-stall clock on non-progress edits and let a stalled ticket masquerade
+    // as fresh. Forward progress is ONLY: a real (non-system) comment, a
+    // lifecycle event (move / claim / release), or output-liveness. created_at
+    // is the floor so a never-touched ticket's stall age counts from creation.
+    const createdMs = new Date((ticket as any).created_at || now).getTime();
+    const lastProgressAtMs = Math.max(createdMs, latestCommentMs, latestLifecycleMs, outputMs);
 
     const { stalled, ageMs } = decideNoProgress({
       lastProgressAtMs,
@@ -537,6 +567,26 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     return Number.isFinite(ts) ? ts : 0;
   }
 
+  /**
+   * Is the ticket's lock LIVE (ticket e7c87517, reviewer blocker #2)? A lock is
+   * live only while `locked_at` is within `staleLockMs` — mirroring the TTL
+   * agent-connection.service's lock sweep uses to clear an abandoned lock. A
+   * lock with no timestamp, or one older than the TTL (owner crashed / never
+   * refreshed via re-claim), is STALE and buys the ticket no immunity from
+   * no-progress detection. Pure/DB-free so it's cheap to call per candidate and
+   * deterministic to unit-test. Owner-liveness is enforced downstream: even a
+   * stale-TTL lock whose owner is genuinely alive is spared a false stall flag
+   * by the output-liveness suppression in `_matchNoProgress`.
+   */
+  private _isLockLive(ticket: Ticket, now: Date): boolean {
+    if (!ticket.locked_by_agent_id) return false;
+    const lockedAtRaw = (ticket as any).locked_at;
+    if (!lockedAtRaw) return false; // locked without a timestamp → cannot prove live
+    const lockedAtMs = new Date(lockedAtRaw).getTime();
+    if (!Number.isFinite(lockedAtMs)) return false;
+    return now.getTime() - lockedAtMs < this.config.staleLockMs;
+  }
+
   /** Does the ticket have at least one AGENT holder on any role? */
   private async _ticketHasAgentHolder(ticketId: string): Promise<boolean> {
     const count = await this.dataSource
@@ -553,12 +603,19 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
    * StuckTicketAlert row (PK = ticket_id) — a ticket matches at most one shape
    * per sweep, since the WAIT path returns before this runs — with
    * last_cycle_count=0 / last_comment_id='' marking it as a no-progress (not
-   * WAIT) alert. Dedup mirrors the stale-WAIT cooldown: re-alert only once
-   * `realertMs` has elapsed. Writes BOTH a structured `stuck_no_progress`
-   * reason audit (the durable recovery pointer) AND the operator chat alert.
-   * The alert re-fires every sweep until the ticket progresses or reaches a
-   * terminal column, so durability survives a server restart (each sweep
-   * re-derives the stall from fresh DB state).
+   * WAIT) alert.
+   *
+   * DURABLE DELIVERY (reviewer blocker #3). The old code stamped the cooldown
+   * clock (`last_alerted_at`) BEFORE posting the chat, then swallowed a
+   * no-room / send failure — so a first delivery that failed silenced the
+   * operator for a whole REALERT window (24h). Now the re-alert cooldown keys
+   * off `delivered_at`, which is stamped ONLY after a chat post actually
+   * succeeds, so a failed delivery is retried EVERY sweep until it lands (a
+   * bounded, once-per-sweep cadence — never a tight loop, never a 24h silence).
+   * The durable row + the structured `stuck_no_progress` reason audit are both
+   * written BEFORE the post attempt, so the recovery pointer survives even a
+   * crash mid-delivery. Each sweep re-derives the stall from fresh DB state, so
+   * the guarantee also survives a server restart.
    */
   private async _applyNoProgressAlert(
     ticket: Ticket,
@@ -568,26 +625,52 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     res: { ageMs: number; hasAgentHolder: boolean; everDispatched: boolean },
   ): Promise<void> {
     const alertRepo = this.dataSource.getRepository(StuckTicketAlert);
-    if (existingAlert) {
-      const elapsedMs = now.getTime() - new Date(existingAlert.last_alerted_at).getTime();
-      if (elapsedMs < this.config.realertMs) return; // dedup within cooldown
-      existingAlert.last_alerted_at = now;
-      existingAlert.last_cycle_count = 0;
-      existingAlert.last_comment_id = '';
-      await alertRepo.save(existingAlert);
-      stats.realerted += 1;
-    } else {
-      await alertRepo.save(alertRepo.create({
+
+    // Cooldown is measured from the last SUCCESSFUL delivery, not the last
+    // attempt. A never-delivered alert (delivered_at == null) is always owed.
+    if (existingAlert?.delivered_at) {
+      const sinceDeliveryMs = now.getTime() - new Date(existingAlert.delivered_at).getTime();
+      if (sinceDeliveryMs < this.config.realertMs) return; // delivered recently — dedup
+    }
+
+    // Upsert the durable row FIRST — the crash-safe recovery pointer must exist
+    // before we risk the chat post. `last_alerted_at` tracks the last ATTEMPT;
+    // `delivered_at` (set below, only on success) drives the cooldown.
+    let alertRow = existingAlert;
+    if (!alertRow) {
+      alertRow = alertRepo.create({
         ticket_id: ticket.id,
         last_alerted_at: now,
         last_cycle_count: 0,
         last_comment_id: '',
-      }));
+        delivered_at: null,
+        delivery_attempts: 0,
+      });
       stats.flagged += 1;
     }
+    alertRow.last_alerted_at = now;
+    alertRow.last_cycle_count = 0;
+    alertRow.last_comment_id = '';
+    alertRow.delivery_attempts = (alertRow.delivery_attempts || 0) + 1;
+    await alertRepo.save(alertRow);
 
+    // Structured reason audit — the durable recovery pointer, written regardless
+    // of whether the chat post lands.
     await this._writeNoProgressAudit(ticket, res, now);
-    await this._postNoProgressAlert(ticket, res, now);
+
+    // Attempt delivery; advance the cooldown clock ONLY on success. A failure
+    // leaves delivered_at unchanged so the next sweep retries.
+    const delivered = await this._postNoProgressAlert(ticket, res, now);
+    if (delivered) {
+      const alreadyDelivered = !!existingAlert?.delivered_at;
+      alertRow.delivered_at = now;
+      await alertRepo.save(alertRow);
+      if (alreadyDelivered) stats.realerted += 1;
+    } else {
+      this.logService.warn('StuckDetector', 'no-progress alert delivery failed — will retry next sweep', {
+        ticket_id: ticket.id, delivery_attempts: alertRow.delivery_attempts,
+      });
+    }
   }
 
   /**
@@ -637,19 +720,22 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
    * Operator chat alert for a no-progress hard stall. Distinct label
    * ("No-progress stall detected") from the stale-WAIT post so the two shapes
    * are unambiguous in the alerts room. Routes through the same
-   * RoomMessagingService.sendSystemMessage in-process path.
+   * RoomMessagingService.sendSystemMessage in-process path. Returns `true` iff
+   * the chat message was actually delivered (ticket e7c87517, blocker #3) — a
+   * missing alerts room or a send exception returns `false` so the caller keeps
+   * `delivered_at` null and retries next sweep instead of silencing the alert.
    */
   private async _postNoProgressAlert(
     ticket: Ticket,
     res: { ageMs: number; hasAgentHolder: boolean; everDispatched: boolean },
     now: Date,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const targetRoomId = await this._resolveAlertRoomId(ticket.workspace_id);
     if (!targetRoomId) {
-      this.logService.warn('StuckDetector', 'no chat room available for no-progress alert — skipping post', {
+      this.logService.warn('StuckDetector', 'no chat room available for no-progress alert — will retry next sweep', {
         ticket_id: ticket.id, workspace_id: ticket.workspace_id,
       });
-      return;
+      return false;
     }
     const column = ticket.column_id
       ? await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } })
@@ -675,10 +761,12 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
         ticket_id: ticket.id, room_id: targetRoomId, age_h: Number(ageH.toFixed(2)),
         ever_dispatched: res.everDispatched, has_agent_holder: res.hasAgentHolder,
       });
+      return true;
     } catch (e) {
-      this.logService.error('StuckDetector', 'no-progress alert post failed', {
+      this.logService.error('StuckDetector', 'no-progress alert post failed — will retry next sweep', {
         err: String(e), ticket_id: ticket.id, room_id: targetRoomId,
       });
+      return false;
     }
   }
 
