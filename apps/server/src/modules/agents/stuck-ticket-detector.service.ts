@@ -358,9 +358,16 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     // AFTER the last comment, which would otherwise leave the alert
     // row sticky forever).
     if (existingAlert) {
-      const recentLifecycle = await this._countLifecycleEvents(
-        ticket.id, existingAlert.last_alerted_at, now,
-      );
+      // A lifecycle event (column move / claim / release) newer than the alert
+      // means the operator or another agent intervened → unstuck. Compare the
+      // TZ-safe `_latestLifecycleAtMs` (entity-hydrated Date) against the alert
+      // timestamp rather than the bounded `_countLifecycleEvents` COUNT: the
+      // latter serializes Date params against sql.js's naive-UTC stored strings
+      // and silently misses a post-alert move under a non-UTC dev TZ (ticket
+      // e7c87517) — the exact reason a column-moved ticket stayed flagged once
+      // the candidate gate moved to the immutable created_at (blocker #5).
+      const latestLifecycleMs = await this._latestLifecycleAtMs(ticket.id);
+      const lifecycleAfterAlert = latestLifecycleMs > new Date(existingAlert.last_alerted_at).getTime();
       // Lock state change also counts: an in-process claim that
       // bypassed the activity log (defensive — the canonical path
       // writes one, but a future code path that doesn't would
@@ -368,7 +375,7 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
       // "someone picked it up" unstuck signal (ticket e7c87517, blocker #2):
       // a STALE leaked lock is not progress, so it must not silently resolve
       // an existing no-progress alert — the ticket stays flagged.
-      if (recentLifecycle > 0 || (ticket.locked_by_agent_id && this._isLockLive(ticket, now))) {
+      if (lifecycleAfterAlert || (ticket.locked_by_agent_id && this._isLockLive(ticket, now))) {
         await this._emitUnstuck(ticket, existingAlert, now, stats, 'lifecycle_after_alert');
         return;
       }
@@ -547,23 +554,32 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
   }
 
   /**
-   * MAX(created_at) epoch ms of the ticket's lifecycle activity (column move /
-   * claim / release), or 0 when none. Same action shape as
-   * `_countLifecycleEvents` so both agree on what "a lifecycle event" is.
+   * Newest lifecycle activity (column move / claim / release) for a ticket in
+   * epoch ms, or 0 when none. Same action shape as `_countLifecycleEvents` so
+   * both agree on what "a lifecycle event" is.
+   *
+   * Uses an ENTITY read (findOne + order DESC), NOT a raw `MAX(a.created_at)`
+   * aggregate, on purpose (ticket e7c87517): TypeORM hydrates a
+   * `@CreateDateColumn` to a TZ-correct Date on every backend, whereas a raw
+   * sql.js aggregate hands back a naive "YYYY-MM-DD HH:MM:SS" string that
+   * `new Date()` reparses in LOCAL time — so under a non-UTC dev TZ (e.g.
+   * Asia/Seoul, +9) a just-moved ticket's lifecycle timestamp gets shifted 9h
+   * EARLIER, making `_matchNoProgress` mis-decide a freshly-progressed ticket as
+   * a hard stall and leaving its alert row sticky (never unstuck). The reconciler's
+   * `_latestForwardProgressMs` avoids the same trap the same way.
    */
   private async _latestLifecycleAtMs(ticketId: string): Promise<number> {
     const repo = this.dataSource.getRepository(ActivityLog);
-    const row = await repo
-      .createQueryBuilder('a')
-      .select('MAX(a.created_at)', 'latest')
-      .where('a.ticket_id = :tid', { tid: ticketId })
-      .andWhere(
-        "((a.action = 'moved' AND a.field_changed = 'column') " +
-        "OR (a.action = 'updated' AND a.field_changed = 'locked_by_agent_id'))",
-      )
-      .getRawOne<{ latest: string | Date | null }>();
-    if (!row?.latest) return 0;
-    const ts = row.latest instanceof Date ? row.latest.getTime() : new Date(row.latest).getTime();
+    const row = await repo.findOne({
+      where: [
+        { ticket_id: ticketId, action: 'moved', field_changed: 'column' },
+        { ticket_id: ticketId, action: 'updated', field_changed: 'locked_by_agent_id' },
+      ],
+      order: { created_at: 'DESC' },
+      select: ['id', 'created_at'],
+    });
+    if (!row?.created_at) return 0;
+    const ts = new Date(row.created_at).getTime();
     return Number.isFinite(ts) ? ts : 0;
   }
 
