@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { Outlet, useNavigate, useParams, useLocation } from 'react-router-dom';
 import Sidebar from './Sidebar';
 import WorkspaceSelector from './WorkspaceSelector';
+import ViewModeToggle from './ViewModeToggle';
 import { useMediaQuery } from '../hooks/useMediaQuery';
 import { useWorkspaces } from '../hooks/useBoard';
 import { api, setActiveWorkspaceId } from '../api';
@@ -243,6 +244,8 @@ export default function AppLayout() {
             </div>
           </button>
           <div style={{ fontSize: '15px', fontWeight: 700, color: tokens.colors.textPrimary }}>AWB</div>
+          <div style={{ flex: 1 }} />
+          <ViewModeToggle />
         </div>
 
         {/* Desktop-only global top strip — owns WorkspaceSelector (writer).
@@ -260,6 +263,8 @@ export default function AppLayout() {
               borderBottom: `1px solid ${tokens.colors.border}`,
               background: tokens.colors.surface,
               flexShrink: 0,
+              justifyContent: 'space-between',
+              gap: 12,
             }}
           >
             <WorkspaceSelector
@@ -273,6 +278,7 @@ export default function AppLayout() {
               onUpdate={handleUpdateWorkspace}
               onUpdateBoard={handleUpdateBoard}
             />
+            <ViewModeToggle />
           </div>
         )}
 

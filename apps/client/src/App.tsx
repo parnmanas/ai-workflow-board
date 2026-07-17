@@ -30,6 +30,8 @@ import WorkspaceRolesPage from './components/WorkspaceRolesPage';
 import WorkspaceSettingsPage from './components/WorkspaceSettingsPage';
 import AgentDetailPage from './components/AgentDetailPage';
 import { tokens } from './tokens';
+import { ViewModeProvider, useViewMode, defaultSectionForMode } from './contexts/ViewModeContext';
+import ChatFirstHome from './components/ChatFirstHome';
 
 // Redirects the user to /ws/:currentWorkspaceId/:to, waiting for auth to resolve.
 function WorkspacedRedirect({ to }: { to: string }) {
@@ -38,11 +40,19 @@ function WorkspacedRedirect({ to }: { to: string }) {
   return <Navigate to={`/ws/${currentWorkspaceId}/${to}`} replace />;
 }
 
-// Redirects / to the workspace boards index once auth resolves.
+// Redirects / to the workspace's mode-aware default section once auth resolves
+// (Chat-first → assistant, Advanced → boards).
 function WorkspaceDefaultRedirect() {
   const { currentWorkspaceId } = useAuth();
+  const { mode } = useViewMode();
   if (!currentWorkspaceId) return null;
-  return <Navigate to={`/ws/${currentWorkspaceId}/boards`} replace />;
+  return <Navigate to={`/ws/${currentWorkspaceId}/${defaultSectionForMode(mode)}`} replace />;
+}
+
+// Redirects /ws/:wsId to the mode-aware default section (relative).
+function WorkspaceSectionRedirect() {
+  const { mode } = useViewMode();
+  return <Navigate to={defaultSectionForMode(mode)} replace />;
 }
 
 function AppContent() {
@@ -156,7 +166,8 @@ function AppContent() {
 
         {/* Workspace-scoped routes */}
         <Route path="ws/:wsId">
-          <Route index element={<Navigate to="boards" replace />} />
+          <Route index element={<WorkspaceSectionRedirect />} />
+          <Route path="assistant" element={<ChatFirstHome />} />
           <Route path="boards" element={<BoardsIndexPage />} />
           <Route path="boards/:boardId" element={<Board />} />
           <Route path="boards/:boardId/resources" element={<BoardResourcesPage />} />
@@ -191,7 +202,9 @@ export default function App() {
       <AuthProvider>
         <LoadingProvider>
           <ConfirmProvider>
-            <AppContent />
+            <ViewModeProvider>
+              <AppContent />
+            </ViewModeProvider>
           </ConfirmProvider>
         </LoadingProvider>
       </AuthProvider>
