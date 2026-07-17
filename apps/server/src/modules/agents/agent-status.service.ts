@@ -398,6 +398,29 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Latest output-liveness timestamp (epoch ms) across ANY (agent, role) strand
+   * for a ticket, or undefined when none was recorded (or all entries aged past
+   * the sweep TTL). The supervisor's force-gate reads the per-strand accessor
+   * above because it already knows the (agent, role); the StuckTicketDetector's
+   * cause-agnostic no-progress path does NOT — it scans tickets, not strands —
+   * so it needs the ticket-level max: a ticket whose worker is actively
+   * producing tokens (but hasn't written the ticket) must not be mis-flagged as
+   * a hard stall. Same alive-but-quiet signal, generalized from one strand to
+   * the whole ticket. Keys are `${agentId}:${ticketId}:${role}` (agent + ticket
+   * are colon-free UUIDs), so split-and-match on the ticket segment is exact.
+   */
+  getLatestOutputLivenessForTicket(ticket_id: string): number | undefined {
+    if (!ticket_id) return undefined;
+    let latest: number | undefined;
+    for (const [key, ts] of this.outputLiveness) {
+      if (key.split(':')[1] === ticket_id && (latest === undefined || ts > latest)) {
+        latest = ts;
+      }
+    }
+    return latest;
+  }
+
+  /**
    * Effective output-liveness retention TTL (ms window) currently in force
    * (ticket 47a72129). TicketSupervisorService clamps its force-gate comparison
    * window to this so the window can never exceed what the map actually retains

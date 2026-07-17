@@ -45,9 +45,11 @@ import { ChatRoom } from '../../entities/ChatRoom';
 import { Comment } from '../../entities/Comment';
 import { StuckTicketAlert } from '../../entities/StuckTicketAlert';
 import { Ticket } from '../../entities/Ticket';
+import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { Workspace } from '../../entities/Workspace';
 import { LogService } from '../../services/log.service';
 import { ActivityService } from '../../services/activity.service';
+import { AgentStatusService } from './agent-status.service';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import {
   ColumnRolePolicyService,
@@ -57,12 +59,26 @@ import {
 
 const DEFAULTS = {
   ENABLED: true,
-  SWEEP_MS: 15 * 60_000,         // 15 min
-  WINDOW: 4,                     // N consecutive agent comments
-  MIN_SPAN_MS: 2 * 60 * 60_000,  // 2 h — fast-loop guard
-  MIN_AGE_MS: 2 * 60 * 60_000,   // 2 h — brand-new ticket grace period
-  REALERT_MS: 24 * 60 * 60_000,  // 24 h — cooldown between re-alerts
+  SWEEP_MS: 15 * 60_000,             // 15 min
+  WINDOW: 4,                         // N consecutive agent comments
+  MIN_SPAN_MS: 2 * 60 * 60_000,      // 2 h — fast-loop guard
+  MIN_AGE_MS: 2 * 60 * 60_000,       // 2 h — brand-new ticket grace period
+  REALERT_MS: 24 * 60 * 60_000,      // 24 h — cooldown between re-alerts
+  NO_PROGRESS_MS: 3 * 60 * 60_000,   // 3 h — cause-agnostic hard-stall threshold
 } as const;
+
+// Cause-agnostic no-progress hard-stall bounds (ticket e7c87517). A candidate
+// ticket with ZERO forward progress (no column move / claim / agent comment /
+// output-liveness) for longer than `noProgressMs` is flagged even with NO agent
+// comments — the failure shape the stale-WAIT heuristic (needs ≥ WINDOW agent
+// comments) is structurally blind to, and the exact production incident (a
+// worktree pool_exhausted / offline-agent / focus-starved dispatch left a
+// ticket 25 h in To Do with no agent ever running). `noProgressMs` is clamped
+// to [FLOOR, CEILING] so a fat-fingered env can never disable the "no 24 h
+// silent stall" guarantee — the CEILING is well under 24 h, so a zero-progress
+// ticket is ALWAYS surfaced within CEILING + one sweep.
+const NO_PROGRESS_FLOOR_MS = 30 * 60_000;         // 30 min — lower bound
+const NO_PROGRESS_CEILING_MS = 12 * 60 * 60_000;  // 12 h — hard cap (< 24 h guarantee)
 
 export interface StuckDetectorConfig {
   enabled: boolean;
@@ -71,6 +87,31 @@ export interface StuckDetectorConfig {
   minSpanMs: number;
   minAgeMs: number;
   realertMs: number;
+  noProgressMs: number;
+}
+
+/**
+ * Pure no-progress decision (ticket e7c87517) — extracted so the hard-stall
+ * threshold logic is deterministically unit-testable without a DataSource
+ * (mirrors decideForceRespawn / decideRunFreshness). Given the newest
+ * forward-progress signal for a candidate ticket:
+ *   - lastProgressAtMs → MAX(updated_at, latest real comment, latest lifecycle
+ *                        activity, latest output-liveness) in epoch ms
+ *   - nowMs            → sweep clock
+ *   - noProgressMs     → clamped hard-stall threshold
+ *   - pending          → ticket parked for a human / prereq (never a stall)
+ * A pending ticket is intentionally parked, never a stall. Otherwise it is a
+ * hard stall once nothing has advanced it for `noProgressMs`.
+ */
+export function decideNoProgress(opts: {
+  lastProgressAtMs: number;
+  nowMs: number;
+  noProgressMs: number;
+  pending: boolean;
+}): { stalled: boolean; ageMs: number } {
+  const ageMs = opts.nowMs - opts.lastProgressAtMs;
+  if (opts.pending) return { stalled: false, ageMs };
+  return { stalled: ageMs >= opts.noProgressMs, ageMs };
 }
 
 function readConfigFromEnv(env: NodeJS.ProcessEnv = process.env): StuckDetectorConfig {
@@ -87,13 +128,18 @@ function readConfigFromEnv(env: NodeJS.ProcessEnv = process.env): StuckDetectorC
     if (['false', '0', 'no', 'off'].includes(v)) return false;
     return true;
   };
+  // Clamp the no-progress threshold to [FLOOR, CEILING] so no env value can
+  // push it past the sub-24h guarantee (or below a sane floor).
+  const clampNoProgress = (n: number): number =>
+    Math.min(NO_PROGRESS_CEILING_MS, Math.max(NO_PROGRESS_FLOOR_MS, n));
   return {
-    enabled:   parseBool(env.STUCK_DETECTOR_ENABLED,    DEFAULTS.ENABLED),
-    sweepMs:   parseInt(env.STUCK_DETECTOR_SWEEP_MS,    DEFAULTS.SWEEP_MS),
-    window:    parseInt(env.STUCK_DETECTOR_WINDOW,      DEFAULTS.WINDOW),
-    minSpanMs: parseInt(env.STUCK_DETECTOR_MIN_SPAN_MS, DEFAULTS.MIN_SPAN_MS),
-    minAgeMs:  parseInt(env.STUCK_DETECTOR_MIN_AGE_MS,  DEFAULTS.MIN_AGE_MS),
-    realertMs: parseInt(env.STUCK_DETECTOR_REALERT_MS,  DEFAULTS.REALERT_MS),
+    enabled:      parseBool(env.STUCK_DETECTOR_ENABLED,     DEFAULTS.ENABLED),
+    sweepMs:      parseInt(env.STUCK_DETECTOR_SWEEP_MS,     DEFAULTS.SWEEP_MS),
+    window:       parseInt(env.STUCK_DETECTOR_WINDOW,       DEFAULTS.WINDOW),
+    minSpanMs:    parseInt(env.STUCK_DETECTOR_MIN_SPAN_MS,  DEFAULTS.MIN_SPAN_MS),
+    minAgeMs:     parseInt(env.STUCK_DETECTOR_MIN_AGE_MS,   DEFAULTS.MIN_AGE_MS),
+    realertMs:    parseInt(env.STUCK_DETECTOR_REALERT_MS,   DEFAULTS.REALERT_MS),
+    noProgressMs: clampNoProgress(parseInt(env.STUCK_DETECTOR_NO_PROGRESS_MS, DEFAULTS.NO_PROGRESS_MS)),
   };
 }
 
@@ -120,6 +166,11 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     private readonly activityService: ActivityService,
     private readonly messaging: RoomMessagingService,
     private readonly policies: ColumnRolePolicyService,
+    // Ticket e7c87517 — read ticket-level output-liveness so the no-progress
+    // path never mis-flags a worker that is alive-but-quiet-on-the-ticket.
+    // Optional at the type level so the disabled-path unit construct (which
+    // returns before touching it) can omit it.
+    private readonly agentStatus?: AgentStatusService,
   ) {
     this.config = readConfigFromEnv();
   }
@@ -312,10 +363,16 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
 
     // Exclude `type='system'` housekeeping rows (reviewer / assignee
     // changes, etc.) from the count — those are not author activity.
+    // A ticket that fails ANY stale-WAIT guard below is not looping-on-WAIT,
+    // but it may still be a cause-agnostic HARD STALL (zero forward progress,
+    // e.g. a never-dispatched / offline-agent ticket with no agent comments at
+    // all) — so each non-match routes through `_resolveNonStaleWait`, which
+    // evaluates the no-progress shape BEFORE deciding the ticket is resolved
+    // (ticket e7c87517). `recentComments` is shared so the no-progress path
+    // reuses the same fetch instead of re-querying.
     const realComments = recentComments.filter(c => c.type !== 'system');
     if (realComments.length === 0) {
-      if (existingAlert) await this._emitUnstuck(ticket, existingAlert, now, stats, 'no_real_comments');
-      return;
+      return this._resolveNonStaleWait(ticket, existingAlert, now, stats, 'no_real_comments', recentComments);
     }
 
     // The most recent real comment determines the "is the agent still
@@ -324,20 +381,17 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     // definition unstuck even if older comments still match.
     const latestIsAgent = realComments[0].author_type === 'agent';
     if (!latestIsAgent) {
-      if (existingAlert) await this._emitUnstuck(ticket, existingAlert, now, stats, 'non_agent_comment');
-      return;
+      return this._resolveNonStaleWait(ticket, existingAlert, now, stats, 'non_agent_comment', recentComments);
     }
 
     if (realComments.length < window) {
-      if (existingAlert) await this._emitUnstuck(ticket, existingAlert, now, stats, 'short_window');
-      return;
+      return this._resolveNonStaleWait(ticket, existingAlert, now, stats, 'short_window', recentComments);
     }
 
     // Top `window` comments — verify they're all agent-authored.
     const windowSlice = realComments.slice(0, window);
     if (!windowSlice.every(c => c.author_type === 'agent')) {
-      if (existingAlert) await this._emitUnstuck(ticket, existingAlert, now, stats, 'window_mixed_authors');
-      return;
+      return this._resolveNonStaleWait(ticket, existingAlert, now, stats, 'window_mixed_authors', recentComments);
     }
 
     // Time span guard — fast-loop comments (e.g. 4 in 30 seconds) are
@@ -346,8 +400,7 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     const oldest = windowSlice[window - 1];
     const spanMs = latest.created_at.getTime() - oldest.created_at.getTime();
     if (spanMs < this.config.minSpanMs) {
-      if (existingAlert) await this._emitUnstuck(ticket, existingAlert, now, stats, 'short_span');
-      return;
+      return this._resolveNonStaleWait(ticket, existingAlert, now, stats, 'short_span', recentComments);
     }
 
     // Lifecycle activity between oldest and latest comment — any
@@ -356,8 +409,7 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
       ticket.id, oldest.created_at, latest.created_at,
     );
     if (intervening > 0) {
-      if (existingAlert) await this._emitUnstuck(ticket, existingAlert, now, stats, 'lifecycle_event');
-      return;
+      return this._resolveNonStaleWait(ticket, existingAlert, now, stats, 'lifecycle_event', recentComments);
     }
 
     // === Stale-WAIT confirmed. ===
@@ -389,6 +441,245 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     }
 
     await this._postStuckAlert(ticket, latest, cycleCount, now);
+  }
+
+  /**
+   * Terminal handler for a ticket that FAILED the stale-WAIT shape (ticket
+   * e7c87517). Before concluding "resolved", evaluate the cause-agnostic
+   * no-progress shape: a ticket with ZERO forward progress for `noProgressMs`
+   * is a HARD STALL even with no agent comments — the never-dispatched /
+   * offline-agent / worktree-pool_exhausted / focus-starved failure the WAIT
+   * heuristic (needs ≥ WINDOW agent comments) is structurally blind to. On a
+   * match, raise/refresh the SAME durable StuckTicketAlert row (a ticket is
+   * either WAIT-looping OR no-progress this sweep — the WAIT path already
+   * returned). Only when NEITHER shape holds is an existing alert resolved,
+   * carrying the stale-WAIT non-match reason for the operator log.
+   */
+  private async _resolveNonStaleWait(
+    ticket: Ticket,
+    existingAlert: StuckTicketAlert | null,
+    now: Date,
+    stats: SweepStats,
+    staleWaitReason: string,
+    recentComments: Comment[],
+  ): Promise<void> {
+    const noProgress = await this._matchNoProgress(ticket, now, recentComments);
+    if (noProgress.stalled) {
+      await this._applyNoProgressAlert(ticket, existingAlert, now, stats, noProgress);
+      return;
+    }
+    if (existingAlert) {
+      await this._emitUnstuck(ticket, existingAlert, now, stats, staleWaitReason);
+    }
+  }
+
+  /**
+   * Evaluate the cause-agnostic no-progress shape (ticket e7c87517). "Forward
+   * progress" = the NEWEST of: ticket.updated_at (any field write / move /
+   * claim), the latest real (non-system) comment by ANY author, the latest
+   * lifecycle activity (move / claim / release), and the latest output-liveness
+   * across any strand on the ticket — a worker producing tokens but not writing
+   * the ticket is alive, not stalled (the same fdc69c13 signal the supervisor's
+   * force-gate uses, generalized to the ticket). A ticket parked for a human /
+   * prereq is intentionally idle, never a stall. The pure threshold call is
+   * `decideNoProgress`. `recentComments` is the shared stale-WAIT fetch so no
+   * extra comment query is issued.
+   */
+  private async _matchNoProgress(
+    ticket: Ticket,
+    now: Date,
+    recentComments: Comment[],
+  ): Promise<{ stalled: boolean; ageMs: number; hasAgentHolder: boolean; everDispatched: boolean }> {
+    const pending = !!((ticket as any).pending_user_action || (ticket as any).pending_on_tickets);
+
+    const latestRealComment = recentComments.find(c => c.type !== 'system');
+    const latestCommentMs = latestRealComment ? latestRealComment.created_at.getTime() : 0;
+    const everDispatched = recentComments.some(c => c.author_type === 'agent');
+
+    const latestLifecycleMs = await this._latestLifecycleAtMs(ticket.id);
+    const outputMs = this.agentStatus?.getLatestOutputLivenessForTicket(ticket.id) ?? 0;
+    const updatedMs = new Date(
+      (ticket as any).updated_at || (ticket as any).created_at || now,
+    ).getTime();
+
+    const lastProgressAtMs = Math.max(updatedMs, latestCommentMs, latestLifecycleMs, outputMs);
+
+    const { stalled, ageMs } = decideNoProgress({
+      lastProgressAtMs,
+      nowMs: now.getTime(),
+      noProgressMs: this.config.noProgressMs,
+      pending,
+    });
+
+    // Holder lookup only matters (and only queried) when we're about to alert.
+    const hasAgentHolder = stalled ? await this._ticketHasAgentHolder(ticket.id) : false;
+    return { stalled, ageMs, hasAgentHolder, everDispatched };
+  }
+
+  /**
+   * MAX(created_at) epoch ms of the ticket's lifecycle activity (column move /
+   * claim / release), or 0 when none. Same action shape as
+   * `_countLifecycleEvents` so both agree on what "a lifecycle event" is.
+   */
+  private async _latestLifecycleAtMs(ticketId: string): Promise<number> {
+    const repo = this.dataSource.getRepository(ActivityLog);
+    const row = await repo
+      .createQueryBuilder('a')
+      .select('MAX(a.created_at)', 'latest')
+      .where('a.ticket_id = :tid', { tid: ticketId })
+      .andWhere(
+        "((a.action = 'moved' AND a.field_changed = 'column') " +
+        "OR (a.action = 'updated' AND a.field_changed = 'locked_by_agent_id'))",
+      )
+      .getRawOne<{ latest: string | Date | null }>();
+    if (!row?.latest) return 0;
+    const ts = row.latest instanceof Date ? row.latest.getTime() : new Date(row.latest).getTime();
+    return Number.isFinite(ts) ? ts : 0;
+  }
+
+  /** Does the ticket have at least one AGENT holder on any role? */
+  private async _ticketHasAgentHolder(ticketId: string): Promise<boolean> {
+    const count = await this.dataSource
+      .getRepository(TicketRoleAssignment)
+      .createQueryBuilder('a')
+      .where('a.ticket_id = :tid', { tid: ticketId })
+      .andWhere("a.agent_id IS NOT NULL AND a.agent_id != ''")
+      .getCount();
+    return count > 0;
+  }
+
+  /**
+   * Raise / refresh the durable no-progress alert (ticket e7c87517). Reuses the
+   * StuckTicketAlert row (PK = ticket_id) — a ticket matches at most one shape
+   * per sweep, since the WAIT path returns before this runs — with
+   * last_cycle_count=0 / last_comment_id='' marking it as a no-progress (not
+   * WAIT) alert. Dedup mirrors the stale-WAIT cooldown: re-alert only once
+   * `realertMs` has elapsed. Writes BOTH a structured `stuck_no_progress`
+   * reason audit (the durable recovery pointer) AND the operator chat alert.
+   * The alert re-fires every sweep until the ticket progresses or reaches a
+   * terminal column, so durability survives a server restart (each sweep
+   * re-derives the stall from fresh DB state).
+   */
+  private async _applyNoProgressAlert(
+    ticket: Ticket,
+    existingAlert: StuckTicketAlert | null,
+    now: Date,
+    stats: SweepStats,
+    res: { ageMs: number; hasAgentHolder: boolean; everDispatched: boolean },
+  ): Promise<void> {
+    const alertRepo = this.dataSource.getRepository(StuckTicketAlert);
+    if (existingAlert) {
+      const elapsedMs = now.getTime() - new Date(existingAlert.last_alerted_at).getTime();
+      if (elapsedMs < this.config.realertMs) return; // dedup within cooldown
+      existingAlert.last_alerted_at = now;
+      existingAlert.last_cycle_count = 0;
+      existingAlert.last_comment_id = '';
+      await alertRepo.save(existingAlert);
+      stats.realerted += 1;
+    } else {
+      await alertRepo.save(alertRepo.create({
+        ticket_id: ticket.id,
+        last_alerted_at: now,
+        last_cycle_count: 0,
+        last_comment_id: '',
+      }));
+      stats.flagged += 1;
+    }
+
+    await this._writeNoProgressAudit(ticket, res, now);
+    await this._postNoProgressAlert(ticket, res, now);
+  }
+
+  /**
+   * Structured `stuck_no_progress` reason audit — the durable recovery pointer
+   * every drop/defer must carry (ticket e7c87517). actor_id='system' so it
+   * never re-enters the trigger loop; a write failure must not change the
+   * alert outcome.
+   */
+  private async _writeNoProgressAudit(
+    ticket: Ticket,
+    res: { ageMs: number; hasAgentHolder: boolean; everDispatched: boolean },
+    now: Date,
+  ): Promise<void> {
+    try {
+      const repo = this.dataSource.getRepository(ActivityLog);
+      await repo.save(repo.create({
+        workspace_id: ticket.workspace_id ?? '',
+        entity_type: 'ticket',
+        entity_id: ticket.id,
+        action: 'stuck_no_progress',
+        field_changed: 'no_forward_progress',
+        old_value: '',
+        new_value: JSON.stringify({
+          age_ms: Math.round(res.ageMs),
+          no_progress_threshold_ms: this.config.noProgressMs,
+          has_agent_holder: res.hasAgentHolder,
+          ever_dispatched: res.everDispatched,
+          column_id: ticket.column_id ?? '',
+          reason: res.everDispatched ? 'dispatched_then_no_progress' : 'never_dispatched',
+          recovery: 'operator: verify agent online / worktree pool / focus window; re-trigger or re-assign',
+        }),
+        actor_id: 'system',
+        actor_name: 'StuckTicketDetector',
+        ticket_id: ticket.id,
+        role: '',
+        trigger_source: 'stuck_detector_no_progress',
+        created_at: now,
+      }));
+    } catch (e) {
+      this.logService.warn('StuckDetector', 'no_progress audit write failed (continuing)', {
+        err: String(e), ticket_id: ticket.id,
+      });
+    }
+  }
+
+  /**
+   * Operator chat alert for a no-progress hard stall. Distinct label
+   * ("No-progress stall detected") from the stale-WAIT post so the two shapes
+   * are unambiguous in the alerts room. Routes through the same
+   * RoomMessagingService.sendSystemMessage in-process path.
+   */
+  private async _postNoProgressAlert(
+    ticket: Ticket,
+    res: { ageMs: number; hasAgentHolder: boolean; everDispatched: boolean },
+    now: Date,
+  ): Promise<void> {
+    const targetRoomId = await this._resolveAlertRoomId(ticket.workspace_id);
+    if (!targetRoomId) {
+      this.logService.warn('StuckDetector', 'no chat room available for no-progress alert — skipping post', {
+        ticket_id: ticket.id, workspace_id: ticket.workspace_id,
+      });
+      return;
+    }
+    const column = ticket.column_id
+      ? await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } })
+      : null;
+    const boardName = column ? await this._resolveBoardNameForColumn(column) : '(no board)';
+    const ageH = Math.max(0, res.ageMs / 3_600_000);
+    const ticketLink = `/ws/${ticket.workspace_id}/ticket/${ticket.id}`;
+    const cause = res.everDispatched
+      ? 'dispatched then went silent'
+      : 'never dispatched (no agent has run)';
+    const holder = res.hasAgentHolder ? 'an agent IS assigned' : 'NO agent assigned';
+    void now;
+    const lines = [
+      `⛔ **No-progress stall detected** — \`${ticket.id}\``,
+      `**${ticket.title}**`,
+      `Board: ${boardName} · column: ${column?.name ?? '(unknown)'} · no forward progress for ${ageH.toFixed(1)}h`,
+      `Cause: ${cause} · ${holder}. Check the agent (online? worktree pool? focus window?), then re-trigger or re-assign.`,
+      `[Open ticket](${ticketLink})`,
+    ];
+    try {
+      await this.messaging.sendSystemMessage(targetRoomId, ticket.workspace_id, lines.join('\n\n'));
+      this.logService.info('StuckDetector', 'no-progress alert posted', {
+        ticket_id: ticket.id, room_id: targetRoomId, age_h: Number(ageH.toFixed(2)),
+        ever_dispatched: res.everDispatched, has_agent_holder: res.hasAgentHolder,
+      });
+    } catch (e) {
+      this.logService.error('StuckDetector', 'no-progress alert post failed', {
+        err: String(e), ticket_id: ticket.id, room_id: targetRoomId,
+      });
+    }
   }
 
   /**
