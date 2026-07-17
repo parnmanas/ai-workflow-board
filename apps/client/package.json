@@ -6,7 +6,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "test": "node --import tsx --test --test-force-exit test/on-done-reorder-dirty.test.mjs test/chat-participants.test.mjs test/composer-send.test.mjs test/environment-config-editor.test.mjs test/view-mode.test.mjs test/artifact-panel.test.mjs test/artifact-panel-view.test.mjs test/ticket-ref-card.test.mjs"
+    "test": "node --import tsx --test --test-force-exit test/on-done-reorder-dirty.test.mjs test/chat-participants.test.mjs test/composer-send.test.mjs test/environment-config-editor.test.mjs test/view-mode.test.mjs test/artifact-panel.test.mjs test/artifact-panel-view.test.mjs test/ticket-ref-card.test.mjs test/ticket-artifact-view.test.mjs"
   },
   "dependencies": {
     "@hello-pangea/dnd": "^17.0.0",

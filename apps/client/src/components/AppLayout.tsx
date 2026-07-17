@@ -6,6 +6,7 @@ import ViewModeToggle from './ViewModeToggle';
 import { useViewMode } from '../contexts/ViewModeContext';
 import { ArtifactPanelProvider } from '../contexts/ArtifactPanelContext';
 import ArtifactPanel, { ArtifactToggleButton } from './ArtifactPanel';
+import TicketArtifactController from './TicketArtifactController';
 import { useMediaQuery } from '../hooks/useMediaQuery';
 import { useWorkspaces } from '../hooks/useBoard';
 import { api, setActiveWorkspaceId } from '../api';
@@ -214,6 +215,7 @@ export default function AppLayout() {
     <BoardStreamProvider>
     <NotificationProvider>
     <ArtifactPanelProvider>
+    <TicketArtifactController>
     <div className="awb-shell">
       <Sidebar
         overlay={drawerMode}
@@ -318,6 +320,7 @@ export default function AppLayout() {
           닫혀 있으면 null 을 반환해 레이아웃에 영향 없음. */}
       <ArtifactPanel isMobile={isMobile} />
     </div>
+    </TicketArtifactController>
     </ArtifactPanelProvider>
     </NotificationProvider>
     </BoardStreamProvider>
