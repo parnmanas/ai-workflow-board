@@ -1561,6 +1561,18 @@ export interface ChatAttachment {
 
 export type ChatRoomMessageType = 'message' | 'progress';
 
+// F-1 (ticket 24694916): structured ticket-action reference the agent-manager
+// captured mechanically from an mcp__awb__* tool result. Rendered as a reliable
+// TicketRefCard in the message list, independent of any @[ticket:...] prose token.
+export interface ChatMessageTicketRef {
+  action: string; // 'create' | 'move' | 'update' | 'comment' | 'claim' | ...
+  ticket_id: string;
+  title?: string; // falls back to ticket_id when absent
+}
+export interface ChatRoomMessageMetadata {
+  ticket_refs?: ChatMessageTicketRef[];
+}
+
 export interface ChatRoomMessageItem {
   id: string;
   room_id: string;
@@ -1577,6 +1589,9 @@ export interface ChatRoomMessageItem {
   content: string;
   images?: string | Array<{ data: string; filename: string; mimetype: string }>; // JSON string or parsed array (legacy inline images)
   attachments?: ChatAttachment[]; // new uniform attachment surface (any mimetype)
+  // F-1 (ticket 24694916): structured metadata (ticket-action refs) the
+  // agent-manager attached. Absent on ordinary chat turns.
+  metadata?: ChatRoomMessageMetadata;
   created_at: string;
 }
 
