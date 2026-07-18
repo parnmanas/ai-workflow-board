@@ -102,6 +102,11 @@ export class AgentManagerCommandService {
       instance_id: instance.instance_id,
       agent_id: instance.agent_id,
       command,
+      // The managed agent this command acts on (ticket 1f750878). For
+      // spawn_agent it's the hydrated args.agent_id (the spawn target) — the
+      // `/command/ack` handler reads it to markStartError the right agent on a
+      // spawn failure. Undefined for verbs without a per-agent target.
+      target_agent_id: typeof hydrated.agent_id === 'string' && hydrated.agent_id ? hydrated.agent_id : undefined,
       issued_at,
     });
     activityEvents.emit('agent_manager_command', { ...payload, timestamp: issued_at });

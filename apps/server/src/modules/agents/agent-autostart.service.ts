@@ -5,9 +5,8 @@ import { Agent } from '../../entities/Agent';
 import { Ticket } from '../../entities/Ticket';
 import { LogService } from '../../services/log.service';
 import { ActivityService, activityEvents } from '../../services/activity.service';
-import { AgentConnectivityRegistry } from '../../services/agent-connectivity.registry';
+import { MemoryMetricsRegistry } from '../../services/memory-metrics.registry';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
-import { InstanceRegistryService } from '../agent-manager/instance-registry.service';
 import {
   AgentManagerCommandService,
   SpawnAgentResult,
@@ -43,6 +42,12 @@ const TICKET_FEEDBACK_DEBOUNCE_MS = 10 * 60_000;
 // Chat feedback is more interactive; a shorter window avoids a wall of system
 // messages when a user types several lines while the agent is starting.
 const CHAT_FEEDBACK_DEBOUNCE_MS = 60_000;
+// Debounce-map eviction cadence (ticket 1f750878). The three maps are tiny and
+// their entries stop mattering once past their own window, so a slow sweep is
+// plenty — it only reclaims keys that will never be read again (a finished
+// ticket / closed room / deleted agent). Interval < every window so no entry
+// lingers more than window + one tick.
+const DEBOUNCE_SWEEP_INTERVAL_MS = 5 * 60_000;
 
 const AUTOSTART_ISSUED_BY = 'system:autostart';
 
@@ -71,6 +76,8 @@ const AUTOSTART_ISSUED_BY = 'system:autostart';
 @Injectable()
 export class AgentAutostartService implements OnModuleInit, OnModuleDestroy {
   private _chatListener?: (evt: AutostartRequestEvent) => void;
+  // Debounce-map TTL eviction handle (ticket 1f750878); cleared in onModuleDestroy.
+  private _sweepHandle: NodeJS.Timeout | null = null;
 
   // agent_id → epoch ms of the last spawn_agent issue (spawn debounce).
   private readonly lastSpawnAt = new Map<string, number>();
@@ -82,14 +89,23 @@ export class AgentAutostartService implements OnModuleInit, OnModuleDestroy {
 
   constructor(
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
-    private readonly registry: InstanceRegistryService,
-    private readonly connectivity: AgentConnectivityRegistry,
     private readonly managerCommand: AgentManagerCommandService,
+    // Reachability now delegates to AgentStatusService.isReachable (ticket
+    // 1f750878) — the single shared definition — so this service no longer
+    // injects InstanceRegistryService / AgentConnectivityRegistry directly.
     private readonly agentStatus: AgentStatusService,
     private readonly activityService: ActivityService,
     private readonly roomMessaging: RoomMessagingService,
     private readonly logService: LogService,
-  ) {}
+    metrics: MemoryMetricsRegistry,
+  ) {
+    // Debounce-map size gauges (ticket 1f750878) for /api/diagnostics/memory —
+    // a persistent climb means the TTL sweep regressed. Mirrors the
+    // agentStatus.* marker gauges.
+    metrics.register('agentAutostart.lastSpawnAt', () => this.lastSpawnAt.size);
+    metrics.register('agentAutostart.lastTicketFeedback', () => this.lastTicketFeedback.size);
+    metrics.register('agentAutostart.lastChatFeedback', () => this.lastChatFeedback.size);
+  }
 
   onModuleInit(): void {
     this._chatListener = (evt) => {
@@ -98,6 +114,16 @@ export class AgentAutostartService implements OnModuleInit, OnModuleDestroy {
       });
     };
     activityEvents.on(AGENT_AUTOSTART_REQUESTED, this._chatListener);
+
+    // Debounce-map TTL eviction (ticket 1f750878). Unlike the agent-status
+    // markers these three maps had NO sweep, so distinct (agent) / (ticket:
+    // agent:role) / (room:agent) keys accumulated monotonically over a long-
+    // running process. An entry is only meaningful within its own debounce
+    // window — past it every get() already treats it as absent — so dropping
+    // expired entries is behavior-preserving. Handle stored + unref'd + cleared
+    // in onModuleDestroy, mirroring AgentStatusService's sweep.
+    this._sweepHandle = setInterval(() => this._evictStaleDebounce(), DEBOUNCE_SWEEP_INTERVAL_MS);
+    if (typeof (this._sweepHandle as any).unref === 'function') (this._sweepHandle as any).unref();
   }
 
   onModuleDestroy(): void {
@@ -105,24 +131,37 @@ export class AgentAutostartService implements OnModuleInit, OnModuleDestroy {
       activityEvents.removeListener(AGENT_AUTOSTART_REQUESTED, this._chatListener);
       this._chatListener = undefined;
     }
+    if (this._sweepHandle) {
+      clearInterval(this._sweepHandle);
+      this._sweepHandle = null;
+    }
+  }
+
+  /**
+   * Drop debounce-map entries older than their own window (ticket 1f750878).
+   * Safe because an entry past its window is already treated as absent by the
+   * get()-side checks (`Date.now() - at < WINDOW`), so this only reclaims memory
+   * for keys that will never be read again. Each map uses its matching window as
+   * the TTL. Exposed for the unit test (deterministic eviction assertion).
+   */
+  private _evictStaleDebounce(): void {
+    const now = Date.now();
+    for (const [k, at] of this.lastSpawnAt) {
+      if (now - at > SPAWN_DEBOUNCE_MS) this.lastSpawnAt.delete(k);
+    }
+    for (const [k, rec] of this.lastTicketFeedback) {
+      if (now - rec.at > TICKET_FEEDBACK_DEBOUNCE_MS) this.lastTicketFeedback.delete(k);
+    }
+    for (const [k, at] of this.lastChatFeedback) {
+      if (now - at > CHAT_FEEDBACK_DEBOUNCE_MS) this.lastChatFeedback.delete(k);
+    }
   }
 
   // ── Reachability + lifecycle classification ─────────────────────────────
 
-  /** Is a live instance (proxy/daemon for the agent itself, or a manager that
-   *  currently supervises it) heartbeating? Fresher than the DB is_online flag
-   *  during the sub-sweep window right after a spawn. */
-  private _hasLiveInstance(agentId: string): boolean {
-    return this.registry.list().some(
-      (i) =>
-        (i.mode !== 'manager' && i.agent_id === agentId) ||
-        (Array.isArray(i.agent_ids) && i.agent_ids.includes(agentId)),
-    );
-  }
-
   /**
    * Classify an agent's reachability + lifecycle + auto-start feasibility. A
-   * cheap DB read plus the in-memory instance registry. `reachable` is the
+   * cheap DB read plus the in-memory reachability check. `reachable` is the
    * gate the dispatch/chat paths test; `autostart` tells the caller whether a
    * spawn will even be attempted (and, if not, why) so feedback is accurate.
    */
@@ -131,14 +170,13 @@ export class AgentAutostartService implements OnModuleInit, OnModuleDestroy {
     if (!agent) {
       return { agent: null, reachable: false, state: 'offline', autostart: 'no_manager_linked' };
     }
-    // Reachable if a live SSE session would deliver an X-scoped event (the
-    // TRUE signal — covers proxy/SSE agents that never ping), OR a live
-    // instance carries it, OR the DB is_online flag is set (MCP-ping / manager
-    // heartbeat). Any one is enough; is_online alone is NOT relied upon.
-    const reachable =
-      this.connectivity.isReachable(agent.id) ||
-      this._hasLiveInstance(agent.id) ||
-      !!agent.is_online;
+    // Reachability = the SINGLE shared definition (ticket 1f750878): a live SSE
+    // session (the TRUE signal — covers proxy/SSE + manager-supervised agents
+    // that never ping) OR a live instance OR the DB is_online fallback. is_online
+    // alone is NOT relied upon. This was the canonical of the three previously-
+    // divergent inlinings; it now lives in AgentStatusService.isReachable and the
+    // REST/SSE badges call the same helper.
+    const reachable = this.agentStatus.isReachable(agent.id, !!agent.is_online);
     const state = deriveAgentLifecycleState({
       isOnline: reachable,
       connectedAt: agent.connected_at ?? null,

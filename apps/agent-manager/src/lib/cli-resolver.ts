@@ -10,10 +10,21 @@
 //   5. Fallback: literal CLI name (will ENOENT; caller's spawn error
 //      listener absorbs it)
 //
-// Memory pin (`feedback_windows_claude_exe_only`): Windows resolution must
-// reject `.cmd`/`.ps1` shims and the MSYS bash wrapper that ship next to the
-// .exe — those don't spawn reliably. The Windows gate (WIN_EXEC_EXT) is
-// preserved verbatim from the original claude-only resolver.
+// Windows shim 처리 (ticket e299c6b3): npm 글로벌 shim 으로만 설치된 CLI 는 형제
+// `.exe` 없이 `<name>.cmd`(배치 래퍼)만 노출한다 — codex 가 대표 케이스
+// (`%APPDATA%\npm\codex.cmd`). Node 의 spawn() 은 CreateProcess 를 직접 호출하는데
+// `.cmd` 는 실행 대상이 아니어서, cmd.exe 는 PATHEXT 로 잘 찾는데도 bare
+// `spawn("codex")` 는 ENOENT 로 던진다. 그래서 `.cmd`/`.bat` shim 은 LAST resort
+// 로만 resolve 하고(진짜 `.exe` 가 항상 먼저 우선 — selectBinary 참고), spawn
+// 사이트는 이를 cross-spawn 으로 실행한다. cross-spawn 은 shim 을
+// `cmd.exe /d /s /c` 로 감싸되 인자를 PROPERLY ESCAPED 한다(순수 `shell: true` 는
+// 인자를 escape 없이 이어붙여 codex 의 inline-TOML `-c` attribution 인자를 망가뜨림).
+//
+// Memory pin (`feedback_windows_claude_exe_only`): 진짜 `.exe` 가 어떤 shim 보다
+// 반드시 우선하고, npm 이 shim 옆에 떨어뜨리는 MSYS/확장자 없는 bash 래퍼는 절대
+// 채택하지 않는다(오직 `.cmd`/`.bat`). selectBinary 는 두 불변식을 모두 지킨다 —
+// 진짜 `.exe` 를 가진 claude 는 여전히 `.exe` 로 resolve 되고, codex 처럼 shim 만
+// 있는 CLI 만 배치 래퍼로 fall through 한다.
 
 import { execSync } from 'node:child_process';
 import { accessSync, constants as fsConstants, readlinkSync } from 'node:fs';
@@ -23,17 +34,54 @@ import { KNOWN_CLI_TYPES } from './constants.js';
 import { log } from './logging.js';
 
 const isWindows = process.platform === 'win32';
-const WIN_EXEC_EXT = /\.exe$/i;
+const WIN_EXE_EXT = /\.exe$/i;
+// `.exe` 가 없을 때 fallback 으로 허용하는 Windows 배치 shim. `.ps1` 은 의도적으로
+// 제외한다 — powershell 스크립트는 cross-spawn 의 cmd.exe 래퍼로 실행되지 않고, npm
+// 은 항상 `.ps1` 옆에 `.cmd` 를 함께 떨어뜨린다.
+const WIN_SHIM_EXT = /\.(cmd|bat)$/i;
 
-function canExec(p: string | null | undefined): p is string {
+/** fs 존재 + 실행 가능 여부 probe. Windows 에는 실행 비트 개념이 없어
+ *  accessSync(X_OK) 는 존재 확인으로 degrade 된다. 확장자 게이팅(`.exe` vs `.cmd`)
+ *  은 selectBinary 에서 처리한다. */
+function fileExecutable(p: string | null | undefined): p is string {
   if (!p) return false;
-  if (isWindows && !WIN_EXEC_EXT.test(p)) return false;
   try {
     accessSync(p, fsConstants.X_OK);
     return true;
   } catch {
     return false;
   }
+}
+
+export interface SelectedBinary {
+  bin: string;
+  kind: 'exe' | 'shim' | 'literal';
+}
+
+/** 순서가 있는 후보 경로 목록(shell-lookup 결과 먼저, 그다음 well-known 설치
+ *  위치)에서 가장 실행 가능한 바이너리를 고른다. 순수 함수 + 의존성 주입이라
+ *  Windows-only-`.cmd` 케이스를 실제 Windows 호스트 없이 unit test 할 수 있다.
+ *  Windows 에선 진짜 `.exe` 가 항상 이기고, 목록 어디에도 `.exe` 가 없을 때만
+ *  `.cmd`/`.bat` shim 을 쓴다. POSIX 에선 실행 가능한 파일이면 무엇이든 이긴다.
+ *  실행 가능한 것이 하나도 없으면 literal CLI 이름으로 fallback 한다(그 결과의
+ *  ENOENT 는 호출자의 spawn error 리스너가 흡수). */
+export function selectBinary(
+  cliType: string,
+  sources: Array<string | null | undefined>,
+  opts: { isWindows: boolean; exists: (p: string) => boolean },
+): SelectedBinary {
+  let shim: string | null = null;
+  for (const p of sources) {
+    if (!p) continue;
+    if (opts.isWindows) {
+      if (WIN_EXE_EXT.test(p) && opts.exists(p)) return { bin: p, kind: 'exe' };
+      if (!shim && WIN_SHIM_EXT.test(p) && opts.exists(p)) shim = p;
+    } else if (opts.exists(p)) {
+      return { bin: p, kind: 'exe' };
+    }
+  }
+  if (shim) return { bin: shim, kind: 'shim' };
+  return { bin: cliType, kind: 'literal' };
 }
 
 interface CandidateProvider {
@@ -52,7 +100,7 @@ function parentExeMatching(nameRegex: RegExp): string | null {
     const ppid = process.ppid;
     if (!ppid) return null;
     const exe = readlinkSync(`/proc/${ppid}/exe`);
-    if (!exe || !canExec(exe)) return null;
+    if (!exe || !fileExecutable(exe)) return null;
     if (/\.vscode\/extensions\//.test(exe)) return null;
     if (!nameRegex.test(basename(exe))) return null;
     return exe;
@@ -94,6 +142,11 @@ export function resolveCliBin(cliType: string, configured?: string | null): stri
     }
   }
 
+  // 순서가 있는 resolution source: shell PATH lookup 먼저, 그다음 well-known 설치
+  // 위치. selectBinary 가 진짜 `.exe` 를 우선하며 훑고, `.exe` 가 없을 때만
+  // `.cmd`/`.bat` shim(Windows npm-shim 설치)으로 fallback 한다 — 그래서 bare
+  // `spawn("codex")` 가 Windows 에서 더 이상 ENOENT 나지 않는다.
+  const sources: string[] = [];
   try {
     const cmd = isWindows
       ? `where ${ct}`
@@ -103,39 +156,30 @@ export function resolveCliBin(cliType: string, configured?: string | null): stri
       timeout: 2000,
       shell: isWindows ? undefined : '/bin/sh',
     }).trim();
-    const lines = out
-      .split(/\r?\n/)
-      .map((s) => s.trim())
-      .filter(Boolean);
-    for (const cand of lines) {
-      if (canExec(cand)) {
-        cache.set(ct, cand);
-        log(`[cli-resolver:${ct}] resolved via shell: ${cand}`);
-        return cand;
-      }
+    for (const line of out.split(/\r?\n/)) {
+      const t = line.trim();
+      if (t) sources.push(t);
     }
   } catch {
-    /* shell or spawn failed — keep trying */
+    /* shell 또는 spawn 실패 — well-known candidate 로 계속 시도한다 */
   }
 
   const provider = CANDIDATE_PROVIDERS[ct];
   if (provider) {
     const home = homedir();
-    const candidates = isWindows ? provider.windows(home) : provider.unix(home);
-    for (const p of candidates) {
-      if (canExec(p)) {
-        cache.set(ct, p);
-        log(`[cli-resolver:${ct}] resolved via candidate: ${p}`);
-        return p;
-      }
-    }
+    sources.push(...(isWindows ? provider.windows(home) : provider.unix(home)));
   }
 
-  cache.set(ct, ct);
-  log(
-    `[cli-resolver:${ct}] resolution failed; falling back to literal "${ct}" (expect ENOENT unless PATH is set)`,
-  );
-  return ct;
+  const picked = selectBinary(ct, sources, { isWindows, exists: fileExecutable });
+  cache.set(ct, picked.bin);
+  if (picked.kind === 'literal') {
+    log(
+      `[cli-resolver:${ct}] resolution failed; falling back to literal "${ct}" (expect ENOENT unless PATH is set)`,
+    );
+  } else {
+    log(`[cli-resolver:${ct}] resolved via ${picked.kind}: ${picked.bin}`);
+  }
+  return picked.bin;
 }
 
 export function _resetResolverCache(): void {
@@ -164,6 +208,10 @@ function claudeWindowsCandidates(home: string): string[] {
     join(pkgBin, 'claude.exe'),
     join(appdata, 'npm', 'claude.exe'),
     join(localAppData, 'Programs', 'anthropic', 'claude-code', 'claude.exe'),
+    // Last-resort npm 배치 shim — 위 .exe 경로가 하나도 없을 때만 도달한다
+    // (selectBinary 는 항상 .exe 를 우선). 매니저가 %APPDATA%\npm 이 빠진 PATH 로
+    // 서비스 실행될 때도 견고하다.
+    join(appdata, 'npm', 'claude.cmd'),
   ];
 }
 
@@ -211,5 +259,9 @@ function codexWindowsCandidates(home: string): string[] {
     join(pkgBin, 'codex.exe'),
     join(appdata, 'npm', 'codex.exe'),
     join(localAppData, 'Programs', 'openai', 'codex', 'codex.exe'),
+    // npm 글로벌 설치는 형제 .exe 없이 이 배치 shim 만 ship 한다 — ticket e299c6b3
+    // 의 대표 repro. .exe 가 없으면 selectBinary 가 이걸로 fallback 하고 cross-spawn
+    // 이 인자를 escape 해 cmd.exe 로 실행한다.
+    join(appdata, 'npm', 'codex.cmd'),
   ];
 }

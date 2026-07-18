@@ -674,6 +674,315 @@ export class InflightDispatchTracker {
   }
 }
 
+/** Cumulative per-reason counter of dispatch-time provisioning BLOCKS (ticket
+ *  d34075b5) — the durable, server-visible signal for a dropped dispatch.
+ *
+ *  Motivation: when `EventDispatcher` aborts a trigger at the worktree /
+ *  push-credential preflight gate (a bare `return`), the only trace was one
+ *  de-duplicated ticket comment — no structured signal the SERVER could see, so a
+ *  shared-pool `pool_exhausted` starvation was invisible until e7c87517's 24h
+ *  no-progress backstop fired. This tracker counts every block by its stable
+ *  `kind` (`worktree:pool_exhausted`, `push_credential_unavailable`,
+ *  `worktree:not_a_git_repo`, …) and is surfaced on the instance heartbeat as
+ *  `dispatch_block_counts`, exactly mirroring
+ *  {@link InflightDispatchTracker.suppressionCounts} (the twin-guard metric) and
+ *  `open_breaker_count` — an operator sees a leaking / starved pool without log
+ *  access.
+ *
+ *  Cumulative and never reset (only a manager restart zeroes it), so once a kind
+ *  is non-zero every heartbeat re-sends it — the same replace-not-merge contract
+ *  the server applies to `dispatch_suppression_counts`. In-memory like the other
+ *  dispatch trackers: one manager owns a ticket's triggers and losing the count
+ *  on restart is harmless. */
+export class DispatchBlockTracker {
+  #counts = new Map<string, number>();
+
+  /** Record one dispatch block of `kind`. A blank / missing kind is ignored so a
+   *  caller never has to guard the call site. */
+  record(kind: string | undefined | null): void {
+    const k = (kind ?? '').trim();
+    if (!k) return;
+    this.#counts.set(k, (this.#counts.get(k) ?? 0) + 1);
+  }
+
+  /** Per-reason snapshot for the instance-heartbeat field. Empty object when
+   *  nothing has been blocked (so the heartbeat omits a noise field). */
+  counts(): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const [k, n] of this.#counts) if (n > 0) out[k] = n;
+    return out;
+  }
+
+  /** Total across reasons (with an arg, that reason's count). Test / observability. */
+  total(reason?: string): number {
+    if (reason) return this.#counts.get(reason) ?? 0;
+    let t = 0;
+    for (const n of this.#counts.values()) t += n;
+    return t;
+  }
+}
+
+/** One queued pool-exhaustion retry (ticket d34075b5): the raw trigger to replay
+ *  + its (ticket, role, agent) identity + backoff bookkeeping. */
+export interface PendingRetryEntry {
+  key: string;
+  raw: string;
+  ticketId: string;
+  role: string;
+  agentId: string;
+  /** How many times the queued trigger has been re-driven (backoff or wake). */
+  attempts: number;
+  /** Current backoff before the next self-scheduled attempt. */
+  delayMs: number;
+  /** Live scheduler handle for the pending attempt, or null when none is armed
+   *  (mid-attempt / just resolved). */
+  timer: unknown | null;
+  /** True while an attempt is in flight, so a concurrent wake doesn't double-fire. */
+  attempting: boolean;
+}
+
+/** Injectable timer surface so the integration harness drives the backoff
+ *  deterministically (capture the callback, fire it on demand) without real
+ *  wall-clock waits. Production uses unref'd setTimeout/clearTimeout. */
+export interface RetryScheduler {
+  set(fn: () => void, ms: number): unknown;
+  clear(handle: unknown): void;
+}
+
+const defaultRetryScheduler: RetryScheduler = {
+  set(fn, ms) {
+    const t = setTimeout(fn, ms);
+    (t as any)?.unref?.();
+    return t;
+  },
+  clear(handle) {
+    clearTimeout(handle as any);
+  },
+};
+
+export interface PendingDispatchRetryOptions {
+  /** Replay a queued trigger (wired to EventDispatcher.handleTrigger). Awaited: a
+   *  retry that recovers calls {@link PendingDispatchRetry.resolve} from inside the
+   *  replay, so by the time this settles the entry is either gone (recovered) or
+   *  still queued (re-blocked → escalate). */
+  onRetry: (raw: string) => Promise<void> | void;
+  /** Terminal give-up after the attempt bound is hit — pend for operator attention
+   *  (genuine sustained contention that no reclaim can heal). */
+  onGiveUp: (entry: PendingRetryEntry) => Promise<void> | void;
+  /** Pre-retry eligibility. `false` → the ticket left the active flow (pended /
+   *  terminal) and the queued retry is cancelled. Omitted → always eligible. A
+   *  thrown error fails OPEN (retry proceeds) so a transient REST hiccup never
+   *  abandons a live ticket. */
+  verify?: (entry: PendingRetryEntry) => Promise<boolean> | boolean;
+  scheduler?: RetryScheduler;
+  baseDelayMs?: number;
+  maxDelayMs?: number;
+  maxAttempts?: number;
+  log?: (msg: string) => void;
+}
+
+/** Manager-owned bounded-backoff retry queue for shared warm-pool `pool_exhausted`
+ *  dispatches (ticket d34075b5 review follow-up).
+ *
+ *  ── the gap it closes ──
+ *  When a shared-mode dispatch hits `pool_exhausted` and the on-demand lease
+ *  reclaim frees nothing — a leaked lease still inside its 20-min reclaim grace, or
+ *  a genuine transient cross-board contention — the legacy code aborted and left
+ *  recovery to a LUCKY server re-push. That is the exact dependency this ticket
+ *  removes. Instead the dispatcher hands the trigger here and it is re-driven
+ *  autonomously two ways: (a) a bounded exponential backoff whose later attempts
+ *  span past the reclaim grace (so the retry's OWN on-demand reclaim frees the now-
+ *  past-grace lease and recovers inline), and (b) an immediate {@link wake} the
+ *  instant a slot is KNOWN to have freed — a ticket went terminal/archived, or a
+ *  periodic/boot reconcile reclaimed a leaked lease. No server re-push needed.
+ *
+ *  ── single-flight (no twin) ──
+ *  Keyed by (ticket, role, agent) — the SAME key {@link InflightDispatchTracker.key}
+ *  reserves — so a duplicate trigger arriving while a retry is queued only refreshes
+ *  the payload; it never stacks a second timer. And the retry replays through
+ *  `handleTrigger`, which re-acquires that same authoritative reservation, so a
+ *  queued retry and a concurrent server re-push can never both spawn.
+ *
+ *  ── cancellation ──
+ *  A queued retry is dropped when the ticket leaves the active flow: proactively via
+ *  {@link cancelByTicket} on the terminal/archive/move board_update, and defensively
+ *  via the pre-retry {@link PendingDispatchRetryOptions.verify} check (which also
+ *  catches a human pend, for which there is no inbound SSE).
+ *
+ *  ── durability ──
+ *  IN-MEMORY, not restart-durable — deliberately, mirroring every other dispatch
+ *  tracker (one manager owns a ticket's triggers). On a manager restart the boot
+ *  reconcile reclaims leaked leases, the server supervisor re-pushes the trigger for
+ *  any ticket still in an active column (it did not move), and e7c87517's 24h
+ *  no-progress backstop is the ultimate net — so a lost in-flight retry self-heals
+ *  without persistence. This queue is a fast-path OVER the server's existing (slow)
+ *  re-push, not a durable replacement for it. */
+export class PendingDispatchRetry {
+  #entries = new Map<string, PendingRetryEntry>();
+  #onRetry: (raw: string) => Promise<void> | void;
+  #onGiveUp: (entry: PendingRetryEntry) => Promise<void> | void;
+  #verify: ((entry: PendingRetryEntry) => Promise<boolean> | boolean) | null;
+  #scheduler: RetryScheduler;
+  #baseDelayMs: number;
+  #maxDelayMs: number;
+  #maxAttempts: number;
+  #log: (msg: string) => void;
+
+  constructor(opts: PendingDispatchRetryOptions) {
+    this.#onRetry = opts.onRetry;
+    this.#onGiveUp = opts.onGiveUp;
+    this.#verify = opts.verify ?? null;
+    this.#scheduler = opts.scheduler ?? defaultRetryScheduler;
+    // Backoff spans the 20-min lease-reclaim grace with margin: 30s → 1 → 2 → 4 →
+    // 5 → 5 → 5 min ≈ 22.5 min across 8 attempts, then give up (pend). By the later
+    // attempts a leaked lease is past its grace, so the retry's own on-demand
+    // reclaim (inside handleTrigger) frees it and the dispatch recovers before the
+    // bound — the bound only fires for a genuinely over-subscribed pool.
+    this.#baseDelayMs = opts.baseDelayMs ?? 30_000;
+    this.#maxDelayMs = opts.maxDelayMs ?? 5 * 60_000;
+    this.#maxAttempts = opts.maxAttempts ?? 8;
+    this.#log = opts.log ?? (() => {});
+  }
+
+  /** Queue (or refresh) a pool-exhaustion retry. Returns whether a NEW entry was
+   *  created — the caller posts the one-time pool comment only then. A duplicate key
+   *  just refreshes the raw payload (freshest trigger context): no second timer, no
+   *  twin. */
+  register(meta: InflightDispatchMeta, raw: string): { created: boolean } {
+    const key = InflightDispatchTracker.key(meta.ticketId, meta.role, meta.agentId);
+    const existing = this.#entries.get(key);
+    if (existing) {
+      existing.raw = raw;
+      return { created: false };
+    }
+    const entry: PendingRetryEntry = {
+      key,
+      raw,
+      ticketId: meta.ticketId,
+      role: meta.role,
+      agentId: meta.agentId,
+      attempts: 0,
+      delayMs: this.#baseDelayMs,
+      timer: null,
+      attempting: false,
+    };
+    this.#entries.set(key, entry);
+    this.#arm(entry);
+    return { created: true };
+  }
+
+  #arm(entry: PendingRetryEntry): void {
+    if (entry.timer !== null) this.#scheduler.clear(entry.timer);
+    entry.timer = this.#scheduler.set(() => void this.#attempt(entry), entry.delayMs);
+  }
+
+  async #attempt(entry: PendingRetryEntry): Promise<void> {
+    // Cancelled/resolved before the timer fired, or a wake raced the timer while an
+    // attempt was already in flight.
+    if (!this.#entries.has(entry.key) || entry.attempting) return;
+    entry.attempting = true;
+    entry.timer = null;
+    try {
+      // Pre-retry eligibility — the ticket may have pended/terminal since we queued.
+      // Fail OPEN on a verify error (never abandon a live ticket on a REST hiccup).
+      if (this.#verify) {
+        let eligible = true;
+        try {
+          eligible = await this.#verify(entry);
+        } catch (err: any) {
+          this.#log(`[pool-retry] verify failed for ${entry.key} (proceeding): ${err?.message ?? err}`);
+          eligible = true;
+        }
+        if (!this.#entries.has(entry.key)) return; // resolved/cancelled during verify
+        if (!eligible) {
+          this.cancel(entry.key, 'ticket left the active flow (pended/terminal)');
+          return;
+        }
+      }
+      entry.attempts += 1;
+      try {
+        // handleTrigger replay: on recovery its green path calls resolve(), removing
+        // this entry; on re-block its fast-path calls register() (deduped — no-op).
+        await this.#onRetry(entry.raw);
+      } catch (err: any) {
+        this.#log(`[pool-retry] retry replay threw for ${entry.key}: ${err?.message ?? err}`);
+      }
+      if (!this.#entries.has(entry.key)) return; // recovered → resolved during the replay
+      if (entry.attempts >= this.#maxAttempts) {
+        this.#entries.delete(entry.key);
+        this.#log(
+          `[pool-retry] giving up on ${entry.key} after ${entry.attempts} attempt(s) — pending for operator`,
+        );
+        try {
+          await this.#onGiveUp(entry);
+        } catch (err: any) {
+          this.#log(`[pool-retry] give-up handler threw for ${entry.key}: ${err?.message ?? err}`);
+        }
+        return;
+      }
+      entry.delayMs = Math.min(entry.delayMs * 2, this.#maxDelayMs);
+      this.#arm(entry);
+    } finally {
+      entry.attempting = false;
+    }
+  }
+
+  /** A retry recovered (or any concurrent dispatch reached green provisioning for
+   *  this key) — drop the queued entry silently. Idempotent; a no-op when nothing
+   *  is queued (e.g. an inline-recovered first dispatch that never registered). */
+  resolve(meta: InflightDispatchMeta): void {
+    this.#drop(InflightDispatchTracker.key(meta.ticketId, meta.role, meta.agentId));
+  }
+
+  /** Cancel a queued retry by key. Idempotent. */
+  cancel(key: string, reason: string): void {
+    if (this.#drop(key)) this.#log(`[pool-retry] cancelled ${key}: ${reason}`);
+  }
+
+  /** Cancel every queued retry for a ticket (any role/agent) — the ticket left the
+   *  active flow (moved / terminal / archived). */
+  cancelByTicket(ticketId: string, reason: string): void {
+    for (const [key, e] of [...this.#entries]) {
+      if (e.ticketId === ticketId) this.cancel(key, reason);
+    }
+  }
+
+  #drop(key: string): boolean {
+    const e = this.#entries.get(key);
+    if (!e) return false;
+    if (e.timer !== null) this.#scheduler.clear(e.timer);
+    this.#entries.delete(key);
+    return true;
+  }
+
+  /** A slot is known to have freed (a ticket went terminal/archived, or a reconcile
+   *  reclaimed a leaked lease) — re-drive every queued retry NOW instead of waiting
+   *  out its backoff. Each attempt still single-flights and re-verifies, so a wake is
+   *  always safe even if the freed slot was already taken. */
+  wake(reason: string): void {
+    if (this.#entries.size === 0) return;
+    this.#log(`[pool-retry] wake (${reason}) — re-driving ${this.#entries.size} queued retry(ies)`);
+    for (const e of [...this.#entries.values()]) {
+      if (e.attempting) continue; // already running; its own tail re-arms
+      if (e.timer !== null) {
+        this.#scheduler.clear(e.timer);
+        e.timer = null;
+      }
+      void this.#attempt(e);
+    }
+  }
+
+  /** True while a retry is queued for this key. Test / observability. */
+  has(key: string): boolean {
+    return this.#entries.has(key);
+  }
+
+  /** Count of queued retries. Test / observability. */
+  size(): number {
+    return this.#entries.size;
+  }
+}
+
 /** First non-empty line of a multi-line string, trimmed. */
 export function firstLine(text: string | undefined | null): string {
   if (!text) return '';

@@ -152,6 +152,17 @@ export class EventStream {
   }
 
   /**
+   * ticket d34075b5 — re-drive any queued shared-pool `pool_exhausted` retries in
+   * the dispatcher. main.ts calls this from the periodic/boot pool-lease reconcile
+   * the moment a leaked lease is reclaimed (a slot just freed), so a starved
+   * dispatch recovers immediately instead of waiting out its backoff. Thin
+   * passthrough — the dispatcher owns the retry queue.
+   */
+  wakePoolRetries(reason: string): void {
+    this.#dispatcher.wakePoolRetries(reason);
+  }
+
+  /**
    * Force-drop the current SSE connection and reconnect immediately. Used by
    * `agent_manager_command spawn_agent` so the server-side `managedAgentIds`
    * snapshot (cached once at SSE connect — see events.controller.ts) is

@@ -217,6 +217,22 @@ export class AgentManagerController {
     const open_breaker_count = hasField('open_breaker_count') && Number.isFinite(body.open_breaker_count)
       ? Math.max(0, Math.trunc(Number(body.open_breaker_count)))
       : undefined;
+    // ticket e299c6b3 — CLI spawn-failure telemetry. update_last_error 와 동일한
+    // absent-vs-null 규율: `null` 은 "다시 정상"(마지막 에러 해소)이라는 의미이므로
+    // 보존하고, 진짜로 없는 필드만 undefined 로 남겨 upsert 의 whole-record replace
+    // 가 슬롯을 비우게 한다.
+    const spawn_failure_count = hasField('spawn_failure_count') && Number.isFinite(body.spawn_failure_count)
+      ? Math.max(0, Math.trunc(Number(body.spawn_failure_count)))
+      : undefined;
+    const last_spawn_error = hasField('last_spawn_error')
+      ? (typeof body.last_spawn_error === 'string' ? body.last_spawn_error.slice(0, 500) : null)
+      : undefined;
+    const last_spawn_error_cli = hasField('last_spawn_error_cli')
+      ? (typeof body.last_spawn_error_cli === 'string' ? body.last_spawn_error_cli.slice(0, 64) : null)
+      : undefined;
+    const last_spawn_error_at = hasField('last_spawn_error_at')
+      ? (typeof body.last_spawn_error_at === 'string' ? body.last_spawn_error_at.slice(0, 40) : null)
+      : undefined;
     // ticket 3d180f85 — per-reason dispatch-suppression counts (provision-
     // spanning twin guard). Defensive: coerce a plain {reason: count} object to
     // non-negative ints; ignore non-objects / arrays so a malformed heartbeat
@@ -238,6 +254,25 @@ export class AgentManagerController {
         if (n > 0) out[k] = n;
       }
       dispatch_suppression_counts = out;
+    }
+    // ticket d34075b5 — per-reason dispatch-BLOCK counts (worktree / push-credential
+    // preflight aborts, incl. shared-pool `pool_exhausted`). Same defensive coercion
+    // + replace-not-merge semantics as dispatch_suppression_counts above: the manager
+    // counter is cumulative (never reset), so once non-zero every heartbeat re-sends
+    // it and only a manager restart zeroes it.
+    let dispatch_block_counts: Record<string, number> | undefined;
+    if (
+      hasField('dispatch_block_counts') &&
+      body.dispatch_block_counts &&
+      typeof body.dispatch_block_counts === 'object' &&
+      !Array.isArray(body.dispatch_block_counts)
+    ) {
+      const out: Record<string, number> = {};
+      for (const [k, v] of Object.entries(body.dispatch_block_counts as Record<string, unknown>)) {
+        const n = Math.max(0, Math.trunc(Number(v) || 0));
+        if (n > 0) out[k] = n;
+      }
+      dispatch_block_counts = out;
     }
 
     // Self-heal: a manager heartbeat that authenticates with a valid apiKey
@@ -315,6 +350,11 @@ export class AgentManagerController {
       update_last_error,
       open_breaker_count,
       dispatch_suppression_counts,
+      dispatch_block_counts,
+      spawn_failure_count,
+      last_spawn_error,
+      last_spawn_error_cli,
+      last_spawn_error_at,
     });
 
     // Mark every managed agent the manager is supervising as alive. Managed
@@ -506,10 +546,24 @@ export class AgentManagerController {
     }
 
     const detail = typeof body?.detail === 'string' ? body.detail.slice(0, 2000) : '';
+
+    // Spawn-failure closed loop (ticket 1f750878). The manager already acks a
+    // failed spawn_agent (working_dir empty / apiKey provisioning / codex prep /
+    // pool exhausted …) with status='error' + the thrown message as `detail` —
+    // it just wasn't consumed here, so the badge silently reverted 시작 중→미시작
+    // once the 3-min starting marker expired and the ticket-feedback debounce
+    // (sig='ok') suppressed re-surfacing for 10 min. Route the failure to the
+    // SPAWN TARGET (record.target_agent_id — NOT the manager agent_id the ack is
+    // signed with) so its lifecycle flips to `error` with the concrete reason
+    // for the 5-min start-error window, and the reason ships as lifecycle_detail.
+    if (status === 'error' && record.command === 'spawn_agent' && record.target_agent_id) {
+      this.agentStatus.markStartError(record.target_agent_id, detail || 'spawn 실패 (사유 미상)');
+    }
+
     this.logService.info(
       'AgentManager',
       `Command ack id=${command_id} status=${status} command=${record.command} agent=${callerAgentId}`,
-      { command_id, status, detail, command: record.command, agent_id: callerAgentId },
+      { command_id, status, detail, command: record.command, agent_id: callerAgentId, target_agent_id: record.target_agent_id },
     );
     return res.json({ ok: true });
   }

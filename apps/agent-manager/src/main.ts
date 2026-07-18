@@ -22,12 +22,13 @@ import { installService, uninstallService, type ServicePlatform } from './lib/se
 import { PresenceHeartbeat } from './lib/presence-heartbeat.js';
 import { InstanceHeartbeat } from './lib/instance-heartbeat.js';
 import type { WorktreeStatusEntry } from './lib/instance-heartbeat.js';
+import { spawnFailureTracker } from './lib/spawn-failure-tracker.js';
 import { EventStream } from './lib/event-stream.js';
 import { SubagentManager } from './lib/subagent-manager.js';
 import { ChatSessionManager } from './lib/chat-session-manager.js';
 import { TicketSessionManager } from './lib/ticket-session-manager.js';
 import { CircuitBreaker } from './lib/circuit-breaker.js';
-import { InflightDispatchTracker } from './lib/dispatch-preflight.js';
+import { InflightDispatchTracker, DispatchBlockTracker } from './lib/dispatch-preflight.js';
 import { uploadIfNewErrors } from './lib/error-log-uploader.js';
 import { onFlushThreshold } from './lib/event-log-recorder.js';
 import { cleanupOrphanSubagents } from './lib/orphan-cleanup.js';
@@ -464,6 +465,11 @@ async function runRuntime(
   // Created here (like circuitBreaker) so its suppression-reason metric can ride
   // the instance heartbeat, and injected into the EventDispatcher via deps.
   const inflightDispatchTracker = new InflightDispatchTracker();
+  // ticket d34075b5 — cumulative per-reason dispatch-BLOCK counter (worktree /
+  // push-credential preflight aborts, incl. shared-pool `pool_exhausted`). Created
+  // here (like inflightDispatchTracker) so its counts ride the instance heartbeat
+  // as `dispatch_block_counts`, and injected into the EventDispatcher via deps.
+  const dispatchBlockTracker = new DispatchBlockTracker();
 
   const subagentManager = new SubagentManager(config, circuitBreaker);
   // Capture the init promise so the boot-time warm-pool lease reclaim can wait
@@ -652,6 +658,13 @@ async function runRuntime(
     log(`Managed-agent rehydrate failed: ${err?.message ?? err}`);
   }
 
+  // ticket d34075b5 — on-demand warm-pool lease reclaim, invoked by the dispatcher
+  // the instant a shared-mode dispatch hits `pool_exhausted` (accelerated
+  // reconciliation). Late-bound: reconcilePoolLeasesAll is defined below (it needs
+  // the live-session snapshots), so the dispatcher gets a thunk that reads it at
+  // call time and no-ops (0 reclaimed) until it is assigned during boot.
+  let reconcilePoolLeasesAll: ((trigger: string) => Promise<number>) | undefined;
+
   const eventStream = new EventStream({
     config,
     deps: {
@@ -664,6 +677,9 @@ async function runRuntime(
       managedAgentContexts,
       worktreeManager,
       inflightDispatchTracker,
+      dispatchBlockTracker,
+      poolReclaimTrigger: () =>
+        reconcilePoolLeasesAll ? reconcilePoolLeasesAll('pool_exhausted') : Promise.resolve(0),
     },
     pluginVersion: version,
     onConnect: kickPresencePing,
@@ -731,7 +747,11 @@ async function runRuntime(
     for (const s of subagentManager._snapshot()) if (s.ticket_id) live.add(s.ticket_id);
     return live;
   };
-  const reconcilePoolLeasesAll = async (trigger: string): Promise<void> => {
+  // Assigns the late-bound holder declared above the EventStream so the
+  // dispatcher's on-demand `poolReclaimTrigger` thunk resolves to it. Returns the
+  // number of orphaned leases reclaimed so the on-demand caller (pool_exhausted
+  // fast-path) knows whether to retry provisioning inline.
+  reconcilePoolLeasesAll = async (trigger: string): Promise<number> => {
     try {
       const liveTicketIds = computeLiveTicketIds();
       let total = 0;
@@ -746,16 +766,34 @@ async function runRuntime(
       }
       if (total > 0) {
         log(`[worktree] pool reclaim (${trigger}) reclaimed ${total} orphaned lease(s)`);
+        // ticket d34075b5 (review follow-up) — a periodic/boot reconcile just freed
+        // slot(s); re-drive any queued pool_exhausted retries so a starved dispatch
+        // recovers WITHOUT a server re-push ("periodic reconcile succeeded → re-run
+        // the pending dispatch"). Skip the on-demand 'pool_exhausted' trigger: that
+        // path is the dispatcher's OWN fast-path, which already retries the freed
+        // slot inline (and waking here would just re-block on the slot it just took).
+        if (trigger !== 'pool_exhausted') {
+          eventStream.wakePoolRetries(`reconcile:${trigger}`);
+        }
       }
+      return total;
     } catch (err: any) {
       log(`[worktree] pool reclaim (${trigger}) failed: ${err?.message ?? err}`);
+      return 0;
     }
   };
-  poolReclaimTimer = setInterval(() => void reconcilePoolLeasesAll('tick'), 10 * 60 * 1000);
+  // ticket d34075b5 — reconcile cadence tightened 10 → 5 min. Combined with the
+  // dispatcher's on-demand reclaim (pool_exhausted fast-path), a leaked lease
+  // blocking a dispatch is now reclaimed within seconds rather than up to the
+  // 20-min grace + this interval. The 20-min reclaim grace itself is kept: it is
+  // load-bearing against false-reclaiming a worker still inside its provision+spawn
+  // window (a cold clone can run to the 20-min git timeout, and the /proc belt does
+  // not cover a `git clone` that runs from the manager cwd, not the slot).
+  poolReclaimTimer = setInterval(() => void reconcilePoolLeasesAll!('tick'), 5 * 60 * 1000);
   poolReclaimTimer.unref?.();
   // Boot reconcile — wait on the subagent reconcile so a detached one-shot that
   // survived the restart is in the snapshot first (else it looks orphaned).
-  void subagentReady.then(() => reconcilePoolLeasesAll('boot'));
+  void subagentReady.then(() => reconcilePoolLeasesAll!('boot'));
 
   agentIdReady.then(async (agentId) => {
     if (!agentId) return;
@@ -795,6 +833,16 @@ async function runRuntime(
       // spanning twin guard). Rides the heartbeat exactly like open_breaker_count
       // so an operator can see suppressed-twin volume without log access.
       dispatchSuppressionCountsProvider: () => inflightDispatchTracker.suppressionCounts(),
+      // ticket d34075b5 — per-reason dispatch-BLOCK counts (worktree / push-
+      // credential preflight aborts, incl. shared-pool `pool_exhausted`). Rides the
+      // heartbeat like dispatch_suppression_counts so an operator sees a leaking /
+      // starved pool — the durable, server-visible signal for a dropped dispatch.
+      dispatchBlockCountsProvider: () => dispatchBlockTracker.counts(),
+      // ticket e299c6b3 — CLI spawn-failure 요약. 두 spawn 경로가 이 공유 tracker
+      // 에 보고하고, heartbeat 이 이를 노출해 CLI 가 5분마다 조용히 ENOENT 나는
+      // 대신 관리자 대시보드에 "degraded" 배지를 띄운다(Windows codex `.cmd` shim
+      // 회귀).
+      spawnFailureProvider: () => spawnFailureTracker.snapshot(),
       // Self-update tracker; lets the heartbeat carry latest_version +
       // update_available so the admin UI can render an Update button.
       updateChecker,

@@ -326,6 +326,10 @@ export const EVENT_TYPES: EventDefinition[] = [
         // AgentStatusService._emit. Omitted when absent so the payload stays
         // clean for any legacy emit path.
         lifecycle_state: event.lifecycle_state || undefined,
+        // Concrete error reason (ticket 1f750878) — present only when
+        // lifecycle_state==='error'; conditional-omit keeps the wire clean
+        // otherwise (the parity guard checks key existence, not value).
+        lifecycle_detail: event.lifecycle_detail || undefined,
         current_task: event.current_task
           ? {
               ticket_id: event.current_task.ticket_id,

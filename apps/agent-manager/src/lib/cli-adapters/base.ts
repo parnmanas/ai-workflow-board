@@ -258,7 +258,6 @@ export interface SessionSpec {
 export interface SpawnDescriptor {
   args: string[];
   stdio: StdioOptions;
-  shell?: boolean;
   writePrompt?: (child: ChildProcess) => void;
   needsMcpConfig?: boolean;
 }

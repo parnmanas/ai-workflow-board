@@ -98,5 +98,42 @@ test('never-started agent ticket dispatch → activity + comment + spawn_agent a
   // (req 3/4) worker marked "starting" so the agent-list badge reflects it.
   assert.equal(agentStatus.isStarting(worker.id), true, 'worker marked starting for the UI');
 
+  // ── ticket 1f750878 #1: the manager reports the spawn FAILED (pool_exhausted /
+  // working_dir / apiKey …). Before this the server only knew the command was
+  // dispatched, so the badge silently reverted 시작 중→미시작 when the 3-min marker
+  // expired. Now the /command/ack error is routed to markStartError on the SPAWN
+  // TARGET, surfacing lifecycle_state=error + the concrete reason. Drive the REAL
+  // controller ack (same code path the manager's REST ack hits).
+  const amcMod = await import('file://' + path.join(DIST_ROOT, 'modules', 'agent-manager', 'agent-manager.controller.js'));
+  const controller = app.get(amcMod.AgentManagerController);
+
+  // Capture the agent_status the failure will broadcast for the worker's badge.
+  const statuses = [];
+  const stListener = (e) => { if (e && e.agent_id === worker.id) statuses.push(e); };
+  activityEvents.on('agent_status', stListener);
+
+  const FAIL_DETAIL = 'spawn_agent: pool_exhausted (E2E)';
+  const res = {
+    statusCode: 200, body: undefined,
+    status(c) { this.statusCode = c; return this; },
+    json(b) { this.body = b; return this; },
+  };
+  await controller.commandAck(
+    { command_id: spawn.command_id, status: 'error', detail: FAIL_DETAIL },
+    // Ack signed by the supervising manager (the ledger's agent_id) so the
+    // ownership check passes — this is exactly what AgentAuthGuard resolves.
+    { currentAgentId: manager.id },
+    res,
+  );
+  await new Promise((r) => setTimeout(r, 60)); // _emitAgentById is async off the bus
+  activityEvents.removeListener('agent_status', stListener);
+
+  assert.equal(res.statusCode, 200, 'the ack was accepted');
+  assert.equal(agentStatus.isStarting(worker.id), false, 'starting marker cleared — no silent 시작 중→미시작 revert');
+  assert.equal(agentStatus.getStartError(worker.id), FAIL_DETAIL, 'server recorded the manager-side spawn-failure reason via markStartError');
+  const errStatus = statuses.find((s) => s.lifecycle_state === 'error');
+  assert.ok(errStatus, 'an agent_status with lifecycle_state=error was broadcast for the badge');
+  assert.equal(errStatus.lifecycle_detail, FAIL_DETAIL, 'the concrete failure reason ships as lifecycle_detail (구체 사유 표면화)');
+
   exitAfterTests();
 });

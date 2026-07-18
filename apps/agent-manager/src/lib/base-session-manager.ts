@@ -12,12 +12,14 @@ import { promises as fsp } from 'node:fs';
 import { existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { createInterface } from 'node:readline';
-import { spawn, type ChildProcessByStdio } from 'node:child_process';
+import { type ChildProcessByStdio } from 'node:child_process';
+import crossSpawn from 'cross-spawn';
 import type { Readable, Writable } from 'node:stream';
 import { SUBAGENTS_BASE_DIR, STOP_GRACE_MS } from './constants.js';
 import { log } from './logging.js';
 import { summarizeCliEvent } from './cli-output-summary.js';
 import { createAdapter } from './cli-adapters/index.js';
+import { spawnFailureTracker } from './spawn-failure-tracker.js';
 import {
   ADAPTER_CAPABILITIES,
   PARSE_STAGE,
@@ -606,10 +608,15 @@ export class BaseSessionManager {
           );
         }
       }
-      // See subagent-manager spawn site for why detached is POSIX-only:
-      // DETACHED_PROCESS on win32 fights with CREATE_NO_WINDOW and flashes a
-      // cmd console when the resolved binary is a .cmd/.bat shim.
-      const child = spawn(resolvedBin, descriptor.args, {
+      // raw spawn 대신 crossSpawn — Windows `.cmd`/`.bat` shim 을 인자 escape 해
+      // cmd.exe 로 실행하기 위함(ticket e299c6b3). 자세한 근거는 SubagentManager
+      // spawn 사이트 참고. 진짜 `.exe`/POSIX 바이너리엔 no-op 래퍼라 claude session
+      // 경로는 그대로다.
+      //
+      // detached 가 POSIX 전용인 이유는 subagent-manager spawn 사이트 참고:
+      // win32 의 DETACHED_PROCESS 는 CREATE_NO_WINDOW 와 충돌하며, resolved
+      // 바이너리가 .cmd/.bat shim 일 때 cmd 콘솔이 번쩍인다.
+      const child = crossSpawn(resolvedBin, descriptor.args, {
         stdio: descriptor.stdio || ['pipe', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',
         windowsHide: true,
@@ -627,12 +634,18 @@ export class BaseSessionManager {
           ...credentialEnv,
           ...adapter.harnessEnv(harness),
         },
-        shell: descriptor.shell ?? /\.(cmd|bat|ps1)$/i.test(resolvedBin),
       }) as ChildProcessByStdio<Writable, Readable, Readable>;
       child.once('error', (err: any) => {
         log(
           `${this.#logTag} spawn error: code=${err?.code || ''} cli=${adapter.cliType} bin=${resolvedBin} msg=${err?.message}`,
         );
+        // session spawn 실패도 AWB 대시보드에 노출한다(ticket e299c6b3) — one-shot
+        // subagent 경로가 보고하는 것과 같은 tracker.
+        spawnFailureTracker.record({
+          cli: adapter.cliType,
+          code: err?.code,
+          message: err?.message ?? String(err),
+        });
       });
       child.unref();
 
@@ -640,6 +653,8 @@ export class BaseSessionManager {
         if (configPath && configPathIsTemp) await fsp.unlink(configPath).catch(() => {});
         return null;
       }
+      // 살아있는 pid 는 이 CLI 의 spawn-failure 배지를 지운다(ticket e299c6b3).
+      spawnFailureTracker.recordSuccess(adapter.cliType);
       if (configPath && configPathIsTemp) {
         // Per-spawn pid sidecar so #sweep + orphan cleanup can find this
         // child by its tempfile. Skipped for the persistent agent-owned

@@ -62,7 +62,9 @@ function makeAgentStatus(StatusClass, RegistryClass, agentRows) {
   // dataSource is only touched by setCurrentTask, not by _sweep.
   const dataSource = { getRepository: () => ({ async findOne() { return null; } }) };
   const registry = new RegistryClass();
-  const service = new StatusClass(agentRepo, dataSource, noopLog, registry);
+  // connectivity + instanceRegistry (ticket 1f750878) — inert fakes so any
+  // _emit on this path falls back to status.is_online (unchanged behavior).
+  const service = new StatusClass(agentRepo, dataSource, noopLog, registry, { isReachable: () => false }, { list: () => [] });
   return { service, registry, agentRepo };
 }
 
