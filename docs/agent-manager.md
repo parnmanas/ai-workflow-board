@@ -337,11 +337,18 @@ a per-agent credential *is* set, the adapter additionally strips the
 operator-inherited auth env (`authEnvKeys`) so the host login can't silently
 shadow it.
 
-**Not the same as the red `no credential` badge.** The manager heartbeat reports
-a per-agent credential *kind* (`subscription` / `api_key` / `operator_home` /
-`missing` / `unknown`); an empty `credential_id` normally surfaces as the neutral
-`operator_home` badge ("operator HOME"), whereas the red `missing` badge means
-the host itself has no login for that CLI either. Source of truth for the
+**Not the same as the red `missing` badge.** The manager heartbeat reports a
+per-agent credential *kind* (`subscription` / `api_key` / `operator_home` /
+`missing` / `unknown`). An empty `credential_id` spawns the context as
+`operator_home` and **stays** `operator_home` on every heartbeat — the heartbeat
+preserves the spawn-time kind and does **not** probe whether the host login/env
+is actually present, so an empty credential never downgrades to `missing` even if
+the host has no login for that CLI (`agentCredentialMetaProvider` in
+`apps/agent-manager/src/main.ts`). The red `missing` badge is reserved for a
+*per-agent* credential that has gone away: a context spawned as `subscription`
+whose on-disk OAuth file has since disappeared. So `missing` never describes an
+empty `credential_id`; a host login that is genuinely absent instead surfaces as
+failing turns / token-expiry flags, not as `missing`. Source of truth for the
 fallback behaviour is each adapter's `prepareCliHome`
 (`apps/agent-manager/src/lib/cli-adapters/{claude,codex,deepseek,antigravity}.ts`);
 the admin-UI copy shown in the credential picker lives in

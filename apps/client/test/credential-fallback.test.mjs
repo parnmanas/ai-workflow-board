@@ -16,16 +16,32 @@ import assert from 'node:assert/strict';
 
 import { credentialFallbackCopy } from '../src/utils/credentialFallback.ts';
 
-// ─── 1. 반오판 방지 불변식 — 모든 어댑터 문구는 "인증 미설정 아님"을 밝힌다 ───────
+// ─── 1. 반오판 방지 불변식 — 공란은 "정상 fallback 설정"이되 인증 가용성 단정 금지 ──
 //
-// 이 티켓의 존재 이유. 어떤 어댑터든 공란 fallback 설명은 "valid setup, not
-// missing auth" 프레이밍을 담아야 한다(이 문장을 지우면 반오판이 재발한다).
+// 이 티켓의 존재 이유. 어떤 어댑터든 공란 fallback 설명은 (a) "공란 = per-agent
+// credential 미부착(정상 fallback 설정)이지 그 자체가 인증 실패 아님" 프레이밍을
+// 담아야 한다(이 문장을 지우면 반오판이 재발한다). 동시에 (b) 공란이 실제 인증
+// 가용성까지 보장한다고 과잉 단정하면 안 된다 — host 파일/env 가 없으면 auth 는
+// 여전히 실패하므로, 문구는 host credential 이 "실제로 존재해야 함"을 함께 밝힌다.
+// (리뷰 지적: 예전 "not missing auth" 단정이 host credential 부재 가능성을 오인시킴.)
 
 for (const cli of ['claude', 'codex', 'deepseek', 'antigravity', 'custom', 'unknown-future-cli']) {
-  test(`meaning: ${cli} → "not missing auth" 프레이밍 포함`, () => {
+  test(`meaning: ${cli} → "정상 fallback 설정" 프레이밍 포함`, () => {
     const { meaning } = credentialFallbackCopy(cli);
-    assert.match(meaning, /not missing auth/i, `${cli} meaning 이 반오판 방지 문구를 담아야 함`);
-    assert.match(meaning, /valid setup/i);
+    assert.match(meaning, /valid fallback configuration/i, `${cli} meaning 이 반오판 방지 문구를 담아야 함`);
+    assert.match(meaning, /not a per-agent credential gap/i);
+  });
+  test(`meaning: ${cli} → 인증 가용성은 host credential 존재에 달렸음을 명시(과잉단정 금지)`, () => {
+    const { meaning } = credentialFallbackCopy(cli);
+    // 설정 의미(fallback 경로 선택)와 실제 인증 가용성을 구분한다: 공란이 auth
+    // 존재를 보장한다고 오인시키면 안 됨.
+    assert.match(
+      meaning,
+      /authentication still requires/i,
+      `${cli} meaning 은 host credential/env 가 실제로 존재해야 함을 밝혀야 함`,
+    );
+    // 예전의 과잉 단정 문구가 되살아나지 않도록 고정.
+    assert.doesNotMatch(meaning, /not missing auth/i);
   });
   test(`optionLabel: ${cli} → "None" 으로 시작(빈 옵션 규약)`, () => {
     const { optionLabel } = credentialFallbackCopy(cli);

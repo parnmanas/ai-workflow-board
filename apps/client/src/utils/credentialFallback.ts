@@ -23,8 +23,10 @@ export interface CredentialFallbackCopy {
   /** credential <select> 의 빈 "None" 옵션 라벨 — 어댑터별로 무엇을 쓰는지 명시. */
   optionLabel: string;
   /**
-   * 필드 아래 도움말 한 문장. "공란은 정상 설정이지 인증 미설정이 아니다"를
-   * 먼저 밝히고, 해당 어댑터가 실제로 무엇으로 fallback 하는지 설명한다.
+   * 필드 아래 도움말 한 문장. "공란은 per-agent credential 을 안 붙인 정상 설정
+   * (호스트 fallback 경로 선택)이지 그 자체가 인증 실패가 아니다"를 먼저 밝히되,
+   * 공란이 인증 가용성을 보장하지는 않는다는 점(해당 host 파일/env 가 실제로
+   * 존재해야 함)까지 함께 밝힌다. 설정 의미와 실제 인증 가용성을 구분한다.
    */
   meaning: string;
 }
@@ -36,22 +38,22 @@ const FALLBACK_BY_CLI: Record<string, CredentialFallbackCopy> = {
   claude: {
     optionLabel: 'None — use the host Claude CLI login (claude login)',
     meaning:
-      'Leaving this empty is a valid setup, not missing auth: the manager reuses the host Claude CLI login — the claude login credential at ~/.claude/.credentials.json (a.k.a. "operator HOME") on the manager host — on every spawn.',
+      'Leaving this empty is a valid fallback configuration, not a per-agent credential gap: the manager points this agent at the host Claude CLI login — the claude login credential at ~/.claude/.credentials.json (a.k.a. "operator HOME") on the manager host — on every spawn. Authentication still requires that host login to actually exist; if it is absent the adapter injects no auth and turns fail.',
   },
   codex: {
     optionLabel: 'None — use the host Codex CLI login (codex login)',
     meaning:
-      'Leaving this empty is a valid setup, not missing auth: the manager reuses the host Codex CLI login — the codex login credential at ~/.codex/auth.json (a.k.a. "operator HOME") on the manager host — on every spawn.',
+      'Leaving this empty is a valid fallback configuration, not a per-agent credential gap: the manager points this agent at the host Codex CLI login — the codex login credential at ~/.codex/auth.json (a.k.a. "operator HOME") on the manager host — on every spawn. Authentication still requires that host login to actually exist; if it is absent the adapter injects no auth and turns fail.',
   },
   deepseek: {
     optionLabel: 'None — use the host DEEPSEEK_API_KEY env',
     meaning:
-      'Leaving this empty is a valid setup, not missing auth: the manager falls back to the DEEPSEEK_API_KEY (and optional DEEPSEEK_BASE_URL / DEEPSEEK_MODEL) shell environment on the manager host on every spawn.',
+      'Leaving this empty is a valid fallback configuration, not a per-agent credential gap: the manager falls back to the DEEPSEEK_API_KEY (and optional DEEPSEEK_BASE_URL / DEEPSEEK_MODEL) shell environment on the manager host on every spawn. Authentication still requires DEEPSEEK_API_KEY to actually be set in that environment; if it is unset no key is injected and turns fail.',
   },
   antigravity: {
     optionLabel: 'None — use the host GEMINI_API_KEY env',
     meaning:
-      'Leaving this empty is a valid setup, not missing auth: the manager falls back to the GEMINI_API_KEY / GOOGLE_API_KEY shell environment on the manager host on every spawn.',
+      'Leaving this empty is a valid fallback configuration, not a per-agent credential gap: the manager falls back to the GEMINI_API_KEY / GOOGLE_API_KEY shell environment on the manager host on every spawn. Authentication still requires that env var to actually be set on the host; if it is unset no key is injected and turns fail.',
   },
 };
 
@@ -59,7 +61,7 @@ const FALLBACK_BY_CLI: Record<string, CredentialFallbackCopy> = {
 const GENERIC_FALLBACK: CredentialFallbackCopy = {
   optionLabel: 'None — use the operator login on the manager host',
   meaning:
-    'Leaving this empty is a valid setup, not missing auth: the manager falls back to the operator login stored on the manager host ("operator HOME") on every spawn.',
+    'Leaving this empty is a valid fallback configuration, not a per-agent credential gap: the manager falls back to the operator login stored on the manager host ("operator HOME") on every spawn. Authentication still requires that host credential to actually exist.',
 };
 
 /**
