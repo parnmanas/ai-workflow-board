@@ -39,6 +39,13 @@ const REFRESH_FALLBACK_MS = 15_000;
 const RECENT_ERROR_WINDOW_MS = 10 * 60_000;
 
 function degradedReason(inst: AgentManagerInstance): string | null {
+  // 아예 실행조차 못 하는 CLI 가 가장 심각한 degraded 상태 — 먼저 노출한다
+  // (ticket e299c6b3). 매니저는 해당 CLI 가 다시 정상 spawn 되면 last_spawn_error
+  // 를 null 로 지우므로, 회복된 호스트는 여기서 사라진다.
+  if (inst.last_spawn_error) {
+    const cli = inst.last_spawn_error_cli ? `${inst.last_spawn_error_cli} ` : '';
+    return `${cli}spawn failing: ${inst.last_spawn_error}`;
+  }
   const breakerCount = inst.open_breaker_count ?? 0;
   const errorAt = inst.last_error_upload_at ? new Date(inst.last_error_upload_at).getTime() : 0;
   const recentError = Number.isFinite(errorAt) && errorAt > 0 && Date.now() - errorAt <= RECENT_ERROR_WINDOW_MS;

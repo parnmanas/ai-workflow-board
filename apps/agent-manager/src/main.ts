@@ -22,6 +22,7 @@ import { installService, uninstallService, type ServicePlatform } from './lib/se
 import { PresenceHeartbeat } from './lib/presence-heartbeat.js';
 import { InstanceHeartbeat } from './lib/instance-heartbeat.js';
 import type { WorktreeStatusEntry } from './lib/instance-heartbeat.js';
+import { spawnFailureTracker } from './lib/spawn-failure-tracker.js';
 import { EventStream } from './lib/event-stream.js';
 import { SubagentManager } from './lib/subagent-manager.js';
 import { ChatSessionManager } from './lib/chat-session-manager.js';
@@ -837,6 +838,11 @@ async function runRuntime(
       // heartbeat like dispatch_suppression_counts so an operator sees a leaking /
       // starved pool — the durable, server-visible signal for a dropped dispatch.
       dispatchBlockCountsProvider: () => dispatchBlockTracker.counts(),
+      // ticket e299c6b3 — CLI spawn-failure 요약. 두 spawn 경로가 이 공유 tracker
+      // 에 보고하고, heartbeat 이 이를 노출해 CLI 가 5분마다 조용히 ENOENT 나는
+      // 대신 관리자 대시보드에 "degraded" 배지를 띄운다(Windows codex `.cmd` shim
+      // 회귀).
+      spawnFailureProvider: () => spawnFailureTracker.snapshot(),
       // Self-update tracker; lets the heartbeat carry latest_version +
       // update_available so the admin UI can render an Update button.
       updateChecker,

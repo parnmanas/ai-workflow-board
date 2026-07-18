@@ -1841,6 +1841,14 @@ export interface AgentManagerInstance {
    *  Unlike dispatch_suppression_counts this IS a degraded-state signal — a dropped
    *  dispatch — so `degradedReason` surfaces it (esp. shared-pool exhaustion). */
   dispatch_block_counts?: Record<string, number>;
+  /** ticket e299c6b3 — CLI spawn-failure telemetry. spawn_failure_count 는 부팅
+   *  이후 monotonic 총계, last_spawn_error* 는 가장 최근의 미해소 실패를 기술한다
+   *  (해당 CLI 가 다시 spawn 되면 null). null 이 아닌 last_spawn_error 는
+   *  degraded-state 신호다(degradedReason 참고). */
+  spawn_failure_count?: number;
+  last_spawn_error?: string | null;
+  last_spawn_error_cli?: string | null;
+  last_spawn_error_at?: string | null;
   /** Latest error-log upload among the manager identity and its managed agents. */
   last_error_upload_at?: string | null;
 }

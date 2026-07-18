@@ -217,6 +217,22 @@ export class AgentManagerController {
     const open_breaker_count = hasField('open_breaker_count') && Number.isFinite(body.open_breaker_count)
       ? Math.max(0, Math.trunc(Number(body.open_breaker_count)))
       : undefined;
+    // ticket e299c6b3 — CLI spawn-failure telemetry. update_last_error 와 동일한
+    // absent-vs-null 규율: `null` 은 "다시 정상"(마지막 에러 해소)이라는 의미이므로
+    // 보존하고, 진짜로 없는 필드만 undefined 로 남겨 upsert 의 whole-record replace
+    // 가 슬롯을 비우게 한다.
+    const spawn_failure_count = hasField('spawn_failure_count') && Number.isFinite(body.spawn_failure_count)
+      ? Math.max(0, Math.trunc(Number(body.spawn_failure_count)))
+      : undefined;
+    const last_spawn_error = hasField('last_spawn_error')
+      ? (typeof body.last_spawn_error === 'string' ? body.last_spawn_error.slice(0, 500) : null)
+      : undefined;
+    const last_spawn_error_cli = hasField('last_spawn_error_cli')
+      ? (typeof body.last_spawn_error_cli === 'string' ? body.last_spawn_error_cli.slice(0, 64) : null)
+      : undefined;
+    const last_spawn_error_at = hasField('last_spawn_error_at')
+      ? (typeof body.last_spawn_error_at === 'string' ? body.last_spawn_error_at.slice(0, 40) : null)
+      : undefined;
     // ticket 3d180f85 — per-reason dispatch-suppression counts (provision-
     // spanning twin guard). Defensive: coerce a plain {reason: count} object to
     // non-negative ints; ignore non-objects / arrays so a malformed heartbeat
@@ -335,6 +351,10 @@ export class AgentManagerController {
       open_breaker_count,
       dispatch_suppression_counts,
       dispatch_block_counts,
+      spawn_failure_count,
+      last_spawn_error,
+      last_spawn_error_cli,
+      last_spawn_error_at,
     });
 
     // Mark every managed agent the manager is supervising as alive. Managed

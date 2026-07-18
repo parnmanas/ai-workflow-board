@@ -21,6 +21,7 @@ import { HEARTBEAT_INTERVAL_MS, REQUEST_TIMEOUT_MS } from './constants.js';
 import { log } from './logging.js';
 import type { AwbConfig } from './rest.js';
 import type { UpdateChecker } from './self-update.js';
+import type { SpawnFailureSnapshot } from './spawn-failure-tracker.js';
 
 export type InstanceMode = 'manager';
 
@@ -69,6 +70,11 @@ export interface InstanceMeta {
   // durable, server-visible signal for a dropped dispatch. Provider so the
   // heartbeat reflects live in-memory counts, like dispatchSuppressionCountsProvider.
   dispatchBlockCountsProvider?: (() => Record<string, number>) | null;
+  // 매 tick 의 CLI spawn-failure 요약(ticket e299c6b3). provider 라서 heartbeat 이
+  // 항상 live in-memory 상태를 반영한다. CLI 가 실행 못 할 때(예: 해소 안 된
+  // Windows `.cmd` shim 의 codex ENOENT) 관리자 대시보드에 "degraded" 배지를
+  // 렌더하는 REST-only additive 필드.
+  spawnFailureProvider?: (() => SpawnFailureSnapshot) | null;
 }
 
 /** Tiny duck-typed read-only snapshot of ManagedAgentRegistry. */
@@ -175,6 +181,14 @@ export interface InstanceHeartbeatPayload {
   // push-credential preflight gate (incl. shared-pool 'worktree:pool_exhausted').
   // Omitted when nothing has been blocked.
   dispatch_block_counts?: Record<string, number>;
+  // ticket e299c6b3 — CLI spawn-failure telemetry(REST-only, open_breaker_count
+  // 과 동일 방식). spawn_failure_count 는 부팅 이후 monotonic 총계이고,
+  // last_spawn_error* 3종은 가장 최근의 미해소 실패를 기술하며 해당 CLI 가 다시
+  // 정상 spawn 되면 null 로 지워진다.
+  spawn_failure_count?: number;
+  last_spawn_error?: string | null;
+  last_spawn_error_cli?: string | null;
+  last_spawn_error_at?: string | null;
 }
 
 export class InstanceHeartbeat {
@@ -205,6 +219,7 @@ export class InstanceHeartbeat {
     const openBreakerCountProvider = meta?.openBreakerCountProvider ?? null;
     const dispatchSuppressionCountsProvider = meta?.dispatchSuppressionCountsProvider ?? null;
     const dispatchBlockCountsProvider = meta?.dispatchBlockCountsProvider ?? null;
+    const spawnFailureProvider = meta?.spawnFailureProvider ?? null;
     this.#payloadFactory = async () => {
       const agentIds = managedSnapshot ? managedSnapshot.liveAgentIds() : [];
       const workingDirs = managedSnapshot ? managedSnapshot.workingDirs() : [];
@@ -239,6 +254,18 @@ export class InstanceHeartbeat {
       } catch (err: any) {
         log(`Instance heartbeat: dispatch-block provider failed: ${err?.message ?? err}`);
         dispatchBlockCounts = {};
+      }
+      // 같은 best-effort 계약: throw 하는 spawn-failure provider 도 heartbeat 을
+      // 절대 막지 못한다. null snapshot 은 필드를 스킵하고(구 서버는 어차피 무시),
+      // 유효하면 count 포함해 항상 실어 보낸다.
+      let spawnFailure: SpawnFailureSnapshot | null = null;
+      if (spawnFailureProvider) {
+        try {
+          spawnFailure = spawnFailureProvider();
+        } catch (err: any) {
+          log(`Instance heartbeat: spawn-failure provider failed: ${err?.message ?? err}`);
+          spawnFailure = null;
+        }
       }
       // Best-effort: a provider that throws should never wedge the
       // heartbeat. Treat any failure as "no credentials this tick" and
@@ -289,6 +316,14 @@ export class InstanceHeartbeat {
           : {}),
         ...(dispatchBlockCountsProvider && Object.keys(dispatchBlockCounts).length > 0
           ? { dispatch_block_counts: dispatchBlockCounts }
+          : {}),
+        ...(spawnFailure
+          ? {
+              spawn_failure_count: spawnFailure.spawn_failure_count,
+              last_spawn_error: spawnFailure.last_spawn_error,
+              last_spawn_error_cli: spawnFailure.last_spawn_error_cli,
+              last_spawn_error_at: spawnFailure.last_spawn_error_at,
+            }
           : {}),
         ...(updateStatus
           ? {

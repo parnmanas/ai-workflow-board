@@ -83,6 +83,14 @@ export interface InstanceRecord {
   // starvation was previously invisible until e7c87517's 24h no-progress backstop).
   // Auto-served by the GET /api/admin/agent-manager/instances `{ ...inst }` spread.
   dispatch_block_counts?: Record<string, number>;
+  // ticket e299c6b3 — CLI spawn-failure telemetry. spawn_failure_count 는 부팅
+  // 이후 monotonic 총계, last_spawn_error* 3종은 가장 최근의 미해소 실패를 기술한다
+  // (해당 CLI 가 다시 spawn 되면 null). 관리자 대시보드 "degraded" 배지를 구동하며,
+  // `{ ...inst }` spread 로 자동 serve 된다.
+  spawn_failure_count?: number;
+  last_spawn_error?: string | null;
+  last_spawn_error_cli?: string | null;
+  last_spawn_error_at?: string | null;
 }
 
 /**

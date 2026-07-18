@@ -13,7 +13,8 @@ import { promises as fsp } from 'node:fs';
 import { existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { createInterface } from 'node:readline';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { type ChildProcess } from 'node:child_process';
+import crossSpawn from 'cross-spawn';
 import {
   SUBAGENTS_BASE_DIR,
   SUBAGENTS_PERSIST_PATH,
@@ -23,6 +24,7 @@ import {
 } from './constants.js';
 import { log } from './logging.js';
 import { createAdapter } from './cli-adapters/index.js';
+import { spawnFailureTracker } from './spawn-failure-tracker.js';
 import {
   ADAPTER_CAPABILITIES,
   type CliAdapter,
@@ -654,14 +656,19 @@ export class SubagentManager implements SubagentManagerContract {
           );
         }
       }
-      // detached on Windows is incompatible with windowsHide: DETACHED_PROCESS
-      // (set by node when detached: true on win32) is mutually exclusive with
-      // CREATE_NO_WINDOW, so the cmd.exe shell that wraps .cmd/.bat targets
-      // ends up calling AllocConsole() and briefly flashes a console. Windows
-      // children outlive the parent by default, so detached buys us nothing
-      // there; keep it on POSIX where it puts the child in a new process
-      // group and shields it from terminal SIGHUP.
-      const child = spawn(resolvedBin, descriptor.args, {
+      // raw child_process.spawn 대신 crossSpawn 을 쓴다 — Windows npm `.cmd`/`.bat`
+      // shim 을 cmd.exe 로, 인자를 PROPERLY ESCAPED 해 실행하기 위함(ticket
+      // e299c6b3). bare spawn() 은 `.cmd` 를 exec 못 해 ENOENT, `shell:true` 는
+      // 인자를 escape 없이 이어붙여(DEP0190) codex 의 inline TOML `-c` attribution
+      // 인자를 망가뜨린다. 진짜 `.exe`/POSIX 바이너리엔 no-op 래퍼라 claude 경로는
+      // 그대로다.
+      //
+      // Windows 에서 detached 는 windowsHide 와 호환되지 않는다: detached: true 가
+      // win32 에서 켜는 DETACHED_PROCESS 는 CREATE_NO_WINDOW 와 상호배타적이라,
+      // cmd.exe shim 래퍼가 AllocConsole() 을 호출해 콘솔이 잠깐 번쩍인다. Windows
+      // 자식은 기본적으로 부모보다 오래 사니 detached 는 이득이 없다. POSIX 에서만
+      // 켜서 자식을 새 프로세스 그룹에 두고 터미널 SIGHUP 으로부터 보호한다.
+      const child = crossSpawn(resolvedBin, descriptor.args, {
         stdio: descriptor.stdio || ['ignore', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',
         windowsHide: true,
@@ -680,12 +687,19 @@ export class SubagentManager implements SubagentManagerContract {
           ...credentialEnv,
           ...adapter.harnessEnv(harness),
         },
-        shell: descriptor.shell ?? /\.(cmd|bat|ps1)$/i.test(resolvedBin),
       });
       child.once('error', (err: any) => {
         log(
           `Subagent spawn error: code=${err?.code || ''} cli=${adapter.cliType} bin=${resolvedBin} msg=${err?.message}`,
         );
+        // 실패를 AWB 대시보드에 노출한다(ticket e299c6b3) — 실행 못 하는 CLI
+        // (예: 해소 안 된 Windows shim 의 codex ENOENT)가 5분마다 조용히 루프
+        // 도는 걸 멈추게 한다.
+        spawnFailureTracker.record({
+          cli: adapter.cliType,
+          code: err?.code,
+          message: err?.message ?? String(err),
+        });
       });
       child.unref();
 
@@ -701,6 +715,10 @@ export class SubagentManager implements SubagentManagerContract {
         this.#map.delete(reservationId);
         return { spawned: false, reason: 'spawn_failed' };
       }
+
+      // 살아있는 pid 는 CLI 가 떴다는 뜻 — 다음 heartbeat 에서 이 CLI 의 이전
+      // spawn-failure 배지를 지운다(ticket e299c6b3).
+      spawnFailureTracker.recordSuccess(adapter.cliType);
 
       if (typeof descriptor.writePrompt === 'function') {
         try {
