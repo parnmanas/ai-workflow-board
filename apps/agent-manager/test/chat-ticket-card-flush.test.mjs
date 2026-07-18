@@ -93,6 +93,26 @@ test('21 successful ticket actions in one turn → 2 cards (20 + 1), every id ca
   }
 });
 
+test('201 successful ticket actions → 11 cards (20×10 + 1), all 201 ids carded (no per-turn ceiling)', async () => {
+  // 5th-review fix: the previous tip capped the turn at TICKET_REFS_MAX_CARD_MESSAGES = 10
+  // cards and dropped the remainder past 200. This drives ceiling+1 (201) refs and proves
+  // EVERY chunk is now emitted — 200 refs fill 10 full cards and the 201st forces an 11th.
+  const mgr = new ChatSessionManager(makeConfig());
+  const sess = makeSess();
+  driveTurn(mgr, sess, Array.from({ length: 201 }, (_, i) => createAction(`big-${i}`)));
+  await settle();
+
+  const cards = cardPosts();
+  assert.equal(cards.length, 11, 'the 201st action forces an 11th card — the old ceiling dropped it');
+  const lens = cards.map((c) => c.body.metadata.ticket_refs.length).sort((a, b) => b - a);
+  assert.deepEqual(lens, [20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 1], '201 refs chunked 20×10 + 1');
+
+  const ids = cards.flatMap((c) => c.body.metadata.ticket_refs.map((r) => r.ticket_id));
+  assert.equal(ids.length, 201, 'no ref dropped beyond the old 200-ref ceiling');
+  assert.equal(new Set(ids).size, 201, 'all 201 distinct ticket_ids survive the split');
+  for (let i = 0; i < 201; i++) assert.ok(ids.includes(`big-${i}`), `big-${i} carded`);
+});
+
 test('the common case (≤ per-message bound) still emits exactly one coalesced card', async () => {
   const mgr = new ChatSessionManager(makeConfig());
   const sess = makeSess();

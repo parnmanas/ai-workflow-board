@@ -88,13 +88,6 @@ const PROGRESS_SUMMARY_MAX = 80;
  *  with the server's per-message MAX_TICKET_REFS (chat-rooms/room-messaging.service.ts)
  *  so every chunk survives the sanitizer whole. */
 const TICKET_REFS_PER_MESSAGE = 20;
-/** Anti-runaway ceiling on how many card MESSAGES one turn may emit (each carrying
- *  ≤TICKET_REFS_PER_MESSAGE refs). A turn with more successful ticket actions than
- *  PER_MESSAGE × this is pathological; the overflow is LOGGED, never silently dropped
- *  — the pre-fix code truncated everything past 20 in a single message, breaking
- *  acceptance #1 ("누락 없이"). At 10 messages this is a 200-ref headroom, far above
- *  any real turn. */
-const TICKET_REFS_MAX_CARD_MESSAGES = 10;
 /** Bound on the per-manager ticket_id→title cache learned from tool results. */
 const TICKET_TITLE_CACHE_MAX = 500;
 
@@ -851,10 +844,10 @@ export class ChatSessionManager
   }
 
   /** Append one captured ref to the turn's coalesced set, collapsing duplicate
-   *  (action, ticket_id) pairs to a single card. The per-turn VOLUME is bounded at
-   *  flush time (#flushTicketRefs chunks into ≤TICKET_REFS_MAX_CARD_MESSAGES messages),
-   *  NOT here — so no successful action is dropped before it can be carded. The old
-   *  hard cap here silently discarded every ref past 20, which broke "누락 없이". */
+   *  (action, ticket_id) pairs to a single card. No volume cap here OR at flush time —
+   *  #flushTicketRefs splits the set into ≤TICKET_REFS_PER_MESSAGE-ref chunks and emits
+   *  ALL of them, so no successful action is ever dropped before it can be carded. The
+   *  old hard cap here silently discarded every ref past 20, which broke "누락 없이". */
   #pushCapturedRef(pid: number, ref: TicketRef): void {
     const refs = this.#capturedTicketRefs.get(pid) ?? [];
     if (refs.some((r) => r.action === ref.action && r.ticket_id === ref.ticket_id)) return;
@@ -880,18 +873,12 @@ export class ChatSessionManager
 
     const cfg = { ...this._config, apiKey: sess._effectiveApiKey || this._config.apiKey };
     // Split into ≤TICKET_REFS_PER_MESSAGE-ref chunks so each survives the server
-    // sanitizer whole. An anti-runaway ceiling caps the message count; a turn past it
-    // is pathological and its remainder is LOGGED, never silently dropped.
-    let chunks = chunkTicketRefs(refs, TICKET_REFS_PER_MESSAGE);
-    if (chunks.length > TICKET_REFS_MAX_CARD_MESSAGES) {
-      const dropped = refs.length - TICKET_REFS_MAX_CARD_MESSAGES * TICKET_REFS_PER_MESSAGE;
-      log(
-        `[chat-session] pid=${sess.pid} produced ${refs.length} ticket-action refs ` +
-          `(${chunks.length} cards); emitting the first ${TICKET_REFS_MAX_CARD_MESSAGES} ` +
-          `and dropping ${dropped} beyond the per-turn ceiling`,
-      );
-      chunks = chunks.slice(0, TICKET_REFS_MAX_CARD_MESSAGES);
-    }
+    // sanitizer whole, then emit EVERY chunk — no message-count ceiling. A hard cap
+    // here (even one that logs) would drop successful refs past it, breaking acceptance
+    // #1 ("누락 없이"). The turn itself already bounds the volume: refs are deduped by
+    // (action, ticket_id) and only successful tracked mutations are captured, so the
+    // chunk count tracks real actions, not runaway input.
+    const chunks = chunkTicketRefs(refs, TICKET_REFS_PER_MESSAGE);
     // Fire-and-forget per chunk — postChatRoomMessage swallows + logs errors, so a
     // failed card post never blocks stdout parsing. type defaults to 'message'
     // (persistent, included in history replay); metadata carries that chunk's refs.
