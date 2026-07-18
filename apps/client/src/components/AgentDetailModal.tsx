@@ -8,6 +8,7 @@ import { useConfirm } from '../contexts/ConfirmContext';
 import type { Agent, AgentDetail, ActivityRow, AgentLiveSession, AgentManagerInstance, Credential, AgentCurrentTask } from '../types';
 import { tokens } from '../tokens';
 import { formatAgentDisplayName } from '../utils/agentName';
+import { credentialFallbackCopy } from '../utils/credentialFallback';
 import AgentFileBrowser from './AgentFileBrowser';
 import AgentSubagentsPanel from './AgentSubagentsPanel';
 import AgentMoveToWorkspaceSection from './AgentMoveToWorkspaceSection';
@@ -977,7 +978,7 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
                   <div style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', wordBreak: 'break-all' }}>
                     {(detail as any).credential_id
                       ? (credentialName || (detail as any).credential_id)
-                      : <span style={{ color: tokens.colors.textMuted }}>None - fall back to operator HOME</span>}
+                      : <span style={{ color: tokens.colors.textMuted }} title={credentialFallbackCopy(detail.type).meaning}>{credentialFallbackCopy(detail.type).optionLabel}</span>}
                   </div>
                 </div>
                 {/* Lifecycle controls — Start/Stop/Restart + maintenance

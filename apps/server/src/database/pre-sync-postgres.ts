@@ -85,6 +85,10 @@
 import 'reflect-metadata';
 import { Client } from 'pg';
 import { getMetadataArgsStorage } from 'typeorm';
+import {
+  DISPATCH_INTENTS_TABLE,
+  DEDUP_OPEN_DISPATCH_INTENTS_SQL,
+} from './dispatch-intent-dedup';
 // Pulling the entity barrel forces every @Entity / @Column decorator to
 // run so getMetadataArgsStorage() returns a populated index. Without
 // this import, discovery below returns zero columns.
@@ -427,6 +431,7 @@ export async function preSyncPostgres(): Promise<void> {
   let uuidAligned = 0;
   let rowsBackfilled = 0;
   let rowsDeleted = 0;
+  let intentsDeduped = 0;
 
   try {
     await client.query('BEGIN');
@@ -531,6 +536,25 @@ export async function preSyncPostgres(): Promise<void> {
       }
     }
 
+    // 6. Pre-index repair for the durable dispatch outbox (ticket 3c3b17a3).
+    //    The partial UNIQUE index on dispatch_intents (ticket_id, role) WHERE
+    //    status != 'resolved' is created by synchronize right after this pre-sync
+    //    returns. If a pre-fix (non-atomic find-then-insert) DB already holds two
+    //    open rows for the same (ticket, role), that CREATE UNIQUE INDEX fails and
+    //    aborts boot. Deterministically resolve the duplicate open rows first,
+    //    keeping the _findOpen-canonical survivor (oldest by created_at, id). No-op
+    //    on a clean DB. See dispatch-intent-dedup.ts. Guarded on table existence —
+    //    a fresh DB (table not yet synchronized) skips it.
+    if (await tableExists(client, DISPATCH_INTENTS_TABLE)) {
+      const r = await client.query(DEDUP_OPEN_DISPATCH_INTENTS_SQL);
+      intentsDeduped = r.rowCount ?? 0;
+      if (intentsDeduped > 0) {
+        logLine(
+          `${DISPATCH_INTENTS_TABLE}: resolved ${intentsDeduped} duplicate open intent(s) before unique-index sync`,
+        );
+      }
+    }
+
     await client.query('COMMIT');
   } catch (err: any) {
     await client.query('ROLLBACK').catch(() => {});
@@ -545,6 +569,6 @@ export async function preSyncPostgres(): Promise<void> {
   logLine(
     `done in ${Date.now() - startedAt}ms ` +
       `(fk-dropped=${fksDropped}, uuid-cast=${uuidCast}, uuid-aligned=${uuidAligned}, ` +
-      `rows-backfilled=${rowsBackfilled}, rows-deleted=${rowsDeleted})`,
+      `rows-backfilled=${rowsBackfilled}, rows-deleted=${rowsDeleted}, intents-deduped=${intentsDeduped})`,
   );
 }

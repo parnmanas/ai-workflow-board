@@ -5,6 +5,7 @@ import type { ChatAttachment, ChatRoomMessageItem } from '../../types';
 import { formatClockTime, daySeparatorLabel, sameDay } from './utils/time';
 import { renderMarkdown, handleMentionAwareCopy, type MentionParticipant } from './utils/markdown';
 import { base64ToBlob, formatBytes, isImageMime, triggerBlobDownload } from './utils/attachments';
+import TicketRefCard from './TicketRefCard';
 
 // ─── Style constants (mirror ChatPage.tsx COLORS) ────────────────────────────
 
@@ -325,6 +326,25 @@ export default function MessageList({ messages, participantCount, participants =
             onCopy={handleMentionAwareCopy}
           >
             {renderMarkdown(msg.content, participants)}
+            {/* F-1 (ticket 24694916): structured ticket-action cards the
+             *  agent-manager captured from mcp__awb__* tool results. Rendered
+             *  independently of any @[ticket:...] prose token so an agent ticket
+             *  action never fails to surface a reliable, clickable card. */}
+            {Array.isArray(msg.metadata?.ticket_refs) && msg.metadata!.ticket_refs!.length > 0 && (
+              <div
+                data-ticket-refs=""
+                style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}
+              >
+                {msg.metadata!.ticket_refs!.map((ref, idx) => (
+                  <TicketRefCard
+                    key={`${ref.ticket_id}:${ref.action}:${idx}`}
+                    id={ref.ticket_id}
+                    title={ref.title || ref.ticket_id}
+                    action={ref.action}
+                  />
+                ))}
+              </div>
+            )}
             {/* Legacy inline image thumbnails (pre-attachment-surface messages). */}
             {msgImages.length > 0 && (
               <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap', justifyContent: isMe ? 'flex-end' : 'flex-start' }}>

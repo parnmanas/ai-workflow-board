@@ -5,6 +5,22 @@ agent-manager spawns each managed agent's `claude` CLI under an isolated
 never reaches the right place. This doc covers two supported re-login
 flows and when to use which.
 
+> **An empty per-agent `credential_id` does not by itself prove a missing
+> credential.** When an agent has no per-agent credential attached, the adapter
+> falls back to the login already on the **manager host** ("operator HOME") — for
+> `claude`/`codex` a host CLI login (`claude login` / `codex login`), for
+> `deepseek`/`antigravity` a host env var. This is a valid, common setup; it
+> surfaces as the neutral `operator HOME` badge, **not** the red `missing` one
+> (the heartbeat keeps it `operator_home` regardless of whether the host login/env
+> is actually there). So a blank `credential_id` is **not** in itself an auth
+> failure — but it is **not** a guarantee that the host credential exists either:
+> the two are separate questions. If that host login/env is genuinely absent, the
+> adapter simply injects no auth and turns fail (the re-login flows below fix
+> that). The per-adapter fallback table is in
+> [`docs/agent-manager.md` → "Per-agent credential fallback"](agent-manager.md#per-agent-credential-fallback-empty-credential_id).
+> Attach a per-agent credential (Methods B/C below) only when you want **isolated**
+> auth rather than the host login.
+
 Symptoms that say a re-login is overdue:
 
 - **AWB Admin → Agent Manager → Managed agents** shows a yellow/red

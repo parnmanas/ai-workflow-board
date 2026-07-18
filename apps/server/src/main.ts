@@ -10,7 +10,7 @@ import { ApiKeyService } from './services/api-key.service';
 import { DeploymentService } from './modules/deployments/deployment.service';
 import { LogService } from './services/log.service';
 import { preSyncPostgres } from './database/pre-sync-postgres';
-import { ensureSqljsDbHealthy } from './db';
+import { ensureSqljsDbHealthy, preSyncSqljsOpenIntents } from './db';
 import { applyHttpBodyParsers } from './common/http-body-parsers';
 
 async function bootstrap() {
@@ -25,6 +25,13 @@ async function bootstrap() {
   // triggers DatabaseModule's TypeOrmModule.forRoot() — which would otherwise
   // hang ~25s on a malformed file (ticket e9847153). No-op on postgres/mysql.
   await ensureSqljsDbHealthy();
+
+  // Also before NestFactory (→ TypeOrmModule.forRoot → synchronize): collapse any
+  // pre-existing duplicate OPEN dispatch_intents so the partial UNIQUE index this
+  // ticket adds can be created without CREATE UNIQUE INDEX failing on legacy dup
+  // rows and aborting boot. No-op on postgres/mysql (postgres handled in
+  // preSyncPostgres above). Ticket 3c3b17a3.
+  await preSyncSqljsOpenIntents();
 
   const app = await NestFactory.create(AppModule);
 

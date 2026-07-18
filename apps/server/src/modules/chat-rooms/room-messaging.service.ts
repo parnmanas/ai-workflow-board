@@ -17,6 +17,7 @@ import { RoomMembershipService } from './room-membership.service';
 import { resolveAgentDisplayName } from '../../utils/agent-name';
 import { projectChatAttachment } from '../mcp/shared/ticket-helpers';
 import { RunProvision } from '../../common/workspace-folder-options';
+import { ChatRoomMessageMetadata, ChatMessageTicketRef } from '../../common/types/stream-events';
 
 const CONTENT_MAX = 10000;
 
@@ -46,6 +47,46 @@ function makeError(status: number, message: string): Error & { status: number } 
   const err = new Error(message) as Error & { status: number };
   err.status = status;
   return err;
+}
+
+// F-1 (ticket 24694916): bound + shape-check the structured metadata an agent
+// (via agent-api) attaches to a chat message before it is persisted / broadcast.
+// Only a well-formed `ticket_refs` array survives; everything else is dropped so
+// a caller can't stuff arbitrary / unbounded JSON onto the row or the SSE wire.
+const MAX_TICKET_REFS = 20;
+const TICKET_REF_STR_MAX = 300;
+
+function sanitizeChatMessageMetadata(raw: unknown): ChatRoomMessageMetadata | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const refsRaw = (raw as { ticket_refs?: unknown }).ticket_refs;
+  if (!Array.isArray(refsRaw)) return null;
+  const refs: ChatMessageTicketRef[] = [];
+  for (const r of refsRaw) {
+    if (refs.length >= MAX_TICKET_REFS) break;
+    if (!r || typeof r !== 'object') continue;
+    const rec = r as Record<string, unknown>;
+    const ticketId = typeof rec.ticket_id === 'string' ? rec.ticket_id.slice(0, TICKET_REF_STR_MAX) : '';
+    if (!ticketId) continue; // a ref with no ticket to point at is useless
+    const ref: ChatMessageTicketRef = {
+      action: typeof rec.action === 'string' ? rec.action.slice(0, TICKET_REF_STR_MAX) : '',
+      ticket_id: ticketId,
+    };
+    if (typeof rec.title === 'string' && rec.title) ref.title = rec.title.slice(0, TICKET_REF_STR_MAX);
+    refs.push(ref);
+  }
+  if (refs.length === 0) return null;
+  return { ticket_refs: refs };
+}
+
+// Parse a persisted metadata text column back into the wire object shape,
+// re-running the sanitizer so a hand-tampered row can never widen the contract.
+function parseChatMessageMetadata(raw: unknown): ChatRoomMessageMetadata | undefined {
+  if (typeof raw !== 'string' || !raw) return undefined;
+  try {
+    return sanitizeChatMessageMetadata(JSON.parse(raw)) ?? undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -180,6 +221,7 @@ export class RoomMessagingService {
           type: msg.type || 'message',
           content: msg.content,
           attachments: attachmentsByMessage.get(msg.id) || [],
+          metadata: parseChatMessageMetadata(msg.metadata),
           created_at: msg.created_at,
           updated_at: msg.updated_at,
         };
@@ -215,9 +257,14 @@ export class RoomMessagingService {
     // SYSTEM_DISPATCH_CONTENT_MAX for this send. Set ONLY by in-process server
     // dispatch (QA / security run prompts) — never plumbed through the REST / MCP
     // / agent-api send paths, so an external caller can't lift their own limit.
-    opts?: { runProvision?: RunProvision | null; bypassContentLimit?: boolean },
+    // `metadata` (ticket 24694916): structured ticket-action refs the agent-manager
+    // captured from mcp__awb__* tool results. Sanitized + bounded before persist so
+    // an external caller can't stuff arbitrary JSON onto the row / SSE wire.
+    opts?: { runProvision?: RunProvision | null; bypassContentLimit?: boolean; metadata?: ChatRoomMessageMetadata | null },
   ): Promise<any> {
     await this.membership.requireActiveParticipant(roomId, senderId, senderType);
+
+    const sanitizedMeta = sanitizeChatMessageMetadata(opts?.metadata);
 
     if (!CHAT_MESSAGE_TYPES.includes(type)) {
       throw makeError(400, `Invalid message type: ${type}`);
@@ -288,6 +335,7 @@ export class RoomMessagingService {
           type,
           content: trimmed,
           images: images && images.length > 0 ? JSON.stringify(images) : '[]',
+          metadata: sanitizedMeta ? JSON.stringify(sanitizedMeta) : null,
         }),
       );
 
@@ -378,6 +426,10 @@ export class RoomMessagingService {
       // subagent "do the work directly" instructions instead of the chat
       // "create a ticket" rule. True whenever the room carries an action_id.
       is_action_room: !!roomForName?.action_id,
+      // F-1 (ticket 24694916): forward the parsed refs on the wire (object, not the
+      // stringified column) so the event-registry map() + client get the shape
+      // directly. Omitted when absent → ordinary chat turns keep the legacy wire.
+      ...(sanitizedMeta ? { metadata: sanitizedMeta } : {}),
       ...(opts?.runProvision ? { run_provision: opts.runProvision } : {}),
     });
 
@@ -413,6 +465,7 @@ export class RoomMessagingService {
       content: savedMsg.content,
       images: savedMsg.images,
       attachments,
+      metadata: sanitizedMeta ?? undefined,
       created_at: savedMsg.created_at,
       updated_at: savedMsg.updated_at,
     };

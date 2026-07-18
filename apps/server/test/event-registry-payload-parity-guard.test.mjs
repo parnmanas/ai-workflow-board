@@ -298,6 +298,9 @@ test('chat_room_message conditional-omit fields are preserved (legacy wire-shape
   // ticket e6d32e9d: Action Run signal — omitted-when-false so ordinary chat
   // turns keep the wire byte-for-byte unchanged.
   assert.match(code, /is_action_room:\s*event\.is_action_room \? true : undefined/);
+  // F-1 (ticket 24694916): structured ticket-action refs — omitted-when-absent so
+  // ordinary chat turns keep the wire byte-for-byte unchanged.
+  assert.match(code, /metadata:\s*event\.metadata \? event\.metadata : undefined/);
 });
 
 test('agent_trigger flatten() forwards every manager-consumed field', () => {

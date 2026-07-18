@@ -19,6 +19,10 @@ import { DataSource, DataSourceOptions, EntitySubscriberInterface, EventSubscrib
 import * as path from 'path';
 import * as fs from 'fs';
 import * as entitiesBarrel from './entities';
+import {
+  DISPATCH_INTENTS_TABLE,
+  DEDUP_OPEN_DISPATCH_INTENTS_SQL,
+} from './database/dispatch-intent-dedup';
 
 const entities = Object.values(entitiesBarrel);
 
@@ -593,9 +597,85 @@ export async function ensureSqljsDbHealthy(): Promise<void> {
   process.exit(1);
 }
 
+/**
+ * Rollout-safe pre-index repair for the dev sql.js database (ticket 3c3b17a3).
+ *
+ * Mirror of the Postgres `preSyncPostgres()` step for the sqljs backend: BEFORE
+ * TypeORM `synchronize` builds the partial UNIQUE index on
+ * `dispatch_intents (ticket_id, role) WHERE status != 'resolved'`, deterministically
+ * resolve any pre-existing DUPLICATE open rows (a pre-fix non-atomic
+ * find-then-insert could have produced them). Without this, `CREATE UNIQUE INDEX`
+ * fails during `initialize()` and aborts boot on an upgraded DB that already holds
+ * two open rows for the same (ticket, role).
+ *
+ * Runs on the persisted file via a raw sql.js load (same package/approach as
+ * `ensureSqljsDbHealthy`), then writes the deduped buffer back — this happens
+ * before the main DataSource reads the file, so no race with TypeORM. Guards:
+ *   - sqlite backend only (postgres handled in preSyncPostgres; mysql N/A)
+ *   - missing/empty file → nothing to repair (fresh DB created on initialize)
+ *   - table absent → nothing to repair (fresh schema)
+ *   - zero rows modified → file left untouched (no needless rewrite)
+ * Idempotent; safe on every boot.
+ */
+export async function preSyncSqljsOpenIntents(): Promise<void> {
+  const dbType = process.env.DB_TYPE || 'sqlite';
+  if (dbType !== 'sqlite') return;
+
+  const { location } = resolveSqljsLocation();
+  if (!fs.existsSync(location)) return;
+  if (fs.statSync(location).size === 0) return;
+
+  let SQL: any;
+  try {
+    const initSqlJs = require('sql.js');
+    SQL = await initSqlJs();
+  } catch {
+    // sql.js unavailable — let TypeORM surface any real problem on initialize().
+    return;
+  }
+
+  let db: any;
+  try {
+    const buf = fs.readFileSync(location);
+    db = new SQL.Database(buf);
+  } catch (e) {
+    // A corrupt file is ensureSqljsDbHealthy's job to report — don't mask it here.
+    console.warn(`[DB] dispatch_intents pre-sync skipped (open failed): ${(e as Error)?.message || e}`);
+    if (db) db.close();
+    return;
+  }
+
+  try {
+    const tbl = db.exec(
+      `SELECT name FROM sqlite_master WHERE type='table' AND name='${DISPATCH_INTENTS_TABLE}'`,
+    );
+    const tableExists = Array.isArray(tbl) && tbl.length > 0 && (tbl[0].values?.length ?? 0) > 0;
+    if (!tableExists) return; // fresh schema — nothing to dedup
+
+    db.run(DEDUP_OPEN_DISPATCH_INTENTS_SQL);
+    const modified = typeof db.getRowsModified === 'function' ? db.getRowsModified() : 0;
+    if (modified > 0) {
+      const out = Buffer.from(db.export());
+      fs.writeFileSync(location, out);
+      console.log(
+        `[DB] dispatch_intents pre-sync: resolved ${modified} duplicate open intent(s) before unique-index sync`,
+      );
+    }
+  } catch (e) {
+    // Non-fatal — if the repair itself errored, let initialize()/synchronize
+    // surface the canonical failure rather than crashing here.
+    console.warn(`[DB] dispatch_intents pre-sync skipped (repair failed): ${(e as Error)?.message || e}`);
+  } finally {
+    db.close();
+  }
+}
+
 export async function initDb() {
   // Catch a corrupt dev DB before TypeORM hangs on it (ticket e9847153).
   await ensureSqljsDbHealthy();
+  // Collapse any pre-existing duplicate open dispatch_intents before synchronize
+  // creates the partial unique index (ticket 3c3b17a3).
+  await preSyncSqljsOpenIntents();
   await AppDataSource.initialize();
   const dbType = process.env.DB_TYPE || 'sqlite';
   console.log(`[DB] Connected using ${dbType}`);
