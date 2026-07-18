@@ -15,9 +15,10 @@
  * — it only defers the retry deadline. Only observed forward progress (or a
  * terminal / parked / unstaffed ticket) resolves an intent.
  */
+import { randomUUID } from 'crypto';
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, EntityManager, In } from 'typeorm';
+import { DataSource, EntityManager, In, Repository } from 'typeorm';
 import { DispatchIntent } from '../../entities/DispatchIntent';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { LogService } from '../../services/log.service';
@@ -191,35 +192,39 @@ export class DispatchIntentService {
     const now = new Date();
     const graceUntil = new Date(now.getTime() + this.config.processingGraceMs);
     try {
-      const repo = this.repo(manager);
-      const open = await this._findOpen(args.ticketId, args.role, repo);
-      if (open) {
-        open.status = DISPATCH_INTENT_STATUS.IN_FLIGHT;
-        open.agent_id = args.agentId || open.agent_id;
-        open.trigger_source = args.triggerSource || open.trigger_source;
-        open.attempts += 1;
-        open.dispatch_generation += 1;
-        open.last_trigger_id = args.triggerId;
-        open.last_ack_kind = '';
-        open.next_attempt_at = graceUntil;
-        open.lease_owner = '';
-        open.lease_expires_at = null;
-        await repo.save(open);
-        return;
-      }
-      await repo.save(repo.create({
-        workspace_id: args.workspaceId || '',
-        board_id: args.boardId || '',
-        ticket_id: args.ticketId,
-        role: args.role,
-        agent_id: args.agentId || '',
-        trigger_source: args.triggerSource || '',
-        status: DISPATCH_INTENT_STATUS.IN_FLIGHT,
-        attempts: 1,
-        dispatch_generation: 1,
-        last_trigger_id: args.triggerId,
-        next_attempt_at: graceUntil,
-      }));
+      await this._upsertOpenIntent(
+        this.repo(manager),
+        args.ticketId,
+        args.role,
+        // Brand-new open intent: a fresh in_flight dispatch.
+        () => ({
+          workspace_id: args.workspaceId || '',
+          board_id: args.boardId || '',
+          ticket_id: args.ticketId,
+          role: args.role,
+          agent_id: args.agentId || '',
+          trigger_source: args.triggerSource || '',
+          status: DISPATCH_INTENT_STATUS.IN_FLIGHT,
+          attempts: 1,
+          dispatch_generation: 1,
+          last_trigger_id: args.triggerId,
+          next_attempt_at: graceUntil,
+        }),
+        // Existing open intent (or a concurrent winner): move to in_flight and
+        // bump the attempt/generation for this dispatch.
+        (open) => {
+          open.status = DISPATCH_INTENT_STATUS.IN_FLIGHT;
+          open.agent_id = args.agentId || open.agent_id;
+          open.trigger_source = args.triggerSource || open.trigger_source;
+          open.attempts += 1;
+          open.dispatch_generation += 1;
+          open.last_trigger_id = args.triggerId;
+          open.last_ack_kind = '';
+          open.next_attempt_at = graceUntil;
+          open.lease_owner = '';
+          open.lease_expires_at = null;
+        },
+      );
     } catch (e) {
       this.logService.warn('DispatchIntent', 'recordDispatched failed (reconciler seeder will backstop)', {
         err: String(e), ticket_id: args.ticketId, role: args.role,
@@ -239,33 +244,90 @@ export class DispatchIntentService {
   ): Promise<void> {
     const now = new Date();
     try {
-      const repo = this.repo(manager);
-      const open = await this._findOpen(args.ticketId, args.role, repo);
-      if (open) {
-        // Already tracked — just annotate the latest gate reason; keep the
-        // existing backoff / attempts (a gate drop is not a fresh attempt).
-        open.last_reason = args.reason || open.last_reason;
-        if (!open.next_attempt_at) open.next_attempt_at = now;
-        await repo.save(open);
-        return;
-      }
-      await repo.save(repo.create({
-        workspace_id: args.workspaceId || '',
-        board_id: args.boardId || '',
-        ticket_id: args.ticketId,
-        role: args.role,
-        agent_id: args.agentId || '',
-        trigger_source: args.triggerSource || '',
-        status: DISPATCH_INTENT_STATUS.PENDING,
-        attempts: 0,
-        dispatch_generation: 0,
-        next_attempt_at: now,
-        last_reason: args.reason || '',
-      }));
+      await this._upsertOpenIntent(
+        this.repo(manager),
+        args.ticketId,
+        args.role,
+        // Brand-new owed intent: pending, awaiting the reconciler once the gate clears.
+        () => ({
+          workspace_id: args.workspaceId || '',
+          board_id: args.boardId || '',
+          ticket_id: args.ticketId,
+          role: args.role,
+          agent_id: args.agentId || '',
+          trigger_source: args.triggerSource || '',
+          status: DISPATCH_INTENT_STATUS.PENDING,
+          attempts: 0,
+          dispatch_generation: 0,
+          next_attempt_at: now,
+          last_reason: args.reason || '',
+        }),
+        // Existing open intent (or a concurrent winner): already tracked — just
+        // annotate the latest gate reason; keep the existing backoff / attempts
+        // (a gate drop is not a fresh attempt).
+        (open) => {
+          open.last_reason = args.reason || open.last_reason;
+          if (!open.next_attempt_at) open.next_attempt_at = now;
+        },
+      );
     } catch (e) {
       this.logService.warn('DispatchIntent', 'recordOwed failed (reconciler seeder will backstop)', {
         err: String(e), ticket_id: args.ticketId, role: args.role,
       });
+    }
+  }
+
+  /**
+   * Idempotent "record/update the ONE open intent for (ticket, role)" primitive
+   * (ticket 3c3b17a3). Replaces the former non-atomic find-then-insert, where
+   * two near-simultaneous emits for the same (ticket, role) could each see no
+   * open row and both INSERT → two open intents (the reconciler would then
+   * dispatch both).
+   *
+   * The `(ticket_id, role) WHERE status != 'resolved'` partial UNIQUE index is
+   * the DB-level arbiter:
+   *   1. an open intent already exists → update it in place (unchanged path); else
+   *   2. INSERT … ON CONFLICT DO NOTHING (.orIgnore()) with a client-generated id.
+   *      Exactly one concurrent INSERT wins; the loser is a silent no-op that
+   *      does NOT abort a caller's (`manager`) transaction — the reason we use
+   *      ON CONFLICT rather than catching a thrown unique-violation, which on
+   *      Postgres would poison the whole transaction.
+   *   3. re-find: if the surviving open row is OURS (id matches) we won and it is
+   *      already in the desired initial state; if it belongs to a concurrent
+   *      winner we lost the race and apply our update onto it — reproducing the
+   *      serialized find-then-update outcome (exactly ONE open row, our mutation
+   *      applied last).
+   *
+   * Callers wrap this in try/catch so any residual failure still falls through
+   * to the reconciler's seeder backstop (intents are best-effort on the emit path).
+   */
+  private async _upsertOpenIntent(
+    repo: Repository<DispatchIntent>,
+    ticketId: string,
+    role: string,
+    buildInsert: () => Partial<DispatchIntent>,
+    applyUpdate: (open: DispatchIntent) => void,
+  ): Promise<void> {
+    const existing = await this._findOpen(ticketId, role, repo);
+    if (existing) {
+      applyUpdate(existing);
+      await repo.save(existing);
+      return;
+    }
+    const id = randomUUID();
+    await repo
+      .createQueryBuilder()
+      .insert()
+      .into(DispatchIntent)
+      .values({ id, ...buildInsert() })
+      .orIgnore()
+      .execute();
+    const settled = await this._findOpen(ticketId, role, repo);
+    if (settled && settled.id !== id) {
+      // Lost the insert race to a concurrent emit — apply our update onto the
+      // winning row so the outcome matches a serialized find-then-update.
+      applyUpdate(settled);
+      await repo.save(settled);
     }
   }
 
@@ -417,19 +479,30 @@ export class DispatchIntentService {
     // Guard against a concurrent record: only seed when nothing open exists.
     const open = await this._findOpen(args.ticketId, args.role, repo);
     if (open) return;
-    await repo.save(repo.create({
-      workspace_id: args.workspaceId || '',
-      board_id: args.boardId || '',
-      ticket_id: args.ticketId,
-      role: args.role,
-      agent_id: args.agentId || '',
-      trigger_source: 'reconcile_seed',
-      status: DISPATCH_INTENT_STATUS.PENDING,
-      attempts: 0,
-      dispatch_generation: 0,
-      next_attempt_at: now,
-      last_reason: 'seeded_by_reconciler',
-    }));
+    // Insert-if-absent: a record*/seed racing the same (ticket, role) is de-duped
+    // by the partial unique index — ON CONFLICT DO NOTHING makes the loser a
+    // silent no-op (no throw), leaving the existing open row untouched. A seed
+    // only fills the gap, so nothing to update on loss.
+    await repo
+      .createQueryBuilder()
+      .insert()
+      .into(DispatchIntent)
+      .values({
+        id: randomUUID(),
+        workspace_id: args.workspaceId || '',
+        board_id: args.boardId || '',
+        ticket_id: args.ticketId,
+        role: args.role,
+        agent_id: args.agentId || '',
+        trigger_source: 'reconcile_seed',
+        status: DISPATCH_INTENT_STATUS.PENDING,
+        attempts: 0,
+        dispatch_generation: 0,
+        next_attempt_at: now,
+        last_reason: 'seeded_by_reconciler',
+      })
+      .orIgnore()
+      .execute();
   }
 
   private async _writeAudit(intent: DispatchIntent, action: string, extra: Record<string, unknown>): Promise<void> {

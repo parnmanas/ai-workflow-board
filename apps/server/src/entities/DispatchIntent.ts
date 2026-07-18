@@ -54,10 +54,22 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
  */
 @Entity('dispatch_intents')
 // The reconciler's hot query is "open intents oldest-first"; index status so the
-// sweep never scans resolved history. `_findOpen` filters by (ticket_id, role,
-// status) so the (ticket_id, role) index keeps the per-emit idempotency lookup cheap.
+// sweep never scans resolved history.
 @Index(['status', 'next_attempt_at'])
-@Index(['ticket_id', 'role'])
+// PARTIAL UNIQUE index — at most ONE open (pending|in_flight) intent per
+// (ticket_id, role). The `status != 'resolved'` predicate scopes uniqueness to
+// OPEN rows so a resolved intent never blocks the next legitimate dispatch for
+// the same (ticket, role) (every re-trigger after a resolution opens a fresh
+// row). This is the DB-level arbiter that makes recordDispatched / recordOwed /
+// createSeed idempotent under concurrent — including multi-instance — emits:
+// the insert path uses ON CONFLICT DO NOTHING (queryBuilder .orIgnore()) against
+// it, so a losing double-insert is a silent no-op instead of a second open row.
+// Partial indexes are supported by both sql.js (SQLite ≥ 3.8) and Postgres, and
+// TypeORM `synchronize` (hardcoded ON for both — see db.ts D-01) emits the same
+// `CREATE UNIQUE INDEX … WHERE status != 'resolved'`. It also still serves the
+// (ticket_id, role) `_findOpen` lookup (now covering just the hot open rows).
+// Ticket 3c3b17a3.
+@Index('uniq_dispatch_intent_open_ticket_role', ['ticket_id', 'role'], { unique: true, where: "status != 'resolved'" })
 export class DispatchIntent {
   @PrimaryGeneratedColumn('uuid')
   id: string;
