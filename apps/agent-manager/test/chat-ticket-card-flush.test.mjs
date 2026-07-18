@@ -63,6 +63,8 @@ function driveTurn(mgr, sess, actions) {
 }
 
 const cardPosts = () => posts.filter((p) => Array.isArray(p.body?.metadata?.ticket_refs));
+// F2-4 ⓒ: 결과물 카드 post 는 metadata.artifact_refs 를 싣는다(ticket_refs 와 독립).
+const artifactCardPosts = () => posts.filter((p) => Array.isArray(p.body?.metadata?.artifact_refs));
 // Let the fire-and-forget postChatRoomMessage promises settle.
 const settle = () => new Promise((r) => setTimeout(r, 30));
 
@@ -139,4 +141,67 @@ test('only SUCCESSFUL, tracked actions count toward the chunks (errors + reads e
   assert.equal(ids.length, 21, 'exactly the 21 successes are carded — errored create + read excluded');
   assert.equal(cards.length, 2, 'still split 20 + 1 by success count, not tool-call count');
   assert.ok(!ids.some((id) => id == null), 'no null/undefined ticket id leaked into a card');
+});
+
+// ── F2-4 ⓒ (ticket d21b28fc): 결과물(빌드/배포) 카드 FLUSH ─────────────────────
+// 결과물성 tool(register_build_artifact·report_deployment)은 티켓 row 를 안 바꾸므로
+// ticket_refs 가 아니라 metadata.artifact_refs 로 방출된다. 아래는 실제 stream-json
+// glue 를 태워 방출되는 실 wire payload(board lesson #5)로 이를 고정한다.
+
+const buildAction = (target, commit) => ({
+  tool: 'register_build_artifact', input: { target },
+  result: { id: `B-${target}`, target, status: 'ok', commit_sha: commit },
+});
+const deployAction = (env) => ({
+  tool: 'report_deployment', input: { environment: env },
+  result: { id: `D-${env}`, environment: env, base_url: `https://${env}.example.com`, deployed_commit_sha: 'deplo1234' },
+});
+
+test('결과물 tool → artifact_refs 카드 방출(빌드/배포 실제 wire payload)', async () => {
+  const mgr = new ChatSessionManager(makeConfig());
+  const sess = makeSess();
+  driveTurn(mgr, sess, [buildAction('server', 'abc1234'), deployAction('production')]);
+  await settle();
+
+  const acards = artifactCardPosts();
+  assert.equal(acards.length, 1, '한 turn 의 결과물들은 하나의 카드로 합쳐진다');
+  const refs = acards[0].body.metadata.artifact_refs;
+  assert.deepEqual(refs, [
+    { kind: 'build', title: 'server', status: 'ok', commit: 'abc1234' },
+    { kind: 'deploy', title: 'production', status: 'deployed', commit: 'deplo1234', url: 'https://production.example.com' },
+  ], '실 wire artifact_refs payload');
+  // content 폴백 ↔ metadata parity: 결과물마다 한 줄.
+  assert.equal(acards[0].body.content.split('\n').length, refs.length, 'content lines == artifact refs');
+  assert.equal(acards[0].roomId, 'room-1');
+  // 티켓 카드는 이 turn 에 없다(결과물 tool 은 ticket_refs 를 만들지 않는다).
+  assert.equal(cardPosts().length, 0, '결과물 turn 은 ticket_refs 카드를 만들지 않는다');
+});
+
+test('티켓 액션 + 결과물이 한 turn 에 섞이면 두 카드로 독립 방출', async () => {
+  const mgr = new ChatSessionManager(makeConfig());
+  const sess = makeSess();
+  driveTurn(mgr, sess, [createAction('T-1'), buildAction('client', 'def5678'), deployAction('staging')]);
+  await settle();
+
+  const tcards = cardPosts();
+  const acards = artifactCardPosts();
+  assert.equal(tcards.length, 1, 'ticket_refs 카드 1개');
+  assert.equal(acards.length, 1, 'artifact_refs 카드 1개');
+  assert.deepEqual(tcards[0].body.metadata.ticket_refs.map((r) => r.ticket_id), ['T-1']);
+  assert.deepEqual(acards[0].body.metadata.artifact_refs.map((r) => r.title), ['client', 'staging']);
+  // 두 카드는 서로 metadata 를 섞지 않는다(독립 flush).
+  assert.equal(tcards[0].body.metadata.artifact_refs, undefined, 'ticket 카드에 artifact_refs 없음');
+  assert.equal(acards[0].body.metadata.ticket_refs, undefined, 'artifact 카드에 ticket_refs 없음');
+});
+
+test('실패한 결과물(에러 result)은 카드로 방출되지 않는다(fail-closed)', async () => {
+  const mgr = new ChatSessionManager(makeConfig());
+  const sess = makeSess();
+  driveTurn(mgr, sess, [
+    { tool: 'register_build_artifact', input: { target: 'server' }, result: { error: 'boom' }, isError: true },
+    { tool: 'report_deployment', input: { environment: 'prod' }, result: { message: 'no environment echoed' } }, // env 없음 → null
+  ]);
+  await settle();
+
+  assert.equal(artifactCardPosts().length, 0, '에러/미인식 shape → 결과물 카드 없음');
 });

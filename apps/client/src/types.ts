@@ -1568,9 +1568,20 @@ export interface ChatMessageTicketRef {
   action: string; // 'create' | 'move' | 'update' | 'comment' | 'claim' | ...
   ticket_id: string;
   title?: string; // falls back to ticket_id when absent
+  // F2-4 ⓑ 승인 카드: propose_move 의 대상 컬럼 이름 등 제안/합의 부가 맥락.
+  detail?: string;
+}
+// F2-4 ⓒ 결과물 카드: 빌드/배포 결과물성 tool 캡처(비-ticket이라 ticket_refs 로 못 실음).
+export interface ChatMessageArtifactRef {
+  kind: string;     // 'build' | 'deploy'
+  title: string;    // 빌드 target / 배포 environment
+  status?: string;  // 'ok' | 'building' | 'failed' | 'deployed' ...
+  commit?: string;  // 커밋 SHA
+  url?: string;     // 배포 base_url 등
 }
 export interface ChatRoomMessageMetadata {
   ticket_refs?: ChatMessageTicketRef[];
+  artifact_refs?: ChatMessageArtifactRef[];
 }
 
 export interface ChatRoomMessageItem {

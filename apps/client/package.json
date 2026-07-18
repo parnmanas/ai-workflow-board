@@ -6,7 +6,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "test": "node --import tsx --test --test-force-exit test/on-done-reorder-dirty.test.mjs test/chat-participants.test.mjs test/composer-send.test.mjs test/environment-config-editor.test.mjs test/view-mode.test.mjs test/artifact-panel.test.mjs test/artifact-panel-view.test.mjs test/ticket-ref-card.test.mjs test/ticket-artifact-view.test.mjs test/assistant-entry.test.mjs test/chat-first-home-view.test.mjs test/assistant-agent-setting-view.test.mjs test/focus-trap.test.mjs test/credential-fallback.test.mjs test/smoke-artifact-panel.test.mjs test/smoke-deeplink.test.mjs test/state-views.test.mjs test/smoke-ticket-artifact-realtime.test.mjs test/smoke-composer-room-switch.test.mjs"
+    "test": "node --import tsx --test --test-force-exit test/on-done-reorder-dirty.test.mjs test/chat-participants.test.mjs test/composer-send.test.mjs test/environment-config-editor.test.mjs test/view-mode.test.mjs test/artifact-panel.test.mjs test/artifact-panel-view.test.mjs test/ticket-ref-card.test.mjs test/ticket-meta-store.test.mjs test/artifact-ref-card.test.mjs test/ticket-artifact-view.test.mjs test/assistant-entry.test.mjs test/chat-first-home-view.test.mjs test/assistant-agent-setting-view.test.mjs test/focus-trap.test.mjs test/credential-fallback.test.mjs test/smoke-artifact-panel.test.mjs test/smoke-deeplink.test.mjs test/state-views.test.mjs test/smoke-ticket-artifact-realtime.test.mjs test/smoke-composer-room-switch.test.mjs"
   },
   "dependencies": {
     "@hello-pangea/dnd": "^17.0.0",

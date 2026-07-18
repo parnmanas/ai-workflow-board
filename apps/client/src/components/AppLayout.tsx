@@ -12,6 +12,7 @@ import { useWorkspaces } from '../hooks/useBoard';
 import { api, setActiveWorkspaceId } from '../api';
 import { BoardStreamProvider } from '../contexts/BoardStreamContext';
 import { NotificationProvider } from '../contexts/NotificationContext';
+import { TicketMetaProvider } from '../contexts/TicketMetaContext';
 import { tokens } from '../tokens';
 
 /**
@@ -215,6 +216,7 @@ export default function AppLayout() {
     <BoardStreamProvider>
     <NotificationProvider>
     <ArtifactPanelProvider>
+    <TicketMetaProvider>
     <TicketArtifactController>
     <div className="awb-shell">
       <Sidebar
@@ -321,6 +323,7 @@ export default function AppLayout() {
       <ArtifactPanel isMobile={isMobile} />
     </div>
     </TicketArtifactController>
+    </TicketMetaProvider>
     </ArtifactPanelProvider>
     </NotificationProvider>
     </BoardStreamProvider>

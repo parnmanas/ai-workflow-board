@@ -6,6 +6,7 @@ import { formatClockTime, daySeparatorLabel, sameDay } from './utils/time';
 import { renderMarkdown, handleMentionAwareCopy, type MentionParticipant } from './utils/markdown';
 import { base64ToBlob, formatBytes, isImageMime, triggerBlobDownload } from './utils/attachments';
 import TicketRefCard from './TicketRefCard';
+import ArtifactRefCard from './ArtifactRefCard';
 
 // ─── MessageList ──────────────────────────────────────────────────────────────
 
@@ -327,7 +328,20 @@ export default function MessageList({ messages, participantCount, participants =
                     id={ref.ticket_id}
                     title={ref.title || ref.ticket_id}
                     action={ref.action}
+                    detail={ref.detail}
                   />
+                ))}
+              </div>
+            )}
+            {/* F2-4 ⓒ (ticket d21b28fc): 결과물성 tool 결과(빌드/배포) 카드. ticket_refs 와
+             *  독립적으로 방출되므로 별도 블록으로 렌더한다(배포 URL 있으면 링크). */}
+            {Array.isArray(msg.metadata?.artifact_refs) && msg.metadata!.artifact_refs!.length > 0 && (
+              <div
+                data-artifact-refs=""
+                style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}
+              >
+                {msg.metadata!.artifact_refs!.map((ref, idx) => (
+                  <ArtifactRefCard key={`${ref.kind}:${ref.title}:${ref.commit || ''}:${idx}`} artifact={ref} />
                 ))}
               </div>
             )}

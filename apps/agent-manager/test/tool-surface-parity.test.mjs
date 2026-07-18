@@ -13,6 +13,7 @@
 //   EMIT     — TICKET_ACTION_TOOLS
 //   BATCH    — BATCH_TICKET_TOOL
 //   REJECT   — REJECT_HANDOFF_TOOL
+//   ARTIFACT — ARTIFACT_ACTION_TOOLS (F2-4 ⓒ 결과물 카드; EXCLUDE 아님)
 //   EXCLUDE  — TICKET_TOOL_EXCLUSIONS (with a per-tool reason)
 // A newly-added server tool therefore fails THIS test until someone decides whether
 // it emits a card or is deliberately excluded — the silent gap can no longer recur.
@@ -27,6 +28,7 @@ import {
   TICKET_ACTION_TOOLS,
   BATCH_TICKET_TOOL,
   REJECT_HANDOFF_TOOL,
+  ARTIFACT_ACTION_TOOLS,
   TICKET_TOOL_EXCLUSIONS,
   classifiedToolNames,
 } from '../dist/lib/ticket-ref-capture.js';
@@ -64,6 +66,7 @@ test('classification buckets are disjoint (no tool classified twice)', () => {
   for (const n of emit) put(n, 'emit');
   put(BATCH_TICKET_TOOL, 'batch');
   put(REJECT_HANDOFF_TOOL, 'reject');
+  for (const n of Object.keys(ARTIFACT_ACTION_TOOLS)) put(n, 'artifact');
   for (const n of exclude) put(n, 'exclude');
   // classifiedToolNames() must equal the union with no dupes swallowed.
   assert.equal(classifiedToolNames().size, seen.size, 'classifiedToolNames drops or dupes a bucket');
