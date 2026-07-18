@@ -309,6 +309,45 @@ Idempotency, concurrency, failure:
 - **Additive to working_dir** — provisioning does NOT repurpose the operator's
   `working_dir` / worktree flow; repos land under the agent home alongside it.
 
+## Per-agent credential fallback (empty `credential_id`)
+
+Each managed agent may carry a per-agent `credential_id` (Admin → Agent Manager
+→ *agent* → Edit → **CLI credential**). Leaving it **empty is a valid, common
+setup — not "no auth"**: the adapter's `prepareCliHome` falls back to the
+credential already present on the **manager host** (the codebase calls this
+**"operator HOME"**). Treating an empty `credential_id` as a missing credential
+has caused false operator escalations — ticket `09a0442f`: a Codex reviewer with
+`credential_id: null` was repeatedly misread as unauthenticated when it was in
+fact authenticating fine via the host `codex login`.
+
+What "empty" falls back to is **adapter-specific** — it is a host **CLI login**
+for claude/codex but a host **env var** for deepseek/antigravity:
+
+| CLI (`type`) | Empty-credential fallback | Source on the manager host |
+| --- | --- | --- |
+| `claude` | Host CLI login | `~/.claude/.credentials.json` (or `$CLAUDE_CONFIG_DIR`) from `claude login`, symlinked/copied into the agent cli-home |
+| `codex` | Host CLI login | `~/.codex/auth.json` (or `$CODEX_HOME`) from `codex login`, symlinked/copied into the agent cli-home |
+| `deepseek` | Host **env var** (no login file) | `DEEPSEEK_API_KEY` (+ optional `DEEPSEEK_BASE_URL` / `DEEPSEEK_MODEL`) from the manager process environment |
+| `antigravity` | Host **env var** (no login file) | `GEMINI_API_KEY` / `GOOGLE_API_KEY` from the manager process environment |
+| `custom` | — | no adapter, no credential concept |
+
+Setting a per-agent credential is only needed for **isolated** auth — a
+different account/key than the host's, or one centrally rotated through AWB. When
+a per-agent credential *is* set, the adapter additionally strips the
+operator-inherited auth env (`authEnvKeys`) so the host login can't silently
+shadow it.
+
+**Not the same as the red `no credential` badge.** The manager heartbeat reports
+a per-agent credential *kind* (`subscription` / `api_key` / `operator_home` /
+`missing` / `unknown`); an empty `credential_id` normally surfaces as the neutral
+`operator_home` badge ("operator HOME"), whereas the red `missing` badge means
+the host itself has no login for that CLI either. Source of truth for the
+fallback behaviour is each adapter's `prepareCliHome`
+(`apps/agent-manager/src/lib/cli-adapters/{claude,codex,deepseek,antigravity}.ts`);
+the admin-UI copy shown in the credential picker lives in
+`apps/client/src/utils/credentialFallback.ts`. See also
+[`docs/managed-agent-relogin.md`](managed-agent-relogin.md).
+
 ## Heartbeats
 
 Two heartbeats run on independent timers:
