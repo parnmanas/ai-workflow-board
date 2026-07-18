@@ -17,6 +17,11 @@ export const CONFIG_PATH = join(AGENT_MANAGER_HOME, 'config.json');
 export const AGENT_PATH = join(AGENT_MANAGER_HOME, 'agent.json');
 export const SUBAGENTS_BASE_DIR = join(AGENT_MANAGER_HOME, 'subagents');
 export const SUBAGENTS_PERSIST_PATH = join(AGENT_MANAGER_HOME, 'subagents.json');
+// ticket 467f714a: durable harness session-limit defer state — the per-agent
+// reset instant + coalesced pending resume intents. Persisted so a defer window
+// (minutes-to-hours until the CLI session cap resets) survives a manager restart
+// and the resume still fires exactly once.
+export const SESSION_DEFER_PATH = join(AGENT_MANAGER_HOME, 'session-defer.json');
 export const INSTANCES_DIR = join(AGENT_MANAGER_HOME, 'instances');
 // ST-6: per-managed-agent state lives under <home>/agents/<agent_id>/. Each
 // directory holds its own apiKey (issued by the server's provisioning
