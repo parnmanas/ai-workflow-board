@@ -993,6 +993,7 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
                       agentId={agentId}
                       workingDir={detail.working_dir}
                       managerInstance={ownerManagerInstance}
+                      lifecycleState={detail.lifecycle_state}
                       layout="full"
                       onDispatched={loadInstances}
                     />

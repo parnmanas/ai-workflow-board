@@ -182,6 +182,47 @@ export default function MessageList({ messages, participantCount, participants =
       continue;
     }
 
+    // System notices (ticket bfdd80b7) — e.g. the auto-start "⏳ **Agent** 가 …
+    // 자동 시작을 요청했습니다" line the server drops into a room when a user
+    // messages a not-started agent. Rendered as a centered, markdown-aware muted
+    // pill (NOT a left-aligned agent bubble) so it reads as an out-of-band status
+    // line rather than a chat turn.
+    const isSystem = msg.sender_type === 'system';
+    if (isSystem) {
+      rendered.push(
+        <div
+          key={msg.id}
+          data-message-id={msg.id}
+          data-message-type="system"
+          style={{
+            padding: '6px 16px',
+            display: 'flex',
+            justifyContent: 'center',
+          }}
+        >
+          <div
+            style={{
+              maxWidth: '75%',
+              background: `${COLORS.border}40`,
+              border: `1px solid ${COLORS.border}`,
+              borderRadius: tokens.radii.full,
+              padding: '4px 12px',
+              fontSize: 12,
+              fontStyle: 'italic',
+              color: COLORS.textSecondary,
+              textAlign: 'center',
+              lineHeight: 1.5,
+              wordBreak: 'break-word',
+            }}
+            onCopy={handleMentionAwareCopy}
+          >
+            {renderMarkdown(msg.content, participants)}
+          </div>
+        </div>,
+      );
+      continue;
+    }
+
     // Collapse sender info if same sender within 60s.
     // `prev` is skipped for the collapse comparison when it was a progress
     // row, since those don't render a sender header anyway — falling
@@ -190,6 +231,7 @@ export default function MessageList({ messages, participantCount, participants =
     const prevSameWindow =
       prev &&
       prev.type !== 'progress' &&
+      prev.sender_type !== 'system' &&
       prev.sender_id === msg.sender_id &&
       sameDay(prev.created_at, msg.created_at) &&
       new Date(msg.created_at).getTime() - new Date(prev.created_at).getTime() < 60000;

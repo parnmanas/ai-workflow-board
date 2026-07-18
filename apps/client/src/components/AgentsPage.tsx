@@ -12,6 +12,7 @@ import { Button, Input, Select, Modal } from './common';
 import type {
   DashboardAgent,
   AgentCurrentTask,
+  AgentLifecycleState,
   AgentManagerInstance,
   Credential,
   ManagedAgentCreateBody,
@@ -84,6 +85,7 @@ interface StatusUpdate {
   agent_id: string;
   is_online: boolean;
   last_seen_at: string | null;
+  lifecycle_state?: AgentLifecycleState;
   current_task?: AgentCurrentTask;
   active_tasks?: AgentCurrentTask[];
 }
@@ -101,6 +103,13 @@ function mergeAgentStatus(
     ...existing,
     is_online: !!update.is_online,
     last_seen_at: update.last_seen_at ?? existing.last_seen_at,
+    // Live 5-state lifecycle (ticket bfdd80b7) so the card badge reflects
+    // starting/never_started/error without a refetch. Keep the existing value
+    // when the update omits it (older server that doesn't send lifecycle_state).
+    lifecycle_state:
+      update.lifecycle_state !== undefined
+        ? update.lifecycle_state
+        : existing.lifecycle_state,
     current_task: update.current_task,
     // The SSE agent_status wire now carries the full authoritative list —
     // board-ticket tasks (kind:'ticket') AND in-progress QA runs (kind:'qa'),
@@ -197,6 +206,8 @@ export default function AgentsPage() {
       agent_id: payload.agent_id,
       is_online: !!payload.is_online,
       last_seen_at: payload.last_seen_at ?? null,
+      // Live lifecycle_state (ticket bfdd80b7); undefined on older servers.
+      lifecycle_state: payload.lifecycle_state,
       current_task: payload.current_task,
       // Forward the live active_tasks list (ticket 09ed8def) — board-ticket
       // tasks + in-progress QA runs. Previously omitted here, which froze the

@@ -1,6 +1,6 @@
 import React, { useCallback, useMemo, useState } from 'react';
 import { api } from '../api';
-import type { AgentManagerCommandKind, AgentManagerInstance } from '../types';
+import type { AgentLifecycleState, AgentManagerCommandKind, AgentManagerInstance } from '../types';
 import { tokens } from '../tokens';
 import { Button, Badge, Input } from './common';
 import { useToast } from '../contexts/ToastContext';
@@ -47,6 +47,10 @@ interface AgentLifecycleControlsProps {
   /** Owning manager's live instance, or null/undefined when the manager is
    *  not currently heartbeating (then every command is disabled). */
   managerInstance?: AgentManagerInstance | null;
+  /** The agent's server lifecycle_state (ticket bfdd80b7). When 'starting' — a
+   *  spawn was dispatched but the agent isn't in the manager's agent_ids[] yet —
+   *  the status badge shows "시작 중…" instead of "중지됨". */
+  lifecycleState?: AgentLifecycleState;
   /** 'compact' (card): status + Start/Stop/Restart only.
    *  'full' (detail): adds maintenance verbs, reload_config, set working dir. */
   layout?: 'compact' | 'full';
@@ -59,6 +63,7 @@ export default function AgentLifecycleControls({
   agentId,
   workingDir,
   managerInstance,
+  lifecycleState,
   layout = 'compact',
   onDispatched,
 }: AgentLifecycleControlsProps) {
@@ -117,11 +122,19 @@ export default function AgentLifecycleControls({
     [agentId, instanceId, pending, confirm, showToast, onDispatched],
   );
 
+  // The dispatched-but-not-yet-running gap (ticket bfdd80b7): a spawn was just
+  // dispatched (local `pending`) or the server reports lifecycle_state='starting',
+  // but the manager heartbeat hasn't listed the agent in agent_ids[] yet. Bridge
+  // it with a "시작 중…" badge instead of flashing "중지됨" until the next beat.
+  const starting = pending === 'spawn_agent' || lifecycleState === 'starting';
+
   // ── Status badge ────────────────────────────────────────────────
   const statusBadge = !managerOnline ? (
     <Badge variant="warning" dot>매니저 오프라인</Badge>
   ) : running ? (
     <Badge variant={stale ? 'warning' : 'success'} dot>{stale ? '실행 중 (heartbeat 지연)' : '실행 중'}</Badge>
+  ) : starting ? (
+    <Badge variant="warning" dot>시작 중…</Badge>
   ) : (
     <Badge variant="neutral" dot>중지됨</Badge>
   );

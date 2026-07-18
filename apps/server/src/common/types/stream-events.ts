@@ -168,6 +168,13 @@ export interface AgentStatusPayload {
   agent_id: string;
   is_online: boolean;
   last_seen_at: string | null;  // ISO-8601
+  // Derived lifecycle state (ticket bfdd80b7): never_started | starting | online
+  // | offline | error. Additive — older clients that only read is_online keep
+  // working. The client badge reads this so "created but never started" is
+  // finally distinguishable from "online" (the whole silent-drop bug was that
+  // they looked identical). Optional so a legacy emit without it degrades to
+  // the is_online view.
+  lifecycle_state?: 'never_started' | 'starting' | 'online' | 'offline' | 'error';
   // Legacy singular — most-recently-claimed task. Kept so older clients that
   // read only current_task keep rendering. New clients read active_tasks.
   current_task?: {

@@ -21,6 +21,7 @@ import { StuckTicketDetectorService } from './stuck-ticket-detector.service';
 import { RespawnStormDetectorService } from './respawn-storm-detector.service';
 import { DispatchIntentService } from './dispatch-intent.service';
 import { DispatchReconcilerService } from './dispatch-reconciler.service';
+import { AgentAutostartService } from './agent-autostart.service';
 import { TicketPrerequisitesService } from '../tickets/ticket-prerequisites.service';
 import { FsBrowserService } from '../../services/fs-browser.service';
 import { SubagentMonitorService } from '../../services/subagent-monitor.service';
@@ -65,6 +66,7 @@ import { ColumnPoliciesModule } from '../column-policies/column-policies.module'
     WorkspaceMoveService,
     DispatchIntentService,
     DispatchReconcilerService,
+    AgentAutostartService,
   ],
   exports: [
     AgentConnectionService, TriggerLoopService, AgentStatusService, AllocationService,

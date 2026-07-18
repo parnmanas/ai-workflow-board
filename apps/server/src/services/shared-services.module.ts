@@ -21,6 +21,7 @@ import { DiscordService } from './discord.service';
 import { LogService } from './log.service';
 import { MemoryMetricsRegistry } from './memory-metrics.registry';
 import { MemoryWatchdogService } from './memory-watchdog.service';
+import { AgentConnectivityRegistry } from './agent-connectivity.registry';
 import { NotificationService } from './notification.service';
 import { SystemCommentService } from './system-comment.service';
 import { ReBACService } from './rebac.service';
@@ -66,6 +67,7 @@ import {
     LogService,
     MemoryMetricsRegistry,
     MemoryWatchdogService,
+    AgentConnectivityRegistry,
     SqljsFlushService,
     NotificationService,
     SystemCommentService,
@@ -85,6 +87,7 @@ import {
     DiscordService,
     LogService,
     MemoryMetricsRegistry,
+    AgentConnectivityRegistry,
     ReBACService,
     MentionService,
     PresenceService,

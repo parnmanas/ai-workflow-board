@@ -42,6 +42,8 @@ import type { TriggerLoopService } from '../../agents/trigger-loop.service';
 import type { RoomCrudService } from '../../chat-rooms/room-crud.service';
 import { RoomMembershipService } from '../../chat-rooms/room-membership.service';
 import { RoomMessagingService } from '../../chat-rooms/room-messaging.service';
+import { AgentConnectivityRegistry } from '../../../services/agent-connectivity.registry';
+import { MemoryMetricsRegistry } from '../../../services/memory-metrics.registry';
 import type { TicketRoleAssignmentService } from '../../workspace-roles/ticket-role-assignment.service';
 import type { ActionsService } from '../../actions/actions.service';
 import type { QaService } from '../../qa/qa.service';
@@ -219,6 +221,10 @@ export function createStandaloneContext(dataSource: DataSource): ToolContext {
     logService,
     roomMembershipService,
     mentionService,
+    // Standalone MCP mode has no live SSE server, so this registry stays empty
+    // (isReachable → false). That's correct: the auto-start hub / feedback
+    // listeners live in the NestJS server process, not here.
+    new AgentConnectivityRegistry(new MemoryMetricsRegistry()),
   );
 
   // Prerequisite service — stateless over dataSource + activityService, so a

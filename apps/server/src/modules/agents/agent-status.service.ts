@@ -22,6 +22,7 @@ import { QaScenario } from '../../entities/QaScenario';
 import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
 import { MemoryMetricsRegistry } from '../../services/memory-metrics.registry';
+import { AgentLifecycleState, deriveAgentLifecycleState } from '../../common/agent-lifecycle';
 
 // Internal shape — held in memory with Date objects for precision. The wire
 // shape (AgentStatusPayload in common/types/stream-events.ts) carries ISO-8601
@@ -75,6 +76,10 @@ interface AgentStatus {
   agent_id: string;
   is_online: boolean;
   last_seen_at: Date | null;
+  // Agent.connected_at — null iff the agent has never connected once. The
+  // sole signal that distinguishes never_started from offline (ticket
+  // bfdd80b7); seeded from the DB row on init and refreshed each sweep.
+  connected_at?: Date | null;
   // Map<ticket_id, ActiveTask>. Internal store. The full non-stale list is
   // now derived for the wire (AgentStatusPayload.active_tasks) via
   // _nonStaleTaskList / getActiveTasks — concurrency N is what the dashboard
@@ -90,6 +95,14 @@ interface AgentStatus {
 
 const SWEEP_INTERVAL_MS = 30_000;
 const OFFLINE_THRESHOLD_MS = 90_000;
+// Auto-start markers (ticket bfdd80b7). A spawn_agent dispatched by AgentAuto-
+// startService stamps a `starting` marker so the UI shows "시작 중" until the
+// agent reports online (or this TTL elapses — long enough for a cold
+// clone/provision + first heartbeat, short enough that a wedged spawn stops
+// masquerading as "starting"). A failed auto-start stamps a `startError`
+// marker so the badge shows "오류" with the reason until a retry or online.
+const STARTING_MARKER_TTL_MS = 3 * 60_000;   // 3 min
+const START_ERROR_MARKER_TTL_MS = 5 * 60_000; // 5 min
 // current_task is plugin-signal driven. If a plugin crashes between
 // setCurrentTask and clearCurrentTask the task would otherwise stay stuck;
 // the sweep auto-clears any task older than this so the dashboard recovers
@@ -167,6 +180,15 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
   // qa_task_changed signal (start→add, finalize→remove) + boot seed; bounded by
   // the reaper's guaranteed finalize and deleted-agent sweep eviction.
   private readonly qaTasks = new Map<string, Map<string, ActiveTask>>();
+  // Auto-start lifecycle markers (ticket bfdd80b7). Both are in-memory only
+  // (never persisted / never on the DB) and TTL-bounded; they refine the wire
+  // `lifecycle_state` between never_started/offline and online. `startingAt`:
+  // agent_id → epoch ms a spawn_agent was dispatched. `startErrorAt`: agent_id
+  // → {at, reason} for the most recent failed auto-start. Both are cleared when
+  // the agent next reports online (sweep / setCurrentTask) or when their TTL
+  // elapses.
+  private readonly startingAt = new Map<string, number>();
+  private readonly startErrorAt = new Map<string, { at: number; reason: string }>();
   private sweepHandle: NodeJS.Timeout | null = null;
 
   constructor(
@@ -198,6 +220,80 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
       for (const m of this.qaTasks.values()) n += m.size;
       return n;
     });
+    // Auto-start marker gauges (ticket bfdd80b7). TTL-bounded + cleared on
+    // online; a persistent climb means the sweep's marker expiry regressed.
+    metrics.register('agentStatus.startingMarkers', () => this.startingAt.size);
+    metrics.register('agentStatus.startErrorMarkers', () => this.startErrorAt.size);
+  }
+
+  // ── Auto-start lifecycle markers (ticket bfdd80b7) ──────────────────────
+
+  /**
+   * Stamp `starting` — a spawn_agent was just dispatched for this agent (auto-
+   * start or manual). Clears any prior start-error and re-broadcasts so the UI
+   * flips to "시작 중" immediately. Idempotent within the TTL.
+   */
+  markStarting(agent_id: string): void {
+    if (!agent_id) return;
+    this.startingAt.set(agent_id, Date.now());
+    this.startErrorAt.delete(agent_id);
+    void this._emitAgentById(agent_id);
+  }
+
+  /**
+   * Stamp `startError` — an auto-start attempt failed (manager offline / no
+   * working dir / spawn error). Supersedes `starting` and re-broadcasts so the
+   * badge shows "오류" with the reason. `reason` is one of the AutostartFeasibility
+   * slugs (kept short for the wire).
+   */
+  markStartError(agent_id: string, reason: string): void {
+    if (!agent_id) return;
+    this.startErrorAt.set(agent_id, { at: Date.now(), reason });
+    this.startingAt.delete(agent_id);
+    void this._emitAgentById(agent_id);
+  }
+
+  /** True while a non-expired `starting` marker is present. */
+  isStarting(agent_id: string): boolean {
+    const at = this.startingAt.get(agent_id);
+    if (at === undefined) return false;
+    if (Date.now() - at > STARTING_MARKER_TTL_MS) {
+      this.startingAt.delete(agent_id);
+      return false;
+    }
+    return true;
+  }
+
+  /** Reason of a non-expired `startError` marker, or undefined. */
+  getStartError(agent_id: string): string | undefined {
+    const rec = this.startErrorAt.get(agent_id);
+    if (!rec) return undefined;
+    if (Date.now() - rec.at > START_ERROR_MARKER_TTL_MS) {
+      this.startErrorAt.delete(agent_id);
+      return undefined;
+    }
+    return rec.reason;
+  }
+
+  /** Drop both markers — called when the agent reports online (a spawn that
+   *  actually landed) so "시작 중"/"오류" don't linger over a live agent. */
+  private _clearStartMarkers(agent_id: string): void {
+    this.startingAt.delete(agent_id);
+    this.startErrorAt.delete(agent_id);
+  }
+
+  /**
+   * Lifecycle state for one agent, derived from liveness + the auto-start
+   * markers (ticket bfdd80b7). Pure wrapper over `deriveAgentLifecycleState`,
+   * shared by the SSE projection (`_emit`) and REST readers (agents.controller).
+   */
+  lifecycleStateFor(agent_id: string, isOnline: boolean, connectedAt: Date | null | undefined): AgentLifecycleState {
+    return deriveAgentLifecycleState({
+      isOnline,
+      connectedAt: connectedAt ?? null,
+      isStarting: this.isStarting(agent_id),
+      hasRecentStartError: this.getStartError(agent_id) !== undefined,
+    });
   }
 
   async onModuleInit(): Promise<void> {
@@ -209,6 +305,7 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
         agent_id: a.id,
         is_online: !!a.is_online,
         last_seen_at: a.last_seen_at,
+        connected_at: a.connected_at,
       });
     }
 
@@ -451,6 +548,11 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
     // 09ed8def). The event-registry map() tags each item's kind from t.kind.
     activityEvents.emit('agent_status', {
       ...status,
+      // Derived lifecycle state (ticket bfdd80b7) — never_started / starting /
+      // online / offline / error. The event-registry map() ships it verbatim;
+      // the client badge reads it so "created but never started" is finally
+      // distinguishable from "online".
+      lifecycle_state: this.lifecycleStateFor(status.agent_id, status.is_online, status.connected_at),
       active_tasks: [
         ...this._nonStaleTaskList(status.active_tasks),
         ...this._qaTaskList(status.agent_id),
@@ -522,8 +624,8 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
       if (!status) {
         const a = await this.agentRepo.findOne({ where: { id: agent_id } });
         status = a
-          ? { agent_id, is_online: !!a.is_online, last_seen_at: a.last_seen_at }
-          : { agent_id, is_online: false, last_seen_at: null };
+          ? { agent_id, is_online: !!a.is_online, last_seen_at: a.last_seen_at, connected_at: a.connected_at }
+          : { agent_id, is_online: false, last_seen_at: null, connected_at: null };
         // Persist only a real agent's status; a phantom id stays transient and
         // the sweep's deleted-agent eviction would drop it anyway.
         if (a) this.state.set(agent_id, status);
@@ -584,6 +686,10 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
    */
   async setCurrentTask(agent_id: string, ticket_id: string, role?: string, taskToken?: string): Promise<void> {
     if (!agent_id || !ticket_id) return;
+
+    // The agent just spawned a working subagent — it is unambiguously online,
+    // so drop any lingering auto-start markers (ticket bfdd80b7).
+    this._clearStartMarkers(agent_id);
 
     const ticket = await this.dataSource
       .getRepository(Ticket)
@@ -771,6 +877,17 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
       const prev = this.state.get(a.id);
       const is_online = !!(a.last_seen_at && a.last_seen_at > threshold);
 
+      // Auto-start markers (ticket bfdd80b7). Drop them the moment the agent is
+      // actually online — a spawn that landed shouldn't keep flashing "시작 중".
+      // Otherwise detect a marker just expiring (starting→never_started, or a
+      // start-error aging out) so the badge reverts on this sweep instead of
+      // lingering until the next unrelated change. `hadMarker` is read BEFORE
+      // isStarting/getStartError (which delete stale entries).
+      if (is_online) this._clearStartMarkers(a.id);
+      const hadMarker = this.startingAt.has(a.id) || this.startErrorAt.has(a.id);
+      const markerLive = this.isStarting(a.id) || this.getStartError(a.id) !== undefined;
+      const markerChanged = hadMarker !== markerLive;
+
       // Stale-task auto-clear: covers plugin crashes that skipped
       // clearCurrentTask. Never blocks legitimate long work — sweep just
       // forgets the badge after CURRENT_TASK_STALE_MS, the next setCurrentTask
@@ -788,6 +905,8 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
 
       const prevLastSeenMs = prev?.last_seen_at?.getTime();
       const nextLastSeenMs = a.last_seen_at?.getTime();
+      const prevConnectedMs = prev?.connected_at?.getTime();
+      const nextConnectedMs = a.connected_at?.getTime();
       const prevTaskCount = prev?.active_tasks?.size ?? 0;
       const nextTaskCount = nextTasks?.size ?? 0;
       const tasksChanged = prevTaskCount !== nextTaskCount;
@@ -795,13 +914,16 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
         !prev ||
         prev.is_online !== is_online ||
         prevLastSeenMs !== nextLastSeenMs ||
-        tasksChanged;
+        prevConnectedMs !== nextConnectedMs ||
+        tasksChanged ||
+        markerChanged;
       if (!stateChanged) continue;
 
       const updated: AgentStatus = {
         agent_id: a.id,
         is_online,
         last_seen_at: a.last_seen_at,
+        connected_at: a.connected_at,
         active_tasks: nextTasks,
         current_task: next_current_task,
       };
@@ -844,6 +966,14 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
     // finalizes the orphaned run, but this bounds the map even if that lags.
     for (const id of this.qaTasks.keys()) {
       if (!seen.has(id)) this.qaTasks.delete(id);
+    }
+    // Same eviction for the auto-start markers (ticket bfdd80b7) — a deleted
+    // agent must not leave a starting/error marker lingering.
+    for (const id of this.startingAt.keys()) {
+      if (!seen.has(id)) this.startingAt.delete(id);
+    }
+    for (const id of this.startErrorAt.keys()) {
+      if (!seen.has(id)) this.startErrorAt.delete(id);
     }
 
     // Refresh the effective output-liveness retention TTL (ticket 47a72129)

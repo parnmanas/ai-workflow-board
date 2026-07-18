@@ -36,6 +36,21 @@ export interface PermissionMeta {
   group: string;
 }
 
+// Lifecycle state of a (managed) agent process (ticket bfdd80b7). Additive over
+// the binary is_online/last_seen — surfaces the auto-start gap so the UI can
+// render 미시작/시작 중/오류 instead of a flat ONLINE/OFFLINE. Mirrors the
+// server's optional `lifecycle_state` on the agent objects + agent_status SSE.
+//   never_started — created but never started (needs Start)
+//   starting      — a spawn was just dispatched (auto-start or manual), not online yet
+//   online / offline — as before
+//   error         — the last (auto-)start attempt failed
+export type AgentLifecycleState =
+  | 'never_started'
+  | 'starting'
+  | 'online'
+  | 'offline'
+  | 'error';
+
 export interface Agent {
   id: string; // GUID
   name: string;
@@ -46,6 +61,7 @@ export interface Agent {
   is_online: number;           // 0 = offline, 1 = online (Phase 2)
   connected_at: string | null; // ISO timestamp or null (Phase 2)
   last_seen_at: string | null; // ISO timestamp or null (Phase 2)
+  lifecycle_state?: AgentLifecycleState; // 5-state process lifecycle (ticket bfdd80b7)
   // Phase 1 role prompt fields (D-14 / ROLE-02)
   role_prompt?: string;
   role_prompt_meta?: Record<string, any> | null;
@@ -1411,6 +1427,9 @@ export interface DashboardAgent {
   is_online: boolean;
   last_seen_at: string | null;
   connected_at: string | null;
+  // 5-state process lifecycle (ticket bfdd80b7). Absent on older servers →
+  // the card falls back to deriving state from is_online/last_seen/connected.
+  lifecycle_state?: AgentLifecycleState;
   workspace_id: string;
   pending_trigger_count: number;
   // Legacy singular — most-recently-claimed task. Prefer active_tasks; kept for
@@ -1589,6 +1608,9 @@ export interface AgentStatusEnvelope {
     agent_id: string;
     is_online: boolean;
     last_seen_at: string | null;
+    // 5-state process lifecycle (ticket bfdd80b7) — pushed live so the card
+    // badge reflects starting/never_started/error, not just online/offline.
+    lifecycle_state?: AgentLifecycleState;
     current_task?: AgentCurrentTask;
     // Full concurrency-N task list. On this SSE wire it carries board-ticket
     // tasks only (all kind:'ticket'); QA runs are merged into the REST

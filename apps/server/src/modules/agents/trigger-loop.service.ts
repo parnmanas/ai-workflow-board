@@ -19,6 +19,7 @@ import { GitHubConnectorService, parseGitHubUrl } from '../../services/github-co
 import { AgentWorkloadService } from './agent-workload.service';
 import { AgentStatusService } from './agent-status.service';
 import { DispatchIntentService, DISPATCH_RECONCILE_SOURCE } from './dispatch-intent.service';
+import { AgentAutostartService } from './agent-autostart.service';
 import { TicketPrerequisitesService } from '../tickets/ticket-prerequisites.service';
 import { priorityIndex } from './priority';
 import { appendBoardLanguageInstruction, resolveHarnessConfig, HarnessConfig } from '../../common/harness-config';
@@ -178,6 +179,11 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
     // instead of evaporating. DispatchIntentService depends only on the
     // DataSource (never on TriggerLoopService), so this injection is cycle-free.
     private readonly dispatchIntents: DispatchIntentService,
+    // Never-started / offline agent handling (ticket bfdd80b7). Classifies
+    // reachability, attempts auto-start, and writes the user-facing "dispatch
+    // 보류" feedback. Same module; it never injects TriggerLoopService, so
+    // cycle-free.
+    private readonly autostart: AgentAutostartService,
   ) {}
 
   onModuleInit() {
@@ -2019,6 +2025,31 @@ candidate's branch or move the ticket.
         });
       }
       return '';
+    }
+
+    // Agent reachability feedback (ticket bfdd80b7). ADDITIVE — deliberately
+    // NOT a gate. If the agent is not reachable (never-started / offline) the
+    // SSE emit below evaporates at zero subscribers with NO user signal (the
+    // silent-drop bug). We surface an explicit "dispatch 보류: agent 미시작"
+    // ticket comment + activity and attempt auto-start (spawn_agent) here, then
+    // let the emit proceed exactly as before so the durable outbox still records
+    // the in_flight intent the reconciler retries (its design tolerates an
+    // evaporated emit — spawn success is NOT resolution). When auto-start lands,
+    // the next reconciler re-dispatch reaches the now-online agent. Debounced
+    // internally so the supervisor/reconciler re-push doesn't spam. Best-effort:
+    // a feedback failure must never gate the dispatch.
+    try {
+      await this.autostart.maybeHandleUnreachableTicket({
+        ticket,
+        agentId,
+        role,
+        triggerSource,
+        triggeredBy,
+      });
+    } catch (e) {
+      this.logService.warn('MCP', 'unreachable-agent feedback/auto-start failed (dispatch continues)', {
+        err: String(e), ticket_id: ticket.id, agent_id: agentId,
+      });
     }
 
     // Compose role_prompt = workspace role's prompt + agent's own prompt.

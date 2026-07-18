@@ -10,6 +10,8 @@ import { UserMention } from '../../entities/UserMention';
 import { TicketAttachment } from '../../entities/TicketAttachment';
 import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
+import { AgentConnectivityRegistry } from '../../services/agent-connectivity.registry';
+import { AGENT_AUTOSTART_REQUESTED, AutostartRequestEvent } from '../../common/agent-autostart-events';
 import { MentionService, ResolvedMention } from '../../services/mention.service';
 import { RoomMembershipService } from './room-membership.service';
 import { resolveAgentDisplayName } from '../../utils/agent-name';
@@ -88,6 +90,10 @@ export class RoomMessagingService {
     private readonly membership: RoomMembershipService,
 
     private readonly mentionService: MentionService,
+
+    // Live SSE reachability (ticket bfdd80b7) — the accurate pre-filter for
+    // "is this chat target actually reachable?" (global service).
+    private readonly connectivity: AgentConnectivityRegistry,
   ) {}
 
   /**
@@ -863,6 +869,10 @@ export class RoomMessagingService {
           'ChatRooms',
           `@mention routed to agent ${agent.name} (${agent.id}) in room ${roomId}`,
         );
+        // Never-started / offline agent (ticket bfdd80b7): the chat_request
+        // above evaporates at zero subscribers with no user signal. Flag it so
+        // AgentAutostartService attempts a spawn and posts a room system message.
+        this._flagUnreachableAgent(agent, roomId, workspaceId);
       } else {
         // User mention — persist + emit user_mention for sidebar badge sync.
         const row = await this.userMentionRepo.save(this.userMentionRepo.create({
@@ -954,6 +964,32 @@ export class RoomMessagingService {
     });
 
     this.logService.info('ChatRooms', `DM auto-routed to agent ${agent.name} (${agent.id}) in room ${roomId}`);
+    // Never-started / offline agent (ticket bfdd80b7) — same flag as the
+    // @mention path so a DM to a not-started agent gets feedback + auto-start.
+    this._flagUnreachableAgent(agent, roomId, workspaceId);
+  }
+
+  /**
+   * Fire the internal auto-start signal (ticket bfdd80b7) when a chat message
+   * targets an agent that is not online. AgentAutostartService consumes it,
+   * re-classifies precisely (it also sees the instance registry, covering the
+   * sub-sweep window), attempts spawn_agent, and posts a room system message so
+   * the user never faces a silent no-response. `is_online=0` is a cheap
+   * pre-filter here; the hub is the authority, so a false pre-filter is a no-op
+   * there (it finds the agent reachable and does nothing).
+   */
+  private _flagUnreachableAgent(agent: Agent, roomId: string, workspaceId: string): void {
+    // Reachable via a live SSE session (proxy or supervising manager) OR a
+    // recent heartbeat → the chat_request will be delivered; do nothing.
+    if (agent.is_online || this.connectivity.isReachable(agent.id)) return;
+    const evt: AutostartRequestEvent = {
+      agent_id: agent.id,
+      agent_name: agent.name,
+      room_id: roomId,
+      workspace_id: workspaceId,
+      source: 'chat',
+    };
+    activityEvents.emit(AGENT_AUTOSTART_REQUESTED, evt);
   }
 
 }

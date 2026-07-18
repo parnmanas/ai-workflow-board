@@ -26,6 +26,7 @@ import { activityEvents } from '../../services/activity.service';
 import { InstanceRegistryService } from './instance-registry.service';
 import { PairingService } from './pairing.service';
 import { CommandLedgerService } from './command-ledger.service';
+import { AgentManagerCommandService } from './agent-manager-command.service';
 import type { AgentManagerCommand, AgentManagerCommandPayload } from '../../common/types/stream-events';
 import { ALLOWED_CLI_TYPES } from '../../common/types/cli-types';
 
@@ -67,6 +68,7 @@ export class AgentManagerController {
     private readonly subagentMonitor: SubagentMonitorService,
     private readonly logService: LogService,
     private readonly commandLedger: CommandLedgerService,
+    private readonly commands: AgentManagerCommandService,
     private readonly triggerLoop: TriggerLoopService,
     private readonly agentStatus: AgentStatusService,
     // Durable dispatch outbox ack sink (ticket e7c87517). From AgentsModule
@@ -851,64 +853,11 @@ export class AgentManagerController {
     }
     const args: Record<string, any> = typeof body?.args === 'object' && body.args ? { ...body.args } : {};
 
-    // For spawn_agent: hydrate the agent record server-side and fill any
-    // missing args (name / cli / working_dir / manager_agent_id) before
-    // emitting. Admin-supplied args win — they're allowed to override the
-    // DB value for one-off scenarios. The manager used to fetch this from
-    // /api/agents/:id over its agent apiKey, but that endpoint is gated by
-    // user-session permissions and always returned 401, leaving spawn_agent
-    // dependent on whatever the caller happened to pass. Filling at
-    // dispatch time gets rid of that round-trip and the auth mismatch.
-    if (command === 'spawn_agent' && typeof args.agent_id === 'string' && args.agent_id) {
-      const target = await this.agentRepo.findOne({ where: { id: args.agent_id } });
-      if (target) {
-        if (args.name === undefined) args.name = target.name;
-        if (args.cli === undefined) args.cli = target.type;
-        if (args.working_dir === undefined && target.working_dir) {
-          args.working_dir = target.working_dir;
-        }
-        if (args.manager_agent_id === undefined && target.manager_agent_id) {
-          args.manager_agent_id = target.manager_agent_id;
-        }
-        if (args.credential_id === undefined && target.credential_id) {
-          args.credential_id = target.credential_id;
-        }
-        // Per-agent default model — same pattern as working_dir/credential_id.
-        // The manager injects it as `--model` (claude/codex) at spawn time.
-        if (args.model === undefined && target.model) {
-          args.model = target.model;
-        }
-      }
-    }
-
-    const command_id = randomBytes(8).toString('hex');
-    const issued_at = new Date().toISOString();
-
-    const payload: AgentManagerCommandPayload = {
-      command_id,
-      instance_id: inst.instance_id,
-      agent_id: inst.agent_id,
-      command,
-      args,
-      issued_by: user.id,
-      issued_at,
-    };
-    // Ledger first, then emit. The order matters: a manager that processes
-    // the SSE event very quickly could ack before our local write commits,
-    // and the ack handler would then 410 Gone a legitimate response.
-    this.commandLedger.record({
-      command_id,
-      instance_id: inst.instance_id,
-      agent_id: inst.agent_id,
-      command,
-      issued_at,
-    });
-    activityEvents.emit('agent_manager_command', { ...payload, timestamp: issued_at });
-    this.logService.info(
-      'AgentManager',
-      `Sent command ${command} to instance ${inst.instance_id} (agent=${inst.agent_id})`,
-      { command_id, args, issued_by: user.id },
-    );
+    // Emit + spawn_agent arg hydration + ledger-record all live in
+    // AgentManagerCommandService now, shared with server-side auto-start
+    // (ticket bfdd80b7) so both paths hydrate identically and record the
+    // ledger before emitting (ack-race safety).
+    const { command_id, issued_at } = await this.commands.issue(inst, command, args, user.id);
     return res.status(202).json({ ok: true, command_id, issued_at });
   }
 
