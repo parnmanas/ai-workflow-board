@@ -4,12 +4,14 @@
 // 인자를 escape 없이 이어붙여(Node DEP0190) codex 의 inline-TOML `-c` attribution
 // 인자를 공백/따옴표/중괄호에서 쪼개고, subagent 에 붙는 MCP 헤더를 오염시킨다.
 //
-// 실제 Windows cmd.exe 실행은 여기서 못 하지만, cross-spawn 이 모든 플랫폼에서
-// 보장하는 성질은 증명할 수 있다: 공백·따옴표가 가득한 복잡한 인자가 spawn 경로를
-// 통과하며 단일 argv 엔트리로 살아남는다. POSIX 에서 cross-spawn 은
-// child_process.spawn(argv, shell 없음)으로 위임하므로, 이 테스트는 누군가 spawn
-// 사이트에 `shell: true` 를 다시 넣는 것도 막는다 — 그건 이 인자들을 쪼갤 것이다
-// (아래에서 검증).
+// 이 파일은 두 플랫폼을 갈라 검증한다:
+//   • POSIX(리눅스 CI): cross-spawn 이 `.sh` 를 shell 없이 실행하며 복잡한 argv 를
+//     단일 엔트리로 보존한다(+ shell:true 대조군이 그걸 쪼갬을 시연).
+//   • Windows(windows-latest CI): 실제 `codex.cmd` npm shim 을 cross-spawn 으로
+//     실행 — `.cmd -> cmd.exe /d /s /c` 해석/escaping 분기를 실제로 태워
+//     `spawn codex ENOENT` 회귀를 잡고, 공백/따옴표/중괄호가 든 argv 가 온전히
+//     도착하며 성공(exit 0) 종료함을 증명한다. (ci.yml 의 `agent-manager-spawn-cmd`
+//     매트릭스 잡이 이 파일을 두 OS 에서 돌린다.)
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -27,6 +29,8 @@ const CODEX_ATTRIBUTION_ARG =
 const CWD_WITH_SPACE = '/tmp/awb wt/ticket dir';
 const CLI_ARGS = ['exec', '-c', CODEX_ATTRIBUTION_ARG, '--cd', CWD_WITH_SPACE, '--json'];
 
+const isWindows = process.platform === 'win32';
+
 function makeArgEchoShim() {
   const dir = mkdtempSync(join(tmpdir(), 'awb-argtest-'));
   const shim = join(dir, 'argecho.sh');
@@ -36,7 +40,7 @@ function makeArgEchoShim() {
   return { dir, shim };
 }
 
-test('cross-spawn preserves complex CLI args as single argv entries', () => {
+test('cross-spawn preserves complex CLI args as single argv entries', { skip: isWindows }, () => {
   const { dir, shim } = makeArgEchoShim();
   try {
     const res = crossSpawn.sync(shim, CLI_ARGS, { encoding: 'utf8' });
@@ -53,7 +57,7 @@ test('cross-spawn preserves complex CLI args as single argv entries', () => {
   }
 });
 
-test('control: shell:true DOES split the same args (why we use cross-spawn)', () => {
+test('control: shell:true DOES split the same args (why we use cross-spawn)', { skip: isWindows }, () => {
   const { dir, shim } = makeArgEchoShim();
   try {
     // cross-spawn 이 피하는 버그를 시연: shell:true 면 인자들이 하나의 command
@@ -70,3 +74,41 @@ test('control: shell:true DOES split the same args (why we use cross-spawn)', ()
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── Windows: 실제 `.cmd -> cmd.exe` 스폰/escaping 분기 (ticket e299c6b3 재현 환경) ──
+//
+// npm 글로벌 codex 는 형제 `.exe` 없이 `%APPDATA%\npm\codex.cmd` 배치 shim 만
+// 노출하고, 그 shim 은 argv 를 `%*` 로 node 에 넘긴다(npm 이 만드는 모든 .cmd shim
+// 의 구조). raw `child_process.spawn("codex.cmd")` 는 CreateProcess 가 `.cmd` 를
+// 실행 대상으로 못 잡아 `spawn ... ENOENT` 로 죽었다. cross-spawn 은 이를
+// `cmd.exe /d /s /c` 로 감싸고 인자를 CommandLineToArgvW 규칙 + cmd 메타문자
+// 카렛-escaping 으로 감싸므로, 배치 `%*` → node 재파싱까지 왕복해도 argv 가
+// 보존된다. 이 테스트는 그 왕복을 실제 cmd.exe 에서 태운다 → windows-latest 러너 전용.
+test(
+  'windows: cross-spawn runs a real codex.cmd npm shim (no ENOENT) and preserves complex argv',
+  { skip: !isWindows },
+  () => {
+    const dir = mkdtempSync(join(tmpdir(), 'awb-winshim-'));
+    try {
+      // node 로 argv 를 그대로 되뱉는 helper (실제 npm shim 이 하듯 `%*` 로 넘김).
+      const echo = join(dir, 'argecho.mjs');
+      writeFileSync(echo, 'for (const a of process.argv.slice(2)) process.stdout.write(a + "\\n");\n');
+      // codex.cmd 배치 shim: `%~dp0` 로 sibling helper 를 찾고 argv 를 `%*` 로 전달.
+      // (cwd 와 무관하게 동작해야 하므로 %~dp0 사용 — 실제 npm shim 과 동일.)
+      const shim = join(dir, 'codex.cmd');
+      writeFileSync(shim, '@echo off\r\nnode "%~dp0argecho.mjs" %*\r\n');
+
+      const res = crossSpawn.sync(shim, CLI_ARGS, { encoding: 'utf8' });
+      // 회귀의 핵심: `.cmd` 를 spawn 할 수 있어야 한다(ENOENT 아님) + 성공 종료.
+      assert.equal(res.error, undefined, `spawn error: ${res.error && res.error.message}`);
+      assert.equal(res.status, 0, res.stderr || 'codex.cmd shim exited non-zero');
+      const lines = res.stdout.split(/\r?\n/).filter((l) => l.length > 0);
+      // 공백/따옴표/중괄호가 든 6개 인자가 단일 argv 엔트리로 온전히 왕복.
+      assert.deepEqual(lines, CLI_ARGS);
+      assert.ok(lines.includes(CODEX_ATTRIBUTION_ARG));
+      assert.ok(lines.includes(CWD_WITH_SPACE));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);

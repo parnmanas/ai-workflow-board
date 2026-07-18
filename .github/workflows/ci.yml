@@ -50,6 +50,34 @@ jobs:
   # 값 자체가 없다 → collapse 될 것도 없어 이 가드는 목적을 잃었다(오히려 정상
   # 변경마다 CI 를 red 로 만든다). 그래서 잡·check-version-bump.mjs·그 테스트를 제거.
 
+  # Windows regression guard (ticket e299c6b3) — codex 의 npm 글로벌 설치는
+  # `%APPDATA%\npm\codex.cmd` 배치 shim 만 남기는데, raw child_process.spawn 은
+  # CreateProcess 로 `.cmd` 를 실행 못 해 `spawn codex ENOENT` 로 죽고 모든 codex
+  # subagent dispatch 가 5분 루프로 조용히 실패했다. spawn 사이트를 cross-spawn 으로
+  # 옮겨(`.cmd -> cmd.exe /d /s /c`, 인자 escape) 고쳤다. 이 잡은 그 경로를 실제
+  # windows-latest 러너에서 태운다 — 진짜 `codex.cmd` shim 을 cross-spawn 해 ENOENT
+  # 없이 성공하고 공백/따옴표가 든 argv 가 온전히 왕복하는지 검증. 리눅스 축은
+  # POSIX cross-spawn(argv 보존 + shell:true 대조군)을 돌린다. 두 축 모두 순수
+  # cross-spawn 만 쓰므로 dist 빌드가 필요 없다.
+  agent-manager-spawn-cmd:
+    name: agent-manager cross-spawn (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Run cross-spawn shim spawn test
+        working-directory: apps/agent-manager
+        run: node --test --test-force-exit test/spawn-cmd-arg-escaping.test.mjs
+
   # Dialect matrix — the actual pre-deploy safety net. Boots the contract flows
   # against Postgres 16 (matching the prod image) so uuid/varchar mismatches and
   # other Postgres-only failures are caught here, not on the live server.
