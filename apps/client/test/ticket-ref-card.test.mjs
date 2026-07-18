@@ -12,6 +12,9 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 import { renderMarkdown } from '../src/components/chat/utils/markdown.tsx';
+import TicketRefCard from '../src/components/chat/TicketRefCard.tsx';
+
+const renderCard = (props) => renderToStaticMarkup(React.createElement(TicketRefCard, props));
 
 const render = (text, participants) =>
   renderToStaticMarkup(React.createElement(React.Fragment, null, ...renderMarkdown(text, participants)));
@@ -55,4 +58,29 @@ test('티켓 토큰 없는 plain 텍스트는 카드 0', () => {
   const html = render('그냥 평범한 메시지입니다');
   assert.doesNotMatch(html, /data-ticket-ref/);
   assert.match(html, /그냥 평범한 메시지입니다/);
+});
+
+// ─── F-1 (ticket 24694916): 구조화 metadata 카드 — action 배지 ────────────────
+// agent-manager 가 tool result 에서 캡처한 ticket_refs 를 MessageList 가 각 ref →
+// action 을 실은 TicketRefCard 로 렌더한다. 카드를 직접 렌더해 배지 델타를 고정한다
+// (content-token 경로는 action 없이 호출 → 기존 인라인 카드 그대로).
+
+test('F-1: action prop → 한글 배지 + aria 에 액션·제목', () => {
+  const html = renderCard({ id: 'T-1', title: '로그인 버그', action: 'move' });
+  assert.match(html, /이동/); // '이동' 한글 배지
+  assert.match(html, /로그인 버그/); // 제목 라벨
+  assert.match(html, /data-ticket-ref="T-1"/); // 클릭 대상 식별
+  assert.match(html, /aria-label="티켓 이동 — 티켓 열기: 로그인 버그"/);
+});
+
+test('F-1: 알 수 없는 action → 코드 문자열 그대로 배지 노출', () => {
+  const html = renderCard({ id: 'T-3', title: 'x', action: 'weird' });
+  assert.match(html, /weird/);
+});
+
+test('F-1: action 미지정(content-token 경로) → 배지 없음, 기존 인라인 카드 유지', () => {
+  const html = renderCard({ id: 'T-2', title: '순수제목' });
+  assert.doesNotMatch(html, /이동|생성|수정|코멘트/); // 액션 배지 없음
+  assert.match(html, /aria-label="티켓 열기: 순수제목"/); // 기존 aria 그대로
+  assert.match(html, /data-ticket-ref="T-2"/);
 });
