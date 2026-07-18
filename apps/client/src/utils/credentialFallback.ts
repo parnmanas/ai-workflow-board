@@ -1,11 +1,13 @@
 // ─── 에이전트 credential 공란 fallback 안내 (ticket d2360de6) ───────────────
-// 에이전트의 `credential_id`가 비어 있을 때 매니저는 인증 없이 도는 것이
-// 아니라 "매니저 호스트에 저장된 로그인"(코드베이스 용어로 "operator HOME")으로
-// fallback 한다. 그런데 그 fallback 의미가 어댑터마다 다른데도 admin UI 는
+// 에이전트의 `credential_id`가 비어 있을 때 매니저는 per-agent credential 대신
+// "매니저 호스트의 로그인/env"(코드베이스 용어로 "operator HOME") fallback 경로를
+// 선택한다 — 그 host 로그인/env 가 실제로 존재하는지는 별개(없으면 turn 이 실패).
+// 그런데 그 fallback 의미가 어댑터마다 다른데도 admin UI 는
 // 모든 CLI 에 대해 똑같이 "None — fall back to operator HOME" 이라는 한 문장만
 // 보여줬다. 그 결과 공란 credential 을 "인증 미설정(blocker)"으로 반복 오판해
 // 불필요한 운영자 조치를 요청하는 일이 있었다 (원 티켓 09a0442f: Codex
-// `credential_id: null` = 호스트 `codex login` 사용, 인증 부재 아님).
+// `credential_id: null` = 호스트 `codex login` fallback 경로 선택 — per-agent
+// credential 누락을 뜻하지 않음; host auth(호스트 로그인/env) 존재 여부는 별도).
 //
 // 이 헬퍼는 credential picker / 읽기전용 표시가 렌더되는 모든 곳에서 어댑터별
 // fallback 의미를 한 곳에서 제공한다. 네 개 표시 지점(admin/AgentManager,

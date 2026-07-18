@@ -312,13 +312,21 @@ Idempotency, concurrency, failure:
 ## Per-agent credential fallback (empty `credential_id`)
 
 Each managed agent may carry a per-agent `credential_id` (Admin → Agent Manager
-→ *agent* → Edit → **CLI credential**). Leaving it **empty is a valid, common
-setup — not "no auth"**: the adapter's `prepareCliHome` falls back to the
-credential already present on the **manager host** (the codebase calls this
-**"operator HOME"**). Treating an empty `credential_id` as a missing credential
-has caused false operator escalations — ticket `09a0442f`: a Codex reviewer with
-`credential_id: null` was repeatedly misread as unauthenticated when it was in
-fact authenticating fine via the host `codex login`.
+→ *agent* → Edit → **CLI credential**). Leaving it **empty selects the adapter's
+host fallback path** — `prepareCliHome` points the agent at the login/env on the
+**manager host** (the codebase calls this **"operator HOME"**) instead of a
+per-agent credential. This is a valid, common setup and is **not by itself a
+per-agent credential gap**; it does **not**, however, guarantee that auth is
+available — the required host login/env must still actually exist, or turns fail
+(see the heartbeat note below and
+[`docs/managed-agent-relogin.md`](managed-agent-relogin.md)).
+
+Treating an empty `credential_id` as a *missing* credential has nonetheless
+caused false operator escalations. As observed in ticket `09a0442f`, a Codex
+reviewer with `credential_id: null` was repeatedly misread as unauthenticated
+when it was in fact authenticating fine via the host `codex login` — but that is
+the observation from that one incident, not a guarantee the host login always
+exists.
 
 What "empty" falls back to is **adapter-specific** — it is a host **CLI login**
 for claude/codex but a host **env var** for deepseek/antigravity:
