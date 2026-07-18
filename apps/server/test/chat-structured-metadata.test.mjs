@@ -138,5 +138,38 @@ test('F-1: ticket-action metadata round-trips REST 201 + SSE wire + history read
   assert.deepEqual(kept[0], { action: 'comment', ticket_id: 'ticket-ccc', title: 'ok' }, 'unknown keys stripped');
   assert.deepEqual(kept[1], { action: '', ticket_id: 'ticket-ddd' }, 'action defaults to empty, no title key');
 
+  // ── 3. "누락 없이" — the 20 + 1 two-message path (F-1 3차 재요청) ──────────────
+  // The server bounds EACH message's ticket_refs at MAX_TICKET_REFS (20), so the
+  // agent-manager CHUNKS a >20-action turn across multiple messages. This asserts the
+  // server side of that contract: (a) a single 21-ref message is bounded to 20 (the
+  // reason the manager must chunk rather than lean on one message), and (b) the
+  // manager's chunked output — one message of 20 + one of 1 — both persist in full, so
+  // all 21 ticket_ids survive across the pair (no action silently dropped).
+
+  // (a) one over-sized message → the sanitizer keeps the first 20 (per-message defense).
+  const twentyOne = Array.from({ length: 21 }, (_, i) => ({ action: 'create', ticket_id: `big-${i}` }));
+  const bigRes = await sendAgentMessage({ agent_id: responder.id, content: 'oversized single message', metadata: { ticket_refs: twentyOne } });
+  const bigBody = await bigRes.json();
+  assert.equal(bigRes.status, 201, 'oversized send still succeeds');
+  assert.equal(bigBody.metadata?.ticket_refs.length, 20, 'a single message is bounded to 20 — the manager must not rely on one message for 21');
+
+  // (b) the manager's chunked output: message A (a full 20) + message B (the overflow 1).
+  const chunkA = Array.from({ length: 20 }, (_, i) => ({ action: 'create', ticket_id: `chunk-${i}` }));
+  const chunkB = [{ action: 'create', ticket_id: 'chunk-20' }];
+  const aBody = await (await sendAgentMessage({ agent_id: responder.id, content: 'chunk A', metadata: { ticket_refs: chunkA } })).json();
+  const bBody = await (await sendAgentMessage({ agent_id: responder.id, content: 'chunk B', metadata: { ticket_refs: chunkB } })).json();
+  assert.equal(aBody.metadata?.ticket_refs.length, 20, 'chunk A (a full 20) persists intact');
+  assert.equal(bBody.metadata?.ticket_refs.length, 1, 'chunk B (the 21st) persists intact');
+
+  // Read history back and prove all 21 chunk ids are present across the two persisted rows.
+  const hist2 = await (await fetch(`${base}/api/agent/chat-rooms/${room.id}/messages`, { headers: { 'X-Agent-Key': responderKey.raw_key } })).json();
+  const rows2 = Array.isArray(hist2) ? hist2 : (hist2?.messages ?? []);
+  const chunkIds = new Set();
+  for (const m of rows2) {
+    if (!Array.isArray(m.metadata?.ticket_refs)) continue;
+    for (const r of m.metadata.ticket_refs) if (String(r.ticket_id).startsWith('chunk-')) chunkIds.add(r.ticket_id);
+  }
+  assert.equal(chunkIds.size, 21, 'all 21 chunk ticket_ids survive across the 20 + 1 message pair (누락 없이)');
+
   // No process.exit — the suite runs with --test-force-exit.
 });
