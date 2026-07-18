@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import type { DashboardAgent, AgentManagerInstance, AgentCurrentTask } from '../types';
+import type { DashboardAgent, AgentManagerInstance, AgentCurrentTask, AgentLifecycleState } from '../types';
 import { tokens } from '../tokens';
 import { Badge } from './common';
 import { formatAgentDisplayName } from '../utils/agentName';
@@ -38,6 +38,32 @@ interface AgentCardProps {
 // Card is a summary tile — cap the visible task rows and roll the rest into a
 // "+N more" line. The full list lives in AgentDetailModal.
 const CARD_TASK_PREVIEW_LIMIT = 3;
+
+// 5-state lifecycle badge (ticket bfdd80b7). Maps the server's lifecycle_state to
+// a Badge variant + label so the tile shows the auto-start gap (미시작/시작 중/
+// 오류) instead of a flat ONLINE/OFFLINE.
+const LIFECYCLE_BADGE: Record<
+  AgentLifecycleState,
+  { variant: 'success' | 'warning' | 'info' | 'neutral' | 'danger'; label: string }
+> = {
+  online: { variant: 'success', label: 'ONLINE' },
+  starting: { variant: 'warning', label: '시작 중' },
+  never_started: { variant: 'neutral', label: '미시작' },
+  offline: { variant: 'neutral', label: 'OFFLINE' },
+  error: { variant: 'danger', label: '오류' },
+};
+
+// Prefer the server's authoritative lifecycle_state; fall back to deriving from
+// the binary online/seen signals so agents from an older server (no
+// lifecycle_state) still render a sensible badge.
+function resolveLifecycle(agent: DashboardAgent): AgentLifecycleState {
+  if (agent.lifecycle_state) return agent.lifecycle_state;
+  if (agent.is_online) return 'online';
+  // Never connected AND never seen → treat as never-started; otherwise it has
+  // been online at some point, so it's offline.
+  if (!agent.last_seen_at && !agent.connected_at) return 'never_started';
+  return 'offline';
+}
 
 function formatClaimedTime(claimedAt: string | Date): string {
   const d = typeof claimedAt === 'string' ? new Date(claimedAt) : claimedAt;
@@ -86,6 +112,10 @@ export default function AgentCard({
   const [btnHover, setBtnHover] = useState(false);
 
   const isOnline = agent.is_online === true;
+  // 5-state lifecycle badge (ticket bfdd80b7) — drives both the avatar dot and
+  // the status pill. The "last seen / never connected" subtext below still keys
+  // off isOnline so its logic stays intact.
+  const lifecycle = LIFECYCLE_BADGE[resolveLifecycle(agent)];
   // Concurrency-N + QA rollup. Prefer the full active_tasks list (a board with
   // max_concurrent_tickets_per_agent > 1 puts several entries here, plus any
   // in-progress QA runs); fall back to the legacy singular current_task (older
@@ -265,7 +295,7 @@ export default function AgentCard({
         <div style={avatarBlockStyle}>
           <div style={avatarCircleStyle}>{glyph}</div>
           <span style={dotWrapperStyle}>
-            <Badge variant={isOnline ? 'success' : 'neutral'} dot />
+            <Badge variant={lifecycle.variant} dot />
           </span>
         </div>
         <div
@@ -279,7 +309,7 @@ export default function AgentCard({
         >
           <div style={nameStyle} title={displayName}>{displayName}</div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-            <Badge variant={isOnline ? 'success' : 'neutral'}>{isOnline ? 'ONLINE' : 'OFFLINE'}</Badge>
+            <Badge variant={lifecycle.variant}>{lifecycle.label}</Badge>
             {!isOnline && (
               <>
                 <span style={subMetaStyle}>·</span>
@@ -350,6 +380,7 @@ export default function AgentCard({
           <AgentLifecycleControls
             agentId={agent.id}
             managerInstance={managerInstance}
+            lifecycleState={agent.lifecycle_state}
             layout="compact"
             onDispatched={onLifecycleDispatched}
           />

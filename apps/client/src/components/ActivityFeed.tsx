@@ -31,6 +31,7 @@ const ACTION_VERB: Record<string, string> = {
   agent_trigger: 'claimed',
   trigger_claimed: 'claimed',
   agent_trigger_resolved: 'resolved',
+  dispatch_deferred: 'dispatch 보류', // ticket bfdd80b7 — auto-start deferred a dispatch
 };
 
 function actionVerb(action: string): string {
