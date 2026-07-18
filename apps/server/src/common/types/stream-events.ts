@@ -236,6 +236,27 @@ export interface ChatRequestPayload {
   room_id?: string;
 }
 
+// F-1 (ticket 24694916) — structured ticket-action reference. The agent-manager
+// captures these mechanically from mcp__awb__* tool results (create/move/update/
+// comment/…) and emits them on its own coalesced chat message, so an agent ticket
+// action renders as a reliable card even when the model never types an
+// @[ticket:...] token in prose. Kept a NAMED interface (not an inline literal) so
+// the event-registry parity guard treats `metadata` as pass-through — only the
+// top-level key must appear in map(), not each sub-field.
+export interface ChatMessageTicketRef {
+  // Action verb derived from the MCP tool name: 'create' | 'move' | 'update' |
+  // 'comment' | 'claim' | 'pend' | 'unpend' | 'archive' | 'delete'.
+  action: string;
+  ticket_id: string;
+  // Best-effort human label pulled from the tool result (or an agent-manager
+  // per-session title cache). The client card falls back to the id when absent,
+  // and the Artifact panel fetches full detail on click.
+  title?: string;
+}
+export interface ChatRoomMessageMetadata {
+  ticket_refs?: ChatMessageTicketRef[];
+}
+
 // Phase 7 — room-based chat
 export interface ChatRoomMessagePayload {
   room_id: string;
@@ -291,6 +312,11 @@ export interface ChatRoomMessagePayload {
   // the wire (absent for ordinary chat turns) so the legacy shape is byte-for-byte
   // unchanged for non-Action rooms.
   is_action_room?: boolean;
+  // F-1 (ticket 24694916): structured message metadata. Carries `ticket_refs`
+  // captured by the agent-manager from mcp__awb__* tool results, driving the
+  // reliable ticket-action card render on the client. Conditional-omit on the
+  // wire (absent for ordinary chat turns) so the legacy shape is unchanged.
+  metadata?: ChatRoomMessageMetadata;
 }
 
 export interface ChatRoomUpdatePayload {

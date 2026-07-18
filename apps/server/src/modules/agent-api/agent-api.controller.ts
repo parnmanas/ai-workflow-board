@@ -865,6 +865,10 @@ export class AgentApiController {
       undefined,
       attachmentIds,
       messageType,
+      // F-1 (ticket 24694916): structured ticket-action refs the agent-manager
+      // captured from mcp__awb__* tool results. sendMessage sanitizes + bounds it;
+      // absent on ordinary sends. Only wired on this agent-authenticated path.
+      { metadata: body.metadata },
     );
     return res.status(201).json(msg);
   }

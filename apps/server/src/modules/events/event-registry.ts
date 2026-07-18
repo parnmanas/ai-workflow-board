@@ -446,6 +446,11 @@ export const EVENT_TYPES: EventDefinition[] = [
         // instruction and tell the subagent to do the work directly. Omit when
         // absent so ordinary chat turns keep the wire byte-for-byte unchanged.
         is_action_room: event.is_action_room ? true : undefined,
+        // F-1 (ticket 24694916): structured ticket-action refs. RoomMessagingService
+        // forwards the parsed object it persisted (agent-manager captured it from
+        // mcp__awb__* tool results). Omit when absent so ordinary chat turns keep
+        // the wire byte-for-byte unchanged. flatten() spreads it through to clients.
+        metadata: event.metadata ? event.metadata : undefined,
       };
       return {
         payload,
