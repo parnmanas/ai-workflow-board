@@ -115,7 +115,11 @@ test('two DataSources race recordDispatched → exactly ONE open row (multi-inst
   );
   assert.equal(idxRows.length, 1, 'partial unique index exists on Postgres');
   assert.match(String(idxRows[0].indexdef), /UNIQUE/i, 'index is UNIQUE');
-  assert.match(String(idxRows[0].indexdef), /WHERE .*status <> 'resolved'|WHERE .*status != 'resolved'/i, 'index is PARTIAL on open rows');
+  // Postgres 는 부분 인덱스 predicate 를 `WHERE ((status)::text <> 'resolved'::text)` 로
+  // 정규화한다 (varchar → text 캐스트 삽입 + `!=`→`<>` 치환). 따라서 연산자가 컬럼명
+  // 바로 뒤에 오도록 요구하면 매칭에 실패한다. 캐스트/괄호를 허용하도록 느슨히 매칭하며
+  // sqlite 의 `WHERE status != 'resolved'` 형태도 동일 정규식으로 커버한다.
+  assert.match(String(idxRows[0].indexdef), /WHERE .*status.*(?:<>|!=).*'resolved'/i, 'index is PARTIAL on open rows');
 
   const svc1 = new DispatchIntentService(ds1, logStub);
   const svc2 = new DispatchIntentService(ds2, logStub);
