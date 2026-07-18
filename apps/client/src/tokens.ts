@@ -16,6 +16,8 @@ export const tokens = {
     textDisabled: '#cbd5e1',
     // 어두운 스크림/오버레이 위 텍스트(항상 흰색) — rgba scrim 위 라벨용
     textInverse: '#ffffff',
+    // 키보드 포커스 링(:focus-visible) 단일 원천 — 어두운 서피스 위 3:1↑ 대비(F2-5).
+    focusRing: '#818cf8',
     // Accent
     accent: '#6366f1',
     accentViolet: '#8b5cf6',

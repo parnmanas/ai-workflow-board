@@ -18,6 +18,8 @@ interface SidebarProps {
   onClose: () => void;
   wsId: string | null;
   boards: { id: string; name: string }[];
+  /** 드로어(overlay) 포커스 트랩용 컨테이너 ref — AppLayout 의 useDialogFocus 가 소유(F2-5). */
+  containerRef?: React.Ref<HTMLElement>;
 }
 
 /**
@@ -35,7 +37,7 @@ interface SidebarProps {
  * CRITICAL: This component MUST NOT import any real-time stream client or activity-bus
  * subscription per UI-SPEC §"SSE Reconnect Contract".
  */
-export default function Sidebar({ overlay, isOpen, onClose, wsId, boards }: SidebarProps) {
+export default function Sidebar({ overlay, isOpen, onClose, wsId, boards, containerRef }: SidebarProps) {
   const { user, logout, hasPermission } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
@@ -195,7 +197,15 @@ export default function Sidebar({ overlay, isOpen, onClose, wsId, boards }: Side
   );
 
   return (
-    <aside className={sidebarClassName} style={overlay ? overlayStyle : persistentStyle}>
+    <aside
+      ref={containerRef}
+      className={sidebarClassName}
+      style={overlay ? overlayStyle : persistentStyle}
+      // 드로어 모드는 배경을 가리는 모달성 네비 — 스크린리더/포커스 트랩을 위해 dialog 로 표식.
+      role={overlay ? 'dialog' : undefined}
+      aria-modal={overlay ? true : undefined}
+      aria-label={overlay ? '내비게이션' : undefined}
+    >
       {/* Header */}
       <div style={{ padding: '20px 16px 16px', borderBottom: `1px solid ${tokens.colors.border}` }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>

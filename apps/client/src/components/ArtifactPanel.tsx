@@ -2,7 +2,7 @@ import React, { useEffect, useRef } from 'react';
 import { useArtifactPanel } from '../contexts/ArtifactPanelContext';
 import type { ArtifactRef } from '../contexts/artifactPanel';
 import { tokens } from '../tokens';
-import { nextFocusableIndex, FOCUSABLE_SELECTOR } from './focusTrap';
+import { useDialogFocus } from './useDialogFocus';
 
 /**
  * 우측 Artifact 패널 프레임 (에픽 bf65ca00 · Phase 1 · S1 공통 셸).
@@ -198,23 +198,17 @@ export default function ArtifactPanel({ isMobile }: { isMobile: boolean }) {
   const { open, artifact, closeArtifact } = useArtifactPanel();
   const closeBtnRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLElement>(null);
-  // 패널을 연 요소(카드/토글)를 기억해 두었다가 닫힐 때 포커스를 되돌린다 — 기본 a11y.
-  const restoreFocusRef = useRef<HTMLElement | null>(null);
 
-  // 열릴 때(또는 대상이 바뀔 때) 닫기 버튼으로 포커스 이동, 닫힐 때 opener 로 복귀.
-  useEffect(() => {
-    if (open) {
-      // opener 는 최초 열림에만 기억한다(대상 전환 시 닫기버튼으로 덮어쓰지 않도록).
-      if (!restoreFocusRef.current && typeof document !== 'undefined') {
-        restoreFocusRef.current = document.activeElement as HTMLElement | null;
-      }
-      closeBtnRef.current?.focus();
-    } else {
-      const opener = restoreFocusRef.current;
-      restoreFocusRef.current = null;
-      opener?.focus?.();
-    }
-  }, [open, artifact?.key]);
+  // 초기 포커스(닫기 버튼)·opener 복귀·모바일 Tab 트랩을 공용 훅으로 통일한다(F2-5).
+  // 데스크톱 비모달 패널에는 트랩을 걸지 않는다(trap=isMobile). artifact.key 전환 시
+  // opener 는 유지한 채 닫기 버튼으로 재포커스.
+  useDialogFocus({
+    active: open,
+    trap: isMobile,
+    containerRef: panelRef,
+    initialFocusRef: closeBtnRef,
+    focusKey: artifact?.key,
+  });
 
   // Esc 로 닫기(패널이 열려 있을 때만 바인딩).
   useEffect(() => {
@@ -225,27 +219,6 @@ export default function ArtifactPanel({ isMobile }: { isMobile: boolean }) {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [open, closeArtifact]);
-
-  // 모바일 모달(role=dialog·aria-modal)에서 Tab 포커스 트랩 — 배경으로 새지 않고 시트
-  // 내부 포커스 가능한 요소를 순환한다. 데스크톱 비모달 패널에는 걸지 않는다.
-  useEffect(() => {
-    if (!open || !isMobile) return;
-    const el = panelRef.current;
-    if (!el) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Tab') return;
-      const nodes = Array.from(el.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
-        (n) => !n.hasAttribute('disabled') && n.tabIndex !== -1,
-      );
-      if (nodes.length === 0) return;
-      const current = nodes.indexOf(document.activeElement as HTMLElement);
-      const next = nextFocusableIndex(nodes.length, current, e.shiftKey);
-      e.preventDefault();
-      nodes[next]?.focus();
-    };
-    el.addEventListener('keydown', onKey);
-    return () => el.removeEventListener('keydown', onKey);
-  }, [open, isMobile, artifact?.key]);
 
   return (
     <ArtifactPanelView
