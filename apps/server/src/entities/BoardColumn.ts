@@ -28,6 +28,19 @@ export type ColumnKind =
   | 'merging'
   | 'terminal';
 
+/**
+ * Non-terminal column kinds that run an agent — i.e. every classified kind
+ * except `terminal` (and except the unclassified `''`). These are the columns
+ * whose tickets a stalled ticket can sit on while still owing a dispatch:
+ * intake (backlog promotion), active (assignee), review (reviewer), merging
+ * (merger). The stuck-ticket detector and the dispatch reconciler both scan
+ * exactly this set so that "no forward progress for 24h is impossible" holds
+ * cause-agnostically on EVERY agent-running column, not just active/intake
+ * (ticket e7c87517, reviewer blocker B1). `terminal` is excluded (work is
+ * done); `''` is excluded (unclassified, never dispatched).
+ */
+export const NON_TERMINAL_KINDS: ColumnKind[] = ['intake', 'active', 'review', 'merging'];
+
 export type UnassignedColumnPolicy = 'halt' | 'skip' | 'skip_if_ticket_staffed';
 
 @Entity('columns')

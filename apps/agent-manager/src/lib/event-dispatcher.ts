@@ -17,6 +17,7 @@ import {
   fetchRepositoryCredential,
   postFsResponse,
   postChatRoomMessage,
+  postDispatchAck,
 } from './rest.js';
 import { recordEvent } from './event-log-recorder.js';
 import type { AwbConfig } from './rest.js';
@@ -1257,6 +1258,11 @@ export class EventDispatcher {
       log(
         `Trigger aborted — ticket worktree verification failed: ticket=${ev.ticket_id} role=${ev.action} reason=${worktreeProvision.reason || 'unknown'} blocker=${blockerKind}${worktreeProvision.path ? ` path=${worktreeProvision.path}` : ''}`,
       );
+      // Durable dispatch nack (ticket e7c87517): tell the server the spawn was
+      // aborted so its reconciler re-dispatches once the worktree blocker
+      // (pool_exhausted / missing repo / …) clears, instead of the trigger
+      // silently evaporating — the exact 30603ce6 pool_exhausted incident.
+      this.#ackDispatch(ev, 'nack', blockerKind);
       return;
     }
 
@@ -1310,6 +1316,10 @@ export class EventDispatcher {
         log(
           `Trigger aborted — push credential unavailable: ticket=${ev.ticket_id} detail=${readiness.detail || ''}`,
         );
+        // Durable dispatch nack (ticket e7c87517) — same recovery as the
+        // worktree abort above: the server reconciler re-dispatches once a
+        // usable push credential is attached.
+        this.#ackDispatch(ev, 'nack', blockerKind);
         return;
       }
     }
@@ -1414,6 +1424,11 @@ export class EventDispatcher {
           log(
             `Trigger dispatched to ticket session: ticket=${ev.ticket_id} pid=${result.pid}${result.firstTurn ? ' (new session)' : ''}`,
           );
+          // Durable dispatch ack (ticket e7c87517): spawn STARTED — extends the
+          // reconciler's retry grace. NOT resolution: only real forward progress
+          // closes the intent, so a strand that dies silently still gets
+          // re-dispatched after the grace elapses.
+          this.#ackDispatch(ev, 'processed');
           return;
         }
         if (result.reason === 'duplicate_trigger') {
@@ -1477,6 +1492,9 @@ export class EventDispatcher {
 
         if (result.spawned) {
           log(`Trigger dispatched to subagent: ticket=${ev.ticket_id} pid=${result.pid}${agentContext ? ` agent=${agentContext.agent_id.slice(0, 8)}` : ''}`);
+          // Durable dispatch ack (ticket e7c87517): one-shot subagent spawned →
+          // processed (grace extension, not resolution).
+          this.#ackDispatch(ev, 'processed');
           return;
         }
         log(`Subagent spawn declined (${result.reason}); no further fallback in standalone mode`);
@@ -1488,6 +1506,26 @@ export class EventDispatcher {
     log(
       `Trigger processed (no delegation path spawned): ticket=${ev.ticket_id} role=${ev.action}`,
     );
+  }
+
+  /**
+   * Durable dispatch outbox ack (ticket e7c87517). Fire-and-forget POST that
+   * tells the server whether this `agent_trigger` actually spawned
+   * (`processed`) or was aborted (`nack` + reason). Echoes the trigger_id the
+   * server put on the SSE payload (`ev.field_changed`) so a stale ack for a
+   * superseded dispatch is ignored server-side. `ev.action` is the role,
+   * `ev.ticket_id` the ticket. Never throws / awaited-but-swallowed — the
+   * server's reconciler falls back to its processing-grace timeout if the ack
+   * never lands, so this can never block or fail a spawn.
+   */
+  #ackDispatch(ev: any, outcome: 'processed' | 'nack', reason?: string): void {
+    void postDispatchAck(this.#config, {
+      ticket_id: String(ev?.ticket_id || ''),
+      role: String(ev?.action || ''),
+      trigger_id: String(ev?.field_changed || ''),
+      outcome,
+      reason: reason ? String(reason).slice(0, 500) : '',
+    });
   }
 
   async handleChatRequest(raw: string): Promise<void> {

@@ -30,6 +30,12 @@ export { Action } from './Action';
 export { ActionRun } from './ActionRun';
 export { ActionApproval } from './ActionApproval';
 export { StuckTicketAlert } from './StuckTicketAlert';
+// Durable dispatch outbox (ticket e7c87517) — one row per owed agent_trigger,
+// driven to `resolved` only by real forward progress. The table is auto-DDL'd
+// on EVERY backend (sqlite + Postgres) by TypeORM `synchronize`, which db.ts
+// hardcodes ON in all branches (D-01, never NODE_ENV-gated) — so no hand-written
+// migration is needed, exactly like the sibling StuckTicketAlert (`stuck_alerts`).
+export { DispatchIntent } from './DispatchIntent';
 export { ColumnRolePolicy } from './ColumnRolePolicy';
 export { TicketPrerequisite } from './TicketPrerequisite';
 export { BenchmarkScore } from './BenchmarkScore';

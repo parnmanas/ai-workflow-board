@@ -5,6 +5,7 @@ import { Ticket } from '../../entities/Ticket';
 import { Subagent } from '../../entities/Subagent';
 import { SubagentLogLine } from '../../entities/SubagentLogLine';
 import { StuckTicketAlert } from '../../entities/StuckTicketAlert';
+import { DispatchIntent } from '../../entities/DispatchIntent';
 import { AgentsController } from './agents.controller';
 import { FsBrowserController } from './fs-browser.controller';
 import { SubagentMonitorController } from './subagent-monitor.controller';
@@ -18,6 +19,8 @@ import { BacklogPromotionService } from './backlog-promotion.service';
 import { ClaimVerificationService } from './claim-verification.service';
 import { StuckTicketDetectorService } from './stuck-ticket-detector.service';
 import { RespawnStormDetectorService } from './respawn-storm-detector.service';
+import { DispatchIntentService } from './dispatch-intent.service';
+import { DispatchReconcilerService } from './dispatch-reconciler.service';
 import { TicketPrerequisitesService } from '../tickets/ticket-prerequisites.service';
 import { FsBrowserService } from '../../services/fs-browser.service';
 import { SubagentMonitorService } from '../../services/subagent-monitor.service';
@@ -36,7 +39,7 @@ import { ColumnPoliciesModule } from '../column-policies/column-policies.module'
   // and now AgentsModule needs InstanceRegistryService from AgentManagerModule
   // to enrich /api/agents responses with live heartbeat data.
   imports: [
-    TypeOrmModule.forFeature([Agent, Ticket, Subagent, SubagentLogLine, StuckTicketAlert]),
+    TypeOrmModule.forFeature([Agent, Ticket, Subagent, SubagentLogLine, StuckTicketAlert, DispatchIntent]),
     forwardRef(() => AgentManagerModule),
     // ChatRoomsModule is the home of RoomMessagingService, which
     // StuckTicketDetectorService uses to post in-process alerts via
@@ -60,6 +63,8 @@ import { ColumnPoliciesModule } from '../column-policies/column-policies.module'
     TicketPrerequisitesService,
     FsBrowserService, SubagentMonitorService,
     WorkspaceMoveService,
+    DispatchIntentService,
+    DispatchReconcilerService,
   ],
   exports: [
     AgentConnectionService, TriggerLoopService, AgentStatusService, AllocationService,
@@ -70,6 +75,8 @@ import { ColumnPoliciesModule } from '../column-policies/column-policies.module'
     ClaimVerificationService,
     TicketPrerequisitesService,
     FsBrowserService, SubagentMonitorService,
+    DispatchIntentService,
+    DispatchReconcilerService,
   ],
 })
 export class AgentsModule {}

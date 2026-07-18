@@ -17,6 +17,21 @@ import { Agent } from '../entities/Agent';
 
 const SEPARATOR = '/';
 
+// Agent.id is `@PrimaryGeneratedColumn('uuid')`, so every real agent id is a
+// canonical UUID. Non-UUID actor ids — system labels ('system',
+// 'auto-advance', 'manual by …'), user ids that happen to be non-uuid, deleted
+// rows — are by definition NOT agents. Filtering them out before the
+// `Agent.id IN (...)` lookup is required for correctness on Postgres, where the
+// id column is a real `uuid` type: a stray 'system' in the IN list makes the
+// whole query throw `invalid input syntax for type uuid` and takes down the
+// entire activity-feed read (the audit surface this trigger-loss work relies
+// on). On SQLite the IN(text) would silently match nothing, so this narrowing
+// is behaviour-preserving there and load-bearing on Postgres. Matches the
+// documented contract of resolveAgentDisplayNamesByIds: non-agent ids are
+// "simply ABSENT from the map".
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export interface AgentDisplayInput {
   name?: string | null;
   manager_name?: string | null;
@@ -79,7 +94,12 @@ export async function resolveAgentDisplayNamesByIds(
   agentRepo: Repository<Agent>,
   ids: Array<string | null | undefined>,
 ): Promise<Map<string, string>> {
-  const distinct = Array.from(new Set(ids.filter((id): id is string => !!id)));
+  // Keep only UUID-shaped ids — a non-uuid actor id (system label, deleted
+  // row) can never be an Agent.id, and passing it to `Agent.id IN (...)` throws
+  // on Postgres (uuid column). See UUID_RE note above.
+  const distinct = Array.from(new Set(
+    ids.filter((id): id is string => !!id && UUID_RE.test(id)),
+  ));
   if (distinct.length === 0) return new Map();
   const agents = await agentRepo.find({
     where: { id: In(distinct) } as any,
