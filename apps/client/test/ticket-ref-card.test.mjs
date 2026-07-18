@@ -78,6 +78,23 @@ test('F-1: 알 수 없는 action → 코드 문자열 그대로 배지 노출', 
   assert.match(html, /weird/);
 });
 
+// F-1 재요청: 확장된 mutation surface(update_child_ticket/handoff/consensus/…)의
+// action 코드가 클라 ACTION_LABEL 에도 한글로 매핑돼 방출↔렌더 계약이 일치함을 고정.
+test('F-1: 확장 action 코드 → 한글 배지 (agent-manager 라벨과 일치)', () => {
+  for (const [action, label] of [
+    ['handoff', '핸드오프'],
+    ['consensus', '합의'],
+    ['prereq', '선행조건'],
+    ['unarchive', '아카이브 해제'],
+    ['release', '클레임 해제'],
+    ['propose', '이동 제안'],
+  ]) {
+    const html = renderCard({ id: 'T-x', title: '작업', action });
+    assert.match(html, new RegExp(label), `${action} → ${label} 배지`);
+    assert.match(html, new RegExp(`aria-label="티켓 ${label} — 티켓 열기: 작업"`));
+  }
+});
+
 test('F-1: action 미지정(content-token 경로) → 배지 없음, 기존 인라인 카드 유지', () => {
   const html = renderCard({ id: 'T-2', title: '순수제목' });
   assert.doesNotMatch(html, /이동|생성|수정|코멘트/); // 액션 배지 없음

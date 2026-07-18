@@ -17,9 +17,13 @@ import { useOpenTicketArtifact } from '../../contexts/ticketArtifactOpener';
  * action 없이 호출하므로 기존 인라인 카드는 그대로다.
  */
 // 액션 코드 → 한글 배지 라벨. 미매핑 코드는 코드 문자열 그대로 노출.
+// agent-manager 의 TICKET_ACTION_LABEL_KO(ticket-ref-capture.ts)와 동일 집합을 유지 —
+// 캡처가 방출하는 모든 action 코드가 여기서 한글 배지로 렌더된다(계약 일치, 수용기준 #3).
 const ACTION_LABEL: Record<string, string> = {
   create: '생성', move: '이동', update: '수정', comment: '코멘트',
-  claim: '클레임', pend: '보류', unpend: '보류 해제', archive: '아카이브', delete: '삭제',
+  claim: '클레임', release: '클레임 해제', pend: '보류', unpend: '보류 해제',
+  archive: '아카이브', unarchive: '아카이브 해제', prereq: '선행조건',
+  handoff: '핸드오프', propose: '이동 제안', consensus: '합의', delete: '삭제',
 };
 
 export default function TicketRefCard({ id, title, action }: { id: string; title: string; action?: string }) {

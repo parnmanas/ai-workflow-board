@@ -21,6 +21,7 @@ import {
   parseStreamToolResult,
   harvestTicketTitles,
   resolveTicketRef,
+  resolveBatchTicketRefs,
   formatTicketRefsContent,
   type TicketToolContext,
   type TicketRef,
@@ -822,12 +823,24 @@ export class ChatSessionManager
     if (!ctx || !pend || !useId) return; // not a tracked ticket action
     pend.delete(useId);
 
-    const ref = resolveTicketRef(ctx, result, block?.is_error === true, (id) => this.#ticketTitleCache.get(id));
-    if (!ref) return;
+    const isError = block?.is_error === true;
+    const lookup = (id: string) => this.#ticketTitleCache.get(id);
+    // batch_operations fans out to many refs (one per successful sub-op); every
+    // other tracked tool resolves to at most one. Push each through the same
+    // dedup + per-turn cap so a batch can't blow the coalesced card past the bound.
+    if (ctx.batchOps) {
+      for (const ref of resolveBatchTicketRefs(ctx, result, isError, lookup)) this.#pushCapturedRef(pid, ref);
+    } else {
+      const ref = resolveTicketRef(ctx, result, isError, lookup);
+      if (ref) this.#pushCapturedRef(pid, ref);
+    }
+  }
 
+  /** Append one captured ref to the turn's coalesced set, enforcing the per-turn
+   *  cap and collapsing duplicate (action, ticket_id) pairs to a single card. */
+  #pushCapturedRef(pid: number, ref: TicketRef): void {
     const refs = this.#capturedTicketRefs.get(pid) ?? [];
     if (refs.length >= TICKET_REFS_MAX_PER_TURN) return;
-    // Dedup by (action, ticket_id) so repeated identical actions collapse to one card.
     if (refs.some((r) => r.action === ref.action && r.ticket_id === ref.ticket_id)) return;
     refs.push(ref);
     this.#capturedTicketRefs.set(pid, refs);
