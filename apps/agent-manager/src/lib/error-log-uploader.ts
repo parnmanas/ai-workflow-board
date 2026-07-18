@@ -24,8 +24,14 @@ interface UploadEntry {
   pid: string;
 }
 
-/** Classify a raw log message. Returns null to skip (success/noise). */
-function classify(msg: string): { level: UploadEntry['level']; category: string } | null {
+/**
+ * 원시 로그 메시지를 분류한다. null 을 반환하면 skip(성공/노이즈)한다.
+ *
+ * 단위 테스트용으로 export (test/error-log-uploader.test.mjs 참조).
+ */
+export function classify(
+  msg: string,
+): { level: UploadEntry['level']; category: string } | null {
   // Skip our own uploader traces BEFORE the /error|failed/i catch-all.
   if (/^\[uploader\]/.test(msg)) return null;
   if (/^\[DIAG\]/.test(msg)) return null;
@@ -39,6 +45,18 @@ function classify(msg: string): { level: UploadEntry['level']; category: string 
   if (/stdout error:|EPIPE/.test(msg)) return { level: 'error', category: 'ipc' };
   if (/result subtype=error|is_error=true/.test(msg))
     return { level: 'error', category: 'subagent' };
+
+  // 구조화된 성공/무실패 신호는 아래 느슨한 catch-all 보다 우선한다. 멀쩡한
+  // 로그도 "error"/"failed" 부분문자열을 포함할 수 있다:
+  //   "result subtype=success is_error=false"        (정상 종료한 턴)
+  //   "restart_all_agents → 4 restarted, 0 failed"   (실패 0건인 재시작)
+  // 기존 /error|failed/i catch-all 이 이 둘을 에러로 오분류해, 채팅/서브에이전트
+  // 턴과 에이전트 재시작마다 last_error_upload_at 을 갱신 → 매니저가 영구
+  // DEGRADED 배지에 고정됐다 (ticket 04d22ec0). 부분문자열 대신 명시적
+  // 플래그/제로카운트를 신뢰해 여기서 skip 한다. 실제 실패(is_error=true,
+  // subtype=error 는 위에서, "N failed" N>0 은 아래 catch-all 에서)는 그대로다.
+  if (/is_error=false|subtype=success|\b0 (?:failed|errors?)\b/.test(msg)) return null;
+
   if (/error|failed/i.test(msg)) return { level: 'warn', category: 'misc' };
   return null;
 }
