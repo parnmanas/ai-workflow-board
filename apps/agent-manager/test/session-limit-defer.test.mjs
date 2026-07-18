@@ -379,3 +379,96 @@ test('store: crash right after the drain-persist (before replay ack) → restart
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── blocker #3: crash AFTER the replay SPAWNED, before the ack ────────────────
+// The above test models a crash BEFORE any spawn (the reviewer's original
+// criticism: `new Promise(()=>{})` never launches a session). This one models the
+// harder case: the replay actually spawned a DETACHED harness (pid recorded via
+// onSpawned), then the manager died before the ack. The detached child outlives
+// the manager, so a naive re-drive would twin. The store persists the spawnedPid
+// on the `dispatching` intent and REAPS it on boot before re-driving → the
+// re-drive is the only surviving session (durable exactly-once, no twin).
+test('store: crash AFTER spawn (pid recorded) → restart REAPS the survivor before re-driving (0 twin)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'awb-session-defer-'));
+  const persistPath = join(dir, 'session-defer.json');
+  try {
+    const nowRef = { v: T0 };
+    const until = T0 + 45 * 60_000;
+    const SPAWN_PID = 40711;
+    // OS-alive detached processes, shared across the crash/restart boundary.
+    const liveSet = new Set();
+
+    // ── instance A: replay spawns (records pid via onSpawned), then HANGS before
+    //    ack — a crash after a real detached spawn. ──
+    const schedA = manualScheduler();
+    const a = new SessionLimitDeferStore({ now: () => nowRef.v, scheduler: schedA.api, persistPath });
+    a.setResumeHandler((intent, onSpawned) => {
+      liveSet.add(SPAWN_PID); // detached child is now an alive OS process
+      onSpawned(SPAWN_PID); // durably record the pid on the dispatching intent
+      return new Promise(() => {}); // never acks (crash after spawn)
+    });
+    a.load();
+    a.recordSessionLimit(AGENT, { deferUntilMs: until, resetLabel: '3am (X)' });
+    a.addPendingIntent(AGENT, meta('T-crash'), 'raw-crash');
+
+    nowRef.v = until + 1;
+    schedA.fire();
+    await settle();
+    assert.equal(liveSet.size, 1, 'the replay spawned a detached harness that survives the crash');
+    const mid = JSON.parse(readFileSync(persistPath, 'utf8'));
+    const midIntent = Object.values(mid.agents[AGENT].intents)[0];
+    assert.equal(midIntent.status, 'dispatching', 'un-acked dispatching on disk');
+    assert.equal(midIntent.spawnedPid, SPAWN_PID, 'the spawned pid was persisted for a boot reap');
+
+    // ── instance B: fresh store, same disk. It must REAP the survivor pid before
+    //    re-driving, so no twin. Inject a fake reaper that removes it from liveSet. ──
+    const reaped = [];
+    const schedB = manualScheduler();
+    const bReplays = [];
+    const b = new SessionLimitDeferStore({
+      now: () => nowRef.v,
+      scheduler: schedB.api,
+      persistPath,
+      reapPid: (pid) => {
+        reaped.push(pid);
+        return liveSet.delete(pid);
+      },
+    });
+    b.setResumeHandler((intent, onSpawned) => {
+      // The re-drive spawns a fresh session; the survivor must already be reaped.
+      assert.equal(liveSet.size, 0, 'the survivor was reaped BEFORE the re-drive spawned (no twin window)');
+      liveSet.add(SPAWN_PID + 1);
+      onSpawned(SPAWN_PID + 1);
+      bReplays.push(intent.raw);
+    });
+    b.load();
+    assert.equal(schedB.armed(), 1, 'boot armed an immediate drain for the un-acked dispatching intent');
+    schedB.fire();
+    await settle();
+
+    assert.deepEqual(reaped, [SPAWN_PID], 'boot reaped exactly the persisted survivor pid');
+    assert.deepEqual(bReplays, ['raw-crash'], 're-driven exactly once');
+    assert.equal(liveSet.size, 1, '0 concurrent live twins — only the re-drive session is alive');
+    assert.ok(liveSet.has(SPAWN_PID + 1) && !liveSet.has(SPAWN_PID), 'the reaped survivor is gone, the re-drive lives');
+    const after = JSON.parse(readFileSync(persistPath, 'utf8'));
+    assert.equal(Object.keys(after.agents).length, 0, 'acked + removed after the successful re-drive');
+
+    // ── instance C boots clean → nothing to reap or replay (no double-reap). ──
+    const reapedC = [];
+    const schedC = manualScheduler();
+    const cReplays = [];
+    const c = new SessionLimitDeferStore({
+      now: () => nowRef.v,
+      scheduler: schedC.api,
+      persistPath,
+      reapPid: (pid) => { reapedC.push(pid); return true; },
+    });
+    c.setResumeHandler((intent) => cReplays.push(intent.raw));
+    c.load();
+    if (schedC.armed()) schedC.fire();
+    assert.deepEqual(reapedC, [], 'no reap after acknowledgement');
+    assert.deepEqual(cReplays, [], 'no duplicate re-drive (exactly-once across restarts)');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

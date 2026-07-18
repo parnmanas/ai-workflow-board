@@ -890,12 +890,17 @@ export class EventDispatcher {
     // an in-memory one. Either way we (re-)wire the resume + rehydrate here.
     this.#sessionDefer = deps.sessionLimitDeferStore ?? new SessionLimitDeferStore();
     // Route each replayed intent by kind: a trigger re-drives the ticket-role via
-    // handleTrigger (re-acquiring the twin reservation — the receiver-side dedupe
-    // for blocker #3); a coalesced mention is re-delivered via handleCommentMention.
-    this.#sessionDefer.setResumeHandler((intent) =>
+    // handleTrigger (re-acquiring the twin reservation — the process-local dedupe);
+    // a coalesced mention is re-delivered via handleCommentMention. For triggers we
+    // forward the spawned pid back to the store via `onSpawned` (blocker #3): the
+    // store persists it on the `dispatching` intent so a crash between spawn and ack
+    // leaves a reapable survivor handle that the next boot terminates before
+    // re-driving — the durable exactly-once the process-local reservation can't give
+    // across a restart. A mention has no durable session to reap, so it passes none.
+    this.#sessionDefer.setResumeHandler((intent, onSpawned) =>
       intent.kind === 'mention'
         ? this.handleCommentMention(intent.raw)
-        : this.handleTrigger(intent.raw),
+        : this.handleTrigger(intent.raw, { onDispatched: (pid) => onSpawned(pid) }),
     );
     this.#sessionDefer.load();
   }
@@ -1269,7 +1274,10 @@ export class EventDispatcher {
     );
   }
 
-  async handleTrigger(raw: string): Promise<void> {
+  async handleTrigger(
+    raw: string,
+    opts?: { onDispatched?: (pid: number | null) => void },
+  ): Promise<void> {
     let ev: any;
     try {
       ev = JSON.parse(raw);
@@ -1466,6 +1474,7 @@ export class EventDispatcher {
         envConfig,
         canAuthoritative && reservedFresh,
         raw,
+        opts,
       );
     } finally {
       if (inflightKey) {
@@ -1525,6 +1534,7 @@ export class EventDispatcher {
     envConfig: ResolvedEnvironmentConfig | null,
     dispatchReserved: boolean,
     raw: string,
+    opts?: { onDispatched?: (pid: number | null) => void },
   ): Promise<void> {
     // ticket 9f26f091: route this ticket into its own git worktree so a branch
     // switch here can't contaminate another ticket sharing the agent's
@@ -1855,6 +1865,10 @@ export class EventDispatcher {
           log(
             `Trigger dispatched to ticket session: ticket=${ev.ticket_id} pid=${result.pid}${result.firstTurn ? ' (new session)' : ''}`,
           );
+          // ticket 467f714a blocker #3: report the spawned pid the instant it
+          // exists so a session-defer replay records it durably — a crash before
+          // the outbox ack then leaves a reapable survivor handle on disk.
+          opts?.onDispatched?.(typeof result.pid === 'number' ? result.pid : null);
           // Durable dispatch ack (ticket e7c87517): spawn STARTED — extends the
           // reconciler's retry grace. NOT resolution: only real forward progress
           // closes the intent, so a strand that dies silently still gets
@@ -1923,6 +1937,9 @@ export class EventDispatcher {
 
         if (result.spawned) {
           log(`Trigger dispatched to subagent: ticket=${ev.ticket_id} pid=${result.pid}${agentContext ? ` agent=${agentContext.agent_id.slice(0, 8)}` : ''}`);
+          // ticket 467f714a blocker #3: report the one-shot pid so a session-defer
+          // replay records a durable, reapable survivor handle (crash-after-spawn).
+          opts?.onDispatched?.(typeof result.pid === 'number' ? result.pid : null);
           // Durable dispatch ack (ticket e7c87517): one-shot subagent spawned →
           // processed (grace extension, not resolution).
           this.#ackDispatch(ev, 'processed');

@@ -253,10 +253,16 @@ export type SessionDeferIntentKind = 'trigger' | 'mention';
  *     leaves the intent recoverable on disk (re-driven on the next boot) instead
  *     of lost. The intent is REMOVED only after the replay is acknowledged
  *     (handed off to handleTrigger/handleCommentMention without throwing) — that
- *     removal is the terminal `acknowledged` state. The (ticket, role, agent)
- *     `key` is the replay idempotency key: a re-drive re-enters handleTrigger,
- *     which re-acquires the single-flight reservation (live-session reuse), so a
- *     duplicate replay after a crash reuses the live session instead of twinning. */
+ *     removal is the terminal `acknowledged` state.
+ *
+ *     Exactly-once across a crash-AFTER-spawn is NOT guaranteed by the (ticket,
+ *     role, agent) `key` alone: the single-flight reservation it re-acquires is
+ *     PROCESS-LOCAL, so a spawn that happened just before the crash left a
+ *     DETACHED child alive that the rebooted manager's fresh reservation map
+ *     knows nothing about → re-driving would twin. The durable fix is the
+ *     `spawnedPid` recorded on the intent the instant the replay spawns (see
+ *     {@link SessionDeferIntent.spawnedPid}): boot reaps that pid BEFORE
+ *     re-driving, so the re-drive is always the only surviving session. */
 export type SessionDeferIntentStatus = 'pending' | 'dispatching';
 
 /** One coalesced pending intent — the freshest raw trigger/mention to replay for
@@ -273,6 +279,15 @@ export interface SessionDeferIntent {
   kind: SessionDeferIntentKind;
   /** Durable outbox status — see {@link SessionDeferIntentStatus}. */
   status: SessionDeferIntentStatus;
+  /** OS pid of the harness this intent's replay spawned, recorded (and PERSISTED)
+   *  the instant the resume handler reports a successful spawn — the durable
+   *  handle that makes the outbox exactly-once across a crash-after-spawn (blocker
+   *  #3). A detached harness survives the manager's death; on the next boot a
+   *  rehydrated `dispatching` intent carrying a `spawnedPid` is REAPED before it is
+   *  re-driven, so the re-drive is the only live session (no twin). null/undefined
+   *  = the replay had not yet spawned when persisted (crash before spawn — nothing
+   *  to reap, the plain re-drive is correct). */
+  spawnedPid?: number | null;
 }
 
 interface AgentDeferRecord {
@@ -294,8 +309,44 @@ export interface SessionDeferState {
 /** Replay one coalesced intent at reset. Receives the WHOLE intent so the caller
  *  routes by `kind` (trigger → handleTrigger, mention → handleCommentMention).
  *  Resolving = acknowledged (the store then removes the intent + persists);
- *  throwing leaves it `dispatching` for the next-boot re-drive. */
-export type SessionDeferResumeHandler = (intent: SessionDeferIntent) => Promise<void> | void;
+ *  throwing leaves it `dispatching` for the next-boot re-drive.
+ *
+ *  The resolved value MAY carry the OS `pid` the replay spawned. The store
+ *  records it on the intent the instant the handler reports it (via `onSpawned`,
+ *  wired below) so a crash between spawn and ack leaves a REAPABLE pid on disk
+ *  (blocker #3). Returning void / no pid means no durable spawn to reap. */
+export type SessionDeferResumeResult = { pid?: number | null } | void;
+export type SessionDeferResumeHandler = (
+  intent: SessionDeferIntent,
+  onSpawned: (pid: number | null | undefined) => void,
+) => Promise<SessionDeferResumeResult> | SessionDeferResumeResult;
+
+/** Terminate an already-spawned, still-surviving detached harness by pid before
+ *  its intent is re-driven on boot (blocker #3). Returns true if the pid was live
+ *  and signalled (best-effort — a dead/unknown pid is a no-op true). Injected for
+ *  test determinism; defaults to a SIGTERM→SIGKILL reaper. */
+export type SessionDeferReapPid = (pid: number) => boolean;
+
+/** Default best-effort reaper: SIGTERM the survivor, then SIGKILL after a short
+ *  grace. Swallows ESRCH (already gone) — a missing pid is a successful reap. */
+const defaultReapPid: SessionDeferReapPid = (pid) => {
+  if (!pid || pid <= 1) return false;
+  try {
+    process.kill(pid, 'SIGTERM');
+  } catch (err: any) {
+    if (err?.code === 'ESRCH') return true; // already gone
+    return false;
+  }
+  const t = setTimeout(() => {
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {
+      /* already gone */
+    }
+  }, 2_000);
+  (t as any)?.unref?.();
+  return true;
+};
 
 export interface SessionLimitDeferStoreOptions {
   /** Absolute path of the JSON persistence file. null → in-memory only (tests). */
@@ -304,6 +355,10 @@ export interface SessionLimitDeferStoreOptions {
   now?: () => number;
   /** Injected timer surface (test determinism). Defaults to unref'd setTimeout. */
   scheduler?: RetryScheduler;
+  /** Injected reaper for a crash-surviving spawned harness (blocker #3). Defaults
+   *  to a SIGTERM→SIGKILL process reaper; overridden in tests with a fake that
+   *  records/removes a live-pid handle. */
+  reapPid?: SessionDeferReapPid;
   log?: (msg: string) => void;
 }
 
@@ -347,17 +402,24 @@ const PERSIST_VERSION = 2;
  * replay: at reset `#fire` transitions each due intent `pending → dispatching`
  * and PERSISTS that before running the replay, then removes the intent only
  * after the replay is acknowledged (`#resume` resolved). So the on-disk state at
- * ANY crash instant reflects an un-acked intent:
- *   - crash after the dispatching-persist, before/during the replay → boot finds
- *     it `dispatching` and re-drives it once (no loss — the old remove-first bug);
- *   - crash after the replay handed off, before the ack-remove → boot re-drives,
- *     but the pre-crash spawn died with the manager, so the re-drive is the ONLY
- *     surviving session (no twin). Within one lifetime a same-key replay re-enters
- *     handleTrigger and reuses the live session via its single-flight reservation.
+ * ANY crash instant reflects an un-acked intent, and the intent carries the pid
+ * of any harness its replay already spawned (`spawnedPid`, persisted the instant
+ * the spawn is reported):
+ *   - crash after the dispatching-persist, BEFORE the replay spawned → boot finds
+ *     it `dispatching` with no `spawnedPid`; nothing was launched, so it is simply
+ *     re-driven once (no loss — the old remove-first bug);
+ *   - crash AFTER the replay spawned, before the ack-remove → the spawn was
+ *     DETACHED and outlived the manager. The `spawnedPid` on disk is that live
+ *     survivor. `load()` collects those pids into `#bootDispatching`, and
+ *     `#replayOne` REAPS the pid (SIGTERM→SIGKILL) BEFORE re-driving — so the
+ *     re-drive is again the only live session (no twin). The process-local
+ *     single-flight reservation can't see a cross-restart survivor, which is
+ *     exactly why the durable pid + boot reap is required.
  * `#inFlightReplay` (in-memory, NOT persisted) holds the keys whose replay was
  * initiated this lifetime so `#arm`/`#fire` never hot-loop a still-draining intent;
  * it starts empty on boot, which is exactly what lets a rehydrated `dispatching`
- * intent be re-driven once.
+ * intent be re-driven once. `#bootDispatching` (also in-memory) marks the subset
+ * of those that were rehydrated with a `spawnedPid` needing a one-time boot reap.
  */
 export class SessionLimitDeferStore {
   #byAgent = new Map<string, AgentDeferRecord>();
@@ -366,17 +428,23 @@ export class SessionLimitDeferStore {
    *  `dispatching` on disk. Prevents `#arm`/`#fire` from hot-looping an intent
    *  that is mid-drain within the same lifetime. */
   #inFlightReplay = new Set<string>();
+  /** Keys rehydrated at boot as `dispatching` WITH a `spawnedPid` — a crash-
+   *  surviving detached harness that must be REAPED once before the intent is
+   *  re-driven (blocker #3). In-memory only; drained by `#replayOne`. */
+  #bootDispatching = new Set<string>();
   #resume: SessionDeferResumeHandler | null = null;
   #timer: unknown | null = null;
   #timerAtMs: number | null = null;
   #now: () => number;
   #scheduler: RetryScheduler;
+  #reapPid: SessionDeferReapPid;
   #persistPath: string | null;
   #log: (msg: string) => void;
 
   constructor(opts: SessionLimitDeferStoreOptions = {}) {
     this.#now = opts.now ?? (() => Date.now());
     this.#scheduler = opts.scheduler ?? defaultScheduler;
+    this.#reapPid = opts.reapPid ?? defaultReapPid;
     this.#persistPath = opts.persistPath ?? null;
     this.#log = opts.log ?? (() => {});
   }
@@ -403,6 +471,10 @@ export class SessionLimitDeferStore {
         const rawIntents = rec.intents && typeof rec.intents === 'object' ? rec.intents : {};
         for (const [key, it] of Object.entries<any>(rawIntents)) {
           if (!it || typeof it.raw !== 'string') continue;
+          const status: SessionDeferIntentStatus =
+            it.status === 'dispatching' ? 'dispatching' : 'pending';
+          const spawnedPid =
+            typeof it.spawnedPid === 'number' && it.spawnedPid > 1 ? it.spawnedPid : null;
           intents.set(key, {
             key,
             raw: it.raw,
@@ -414,8 +486,14 @@ export class SessionLimitDeferStore {
             // trigger. A rehydrated `dispatching` intent = a crash mid-drain →
             // re-driven once on the next tick (#inFlightReplay starts empty).
             kind: it.kind === 'mention' ? 'mention' : 'trigger',
-            status: it.status === 'dispatching' ? 'dispatching' : 'pending',
+            status,
+            spawnedPid,
           });
+          // A `dispatching` intent that carries a spawned pid = the pre-crash
+          // replay launched a detached harness that outlived the manager. Mark it
+          // for a one-time boot reap so `#replayOne` terminates that survivor
+          // BEFORE re-driving (blocker #3 — durable exactly-once).
+          if (status === 'dispatching' && spawnedPid) this.#bootDispatching.add(key);
         }
         this.#byAgent.set(agentId, {
           agentId,
@@ -557,6 +635,7 @@ export class SessionLimitDeferStore {
         if (it.ticketId === ticketId) {
           rec.intents.delete(key);
           this.#inFlightReplay.delete(key);
+          this.#bootDispatching.delete(key);
           removed++;
         }
       }
@@ -572,7 +651,11 @@ export class SessionLimitDeferStore {
   clear(agentId: string | undefined): void {
     if (!agentId) return;
     const rec = this.#byAgent.get(agentId);
-    if (rec) for (const key of rec.intents.keys()) this.#inFlightReplay.delete(key);
+    if (rec)
+      for (const key of rec.intents.keys()) {
+        this.#inFlightReplay.delete(key);
+        this.#bootDispatching.delete(key);
+      }
     if (this.#byAgent.delete(agentId)) {
       this.#persist();
       this.#arm();
@@ -676,8 +759,41 @@ export class SessionLimitDeferStore {
       this.#inFlightReplay.delete(intent.key);
       return;
     }
+    // Blocker #3 — crash-after-spawn reap. If this intent was rehydrated as
+    // `dispatching` with a live spawned pid, a detached harness from the pre-crash
+    // replay is still running (the process-local single-flight reservation can't
+    // see it across the restart). Reap it BEFORE re-driving so the re-drive is the
+    // ONLY surviving session — durable exactly-once, no twin.
+    if (this.#bootDispatching.delete(intent.key) && intent.spawnedPid) {
+      const pid = intent.spawnedPid;
+      this.#log(
+        `[session-defer] boot-reaping crash-surviving harness pid=${pid} for ${intent.key} before re-drive`,
+      );
+      try {
+        this.#reapPid(pid);
+      } catch (err: any) {
+        this.#log(`[session-defer] reap pid=${pid} for ${intent.key} failed: ${err?.message ?? err}`);
+      }
+      // The survivor is gone; clear the stale pid so a re-persist mid-replay does
+      // not mark it reapable a second time.
+      intent.spawnedPid = null;
+    }
+    // Record the freshly-spawned harness pid the instant the replay reports it, so
+    // a crash between spawn and ack leaves a reapable pid on disk for the next boot.
+    const onSpawned = (pid: number | null | undefined): void => {
+      const rec = this.#byAgent.get(intent.agentId);
+      const live = rec?.intents.get(intent.key);
+      if (!live || live.status !== 'dispatching') return; // acked/cancelled meanwhile
+      live.spawnedPid = typeof pid === 'number' && pid > 1 ? pid : null;
+      intent.spawnedPid = live.spawnedPid;
+      this.#persist();
+    };
     try {
-      await this.#resume(intent);
+      const result = await this.#resume(intent, onSpawned);
+      // A resolved result may carry a pid the handler did not surface via onSpawned
+      // (e.g. a synchronous spawn). Fold it in before ack so any crash window is
+      // covered even without the callback — belt-and-suspenders.
+      if (result && typeof result === 'object' && 'pid' in result) onSpawned(result.pid);
       // Acknowledged — the replay was handed off without throwing. Remove the
       // intent (terminal state) and persist so a later restart never replays it.
       this.#ackIntent(intent);
@@ -695,6 +811,7 @@ export class SessionLimitDeferStore {
    *  durable and exactly-once across a restart. */
   #ackIntent(intent: SessionDeferIntent): void {
     this.#inFlightReplay.delete(intent.key);
+    this.#bootDispatching.delete(intent.key);
     const rec = this.#byAgent.get(intent.agentId);
     if (rec) {
       rec.intents.delete(intent.key);
@@ -721,6 +838,9 @@ export class SessionLimitDeferStore {
           firstAtMs: it.firstAtMs,
           kind: it.kind,
           status: it.status,
+          // Persist the spawned pid so a crash between spawn and ack leaves a
+          // reapable survivor handle for the next boot (blocker #3).
+          spawnedPid: it.spawnedPid ?? null,
         };
       }
       agents[rec.agentId] = {

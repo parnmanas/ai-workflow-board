@@ -22,6 +22,9 @@
 
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { EventDispatcher } from '../dist/lib/event-dispatcher.js';
 import { SessionLimitDeferStore } from '../dist/lib/session-limit-defer.js';
@@ -87,7 +90,12 @@ afterEach(() => {
 });
 
 // Faithful single-flight subagentManager — a twin would show as a second spawn.
-function makeSubagentManager(state) {
+// `liveSet` (optional) models the set of ACTUALLY-alive OS processes: a spawn
+// adds its pid, and `state.reapPid(pid)` removes it (a SIGTERM reaping a detached
+// survivor). Distinct from `records` (the PROCESS-LOCAL dedup map, which a fresh
+// manager boot starts empty) so a crash-surviving detached child can be modelled
+// as "alive in the OS but unknown to the rebooted manager's dedup map".
+function makeSubagentManager(state, liveSet, pidBase = 4200) {
   const records = new Map();
   let resCounter = 0;
   // Model a session's death: reap its spawn record so a later re-drive for the
@@ -99,6 +107,17 @@ function makeSubagentManager(state) {
       if (rec.ticket_id === ticketId) records.delete(id);
     }
   };
+  // Reap a crash-surviving detached harness by pid (blocker #3): drop its OS-live
+  // handle and any local record. Wired as the store's `reapPid` for the restart.
+  state.reapPid = (pid) => {
+    let killed = false;
+    if (liveSet && liveSet.delete(pid)) killed = true;
+    for (const [id, rec] of [...records]) {
+      if (rec.pid === pid) records.delete(id);
+    }
+    state.reaped.push(pid);
+    return killed;
+  };
   return {
     canSpawn: () => true,
     async spawn(spec) {
@@ -108,6 +127,7 @@ function makeSubagentManager(state) {
         return { spawned: false, reason: dup };
       }
       const id = --resCounter;
+      const pid = pidBase - id;
       records.set(id, {
         kind: spec.kind,
         trigger_id: spec.triggerId || null,
@@ -115,9 +135,11 @@ function makeSubagentManager(state) {
         ticket_id: spec.ticketId || null,
         role: spec.role || null,
         agent_id: spec.agentId || null,
+        pid,
       });
-      state.spawns.push(spec);
-      return { spawned: true, pid: 4200 - id };
+      if (liveSet) liveSet.add(pid); // detached child is now an alive OS process
+      state.spawns.push({ ...spec, pid });
+      return { spawned: true, pid };
     },
   };
 }
@@ -140,11 +162,20 @@ function manualScheduler() {
   };
 }
 
-function makeHarness() {
-  const nowRef = { v: T0 };
-  const sched = manualScheduler();
-  const state = { spawns: [], dedups: [] };
-  const store = new SessionLimitDeferStore({ now: () => nowRef.v, scheduler: sched.api, persistPath: null });
+function makeHarness(opts = {}) {
+  const nowRef = opts.nowRef ?? { v: T0 };
+  const sched = opts.sched ?? manualScheduler();
+  const liveSet = opts.liveSet ?? null;
+  const state = { spawns: [], dedups: [], reaped: [] };
+  const store = new SessionLimitDeferStore({
+    now: () => nowRef.v,
+    scheduler: sched.api,
+    persistPath: opts.persistPath ?? null,
+    // Reap a crash-surviving detached harness by pid before its intent is
+    // re-driven on boot (blocker #3). Injected fake removes it from the OS-live
+    // set so a twin would be observable if the reap were skipped.
+    reapPid: (pid) => state.reapPid(pid),
+  });
   const worktreeManager = {
     enabled: true,
     async resolveCwd() {
@@ -162,9 +193,9 @@ function makeHarness() {
   };
   const d = new EventDispatcher(
     { url: 'http://127.0.0.1:0', apiKey: 'test-key', delegation: { enabled: true } },
-    { worktreeManager, subagentManager: makeSubagentManager(state), managedAgentContexts, sessionLimitDeferStore: store },
+    { worktreeManager, subagentManager: makeSubagentManager(state, liveSet, opts.pidBase), managedAgentContexts, sessionLimitDeferStore: store },
   );
-  return { d, store, sched, nowRef, state };
+  return { d, store, sched, nowRef, state, liveSet };
 }
 
 function trigger(overrides = {}) {
@@ -383,4 +414,84 @@ test('blocker #2: a mention arriving during defer (no trigger) is coalesced and 
   assert.equal(state.spawns[0].ticketId, 'T-m');
   assert.equal(state.dedups.length, 0, 'no twin');
   assert.equal(d.pendingSessionDeferCount(AGENT), 0, 'nothing left queued (exactly-once)');
+});
+
+// ── (8) blocker #3: crash AFTER spawn, before outbox ack → restart reaps the ──
+// crash-surviving detached harness BEFORE re-driving, so 0 concurrent live twins
+// and exactly 1 valid execution survive. This is the reviewer's option (B): a
+// durable lifecycle guarantee (persisted spawnedPid + boot reap), proven with the
+// REAL EventDispatcher + spawn fake through a genuine "spawn then die before ack"
+// on-disk state and a fresh-manager restart against the same persistPath.
+
+test('blocker #3: crash-after-spawn-before-ack → restart reaps the survivor, re-drives once — 0 live twins, exactly 1 execution', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'awb-session-defer-crash-'));
+  const persistPath = join(dir, 'session-defer.json');
+  // The OS-alive detached processes, SHARED across the crash/restart boundary:
+  // a spawn adds a pid, the reaper removes it. A detached child survives the
+  // manager's death → it stays in this set until reaped.
+  const liveSet = new Set();
+  const nowRef = { v: T0 };
+
+  try {
+    // ── pre-crash manager lifetime ──
+    const sched1 = manualScheduler();
+    const h1 = makeHarness({ persistPath, liveSet, nowRef, sched: sched1 });
+
+    // Override h1's resume to model a CRASH: run the REAL spawn (records the pid
+    // durably via onSpawned), then die BEFORE the outbox ack removes the intent.
+    h1.store.setResumeHandler(async (intent, onSpawned) => {
+      await h1.d.handleTrigger(intent.raw, { onDispatched: (pid) => onSpawned(pid) });
+      throw new Error('SIMULATED manager crash: died after spawn, before outbox ack');
+    });
+
+    openWindow(h1.d);
+    await h1.d.handleTrigger(trigger({ ticket_id: 'T-c', field_changed: 'c0' }));
+    assert.equal(h1.state.spawns.length, 0, 'nothing spawned while deferred');
+    assert.equal(h1.d.pendingSessionDeferCount(AGENT), 1, 'one coalesced pending intent');
+
+    // Reset fires → replay spawns the harness, then the manager "crashes" before ack.
+    nowRef.v = RESET_UNTIL + 1;
+    await sched1.fire();
+
+    assert.equal(h1.state.spawns.length, 1, 'the replay spawned exactly one harness before the crash');
+    const survivorPid = h1.state.spawns[0].pid;
+    assert.equal(liveSet.size, 1, 'the crash-surviving detached harness is still alive');
+    assert.ok(liveSet.has(survivorPid), 'the survivor pid is the one the replay spawned');
+
+    // On-disk outbox state at the crash instant: intent still present, `dispatching`,
+    // carrying the spawned pid — the durable reapable handle (blocker #3).
+    const onDisk = JSON.parse(readFileSync(persistPath, 'utf8'));
+    const persistedIntent = Object.values(onDisk.agents[AGENT].intents)[0];
+    assert.equal(persistedIntent.status, 'dispatching', 'the intent is persisted un-acked as dispatching');
+    assert.equal(persistedIntent.spawnedPid, survivorPid, 'the spawned pid is persisted for the next boot to reap');
+
+    // ── restart: fresh manager (empty dedup map) against the same persistPath ──
+    // The process-local single-flight reservation is GONE (fresh boot), so without
+    // the durable reap the re-drive would spawn a second live session → twin.
+    const sched2 = manualScheduler();
+    // Distinct pid range so the re-drive's pid is observably different from the
+    // reaped survivor's (a fresh manager's pids don't collide with the dead one's).
+    const h2 = makeHarness({ persistPath, liveSet, nowRef, sched: sched2, pidBase: 8800 });
+    // h2 uses the DEFAULT resume wiring (clean handleTrigger→ack). Its store.load()
+    // ran in the constructor, rehydrating the dispatching+pid intent for boot reap.
+    assert.equal(h2.d.pendingSessionDeferCount(AGENT), 1, 'the un-acked intent rehydrated on boot');
+
+    await sched2.fire();
+
+    // The survivor was reaped BEFORE the re-drive; exactly one live session remains.
+    assert.deepEqual(h2.state.reaped, [survivorPid], 'boot reaped exactly the crash-surviving pid');
+    assert.equal(liveSet.size, 1, '0 concurrent live twins — the survivor was killed, only the re-drive lives');
+    assert.equal(h2.state.spawns.length, 1, 'the re-drive spawned exactly one valid session');
+    const redrivenPid = h2.state.spawns[0].pid;
+    assert.ok(liveSet.has(redrivenPid), 'the surviving live session is the re-drive, not the reaped survivor');
+    assert.ok(!liveSet.has(survivorPid), 'the pre-crash survivor is no longer alive');
+    assert.equal(h2.state.dedups.length, 0, 'the re-drive was not deduped — it is the sole valid execution');
+    assert.equal(h2.d.pendingSessionDeferCount(AGENT), 0, 'the outbox intent is acked and cleared (exactly-once)');
+
+    // The window is fully drained on disk — a further restart replays nothing.
+    const finalDisk = JSON.parse(readFileSync(persistPath, 'utf8'));
+    assert.ok(!finalDisk.agents[AGENT], 'the drained agent window is removed from disk');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
