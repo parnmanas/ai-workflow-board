@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 import { setupDom, mount, React } from './helpers/jsdom.mjs';
 import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
 import { ArtifactPanelProvider } from '../src/contexts/ArtifactPanelContext.tsx';
+import { BoardStreamProvider } from '../src/contexts/BoardStreamContext.tsx';
 import TicketArtifactController from '../src/components/TicketArtifactController.tsx';
 import ArtifactPanel from '../src/components/ArtifactPanel.tsx';
 import { ViewModeProvider } from '../src/contexts/ViewModeContext.tsx';
@@ -34,6 +35,10 @@ test('② `?ticket=<id>` 딥링크 → 패널 오픈 + URL 에서 ticket 파라�
   // 패널은 로딩 상태로 열리고, 우리는 "열렸는지 + 파라미터 제거" 계약만 본다.
   const prevFetch = globalThis.fetch;
   globalThis.fetch = () => new Promise(() => {});
+  // TicketArtifact 가 이제 useBoardStream 을 쓰므로 프로덕션과 동일하게 BoardStreamProvider
+  // 로 감싼다. auth_token 이 없으면 Provider 는 EventSource 를 열지 않고(effect early-return)
+  // 조용히 미연결 상태로 있는다 — 딥링크 오픈 계약만 보는 이 테스트엔 그걸로 충분.
+  globalThis.localStorage = dom.window.localStorage;
   probe.search = null;
   try {
     mount(
@@ -46,13 +51,17 @@ test('② `?ticket=<id>` 딥링크 → 패널 오픈 + URL 에서 ticket 파라�
           h(Route, {
             path: '/ws/:wsId/assistant',
             element: h(
-              ArtifactPanelProvider,
+              BoardStreamProvider,
               null,
               h(
-                TicketArtifactController,
+                ArtifactPanelProvider,
                 null,
-                h(LocationProbe),
-                h(ArtifactPanel, { isMobile: false }),
+                h(
+                  TicketArtifactController,
+                  null,
+                  h(LocationProbe),
+                  h(ArtifactPanel, { isMobile: false }),
+                ),
               ),
             ),
           }),
