@@ -24,6 +24,9 @@
 //   9. seed: a routed-but-idle ticket with NO intent (lost emit) is seeded then
 //      dispatched — the self-healing backstop.
 //  10. HTTP ack endpoint: manager → server nack over the wire flips the intent.
+//  11. seed on a REVIEW-kind column (blocker B1): a lost reviewer emit leaves no
+//      intent; the widened seeder re-derives and dispatches it. Previously the
+//      seeder scanned only active/intake, so review/merging never self-healed.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -268,6 +271,30 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
 
     const bad = await post({ ticket_id: ticket.id });
     assert.equal(bad.status, 400, 'missing role/outcome → 400 (contract validation)');
+  });
+
+  await t.test('11: seed — a REVIEW-kind ticket with a lost reviewer emit is seeded then dispatched (blocker B1)', async () => {
+    // Reviewer blocker B1: the seeder previously scanned only active/intake, so a
+    // reviewer trigger lost to a commit↔emit crash left the ticket in Review with
+    // NO open intent AND no seed to re-derive one — the durable outbox self-heal
+    // never covered review/merging. Prove the widened candidate set seeds it.
+    const reviewer = await createAgent(app, getDataSourceToken, ws.id, { name: 'carol' });
+    const t = await createTicket(app, getDataSourceToken, {
+      columnId: columns.review.id, workspaceId: ws.id, title: 'lost reviewer emit in Review',
+      reviewerId: reviewer.id,
+    });
+    // Idle past seedAfterMs, no emit ever ran → no open intent for the reviewer.
+    await ticketRepo.update(t.id, { created_at: new Date(Date.now() - 10 * 60_000) });
+    assert.equal(await intents.findOpenForTicketRole(t.id, 'reviewer'), null, 'no reviewer intent before the sweep (the emit was lost)');
+
+    await reconciler.reconcile(new Date());
+    const seeded = await intents.findOpenForTicketRole(t.id, 'reviewer');
+    assert.ok(seeded, 'the reconciler seeded a durable reviewer intent for the review-kind stall');
+    assert.equal(seeded.trigger_source, 'reconcile_seed');
+    assert.equal(seeded.role, 'reviewer', 'the seed is owed to the reviewer role that routes on the Review column');
+
+    await reconciler.reconcile(new Date());
+    assert.equal((await intentRepo.findOne({ where: { id: seeded.id } })).status, 'in_flight', 'the seeded review-column intent is dispatched on the next sweep');
   });
 });
 

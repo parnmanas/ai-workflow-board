@@ -19,6 +19,10 @@
 //   5. unstuck — a column move (forward progress) clears the alert.
 //   6. 24h guarantee — a 25h-no-progress ticket is ALWAYS flagged (impossible
 //      to sit a full day with no alert).
+//   7. REVIEW-kind column (blocker B1) — a ticket idle in Review with an offline
+//      reviewer is flagged. Previously the candidate query only scanned
+//      active/intake, so review/merging stalls raised ZERO alerts.
+//   8. MERGING-kind column (blocker B1) — a ticket idle in Merging is flagged.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -75,6 +79,14 @@ test('StuckTicketDetector — cause-agnostic no-progress hard stall', async (t) 
   });
   const inProgress = await createColumn(app, getDataSourceToken, board.id, {
     name: 'In Progress', position: 2, workspaceId: ws.id, kind: 'active', roleRouting: ['assignee'],
+  });
+  // review / merging columns — non-terminal, agent-dispatching, and the exact
+  // columns that reviewer blocker B1 (ticket e7c87517) said were being skipped.
+  const reviewCol = await createColumn(app, getDataSourceToken, board.id, {
+    name: 'Review', position: 3, workspaceId: ws.id, kind: 'review', roleRouting: ['reviewer'],
+  });
+  const mergingCol = await createColumn(app, getDataSourceToken, board.id, {
+    name: 'Merging', position: 4, workspaceId: ws.id, kind: 'merging', roleRouting: ['assignee'],
   });
 
   const roomRepo = ds.getRepository('ChatRoom');
@@ -173,6 +185,48 @@ test('StuckTicketDetector — cause-agnostic no-progress hard stall', async (t) 
     await detector.sweep(now);
     const alert = await alertRepo.findOne({ where: { ticket_id: ticket.id } });
     assert.ok(alert, 'a ticket idle for 25h can never sit without a durable alert');
+  });
+
+  await t.test('7: REVIEW-kind column — idle + reviewer offline → flagged (blocker B1)', async () => {
+    // The real sibling incidents (ea4adc71 / 1fcba693) lived in Review. A ticket
+    // stalled in a review-kind column because the reviewer went offline (no
+    // output-liveness recorded) previously produced ZERO chat alerts because the
+    // candidate query only scanned active/intake. It must now flag by symptom.
+    const ticket = await createTicket(app, getDataSourceToken, {
+      columnId: reviewCol.id, workspaceId: ws.id, title: 'stalled in Review, reviewer offline',
+      reviewerId: agent.id,
+    });
+    await backdate(ticketRepo, ticket.id, {
+      created_at: new Date(now.getTime() - 5 * HOUR),
+      updated_at: new Date(now.getTime() - 5 * HOUR),
+    });
+    const beforeSys = systemMsgs(await messageRepo.find({ where: { room_id: room.id } })).length;
+
+    await detector.sweep(now);
+
+    const alert = await alertRepo.findOne({ where: { ticket_id: ticket.id } });
+    assert.ok(alert, 'a review-kind ticket idle 5h with an offline reviewer is flagged');
+    const msgs = systemMsgs(await messageRepo.find({ where: { room_id: room.id } }));
+    const mine = msgs.find(m => m.content.includes(ticket.id) && /No-progress stall detected/.test(m.content));
+    assert.ok(mine, 'a no-progress chat alert was posted for the review-column stall');
+    assert.equal(msgs.length - beforeSys, 1, 'exactly one new alert for the review ticket');
+    const audits = await activityRepo.find({ where: { ticket_id: ticket.id, action: 'stuck_no_progress' } });
+    assert.equal(audits.length, 1, 'a structured stuck_no_progress reason audit was written');
+    assert.equal(JSON.parse(audits[0].new_value).has_agent_holder, true, 'reviewer holder detected');
+  });
+
+  await t.test('8: MERGING-kind column — idle stall → flagged (blocker B1)', async () => {
+    const ticket = await createTicket(app, getDataSourceToken, {
+      columnId: mergingCol.id, workspaceId: ws.id, title: 'stalled in Merging',
+      assigneeId: agent.id,
+    });
+    await backdate(ticketRepo, ticket.id, {
+      created_at: new Date(now.getTime() - 5 * HOUR),
+      updated_at: new Date(now.getTime() - 5 * HOUR),
+    });
+    await detector.sweep(now);
+    const alert = await alertRepo.findOne({ where: { ticket_id: ticket.id } });
+    assert.ok(alert, 'a merging-kind ticket idle 5h is flagged — merging is non-terminal & dispatches');
   });
 });
 

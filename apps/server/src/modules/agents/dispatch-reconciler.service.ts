@@ -31,7 +31,7 @@ import { DataSource } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { Agent } from '../../entities/Agent';
-import { BoardColumn } from '../../entities/BoardColumn';
+import { BoardColumn, NON_TERMINAL_KINDS } from '../../entities/BoardColumn';
 import { Comment } from '../../entities/Comment';
 import { Ticket } from '../../entities/Ticket';
 import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
@@ -245,15 +245,19 @@ export class DispatchReconcilerService implements OnModuleInit, OnModuleDestroy 
   /**
    * Seed durable intents for routed tickets sitting idle with a holder but no
    * open intent (ticket e7c87517). Scans the same candidate set as the stuck
-   * detector (active/intake columns, not archived). A ticket that has made
-   * forward progress within `seedAfterMs`, is parked, or already has an open
-   * intent for the role is skipped.
+   * detector — every NON-TERMINAL column (intake / active / review / merging),
+   * not archived. review / merging were previously excluded (reviewer blocker
+   * B1); without them a reviewer / merger trigger lost to a commit↔emit crash
+   * would leave the ticket with no open intent AND no seed to re-derive one, so
+   * the durable outbox self-heal never covered Review / Merging. A ticket that
+   * has made forward progress within `seedAfterMs`, is parked, or already has an
+   * open intent for the role is skipped.
    */
   private async _seedMissingIntents(now: Date, stats: ReconcileStats): Promise<void> {
     const colRepo = this.dataSource.getRepository(BoardColumn);
     const candidateCols = await colRepo
       .createQueryBuilder('c')
-      .where('c.kind IN (:...kinds)', { kinds: ['active', 'intake'] })
+      .where('c.kind IN (:...kinds)', { kinds: NON_TERMINAL_KINDS })
       .getMany();
     if (candidateCols.length === 0) return;
     const colById = new Map(candidateCols.map(c => [c.id, c]));

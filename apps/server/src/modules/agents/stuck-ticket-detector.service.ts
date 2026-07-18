@@ -13,7 +13,7 @@
  * Sweep contract:
  *   - Runs every `STUCK_DETECTOR_SWEEP_MS` (default 15 min) via
  *     `setInterval` from `onModuleInit`, mirroring TicketSupervisorService.
- *   - Iterates active / intake column tickets that aren't currently
+ *   - Iterates every non-terminal column's tickets that aren't currently
  *     locked, are older than the grace window, and whose last N agent
  *     comments span at least `STUCK_DETECTOR_MIN_SPAN_MS` without a
  *     lifecycle event (column move, claim, release) in between.
@@ -40,7 +40,7 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, IsNull, LessThan } from 'typeorm';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { Board } from '../../entities/Board';
-import { BoardColumn } from '../../entities/BoardColumn';
+import { BoardColumn, NON_TERMINAL_KINDS } from '../../entities/BoardColumn';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { Comment } from '../../entities/Comment';
 import { StuckTicketAlert } from '../../entities/StuckTicketAlert';
@@ -229,15 +229,23 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     const colRepo    = this.dataSource.getRepository(BoardColumn);
     const alertRepo  = this.dataSource.getRepository(StuckTicketAlert);
 
-    // Step 1 — candidate ticket set. Restrict to active / intake
-    // columns up front via an IN-clause so we don't read every ticket
-    // in the database. The grace-period guard is keyed off the IMMUTABLE
-    // `created_at` (ticket e7c87517, reviewer blocker #5) — NOT `updated_at`:
-    // a non-progress field write (label / assignee / metadata edit) must not
-    // slip a stalled ticket out of the candidate set and delay its detection.
+    // Step 1 — candidate ticket set. Restrict to every NON-TERMINAL column
+    // up front via an IN-clause so we don't read every ticket in the database.
+    // The kind space is `intake | active | review | merging | terminal`
+    // (db.ts:127); we scan all but `terminal`. review / merging were previously
+    // excluded (ticket e7c87517, reviewer blocker B1) — but those columns are
+    // non-terminal and DO dispatch agent triggers (reviewer / merger), so a
+    // ticket stalled in Review because the reviewer went offline or its trigger
+    // was lost would otherwise NEVER surface a no-progress chat alert. Scanning
+    // all non-terminal kinds makes "24h no-progress is impossible" hold cause-
+    // agnostically on every column that runs an agent. The grace-period guard is
+    // keyed off the IMMUTABLE `created_at` (reviewer blocker #5) — NOT
+    // `updated_at`: a non-progress field write (label / assignee / metadata
+    // edit) must not slip a stalled ticket out of the candidate set and delay
+    // its detection.
     const candidateCols = await colRepo
       .createQueryBuilder('c')
-      .where("c.kind IN (:...kinds)", { kinds: ['active', 'intake'] })
+      .where("c.kind IN (:...kinds)", { kinds: NON_TERMINAL_KINDS })
       .getMany();
     if (candidateCols.length === 0) return stats;
     const colIds = candidateCols.map(c => c.id);
@@ -295,12 +303,13 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     //   (b) Ticket still exists but no longer matches the candidate
     //       filter — since the candidate gate is now the immutable
     //       `created_at` (blocker #5), this happens when a move lands the
-    //       ticket in a column whose `kind` is no longer active/intake
-    //       (e.g. Review / Done). That transition is itself the signal
-    //       the spec wants surfaced as "ticket_unstuck", so emit the
-    //       resolution message before pruning.
+    //       ticket in a `terminal`-kind column (e.g. Done) — the only kind
+    //       now excluded from the candidate set (blocker B1 widened it to
+    //       every non-terminal kind). That transition into a terminal column
+    //       is itself the signal the spec wants surfaced as "ticket_unstuck",
+    //       so emit the resolution message before pruning.
     //
-    // Note: a move that keeps the ticket on an active/intake column now
+    // Note: a move that keeps the ticket on a non-terminal column now
     // leaves it IN the candidate set (created_at is unchanged), so its
     // unstuck is handled in-window by `_evaluateTicket` (the lifecycle-
     // after-alert fast path) rather than here. Both paths emit exactly one
