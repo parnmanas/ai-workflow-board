@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
 import { Select } from '../common/Select';
@@ -154,18 +154,13 @@ export default function AssistantAgentSetting({
     }
   };
 
-  const view = useMemo(
-    () => ({ agents, value, dirty, saving }),
-    [agents, value, dirty, saving],
-  );
-
   return (
     <>
       <AssistantAgentSettingView
-        agents={view.agents}
-        value={view.value}
-        dirty={view.dirty}
-        saving={view.saving}
+        agents={agents}
+        value={value}
+        dirty={dirty}
+        saving={saving}
         onChange={setValue}
         onSave={onSave}
       />
