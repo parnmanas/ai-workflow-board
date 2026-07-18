@@ -5,6 +5,7 @@ import type { Agent, Credential } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { Button, Input, Modal, Select } from '../common';
 import DirectoryPicker from './DirectoryPicker';
+import { credentialFallbackCopy } from '../../utils/credentialFallback';
 
 /**
  * ManagedAgentDialog — create / edit form for an agent-manager-supervised
@@ -349,13 +350,13 @@ export default function ManagedAgentDialog({
             <Select
               value={credentialId}
               options={[
-                { value: '', label: 'None — fall back to operator HOME' },
+                { value: '', label: credentialFallbackCopy(cli).optionLabel },
                 ...eligibleCredentials.map((c) => ({ value: c.id, label: `${c.name} · ${c.provider}${c.scope === 'global' ? ' · Global' : ''}` })),
               ]}
               onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setCredentialId(e.target.value)}
             />
             <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2, lineHeight: 1.5 }}>
-              Subscription credentials drop the OAuth file into this agent's cli-home; API-key credentials export the matching env var on every spawn. Add or rotate values in the Credentials page.
+              {credentialFallbackCopy(cli).meaning} Set a per-agent credential only for isolated auth — subscription credentials drop the OAuth file into this agent's cli-home; API-key credentials export the matching env var on every spawn. Add or rotate values in the Credentials page.
             </div>
           </div>
         )}

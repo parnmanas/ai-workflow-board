@@ -8,6 +8,7 @@ import PageHeader from './PageHeader';
 import AgentCard from './AgentCard';
 import DirectoryPicker from './admin/DirectoryPicker';
 import { tokens } from '../tokens';
+import { credentialFallbackCopy } from '../utils/credentialFallback';
 import { Button, Input, Select, Modal } from './common';
 import type {
   DashboardAgent,
@@ -765,12 +766,12 @@ export default function AgentsPage() {
                 value={managedForm.credential_id}
                 onChange={e => setManagedForm(f => ({ ...f, credential_id: (e.target as HTMLSelectElement).value }))}
                 options={[
-                  { value: '', label: 'None — fall back to operator HOME' },
+                  { value: '', label: credentialFallbackCopy(managedForm.cli).optionLabel },
                   ...eligibleCredentials.map(c => ({ value: c.id, label: `${c.name} · ${c.provider}` })),
                 ]}
               />
               <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginTop: 4, lineHeight: 1.5 }}>
-                Per-agent CLI auth. Subscription credentials drop the OAuth file into this agent's cli-home; API-key credentials export the matching env var on every spawn. Manage values in the Credentials page.
+                {credentialFallbackCopy(managedForm.cli).meaning} Set a per-agent credential only for isolated auth — subscription credentials drop the OAuth file into this agent's cli-home; API-key credentials export the matching env var on every spawn. Manage values in the Credentials page.
               </div>
             </div>
           )}

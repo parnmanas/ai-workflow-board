@@ -7,6 +7,7 @@ import { useCrudList } from '../../hooks/useCrudList';
 import { useToast } from '../../contexts/ToastContext';
 import { useConfirm } from '../../contexts/ConfirmContext';
 import { formatAgentDisplayName } from '../../utils/agentName';
+import { credentialFallbackCopy } from '../../utils/credentialFallback';
 
 /** Map agent.type → credential provider prefix used to filter the credential
  *  picker. CLIs whose adapter ships in agent-manager (claude / codex / antigravity)
@@ -715,12 +716,12 @@ export default function AgentManager() {
                 value={form.credential_id}
                 onChange={e => setForm({ ...form, credential_id: (e.target as HTMLSelectElement).value })}
                 options={[
-                  { value: '', label: 'None — fall back to operator HOME' },
+                  { value: '', label: credentialFallbackCopy(form.type).optionLabel },
                   ...eligibleCredentials.map(c => ({ value: c.id, label: `${c.name} · ${c.provider}${c.scope === 'global' ? ' · Global' : ''}` })),
                 ]}
               />
               <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginTop: 4, lineHeight: 1.5 }}>
-                Per-agent CLI auth. Subscription credentials drop the OAuth file into this agent's cli-home; API-key credentials export the matching env var on every spawn. Manage values in the Credentials page.
+                {credentialFallbackCopy(form.type).meaning} Set a per-agent credential only for isolated auth — subscription credentials drop the OAuth file into this agent's cli-home; API-key credentials export the matching env var on every spawn. Manage values in the Credentials page.
               </div>
             </div>
           )}
