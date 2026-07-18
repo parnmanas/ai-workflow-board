@@ -143,7 +143,9 @@ function manualScheduler() {
 const AGENT = 'agent-rolf';
 const meta = (ticketId, role = 'assignee') => ({ ticketId, role, agentId: AGENT });
 
-test('store: coalesce many re-dispatches of one ticket-role into a SINGLE intent, replay once at reset', () => {
+const settle = () => new Promise((r) => setImmediate(r));
+
+test('store: coalesce many re-dispatches of one ticket-role into a SINGLE intent, replay once at reset', async () => {
   const nowRef = { v: T0 };
   const sched = manualScheduler();
   const replays = [];
@@ -152,7 +154,7 @@ test('store: coalesce many re-dispatches of one ticket-role into a SINGLE intent
     scheduler: sched.api,
     persistPath: null,
   });
-  store.setResumeHandler((raw) => replays.push(raw));
+  store.setResumeHandler((intent) => replays.push(intent.raw));
 
   const until = T0 + 60 * 60_000;
   assert.deepEqual(store.recordSessionLimit(AGENT, { deferUntilMs: until, resetLabel: '11am (X)' }), {
@@ -174,14 +176,18 @@ test('store: coalesce many re-dispatches of one ticket-role into a SINGLE intent
   store.addPendingIntent(AGENT, meta('T-2'), 'raw-t2');
   assert.equal(store.pendingIntentCount(AGENT), 2);
 
-  // Reset fires: replay each intent EXACTLY once, window clears.
+  // Reset fires: replay each intent EXACTLY once, window clears. The replay is
+  // dispatched synchronously (freshest raw pushed), but the durable-outbox ACK
+  // that removes the intent lands on the next microtask (blocker #3: remove AFTER
+  // acknowledged), so drain the microtask queue before asserting the drained count.
   nowRef.v = until + 1;
   sched.fire();
   assert.equal(replays.length, 2, 'exactly one replay per deferred ticket-role');
   assert.equal(replays[0], 'raw-5', 'the freshest coalesced raw is replayed (not a stale one)');
   assert.ok(replays.includes('raw-t2'));
   assert.equal(store.isDeferred(AGENT), false, 'window cleared after reset');
-  assert.equal(store.pendingIntentCount(AGENT), 0, 'intents drained');
+  await settle();
+  assert.equal(store.pendingIntentCount(AGENT), 0, 'intents drained (acknowledged)');
 });
 
 test('store: a non-deferred agent never coalesces (gate no-op)', () => {
@@ -196,7 +202,7 @@ test('store: cancelByTicket drops that ticket’s intents but keeps the window +
   const sched = manualScheduler();
   const replays = [];
   const store = new SessionLimitDeferStore({ now: () => nowRef.v, scheduler: sched.api, persistPath: null });
-  store.setResumeHandler((raw) => replays.push(raw));
+  store.setResumeHandler((intent) => replays.push(intent.raw));
 
   const until = T0 + 60 * 60_000;
   store.recordSessionLimit(AGENT, { deferUntilMs: until });
@@ -228,7 +234,7 @@ test('store: recordSessionLimit extends to a LATER reset but never shortens', ()
 
 // ── SessionLimitDeferStore: RESTART DURABILITY ───────────────────────────────
 
-test('store: persists + rehydrates across a "restart" and still resumes exactly once', () => {
+test('store: persists + rehydrates across a "restart" and still resumes exactly once', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'awb-session-defer-'));
   const persistPath = join(dir, 'session-defer.json');
   try {
@@ -252,7 +258,7 @@ test('store: persists + rehydrates across a "restart" and still resumes exactly 
     const schedB = manualScheduler();
     const replays = [];
     const b = new SessionLimitDeferStore({ now: () => nowRef.v, scheduler: schedB.api, persistPath });
-    b.setResumeHandler((raw) => replays.push(raw));
+    b.setResumeHandler((intent) => replays.push(intent.raw));
     b.load();
     assert.equal(b.isDeferred(AGENT), true, 'the window survived the restart');
     assert.equal(b.pendingIntentCount(AGENT), 2, 'both coalesced intents survived the restart');
@@ -264,9 +270,19 @@ test('store: persists + rehydrates across a "restart" and still resumes exactly 
     assert.equal(replays.length, 2, 'restart-persisted intents resume exactly once');
     assert.deepEqual(replays.sort(), ['raw-A1', 'raw-A2']);
     assert.equal(b.isDeferred(AGENT), false);
-    // The drain was persisted → a SECOND restart replays nothing (exactly-once).
+    // Outbox (blocker #3): the `dispatching` transition is persisted BEFORE the
+    // replay's ACK removes the intent, so at THIS instant (ack still pending on the
+    // microtask queue) the intents are on disk as 'dispatching' — a crash here loses
+    // nothing.
+    const mid = JSON.parse(readFileSync(persistPath, 'utf8'));
+    assert.equal(Object.keys(mid.agents[AGENT].intents).length, 2, 'intents still on disk mid-drain');
+    for (const it of Object.values(mid.agents[AGENT].intents)) {
+      assert.equal(it.status, 'dispatching', 'persisted as dispatching before ack');
+    }
+    // Let the ACKs settle → a SECOND restart replays nothing (exactly-once).
+    await new Promise((r) => setImmediate(r));
     const after = JSON.parse(readFileSync(persistPath, 'utf8'));
-    assert.equal(Object.keys(after.agents).length, 0, 'the expired window was removed from disk');
+    assert.equal(Object.keys(after.agents).length, 0, 'the acknowledged window was removed from disk');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -290,13 +306,75 @@ test('store: a window that ALREADY expired while the manager was down replays on
     const schedB = manualScheduler();
     const replays = [];
     const b = new SessionLimitDeferStore({ now: () => nowRef.v, scheduler: schedB.api, persistPath });
-    b.setResumeHandler((raw) => replays.push(raw));
+    b.setResumeHandler((intent) => replays.push(intent.raw));
     b.load();
     // load() arms a (delay 0) timer for the already-past window; firing it replays.
     assert.equal(schedB.armed(), 1, 'an immediate timer is armed for the past-due window');
     schedB.fire();
     assert.deepEqual(replays, ['raw-late'], 'the missed resume fires once on boot');
     assert.equal(b.isDeferred(AGENT), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── blocker #3: crash BETWEEN the drain-persist and the replay ack ────────────
+// The old code deleted+persisted the intent BEFORE dispatching the replay, so a
+// crash in that window lost the resume forever (at-most-once). The durable outbox
+// persists a `dispatching` state before the replay and removes only after the ack,
+// so a crash mid-replay leaves the intent recoverable → re-driven EXACTLY once on
+// restart, with the ack making a further restart a no-op (no twin / no repeat).
+test('store: crash right after the drain-persist (before replay ack) → restart re-drives EXACTLY once, no loss/twin', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'awb-session-defer-'));
+  const persistPath = join(dir, 'session-defer.json');
+  try {
+    const nowRef = { v: T0 };
+    const until = T0 + 45 * 60_000;
+
+    // ── instance A: at reset #fire persists 'dispatching', then the replay HANGS
+    //    (never acks) — models a crash between the persist and the ack. ──
+    const schedA = manualScheduler();
+    const aReplays = [];
+    const a = new SessionLimitDeferStore({ now: () => nowRef.v, scheduler: schedA.api, persistPath });
+    a.setResumeHandler((intent) => {
+      aReplays.push(intent.raw);
+      return new Promise(() => {}); // never resolves → the ack never runs (crash)
+    });
+    a.load();
+    a.recordSessionLimit(AGENT, { deferUntilMs: until, resetLabel: '3am (X)' });
+    a.addPendingIntent(AGENT, meta('T-crash'), 'raw-crash');
+
+    nowRef.v = until + 1;
+    schedA.fire(); // transition→dispatching + PERSIST, then the replay hangs
+    assert.equal(aReplays.length, 1, 'A initiated the replay');
+    // Old behavior would have deleted the intent here → total loss. The outbox keeps
+    // it on disk as 'dispatching'.
+    const mid = JSON.parse(readFileSync(persistPath, 'utf8'));
+    assert.equal(Object.keys(mid.agents[AGENT].intents).length, 1, 'intent survived on disk (not deleted pre-replay)');
+    assert.equal(Object.values(mid.agents[AGENT].intents)[0].status, 'dispatching');
+
+    // ── instance B: fresh store, same disk, still past reset. A's hung replay left
+    //    the intent un-acked → B re-drives it exactly once (fresh #inFlightReplay). ──
+    const schedB = manualScheduler();
+    const bReplays = [];
+    const b = new SessionLimitDeferStore({ now: () => nowRef.v, scheduler: schedB.api, persistPath });
+    b.setResumeHandler((intent) => bReplays.push(intent.raw));
+    b.load();
+    assert.equal(schedB.armed(), 1, 'boot armed an immediate drain for the un-acked dispatching intent');
+    schedB.fire();
+    assert.deepEqual(bReplays, ['raw-crash'], 're-driven exactly once (no loss)');
+    await settle();
+    const after = JSON.parse(readFileSync(persistPath, 'utf8'));
+    assert.equal(Object.keys(after.agents).length, 0, 'acknowledged + removed after the successful re-drive');
+
+    // ── instance C boots clean → nothing to replay (proves no duplicate / no twin). ──
+    const schedC = manualScheduler();
+    const cReplays = [];
+    const c = new SessionLimitDeferStore({ now: () => nowRef.v, scheduler: schedC.api, persistPath });
+    c.setResumeHandler((intent) => cReplays.push(intent.raw));
+    c.load();
+    if (schedC.armed()) schedC.fire();
+    assert.deepEqual(cReplays, [], 'no duplicate re-drive after acknowledgement (exactly-once across restarts)');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

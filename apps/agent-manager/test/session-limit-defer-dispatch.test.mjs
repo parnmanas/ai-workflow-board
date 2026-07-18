@@ -90,6 +90,15 @@ afterEach(() => {
 function makeSubagentManager(state) {
   const records = new Map();
   let resCounter = 0;
+  // Model a session's death: reap its spawn record so a later re-drive for the
+  // same ticket does not spuriously dedup against a corpse (in reality the reaper
+  // drops the record when the child exits — the very death that opened the defer
+  // window). Test-only handle surfaced on `state`.
+  state.reapTicket = (ticketId) => {
+    for (const [id, rec] of [...records]) {
+      if (rec.ticket_id === ticketId) records.delete(id);
+    }
+  };
   return {
     canSpawn: () => true,
     async spawn(spec) {
@@ -254,23 +263,32 @@ test('an explicit operator `manual` trigger bypasses the defer window (escape ha
   assert.equal(d.pendingSessionDeferCount('T-op'), 0, 'a bypassing trigger is not coalesced into an intent');
 });
 
-// ── (4) a comment_mention is suppressed while deferred (no futile one-shot) ──
+// ── (4) a comment_mention is coalesced (not dropped) while deferred, no spawn ──
 
-test('a comment_mention is suppressed while deferred (no one-shot spawn)', async () => {
+test('a comment_mention is coalesced into one pending intent while deferred (no one-shot spawn)', async () => {
   const { d, state } = makeHarness();
   openWindow(d);
 
-  await d.handleCommentMention(
+  const mention = (comment) =>
     JSON.stringify({
       event_type: 'comment_mention',
       ticket_id: 'T-1',
-      comment_id: 'c1',
+      comment_id: comment,
       agent_id: AGENT,
       actor_name: 'reviewer',
+      mention_source: 'role',
+      role_shortcut: 'assignee',
       content: '@[role:assignee] please proceed',
-    }),
-  );
+    });
+  // Two mentions for the same (ticket, role) — the storm shape.
+  await d.handleCommentMention(mention('c1'));
+  await d.handleCommentMention(mention('c2'));
   assert.equal(state.spawns.length, 0, 'the mention did not spawn a doomed one-shot while deferred');
+  assert.equal(
+    d.pendingSessionDeferCount(AGENT),
+    1,
+    'the mentions COALESCED into exactly one pending intent (blocker #2 — not dropped)',
+  );
 });
 
 // ── (5) a moved ticket cancels its pending resume intent ──
@@ -292,4 +310,77 @@ test('a moved ticket cancels its pending resume intent (board_update), so it nev
   await sched.fire();
   assert.equal(state.spawns.length, 1, 'only the un-moved ticket resumed');
   assert.equal(state.spawns[0].ticketId, 'T-2');
+});
+
+// ── (6) blocker #1: the dead task itself is seeded — it resumes at reset even ──
+// with NO intervening supervisor/mention trigger. This is the gap the reviewer
+// flagged: recordHarnessSessionLimit used to open the window WITHOUT queuing the
+// failed task, so a reset with no further trigger replayed nothing.
+
+test('blocker #1: a session-limit exit seeds the dead task — it resumes EXACTLY once at reset with no intervening trigger', async () => {
+  const { d, sched, nowRef, state } = makeHarness();
+
+  // A normal supervisor trigger dispatches (no window yet) → spawns the doomed
+  // session and records its raw for the seed.
+  await d.handleTrigger(trigger({ ticket_id: 'T-orig', field_changed: 'orig' }));
+  assert.equal(state.spawns.length, 1, 'the original task spawned');
+
+  // That session dies of a harness session limit: the exit handler opens the
+  // window AND seeds the dead task itself as a durable pending intent. Model the
+  // death by reaping its spawn record (the reaper drops it on child exit).
+  state.reapTicket('T-orig');
+  const opened = d.recordHarnessSessionLimit({
+    agentId: AGENT,
+    ticketId: 'T-orig',
+    role: 'assignee',
+    deferUntilMs: RESET_UNTIL,
+    reason: 'session_limit',
+    resetLabel: '12:30am (Asia/Seoul)',
+  });
+  assert.deepEqual(opened, { opened: true }, 'the exit opened a fresh window');
+  assert.equal(d.pendingSessionDeferCount(AGENT), 1, 'the dead task was seeded as ONE pending intent');
+  for (let i = 0; i < 8; i++) await settle();
+  assert.equal(countTool('add_comment'), 1, 'one audit-visible defer comment for the seeded ticket-role');
+  assert.match(commentContent(), /정확히 1회/, 'the seed comment states the resume-once contract');
+
+  // NO further supervisor/mention trigger arrives. The reset instant alone must
+  // re-drive the original ticket-role exactly once.
+  nowRef.v = RESET_UNTIL + 1;
+  await sched.fire();
+  assert.equal(state.spawns.length, 2, 'the seeded original re-drove once at reset (no intervening trigger needed)');
+  assert.equal(state.spawns[1].ticketId, 'T-orig');
+  assert.equal(state.dedups.length, 0, 'no twin — exactly one live re-drive');
+  assert.equal(d.pendingSessionDeferCount(AGENT), 0, 'nothing left queued (exactly-once)');
+});
+
+// ── (7) blocker #2 end-to-end: a mention-only window resumes once at reset ──
+
+test('blocker #2: a mention arriving during defer (no trigger) is coalesced and resumes EXACTLY once at reset', async () => {
+  const { d, sched, nowRef, state } = makeHarness();
+  openWindow(d); // window open, no seed — isolate the mention path
+
+  await d.handleCommentMention(
+    JSON.stringify({
+      event_type: 'comment_mention',
+      ticket_id: 'T-m',
+      comment_id: 'c1',
+      agent_id: AGENT,
+      actor_name: 'reviewer',
+      mention_source: 'role',
+      role_shortcut: 'assignee',
+      content: '@[role:assignee] please proceed',
+    }),
+  );
+  assert.equal(state.spawns.length, 0, 'no doomed one-shot spawned while deferred');
+  assert.equal(d.pendingSessionDeferCount(AGENT), 1, 'the mention was coalesced into one durable intent');
+  for (let i = 0; i < 8; i++) await settle();
+  assert.equal(countTool('add_comment'), 1, 'one audit-visible defer comment for the deferred mention');
+
+  // Reset → the coalesced mention is re-delivered EXACTLY once (via handleCommentMention).
+  nowRef.v = RESET_UNTIL + 1;
+  await sched.fire();
+  assert.equal(state.spawns.length, 1, 'the deferred mention resumed once at reset');
+  assert.equal(state.spawns[0].ticketId, 'T-m');
+  assert.equal(state.dedups.length, 0, 'no twin');
+  assert.equal(d.pendingSessionDeferCount(AGENT), 0, 'nothing left queued (exactly-once)');
 });
