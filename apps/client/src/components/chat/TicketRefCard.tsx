@@ -53,11 +53,11 @@ export default function TicketRefCard({ id, title, action }: { id: string; title
         margin: '0 1px',
         padding: '1px 8px 1px 6px',
         fontFamily: 'inherit',
-        fontSize: 13,
+        fontSize: tokens.typography.fontSizeMd,
         fontWeight: 600,
         lineHeight: 1.4,
         color: tokens.colors.accentSubtle,
-        background: hover ? 'rgba(99,102,241,0.20)' : 'rgba(99,102,241,0.12)',
+        background: hover ? tokens.overlays.accentStrong : tokens.overlays.accentSoft,
         border: `1px solid ${hover ? tokens.colors.accent : 'rgba(99,102,241,0.30)'}`,
         borderRadius: tokens.radii.md,
         cursor: 'pointer',
@@ -70,11 +70,11 @@ export default function TicketRefCard({ id, title, action }: { id: string; title
       {actionLabel && (
         <span
           style={{
-            fontSize: 11,
+            fontSize: tokens.typography.fontSizeXs,
             fontWeight: 700,
             padding: '0 5px',
             borderRadius: tokens.radii.sm,
-            background: 'rgba(99,102,241,0.22)',
+            background: tokens.overlays.accentStronger,
             color: tokens.colors.accentSubtle,
             flexShrink: 0,
           }}

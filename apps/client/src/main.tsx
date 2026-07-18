@@ -7,6 +7,10 @@ import { tokens } from './tokens';
 // Inject global keyframes + AppLayout responsive sidebar CSS
 const style = document.createElement('style');
 style.textContent = `
+  /* 문서 배경/기본 텍스트의 권위 원천은 토큰이다(F2-2). index.html 의 인라인
+     body 규칙은 번들 로드 전 flash 방지용 fallback 이며 이 값과 미러링한다. */
+  body { background: ${tokens.colors.surface}; color: ${tokens.colors.textStrong}; }
+
   @keyframes dotPulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
 
   /* Ticket pending-user-action badge pulse (ticket a57517be).
@@ -59,7 +63,7 @@ style.textContent = `
   .awb-sidebar-backdrop {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.4);
+    background: ${tokens.overlays.backdropSoft};
     z-index: 1099;
   }
   .awb-topbar {

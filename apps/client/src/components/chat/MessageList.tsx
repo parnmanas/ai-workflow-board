@@ -7,20 +7,6 @@ import { renderMarkdown, handleMentionAwareCopy, type MentionParticipant } from 
 import { base64ToBlob, formatBytes, isImageMime, triggerBlobDownload } from './utils/attachments';
 import TicketRefCard from './TicketRefCard';
 
-// ─── Style constants (mirror ChatPage.tsx COLORS) ────────────────────────────
-
-const COLORS = {
-  dominant: tokens.colors.surface,
-  secondary: tokens.colors.surfaceCard,
-  accent: tokens.colors.accent,
-  border: tokens.colors.border,
-  textPrimary: tokens.colors.textPrimary,
-  textSecondary: tokens.colors.textSecondary,
-  textMuted: tokens.colors.borderStrong,
-  destructive: tokens.colors.danger,
-  agentName: tokens.colors.accentSubtle,
-};
-
 // ─── MessageList ──────────────────────────────────────────────────────────────
 
 export interface MessageListProps {
@@ -119,11 +105,11 @@ export default function MessageList({ messages, participantCount, participants =
             gap: 12,
           }}
         >
-          <div style={{ flex: 1, height: 1, background: COLORS.border }} />
+          <div style={{ flex: 1, height: 1, background: tokens.colors.border }} />
           <span
             style={{
-              fontSize: 11,
-              color: COLORS.textMuted,
+              fontSize: tokens.typography.fontSizeXs,
+              color: tokens.colors.textMuted,
               letterSpacing: '0.05em',
               textTransform: 'uppercase',
               whiteSpace: 'nowrap',
@@ -131,7 +117,7 @@ export default function MessageList({ messages, participantCount, participants =
           >
             {label}
           </span>
-          <div style={{ flex: 1, height: 1, background: COLORS.border }} />
+          <div style={{ flex: 1, height: 1, background: tokens.colors.border }} />
         </div>,
       );
     }
@@ -157,9 +143,9 @@ export default function MessageList({ messages, participantCount, participants =
             padding: '2px 16px',
             display: 'flex',
             alignItems: 'baseline',
-            gap: 8,
-            color: COLORS.textMuted,
-            fontSize: 11,
+            gap: tokens.spacing.sm,
+            color: tokens.colors.textMuted,
+            fontSize: tokens.typography.fontSizeXs,
           }}
         >
           <span style={{ fontWeight: 500 }}>{msg.sender_name}</span>
@@ -204,13 +190,13 @@ export default function MessageList({ messages, participantCount, participants =
           <div
             style={{
               maxWidth: '75%',
-              background: `${COLORS.border}40`,
-              border: `1px solid ${COLORS.border}`,
+              background: `${tokens.colors.border}40`,
+              border: `1px solid ${tokens.colors.border}`,
               borderRadius: tokens.radii.full,
               padding: '4px 12px',
               fontSize: 12,
               fontStyle: 'italic',
-              color: COLORS.textSecondary,
+              color: tokens.colors.textSecondary,
               textAlign: 'center',
               lineHeight: 1.5,
               wordBreak: 'break-word',
@@ -273,17 +259,17 @@ export default function MessageList({ messages, participantCount, participants =
               style={{
                 display: 'flex',
                 alignItems: 'baseline',
-                gap: 8,
-                marginBottom: 4,
+                gap: tokens.spacing.sm,
+                marginBottom: tokens.spacing.xs,
                 justifyContent: isMe ? 'flex-end' : 'flex-start',
               }}
             >
               {isMe ? (
                 <>
-                  <span style={{ fontSize: 11, color: COLORS.textMuted }}>
+                  <span style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textMuted }}>
                     {formatClockTime(msg.created_at)}
                   </span>
-                  <span style={{ fontSize: 13, fontWeight: 600, color: COLORS.textPrimary }}>
+                  <span style={{ fontSize: tokens.typography.fontSizeMd, fontWeight: 600, color: tokens.colors.textPrimary }}>
                     {msg.sender_name}
                   </span>
                 </>
@@ -291,17 +277,17 @@ export default function MessageList({ messages, participantCount, participants =
                 <>
                   <span
                     style={{
-                      fontSize: 13,
+                      fontSize: tokens.typography.fontSizeMd,
                       fontWeight: 600,
-                      color: isAgent ? COLORS.agentName : COLORS.textPrimary,
+                      color: isAgent ? tokens.colors.accentSubtle : tokens.colors.textPrimary,
                     }}
                   >
                     {msg.sender_name}
                   </span>
                   {isAgent && (
-                    <span style={{ fontSize: 11, color: COLORS.textSecondary }}>(agent)</span>
+                    <span style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textSecondary }}>(agent)</span>
                   )}
-                  <span style={{ fontSize: 11, color: COLORS.textMuted }}>
+                  <span style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textMuted }}>
                     {formatClockTime(msg.created_at)}
                   </span>
                 </>
@@ -310,12 +296,12 @@ export default function MessageList({ messages, participantCount, participants =
           )}
           <div
             style={{
-              fontSize: 14,
-              color: COLORS.textPrimary,
+              fontSize: tokens.typography.fontSizeLg,
+              color: tokens.colors.textPrimary,
               lineHeight: 1.5,
               whiteSpace: 'pre-wrap',
               wordBreak: 'break-word',
-              background: isMe ? `${tokens.colors.accent}18` : COLORS.secondary,
+              background: isMe ? `${tokens.colors.accent}18` : tokens.colors.surfaceCard,
               padding: '8px 12px',
               borderRadius: prevSameWindow
                 ? '12px'
@@ -347,7 +333,7 @@ export default function MessageList({ messages, participantCount, participants =
             )}
             {/* Legacy inline image thumbnails (pre-attachment-surface messages). */}
             {msgImages.length > 0 && (
-              <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap', justifyContent: isMe ? 'flex-end' : 'flex-start' }}>
+              <div style={{ display: 'flex', gap: tokens.spacing.sm, marginTop: tokens.spacing.sm, flexWrap: 'wrap', justifyContent: isMe ? 'flex-end' : 'flex-start' }}>
                 {msgImages.map((img, idx) => (
                   <img
                     key={idx}
@@ -359,7 +345,7 @@ export default function MessageList({ messages, participantCount, participants =
                       borderRadius: tokens.radii.sm,
                       objectFit: 'cover',
                       cursor: 'pointer',
-                      border: `1px solid ${COLORS.border}`,
+                      border: `1px solid ${tokens.colors.border}`,
                     }}
                     onClick={() => setLightboxImage(`data:${img.mimetype};base64,${img.data}`)}
                   />
@@ -368,7 +354,7 @@ export default function MessageList({ messages, participantCount, participants =
             )}
             {/* Image attachments — fetched on demand into a Blob URL. */}
             {imageAttachments.length > 0 && (
-              <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap', justifyContent: isMe ? 'flex-end' : 'flex-start' }}>
+              <div style={{ display: 'flex', gap: tokens.spacing.sm, marginTop: tokens.spacing.sm, flexWrap: 'wrap', justifyContent: isMe ? 'flex-end' : 'flex-start' }}>
                 {imageAttachments.map((att) => {
                   const id = att.id || att.attachment_id || '';
                   const url = previewUrls[id];
@@ -381,8 +367,8 @@ export default function MessageList({ messages, participantCount, participants =
                         width: 96,
                         height: 96,
                         borderRadius: tokens.radii.sm,
-                        background: COLORS.border,
-                        border: `1px solid ${COLORS.border}`,
+                        background: tokens.colors.border,
+                        border: `1px solid ${tokens.colors.border}`,
                         cursor: url ? 'pointer' : 'default',
                         overflow: 'hidden',
                         display: 'flex',
@@ -398,7 +384,7 @@ export default function MessageList({ messages, participantCount, participants =
                           style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
                         />
                       ) : (
-                        <span style={{ fontSize: 11, color: COLORS.textSecondary }}>…</span>
+                        <span style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textSecondary }}>…</span>
                       )}
                     </div>
                   );
@@ -407,7 +393,7 @@ export default function MessageList({ messages, participantCount, participants =
             )}
             {/* Non-image attachments — metadata + download button only. */}
             {fileAttachments.length > 0 && (
-              <div style={{ display: 'flex', gap: 6, marginTop: 8, flexDirection: 'column', alignItems: isMe ? 'flex-end' : 'flex-start' }}>
+              <div style={{ display: 'flex', gap: 6, marginTop: tokens.spacing.sm, flexDirection: 'column', alignItems: isMe ? 'flex-end' : 'flex-start' }}>
                 {fileAttachments.map((att) => {
                   const id = att.id || att.attachment_id || '';
                   return (
@@ -415,10 +401,10 @@ export default function MessageList({ messages, participantCount, participants =
                       key={id}
                       style={{
                         display: 'flex',
-                        gap: 8,
+                        gap: tokens.spacing.sm,
                         alignItems: 'center',
-                        background: COLORS.dominant,
-                        border: `1px solid ${COLORS.border}`,
+                        background: tokens.colors.surface,
+                        border: `1px solid ${tokens.colors.border}`,
                         borderRadius: tokens.radii.sm,
                         padding: '6px 10px',
                         maxWidth: 320,
@@ -426,10 +412,10 @@ export default function MessageList({ messages, participantCount, participants =
                     >
                       <span style={{ fontSize: 18 }} aria-hidden>📄</span>
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 12, color: COLORS.textPrimary, fontWeight: 500, whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden' }}>
+                        <div style={{ fontSize: 12, color: tokens.colors.textPrimary, fontWeight: 500, whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden' }}>
                           {att.filename || att.file_name || 'File'}
                         </div>
-                        <div style={{ fontSize: 10, color: COLORS.textSecondary }}>
+                        <div style={{ fontSize: 10, color: tokens.colors.textSecondary }}>
                           {formatBytes(att.size_bytes ?? att.file_size ?? 0)}
                         </div>
                       </div>
@@ -438,11 +424,11 @@ export default function MessageList({ messages, participantCount, participants =
                         aria-label={`Download ${att.filename || 'file'}`}
                         style={{
                           background: 'transparent',
-                          border: `1px solid ${COLORS.border}`,
-                          color: COLORS.textSecondary,
+                          border: `1px solid ${tokens.colors.border}`,
+                          color: tokens.colors.textSecondary,
                           borderRadius: tokens.radii.sm,
                           padding: '4px 8px',
-                          fontSize: 11,
+                          fontSize: tokens.typography.fontSizeXs,
                           cursor: 'pointer',
                           whiteSpace: 'nowrap',
                         }}
@@ -457,7 +443,7 @@ export default function MessageList({ messages, participantCount, participants =
           </div>
           {/* Read receipt below last message */}
           {isLast && participantCount > 1 && (
-            <div style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 4, textAlign: isMe ? 'right' : 'left' }}>
+            <div style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textMuted, marginTop: tokens.spacing.xs, textAlign: isMe ? 'right' : 'left' }}>
               Read by {participantCount - 1}
             </div>
           )}
@@ -479,7 +465,7 @@ export default function MessageList({ messages, participantCount, participants =
           style={{
             position: 'fixed',
             inset: 0,
-            background: 'rgba(0,0,0,0.85)',
+            background: tokens.overlays.scrimStrong,
             zIndex: 2000,
             display: 'flex',
             alignItems: 'center',

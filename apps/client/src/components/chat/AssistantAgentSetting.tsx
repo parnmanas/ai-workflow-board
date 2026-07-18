@@ -51,17 +51,17 @@ export function AssistantAgentSettingView({
         background: tokens.colors.surfaceCard,
       }}
     >
-      <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: tokens.colors.textStrong }}>
+      <h3 style={{ margin: 0, fontSize: tokens.typography.fontSizeXl, fontWeight: 700, color: tokens.colors.textStrong }}>
         AWB 어시스턴트
       </h3>
-      <p style={{ margin: `${tokens.spacing.xs}px 0 ${tokens.spacing.md}px`, fontSize: 13, color: tokens.colors.textSecondary, lineHeight: 1.6 }}>
+      <p style={{ margin: `${tokens.spacing.xs}px 0 ${tokens.spacing.md}px`, fontSize: tokens.typography.fontSizeMd, color: tokens.colors.textSecondary, lineHeight: 1.6 }}>
         Chat-first 기본 진입 화면이 이 에이전트와의 DM 으로 연결됩니다. 사용자가 자연어로 말하면 어시스턴트가
         멘션 없이 응답합니다. 활성 상태의 이 워크스페이스 에이전트만 지정할 수 있으며(매니저 제외), 지정하지 않으면
         랜딩은 지정 안내 화면을 보여줍니다.
       </p>
 
       {agents.length === 0 && !staleValue ? (
-        <div style={{ fontSize: 13, color: tokens.colors.textMuted }}>
+        <div style={{ fontSize: tokens.typography.fontSizeMd, color: tokens.colors.textMuted }}>
           지정 가능한 활성 에이전트가 없습니다. 먼저 이 워크스페이스에 에이전트를 추가하세요.
         </div>
       ) : (
@@ -84,7 +84,7 @@ export function AssistantAgentSettingView({
               fontSize: tokens.typography.fontSizeMd,
               fontWeight: 600,
               fontFamily: 'inherit',
-              color: '#fff',
+              color: tokens.colors.textInverse,
               background: tokens.colors.accent,
               border: 'none',
               borderRadius: tokens.radii.md,

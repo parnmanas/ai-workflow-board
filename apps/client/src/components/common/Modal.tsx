@@ -35,7 +35,7 @@ export function Modal({ isOpen, onClose, title, children, footer, maxWidth }: Mo
       style={{
         position: 'fixed',
         inset: 0,
-        background: 'rgba(0,0,0,0.6)',
+        background: tokens.overlays.backdrop,
         zIndex: 2000,
         display: 'flex',
         alignItems: 'center',

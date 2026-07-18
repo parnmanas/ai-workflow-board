@@ -5,19 +5,6 @@ import PageHeader from '../PageHeader';
 import type { ChatRoomListItem } from '../../types';
 import { relativeTimeShort } from './utils/time';
 
-// ─── Style constants (mirror ChatPage.tsx COLORS) ────────────────────────────
-
-const COLORS = {
-  dominant: tokens.colors.surface,
-  secondary: tokens.colors.surfaceCard,
-  accent: tokens.colors.accent,
-  border: tokens.colors.border,
-  textPrimary: tokens.colors.textPrimary,
-  textSecondary: tokens.colors.textSecondary,
-  textMuted: tokens.colors.borderStrong,
-  destructive: tokens.colors.danger,
-};
-
 // ─── ChatRoomListPanel ────────────────────────────────────────────────────────
 
 export interface ChatRoomListPanelProps {
@@ -179,8 +166,8 @@ export default function ChatRoomListPanel({
   return (
     <div
       style={{
-        background: COLORS.secondary,
-        borderRight: `1px solid ${COLORS.border}`,
+        background: tokens.colors.surfaceCard,
+        borderRight: `1px solid ${tokens.colors.border}`,
         display: 'flex',
         flexDirection: 'column',
         height: '100%',
@@ -192,15 +179,15 @@ export default function ChatRoomListPanel({
           title="Chat"
           description="Workspace messaging"
           actions={
-            <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+            <div style={{ display: 'flex', gap: tokens.spacing.xs, alignItems: 'center' }}>
               <button
                 onClick={openSearch}
                 aria-label="Search messages"
                 style={{
                   background: 'transparent',
                   border: 'none',
-                  color: COLORS.textSecondary,
-                  fontSize: 16,
+                  color: tokens.colors.textSecondary,
+                  fontSize: tokens.typography.fontSizeXl,
                   padding: 8,
                   cursor: 'pointer',
                   lineHeight: 1,
@@ -213,12 +200,12 @@ export default function ChatRoomListPanel({
                   onClick={() => onToggleShowAllRooms(!showAllRooms)}
                   title={showAllRooms ? 'Showing every workspace room (incl. agent-to-agent). Click for "my rooms" only.' : 'Click to also show rooms you are not a participant in.'}
                   style={{
-                    background: showAllRooms ? COLORS.accent : 'transparent',
-                    color: showAllRooms ? 'white' : COLORS.textSecondary,
-                    border: `1px solid ${showAllRooms ? COLORS.accent : COLORS.border}`,
+                    background: showAllRooms ? tokens.colors.accent : 'transparent',
+                    color: showAllRooms ? 'white' : tokens.colors.textSecondary,
+                    border: `1px solid ${showAllRooms ? tokens.colors.accent : tokens.colors.border}`,
                     borderRadius: tokens.radii.md,
                     padding: '6px 10px',
-                    fontSize: 11,
+                    fontSize: tokens.typography.fontSizeXs,
                     fontWeight: 600,
                     cursor: 'pointer',
                     whiteSpace: 'nowrap',
@@ -230,12 +217,12 @@ export default function ChatRoomListPanel({
               <button
                 onClick={onNewChat}
                 style={{
-                  background: COLORS.accent,
+                  background: tokens.colors.accent,
                   color: 'white',
                   border: 'none',
                   borderRadius: tokens.radii.md,
                   padding: '8px 16px',
-                  fontSize: 13,
+                  fontSize: tokens.typography.fontSizeMd,
                   fontWeight: 600,
                   cursor: 'pointer',
                   whiteSpace: 'nowrap',
@@ -247,7 +234,7 @@ export default function ChatRoomListPanel({
           }
         />
       ) : (
-        <div style={{ padding: '12px 16px', borderBottom: `1px solid ${COLORS.border}`, flexShrink: 0, display: 'flex', gap: 8, alignItems: 'center' }}>
+        <div style={{ padding: '12px 16px', borderBottom: `1px solid ${tokens.colors.border}`, flexShrink: 0, display: 'flex', gap: tokens.spacing.sm, alignItems: 'center' }}>
           <input
             ref={searchInputRef}
             type="text"
@@ -256,16 +243,16 @@ export default function ChatRoomListPanel({
             onChange={(e) => setSearchQuery(e.target.value)}
             style={{
               flex: 1,
-              background: COLORS.dominant,
-              border: `1px solid ${COLORS.border}`,
+              background: tokens.colors.surface,
+              border: `1px solid ${tokens.colors.border}`,
               borderRadius: tokens.radii.md,
               padding: '8px 16px',
-              fontSize: 14,
-              color: COLORS.textPrimary,
+              fontSize: tokens.typography.fontSizeLg,
+              color: tokens.colors.textPrimary,
               outline: 'none',
             }}
-            onFocus={(e) => (e.target.style.borderColor = COLORS.accent)}
-            onBlur={(e) => (e.target.style.borderColor = COLORS.border)}
+            onFocus={(e) => (e.target.style.borderColor = tokens.colors.accent)}
+            onBlur={(e) => (e.target.style.borderColor = tokens.colors.border)}
           />
           <button
             onClick={closeSearch}
@@ -273,7 +260,7 @@ export default function ChatRoomListPanel({
             style={{
               background: 'transparent',
               border: 'none',
-              color: COLORS.textSecondary,
+              color: tokens.colors.textSecondary,
               fontSize: 18,
               cursor: 'pointer',
               padding: '0 4px',
@@ -292,10 +279,10 @@ export default function ChatRoomListPanel({
         <div
           style={{
             padding: '8px 16px',
-            borderBottom: `1px solid ${COLORS.border}`,
+            borderBottom: `1px solid ${tokens.colors.border}`,
             flexShrink: 0,
             display: 'flex',
-            gap: 8,
+            gap: tokens.spacing.sm,
             alignItems: 'center',
           }}
         >
@@ -307,16 +294,16 @@ export default function ChatRoomListPanel({
             aria-label="Filter rooms by member name or message content"
             style={{
               flex: 1,
-              background: COLORS.dominant,
-              border: `1px solid ${COLORS.border}`,
+              background: tokens.colors.surface,
+              border: `1px solid ${tokens.colors.border}`,
               borderRadius: tokens.radii.md,
               padding: '6px 12px',
-              fontSize: 13,
-              color: COLORS.textPrimary,
+              fontSize: tokens.typography.fontSizeMd,
+              color: tokens.colors.textPrimary,
               outline: 'none',
             }}
-            onFocus={(e) => (e.target.style.borderColor = COLORS.accent)}
-            onBlur={(e) => (e.target.style.borderColor = COLORS.border)}
+            onFocus={(e) => (e.target.style.borderColor = tokens.colors.accent)}
+            onBlur={(e) => (e.target.style.borderColor = tokens.colors.border)}
           />
           {filterQuery && (
             <button
@@ -325,8 +312,8 @@ export default function ChatRoomListPanel({
               style={{
                 background: 'transparent',
                 border: 'none',
-                color: COLORS.textSecondary,
-                fontSize: 16,
+                color: tokens.colors.textSecondary,
+                fontSize: tokens.typography.fontSizeXl,
                 cursor: 'pointer',
                 padding: '0 4px',
                 lineHeight: 1,
@@ -342,17 +329,17 @@ export default function ChatRoomListPanel({
       <div style={{ flex: 1, overflowY: 'auto' }}>
         {isSearching ? (
           searchQuery.length < 2 ? (
-            <div style={{ padding: '24px 16px', textAlign: 'center', fontSize: 13, color: COLORS.textSecondary }}>
+            <div style={{ padding: '24px 16px', textAlign: 'center', fontSize: tokens.typography.fontSizeMd, color: tokens.colors.textSecondary }}>
               Type at least 2 characters to search
             </div>
           ) : searchLoading ? (
             <div style={{ padding: '8px 0' }}>
               {[1, 2, 3].map((i) => (
-                <div key={i} style={{ height: 40, margin: '8px 16px', background: COLORS.border, borderRadius: tokens.radii.sm }} />
+                <div key={i} style={{ height: 40, margin: '8px 16px', background: tokens.colors.border, borderRadius: tokens.radii.sm }} />
               ))}
             </div>
           ) : searchResults.length === 0 ? (
-            <div style={{ padding: '24px 16px', textAlign: 'center', fontSize: 14, color: COLORS.textSecondary }}>
+            <div style={{ padding: '24px 16px', textAlign: 'center', fontSize: tokens.typography.fontSizeLg, color: tokens.colors.textSecondary }}>
               No messages match '{searchQuery}'. Try shorter keywords or check your spelling.
             </div>
           ) : (
@@ -378,10 +365,10 @@ export default function ChatRoomListPanel({
             style={{
               margin: 16,
               padding: '8px 12px',
-              border: `1px solid ${COLORS.destructive}`,
+              border: `1px solid ${tokens.colors.danger}`,
               borderRadius: tokens.radii.sm,
-              color: COLORS.destructive,
-              fontSize: 13,
+              color: tokens.colors.danger,
+              fontSize: tokens.typography.fontSizeMd,
             }}
           >
             Could not load chats. Check your connection and retry.
@@ -393,17 +380,17 @@ export default function ChatRoomListPanel({
               textAlign: 'center',
             }}
           >
-            <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.textPrimary, marginBottom: 8 }}>
+            <div style={{ fontSize: tokens.typography.fontSizeLg, fontWeight: 600, color: tokens.colors.textPrimary, marginBottom: tokens.spacing.sm }}>
               No chats yet
             </div>
-            <div style={{ fontSize: 13, color: COLORS.textSecondary }}>
+            <div style={{ fontSize: tokens.typography.fontSizeMd, color: tokens.colors.textSecondary }}>
               Start a conversation with your team or agents. Click 'New Chat' to begin.
             </div>
           </div>
         ) : (
           <>
             {filteredRooms.length === 0 ? (
-              <div style={{ padding: '24px 16px', textAlign: 'center', fontSize: 13, color: COLORS.textSecondary }}>
+              <div style={{ padding: '24px 16px', textAlign: 'center', fontSize: tokens.typography.fontSizeMd, color: tokens.colors.textSecondary }}>
                 No rooms match this filter.
               </div>
             ) : (
@@ -424,15 +411,15 @@ export default function ChatRoomListPanel({
                 ≥ 2 chars. Click jumps to the message in its room, same as
                 the magnifier overlay flow. */}
             {filterQuery.trim().length >= 2 && (
-              <div style={{ borderTop: `1px solid ${COLORS.border}`, marginTop: 4 }}>
+              <div style={{ borderTop: `1px solid ${tokens.colors.border}`, marginTop: tokens.spacing.xs }}>
                 <div
                   style={{
                     padding: '8px 16px',
-                    fontSize: 11,
+                    fontSize: tokens.typography.fontSizeXs,
                     fontWeight: 600,
                     textTransform: 'uppercase',
                     letterSpacing: 0.5,
-                    color: COLORS.textMuted,
+                    color: tokens.colors.textMuted,
                   }}
                 >
                   Messages
@@ -440,11 +427,11 @@ export default function ChatRoomListPanel({
                 {messageHitsLoading ? (
                   <div style={{ padding: '8px 0' }}>
                     {[1, 2].map((i) => (
-                      <div key={i} style={{ height: 40, margin: '8px 16px', background: COLORS.border, borderRadius: tokens.radii.sm }} />
+                      <div key={i} style={{ height: 40, margin: '8px 16px', background: tokens.colors.border, borderRadius: tokens.radii.sm }} />
                     ))}
                   </div>
                 ) : messageHits.length === 0 ? (
-                  <div style={{ padding: '8px 16px 16px', fontSize: 13, color: COLORS.textSecondary }}>
+                  <div style={{ padding: '8px 16px 16px', fontSize: tokens.typography.fontSizeMd, color: tokens.colors.textSecondary }}>
                     No messages match '{filterQuery.trim()}'.
                   </div>
                 ) : (
@@ -492,24 +479,24 @@ function SearchResultRow({ result, query, highlightMatch, onClick }: SearchResul
         minHeight: 56,
         padding: '10px 16px',
         cursor: 'pointer',
-        background: hovered ? 'rgba(255,255,255,0.04)' : 'transparent',
+        background: hovered ? tokens.overlays.rowHover : 'transparent',
         display: 'flex',
         flexDirection: 'column',
         justifyContent: 'center',
         gap: 2,
-        borderBottom: `1px solid ${COLORS.border}`,
+        borderBottom: `1px solid ${tokens.colors.border}`,
         boxSizing: 'border-box',
       }}
     >
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }}>
-        <span style={{ fontSize: 13, fontWeight: 600, color: COLORS.textPrimary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: tokens.spacing.sm }}>
+        <span style={{ fontSize: tokens.typography.fontSizeMd, fontWeight: 600, color: tokens.colors.textPrimary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {result.room_name}
         </span>
-        <span style={{ fontSize: 11, fontWeight: 400, color: COLORS.textMuted, flexShrink: 0 }}>
+        <span style={{ fontSize: tokens.typography.fontSizeXs, fontWeight: 400, color: tokens.colors.textMuted, flexShrink: 0 }}>
           {relativeTimeShort(result.created_at)}
         </span>
       </div>
-      <div style={{ fontSize: 14, fontWeight: 400, color: COLORS.textSecondary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+      <div style={{ fontSize: tokens.typography.fontSizeLg, fontWeight: 400, color: tokens.colors.textSecondary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
         {highlightMatch(snippet, query)}
       </div>
     </li>
@@ -527,15 +514,15 @@ function RoomListSkeleton() {
             padding: '0 16px',
             display: 'flex',
             alignItems: 'center',
-            gap: 8,
+            gap: tokens.spacing.sm,
           }}
         >
           <div
             style={{
               width: 36,
               height: 36,
-              borderRadius: '50%',
-              background: COLORS.border,
+              borderRadius: tokens.radii.full,
+              background: tokens.colors.border,
               flexShrink: 0,
             }}
           />
@@ -545,7 +532,7 @@ function RoomListSkeleton() {
                 width: '60%',
                 height: 12,
                 borderRadius: tokens.radii.sm,
-                background: COLORS.border,
+                background: tokens.colors.border,
                 marginBottom: 6,
               }}
             />
@@ -554,7 +541,7 @@ function RoomListSkeleton() {
                 width: '80%',
                 height: 10,
                 borderRadius: tokens.radii.sm,
-                background: COLORS.border,
+                background: tokens.colors.border,
               }}
             />
           </div>
@@ -635,9 +622,9 @@ function RoomListRow({ room, isActive, onClick, currentUserId }: RoomListRowProp
   const badgeLabel = unreadCount >= 100 ? '99+' : String(unreadCount);
 
   const bg = isActive
-    ? 'rgba(99,102,241,0.08)'
+    ? tokens.overlays.accentFaint
     : hovered
-    ? 'rgba(255,255,255,0.04)'
+    ? tokens.overlays.rowHover
     : 'transparent';
 
   return (
@@ -653,10 +640,10 @@ function RoomListRow({ room, isActive, onClick, currentUserId }: RoomListRowProp
         padding: '8px 16px',
         display: 'flex',
         alignItems: 'center',
-        gap: 8,
+        gap: tokens.spacing.sm,
         cursor: 'pointer',
         background: bg,
-        borderLeft: isActive ? `3px solid ${COLORS.accent}` : '3px solid transparent',
+        borderLeft: isActive ? `3px solid ${tokens.colors.accent}` : '3px solid transparent',
         boxSizing: 'border-box',
       }}
     >
@@ -665,14 +652,14 @@ function RoomListRow({ room, isActive, onClick, currentUserId }: RoomListRowProp
         style={{
           width: 36,
           height: 36,
-          borderRadius: '50%',
-          background: COLORS.border,
+          borderRadius: tokens.radii.full,
+          background: tokens.colors.border,
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          fontSize: 13,
+          fontSize: tokens.typography.fontSizeMd,
           fontWeight: 600,
-          color: COLORS.textPrimary,
+          color: tokens.colors.textPrimary,
           flexShrink: 0,
         }}
       >
@@ -684,9 +671,9 @@ function RoomListRow({ room, isActive, onClick, currentUserId }: RoomListRowProp
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
           <span
             style={{
-              fontSize: 13,
+              fontSize: tokens.typography.fontSizeMd,
               fontWeight: 600,
-              color: COLORS.textPrimary,
+              color: tokens.colors.textPrimary,
               overflow: 'hidden',
               textOverflow: 'ellipsis',
               whiteSpace: 'nowrap',
@@ -702,9 +689,9 @@ function RoomListRow({ room, isActive, onClick, currentUserId }: RoomListRowProp
                 flexShrink: 0,
                 fontSize: 10,
                 fontWeight: 600,
-                color: COLORS.textSecondary,
-                background: COLORS.dominant,
-                border: `1px solid ${COLORS.border}`,
+                color: tokens.colors.textSecondary,
+                background: tokens.colors.surface,
+                border: `1px solid ${tokens.colors.border}`,
                 borderRadius: tokens.radii.lg,
                 padding: '0 6px',
                 lineHeight: '16px',
@@ -719,8 +706,8 @@ function RoomListRow({ room, isActive, onClick, currentUserId }: RoomListRowProp
           <div
             title={participantSummary}
             style={{
-              fontSize: 11,
-              color: COLORS.textSecondary,
+              fontSize: tokens.typography.fontSizeXs,
+              color: tokens.colors.textSecondary,
               overflow: 'hidden',
               textOverflow: 'ellipsis',
               whiteSpace: 'nowrap',
@@ -733,8 +720,8 @@ function RoomListRow({ room, isActive, onClick, currentUserId }: RoomListRowProp
         {room.last_message_preview && (
           <div
             style={{
-              fontSize: 11,
-              color: COLORS.textSecondary,
+              fontSize: tokens.typography.fontSizeXs,
+              color: tokens.colors.textSecondary,
               overflow: 'hidden',
               textOverflow: 'ellipsis',
               whiteSpace: 'nowrap',
@@ -752,20 +739,20 @@ function RoomListRow({ room, isActive, onClick, currentUserId }: RoomListRowProp
           display: 'flex',
           flexDirection: 'column',
           alignItems: 'flex-end',
-          gap: 4,
+          gap: tokens.spacing.xs,
           flexShrink: 0,
         }}
       >
-        <span style={{ fontSize: 11, color: COLORS.textMuted }}>
+        <span style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textMuted }}>
           {relativeTimeShort(room.last_message_at || room.created_at)}
         </span>
         {showBadge && (
           <span
             aria-label={`${unreadCount} unread messages`}
             style={{
-              background: COLORS.accent,
+              background: tokens.colors.accent,
               color: 'white',
-              fontSize: 11,
+              fontSize: tokens.typography.fontSizeXs,
               fontWeight: 600,
               minWidth: 16,
               height: 16,

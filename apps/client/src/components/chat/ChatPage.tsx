@@ -39,12 +39,6 @@ import ChatRoomView from './RoomDetailPanel';
  * room list default, tap-to-enter room.
  */
 
-// ─── Style constants ─────────────────────────────────────────────────────────
-
-const COLORS = {
-  border: tokens.colors.border,
-};
-
 // Page size for both initial load and `before=<id>` history pagination.
 // Server caps at 200 (chat-rooms.controller.ts) — 50 is a comfortable
 // scroll window without dragging the first paint.
@@ -71,7 +65,7 @@ function ProtocolUpgradeBanner() {
         flexShrink: 0,
       }}
     >
-      <span style={{ fontSize: 14, fontWeight: 600, color: tokens.colors.danger }}>
+      <span style={{ fontSize: tokens.typography.fontSizeLg, fontWeight: 600, color: tokens.colors.danger }}>
         채팅 시스템이 업그레이드되었습니다.
       </span>
       <button
@@ -82,7 +76,7 @@ function ProtocolUpgradeBanner() {
           color: tokens.colors.danger,
           borderRadius: tokens.radii.md,
           padding: '4px 8px',
-          fontSize: 13,
+          fontSize: tokens.typography.fontSizeMd,
           cursor: 'pointer',
         }}
       >
@@ -330,7 +324,7 @@ export default function ChatPage() {
       // Briefly highlight the message
       const htmlEl = el as HTMLElement;
       htmlEl.style.transition = 'background 0s';
-      htmlEl.style.background = 'rgba(99,102,241,0.20)';
+      htmlEl.style.background = tokens.overlays.accentStrong;
       setTimeout(() => {
         htmlEl.style.transition = 'background 1.5s ease';
         htmlEl.style.background = 'transparent';
@@ -690,7 +684,7 @@ export default function ChatPage() {
             currentUserId={user?.id}
           />
         </Panel>
-        <Separator style={{ background: COLORS.border, width: 1, cursor: 'col-resize' }} />
+        <Separator style={{ background: tokens.colors.border, width: 1, cursor: 'col-resize' }} />
         <Panel defaultSize="70" minSize="40">
           <ChatRoomView
             room={activeRoom}

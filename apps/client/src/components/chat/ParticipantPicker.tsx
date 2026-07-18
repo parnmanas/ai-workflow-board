@@ -6,19 +6,6 @@ import type { ChatRoomDetail } from '../../types';
 import { formatAgentDisplayName } from '../../utils/agentName';
 import { loadAddPeopleCandidates } from './utils/participantFlow';
 
-// ─── Style constants (mirror ChatPage.tsx COLORS) ────────────────────────────
-
-const COLORS = {
-  dominant: tokens.colors.surface,
-  secondary: tokens.colors.surfaceCard,
-  accent: tokens.colors.accent,
-  border: tokens.colors.border,
-  textPrimary: tokens.colors.textPrimary,
-  textSecondary: tokens.colors.textSecondary,
-  textMuted: tokens.colors.borderStrong,
-  destructive: tokens.colors.danger,
-};
-
 // ─── Participant type for picker ──────────────────────────────────────────────
 
 export interface PickerParticipant {
@@ -148,7 +135,7 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
       style={{
         position: 'fixed',
         inset: 0,
-        background: 'rgba(0,0,0,0.6)',
+        background: tokens.overlays.backdrop,
         zIndex: 1000,
         display: 'flex',
         alignItems: 'center',
@@ -161,8 +148,8 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
         aria-modal="true"
         aria-labelledby={titleId}
         style={{
-          background: COLORS.secondary,
-          border: `1px solid ${COLORS.border}`,
+          background: tokens.colors.surfaceCard,
+          border: `1px solid ${tokens.colors.border}`,
           borderRadius: tokens.radii.lg,
           width: 480,
           maxWidth: '90vw',
@@ -176,14 +163,14 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
         <div
           style={{
             padding: '16px 20px',
-            borderBottom: `1px solid ${COLORS.border}`,
+            borderBottom: `1px solid ${tokens.colors.border}`,
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
             flexShrink: 0,
           }}
         >
-          <span id={titleId} style={{ fontSize: 16, fontWeight: 600, color: COLORS.textPrimary }}>
+          <span id={titleId} style={{ fontSize: tokens.typography.fontSizeXl, fontWeight: 600, color: tokens.colors.textPrimary }}>
             {title}
           </span>
           <button
@@ -191,7 +178,7 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
             style={{
               background: 'transparent',
               border: 'none',
-              color: COLORS.textSecondary,
+              color: tokens.colors.textSecondary,
               cursor: 'pointer',
               fontSize: 18,
               lineHeight: 1,
@@ -210,8 +197,8 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
               padding: '8px 16px',
               display: 'flex',
               flexWrap: 'wrap',
-              gap: 4,
-              borderBottom: `1px solid ${COLORS.border}`,
+              gap: tokens.spacing.xs,
+              borderBottom: `1px solid ${tokens.colors.border}`,
               flexShrink: 0,
             }}
           >
@@ -219,15 +206,15 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
               <span
                 key={p.id}
                 style={{
-                  background: COLORS.accent,
+                  background: tokens.colors.accent,
                   color: 'white',
                   borderRadius: tokens.radii.xl,
                   padding: '4px 8px',
-                  fontSize: 11,
+                  fontSize: tokens.typography.fontSizeXs,
                   fontWeight: 600,
                   display: 'inline-flex',
                   alignItems: 'center',
-                  gap: 4,
+                  gap: tokens.spacing.xs,
                 }}
               >
                 {p.name}
@@ -261,12 +248,12 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
             onChange={(e) => setSearchQuery(e.target.value)}
             style={{
               width: '100%',
-              background: COLORS.dominant,
-              border: `1px solid ${COLORS.border}`,
+              background: tokens.colors.surface,
+              border: `1px solid ${tokens.colors.border}`,
               borderRadius: tokens.radii.md,
               padding: '8px 16px',
-              fontSize: 14,
-              color: COLORS.textPrimary,
+              fontSize: tokens.typography.fontSizeLg,
+              color: tokens.colors.textPrimary,
               outline: 'none',
               boxSizing: 'border-box',
             }}
@@ -275,7 +262,7 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
 
         {/* DM / Group label */}
         {!isAddMode && selectedParticipants.length > 0 && (
-          <div style={{ padding: '0 16px 8px', fontSize: 11, color: COLORS.textSecondary, flexShrink: 0 }}>
+          <div style={{ padding: '0 16px 8px', fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textSecondary, flexShrink: 0 }}>
             {isDM ? 'Direct message' : `Group · ${selectedParticipants.length} selected`}
           </div>
         )}
@@ -283,7 +270,7 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
         {/* Participant list */}
         <div style={{ overflowY: 'auto', maxHeight: 280, flex: 1 }}>
           {filtered.length === 0 ? (
-            <div style={{ padding: 16, fontSize: 13, color: COLORS.textMuted, textAlign: 'center' }}>
+            <div style={{ padding: 16, fontSize: tokens.typography.fontSizeMd, color: tokens.colors.textMuted, textAlign: 'center' }}>
               No matches. Try a different name.
             </div>
           ) : (
@@ -296,38 +283,38 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
                   style={{
                     display: 'flex',
                     alignItems: 'center',
-                    gap: 8,
+                    gap: tokens.spacing.sm,
                     padding: '0 16px',
                     height: 40,
                     cursor: 'pointer',
-                    background: isSelected ? 'rgba(99,102,241,0.08)' : 'transparent',
+                    background: isSelected ? tokens.overlays.accentFaint : 'transparent',
                   }}
                 >
                   <input
                     type="checkbox"
                     checked={isSelected}
                     onChange={() => toggleParticipant(p)}
-                    style={{ accentColor: COLORS.accent, width: 14, height: 14, flexShrink: 0 }}
+                    style={{ accentColor: tokens.colors.accent, width: 14, height: 14, flexShrink: 0 }}
                   />
                   <div
                     style={{
                       width: 28,
                       height: 28,
-                      borderRadius: '50%',
-                      background: COLORS.border,
+                      borderRadius: tokens.radii.full,
+                      background: tokens.colors.border,
                       display: 'flex',
                       alignItems: 'center',
                       justifyContent: 'center',
-                      fontSize: 11,
+                      fontSize: tokens.typography.fontSizeXs,
                       fontWeight: 600,
-                      color: COLORS.textPrimary,
+                      color: tokens.colors.textPrimary,
                       flexShrink: 0,
                     }}
                   >
                     {initials}
                   </div>
-                  <span style={{ fontSize: 13, color: COLORS.textPrimary, flex: 1 }}>{p.name}</span>
-                  <span style={{ fontSize: 11, color: COLORS.textSecondary }}>
+                  <span style={{ fontSize: tokens.typography.fontSizeMd, color: tokens.colors.textPrimary, flex: 1 }}>{p.name}</span>
+                  <span style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textSecondary }}>
                     {p.type === 'agent' ? 'Agent' : 'User'}
                   </span>
                 </label>
@@ -342,10 +329,10 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
             style={{
               margin: '0 16px',
               padding: '8px 12px',
-              border: `1px solid ${COLORS.destructive}`,
+              border: `1px solid ${tokens.colors.danger}`,
               borderRadius: tokens.radii.sm,
-              color: COLORS.destructive,
-              fontSize: 13,
+              color: tokens.colors.danger,
+              fontSize: tokens.typography.fontSizeMd,
               flexShrink: 0,
             }}
           >
@@ -360,12 +347,12 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
             disabled={!canCreate}
             style={{
               width: '100%',
-              background: COLORS.accent,
+              background: tokens.colors.accent,
               color: 'white',
               border: 'none',
               borderRadius: tokens.radii.md,
               padding: '8px 16px',
-              fontSize: 13,
+              fontSize: tokens.typography.fontSizeMd,
               fontWeight: 600,
               cursor: canCreate ? 'pointer' : 'not-allowed',
               opacity: canCreate ? 1 : 0.5,

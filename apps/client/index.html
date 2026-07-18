@@ -10,6 +10,9 @@
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
       font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      /* 번들 로드 전 flash 방지용 fallback. 권위 원천은 tokens.ts
+         (surface=#0f172a / textStrong=#e2e8f0) — main.tsx 주입 CSS 의 body 규칙과
+         미러링한다. 토큰을 바꾸면 이 두 값도 함께 갱신할 것(F2-2). */
       background: #0f172a;
       color: #e2e8f0;
       overflow-x: auto;
