@@ -29,6 +29,16 @@ export interface CliErrorClassification {
 
 const OK: CliErrorClassification = { isFatal: false, nonRetryable: false, reason: '' };
 
+// Harness SESSION limit — the CLI account's rolling session cap is exhausted and
+// the CLI reports a concrete reset instant (`You've hit your session limit ·
+// resets 12:30am (Asia/Seoul)`, ticket 467f714a). Distinct from `usage_limit`:
+// it heals by TIME at a known reset, so it is NOT fallback-eligible (a different
+// model on the SAME account still hits the session wall) — agent-manager defers
+// dispatch until the reset instead (see session-limit-defer.ts). Anchored on the
+// literal "session limit" so it never collides with the usage/monthly phrasings.
+const SESSION_LIMIT_RE =
+  /\bsession limit\b|(?:hit|reached|exceeded) your (?:session|\d+-hour|weekly) limit/i;
+
 // Usage / rate / quota exhaustion — operator must upgrade plan or wait for the
 // window to reset; a retry within the cooldown just fails again.
 const USAGE_LIMIT_RE =
@@ -91,6 +101,10 @@ export function classifyCliError(
   // Anchor usage/auth classification to a real failure — never to raw answer
   // text alone — so legit exit-0 answers that mention these terms pass through.
   if (hasErrorContext) {
+    // Session limit first — a "session limit" line is time-healed (defer to the
+    // reset), never a plan/quota upgrade or a model-fallback trigger.
+    if (SESSION_LIMIT_RE.test(s))
+      return { isFatal: true, nonRetryable: true, reason: 'session_limit' };
     if (USAGE_LIMIT_RE.test(s)) return { isFatal: true, nonRetryable: true, reason: 'usage_limit' };
     if (AUTH_RE.test(s)) return { isFatal: true, nonRetryable: true, reason: 'auth_failure' };
     // A bad --model id won't self-heal on THIS config (nonRetryable → the
