@@ -24,6 +24,7 @@ import {
   resolveBatchTicketRefs,
   resolveRejectHandoffRefs,
   formatTicketRefsContent,
+  chunkTicketRefs,
   type TicketToolContext,
   type TicketRef,
 } from './ticket-ref-capture.js';
@@ -83,8 +84,17 @@ const PROGRESS_MAX_PER_SESSION = 30;
 /** Truncation for the summary slice rendered alongside the tool name. */
 const PROGRESS_SUMMARY_MAX = 80;
 
-/** Max ticket refs coalesced into one turn's card message (F-1 ticket 24694916). */
-const TICKET_REFS_MAX_PER_TURN = 20;
+/** Ticket refs per emitted card message (F-1 ticket 24694916). Kept in lockstep
+ *  with the server's per-message MAX_TICKET_REFS (chat-rooms/room-messaging.service.ts)
+ *  so every chunk survives the sanitizer whole. */
+const TICKET_REFS_PER_MESSAGE = 20;
+/** Anti-runaway ceiling on how many card MESSAGES one turn may emit (each carrying
+ *  ≤TICKET_REFS_PER_MESSAGE refs). A turn with more successful ticket actions than
+ *  PER_MESSAGE × this is pathological; the overflow is LOGGED, never silently dropped
+ *  — the pre-fix code truncated everything past 20 in a single message, breaking
+ *  acceptance #1 ("누락 없이"). At 10 messages this is a 200-ref headroom, far above
+ *  any real turn. */
+const TICKET_REFS_MAX_CARD_MESSAGES = 10;
 /** Bound on the per-manager ticket_id→title cache learned from tool results. */
 const TICKET_TITLE_CACHE_MAX = 500;
 
@@ -840,21 +850,25 @@ export class ChatSessionManager
     }
   }
 
-  /** Append one captured ref to the turn's coalesced set, enforcing the per-turn
-   *  cap and collapsing duplicate (action, ticket_id) pairs to a single card. */
+  /** Append one captured ref to the turn's coalesced set, collapsing duplicate
+   *  (action, ticket_id) pairs to a single card. The per-turn VOLUME is bounded at
+   *  flush time (#flushTicketRefs chunks into ≤TICKET_REFS_MAX_CARD_MESSAGES messages),
+   *  NOT here — so no successful action is dropped before it can be carded. The old
+   *  hard cap here silently discarded every ref past 20, which broke "누락 없이". */
   #pushCapturedRef(pid: number, ref: TicketRef): void {
     const refs = this.#capturedTicketRefs.get(pid) ?? [];
-    if (refs.length >= TICKET_REFS_MAX_PER_TURN) return;
     if (refs.some((r) => r.action === ref.action && r.ticket_id === ref.ticket_id)) return;
     refs.push(ref);
     this.#capturedTicketRefs.set(pid, refs);
   }
 
-  /** Flush the turn's captured ticket-action refs as ONE coalesced structured
-   *  message. Non-empty Korean content is the fallback for surfaces that don't
-   *  render metadata (history replay, notifications, legacy clients); the
-   *  metadata.ticket_refs drives the rich card. Fire-and-forget; clears per-pid
-   *  state so it is idempotent (a second call after turn-end is a no-op). */
+  /** Flush the turn's captured ticket-action refs as structured card message(s).
+   *  The server bounds each message's ticket_refs at TICKET_REFS_PER_MESSAGE, so a
+   *  turn with more successful actions than that is split across MULTIPLE cards (never
+   *  truncated — acceptance #1 "누락 없이"). Non-empty Korean content is the fallback
+   *  for surfaces that don't render metadata (history replay, notifications, legacy
+   *  clients); the metadata.ticket_refs drives the rich card. Fire-and-forget; clears
+   *  per-pid state so it is idempotent (a second call after turn-end is a no-op). */
   #flushTicketRefs(sess: SessionRecord): void {
     const refs = this.#capturedTicketRefs.get(sess.pid);
     this.#capturedTicketRefs.delete(sess.pid);
@@ -864,12 +878,27 @@ export class ChatSessionManager
     const agentId: string | undefined = sess.agentId;
     if (!roomId || !agentId) return;
 
-    const content = formatTicketRefsContent(refs);
     const cfg = { ...this._config, apiKey: sess._effectiveApiKey || this._config.apiKey };
-    // Fire-and-forget — postChatRoomMessage swallows + logs errors, so a failed
-    // card post never blocks stdout parsing. type defaults to 'message' (persistent,
-    // included in history replay); metadata carries the structured refs.
-    void postChatRoomMessage(cfg, roomId, agentId, content, { metadata: { ticket_refs: refs } });
+    // Split into ≤TICKET_REFS_PER_MESSAGE-ref chunks so each survives the server
+    // sanitizer whole. An anti-runaway ceiling caps the message count; a turn past it
+    // is pathological and its remainder is LOGGED, never silently dropped.
+    let chunks = chunkTicketRefs(refs, TICKET_REFS_PER_MESSAGE);
+    if (chunks.length > TICKET_REFS_MAX_CARD_MESSAGES) {
+      const dropped = refs.length - TICKET_REFS_MAX_CARD_MESSAGES * TICKET_REFS_PER_MESSAGE;
+      log(
+        `[chat-session] pid=${sess.pid} produced ${refs.length} ticket-action refs ` +
+          `(${chunks.length} cards); emitting the first ${TICKET_REFS_MAX_CARD_MESSAGES} ` +
+          `and dropping ${dropped} beyond the per-turn ceiling`,
+      );
+      chunks = chunks.slice(0, TICKET_REFS_MAX_CARD_MESSAGES);
+    }
+    // Fire-and-forget per chunk — postChatRoomMessage swallows + logs errors, so a
+    // failed card post never blocks stdout parsing. type defaults to 'message'
+    // (persistent, included in history replay); metadata carries that chunk's refs.
+    for (const chunk of chunks) {
+      const content = formatTicketRefsContent(chunk);
+      void postChatRoomMessage(cfg, roomId, agentId, content, { metadata: { ticket_refs: chunk } });
+    }
   }
 
   // ---------------------------------------------------------------------------

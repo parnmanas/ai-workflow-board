@@ -17,6 +17,7 @@ import {
   resolveBatchTicketRefs,
   resolveRejectHandoffRefs,
   formatTicketRefsContent,
+  chunkTicketRefs,
 } from '../dist/lib/ticket-ref-capture.js';
 
 test('bareToolName strips the MCP server prefix, tolerating any prefix', () => {
@@ -342,4 +343,35 @@ test('formatTicketRefsContent: comment + reject action labels render in Korean',
     content,
     '📋 티켓 질문: 질문\n📋 티켓 답변: T-2\n📋 티켓 결정: 결정문\n📋 티켓 반려: 반려 결함',
   );
+});
+
+// ── 3차 재요청 대응 (ticket 24694916): per-turn ref 절단 → 다중 메시지 chunking ──
+// 리뷰어 지적 — 한 turn 에서 21개+ 성공 액션이면 매니저의 per-turn cap(20)이 21번째
+// 이후를 조용히 버려 수용기준 #1("누락 없이") 위배. 서버 sanitizer 는 message 당 20개
+// 로 bound 하므로, 매니저는 refs 를 20개씩 여러 메시지로 chunk 해 전부 방출해야 한다.
+// 아래는 그 chunking 산술을 순수 단위로 고정한다(방출 자체는 chat-ticket-card-flush).
+
+test('chunkTicketRefs: 21 refs split into 20 + 1, every ticket_id preserved in order', () => {
+  const refs = Array.from({ length: 21 }, (_, i) => ({ action: 'create', ticket_id: `T-${i}` }));
+  const chunks = chunkTicketRefs(refs, 20);
+  assert.equal(chunks.length, 2, 'one over the per-message bound → a SECOND card, not a drop');
+  assert.equal(chunks[0].length, 20, 'first message carries a full 20');
+  assert.equal(chunks[1].length, 1, 'the 21st is carried, never truncated (누락 없이)');
+  // Flatten back and prove the union equals the input exactly (order + ids).
+  const flat = chunks.flat();
+  assert.equal(flat.length, 21, 'no ref dropped across the split');
+  assert.deepEqual(flat.map((r) => r.ticket_id), refs.map((r) => r.ticket_id), 'order preserved');
+  assert.equal(new Set(flat.map((r) => r.ticket_id)).size, 21, 'all 21 distinct ids survive');
+});
+
+test('chunkTicketRefs: boundary + degenerate sizes', () => {
+  const mk = (n) => Array.from({ length: n }, (_, i) => ({ action: 'move', ticket_id: `T-${i}` }));
+  assert.deepEqual(chunkTicketRefs([], 20), [], 'empty input → no messages');
+  assert.equal(chunkTicketRefs(mk(20), 20).length, 1, 'exactly the bound → a single card');
+  const forty = chunkTicketRefs(mk(40), 20);
+  assert.deepEqual(forty.map((c) => c.length), [20, 20], 'exact multiple → even split');
+  assert.deepEqual(chunkTicketRefs(mk(45), 20).map((c) => c.length), [20, 20, 5], 'remainder rides the last card');
+  // Defensive: a non-positive size never divides-by-zero / infinite-loops — one chunk.
+  assert.equal(chunkTicketRefs(mk(5), 0).length, 1, 'size 0 collapses to a single chunk');
+  assert.equal(chunkTicketRefs(mk(5), -3).length, 1, 'negative size collapses to a single chunk');
 });

@@ -320,6 +320,20 @@ export function formatTicketRefsContent(refs: TicketRef[]): string {
     .join('\n');
 }
 
+/** Split a coalesced ref set into ≤`size` chunks — one per emitted ChatRoomMessage.
+ *  The server bounds EACH message's ticket_refs at MAX_TICKET_REFS (room-messaging.
+ *  service.ts), so a turn with more successful ticket actions than `size` is rendered
+ *  across MULTIPLE cards rather than truncated at the bound — the "누락 없이"
+ *  contract (ticket 24694916, acceptance #1). Order-preserving; empty input → no
+ *  chunks; a non-positive `size` collapses to one chunk (defensive — never called so). */
+export function chunkTicketRefs(refs: TicketRef[], size: number): TicketRef[][] {
+  if (!Array.isArray(refs) || refs.length === 0) return [];
+  if (!Number.isFinite(size) || size <= 0) return [refs.slice()];
+  const out: TicketRef[][] = [];
+  for (let i = 0; i < refs.length; i += size) out.push(refs.slice(i, i + size));
+  return out;
+}
+
 /**
  * The COMPLEMENT of the emit surface: every server-registered MCP tool that is
  * deliberately NOT a ticket-action card, each with a one-word reason. Together with
