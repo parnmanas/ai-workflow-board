@@ -21,9 +21,10 @@ import { useOpenTicketArtifact } from '../../contexts/ticketArtifactOpener';
 // 캡처가 방출하는 모든 action 코드가 여기서 한글 배지로 렌더된다(계약 일치, 수용기준 #3).
 const ACTION_LABEL: Record<string, string> = {
   create: '생성', move: '이동', update: '수정', comment: '코멘트',
+  question: '질문', answer: '답변', decision: '결정',
   claim: '클레임', release: '클레임 해제', pend: '보류', unpend: '보류 해제',
   archive: '아카이브', unarchive: '아카이브 해제', prereq: '선행조건',
-  handoff: '핸드오프', propose: '이동 제안', consensus: '합의', delete: '삭제',
+  handoff: '핸드오프', propose: '이동 제안', consensus: '합의', reject: '반려', delete: '삭제',
 };
 
 export default function TicketRefCard({ id, title, action }: { id: string; title: string; action?: string }) {

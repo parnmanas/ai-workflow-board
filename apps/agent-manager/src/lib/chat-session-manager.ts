@@ -22,6 +22,7 @@ import {
   harvestTicketTitles,
   resolveTicketRef,
   resolveBatchTicketRefs,
+  resolveRejectHandoffRefs,
   formatTicketRefsContent,
   type TicketToolContext,
   type TicketRef,
@@ -825,11 +826,14 @@ export class ChatSessionManager
 
     const isError = block?.is_error === true;
     const lookup = (id: string) => this.#ticketTitleCache.get(id);
-    // batch_operations fans out to many refs (one per successful sub-op); every
-    // other tracked tool resolves to at most one. Push each through the same
-    // dedup + per-turn cap so a batch can't blow the coalesced card past the bound.
+    // batch_operations and reject_handoff each fan ONE result out to many refs;
+    // every other tracked tool resolves to at most one. Push each through the same
+    // dedup + per-turn cap so a multi-ref call can't blow the coalesced card past
+    // the bound.
     if (ctx.batchOps) {
       for (const ref of resolveBatchTicketRefs(ctx, result, isError, lookup)) this.#pushCapturedRef(pid, ref);
+    } else if (ctx.rejectHandoff) {
+      for (const ref of resolveRejectHandoffRefs(ctx, result, isError, lookup)) this.#pushCapturedRef(pid, ref);
     } else {
       const ref = resolveTicketRef(ctx, result, isError, lookup);
       if (ref) this.#pushCapturedRef(pid, ref);

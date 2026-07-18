@@ -11,28 +11,24 @@
  * after the last `__`) so it matches whatever MCP server prefix the CLI uses
  * (mcp__awb__… / mcp__ai-workflow-board__…).
  *
- * CONTRACT (ticket 24694916, acceptance #1 "누락 없이") — every MCP tool that
- * mutates a ticket's own row / lifecycle / workflow state emits a card. The scope
- * is classified explicitly and exhaustively so a newly-added tool is a deliberate
- * decision, never a silent gap:
+ * CONTRACT (ticket 24694916, acceptance #1 "누락 없이") — the MCP tool surface is
+ * classified EXHAUSTIVELY across four buckets so a newly-added tool is a deliberate
+ * decision, never a silent gap. tool-surface-parity.test.mjs asserts the server's
+ * registered tools equal EMIT ∪ BATCH ∪ REJECT ∪ EXCLUDE, failing CI on any
+ * unclassified (or stale) tool:
  *
  *   EMIT (this map) — create / move (incl. cross-board) / update (incl. child),
- *     comment, claim / release, pend / unpend, archive / unarchive, prerequisite
- *     add / remove, handoff, and the consensus micro-protocol (propose_move +
- *     record_agreement). batch_operations is EMIT too but fans ONE result out to
- *     many refs → BATCH_TICKET_TOOL below.
- *
- *   EXCLUDE (intentional — never a card) —
- *     • Reads (get_ticket, get_*, list_*, search_*) — feed the title cache only.
- *     • Deletes (delete_ticket, delete_child_ticket) — the card would deep-link a
- *       ticket that no longer exists (404).
- *     • reject_handoff — keys on `followup_ticket_id` (not `ticket_id`) and is a
- *       rare relay rejection; excluded so a mis-resolved id never ships a bad ref.
- *     • Ticket attachments (add/delete_ticket_attachment) — sub-resource I/O, not
- *       a ticket-lifecycle action.
- *     • send_chat_room_message — the assistant's own reply, not a ticket action.
- *     • Every non-ticket tool (board / workspace / agent / channel / resource / qa
- *       / security / feature / action / user / …) — not a ticket-row mutation.
+ *     comment plus the typed-comment mutations (ask_question / answer_question /
+ *     record_decision), claim / release, pend / unpend, archive / unarchive,
+ *     prerequisite add / remove, handoff, and the consensus micro-protocol
+ *     (propose_move + record_agreement).
+ *   BATCH (BATCH_TICKET_TOOL) — batch_operations: ONE result fans out to MANY refs.
+ *   REJECT (REJECT_HANDOFF_TOOL) — reject_handoff: ONE result → the newly-filed 반려
+ *     defect ticket + the re-blocked follow-up (bespoke shape → resolveRejectHandoffRefs).
+ *   EXCLUDE (TICKET_TOOL_EXCLUSIONS) — reads, ticket deletes (404 deep-link),
+ *     ticket-attachment I/O, the assistant's own send_chat_room_message, the
+ *     current-task focus seat, remote improvement tickets (off-instance → 404), and
+ *     every non-ticket domain. Enumerated there with a per-tool reason.
  */
 export const TICKET_ACTION_TOOLS: Record<string, string> = {
   create_ticket: 'create',
@@ -42,6 +38,12 @@ export const TICKET_ACTION_TOOLS: Record<string, string> = {
   update_ticket: 'update',
   update_child_ticket: 'update',
   add_comment: 'comment',
+  // Typed-comment mutations — each creates a comment row (ask/decision) or flips a
+  // question's status (answer). answer_question carries NO input ticket_id (keys on
+  // question_comment_id); its ticket id is resolved from the result row's ticket_id.
+  ask_question: 'question',
+  answer_question: 'answer',
+  record_decision: 'decision',
   claim_ticket: 'claim',
   release_ticket: 'release',
   pend_ticket: 'pend',
@@ -64,6 +66,12 @@ export const TICKET_CREATE_TOOLS = new Set(['create_ticket', 'create_child_ticke
  *  `results[]` array parallel to the input `operations[]`. Handled by
  *  resolveBatchTicketRefs (multi-ref), NOT the 1-result→1-ref path above. */
 export const BATCH_TICKET_TOOL = 'batch_operations';
+/** The cross-board reverse-rejection tool. Like batch_operations its single
+ *  tool_result fans out to MANY refs, and its shape fits NEITHER the create
+ *  (result.id) NOR the existing-ticket (input ticket_id) path — it returns
+ *  {defect_ticket_id, source_ticket_id, followup_pending_on_tickets, followup{…}}.
+ *  Handled by resolveRejectHandoffRefs (multi-ref), NOT resolveTicketRef. */
+export const REJECT_HANDOFF_TOOL = 'reject_handoff';
 /** batch_operations sub-action → card action. An op whose action isn't here (or
  *  that failed) emits no ref. Legacy aliases (add-subtask / update-subtask) fold
  *  onto the same action as their current name. */
@@ -80,9 +88,10 @@ export const BATCH_OP_ACTION: Record<string, string> = {
  *  don't understand metadata (history replay, notifications, legacy clients). */
 export const TICKET_ACTION_LABEL_KO: Record<string, string> = {
   create: '생성', move: '이동', update: '수정', comment: '코멘트',
+  question: '질문', answer: '답변', decision: '결정',
   claim: '클레임', release: '클레임 해제', pend: '보류', unpend: '보류 해제',
   archive: '아카이브', unarchive: '아카이브 해제', prereq: '선행조건',
-  handoff: '핸드오프', propose: '이동 제안', consensus: '합의',
+  handoff: '핸드오프', propose: '이동 제안', consensus: '합의', reject: '반려',
 };
 
 export interface TicketToolContext {
@@ -94,6 +103,9 @@ export interface TicketToolContext {
    *  the result `results[]` by resolveBatchTicketRefs. Presence of this field is
    *  what routes a capture down the multi-ref path instead of resolveTicketRef. */
   batchOps?: any[];
+  /** Set ONLY for reject_handoff: routes to resolveRejectHandoffRefs (bespoke
+   *  multi-ref shape). Presence of this flag is what selects that path. */
+  rejectHandoff?: boolean;
 }
 export interface TicketRef {
   action: string;
@@ -120,6 +132,17 @@ export function trackedTicketTool(name: unknown, input: any): TicketToolContext 
       action: 'batch',
       fromResult: true,
       batchOps: Array.isArray(inp.operations) ? inp.operations : [],
+    };
+  }
+  // reject_handoff is the other multi-ref special: it keys on `followup_ticket_id`
+  // (not `ticket_id`) and files a NEW defect ticket, so its refs come from the
+  // bespoke resolveRejectHandoffRefs, not the standard action map below.
+  if (bare === REJECT_HANDOFF_TOOL) {
+    return {
+      action: 'reject',
+      fromResult: true,
+      rejectHandoff: true,
+      inputTicketId: typeof inp.followup_ticket_id === 'string' ? inp.followup_ticket_id : undefined,
     };
   }
   const action = TICKET_ACTION_TOOLS[bare];
@@ -241,9 +264,159 @@ export function resolveBatchTicketRefs(
   return out;
 }
 
+/** Resolve a reject_handoff call into its ticket refs. The tool files a NEW defect
+ *  ticket back on the source board AND re-blocks the follow-up on it, so ONE result
+ *  legitimately yields TWO refs — neither fits resolveTicketRef's create (result.id)
+ *  or existing-ticket (input ticket_id) shapes. Result shape:
+ *  {defect_ticket_id, defect_board_id, source_ticket_id, followup_pending_on_tickets,
+ *   followup:{id,title,…}}.
+ *    • defect_ticket_id → action 'reject' (the newly-filed 반려 defect ticket, primary).
+ *    • the follow-up (input followup_ticket_id, else result.followup.id) → 'prereq'
+ *      (it was re-blocked on the defect as a prerequisite).
+ *  Errors / missing ids emit nothing (fail-closed). The defect lives on the SOURCE
+ *  board — a DIFFERENT board maybe, but the SAME AWB instance, so its deep-link
+ *  resolves (unlike create_remote_improvement_ticket, which is off-instance). */
+export function resolveRejectHandoffRefs(
+  ctx: TicketToolContext,
+  result: any,
+  isError: boolean,
+  titleLookup?: (id: string) => string | undefined,
+): TicketRef[] {
+  if (isError) return [];
+  const obj = result && typeof result === 'object' && !Array.isArray(result) ? result : null;
+  if (!obj) return [];
+  // 1. The newly-filed defect ticket — the primary artifact of a rejection. Its
+  //    presence is the SUCCESS signal: with no defect_ticket_id the rejection did
+  //    not happen (error / unexpected shape), so emit NOTHING — never a stray prereq
+  //    off the input ticket id (fail-closed, mirrors the batch per-op success gate).
+  const defectId = typeof obj.defect_ticket_id === 'string' ? obj.defect_ticket_id : undefined;
+  if (!defectId) return [];
+  const out: TicketRef[] = [];
+  const defectRef: TicketRef = { action: 'reject', ticket_id: defectId };
+  const defectTitle = titleLookup && titleLookup(defectId);
+  if (defectTitle) defectRef.title = defectTitle;
+  out.push(defectRef);
+  // 2. The follow-up ticket, re-blocked on the defect as a prerequisite. Its title
+  //    rides along in the result under `followup`, else falls back to the cache.
+  const followup = obj.followup && typeof obj.followup === 'object' && !Array.isArray(obj.followup)
+    ? obj.followup : null;
+  const followupId =
+    ctx.inputTicketId || (followup && typeof followup.id === 'string' ? followup.id : undefined);
+  if (followupId) {
+    const ref: TicketRef = { action: 'prereq', ticket_id: followupId };
+    const title =
+      (followup && typeof followup.title === 'string' && followup.title ? followup.title : undefined) ||
+      (titleLookup && titleLookup(followupId)) || undefined;
+    if (title) ref.title = title;
+    out.push(ref);
+  }
+  return out;
+}
+
 /** Compose the Korean fallback content line for a coalesced set of refs. */
 export function formatTicketRefsContent(refs: TicketRef[]): string {
   return refs
     .map((r) => `📋 티켓 ${TICKET_ACTION_LABEL_KO[r.action] || r.action || '작업'}: ${r.title || r.ticket_id}`)
     .join('\n');
+}
+
+/**
+ * The COMPLEMENT of the emit surface: every server-registered MCP tool that is
+ * deliberately NOT a ticket-action card, each with a one-word reason. Together with
+ * TICKET_ACTION_TOOLS + BATCH_TICKET_TOOL + REJECT_HANDOFF_TOOL this is an EXHAUSTIVE
+ * classification of the MCP tool surface — tool-surface-parity.test.mjs asserts the
+ * server's registered tools == this union, so a newly-added tool fails CI until it is
+ * classified here (or promoted to an emit above). Reasons:
+ *   read        — get_/list_/search_ + whoami/ping/subscribe/fetch: feed title cache only.
+ *   delete      — delete_ticket / delete_child_ticket: a card would deep-link a 404.
+ *   attachment  — ticket-attachment sub-resource I/O, not a lifecycle action.
+ *   assistant   — send_chat_room_message: the assistant's own reply, not an action.
+ *   agent-state — set/clear_current_task: the focus seat, not a ticket-row mutation.
+ *   remote      — create_remote_improvement_ticket: files on ANOTHER AWB instance,
+ *                 so a local deep-link would 404.
+ *   non-ticket  — board / workspace / agent / channel / resource / qa / security /
+ *                 feature / action / user / api-key / benchmark / prompt-template /
+ *                 chat / lesson / build / deploy: not a ticket-row mutation.
+ */
+export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
+  // read (60)
+  fetch_github_info: 'read', get_action: 'read', get_agent: 'read',
+  get_allocated_tickets: 'read', get_api_key: 'read', get_benchmark_leaderboard: 'read',
+  get_board: 'read', get_board_summary: 'read', get_chat_room_messages: 'read',
+  get_feature: 'read', get_handoff_pipeline: 'read', get_latest_artifact: 'read',
+  get_my_tickets: 'read', get_qa_batch: 'read', get_qa_run: 'read', get_qa_scenario: 'read',
+  get_qa_schedule: 'read', get_recent_activity: 'read', get_resource: 'read',
+  get_security_batch: 'read', get_security_profile: 'read', get_security_run: 'read',
+  get_security_schedule: 'read', get_ticket: 'read', get_ticket_activity: 'read',
+  get_ticket_attachment: 'read', get_user: 'read', get_workspace: 'read',
+  get_workspace_schedule: 'read', list_action_runs: 'read', list_actions: 'read',
+  list_agents: 'read', list_api_keys: 'read', list_archived_tickets: 'read',
+  list_board_lessons: 'read', list_boards: 'read', list_channels: 'read',
+  list_chat_rooms: 'read', list_features: 'read', list_prompt_templates: 'read',
+  list_qa_runs: 'read', list_qa_scenarios: 'read', list_qa_schedules: 'read',
+  list_repo_branches: 'read', list_resources: 'read', list_security_profiles: 'read',
+  list_security_runs: 'read', list_security_schedules: 'read', list_ticket_attachments: 'read',
+  list_ticket_prerequisites: 'read', list_users: 'read', list_workspace_schedules: 'read',
+  list_workspaces: 'read', ping: 'read', search_actions: 'read', search_chat_messages: 'read',
+  search_github: 'read', search_resources: 'read', subscribe_events: 'read', whoami: 'read',
+  // delete (2)
+  delete_child_ticket: 'delete', delete_ticket: 'delete',
+  // attachment (2)
+  add_ticket_attachment: 'attachment', delete_ticket_attachment: 'attachment',
+  // assistant (1)
+  send_chat_room_message: 'assistant',
+  // agent-state (2)
+  clear_current_task: 'agent-state', set_current_task: 'agent-state',
+  // remote (1)
+  create_remote_improvement_ticket: 'remote',
+  // non-ticket (82)
+  add_board_lesson: 'non-ticket', add_chat_message_attachment: 'non-ticket',
+  add_chat_participants: 'non-ticket', approve_feature: 'non-ticket',
+  attach_qa_artifact: 'non-ticket', attach_security_artifact: 'non-ticket',
+  complete_action_run: 'non-ticket', complete_qa_run: 'non-ticket',
+  complete_security_run: 'non-ticket', create_agent: 'non-ticket',
+  create_api_key: 'non-ticket', create_benchmark_run: 'non-ticket', create_board: 'non-ticket',
+  create_channel: 'non-ticket', create_chat_room: 'non-ticket', create_column: 'non-ticket',
+  create_qa_scenario: 'non-ticket', create_qa_schedule: 'non-ticket',
+  create_security_profile: 'non-ticket', create_security_schedule: 'non-ticket',
+  create_user: 'non-ticket', create_workspace: 'non-ticket',
+  create_workspace_schedule: 'non-ticket', delete_action: 'non-ticket',
+  delete_agent: 'non-ticket', delete_api_key: 'non-ticket', delete_board: 'non-ticket',
+  delete_channel: 'non-ticket', delete_chat_message_attachment: 'non-ticket',
+  delete_column: 'non-ticket', delete_prompt_template: 'non-ticket',
+  delete_qa_scenario: 'non-ticket', delete_qa_schedule: 'non-ticket',
+  delete_resource: 'non-ticket', delete_security_profile: 'non-ticket',
+  delete_security_schedule: 'non-ticket', delete_user: 'non-ticket',
+  delete_workspace: 'non-ticket', delete_workspace_schedule: 'non-ticket',
+  embed_resources: 'non-ticket', move_agent_to_workspace: 'non-ticket',
+  move_board_to_workspace: 'non-ticket', propose_feature_chain: 'non-ticket',
+  qa_run_heartbeat: 'non-ticket', record_qa_step: 'non-ticket',
+  record_security_finding: 'non-ticket', refresh_security_checklist: 'non-ticket',
+  register_build_artifact: 'non-ticket', reject_feature: 'non-ticket',
+  report_build_failure: 'non-ticket', report_deployment: 'non-ticket',
+  revoke_api_key: 'non-ticket', run_action: 'non-ticket', run_qa_schedule_now: 'non-ticket',
+  run_security_schedule_now: 'non-ticket', run_workspace_schedule_now: 'non-ticket',
+  save_action: 'non-ticket', save_prompt_template: 'non-ticket', save_resource: 'non-ticket',
+  set_chat_room_name: 'non-ticket', set_qa_phase: 'non-ticket', set_typing: 'non-ticket',
+  start_qa_batch: 'non-ticket', start_qa_run: 'non-ticket', start_security_batch: 'non-ticket',
+  start_security_run: 'non-ticket', submit_benchmark_score: 'non-ticket',
+  submit_feature_request: 'non-ticket', sync_github_resource: 'non-ticket',
+  update_agent: 'non-ticket', update_api_key: 'non-ticket', update_board: 'non-ticket',
+  update_board_lesson: 'non-ticket', update_channel: 'non-ticket', update_column: 'non-ticket',
+  update_qa_scenario: 'non-ticket', update_qa_schedule: 'non-ticket',
+  update_security_profile: 'non-ticket', update_security_schedule: 'non-ticket',
+  update_user: 'non-ticket', update_workspace: 'non-ticket',
+  update_workspace_schedule: 'non-ticket',
+};
+
+/** The full set of bare tool names this module classifies (emit ∪ batch ∪ reject ∪
+ *  exclude). The parity test compares this against the server's registered surface;
+ *  exported as a function so callers always get a fresh Set (no shared mutable state). */
+export function classifiedToolNames(): Set<string> {
+  return new Set<string>([
+    ...Object.keys(TICKET_ACTION_TOOLS),
+    BATCH_TICKET_TOOL,
+    REJECT_HANDOFF_TOOL,
+    ...Object.keys(TICKET_TOOL_EXCLUSIONS),
+  ]);
 }
