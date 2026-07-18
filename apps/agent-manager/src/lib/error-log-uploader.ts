@@ -52,10 +52,21 @@ export function classify(
   //   "restart_all_agents → 4 restarted, 0 failed"   (실패 0건인 재시작)
   // 기존 /error|failed/i catch-all 이 이 둘을 에러로 오분류해, 채팅/서브에이전트
   // 턴과 에이전트 재시작마다 last_error_upload_at 을 갱신 → 매니저가 영구
-  // DEGRADED 배지에 고정됐다 (ticket 04d22ec0). 부분문자열 대신 명시적
-  // 플래그/제로카운트를 신뢰해 여기서 skip 한다. 실제 실패(is_error=true,
-  // subtype=error 는 위에서, "N failed" N>0 은 아래 catch-all 에서)는 그대로다.
-  if (/is_error=false|subtype=success|\b0 (?:failed|errors?)\b/.test(msg)) return null;
+  // DEGRADED 배지에 고정됐다 (ticket 04d22ec0).
+  //
+  // 단 "성공 신호가 라인 어딘가 있음" 만으로 skip 하면 같은 라인의 실제 실패를
+  // 삼킨다 — update_plugins 결과 "... skipped=0 failed=2 ..." 는 "skipped=0"
+  // 때문에 "0 failed" 부분문자열이 생겨 nonzero 실패가 드롭됐다(리뷰 지적).
+  // 그래서 (a) 명시적 성공 신호가 있고 AND (b) nonzero 실패 카운트가 전혀 없을
+  // 때만 skip 한다. 카운트는 값자리 숫자(`skipped=0`, `updated=1`)를 독립 카운트로
+  // 오인하지 않도록 앞이 `=`·워드문자가 아닌 것만 본다 — "4 restarted, 0 failed"
+  // 의 `0`(공백 앞)은 잡고 "skipped=0 failed" 의 `0`(= 앞)은 제외. 키=값 실패
+  // (`failed=2`)는 별도 대안으로 nonzero 로 인정한다.
+  const hasSuccessSignal =
+    /is_error=false|subtype=success|(?<![=\w])0 (?:failed|errors?)\b/.test(msg);
+  const hasNonzeroFailure =
+    /(?<![=\w])[1-9]\d* (?:failed|errors?)\b|(?:failed|errors?)=[1-9]/.test(msg);
+  if (hasSuccessSignal && !hasNonzeroFailure) return null;
 
   if (/error|failed/i.test(msg)) return { level: 'warn', category: 'misc' };
   return null;

@@ -82,6 +82,35 @@ test('word boundary: "10 failed" is NOT the "0 failed" skip case → classified'
   assert.equal(r.level, 'warn');
 });
 
+// ── 값자리 0 / 혼합 카운트 오매치 회귀 (리뷰 지적, 04d22ec0) ──────────────
+// 성공 신호가 라인 어딘가 있다는 이유로 같은 라인의 nonzero 실패를 삼키면 안 된다.
+test('update_plugins with failed=2 (preceded by skipped=0) → classified, NOT skipped', () => {
+  // agent-manager-commands.ts:822-824 실측 형식. "skipped=0 failed=2" 의 "0 failed"
+  // 부분문자열이 실패 2건을 드롭시키던 회귀. failed=2 는 nonzero → 반드시 분류.
+  const r = classify(
+    'agent_manager_command update_plugins id=xyz → update_plugins ok: agent=ab12ef34 updated=1 skipped=0 failed=2 — first error: ENOSPC',
+  );
+  assert.ok(r, 'update_plugins failed=2 must not be swallowed by the skipped=0 "0 failed" substring');
+  assert.equal(r.level, 'warn');
+});
+
+test('mixed counts "3 failed, 0 errors" → classified (0-count must not whitelist the line)', () => {
+  const r = classify('some_command → 3 failed, 0 errors');
+  assert.ok(r, '3 failed is a real failure; the trailing "0 errors" must not skip the line');
+  assert.equal(r.level, 'warn');
+});
+
+test('update_plugins failed=0 success stays flagged (기존 동작 — 스코프 밖 오탐, drop 아님)', () => {
+  // 값자리 "failed=0" 는 "0 failed"(공백 앞) 가 아니라 성공신호로 안 잡히고,
+  // catch-all 로 warn 처리된다(수정 전과 동일한 오탐). update_plugins 는 per-turn
+  // 이 아니라 DEGRADED 재유발 없음 → 스코프 밖. 여기서 검증하는 핵심은 "실제
+  // 실패를 드롭하지 않는다" 이지 이 오탐을 없애는 게 아니다.
+  const r = classify(
+    'agent_manager_command update_plugins id=xyz → update_plugins ok: agent=ab12ef34 updated=1 skipped=0 failed=0',
+  );
+  assert.ok(r, 'failed=0 update_plugins stays classified (pre-existing behavior, not dropped)');
+});
+
 // ── 기존 specific 규칙 회귀 (unchanged) ──────────────────────────────────
 test('specific error rules still fire', () => {
   assert.deepEqual(classify('Uncaught error: boom'), { level: 'fatal', category: 'crash' });
