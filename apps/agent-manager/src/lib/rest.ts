@@ -385,13 +385,17 @@ export async function postChatRoomMessage(
   roomId: string,
   agentId: string,
   content: string,
-  opts?: { type?: 'message' | 'progress' },
+  // `metadata` (ticket 24694916): structured ticket-action refs the ChatSessionManager
+  // captured from mcp__awb__* tool results. Forwarded to the agent-api send endpoint,
+  // which sanitizes + persists it so the client renders reliable ticket cards.
+  opts?: { type?: 'message' | 'progress'; metadata?: unknown },
 ): Promise<boolean> {
   if (!roomId || !content) return false;
   try {
     const url = `${trimSlash(config.url)}/api/agent/chat-rooms/${encodeURIComponent(roomId)}/messages`;
     const body: Record<string, unknown> = { agent_id: agentId, content };
     if (opts?.type && opts.type !== 'message') body.type = opts.type;
+    if (opts?.metadata) body.metadata = opts.metadata;
     const resp = await fetch(url, {
       method: 'POST',
       headers: {

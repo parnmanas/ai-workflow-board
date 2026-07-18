@@ -16,6 +16,15 @@ import { ADAPTER_CAPABILITIES, type ParseResult, type TurnImage } from './cli-ad
 import { fetchChatRoomHistory, postChatRoomMessage } from './rest.js';
 import { log } from './logging.js';
 import { callMcpTool, fireAndForgetTool, unwrapToolResult } from './mcp-client.js';
+import {
+  trackedTicketTool,
+  parseStreamToolResult,
+  harvestTicketTitles,
+  resolveTicketRef,
+  formatTicketRefsContent,
+  type TicketToolContext,
+  type TicketRef,
+} from './ticket-ref-capture.js';
 import { findLiveBackgroundTasks, reapProcessTrees, type ProcNode } from './process-tree.js';
 import { composeChatRoomPrompt } from './prompts.js';
 import {
@@ -72,6 +81,11 @@ const PROGRESS_MAX_PER_SESSION = 30;
 /** Truncation for the summary slice rendered alongside the tool name. */
 const PROGRESS_SUMMARY_MAX = 80;
 
+/** Max ticket refs coalesced into one turn's card message (F-1 ticket 24694916). */
+const TICKET_REFS_MAX_PER_TURN = 20;
+/** Bound on the per-manager ticket_id→title cache learned from tool results. */
+const TICKET_TITLE_CACHE_MAX = 500;
+
 /** ticket 89716f04 — grace after a run session's result line before the
  *  turn-end orphan sweep runs. Lets any tail-end benign shell-out from the
  *  just-finished turn exit first (avoids false positives), while staying far
@@ -108,6 +122,18 @@ export class ChatSessionManager
   // respawned child gets a fresh budget without leaking the previous
   // session's last-emit timestamp / count.
   #progressMeta = new Map<number, { lastEmitMs: number; count: number; finalSeen: boolean }>();
+
+  // F-1 (ticket 24694916): mechanical ticket-action card capture. Pending tracked
+  // tool_use calls keyed by pid → (tool_use_id → capture ctx), matched against the
+  // tool_result carrier that arrives later in the same turn's stream. Pure capture
+  // logic lives in ./ticket-ref-capture; these maps are just the per-session glue.
+  #pendingTicketTools = new Map<number, Map<string, TicketToolContext>>();
+  // Refs accumulated across a turn, flushed as one coalesced structured message on
+  // turn end (or child exit). Keyed by pid.
+  #capturedTicketRefs = new Map<number, TicketRef[]>();
+  // ticket_id → title learned from ANY tool result (create/move/get_ticket/…), so a
+  // title-less action result (add_comment/claim) can still label its card. Bounded LRU.
+  #ticketTitleCache = new Map<string, string>();
 
   constructor(config: SessionAwareConfig) {
     super(config, {
@@ -374,6 +400,10 @@ export class ChatSessionManager
     // future turns on the same pid.
     if (parsed.isResult) {
       this.#progressMeta.delete(sess.pid);
+      // F-1 (ticket 24694916): turn ended — every tool_use + tool_result line for
+      // this turn has already been parsed, so flush the captured ticket-action refs
+      // as one coalesced structured card message.
+      this.#flushTicketRefs(sess);
       // ticket 89716f04 — turn ended: for a one-shot run session, arm the
       // orphan sweep (no-op unless sess._run is set). A follow-up turn or the
       // child exiting cancels it before it fires.
@@ -394,6 +424,9 @@ export class ChatSessionManager
             continue;
           }
           progressTools.push({ name: block.name, input: block.input });
+          // F-1 (ticket 24694916): if this is a tracked ticket-action tool, record
+          // it as pending — matched to its tool_result later this turn.
+          this.#trackTicketToolUse(sess.pid, block);
         }
         if (progressTools.length > 0) {
           this.#emitProgress(sess, progressTools);
@@ -405,6 +438,17 @@ export class ChatSessionManager
           const meta = this.#progressMeta.get(sess.pid);
           if (meta) meta.finalSeen = true;
           else this.#progressMeta.set(sess.pid, { lastEmitMs: 0, count: 0, finalSeen: true });
+        }
+      }
+    }
+    // F-1 (ticket 24694916): tool RESULTS arrive as `user`-role carrier messages
+    // (Claude stream-json). Match them to the tracked tool_use calls to capture a
+    // ticket-action ref, and harvest any {id,title} pairs into the title cache.
+    if (parsed.raw?.type === 'user') {
+      const content = parsed.raw?.message?.content;
+      if (Array.isArray(content)) {
+        for (const block of content) {
+          if (block?.type === 'tool_result') this.#consumeTicketToolResult(sess.pid, block);
         }
       }
     }
@@ -437,6 +481,10 @@ export class ChatSessionManager
         /* ignore — lock release must never break exit cleanup */
       }
     }
+    // F-1 (ticket 24694916): backstop — if the child died mid-turn after doing
+    // ticket actions (before the turn-end result line), still emit their card so a
+    // crash never drops a "누락 없이" ticket-action card. No-op when already flushed.
+    this.#flushTicketRefs(sess);
     const sent = this.#chatSent.has(sess.pid);
     // Snapshot the buffered output BEFORE the base class clears it (the
     // base clears the ring after this hook returns).
@@ -733,6 +781,78 @@ export class ChatSessionManager
     // Escape backticks / underscores so the chat italic wrapper doesn't
     // accidentally close inside the summary.
     return s.replace(/[`_*]/g, (c) => `\\${c}`);
+  }
+
+  // -- F-1 ticket-action card capture (ticket 24694916) -----------------------
+  // Pure capture logic (tool-name mapping, result parsing, ref resolution) lives
+  // in ./ticket-ref-capture and is unit-tested there; these methods are just the
+  // stateful per-session glue (pending map, title cache, coalesced flush).
+
+  #cacheTicketTitle(id: string, title: string): void {
+    // LRU touch: delete + re-set moves the key to the end; evict oldest over cap.
+    this.#ticketTitleCache.delete(id);
+    this.#ticketTitleCache.set(id, title);
+    if (this.#ticketTitleCache.size > TICKET_TITLE_CACHE_MAX) {
+      const oldest = this.#ticketTitleCache.keys().next().value;
+      if (oldest !== undefined) this.#ticketTitleCache.delete(oldest);
+    }
+  }
+
+  #trackTicketToolUse(pid: number, block: any): void {
+    if (typeof block?.id !== 'string') return;
+    const ctx = trackedTicketTool(block?.name, block?.input);
+    if (!ctx) return;
+    let pend = this.#pendingTicketTools.get(pid);
+    if (!pend) {
+      pend = new Map();
+      this.#pendingTicketTools.set(pid, pend);
+    }
+    pend.set(block.id, ctx);
+  }
+
+  #consumeTicketToolResult(pid: number, block: any): void {
+    const result = parseStreamToolResult(block?.content);
+    // Harvest {id,title} pairs from ANY result (incl. reads) so a later title-less
+    // action (add_comment/claim) can still label its card from the cache.
+    for (const pair of harvestTicketTitles(result)) this.#cacheTicketTitle(pair.id, pair.title);
+
+    const pend = this.#pendingTicketTools.get(pid);
+    const useId = typeof block?.tool_use_id === 'string' ? block.tool_use_id : undefined;
+    const ctx = pend && useId ? pend.get(useId) : undefined;
+    if (!ctx || !pend || !useId) return; // not a tracked ticket action
+    pend.delete(useId);
+
+    const ref = resolveTicketRef(ctx, result, block?.is_error === true, (id) => this.#ticketTitleCache.get(id));
+    if (!ref) return;
+
+    const refs = this.#capturedTicketRefs.get(pid) ?? [];
+    if (refs.length >= TICKET_REFS_MAX_PER_TURN) return;
+    // Dedup by (action, ticket_id) so repeated identical actions collapse to one card.
+    if (refs.some((r) => r.action === ref.action && r.ticket_id === ref.ticket_id)) return;
+    refs.push(ref);
+    this.#capturedTicketRefs.set(pid, refs);
+  }
+
+  /** Flush the turn's captured ticket-action refs as ONE coalesced structured
+   *  message. Non-empty Korean content is the fallback for surfaces that don't
+   *  render metadata (history replay, notifications, legacy clients); the
+   *  metadata.ticket_refs drives the rich card. Fire-and-forget; clears per-pid
+   *  state so it is idempotent (a second call after turn-end is a no-op). */
+  #flushTicketRefs(sess: SessionRecord): void {
+    const refs = this.#capturedTicketRefs.get(sess.pid);
+    this.#capturedTicketRefs.delete(sess.pid);
+    this.#pendingTicketTools.delete(sess.pid);
+    if (!refs || refs.length === 0) return;
+    const roomId: string | undefined = sess.roomId;
+    const agentId: string | undefined = sess.agentId;
+    if (!roomId || !agentId) return;
+
+    const content = formatTicketRefsContent(refs);
+    const cfg = { ...this._config, apiKey: sess._effectiveApiKey || this._config.apiKey };
+    // Fire-and-forget — postChatRoomMessage swallows + logs errors, so a failed
+    // card post never blocks stdout parsing. type defaults to 'message' (persistent,
+    // included in history replay); metadata carries the structured refs.
+    void postChatRoomMessage(cfg, roomId, agentId, content, { metadata: { ticket_refs: refs } });
   }
 
   // ---------------------------------------------------------------------------
