@@ -24,6 +24,7 @@ import { postSilentExitSystemComment, postOutputLiveness } from './rest.js';
 import { OUTPUT_LIVENESS_MIN_INTERVAL_MS } from './constants.js';
 import { CircuitBreaker } from './circuit-breaker.js';
 import { classifyCliError, isFallbackEligible } from './cli-error-signatures.js';
+import { detectHarnessSessionLimit } from './session-limit-defer.js';
 import type {
   DispatchReservation,
   TicketDispatchResult,
@@ -144,6 +145,23 @@ export class TicketSessionManager
    *  좀비로 보고 강제 해제한다(나이 게이트 없이는 정상 프로비저닝 창을 트윈으로
    *  깨울 수 있으므로). */
   #reserveSuppress = new Map<string, number>();
+
+  /** ticket 467f714a: notified when a session dies on a harness session-limit
+   *  signature (`You've hit your session limit · resets …`), with the resolved
+   *  reset instant. main.ts wires this to EventStream.recordHarnessSessionLimit so
+   *  the dispatcher opens a per-agent defer window and coalesces subsequent
+   *  re-dispatches until reset. Unset in harnesses that don't exercise the defer
+   *  path. */
+  onHarnessSessionLimit:
+    | ((info: {
+        agentId: string;
+        ticketId: string;
+        role: string;
+        reason: string;
+        resetLabel: string;
+        deferUntilMs: number;
+      }) => void)
+    | null = null;
 
   constructor(config: SessionAwareConfig, circuitBreaker?: CircuitBreaker) {
     super(config, {
@@ -1142,10 +1160,42 @@ export class TicketSessionManager
       }
     }
 
+    // ticket 467f714a: a harness session-limit death (`You've hit your session
+    // limit · resets …`) is NOT an agent fault and heals by TIME at a concrete
+    // reset the CLI reports — defer the agent's dispatch until then instead of
+    // counting it toward the circuit breaker (which would spuriously pend the
+    // ticket and defeat the auto-resume) or model-fallback (same account still
+    // hits the wall). Detected off the same tail the silent-exit fallback
+    // classifies; the fallback comment still posts (reason=session_limit) so the
+    // death is visible, but the breaker/pend is skipped below.
+    const harnessLimit =
+      !commented && sess.agentId ? detectHarnessSessionLimit(tail, code, Date.now()) : null;
+    if (harnessLimit && sess.agentId && this.onHarnessSessionLimit) {
+      log(
+        `[ticket-session] harness session-limit exit ticket=${ticketId.slice(0, 8)} role=${role || '_'} ` +
+          `agent=${sess.agentId.slice(0, 8)} reset="${harnessLimit.resetLabel || '(unparsed → default window)'}" ` +
+          `— deferring dispatch until ${new Date(harnessLimit.deferUntilMs).toISOString()}`,
+      );
+      try {
+        this.onHarnessSessionLimit({
+          agentId: sess.agentId,
+          ticketId,
+          role,
+          reason: harnessLimit.reason,
+          resetLabel: harnessLimit.resetLabel,
+          deferUntilMs: harnessLimit.deferUntilMs,
+        });
+      } catch (err: any) {
+        log(`[ticket-session] onHarnessSessionLimit hook threw: ${err?.message ?? err}`);
+      }
+    }
+
     // Circuit-breaker: record non-transient exits. Transient signals
     // (143/SIGTERM, 137/SIGKILL) are the zombie-reap / restart path and
-    // must NOT count — the agent will be re-dispatched normally.
-    if (sess.agentId && !CircuitBreaker.isTransientExit(code)) {
+    // must NOT count — the agent will be re-dispatched normally. A harness
+    // session-limit death (ticket 467f714a) likewise must NOT count — it is
+    // deferred + resumed by wall-clock, not an agent failure.
+    if (sess.agentId && !CircuitBreaker.isTransientExit(code) && !harnessLimit) {
       const cbKey = CircuitBreaker.key(sess.agentId, ticketId, role);
       const { justOpened, entry } = this.circuitBreaker.record(cbKey, code, tail);
       if (justOpened) {
