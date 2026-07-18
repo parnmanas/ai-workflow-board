@@ -16,6 +16,7 @@ import { AuthService } from '../../services/auth.service';
 import { ApiKeyService } from '../../services/api-key.service';
 import { LogService } from '../../services/log.service';
 import { MemoryMetricsRegistry } from '../../services/memory-metrics.registry';
+import { AgentConnectivityRegistry } from '../../services/agent-connectivity.registry';
 import { StreamEvent } from '../../common/types/stream-events';
 import { EVENT_TYPES } from './event-registry';
 import { EventDefinition, EventMapContext, SubscriberIdentity } from './types';
@@ -151,6 +152,10 @@ export class EventsController implements OnModuleDestroy {
     private readonly apiKeyService: ApiKeyService,
     private readonly logService: LogService,
     private readonly instanceRegistry: InstanceRegistryService,
+    // Live SSE reachability (ticket bfdd80b7). Fed on connect/disconnect below
+    // so the dispatch/chat feedback gate can tell a truly-unreachable agent
+    // from one that's connected-but-not-pinging.
+    private readonly connectivity: AgentConnectivityRegistry,
     metrics: MemoryMetricsRegistry,
   ) {
     // Memory observability gauges for the SSE maps. `sse.connections` is the
@@ -370,6 +375,10 @@ export class EventsController implements OnModuleDestroy {
       // ActivityLog entry so this connect lands in the agent's Recent
       // Activity feed alongside ticket events.
       this._recordProxyActivity(identity.agentId, identity.name, 'proxy_connected', detail);
+      // Live reachability (ticket bfdd80b7): this session can deliver events
+      // scoped to its own agent id AND (for a manager identity) to every agent
+      // it supervises — the exact keys the fan-out below routes to.
+      this.connectivity.noteConnected(sseSessionId, identity.agentId, identity.managedAgentIds);
     }
     this.logService.info(
       'SSE',
@@ -390,6 +399,8 @@ export class EventsController implements OnModuleDestroy {
       if (cleanedUp) return;
       cleanedUp = true;
       this.clientCount--;
+      // Drop this session's reachability contribution (ticket bfdd80b7).
+      this.connectivity.noteDisconnected(sseSessionId);
       let endedDetail: SseSessionDetail | undefined;
       let bucketSize = 0;
       if (identity.agentId) {

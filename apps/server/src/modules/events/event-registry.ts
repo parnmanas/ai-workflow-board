@@ -322,6 +322,10 @@ export const EVENT_TYPES: EventDefinition[] = [
             ? event.last_seen_at.toISOString()
             : String(event.last_seen_at)
           : null,
+        // Derived lifecycle state (ticket bfdd80b7) — shipped verbatim from
+        // AgentStatusService._emit. Omitted when absent so the payload stays
+        // clean for any legacy emit path.
+        lifecycle_state: event.lifecycle_state || undefined,
         current_task: event.current_task
           ? {
               ticket_id: event.current_task.ticket_id,

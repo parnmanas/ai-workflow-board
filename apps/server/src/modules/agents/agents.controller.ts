@@ -19,6 +19,7 @@ import { WorkspaceMoveService, WorkspaceMoveBlockedError } from '../../services/
 import { activityEvents } from '../../services/activity.service';
 import type { AgentManagerCommandPayload } from '../../common/types/stream-events';
 import { AgentStatusService } from './agent-status.service';
+import { AgentLifecycleState } from '../../common/agent-lifecycle';
 import { AllocationService } from './allocation.service';
 import { SubagentMonitorService } from '../../services/subagent-monitor.service';
 import { InstanceRegistryService, InstanceRecord } from '../agent-manager/instance-registry.service';
@@ -183,9 +184,9 @@ export class AgentsController {
    * recent rows so the response stays bounded; the full lists remain at the
    * existing /api/admin/agent-manager/instances/:id/subagents endpoint.
    */
-  private async _enrichLiveData<T extends Pick<Agent, 'id' | 'workspace_id'>>(
+  private async _enrichLiveData<T extends Pick<Agent, 'id' | 'workspace_id' | 'is_online' | 'connected_at'>>(
     agents: T[],
-  ): Promise<Array<T & { live_instance?: AgentLiveInstance; subagents?: AgentSubagentRollup }>> {
+  ): Promise<Array<T & { live_instance?: AgentLiveInstance; subagents?: AgentSubagentRollup; lifecycle_state?: AgentLifecycleState }>> {
     if (agents.length === 0) return [];
 
     // ── live_instance ──────────────────────────────────────────────
@@ -232,7 +233,14 @@ export class AgentsController {
     return agents.map((a) => {
       const inst = primaryByAgentId.get(a.id) || supervisorByAgentId.get(a.id);
       const subList = subagentsByAgentId.get(a.id) || [];
-      const enriched: T & { live_instance?: AgentLiveInstance; subagents?: AgentSubagentRollup } = { ...a };
+      const enriched: T & { live_instance?: AgentLiveInstance; subagents?: AgentSubagentRollup; lifecycle_state?: AgentLifecycleState } = { ...a };
+      // Lifecycle state (ticket bfdd80b7) so the initial REST render already
+      // distinguishes never_started/offline/online (the live agent_status SSE
+      // then keeps it fresh incl. the transient starting/error markers).
+      // Reachable = DB is_online OR a live instance carries it (fresher than the
+      // 30s sweep right after a spawn).
+      const reachable = !!a.is_online || !!inst;
+      enriched.lifecycle_state = this.agentStatusService.lifecycleStateFor(a.id, reachable, a.connected_at ?? null);
       if (inst) {
         enriched.live_instance = {
           instance_id: inst.instance_id,

@@ -44,6 +44,16 @@ export class SystemCommentService implements OnModuleInit, OnModuleDestroy {
   private async buildSystemComment(log: ActivityLog): Promise<string | null> {
     const actor = log.actor_name ? ` by **${log.actor_name}**` : '';
 
+    // Dispatch deferred — the target agent is not reachable (never-started /
+    // offline) so the trigger was held (ticket bfdd80b7). Surface it as a
+    // prominent ticket comment (not just an Activity-tab row) so the user
+    // immediately sees WHY nothing is progressing. `new_value` carries the
+    // pre-composed human message (state + auto-start outcome).
+    if (log.entity_type === 'ticket' && log.action === 'dispatch_deferred') {
+      const detail = log.new_value || 'agent 미시작';
+      return `⏳ **dispatch 보류** — ${detail}`;
+    }
+
     // Check if this is a child ticket (subtask) action:
     // Child tickets use entity_type='ticket' but have ticket_id != entity_id
     // (ticket_id points to parent, entity_id is the child itself)

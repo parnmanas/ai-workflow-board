@@ -29,7 +29,14 @@ export interface LogActivityParams {
   action:
     | 'created' | 'updated' | 'moved' | 'deleted' | 'status_changed' | 'archived' | 'unarchived'
     | 'respawn_storm_halted' | 'respawn_twin_detected' | 'respawn_twin_autostop_intent'
-    | 'config_changed';
+    | 'config_changed'
+    // 'dispatch_deferred' (ticket bfdd80b7): a dispatch targeted an agent that
+    // is not reachable (never-started / offline). Written via logActivity — NOT
+    // the raw repo.save the silent drop-gates use — so it rides the live
+    // 'activity' SSE (board update) AND SystemCommentService projects it into a
+    // visible ticket comment. `new_value` carries the human-readable reason +
+    // the auto-start outcome; `field_changed` carries the lifecycle state.
+    | 'dispatch_deferred';
   field_changed?: string;
   old_value?: string;
   new_value?: string;
