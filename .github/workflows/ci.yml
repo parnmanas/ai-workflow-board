@@ -78,6 +78,25 @@ jobs:
         working-directory: apps/agent-manager
         run: node --test --test-force-exit test/spawn-cmd-arg-escaping.test.mjs
 
+  # 클라이언트 단위·상호작용 테스트 (티켓 98d0936e · F2-1). Phase 1 은 브라우저
+  # 러너 부재로 카드 클릭·`?ticket=` 딥링크·모바일 패널·포커스트랩이 SSR/순수
+  # 계약으로만 커버됐다. 이제 jsdom 하네스(node --import tsx --test)가 실제
+  # react-dom/client 마운트로 그 상호작용을 검증하므로 이 잡이 그 스위트를 CI 에서
+  # 태운다 — 신규 프레임워크 없이 기존 러너 관례 그대로.
+  client-tests:
+    name: client unit + interaction tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Run client tests
+        run: npm test -w client
+
   # Dialect matrix — the actual pre-deploy safety net. Boots the contract flows
   # against Postgres 16 (matching the prod image) so uuid/varchar mismatches and
   # other Postgres-only failures are caught here, not on the live server.

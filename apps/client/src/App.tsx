@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { Routes, Route, Navigate } from 'react-router-dom';
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { ToastProvider, useToast } from './contexts/ToastContext';
 import { LoadingProvider } from './contexts/LoadingContext';
@@ -34,25 +34,32 @@ import { ViewModeProvider, useViewMode, defaultSectionForMode } from './contexts
 import ChatFirstHome from './components/ChatFirstHome';
 
 // Redirects the user to /ws/:currentWorkspaceId/:to, waiting for auth to resolve.
-function WorkspacedRedirect({ to }: { to: string }) {
+// Preserves the incoming query string so deep-link params (?ticket=&comment=)
+// survive the redirect instead of being dropped on the floor (에픽 리뷰 MINOR-1).
+export function WorkspacedRedirect({ to }: { to: string }) {
   const { currentWorkspaceId } = useAuth();
+  const { search } = useLocation();
   if (!currentWorkspaceId) return null;
-  return <Navigate to={`/ws/${currentWorkspaceId}/${to}`} replace />;
+  return <Navigate to={`/ws/${currentWorkspaceId}/${to}${search}`} replace />;
 }
 
 // Redirects / to the workspace's mode-aware default section once auth resolves
-// (Chat-first → assistant, Advanced → boards).
-function WorkspaceDefaultRedirect() {
+// (Chat-first → assistant, Advanced → boards). Carries the query string through
+// so a bookmarked `/?ticket=<id>` deep-link reaches the shell (에픽 리뷰 MINOR-1).
+export function WorkspaceDefaultRedirect() {
   const { currentWorkspaceId } = useAuth();
   const { mode } = useViewMode();
+  const { search } = useLocation();
   if (!currentWorkspaceId) return null;
-  return <Navigate to={`/ws/${currentWorkspaceId}/${defaultSectionForMode(mode)}`} replace />;
+  return <Navigate to={`/ws/${currentWorkspaceId}/${defaultSectionForMode(mode)}${search}`} replace />;
 }
 
-// Redirects /ws/:wsId to the mode-aware default section (relative).
-function WorkspaceSectionRedirect() {
+// Redirects /ws/:wsId to the mode-aware default section (relative). Preserves the
+// query string so `/ws/:wsId?ticket=<id>` keeps the deep-link param (MINOR-1).
+export function WorkspaceSectionRedirect() {
   const { mode } = useViewMode();
-  return <Navigate to={defaultSectionForMode(mode)} replace />;
+  const { search } = useLocation();
+  return <Navigate to={`${defaultSectionForMode(mode)}${search}`} replace />;
 }
 
 function AppContent() {
