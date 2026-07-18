@@ -238,8 +238,29 @@ export function detectHarnessSessionLimit(
 
 // ── durable defer store ──────────────────────────────────────────────────────
 
-/** One coalesced pending intent — the freshest raw trigger to replay for a
- *  deferred (ticket, role, agent), keyed identically to the twin guard so a
+/** How a coalesced intent is replayed at reset — a full ticket trigger
+ *  (re-drives the ticket-role via handleTrigger, re-acquiring the twin
+ *  reservation) or a comment mention (re-delivered via handleCommentMention).
+ *  A `trigger` is the authoritative full re-drive: a `mention` for the same
+ *  (ticket, role, agent) coalesces INTO an existing trigger intent and never
+ *  downgrades it. */
+export type SessionDeferIntentKind = 'trigger' | 'mention';
+
+/** Durable outbox status of a coalesced intent (ticket 467f714a blocker #3).
+ *   - `pending`     — waiting for the reset instant.
+ *   - `dispatching` — the window fired and a replay was INITIATED; the store
+ *     persists this transition BEFORE the replay runs, so a crash mid-replay
+ *     leaves the intent recoverable on disk (re-driven on the next boot) instead
+ *     of lost. The intent is REMOVED only after the replay is acknowledged
+ *     (handed off to handleTrigger/handleCommentMention without throwing) — that
+ *     removal is the terminal `acknowledged` state. The (ticket, role, agent)
+ *     `key` is the replay idempotency key: a re-drive re-enters handleTrigger,
+ *     which re-acquires the single-flight reservation (live-session reuse), so a
+ *     duplicate replay after a crash reuses the live session instead of twinning. */
+export type SessionDeferIntentStatus = 'pending' | 'dispatching';
+
+/** One coalesced pending intent — the freshest raw trigger/mention to replay for
+ *  a deferred (ticket, role, agent), keyed identically to the twin guard so a
  *  replay re-acquires the same single-flight reservation. */
 export interface SessionDeferIntent {
   key: string;
@@ -248,6 +269,10 @@ export interface SessionDeferIntent {
   role: string;
   agentId: string;
   firstAtMs: number;
+  /** Replay vehicle — see {@link SessionDeferIntentKind}. */
+  kind: SessionDeferIntentKind;
+  /** Durable outbox status — see {@link SessionDeferIntentStatus}. */
+  status: SessionDeferIntentStatus;
 }
 
 interface AgentDeferRecord {
@@ -266,7 +291,11 @@ export interface SessionDeferState {
   resetLabel?: string;
 }
 
-export type SessionDeferResumeHandler = (raw: string) => Promise<void> | void;
+/** Replay one coalesced intent at reset. Receives the WHOLE intent so the caller
+ *  routes by `kind` (trigger → handleTrigger, mention → handleCommentMention).
+ *  Resolving = acknowledged (the store then removes the intent + persists);
+ *  throwing leaves it `dispatching` for the next-boot re-drive. */
+export type SessionDeferResumeHandler = (intent: SessionDeferIntent) => Promise<void> | void;
 
 export interface SessionLimitDeferStoreOptions {
   /** Absolute path of the JSON persistence file. null → in-memory only (tests). */
@@ -289,7 +318,10 @@ const defaultScheduler: RetryScheduler = {
   },
 };
 
-const PERSIST_VERSION = 1;
+// v2 (ticket 467f714a blocker #3) adds per-intent `kind` + `status`. load()
+// does not gate on the version — a v1 file rehydrates via field defaults
+// (kind='trigger', status='pending') — so the bump is purely documentary.
+const PERSIST_VERSION = 2;
 
 /**
  * Restart-durable, agent-scoped session-limit defer store (ticket 467f714a).
@@ -305,17 +337,35 @@ const PERSIST_VERSION = 1;
  * EventDispatcher.handleTrigger, which re-acquires the twin reservation — so the
  * replay can never spawn a twin).
  *
- * ── durability ──
- * The whole structure (windows + intents) is persisted atomically to
- * `persistPath` on every mutation and rehydrated by `load()` at boot, which
- * re-arms the timer from the persisted `deferUntilMs`. A window that elapsed
- * while the manager was down replays on the next tick. Exactly-once survives a
- * restart because an intent is REMOVED (and the removal persisted) before its
- * replay is dispatched — a crash mid-replay loses at most that one resume, which
- * the server supervisor's own post-reset re-push then covers.
+ * ── durability (outbox, ticket 467f714a blocker #3) ──
+ * The whole structure (windows + intents + per-intent `status`) is persisted
+ * atomically to `persistPath` on every mutation and rehydrated by `load()` at
+ * boot, which re-arms the timer from the persisted `deferUntilMs`. A window that
+ * elapsed while the manager was down replays on the next tick.
+ *
+ * Exactly-once across a crash uses a durable outbox instead of remove-before-
+ * replay: at reset `#fire` transitions each due intent `pending → dispatching`
+ * and PERSISTS that before running the replay, then removes the intent only
+ * after the replay is acknowledged (`#resume` resolved). So the on-disk state at
+ * ANY crash instant reflects an un-acked intent:
+ *   - crash after the dispatching-persist, before/during the replay → boot finds
+ *     it `dispatching` and re-drives it once (no loss — the old remove-first bug);
+ *   - crash after the replay handed off, before the ack-remove → boot re-drives,
+ *     but the pre-crash spawn died with the manager, so the re-drive is the ONLY
+ *     surviving session (no twin). Within one lifetime a same-key replay re-enters
+ *     handleTrigger and reuses the live session via its single-flight reservation.
+ * `#inFlightReplay` (in-memory, NOT persisted) holds the keys whose replay was
+ * initiated this lifetime so `#arm`/`#fire` never hot-loop a still-draining intent;
+ * it starts empty on boot, which is exactly what lets a rehydrated `dispatching`
+ * intent be re-driven once.
  */
 export class SessionLimitDeferStore {
   #byAgent = new Map<string, AgentDeferRecord>();
+  /** Keys whose replay was INITIATED this lifetime (blocker #3). In-memory only
+   *  — deliberately NOT persisted, so a restart re-drives any intent left
+   *  `dispatching` on disk. Prevents `#arm`/`#fire` from hot-looping an intent
+   *  that is mid-drain within the same lifetime. */
+  #inFlightReplay = new Set<string>();
   #resume: SessionDeferResumeHandler | null = null;
   #timer: unknown | null = null;
   #timerAtMs: number | null = null;
@@ -360,6 +410,11 @@ export class SessionLimitDeferStore {
             role: String(it.role ?? ''),
             agentId: String(it.agentId ?? agentId),
             firstAtMs: Number(it.firstAtMs) || this.#now(),
+            // Missing kind/status (pre-blocker-#3 files) default to a pending
+            // trigger. A rehydrated `dispatching` intent = a crash mid-drain →
+            // re-driven once on the next tick (#inFlightReplay starts empty).
+            kind: it.kind === 'mention' ? 'mention' : 'trigger',
+            status: it.status === 'dispatching' ? 'dispatching' : 'pending',
           });
         }
         this.#byAgent.set(agentId, {
@@ -437,26 +492,42 @@ export class SessionLimitDeferStore {
     };
   }
 
-  /** Coalesce a deferred re-dispatch into the SINGLE pending intent for its
-   *  (ticket, role, agent). A repeat only refreshes the raw payload (freshest
-   *  trigger context) — it never stacks a second entry, so exactly one replay
-   *  fires at reset and no twin is possible. No-op (created:false) when the agent
-   *  has no live window. Returns whether a NEW intent was created — the caller
-   *  posts its one-time audit comment only then. */
+  /** Coalesce a deferred re-dispatch (supervisor trigger, exit-time seed, or
+   *  comment mention) into the SINGLE pending intent for its (ticket, role,
+   *  agent). A repeat only refreshes the raw payload (freshest context) — it
+   *  never stacks a second entry, so exactly one replay fires at reset and no
+   *  twin is possible. `kind` selects the replay vehicle; a `trigger` is the
+   *  authoritative full re-drive, so it upgrades an existing `mention` intent
+   *  (never the reverse) — that is how a supervisor trigger and a role mention
+   *  for the same ticket-role collapse into ONE replay. No-op (created:false)
+   *  when the agent has no live window. Returns whether a NEW intent was created
+   *  — the caller posts its one-time audit comment only then. */
   addPendingIntent(
     agentId: string | undefined,
     meta: InflightDispatchMeta,
     raw: string,
-    nowMs?: number,
+    opts?: { kind?: SessionDeferIntentKind; nowMs?: number },
   ): { created: boolean } {
     if (!agentId) return { created: false };
     const rec = this.#byAgent.get(agentId);
-    const now = nowMs ?? this.#now();
+    const now = opts?.nowMs ?? this.#now();
+    // A live window is required — while open, every intent is `pending` (the
+    // drain in #fire only runs at/after expiry), so no status handling here.
     if (!rec || rec.deferUntilMs <= now) return { created: false };
+    const kind = opts?.kind ?? 'trigger';
     const key = InflightDispatchTracker.key(meta.ticketId, meta.role, meta.agentId);
     const existing = rec.intents.get(key);
     if (existing) {
-      existing.raw = raw;
+      if (kind === 'trigger') {
+        // Trigger is the full re-drive — adopt it and refresh the raw, upgrading
+        // a prior mention-only intent.
+        existing.kind = 'trigger';
+        existing.raw = raw;
+      } else if (existing.kind === 'mention') {
+        // Mention refreshing a mention → freshest mention wins; never downgrade
+        // an existing trigger.
+        existing.raw = raw;
+      }
       this.#persist();
       return { created: false };
     }
@@ -467,6 +538,8 @@ export class SessionLimitDeferStore {
       role: meta.role,
       agentId: meta.agentId,
       firstAtMs: now,
+      kind,
+      status: 'pending',
     });
     this.#persist();
     return { created: true };
@@ -483,6 +556,7 @@ export class SessionLimitDeferStore {
       for (const [key, it] of [...rec.intents]) {
         if (it.ticketId === ticketId) {
           rec.intents.delete(key);
+          this.#inFlightReplay.delete(key);
           removed++;
         }
       }
@@ -496,7 +570,10 @@ export class SessionLimitDeferStore {
 
   /** Clear an agent's window + intents outright (test / manual recovery). */
   clear(agentId: string | undefined): void {
-    if (agentId && this.#byAgent.delete(agentId)) {
+    if (!agentId) return;
+    const rec = this.#byAgent.get(agentId);
+    if (rec) for (const key of rec.intents.keys()) this.#inFlightReplay.delete(key);
+    if (this.#byAgent.delete(agentId)) {
       this.#persist();
       this.#arm();
     }
@@ -522,14 +599,34 @@ export class SessionLimitDeferStore {
 
   // ── internals ──
 
-  /** Arm a single timer to the nearest live `deferUntilMs`. Idempotent: a
-   *  clear/record that changes the minimum re-arms; nothing to defer disarms. */
+  /** Arm a single timer. A window with a FUTURE reset arms to the nearest such
+   *  instant. An ALREADY-EXPIRED window that still holds an intent not yet being
+   *  replayed this lifetime (a boot-rehydrated one, or one just left `dispatching`
+   *  by a crash) needs an IMMEDIATE drain tick — that wins over any future window.
+   *  Idempotent: `#timerAtMs` (0 = the immediate-drain sentinel; deferUntilMs is
+   *  always a large epoch, never 0) guards against re-arm churn, and an intent
+   *  already in `#inFlightReplay` no longer counts as needing a drain, so #fire
+   *  can never hot-loop the intent it just transitioned. */
   #arm(): void {
-    let min: number | null = null;
+    const now = this.#now();
+    let minFuture: number | null = null;
+    let immediate = false;
     for (const rec of this.#byAgent.values()) {
-      if (min === null || rec.deferUntilMs < min) min = rec.deferUntilMs;
+      if (rec.deferUntilMs > now) {
+        if (minFuture === null || rec.deferUntilMs < minFuture) minFuture = rec.deferUntilMs;
+        continue;
+      }
+      if (!immediate) {
+        for (const it of rec.intents.values()) {
+          if (!this.#inFlightReplay.has(it.key)) {
+            immediate = true;
+            break;
+          }
+        }
+      }
     }
-    if (min === null) {
+    const target = immediate ? 0 : minFuture;
+    if (target === null) {
       if (this.#timer !== null) {
         this.#scheduler.clear(this.#timer);
         this.#timer = null;
@@ -537,42 +634,77 @@ export class SessionLimitDeferStore {
       }
       return;
     }
-    if (this.#timer !== null && this.#timerAtMs === min) return; // already armed for this instant
+    if (this.#timer !== null && this.#timerAtMs === target) return; // already armed for this instant
     if (this.#timer !== null) this.#scheduler.clear(this.#timer);
-    this.#timerAtMs = min;
-    const delay = Math.max(0, min - this.#now());
+    this.#timerAtMs = target;
+    const delay = immediate ? 0 : Math.max(0, (minFuture as number) - now);
     this.#timer = this.#scheduler.set(() => void this.#fire(), delay);
   }
 
-  /** Timer callback: drain every window whose reset has passed, replaying each
-   *  coalesced intent exactly once, then re-arm for the next window. */
+  /** Timer callback: drain every window whose reset has passed. Each due intent
+   *  is transitioned `pending → dispatching` and that transition is PERSISTED
+   *  BEFORE any replay runs (blocker #3 — a crash now leaves the intent on disk
+   *  as un-acked, re-driven on the next boot, instead of the old remove-first
+   *  loss). Intents already in `#inFlightReplay` (mid-drain this lifetime) are
+   *  skipped so a re-`#arm` can never double-fire them. */
   #fire(): void {
     this.#timer = null;
     this.#timerAtMs = null;
     const now = this.#now();
-    const due: AgentDeferRecord[] = [];
+    const toReplay: SessionDeferIntent[] = [];
     for (const rec of this.#byAgent.values()) {
-      if (rec.deferUntilMs <= now) due.push(rec);
+      if (rec.deferUntilMs > now) continue; // window still live — not due
+      for (const it of rec.intents.values()) {
+        if (this.#inFlightReplay.has(it.key)) continue; // already draining this lifetime
+        it.status = 'dispatching';
+        this.#inFlightReplay.add(it.key);
+        toReplay.push(it);
+      }
     }
-    for (const rec of due) this.#byAgent.delete(rec.agentId);
-    if (due.length) this.#persist(); // removal persisted BEFORE replay → at-most-once
-    this.#arm(); // re-arm for any still-future window
-    for (const rec of due) {
-      const intents = [...rec.intents.values()];
+    if (toReplay.length) this.#persist(); // dispatching state persisted BEFORE replay
+    this.#arm(); // re-arm for future windows only (drained intents now in-flight)
+    for (const it of toReplay) {
       this.#log(
-        `[session-defer] window expired agent=${rec.agentId.slice(0, 8)} — replaying ${intents.length} pending intent(s) once`,
+        `[session-defer] window expired agent=${it.agentId.slice(0, 8)} — replaying ${it.kind} intent ${it.key} once`,
       );
-      for (const it of intents) void this.#replayOne(it);
+      void this.#replayOne(it);
     }
   }
 
   async #replayOne(intent: SessionDeferIntent): Promise<void> {
-    if (!this.#resume) return;
+    if (!this.#resume) {
+      this.#inFlightReplay.delete(intent.key);
+      return;
+    }
     try {
-      await this.#resume(intent.raw);
+      await this.#resume(intent);
+      // Acknowledged — the replay was handed off without throwing. Remove the
+      // intent (terminal state) and persist so a later restart never replays it.
+      this.#ackIntent(intent);
     } catch (err: any) {
+      // Replay threw — leave the intent `dispatching` on disk (do NOT ack) so the
+      // next boot re-drives it. Keep the key in #inFlightReplay so it is not
+      // hot-re-fired THIS lifetime (no live timer exists after expiry; the server
+      // supervisor's own post-reset re-push also covers it).
       this.#log(`[session-defer] resume replay threw for ${intent.key}: ${err?.message ?? err}`);
     }
+  }
+
+  /** Terminal `acknowledged` transition: drop a replayed intent (and its now-empty
+   *  expired window), release its in-flight key, and persist — so the drain is
+   *  durable and exactly-once across a restart. */
+  #ackIntent(intent: SessionDeferIntent): void {
+    this.#inFlightReplay.delete(intent.key);
+    const rec = this.#byAgent.get(intent.agentId);
+    if (rec) {
+      rec.intents.delete(intent.key);
+      // Drop a fully-drained, expired window; keep one that re-opened (a later
+      // session-limit death extended it) so its fresh intents still fire.
+      if (rec.intents.size === 0 && rec.deferUntilMs <= this.#now()) {
+        this.#byAgent.delete(intent.agentId);
+      }
+    }
+    this.#persist();
   }
 
   #persist(): void {
@@ -587,6 +719,8 @@ export class SessionLimitDeferStore {
           role: it.role,
           agentId: it.agentId,
           firstAtMs: it.firstAtMs,
+          kind: it.kind,
+          status: it.status,
         };
       }
       agents[rec.agentId] = {

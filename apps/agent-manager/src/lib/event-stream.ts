@@ -171,6 +171,10 @@ export class EventStream {
    */
   recordHarnessSessionLimit(info: {
     agentId: string;
+    // ticket 467f714a blocker #1: the dead task's (ticket, role) so the dispatcher
+    // can seed it as a durable pending intent (replays even with no later trigger).
+    ticketId?: string;
+    role?: string;
     deferUntilMs: number;
     reason?: string;
     resetLabel?: string;

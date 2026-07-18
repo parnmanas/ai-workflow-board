@@ -735,13 +735,51 @@ export class EventDispatcher {
   // the reset instant. Owned so its resume callback can close over handleTrigger;
   // main.ts injects the persisted instance so the window survives a restart.
   readonly #sessionDefer: SessionLimitDeferStore;
+  /** ticket 467f714a blocker #1 — the freshest trigger `raw` this manager
+   *  dispatched per (ticket, role, agent) key, captured in handleTrigger. When a
+   *  session dies of a harness session limit, `recordHarnessSessionLimit` looks
+   *  up the dead task's key here and SEEDS a durable pending intent from that raw,
+   *  so the original work replays at reset even if NO further supervisor/mention
+   *  trigger arrives in the window. Bounded: consumed on seed, evicted when the
+   *  ticket leaves the flow (moved/archived), and hard-capped (FIFO) as a backstop.
+   *  In-memory only — the seed lands as a DURABLE intent in #sessionDefer, so this
+   *  need only survive dispatch→exit within one lifetime. */
+  readonly #inflightTriggerRaw = new Map<string, string>();
+  static readonly #INFLIGHT_RAW_CAP = 512;
+  /** Remember the raw of a trigger we are about to dispatch (blocker #1). FIFO-
+   *  capped so a long-lived manager can't grow it unbounded from keys that never
+   *  hit a session limit. */
+  #rememberTriggerRaw(key: string, raw: string): void {
+    this.#inflightTriggerRaw.delete(key); // re-insert to move to newest (FIFO)
+    this.#inflightTriggerRaw.set(key, raw);
+    while (this.#inflightTriggerRaw.size > EventDispatcher.#INFLIGHT_RAW_CAP) {
+      const oldest = this.#inflightTriggerRaw.keys().next().value;
+      if (oldest === undefined) break;
+      this.#inflightTriggerRaw.delete(oldest);
+    }
+  }
+  /** Evict every remembered trigger raw for a ticket (blocker #1) — the ticket
+   *  left the active flow (moved/archived), so a late session-limit death must
+   *  not seed a stale re-drive. Keys are `${ticketId}:${role}:${agentId}`. */
+  #forgetTriggerRawForTicket(ticketId: string): void {
+    if (!ticketId) return;
+    const prefix = `${ticketId}:`;
+    for (const key of [...this.#inflightTriggerRaw.keys()]) {
+      if (key.startsWith(prefix)) this.#inflightTriggerRaw.delete(key);
+    }
+  }
   /** Record a recognized harness session-limit exit — open/extend the agent's
-   *  defer window (ticket 467f714a). Called by the ticket-session / one-shot exit
-   *  handlers (wired through EventStream). `deferUntilMs` is already resolved
-   *  (parsed reset, or a conservative default) by the caller. Returns whether a
-   *  fresh window opened. */
+   *  defer window AND seed the dead task itself as a durable pending intent
+   *  (ticket 467f714a blocker #1), so it replays exactly once at reset even with
+   *  no later trigger. Called by the ticket-session / one-shot exit handlers
+   *  (wired through EventStream). `deferUntilMs` is already resolved (parsed reset,
+   *  or a conservative default) by the caller. `ticketId`/`role` identify the dead
+   *  task (present for ticket triggers; a one-shot mention death omits a usable
+   *  role). Returns whether a fresh window opened. */
   recordHarnessSessionLimit(info: {
     agentId: string;
+    ticketId?: string;
+    role?: string;
     deferUntilMs: number;
     reason?: string;
     resetLabel?: string;
@@ -758,6 +796,32 @@ export class EventDispatcher {
           `— supervisor/mention re-dispatch deferred until reset`,
       );
     }
+    // blocker #1: seed the failed original task as a durable intent from the raw
+    // we captured when we dispatched it, so a reset with NO intervening trigger
+    // still replays it exactly once. Consume the raw (the durable intent now owns
+    // the re-drive). Skipped when there is no usable ticket key or captured raw
+    // (e.g. a one-shot mention death) — the mention/trigger coalesce paths and the
+    // server supervisor's own re-push cover those.
+    if (info.ticketId) {
+      const key = InflightDispatchTracker.key(info.ticketId, info.role || '', info.agentId);
+      const raw = this.#inflightTriggerRaw.get(key);
+      if (raw) {
+        const { created } = this.#sessionDefer.addPendingIntent(
+          info.agentId,
+          { ticketId: info.ticketId, role: info.role || '', agentId: info.agentId },
+          raw,
+          { kind: 'trigger' },
+        );
+        this.#inflightTriggerRaw.delete(key);
+        if (created) {
+          log(
+            `[dispatch] harness session-limit seeded dead task as pending intent ` +
+              `ticket=${info.ticketId.slice(0, 8)} role=${info.role || '_'} agent=${info.agentId.slice(0, 8)}`,
+          );
+          this.#postDeferAuditComment(info.ticketId, info.resetLabel ?? '');
+        }
+      }
+    }
     return res;
   }
   /** Current session-limit defer state for an agent — test / observability. */
@@ -768,6 +832,25 @@ export class EventDispatcher {
    *  observability. */
   pendingSessionDeferCount(agentId?: string): number {
     return this.#sessionDefer.pendingIntentCount(agentId);
+  }
+  /** Post the ONE audit-visible defer comment for a newly-deferred ticket-role
+   *  (ticket 467f714a — the "audit-visible defer 사유" completion criterion).
+   *  Fired exactly once per intent creation across all three sources (exit-time
+   *  seed, supervisor trigger, comment mention); repeats coalesce silently. Plain
+   *  note (no @mention) so it never re-triggers an agent. Fire-and-forget — a
+   *  failed POST must never affect dispatch. */
+  #postDeferAuditComment(ticketId: string, resetLabel: string): void {
+    if (!ticketId) return;
+    fireAndForgetTool(this.#config, 'add_comment', {
+      ticket_id: ticketId,
+      content:
+        '⏸️ **Harness 세션 한도로 재디스패치 유예** — 이 agent 의 CLI 세션 한도가 소진되어 ' +
+        '(`session limit`) 재설정 시각까지 이 (ticket, role) 의 dispatch 를 spawn 하지 않고 ' +
+        '단일 pending intent 로 합쳤습니다. supervisor/mention 재트리거는 세션을 새로 만들지 ' +
+        '않으며, 재설정 후 **정확히 1회** 재개됩니다' +
+        (resetLabel ? ` (reset: ${resetLabel})` : '') +
+        '. (ticket 467f714a)',
+    });
   }
   // ticket e9d0e8bc: folder-keyed run-lifetime lock. One per manager process
   // (this dispatcher is a singleton), so it serializes same-scenario QA/security
@@ -806,7 +889,14 @@ export class EventDispatcher {
     // main.ts injects the persisted, disk-backed instance; a bare dispatcher makes
     // an in-memory one. Either way we (re-)wire the resume + rehydrate here.
     this.#sessionDefer = deps.sessionLimitDeferStore ?? new SessionLimitDeferStore();
-    this.#sessionDefer.setResumeHandler((raw) => this.handleTrigger(raw));
+    // Route each replayed intent by kind: a trigger re-drives the ticket-role via
+    // handleTrigger (re-acquiring the twin reservation — the receiver-side dedupe
+    // for blocker #3); a coalesced mention is re-delivered via handleCommentMention.
+    this.#sessionDefer.setResumeHandler((intent) =>
+      intent.kind === 'mention'
+        ? this.handleCommentMention(intent.raw)
+        : this.handleTrigger(intent.raw),
+    );
     this.#sessionDefer.load();
   }
 
@@ -1228,6 +1318,7 @@ export class EventDispatcher {
           deferAgentId,
           { ticketId: ev.ticket_id, role: ev.action || '', agentId: deferAgentId },
           raw,
+          { kind: 'trigger' },
         );
         log(
           `Trigger deferred — harness session limit: ticket=${ev.ticket_id.slice(0, 8)} ` +
@@ -1236,21 +1327,9 @@ export class EventDispatcher {
               defer.deferUntilMs ? new Date(defer.deferUntilMs).toISOString() : '?'
             } (${created ? 'new pending intent' : 'coalesced'})`,
         );
-        if (created) {
-          // One audit comment per newly-deferred ticket-role — the "audit-visible
-          // defer 사유". Plain note (no @mention) so it never re-triggers an agent;
-          // repeats of the same ticket-role coalesce silently.
-          fireAndForgetTool(this.#config, 'add_comment', {
-            ticket_id: ev.ticket_id,
-            content:
-              '⏸️ **Harness 세션 한도로 재디스패치 유예** — 이 agent 의 CLI 세션 한도가 소진되어 ' +
-              '(`session limit`) 재설정 시각까지 이 (ticket, role) 의 dispatch 를 spawn 하지 않고 ' +
-              '단일 pending intent 로 합쳤습니다. supervisor/mention 재트리거는 세션을 새로 만들지 ' +
-              '않으며, 재설정 후 **정확히 1회** 재개됩니다' +
-              (defer.resetLabel ? ` (reset: ${defer.resetLabel})` : '') +
-              '. (ticket 467f714a)',
-          });
-        }
+        // One audit comment per newly-deferred ticket-role — the "audit-visible
+        // defer 사유"; repeats of the same ticket-role coalesce silently.
+        if (created) this.#postDeferAuditComment(ev.ticket_id, defer.resetLabel ?? '');
         return;
       }
     }
@@ -1291,6 +1370,13 @@ export class EventDispatcher {
       typeof ev.ticket_id === 'string' && ev.ticket_id
         ? InflightDispatchTracker.key(ev.ticket_id, ev.action || '', dispatchAgentId)
         : null;
+    // ticket 467f714a blocker #1: remember this proceeding trigger's raw keyed by
+    // (ticket, role, agent). If its spawned session later dies of a harness session
+    // limit, recordHarnessSessionLimit seeds this exact raw as the durable re-drive
+    // intent — so the work resumes at reset even if NO further trigger arrives.
+    // Reached only past the defer + suppression gates (a deferred/suppressed trigger
+    // returned earlier), so we only remember triggers we actually act on.
+    if (inflightKey) this.#rememberTriggerRaw(inflightKey, raw);
     const delegationCfg = (this.#config as any)?.delegation ?? {};
     const canAuthoritative =
       delegationCfg.enabled !== false &&
@@ -2042,20 +2128,32 @@ export class EventDispatcher {
       }
     }
 
-    // ticket 467f714a: a mention with no live session to forward to would spawn a
-    // fresh one-shot — but while this agent is in a harness session-limit defer
-    // window that spawn hits the same account session wall and dies. Suppress it
-    // (the "mention 재디스패치는 spawn하지 않고" half). The mention text is already on
-    // the ticket and the post-reset supervisor / column trigger re-drives the work,
-    // so no dedicated replay intent is queued here.
+    // ticket 467f714a blocker #2: a mention with no live session to forward to
+    // would spawn a fresh one-shot — but while this agent is in a harness
+    // session-limit defer window that spawn hits the same account session wall and
+    // dies. Instead of DROPPING the mention (which loses it if no later trigger
+    // arrives), COALESCE it into the single pending intent for its (ticket, role,
+    // agent) and replay it exactly once at reset. A role-shortcut mention keys on
+    // its role, so it MERGES into an existing supervisor-trigger intent (kind stays
+    // 'trigger' — the full re-drive); a mention with no trigger becomes a durable
+    // 'mention' intent re-delivered via handleCommentMention. No spawn while
+    // deferred — the doomed one-shot is never started ("재디스패치는 spawn하지 않고").
     const mentionDefer = this.#sessionDefer.deferState(agentId);
     if (mentionDefer.deferred) {
+      const mentionRole = mention.mention_source === 'role' ? mention.role_shortcut || '' : '';
+      const { created } = this.#sessionDefer.addPendingIntent(
+        agentId,
+        { ticketId, role: mentionRole, agentId },
+        raw,
+        { kind: 'mention' },
+      );
       log(
         `Comment mention deferred — harness session limit: ticket=${ticketId.slice(0, 8) || '_'} ` +
-          `agent=${(agentId || '').slice(0, 8) || '_'} until=${
+          `role=${mentionRole || '_'} agent=${(agentId || '').slice(0, 8) || '_'} until=${
             mentionDefer.deferUntilMs ? new Date(mentionDefer.deferUntilMs).toISOString() : '?'
-          } (no one-shot spawn while deferred)`,
+          } (${created ? 'new pending intent' : 'coalesced'}, no one-shot spawn while deferred)`,
       );
+      if (created) this.#postDeferAuditComment(ticketId, mentionDefer.resetLabel ?? '');
       return;
     }
 
@@ -2130,8 +2228,10 @@ export class EventDispatcher {
         this.#poolRetry.cancelByTicket(ev.ticket_id, 'ticket moved');
         // ticket 467f714a: a moved ticket's deferred re-dispatch must not replay at
         // reset (its pre-move trigger is stale). The agent's window itself stays —
-        // other tickets may still be deferred.
+        // other tickets may still be deferred. Also drop any remembered trigger raw
+        // (blocker #1) so a late session-limit death can't seed a stale re-drive.
         this.#sessionDefer.cancelByTicket(ev.ticket_id, 'ticket moved');
+        this.#forgetTriggerRawForTicket(ev.ticket_id);
         void this.#cleanupTerminalTicketWorktrees(ev.ticket_id);
       }
 
@@ -2147,6 +2247,7 @@ export class EventDispatcher {
         // ticket d34075b5: an archived ticket's queued pool_exhausted retry is moot.
         this.#poolRetry.cancelByTicket(ev.ticket_id, 'ticket archived');
         this.#sessionDefer.cancelByTicket(ev.ticket_id, 'ticket archived');
+        this.#forgetTriggerRawForTicket(ev.ticket_id); // ticket 467f714a blocker #1
         void this.#cleanupArchivedTicketWorkspace(ev.ticket_id, ev.repository_resource_id);
       }
 
