@@ -86,6 +86,7 @@ interface StatusUpdate {
   is_online: boolean;
   last_seen_at: string | null;
   lifecycle_state?: AgentLifecycleState;
+  lifecycle_detail?: string;
   current_task?: AgentCurrentTask;
   active_tasks?: AgentCurrentTask[];
 }
@@ -110,6 +111,15 @@ function mergeAgentStatus(
       update.lifecycle_state !== undefined
         ? update.lifecycle_state
         : existing.lifecycle_state,
+    // Concrete error reason (ticket 1f750878). Track the STATE's presence, not
+    // its own — the wire omits detail for non-error states, so when a fresh
+    // state arrives (e.g. error→online) take the update's detail (undefined =
+    // clear the stale reason). Keep existing only when the whole state field is
+    // absent (older server that sends neither).
+    lifecycle_detail:
+      update.lifecycle_state !== undefined
+        ? update.lifecycle_detail
+        : existing.lifecycle_detail,
     current_task: update.current_task,
     // The SSE agent_status wire now carries the full authoritative list —
     // board-ticket tasks (kind:'ticket') AND in-progress QA runs (kind:'qa'),
@@ -208,6 +218,8 @@ export default function AgentsPage() {
       last_seen_at: payload.last_seen_at ?? null,
       // Live lifecycle_state (ticket bfdd80b7); undefined on older servers.
       lifecycle_state: payload.lifecycle_state,
+      // Concrete error reason (ticket 1f750878); present only when state='error'.
+      lifecycle_detail: payload.lifecycle_detail,
       current_task: payload.current_task,
       // Forward the live active_tasks list (ticket 09ed8def) — board-ticket
       // tasks + in-progress QA runs. Previously omitted here, which froze the

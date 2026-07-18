@@ -11,7 +11,7 @@
 // Scope). The sweep reads every agent in the agents table regardless of workspace.
 // When multi-tenant arrives, the sweep + emit path will need a workspace filter
 // (see 03-RESEARCH.md §Pitfall 7).
-import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, OnModuleInit, OnModuleDestroy, Inject, forwardRef } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, DataSource, In } from 'typeorm';
 import { Agent } from '../../entities/Agent';
@@ -22,7 +22,9 @@ import { QaScenario } from '../../entities/QaScenario';
 import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
 import { MemoryMetricsRegistry } from '../../services/memory-metrics.registry';
-import { AgentLifecycleState, deriveAgentLifecycleState } from '../../common/agent-lifecycle';
+import { AgentConnectivityRegistry } from '../../services/agent-connectivity.registry';
+import { InstanceRegistryService } from '../agent-manager/instance-registry.service';
+import { AgentLifecycleState, deriveAgentLifecycleState, autostartFeasibilityLabel } from '../../common/agent-lifecycle';
 
 // Internal shape — held in memory with Date objects for precision. The wire
 // shape (AgentStatusPayload in common/types/stream-events.ts) carries ISO-8601
@@ -196,6 +198,15 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly logService: LogService,
     metrics: MemoryMetricsRegistry,
+    // Reachability sources (ticket 1f750878). The SINGLE definition of
+    // "reachable" now lives in isReachable() below and is shared by _emit (SSE
+    // badge), AgentsController._enrichLiveData (REST badge) and AgentAutostart-
+    // Service.classify (dispatch gate). AgentConnectivityRegistry is @Global;
+    // InstanceRegistryService comes from AgentManagerModule via the existing
+    // AgentsModule↔AgentManagerModule forwardRef (same as AgentAutostartService).
+    private readonly connectivity: AgentConnectivityRegistry,
+    @Inject(forwardRef(() => InstanceRegistryService))
+    private readonly instanceRegistry: InstanceRegistryService,
   ) {
     // Size gauge for /api/diagnostics/memory + the [Memory] watchdog row.
     // Pre-fix the `state` Map only ever grew (sweep set, never deleted), so a
@@ -294,6 +305,50 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
       isStarting: this.isStarting(agent_id),
       hasRecentStartError: this.getStartError(agent_id) !== undefined,
     });
+  }
+
+  /**
+   * The SINGLE reachability definition (ticket 1f750878). An agent is reachable
+   * when ANY of: a live SSE session would deliver an X-scoped event (the TRUE
+   * signal — covers proxy/SSE agents and manager-supervised agents that never
+   * MCP-ping), OR a live instance carries it (its own daemon/proxy, or a manager
+   * whose agent_ids[] includes it), OR the caller's is_online fallback (DB flag /
+   * in-memory status) is set. Any one is enough; is_online alone is NOT relied
+   * upon.
+   *
+   * Synchronous + DB-free so it can run on the hot _emit path (which holds only
+   * status.is_online, no Agent row). The connectivity lookup short-circuits O(1)
+   * for the common SSE-connected case; only a disconnected agent scans the
+   * (tiny) instance registry. Before this, three surfaces each inlined their own
+   * OR — the dispatch gate used all three signals, the REST badge used
+   * is_online‖instance, and _emit used is_online ALONE — so an SSE-only reachable
+   * agent (is_online=0) dispatched fine yet was broadcast offline. All three now
+   * delegate here.
+   */
+  isReachable(agentId: string, isOnlineFallback: boolean): boolean {
+    if (!agentId) return !!isOnlineFallback;
+    if (this.connectivity.isReachable(agentId)) return true;
+    const hasLiveInstance = this.instanceRegistry.list().some(
+      (i) =>
+        (i.mode !== 'manager' && i.agent_id === agentId) ||
+        (Array.isArray(i.agent_ids) && i.agent_ids.includes(agentId)),
+    );
+    return hasLiveInstance || !!isOnlineFallback;
+  }
+
+  /**
+   * Human-readable detail for the `error` lifecycle state (ticket 1f750878),
+   * or undefined for any other state. Reads the start-error marker's reason and
+   * maps it through autostartFeasibilityLabel: a known AutostartFeasibility slug
+   * renders as its localized label; a manager-side spawn-failure `detail`
+   * (stored verbatim by the /command/ack loop) passes through unchanged. Shared
+   * by _emit (SSE) and AgentsController._enrichLiveData (REST) so the badge
+   * tooltip reads identically on both surfaces.
+   */
+  lifecycleDetailFor(agent_id: string, state: AgentLifecycleState): string | undefined {
+    if (state !== 'error') return undefined;
+    const reason = this.getStartError(agent_id);
+    return reason ? autostartFeasibilityLabel(reason) : undefined;
   }
 
   async onModuleInit(): Promise<void> {
@@ -546,13 +601,25 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
     // the full authoritative picture, so a ticket-task change never blinks a
     // live QA run out and QA start/finalize appear/disappear live (ticket
     // 09ed8def). The event-registry map() tags each item's kind from t.kind.
+    // Reachability + lifecycle (ticket bfdd80b7, unified in 1f750878). Route
+    // through the shared isReachable so the SSE badge matches the dispatch gate
+    // + REST badge: status.is_online is only the FALLBACK signal now, so an
+    // SSE-only reachable agent (is_online=0, e.g. manager-supervised) is no
+    // longer broadcast as offline/never_started when it dispatches fine.
+    const reachable = this.isReachable(status.agent_id, status.is_online);
+    const lifecycle_state = this.lifecycleStateFor(status.agent_id, reachable, status.connected_at);
     activityEvents.emit('agent_status', {
       ...status,
       // Derived lifecycle state (ticket bfdd80b7) — never_started / starting /
       // online / offline / error. The event-registry map() ships it verbatim;
       // the client badge reads it so "created but never started" is finally
       // distinguishable from "online".
-      lifecycle_state: this.lifecycleStateFor(status.agent_id, status.is_online, status.connected_at),
+      lifecycle_state,
+      // Concrete reason for the `error` state (ticket 1f750878) so the badge
+      // shows WHY (manager offline / no working dir / manager-side spawn-failure
+      // detail), not just 오류. Undefined for non-error states — the map() ships
+      // it conditionally so the wire stays clean otherwise.
+      lifecycle_detail: this.lifecycleDetailFor(status.agent_id, lifecycle_state),
       active_tasks: [
         ...this._nonStaleTaskList(status.active_tasks),
         ...this._qaTaskList(status.agent_id),

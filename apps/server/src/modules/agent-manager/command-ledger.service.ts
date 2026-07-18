@@ -22,6 +22,15 @@ export interface CommandRecord {
   /** Manager Agent identity that the dispatch SSE was scoped to. */
   agent_id: string;
   command: string;
+  /**
+   * The MANAGED agent the command acts on (ticket 1f750878). For `spawn_agent`
+   * this is `args.agent_id` — DISTINCT from `agent_id` above (the supervising
+   * manager). Recorded server-side so the `/command/ack` handler can route a
+   * spawn-failure ack to `markStartError(target_agent_id, …)` without the
+   * manager having to echo it back (keeps the ack wire contract unchanged).
+   * Undefined for verbs that don't target a specific managed agent.
+   */
+  target_agent_id?: string;
   issued_at: string;
   expires_at: number;
 }
@@ -48,7 +57,7 @@ export class CommandLedgerService implements OnModuleDestroy {
     this.records.clear();
   }
 
-  record(input: { command_id: string; instance_id: string; agent_id: string; command: string; issued_at: string }): void {
+  record(input: { command_id: string; instance_id: string; agent_id: string; command: string; issued_at: string; target_agent_id?: string }): void {
     this.records.set(input.command_id, {
       ...input,
       expires_at: Date.now() + RECORD_TTL_MS,

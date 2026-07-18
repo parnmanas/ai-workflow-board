@@ -506,10 +506,24 @@ export class AgentManagerController {
     }
 
     const detail = typeof body?.detail === 'string' ? body.detail.slice(0, 2000) : '';
+
+    // Spawn-failure closed loop (ticket 1f750878). The manager already acks a
+    // failed spawn_agent (working_dir empty / apiKey provisioning / codex prep /
+    // pool exhausted …) with status='error' + the thrown message as `detail` —
+    // it just wasn't consumed here, so the badge silently reverted 시작 중→미시작
+    // once the 3-min starting marker expired and the ticket-feedback debounce
+    // (sig='ok') suppressed re-surfacing for 10 min. Route the failure to the
+    // SPAWN TARGET (record.target_agent_id — NOT the manager agent_id the ack is
+    // signed with) so its lifecycle flips to `error` with the concrete reason
+    // for the 5-min start-error window, and the reason ships as lifecycle_detail.
+    if (status === 'error' && record.command === 'spawn_agent' && record.target_agent_id) {
+      this.agentStatus.markStartError(record.target_agent_id, detail || 'spawn 실패 (사유 미상)');
+    }
+
     this.logService.info(
       'AgentManager',
       `Command ack id=${command_id} status=${status} command=${record.command} agent=${callerAgentId}`,
-      { command_id, status, detail, command: record.command, agent_id: callerAgentId },
+      { command_id, status, detail, command: record.command, agent_id: callerAgentId, target_agent_id: record.target_agent_id },
     );
     return res.json({ ok: true });
   }

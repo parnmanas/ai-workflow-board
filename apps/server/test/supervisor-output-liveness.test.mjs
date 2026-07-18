@@ -225,7 +225,10 @@ test('AgentStatusService.recordOutputLiveness round-trips and is keyed by (agent
   const { MemoryMetricsRegistry } = await loadDist(['services', 'memory-metrics.registry.js']);
   const agentRepo = { async find() { return []; }, async update() {} };
   const dataSource = { getRepository: () => ({ async findOne() { return null; } }) };
-  const service = new AgentStatusService(agentRepo, dataSource, noopLog, new MemoryMetricsRegistry());
+  // connectivity + instanceRegistry (ticket 1f750878) — inert fakes so
+  // isReachable() falls back to status.is_online (identical to the pre-1f750878
+  // _emit behavior these output-liveness assertions were written against).
+  const service = new AgentStatusService(agentRepo, dataSource, noopLog, new MemoryMetricsRegistry(), { isReachable: () => false }, { list: () => [] });
 
   assert.equal(service.getOutputLivenessAt('a', 't', 'assignee'), undefined, 'unknown strand → undefined');
   const before = Date.now();

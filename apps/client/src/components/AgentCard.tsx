@@ -115,7 +115,13 @@ export default function AgentCard({
   // 5-state lifecycle badge (ticket bfdd80b7) — drives both the avatar dot and
   // the status pill. The "last seen / never connected" subtext below still keys
   // off isOnline so its logic stays intact.
-  const lifecycle = LIFECYCLE_BADGE[resolveLifecycle(agent)];
+  const lifecycleState = resolveLifecycle(agent);
+  const lifecycle = LIFECYCLE_BADGE[lifecycleState];
+  // Concrete error reason (ticket 1f750878) — surfaced on the 오류 badge as both
+  // a tooltip and a small danger-colored line so "구체 실패 사유" (manager offline
+  // / no working dir / manager-side spawn-failure detail) is visible instead of
+  // the badge silently flipping back to 미시작. Only meaningful for error state.
+  const lifecycleDetail = lifecycleState === 'error' ? agent.lifecycle_detail : undefined;
   // Concurrency-N + QA rollup. Prefer the full active_tasks list (a board with
   // max_concurrent_tickets_per_agent > 1 puts several entries here, plus any
   // in-progress QA runs); fall back to the legacy singular current_task (older
@@ -205,6 +211,21 @@ export default function AgentCard({
     fontSize: 11,
     fontWeight: 400,
     color: tokens.colors.textMuted,
+  };
+
+  // Error-reason line under the 오류 badge (ticket 1f750878). Danger-colored,
+  // clamped to 2 lines so a long manager detail doesn't blow out the card.
+  const lifecycleDetailStyle: React.CSSProperties = {
+    fontSize: 11,
+    fontWeight: 400,
+    color: tokens.colors.dangerLight,
+    lineHeight: 1.35,
+    display: '-webkit-box',
+    WebkitLineClamp: 2,
+    WebkitBoxOrient: 'vertical',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    wordBreak: 'break-word',
   };
 
   const sectionLabelStyle: React.CSSProperties = {
@@ -309,7 +330,9 @@ export default function AgentCard({
         >
           <div style={nameStyle} title={displayName}>{displayName}</div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-            <Badge variant={lifecycle.variant}>{lifecycle.label}</Badge>
+            <span style={{ display: 'inline-flex' }} title={lifecycleDetail || undefined}>
+              <Badge variant={lifecycle.variant}>{lifecycle.label}</Badge>
+            </span>
             {!isOnline && (
               <>
                 <span style={subMetaStyle}>·</span>
@@ -321,6 +344,11 @@ export default function AgentCard({
               </>
             )}
           </div>
+          {lifecycleDetail && (
+            <div style={lifecycleDetailStyle} title={lifecycleDetail}>
+              {lifecycleDetail}
+            </div>
+          )}
         </div>
       </div>
 

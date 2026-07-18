@@ -62,6 +62,7 @@ export interface Agent {
   connected_at: string | null; // ISO timestamp or null (Phase 2)
   last_seen_at: string | null; // ISO timestamp or null (Phase 2)
   lifecycle_state?: AgentLifecycleState; // 5-state process lifecycle (ticket bfdd80b7)
+  lifecycle_detail?: string;   // concrete reason when lifecycle_state==='error' (ticket 1f750878)
   // Phase 1 role prompt fields (D-14 / ROLE-02)
   role_prompt?: string;
   role_prompt_meta?: Record<string, any> | null;
@@ -1430,6 +1431,9 @@ export interface DashboardAgent {
   // 5-state process lifecycle (ticket bfdd80b7). Absent on older servers →
   // the card falls back to deriving state from is_online/last_seen/connected.
   lifecycle_state?: AgentLifecycleState;
+  // Concrete reason when lifecycle_state==='error' (ticket 1f750878) — the card
+  // shows it as a tooltip on the 오류 badge. Absent for non-error states.
+  lifecycle_detail?: string;
   workspace_id: string;
   pending_trigger_count: number;
   // Legacy singular — most-recently-claimed task. Prefer active_tasks; kept for
@@ -1611,6 +1615,9 @@ export interface AgentStatusEnvelope {
     // 5-state process lifecycle (ticket bfdd80b7) — pushed live so the card
     // badge reflects starting/never_started/error, not just online/offline.
     lifecycle_state?: AgentLifecycleState;
+    // Concrete reason when lifecycle_state==='error' (ticket 1f750878), pushed
+    // live alongside the state so the 오류 badge tooltip updates in real time.
+    lifecycle_detail?: string;
     current_task?: AgentCurrentTask;
     // Full concurrency-N task list. On this SSE wire it carries board-ticket
     // tasks only (all kind:'ticket'); QA runs are merged into the REST

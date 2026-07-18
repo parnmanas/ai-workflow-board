@@ -186,7 +186,7 @@ export class AgentsController {
    */
   private async _enrichLiveData<T extends Pick<Agent, 'id' | 'workspace_id' | 'is_online' | 'connected_at'>>(
     agents: T[],
-  ): Promise<Array<T & { live_instance?: AgentLiveInstance; subagents?: AgentSubagentRollup; lifecycle_state?: AgentLifecycleState }>> {
+  ): Promise<Array<T & { live_instance?: AgentLiveInstance; subagents?: AgentSubagentRollup; lifecycle_state?: AgentLifecycleState; lifecycle_detail?: string }>> {
     if (agents.length === 0) return [];
 
     // ── live_instance ──────────────────────────────────────────────
@@ -233,14 +233,19 @@ export class AgentsController {
     return agents.map((a) => {
       const inst = primaryByAgentId.get(a.id) || supervisorByAgentId.get(a.id);
       const subList = subagentsByAgentId.get(a.id) || [];
-      const enriched: T & { live_instance?: AgentLiveInstance; subagents?: AgentSubagentRollup; lifecycle_state?: AgentLifecycleState } = { ...a };
+      const enriched: T & { live_instance?: AgentLiveInstance; subagents?: AgentSubagentRollup; lifecycle_state?: AgentLifecycleState; lifecycle_detail?: string } = { ...a };
       // Lifecycle state (ticket bfdd80b7) so the initial REST render already
       // distinguishes never_started/offline/online (the live agent_status SSE
       // then keeps it fresh incl. the transient starting/error markers).
-      // Reachable = DB is_online OR a live instance carries it (fresher than the
-      // 30s sweep right after a spawn).
-      const reachable = !!a.is_online || !!inst;
+      // Reachability now delegates to AgentStatusService.isReachable (ticket
+      // 1f750878) — the SINGLE definition shared with _emit + the dispatch gate,
+      // so an SSE-only reachable agent (is_online=0) is no longer mis-badged
+      // offline here either. is_online is passed as the fallback signal.
+      const reachable = this.agentStatusService.isReachable(a.id, !!a.is_online);
       enriched.lifecycle_state = this.agentStatusService.lifecycleStateFor(a.id, reachable, a.connected_at ?? null);
+      // Concrete error reason (ticket 1f750878) so the REST render carries the
+      // same "구체 실패 사유" tooltip as the SSE badge.
+      enriched.lifecycle_detail = this.agentStatusService.lifecycleDetailFor(a.id, enriched.lifecycle_state);
       if (inst) {
         enriched.live_instance = {
           instance_id: inst.instance_id,

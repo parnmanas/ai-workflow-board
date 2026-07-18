@@ -89,21 +89,39 @@ function connectivityOf(reachable = []) {
   return { isReachable: (id) => set.has(id) };
 }
 
+function metricsFake() {
+  return { register() {} };
+}
+
 async function buildAutostart({ agentRows, instances, agentStatus, activity, roomMessaging, connectivity }) {
   const { AgentAutostartService } = await loadDist(['modules', 'agents', 'agent-autostart.service.js']);
   const registry = registryOf(instances);
+  const conn = connectivity ?? connectivityOf();
   const { svc: managerCommand } = await buildCommandService(registry, agentRows);
-  const service = new AgentAutostartService(
+  // Reachability now lives on AgentStatusService.isReachable (ticket 1f750878) —
+  // the autostart service delegates to it (no longer injects Instance/Connectivity
+  // directly). Augment the passed fake with the SAME OR over the test's
+  // connectivity + instances so classify() resolves reachability identically.
+  // The spread preserves the marker closures, so the test's assertions on the
+  // original agentStatus (markStarting/getStartError) still observe the mutations.
+  const status = {
+    ...agentStatus,
+    isReachable: (id, isOnlineFallback) =>
+      conn.isReachable(id) ||
+      instances.some(
+        (i) => (i.mode !== 'manager' && i.agent_id === id) || (Array.isArray(i.agent_ids) && i.agent_ids.includes(id)),
+      ) ||
+      !!isOnlineFallback,
+  };
+  return new AgentAutostartService(
     agentRepoOf(agentRows),
-    registry,
-    connectivity ?? connectivityOf(),
     managerCommand,
-    agentStatus,
+    status,
     activity,
     roomMessaging,
     noopLog,
+    metricsFake(),
   );
-  return service;
 }
 
 // Capture agent_manager_command emissions on the shared bus for the window of a
@@ -294,4 +312,101 @@ test('chat path — reachable agent produces NO system message (no false noise)'
   await new Promise((r) => setTimeout(r, 20));
   svc.onModuleDestroy();
   assert.equal(roomMessaging.sent.length, 0, 'reachable agent → the hub stays silent (classify is the authority)');
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Follow-up 3 (ticket 1f750878): spawn-fail ack loop · reachability unification ·
+// debounce-map TTL eviction.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Real AgentStatusService (fakes for the DB / registries) — exercises the SHARED
+// reachability + error-detail logic the SSE badge, REST badge and dispatch gate
+// all now delegate to. onModuleInit (DB seed + sweep) is never called.
+async function buildAgentStatus({ instances = [], reachable = [] } = {}) {
+  const { AgentStatusService } = await loadDist(['modules', 'agents', 'agent-status.service.js']);
+  const agentRepo = { async find() { return []; }, async findOne() { return null; } };
+  const dataSource = { getRepository() { return { async find() { return []; } }; } };
+  return new AgentStatusService(agentRepo, dataSource, noopLog, metricsFake(), connectivityOf(reachable), registryOf(instances));
+}
+
+// ── #2 reachability — the SINGLE isReachable definition ─────────────────────
+test('isReachable — connectivity ‖ live-instance ‖ is_online fallback (ticket 1f750878 #2)', async () => {
+  // SSE-only reachable (is_online=0, no instance) — the exact case _emit used to
+  // mis-badge offline while the dispatch gate correctly considered it reachable.
+  const viaSse = await buildAgentStatus({ reachable: ['a'] });
+  assert.equal(viaSse.isReachable('a', false), true, 'live SSE session → reachable despite is_online=0');
+  assert.equal(viaSse.isReachable('other', false), false, 'no signal + no fallback → not reachable');
+
+  // A proxy/daemon instance whose primary agent_id IS the agent carries it.
+  const viaProxy = await buildAgentStatus({ instances: [{ instance_id: 'i', agent_id: 'd', mode: 'proxy', started_at: 't' }] });
+  assert.equal(viaProxy.isReachable('d', false), true, "own proxy/daemon instance → reachable");
+
+  // A manager instance listing the agent in agent_ids[] carries it; the manager's
+  // OWN id is not thereby a reachable managed agent.
+  const viaMgr = await buildAgentStatus({ instances: [{ instance_id: 'i', agent_id: 'mgr', mode: 'manager', agent_ids: ['b'], started_at: 't' }] });
+  assert.equal(viaMgr.isReachable('b', false), true, 'manager agent_ids[] carries it → reachable');
+  assert.equal(viaMgr.isReachable('mgr', false), false, 'a manager instance does not make its own id a reachable managed agent');
+
+  // is_online fallback alone.
+  const plain = await buildAgentStatus();
+  assert.equal(plain.isReachable('c', true), true, 'is_online fallback → reachable');
+  assert.equal(plain.isReachable('c', false), false, 'nothing → not reachable');
+  assert.equal(plain.isReachable('', true), true, 'empty id degrades to the fallback');
+});
+
+// ── #1 error surfacing — markStartError → error state + concrete detail ─────
+test('markStartError → error lifecycle + concrete detail surfaced, no silent revert (ticket 1f750878 #1)', async () => {
+  const svc = await buildAgentStatus();
+
+  // Manager-side spawn-failure detail (free-form) surfaces verbatim so "구체
+  // 실패 사유" is visible instead of the badge silently flipping back to 미시작.
+  svc.markStartError('a', 'spawn_agent: working_dir is empty');
+  assert.equal(svc.lifecycleStateFor('a', false, null), 'error', 'start error → error lifecycle state');
+  assert.equal(svc.isStarting('a'), false, 'markStartError clears the starting marker (no 시작 중→미시작 revert)');
+  assert.equal(svc.lifecycleDetailFor('a', 'error'), 'spawn_agent: working_dir is empty', 'raw manager detail passes through as the reason');
+  assert.equal(svc.lifecycleDetailFor('a', 'online'), undefined, 'detail is only surfaced for the error state');
+
+  // A known feasibility slug is localized (shared with the autostart feedback copy).
+  svc.markStartError('b', 'manager_offline');
+  assert.match(svc.lifecycleDetailFor('b', 'error'), /오프라인/, 'known slug → localized label');
+
+  // markStarting supersedes the error (a fresh spawn dispatch).
+  svc.markStarting('a');
+  assert.equal(svc.lifecycleStateFor('a', false, null), 'starting');
+  assert.equal(svc.lifecycleDetailFor('a', 'starting'), undefined, 'no detail once back to starting');
+});
+
+// ── #1 ledger threading — the blocker the ack loop needs ────────────────────
+test('spawn_agent ledger records the TARGET agent id for the ack loop (ticket 1f750878 #1)', async () => {
+  const { svc, ledger } = await buildCommandService(registryOf([liveManagerInstance()]), [startableAgent('tgt')]);
+  const r = await svc.issueSpawnAgent('tgt', 'system:autostart');
+  assert.equal(r.ok, true);
+  const rec = ledger.get(r.command_id);
+  assert.ok(rec, 'command recorded in the ledger');
+  assert.equal(rec.command, 'spawn_agent');
+  assert.equal(rec.agent_id, MANAGER_ID, 'ledger agent_id is the supervising MANAGER (whose key signs the ack)');
+  assert.equal(rec.target_agent_id, 'tgt', 'ledger ALSO carries the spawn TARGET so the ack can markStartError the right agent');
+});
+
+// ── #3 debounce maps — TTL eviction ─────────────────────────────────────────
+test('debounce maps evict stale entries, keep fresh (ticket 1f750878 #3)', async () => {
+  const svc = await buildAutostart({ agentRows: [startableAgent()], instances: [liveManagerInstance()], agentStatus: agentStatusFake(), activity: activityFake(), roomMessaging: roomMessagingFake() });
+  const now = Date.now();
+  const OLD = now - 24 * 60 * 60_000; // 24h ago — older than every debounce window
+  // Seed the private maps directly (TS `private` compiles to a plain property).
+  svc.lastSpawnAt.set('stale', OLD);
+  svc.lastSpawnAt.set('fresh', now);
+  svc.lastTicketFeedback.set('t:stale', { at: OLD, sig: 'ok' });
+  svc.lastTicketFeedback.set('t:fresh', { at: now, sig: 'ok' });
+  svc.lastChatFeedback.set('c:stale', OLD);
+  svc.lastChatFeedback.set('c:fresh', now);
+
+  svc._evictStaleDebounce();
+
+  assert.equal(svc.lastSpawnAt.has('stale'), false, 'stale spawn entry evicted');
+  assert.equal(svc.lastSpawnAt.has('fresh'), true, 'fresh spawn entry kept');
+  assert.equal(svc.lastTicketFeedback.has('t:stale'), false, 'stale ticket-feedback entry evicted');
+  assert.equal(svc.lastTicketFeedback.has('t:fresh'), true, 'fresh ticket-feedback entry kept');
+  assert.equal(svc.lastChatFeedback.has('c:stale'), false, 'stale chat-feedback entry evicted');
+  assert.equal(svc.lastChatFeedback.has('c:fresh'), true, 'fresh chat-feedback entry kept');
 });

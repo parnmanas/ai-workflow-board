@@ -64,7 +64,10 @@ function makeService(StatusClass, RegistryClass, { agentRows = [], qaRuns = [], 
     },
   };
   const registry = new RegistryClass();
-  const service = new StatusClass(agentRepo, dataSource, noopLog, registry);
+  // connectivity + instanceRegistry (ticket 1f750878) — inert fakes so
+  // isReachable() falls back to status.is_online (unchanged _emit lifecycle for
+  // these QA-task assertions, which don't exercise reachability).
+  const service = new StatusClass(agentRepo, dataSource, noopLog, registry, { isReachable: () => false }, { list: () => [] });
   return { service, registry };
 }
 

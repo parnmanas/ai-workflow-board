@@ -175,6 +175,13 @@ export interface AgentStatusPayload {
   // they looked identical). Optional so a legacy emit without it degrades to
   // the is_online view.
   lifecycle_state?: 'never_started' | 'starting' | 'online' | 'offline' | 'error';
+  // Concrete reason for the `error` lifecycle state (ticket 1f750878) — e.g.
+  // "Agent Manager 가 오프라인이라 …" for a known feasibility slug, or the
+  // manager-side spawn-failure detail (working_dir empty / apiKey provisioning /
+  // pool exhausted …) surfaced by the /command/ack closed loop. The client badge
+  // renders it as a tooltip so "구체 실패 사유" is visible instead of a bare 오류.
+  // Additive + conditional-omit: present only when lifecycle_state==='error'.
+  lifecycle_detail?: string;
   // Legacy singular — most-recently-claimed task. Kept so older clients that
   // read only current_task keep rendering. New clients read active_tasks.
   current_task?: {
