@@ -630,7 +630,8 @@ test('chat-session: second message AFTER first spawn lands collapses to follow-u
   assert.equal(r2.pid, r1.pid, 'second message reuses the same pid');
   assert.equal(r2.firstTurn, undefined);
   assert.equal(mgr.followUps.length, 1, 'exactly one follow-up turn was written');
-  assert.equal(mgr.followUps[0].turnText, 'how are you?');
+  assert.ok(mgr.followUps[0].turnText.startsWith('how are you?\n\nTurn policy:\n'));
+  assert.ok(mgr.followUps[0].turnText.includes('Reuse any run id or open capability ticket'));
 });
 
 test('chat-session: different agents in same room each spawn their own session', async () => {
@@ -676,5 +677,6 @@ test('chat-session: dedup mark is rolled back when in-flight guard drops the sec
   const r3 = await mgr.dispatch({ ...base, createdAt: droppedStamp, content: 'second-retry' });
   assert.equal(r3.dispatched, true);
   assert.equal(mgr.followUps.length, 1);
-  assert.equal(mgr.followUps[0].turnText, 'second-retry');
+  assert.ok(mgr.followUps[0].turnText.startsWith('second-retry\n\nTurn policy:\n'));
+  assert.ok(mgr.followUps[0].turnText.includes('Reuse any run id or open capability ticket'));
 });

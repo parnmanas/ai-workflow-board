@@ -42,7 +42,7 @@ export async function loadServerModules() {
 async function prepareIsolatedPgSchema(schema) {
   // Defensive identifier validation — schema is built from pid+port (always
   // safe) but never interpolate an unvalidated value into DDL.
-  if (!/^[a-z_][a-z0-9_]*$/i.test(schema)) {
+  if (!/^[a-z_][a-z0-9_]*$/.test(schema)) {
     throw new Error(`unsafe pg schema name: ${schema}`);
   }
   const { Client } = await import('pg');
@@ -55,6 +55,11 @@ async function prepareIsolatedPgSchema(schema) {
   });
   await client.connect();
   try {
+    // TypeORM auto-installs uuid-ossp in the first schema on search_path. In
+    // the dialect matrix that would strand the extension in the first test's
+    // disposable schema, making subsequent schemas unable to resolve
+    // uuid_generate_v4(). Keep shared extensions in public explicitly.
+    await client.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA public');
     await client.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
     await client.query(`CREATE SCHEMA "${schema}"`);
   } finally {

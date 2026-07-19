@@ -2123,6 +2123,20 @@ export class EventDispatcher {
       return;
     }
 
+    // The server is the first dedupe boundary; this is the final safety net for
+    // old servers/replayed SSE. Only terminal approval receipts are suppressed.
+    // Questions, change requests, consensus discussion and handoffs still flow.
+    const { isAgentTerminalAcknowledgement } = await import('./terminal-ack-guard.js');
+    if (isAgentTerminalAcknowledgement(ev)) {
+      log(
+        `Comment mention suppressed — duplicate terminal acknowledgement: ` +
+          `ticket=${(ev.ticket_id || '').slice(0, 8) || '_'} ` +
+          `comment=${(ev.comment_id || '').slice(0, 8) || '_'} ` +
+          `actor=${(ev.actor_id || '').slice(0, 8) || '_'}`,
+      );
+      return;
+    }
+
     const ticketId = ev.ticket_id || '';
     const commentId = ev.comment_id || ev.field_changed || '';
     const agentId = ev.agent_id || ev.actor_name || '';
@@ -2663,7 +2677,7 @@ export class EventDispatcher {
           kind: 'chat',
           taskText,
           rolePrompt,
-          chatRequestId: `msg:${p.sender_id}:${p.created_at || ''}`,
+          chatRequestId: p.message_id || p.id || `msg:${p.sender_id}:${p.created_at || ''}`,
           ticketId: '',
           agentId: agentContext?.agent_id || '',
           roomId: p.room_id || '',

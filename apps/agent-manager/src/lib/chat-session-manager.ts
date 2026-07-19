@@ -13,6 +13,7 @@ import {
   type SessionRecord,
 } from './base-session-manager.js';
 import { ADAPTER_CAPABILITIES, type ParseResult, type TurnImage } from './cli-adapters/base.js';
+import { createAdapter } from './cli-adapters/index.js';
 import { fetchChatRoomHistory, postChatRoomMessage } from './rest.js';
 import { log } from './logging.js';
 import { callMcpTool, fireAndForgetTool, unwrapToolResult } from './mcp-client.js';
@@ -35,7 +36,7 @@ import {
   type ArtifactRef,
 } from './ticket-ref-capture.js';
 import { findLiveBackgroundTasks, reapProcessTrees, type ProcNode } from './process-tree.js';
-import { composeChatRoomPrompt } from './prompts.js';
+import { chatFollowupPolicy, composeChatRoomPrompt } from './prompts.js';
 import {
   approxBase64Bytes,
   prepareChatAttachments,
@@ -352,7 +353,7 @@ export class ChatSessionManager
         sender_id: spec.senderId || '',
       },
       preparedFirstTurn,
-      true,
+      createAdapter(spec.agentContext?.cli).has(ADAPTER_CAPABILITIES.NATIVE_MCP),
       historyAttachments,
       spec.roomName || '',
       spec.isActionRoom || false,
@@ -956,16 +957,16 @@ export class ChatSessionManager
    *  new user message + any attachment block, since history is already in
    *  the model's running context. */
   #followupTurnText(
-    spec: { content?: string },
+    spec: { content?: string; isActionRoom?: boolean },
     attachments: PreparedAttachment[],
   ): string {
     const text = (spec.content || '').trim();
-    if (attachments.length === 0) return text;
     const lines: string[] = [];
     if (text) lines.push(text);
     for (const ln of renderAttachmentBlock(attachments)) {
       lines.push(ln);
     }
+    lines.push('', 'Turn policy:', chatFollowupPolicy(!!spec.isActionRoom));
     return lines.join('\n');
   }
 

@@ -40,6 +40,7 @@ import { isReviewToMerging, hasReviewerApproval, ReviewApprovalRequiredError } f
 import { evaluateMergeGate, MergeGateBlockedError } from '../mcp/shared/merge-gate';
 import { findOrFail } from '../../common/find-or-fail';
 import { resolveAgentDisplayName } from '../../utils/agent-name';
+import { createHash } from 'node:crypto';
 
 @ApiSecurity('agent-api-key')
 @ApiTags('agent-api')
@@ -406,6 +407,70 @@ export class AgentApiController {
       relations: ['children'],
     });
     return res.status(201).json({ ...full, labels: JSON.parse(full!.labels || '[]') });
+  }
+
+  /** Atomic manager fallback for chat runtimes without native MCP.  The unique
+   * key is cleared when a ticket becomes terminal, so only open work dedupes. */
+  @Post('operational-capability-ticket')
+  async operationalCapabilityTicket(@Body() body: any, @Req() req: Request, @Res() res: Response) {
+    const scope = this.requestScope(req);
+    const workspaceId = String(body.workspace_id || scope || '');
+    if (!workspaceId || !body.dedupe_key || !body.operation || !body.missing_capability) {
+      return res.status(400).json({ error: 'workspace_id, dedupe_key, operation and missing_capability are required' });
+    }
+    if (scope && scope !== workspaceId) return this.denyScope(res);
+    const recurrenceKey = createHash('sha256').update(
+      `${String(body.dedupe_key)}\n${String(body.room_id || '')}\n${String(body.message_id || '')}`,
+    ).digest('hex');
+    const recordRecurrence = async (manager: EntityManager, ticketId: string) => {
+      // INSERT .. ON CONFLICT DO NOTHING is the retry policy: the exact same
+      // source message is stored once, while distinct room/message recurrences
+      // each remain traceable. This also closes the create unique-race window.
+      await manager.getRepository(Comment).createQueryBuilder().insert().values({
+        ticket_id: ticketId,
+        author_type: 'system', author: 'Agent Manager', type: 'system',
+        content: `반복 운영 요청 감지: room=${body.room_id || ''} message=${body.message_id || ''}`,
+        operational_recurrence_key: recurrenceKey,
+      }).orIgnore().execute();
+    };
+    try {
+      const result = await this.dataSource.transaction(async manager => {
+        const tickets = manager.getRepository(Ticket);
+        let ticket = await tickets.findOne({ where: { operational_dedupe_key: String(body.dedupe_key), archived_at: IsNull() } });
+        if (ticket) {
+          await recordRecurrence(manager, ticket.id);
+          return { ticket, reused: true };
+        }
+        const board = body.board_id
+          ? await manager.getRepository(Board).findOne({ where: { id: String(body.board_id), workspace_id: workspaceId } })
+          : await manager.getRepository(Board).findOne({ where: { workspace_id: workspaceId }, order: { created_at: 'ASC' } });
+        if (!board) throw new Error('no board available for operational fallback');
+        const column = await manager.getRepository(BoardColumn).findOne({ where: { board_id: board.id, is_terminal: false }, order: { position: 'ASC' } });
+        if (!column) throw new Error('no active column available for operational fallback');
+        const title = `[운영 자동화] ${String(body.operation).slice(0, 120)}용 MCP/Action capability 추가`;
+        ticket = tickets.create({
+          workspace_id: workspaceId, column_id: column.id, title,
+          description: `원 요청: ${body.original_request || body.operation}\n정규화 operation: ${body.operation}\n누락 capability: ${body.missing_capability}\nsource room/message: ${body.room_id || ''}/${body.message_id || ''}\n\nAction 검색 후에도 실행 수단이 없었습니다. capability 구현 후 원 대화에 결과를 회신하고, 안전·권한 조건을 포함한 idempotent Action으로 등록합니다.`,
+          labels: JSON.stringify(['automation', 'mcp', 'mcp-missing', 'source:chat']),
+          priority: 'medium', position: await maxTicketPosition(manager, column.id),
+          operational_dedupe_key: String(body.dedupe_key),
+        });
+        ticket = await tickets.save(ticket);
+        return { ticket, reused: false };
+      });
+      return res.status(result.reused ? 200 : 201).json({ id: result.ticket.id, title: result.ticket.title, reused: result.reused });
+    } catch (error: any) {
+      // A racing transaction won the unique key: read and reuse its open row.
+      const existing = await this.ticketRepo.findOne({ where: { operational_dedupe_key: String(body.dedupe_key), archived_at: IsNull() } });
+      if (existing) {
+        // The losing transaction is already rolled back. Record its source in
+        // a fresh transaction; the recurrence unique key makes this safe to
+        // retry if the caller did not receive the 200 response.
+        await this.dataSource.transaction(manager => recordRecurrence(manager, existing.id));
+        return res.status(200).json({ id: existing.id, title: existing.title, reused: true });
+      }
+      return res.status(503).json({ error: 'operational_fallback_failed', message: error?.message || String(error) });
+    }
   }
 
   @Post('move-ticket')

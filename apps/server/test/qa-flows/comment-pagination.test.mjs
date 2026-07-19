@@ -101,7 +101,8 @@ test('comment dynamic loading: bounded detail GET + cursor pagination', async (t
   assert.ok(capPage.length <= 200, `limit capped at 200, got ${capPage.length}`);
 
   step('unknown ticket → 404');
-  const missingRes = await fetch(`http://localhost:${port}/api/tickets/does-not-exist/comments`, { headers: authHeaders });
+  const missingTicketId = '00000000-0000-4000-8000-000000000000';
+  const missingRes = await fetch(`http://localhost:${port}/api/tickets/${missingTicketId}/comments`, { headers: authHeaders });
   assert.equal(missingRes.status, 404, 'missing ticket returns 404');
 
   exitAfterTests(0);

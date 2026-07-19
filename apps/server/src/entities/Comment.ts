@@ -60,6 +60,13 @@ export class Comment {
   @Column({ type: 'text', default: '{}' })
   metadata: string;
 
+  // Idempotency key for an operational fallback recurrence source.  Nullable
+  // unique lets ordinary comments coexist while making a manager retry (or a
+  // create-ticket unique-key race loser) record a room/message at most once.
+  @Index({ unique: true })
+  @Column({ type: 'varchar', nullable: true, default: null })
+  operational_recurrence_key: string | null;
+
   // Dedupe counters for noisy auto-generated system rows (e.g. silent-exit
   // fallback fired by a stuck retry loop). When the silent-exit endpoint sees
   // the same fingerprint as the most recent comment on the ticket, it bumps

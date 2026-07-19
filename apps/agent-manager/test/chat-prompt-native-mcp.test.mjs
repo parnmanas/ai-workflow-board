@@ -13,7 +13,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { composeChatRoomPrompt, composeChatPrompt } from '../dist/lib/prompts.js';
+import { chatFollowupPolicy, composeChatRoomPrompt, composeChatPrompt } from '../dist/lib/prompts.js';
 import { CodexCliAdapter } from '../dist/lib/cli-adapters/codex.js';
 import { ADAPTER_CAPABILITIES } from '../dist/lib/cli-adapters/base.js';
 
@@ -134,15 +134,39 @@ test('composeChatRoomPrompt Action room (non-native / antigravity) → direct wo
   );
 });
 
-test('composeChatRoomPrompt ordinary chat still files a ticket (regression — flag defaults false)', () => {
+test('composeChatRoomPrompt ordinary chat uses capability-first operational policy', () => {
   const p = composeChatRoomPrompt(ROOM, [], MSG, undefined, true);
   assert.ok(
-    p.includes('This is a CHAT channel, NOT a work channel'),
-    'chat work-policy rule intact when isActionRoom is omitted',
+    p.includes('OPERATIONAL REQUEST POLICY'),
+    'ordinary chat receives the operational policy',
   );
   assert.ok(
-    p.includes('create an AWB ticket with mcp__awb__create_ticket'),
-    'ordinary chat still creates a ticket for dev work',
+    p.includes('search workspace/board Actions') && p.includes('run it exactly once'),
+    'Action lookup and execution precede fallback',
   );
+  assert.ok(p.includes('required MCP/tool itself is unavailable'));
+  assert.ok(p.includes('create one AWB capability ticket'));
+  assert.ok(p.includes('Never ask the user to run commands'));
   assert.ok(!p.includes('This is an ACTION run'), 'Action framing never leaks into ordinary chat');
+});
+
+test('non-native chat routes missing capability to manager fallback, never the user', () => {
+  const p = composeChatRoomPrompt(ROOM, [], { ...MSG, content: 'Deploy AWB' }, undefined, false);
+  assert.ok(p.includes('agent-manager fallback can create/reuse the capability ticket'));
+  assert.ok(p.includes('never tell the user to file it'));
+  assert.ok(p.includes('room/source ids'));
+});
+
+test('persistent follow-up policy preserves run/ticket dedupe and rechecks Actions', () => {
+  const p = chatFollowupPolicy(false);
+  assert.ok(p.includes('Action search/run first'));
+  assert.ok(p.includes('Reuse any run id or open capability ticket'));
+  assert.ok(p.includes('re-checking whether a matching Action has since appeared'));
+  assert.ok(!p.includes('ask the user'));
+});
+
+test('Action-room follow-up stays direct and never recursively delegates', () => {
+  const p = chatFollowupPolicy(true);
+  assert.ok(p.includes('Continue this Action directly'));
+  assert.ok(p.includes('do not defer it'));
 });

@@ -204,6 +204,13 @@ export function composeTriggerPrompt(
  *  "do the work directly, do NOT create a ticket" rule. Ordinary chat rooms
  *  (isActionRoom = false, the default) keep the prior behavior verbatim. */
 function chatReplyInstructions(usesNativeMcp: boolean, roomId: string, isActionRoom = false): string[] {
+  const operationalPolicy = [
+    '- OPERATIONAL REQUEST POLICY: requests to deploy, upgrade, publish, restart, roll out, or run recurring operational work are capability-first. Never ask the user to run commands, install tooling, create a ticket, or otherwise carry out the operation for you.',
+    '- For an operational request, first search workspace/board Actions (`search_actions` or `list_actions`). If a matching Action exists, check its approval/risk guard and run it exactly once with `run_action`; report the run id and state.',
+    '- If no Action matches but a relevant MCP/tool exists, perform the operation with that tool. For safe repeatable work, register a narrow idempotent Action with `save_action` and run it. Ask for user input only when a concrete permission, approval, secret, or irreversible-risk gate requires it, and request only that minimum input.',
+    '- If the required MCP/tool itself is unavailable, create one AWB capability ticket (title prefix `[운영 자동화]`; labels `automation`, `mcp`, `mcp-missing`, `source:chat`) instead of delegating work to the user. Include the original request, normalized operation, room/source ids, Action search evidence, missing capability, success criteria, risk conditions, and a back-reference to this conversation.',
+    '- REPEATED-TURN RULE: inspect conversation history for an existing run id or open capability ticket for the same normalized operation. Reuse it and report its current state; do not create a duplicate run/ticket. Re-check Actions on a later turn so a newly registered Action can supersede an earlier missing-capability result.',
+  ];
   if (usesNativeMcp) {
     const lines = [
       `- Reply ONLY via the mcp__awb__send_chat_room_message MCP tool (room_id: "${roomId}").`,
@@ -214,9 +221,8 @@ function chatReplyInstructions(usesNativeMcp: boolean, roomId: string, isActionR
         '- This is an ACTION run, NOT a chat. The message above is a task assigned specifically to YOU — carry it out DIRECTLY (code edits, feature implementation, bug fixes, refactors, migrations, config changes, and any committing/merging/branch work the task calls for). Do NOT create an AWB ticket to defer it and do NOT tell anyone to file one — you ARE the agent meant to do this work. Perform the requested task, then use send_chat_room_message to report your result / progress / summary.',
       );
     } else {
-      lines.push(
-        '- This is a CHAT channel, NOT a work channel. Do NOT perform development work directly here — no code edits, feature implementation, bug fixes, refactors, migrations, or config changes, and no committing/merging/branch surgery on the user\'s behalf. When the user asks for such work, create an AWB ticket with mcp__awb__create_ticket (leave roles unset so the board default assignees staff it) so the normal agent loop does the work, then reply with the ticket id/title. Answering questions, status/triage lookups, and light READ-ONLY investigation are the only things you do inline. If the user EXPLICITLY orders a direct action in this message, do it, but still prefer a ticket for anything substantive.',
-      );
+      lines.push(...operationalPolicy);
+      lines.push('- For non-operational development work, create an AWB ticket with `mcp__awb__create_ticket` (leave roles unset for board defaults). Questions, status/triage, and read-only investigation stay inline.');
     }
     return lines;
   }
@@ -229,11 +235,22 @@ function chatReplyInstructions(usesNativeMcp: boolean, roomId: string, isActionR
       '- This is an ACTION run, NOT a chat. The message above is a task assigned specifically to YOU — carry it out DIRECTLY (code edits, fixes, refactors, migrations, config changes — whatever the task asks). Do NOT defer it to an AWB ticket; you are the agent meant to do this work. Write your result / summary as your final message.',
     );
   } else {
-    lines.push(
-      '- This is a CHAT channel, NOT a work channel. Do NOT perform development work directly here — no code edits, feature implementation, bug fixes, refactors, migrations, or config changes. When the user asks for such work, tell them it should be filed as an AWB ticket so the normal agent loop handles it (this runtime cannot create tickets itself). Answering questions and light read-only investigation are the only things you do inline.',
-    );
+    lines.push(...operationalPolicy);
+    lines.push('- This adapter cannot call AWB MCP directly. For a missing operational capability, end with exactly one machine-readable line `AWB_OPERATIONAL_FALLBACK: {"operation":"<normalized operation>","missing_capability":"<missing MCP/tool>","original_request":"<request>"}` so the agent-manager fallback can create/reuse the capability ticket atomically; never tell the user to file it. For non-operational development work, describe the ticket needed for the existing manager-side reply flow.');
   }
   return lines;
+}
+
+/** Policy repeated on every persistent-session follow-up. A live CLI retains
+ * history, but recency bias made later requests fall back to asking the user to
+ * operate the system. Keep this compact and point back to run/ticket evidence
+ * already present in the conversation. */
+export function chatFollowupPolicy(isActionRoom = false): string {
+  if (isActionRoom) return '- Continue this Action directly; do not defer it to another ticket or Action.';
+  return [
+    '- Apply the operational-request policy again on this turn: Action search/run first, then an available MCP/tool, otherwise one deduplicated capability ticket; never delegate commands or ticket creation to the user.',
+    '- Reuse any run id or open capability ticket already recorded in this conversation for the same normalized operation, while re-checking whether a matching Action has since appeared.',
+  ].join('\n');
 }
 
 export function composeChatPrompt(

@@ -9,6 +9,7 @@
     "mcp": "tsx src/mcp-server.ts",
     "mcp:http": "MCP_TRANSPORT=http tsx src/mcp-server.ts",
     "mcp:build": "nest build && node dist/mcp-server.js",
+    "test:postgres-schema": "node --test --test-force-exit test/postgres-schema-search-path.test.mjs",
     "migration:generate": "tsx ../../node_modules/typeorm/cli.js migration:generate -d src/db.ts",
     "migration:create": "tsx ../../node_modules/typeorm/cli.js migration:create",
     "migration:run": "tsx ../../node_modules/typeorm/cli.js migration:run -d src/db.ts",

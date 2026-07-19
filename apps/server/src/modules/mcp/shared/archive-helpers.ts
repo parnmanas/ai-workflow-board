@@ -52,6 +52,7 @@ export async function applyTerminalEnteredAtForMove(
   if (wasTerminal === isTerminal) return;
   await ticketRepo.update(ticketId, {
     terminal_entered_at: isTerminal ? new Date() : null,
+    ...(isTerminal ? { operational_dedupe_key: null } : {}),
   });
 }
 
