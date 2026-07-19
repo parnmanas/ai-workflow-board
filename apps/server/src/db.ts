@@ -330,6 +330,10 @@ export function buildDataSourceOptions(): DataSourceOptions {
   }
 
   if (dbType === 'postgres') {
+    const schema = process.env.DB_SCHEMA || undefined;
+    if (schema && !/^[a-z_][a-z0-9_]*$/i.test(schema)) {
+      throw new Error(`Invalid DB_SCHEMA identifier: ${schema}`);
+    }
     return {
       type: 'postgres',
       host: process.env.DB_HOST || 'localhost',
@@ -343,7 +347,13 @@ export function buildDataSourceOptions(): DataSourceOptions {
       // not cross-contaminate the way SQLJS_DB_PATH isolates the sqljs path.
       // bootApp() creates the schema before TypeORM synchronize builds the
       // tables into it (ticket 0c175408).
-      schema: process.env.DB_SCHEMA || undefined,
+      schema,
+      // TypeORM's `schema` option qualifies synchronize's own DDL, but raw,
+      // unqualified SQL in DATA migrations is resolved through the connection
+      // search_path. Apply the isolated QA schema to every pg pool connection
+      // so those migrations operate on the same tables synchronize created.
+      // No DB_SCHEMA means no override, preserving Postgres' production default.
+      ...(schema ? { extra: { options: `-c search_path=${schema}` } } : {}),
       entities,
       migrations: migrationsGlob,
       synchronize: true,   // D-01
