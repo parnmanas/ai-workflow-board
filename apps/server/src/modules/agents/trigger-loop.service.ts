@@ -1115,6 +1115,18 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
     return { trigger_id: triggerId, ticket_id: ticketId, agent_id: targetAgentId, role };
   }
 
+  async emitCommentSummaryTrigger(ticketId: string, targetAgentId: string, runId: string): Promise<string> {
+    const ticket = await this.dataSource.getRepository(Ticket).findOne({ where: { id: ticketId } });
+    if (!ticket) throw Object.assign(new Error('Ticket not found'), { status: 404 });
+    const content = `Summarize all existing comments on ticket ${ticketId}. Preserve decisions, open questions, outcomes, and important context; omit repetitive operational noise. Do not edit or delete comments yourself. When ready, call mcp__awb__complete_comment_summary exactly once with run_id="${runId}", ticket_id="${ticketId}", status="succeeded", and summary="<your summary>". If you cannot summarize, call it with status="failed" and error="<reason>".`;
+    const triggerId = await this._emitTrigger(ticket, targetAgentId, 'assignee', 'comment_summary', '', {
+      bypassFocus: true,
+      columnPromptOverride: { template_id: 'comment-summary-inline', name: 'Comment Summary', content },
+    });
+    if (!triggerId) throw Object.assign(new Error('Summary agent dispatch was not accepted'), { status: 503 });
+    return triggerId;
+  }
+
   /**
    * Public emitter for server-side schedulers (e.g. TicketSupervisorService).
    * Delegates to the private _emitTrigger with the same payload composition

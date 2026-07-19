@@ -14,6 +14,7 @@ import { tokens } from '../tokens';
 import { MentionTextarea, MentionCandidate } from './common/MentionTextarea';
 import { ALL_COMMENT_TYPES, COMMENT_TYPE_STYLES, defaultVisibleTypes, resolveCommentType, hasStaleOpenQuestion } from './comment-types';
 import { formatAgentDisplayName } from '../utils/agentName';
+import { isCommentSummaryInProgress } from '../utils/commentSummary';
 
 export interface WorkspaceRoleSummary {
   id: string; slug: string; name: string;
@@ -574,6 +575,8 @@ export default function TicketPanel({
   // double-fires while the network round trip is pending.
   const [retriggering, setRetriggering] = useState<Record<string, boolean>>({});
   const [triggerMenuOpen, setTriggerMenuOpen] = useState(false);
+  const [commentSummary, setCommentSummary] = useState<any>({ status: 'idle' });
+  const [summaryStarting, setSummaryStarting] = useState(false);
 
   // "Move to board" picker state. Boards in the workspace are loaded lazily
   // on first menu open and cached for the panel's lifetime so re-opening the
@@ -598,6 +601,43 @@ export default function TicketPanel({
 
   // Derive active ticket from the root ticket tree
   const activeTicket = findInTree(ticket, activePanelId) || ticket;
+
+  const refreshCommentSummary = useCallback(async () => {
+    try { setCommentSummary(await api.getCommentSummary(activePanelId)); } catch { /* retry on next poll */ }
+  }, [activePanelId]);
+
+  useEffect(() => { void refreshCommentSummary(); }, [refreshCommentSummary]);
+  useEffect(() => {
+    if (!isCommentSummaryInProgress(commentSummary?.status)) return;
+    const timer = window.setInterval(async () => {
+      try {
+        const next = await api.getCommentSummary(activePanelId);
+        setCommentSummary(next);
+        if (next.status === 'completed') window.location.reload();
+      } catch { /* keep originals visible and poll again */ }
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [activePanelId, commentSummary?.status]);
+
+  const handleStartCommentSummary = useCallback(async () => {
+    if (summaryStarting || isCommentSummaryInProgress(commentSummary?.status)) return;
+    const accepted = await confirm({
+      title: 'Replace comments with a summary?',
+      message: 'All existing comments will be replaced by one agent-generated summary after it succeeds. Originals remain unchanged if summarization fails.',
+      confirmLabel: 'Summarize and replace',
+      danger: true,
+    });
+    if (!accepted) return;
+    setSummaryStarting(true);
+    try {
+      const run = await api.startCommentSummary(activePanelId);
+      setCommentSummary(run);
+      showToast(run.status === 'pending' ? 'Comment summary started' : 'Summary already in progress', 'success');
+    } catch (e: any) {
+      setCommentSummary({ status: 'failed', error: e?.message || 'Failed to start summary' });
+      showToast(e?.message || 'Failed to start comment summary', 'error');
+    } finally { setSummaryStarting(false); }
+  }, [activePanelId, commentSummary?.status, confirm, showToast, summaryStarting]);
 
   // 헤더의 Ticket ID pill 클릭 → 현재 활성 티켓의 전체 ID 를 클립보드에 복사.
   // 성공 시 success toast + pill 을 잠깐 초록으로 강조하고, 실패 시 error toast.
@@ -3539,6 +3579,20 @@ export default function TicketPanel({
                independent of the filter (chip = list visibility, mute =
                signal suppression like unread dots and typing indicators). */}
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 8, alignItems: 'center', position: 'relative' }}>
+              <button
+                type="button"
+                onClick={handleStartCommentSummary}
+                disabled={summaryStarting || isCommentSummaryInProgress(commentSummary?.status)}
+                title="Replace existing comments with one agent-generated summary"
+                style={{ padding: '2px 8px', borderRadius: tokens.radii.full as any, fontSize: 11, fontWeight: 600, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surfaceSubtle, color: tokens.colors.textStrong, cursor: summaryStarting || isCommentSummaryInProgress(commentSummary?.status) ? 'not-allowed' : 'pointer', opacity: summaryStarting || isCommentSummaryInProgress(commentSummary?.status) ? 0.6 : 1 }}
+              >
+                {summaryStarting || isCommentSummaryInProgress(commentSummary?.status) ? 'Summarizing…' : 'Summary'}
+              </button>
+              {commentSummary?.status === 'failed' && (
+                <span role="alert" style={{ fontSize: 11, color: tokens.colors.danger }}>
+                  {commentSummary.error || 'Summary failed. Originals were preserved; you can retry.'}
+                </span>
+              )}
               {/* Render a chip for every type that has at least one comment.
                  Previously also kept chips for OFF types the user had toggled
                  off, but that branch hid chips for types with count=0 the

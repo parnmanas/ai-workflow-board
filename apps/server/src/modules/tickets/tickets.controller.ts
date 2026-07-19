@@ -7,6 +7,7 @@ import { Ticket } from '../../entities/Ticket';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { Board } from '../../entities/Board';
 import { Comment, COMMENT_TYPES, CommentType } from '../../entities/Comment';
+import { CommentSummaryRun } from '../../entities/CommentSummaryRun';
 import { Agent } from '../../entities/Agent';
 import { UserMention } from '../../entities/UserMention';
 import { TicketReadState } from '../../entities/TicketReadState';
@@ -62,6 +63,7 @@ export class TicketsController {
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
     @InjectRepository(BoardColumn) private readonly colRepo: Repository<BoardColumn>,
     @InjectRepository(Comment) private readonly commentRepo: Repository<Comment>,
+    @InjectRepository(CommentSummaryRun) private readonly commentSummaryRepo: Repository<CommentSummaryRun>,
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     @InjectRepository(UserMention) private readonly mentionRepo: Repository<UserMention>,
     @InjectRepository(TicketReadState) private readonly readStateRepo: Repository<TicketReadState>,
@@ -75,6 +77,88 @@ export class TicketsController {
     private readonly ticketRoleAssignments: TicketRoleAssignmentService,
     private readonly ticketPrerequisites: TicketPrerequisitesService,
   ) {}
+
+  @Get('tickets/:id/comment-summary')
+  async getCommentSummary(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
+    const workspaceId = (req as any).currentWorkspaceId as string;
+    const ticket = await this.ticketRepo.findOne({ where: { id, workspace_id: workspaceId } });
+    if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+    const run = await this.commentSummaryRepo.findOne({ where: { ticket_id: id, workspace_id: workspaceId } });
+    if ((run?.status === 'pending' || run?.status === 'completing') && Date.now() - new Date(run.updated_at).getTime() > 5 * 60_000) {
+      await this.commentSummaryRepo.createQueryBuilder()
+        .update(CommentSummaryRun)
+        .set({ status: 'failed', error: 'Summary request timed out. Original comments were preserved.' })
+        .where('id = :id', { id: run.id })
+        .andWhere('status = :status', { status: run.status })
+        .andWhere('updated_at = :updatedAt', { updatedAt: run.updated_at })
+        .execute();
+      const current = await this.commentSummaryRepo.findOne({ where: { id: run.id, workspace_id: workspaceId } });
+      return res.json(current || { ticket_id: id, status: 'idle' });
+    }
+    return res.json(run || { ticket_id: id, status: 'idle' });
+  }
+
+  @Post('tickets/:id/comment-summary')
+  async startCommentSummary(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
+    const workspaceId = (req as any).currentWorkspaceId as string;
+    const ticket = await this.ticketRepo.findOne({ where: { id, workspace_id: workspaceId } });
+    if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+    const comments = await this.commentRepo.find({ where: { ticket_id: id }, order: { created_at: 'ASC' } });
+    const real = comments.filter(c => c.type !== 'system');
+    const alreadySummary = real.length === 1 && (() => {
+      try { return JSON.parse(real[0].metadata || '{}').comment_summary === true; } catch { return false; }
+    })();
+    if (real.length === 0) return res.status(409).json({ error: 'There are no comments to summarize' });
+    if (alreadySummary) return res.status(409).json({ error: 'This ticket already contains only a summary' });
+
+    const existing = await this.commentSummaryRepo.findOne({ where: { ticket_id: id, workspace_id: workspaceId } });
+    if (existing?.status === 'pending' || existing?.status === 'completing') return res.status(200).json(existing);
+    const agents = await this.agentRepo.find({
+      where: { workspace_id: ticket.workspace_id, is_active: 1 } as any,
+      order: { name: 'ASC' },
+    });
+    const usableAgents = agents.filter(a => a.type !== 'manager').sort((a, b) => {
+      const aBusyHere = a.id === ticket.assignee_id ? 1 : 0;
+      const bBusyHere = b.id === ticket.assignee_id ? 1 : 0;
+      return aBusyHere - bBusyHere || b.is_online - a.is_online || a.name.localeCompare(b.name);
+    });
+    if (!usableAgents.length) return res.status(409).json({ error: 'No active agent is available' });
+
+    const run = existing || this.commentSummaryRepo.create({
+      ticket_id: id,
+      workspace_id: ticket.workspace_id,
+      agent_id: usableAgents[0].id,
+      status: 'pending',
+      source_comment_count: comments.length,
+      source_comment_ids: JSON.stringify(comments.map(comment => comment.id)),
+      error: '',
+      completed_at: null,
+    });
+    try {
+      let saved: CommentSummaryRun;
+      if (existing) {
+        const claimed = await this.commentSummaryRepo.update(
+          { id: existing.id, status: existing.status },
+          { agent_id: usableAgents[0].id, status: 'pending', source_comment_count: comments.length, source_comment_ids: JSON.stringify(comments.map(comment => comment.id)), error: '', completed_at: null },
+        );
+        saved = (await this.commentSummaryRepo.findOne({ where: { id: existing.id } }))!;
+        if (!claimed.affected) return res.status(200).json(saved);
+      } else try {
+        saved = await this.commentSummaryRepo.save(run);
+      } catch (saveError: any) {
+        const raced = await this.commentSummaryRepo.findOne({ where: { ticket_id: id, workspace_id: workspaceId } });
+        if (raced) return res.status(200).json(raced);
+        throw saveError;
+      }
+      await this.triggerLoop.emitCommentSummaryTrigger(id, saved.agent_id, saved.id);
+      return res.status(202).json(saved);
+    } catch (e: any) {
+      run.status = 'failed';
+      run.error = e?.message || 'Failed to dispatch summary agent';
+      await this.commentSummaryRepo.save(run);
+      return res.status(503).json(run);
+    }
+  }
 
   private resolveCreator(req: any, body: any): { created_by: string; created_by_type: string; created_by_id: string } {
     // If explicitly provided in body (e.g., from MCP/agent API)

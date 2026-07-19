@@ -1,0 +1,141 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { bootApp, exitAfterTests } from '../helpers/boot.mjs';
+import { setupKanbanScene, createAgent, createApiKey, createTicket, createUser } from '../helpers/fixtures.mjs';
+import { McpClient } from '../helpers/mcp-client.mjs';
+import { apiRequest, makeBaseUrl } from '../test-helpers.mjs';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const DIST_ROOT = path.join(__dirname, '..', '..', 'dist');
+process.env.PORT = process.env.QA_COMMENT_SUMMARY_PORT || '7898';
+
+test('comment summary is workspace-scoped, idempotent, and preserves originals on every failure path', async (t) => {
+  const { app, port, modules } = await bootApp({ port: Number(process.env.PORT) });
+  t.after(() => { void app.close().catch(() => {}); });
+  const { getDataSourceToken, AuthService } = modules;
+  const ds = app.get(getDataSourceToken());
+  const commentRepo = ds.getRepository('Comment');
+  const runRepo = ds.getRepository('CommentSummaryRun');
+  const sceneA = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'summary-a' });
+  const sceneB = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'summary-b' });
+  const agent = await createAgent(app, getDataSourceToken, sceneA.ws.id, { name: 'summarizer' });
+  const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: sceneA.ws.id, label: 'summarizer' });
+  const admin = await createUser(app, getDataSourceToken, { name: 'summary-admin', role: 'admin' });
+  const token = app.get(AuthService).createSession(admin.id);
+  const baseUrl = makeBaseUrl(port);
+
+  const triggerModule = await import('file://' + path.join(DIST_ROOT, 'modules', 'agents', 'trigger-loop.service.js'));
+  const triggerLoop = app.get(triggerModule.TriggerLoopService);
+  const ticketsModule = await import('file://' + path.join(DIST_ROOT, 'modules', 'tickets', 'tickets.controller.js'));
+  const controllerRunRepo = app.get(ticketsModule.TicketsController).commentSummaryRepo;
+  let dispatches = 0;
+  triggerLoop.emitCommentSummaryTrigger = async () => { dispatches += 1; return 'summary-trigger'; };
+
+  const seedTicket = async (title, contents = ['first', 'second']) => {
+    const ticket = await createTicket(app, getDataSourceToken, {
+      columnId: sceneA.columns.todo.id,
+      workspaceId: sceneA.ws.id,
+      title,
+    });
+    for (const content of contents) {
+      await commentRepo.save(commentRepo.create({
+        ticket_id: ticket.id,
+        workspace_id: sceneA.ws.id,
+        author_type: 'user',
+        author_id: admin.id,
+        author: admin.name,
+        content,
+        attachment_resource_ids: '[]',
+        type: 'note',
+        metadata: '{}',
+      }));
+    }
+    return ticket;
+  };
+  const postSummary = (ticketId, workspaceId = sceneA.ws.id) => apiRequest(baseUrl, `/tickets/${ticketId}/comment-summary`, {
+    token, workspaceId, method: 'POST',
+  });
+
+  const ticket = await seedTicket('concurrent completion');
+  const deniedGet = await apiRequest(baseUrl, `/tickets/${ticket.id}/comment-summary`, { token, workspaceId: sceneB.ws.id });
+  const deniedPost = await postSummary(ticket.id, sceneB.ws.id);
+  assert.equal(deniedGet.status, 404);
+  assert.equal(deniedPost.status, 404);
+
+  const starts = await Promise.all([postSummary(ticket.id), postSummary(ticket.id)]);
+  assert.deepEqual(starts.map(result => result.status).sort(), [200, 202]);
+  assert.equal(dispatches, 1, 'concurrent starts dispatch exactly once');
+  const run = await runRepo.findOneByOrFail({ ticket_id: ticket.id });
+  const mcpA = new McpClient({ baseUrl: `http://localhost:${port}`, apiKey: key.raw_key });
+  const mcpB = new McpClient({ baseUrl: `http://localhost:${port}`, apiKey: key.raw_key });
+  await Promise.all([
+    mcpA.callTool('complete_comment_summary', { run_id: run.id, ticket_id: ticket.id, status: 'succeeded', summary: 'one summary' }),
+    mcpB.callTool('complete_comment_summary', { run_id: run.id, ticket_id: ticket.id, status: 'succeeded', summary: 'one summary' }),
+  ]);
+  const completedComments = await commentRepo.find({ where: { ticket_id: ticket.id } });
+  assert.equal(completedComments.length, 1, 'concurrent completion leaves one comment');
+  assert.equal(completedComments[0].content, 'one summary');
+
+  const changedTicket = await seedTicket('snapshot mismatch');
+  const changedStart = await postSummary(changedTicket.id);
+  assert.equal(changedStart.status, 202);
+  await commentRepo.save(commentRepo.create({
+    ticket_id: changedTicket.id,
+    workspace_id: sceneA.ws.id,
+    author_type: 'user', author_id: admin.id, author: admin.name,
+    content: 'arrived while summarizing', attachment_resource_ids: '[]', type: 'note', metadata: '{}',
+  }));
+  const changedRun = await runRepo.findOneByOrFail({ ticket_id: changedTicket.id });
+  await mcpA.callTool('complete_comment_summary', {
+    run_id: changedRun.id, ticket_id: changedTicket.id, status: 'succeeded', summary: 'stale summary',
+  });
+  assert.equal((await runRepo.findOneByOrFail({ id: changedRun.id })).status, 'failed');
+  assert.equal(await commentRepo.count({ where: { ticket_id: changedTicket.id } }), 3, 'snapshot mismatch preserves every comment');
+
+  const failedTicket = await seedTicket('dispatch failure');
+  triggerLoop.emitCommentSummaryTrigger = async () => { dispatches += 1; throw new Error('dispatch unavailable'); };
+  const failedStart = await postSummary(failedTicket.id);
+  assert.equal(failedStart.status, 503);
+  assert.equal(await commentRepo.count({ where: { ticket_id: failedTicket.id } }), 2);
+
+  triggerLoop.emitCommentSummaryTrigger = async () => { dispatches += 1; return 'summary-trigger'; };
+  const timeoutTicket = await seedTicket('timeout');
+  assert.equal((await postSummary(timeoutTicket.id)).status, 202);
+  const timeoutRun = await runRepo.findOneByOrFail({ ticket_id: timeoutTicket.id });
+  await runRepo.createQueryBuilder().update().set({ updated_at: new Date(Date.now() - 6 * 60_000) }).where('id = :id', { id: timeoutRun.id }).execute();
+  const timedOut = await apiRequest(baseUrl, `/tickets/${timeoutTicket.id}/comment-summary`, { token, workspaceId: sceneA.ws.id });
+  assert.equal(timedOut.status, 200);
+  assert.equal(timedOut.data.status, 'failed');
+  assert.equal(await commentRepo.count({ where: { ticket_id: timeoutTicket.id } }), 2, 'timeout preserves originals');
+
+  const raceTicket = await seedTicket('completion wins timeout race');
+  assert.equal((await postSummary(raceTicket.id)).status, 202);
+  const raceRun = await runRepo.findOneByOrFail({ ticket_id: raceTicket.id });
+  await runRepo.createQueryBuilder().update().set({ updated_at: new Date(Date.now() - 6 * 60_000) }).where('id = :id', { id: raceRun.id }).execute();
+  const staleRun = await runRepo.findOneByOrFail({ id: raceRun.id });
+  const originalFindOne = controllerRunRepo.findOne.bind(controllerRunRepo);
+  let injectedCompletion = false;
+  controllerRunRepo.findOne = async (options) => {
+    if (!injectedCompletion && options?.where?.ticket_id === raceTicket.id) {
+      injectedCompletion = true;
+      await mcpA.callTool('complete_comment_summary', {
+        run_id: raceRun.id, ticket_id: raceTicket.id, status: 'succeeded', summary: 'completion won',
+      });
+      assert.equal((await runRepo.findOneByOrFail({ id: raceRun.id })).status, 'completed');
+      return { ...staleRun };
+    }
+    return originalFindOne(options);
+  };
+  const raced = await apiRequest(baseUrl, `/tickets/${raceTicket.id}/comment-summary`, { token, workspaceId: sceneA.ws.id });
+  controllerRunRepo.findOne = originalFindOne;
+  assert.equal(raced.status, 200);
+  assert.equal(raced.data.status, 'completed', 'stale timeout cannot overwrite completed run');
+  const racedComments = await commentRepo.find({ where: { ticket_id: raceTicket.id } });
+  assert.equal(racedComments.length, 1);
+  assert.equal(racedComments[0].content, 'completion won');
+
+  await Promise.all([mcpA.close(), mcpB.close()]);
+  exitAfterTests(0);
+});

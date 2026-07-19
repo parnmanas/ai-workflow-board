@@ -505,6 +505,10 @@ export const api = {
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return request<Comment[]>(`/tickets/${ticketId}/comments${suffix}`);
   },
+  getCommentSummary: (ticketId: string) =>
+    request<any>(`/tickets/${ticketId}/comment-summary`),
+  startCommentSummary: (ticketId: string) =>
+    request<any>(`/tickets/${ticketId}/comment-summary`, { method: 'POST' }),
 
   // ─── Columns ──────────────────────────────────────────
   createColumn: (boardId: string, data: { name: string; color?: string; description?: string }) =>
