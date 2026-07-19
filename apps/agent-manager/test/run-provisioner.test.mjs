@@ -27,12 +27,18 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, existsSync, writeFileSync, readFileSync, utimesSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 
 const HOME = mkdtempSync(join(tmpdir(), 'awb-runprov-home-'));
 process.env.AWB_AGENT_MANAGER_HOME = HOME;
 // The agent's working_dir the dispatcher passes as baseWorkingDir (규약 ③).
 const BASE = mkdtempSync(join(tmpdir(), 'awb-runprov-base-'));
+
+function credentialFileFromHelper(helper) {
+  const match = helper.match(/^store --file=("(?:\\.|[^"])*")$/);
+  assert.ok(match, `helper 형식 불일치: ${helper}`);
+  return JSON.parse(match[1]);
+}
 
 const { parseRunProvision, provisionRunWorkspace, reconcileRunBaseWorkingDir } = await import('../dist/lib/run-provisioner.js');
 
@@ -322,13 +328,7 @@ test('fresh index.lock actively blocking a git op is reclaimed reactively and re
 // 인증 URL 을 GIT_CONFIG insteadOf 로 그 로컬 원격에 매핑한다(worktree 크리덴셜
 // 회귀 테스트와 동일 기법). clean URL 도 매핑해 scrub 후 fetch 가 로컬 원격에 닿게 한다.
 
-// Windows CI (ticket e09fa003): awb-credentials 의 POSIX owner-only 권한(mode & 0o077
-// === 0)·credential.helper --file= 경로 왕복을 단언한다 — Windows 는 mode 비트/백슬래시
-// 경로 규약이 달라 깨진다. windows-latest 를 직접 관찰 못 해 win32 에서 명시적 skip.
-// 나머지 provisioning 테스트(parse/reuse/fresh/traversal/concurrency/index.lock)는 그대로 돈다.
-test('provisionRunWorkspace: credential 주입 — fresh clone origin scrub + awb-credentials, reuse fetch 인증, 토큰 비노출', {
-  skip: process.platform === 'win32' && 'POSIX credential-file 권한/경로 단언 — windows-latest 미검증 (ticket e09fa003)',
-}, async () => {
+test('provisionRunWorkspace: credential 주입 — fresh clone origin scrub + awb-credentials, reuse fetch 인증, 토큰 비노출', async () => {
   const remote = makeRemote();
   const workingDir = mkdtempSync(join(tmpdir(), 'awb-runprov-cred-'));
   const cleanUrl = 'https://git.example.test/acme/priv.git';
@@ -367,10 +367,13 @@ test('provisionRunWorkspace: credential 주입 — fresh clone origin scrub + aw
     // awb-credentials(owner 전용) + credential.helper=store 설치. (--local: 호스트 전역
     // credential.helper=cache 가 있어도 이 repo 가 설치한 값만 본다.)
     const helper = git(dir, ['config', '--local', '--get', 'credential.helper']).trim();
-    const m = helper.match(/^store --file="(.+)"$/);
-    assert.ok(m, `helper 형식 불일치: ${helper}`);
-    assert.match(readFileSync(m[1], 'utf8'), /tok-user:sekret@git\.example\.test/);
-    assert.equal(statSync(m[1]).mode & 0o077, 0, 'awb-credentials 는 owner 전용');
+    const credentialFile = credentialFileFromHelper(helper);
+    assert.ok(isAbsolute(credentialFile), `credential 파일이 절대경로가 아님: ${credentialFile}`);
+    assert.ok(statSync(credentialFile).isFile(), 'awb-credentials 파일이 생성돼야 함');
+    assert.match(readFileSync(credentialFile, 'utf8'), /tok-user:sekret@git\.example\.test/);
+    if (process.platform !== 'win32') {
+      assert.equal(statSync(credentialFile).mode & 0o077, 0, 'awb-credentials 는 owner 전용');
+    }
     // steps/notes 어디에도 토큰이 노출되지 않는다.
     assert.ok(!res1.steps.join('\n').includes('sekret'), 'steps 토큰 노출');
     assert.ok(!(res1.notes || []).join('\n').includes('sekret'), 'notes 토큰 노출');

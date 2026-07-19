@@ -12,7 +12,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { promises as fsp, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -29,6 +29,12 @@ import {
 
 function git(cwd, args) {
   return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim();
+}
+
+function credentialFileFromHelper(helper) {
+  const match = helper.match(/^store --file=("(?:\\.|[^"])*")$/);
+  assert.ok(match, `helper 형식 불일치: ${helper}`);
+  return JSON.parse(match[1]);
 }
 
 async function makeRepo() {
@@ -198,13 +204,7 @@ test('one non-git container isolates base clones for different repository resour
   }
 });
 
-// Windows CI (ticket e09fa003): credential.helper --file="…" 경로를 regex 로 되읽어
-// readFileSync 로 여는데, JSON-escape 된 Windows 백슬래시 경로 왕복이 취약하다. windows-
-// latest 를 직접 관찰 못 해 win32 에서 명시적 skip. 나머지 worktree 테스트(slug/root 헬퍼,
-// container clone/provisioning, verifyCheckout)는 Windows 에서도 그대로 돈다. 검증은 후속 티켓.
-test('container base clone credential store is inherited by its ticket worktree', {
-  skip: process.platform === 'win32' && 'credential.helper --file= Windows 경로 왕복 — windows-latest 미검증 (ticket e09fa003)',
-}, async () => {
+test('container base clone credential store is inherited by its ticket worktree', async () => {
   const source = await makeRepoWithRemote();
   const workingDir = join(source.root, 'credential-container');
   const remoteUrl = 'https://git.example.test/acme/private.git';
@@ -234,9 +234,10 @@ test('container base clone credential store is inherited by its ticket worktree'
     assert.equal(git(baseClone, ['remote', 'get-url', 'origin']), remoteUrl);
     const baseHelper = git(baseClone, ['config', '--get', 'credential.helper']);
     assert.equal(git(result.cwd, ['config', '--get', 'credential.helper']), baseHelper);
-    const match = baseHelper.match(/^store --file="(.+)"$/);
-    assert.ok(match);
-    assert.match(await fsp.readFile(match[1], 'utf8'), /token-user:container-secret@git\.example\.test/);
+    const credentialFile = credentialFileFromHelper(baseHelper);
+    assert.ok(isAbsolute(credentialFile), `credential 파일이 절대경로가 아님: ${credentialFile}`);
+    assert.equal(await fsp.stat(credentialFile).then((stat) => stat.isFile()), true);
+    assert.match(await fsp.readFile(credentialFile, 'utf8'), /token-user:container-secret@git\.example\.test/);
   } finally {
     for (const [name, value] of Object.entries({
       GIT_CONFIG_COUNT: previous.count,
