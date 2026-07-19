@@ -115,7 +115,8 @@ test('reuse: rooted at working_dir; first clones, second fetch+ff-pulls the same
   assert.ok(!first.dir.startsWith(HOME), 'not rooted under the manager home');
   assert.ok(existsSync(join(first.dir, '.git')), 'cloned');
   assert.ok(first.steps.some((s) => s.startsWith('clone')), 'first run clones');
-  assert.equal(readFileSync(join(first.dir, 'README.md'), 'utf8'), 'v1\n');
+  // Windows git checkout 은 core.autocrlf 로 LF→CRLF 변환하므로 개행 정규화 후 비교 (ticket e09fa003).
+  assert.equal(readFileSync(join(first.dir, 'README.md'), 'utf8').replace(/\r\n/g, '\n'), 'v1\n');
 
   // New upstream commit, then a second reuse run must pull it in (same folder).
   remote.pushFile('NEW.txt', 'hello\n');

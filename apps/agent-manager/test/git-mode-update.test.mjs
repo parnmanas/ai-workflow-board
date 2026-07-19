@@ -18,17 +18,20 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { tmpdir, devNull } from 'node:os';
+import { tmpdir } from 'node:os';
 
 const { computeGitUpdateState, UpdateChecker } = await import('../dist/lib/self-update.js');
 
-// 격리된 git 환경 — 사용자 전역 config 간섭 차단. os.devNull 을 쓰면 POSIX '/dev/null',
-// Windows '\\.\nul' 로 해석되고 git 은 어느 쪽이든 빈(=부재) 전역/시스템 config 로 취급해
-// windows-latest 에서도 동일하게 격리된다 (ticket e09fa003 — 하드코딩 '/dev/null' 이식성 수정).
+// 격리된 git 환경 — 사용자 전역/시스템 config 간섭 차단. os.devNull 을 config 경로로 쓰면
+// Windows 에서 '\\.\nul' 로 해석돼 git 이 `unable to access '//./nul'` 로 죽으므로(ticket
+// e09fa003 windows-latest 실증), 실제 빈 파일을 GIT_CONFIG_GLOBAL/SYSTEM 으로 가리켜 양
+// 플랫폼에서 동일하게 "빈 전역/시스템 config" 격리를 얻는다.
+const EMPTY_GITCONFIG = join(mkdtempSync(join(tmpdir(), 'awb-gitcfg-')), 'empty.gitconfig');
+writeFileSync(EMPTY_GITCONFIG, '');
 const GIT_ENV = {
   ...process.env,
-  GIT_CONFIG_GLOBAL: devNull,
-  GIT_CONFIG_SYSTEM: devNull,
+  GIT_CONFIG_GLOBAL: EMPTY_GITCONFIG,
+  GIT_CONFIG_SYSTEM: EMPTY_GITCONFIG,
   GIT_AUTHOR_NAME: 'test',
   GIT_AUTHOR_EMAIL: 'test@example.com',
   GIT_COMMITTER_NAME: 'test',

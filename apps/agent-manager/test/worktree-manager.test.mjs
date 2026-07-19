@@ -120,7 +120,8 @@ test('empty non-git working_dir keeps its container root and clones under .awb',
     assert.equal(git(join(workingDir, '.awb', 'base', 'repo-empty'), ['remote', 'get-url', 'origin']), source.remote);
     assert.equal(existsSync(join(workingDir, '.git')), false);
     assert.throws(() => git(workingDir, ['status', '--short']), /not a git repository/);
-    assert.equal(await fsp.readFile(join(result.cwd, 'README.md'), 'utf8'), '# base\n');
+    // Windows git checkout 은 core.autocrlf 로 LF→CRLF 변환하므로 개행 정규화 후 비교 (ticket e09fa003).
+    assert.equal((await fsp.readFile(join(result.cwd, 'README.md'), 'utf8')).replace(/\r\n/g, '\n'), '# base\n');
   } finally {
     await source.cleanup();
   }
@@ -189,7 +190,8 @@ test('one non-git container isolates base clones for different repository resour
     assert.equal(git(join(workingDir, '.awb', 'base', 'repo_A'), ['remote', 'get-url', 'origin']), first.remote);
     assert.equal(git(join(workingDir, '.awb', 'base', 'repo_B'), ['remote', 'get-url', 'origin']), second.remote);
     assert.equal(existsSync(join(a.cwd, 'SECOND.md')), false);
-    assert.equal(await fsp.readFile(join(b.cwd, 'SECOND.md'), 'utf8'), 'second repository\n');
+    // Windows git checkout 은 core.autocrlf 로 LF→CRLF 변환하므로 개행 정규화 후 비교 (ticket e09fa003).
+    assert.equal((await fsp.readFile(join(b.cwd, 'SECOND.md'), 'utf8')).replace(/\r\n/g, '\n'), 'second repository\n');
   } finally {
     await first.cleanup();
     await second.cleanup();

@@ -100,7 +100,10 @@ test(
 
       const res = crossSpawn.sync(shim, CLI_ARGS, { encoding: 'utf8' });
       // 회귀의 핵심: `.cmd` 를 spawn 할 수 있어야 한다(ENOENT 아님) + 성공 종료.
-      assert.equal(res.error, undefined, `spawn error: ${res.error && res.error.message}`);
+      // cross-spawn.sync 는 성공 시 error 를 `null` 로 정규화한다(`result.error ||
+      // verifyENOENTSync(...)`, 후자는 non-ENOENT 에서 null 반환) — undefined 가 아니므로
+      // 엄격 비교 대신 falsy 검사로 "spawn 에러 없음"(=ENOENT 아님)만 단언한다 (ticket e09fa003).
+      assert.ok(!res.error, `spawn error: ${res.error && res.error.message}`);
       assert.equal(res.status, 0, res.stderr || 'codex.cmd shim exited non-zero');
       const lines = res.stdout.split(/\r?\n/).filter((l) => l.length > 0);
       // 공백/따옴표/중괄호가 든 6개 인자가 단일 argv 엔트리로 온전히 왕복.

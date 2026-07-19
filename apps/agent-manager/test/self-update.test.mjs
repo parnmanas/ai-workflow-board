@@ -106,7 +106,8 @@ test('adoptRemoteBranch updates the tree even when a worktree holds the default 
 
     // HEAD now points at the freshly published commit, and its file is present.
     assert.equal(git(c.manager, ['rev-parse', 'HEAD']), newSha, 'adopted the new release commit');
-    assert.equal(await fsp.readFile(join(c.manager, 'VERSION'), 'utf8'), '0.9.1\n');
+    // Windows git checkout 은 core.autocrlf 로 LF→CRLF 변환하므로 개행 정규화 후 비교 (ticket e09fa003).
+    assert.equal((await fsp.readFile(join(c.manager, 'VERSION'), 'utf8')).replace(/\r\n/g, '\n'), '0.9.1\n');
 
     // The unrelated local branch was NOT moved (the `git reset --hard` hazard
     // the detached checkout deliberately avoids).
