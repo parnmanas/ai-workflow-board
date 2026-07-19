@@ -36,6 +36,11 @@ import { EventDispatcher } from '../dist/lib/event-dispatcher.js';
 import { TicketSessionManager as RealTicketMgr } from '../dist/lib/ticket-session-manager.js';
 import { SubagentManager } from '../dist/lib/subagent-manager.js';
 import { CircuitBreaker } from '../dist/lib/circuit-breaker.js';
+import {
+  INFLIGHT_RESERVATION_STALE_MS,
+  INFLIGHT_SUPPRESS_SAFETY_VALVE,
+  INFLIGHT_SUPPRESS_SAFETY_VALVE_MIN_AGE_MS,
+} from '../dist/lib/base-session-manager.js';
 
 // ─────────────────────────────── helpers ───────────────────────────────
 
@@ -576,6 +581,230 @@ test('SubagentManager idle-reap: _sweepNow delivers a REAL SIGTERM via #wireExit
   // Drop-first means the exit handler early-returns: NOT counted toward the
   // circuit breaker (an idle reap is a manager-initiated kill, not a death).
   assert.equal(sub.circuitBreaker.getOpenBreakers().length, 0, 'idle-reap not counted toward the breaker');
+});
+
+// ───────────── Part D: zombie-reservation recovery — TTL + safety valve (ticket 7c3ba9cf) ─────────────
+//
+// The 6h Review-column stall: a holder that hung mid-provisioning (its
+// handleTrigger await never resolved → the try/finally releaseDispatch never
+// ran) leaves a ZOMBIE reservation in the authoritative _inflight registry with
+// NO pid to pid-check and NO TTL, so every supervisor retry is suppressed as a
+// twin FOREVER. Two backstops reclaim it, both atomically (evict + re-reserve in
+// the same synchronous CAS): (1) a wall-clock TTL, (2) an N-consecutive-
+// suppression safety valve that also leaves an operator-visible warning.
+// Non-vacuous: deleting either backstop makes the wedged-holder tests below hang
+// the ticket (every retry refused, spawnCount stuck at 0).
+
+// Deterministic clock override so a 10-min TTL is testable without a real wait.
+function withClock(fn) {
+  const realNow = Date.now;
+  let t = 1_000_000; // arbitrary epoch
+  Date.now = () => t;
+  const advance = (ms) => {
+    t += ms;
+  };
+  try {
+    return fn(advance);
+  } finally {
+    Date.now = realNow;
+  }
+}
+
+test('TTL: a reservation older than the stale window is evicted so a retry re-dispatches (authoritative)', () => {
+  withClock((advance) => {
+    const mgr = new RealTicketMgrStub(makeConfig());
+    // A dispatch reserved the provision→spawn window, then HUNG (never released).
+    assert.deepEqual(mgr.tryReserveDispatch('t', 'assignee', 'a'), { acquired: true, live: false });
+    // Still inside the window → a retry is (correctly) refused as a twin.
+    assert.equal(mgr.tryReserveDispatch('t', 'assignee', 'a').acquired, false, 'fresh hold refuses the twin');
+
+    advance(INFLIGHT_RESERVATION_STALE_MS + 1); // holder is now a presumed zombie
+    const evicted = mgr.tryReserveDispatch('t', 'assignee', 'a');
+    assert.deepEqual(
+      evicted,
+      { acquired: true, live: false, evicted: 'stale' },
+      'past the TTL the zombie is evicted and the retry re-reserves',
+    );
+    // The reclaim re-stamped reservedAt to now → the freshly reclaimed slot again
+    // refuses a concurrent twin (no thrashing).
+    assert.equal(mgr.tryReserveDispatch('t', 'assignee', 'a').acquired, false, 'reclaimed slot is a fresh hold');
+  });
+});
+
+test('twin-safety: N rapid suppressions WITHIN the min-age gate do NOT valve (a healthy slow provision is never twinned)', () => {
+  withClock(() => {
+    const mgr = new RealTicketMgrStub(makeConfig());
+    // A healthy holder is still provisioning; a bursty supervisor hammers the key
+    // many times in quick succession (age stays ~0, well under the min-age gate).
+    assert.deepEqual(mgr.tryReserveDispatch('t', 'assignee', 'a'), { acquired: true, live: false });
+    for (let i = 0; i < INFLIGHT_SUPPRESS_SAFETY_VALVE + 3; i++) {
+      const r = mgr.tryReserveDispatch('t', 'assignee', 'a');
+      assert.equal(r.acquired, false, `rapid suppression #${i + 1} stays refused — no premature valve → no twin`);
+      assert.equal(r.evicted, undefined, 'the count alone must not force-release inside the min-age window');
+    }
+  });
+});
+
+test('safety valve: N consecutive suppressions AND age past the min-age gate force-release (evicted:safety_valve)', () => {
+  withClock((advance) => {
+    const mgr = new RealTicketMgrStub(makeConfig());
+    // A wedged holder that never released. Age it past the min-age gate (but still
+    // under the TTL) — a healthy holder would have released well before now.
+    assert.deepEqual(mgr.tryReserveDispatch('t', 'assignee', 'a'), { acquired: true, live: false });
+    advance(INFLIGHT_SUPPRESS_SAFETY_VALVE_MIN_AGE_MS + 1_000);
+    assert.ok(
+      INFLIGHT_SUPPRESS_SAFETY_VALVE_MIN_AGE_MS + 1_000 < INFLIGHT_RESERVATION_STALE_MS,
+      'sanity: still under the TTL so this exercises the valve, not the stale path',
+    );
+    // The first (N-1) retries are suppressed; the Nth crosses the valve.
+    for (let i = 1; i < INFLIGHT_SUPPRESS_SAFETY_VALVE; i++) {
+      assert.equal(
+        mgr.tryReserveDispatch('t', 'assignee', 'a').acquired,
+        false,
+        `suppression ${i} < ${INFLIGHT_SUPPRESS_SAFETY_VALVE} → still refused`,
+      );
+    }
+    const valved = mgr.tryReserveDispatch('t', 'assignee', 'a');
+    assert.deepEqual(
+      valved,
+      { acquired: true, live: false, evicted: 'safety_valve' },
+      `the ${INFLIGHT_SUPPRESS_SAFETY_VALVE}th consecutive suppression past the min-age gate force-releases`,
+    );
+  });
+});
+
+test('safety-valve counter resets on releaseDispatch (a clean release re-arms the count)', () => {
+  withClock((advance) => {
+    const mgr = new RealTicketMgrStub(makeConfig());
+    mgr.tryReserveDispatch('t', 'assignee', 'a');
+    advance(INFLIGHT_SUPPRESS_SAFETY_VALVE_MIN_AGE_MS + 1_000); // past the age gate
+    // Accumulate suppressions just short of the valve, then the holder RELEASES
+    // cleanly (not a zombie) — this must reset the consecutive count.
+    for (let i = 1; i < INFLIGHT_SUPPRESS_SAFETY_VALVE; i++) mgr.tryReserveDispatch('t', 'assignee', 'a');
+    mgr.releaseDispatch('t', 'assignee', 'a');
+
+    // A fresh hold; age it past the gate again so ONLY the counter (not the age
+    // gate) governs. The very next suppression must count as #1, NOT continue from
+    // the pre-release total — else it would valve immediately (proving the reset).
+    assert.deepEqual(mgr.tryReserveDispatch('t', 'assignee', 'a'), { acquired: true, live: false });
+    advance(INFLIGHT_SUPPRESS_SAFETY_VALVE_MIN_AGE_MS + 1_000);
+    const r = mgr.tryReserveDispatch('t', 'assignee', 'a');
+    assert.equal(r.acquired, false, 'post-release the counter restarts → this suppression does not instantly valve');
+    assert.equal(r.evicted, undefined, 'no force-release: the consecutive count began fresh after the clean release');
+  });
+});
+
+test('fallback slot (persistent sessions off) gets the same TTL zombie recovery', () => {
+  withClock((advance) => {
+    const tracker = new InflightDispatchTracker();
+    const key = InflightDispatchTracker.key('t', 'assignee', 'a');
+    const meta = { ticketId: 't', role: 'assignee', agentId: 'a' };
+    assert.equal(tracker.tryAcquireFallback(key, meta).acquired, true, 'free fallback slot → acquired');
+    assert.equal(tracker.tryAcquireFallback(key, meta).acquired, false, 'held fallback slot → twin refused');
+
+    advance(INFLIGHT_RESERVATION_STALE_MS + 1);
+    assert.equal(
+      tracker.tryAcquireFallback(key, meta).acquired,
+      true,
+      'past the TTL the fallback zombie is evicted and re-claimed',
+    );
+    assert.equal(tracker.tryAcquireFallback(key, meta).acquired, false, 'reclaimed fallback slot is a fresh hold');
+  });
+});
+
+test('end-to-end: a zombie reservation past the TTL no longer wedges the ticket — handleTrigger re-dispatches', async () => {
+  await withClock(async (advance) => {
+    const mgr = new RealTicketMgrStub(makeConfig());
+    const { dispatcher } = makeDispatcher({ ticketMgr: mgr });
+    // Simulate the wedged holder: a reservation placed then abandoned (its
+    // handleTrigger hung and never released). No live session, no pid.
+    assert.equal(mgr.tryReserveDispatch('t1', 'assignee', 'a1').acquired, true, 'the zombie holds the slot');
+    assert.equal(mgr.spawnCount, 0, 'the wedged holder never spawned');
+
+    advance(INFLIGHT_RESERVATION_STALE_MS + 1); // the holder is now a presumed zombie
+    // The next supervisor cycle arrives — pre-fix this was suppressed forever.
+    await dispatcher.handleTrigger(evJson());
+    assert.equal(mgr.spawnCount, 1, 'the stale zombie was evicted and the retry actually re-dispatched');
+    // The completed dispatch left a live session → healthy reuse, not wedged.
+    assert.equal(mgr.tryReserveDispatch('t1', 'assignee', 'a1').live, true, 'recovered to a live-reuse state');
+  });
+});
+
+test('safety-valve eviction posts an operator warning; a silent TTL eviction does not', async () => {
+  // Capture MCP tools/call bodies so we can assert the safety-valve warning
+  // comment is posted (and that a stale TTL eviction stays silent).
+  const captured = [];
+  const savedFetchLocal = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    const body = typeof init?.body === 'string' ? init.body : '';
+    if (body.includes('"initialize"')) {
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: (h) => (h.toLowerCase() === 'mcp-session-id' ? 'sess-1' : null) },
+        async text() {
+          return '';
+        },
+        async json() {
+          return {};
+        },
+      };
+    }
+    if (body.includes('"tools/call"')) {
+      try {
+        captured.push(JSON.parse(body));
+      } catch {
+        /* ignore */
+      }
+    }
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      async text() {
+        return '';
+      },
+      async json() {
+        return {};
+      },
+    };
+  };
+  try {
+    // safety_valve → warning expected.
+    {
+      const mgr = new RealTicketMgrStub(makeConfig());
+      mgr.tryReserveDispatch = () => ({ acquired: true, live: false, evicted: 'safety_valve' });
+      const { dispatcher } = makeDispatcher({ ticketMgr: mgr });
+      await dispatcher.handleTrigger(evJson());
+      const posted = await waitFor(
+        () =>
+          captured.some(
+            (c) =>
+              c?.params?.name === 'add_comment' &&
+              String(c?.params?.arguments?.content ?? '').includes('safety valve'),
+          ),
+        { timeoutMs: 3000 },
+      );
+      assert.equal(posted, true, 'a safety-valve force-release posts an operator warning comment');
+    }
+    // stale → silent (no warning comment for the routine TTL path).
+    captured.length = 0;
+    {
+      const mgr = new RealTicketMgrStub(makeConfig());
+      mgr.tryReserveDispatch = () => ({ acquired: true, live: false, evicted: 'stale' });
+      const { dispatcher } = makeDispatcher({ ticketMgr: mgr });
+      await dispatcher.handleTrigger(evJson());
+      await delay(150);
+      const warned = captured.some(
+        (c) =>
+          c?.params?.name === 'add_comment' &&
+          String(c?.params?.arguments?.content ?? '').includes('safety valve'),
+      );
+      assert.equal(warned, false, 'a routine stale TTL eviction is silent (no operator warning)');
+    }
+  } finally {
+    globalThis.fetch = savedFetchLocal;
+  }
 });
 
 function isDead(pid) {

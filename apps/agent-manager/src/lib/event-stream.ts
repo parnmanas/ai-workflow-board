@@ -163,6 +163,26 @@ export class EventStream {
   }
 
   /**
+   * ticket 467f714a — record a recognized harness session-limit exit (opens the
+   * per-agent defer window in the dispatcher). main.ts wires the ticket-session /
+   * one-shot exit handlers to this, so a `You've hit your session limit · resets …`
+   * death defers the agent's dispatch until the reset instant. Thin passthrough —
+   * the dispatcher owns the durable defer store.
+   */
+  recordHarnessSessionLimit(info: {
+    agentId: string;
+    // ticket 467f714a blocker #1: the dead task's (ticket, role) so the dispatcher
+    // can seed it as a durable pending intent (replays even with no later trigger).
+    ticketId?: string;
+    role?: string;
+    deferUntilMs: number;
+    reason?: string;
+    resetLabel?: string;
+  }): void {
+    this.#dispatcher.recordHarnessSessionLimit(info);
+  }
+
+  /**
    * Force-drop the current SSE connection and reconnect immediately. Used by
    * `agent_manager_command spawn_agent` so the server-side `managedAgentIds`
    * snapshot (cached once at SSE connect — see events.controller.ts) is

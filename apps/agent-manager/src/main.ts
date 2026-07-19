@@ -7,6 +7,7 @@ import {
   AGENT_MANAGER_HOME,
   CONFIG_PATH,
   LEGACY_CONFIG_PATH,
+  SESSION_DEFER_PATH,
 } from './lib/constants.js';
 import { loadConfig, resolveAgentId } from './lib/config.js';
 import { installCrashHandlers, log } from './lib/logging.js';
@@ -29,6 +30,7 @@ import { ChatSessionManager } from './lib/chat-session-manager.js';
 import { TicketSessionManager } from './lib/ticket-session-manager.js';
 import { CircuitBreaker } from './lib/circuit-breaker.js';
 import { InflightDispatchTracker, DispatchBlockTracker } from './lib/dispatch-preflight.js';
+import { SessionLimitDeferStore } from './lib/session-limit-defer.js';
 import { uploadIfNewErrors } from './lib/error-log-uploader.js';
 import { onFlushThreshold } from './lib/event-log-recorder.js';
 import { cleanupOrphanSubagents } from './lib/orphan-cleanup.js';
@@ -470,6 +472,16 @@ async function runRuntime(
   // here (like inflightDispatchTracker) so its counts ride the instance heartbeat
   // as `dispatch_block_counts`, and injected into the EventDispatcher via deps.
   const dispatchBlockTracker = new DispatchBlockTracker();
+  // ticket 467f714a — durable harness session-limit defer store. Created here so
+  // it is the SAME instance the EventDispatcher gates on and the ticket-session /
+  // one-shot exit handlers record into. Disk-backed (SESSION_DEFER_PATH) so a
+  // defer window + its coalesced resume intents survive a manager restart. The
+  // EventDispatcher wires its resume handler + calls load() (boot rehydrate);
+  // main must NOT double-load.
+  const sessionLimitDeferStore = new SessionLimitDeferStore({
+    persistPath: SESSION_DEFER_PATH,
+    log,
+  });
 
   const subagentManager = new SubagentManager(config, circuitBreaker);
   // Capture the init promise so the boot-time warm-pool lease reclaim can wait
@@ -678,6 +690,7 @@ async function runRuntime(
       worktreeManager,
       inflightDispatchTracker,
       dispatchBlockTracker,
+      sessionLimitDeferStore,
       poolReclaimTrigger: () =>
         reconcilePoolLeasesAll ? reconcilePoolLeasesAll('pool_exhausted') : Promise.resolve(0),
     },
@@ -687,6 +700,27 @@ async function runRuntime(
   eventStreamRef = eventStream;
   eventStream.start();
   log('SSE event stream started');
+
+  // ticket 467f714a: a harness session-limit death (`You've hit your session
+  // limit · resets …`) opens the dispatcher's per-agent defer window. The exit
+  // handler lives in TicketSessionManager (constructed before the stream), so wire
+  // the callback now that the stream → dispatcher exists. Fire-and-forget, never
+  // throws into the exit path.
+  ticketSessionManager.onHarnessSessionLimit = (info) => {
+    try {
+      eventStream.recordHarnessSessionLimit(info);
+    } catch (err: any) {
+      log(`recordHarnessSessionLimit failed: ${err?.message ?? err}`);
+    }
+  };
+  // Same defer store for the one-shot subagent path (persistent sessions off).
+  subagentManager.onHarnessSessionLimit = (info) => {
+    try {
+      eventStream.recordHarnessSessionLimit(info);
+    } catch (err: any) {
+      log(`recordHarnessSessionLimit (one-shot) failed: ${err?.message ?? err}`);
+    }
+  };
 
   let uploadTimer: NodeJS.Timeout | null = null;
 

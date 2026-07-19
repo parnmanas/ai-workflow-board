@@ -37,6 +37,8 @@ import {
 import { CircuitBreaker } from './circuit-breaker.js';
 import { writeMcpConfig } from './managed-agent-store.js';
 import { classifyCliError, isFallbackEligible } from './cli-error-signatures.js';
+import { detectHarnessSessionLimit, resolveDeferUntil } from './session-limit-defer.js';
+import type { HarnessSessionLimitDetection } from './session-limit-defer.js';
 import { summarizeCliJsonLine } from './cli-output-summary.js';
 import { callMcpTool, fireAndForgetTool, unwrapToolResult } from './mcp-client.js';
 import {
@@ -332,6 +334,22 @@ export class SubagentManager implements SubagentManagerContract {
   readonly circuitBreaker: CircuitBreaker;
 
   onExit?: (info: SubagentExitInfo) => void;
+
+  /** ticket 467f714a: notified when a one-shot ticket subagent dies on a harness
+   *  session-limit signature, with the resolved reset instant. main.ts wires this
+   *  to EventStream.recordHarnessSessionLimit (SAME store as the persistent path)
+   *  so the dispatcher defers the agent's dispatch until reset instead of pending.
+   *  Unset in harnesses that don't exercise the defer path. */
+  onHarnessSessionLimit:
+    | ((info: {
+        agentId: string;
+        ticketId: string;
+        role: string;
+        reason: string;
+        resetLabel: string;
+        deferUntilMs: number;
+      }) => void)
+    | null = null;
 
   constructor(config: SubagentAwareConfig, circuitBreaker?: CircuitBreaker) {
     this.#config = config;
@@ -968,12 +986,52 @@ export class SubagentManager implements SubagentManagerContract {
       }
     }
 
+    // ticket 467f714a: a harness session-limit death (`You've hit your session
+    // limit · resets …`) is time-healed at a concrete reset — defer the agent's
+    // dispatch until then rather than force-opening the breaker (which the
+    // session_limit classification would otherwise do via nonRetryable, pending on
+    // the FIRST death) or model-fallback (same account still hits the wall).
+    // Detected off the raw tail so it covers a claude one-shot whose answer we
+    // don't capture (NATIVE_MCP); if the tail can't be parsed but the aggregated
+    // answer already classified session_limit, a conservative default window is
+    // used. Mirrors TicketSessionManager._onChildExit.
+    const oneshotTail =
+      record.kind === 'trigger' && record.ticket_id ? this.#collectTail(record) : '';
+    let harnessSessionLimit: HarnessSessionLimitDetection | null = null;
+    if (record.kind === 'trigger' && record.ticket_id && record.agent_id && !record.commentSent) {
+      harnessSessionLimit =
+        detectHarnessSessionLimit(oneshotTail, code, Date.now()) ??
+        (errClass.reason === 'session_limit'
+          ? { reason: 'session_limit', resetLabel: '', deferUntilMs: resolveDeferUntil(Date.now(), null) }
+          : null);
+      if (harnessSessionLimit && this.onHarnessSessionLimit) {
+        log(
+          `[subagent] harness session-limit exit ticket=${record.ticket_id.slice(0, 8)} ` +
+            `role=${record.role || '_'} agent=${record.agent_id.slice(0, 8)} ` +
+            `reset="${harnessSessionLimit.resetLabel || '(unparsed → default window)'}" — deferring dispatch`,
+        );
+        try {
+          this.onHarnessSessionLimit({
+            agentId: record.agent_id,
+            ticketId: record.ticket_id,
+            role: record.role || '',
+            reason: harnessSessionLimit.reason,
+            resetLabel: harnessSessionLimit.resetLabel,
+            deferUntilMs: harnessSessionLimit.deferUntilMs,
+          });
+        } catch (err: any) {
+          log(`[subagent] onHarnessSessionLimit hook threw: ${err?.message ?? err}`);
+        }
+      }
+    }
+
     // Circuit-breaker (ticket 27806095, defect ②/③). Ticket triggers only —
     // count non-transient exits per (agent, ticket, role); open + pend when the
     // threshold is crossed, OR immediately for a non-retryable signature
     // (usage-limit / auth). A clean exit that left a real agent comment resets
-    // the counter. Mirrors TicketSessionManager._onChildExit.
-    if (record.kind === 'trigger' && record.ticket_id && record.agent_id) {
+    // the counter. A harness session-limit death is handled above (defer, not
+    // pend), so it skips the breaker entirely. Mirrors TicketSessionManager.
+    if (!harnessSessionLimit && record.kind === 'trigger' && record.ticket_id && record.agent_id) {
       const role = record.role || '';
       const cbKey = CircuitBreaker.key(record.agent_id, record.ticket_id, role);
       // ticket 7e7e23bf: a subagent that surfaced an audit-trail comment did
@@ -1005,7 +1063,7 @@ export class SubagentManager implements SubagentManagerContract {
         // death, not one of those benign reaps. A genuine one-off transient kill
         // is followed by a successful run that resets the counter, so only a
         // persistent silent-exit loop pends.
-        const tail = this.#collectTail(record);
+        const tail = oneshotTail || this.#collectTail(record);
         const { justOpened, entry } = this.circuitBreaker.record(cbKey, code, tail, {
           forceOpen: errClass.nonRetryable,
         });

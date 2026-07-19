@@ -70,6 +70,43 @@ test('bare codex error (no usage/auth signature) → fatal but retryable', () =>
   assert.equal(c.reason, 'codex_error');
 });
 
+// ticket 467f714a: the harness SESSION-limit line is distinct from usage_limit —
+// it heals by TIME (defer to reset), so it must classify as `session_limit` and
+// NOT be fallback-eligible (a different model on the same account still hits the
+// session wall). This is the exact string that killed d34075b5's dispatch loop.
+test('harness session limit (the d34075b5 incident text) → session_limit, non-retryable, NOT fallback', () => {
+  const c = classifyCliError(
+    "You've hit your session limit · resets 12:30am (Asia/Seoul)",
+    { exitCode: 1 },
+  );
+  assert.equal(c.isFatal, true);
+  assert.equal(c.nonRetryable, true);
+  assert.equal(c.reason, 'session_limit', 'labeled session_limit, not usage_limit');
+  assert.equal(isFallbackEligible(c), false, 'a model switch cannot clear a session cap');
+});
+
+test('session-limit variants → session_limit (with error context)', () => {
+  for (const s of [
+    "You've hit your session limit · resets 3pm (America/New_York)",
+    'session limit reached; try again later',
+    'You have reached your weekly limit for this model',
+    'You have hit your 5-hour limit',
+  ]) {
+    const c = classifyCliError(s, { exitCode: 1 });
+    assert.equal(c.isFatal, true, `fatal: ${s}`);
+    assert.equal(c.reason, 'session_limit', `session_limit: ${s}`);
+  }
+});
+
+test('clean exit-0 answer mentioning "session limit" → NOT fatal (no false positive)', () => {
+  const c = classifyCliError(
+    'Added a session limit banner to the settings page and a test for the reset copy.',
+    { exitCode: 0 },
+  );
+  assert.equal(c.isFatal, false);
+  assert.equal(c.reason, '');
+});
+
 // Regression (reviewer blocker): usage/auth signatures are common substrings of
 // legitimate SWE answers. A clean exit-0 codex answer that merely *mentions*
 // these terms must pass through as a valid agent answer — not be suppressed,
