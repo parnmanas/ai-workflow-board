@@ -85,9 +85,15 @@ export class TicketsController {
     if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
     const run = await this.commentSummaryRepo.findOne({ where: { ticket_id: id, workspace_id: workspaceId } });
     if ((run?.status === 'pending' || run?.status === 'completing') && Date.now() - new Date(run.updated_at).getTime() > 5 * 60_000) {
-      run.status = 'failed';
-      run.error = 'Summary request timed out. Original comments were preserved.';
-      await this.commentSummaryRepo.save(run);
+      await this.commentSummaryRepo.createQueryBuilder()
+        .update(CommentSummaryRun)
+        .set({ status: 'failed', error: 'Summary request timed out. Original comments were preserved.' })
+        .where('id = :id', { id: run.id })
+        .andWhere('status = :status', { status: run.status })
+        .andWhere('updated_at = :updatedAt', { updatedAt: run.updated_at })
+        .execute();
+      const current = await this.commentSummaryRepo.findOne({ where: { id: run.id, workspace_id: workspaceId } });
+      return res.json(current || { ticket_id: id, status: 'idle' });
     }
     return res.json(run || { ticket_id: id, status: 'idle' });
   }

@@ -28,6 +28,8 @@ test('comment summary is workspace-scoped, idempotent, and preserves originals o
 
   const triggerModule = await import('file://' + path.join(DIST_ROOT, 'modules', 'agents', 'trigger-loop.service.js'));
   const triggerLoop = app.get(triggerModule.TriggerLoopService);
+  const ticketsModule = await import('file://' + path.join(DIST_ROOT, 'modules', 'tickets', 'tickets.controller.js'));
+  const controllerRunRepo = app.get(ticketsModule.TicketsController).commentSummaryRepo;
   let dispatches = 0;
   triggerLoop.emitCommentSummaryTrigger = async () => { dispatches += 1; return 'summary-trigger'; };
 
@@ -107,6 +109,32 @@ test('comment summary is workspace-scoped, idempotent, and preserves originals o
   assert.equal(timedOut.status, 200);
   assert.equal(timedOut.data.status, 'failed');
   assert.equal(await commentRepo.count({ where: { ticket_id: timeoutTicket.id } }), 2, 'timeout preserves originals');
+
+  const raceTicket = await seedTicket('completion wins timeout race');
+  assert.equal((await postSummary(raceTicket.id)).status, 202);
+  const raceRun = await runRepo.findOneByOrFail({ ticket_id: raceTicket.id });
+  await runRepo.createQueryBuilder().update().set({ updated_at: new Date(Date.now() - 6 * 60_000) }).where('id = :id', { id: raceRun.id }).execute();
+  const staleRun = await runRepo.findOneByOrFail({ id: raceRun.id });
+  const originalFindOne = controllerRunRepo.findOne.bind(controllerRunRepo);
+  let injectedCompletion = false;
+  controllerRunRepo.findOne = async (options) => {
+    if (!injectedCompletion && options?.where?.ticket_id === raceTicket.id) {
+      injectedCompletion = true;
+      await mcpA.callTool('complete_comment_summary', {
+        run_id: raceRun.id, ticket_id: raceTicket.id, status: 'succeeded', summary: 'completion won',
+      });
+      assert.equal((await runRepo.findOneByOrFail({ id: raceRun.id })).status, 'completed');
+      return { ...staleRun };
+    }
+    return originalFindOne(options);
+  };
+  const raced = await apiRequest(baseUrl, `/tickets/${raceTicket.id}/comment-summary`, { token, workspaceId: sceneA.ws.id });
+  controllerRunRepo.findOne = originalFindOne;
+  assert.equal(raced.status, 200);
+  assert.equal(raced.data.status, 'completed', 'stale timeout cannot overwrite completed run');
+  const racedComments = await commentRepo.find({ where: { ticket_id: raceTicket.id } });
+  assert.equal(racedComments.length, 1);
+  assert.equal(racedComments[0].content, 'completion won');
 
   await Promise.all([mcpA.close(), mcpB.close()]);
   exitAfterTests(0);

@@ -14,6 +14,7 @@ import { tokens } from '../tokens';
 import { MentionTextarea, MentionCandidate } from './common/MentionTextarea';
 import { ALL_COMMENT_TYPES, COMMENT_TYPE_STYLES, defaultVisibleTypes, resolveCommentType, hasStaleOpenQuestion } from './comment-types';
 import { formatAgentDisplayName } from '../utils/agentName';
+import { isCommentSummaryInProgress } from '../utils/commentSummary';
 
 export interface WorkspaceRoleSummary {
   id: string; slug: string; name: string;
@@ -607,7 +608,7 @@ export default function TicketPanel({
 
   useEffect(() => { void refreshCommentSummary(); }, [refreshCommentSummary]);
   useEffect(() => {
-    if (commentSummary?.status !== 'pending') return;
+    if (!isCommentSummaryInProgress(commentSummary?.status)) return;
     const timer = window.setInterval(async () => {
       try {
         const next = await api.getCommentSummary(activePanelId);
@@ -619,7 +620,7 @@ export default function TicketPanel({
   }, [activePanelId, commentSummary?.status]);
 
   const handleStartCommentSummary = useCallback(async () => {
-    if (summaryStarting || commentSummary?.status === 'pending') return;
+    if (summaryStarting || isCommentSummaryInProgress(commentSummary?.status)) return;
     const accepted = await confirm({
       title: 'Replace comments with a summary?',
       message: 'All existing comments will be replaced by one agent-generated summary after it succeeds. Originals remain unchanged if summarization fails.',
@@ -3581,11 +3582,11 @@ export default function TicketPanel({
               <button
                 type="button"
                 onClick={handleStartCommentSummary}
-                disabled={summaryStarting || commentSummary?.status === 'pending'}
+                disabled={summaryStarting || isCommentSummaryInProgress(commentSummary?.status)}
                 title="Replace existing comments with one agent-generated summary"
-                style={{ padding: '2px 8px', borderRadius: tokens.radii.full as any, fontSize: 11, fontWeight: 600, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surfaceSubtle, color: tokens.colors.textStrong, cursor: summaryStarting || commentSummary?.status === 'pending' ? 'not-allowed' : 'pointer', opacity: summaryStarting || commentSummary?.status === 'pending' ? 0.6 : 1 }}
+                style={{ padding: '2px 8px', borderRadius: tokens.radii.full as any, fontSize: 11, fontWeight: 600, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surfaceSubtle, color: tokens.colors.textStrong, cursor: summaryStarting || isCommentSummaryInProgress(commentSummary?.status) ? 'not-allowed' : 'pointer', opacity: summaryStarting || isCommentSummaryInProgress(commentSummary?.status) ? 0.6 : 1 }}
               >
-                {summaryStarting || commentSummary?.status === 'pending' ? 'Summarizing…' : 'Summary'}
+                {summaryStarting || isCommentSummaryInProgress(commentSummary?.status) ? 'Summarizing…' : 'Summary'}
               </button>
               {commentSummary?.status === 'failed' && (
                 <span role="alert" style={{ fontSize: 11, color: tokens.colors.danger }}>
