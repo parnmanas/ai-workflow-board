@@ -79,9 +79,12 @@ export class TicketsController {
   ) {}
 
   @Get('tickets/:id/comment-summary')
-  async getCommentSummary(@Param('id') id: string, @Res() res: Response) {
-    const run = await this.commentSummaryRepo.findOne({ where: { ticket_id: id } });
-    if (run?.status === 'pending' && Date.now() - new Date(run.updated_at).getTime() > 5 * 60_000) {
+  async getCommentSummary(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
+    const workspaceId = (req as any).currentWorkspaceId as string;
+    const ticket = await this.ticketRepo.findOne({ where: { id, workspace_id: workspaceId } });
+    if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+    const run = await this.commentSummaryRepo.findOne({ where: { ticket_id: id, workspace_id: workspaceId } });
+    if ((run?.status === 'pending' || run?.status === 'completing') && Date.now() - new Date(run.updated_at).getTime() > 5 * 60_000) {
       run.status = 'failed';
       run.error = 'Summary request timed out. Original comments were preserved.';
       await this.commentSummaryRepo.save(run);
@@ -90,8 +93,9 @@ export class TicketsController {
   }
 
   @Post('tickets/:id/comment-summary')
-  async startCommentSummary(@Param('id') id: string, @Res() res: Response) {
-    const ticket = await this.ticketRepo.findOne({ where: { id } });
+  async startCommentSummary(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
+    const workspaceId = (req as any).currentWorkspaceId as string;
+    const ticket = await this.ticketRepo.findOne({ where: { id, workspace_id: workspaceId } });
     if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
     const comments = await this.commentRepo.find({ where: { ticket_id: id }, order: { created_at: 'ASC' } });
     const real = comments.filter(c => c.type !== 'system');
@@ -101,8 +105,8 @@ export class TicketsController {
     if (real.length === 0) return res.status(409).json({ error: 'There are no comments to summarize' });
     if (alreadySummary) return res.status(409).json({ error: 'This ticket already contains only a summary' });
 
-    const existing = await this.commentSummaryRepo.findOne({ where: { ticket_id: id } });
-    if (existing?.status === 'pending') return res.json(existing);
+    const existing = await this.commentSummaryRepo.findOne({ where: { ticket_id: id, workspace_id: workspaceId } });
+    if (existing?.status === 'pending' || existing?.status === 'completing') return res.status(200).json(existing);
     const agents = await this.agentRepo.find({
       where: { workspace_id: ticket.workspace_id, is_active: 1 } as any,
       order: { name: 'ASC' },
@@ -120,6 +124,7 @@ export class TicketsController {
       agent_id: usableAgents[0].id,
       status: 'pending',
       source_comment_count: comments.length,
+      source_comment_ids: JSON.stringify(comments.map(comment => comment.id)),
       error: '',
       completed_at: null,
     });
@@ -128,15 +133,15 @@ export class TicketsController {
       if (existing) {
         const claimed = await this.commentSummaryRepo.update(
           { id: existing.id, status: existing.status },
-          { agent_id: usableAgents[0].id, status: 'pending', source_comment_count: comments.length, error: '', completed_at: null },
+          { agent_id: usableAgents[0].id, status: 'pending', source_comment_count: comments.length, source_comment_ids: JSON.stringify(comments.map(comment => comment.id)), error: '', completed_at: null },
         );
         saved = (await this.commentSummaryRepo.findOne({ where: { id: existing.id } }))!;
-        if (!claimed.affected) return res.json(saved);
+        if (!claimed.affected) return res.status(200).json(saved);
       } else try {
         saved = await this.commentSummaryRepo.save(run);
       } catch (saveError: any) {
-        const raced = await this.commentSummaryRepo.findOne({ where: { ticket_id: id } });
-        if (raced) return res.json(raced);
+        const raced = await this.commentSummaryRepo.findOne({ where: { ticket_id: id, workspace_id: workspaceId } });
+        if (raced) return res.status(200).json(raced);
         throw saveError;
       }
       await this.triggerLoop.emitCommentSummaryTrigger(id, saved.agent_id, saved.id);
