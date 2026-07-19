@@ -8,6 +8,7 @@ import { Board } from '../../entities/Board';
 import { UserMention } from '../../entities/UserMention';
 import { TicketReadState } from '../../entities/TicketReadState';
 import { TicketAttachment } from '../../entities/TicketAttachment';
+import { CommentSummaryRun } from '../../entities/CommentSummaryRun';
 import { TicketsController } from './tickets.controller';
 import { TicketArchiverService } from './ticket-archiver.service';
 import { AuthGuard } from '../../common/guards/auth.guard';
@@ -16,7 +17,7 @@ import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module'
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Ticket, BoardColumn, Comment, Agent, Board, UserMention, TicketReadState, TicketAttachment]),
+    TypeOrmModule.forFeature([Ticket, BoardColumn, Comment, CommentSummaryRun, Agent, Board, UserMention, TicketReadState, TicketAttachment]),
     // Exports TriggerLoopService so /api/tickets/:id/trigger can re-engage agents.
     AgentsModule,
     WorkspaceRolesModule,

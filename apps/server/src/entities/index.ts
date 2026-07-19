@@ -3,6 +3,7 @@ export { Board } from './Board';
 export { BoardColumn } from './BoardColumn';
 export { Ticket } from './Ticket';
 export { Comment } from './Comment';
+export { CommentSummaryRun } from './CommentSummaryRun';
 export { User } from './User';
 export { Agent } from './Agent';
 export { Channel } from './Channel';
