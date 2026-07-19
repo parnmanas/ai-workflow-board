@@ -14,6 +14,10 @@ export const tokens = {
     textSecondary: '#94a3b8',
     textMuted: '#64748b',
     textDisabled: '#cbd5e1',
+    // 어두운 스크림/오버레이 위 텍스트(항상 흰색) — rgba scrim 위 라벨용
+    textInverse: '#ffffff',
+    // 키보드 포커스 링(:focus-visible) 단일 원천 — 어두운 서피스 위 3:1↑ 대비(F2-5).
+    focusRing: '#818cf8',
     // Accent
     accent: '#6366f1',
     accentViolet: '#8b5cf6',
@@ -43,6 +47,23 @@ export const tokens = {
     badgeSystemText: '#a8a29e',
     badgeAgentBg: '#1e1b4b',
     badgeUserBg: '#0c4a6e',
+  },
+  // 반투명 오버레이/스크림/틴트 계층 — 여기저기 흩어져 있던 raw rgba() 를
+  // 단일 원천으로 수렴한다(F2-2). accent 틴트는 accent(#6366f1 = rgb(99,102,241))의
+  // 알파 변주다.
+  overlays: {
+    backdrop: 'rgba(0,0,0,0.6)',        // 모달/피커 배경 딤
+    backdropSoft: 'rgba(0,0,0,0.4)',    // 드로어 사이드바 배경 딤
+    scrimStrong: 'rgba(0,0,0,0.85)',    // 전체화면 이미지 라이트박스
+    imageBarSubtle: 'rgba(0,0,0,0.35)', // 이미지 위 액션/캡션 바(약)
+    imageBar: 'rgba(0,0,0,0.45)',       // 이미지 위 액션/캡션 바
+    imageBarStrong: 'rgba(0,0,0,0.7)',  // 이미지 위 액션/캡션 바(강)
+    accentFaint: 'rgba(99,102,241,0.08)',   // 선택/호버 accent 틴트(약)
+    accentSoft: 'rgba(99,102,241,0.12)',    // 티켓 카드 기본 배경
+    accentTint: 'rgba(99,102,241,0.15)',    // agent 멘션 배경
+    accentStrong: 'rgba(99,102,241,0.20)',  // 티켓 카드 호버 / 하이라이트 플래시
+    accentStronger: 'rgba(99,102,241,0.22)',// 티켓 카드 이미지 배지
+    rowHover: 'rgba(255,255,255,0.04)',     // 리스트 행 호버
   },
   gradients: {
     surfacePage: 'linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%)',

@@ -15,7 +15,6 @@ export { readInitialMode, persistMode, defaultSectionForMode } from './viewMode'
 interface ViewModeContextValue {
   mode: ViewMode;
   setMode: (m: ViewMode) => void;
-  toggle: () => void;
 }
 
 const ViewModeContext = createContext<ViewModeContextValue | undefined>(undefined);
@@ -28,16 +27,8 @@ export function ViewModeProvider({ children }: { children: React.ReactNode }) {
     persistMode(m);
   }, []);
 
-  const toggle = useCallback(() => {
-    setModeState((prev) => {
-      const next: ViewMode = prev === 'chat' ? 'advanced' : 'chat';
-      persistMode(next);
-      return next;
-    });
-  }, []);
-
   return (
-    <ViewModeContext.Provider value={{ mode, setMode, toggle }}>
+    <ViewModeContext.Provider value={{ mode, setMode }}>
       {children}
     </ViewModeContext.Provider>
   );

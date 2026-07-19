@@ -28,7 +28,7 @@ function renderMentionPill(
   raw?: string,
 ): React.ReactNode {
   // agent = stronger tint; user/role = softer
-  const bgColor = variant === 'agent' ? 'rgba(99,102,241,0.15)' : 'rgba(99,102,241,0.12)';
+  const bgColor = variant === 'agent' ? tokens.overlays.accentTint : tokens.overlays.accentSoft;
   const textColor = variant === 'agent' ? tokens.colors.accentSubtle : tokens.colors.accentPale;
   return (
     <span
@@ -96,7 +96,7 @@ export function renderMarkdown(text: string, participants?: MentionParticipant[]
           key={keyIdx++}
           style={{
             fontFamily: 'monospace',
-            fontSize: 13,
+            fontSize: tokens.typography.fontSizeMd,
             background: tokens.colors.surfaceCard,
             padding: '1px 4px',
             borderRadius: tokens.radii.xs,

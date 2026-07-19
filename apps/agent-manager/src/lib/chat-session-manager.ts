@@ -25,8 +25,14 @@ import {
   resolveRejectHandoffRefs,
   formatTicketRefsContent,
   chunkTicketRefs,
+  trackedArtifactTool,
+  resolveArtifactRef,
+  chunkArtifactRefs,
+  formatArtifactRefsContent,
   type TicketToolContext,
   type TicketRef,
+  type ArtifactToolContext,
+  type ArtifactRef,
 } from './ticket-ref-capture.js';
 import { findLiveBackgroundTasks, reapProcessTrees, type ProcNode } from './process-tree.js';
 import { composeChatRoomPrompt } from './prompts.js';
@@ -139,6 +145,10 @@ export class ChatSessionManager
   // ticket_id → title learned from ANY tool result (create/move/get_ticket/…), so a
   // title-less action result (add_comment/claim) can still label its card. Bounded LRU.
   #ticketTitleCache = new Map<string, string>();
+  // F2-4 ⓒ (ticket d21b28fc): 결과물(빌드/배포) 카드 캡처. ticket-ref 와 동일한 pid 키
+  // pending/captured 이중 맵 — 티켓 ref 와 독립적으로 누적돼 flush 시 artifact_refs 로 방출.
+  #pendingArtifactTools = new Map<number, Map<string, ArtifactToolContext>>();
+  #capturedArtifactRefs = new Map<number, ArtifactRef[]>();
 
   constructor(config: SessionAwareConfig) {
     super(config, {
@@ -806,13 +816,24 @@ export class ChatSessionManager
   #trackTicketToolUse(pid: number, block: any): void {
     if (typeof block?.id !== 'string') return;
     const ctx = trackedTicketTool(block?.name, block?.input);
-    if (!ctx) return;
-    let pend = this.#pendingTicketTools.get(pid);
-    if (!pend) {
-      pend = new Map();
-      this.#pendingTicketTools.set(pid, pend);
+    if (ctx) {
+      let pend = this.#pendingTicketTools.get(pid);
+      if (!pend) {
+        pend = new Map();
+        this.#pendingTicketTools.set(pid, pend);
+      }
+      pend.set(block.id, ctx);
+      return;
     }
-    pend.set(block.id, ctx);
+    // F2-4 ⓒ: 티켓 tool 이 아니면 결과물(빌드/배포) tool 인지 확인해 별도 추적.
+    const actx = trackedArtifactTool(block?.name, block?.input);
+    if (!actx) return;
+    let apend = this.#pendingArtifactTools.get(pid);
+    if (!apend) {
+      apend = new Map();
+      this.#pendingArtifactTools.set(pid, apend);
+    }
+    apend.set(block.id, actx);
   }
 
   #consumeTicketToolResult(pid: number, block: any): void {
@@ -821,13 +842,17 @@ export class ChatSessionManager
     // action (add_comment/claim) can still label its card from the cache.
     for (const pair of harvestTicketTitles(result)) this.#cacheTicketTitle(pair.id, pair.title);
 
+    const isError = block?.is_error === true;
     const pend = this.#pendingTicketTools.get(pid);
     const useId = typeof block?.tool_use_id === 'string' ? block.tool_use_id : undefined;
     const ctx = pend && useId ? pend.get(useId) : undefined;
-    if (!ctx || !pend || !useId) return; // not a tracked ticket action
+    if (!ctx || !pend || !useId) {
+      // Not a tracked ticket action — maybe a tracked artifact result (F2-4 ⓒ).
+      this.#consumeArtifactToolResult(pid, useId, result, isError);
+      return;
+    }
     pend.delete(useId);
 
-    const isError = block?.is_error === true;
     const lookup = (id: string) => this.#ticketTitleCache.get(id);
     // batch_operations and reject_handoff each fan ONE result out to many refs;
     // every other tracked tool resolves to at most one. Push each through the same
@@ -855,18 +880,46 @@ export class ChatSessionManager
     this.#capturedTicketRefs.set(pid, refs);
   }
 
-  /** Flush the turn's captured ticket-action refs as structured card message(s).
-   *  The server bounds each message's ticket_refs at TICKET_REFS_PER_MESSAGE, so a
-   *  turn with more successful actions than that is split across MULTIPLE cards (never
-   *  truncated — acceptance #1 "누락 없이"). Non-empty Korean content is the fallback
-   *  for surfaces that don't render metadata (history replay, notifications, legacy
-   *  clients); the metadata.ticket_refs drives the rich card. Fire-and-forget; clears
-   *  per-pid state so it is idempotent (a second call after turn-end is a no-op). */
+  /** F2-4 ⓒ: 결과물(빌드/배포) tool_result 를 소비해 ArtifactRef 로 캡처한다.
+   *  티켓 tool 이 아닌 tool_result 경로에서만 호출됨 — pending artifact 맵에 매칭될
+   *  때만 방출(fail-closed). 티켓 캡처와 동일하게 turn 종료 시 함께 flush 된다. */
+  #consumeArtifactToolResult(pid: number, useId: string | undefined, result: any, isError: boolean): void {
+    const apend = this.#pendingArtifactTools.get(pid);
+    const actx = apend && useId ? apend.get(useId) : undefined;
+    if (!actx || !apend || !useId) return; // not a tracked artifact tool
+    apend.delete(useId);
+    const ref = resolveArtifactRef(actx, result, isError);
+    if (ref) this.#pushCapturedArtifactRef(pid, ref);
+  }
+
+  /** Append a captured artifact ref, collapsing duplicate (kind, title, commit)
+   *  so a re-report of the same build/deploy renders one card. */
+  #pushCapturedArtifactRef(pid: number, ref: ArtifactRef): void {
+    const refs = this.#capturedArtifactRefs.get(pid) ?? [];
+    if (refs.some((r) => r.kind === ref.kind && r.title === ref.title && r.commit === ref.commit)) return;
+    refs.push(ref);
+    this.#capturedArtifactRefs.set(pid, refs);
+  }
+
+  /** Flush the turn's captured ticket-action + artifact refs as structured card
+   *  message(s). The server bounds each message's ticket_refs / artifact_refs at
+   *  TICKET_REFS_PER_MESSAGE, so a turn with more successful actions than that is split
+   *  across MULTIPLE cards (never truncated — acceptance #1 "누락 없이"). Non-empty Korean
+   *  content is the fallback for surfaces that don't render metadata (history replay,
+   *  notifications, legacy clients); the metadata.{ticket_refs,artifact_refs} drives the
+   *  rich card. F2-4 ⓒ: ticket / artifact 는 서로 독립적으로 flush — 한쪽만 있어도 방출.
+   *  Fire-and-forget; clears per-pid state so it is idempotent (a second call after
+   *  turn-end is a no-op). */
   #flushTicketRefs(sess: SessionRecord): void {
     const refs = this.#capturedTicketRefs.get(sess.pid);
+    const artifactRefs = this.#capturedArtifactRefs.get(sess.pid);
     this.#capturedTicketRefs.delete(sess.pid);
     this.#pendingTicketTools.delete(sess.pid);
-    if (!refs || refs.length === 0) return;
+    this.#capturedArtifactRefs.delete(sess.pid);
+    this.#pendingArtifactTools.delete(sess.pid);
+    const hasTicket = !!refs && refs.length > 0;
+    const hasArtifact = !!artifactRefs && artifactRefs.length > 0;
+    if (!hasTicket && !hasArtifact) return;
     const roomId: string | undefined = sess.roomId;
     const agentId: string | undefined = sess.agentId;
     if (!roomId || !agentId) return;
@@ -875,16 +928,23 @@ export class ChatSessionManager
     // Split into ≤TICKET_REFS_PER_MESSAGE-ref chunks so each survives the server
     // sanitizer whole, then emit EVERY chunk — no message-count ceiling. A hard cap
     // here (even one that logs) would drop successful refs past it, breaking acceptance
-    // #1 ("누락 없이"). The turn itself already bounds the volume: refs are deduped by
-    // (action, ticket_id) and only successful tracked mutations are captured, so the
-    // chunk count tracks real actions, not runaway input.
-    const chunks = chunkTicketRefs(refs, TICKET_REFS_PER_MESSAGE);
+    // #1 ("누락 없이"). The turn itself already bounds the volume: refs are deduped and
+    // only successful tracked mutations are captured, so the chunk count tracks real
+    // actions, not runaway input.
     // Fire-and-forget per chunk — postChatRoomMessage swallows + logs errors, so a
     // failed card post never blocks stdout parsing. type defaults to 'message'
     // (persistent, included in history replay); metadata carries that chunk's refs.
-    for (const chunk of chunks) {
-      const content = formatTicketRefsContent(chunk);
-      void postChatRoomMessage(cfg, roomId, agentId, content, { metadata: { ticket_refs: chunk } });
+    if (hasTicket) {
+      for (const chunk of chunkTicketRefs(refs!, TICKET_REFS_PER_MESSAGE)) {
+        const content = formatTicketRefsContent(chunk);
+        void postChatRoomMessage(cfg, roomId, agentId, content, { metadata: { ticket_refs: chunk } });
+      }
+    }
+    if (hasArtifact) {
+      for (const chunk of chunkArtifactRefs(artifactRefs!, TICKET_REFS_PER_MESSAGE)) {
+        const content = formatArtifactRefsContent(chunk);
+        void postChatRoomMessage(cfg, roomId, agentId, content, { metadata: { artifact_refs: chunk } });
+      }
     }
   }
 

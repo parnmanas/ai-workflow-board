@@ -1,6 +1,7 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Outlet, useNavigate, useParams, useLocation } from 'react-router-dom';
 import Sidebar from './Sidebar';
+import { useDialogFocus } from './useDialogFocus';
 import WorkspaceSelector from './WorkspaceSelector';
 import ViewModeToggle from './ViewModeToggle';
 import { useViewMode } from '../contexts/ViewModeContext';
@@ -12,6 +13,7 @@ import { useWorkspaces } from '../hooks/useBoard';
 import { api, setActiveWorkspaceId } from '../api';
 import { BoardStreamProvider } from '../contexts/BoardStreamContext';
 import { NotificationProvider } from '../contexts/NotificationContext';
+import { TicketMetaProvider } from '../contexts/TicketMetaContext';
 import { tokens } from '../tokens';
 
 /**
@@ -206,6 +208,12 @@ export default function AppLayout() {
     return () => window.removeEventListener('keydown', onKey);
   }, [drawerMode, drawerOpen]);
 
+  // 드로어(off-canvas 네비)의 초기 포커스·Tab 트랩·opener(햄버거) 복귀를 Modal/Artifact
+  // 패널과 동일한 공용 훅으로 통일한다(F2-5). 열리면 사이드바 내 첫 포커스 요소로 이동,
+  // Tab 은 사이드바 안에 갇히고, 닫히면 열었던 햄버거 버튼으로 포커스가 되돌아온다.
+  const drawerRef = useRef<HTMLElement>(null);
+  useDialogFocus({ active: drawerMode && drawerOpen, trap: true, containerRef: drawerRef });
+
   return (
     // BoardStreamProvider wraps the whole authenticated shell (Sidebar + main)
     // because Sidebar now subscribes to `user_mention` SSE events for the unread
@@ -215,6 +223,7 @@ export default function AppLayout() {
     <BoardStreamProvider>
     <NotificationProvider>
     <ArtifactPanelProvider>
+    <TicketMetaProvider>
     <TicketArtifactController>
     <div className="awb-shell">
       <Sidebar
@@ -223,6 +232,7 @@ export default function AppLayout() {
         onClose={() => setDrawerOpen(false)}
         wsId={urlWsId}
         boards={sidebarBoards}
+        containerRef={drawerRef}
       />
       {drawerMode && drawerOpen && (
         <div
@@ -321,6 +331,7 @@ export default function AppLayout() {
       <ArtifactPanel isMobile={isMobile} />
     </div>
     </TicketArtifactController>
+    </TicketMetaProvider>
     </ArtifactPanelProvider>
     </NotificationProvider>
     </BoardStreamProvider>

@@ -8,6 +8,7 @@ import PageHeader from './PageHeader';
 import HarnessConfigEditor from './HarnessConfigEditor';
 import WorkspaceSchedulesEditor from './WorkspaceSchedulesEditor';
 import AssistantAgentSetting from './chat/AssistantAgentSetting';
+import { PermissionNotice } from './common';
 import { tokens } from '../tokens';
 
 // Workspace Settings (ticket 7122600c). Currently hosts the workspace-wide
@@ -47,9 +48,10 @@ export default function WorkspaceSettingsPage() {
       <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
         <PageHeader title="Workspace Settings" />
         <div style={pageStyle}>
-          <div style={{ color: tokens.colors.textSecondary, fontSize: 14 }}>
-            Admin access is required to edit workspace settings.
-          </div>
+          <PermissionNotice
+            title="Admin access required"
+            message="Admin access is required to edit workspace settings."
+          />
         </div>
       </div>
     );

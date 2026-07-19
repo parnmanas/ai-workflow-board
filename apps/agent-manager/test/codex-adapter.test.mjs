@@ -5,7 +5,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'smol-toml';
 
-import { CodexCliAdapter } from '../dist/lib/cli-adapters/codex.js';
+import {
+  CodexCliAdapter,
+  validateCodexMcpServers,
+  InvalidMcpTransportError,
+  CODEX_MCP_TRANSPORTS,
+} from '../dist/lib/cli-adapters/codex.js';
 import { ADAPTER_CAPABILITIES } from '../dist/lib/cli-adapters/base.js';
 
 const tempDirs = [];
@@ -56,12 +61,18 @@ test('listModels degrades to free-text mode when Codex has no cache yet', async 
   assert.deepEqual(await new CodexCliAdapter().listModels(), []);
 });
 
-test('buildOneshotSpawn adds ticket attribution as a TOML config override', () => {
+test('buildOneshotSpawn adds ticket attribution as a TOML config override', async () => {
+  const cliHomeDir = await freshDir();
+  await fsp.writeFile(
+    join(cliHomeDir, 'config.toml'),
+    '[mcp_servers.awb]\nurl = "https://awb.example/mcp"\n',
+  );
   const adapter = new CodexCliAdapter();
   const descriptor = adapter.buildOneshotSpawn({
     rolePrompt: 'role',
     taskText: 'task',
     mcpConfigPath: null,
+    cliHomeDir,
     mcpAttribution: {
       ticketId: 'ticket-123',
       role: 'reviewer',
@@ -80,6 +91,26 @@ test('buildOneshotSpawn adds ticket attribution as a TOML config override', () =
     'X-AWB-Subagent-Role': 'reviewer',
     'X-AWB-Subagent-Trigger-Source': 'ticket_done_review',
   });
+});
+
+test('buildOneshotSpawn rejects attribution before spawn when effective awb is headers-only', async () => {
+  const cliHomeDir = await freshDir();
+  await assert.rejects(
+    async () => new CodexCliAdapter().buildOneshotSpawn({
+      rolePrompt: 'role',
+      taskText: 'task',
+      mcpConfigPath: null,
+      cliHomeDir,
+      mcpAttribution: { ticketId: 'ticket-123', role: 'reviewer' },
+    }),
+    (err) => {
+      assert.ok(err instanceof InvalidMcpTransportError);
+      assert.match(err.message, /mcp_servers\.awb/);
+      assert.ok(err.message.includes(join(cliHomeDir, 'config.toml')));
+      assert.match(err.message, /stdio, streamable_http/);
+      return true;
+    },
+  );
 });
 
 test('buildOneshotSpawn omits per-run MCP override for unattributed chat runs', () => {
@@ -334,4 +365,120 @@ test('prepareCliHome replaces an inherited config symlink without modifying the 
   const { config } = await readConfig(agentHome);
   assert.equal(config.model, 'gpt-5.4');
   assert.equal(config.mcp_servers.awb.required, true);
+});
+
+// ── MCP transport validation (ticket 40d18474) ──────────────────────────────
+// codex aborts config loading with `invalid transport in mcp_servers.<name>`
+// (exit 1 → silent subagent exit) for any server it can't resolve to a
+// transport. Incident 26a92722: a managed codex reviewer died twice this way.
+
+test('CODEX_MCP_TRANSPORTS is the codex-supported allow-list', () => {
+  assert.deepEqual([...CODEX_MCP_TRANSPORTS], ['stdio', 'streamable_http']);
+});
+
+test('validateCodexMcpServers accepts url (streamable_http), command (stdio) and explicit supported transports', () => {
+  assert.doesNotThrow(() =>
+    validateCodexMcpServers(
+      {
+        mcp_servers: {
+          awb: { url: 'https://awb.example/mcp', bearer_token_env_var: 'AWB_API_KEY', required: true },
+          host: { command: '/usr/bin/node', args: ['main.js', 'mcp-host'] },
+          extra: { transport: 'streamable_http', url: 'https://extra.example' },
+        },
+      },
+      '/home/agent/config.toml',
+    ),
+  );
+});
+
+test('validateCodexMcpServers treats a config without mcp_servers as vacuously valid', () => {
+  for (const c of [{}, { model: 'gpt-5.4' }, null, undefined, { mcp_servers: null }]) {
+    assert.doesNotThrow(() => validateCodexMcpServers(c, '/c'), `vacuous: ${JSON.stringify(c)}`);
+  }
+});
+
+test('validateCodexMcpServers rejects a transport-less awb (the invalid-transport incident 26a92722)', () => {
+  // A headers-only awb — exactly what the always-injected
+  // `-c mcp_servers.awb.http_headers` override manufactures when config.toml
+  // carries no complete awb — has neither url nor command.
+  assert.throws(
+    () =>
+      validateCodexMcpServers(
+        { mcp_servers: { awb: { http_headers: { 'X-AWB-Client-Type': 'managed-subagent' } } } },
+        '/home/agent/config.toml',
+      ),
+    (err) => {
+      assert.ok(err instanceof InvalidMcpTransportError, 'InvalidMcpTransportError');
+      assert.match(err.message, /mcp_servers\.awb/, 'names the offending server key');
+      assert.match(err.message, /\/home\/agent\/config\.toml/, 'names the config path');
+      assert.match(err.message, /stdio, streamable_http/, 'lists the allowed transports');
+      return true;
+    },
+  );
+});
+
+test('validateCodexMcpServers rejects an explicit transport outside the allow-list', () => {
+  for (const bad of ['http', 'sse', 'ws', 'streamablehttp']) {
+    assert.throws(
+      () => validateCodexMcpServers({ mcp_servers: { awb: { transport: bad, url: 'https://x' } } }, '/c'),
+      (err) => {
+        assert.ok(err instanceof InvalidMcpTransportError, `InvalidMcpTransportError for ${bad}`);
+        assert.ok(err.message.includes(`transport = "${bad}"`), `echoes the bad value ${bad}`);
+        assert.match(err.message, /stdio, streamable_http/, 'lists the allowed transports');
+        return true;
+      },
+    );
+  }
+});
+
+test('validateCodexMcpServers rejects an explicit transport inconsistent with its fields', () => {
+  assert.throws(
+    () => validateCodexMcpServers({ mcp_servers: { awb: { transport: 'streamable_http' } } }, '/c'),
+    (err) => err instanceof InvalidMcpTransportError && /requires a "url"/.test(err.message),
+  );
+  assert.throws(
+    () => validateCodexMcpServers({ mcp_servers: { host: { transport: 'stdio' } } }, '/c'),
+    (err) => err instanceof InvalidMcpTransportError && /requires a "command"/.test(err.message),
+  );
+  // A non-table entry is rejected too.
+  assert.throws(
+    () => validateCodexMcpServers({ mcp_servers: { junk: 'nope' } }, '/c'),
+    (err) => err instanceof InvalidMcpTransportError && /mcp_servers\.junk/.test(err.message),
+  );
+});
+
+test('prepareCliHome writes a valid awb transport even when the per-agent apiKey is absent (root cause of 26a92722)', async () => {
+  // The awb block never embeds the key (bearer comes from the AWB_API_KEY env
+  // var), so an absent apiKey must NOT drop awb — otherwise the spawn-time
+  // `-c mcp_servers.awb.http_headers` override manufactures a transport-less
+  // awb and codex aborts config loading. Isolate CODEX_HOME so no operator
+  // config is inherited.
+  const adapter = new CodexCliAdapter();
+  const home = await freshDir();
+  process.env.CODEX_HOME = await freshDir('awb-codex-emptymain-');
+
+  await adapter.prepareCliHome(home, null, { url: 'https://awb.example.com', apiKey: '' });
+
+  const { config } = await readConfig(home);
+  assert.equal(config.mcp_servers.awb.url, 'https://awb.example.com/mcp');
+  assert.equal(config.mcp_servers.awb.required, true);
+  assert.equal(typeof config.mcp_servers.host.command, 'string');
+});
+
+test('prepareCliHome refuses (without overwriting) when an inherited MCP server has no resolvable transport', async () => {
+  // A preserved operator server with neither url nor command must be caught
+  // before codex is handed the config — as a clear InvalidMcpTransportError,
+  // and the original file must stay intact (validation precedes the write).
+  const adapter = new CodexCliAdapter();
+  const home = await freshDir();
+  process.env.CODEX_HOME = await freshDir('awb-codex-emptymain-');
+  const configPath = join(home, 'config.toml');
+  const broken = ['[mcp_servers.legacy]', 'http_headers = { "X-Trace" = "1" }', ''].join('\n');
+  await fsp.writeFile(configPath, broken);
+
+  await assert.rejects(
+    adapter.prepareCliHome(home, null, { url: 'https://awb.example.com', apiKey: 'k' }),
+    (err) => err instanceof InvalidMcpTransportError && /mcp_servers\.legacy/.test(err.message),
+  );
+  assert.equal(await fsp.readFile(configPath, 'utf8'), broken);
 });

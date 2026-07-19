@@ -26,6 +26,22 @@ test('오류 상태: role=alert + 메시지', () => {
   assert.match(html, /HTTP 404/);
 });
 
+test('오류 상태: onRetry 주면 재시도 버튼 노출 (F2-3)', () => {
+  const html = renderToStaticMarkup(
+    React.createElement(TicketArtifactView, { state: { status: 'error', message: 'x' }, onRetry: () => {} }),
+  );
+  assert.match(html, /다시 시도/);
+});
+
+test('로드 상태 + disconnected: SSE 단절 배너 노출, 연결 시 미노출 (F2-3)', () => {
+  const state = { status: 'loaded', ticket: { title: 'T' } };
+  const off = renderToStaticMarkup(React.createElement(TicketArtifactView, { state, disconnected: true }));
+  assert.match(off, /role="status"/);
+  assert.match(off, /실시간 갱신이 일시중단/);
+  const on = renderToStaticMarkup(React.createElement(TicketArtifactView, { state, disconnected: false }));
+  assert.doesNotMatch(on, /실시간 갱신이 일시중단/);
+});
+
 test('로드 상태: 제목·우선순위·라벨·역할·설명·하위작업·코멘트', () => {
   const ticket = {
     title: '로그인 리다이렉트 버그',

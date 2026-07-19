@@ -7,19 +7,6 @@ import { formatAgentDisplayName } from '../../utils/agentName';
 import { formatBytes, isImageMime, readFileAsBase64 } from './utils/attachments';
 import { completeComposerSend } from './utils/composerSend';
 
-// ─── Style constants (mirror ChatPage.tsx COLORS) ────────────────────────────
-
-const COLORS = {
-  dominant: tokens.colors.surface,
-  secondary: tokens.colors.surfaceCard,
-  accent: tokens.colors.accent,
-  border: tokens.colors.border,
-  textPrimary: tokens.colors.textPrimary,
-  textSecondary: tokens.colors.textSecondary,
-  textMuted: tokens.colors.borderStrong,
-  destructive: tokens.colors.danger,
-};
-
 // ─── ChatMessageInput ─────────────────────────────────────────────────────────
 
 export interface ChatMessageInputProps {
@@ -322,8 +309,8 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
       style={{
-        background: COLORS.secondary,
-        borderTop: `1px solid ${COLORS.border}`,
+        background: tokens.colors.surfaceCard,
+        borderTop: `1px solid ${tokens.colors.border}`,
         flexShrink: 0,
         position: 'relative',
       }}
@@ -341,7 +328,7 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
             alignItems: 'center',
             justifyContent: 'center',
             color: tokens.colors.accent,
-            fontSize: 14,
+            fontSize: tokens.typography.fontSizeLg,
             fontWeight: 600,
             zIndex: 5,
             pointerEvents: 'none',
@@ -355,10 +342,10 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
         <div
           style={{
             background: tokens.colors.surfaceCard,
-            borderTop: `1px solid ${COLORS.border}`,
+            borderTop: `1px solid ${tokens.colors.border}`,
             padding: '8px 16px',
             display: 'flex',
-            gap: 8,
+            gap: tokens.spacing.sm,
             overflowX: 'auto',
             alignItems: 'flex-end',
           }}
@@ -370,24 +357,24 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
               onRemove={() => handleRemove(p.localId)}
             />
           ))}
-          <div style={{ marginLeft: 'auto', fontSize: 11, color: COLORS.textSecondary, whiteSpace: 'nowrap', alignSelf: 'center' }}>
+          <div style={{ marginLeft: 'auto', fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textSecondary, whiteSpace: 'nowrap', alignSelf: 'center' }}>
             {pendingAttachments.length} / {MAX_CLIENT_ATTACHMENTS}
           </div>
         </div>
       )}
       {uploadError && (
-        <div style={{ fontSize: 11, color: tokens.colors.danger, padding: '4px 16px' }}>
+        <div style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.danger, padding: '4px 16px' }}>
           {uploadError}
         </div>
       )}
 
       <div style={{ padding: '16px 16px' }} onPaste={handlePaste}>
         {sendError && (
-          <div style={{ fontSize: 13, color: COLORS.destructive, marginBottom: 8 }}>
+          <div style={{ fontSize: tokens.typography.fontSizeMd, color: tokens.colors.danger, marginBottom: tokens.spacing.sm }}>
             {sendError}
           </div>
         )}
-        <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+        <div style={{ display: 'flex', gap: tokens.spacing.sm, alignItems: 'flex-end' }}>
           <input
             ref={fileInputRef}
             type="file"
@@ -403,7 +390,7 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
             style={{
               background: 'transparent',
               border: 'none',
-              color: canAttach ? COLORS.textSecondary : COLORS.textMuted,
+              color: canAttach ? tokens.colors.textSecondary : tokens.colors.textMuted,
               fontSize: 18,
               padding: 8,
               cursor: canAttach ? 'pointer' : 'not-allowed',
@@ -434,11 +421,11 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
             placeholder="Type a message… (@ to tag · paste / drop files to attach)"
             style={{
               flex: 1,
-              background: COLORS.dominant,
-              border: `1px solid ${COLORS.border}`,
+              background: tokens.colors.surface,
+              border: `1px solid ${tokens.colors.border}`,
               borderRadius: tokens.radii.md,
-              color: COLORS.textPrimary,
-              fontSize: 14,
+              color: tokens.colors.textPrimary,
+              fontSize: tokens.typography.fontSizeLg,
               padding: '8px 16px',
               resize: 'none',
               minHeight: 44,
@@ -456,12 +443,12 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
             aria-label={isMobile ? 'Send message' : undefined}
             title={hasUploading ? 'Wait for uploads to finish' : undefined}
             style={{
-              background: COLORS.accent,
+              background: tokens.colors.accent,
               color: 'white',
               border: 'none',
               borderRadius: tokens.radii.md,
               padding: '8px 16px',
-              fontSize: 13,
+              fontSize: tokens.typography.fontSizeMd,
               fontWeight: 600,
               cursor: canSend ? 'pointer' : 'not-allowed',
               opacity: canSend ? 1 : 0.5,
@@ -474,7 +461,7 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
             {isMobile ? '▶' : 'Send Message'}
           </button>
         </div>
-        <div style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 4 }}>
+        <div style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textMuted, marginTop: tokens.spacing.xs }}>
           Enter to send · Shift+Enter for new line · Drop or paste files to attach
         </div>
       </div>
@@ -570,9 +557,9 @@ function PendingAttachmentChip({ entry, onRemove }: PendingAttachmentChipProps) 
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            background: 'rgba(0,0,0,0.35)',
-            color: '#fff',
-            fontSize: 11,
+            background: tokens.overlays.imageBarSubtle,
+            color: tokens.colors.textInverse,
+            fontSize: tokens.typography.fontSizeXs,
             fontWeight: 600,
           }}
         >
@@ -588,9 +575,9 @@ function PendingAttachmentChip({ entry, onRemove }: PendingAttachmentChipProps) 
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            background: 'rgba(0,0,0,0.45)',
+            background: tokens.overlays.imageBar,
             color: tokens.colors.danger,
-            fontSize: 11,
+            fontSize: tokens.typography.fontSizeXs,
             fontWeight: 600,
           }}
         >
@@ -606,7 +593,7 @@ function PendingAttachmentChip({ entry, onRemove }: PendingAttachmentChipProps) 
           right: -6,
           width: 18,
           height: 18,
-          background: 'rgba(0,0,0,0.7)',
+          background: tokens.overlays.imageBarStrong,
           color: tokens.colors.textPrimary,
           border: 'none',
           borderRadius: tokens.radii.lg,

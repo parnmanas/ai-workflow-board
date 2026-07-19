@@ -9,19 +9,6 @@ import { useConfirm } from '../../contexts/ConfirmContext';
 import { type MentionParticipant } from './utils/markdown';
 import ChatMessageInput from './ChatMessageInput';
 
-// ─── Style constants (mirror ChatPage.tsx COLORS) ────────────────────────────
-
-const COLORS = {
-  dominant: tokens.colors.surface,
-  secondary: tokens.colors.surfaceCard,
-  accent: tokens.colors.accent,
-  border: tokens.colors.border,
-  textPrimary: tokens.colors.textPrimary,
-  textSecondary: tokens.colors.textSecondary,
-  textMuted: tokens.colors.borderStrong,
-  destructive: tokens.colors.danger,
-};
-
 
 // ─── RoomHeaderActions ────────────────────────────────────────────────────────
 
@@ -67,27 +54,27 @@ function RoomHeaderActions({
 
   const ghostButton = {
     background: 'transparent',
-    border: `1px solid ${COLORS.border}`,
-    color: COLORS.textSecondary,
+    border: `1px solid ${tokens.colors.border}`,
+    color: tokens.colors.textSecondary,
     borderRadius: tokens.radii.md,
     padding: '8px 16px',
-    fontSize: 13,
+    fontSize: tokens.typography.fontSizeMd,
     cursor: 'pointer',
   } as React.CSSProperties;
 
   const destructiveButton = {
     background: 'transparent',
-    border: `1px solid ${COLORS.destructive}`,
-    color: COLORS.destructive,
+    border: `1px solid ${tokens.colors.danger}`,
+    color: tokens.colors.danger,
     borderRadius: tokens.radii.md,
     padding: '8px 16px',
-    fontSize: 13,
+    fontSize: tokens.typography.fontSizeMd,
     cursor: 'pointer',
   } as React.CSSProperties;
 
   if (isRenaming) {
     return (
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+      <div style={{ display: 'flex', gap: tokens.spacing.sm, alignItems: 'center' }}>
         <input
           ref={renameInputRef}
           type="text"
@@ -98,9 +85,9 @@ function RoomHeaderActions({
           style={{
             background: 'transparent',
             border: 'none',
-            borderBottom: `1px solid ${COLORS.accent}`,
-            color: COLORS.textPrimary,
-            fontSize: 16,
+            borderBottom: `1px solid ${tokens.colors.accent}`,
+            color: tokens.colors.textPrimary,
+            fontSize: tokens.typography.fontSizeXl,
             fontWeight: 600,
             outline: 'none',
             width: 200,
@@ -108,7 +95,7 @@ function RoomHeaderActions({
         />
         <button
           onClick={() => { const v = renameValue.trim(); if (v) onRenameConfirm(v); }}
-          style={{ ...ghostButton, borderColor: COLORS.accent, color: COLORS.accent }}
+          style={{ ...ghostButton, borderColor: tokens.colors.accent, color: tokens.colors.accent }}
         >
           Rename Room
         </button>
@@ -120,7 +107,7 @@ function RoomHeaderActions({
   }
 
   return (
-    <div style={{ display: 'flex', gap: 8 }}>
+    <div style={{ display: 'flex', gap: tokens.spacing.sm }}>
       {/* Add People stays group-only — DMs are fixed at 2 participants. */}
       {room.type === 'group' && (
         <button onClick={onAddPeople} style={ghostButton}>
@@ -387,7 +374,7 @@ export default function ChatRoomView({
     return (
       <div
         style={{
-          background: COLORS.dominant,
+          background: tokens.colors.surface,
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
@@ -395,10 +382,10 @@ export default function ChatRoomView({
         }}
       >
         <div style={{ textAlign: 'center' }}>
-          <div style={{ fontSize: 16, fontWeight: 600, color: COLORS.textPrimary, marginBottom: 8 }}>
+          <div style={{ fontSize: tokens.typography.fontSizeXl, fontWeight: 600, color: tokens.colors.textPrimary, marginBottom: tokens.spacing.sm }}>
             Select a room
           </div>
-          <div style={{ fontSize: 13, color: COLORS.textSecondary }}>
+          <div style={{ fontSize: tokens.typography.fontSizeMd, color: tokens.colors.textSecondary }}>
             Choose a chat from the list to view messages.
           </div>
         </div>
@@ -429,7 +416,7 @@ export default function ChatRoomView({
   return (
     <div
       style={{
-        background: COLORS.dominant,
+        background: tokens.colors.surface,
         display: 'flex',
         flexDirection: 'column',
         height: '100%',
@@ -440,18 +427,18 @@ export default function ChatRoomView({
         <div
           style={{
             background: tokens.gradients.surfaceCard,
-            borderBottom: `1px solid ${COLORS.border}`,
+            borderBottom: `1px solid ${tokens.colors.border}`,
             padding: '16px 24px',
             display: 'flex',
             alignItems: 'center',
-            gap: 16,
+            gap: tokens.spacing.md,
             flexShrink: 0,
           }}
         >
           {isMobile && onBack && (
             <button
               onClick={onBack}
-              style={{ background: 'transparent', border: 'none', color: COLORS.textSecondary, cursor: 'pointer', fontSize: 18, flexShrink: 0 }}
+              style={{ background: 'transparent', border: 'none', color: tokens.colors.textSecondary, cursor: 'pointer', fontSize: 18, flexShrink: 0 }}
             >
               ←
             </button>
@@ -472,11 +459,11 @@ export default function ChatRoomView({
           title={roomDisplayName}
           description={undefined}
           actions={
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <div style={{ display: 'flex', gap: tokens.spacing.sm, alignItems: 'center' }}>
               {isMobile && onBack && (
                 <button
                   onClick={onBack}
-                  style={{ background: 'transparent', border: 'none', color: COLORS.textSecondary, cursor: 'pointer', fontSize: 18 }}
+                  style={{ background: 'transparent', border: 'none', color: tokens.colors.textSecondary, cursor: 'pointer', fontSize: 18 }}
                   aria-label="Back to room list"
                 >
                   ←
@@ -499,22 +486,22 @@ export default function ChatRoomView({
             flexWrap: 'wrap',
             gap: 6,
             padding: '8px 16px',
-            borderBottom: `1px solid ${COLORS.border}`,
-            background: COLORS.secondary,
+            borderBottom: `1px solid ${tokens.colors.border}`,
+            background: tokens.colors.surfaceCard,
             flexShrink: 0,
           }}
         >
-          <span style={{ fontSize: 11, fontWeight: 600, color: COLORS.textSecondary, marginRight: 2 }}>
+          <span style={{ fontSize: tokens.typography.fontSizeXs, fontWeight: 600, color: tokens.colors.textSecondary, marginRight: 2 }}>
             Participants · {participants.length}
           </span>
           {participants.slice(0, MAX_VISIBLE_PARTICIPANT_CHIPS).map((p) => (
             <span
               key={`${p.type}:${p.id}`}
               style={{
-                fontSize: 11,
-                color: COLORS.textPrimary,
-                background: COLORS.dominant,
-                border: `1px solid ${COLORS.border}`,
+                fontSize: tokens.typography.fontSizeXs,
+                color: tokens.colors.textPrimary,
+                background: tokens.colors.surface,
+                border: `1px solid ${tokens.colors.border}`,
                 borderRadius: tokens.radii.xl,
                 padding: '2px 8px',
                 whiteSpace: 'nowrap',
@@ -522,14 +509,14 @@ export default function ChatRoomView({
             >
               {p.name}
               {p.type === 'agent' && (
-                <span style={{ color: COLORS.textSecondary, marginLeft: 4, fontSize: 10 }}>agent</span>
+                <span style={{ color: tokens.colors.textSecondary, marginLeft: 4, fontSize: 10 }}>agent</span>
               )}
             </span>
           ))}
           {participants.length > MAX_VISIBLE_PARTICIPANT_CHIPS && (
             <span
               title={participants.map((p) => p.name).join(', ')}
-              style={{ fontSize: 11, color: COLORS.textSecondary, padding: '2px 4px', whiteSpace: 'nowrap' }}
+              style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textSecondary, padding: '2px 4px', whiteSpace: 'nowrap' }}
             >
               +{participants.length - MAX_VISIBLE_PARTICIPANT_CHIPS} more
             </span>
@@ -541,11 +528,11 @@ export default function ChatRoomView({
               onClick={() => setShowAddPeople(true)}
               aria-label="Add participant"
               style={{
-                fontSize: 11,
+                fontSize: tokens.typography.fontSizeXs,
                 fontWeight: 600,
-                color: COLORS.accent,
+                color: tokens.colors.accent,
                 background: 'transparent',
-                border: `1px dashed ${COLORS.accent}`,
+                border: `1px dashed ${tokens.colors.accent}`,
                 borderRadius: tokens.radii.xl,
                 padding: '2px 8px',
                 cursor: 'pointer',
@@ -567,8 +554,8 @@ export default function ChatRoomView({
           style={{
             padding: '4px 16px',
             textAlign: 'center',
-            fontSize: 11,
-            color: COLORS.textMuted,
+            fontSize: tokens.typography.fontSizeXs,
+            color: tokens.colors.textMuted,
             fontStyle: 'italic',
             flexShrink: 0,
           }}
@@ -590,9 +577,9 @@ export default function ChatRoomView({
         {loadingMessages ? (
           <div style={{ padding: 24 }}>
             {[1, 2, 3].map((i) => (
-              <div key={i} style={{ marginBottom: 16 }}>
-                <div style={{ width: 80, height: 12, background: COLORS.border, borderRadius: tokens.radii.sm, marginBottom: 6 }} />
-                <div style={{ width: '60%', height: 14, background: COLORS.border, borderRadius: tokens.radii.sm }} />
+              <div key={i} style={{ marginBottom: tokens.spacing.md }}>
+                <div style={{ width: 80, height: 12, background: tokens.colors.border, borderRadius: tokens.radii.sm, marginBottom: 6 }} />
+                <div style={{ width: '60%', height: 14, background: tokens.colors.border, borderRadius: tokens.radii.sm }} />
               </div>
             ))}
           </div>
@@ -605,7 +592,7 @@ export default function ChatRoomView({
               justifyContent: 'center',
             }}
           >
-            <div style={{ fontSize: 13, color: COLORS.textSecondary }}>
+            <div style={{ fontSize: tokens.typography.fontSizeMd, color: tokens.colors.textSecondary }}>
               No messages yet. Send one to get started.
             </div>
           </div>
@@ -624,7 +611,7 @@ export default function ChatRoomView({
         <div style={{
           padding: '4px 16px',
           fontSize: '13px',
-          color: COLORS.textSecondary,
+          color: tokens.colors.textSecondary,
           fontStyle: 'italic',
           flexShrink: 0,
         }}>

@@ -228,17 +228,19 @@ export class TicketSessionManager
     if (existing) {
       const age = Date.now() - (existing.reservedAt ?? 0);
       if (age >= INFLIGHT_RESERVATION_STALE_MS) {
+        const nonce = randomUUID();
         log(
           `[ticket-session] tryReserveDispatch evicted STALE reservation key=${key} ` +
             `age=${Math.round(age / 1000)}s ≥ ${Math.round(INFLIGHT_RESERVATION_STALE_MS / 1000)}s ` +
             `— 좀비 예약으로 판정, 재-dispatch 허용`,
         );
         this.#reserveSuppress.delete(key);
-        this._inflight.set(key, { agentId: agentId || '', ticketId, reservedAt: Date.now() });
-        return { acquired: true, live: false, evicted: 'stale' };
+        this._inflight.set(key, { agentId: agentId || '', ticketId, reservedAt: Date.now(), nonce });
+        return { acquired: true, live: false, evicted: 'stale', nonce };
       }
       const count = (this.#reserveSuppress.get(key) ?? 0) + 1;
       if (count >= INFLIGHT_SUPPRESS_SAFETY_VALVE && age >= INFLIGHT_SUPPRESS_SAFETY_VALVE_MIN_AGE_MS) {
+        const nonce = randomUUID();
         log(
           `[ticket-session] tryReserveDispatch SAFETY VALVE force-release key=${key} ` +
             `after ${count} consecutive suppressions (age=${Math.round(age / 1000)}s ` +
@@ -246,24 +248,44 @@ export class TicketSessionManager
             `— 반복 억제 + 최소 나이 초과로 좀비 판정, 강제 해제`,
         );
         this.#reserveSuppress.delete(key);
-        this._inflight.set(key, { agentId: agentId || '', ticketId, reservedAt: Date.now() });
-        return { acquired: true, live: false, evicted: 'safety_valve' };
+        this._inflight.set(key, { agentId: agentId || '', ticketId, reservedAt: Date.now(), nonce });
+        return { acquired: true, live: false, evicted: 'safety_valve', nonce };
       }
       this.#reserveSuppress.set(key, count);
       return { acquired: false, live: false };
     }
     // Free → claim the whole provision→spawn window in the authoritative map.
+    // Stamp a fresh generation nonce so releaseDispatch can CAS: if a zombie
+    // holder is later evicted and this slot is re-reserved, the evicted holder's
+    // late release (nonce of the OLD generation) is a no-op and cannot delete
+    // the new holder's reservation (ticket 26a92722 — 좀비 홀더의 지연 release 로
+    // 잠깐 다시 열리던 live-twin 창을 차단).
+    const nonce = randomUUID();
     this.#reserveSuppress.delete(key);
-    this._inflight.set(key, { agentId: agentId || '', ticketId, reservedAt: Date.now() });
-    return { acquired: true, live: false };
+    this._inflight.set(key, { agentId: agentId || '', ticketId, reservedAt: Date.now(), nonce });
+    return { acquired: true, live: false, nonce };
   }
 
   /** Release a provisioning reservation placed by tryReserveDispatch
    *  (`live===false`). Idempotent; only clears the `_inflight` reservation, never
    *  a live `_sessions` entry. A clean release also resets the consecutive-
-   *  suppression counter — the holder finished, so the next zombie starts fresh. */
-  releaseDispatch(ticketId: string, role: string, agentId: string): void {
+   *  suppression counter — the holder finished, so the next zombie starts fresh.
+   *
+   *  Generation CAS (ticket 26a92722): pass the `nonce` returned by the matching
+   *  tryReserveDispatch. When the CURRENT reservation's nonce differs from the
+   *  caller's, this release belongs to an OLDER generation — a holder that hung,
+   *  was evicted (TTL/safety-valve), and whose finally only now runs — so it is a
+   *  no-op and must NOT delete the successor's reservation (nor reset its
+   *  suppression counter). A missing nonce (legacy caller / test) or an absent
+   *  reservation falls back to the old unconditional clear. */
+  releaseDispatch(ticketId: string, role: string, agentId: string, nonce?: string): void {
     const key = this.#makeKey(ticketId, role || '', agentId || '');
+    const existing = this._inflight.get(key);
+    if (existing && nonce !== undefined && existing.nonce !== nonce) {
+      // Stale-generation release from an evicted zombie holder — do not touch the
+      // successor's reservation or its suppression counter.
+      return;
+    }
     this._inflight.delete(key);
     this.#reserveSuppress.delete(key);
   }

@@ -17,7 +17,7 @@ import { RoomMembershipService } from './room-membership.service';
 import { resolveAgentDisplayName } from '../../utils/agent-name';
 import { projectChatAttachment } from '../mcp/shared/ticket-helpers';
 import { RunProvision } from '../../common/workspace-folder-options';
-import { ChatRoomMessageMetadata, ChatMessageTicketRef } from '../../common/types/stream-events';
+import { ChatRoomMessageMetadata, ChatMessageTicketRef, ChatMessageArtifactRef } from '../../common/types/stream-events';
 
 const CONTENT_MAX = 10000;
 
@@ -51,15 +51,16 @@ function makeError(status: number, message: string): Error & { status: number } 
 
 // F-1 (ticket 24694916): bound + shape-check the structured metadata an agent
 // (via agent-api) attaches to a chat message before it is persisted / broadcast.
-// Only a well-formed `ticket_refs` array survives; everything else is dropped so
-// a caller can't stuff arbitrary / unbounded JSON onto the row or the SSE wire.
+// Only well-formed refs survive; everything else is dropped so a caller can't
+// stuff arbitrary / unbounded JSON onto the row or the SSE wire.
+// F2-4 (ticket d21b28fc): `ticket_refs` 와 `artifact_refs` 를 독립적으로 정제한다 —
+// 한쪽만 있어도(예: 빌드 결과물만) metadata 는 유지되고, 둘 다 없을 때만 null.
 const MAX_TICKET_REFS = 20;
+const MAX_ARTIFACT_REFS = 20;
 const TICKET_REF_STR_MAX = 300;
 
-function sanitizeChatMessageMetadata(raw: unknown): ChatRoomMessageMetadata | null {
-  if (!raw || typeof raw !== 'object') return null;
-  const refsRaw = (raw as { ticket_refs?: unknown }).ticket_refs;
-  if (!Array.isArray(refsRaw)) return null;
+function sanitizeTicketRefs(refsRaw: unknown): ChatMessageTicketRef[] {
+  if (!Array.isArray(refsRaw)) return [];
   const refs: ChatMessageTicketRef[] = [];
   for (const r of refsRaw) {
     if (refs.length >= MAX_TICKET_REFS) break;
@@ -72,10 +73,43 @@ function sanitizeChatMessageMetadata(raw: unknown): ChatRoomMessageMetadata | nu
       ticket_id: ticketId,
     };
     if (typeof rec.title === 'string' && rec.title) ref.title = rec.title.slice(0, TICKET_REF_STR_MAX);
+    // F2-4 ⓑ: propose/consensus 카드의 대상 컬럼 등 부가 맥락(있으면 보존).
+    if (typeof rec.detail === 'string' && rec.detail) ref.detail = rec.detail.slice(0, TICKET_REF_STR_MAX);
     refs.push(ref);
   }
-  if (refs.length === 0) return null;
-  return { ticket_refs: refs };
+  return refs;
+}
+
+// F2-4 ⓒ: 빌드/배포 결과물 ref 정제. `kind`+`title` 은 필수(없으면 카드가 무의미),
+// status/commit/url 은 있으면 보존. ticket_refs 와 동일한 문자열 상한을 공유한다.
+function sanitizeArtifactRefs(refsRaw: unknown): ChatMessageArtifactRef[] {
+  if (!Array.isArray(refsRaw)) return [];
+  const refs: ChatMessageArtifactRef[] = [];
+  for (const r of refsRaw) {
+    if (refs.length >= MAX_ARTIFACT_REFS) break;
+    if (!r || typeof r !== 'object') continue;
+    const rec = r as Record<string, unknown>;
+    const kind = typeof rec.kind === 'string' ? rec.kind.slice(0, TICKET_REF_STR_MAX) : '';
+    const title = typeof rec.title === 'string' ? rec.title.slice(0, TICKET_REF_STR_MAX) : '';
+    if (!kind || !title) continue; // 종류/라벨 없는 ref 는 렌더 불가
+    const ref: ChatMessageArtifactRef = { kind, title };
+    if (typeof rec.status === 'string' && rec.status) ref.status = rec.status.slice(0, TICKET_REF_STR_MAX);
+    if (typeof rec.commit === 'string' && rec.commit) ref.commit = rec.commit.slice(0, TICKET_REF_STR_MAX);
+    if (typeof rec.url === 'string' && rec.url) ref.url = rec.url.slice(0, TICKET_REF_STR_MAX);
+    refs.push(ref);
+  }
+  return refs;
+}
+
+function sanitizeChatMessageMetadata(raw: unknown): ChatRoomMessageMetadata | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const ticketRefs = sanitizeTicketRefs((raw as { ticket_refs?: unknown }).ticket_refs);
+  const artifactRefs = sanitizeArtifactRefs((raw as { artifact_refs?: unknown }).artifact_refs);
+  if (ticketRefs.length === 0 && artifactRefs.length === 0) return null;
+  const meta: ChatRoomMessageMetadata = {};
+  if (ticketRefs.length > 0) meta.ticket_refs = ticketRefs;
+  if (artifactRefs.length > 0) meta.artifact_refs = artifactRefs;
+  return meta;
 }
 
 // Parse a persisted metadata text column back into the wire object shape,

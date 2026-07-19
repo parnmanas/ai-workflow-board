@@ -56,6 +56,21 @@ export const TICKET_ACTION_TOOLS: Record<string, string> = {
   propose_move: 'propose',
   record_agreement: 'consensus',
 };
+/**
+ * F2-4 ⓒ (ticket d21b28fc) — 결과물(artifact) 카드 캡처면.
+ * 빌드/배포 이벤트는 티켓 row 를 바꾸지 않아 EMIT(ticket_refs)에 들어갈 수 없다.
+ * 하지만 채팅에 결과물 카드로 남겨야 하므로 별도 `artifact_refs` 로 캡처한다.
+ * 이 세 tool 은 tool-surface-parity 상 EXCLUDE 가 아니라 이 ARTIFACT 버킷에 속하며,
+ * classifiedToolNames() 가 이들을 포함한다(EXCLUDE 에서 제외 = 같은 분류 한 번만).
+ *   register_build_artifact / report_build_failure → 'build'
+ *   report_deployment                              → 'deploy'
+ */
+export const ARTIFACT_ACTION_TOOLS: Record<string, string> = {
+  register_build_artifact: 'build',
+  report_build_failure: 'build',
+  report_deployment: 'deploy',
+};
+
 /** Tools whose NEW ticket id is only in the tool RESULT (not the input). For every
  *  other tracked tool the input `ticket_id` is authoritative — the result `id` may
  *  be a comment id (add_comment) etc., so it must NOT be used as the ticket id. */
@@ -111,6 +126,23 @@ export interface TicketRef {
   action: string;
   ticket_id: string;
   title?: string;
+  // F2-4 ⓑ: propose_move 의 대상 컬럼 이름 등 제안/합의 부가 맥락(있으면).
+  detail?: string;
+}
+
+/** F2-4 ⓒ 결과물 ref — 빌드/배포 카드용. 티켓 ref 와 별도 배열(artifact_refs)로 방출. */
+export interface ArtifactRef {
+  kind: string;    // 'build' | 'deploy'
+  title: string;   // 빌드 target / 배포 environment
+  status?: string; // 'ok' | 'building' | 'failed' | 'deployed'
+  commit?: string; // 커밋 SHA
+  url?: string;    // 배포 base_url 등
+}
+
+export interface ArtifactToolContext {
+  kind: string;
+  /** bare tool name — 결과 shape 이 tool 마다 달라 분기에 쓴다. */
+  tool: string;
 }
 
 export function bareToolName(name: string): string {
@@ -218,7 +250,76 @@ export function resolveTicketRef(
   if (!title) title = (titleLookup && titleLookup(ticketId)) || ctx.inputTitle;
   const ref: TicketRef = { action: ctx.action, ticket_id: ticketId };
   if (title) ref.title = title;
+  // F2-4 ⓑ: propose_move 결과의 target_column.name 을 승인 카드 배지용 detail 로 싣는다.
+  // ("→ <컬럼> 이동 제안"). record_agreement 등 여타 action 은 detail 없이 배지만 렌더.
+  if (ctx.action === 'propose' && obj && obj.target_column && typeof obj.target_column === 'object') {
+    const colName = (obj.target_column as any).name;
+    if (typeof colName === 'string' && colName) ref.detail = colName;
+  }
   return ref;
+}
+
+/** Map a tool_use block → artifact capture context, or null when not a tracked
+ *  artifact tool. Pure — mirrors trackedTicketTool for the F2-4 ⓒ result surface. */
+export function trackedArtifactTool(name: unknown, _input?: any): ArtifactToolContext | null {
+  if (typeof name !== 'string') return null;
+  const bare = bareToolName(name);
+  const kind = ARTIFACT_ACTION_TOOLS[bare];
+  if (!kind) return null;
+  return { kind, tool: bare };
+}
+
+/** Resolve a tracked artifact tool call + its parsed result into an ArtifactRef,
+ *  or null on error / unrecognizable shape (fail-closed — no phantom card).
+ *  Shapes (verified against server tools, ticket d21b28fc):
+ *   • register_build_artifact → flat {target, status, commit_sha, ...}
+ *   • report_build_failure   → { artifact: {target, status:'failed', commit_sha, ...}, ... }
+ *   • report_deployment      → flat {environment, base_url, deployed_commit_sha, ...} */
+export function resolveArtifactRef(
+  ctx: ArtifactToolContext,
+  result: any,
+  isError: boolean,
+): ArtifactRef | null {
+  if (isError) return null;
+  const obj = result && typeof result === 'object' && !Array.isArray(result) ? result : null;
+  if (!obj) return null;
+  if (ctx.kind === 'build') {
+    // report_build_failure nests the artifact row; register_build_artifact is flat.
+    const a =
+      ctx.tool === 'report_build_failure'
+        ? (obj.artifact && typeof obj.artifact === 'object' ? obj.artifact : null)
+        : obj;
+    if (!a) return null;
+    const target = typeof a.target === 'string' && a.target ? a.target : undefined;
+    if (!target) return null; // 라벨 없는 빌드 카드는 무의미
+    const ref: ArtifactRef = { kind: 'build', title: target };
+    const status =
+      typeof a.status === 'string' && a.status
+        ? a.status
+        : ctx.tool === 'report_build_failure'
+          ? 'failed'
+          : undefined;
+    if (status) ref.status = status;
+    if (typeof a.commit_sha === 'string' && a.commit_sha) ref.commit = a.commit_sha;
+    return ref;
+  }
+  // deploy — report_deployment. environment 는 필수, 나머지는 있으면 보존.
+  const env = typeof obj.environment === 'string' && obj.environment ? obj.environment : undefined;
+  if (!env) return null;
+  const ref: ArtifactRef = { kind: 'deploy', title: env, status: 'deployed' };
+  if (typeof obj.deployed_commit_sha === 'string' && obj.deployed_commit_sha) ref.commit = obj.deployed_commit_sha;
+  if (typeof obj.base_url === 'string' && obj.base_url) ref.url = obj.base_url;
+  return ref;
+}
+
+/** Split artifact refs into ≤`size` chunks — one per emitted ChatRoomMessage,
+ *  mirroring chunkTicketRefs (server bounds each message at MAX_ARTIFACT_REFS). */
+export function chunkArtifactRefs(refs: ArtifactRef[], size: number): ArtifactRef[][] {
+  if (!Array.isArray(refs) || refs.length === 0) return [];
+  if (!Number.isFinite(size) || size <= 0) return [refs.slice()];
+  const out: ArtifactRef[][] = [];
+  for (let i = 0; i < refs.length; i += size) out.push(refs.slice(i, i + size));
+  return out;
 }
 
 /** Resolve a batch_operations call into MANY ticket refs — the multi-ref path the
@@ -320,6 +421,20 @@ export function formatTicketRefsContent(refs: TicketRef[]): string {
     .join('\n');
 }
 
+/** F2-4 ⓒ: 결과물 카드의 Korean fallback content line(메타 미이해 표면용). */
+export const ARTIFACT_KIND_LABEL_KO: Record<string, string> = {
+  build: '빌드', deploy: '배포',
+};
+export function formatArtifactRefsContent(refs: ArtifactRef[]): string {
+  return refs
+    .map((r) => {
+      const label = ARTIFACT_KIND_LABEL_KO[r.kind] || r.kind || '결과물';
+      const status = r.status ? ` (${r.status})` : '';
+      return `📦 ${label}: ${r.title}${status}`;
+    })
+    .join('\n');
+}
+
 /** Split a coalesced ref set into ≤`size` chunks — one per emitted ChatRoomMessage.
  *  The server bounds EACH message's ticket_refs at MAX_TICKET_REFS (room-messaging.
  *  service.ts), so a turn with more successful ticket actions than `size` is rendered
@@ -350,7 +465,8 @@ export function chunkTicketRefs(refs: TicketRef[], size: number): TicketRef[][] 
  *                 so a local deep-link would 404.
  *   non-ticket  — board / workspace / agent / channel / resource / qa / security /
  *                 feature / action / user / api-key / benchmark / prompt-template /
- *                 chat / lesson / build / deploy: not a ticket-row mutation.
+ *                 chat / lesson: not a ticket-row mutation. (build / deploy 결과물성
+ *                 tool 은 F2-4 ⓒ 로 ARTIFACT_ACTION_TOOLS 로 이관 — EXCLUDE 아님.)
  */
 export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   // read (60)
@@ -383,7 +499,9 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   clear_current_task: 'agent-state', set_current_task: 'agent-state',
   // remote (1)
   create_remote_improvement_ticket: 'remote',
-  // non-ticket (82)
+  // non-ticket (79) — 빌드/배포(register_build_artifact·report_build_failure·
+  // report_deployment)는 F2-4 ⓒ 로 ARTIFACT_ACTION_TOOLS 로 이관됨(EXCLUDE 아님).
+  // non-ticket
   add_board_lesson: 'non-ticket', add_chat_message_attachment: 'non-ticket',
   add_chat_participants: 'non-ticket', approve_feature: 'non-ticket',
   attach_qa_artifact: 'non-ticket', attach_security_artifact: 'non-ticket',
@@ -406,8 +524,7 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   move_board_to_workspace: 'non-ticket', propose_feature_chain: 'non-ticket',
   qa_run_heartbeat: 'non-ticket', record_qa_step: 'non-ticket',
   record_security_finding: 'non-ticket', refresh_security_checklist: 'non-ticket',
-  register_build_artifact: 'non-ticket', reject_feature: 'non-ticket',
-  report_build_failure: 'non-ticket', report_deployment: 'non-ticket',
+  reject_feature: 'non-ticket',
   revoke_api_key: 'non-ticket', run_action: 'non-ticket', run_qa_schedule_now: 'non-ticket',
   run_security_schedule_now: 'non-ticket', run_workspace_schedule_now: 'non-ticket',
   save_action: 'non-ticket', save_prompt_template: 'non-ticket', save_resource: 'non-ticket',
@@ -424,13 +541,15 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
 };
 
 /** The full set of bare tool names this module classifies (emit ∪ batch ∪ reject ∪
- *  exclude). The parity test compares this against the server's registered surface;
- *  exported as a function so callers always get a fresh Set (no shared mutable state). */
+ *  artifact ∪ exclude). The parity test compares this against the server's registered
+ *  surface; exported as a function so callers always get a fresh Set (no shared mutable
+ *  state). F2-4 ⓒ: ARTIFACT_ACTION_TOOLS 는 결과물 카드 버킷(EXCLUDE 아님)으로 합류. */
 export function classifiedToolNames(): Set<string> {
   return new Set<string>([
     ...Object.keys(TICKET_ACTION_TOOLS),
     BATCH_TICKET_TOOL,
     REJECT_HANDOFF_TOOL,
+    ...Object.keys(ARTIFACT_ACTION_TOOLS),
     ...Object.keys(TICKET_TOOL_EXCLUSIONS),
   ]);
 }

@@ -7,7 +7,7 @@
 // settings / auth / history under <MANAGER_HOME>/agents/<id>/cli-home/
 // rather than sharing the operator's $HOME.
 
-import { promises as fsp } from 'node:fs';
+import { promises as fsp, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { parse, stringify } from 'smol-toml';
@@ -36,6 +36,81 @@ function inlineTomlStringMap(values: Record<string, string>): string {
     .join(', ')} }`;
 }
 
+// ── MCP transport 검증 (ticket 40d18474) ────────────────────────────────────
+//
+// codex 는 각 `mcp_servers.<name>` 엔트리의 transport 를 모양으로 해석한다 —
+// `url` 이면 streamable-HTTP, `command` 이면 stdio 서버. 둘 중 어느 것으로도
+// 해석되지 않는 엔트리는 codex 가 에이전트 실행 전에 *config 로드 자체*를
+//   Error loading config.toml: invalid transport in `mcp_servers.<name>`
+// (exit 1) 로 중단시키는데, 이는 오직 silent subagent exit 로만 드러났다
+// (인시던트 26a92722: managed codex 리뷰어가 이 오류로 두 번 즉사해 리뷰 지연).
+// 함정은 `buildOneshotSpawn` 이 항상 `-c mcp_servers.awb.http_headers=…`
+// 오버라이드를 주입한다는 점이다 — config.toml 에 완전한 `awb` 서버가 없으면
+// 이 오버라이드가 header 만 있고 transport 없는 `awb` 를 *새로 만들어* codex 가
+// 로드를 거부한다. codex 에 넘기기 직전의 config 를 검증해, 잘못된/누락된
+// transport 를 애매한 crash 대신 정확한 키와 허용 스키마를 담은 spawn 이전
+// 매니저 오류로 바꾼다.
+export const CODEX_MCP_TRANSPORTS = Object.freeze(['stdio', 'streamable_http'] as const);
+
+export class InvalidMcpTransportError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidMcpTransportError';
+  }
+}
+
+/**
+ * `config` 의 어떤 `mcp_servers.<name>` 엔트리든 codex 가 해석할 수 있는
+ * transport 가 없으면 {@link InvalidMcpTransportError} 를 던진다 — 명시 `transport`
+ * 가 {@link CODEX_MCP_TRANSPORTS} 밖이거나, `url`(streamable_http) 도 `command`
+ * (stdio) 도 없는 경우. 오퍼레이터가 어느 파일·키를 고쳐야 하는지 보이도록
+ * `configPath` 를 메시지에 녹인다. `mcp_servers` 테이블이 없는 config 는 공허하게
+ * 유효하다.
+ */
+export function validateCodexMcpServers(config: unknown, configPath: string): void {
+  const servers = (config as { mcp_servers?: unknown } | null | undefined)?.mcp_servers;
+  if (!servers || typeof servers !== 'object' || Array.isArray(servers)) return;
+  const allowed = CODEX_MCP_TRANSPORTS.join(', ');
+  for (const [name, raw] of Object.entries(servers as Record<string, unknown>)) {
+    const where = `mcp_servers.${name}`;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new InvalidMcpTransportError(
+        `Refusing to launch subagent: ${where} in ${configPath} is not a valid MCP server table — ` +
+          `define a "url" (streamable_http) or a "command" (stdio). Allowed transports: ${allowed}.`,
+      );
+    }
+    const entry = raw as Record<string, unknown>;
+    const declared = entry.transport;
+    const hasUrl = typeof entry.url === 'string' && entry.url.trim() !== '';
+    const hasCommand = typeof entry.command === 'string' && entry.command.trim() !== '';
+    if (declared !== undefined) {
+      if (typeof declared !== 'string' || !CODEX_MCP_TRANSPORTS.includes(declared as any)) {
+        throw new InvalidMcpTransportError(
+          `Refusing to launch subagent: ${where}.transport = ${JSON.stringify(declared)} in ${configPath} ` +
+            `is not a supported MCP transport. Allowed transports: ${allowed}.`,
+        );
+      }
+      if (declared === 'streamable_http' && !hasUrl) {
+        throw new InvalidMcpTransportError(
+          `Refusing to launch subagent: ${where}.transport = "streamable_http" in ${configPath} requires a "url". ` +
+            `Allowed transports: ${allowed}.`,
+        );
+      }
+      if (declared === 'stdio' && !hasCommand) {
+        throw new InvalidMcpTransportError(
+          `Refusing to launch subagent: ${where}.transport = "stdio" in ${configPath} requires a "command". ` +
+            `Allowed transports: ${allowed}.`,
+        );
+      }
+    } else if (!hasUrl && !hasCommand) {
+      throw new InvalidMcpTransportError(
+        `Refusing to launch subagent: ${where} in ${configPath} has no resolvable transport — ` +
+          `set a "url" (streamable_http) or a "command" (stdio). Allowed transports: ${allowed}.`,
+      );
+    }
+  }
+}
+
 export class CodexCliAdapter extends CliAdapter {
   static cliType = 'codex';
 
@@ -48,7 +123,14 @@ export class CodexCliAdapter extends CliAdapter {
     return resolveCliBin('codex', configured);
   }
 
-  buildOneshotSpawn({ rolePrompt, taskText, model, mcpAttribution, cwd }: OneshotSpec): SpawnDescriptor {
+  buildOneshotSpawn({
+    rolePrompt,
+    taskText,
+    model,
+    mcpAttribution,
+    cwd,
+    cliHomeDir,
+  }: OneshotSpec): SpawnDescriptor {
     const fullPrompt = rolePrompt ? `${rolePrompt}\n\n${taskText}` : taskText || '';
     const hasAttribution = !!(
       mcpAttribution?.ticketId ||
@@ -71,6 +153,32 @@ export class CodexCliAdapter extends CliAdapter {
         '-c',
         `mcp_servers.awb.http_headers=${inlineTomlStringMap(headers)}`,
       );
+
+      // Validate what Codex will actually see, not only the file prepared
+      // earlier. The attribution override creates an `awb` table when the
+      // file has none; that headers-only table has no valid transport.
+      const configPath = join(
+        cliHomeDir ?? process.env.CODEX_HOME ?? join(homedir(), '.codex'),
+        'config.toml',
+      );
+      let effectiveConfig: Record<string, any> = {};
+      try {
+        const text = readFileSync(configPath, 'utf8');
+        effectiveConfig = text.trim() ? (parse(text) as Record<string, any>) : {};
+      } catch (err: any) {
+        if (err?.code !== 'ENOENT') throw err;
+      }
+      const servers = effectiveConfig.mcp_servers;
+      effectiveConfig.mcp_servers =
+        servers && typeof servers === 'object' && !Array.isArray(servers)
+          ? { ...servers }
+          : {};
+      const awb = effectiveConfig.mcp_servers.awb;
+      effectiveConfig.mcp_servers.awb = {
+        ...(awb && typeof awb === 'object' && !Array.isArray(awb) ? awb : {}),
+        http_headers: headers,
+      };
+      validateCodexMcpServers(effectiveConfig, configPath);
     }
     // `codex` with no subcommand is the interactive TUI and refuses piped
     // stdin ("stdin is not a terminal"). `codex exec` is the non-interactive
@@ -393,19 +501,29 @@ export class CodexCliAdapter extends CliAdapter {
     const dst = join(cliHomeDir, 'config.toml');
     const mainConfig = join(mainHome, 'config.toml');
 
-    if (!mcp?.url || !mcp?.apiKey) {
+    // awb 서버 블록은 per-agent AWB 키를 임베드하지 않는다(spawn env 의
+    // `bearer_token_env_var = "AWB_API_KEY"` 에서 읽음). 따라서 apiKey 누락은
+    // awb 생성을 건너뛸 이유가 못 된다 — 오직 URL 로만 게이트해야 매니저에
+    // AWB 엔드포인트가 있는 한 config.toml 이 항상 완전한 awb 를 갖는다. 그렇지
+    // 않으면 항상 주입되는 `-c mcp_servers.awb.http_headers` spawn 오버라이드가
+    // transport 없는 awb 를 만들어 codex 가 config 로드를 중단한다(ticket 40d18474).
+    // 아래 verbatim 분기는 매니저에 AWB URL 이 아예 없을 때만 실행된다.
+    if (!mcp?.url) {
       await this.#unlinkIfPresent(dst);
       if (mode === 'replace') {
         if (providedConfig) {
+          // verbatim 오퍼레이터 config 도 검증한다 — transport 미해결은 codex
+          // config 로드를 exit 1 로 중단시키는 silent subagent exit 이다.
+          validateCodexMcpServers(providedConfig.trim() ? parse(providedConfig) : {}, dst);
           await fsp.writeFile(dst, providedConfig, { mode: 0o600 });
         }
         return;
       }
-      try {
-        await fsp.access(mainConfig);
-      } catch {
-        return;
-      }
+      // 심링크 전에 오퍼레이터 config 텍스트를 읽어 transport 를 검증한다(원본은
+      // 건드리지 않음). 파일이 없으면 배치할 config 도 없으니 그대로 반환.
+      const inheritedText = await this.#readIfPresent(mainConfig);
+      if (!inheritedText) return;
+      validateCodexMcpServers(inheritedText.trim() ? parse(inheritedText) : {}, dst);
       try {
         await fsp.symlink(mainConfig, dst);
       } catch (err: any) {
@@ -445,6 +563,12 @@ export class CodexCliAdapter extends CliAdapter {
       args: [...self.prefixArgs, 'mcp-host'],
     };
     config.mcp_servers = mcpServers;
+
+    // codex 가 해석 못 하는 transport 를 넘기지 않는다 — 애매한 `invalid transport`
+    // config 로드 중단(silent subagent exit)을 spawn 이전의 명확한 매니저 오류로
+    // 바꾼다(ticket 40d18474). dst 를 건드리기 전에 실행해, 보존된 잘못된 오퍼레이터
+    // 서버가 준비된 파일을 덮어쓰지 못하게 한다.
+    validateCodexMcpServers(config, dst);
 
     // dst may point at the operator's global config. Replace only the agent
     // path with a private regular file so managed MCP state cannot leak out.

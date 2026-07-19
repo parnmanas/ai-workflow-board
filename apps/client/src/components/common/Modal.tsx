@@ -1,6 +1,7 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { tokens } from '../../tokens';
 import { useMediaQuery } from '../../hooks/useMediaQuery';
+import { useDialogFocus } from '../useDialogFocus';
 
 interface ModalProps {
   isOpen: boolean;
@@ -17,6 +18,12 @@ export function Modal({ isOpen, onClose, title, children, footer, maxWidth }: Mo
   // Generate a stable id per instance for aria-labelledby
   const [titleId] = React.useState(() => `modal-title-${++_modalIdCounter}`);
   const isMobile = useMediaQuery('(max-width: 768px)');
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // 초기 포커스·Tab 트랩·opener 복귀를 공용 훅으로 통일한다(F2-5). aria-modal 이므로
+  // trap=true — 열려 있는 동안 Tab 이 모달 밖 배경으로 새지 않는다. initialFocusRef 를
+  // 주지 않아 컨테이너 내 첫 포커스 요소(없으면 다이얼로그 자신, tabIndex=-1)로 이동한다.
+  useDialogFocus({ active: isOpen, trap: true, containerRef: dialogRef });
 
   useEffect(() => {
     if (!isOpen) return;
@@ -35,7 +42,7 @@ export function Modal({ isOpen, onClose, title, children, footer, maxWidth }: Mo
       style={{
         position: 'fixed',
         inset: 0,
-        background: 'rgba(0,0,0,0.6)',
+        background: tokens.overlays.backdrop,
         zIndex: 2000,
         display: 'flex',
         alignItems: 'center',
@@ -46,9 +53,11 @@ export function Modal({ isOpen, onClose, title, children, footer, maxWidth }: Mo
       }}
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby={title ? titleId : undefined}
+        tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
         style={{
           background: tokens.colors.surfaceCard,

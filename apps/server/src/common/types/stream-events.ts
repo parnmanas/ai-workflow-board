@@ -252,9 +252,33 @@ export interface ChatMessageTicketRef {
   // per-session title cache). The client card falls back to the id when absent,
   // and the Artifact panel fetches full detail on click.
   title?: string;
+  // F2-4 ⓑ 승인 카드: 제안/합의 계열(propose_move·record_agreement) ref 의 부가 맥락.
+  // propose_move 결과의 대상 컬럼 이름을 담아 클라가 "→ <컬럼> 이동 제안" 배지를
+  // 렌더한다. additive/nullable — 여타 action 은 이 필드를 안 실으며 legacy 카드는 무시.
+  detail?: string;
+}
+// F2-4 ⓒ 결과물 카드: 빌드/배포 등 결과물성 tool 결과를 티켓 ref 와 별도로 방출한다.
+// register_build_artifact·report_build_failure·report_deployment 는 티켓 row 를
+// 바꾸지 않으므로(비-ticket) ticket_refs 로 못 싣는다 — 자체 shape 로 캡처해 카드화.
+// 전부 additive/nullable, 마이그레이션 불요.
+export interface ChatMessageArtifactRef {
+  // 'build' — register_build_artifact / report_build_failure
+  // 'deploy' — report_deployment
+  kind: string;
+  // 표시 라벨: 빌드는 target(+status), 배포는 environment.
+  title: string;
+  // 빌드/배포 상태: 'ok' | 'building' | 'failed' | 'deployed' 등(원본 tool status 반영).
+  status?: string;
+  // 결과물이 가리키는 커밋 SHA(있으면).
+  commit?: string;
+  // 배포 base_url 등 열람 대상 URL(있으면).
+  url?: string;
 }
 export interface ChatRoomMessageMetadata {
   ticket_refs?: ChatMessageTicketRef[];
+  // F2-4 ⓒ: 빌드/배포 결과물 카드. ticket_refs 와 독립적으로 존재 가능 —
+  // 한쪽만 있어도 metadata 는 유지된다(sanitizer 독립 처리).
+  artifact_refs?: ChatMessageArtifactRef[];
 }
 
 // Phase 7 — room-based chat

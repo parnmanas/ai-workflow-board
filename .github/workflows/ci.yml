@@ -50,17 +50,36 @@ jobs:
   # 값 자체가 없다 → collapse 될 것도 없어 이 가드는 목적을 잃었다(오히려 정상
   # 변경마다 CI 를 red 로 만든다). 그래서 잡·check-version-bump.mjs·그 테스트를 제거.
 
-  # Windows regression guard (ticket e299c6b3) — codex 의 npm 글로벌 설치는
-  # `%APPDATA%\npm\codex.cmd` 배치 shim 만 남기는데, raw child_process.spawn 은
-  # CreateProcess 로 `.cmd` 를 실행 못 해 `spawn codex ENOENT` 로 죽고 모든 codex
-  # subagent dispatch 가 5분 루프로 조용히 실패했다. spawn 사이트를 cross-spawn 으로
-  # 옮겨(`.cmd -> cmd.exe /d /s /c`, 인자 escape) 고쳤다. 이 잡은 그 경로를 실제
-  # windows-latest 러너에서 태운다 — 진짜 `codex.cmd` shim 을 cross-spawn 해 ENOENT
-  # 없이 성공하고 공백/따옴표가 든 argv 가 온전히 왕복하는지 검증. 리눅스 축은
-  # POSIX cross-spawn(argv 보존 + shell:true 대조군)을 돌린다. 두 축 모두 순수
-  # cross-spawn 만 쓰므로 dist 빌드가 필요 없다.
-  agent-manager-spawn-cmd:
-    name: agent-manager cross-spawn (${{ matrix.os }})
+  # agent-manager 테스트 게이트 (ticket e09fa003 — e299c6b3 리뷰 후속).
+  #
+  # 배경: e299c6b3 전까지 agent-manager 의 node --test 스위트(rebase 시점 535 tests —
+  # cli-resolver Windows shim, spawn-failure-tracker, subagent-manager 서킷브레이커/silent-exit 등
+  # 이 보드의 반복 버그원 회귀 가드 포함)는 어느 CI 잡에도 안 걸려 있었다. blocker
+  # 대응으로 추가된 잡은 spawn-cmd 1개 파일만 돌려 "N tests green" 이 assignee 로컬
+  # 실행에만 의존했다(리뷰어는 gh 도 없어 교차검증 불가). 이 잡이 전체 스위트를
+  # ubuntu + windows-latest 양 축의 CI 게이트로 편입한다.
+  #
+  # 양 축 모두 build + 전체 스위트(node --test 'test/*.test.mjs')를 돌린다. 대부분
+  # 테스트가 dist/ 를 import 하므로 build step 이 선행돼야 한다(tsc·copyFileSync 모두
+  # cross-platform). ubuntu 로컬 검증(origin/main@c52e20b 위 rebase 후): 534 pass /
+  # 1 skip / 0 fail, ~13s. (skip = spawn-cmd 의 windows-전용 테스트, Linux self-skip)
+  #
+  # Windows 이식성: 스위트는 대부분 platform·fs 를 '주입'하는 순수 로직이라 win32 에서
+  # 그대로 돈다(cli-resolver `.cmd` shim, service-install 런처 XML, process-tree
+  # parseProcListWin 등 — 각 테스트 주석 "실제 Windows 호스트 없이 테스트 가능"). 실제
+  # `.cmd` CreateProcess 경로(spawn-cmd)와 codex 심링크(자기-skip)는 win32 축에서 처음
+  # 진짜 실행된다(위 e299c6b3 codex `.cmd` ENOENT 회귀 — 주입으로 대체 불가). 실 git
+  # 서브프로세스로 POSIX 파일권한(mode & 0o077)·절대경로·credential --file= 경로를
+  # 단언하는 3개 테스트만 win32 에서 명시적 skip(repo-credential·run-provisioner·
+  # worktree-manager 각 1개; 각 `{ skip: process.platform === 'win32' && '…' }` 주석
+  # 참조). git config 격리는 os.devNull 로 이식성 있게 고쳤다(git-mode-update).
+  #
+  # 참고: `node --test test/`(디렉터리 인자)는 node ≥22 에서 `test` 를 엔트리 모듈로
+  # 취급해 MODULE_NOT_FOUND 로 죽는다. 그래서 package.json `test` 스크립트와 동일한
+  # glob 형(`'test/*.test.mjs'`)을 쓴다 — node 자체가 확장하므로 shell 무관(Windows
+  # PowerShell 에선 작은따옴표 리터럴로 node 에 전달돼 node 가 확장한다).
+  agent-manager-tests:
+    name: agent-manager tests (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -74,9 +93,32 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
-      - name: Run cross-spawn shim spawn test
+      # 전체 스위트가 dist/ 를 import → build 선행 필수 (양 축 공통).
+      - name: Build agent-manager (suite imports dist/)
         working-directory: apps/agent-manager
-        run: node --test --test-force-exit test/spawn-cmd-arg-escaping.test.mjs
+        run: npm run build
+      - name: Run full agent-manager test suite
+        working-directory: apps/agent-manager
+        run: node --test --test-force-exit 'test/*.test.mjs'
+
+  # 클라이언트 단위·상호작용 테스트 (티켓 98d0936e · F2-1). Phase 1 은 브라우저
+  # 러너 부재로 카드 클릭·`?ticket=` 딥링크·모바일 패널·포커스트랩이 SSR/순수
+  # 계약으로만 커버됐다. 이제 jsdom 하네스(node --import tsx --test)가 실제
+  # react-dom/client 마운트로 그 상호작용을 검증하므로 이 잡이 그 스위트를 CI 에서
+  # 태운다 — 신규 프레임워크 없이 기존 러너 관례 그대로.
+  client-tests:
+    name: client unit + interaction tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Run client tests
+        run: npm test -w client
 
   # Dialect matrix — the actual pre-deploy safety net. Boots the contract flows
   # against Postgres 16 (matching the prod image) so uuid/varchar mismatches and

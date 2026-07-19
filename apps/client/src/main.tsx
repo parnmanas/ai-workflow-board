@@ -7,6 +7,20 @@ import { tokens } from './tokens';
 // Inject global keyframes + AppLayout responsive sidebar CSS
 const style = document.createElement('style');
 style.textContent = `
+  /* 문서 배경/기본 텍스트의 권위 원천은 토큰이다(F2-2). index.html 의 인라인
+     body 규칙은 번들 로드 전 flash 방지용 fallback 이며 이 값과 미러링한다. */
+  body { background: ${tokens.colors.surface}; color: ${tokens.colors.textStrong}; }
+
+  /* 키보드 포커스 가시성 통일(F2-5). 인라인 스타일 위주라 전역 :focus-visible 규칙으로
+     모든 인터랙티브 요소에 일관된 링을 준다. 마우스 클릭(:focus but not -visible)에는
+     링을 띄우지 않아 시각 노이즈를 막고, 키보드 탐색 시에만 노출된다. */
+  :focus-visible {
+    outline: 2px solid ${tokens.colors.focusRing};
+    outline-offset: 2px;
+  }
+  /* :focus-visible 를 지원하는 환경에선 레거시 :focus 아웃라인을 끈다(이중 링 방지). */
+  :focus:not(:focus-visible) { outline: none; }
+
   @keyframes dotPulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
 
   /* Ticket pending-user-action badge pulse (ticket a57517be).
@@ -59,7 +73,7 @@ style.textContent = `
   .awb-sidebar-backdrop {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.4);
+    background: ${tokens.overlays.backdropSoft};
     z-index: 1099;
   }
   .awb-topbar {
