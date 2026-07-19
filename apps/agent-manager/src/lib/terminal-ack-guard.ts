@@ -22,6 +22,11 @@ export function isAgentTerminalAcknowledgement(value: TerminalAckLike): boolean 
   const content = value.content || '';
   if (WORK_RE.test(content)) return false;
   const metadata = metadataOf(value.metadata);
-  if (value.terminal_ack === true || metadata.terminal_ack === true) return true;
+  if (value.terminal_ack === true || metadata.terminal_ack === true) {
+    return !!(
+      metadata.sha || SHA_RE.test(content) || metadata.transition_id ||
+      metadata.event_id || metadata.approval_cycle_id
+    );
+  }
   return SHA_RE.test(content) && APPROVAL_RE.test(content) && CLEAR_RE.test(content);
 }

@@ -33,7 +33,7 @@ import { buildConsensusMetadata, buildProposalMetadata } from '../../../common/c
 import { getConsensusState, findOpenProposal } from '../../../services/consensus.service';
 import { buildConsensusUpdatePayload, autoExecuteConsensusMove } from '../../../services/consensus-actions';
 import type { ToolContext } from './context';
-import { shouldPendRepeatedWaiting, shouldSuppressTerminalAck } from '../../../common/agent-comment-pingpong';
+import { applyAgentCommentPingPongGuard } from '../../../common/agent-comment-pingpong';
 
 export function registerCommentTools(server: McpServer, ctx: ToolContext): void {
   const { dataSource, activityService, mentionService, logger, ticketRoleAssignmentService } = ctx;
@@ -171,33 +171,29 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       // Server-side primary guard. Pending tickets accept no further agent
       // comments; repeated terminal receipts are dropped before comment/SSE
       // creation. The manager repeats the terminal check as a replay safety net.
-      if (resolvedAuthorType === 'agent' && ticket.pending_user_action) {
-        return ok({ suppressed: true, reason: 'pending_user_action' });
-      }
       const recentAgentComments = resolvedAuthorType === 'agent'
         ? await commentRepo.find({ where: { ticket_id }, order: { created_at: 'DESC' }, take: 20 })
         : [];
       const nextGuardComment = { author_type: resolvedAuthorType, content, metadata: finalMetadata };
-      if (shouldSuppressTerminalAck(nextGuardComment, recentAgentComments)) {
-        return ok({ suppressed: true, reason: 'duplicate_terminal_acknowledgement' });
-      }
-      if (shouldPendRepeatedWaiting({
+      const guard = await applyAgentCommentPingPongGuard({
+        ticket,
         next: nextGuardComment,
         recent: recentAgentComments,
-        ticketDescription: `${ticket.title}\n${ticket.description || ''}`,
-        hasBaseRepo: !!ticket.base_repo_resource_id,
-      })) {
-        ticket.pending_user_action = true;
-        ticket.pending_reason = '작업 대상 부재 상태에서 동일 대기 확인이 반복되어 자동 중지되었습니다. 작업 대상을 지정한 뒤 pending을 해제하세요.';
-        ticket.pending_set_at = new Date();
-        ticket.pending_set_by = 'agent_comment_pingpong_guard';
-        await dataSource.getRepository(Ticket).save(ticket);
-        await activityService.logActivity({
-          entity_type: 'ticket', entity_id: ticket.id, action: 'updated', ticket_id: ticket.id,
-          field_changed: 'pending_user_action', old_value: 'false', new_value: 'true',
-          actor_id: 'system', actor_name: 'agent_comment_pingpong_guard',
-        });
-        return ok({ suppressed: true, reason: 'repeated_waiting_without_work_target', pending_user_action: true });
+        pend: async () => {
+          ticket.pending_user_action = true;
+          ticket.pending_reason = '작업 대상 부재 상태에서 동일 대기 확인이 반복되어 자동 중지되었습니다. 작업 대상을 지정한 뒤 pending을 해제하세요.';
+          ticket.pending_set_at = new Date();
+          ticket.pending_set_by = 'agent_comment_pingpong_guard';
+          await dataSource.getRepository(Ticket).save(ticket);
+          await activityService.logActivity({
+            entity_type: 'ticket', entity_id: ticket.id, action: 'updated', ticket_id: ticket.id,
+            field_changed: 'pending_user_action', old_value: 'false', new_value: 'true',
+            actor_id: 'system', actor_name: 'agent_comment_pingpong_guard',
+          });
+        },
+      });
+      if (guard.suppressed) {
+        return ok(guard);
       }
 
       // Deferral-to-terminal guard (ticket 9f2adfd0): FLAG — never block — when
