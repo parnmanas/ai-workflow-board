@@ -46,3 +46,8 @@ it('rejects unsafe DB_SCHEMA values before interpolating pg connection options',
   process.env.DB_SCHEMA = 'qa_safe -c role=admin';
   assert.throws(() => buildDataSourceOptions(), /Invalid DB_SCHEMA identifier/);
 });
+
+it('rejects uppercase DB_SCHEMA because PostgreSQL folds an unquoted search_path', () => {
+  process.env.DB_SCHEMA = 'QA_Flows';
+  assert.throws(() => buildDataSourceOptions(), /Invalid DB_SCHEMA identifier/);
+});

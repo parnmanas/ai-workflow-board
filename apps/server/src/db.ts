@@ -331,7 +331,11 @@ export function buildDataSourceOptions(): DataSourceOptions {
 
   if (dbType === 'postgres') {
     const schema = process.env.DB_SCHEMA || undefined;
-    if (schema && !/^[a-z_][a-z0-9_]*$/i.test(schema)) {
+    // Keep this lowercase-only: pg parses `options: -c search_path=...` as an
+    // unquoted identifier and folds it to lowercase. Accepting uppercase here
+    // would let TypeORM's quoted `schema` and raw migrations target different
+    // schemas.
+    if (schema && !/^[a-z_][a-z0-9_]*$/.test(schema)) {
       throw new Error(`Invalid DB_SCHEMA identifier: ${schema}`);
     }
     return {

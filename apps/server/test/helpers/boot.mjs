@@ -42,7 +42,7 @@ export async function loadServerModules() {
 async function prepareIsolatedPgSchema(schema) {
   // Defensive identifier validation — schema is built from pid+port (always
   // safe) but never interpolate an unvalidated value into DDL.
-  if (!/^[a-z_][a-z0-9_]*$/i.test(schema)) {
+  if (!/^[a-z_][a-z0-9_]*$/.test(schema)) {
     throw new Error(`unsafe pg schema name: ${schema}`);
   }
   const { Client } = await import('pg');
