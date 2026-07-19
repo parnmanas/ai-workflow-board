@@ -2663,7 +2663,7 @@ export class EventDispatcher {
           kind: 'chat',
           taskText,
           rolePrompt,
-          chatRequestId: `msg:${p.sender_id}:${p.created_at || ''}`,
+          chatRequestId: p.message_id || p.id || `msg:${p.sender_id}:${p.created_at || ''}`,
           ticketId: '',
           agentId: agentContext?.agent_id || '',
           roomId: p.room_id || '',

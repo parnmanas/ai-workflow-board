@@ -236,7 +236,7 @@ function chatReplyInstructions(usesNativeMcp: boolean, roomId: string, isActionR
     );
   } else {
     lines.push(...operationalPolicy);
-    lines.push('- This adapter cannot call AWB MCP directly. For a missing operational capability, state the normalized operation and missing MCP/tool in your final answer so the agent-manager fallback can create/reuse the capability ticket; never tell the user to file it. For non-operational development work, describe the ticket needed for the same manager-side fallback.');
+    lines.push('- This adapter cannot call AWB MCP directly. For a missing operational capability, end with exactly one machine-readable line `AWB_OPERATIONAL_FALLBACK: {"operation":"<normalized operation>","missing_capability":"<missing MCP/tool>","original_request":"<request>"}` so the agent-manager fallback can create/reuse the capability ticket atomically; never tell the user to file it. For non-operational development work, describe the ticket needed for the existing manager-side reply flow.');
   }
   return lines;
 }

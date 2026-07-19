@@ -19,6 +19,10 @@ export class Ticket {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
+  @Index('uq_tickets_operational_dedupe_open', { unique: true })
+  @Column({ type: 'varchar', nullable: true, default: null })
+  operational_dedupe_key: string | null;
+
   @Column({ type: 'varchar', nullable: true, default: '' })
   workspace_id: string;
 

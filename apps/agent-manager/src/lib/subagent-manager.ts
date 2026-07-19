@@ -51,6 +51,7 @@ import {
   postSilentExitSystemComment,
   type AwbConfig,
 } from './rest.js';
+import { ensureOperationalFallbackTicket, parseOperationalFallback } from './operational-chat-fallback.js';
 import type {
   SubagentManager as SubagentManagerContract,
   SubagentSpawnArgs,
@@ -904,7 +905,7 @@ export class SubagentManager implements SubagentManagerContract {
         // Use the same adapter that spawned this child — picked by
         // record.cli_type so we don't aggregate antigravity's stdout with
         // claude's parser.
-        const answer = this.#adapterFor(record.cli_type).collectOneshotResult(record.outLines);
+        let answer = this.#adapterFor(record.cli_type).collectOneshotResult(record.outLines);
         // Pass the exit code so usage/auth signatures are only fatal in a real
         // error context — a clean exit-0 answer that merely mentions 403/429/
         // quota stays a valid agent answer (won't be suppressed or trip the
@@ -914,6 +915,19 @@ export class SubagentManager implements SubagentManagerContract {
           // Chat one-shot: post the result (or a generic failure) to the room.
           // Chat replies don't feed the ticket trigger loop, so the re-trigger
           // guard below is irrelevant here — keep prior behavior.
+          const fallback = answer ? parseOperationalFallback(answer) : null;
+          if (fallback) {
+            try {
+              const ticket = await ensureOperationalFallbackTicket(this.#config, fallback, {
+                room_id: record.room_id,
+                message_id: record.chat_request_id || '',
+              });
+              answer = `${ticket.reused ? '기존' : '새'} capability 티켓을 ${ticket.reused ? '재사용' : '자동 생성'}했습니다: ${ticket.id} ${ticket.title}`;
+            } catch (error: any) {
+              log(`[operational-fallback] observable failure room=${record.room_id}: ${error?.message || error}`);
+              answer = `⚠️ 운영 capability 자동 티켓 생성에 실패했습니다. 사용자 작업을 요청하지 않고 매니저 오류로 기록했습니다: ${error?.message || error}`;
+            }
+          }
           if (answer) {
             await this.#postOneshotChatAnswer(record, answer);
           } else if (code !== 0) {
