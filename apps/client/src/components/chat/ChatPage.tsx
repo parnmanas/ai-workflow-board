@@ -14,7 +14,8 @@ import { useToast } from '../../contexts/ToastContext';
 import { useNotifications } from '../../contexts/NotificationContext';
 import { useMediaQuery } from '../../hooks/useMediaQuery';
 import { tokens } from '../../tokens';
-import type { ChatRoomListItem, ChatRoomDetail, ChatRoomMessageItem } from '../../types';
+import type { ChatRoomListItem, ChatRoomDetail, ChatRoomMessageItem, DashboardAgent } from '../../types';
+import { useOpenTicketArtifact } from '../../contexts/ticketArtifactOpener';
 import { type MentionParticipant } from './utils/markdown';
 import {
   projectParticipants,
@@ -26,6 +27,7 @@ import {
 import NewChatModal from './ParticipantPicker';
 import ChatRoomListPanel from './RoomListPanel';
 import ChatRoomView from './RoomDetailPanel';
+import { getDmAgentPartnerId, normalizeAgentTasks } from './utils/agentTasks';
 
 /**
  * ChatPage — Phase 7 room-based chat surface.
@@ -94,6 +96,7 @@ export default function ChatPage() {
   // waiting for the 60 s refresh. Room-scoped (per-room unread zeros).
   const { markRead: markBadgeRead } = useNotifications();
   const isMobile = useMediaQuery('(max-width: 767px)');
+  const openTicketArtifact = useOpenTicketArtifact();
 
   const [rooms, setRooms] = useState<ChatRoomListItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -117,6 +120,7 @@ export default function ChatPage() {
   // possible when showAllRooms is on). Used to skip mark-read calls that
   // would 403 server-side for non-members.
   const [isObserver, setIsObserver] = useState<boolean>(false);
+  const [dashboardAgents, setDashboardAgents] = useState<DashboardAgent[]>([]);
   const originalTitleRef = useRef(document.title);
   const activeRoomIdRef = useRef<string | null>(null);
   const isObserverRef = useRef<boolean>(false);
@@ -610,6 +614,26 @@ export default function ChatPage() {
   );
 
   const workspaceId = getActiveWorkspaceId() || '';
+  useEffect(() => {
+    if (!workspaceId) return;
+    let cancelled = false;
+    api.getAgentDashboard(workspaceId).then((agents) => { if (!cancelled) setDashboardAgents(agents); }).catch(() => { if (!cancelled) setDashboardAgents([]); });
+    return () => { cancelled = true; };
+  }, [workspaceId]);
+
+  useBoardStreamEvent('agent_status', useCallback((event: any) => {
+    const payload = event?.payload ?? event;
+    const agentId = payload?.agent_id ?? event?.scope?.agent_id;
+    if (!agentId) return;
+    setDashboardAgents((agents) => agents.map((agent) => agent.id !== agentId ? agent : {
+      ...agent,
+      current_task: payload.current_task,
+      active_tasks: payload.active_tasks !== undefined ? payload.active_tasks : agent.active_tasks,
+    }));
+  }, []));
+
+  const dmAgentId = getDmAgentPartnerId({ roomType: activeRoom?.type, participants: roomParticipants, currentUserId: user?.id, isObserver });
+  const activeAgentTasks = normalizeAgentTasks(dashboardAgents.find((agent) => agent.id === dmAgentId));
   const showUpgradeBanner = chatProtocolVersion !== null && chatProtocolVersion < 2;
 
   // Mobile layout: single panel
@@ -653,6 +677,8 @@ export default function ChatPage() {
             participants={roomParticipants}
             typingAgents={typingAgents}
             currentUserId={user?.id}
+            activeTasks={activeAgentTasks}
+            onSelectTask={openTicketArtifact}
           />
         )}
         <NewChatModal
@@ -703,6 +729,8 @@ export default function ChatPage() {
             participants={roomParticipants}
             typingAgents={typingAgents}
             currentUserId={user?.id}
+            activeTasks={activeAgentTasks}
+            onSelectTask={openTicketArtifact}
           />
         </Panel>
       </Group>

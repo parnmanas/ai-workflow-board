@@ -2,12 +2,13 @@ import React, { useState, useEffect, useRef, useLayoutEffect } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
 import PageHeader from '../PageHeader';
-import type { ChatRoomListItem, ChatRoomMessageItem } from '../../types';
+import type { AgentCurrentTask, ChatRoomListItem, ChatRoomMessageItem } from '../../types';
 import MessageList from './MessageList';
 import NewChatModal from './ParticipantPicker';
 import { useConfirm } from '../../contexts/ConfirmContext';
 import { type MentionParticipant } from './utils/markdown';
 import ChatMessageInput from './ChatMessageInput';
+import ActiveTaskStrip from './ActiveTaskStrip';
 
 
 // ─── RoomHeaderActions ────────────────────────────────────────────────────────
@@ -163,6 +164,8 @@ export interface ChatRoomViewProps {
   participants?: MentionParticipant[];
   typingAgents?: Record<string, { name: string; status?: string }>; // agent_id -> { name, status }
   currentUserId?: string;
+  activeTasks?: AgentCurrentTask[];
+  onSelectTask?: (ticketId: string, title: string) => void;
 }
 
 // Distance from the top (in px) at which we start fetching older history.
@@ -198,6 +201,8 @@ export default function ChatRoomView({
   participants = [],
   typingAgents = {} as Record<string, { name: string; status?: string }>,
   currentUserId,
+  activeTasks = [],
+  onSelectTask = () => {},
 }: ChatRoomViewProps) {
   const confirm = useConfirm();
   const [isRenaming, setIsRenaming] = useState(false);
@@ -544,6 +549,8 @@ export default function ChatRoomView({
           )}
         </div>
       )}
+
+      <ActiveTaskStrip tasks={activeTasks} onSelectTicket={onSelectTask} />
 
       {/* Older-message loading banner — sits OUTSIDE the scroll viewport so
           its appearance/disappearance doesn't perturb scrollHeight and break
