@@ -40,6 +40,7 @@ import { isReviewToMerging, hasReviewerApproval, ReviewApprovalRequiredError } f
 import { evaluateMergeGate, MergeGateBlockedError } from '../mcp/shared/merge-gate';
 import { findOrFail } from '../../common/find-or-fail';
 import { resolveAgentDisplayName } from '../../utils/agent-name';
+import { createHash } from 'node:crypto';
 
 @ApiSecurity('agent-api-key')
 @ApiTags('agent-api')
@@ -418,17 +419,26 @@ export class AgentApiController {
       return res.status(400).json({ error: 'workspace_id, dedupe_key, operation and missing_capability are required' });
     }
     if (scope && scope !== workspaceId) return this.denyScope(res);
+    const recurrenceKey = createHash('sha256').update(
+      `${String(body.dedupe_key)}\n${String(body.room_id || '')}\n${String(body.message_id || '')}`,
+    ).digest('hex');
+    const recordRecurrence = async (manager: EntityManager, ticketId: string) => {
+      // INSERT .. ON CONFLICT DO NOTHING is the retry policy: the exact same
+      // source message is stored once, while distinct room/message recurrences
+      // each remain traceable. This also closes the create unique-race window.
+      await manager.getRepository(Comment).createQueryBuilder().insert().values({
+        ticket_id: ticketId,
+        author_type: 'system', author: 'Agent Manager', type: 'system',
+        content: `반복 운영 요청 감지: room=${body.room_id || ''} message=${body.message_id || ''}`,
+        operational_recurrence_key: recurrenceKey,
+      }).orIgnore().execute();
+    };
     try {
       const result = await this.dataSource.transaction(async manager => {
         const tickets = manager.getRepository(Ticket);
-        const comments = manager.getRepository(Comment);
         let ticket = await tickets.findOne({ where: { operational_dedupe_key: String(body.dedupe_key), archived_at: IsNull() } });
         if (ticket) {
-          await comments.save(comments.create({
-            ticket_id: ticket.id,
-            author_type: 'system', author: 'Agent Manager', type: 'system',
-            content: `반복 운영 요청 감지: room=${body.room_id || ''} message=${body.message_id || ''}`,
-          }));
+          await recordRecurrence(manager, ticket.id);
           return { ticket, reused: true };
         }
         const board = body.board_id
@@ -452,7 +462,13 @@ export class AgentApiController {
     } catch (error: any) {
       // A racing transaction won the unique key: read and reuse its open row.
       const existing = await this.ticketRepo.findOne({ where: { operational_dedupe_key: String(body.dedupe_key), archived_at: IsNull() } });
-      if (existing) return res.status(200).json({ id: existing.id, title: existing.title, reused: true });
+      if (existing) {
+        // The losing transaction is already rolled back. Record its source in
+        // a fresh transaction; the recurrence unique key makes this safe to
+        // retry if the caller did not receive the 200 response.
+        await this.dataSource.transaction(manager => recordRecurrence(manager, existing.id));
+        return res.status(200).json({ id: existing.id, title: existing.title, reused: true });
+      }
       return res.status(503).json({ error: 'operational_fallback_failed', message: error?.message || String(error) });
     }
   }
