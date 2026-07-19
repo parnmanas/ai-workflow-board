@@ -7,7 +7,7 @@
 // settings / auth / history under <MANAGER_HOME>/agents/<id>/cli-home/
 // rather than sharing the operator's $HOME.
 
-import { promises as fsp } from 'node:fs';
+import { promises as fsp, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { parse, stringify } from 'smol-toml';
@@ -123,7 +123,14 @@ export class CodexCliAdapter extends CliAdapter {
     return resolveCliBin('codex', configured);
   }
 
-  buildOneshotSpawn({ rolePrompt, taskText, model, mcpAttribution, cwd }: OneshotSpec): SpawnDescriptor {
+  buildOneshotSpawn({
+    rolePrompt,
+    taskText,
+    model,
+    mcpAttribution,
+    cwd,
+    cliHomeDir,
+  }: OneshotSpec): SpawnDescriptor {
     const fullPrompt = rolePrompt ? `${rolePrompt}\n\n${taskText}` : taskText || '';
     const hasAttribution = !!(
       mcpAttribution?.ticketId ||
@@ -146,6 +153,32 @@ export class CodexCliAdapter extends CliAdapter {
         '-c',
         `mcp_servers.awb.http_headers=${inlineTomlStringMap(headers)}`,
       );
+
+      // Validate what Codex will actually see, not only the file prepared
+      // earlier. The attribution override creates an `awb` table when the
+      // file has none; that headers-only table has no valid transport.
+      const configPath = join(
+        cliHomeDir ?? process.env.CODEX_HOME ?? join(homedir(), '.codex'),
+        'config.toml',
+      );
+      let effectiveConfig: Record<string, any> = {};
+      try {
+        const text = readFileSync(configPath, 'utf8');
+        effectiveConfig = text.trim() ? (parse(text) as Record<string, any>) : {};
+      } catch (err: any) {
+        if (err?.code !== 'ENOENT') throw err;
+      }
+      const servers = effectiveConfig.mcp_servers;
+      effectiveConfig.mcp_servers =
+        servers && typeof servers === 'object' && !Array.isArray(servers)
+          ? { ...servers }
+          : {};
+      const awb = effectiveConfig.mcp_servers.awb;
+      effectiveConfig.mcp_servers.awb = {
+        ...(awb && typeof awb === 'object' && !Array.isArray(awb) ? awb : {}),
+        http_headers: headers,
+      };
+      validateCodexMcpServers(effectiveConfig, configPath);
     }
     // `codex` with no subcommand is the interactive TUI and refuses piped
     // stdin ("stdin is not a terminal"). `codex exec` is the non-interactive

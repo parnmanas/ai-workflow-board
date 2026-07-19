@@ -61,12 +61,18 @@ test('listModels degrades to free-text mode when Codex has no cache yet', async 
   assert.deepEqual(await new CodexCliAdapter().listModels(), []);
 });
 
-test('buildOneshotSpawn adds ticket attribution as a TOML config override', () => {
+test('buildOneshotSpawn adds ticket attribution as a TOML config override', async () => {
+  const cliHomeDir = await freshDir();
+  await fsp.writeFile(
+    join(cliHomeDir, 'config.toml'),
+    '[mcp_servers.awb]\nurl = "https://awb.example/mcp"\n',
+  );
   const adapter = new CodexCliAdapter();
   const descriptor = adapter.buildOneshotSpawn({
     rolePrompt: 'role',
     taskText: 'task',
     mcpConfigPath: null,
+    cliHomeDir,
     mcpAttribution: {
       ticketId: 'ticket-123',
       role: 'reviewer',
@@ -85,6 +91,26 @@ test('buildOneshotSpawn adds ticket attribution as a TOML config override', () =
     'X-AWB-Subagent-Role': 'reviewer',
     'X-AWB-Subagent-Trigger-Source': 'ticket_done_review',
   });
+});
+
+test('buildOneshotSpawn rejects attribution before spawn when effective awb is headers-only', async () => {
+  const cliHomeDir = await freshDir();
+  await assert.rejects(
+    async () => new CodexCliAdapter().buildOneshotSpawn({
+      rolePrompt: 'role',
+      taskText: 'task',
+      mcpConfigPath: null,
+      cliHomeDir,
+      mcpAttribution: { ticketId: 'ticket-123', role: 'reviewer' },
+    }),
+    (err) => {
+      assert.ok(err instanceof InvalidMcpTransportError);
+      assert.match(err.message, /mcp_servers\.awb/);
+      assert.ok(err.message.includes(join(cliHomeDir, 'config.toml')));
+      assert.match(err.message, /stdio, streamable_http/);
+      return true;
+    },
+  );
 });
 
 test('buildOneshotSpawn omits per-run MCP override for unattributed chat runs', () => {

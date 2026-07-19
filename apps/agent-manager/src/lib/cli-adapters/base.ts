@@ -211,6 +211,10 @@ export interface OneshotSpec {
    *  their own workspace-root flag (notably Codex `--cd`) should pass the same
    *  path explicitly so CLI-side root discovery cannot diverge from spawn cwd. */
   cwd?: string | null;
+  /** Effective CLI home used by this spawn. Native-config adapters may read
+   *  it immediately before descriptor creation to validate config plus any
+   *  per-spawn overrides as one effective configuration. */
+  cliHomeDir?: string | null;
   /** Per-run AWB attribution for native MCP adapters whose MCP config is
    *  loaded from their CLI home rather than a per-spawn JSON file. */
   mcpAttribution?: McpAttribution;
