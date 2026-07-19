@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { promises as fsp } from 'node:fs';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 
@@ -117,8 +117,17 @@ test('adoptRemoteBranch updates the tree even when a worktree holds the default 
       'production.private ref must be untouched',
     );
 
-    // The ticket worktree holding main is left intact.
-    assert.ok(git(c.manager, ['worktree', 'list']).includes(wt), 'worktree still registered');
+    // The ticket worktree holding main is left intact. `git worktree list`
+    // prints forward-slash, realpath-canonicalized paths, whereas `wt` is a
+    // backslash `join()` path rooted at os.tmpdir() — on the windows-latest
+    // runner that tmpdir is an 8.3 short path (C:\Users\RUNNER~1\…) which git
+    // expands to the long form, so a full-path `.includes` mismatches on
+    // separators AND on the short/long-name and drive-case differences. Assert
+    // on the unambiguous worktree basename instead (ticket e09fa003).
+    assert.ok(
+      git(c.manager, ['worktree', 'list']).includes(basename(wt)),
+      'worktree still registered',
+    );
   } finally {
     await c.cleanup();
   }
