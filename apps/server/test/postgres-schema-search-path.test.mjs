@@ -32,7 +32,7 @@ it('sets schema and connection search_path together for isolated Postgres QA', (
   process.env.DB_SCHEMA = 'qa_1234_7800';
   const options = buildDataSourceOptions();
   assert.equal(options.schema, 'qa_1234_7800');
-  assert.deepEqual(options.extra, { options: '-c search_path=qa_1234_7800' });
+  assert.deepEqual(options.extra, { options: '-c search_path=qa_1234_7800,public' });
 });
 
 it('preserves the default Postgres search_path when DB_SCHEMA is unset', () => {

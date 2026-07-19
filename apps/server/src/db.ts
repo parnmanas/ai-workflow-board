@@ -354,10 +354,11 @@ export function buildDataSourceOptions(): DataSourceOptions {
       schema,
       // TypeORM's `schema` option qualifies synchronize's own DDL, but raw,
       // unqualified SQL in DATA migrations is resolved through the connection
-      // search_path. Apply the isolated QA schema to every pg pool connection
-      // so those migrations operate on the same tables synchronize created.
+      // search_path. Apply the isolated QA schema first on every pg pool
+      // connection so those migrations operate on the same tables synchronize
+      // created, while retaining public for extensions such as uuid-ossp.
       // No DB_SCHEMA means no override, preserving Postgres' production default.
-      ...(schema ? { extra: { options: `-c search_path=${schema}` } } : {}),
+      ...(schema ? { extra: { options: `-c search_path=${schema},public` } } : {}),
       entities,
       migrations: migrationsGlob,
       synchronize: true,   // D-01

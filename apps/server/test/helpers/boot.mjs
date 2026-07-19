@@ -55,6 +55,11 @@ async function prepareIsolatedPgSchema(schema) {
   });
   await client.connect();
   try {
+    // TypeORM auto-installs uuid-ossp in the first schema on search_path. In
+    // the dialect matrix that would strand the extension in the first test's
+    // disposable schema, making subsequent schemas unable to resolve
+    // uuid_generate_v4(). Keep shared extensions in public explicitly.
+    await client.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA public');
     await client.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
     await client.query(`CREATE SCHEMA "${schema}"`);
   } finally {
