@@ -1119,11 +1119,19 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
     const ticket = await this.dataSource.getRepository(Ticket).findOne({ where: { id: ticketId } });
     if (!ticket) throw Object.assign(new Error('Ticket not found'), { status: 404 });
     const content = `Summarize all existing comments on ticket ${ticketId}. Preserve decisions, open questions, outcomes, and important context; omit repetitive operational noise. Do not edit or delete comments yourself. When ready, call mcp__awb__complete_comment_summary exactly once with run_id="${runId}", ticket_id="${ticketId}", status="succeeded", and summary="<your summary>". If you cannot summarize, call it with status="failed" and error="<reason>".`;
-    const triggerId = await this._emitTrigger(ticket, targetAgentId, 'assignee', 'comment_summary', '', {
+    // Summary work is independent of the ticket's workflow assignee strand.
+    // A dedicated role prevents an active assignee turn from rejecting the
+    // summary as a duplicate same-role strand.
+    const triggerId = await this._emitTrigger(ticket, targetAgentId, 'comment_summary', 'comment_summary', '', {
       bypassFocus: true,
+      // Summary work does not advance workflow, so parked tickets remain safe.
+      bypassTicketPending: true,
       columnPromptOverride: { template_id: 'comment-summary-inline', name: 'Comment Summary', content },
     });
-    if (!triggerId) throw Object.assign(new Error('Summary agent dispatch was not accepted'), { status: 503 });
+    if (!triggerId) throw Object.assign(new Error('The selected summary agent could not accept the dispatch'), {
+      status: 503,
+      code: 'SUMMARY_DISPATCH_REJECTED',
+    });
     return triggerId;
   }
 
@@ -1711,6 +1719,7 @@ candidate's branch or move the ticket.
     opts?: {
       forceRespawn?: boolean;
       bypassFocus?: boolean;
+      bypassTicketPending?: boolean;
       // Inline override for `column_prompt` — used by `_dispatchPostDoneReview`
       // to inject the self-improvement analysis prompt onto a terminal-column
       // trigger that the normal `board.column_prompts[column_id]` path can't
@@ -1861,7 +1870,7 @@ candidate's branch or move the ticket.
       // `pending_on_tickets` (blocked behind prerequisite tickets). Either
       // drops the trigger. The audit action is suffixed so a grep can tell the
       // two apart — `_pending_user` vs `_pending_tickets`.
-      if (freshForGate?.pending_user_action || freshForGate?.pending_on_tickets) {
+      if (!opts?.bypassTicketPending && (freshForGate?.pending_user_action || freshForGate?.pending_on_tickets)) {
         const onTickets = !freshForGate.pending_user_action && !!freshForGate.pending_on_tickets;
         const dropAction = onTickets
           ? 'agent_trigger_dropped_pending_tickets'

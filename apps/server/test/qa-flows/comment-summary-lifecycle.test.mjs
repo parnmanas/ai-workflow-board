@@ -21,6 +21,7 @@ test('comment summary is workspace-scoped, idempotent, and preserves originals o
   const sceneA = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'summary-a' });
   const sceneB = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'summary-b' });
   const agent = await createAgent(app, getDataSourceToken, sceneA.ws.id, { name: 'summarizer' });
+  await ds.getRepository('Agent').update({ id: agent.id }, { is_online: 1 });
   const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: sceneA.ws.id, label: 'summarizer' });
   const admin = await createUser(app, getDataSourceToken, { name: 'summary-admin', role: 'admin' });
   const token = app.get(AuthService).createSession(admin.id);
@@ -63,10 +64,32 @@ test('comment summary is workspace-scoped, idempotent, and preserves originals o
   const deniedPost = await postSummary(ticket.id, sceneB.ws.id);
   assert.equal(deniedGet.status, 404);
   assert.equal(deniedPost.status, 404);
+  await ds.getRepository('Ticket').update({ id: ticket.id }, {
+    pending_user_action: true,
+    pending_reason: 'waiting for a user while comments can still be summarized',
+  });
 
+  // Regression: summary dispatch must not share the workflow assignee's
+  // same-role strand key (the old path returned "Summary agent dispatch was not accepted").
+  const originalEmit = triggerModule.TriggerLoopService.prototype.emitCommentSummaryTrigger.bind(triggerLoop);
+  let summaryRole = '';
+  let summaryDispatches = 0;
+  triggerLoop.emitCommentSummaryTrigger = async (ticketId, agentId, runId) => {
+    summaryDispatches += 1;
+    const originalPrivateEmit = triggerLoop._emitTrigger.bind(triggerLoop);
+    triggerLoop._emitTrigger = async (targetTicket, targetAgentId, role, source, actor, options) => {
+      summaryRole = role;
+      assert.notEqual(role, 'assignee');
+      return 'summary-trigger';
+    };
+    try { return await originalEmit(ticketId, agentId, runId); }
+    finally { triggerLoop._emitTrigger = originalPrivateEmit; }
+  };
   const starts = await Promise.all([postSummary(ticket.id), postSummary(ticket.id)]);
   assert.deepEqual(starts.map(result => result.status).sort(), [200, 202]);
-  assert.equal(dispatches, 1, 'concurrent starts dispatch exactly once');
+  assert.equal(summaryRole, 'comment_summary');
+  assert.equal(summaryDispatches, 1, 'concurrent starts dispatch exactly once');
+  triggerLoop.emitCommentSummaryTrigger = async () => { dispatches += 1; return 'summary-trigger'; };
   const run = await runRepo.findOneByOrFail({ ticket_id: ticket.id });
   const mcpA = new McpClient({ baseUrl: `http://localhost:${port}`, apiKey: key.raw_key });
   const mcpB = new McpClient({ baseUrl: `http://localhost:${port}`, apiKey: key.raw_key });
@@ -98,6 +121,8 @@ test('comment summary is workspace-scoped, idempotent, and preserves originals o
   triggerLoop.emitCommentSummaryTrigger = async () => { dispatches += 1; throw new Error('dispatch unavailable'); };
   const failedStart = await postSummary(failedTicket.id);
   assert.equal(failedStart.status, 503);
+  assert.equal(failedStart.data.error_code, 'SUMMARY_DISPATCH_FAILED');
+  assert.doesNotMatch(failedStart.data.error, /Summary agent dispatch was not accepted/);
   assert.equal(await commentRepo.count({ where: { ticket_id: failedTicket.id } }), 2);
 
   triggerLoop.emitCommentSummaryTrigger = async () => { dispatches += 1; return 'summary-trigger'; };
