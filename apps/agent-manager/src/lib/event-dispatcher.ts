@@ -518,6 +518,11 @@ export interface DispatchReservation {
    *  the dispatch will reuse it as a follow-up turn). false → the provisioning→
    *  spawn reservation was just placed and the caller MUST release it. */
   live: boolean;
+  /** 좀비 예약을 강제 회수하고 이 dispatch 가 새 예약을 잡았다는 신호
+   *  (ticket 7c3ba9cf). 'stale' = TTL(`INFLIGHT_RESERVATION_STALE_MS`) 초과
+   *  예약을 evict, 'safety_valve' = TTL 미도달이나 연속 억제가 임계에 도달해
+   *  강제 해제. dispatcher 는 이때 티켓에 경고를 남긴다. 정상 취득이면 undefined. */
+  evicted?: 'stale' | 'safety_valve';
 }
 
 export interface TicketDispatchResult {
@@ -1236,6 +1241,29 @@ export class EventDispatcher {
           });
         }
         return;
+      }
+      // 좀비 예약 강제 회수(safety valve / TTL): 진행 중인 dispatch 없이 예약만
+      // 남아 연속 재시도를 막던 (ticket,role) 예약을 tryReserveDispatch 가
+      // 원자적으로 회수하고 새 예약을 잡아 acquired:true 로 반환한 경우다. TTL
+      // 만료(stale)는 조용히 재-dispatch 하고, safety valve(연속 억제 N회)는
+      // 티켓에 경고를 남겨 운영자가 프로비저닝 hang / codex exit-1 근본원인을
+      // 확인하도록 유도한다.
+      if (reservation.evicted) {
+        log(
+          `[dispatch] zombie reservation reclaimed (${reservation.evicted}): ` +
+            `재-dispatch 진행 ticket=${ev.ticket_id.slice(0, 8)} role=${ev.action || '_'} ` +
+            `agent=${dispatchAgentId.slice(0, 8) || '_'}`,
+        );
+        if (reservation.evicted === 'safety_valve') {
+          fireAndForgetTool(this.#config, 'add_comment', {
+            ticket_id: ev.ticket_id,
+            content:
+              '⚠️ **디스패치 dedupe 강제 해제 (safety valve)** — 이 (ticket, role) 의 ' +
+              'in-flight 예약이 연속 재시도를 억제해, 실제 진행이 없는 좀비 예약으로 ' +
+              '판단하고 강제 해제 후 재-dispatch 했습니다. 반복되면 매니저 로그에서 ' +
+              '프로비저닝 hang / codex exit-1 근본원인을 확인하세요. (ticket 7c3ba9cf)',
+          });
+        }
       }
     }
     // We placed a reservation to release only when live===false (a fresh spawn);

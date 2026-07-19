@@ -28,6 +28,12 @@
 // whole dispatcher. The I/O shell (`WorktreeManager.verifyPushReadiness`) calls
 // git and hands the observed facts to `decidePushReadiness`.
 
+// Single source of truth for the zombie-reservation TTL — shared with the
+// authoritative `_inflight` registry so the fallback slot and the authoritative
+// registry recover a hung-provisioning holder on the same clock (ticket 7c3ba9cf).
+// A pure value import (a number); pulls in no I/O.
+import { INFLIGHT_RESERVATION_STALE_MS } from './base-session-manager.js';
+
 /** git stderr fragments (lowercased) that mean "the remote rejected us for lack
  *  of usable credentials", as opposed to a transient network/DNS/timeout error.
  *  We fail CLOSED (abort dispatch) on these and fail OPEN on everything else, so
@@ -528,6 +534,10 @@ export interface InflightDispatchMeta {
   ticketId: string;
   role: string;
   agentId: string;
+  /** 예약을 건 시각(Date.now()). 프로비저닝 중 홀더가 hang 하면(finally 미실행)
+   *  fallback slot 도 좀비로 남아 재시도를 영구 차단하므로, TTL 로 evict 한다
+   *  (authoritative `_inflight` 와 동일한 좀비 회복 — ticket 7c3ba9cf). */
+  reservedAt?: number;
 }
 
 /** Why a dispatch was suppressed by the provision-spanning single-flight guard.
@@ -609,8 +619,16 @@ export class InflightDispatchTracker {
    *  the `has` and the `set`, so under Node's single thread the check-and-set
    *  cannot interleave with another dispatch. */
   tryAcquireFallback(key: string, meta: InflightDispatchMeta): { acquired: boolean } {
-    if (this.#fallback.has(key)) return { acquired: false };
-    this.#fallback.set(key, meta);
+    const existing = this.#fallback.get(key);
+    if (existing) {
+      // Zombie recovery (ticket 7c3ba9cf): a holder that hung mid-provisioning
+      // never calls releaseFallback, so without a TTL the slot blocks every
+      // retry forever. Evict a reservation older than the shared stale window
+      // and re-claim it for THIS dispatch.
+      const age = Date.now() - (existing.reservedAt ?? 0);
+      if (age < INFLIGHT_RESERVATION_STALE_MS) return { acquired: false };
+    }
+    this.#fallback.set(key, { ...meta, reservedAt: Date.now() });
     return { acquired: true };
   }
 

@@ -265,7 +265,39 @@ export interface InflightReservation {
   agentId?: string;
   ticketId?: string;
   roomId?: string;
+  /** 예약을 건 시각(Date.now()). 프로비저닝 창은 아직 PID 가 없어
+   *  `_getLiveSession` 으로 실존을 검증할 수 없으므로, 이 타임스탬프로 좀비
+   *  예약(예: 프로비저닝 await 가 영영 안 끝나 finally 를 못 탄 홀더)을 TTL
+   *  판정한다. `INFLIGHT_RESERVATION_STALE_MS` 초과 예약은 재-dispatch 를
+   *  영구 차단하는 좀비로 보고 evict 한다(ticket 7c3ba9cf). */
+  reservedAt?: number;
 }
+
+/** 프로비저닝→spawn 예약이 이 시간을 넘겨 살아있으면 좀비로 판정한다.
+ *  handleTrigger 의 try/finally(ticket 3d180f85)가 return/throw 는 모두
+ *  풀지만, 프로비저닝 await 자체가 영영 안 끝나면(네트워크 hang 등) finally
+ *  가 실행되지 않아 예약이 영구히 남고 동일 (ticket,role,agent) 재시도가 전부
+ *  억제된다 — 6시간 정체의 근본 원인(ticket 7c3ba9cf). 정상 프로비저닝+spawn
+ *  은 이보다 훨씬 짧으므로(대형 clone 도 수 분), 이 값을 넘긴 예약을 evict 해도
+ *  진짜 진행 중인 dispatch 를 트윈으로 깨울 위험은 사실상 없다. */
+export const INFLIGHT_RESERVATION_STALE_MS = 10 * 60_000; // 10분
+
+/** 좀비가 아직 TTL 에 안 닿았는데 재시도가 이 횟수만큼 연속 억제되면(홀더가
+ *  한 번도 release 하지 않은 채) 예약을 강제 해제하고 티켓에 경고를 남긴다.
+ *  TTL 이 침묵형 백스톱이라면 이쪽은 운영자-가시성 safety valve 다. 단독으로는
+ *  안 쓰고 반드시 아래 MIN_AGE 게이트와 AND 로 묶는다. */
+export const INFLIGHT_SUPPRESS_SAFETY_VALVE = 3;
+
+/** safety valve 의 최소 나이 게이트. 연속 억제 '횟수'만으로 강제 해제하면,
+ *  정상이지만 느린 프로비저닝 창(대형 clone 등)이 공격적인 supervisor 재전송
+ *  으로 순식간에 N회 억제됐을 때 진짜 진행 중인 dispatch 를 트윈으로 깨울 수
+ *  있다 — 이 가드 전체가 막으려는 바로 그 트윈이다. 그래서 예약이 이 시간을
+ *  넘겨 살아있을 때만(정상 홀더라면 이미 release 해 카운터가 리셋됐을 만큼
+ *  오래 지난 뒤) valve 를 연다. 결과적으로 [MIN_AGE, TTL) 구간에서 '억제가
+ *  계속되는데 홀더가 여전히 안 끝난' 경우에만 발동 → 정상 프로비저닝 창에서는
+ *  절대 트립하지 않는다. TTL(10분)보다 짧아, 활발히 재전송되는 좀비를 TTL
+ *  보다 일찍 잡아 경고를 남기는 것이 목적. */
+export const INFLIGHT_SUPPRESS_SAFETY_VALVE_MIN_AGE_MS = 5 * 60_000; // 5분
 
 export class BaseSessionManager {
   protected readonly _config: SessionAwareConfig;

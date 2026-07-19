@@ -10,6 +10,9 @@
 import { randomUUID } from 'node:crypto';
 import {
   BaseSessionManager,
+  INFLIGHT_RESERVATION_STALE_MS,
+  INFLIGHT_SUPPRESS_SAFETY_VALVE,
+  INFLIGHT_SUPPRESS_SAFETY_VALVE_MIN_AGE_MS,
   type SessionAwareConfig,
   type SessionRecord,
 } from './base-session-manager.js';
@@ -133,6 +136,14 @@ export class TicketSessionManager
    *  the system comment can correlate it with the AWB trigger that
    *  produced the dead cycle. */
   #lastTriggerId = new Map<number, string>();
+  /** sessionKey 별 연속 억제 횟수(ticket 7c3ba9cf). `tryReserveDispatch` 가
+   *  살아있는(비-stale) 예약 때문에 dispatch 를 억제할 때마다 증가하고, 예약이
+   *  새로 서거나(fresh reserve) evict(TTL/valve)되거나 `releaseDispatch` 로
+   *  정상 해제될 때 0 으로 리셋된다. `INFLIGHT_SUPPRESS_SAFETY_VALVE` 를 넘기고
+   *  예약 나이가 `INFLIGHT_SUPPRESS_SAFETY_VALVE_MIN_AGE_MS` 도 넘겼을 때만
+   *  좀비로 보고 강제 해제한다(나이 게이트 없이는 정상 프로비저닝 창을 트윈으로
+   *  깨울 수 있으므로). */
+  #reserveSuppress = new Map<string, number>();
 
   constructor(config: SessionAwareConfig, circuitBreaker?: CircuitBreaker) {
     super(config, {
@@ -173,20 +184,70 @@ export class TicketSessionManager
     const key = this.#makeKey(ticketId, role || '', agentId || '');
     // Live first: once a session is registered, a concurrent trigger should
     // REUSE it (follow-up turn), not be dropped as a twin.
-    if (this._getLiveSession(key)) return { acquired: true, live: true };
+    if (this._getLiveSession(key)) {
+      this.#reserveSuppress.delete(key);
+      return { acquired: true, live: true };
+    }
     // A fresh spawn (or an earlier provisioning reservation) already holds the
-    // key → this concurrent trigger is the twin; suppress it.
-    if (this._inflight.has(key)) return { acquired: false, live: false };
+    // key → this concurrent trigger is normally the twin, so suppress it.
+    // BUT the provisioning window has no PID yet, so a holder that hung mid-
+    // provisioning (its handleTrigger await never resolved → the try/finally
+    // that would releaseDispatch never ran) leaves a ZOMBIE reservation that
+    // blocks every retry forever — the 6h Review-column stall (ticket 7c3ba9cf).
+    // Two backstops recover it, both reclaiming the slot ATOMICALLY (evict +
+    // re-reserve in this one synchronous CAS, so no re-entry / ownership cross):
+    //   1) TTL — a reservation older than INFLIGHT_RESERVATION_STALE_MS is a
+    //      presumed zombie; evict it. Legit provision+spawn is far shorter.
+    //   2) safety valve — N consecutive suppressions with the holder never
+    //      releasing AND the hold already older than the MIN_AGE gate means the
+    //      holder is wedged; force it (and warn). The MIN_AGE gate is essential:
+    //      a suppression COUNT alone would fire during a healthy-but-slow
+    //      provisioning window that a bursty supervisor hammered N times, spawning
+    //      the very twin this guard exists to prevent. A healthy holder releases
+    //      (finally runs) well before MIN_AGE, resetting the counter — so a count
+    //      still climbing past MIN_AGE is a genuine zombie, never a live provision.
+    const existing = this._inflight.get(key);
+    if (existing) {
+      const age = Date.now() - (existing.reservedAt ?? 0);
+      if (age >= INFLIGHT_RESERVATION_STALE_MS) {
+        log(
+          `[ticket-session] tryReserveDispatch evicted STALE reservation key=${key} ` +
+            `age=${Math.round(age / 1000)}s ≥ ${Math.round(INFLIGHT_RESERVATION_STALE_MS / 1000)}s ` +
+            `— 좀비 예약으로 판정, 재-dispatch 허용`,
+        );
+        this.#reserveSuppress.delete(key);
+        this._inflight.set(key, { agentId: agentId || '', ticketId, reservedAt: Date.now() });
+        return { acquired: true, live: false, evicted: 'stale' };
+      }
+      const count = (this.#reserveSuppress.get(key) ?? 0) + 1;
+      if (count >= INFLIGHT_SUPPRESS_SAFETY_VALVE && age >= INFLIGHT_SUPPRESS_SAFETY_VALVE_MIN_AGE_MS) {
+        log(
+          `[ticket-session] tryReserveDispatch SAFETY VALVE force-release key=${key} ` +
+            `after ${count} consecutive suppressions (age=${Math.round(age / 1000)}s ` +
+            `≥ ${Math.round(INFLIGHT_SUPPRESS_SAFETY_VALVE_MIN_AGE_MS / 1000)}s) ` +
+            `— 반복 억제 + 최소 나이 초과로 좀비 판정, 강제 해제`,
+        );
+        this.#reserveSuppress.delete(key);
+        this._inflight.set(key, { agentId: agentId || '', ticketId, reservedAt: Date.now() });
+        return { acquired: true, live: false, evicted: 'safety_valve' };
+      }
+      this.#reserveSuppress.set(key, count);
+      return { acquired: false, live: false };
+    }
     // Free → claim the whole provision→spawn window in the authoritative map.
-    this._inflight.set(key, { agentId: agentId || '', ticketId });
+    this.#reserveSuppress.delete(key);
+    this._inflight.set(key, { agentId: agentId || '', ticketId, reservedAt: Date.now() });
     return { acquired: true, live: false };
   }
 
   /** Release a provisioning reservation placed by tryReserveDispatch
    *  (`live===false`). Idempotent; only clears the `_inflight` reservation, never
-   *  a live `_sessions` entry. */
+   *  a live `_sessions` entry. A clean release also resets the consecutive-
+   *  suppression counter — the holder finished, so the next zombie starts fresh. */
   releaseDispatch(ticketId: string, role: string, agentId: string): void {
-    this._inflight.delete(this.#makeKey(ticketId, role || '', agentId || ''));
+    const key = this.#makeKey(ticketId, role || '', agentId || '');
+    this._inflight.delete(key);
+    this.#reserveSuppress.delete(key);
   }
 
   async dispatchTrigger(spec: TicketTriggerArgs): Promise<TicketDispatchResult> {
@@ -388,6 +449,7 @@ export class TicketSessionManager
       this._inflight.set(sessionKey, {
         agentId: spec.agentId || '',
         ticketId: spec.ticketId,
+        reservedAt: Date.now(),
       });
     }
 
