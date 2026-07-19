@@ -214,6 +214,22 @@ function evJson(fields = {}) {
 
 const KEY = (t, r, a) => InflightDispatchTracker.key(t, r, a);
 
+// A placed reservation (acquired && !live) now carries a generation nonce
+// (ticket 26a92722) so a stale-generation release can be CAS-rejected. The nonce
+// is a random UUID, so the shape-asserting deepEqual sites strip it first and a
+// dedicated helper asserts it is a non-empty string where it matters.
+function stripNonce(reservation) {
+  if (reservation && typeof reservation === 'object' && 'nonce' in reservation) {
+    const { nonce, ...rest } = reservation;
+    return rest;
+  }
+  return reservation;
+}
+function assertNonce(reservation, msg = 'a placed reservation carries a generation nonce') {
+  assert.equal(typeof reservation.nonce, 'string', msg);
+  assert.ok(reservation.nonce.length > 0, msg);
+}
+
 // Fail-closed fetch so handleTrigger's REST helpers (fetchTicketContext,
 // fetchRepositoryCredential) resolve to null fast without real network.
 let savedFetch;
@@ -239,14 +255,17 @@ afterEach(() => {
 test('tryReserveDispatch reserves in the REAL _inflight; a twin is refused, release re-arms', () => {
   const mgr = new RealTicketMgrStub(makeConfig());
   const r1 = mgr.tryReserveDispatch('t', 'assignee', 'a');
-  assert.deepEqual(r1, { acquired: true, live: false }, 'free key → reserved (fresh)');
+  assert.deepEqual(stripNonce(r1), { acquired: true, live: false }, 'free key → reserved (fresh)');
+  assertNonce(r1);
 
   const r2 = mgr.tryReserveDispatch('t', 'assignee', 'a');
   assert.equal(r2.acquired, false, 'a concurrent same-key trigger is the twin → refused');
 
   mgr.releaseDispatch('t', 'assignee', 'a');
   const r3 = mgr.tryReserveDispatch('t', 'assignee', 'a');
-  assert.deepEqual(r3, { acquired: true, live: false }, 'release re-arms the slot');
+  assert.deepEqual(stripNonce(r3), { acquired: true, live: false }, 'release re-arms the slot');
+  assertNonce(r3);
+  assert.notEqual(r3.nonce, r1.nonce, 're-reservation issues a fresh generation nonce');
 });
 
 test('tryReserveDispatch on a LIVE session returns live (reuse, no reservation placed)', async () => {
@@ -614,17 +633,18 @@ test('TTL: a reservation older than the stale window is evicted so a retry re-di
   withClock((advance) => {
     const mgr = new RealTicketMgrStub(makeConfig());
     // A dispatch reserved the provision→spawn window, then HUNG (never released).
-    assert.deepEqual(mgr.tryReserveDispatch('t', 'assignee', 'a'), { acquired: true, live: false });
+    assert.deepEqual(stripNonce(mgr.tryReserveDispatch('t', 'assignee', 'a')), { acquired: true, live: false });
     // Still inside the window → a retry is (correctly) refused as a twin.
     assert.equal(mgr.tryReserveDispatch('t', 'assignee', 'a').acquired, false, 'fresh hold refuses the twin');
 
     advance(INFLIGHT_RESERVATION_STALE_MS + 1); // holder is now a presumed zombie
     const evicted = mgr.tryReserveDispatch('t', 'assignee', 'a');
     assert.deepEqual(
-      evicted,
+      stripNonce(evicted),
       { acquired: true, live: false, evicted: 'stale' },
       'past the TTL the zombie is evicted and the retry re-reserves',
     );
+    assertNonce(evicted);
     // The reclaim re-stamped reservedAt to now → the freshly reclaimed slot again
     // refuses a concurrent twin (no thrashing).
     assert.equal(mgr.tryReserveDispatch('t', 'assignee', 'a').acquired, false, 'reclaimed slot is a fresh hold');
@@ -636,7 +656,7 @@ test('twin-safety: N rapid suppressions WITHIN the min-age gate do NOT valve (a 
     const mgr = new RealTicketMgrStub(makeConfig());
     // A healthy holder is still provisioning; a bursty supervisor hammers the key
     // many times in quick succession (age stays ~0, well under the min-age gate).
-    assert.deepEqual(mgr.tryReserveDispatch('t', 'assignee', 'a'), { acquired: true, live: false });
+    assert.deepEqual(stripNonce(mgr.tryReserveDispatch('t', 'assignee', 'a')), { acquired: true, live: false });
     for (let i = 0; i < INFLIGHT_SUPPRESS_SAFETY_VALVE + 3; i++) {
       const r = mgr.tryReserveDispatch('t', 'assignee', 'a');
       assert.equal(r.acquired, false, `rapid suppression #${i + 1} stays refused — no premature valve → no twin`);
@@ -650,7 +670,7 @@ test('safety valve: N consecutive suppressions AND age past the min-age gate for
     const mgr = new RealTicketMgrStub(makeConfig());
     // A wedged holder that never released. Age it past the min-age gate (but still
     // under the TTL) — a healthy holder would have released well before now.
-    assert.deepEqual(mgr.tryReserveDispatch('t', 'assignee', 'a'), { acquired: true, live: false });
+    assert.deepEqual(stripNonce(mgr.tryReserveDispatch('t', 'assignee', 'a')), { acquired: true, live: false });
     advance(INFLIGHT_SUPPRESS_SAFETY_VALVE_MIN_AGE_MS + 1_000);
     assert.ok(
       INFLIGHT_SUPPRESS_SAFETY_VALVE_MIN_AGE_MS + 1_000 < INFLIGHT_RESERVATION_STALE_MS,
@@ -666,10 +686,11 @@ test('safety valve: N consecutive suppressions AND age past the min-age gate for
     }
     const valved = mgr.tryReserveDispatch('t', 'assignee', 'a');
     assert.deepEqual(
-      valved,
+      stripNonce(valved),
       { acquired: true, live: false, evicted: 'safety_valve' },
       `the ${INFLIGHT_SUPPRESS_SAFETY_VALVE}th consecutive suppression past the min-age gate force-releases`,
     );
+    assertNonce(valved);
   });
 });
 
@@ -686,7 +707,7 @@ test('safety-valve counter resets on releaseDispatch (a clean release re-arms th
     // A fresh hold; age it past the gate again so ONLY the counter (not the age
     // gate) governs. The very next suppression must count as #1, NOT continue from
     // the pre-release total — else it would valve immediately (proving the reset).
-    assert.deepEqual(mgr.tryReserveDispatch('t', 'assignee', 'a'), { acquired: true, live: false });
+    assert.deepEqual(stripNonce(mgr.tryReserveDispatch('t', 'assignee', 'a')), { acquired: true, live: false });
     advance(INFLIGHT_SUPPRESS_SAFETY_VALVE_MIN_AGE_MS + 1_000);
     const r = mgr.tryReserveDispatch('t', 'assignee', 'a');
     assert.equal(r.acquired, false, 'post-release the counter restarts → this suppression does not instantly valve');
@@ -805,6 +826,92 @@ test('safety-valve eviction posts an operator warning; a silent TTL eviction doe
   } finally {
     globalThis.fetch = savedFetchLocal;
   }
+});
+
+// ───────────── Part E: generation-nonce CAS on release (ticket 26a92722) ─────────────
+//
+// The residual live-twin window Part D left open: after a zombie holder H is
+// evicted (TTL/safety-valve) and the slot is RE-RESERVED by a new holder N, H's
+// hung `await` may finally resolve and its try/finally calls releaseDispatch on
+// the SAME key. A key-only delete would wipe N's still-provisioning reservation
+// (N has no pid yet), briefly re-opening the live-twin window. tryReserveDispatch
+// now stamps a generation nonce per reservation; releaseDispatch only deletes on
+// a nonce match (CAS), so H's stale-generation release is a no-op.
+// Non-vacuous: reverting releaseDispatch to a key-only delete makes the
+// "stale release must not evict the successor" asserts below fail (the twin
+// window re-opens — the successor's reservation vanishes and a retry twin-spawns).
+
+test('CAS: an evicted holder’s stale-generation release does NOT delete the successor’s reservation (authoritative)', () => {
+  withClock((advance) => {
+    const mgr = new RealTicketMgrStub(makeConfig());
+    // Holder H reserves, then hangs.
+    const h = mgr.tryReserveDispatch('t', 'assignee', 'a');
+    assertNonce(h);
+
+    // TTL passes → the next dispatch (N) evicts H and re-reserves with a NEW nonce.
+    advance(INFLIGHT_RESERVATION_STALE_MS + 1);
+    const n = mgr.tryReserveDispatch('t', 'assignee', 'a');
+    assert.equal(n.evicted, 'stale', 'N reclaimed the zombie slot');
+    assertNonce(n);
+    assert.notEqual(n.nonce, h.nonce, 'N holds a distinct generation');
+
+    // H’s hung await finally resolves → its finally releases with the OLD nonce.
+    mgr.releaseDispatch('t', 'assignee', 'a', h.nonce);
+
+    // N’s reservation must survive: a concurrent twin is still refused (the slot
+    // is still held), i.e. the stale release did NOT re-open the twin window.
+    assert.equal(
+      mgr.tryReserveDispatch('t', 'assignee', 'a').acquired,
+      false,
+      'stale-generation release is a no-op — the successor’s hold is intact',
+    );
+
+    // N’s own (current-generation) release then clears the slot normally.
+    mgr.releaseDispatch('t', 'assignee', 'a', n.nonce);
+    const after = mgr.tryReserveDispatch('t', 'assignee', 'a');
+    assert.equal(after.acquired, true, 'a matching-generation release frees the slot');
+  });
+});
+
+test('CAS: a release with the CURRENT nonce (or no nonce) still frees the slot (authoritative)', () => {
+  const mgr = new RealTicketMgrStub(makeConfig());
+  // Matching nonce → deletes.
+  const r1 = mgr.tryReserveDispatch('t', 'assignee', 'a');
+  mgr.releaseDispatch('t', 'assignee', 'a', r1.nonce);
+  assert.equal(mgr.tryReserveDispatch('t', 'assignee', 'a').acquired, true, 'matching nonce clears the slot');
+
+  // Legacy caller (no nonce) → unconditional delete, preserving old behavior.
+  mgr.releaseDispatch('t', 'assignee', 'a');
+  assert.equal(mgr.tryReserveDispatch('t', 'assignee', 'a').acquired, true, 'a nonce-less release still clears');
+});
+
+test('CAS: the fallback slot rejects an evicted holder’s stale-generation release too (persistent sessions off)', () => {
+  withClock((advance) => {
+    const tracker = new InflightDispatchTracker();
+    const key = InflightDispatchTracker.key('t', 'assignee', 'a');
+    const meta = { ticketId: 't', role: 'assignee', agentId: 'a' };
+
+    const h = tracker.tryAcquireFallback(key, meta);
+    assert.equal(h.acquired, true);
+    assert.equal(typeof h.nonce, 'string');
+
+    advance(INFLIGHT_RESERVATION_STALE_MS + 1);
+    const n = tracker.tryAcquireFallback(key, meta);
+    assert.equal(n.acquired, true, 'N reclaimed the stale fallback slot');
+    assert.notEqual(n.nonce, h.nonce, 'N holds a distinct generation');
+
+    // H’s late release with the OLD nonce must be a no-op.
+    tracker.releaseFallback(key, h.nonce);
+    assert.equal(
+      tracker.isFallbackInflight(key),
+      true,
+      'stale-generation releaseFallback is a no-op — the successor’s hold is intact',
+    );
+
+    // N’s matching-generation release frees it.
+    tracker.releaseFallback(key, n.nonce);
+    assert.equal(tracker.isFallbackInflight(key), false, 'a matching-generation release frees the fallback slot');
+  });
 });
 
 function isDead(pid) {

@@ -524,6 +524,11 @@ export interface DispatchReservation {
    *  예약을 evict, 'safety_valve' = TTL 미도달이나 연속 억제가 임계에 도달해
    *  강제 해제. dispatcher 는 이때 티켓에 경고를 남긴다. 정상 취득이면 undefined. */
   evicted?: 'stale' | 'safety_valve';
+  /** generation nonce (ticket 26a92722). 예약이 실제로 배치된 경우(acquired &&
+   *  !live)에만 채워진다. dispatcher 는 이 값을 finally 의 releaseDispatch 에
+   *  그대로 넘겨, 이 예약이 이후 evict 되고 슬롯이 재예약된 뒤 지연 도착한
+   *  release 가 새 예약을 지우지 못하도록 CAS 를 성립시킨다. */
+  nonce?: string;
 }
 
 export interface TicketDispatchResult {
@@ -542,8 +547,11 @@ export interface TicketSessionManager {
    *  minimal/legacy TicketSessionManager (or a test fake) that omits it makes
    *  the dispatcher fall back to a process-local slot. */
   tryReserveDispatch?(ticketId: string, role: string, agentId: string): DispatchReservation;
-  /** Release a reservation placed by tryReserveDispatch (live===false). Idempotent. */
-  releaseDispatch?(ticketId: string, role: string, agentId: string): void;
+  /** Release a reservation placed by tryReserveDispatch (live===false). Idempotent.
+   *  `nonce` (ticket 26a92722): tryReserveDispatch 가 반환한 값을 그대로 넘기면
+   *  현재 예약의 nonce 와 일치할 때만 삭제하는 CAS 가 적용된다 — evict 된 좀비
+   *  홀더의 지연 release 가 새 예약을 지우는 no-op 이 되도록. */
+  releaseDispatch?(ticketId: string, role: string, agentId: string, nonce?: string): void;
   /** targetAgentId — comment_mention 이벤트의 수신 agent(per-agent 스코프).
    *  식별되면 그 agent 의 세션에만 주입하고, 라이브 세션이 없으면 false 를
    *  반환해 one-shot 스폰 경로를 살린다(멘션 swallow/오배달 방지, T7 리뷰 #3). */
@@ -1404,7 +1412,7 @@ export class EventDispatcher {
           role: ev.action || '',
           agentId: dispatchAgentId,
         });
-        reservation = { acquired: acq.acquired, live: false };
+        reservation = { acquired: acq.acquired, live: false, nonce: acq.nonce };
       }
       if (!reservation.acquired) {
         // A fresh spawn for this exact key is already provisioning/spawning →
@@ -1479,10 +1487,18 @@ export class EventDispatcher {
     } finally {
       if (inflightKey) {
         if (reservedFresh) {
+          // nonce 를 함께 넘겨 CAS release: 이 dispatch 의 예약이 진행 중
+          // evict 되고 슬롯이 재예약됐다면, 뒤늦게 실행되는 이 finally 는
+          // 세대가 달라 no-op 이 되어 새 예약을 지우지 않는다 (ticket 26a92722).
           if (canAuthoritative) {
-            this.#ticketSessionManager!.releaseDispatch!(ev.ticket_id, ev.action || '', dispatchAgentId);
+            this.#ticketSessionManager!.releaseDispatch!(
+              ev.ticket_id,
+              ev.action || '',
+              dispatchAgentId,
+              reservation!.nonce,
+            );
           } else {
-            this.#inflightDispatch.releaseFallback(inflightKey);
+            this.#inflightDispatch.releaseFallback(inflightKey, reservation!.nonce);
           }
         }
         // Re-arm activity surfacing and replay a single suppressed force-respawn

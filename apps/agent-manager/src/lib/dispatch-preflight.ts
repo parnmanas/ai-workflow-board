@@ -33,6 +33,7 @@
 // registry recover a hung-provisioning holder on the same clock (ticket 7c3ba9cf).
 // A pure value import (a number); pulls in no I/O.
 import { INFLIGHT_RESERVATION_STALE_MS } from './base-session-manager.js';
+import { randomUUID } from 'node:crypto';
 
 /** git stderr fragments (lowercased) that mean "the remote rejected us for lack
  *  of usable credentials", as opposed to a transient network/DNS/timeout error.
@@ -538,6 +539,11 @@ export interface InflightDispatchMeta {
    *  fallback slot 도 좀비로 남아 재시도를 영구 차단하므로, TTL 로 evict 한다
    *  (authoritative `_inflight` 와 동일한 좀비 회복 — ticket 7c3ba9cf). */
   reservedAt?: number;
+  /** generation nonce (ticket 26a92722). tryAcquireFallback 가 슬롯을 잡을 때마다
+   *  새로 발급하고, releaseFallback 은 현재 예약의 nonce 와 일치할 때만 삭제한다
+   *  (CAS). authoritative `_inflight` 경로와 동일하게, evict 후 재예약된 슬롯을
+   *  좀비 홀더의 지연 release 가 지우지 못하게 한다. */
+  nonce?: string;
 }
 
 /** Why a dispatch was suppressed by the provision-spanning single-flight guard.
@@ -618,7 +624,7 @@ export class InflightDispatchTracker {
    *  not-acquired; the caller suppresses. Pure/synchronous: no `await` between
    *  the `has` and the `set`, so under Node's single thread the check-and-set
    *  cannot interleave with another dispatch. */
-  tryAcquireFallback(key: string, meta: InflightDispatchMeta): { acquired: boolean } {
+  tryAcquireFallback(key: string, meta: InflightDispatchMeta): { acquired: boolean; nonce?: string } {
     const existing = this.#fallback.get(key);
     if (existing) {
       // Zombie recovery (ticket 7c3ba9cf): a holder that hung mid-provisioning
@@ -628,12 +634,22 @@ export class InflightDispatchTracker {
       const age = Date.now() - (existing.reservedAt ?? 0);
       if (age < INFLIGHT_RESERVATION_STALE_MS) return { acquired: false };
     }
-    this.#fallback.set(key, { ...meta, reservedAt: Date.now() });
-    return { acquired: true };
+    // Fresh generation nonce (ticket 26a92722): if this reservation later gets
+    // evicted and the slot is re-claimed, the evicted holder's late
+    // releaseFallback carries the OLD nonce and is a no-op (see releaseFallback).
+    const nonce = randomUUID();
+    this.#fallback.set(key, { ...meta, reservedAt: Date.now(), nonce });
+    return { acquired: true, nonce };
   }
 
-  /** Release the process-local fallback slot. Idempotent. */
-  releaseFallback(key: string): void {
+  /** Release the process-local fallback slot. Idempotent. `nonce` (ticket
+   *  26a92722): when provided and the current reservation's nonce differs, this
+   *  release belongs to an evicted older generation and is a no-op — it must not
+   *  delete the successor's reservation. A missing nonce or absent reservation
+   *  falls back to the old unconditional delete. */
+  releaseFallback(key: string, nonce?: string): void {
+    const existing = this.#fallback.get(key);
+    if (existing && nonce !== undefined && existing.nonce !== nonce) return;
     this.#fallback.delete(key);
   }
 

@@ -271,6 +271,13 @@ export interface InflightReservation {
    *  판정한다. `INFLIGHT_RESERVATION_STALE_MS` 초과 예약은 재-dispatch 를
    *  영구 차단하는 좀비로 보고 evict 한다(ticket 7c3ba9cf). */
   reservedAt?: number;
+  /** 이 예약을 발급할 때 부여한 generation nonce(ticket 26a92722). 예약을
+   *  키 단위로만 지우면, TTL/safety-valve 로 좀비 예약을 evict 하고 재예약한
+   *  뒤 옛 홀더의 지연 release(finally 가 뒤늦게 실행)가 새 홀더의 예약을
+   *  대신 삭제해 잠깐 live-twin 창이 다시 열린다. release 를 이 nonce 와
+   *  CAS(nonce 일치 시에만 삭제)하면 옛 세대의 지연 release 는 no-op 가 된다 —
+   *  세션 seat 의 taskToken CAS 와 동일한 패턴(ticket 1fcba693). */
+  nonce?: string;
 }
 
 /** 프로비저닝→spawn 예약이 이 시간을 넘겨 살아있으면 좀비로 판정한다.
