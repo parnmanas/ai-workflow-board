@@ -1,37 +1,56 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, lazy, Suspense } from 'react';
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { ToastProvider, useToast } from './contexts/ToastContext';
 import { LoadingProvider } from './contexts/LoadingContext';
 import { ConfirmProvider } from './contexts/ConfirmContext';
-import Board from './components/Board';
 import LoginPage from './components/LoginPage';
-import AdminPage from './components/admin/AdminPage';
 import AppLayout from './components/AppLayout';
-import ChatPage from './components/ChatPage';
-import AgentsPage from './components/AgentsPage';
-import BoardSettingsPage from './components/BoardSettingsPage';
-import BoardResourcesPage from './components/BoardResourcesPage';
-import BoardArchivePage from './components/BoardArchivePage';
-import BoardActionsPage from './components/BoardActionsPage';
-import BoardFeaturesPage from './components/BoardFeaturesPage';
-import BoardQaPage from './components/BoardQaPage';
-import BoardSecurityPage from './components/BoardSecurityPage';
-import BenchmarkLeaderboardPage from './components/BenchmarkLeaderboardPage';
-import BoardsIndexPage from './components/BoardsIndexPage';
-import WorkspaceUsersPage from './components/WorkspaceUsersPage';
-import WorkspaceChannelsPage from './components/WorkspaceChannelsPage';
-import WorkspaceApiKeysPage from './components/WorkspaceApiKeysPage';
-import WorkspacePromptTemplatesPage from './components/WorkspacePromptTemplatesPage';
-import WorkspaceResourcesPage from './components/WorkspaceResourcesPage';
-import WorkspaceActionsPage from './components/WorkspaceActionsPage';
-import WorkspaceCredentialsPage from './components/WorkspaceCredentialsPage';
-import WorkspaceRolesPage from './components/WorkspaceRolesPage';
-import WorkspaceSettingsPage from './components/WorkspaceSettingsPage';
-import AgentDetailPage from './components/AgentDetailPage';
 import { tokens } from './tokens';
 import { ViewModeProvider, useViewMode, defaultSectionForMode } from './contexts/ViewModeContext';
-import ChatFirstHome from './components/ChatFirstHome';
+
+// 라우트 단위 코드 스플리팅: 무거운 페이지 컴포넌트를 지연 로드해 초기 번들을
+// 작게 유지한다 (티켓 33a8ccc4 — 1.18MB 단일 청크 경고 해소).
+const Board = lazy(() => import('./components/Board'));
+const AdminPage = lazy(() => import('./components/admin/AdminPage'));
+const ChatPage = lazy(() => import('./components/ChatPage'));
+const AgentsPage = lazy(() => import('./components/AgentsPage'));
+const BoardSettingsPage = lazy(() => import('./components/BoardSettingsPage'));
+const BoardResourcesPage = lazy(() => import('./components/BoardResourcesPage'));
+const BoardArchivePage = lazy(() => import('./components/BoardArchivePage'));
+const BoardActionsPage = lazy(() => import('./components/BoardActionsPage'));
+const BoardFeaturesPage = lazy(() => import('./components/BoardFeaturesPage'));
+const BoardQaPage = lazy(() => import('./components/BoardQaPage'));
+const BoardSecurityPage = lazy(() => import('./components/BoardSecurityPage'));
+const BenchmarkLeaderboardPage = lazy(() => import('./components/BenchmarkLeaderboardPage'));
+const BoardsIndexPage = lazy(() => import('./components/BoardsIndexPage'));
+const WorkspaceUsersPage = lazy(() => import('./components/WorkspaceUsersPage'));
+const WorkspaceChannelsPage = lazy(() => import('./components/WorkspaceChannelsPage'));
+const WorkspaceApiKeysPage = lazy(() => import('./components/WorkspaceApiKeysPage'));
+const WorkspacePromptTemplatesPage = lazy(() => import('./components/WorkspacePromptTemplatesPage'));
+const WorkspaceResourcesPage = lazy(() => import('./components/WorkspaceResourcesPage'));
+const WorkspaceActionsPage = lazy(() => import('./components/WorkspaceActionsPage'));
+const WorkspaceCredentialsPage = lazy(() => import('./components/WorkspaceCredentialsPage'));
+const WorkspaceRolesPage = lazy(() => import('./components/WorkspaceRolesPage'));
+const WorkspaceSettingsPage = lazy(() => import('./components/WorkspaceSettingsPage'));
+const AgentDetailPage = lazy(() => import('./components/AgentDetailPage'));
+const ChatFirstHome = lazy(() => import('./components/ChatFirstHome'));
+
+// 지연 로드되는 라우트 청크를 가져오는 동안 보여줄 폴백.
+function RouteFallback() {
+  return (
+    <div style={{
+      minHeight: '60vh',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      color: tokens.colors.textMuted,
+      fontSize: '13px',
+    }}>
+      Loading...
+    </div>
+  );
+}
 
 // Redirects the user to /ws/:currentWorkspaceId/:to, waiting for auth to resolve.
 // Preserves the incoming query string so deep-link params (?ticket=&comment=)
@@ -159,47 +178,49 @@ function AppContent() {
   }
 
   return (
-    <Routes>
-      <Route element={<AppLayout />}>
-        {/* Legacy redirects */}
-        <Route index element={<WorkspaceDefaultRedirect />} />
-        <Route path="agents" element={<WorkspacedRedirect to="agents" />} />
-        <Route path="dashboard" element={<WorkspacedRedirect to="agents" />} />
-        <Route path="chat" element={<WorkspacedRedirect to="chat" />} />
-        <Route path="board/settings" element={<WorkspacedRedirect to="boards" />} />
+    <Suspense fallback={<RouteFallback />}>
+      <Routes>
+        <Route element={<AppLayout />}>
+          {/* Legacy redirects */}
+          <Route index element={<WorkspaceDefaultRedirect />} />
+          <Route path="agents" element={<WorkspacedRedirect to="agents" />} />
+          <Route path="dashboard" element={<WorkspacedRedirect to="agents" />} />
+          <Route path="chat" element={<WorkspacedRedirect to="chat" />} />
+          <Route path="board/settings" element={<WorkspacedRedirect to="boards" />} />
 
-        {/* Admin routes — all management pages live here */}
-        <Route path="admin/*" element={<AdminPage />} />
+          {/* Admin routes — all management pages live here */}
+          <Route path="admin/*" element={<AdminPage />} />
 
-        {/* Workspace-scoped routes */}
-        <Route path="ws/:wsId">
-          <Route index element={<WorkspaceSectionRedirect />} />
-          <Route path="assistant" element={<ChatFirstHome />} />
-          <Route path="boards" element={<BoardsIndexPage />} />
-          <Route path="boards/:boardId" element={<Board />} />
-          <Route path="boards/:boardId/resources" element={<BoardResourcesPage />} />
-          <Route path="boards/:boardId/actions" element={<BoardActionsPage />} />
-          <Route path="boards/:boardId/features" element={<BoardFeaturesPage />} />
-          <Route path="boards/:boardId/qa" element={<BoardQaPage />} />
-          <Route path="boards/:boardId/security" element={<BoardSecurityPage />} />
-          <Route path="boards/:boardId/settings" element={<BoardSettingsPage />} />
-          <Route path="boards/:boardId/archive" element={<BoardArchivePage />} />
-          <Route path="boards/:boardId/leaderboard" element={<BenchmarkLeaderboardPage />} />
-          <Route path="chat" element={<ChatPage />} />
-          <Route path="users" element={<WorkspaceUsersPage />} />
-          <Route path="agents" element={<AgentsPage />} />
-          <Route path="agents/:agentId" element={<AgentDetailPage />} />
-          <Route path="channels" element={<WorkspaceChannelsPage />} />
-          <Route path="api-keys" element={<WorkspaceApiKeysPage />} />
-          <Route path="prompt-templates" element={<WorkspacePromptTemplatesPage />} />
-          <Route path="resources" element={<WorkspaceResourcesPage />} />
-          <Route path="actions" element={<WorkspaceActionsPage />} />
-          <Route path="credentials" element={<WorkspaceCredentialsPage />} />
-          <Route path="roles" element={<WorkspaceRolesPage />} />
-          <Route path="settings" element={<WorkspaceSettingsPage />} />
+          {/* Workspace-scoped routes */}
+          <Route path="ws/:wsId">
+            <Route index element={<WorkspaceSectionRedirect />} />
+            <Route path="assistant" element={<ChatFirstHome />} />
+            <Route path="boards" element={<BoardsIndexPage />} />
+            <Route path="boards/:boardId" element={<Board />} />
+            <Route path="boards/:boardId/resources" element={<BoardResourcesPage />} />
+            <Route path="boards/:boardId/actions" element={<BoardActionsPage />} />
+            <Route path="boards/:boardId/features" element={<BoardFeaturesPage />} />
+            <Route path="boards/:boardId/qa" element={<BoardQaPage />} />
+            <Route path="boards/:boardId/security" element={<BoardSecurityPage />} />
+            <Route path="boards/:boardId/settings" element={<BoardSettingsPage />} />
+            <Route path="boards/:boardId/archive" element={<BoardArchivePage />} />
+            <Route path="boards/:boardId/leaderboard" element={<BenchmarkLeaderboardPage />} />
+            <Route path="chat" element={<ChatPage />} />
+            <Route path="users" element={<WorkspaceUsersPage />} />
+            <Route path="agents" element={<AgentsPage />} />
+            <Route path="agents/:agentId" element={<AgentDetailPage />} />
+            <Route path="channels" element={<WorkspaceChannelsPage />} />
+            <Route path="api-keys" element={<WorkspaceApiKeysPage />} />
+            <Route path="prompt-templates" element={<WorkspacePromptTemplatesPage />} />
+            <Route path="resources" element={<WorkspaceResourcesPage />} />
+            <Route path="actions" element={<WorkspaceActionsPage />} />
+            <Route path="credentials" element={<WorkspaceCredentialsPage />} />
+            <Route path="roles" element={<WorkspaceRolesPage />} />
+            <Route path="settings" element={<WorkspaceSettingsPage />} />
+          </Route>
         </Route>
-      </Route>
-    </Routes>
+      </Routes>
+    </Suspense>
   );
 }
 
