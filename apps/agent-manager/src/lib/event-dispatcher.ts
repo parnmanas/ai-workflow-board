@@ -2123,14 +2123,13 @@ export class EventDispatcher {
       return;
     }
 
-    // Agent-authored mentions are an acknowledgement channel, not a new unit
-    // of work. Re-dispatching them lets two role sessions wake each other with
-    // receipts indefinitely (approve -> received -> confirmed -> ...). User
-    // mentions still dispatch normally, while agent-to-user notifications are
-    // handled by the server/UI and never reach this path.
-    if (ev.actor_type === 'agent') {
+    // The server is the first dedupe boundary; this is the final safety net for
+    // old servers/replayed SSE. Only terminal approval receipts are suppressed.
+    // Questions, change requests, consensus discussion and handoffs still flow.
+    const { isAgentTerminalAcknowledgement } = await import('./terminal-ack-guard.js');
+    if (isAgentTerminalAcknowledgement(ev)) {
       log(
-        `Comment mention suppressed — agent-to-agent ping-pong guard: ` +
+        `Comment mention suppressed — duplicate terminal acknowledgement: ` +
           `ticket=${(ev.ticket_id || '').slice(0, 8) || '_'} ` +
           `comment=${(ev.comment_id || '').slice(0, 8) || '_'} ` +
           `actor=${(ev.actor_id || '').slice(0, 8) || '_'}`,
