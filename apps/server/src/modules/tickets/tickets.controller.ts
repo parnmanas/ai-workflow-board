@@ -141,8 +141,8 @@ export class TicketsController {
       dispatch_trigger_id: '',
       completed_at: null,
     });
+    let saved: CommentSummaryRun | null = null;
     try {
-      let saved: CommentSummaryRun;
       if (existing) {
         const claimed = await this.commentSummaryRepo.update(
           { id: existing.id, status: existing.status },
@@ -163,11 +163,13 @@ export class TicketsController {
       await this.commentSummaryRepo.save(saved);
       return res.status(202).json(saved);
     } catch (e: any) {
-      run.status = 'failed';
-      run.error_code = e?.code || 'SUMMARY_DISPATCH_FAILED';
-      run.error = e?.message || 'Failed to dispatch summary agent';
-      await this.commentSummaryRepo.save(run);
-      return res.status(503).json(run);
+      const failed = saved || run;
+      failed.status = 'failed';
+      failed.error_code = e?.code || 'SUMMARY_DISPATCH_FAILED';
+      failed.error = e?.message || 'Failed to dispatch summary agent';
+      failed.completed_at = null;
+      await this.commentSummaryRepo.save(failed);
+      return res.status(503).json(failed);
     }
   }
 

@@ -1772,6 +1772,11 @@ candidate's branch or move the ticket.
             err: String(e), ticket_id: ticket.id,
           });
         }
+        if (triggerSource === 'comment_summary') {
+          throw Object.assign(new Error('Manager agents cannot run comment summaries'), {
+            status: 503, code: 'SUMMARY_DISPATCH_MANAGER_AGENT',
+          });
+        }
         return '';
       }
     }
@@ -1815,6 +1820,11 @@ candidate's branch or move the ticket.
             err: String(e), ticket_id: ticket.id, board_id: boardId,
           });
         }
+        if (triggerSource === 'comment_summary') {
+          throw Object.assign(new Error('The board is paused'), {
+            status: 503, code: 'SUMMARY_DISPATCH_BOARD_PAUSED',
+          });
+        }
         return '';
       }
     }
@@ -1849,6 +1859,11 @@ candidate's branch or move the ticket.
         } catch (e) {
           this.logService.warn('MCP', 'archived-drop audit write failed (drop still applied)', {
             err: String(e), ticket_id: ticket.id,
+          });
+        }
+        if (triggerSource === 'comment_summary') {
+          throw Object.assign(new Error('The ticket is archived'), {
+            status: 503, code: 'SUMMARY_DISPATCH_TICKET_ARCHIVED',
           });
         }
         return '';
@@ -2043,6 +2058,11 @@ candidate's branch or move the ticket.
           workspaceId: ticket.workspace_id || '', boardId, ticketId: ticket.id,
           role, agentId, triggerSource,
           reason: `inflight_strand_serialization queued_for_replay=${queuedForReplay}`,
+        });
+      }
+      if (triggerSource === 'comment_summary') {
+        throw Object.assign(new Error('A comment summary strand is already running for this ticket'), {
+          status: 503, code: 'SUMMARY_DISPATCH_LIVE_STRAND',
         });
       }
       return '';
@@ -2329,6 +2349,11 @@ candidate's branch or move the ticket.
       })
     ) {
       await this._pendForMissingBaseRepo(ticket, agentId, role, triggerSource);
+      if (triggerSource === 'comment_summary') {
+        throw Object.assign(new Error('No repository is configured for this dispatch'), {
+          status: 503, code: 'SUMMARY_DISPATCH_REPOSITORY_MISSING',
+        });
+      }
       return '';
     }
 

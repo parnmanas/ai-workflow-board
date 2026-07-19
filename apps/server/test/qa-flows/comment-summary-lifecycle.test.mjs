@@ -69,26 +69,21 @@ test('comment summary is workspace-scoped, idempotent, and preserves originals o
     pending_reason: 'waiting for a user while comments can still be summarized',
   });
 
-  // Regression: summary dispatch must not share the workflow assignee's
-  // same-role strand key (the old path returned "Summary agent dispatch was not accepted").
+  // Regression: exercise the real _emitTrigger gates. A pending ticket with a
+  // live assignee strand must still accept one independent summary dispatch.
   const originalEmit = triggerModule.TriggerLoopService.prototype.emitCommentSummaryTrigger.bind(triggerLoop);
-  let summaryRole = '';
   let summaryDispatches = 0;
+  await ds.getRepository('Ticket').update({ id: ticket.id }, { assignee_id: agent.id });
+  await triggerLoop.agentStatus.setCurrentTask(agent.id, ticket.id, 'assignee', 'summary-live-assignee');
   triggerLoop.emitCommentSummaryTrigger = async (ticketId, agentId, runId) => {
     summaryDispatches += 1;
-    const originalPrivateEmit = triggerLoop._emitTrigger.bind(triggerLoop);
-    triggerLoop._emitTrigger = async (targetTicket, targetAgentId, role, source, actor, options) => {
-      summaryRole = role;
-      assert.notEqual(role, 'assignee');
-      return 'summary-trigger';
-    };
-    try { return await originalEmit(ticketId, agentId, runId); }
-    finally { triggerLoop._emitTrigger = originalPrivateEmit; }
+    return originalEmit(ticketId, agentId, runId);
   };
   const starts = await Promise.all([postSummary(ticket.id), postSummary(ticket.id)]);
   assert.deepEqual(starts.map(result => result.status).sort(), [200, 202]);
-  assert.equal(summaryRole, 'comment_summary');
+  assert.ok(starts.find(result => result.status === 202).data.dispatch_trigger_id);
   assert.equal(summaryDispatches, 1, 'concurrent starts dispatch exactly once');
+  await triggerLoop.agentStatus.clearCurrentTask(agent.id, ticket.id, 'summary-live-assignee');
   triggerLoop.emitCommentSummaryTrigger = async () => { dispatches += 1; return 'summary-trigger'; };
   const run = await runRepo.findOneByOrFail({ ticket_id: ticket.id });
   const mcpA = new McpClient({ baseUrl: `http://localhost:${port}`, apiKey: key.raw_key });
@@ -118,12 +113,39 @@ test('comment summary is workspace-scoped, idempotent, and preserves originals o
   assert.equal(await commentRepo.count({ where: { ticket_id: changedTicket.id } }), 3, 'snapshot mismatch preserves every comment');
 
   const failedTicket = await seedTicket('dispatch failure');
-  triggerLoop.emitCommentSummaryTrigger = async () => { dispatches += 1; throw new Error('dispatch unavailable'); };
+  triggerLoop.emitCommentSummaryTrigger = async () => {
+    dispatches += 1;
+    throw Object.assign(new Error('dispatch unavailable'), { code: 'SUMMARY_DISPATCH_LIVE_STRAND' });
+  };
   const failedStart = await postSummary(failedTicket.id);
   assert.equal(failedStart.status, 503);
-  assert.equal(failedStart.data.error_code, 'SUMMARY_DISPATCH_FAILED');
+  assert.equal(failedStart.data.error_code, 'SUMMARY_DISPATCH_LIVE_STRAND');
   assert.doesNotMatch(failedStart.data.error, /Summary agent dispatch was not accepted/);
   assert.equal(await commentRepo.count({ where: { ticket_id: failedTicket.id } }), 2);
+
+  await commentRepo.save(commentRepo.create({
+    ticket_id: failedTicket.id, workspace_id: sceneA.ws.id,
+    author_type: 'user', author_id: admin.id, author: admin.name,
+    content: 'new comment before retry', attachment_resource_ids: '[]', type: 'note', metadata: '{}',
+  }));
+  const failedRetry = await postSummary(failedTicket.id);
+  assert.equal(failedRetry.status, 503);
+  assert.equal(failedRetry.data.status, 'failed');
+  assert.equal(failedRetry.data.source_comment_count, 3, 'failed retry keeps the new claimed snapshot');
+  assert.equal(JSON.parse(failedRetry.data.source_comment_ids).length, 3);
+  assert.equal(failedRetry.data.agent_id, agent.id);
+  assert.equal(failedRetry.data.completed_at, null);
+  assert.equal(await commentRepo.count({ where: { ticket_id: failedTicket.id } }), 3);
+
+  const pausedTicket = await seedTicket('paused board dispatch failure');
+  triggerLoop.emitCommentSummaryTrigger = originalEmit;
+  await ds.getRepository('Board').update({ id: sceneA.board.id }, { paused_at: new Date() });
+  const pausedStart = await postSummary(pausedTicket.id);
+  assert.equal(pausedStart.status, 503);
+  assert.equal(pausedStart.data.error_code, 'SUMMARY_DISPATCH_BOARD_PAUSED');
+  assert.equal(pausedStart.data.error, 'The board is paused');
+  assert.equal(await commentRepo.count({ where: { ticket_id: pausedTicket.id } }), 2, 'paused dispatch preserves originals');
+  await ds.getRepository('Board').update({ id: sceneA.board.id }, { paused_at: null });
 
   triggerLoop.emitCommentSummaryTrigger = async () => { dispatches += 1; return 'summary-trigger'; };
   const timeoutTicket = await seedTicket('timeout');
