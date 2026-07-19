@@ -114,15 +114,25 @@ export class TicketsController {
     });
     if (!usableAgents.length) return res.status(409).json({ error: 'No active agent is available' });
 
-    const run = existing || this.commentSummaryRepo.create({ ticket_id: id, workspace_id: ticket.workspace_id });
-    run.agent_id = usableAgents[0].id;
-    run.status = 'pending';
-    run.source_comment_count = comments.length;
-    run.error = '';
-    run.completed_at = null;
+    const run = existing || this.commentSummaryRepo.create({
+      ticket_id: id,
+      workspace_id: ticket.workspace_id,
+      agent_id: usableAgents[0].id,
+      status: 'pending',
+      source_comment_count: comments.length,
+      error: '',
+      completed_at: null,
+    });
     try {
       let saved: CommentSummaryRun;
-      try {
+      if (existing) {
+        const claimed = await this.commentSummaryRepo.update(
+          { id: existing.id, status: existing.status },
+          { agent_id: usableAgents[0].id, status: 'pending', source_comment_count: comments.length, error: '', completed_at: null },
+        );
+        saved = (await this.commentSummaryRepo.findOne({ where: { id: existing.id } }))!;
+        if (!claimed.affected) return res.json(saved);
+      } else try {
         saved = await this.commentSummaryRepo.save(run);
       } catch (saveError: any) {
         const raced = await this.commentSummaryRepo.findOne({ where: { ticket_id: id } });
