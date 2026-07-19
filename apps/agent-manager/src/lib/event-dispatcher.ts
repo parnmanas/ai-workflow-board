@@ -2123,6 +2123,21 @@ export class EventDispatcher {
       return;
     }
 
+    // Agent-authored mentions are an acknowledgement channel, not a new unit
+    // of work. Re-dispatching them lets two role sessions wake each other with
+    // receipts indefinitely (approve -> received -> confirmed -> ...). User
+    // mentions still dispatch normally, while agent-to-user notifications are
+    // handled by the server/UI and never reach this path.
+    if (ev.actor_type === 'agent') {
+      log(
+        `Comment mention suppressed — agent-to-agent ping-pong guard: ` +
+          `ticket=${(ev.ticket_id || '').slice(0, 8) || '_'} ` +
+          `comment=${(ev.comment_id || '').slice(0, 8) || '_'} ` +
+          `actor=${(ev.actor_id || '').slice(0, 8) || '_'}`,
+      );
+      return;
+    }
+
     const ticketId = ev.ticket_id || '';
     const commentId = ev.comment_id || ev.field_changed || '';
     const agentId = ev.agent_id || ev.actor_name || '';
