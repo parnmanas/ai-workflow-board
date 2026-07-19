@@ -3590,6 +3590,7 @@ export default function TicketPanel({
               </button>
               {commentSummary?.status === 'failed' && (
                 <span role="alert" style={{ fontSize: 11, color: tokens.colors.danger }}>
+                  {commentSummary.error_code ? `${commentSummary.error_code}: ` : ''}
                   {commentSummary.error || 'Summary failed. Originals were preserved; you can retry.'}
                 </span>
               )}

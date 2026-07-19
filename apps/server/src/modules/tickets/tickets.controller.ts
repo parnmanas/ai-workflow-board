@@ -117,12 +117,17 @@ export class TicketsController {
       where: { workspace_id: ticket.workspace_id, is_active: 1 } as any,
       order: { name: 'ASC' },
     });
-    const usableAgents = agents.filter(a => a.type !== 'manager').sort((a, b) => {
+    const usableAgents = agents.filter(a => a.type !== 'manager' && !!a.is_online).sort((a, b) => {
       const aBusyHere = a.id === ticket.assignee_id ? 1 : 0;
       const bBusyHere = b.id === ticket.assignee_id ? 1 : 0;
-      return aBusyHere - bBusyHere || b.is_online - a.is_online || a.name.localeCompare(b.name);
+      return aBusyHere - bBusyHere || a.name.localeCompare(b.name);
     });
-    if (!usableAgents.length) return res.status(409).json({ error: 'No active agent is available' });
+    if (!usableAgents.length) {
+      return res.status(409).json({
+        error: 'No online non-manager agent is available to summarize comments',
+        error_code: 'SUMMARY_AGENT_UNAVAILABLE',
+      });
+    }
 
     const run = existing || this.commentSummaryRepo.create({
       ticket_id: id,
@@ -132,14 +137,16 @@ export class TicketsController {
       source_comment_count: comments.length,
       source_comment_ids: JSON.stringify(comments.map(comment => comment.id)),
       error: '',
+      error_code: '',
+      dispatch_trigger_id: '',
       completed_at: null,
     });
+    let saved: CommentSummaryRun | null = null;
     try {
-      let saved: CommentSummaryRun;
       if (existing) {
         const claimed = await this.commentSummaryRepo.update(
           { id: existing.id, status: existing.status },
-          { agent_id: usableAgents[0].id, status: 'pending', source_comment_count: comments.length, source_comment_ids: JSON.stringify(comments.map(comment => comment.id)), error: '', completed_at: null },
+          { agent_id: usableAgents[0].id, status: 'pending', source_comment_count: comments.length, source_comment_ids: JSON.stringify(comments.map(comment => comment.id)), error: '', error_code: '', dispatch_trigger_id: '', completed_at: null },
         );
         saved = (await this.commentSummaryRepo.findOne({ where: { id: existing.id } }))!;
         if (!claimed.affected) return res.status(200).json(saved);
@@ -150,13 +157,19 @@ export class TicketsController {
         if (raced) return res.status(200).json(raced);
         throw saveError;
       }
-      await this.triggerLoop.emitCommentSummaryTrigger(id, saved.agent_id, saved.id);
+      const triggerId = await this.triggerLoop.emitCommentSummaryTrigger(id, saved.agent_id, saved.id);
+      saved.dispatch_trigger_id = triggerId;
+      saved.error_code = '';
+      await this.commentSummaryRepo.save(saved);
       return res.status(202).json(saved);
     } catch (e: any) {
-      run.status = 'failed';
-      run.error = e?.message || 'Failed to dispatch summary agent';
-      await this.commentSummaryRepo.save(run);
-      return res.status(503).json(run);
+      const failed = saved || run;
+      failed.status = 'failed';
+      failed.error_code = e?.code || 'SUMMARY_DISPATCH_FAILED';
+      failed.error = e?.message || 'Failed to dispatch summary agent';
+      failed.completed_at = null;
+      await this.commentSummaryRepo.save(failed);
+      return res.status(503).json(failed);
     }
   }
 

@@ -11,6 +11,8 @@ export class CommentSummaryRun {
   @Column({ type: 'int', default: 0 }) source_comment_count: number;
   @Column({ type: 'text', default: '[]' }) source_comment_ids: string;
   @Column({ type: 'text', default: '' }) error: string;
+  @Column({ type: 'varchar', default: '' }) error_code: string;
+  @Column({ type: 'varchar', default: '' }) dispatch_trigger_id: string;
   @Column({ type: Date, nullable: true, default: null }) completed_at: Date | null;
   @CreateDateColumn() created_at: Date;
   @UpdateDateColumn() updated_at: Date;
