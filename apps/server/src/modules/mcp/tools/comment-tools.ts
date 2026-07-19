@@ -33,7 +33,15 @@ import { buildConsensusMetadata, buildProposalMetadata } from '../../../common/c
 import { getConsensusState, findOpenProposal } from '../../../services/consensus.service';
 import { buildConsensusUpdatePayload, autoExecuteConsensusMove } from '../../../services/consensus-actions';
 import type { ToolContext } from './context';
-import { applyAgentCommentPingPongGuard } from '../../../common/agent-comment-pingpong';
+import { applyAgentCommentPingPongGuard, terminalAckKey } from '../../../common/agent-comment-pingpong';
+
+function isUniqueConstraintError(error: unknown): boolean {
+  const value = error as { code?: string; errno?: number; message?: string } | null;
+  return value?.code === '23505'
+    || value?.code === 'SQLITE_CONSTRAINT'
+    || value?.errno === 19
+    || /unique constraint/i.test(value?.message || '');
+}
 
 export function registerCommentTools(server: McpServer, ctx: ToolContext): void {
   const { dataSource, activityService, mentionService, logger, ticketRoleAssignmentService } = ctx;
@@ -85,7 +93,8 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         .describe("Resource ids to attach. Each must already exist with type='comment_attachment' in the ticket's workspace — create them first via save_resource. MCP does not accept inline base64 here (cap payload size, keep upload/transaction logic in one place)."),
     },
     async ({ ticket_id, author_type, author_id, author, content, type, parent_id, metadata, author_role, attachment_resource_ids }, extra: { sessionId?: string }) => {
-      const ticket = await dataSource.getRepository(Ticket).findOne({ where: { id: ticket_id } });
+      const ticketRepo = dataSource.getRepository(Ticket);
+      const ticket = await ticketRepo.findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Ticket not found');
       if (ticket.archived_at) return err(new TicketArchivedError(ticket.id).message);
 
@@ -180,11 +189,22 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         next: nextGuardComment,
         recent: recentAgentComments,
         pend: async () => {
+          const pendingReason = '작업 대상 부재 상태에서 동일 대기 확인이 반복되어 자동 중지되었습니다. 작업 대상을 지정한 뒤 pending을 해제하세요.';
+          const pendingAt = new Date();
+          // Compare-and-set is the DB serialization point. Concurrent third
+          // waiting comments may all reach this callback, but exactly one can
+          // flip false -> true and therefore exactly one writes the audit row.
+          const claimed = await ticketRepo.update(
+            { id: ticket.id, pending_user_action: false },
+            {
+              pending_user_action: true,
+              pending_reason: pendingReason,
+              pending_set_at: pendingAt,
+              pending_set_by: 'agent_comment_pingpong_guard',
+            },
+          );
           ticket.pending_user_action = true;
-          ticket.pending_reason = '작업 대상 부재 상태에서 동일 대기 확인이 반복되어 자동 중지되었습니다. 작업 대상을 지정한 뒤 pending을 해제하세요.';
-          ticket.pending_set_at = new Date();
-          ticket.pending_set_by = 'agent_comment_pingpong_guard';
-          await dataSource.getRepository(Ticket).save(ticket);
+          if (claimed.affected !== 1) return;
           await activityService.logActivity({
             entity_type: 'ticket', entity_id: ticket.id, action: 'updated', ticket_id: ticket.id,
             field_changed: 'pending_user_action', old_value: 'false', new_value: 'true',
@@ -251,7 +271,10 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         logger.warn('DeferralGuard', `deferral-terminal detection failed on ${ticket_id}: ${e instanceof Error ? e.message : String(e)}`);
       }
 
-      const comment = await commentRepo.save(commentRepo.create({
+      const ackKey = terminalAckKey(nextGuardComment);
+      let comment: Comment;
+      try {
+        comment = await commentRepo.save(commentRepo.create({
         ticket_id,
         author_type: resolvedAuthorType,
         author_id: resolvedAuthorId,
@@ -262,7 +285,17 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         status: resolvedType === 'question' ? 'open' : null,
         parent_id: resolvedParentId,
         metadata: JSON.stringify(finalMetadata),
-      }));
+        // Reuse the existing nullable unique idempotency column. The prefix
+        // keeps this namespace disjoint from operational fallback recurrence
+        // keys while the DB unique index makes concurrent receipts atomic.
+        operational_recurrence_key: ackKey ? `agent-terminal-ack:${ticket_id}:${ackKey}` : null,
+        }));
+      } catch (error) {
+        if (ackKey && isUniqueConstraintError(error)) {
+          return ok({ suppressed: true, reason: 'duplicate_terminal_acknowledgement' });
+        }
+        throw error;
+      }
 
       // Auto-resolve parent question on answer — same idempotent flip the REST
       // endpoint and answer_question tool perform, so all three surfaces agree.
