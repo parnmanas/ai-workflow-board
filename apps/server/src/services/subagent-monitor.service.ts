@@ -58,6 +58,30 @@ export interface SubagentLogLineDto {
   ts: string;
 }
 
+// Token/cost usage the agent-manager reports on the `end` POST (ticket
+// 6dd3f968). All fields optional/nullable — a pre-6dd3f968 manager build
+// sends no `usage` key at all, and even an instrumented run may not have a
+// figure for every field (Codex has no cost concept; Antigravity has none of
+// this at all). Every numeric field is independently nullable so aggregation
+// can tell "the CLI reported zero" apart from "never instrumented".
+export interface SubagentEndUsage {
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  cache_read_input_tokens?: number | null;
+  cache_creation_input_tokens?: number | null;
+  total_cost_usd?: number | null;
+  model?: string | null;
+}
+
+// Sanity ceilings for a single run's reported usage — generous enough for any
+// legitimate long multi-turn session, but tight enough to reject a corrupt/
+// adversarial payload before it poisons a SUM aggregate. A negative value or
+// one past the ceiling is treated as "not reported" (null) rather than
+// clamped-and-kept, since a value this implausible carries no useful signal.
+const MAX_TOKEN_COUNT = 50_000_000;
+const MAX_COST_USD = 1000;
+const MAX_MODEL_LEN = 100;
+
 const DEFAULT_ENDED_RETENTION_HOURS = 48;
 function endedRetentionMs(): number {
   const raw = process.env.SUBAGENT_ENDED_RETENTION_HOURS;
@@ -198,20 +222,23 @@ export class SubagentMonitorService {
     agent_id: string;
     exit_code?: number | null;
     signal?: string | null;
+    usage?: SubagentEndUsage | null;
   }): Promise<{ ok: boolean; reason?: string }> {
     const rec = await this.subagents.findOne({ where: { subagent_id: input.subagent_id } });
     if (!rec) return { ok: false, reason: 'unknown subagent_id' };
     if (rec.agent_id !== input.agent_id) return { ok: false, reason: 'agent mismatch' };
-    if (rec.ended_at) return { ok: true }; // idempotent
+    if (rec.ended_at) return { ok: true }; // idempotent — usage from a resend is dropped, same as exit_code/signal
 
     const endedAt = new Date();
     const durationMs = endedAt.getTime() - new Date(rec.started_at).getTime();
     const expiresAt = new Date(endedAt.getTime() + this.retentionMs);
+    const usage = this._sanitizeUsage(input.usage);
     rec.ended_at = endedAt;
     rec.exit_code = input.exit_code ?? null;
     rec.signal = input.signal ?? null;
     rec.duration_ms = durationMs;
     rec.expires_at = expiresAt;
+    Object.assign(rec, usage);
     await this.subagents.update(
       { subagent_id: rec.subagent_id },
       {
@@ -220,6 +247,7 @@ export class SubagentMonitorService {
         signal: rec.signal,
         duration_ms: durationMs,
         expires_at: expiresAt,
+        ...usage,
       },
     );
     activityEvents.emit('subagent_ended', {
@@ -311,6 +339,46 @@ export class SubagentMonitorService {
       ts: l.ts.toISOString(),
     }));
     return { summary: this._summary(rec), lines };
+  }
+
+  /**
+   * Validate + clamp the optional `usage` block on an `end` POST (ticket
+   * 6dd3f968) into the exact Subagent column shape. A malformed/out-of-range
+   * value is dropped to null rather than clamped-and-kept — a bad reading is
+   * not a useful lower/upper bound once it's this implausible. Never throws;
+   * an adversarial or buggy payload degrades to "not reported", same as an
+   * older manager build that sends no `usage` key at all.
+   */
+  private _sanitizeUsage(usage: SubagentEndUsage | null | undefined): {
+    input_tokens: number | null;
+    output_tokens: number | null;
+    cache_read_input_tokens: number | null;
+    cache_creation_input_tokens: number | null;
+    total_cost_usd: number | null;
+    usage_model: string | null;
+  } {
+    const count = (v: unknown): number | null => {
+      if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > MAX_TOKEN_COUNT) return null;
+      return Math.round(v);
+    };
+    const cost = (v: unknown): number | null => {
+      if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > MAX_COST_USD) return null;
+      return v;
+    };
+    const model = (v: unknown): string | null => {
+      if (typeof v !== 'string') return null;
+      const trimmed = v.trim();
+      if (!trimmed) return null;
+      return trimmed.length > MAX_MODEL_LEN ? trimmed.slice(0, MAX_MODEL_LEN) : trimmed;
+    };
+    return {
+      input_tokens: count(usage?.input_tokens),
+      output_tokens: count(usage?.output_tokens),
+      cache_read_input_tokens: count(usage?.cache_read_input_tokens),
+      cache_creation_input_tokens: count(usage?.cache_creation_input_tokens),
+      total_cost_usd: cost(usage?.total_cost_usd),
+      usage_model: model(usage?.model),
+    };
   }
 
   private _summary(r: Subagent): SubagentSummary {

@@ -126,6 +126,7 @@ export class SubagentMonitorController {
       agent_id: agentId,
       exit_code: body?.exit_code,
       signal: body?.signal,
+      usage: body?.usage && typeof body.usage === 'object' ? body.usage : null,
     });
     if (!result.ok) return res.status(404).json({ error: result.reason });
     return res.status(204).send();

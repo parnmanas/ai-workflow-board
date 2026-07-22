@@ -18,6 +18,7 @@ import { randomUUID } from 'node:crypto';
 import { REQUEST_TIMEOUT_MS } from './constants.js';
 import { log } from './logging.js';
 import type { AwbConfig } from './rest.js';
+import type { CliUsageSnapshot } from './cli-adapters/base.js';
 
 const FLUSH_INTERVAL_MS = 200;
 const FLUSH_LINE_THRESHOLD = 50;
@@ -44,10 +45,24 @@ export interface SubagentRegisterArgs {
   apiKey?: string;
 }
 
+export interface SubagentEndInfo {
+  exit_code?: number | null;
+  signal?: NodeJS.Signals | null;
+  /** Accumulated token/cost usage for this run's whole lifetime (ticket
+   *  6dd3f968), plus best-effort model attribution. Optional — omitted when
+   *  the adapter/CLI reported nothing, or by an older manager build that
+   *  predates usage capture; the server accepts either the same way it
+   *  already accepts a body with no usage. `model` is deliberately NOT part
+   *  of `CliUsageSnapshot` (the adapter extraction layer never saw it) — it's
+   *  the spawn's already-resolved `--model` value, folded in here by the
+   *  manager call site right before posting. */
+  usage?: CliUsageSnapshot & { model?: string | null };
+}
+
 export interface SubagentTapHandle {
   inLine(line: string): void;
   outLine(line: string): void;
-  end(info?: { exit_code?: number | null; signal?: NodeJS.Signals | null }): Promise<void> | void;
+  end(info?: SubagentEndInfo): Promise<void> | void;
   readonly subagentId: string | null;
   readonly startedAt: string;
 }
@@ -132,7 +147,7 @@ export class SubagentMonitor {
 
   async _end(
     subagentId: string,
-    info: { exit_code?: number | null; signal?: NodeJS.Signals | null } | null | undefined,
+    info: SubagentEndInfo | null | undefined,
   ): Promise<PostResult> {
     if (!this.#enabled) return 'ok';
     const apiKey = this.#apiKeyForSubagent.get(subagentId) || this.#config.apiKey;
@@ -288,7 +303,7 @@ class SubagentTap implements SubagentTapHandle {
     );
   }
 
-  async end(info?: { exit_code?: number | null; signal?: NodeJS.Signals | null }): Promise<void> {
+  async end(info?: SubagentEndInfo): Promise<void> {
     if (this.#ended) return;
     this.#ended = true;
     this.#flushNow();
