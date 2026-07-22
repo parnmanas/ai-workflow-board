@@ -22,7 +22,10 @@ import type {
 /** Map agent.type → credential provider prefix used to filter the credential
  *  picker. Mirrors the same map in admin/AgentManager.tsx — keep them in sync.
  *  CLIs whose adapter ships in agent-manager (claude / codex / antigravity) show
- *  only credentials with a matching provider prefix; `custom` skips it. */
+ *  only credentials with a matching provider prefix; `custom` skips it. `pi`
+ *  has no provider prefix at all — it has no credential concept AWB manages
+ *  (see cli-adapters/pi.ts) — so it's deliberately absent from this map,
+ *  which is what keeps the credential picker below from rendering for it. */
 const CLI_TO_CREDENTIAL_PREFIX: Record<string, string> = {
   claude: 'claude_',
   codex: 'codex_',
@@ -42,6 +45,7 @@ const MANAGED_CLI_OPTIONS: Array<{ value: ManagedCli; label: string }> = [
   { value: 'codex', label: 'Codex' },
   { value: 'antigravity', label: 'Antigravity' },
   { value: 'deepseek', label: 'DeepSeek' },
+  { value: 'pi', label: 'PI' },
   { value: 'custom', label: 'Custom' },
 ];
 
@@ -626,6 +630,7 @@ export default function AgentsPage() {
                   <option value="codex">Codex</option>
                   <option value="antigravity">Antigravity</option>
                   <option value="deepseek">DeepSeek</option>
+                  <option value="pi">PI</option>
                   <option value="custom">Custom</option>
                 </select>
               </div>

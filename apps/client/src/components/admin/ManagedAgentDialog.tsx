@@ -27,13 +27,14 @@ import { credentialFallbackCopy } from '../../utils/credentialFallback';
  * change won't take effect until the agent is restarted.
  */
 
-export type CliKind = 'claude' | 'deepseek' | 'codex' | 'antigravity' | 'custom';
+export type CliKind = 'claude' | 'deepseek' | 'codex' | 'antigravity' | 'pi' | 'custom';
 
 export const MANAGED_CLI_OPTIONS: { value: CliKind; label: string }[] = [
   { value: 'claude', label: 'Claude Code' },
   { value: 'deepseek', label: 'DeepSeek (via Claude Code)' },
   { value: 'codex', label: 'Codex' },
   { value: 'antigravity', label: 'Antigravity' },
+  { value: 'pi', label: 'PI' },
   { value: 'custom', label: 'Custom' },
 ];
 
@@ -76,7 +77,8 @@ export default function ManagedAgentDialog({
   // directory instead of typing an absolute path.
   const [pickerOpen, setPickerOpen] = useState(false);
   // Per-agent CLI credential. Only claude / codex / antigravity have adapters
-  // that consume credentials; custom CLIs leave this null.
+  // that consume credentials; custom and pi CLIs leave this null (pi has no
+  // credential concept at all — see cli-adapters/pi.ts).
   const [credentialId, setCredentialId] = useState<string>('');
   const [credentials, setCredentials] = useState<Credential[]>([]);
   // Per-agent default model + the per-CLI candidate lists the owning manager
@@ -187,12 +189,14 @@ export default function ManagedAgentDialog({
         // take-effect-on-restart contract as `model` below.
         // Per-agent credential is only meaningful when an adapter consumes it
         // (claude / codex / antigravity); for `custom` we always send null so a
-        // stale id doesn't linger after the operator switched CLI. Switching CLI
-        // also clears the credential selection (see the CLI onChange) so we
-        // never persist a credential whose provider prefix mismatches the new
-        // CLI — the manager validates `${cli}_…` and would reject it, silently
-        // falling back to operator-HOME auth.
-        const supportsCredential = cli !== 'custom';
+        // stale id doesn't linger after the operator switched CLI. `pi` has no
+        // credential concept AWB manages at all (see cli-adapters/pi.ts), so it
+        // is excluded the same way. Switching CLI also clears the credential
+        // selection (see the CLI onChange) so we never persist a credential
+        // whose provider prefix mismatches the new CLI — the manager validates
+        // `${cli}_…` and would reject it, silently falling back to
+        // operator-HOME auth.
+        const supportsCredential = cli !== 'custom' && cli !== 'pi';
         await api.updateAgent(agent.id, {
           name: trimmedName,
           description,
@@ -248,7 +252,7 @@ export default function ManagedAgentDialog({
         }
       } else {
         // Create flow.
-        const supportsCredential = cli !== 'custom';
+        const supportsCredential = cli !== 'custom' && cli !== 'pi';
         const created = await api.createManagedAgent({
           name: trimmedName,
           cli,
@@ -342,7 +346,7 @@ export default function ManagedAgentDialog({
             </div>
           )}
         </div>
-        {cli !== 'custom' && (
+        {cli !== 'custom' && cli !== 'pi' && (
           <div>
             <label style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 4 }}>
               CLI credential

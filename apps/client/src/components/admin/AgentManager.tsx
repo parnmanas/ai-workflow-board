@@ -12,7 +12,9 @@ import { credentialFallbackCopy } from '../../utils/credentialFallback';
 /** Map agent.type → credential provider prefix used to filter the credential
  *  picker. CLIs whose adapter ships in agent-manager (claude / codex / antigravity)
  *  show only credentials with a matching provider prefix; legacy / custom
- *  agent types skip the picker entirely. */
+ *  agent types skip the picker entirely. `pi` has no credential concept AWB
+ *  manages at all (see cli-adapters/pi.ts) — deliberately absent here so the
+ *  picker never renders for it. */
 const CLI_TO_CREDENTIAL_PREFIX: Record<string, string> = {
   claude: 'claude_',
   codex: 'codex_',
@@ -74,7 +76,7 @@ function modeBadgeColor(mode: 'daemon' | 'proxy' | 'manager'): string {
 
 function agentTypeBadgeVariant(type: string): 'info' | 'success' | 'neutral' {
   if (type === 'claude') return 'info';
-  if (type === 'codex' || type === 'antigravity') return 'success';
+  if (type === 'codex' || type === 'antigravity' || type === 'pi') return 'success';
   return 'neutral';
 }
 
@@ -162,6 +164,7 @@ function AgentCard({ agent, onEdit, onDelete, onShowSubagents }: AgentCardProps)
     manager: tokens.colors.accent,
     codex: tokens.colors.warning,
     antigravity: tokens.colors.successLight,
+    pi: tokens.colors.accentViolet,
   };
   const avatarColor = typeColors[agent.type] || tokens.colors.border;
 
@@ -438,7 +441,7 @@ function SubagentsModal({ agent, onClose }: SubagentsModalProps) {
  *  createManagedAgent whitelist (common/types/cli-types.ts CLI_TYPES). Picking
  *  a manager from the optional dropdown switches the form into "managed agent"
  *  mode and constrains Type to one of these. */
-const MANAGED_CLI_TYPES = new Set(['claude', 'codex', 'antigravity', 'deepseek', 'custom']);
+const MANAGED_CLI_TYPES = new Set(['claude', 'codex', 'antigravity', 'deepseek', 'pi', 'custom']);
 
 interface ManagerOption {
   id: string;
@@ -662,6 +665,7 @@ export default function AgentManager() {
                 { value: 'codex', label: 'Codex' },
                 { value: 'antigravity', label: 'Antigravity' },
                 { value: 'deepseek', label: 'DeepSeek' },
+                { value: 'pi', label: 'PI' },
                 { value: 'custom', label: 'Custom' },
               ]}
             />
@@ -706,7 +710,7 @@ export default function AgentManager() {
           )}
           {managedTypeInvalid && (
             <div style={{ fontSize: '11px', color: tokens.colors.warning, lineHeight: 1.5 }}>
-              ⚠ Type "{form.type}" is not supported by the agent-manager spawn pipeline. Choose Claude, Codex, Antigravity, or Custom — or clear the Agent Manager picker to keep the legacy behaviour.
+              ⚠ Type "{form.type}" is not supported by the agent-manager spawn pipeline. Choose Claude, Codex, Antigravity, PI, DeepSeek, or Custom — or clear the Agent Manager picker to keep the legacy behaviour.
             </div>
           )}
           {CLI_TO_CREDENTIAL_PREFIX[form.type] && (

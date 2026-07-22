@@ -1307,7 +1307,7 @@ function SelfImprovementSetting({ board, onSave }: SelfImprovementSettingProps) 
 // Abstract per-board effort presets → per-CLI option mapping. The ticket
 // carries only the abstract preset id; the server resolves it into per-CLI
 // options at dispatch. Claude gets effort + ultracode + model; codex /
-// antigravity get model-only. Starts from the board's stored presets, else
+// antigravity / pi get model-only. Starts from the board's stored presets, else
 // BUILTIN_EFFORT_PRESETS. Save writes the whole config (or null to clear the
 // override and fall back to the builtins on the server).
 const EFFORT_LEVELS: EffortLevel[] = ['low', 'medium', 'high', 'max'];
@@ -1334,6 +1334,7 @@ function parseEffortPresets(raw: Board['effort_presets']): EffortPresetsConfig {
       ...(p.claude ? { claude: { ...p.claude } } : {}),
       ...(p.codex ? { codex: { ...p.codex } } : {}),
       ...(p.antigravity ? { antigravity: { ...p.antigravity } } : {}),
+      ...(p.pi ? { pi: { ...p.pi } } : {}),
     }));
   if (presets.length === 0) return cloneEffortConfig(BUILTIN_EFFORT_PRESETS);
   const def = typeof cfg.default === 'string' && presets.some((p) => p.id === cfg.default)
@@ -1370,11 +1371,11 @@ function EffortPresetsSetting({ board, onSave }: EffortPresetsSettingProps) {
     });
   };
 
-  // Patch a CLI sub-object (claude/codex/antigravity), pruning empty objects so
-  // the saved config stays clean (mirror the server WRITE-side normalization).
+  // Patch a CLI sub-object (claude/codex/antigravity/pi), pruning empty objects
+  // so the saved config stays clean (mirror the server WRITE-side normalization).
   const updateCli = (
     idx: number,
-    cli: 'claude' | 'codex' | 'antigravity',
+    cli: 'claude' | 'codex' | 'antigravity' | 'pi',
     patch: Record<string, any>,
   ) => {
     setConfig((prev) => {
@@ -1445,7 +1446,7 @@ function EffortPresetsSetting({ board, onSave }: EffortPresetsSettingProps) {
       <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, marginBottom: 12 }}>
         Abstract effort options a ticket can carry. Each preset maps to per-CLI options at dispatch:
         Claude gets <code>--effort</code>, the <code>ultracode</code> orchestration keyword, and an
-        optional model; Codex and Antigravity get model-only (other keys are gracefully skipped).
+        optional model; Codex, Antigravity, and PI get model-only (other keys are gracefully skipped).
         Tickets reference a preset by name; clearing falls back to the built-in presets.
       </div>
 
@@ -1538,8 +1539,8 @@ function EffortPresetsSetting({ board, onSave }: EffortPresetsSettingProps) {
               </div>
             </div>
 
-            {/* Codex / Antigravity model-only */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+            {/* Codex / Antigravity / PI model-only */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
               <div>
                 <label style={fieldLabel}>Codex model</label>
                 <input
@@ -1555,6 +1556,15 @@ function EffortPresetsSetting({ board, onSave }: EffortPresetsSettingProps) {
                   value={p.antigravity?.model || ''}
                   placeholder="(CLI default)"
                   onChange={(e) => updateCli(idx, 'antigravity', { model: e.target.value })}
+                  style={inputStyle}
+                />
+              </div>
+              <div>
+                <label style={fieldLabel}>PI model</label>
+                <input
+                  value={p.pi?.model || ''}
+                  placeholder="(CLI default)"
+                  onChange={(e) => updateCli(idx, 'pi', { model: e.target.value })}
                   style={inputStyle}
                 />
               </div>
