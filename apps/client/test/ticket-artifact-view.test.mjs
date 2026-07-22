@@ -89,3 +89,38 @@ test('설명에 티켓 토큰이 있으면 중첩 카드로 렌더', () => {
   assert.match(html, /data-ticket-ref="dep-9"/);
   assert.match(html, /의존 티켓/);
 });
+
+// ─── "보드에서 열기" 버튼 (티켓 7815a958) ────────────────────────────────────
+
+test('onOpenOnBoard 없으면 보드 열기 버튼 미노출', () => {
+  const ticket = { title: 'T', board_id: 'b1' };
+  const html = render({ status: 'loaded', ticket });
+  assert.doesNotMatch(html, /보드에서 열기/);
+});
+
+test('board_id 있고 아카이브 안 됐으면 활성 버튼', () => {
+  const ticket = { title: 'T', board_id: 'b1' };
+  const html = renderToStaticMarkup(
+    React.createElement(TicketArtifactView, { state: { status: 'loaded', ticket }, onOpenOnBoard: () => {} }),
+  );
+  assert.match(html, /보드에서 열기/);
+  assert.doesNotMatch(html, /disabled=""/);
+});
+
+test('board_id 없으면 버튼 비활성 + 안내', () => {
+  const ticket = { title: 'T' };
+  const html = renderToStaticMarkup(
+    React.createElement(TicketArtifactView, { state: { status: 'loaded', ticket }, onOpenOnBoard: () => {} }),
+  );
+  assert.match(html, /disabled=""/);
+  assert.match(html, /보드를 찾을 수 없습니다/);
+});
+
+test('archived_at 있으면 board_id 가 있어도 버튼 비활성 + 안내', () => {
+  const ticket = { title: 'T', board_id: 'b1', archived_at: '2026-01-01T00:00:00.000Z' };
+  const html = renderToStaticMarkup(
+    React.createElement(TicketArtifactView, { state: { status: 'loaded', ticket }, onOpenOnBoard: () => {} }),
+  );
+  assert.match(html, /disabled=""/);
+  assert.match(html, /보관된 티켓은 보드에서 바로 열 수 없습니다/);
+});

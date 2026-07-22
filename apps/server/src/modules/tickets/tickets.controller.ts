@@ -560,7 +560,21 @@ export class TicketsController {
     // 직렬화하고 있었다.
     const ticket = await loadTicketFull(this.dataSource, id, { commentLimit: DETAIL_COMMENT_PAGE });
     if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
-    return res.json(ticket);
+    // 채팅 ticket 아티팩트의 "보드에서 열기" 버튼(티켓 7815a958)이 쓸 board_id.
+    // Ticket 엔티티엔 board_id 컬럼이 없다(column_id 만 저장) — child/grandchild 는
+    // column_id 가 null 이라 column 을 가진 조상까지 올라간다(addComment 첨부 라우팅의
+    // resolveBoardId 와 동일 패턴). 이 REST 응답에만 붙이고 공유 loadTicketFull/MCP
+    // get_ticket 계약은 그대로 둔다.
+    let cursorColumnId = ticket.column_id as string | null;
+    let cursorParentId = ticket.parent_id as string | null;
+    while (!cursorColumnId && cursorParentId) {
+      const parent: Ticket | null = await this.ticketRepo.findOne({ where: { id: cursorParentId } });
+      if (!parent) break;
+      cursorColumnId = parent.column_id;
+      cursorParentId = parent.parent_id;
+    }
+    const board_id = cursorColumnId ? (await this.colRepo.findOne({ where: { id: cursorColumnId } }))?.board_id ?? null : null;
+    return res.json({ ...ticket, board_id });
   }
 
   // 단일 티켓(root/하위)의 커서 페이지네이션 코멘트. chat 메시지 엔드포인트
