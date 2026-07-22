@@ -1,7 +1,8 @@
 # Agent Manager — Reference
 
 `apps/agent-manager/` is the standalone subagent runner that drives CLI-based
-AI agents (Claude, Codex, Gemini, custom) on behalf of an AWB workspace. It
+AI agents (Claude, DeepSeek, Codex, Antigravity, PI, custom) on behalf of an
+AWB workspace. It
 replaces the daemon that used to live inside the
 `@parnmanas/awb` Claude plugin (≤ v0.39).
 
@@ -83,7 +84,7 @@ interface AwbConfig {
   apiKey: string;              // bearer issued by /api/agent-manager/pair/redeem
   workspace_id?: string;       // workspace this manager binds to
   agent_id?: string | null;    // manager's Agent identity (auto-resolved if null)
-  cli?: 'claude' | 'codex' | 'antigravity' | string;  // default 'claude'
+  cli?: 'claude' | 'codex' | 'antigravity' | 'pi' | string;  // default 'claude'
   delegation?: {
     enabled?: boolean;         // master switch for SubagentManager
     max_concurrent_subagents?: number;
@@ -173,7 +174,7 @@ interface AgentManagerCommand {
     agent_id?: string;     // REQUIRED for *_agent / set_working_dir / maintenance verbs;
                            // identifies the managed-agent target on this manager
     working_dir?: string;
-    cli?: 'claude' | 'codex' | 'antigravity' | 'custom';
+    cli?: 'claude' | 'codex' | 'antigravity' | 'pi' | 'custom';
   };
 }
 ```
@@ -219,7 +220,7 @@ spawn time (ticket e9c7a896):
 | `system_prompt_append` | appended to the role prompt in `--append-system-prompt` (never replaces it) | warn + skip |
 | `allowed_tools`        | appended to the AWB baseline in `--allowedTools` (baseline `mcp__awb__*,mcp__host__*` always survives) | warn + skip |
 | `disallowed_tools`     | `--disallowedTools`                               | warn + skip |
-| `model`                | `--model` — beats the per-agent `Agent.model` default | `--model` (codex / antigravity support it; deepseek also mirrors it into `ANTHROPIC_MODEL` so flag and env agree) |
+| `model`                | `--model` — beats the per-agent `Agent.model` default | `--model` (codex / antigravity / pi support it; deepseek also mirrors it into `ANTHROPIC_MODEL` so flag and env agree) |
 | `fallback_models`      | NOT a flag — a manager-side retry policy (see below) | same (CLI-agnostic) |
 | `permission_mode`      | `--permission-mode`, REPLACING `--dangerously-skip-permissions` (the skip flag pins bypassPermissions, so passing both would no-op the mode) | warn + skip |
 
@@ -329,7 +330,7 @@ the observation from that one incident, not a guarantee the host login always
 exists.
 
 What "empty" falls back to is **adapter-specific** — it is a host **CLI login**
-for claude/codex but a host **env var** for deepseek/antigravity:
+for claude/codex/pi but a host **env var** for deepseek/antigravity:
 
 | CLI (`type`) | Empty-credential fallback | Source on the manager host |
 | --- | --- | --- |
@@ -337,7 +338,13 @@ for claude/codex but a host **env var** for deepseek/antigravity:
 | `codex` | Host CLI login | `~/.codex/auth.json` (or `$CODEX_HOME`) from `codex login`, symlinked/copied into the agent cli-home |
 | `deepseek` | Host **env var** (no login file) | `DEEPSEEK_API_KEY` (+ optional `DEEPSEEK_BASE_URL` / `DEEPSEEK_MODEL`) from the manager process environment |
 | `antigravity` | Host **env var** (no login file) | `GEMINI_API_KEY` / `GOOGLE_API_KEY` from the manager process environment |
+| `pi` | Host CLI login (**always** — no per-agent kind exists) | `~/.pi/agent/{auth.json,settings.json}` from `pi /login` (including a credential-free local llama.cpp server), symlinked/copied into the agent cli-home |
 | `custom` | — | no adapter, no credential concept |
+
+`pi` is the one CLI with no per-agent credential concept at all — unlike every
+other adapter above, AWB never offers a credential picker for it and the
+manager never branches on a `credential_id`; the operator-HOME fallback is the
+only path (see `apps/agent-manager/src/lib/cli-adapters/pi.ts`).
 
 Setting a per-agent credential is only needed for **isolated** auth — a
 different account/key than the host's, or one centrally rotated through AWB. When
@@ -358,7 +365,7 @@ whose on-disk OAuth file has since disappeared. So `missing` never describes an
 empty `credential_id`; a host login that is genuinely absent instead surfaces as
 failing turns / token-expiry flags, not as `missing`. Source of truth for the
 fallback behaviour is each adapter's `prepareCliHome`
-(`apps/agent-manager/src/lib/cli-adapters/{claude,codex,deepseek,antigravity}.ts`);
+(`apps/agent-manager/src/lib/cli-adapters/{claude,codex,deepseek,antigravity,pi}.ts`);
 the admin-UI copy shown in the credential picker lives in
 `apps/client/src/utils/credentialFallback.ts`. See also
 [`docs/managed-agent-relogin.md`](managed-agent-relogin.md).

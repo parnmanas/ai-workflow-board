@@ -2,7 +2,7 @@
 
 Standalone subagent runner for [AI Workflow Board](../../README.md). Connects to
 an AWB server over SSE + REST, spawns CLI-driven agents (Claude, Codex, Antigravity,
-or any custom binary that speaks MCP), and reports liveness back to the AWB
+PI, or any custom binary that speaks MCP), and reports liveness back to the AWB
 admin dashboard.
 
 This package replaces the daemon that used to live inside the
@@ -30,7 +30,7 @@ browser, instance heartbeats, and CLI lifecycle management.
 └─────────────────────────────────────────────────────────────────┘
        │ stdio
        ▼
-   claude / codex / antigravity / custom CLI
+   claude / codex / antigravity / pi / custom CLI
 ```
 
 ## Install
@@ -93,7 +93,7 @@ After redeeming, the manager stores its API key and agent identity in
    You'll be prompted for:
    - AWB server URL (e.g. `https://awb.example.com:7700`)
    - Pairing token (paste from step 1)
-   - CLI to drive (`claude` / `codex` / `antigravity`, default `claude`)
+   - CLI to drive (`claude` / `codex` / `antigravity` / `pi`, default `claude`)
 
    The wizard calls `/api/agent-manager/pair/redeem`, then writes
    `~/.config/awb-agent-manager/config.json` with mode 0600. Output:
@@ -127,9 +127,9 @@ After redeeming, the manager stores its API key and agent identity in
    events.
 
 4. **Add managed agents** — Back in AWB, _Agent Manager → Managed Agents →
-   Create_. Pick the CLI (`claude` / `codex` / `antigravity` / `custom`), point at
-   a working directory, and leave _Spawn on this manager after create_ on for
-   one-click setup. The manager provisions a per-agent apiKey, writes its
+   Create_. Pick the CLI (`claude` / `codex` / `antigravity` / `pi` / `custom`),
+   point at a working directory, and leave _Spawn on this manager after create_
+   on for one-click setup. The manager provisions a per-agent apiKey, writes its
    on-disk config + mcp-config.json, and starts routing matching ticket /
    chat / mention events to subagents that run under that agent's identity.
 
@@ -138,6 +138,18 @@ After redeeming, the manager stores its API key and agent identity in
    per-process `AWB_API_KEY` bearer token, and fails the Codex run if the MCP
    endpoint cannot initialize. Manager restart/rehydrate and
    `refresh_mcp_config` both repair this native config automatically.
+
+   **PI has no credential concept at all** (not even the optional per-agent
+   credential every other adapter supports) — every spawn simply inherits
+   whatever the operator already configured on the manager host via `pi
+   /login` (including a credential-free local llama.cpp server). **PI also has
+   no native MCP client as of this writing** (its own upstream philosophy is
+   "No MCP" — see `cli-adapters/pi.ts`), so a managed PI agent can run chat
+   one-shots end-to-end, but on a ticket dispatch it can do the requested work
+   without being able to call `add_comment` / `move_ticket` itself; the
+   existing "subagent exited without a comment" system fallback still surfaces
+   its raw output on the ticket. Revisit once pi (or a verified MCP-bridging
+   extension) ships a real MCP client.
 
    On manager restart, agents previously spawned this way auto-rehydrate
    from disk — no need to re-click Spawn.
