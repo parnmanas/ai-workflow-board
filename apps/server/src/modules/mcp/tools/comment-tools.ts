@@ -508,6 +508,27 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
     return { authorType, authorId, authorName };
   }
 
+  // ─── Helper: 저장 직전 pending_user_action 재확인 (ticket be934f61 패턴,
+  // ticket 4f99a9f5로 4개 툴에 이식) ───────────────────────────────────────
+  // 아래 4개 핸들러(ask_question/answer_question/record_decision/
+  // handoff_to_agent)의 얼리 가드(isPendingUserActionBlocked, ticket
+  // 8fc94adf)는 핸들러 상단에서 1회 로드한 stale in-memory ticket 만
+  // 검사한다. 그 로드~저장 사이(resolveAuthor/hard-budget/resolveAuthorRole
+  // 등 다수의 await)에 별도 요청의 pend_ticket 이 끼어들면 stale 객체에는
+  // 반영되지 않아 얼리 가드를 그대로 통과한다. add_comment(~317행
+  // freshForGate)가 저장 직전 재조회로 이 창을 닫은 것과 동일하게, 각
+  // 핸들러의 저장 직전에 한 번 더 호출한다. agent 저작 한정 — 얼리 가드와
+  // 동일 스코프. optional chaining으로 ticket 이 동시에 삭제된 극단적
+  // 경우까지 안전하게 처리한다.
+  const freshPendingGateBlocked = async (
+    ticketId: string,
+    authorType: 'user' | 'agent',
+  ): Promise<boolean> => {
+    if (authorType !== 'agent') return false;
+    const freshForGate = await dataSource.getRepository(Ticket).findOne({ where: { id: ticketId } });
+    return !!freshForGate?.pending_user_action;
+  };
+
   // ─── ask_question ────────────────────────────────────────────────
   server.tool(
     'ask_question',
@@ -554,6 +575,13 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         callerCtx?.subagentRole, callerCtx?.subagentTicketId,
       );
       const askMetadata = mergeAuthorRoleIntoMetadata(undefined, resolvedAuthorRole);
+
+      // 저장 직전 재확인 (ticket be934f61 패턴, ticket 4f99a9f5) — 위 얼리
+      // 가드 이후의 await 들이 여는 TOCTOU 창을 닫는다. freshPendingGateBlocked 참고.
+      if (await freshPendingGateBlocked(ticket_id, resolved.authorType)) {
+        return ok({ suppressed: true, reason: 'pending_user_action' });
+      }
+
       const comment = await commentRepo.save(commentRepo.create({
         ticket_id,
         author_type: resolved.authorType,
@@ -675,6 +703,13 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         callerCtx?.subagentRole, callerCtx?.subagentTicketId,
       );
       const answerMetadata = mergeAuthorRoleIntoMetadata(undefined, resolvedAuthorRole);
+
+      // 저장 직전 재확인 (ticket be934f61 패턴, ticket 4f99a9f5) — 위 얼리
+      // 가드 이후의 await 들이 여는 TOCTOU 창을 닫는다. freshPendingGateBlocked 참고.
+      if (await freshPendingGateBlocked(question.ticket_id, resolved.authorType)) {
+        return ok({ suppressed: true, reason: 'pending_user_action' });
+      }
+
       const answer = await commentRepo.save(commentRepo.create({
         ticket_id: question.ticket_id,
         author_type: resolved.authorType,
@@ -748,6 +783,13 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         references && references.length > 0 ? { references } : undefined,
         resolvedAuthorRole,
       );
+
+      // 저장 직전 재확인 (ticket be934f61 패턴, ticket 4f99a9f5) — 위 얼리
+      // 가드 이후의 await 들이 여는 TOCTOU 창을 닫는다. freshPendingGateBlocked 참고.
+      if (await freshPendingGateBlocked(ticket_id, resolved.authorType)) {
+        return ok({ suppressed: true, reason: 'pending_user_action' });
+      }
+
       const comment = await commentRepo.save(commentRepo.create({
         ticket_id,
         author_type: resolved.authorType,
@@ -1161,6 +1203,14 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         previous_assignee_name: previousAssigneeName || null,
         role: 'assignee',
       }, resolvedAuthorRole);
+
+      // 저장 직전 재확인 (ticket be934f61 패턴, ticket 4f99a9f5) — 위 얼리
+      // 가드 이후의 await 들이 여는 TOCTOU 창을 닫는다. 코멘트 저장뿐 아니라
+      // 재배정까지 함께 막는다(얼리 가드와 동일 스코프). freshPendingGateBlocked 참고.
+      if (await freshPendingGateBlocked(ticket_id, resolved.authorType)) {
+        return ok({ suppressed: true, reason: 'pending_user_action' });
+      }
+
       const comment = await commentRepo.save(commentRepo.create({
         ticket_id,
         author_type: resolved.authorType,
