@@ -1341,7 +1341,7 @@ export class SubagentManager implements SubagentManagerContract {
     }
   }
 
-  /** Watch parsed JSONL for successful Claude or Codex MCP calls that create
+  /** Watch parsed JSONL for successful Claude, Codex, or pi MCP calls that create
    *  ticket comments. Kept as a test seam because a missed event causes a
    *  misleading system fallback comment after otherwise successful work. */
   _scanForCommentTool(record: SubagentRecord, line: string): void {
@@ -1360,6 +1360,17 @@ export class SubagentManager implements SubagentManagerContract {
     if (parsed?.type === 'item.completed' && parsed?.item?.type === 'mcp_tool_call') {
       const item = parsed.item;
       if (item.server === 'awb' && item.error == null && isCommentTool(item.tool ?? item.name)) {
+        record.commentSent = true;
+      }
+      return;
+    }
+
+    // pi's awb-mcp-bridge.ts extension (ticket d5a6100d) — pi's `-p` mode has
+    // no structured turn events of its own, so the bridge prints this
+    // sentinel to real stdout on every successful AWB tool call it makes on
+    // pi's behalf (see cli-adapters/pi.ts#buildAwbMcpBridgeSource).
+    if (parsed?.type === 'awb_mcp_bridge_tool_call') {
+      if (parsed.server === 'awb' && parsed.error == null && isCommentTool(parsed.tool)) {
         record.commentSent = true;
       }
       return;

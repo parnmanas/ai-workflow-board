@@ -111,6 +111,25 @@ function claudeAssistantToolUseLine(toolName) {
   });
 }
 
+// pi's awb-mcp-bridge.ts extension sentinel (ticket d5a6100d review round-2
+// fix) — the exact literal shape emitted by cli-adapters/pi.ts after a
+// successful AWB tool call.
+function piBridgeToolCallLine(tool, error = null) {
+  return JSON.stringify({ type: 'awb_mcp_bridge_tool_call', server: 'awb', tool, error });
+}
+
+let piPidSeq = 80000;
+function makePiRecord(overrides = {}) {
+  return makeCodexRecord({
+    pid: ++piPidSeq,
+    cli_type: 'pi',
+    captureOutput: false,
+    outLines: [],
+    tailLines: [],
+    ...overrides,
+  });
+}
+
 let originalFetch;
 let mcpToolCalls; // names of tools/call invoked over /mcp
 let restPosts; // { url, body } for non-MCP REST endpoints
@@ -434,6 +453,72 @@ test('Codex native MCP add_comment completion suppresses the silent-exit fallbac
   await mgr._handleOneshotExit(rec, 0);
 
   assert.equal(silentExit(), undefined, 'no false system comment after Codex add_comment succeeds');
+});
+
+test('pi bridge sentinel: add_comment success is recognized and suppresses the silent-exit fallback', async () => {
+  const mgr = new SubagentManager(makeConfig());
+  const rec = makePiRecord();
+
+  for (const line of [
+    '',
+    '[awb-mcp-bridge] registered 1 AWB MCP tool(s)',
+    piBridgeToolCallLine('add_comment'),
+    '완료: add_comment 호출함.',
+  ]) {
+    mgr._scanForCommentTool(rec, line);
+  }
+  assert.equal(rec.commentSent, true, 'pi bridge tool-call sentinel counts as a persisted comment');
+
+  await mgr._handleOneshotExit(rec, 0);
+
+  assert.equal(silentExit(), undefined, 'no false system comment after the pi bridge posts add_comment');
+});
+
+test('pi bridge sentinel: a failed tool call does NOT set commentSent', () => {
+  const mgr = new SubagentManager(makeConfig());
+  const rec = makePiRecord();
+
+  mgr._scanForCommentTool(rec, piBridgeToolCallLine('add_comment', 'AWB MCP add_comment failed: HTTP 500'));
+
+  assert.equal(rec.commentSent, false);
+});
+
+test('pi bridge sentinel: a non-comment tool does NOT set commentSent', () => {
+  const mgr = new SubagentManager(makeConfig());
+  const rec = makePiRecord();
+
+  mgr._scanForCommentTool(rec, piBridgeToolCallLine('get_ticket'));
+
+  assert.equal(rec.commentSent, false);
+});
+
+test('pi bridge sentinel: malformed brace-prefixed prose is ignored', () => {
+  const mgr = new SubagentManager(makeConfig());
+  const rec = makePiRecord();
+
+  mgr._scanForCommentTool(rec, '{not actually json, just a stray brace in pi\'s prose reply}');
+
+  assert.equal(rec.commentSent, false);
+});
+
+test('pi bridge sentinel: recorded add_comment resets a partially-tripped breaker', async () => {
+  const cb = new CircuitBreaker();
+  const mgr = new SubagentManager(makeConfig(), cb);
+  const key = CircuitBreaker.key('agent-rolf', 'ticket-loop', 'assignee');
+
+  for (let i = 0; i < 2; i++) {
+    await mgr._handleOneshotExit(makePiRecord({ agent_id: 'agent-rolf' }), 1);
+  }
+  assert.equal(cb.size, 1);
+
+  restPosts.length = 0;
+
+  const ok = makePiRecord({ agent_id: 'agent-rolf' });
+  mgr._scanForCommentTool(ok, piBridgeToolCallLine('add_comment'));
+  await mgr._handleOneshotExit(ok, 0);
+
+  assert.equal(cb.shouldBlock(key), null, 'a real bridge-posted comment resets the breaker');
+  assert.equal(silentExit(), undefined, 'no silent-exit fallback on the successful dispatch');
 });
 
 // ── ticket 3feaf80f: Claude one-shot의 commentSent는 구조적으로 항상 false

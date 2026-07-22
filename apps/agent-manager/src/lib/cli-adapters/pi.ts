@@ -46,6 +46,26 @@
 // stdout as the deliverable (captureOutput flips off, chat replies switch to
 // `send_chat_room_message`, exactly like claude/codex already do).
 //
+// Review regression fix (ticket d5a6100d, round 2): flipping on NATIVE_MCP
+// sets `captureOutput: false` (subagent-manager.ts), which is fine for the
+// answer-aggregation path but ALSO starves `_scanForCommentTool` — the scan
+// that flips `record.commentSent` and is what suppresses the silent-exit
+// fallback comment and resets the circuit-breaker. codex gets this for free
+// because `codex exec --json` prints structured `item.completed`/
+// `mcp_tool_call` events pi's own `-p` mode never does (pi prints plain
+// prose — see `parseStdoutLine` below). Without a stdout signal, EVERY
+// successful pi ticket dispatch was misread as silent: the "exited without
+// leaving a ticket comment" system comment fired despite a real comment
+// having been posted, and the breaker never saw a recordSuccess() reset —
+// eventually pending the ticket and defeating this ticket's entire goal. The
+// fix: the bridge's `execute()` now prints one `awb_mcp_bridge_tool_call`
+// JSON line to REAL stdout (console.log, not the console.error/stderr the
+// rest of the bridge's own diagnostics use — `_scanForCommentTool` only
+// reads `child.stdout`) on every successful AWB tool call, and
+// `_scanForCommentTool` gained a matching branch. Verified against a real
+// spawned `pi` process that the line survives intermixed with pi's own
+// plain-text turn output and reaches the manager's stdout reader unbroken.
+//
 // Pi also has no credential concept AWB manages — no per-agent credential
 // kind exists to select in the UI. Its own provider auth (API key / OAuth /
 // a local llama.cpp server, pi's only genuinely key-free provider) lives in
@@ -326,6 +346,16 @@ export default async function (pi) {
         if (result && result.isError) {
           throw new Error(content.map((c) => c.text || '').join('\\n') || \`\${tool.name} failed\`);
         }
+        // Sentinel line on REAL stdout (not console.error/stderr) so
+        // subagent-manager.ts's _scanForCommentTool — which only reads
+        // child.stdout — can observe that this tool call actually happened.
+        // pi's own -p mode prints plain prose, not structured events, so
+        // without this line every successful add_comment/move_ticket call
+        // is invisible to the manager: commentSent never flips true, the
+        // silent-exit fallback fires on every dispatch even though the
+        // ticket comment was posted, and the circuit-breaker never sees a
+        // recordSuccess() reset (ticket d5a6100d review regression).
+        console.log(JSON.stringify({ type: 'awb_mcp_bridge_tool_call', server: 'awb', tool: tool.name, error: null }));
         return { content, details: {} };
       },
     });
