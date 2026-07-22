@@ -15,7 +15,7 @@ description: Release procedure for changes under apps/agent-manager (SSE pipelin
 
 > **버전은 publish 시점에 자동 계산된다 (ticket 433f6cbd, source c17a8a40).**
 > 변경이 `main` 에 랜딩하면 `.github/workflows/publish-agent-manager.yml` 이
-> `scripts/compute-publish-version.mjs` 로 **레지스트리 최신값 + patch** 를 계산해
+> `apps/agent-manager/scripts/compute-publish-version.mjs` 로 **레지스트리 최신값 + patch** 를 계산해
 > 그 버전으로 npm publish 하고 `awb-agent-manager-v<version>` 태그를 남긴다.
 > `apps/agent-manager/package.json` 의 `version` 은 이제 **'최초 배포 seed floor'**
 > 로만 쓰이고(이미 npm 에 올라간 뒤엔 참조 안 됨) 손으로 올릴 필요가 없다.
