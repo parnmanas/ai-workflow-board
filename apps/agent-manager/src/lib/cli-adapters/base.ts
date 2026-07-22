@@ -151,6 +151,7 @@ export interface ResolvedEffortPreset {
   claude?: EffortSlice;
   codex?: { model?: string };
   antigravity?: { model?: string };
+  pi?: { model?: string };
 }
 
 /**
@@ -158,11 +159,12 @@ export interface ResolvedEffortPreset {
  *   - claude / deepseek → the rich `claude` slice (model + effort + ultracode)
  *   - codex             → the codex slice (model only)
  *   - antigravity       → the antigravity slice (model only)
+ *   - pi                → the pi slice (model only)
  *   - anything else / a null preset → null
  * The return shape is normalized to `{ model?, effort?, ultracode? }` so the
  * spawn site can fold `model` into the model precedence and pass `effort` /
- * `ultracode` straight through (codex / antigravity slices never carry the
- * latter two, so they degrade to model-only automatically).
+ * `ultracode` straight through (codex / antigravity / pi slices never carry
+ * the latter two, so they degrade to model-only automatically).
  */
 export function selectEffortSlice(
   cliType: string,
@@ -182,6 +184,11 @@ export function selectEffortSlice(
   }
   if (t === 'antigravity') {
     const s = preset.antigravity;
+    if (!s) return null;
+    return { model: s.model };
+  }
+  if (t === 'pi') {
+    const s = preset.pi;
     if (!s) return null;
     return { model: s.model };
   }

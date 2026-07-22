@@ -93,6 +93,7 @@ const CANDIDATE_PROVIDERS: Record<string, CandidateProvider> = {
   claude: { unix: claudeUnixCandidates, windows: claudeWindowsCandidates },
   agy: { unix: agyUnixCandidates, windows: agyWindowsCandidates },
   codex: { unix: codexUnixCandidates, windows: codexWindowsCandidates },
+  pi: { unix: piUnixCandidates, windows: piWindowsCandidates },
 };
 
 function parentExeMatching(nameRegex: RegExp): string | null {
@@ -264,4 +265,27 @@ function codexWindowsCandidates(home: string): string[] {
     // 이 인자를 escape 해 cmd.exe 로 실행한다.
     join(appdata, 'npm', 'codex.cmd'),
   ];
+}
+
+// Pi (`@earendil-works/pi-coding-agent`) is a pure TypeScript/Node CLI, not
+// a compiled binary like codex — `npm install -g` and the `pi.dev/install.sh`
+// curl installer both drop a JS entrypoint, so unlike codex there is no
+// sibling `.exe` to prefer on Windows, only the npm batch shim.
+function piUnixCandidates(home: string): string[] {
+  return [
+    join(home, '.npm-global/bin/pi'),
+    join(home, '.bun/bin/pi'),
+    join(home, '.local/bin/pi'),
+    join(home, '.volta/bin/pi'),
+    join(home, '.npm-packages/bin/pi'),
+    join(home, 'node_modules/.bin/pi'),
+    '/usr/local/bin/pi',
+    '/opt/homebrew/bin/pi',
+    '/usr/bin/pi',
+  ];
+}
+
+function piWindowsCandidates(home: string): string[] {
+  const appdata = process.env.APPDATA || join(home, 'AppData', 'Roaming');
+  return [join(appdata, 'npm', 'pi.cmd')];
 }

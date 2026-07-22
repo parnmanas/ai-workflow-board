@@ -143,7 +143,7 @@ export function parseEffortPreset(raw: unknown): ResolvedEffortPreset | null {
     if (typeof obj.claude.ultracode === 'boolean') c.ultracode = obj.claude.ultracode;
     if (Object.keys(c).length > 0) out.claude = c;
   }
-  for (const key of ['codex', 'antigravity'] as const) {
+  for (const key of ['codex', 'antigravity', 'pi'] as const) {
     const slice = obj[key];
     if (slice && typeof slice === 'object' && !Array.isArray(slice)) {
       if (typeof slice.model === 'string' && slice.model.trim()) {
