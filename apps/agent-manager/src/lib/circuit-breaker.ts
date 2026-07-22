@@ -178,14 +178,50 @@ export class CircuitBreaker {
   }
 
   /**
-   * Reset the breaker for a key — called when the agent successfully posts
-   * a comment (proves it can operate) or when an operator unpends / restarts.
+   * Unconditionally clear the breaker for a key. Reserved for explicit
+   * human/operator-attributable paths (currently only resetAgent(), wired to
+   * the admin-only restart_agent command) — never call this directly from a
+   * "the agent succeeded" signal. Ticket b2e88390: a lucky retry proves the
+   * ONE attempt worked, not that the underlying problem (bad credentials /
+   * broken config) is fixed, so success alone must not fully close a breaker
+   * that already tripped and surfaced to a human via pend_ticket. Use
+   * recordSuccess() at success call sites instead — it defers to this method
+   * only when the breaker was never open in the first place.
    */
   reset(key: string): void {
     if (this.#state.has(key)) {
       log(`[circuit-breaker] RESET key=${key}`);
       this.#state.delete(key);
     }
+  }
+
+  /**
+   * Record that the agent successfully operated (posted a real comment / a
+   * clean exit with output) for a key — the ONLY call this makes on behalf
+   * of a mere retry succeeding.
+   *
+   * - Breaker not open (no entry, or a sub-threshold failure streak that
+   *   hadn't tripped yet): this is ordinary recovery — clear it exactly like
+   *   the old unconditional reset() did, so unrelated blips don't linger and
+   *   falsely accumulate toward the threshold later.
+   * - Breaker OPEN: the ticket already pended for a human (justOpened fired
+   *   pend_ticket) — a single half-open probe succeeding is not the same as
+   *   a human confirming the underlying issue is fixed (ticket b2e88390).
+   *   Leave the entry open; shouldBlock() keeps gating future dispatches
+   *   behind the cooldown/probe cycle until an operator explicitly clears it
+   *   via resetAgent() (restart_agent), or a future probe fails again and
+   *   re-stamps the open state via record().
+   */
+  recordSuccess(key: string): void {
+    const entry = this.#state.get(key);
+    if (!entry || !entry.open) {
+      this.reset(key);
+      return;
+    }
+    log(
+      `[circuit-breaker] half-open probe succeeded key=${key} — staying OPEN ` +
+        `(requires operator resetAgent()/restart_agent to fully close; ticket b2e88390)`,
+    );
   }
 
   /** Reset all entries for a given agent (e.g. after restart_agent). */
