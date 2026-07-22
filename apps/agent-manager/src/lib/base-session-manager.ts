@@ -24,6 +24,7 @@ import {
   ADAPTER_CAPABILITIES,
   PARSE_STAGE,
   type CliAdapter,
+  type CliUsageSnapshot,
   type HarnessSpec,
   type ParseResult,
   type ResolvedEffortPreset,
@@ -33,6 +34,7 @@ import {
   partitionHarness,
   selectEffortSlice,
 } from './cli-adapters/base.js';
+import { accumulateUsage } from './cli-usage-accumulator.js';
 import type { AwbConfig } from './rest.js';
 import { writeMcpConfig } from './managed-agent-store.js';
 import type { SubagentMonitor, SubagentTapHandle } from './subagent-monitor.js';
@@ -183,6 +185,13 @@ export interface SessionRecord {
   unrespondedSince: number | null;
   unhealthyKilled: boolean;
   tap: SubagentTapHandle | null;
+  /** Running token/cost total accumulated across every turn's `result` event
+   *  for the life of this persistent process (ticket 6dd3f968). A long ticket
+   *  session emits one `result` per turn (see `#advanceTurn`'s `isResult`
+   *  branch, the same signal that drives turn-end detection), so this SUMS
+   *  rather than replaces — sent once on the tap's `end()` call at process
+   *  exit, mirroring the one-shot accumulation in subagent-manager.ts. */
+  usage?: CliUsageSnapshot | null;
   _currentTurn?: TurnState | null;
   onResult?: (raw: any) => void;
   /** ticket e9d0e8bc / 9a28bf53: release the run-lifetime folder lock held for a
@@ -719,6 +728,7 @@ export class BaseSessionManager {
         unrespondedSince: null,
         unhealthyKilled: false,
         tap: null,
+        usage: null,
         modelChain,
         chainAttempt,
       };
@@ -848,6 +858,14 @@ export class BaseSessionManager {
     if (parsed.isResult) {
       sess.unrespondedTurnCount = 0;
       sess.unrespondedSince = null;
+      // Best-effort per-turn usage capture (ticket 6dd3f968) — folded into the
+      // session's running total, never allowed to affect turn-end/onResult.
+      try {
+        const snapshot = sess.adapter.extractUsage(parsed.raw);
+        if (snapshot) sess.usage = accumulateUsage(sess.usage ?? null, snapshot);
+      } catch (err: any) {
+        log(`${this.#logTag} usage capture failed pid=${sess.pid}: ${err?.message ?? err}`);
+      }
       try {
         sess.onResult?.(parsed.raw);
       } catch (err: any) {
@@ -982,7 +1000,14 @@ export class BaseSessionManager {
       this.#endTurn(sess);
       const durationSec = Math.round((Date.now() - sess.startedAt) / 1000);
       const key = sess[this.#keyField];
-      sess.tap?.end({ exit_code: code, signal });
+      // See subagent-manager.ts's #wireExitHandler for why model rides on
+      // `usage` only when numeric usage was also captured.
+      const resolvedModel = sess.modelChain?.[sess.chainAttempt ?? 0] ?? null;
+      sess.tap?.end({
+        exit_code: code,
+        signal,
+        usage: sess.usage ? { ...sess.usage, model: resolvedModel } : undefined,
+      });
       log(
         `${this.#logTag} exit pid=${sess.pid} ${this.#keyField}=${key} code=${code} signal=${signal || '-'} turns=${sess.turnCount} duration=${durationSec}s`,
       );

@@ -29,11 +29,13 @@ import {
   ADAPTER_CAPABILITIES,
   type CliAdapter,
   type CliProgressEvent,
+  type CliUsageSnapshot,
   buildModelChain,
   describeHarness,
   partitionHarness,
   selectEffortSlice,
 } from './cli-adapters/base.js';
+import { accumulateUsage } from './cli-usage-accumulator.js';
 import { CircuitBreaker } from './circuit-breaker.js';
 import { writeMcpConfig } from './managed-agent-store.js';
 import { classifyCliError, isFallbackEligible } from './cli-error-signatures.js';
@@ -254,6 +256,13 @@ interface SubagentRecord {
    *  fallback when this is true keeps clean cycles quiet. */
   commentSent: boolean;
   tap: SubagentTapHandle | null;
+  /** Running token/cost total accumulated across every `result` /
+   *  `turn.completed` stdout line observed for this run (ticket 6dd3f968).
+   *  A one-shot normally sees at most one such event, but accumulation is
+   *  the same fold used by persistent sessions — see `#captureUsageLine`.
+   *  Plain data (survives #persist, unlike the function-valued fields
+   *  below), sent on the tap's `end()` call in the exit handler. */
+  usage: CliUsageSnapshot | null;
   /** 폴백 모델 체인 (ticket 61f4dd18). head=주 모델(null=CLI 기본), 이후는
    *  우선순위 순 폴백. 길이 1 이면 폴백 없음. */
   modelChain?: (string | null)[];
@@ -770,6 +779,7 @@ export class SubagentManager implements SubagentManagerContract {
         tailLines: [],
         commentSent: false,
         tap: null,
+        usage: null,
         modelChain,
         chainAttempt,
         respawnSpec: spec,
@@ -853,7 +863,15 @@ export class SubagentManager implements SubagentManagerContract {
           /* best-effort */
         }
       }
-      record.tap?.end({ exit_code: code, signal });
+      // Model attribution rides on `usage` only when we also have real numeric
+      // usage to report — an all-null usage object solely to carry a model
+      // string isn't worth the wire noise (ticket 6dd3f968).
+      const resolvedModel = record.modelChain?.[record.chainAttempt ?? 0] ?? null;
+      record.tap?.end({
+        exit_code: code,
+        signal,
+        usage: record.usage ? { ...record.usage, model: resolvedModel } : undefined,
+      });
 
       // Answer-posting, circuit-breaker and silent-exit fallback. Extracted to
       // a named method so it can be unit-tested without forking a real child.
@@ -1250,6 +1268,7 @@ export class SubagentManager implements SubagentManagerContract {
           this.#bufferTail(record, line);
           this._scanForCommentTool(record, line);
           this.#maybeEmitChatProgress(record, line);
+          this.#captureUsageLine(record, line);
         }
         log(`${tagFor(record)} ${line}`);
       });
@@ -1281,6 +1300,25 @@ export class SubagentManager implements SubagentManagerContract {
     }
     record.tailLines.push(entry);
     while (record.tailLines.length > TAIL_RING_MAX_LINES) record.tailLines.shift();
+  }
+
+  /** Best-effort per-line usage capture (ticket 6dd3f968). Only result-shaped
+   *  lines carry usage, so this re-parses via the SAME adapter that spawned
+   *  the child (never claude's parser against a codex line, etc.) and folds
+   *  any snapshot into the record's running total. Usage is a nice-to-have
+   *  observability signal, never a dispatch/comment/circuit-breaker input —
+   *  any failure here is caught and logged, never rethrown. */
+  #captureUsageLine(record: SubagentRecord, line: string): void {
+    try {
+      const adapter = this.#adapterFor(record.cli_type);
+      const parsed = adapter.parseStdoutLine(line);
+      if (!parsed.isResult || !parsed.raw) return;
+      const snapshot = adapter.extractUsage(parsed.raw);
+      if (!snapshot) return;
+      record.usage = accumulateUsage(record.usage, snapshot);
+    } catch (err: any) {
+      log(`[subagent] usage capture failed pid=${record.pid}: ${err?.message ?? err}`);
+    }
   }
 
   /** Watch parsed JSONL for successful Claude or Codex MCP calls that create
