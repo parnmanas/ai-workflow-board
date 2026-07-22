@@ -274,11 +274,37 @@ export interface ChatMessageArtifactRef {
   // 배포 base_url 등 열람 대상 URL(있으면).
   url?: string;
 }
+// F-3 (ticket 3ca88253) — agent 상태 카드: get_agent 결과를 캡처해 채팅 응답에
+// AI Agents 화면과 동일한 핵심 정보(이름/온라인/heartbeat/현재 작업/manager/타입/
+// working dir)를 카드로 붙인다. 캡처는 id(+표시용 name)만 싣고, 클라이언트가 클릭
+// 시 GET /api/agents/:id 로 최신 상세를 다시 받아온다(TicketRefCard 가 ticket_id 만
+// 싣고 열람 시 getTicket 을 다시 부르는 것과 동일 패턴) — 그래서 카드가 항상 최신이고
+// 페이로드도 작다. list_agents(다건 조회)는 캡처하지 않는다 — "특정 agent" 상태
+// 질문에 대한 카드이지 목록 나열용이 아니다.
+export interface ChatMessageAgentRef {
+  agent_id: string;
+  // 표시용 라벨(있으면). 없으면 카드가 agent_id 를 보여주다가 상세 fetch 후 갱신.
+  name?: string;
+}
+// F-3 (ticket 3ca88253) — board 현황 카드: get_board_summary(LLM 용 압축 보드 요약)
+// 결과를 캡처해 채팅 응답에 보드 UI 를 축약한 카드를 붙인다. agent_refs 와 동일하게
+// id(+title)만 싣고, 클라이언트가 열람 시 GET /api/boards/:id 로 전체 컬럼/티켓을
+// 다시 받아 Board 화면과 같은 데이터로 렌더한다. get_board(전체 상세)는 다른 목적으로도
+// 쓰이는 범용 조회라 캡처 대상에서 제외 — get_board_summary 만 "보드 현황" 질문의
+// 전용 tool 이다.
+export interface ChatMessageBoardRef {
+  board_id: string;
+  // 보드 이름(있으면). get_board_summary 결과의 `board` 필드.
+  title?: string;
+}
 export interface ChatRoomMessageMetadata {
   ticket_refs?: ChatMessageTicketRef[];
   // F2-4 ⓒ: 빌드/배포 결과물 카드. ticket_refs 와 독립적으로 존재 가능 —
   // 한쪽만 있어도 metadata 는 유지된다(sanitizer 독립 처리).
   artifact_refs?: ChatMessageArtifactRef[];
+  // F-3: agent/board 상태 카드. 다른 refs 와 독립적으로 존재 가능.
+  agent_refs?: ChatMessageAgentRef[];
+  board_refs?: ChatMessageBoardRef[];
 }
 
 // Phase 7 — room-based chat
