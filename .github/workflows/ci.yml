@@ -120,6 +120,33 @@ jobs:
       - name: Run client tests
         run: npm test -w client
 
+  # apps/server 전체 `npm test` 체이닝 CI 게이트 (ticket 003fcc99).
+  #
+  # 배경: apps/server/package.json 의 `test` 스크립트(build 선행 + top-level ~92개
+  # 파일 + `test:qa` e2e ~91개 파일 + 마지막 1개, 총 168개 파일)를 실행하는 CI 잡이
+  # 하나도 없었다. 아래 `postgres-dialect-matrix` 는 `test:qa:pg`(test:qa 의 11개
+  # 파일 부분집합)만 Postgres 로 돌리므로, 나머지 top-level 가드와 `test:qa` 전체는
+  # CI 어디에서도 실행되지 않아 로컬 실행 결과에만 의존하는 사각지대였다 — 실제로
+  # `base-repo-binding.test.mjs` 정적 가드가 clean main 에서도 red 였던 회귀가 이
+  # 갭 때문에 한동안 아무 CI 도 잡지 못했다(ticket 9ab1bae1 로 테스트만 별도 수정).
+  #
+  # 이 잡은 그 전체 체인을 sqlite(sql.js, 기본 다이얼렉트)로 CI 게이트에 편입한다.
+  # `npm test` 자체가 build 를 선행하므로 별도 build step 은 불필요.
+  server-tests:
+    name: apps/server full test suite (sqlite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Run apps/server full test suite (build + top-level + qa-flows)
+        working-directory: apps/server
+        run: npm test
+
   # Dialect matrix — the actual pre-deploy safety net. Boots the contract flows
   # against Postgres 16 (matching the prod image) so uuid/varchar mismatches and
   # other Postgres-only failures are caught here, not on the live server.
