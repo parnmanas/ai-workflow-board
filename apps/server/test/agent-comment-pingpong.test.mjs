@@ -207,3 +207,59 @@ test('add_comment does NOT re-check pending_user_action for user-authored commen
   assert.equal(parsed.suppressed, undefined);
   assert.equal(harness.counters.commentSaves, 1);
 });
+
+// ── agent_chain_depth stamp on comment_mention (ticket 07402c57) ───────────
+//
+// add_comment computes the ticket-comment chain depth via
+// computeTicketCommentChainDepth (common/agent-chain-depth.ts) and stamps it
+// on every comment_mention it emits, mirroring room-messaging.service.ts's
+// chat-room stamp. agent-manager's event-dispatcher reads the field to cap
+// agent-mention ping-pong — these tests pin the SERVER half of that contract:
+// the emitted value must reflect the real authorship history.
+
+test('add_comment stamps agent_chain_depth reflecting an alternating agent mention chain', async () => {
+  const ticket = { id: 't6', workspace_id: 'w1', title: '작업', description: 'apps/server/src/a.ts', pending_user_action: false };
+  // Newest-first, matching the DESC-by-created_at order find() returns:
+  // one turn back was agentB, two turns back was agentA.
+  const harness = registeredAddCommentHarness({
+    ticket,
+    recent: [
+      { author_type: 'agent', author_id: 'agentB', content: '@[role:reviewer|Reviewer] 확인 부탁' },
+      { author_type: 'agent', author_id: 'agentA', content: '@[role:reviewer|Reviewer] 리뷰 요청' },
+    ],
+  });
+  let captured = null;
+  const onMention = (payload) => { captured = payload; };
+  activityEvents.on('comment_mention', onMention);
+  try {
+    const input = {
+      ticket_id: 't6', author_type: 'agent', author_id: 'agentA', author: 'AgentA', author_role: 'assignee',
+      content: '@[role:reviewer|Reviewer] 재요청',
+    };
+    await harness.addComment(input, {});
+  } finally {
+    activityEvents.off('comment_mention', onMention);
+  }
+  assert.ok(captured, 'comment_mention must fire for the role mention');
+  // [new:agentA, agentB, agentA] — matches the "agentA, agentB, agentA → 3" rule.
+  assert.equal(captured.agent_chain_depth, 3);
+});
+
+test('add_comment stamps agent_chain_depth=0 when a human comment breaks the chain', async () => {
+  const ticket = { id: 't7', workspace_id: 'w1', title: '작업', description: 'apps/server/src/a.ts', pending_user_action: false };
+  const harness = registeredAddCommentHarness({ ticket, recent: [] });
+  let captured = null;
+  const onMention = (payload) => { captured = payload; };
+  activityEvents.on('comment_mention', onMention);
+  try {
+    const input = {
+      ticket_id: 't7', author_type: 'user', author_id: 'human1', author: 'Human',
+      content: '@[role:reviewer|Reviewer] 사람이 남긴 첫 코멘트',
+    };
+    await harness.addComment(input, {});
+  } finally {
+    activityEvents.off('comment_mention', onMention);
+  }
+  assert.ok(captured, 'comment_mention must fire for the role mention');
+  assert.equal(captured.agent_chain_depth, 0);
+});

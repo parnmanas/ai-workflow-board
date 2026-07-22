@@ -18,6 +18,7 @@ import { resolveAgentDisplayName } from '../../utils/agent-name';
 import { projectChatAttachment } from '../mcp/shared/ticket-helpers';
 import { RunProvision } from '../../common/workspace-folder-options';
 import { ChatRoomMessageMetadata, ChatMessageTicketRef, ChatMessageArtifactRef } from '../../common/types/stream-events';
+import { computeChainDepth } from '../../common/agent-chain-depth';
 
 const CONTENT_MAX = 10000;
 
@@ -820,17 +821,12 @@ export class RoomMessagingService {
       .limit(AGENT_CHAIN_LOOKBACK)
       .getMany();
 
-    let depth = 0;
-    let prevSenderId: string | null = null;
-    for (const m of recent) {
-      if (m.sender_type !== 'agent') break;
-      // Same agent in a row: still part of the same chain step.
-      if (m.sender_id !== prevSenderId) {
-        depth++;
-        prevSenderId = m.sender_id;
-      }
-    }
-    return depth;
+    // Counting rule lives in common/agent-chain-depth so the ticket-comment
+    // mention path (tickets.controller.ts / comment-tools.ts) agrees with
+    // this room-chat path on one algorithm.
+    return computeChainDepth(
+      recent.map((m) => ({ isAgent: m.sender_type === 'agent', authorKey: m.sender_id })),
+    );
   }
 
   private async _loadAttachmentsForMessages(messageIds: string[]): Promise<Map<string, any[]>> {

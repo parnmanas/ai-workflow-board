@@ -386,6 +386,12 @@ export interface CommentMentionPayload {
   role_prompt: string;
   mention_source: 'direct' | 'role'; // direct @-mention vs. @assignee-style role shortcut
   role_shortcut?: string; // 'assignee' | 'reporter' | 'reviewer' when mention_source === 'role'
+  // Ticket-comment analog of ChatRoomMessagePayload.agent_chain_depth: trailing
+  // strictly-alternating agent-authorship chain length on this ticket's
+  // comments, including this one. agent-manager skips delegation once the
+  // depth reaches its cap so an agent-mention ping-pong auto-terminates —
+  // the chain resets once a human comments.
+  agent_chain_depth?: number;
 }
 
 // Phase-9 typed comments — fires when a user/agent starts composing a comment

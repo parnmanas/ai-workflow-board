@@ -53,6 +53,7 @@ import {
 import { findOrFail } from '../../common/find-or-fail';
 import { parseDefaultRoleAssignments, type DefaultRoleAssignments } from '../../common/default-role-assignments-config';
 import { validateHandoffSpecInput } from '../../common/handoff-spec-config';
+import { computeTicketCommentChainDepth } from '../../common/agent-chain-depth';
 
 @ApiBearerAuth('user-session')
 @ApiTags('tickets')
@@ -2285,6 +2286,12 @@ export class TicketsController {
       boardId = col?.board_id ?? null;
     }
 
+    // Ticket-comment analog of room-messaging.service.ts's chat chain-depth
+    // stamp (ticket 07402c57) — computed once per comment and reused across
+    // every fan-out target below, since it reflects this ticket's comment
+    // history, not the recipient.
+    const agentChainDepth = await computeTicketCommentChainDepth(this.commentRepo, ticket.id);
+
     for (const m of resolved) {
       if (m.type === 'agent') {
         const agent = await this.agentRepo.findOne({ where: { id: m.id } });
@@ -2305,6 +2312,7 @@ export class TicketsController {
           mention_source: m.roleShortcut ? 'role' : 'direct',
           role_shortcut: m.roleShortcut,
           timestamp: ts,
+          agent_chain_depth: agentChainDepth,
         });
         this.logService.info('Mentions', `Agent @-mention routed: ${agent.name} (${agent.id}) on ticket ${ticket.id}`);
       } else {

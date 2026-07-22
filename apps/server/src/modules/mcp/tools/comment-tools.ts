@@ -34,6 +34,7 @@ import { getConsensusState, findOpenProposal } from '../../../services/consensus
 import { buildConsensusUpdatePayload, autoExecuteConsensusMove } from '../../../services/consensus-actions';
 import type { ToolContext } from './context';
 import { applyAgentCommentPingPongGuard, terminalAckKey } from '../../../common/agent-comment-pingpong';
+import { computeTicketCommentChainDepth } from '../../../common/agent-chain-depth';
 
 function isUniqueConstraintError(error: unknown): boolean {
   const value = error as { code?: string; errno?: number; message?: string } | null;
@@ -345,6 +346,11 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
           const preview = (content || '').slice(0, 500);
           const ts = (comment.created_at instanceof Date ? comment.created_at : new Date()).toISOString();
           const userMentionRepo = dataSource.getRepository(UserMention);
+          // ticket 07402c57: chain-depth stamp for the agent-mention ping-pong
+          // cap (event-dispatcher.ts). Computed once and reused across every
+          // fan-out target — it reflects this ticket's comment history, not
+          // the recipient.
+          const agentChainDepth = await computeTicketCommentChainDepth(commentRepo, ticket.id);
           for (const m of resolved) {
             if (m.type === 'agent') {
               const agent = await dataSource.getRepository(Agent).findOne({ where: { id: m.id } });
@@ -364,6 +370,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
                 mention_source: m.roleShortcut ? 'role' : 'direct',
                 role_shortcut: m.roleShortcut,
                 timestamp: ts,
+                agent_chain_depth: agentChainDepth,
               });
               logger.info('Mentions', `Agent @-mention routed via MCP add_comment: ${agent.name} (${agent.id}) on ticket ${ticket.id}`);
             } else {
@@ -500,6 +507,8 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
           const preview = (content || '').slice(0, 500);
           const ts = (comment.created_at instanceof Date ? comment.created_at : new Date()).toISOString();
           const userMentionRepo = dataSource.getRepository(UserMention);
+          // ticket 07402c57: same chain-depth stamp as add_comment above.
+          const agentChainDepth = await computeTicketCommentChainDepth(commentRepo, ticket.id);
           for (const m of resolvedRefs) {
             if (m.type === 'agent') {
               const agent = await dataSource.getRepository(Agent).findOne({ where: { id: m.id } });
@@ -512,6 +521,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
                 content, role_prompt: agent.role_prompt || '',
                 mention_source: m.roleShortcut ? 'role' : 'direct', role_shortcut: m.roleShortcut,
                 timestamp: ts,
+                agent_chain_depth: agentChainDepth,
               });
             } else {
               const row = await userMentionRepo.save(userMentionRepo.create({
@@ -1079,6 +1089,8 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       //    subagent NOW with the handoff content rather than waiting for
       //    the next assignee-trigger cycle.
       const ts = (comment.created_at instanceof Date ? comment.created_at : new Date()).toISOString();
+      // ticket 07402c57: same chain-depth stamp as add_comment/ask_question.
+      const agentChainDepth = await computeTicketCommentChainDepth(commentRepo, ticket.id);
       activityEvents.emit('comment_mention', {
         ticket_id: ticket.id,
         comment_id: comment.id,
@@ -1091,6 +1103,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         role_prompt: targetAgent.role_prompt || '',
         mention_source: 'direct',
         timestamp: ts,
+        agent_chain_depth: agentChainDepth,
       });
       logger.info('Handoff', `Ticket ${ticket.id} handed to agent ${targetAgent.name} (${targetAgent.id}) by ${resolved.authorName}`);
 
