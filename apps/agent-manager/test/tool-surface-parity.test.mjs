@@ -29,6 +29,8 @@ import {
   BATCH_TICKET_TOOL,
   REJECT_HANDOFF_TOOL,
   ARTIFACT_ACTION_TOOLS,
+  AGENT_ACTION_TOOLS,
+  BOARD_ACTION_TOOLS,
   TICKET_TOOL_EXCLUSIONS,
   classifiedToolNames,
 } from '../dist/lib/ticket-ref-capture.js';
@@ -67,6 +69,8 @@ test('classification buckets are disjoint (no tool classified twice)', () => {
   put(BATCH_TICKET_TOOL, 'batch');
   put(REJECT_HANDOFF_TOOL, 'reject');
   for (const n of Object.keys(ARTIFACT_ACTION_TOOLS)) put(n, 'artifact');
+  for (const n of Object.keys(AGENT_ACTION_TOOLS)) put(n, 'agent');
+  for (const n of Object.keys(BOARD_ACTION_TOOLS)) put(n, 'board');
   for (const n of exclude) put(n, 'exclude');
   // classifiedToolNames() must equal the union with no dupes swallowed.
   assert.equal(classifiedToolNames().size, seen.size, 'classifiedToolNames drops or dupes a bucket');

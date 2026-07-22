@@ -65,6 +65,9 @@ function driveTurn(mgr, sess, actions) {
 const cardPosts = () => posts.filter((p) => Array.isArray(p.body?.metadata?.ticket_refs));
 // F2-4 ⓒ: 결과물 카드 post 는 metadata.artifact_refs 를 싣는다(ticket_refs 와 독립).
 const artifactCardPosts = () => posts.filter((p) => Array.isArray(p.body?.metadata?.artifact_refs));
+// F-3 (ticket 3ca88253): agent-status / board-summary 카드 post 는 각각 독립 채널.
+const agentCardPosts = () => posts.filter((p) => Array.isArray(p.body?.metadata?.agent_refs));
+const boardCardPosts = () => posts.filter((p) => Array.isArray(p.body?.metadata?.board_refs));
 // Let the fire-and-forget postChatRoomMessage promises settle.
 const settle = () => new Promise((r) => setTimeout(r, 30));
 
@@ -204,4 +207,127 @@ test('실패한 결과물(에러 result)은 카드로 방출되지 않는다(fai
   await settle();
 
   assert.equal(artifactCardPosts().length, 0, '에러/미인식 shape → 결과물 카드 없음');
+});
+
+// ── F-3 (ticket 3ca88253): agent-status / board-summary 카드 FLUSH ────────────
+// get_agent · get_board_summary 는 티켓 row 를 안 바꾸므로 ticket_refs 가 아니라 각각
+// metadata.agent_refs / metadata.board_refs 로 독립 방출된다. 아래는 실제 stream-json
+// glue 를 태워 방출되는 실 wire payload로 이를 고정한다.
+
+const agentAction = (id, name) => ({
+  tool: 'get_agent', input: { id },
+  result: { id, name, type: 'claude', is_online: true },
+});
+const boardAction = (id, name) => ({
+  tool: 'get_board_summary', input: { board_id: id },
+  result: { board: name, description: '', columns: [] },
+});
+
+test('get_agent tool → agent_refs 카드 방출(실 wire payload)', async () => {
+  const mgr = new ChatSessionManager(makeConfig());
+  const sess = makeSess();
+  driveTurn(mgr, sess, [agentAction('A-1', 'Rolf')]);
+  await settle();
+
+  const cards = agentCardPosts();
+  assert.equal(cards.length, 1, '한 turn 의 agent 조회는 하나의 카드로 합쳐진다');
+  assert.deepEqual(cards[0].body.metadata.agent_refs, [{ agent_id: 'A-1', name: 'Rolf' }]);
+  assert.equal(cards[0].body.content.split('\n').length, 1, 'content lines == agent refs');
+  assert.equal(cards[0].roomId, 'room-1');
+  // 다른 채널과 섞이지 않는다.
+  assert.equal(cardPosts().length, 0);
+  assert.equal(artifactCardPosts().length, 0);
+  assert.equal(boardCardPosts().length, 0);
+});
+
+test('get_board_summary tool → board_refs 카드 방출(실 wire payload)', async () => {
+  const mgr = new ChatSessionManager(makeConfig());
+  const sess = makeSess();
+  driveTurn(mgr, sess, [boardAction('B-1', 'AWB')]);
+  await settle();
+
+  const cards = boardCardPosts();
+  assert.equal(cards.length, 1, '한 turn 의 board 조회는 하나의 카드로 합쳐진다');
+  assert.deepEqual(cards[0].body.metadata.board_refs, [{ board_id: 'B-1', title: 'AWB' }]);
+  assert.equal(cards[0].body.content.split('\n').length, 1, 'content lines == board refs');
+  assert.equal(agentCardPosts().length, 0);
+});
+
+test('같은 agent 를 한 turn 에 두 번 물어도 카드는 하나(dedup)', async () => {
+  const mgr = new ChatSessionManager(makeConfig());
+  const sess = makeSess();
+  driveTurn(mgr, sess, [agentAction('A-1', 'Rolf'), agentAction('A-1', 'Rolf')]);
+  await settle();
+
+  const cards = agentCardPosts();
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0].body.metadata.agent_refs.length, 1, '동일 agent_id 는 한 카드에 한 번만');
+});
+
+test('티켓·결과물·agent·board 가 한 turn 에 섞이면 네 카드로 독립 방출', async () => {
+  const mgr = new ChatSessionManager(makeConfig());
+  const sess = makeSess();
+  driveTurn(mgr, sess, [
+    createAction('T-1'),
+    buildAction('client', 'def5678'),
+    agentAction('A-1', 'Rolf'),
+    boardAction('B-1', 'AWB'),
+  ]);
+  await settle();
+
+  assert.equal(cardPosts().length, 1, 'ticket_refs 카드 1개');
+  assert.equal(artifactCardPosts().length, 1, 'artifact_refs 카드 1개');
+  assert.equal(agentCardPosts().length, 1, 'agent_refs 카드 1개');
+  assert.equal(boardCardPosts().length, 1, 'board_refs 카드 1개');
+  // 네 카드는 서로 metadata 를 섞지 않는다(독립 flush).
+  const [tCard] = cardPosts();
+  const [bCard] = boardCardPosts();
+  assert.equal(tCard.body.metadata.agent_refs, undefined);
+  assert.equal(bCard.body.metadata.ticket_refs, undefined);
+});
+
+test('에러난 get_agent 결과는 카드로 방출되지 않는다(fail-closed)', async () => {
+  const mgr = new ChatSessionManager(makeConfig());
+  const sess = makeSess();
+  driveTurn(mgr, sess, [
+    { tool: 'get_agent', input: { id: 'A-1' }, result: { error: 'not found' }, isError: true },
+  ]);
+  await settle();
+
+  assert.equal(agentCardPosts().length, 0, '에러 결과 → agent 카드 없음');
+});
+
+// 서버의 MAX_AGENT_REFS/MAX_BOARD_REFS(room-messaging.service.ts)는 10 — ticket/artifact
+// 의 MAX_TICKET_REFS/MAX_ARTIFACT_REFS(20)의 절반이다. 위 21-ticket 테스트와 같은 회귀를
+// agent/board 채널에서도 고정한다: TICKET_REFS_PER_MESSAGE(20)로 청킹했다면 11번째~20번째
+// ref가 서버 sanitizer 에서 조용히 잘렸을 것 — chunkAgentRefs/chunkBoardRefs 호출부가
+// AGENT_BOARD_REFS_PER_MESSAGE(10)를 쓰는지 실 flush 경로로 고정한다.
+test('11개의 get_agent 조회가 한 turn 에 있으면 2개 카드(10 + 1)로 분할, 누락 없이', async () => {
+  const mgr = new ChatSessionManager(makeConfig());
+  const sess = makeSess();
+  driveTurn(mgr, sess, Array.from({ length: 11 }, (_, i) => agentAction(`A-${i}`, `agent-${i}`)));
+  await settle();
+
+  const cards = agentCardPosts();
+  assert.equal(cards.length, 2, '11번째 agent 조회가 두 번째 카드를 강제한다(서버 MAX_AGENT_REFS=10 초과 방지)');
+  const lens = cards.map((c) => c.body.metadata.agent_refs.length).sort((a, b) => b - a);
+  assert.deepEqual(lens, [10, 1], 'refs 는 10 + 1 로 분할되어 서버 per-message bound 를 지킨다');
+
+  const ids = cards.flatMap((c) => c.body.metadata.agent_refs.map((r) => r.agent_id));
+  assert.equal(new Set(ids).size, 11, '11개 서로 다른 agent_id 모두 생존');
+});
+
+test('11개의 get_board_summary 조회가 한 turn 에 있으면 2개 카드(10 + 1)로 분할, 누락 없이', async () => {
+  const mgr = new ChatSessionManager(makeConfig());
+  const sess = makeSess();
+  driveTurn(mgr, sess, Array.from({ length: 11 }, (_, i) => boardAction(`B-${i}`, `board-${i}`)));
+  await settle();
+
+  const cards = boardCardPosts();
+  assert.equal(cards.length, 2, '11번째 board 조회가 두 번째 카드를 강제한다(서버 MAX_BOARD_REFS=10 초과 방지)');
+  const lens = cards.map((c) => c.body.metadata.board_refs.length).sort((a, b) => b - a);
+  assert.deepEqual(lens, [10, 1], 'refs 는 10 + 1 로 분할되어 서버 per-message bound 를 지킨다');
+
+  const ids = cards.flatMap((c) => c.body.metadata.board_refs.map((r) => r.board_id));
+  assert.equal(new Set(ids).size, 11, '11개 서로 다른 board_id 모두 생존');
 });

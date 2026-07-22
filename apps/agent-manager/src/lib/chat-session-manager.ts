@@ -30,10 +30,22 @@ import {
   resolveArtifactRef,
   chunkArtifactRefs,
   formatArtifactRefsContent,
+  trackedAgentTool,
+  resolveAgentRef,
+  chunkAgentRefs,
+  formatAgentRefsContent,
+  trackedBoardTool,
+  resolveBoardRef,
+  chunkBoardRefs,
+  formatBoardRefsContent,
   type TicketToolContext,
   type TicketRef,
   type ArtifactToolContext,
   type ArtifactRef,
+  type AgentToolContext,
+  type AgentRef,
+  type BoardToolContext,
+  type BoardRef,
 } from './ticket-ref-capture.js';
 import { findLiveBackgroundTasks, reapProcessTrees, type ProcNode } from './process-tree.js';
 import { chatFollowupPolicy, composeChatRoomPrompt } from './prompts.js';
@@ -95,6 +107,12 @@ const PROGRESS_SUMMARY_MAX = 80;
  *  with the server's per-message MAX_TICKET_REFS (chat-rooms/room-messaging.service.ts)
  *  so every chunk survives the sanitizer whole. */
 const TICKET_REFS_PER_MESSAGE = 20;
+/** Agent/board refs per emitted card message (F-3 ticket 3ca88253). The server caps
+ *  these at MAX_AGENT_REFS/MAX_BOARD_REFS = 10 — half of MAX_TICKET_REFS/MAX_ARTIFACT_REFS
+ *  (chat-rooms/room-messaging.service.ts) — so chunking agent/board refs at
+ *  TICKET_REFS_PER_MESSAGE (20) would let the server sanitizer silently drop refs 11-20
+ *  of an oversized chunk, breaking the same "누락 없이" guarantee ticket/artifact refs get. */
+const AGENT_BOARD_REFS_PER_MESSAGE = 10;
 /** Bound on the per-manager ticket_id→title cache learned from tool results. */
 const TICKET_TITLE_CACHE_MAX = 500;
 
@@ -150,6 +168,13 @@ export class ChatSessionManager
   // pending/captured 이중 맵 — 티켓 ref 와 독립적으로 누적돼 flush 시 artifact_refs 로 방출.
   #pendingArtifactTools = new Map<number, Map<string, ArtifactToolContext>>();
   #capturedArtifactRefs = new Map<number, ArtifactRef[]>();
+  // F-3 (ticket 3ca88253): agent-status / board-summary 카드 캡처. 동일한 pid 키
+  // pending/captured 이중 맵 패턴 — 다른 ref 채널과 독립적으로 누적돼 flush 시
+  // agent_refs / board_refs 로 방출.
+  #pendingAgentTools = new Map<number, Map<string, AgentToolContext>>();
+  #capturedAgentRefs = new Map<number, AgentRef[]>();
+  #pendingBoardTools = new Map<number, Map<string, BoardToolContext>>();
+  #capturedBoardRefs = new Map<number, BoardRef[]>();
 
   constructor(config: SessionAwareConfig) {
     super(config, {
@@ -828,13 +853,36 @@ export class ChatSessionManager
     }
     // F2-4 ⓒ: 티켓 tool 이 아니면 결과물(빌드/배포) tool 인지 확인해 별도 추적.
     const actx = trackedArtifactTool(block?.name, block?.input);
-    if (!actx) return;
-    let apend = this.#pendingArtifactTools.get(pid);
-    if (!apend) {
-      apend = new Map();
-      this.#pendingArtifactTools.set(pid, apend);
+    if (actx) {
+      let apend = this.#pendingArtifactTools.get(pid);
+      if (!apend) {
+        apend = new Map();
+        this.#pendingArtifactTools.set(pid, apend);
+      }
+      apend.set(block.id, actx);
+      return;
     }
-    apend.set(block.id, actx);
+    // F-3 (ticket 3ca88253): 결과물 tool 도 아니면 agent-status / board-summary tool
+    // 인지 확인해 별도 추적. 세 채널 모두 tool 이름으로 배타 분기되므로(동일 tool 이
+    // 두 맵에 동시에 들어갈 수 없음) 순차 체크로 충분하다.
+    const agctx = trackedAgentTool(block?.name);
+    if (agctx) {
+      let agpend = this.#pendingAgentTools.get(pid);
+      if (!agpend) {
+        agpend = new Map();
+        this.#pendingAgentTools.set(pid, agpend);
+      }
+      agpend.set(block.id, agctx);
+      return;
+    }
+    const bctx = trackedBoardTool(block?.name, block?.input);
+    if (!bctx) return;
+    let bpend = this.#pendingBoardTools.get(pid);
+    if (!bpend) {
+      bpend = new Map();
+      this.#pendingBoardTools.set(pid, bpend);
+    }
+    bpend.set(block.id, bctx);
   }
 
   #consumeTicketToolResult(pid: number, block: any): void {
@@ -848,8 +896,12 @@ export class ChatSessionManager
     const useId = typeof block?.tool_use_id === 'string' ? block.tool_use_id : undefined;
     const ctx = pend && useId ? pend.get(useId) : undefined;
     if (!ctx || !pend || !useId) {
-      // Not a tracked ticket action — maybe a tracked artifact result (F2-4 ⓒ).
+      // Not a tracked ticket action — try the other tracked channels (each is a
+      // no-op if useId isn't in ITS pending map, so calling all three is safe: a
+      // given tool_use_id can only ever be pending in at most one of them).
       this.#consumeArtifactToolResult(pid, useId, result, isError);
+      this.#consumeAgentToolResult(pid, useId, result, isError);
+      this.#consumeBoardToolResult(pid, useId, result, isError);
       return;
     }
     pend.delete(useId);
@@ -902,36 +954,86 @@ export class ChatSessionManager
     this.#capturedArtifactRefs.set(pid, refs);
   }
 
-  /** Flush the turn's captured ticket-action + artifact refs as structured card
-   *  message(s). The server bounds each message's ticket_refs / artifact_refs at
-   *  TICKET_REFS_PER_MESSAGE, so a turn with more successful actions than that is split
-   *  across MULTIPLE cards (never truncated — acceptance #1 "누락 없이"). Non-empty Korean
-   *  content is the fallback for surfaces that don't render metadata (history replay,
-   *  notifications, legacy clients); the metadata.{ticket_refs,artifact_refs} drives the
-   *  rich card. F2-4 ⓒ: ticket / artifact 는 서로 독립적으로 flush — 한쪽만 있어도 방출.
+  /** F-3 (ticket 3ca88253): get_agent tool_result 를 소비해 AgentRef 로 캡처한다.
+   *  pending agent 맵에 매칭될 때만 방출(fail-closed). */
+  #consumeAgentToolResult(pid: number, useId: string | undefined, result: any, isError: boolean): void {
+    const agpend = this.#pendingAgentTools.get(pid);
+    const agctx = agpend && useId ? agpend.get(useId) : undefined;
+    if (!agctx || !agpend || !useId) return; // not a tracked agent tool
+    agpend.delete(useId);
+    const ref = resolveAgentRef(agctx, result, isError);
+    if (ref) this.#pushCapturedAgentRef(pid, ref);
+  }
+
+  /** Append a captured agent ref, collapsing duplicate agent_id so asking about the
+   *  same agent twice in one turn renders one card. */
+  #pushCapturedAgentRef(pid: number, ref: AgentRef): void {
+    const refs = this.#capturedAgentRefs.get(pid) ?? [];
+    if (refs.some((r) => r.agent_id === ref.agent_id)) return;
+    refs.push(ref);
+    this.#capturedAgentRefs.set(pid, refs);
+  }
+
+  /** F-3 (ticket 3ca88253): get_board_summary tool_result 를 소비해 BoardRef 로
+   *  캡처한다. pending board 맵에 매칭될 때만 방출(fail-closed). */
+  #consumeBoardToolResult(pid: number, useId: string | undefined, result: any, isError: boolean): void {
+    const bpend = this.#pendingBoardTools.get(pid);
+    const bctx = bpend && useId ? bpend.get(useId) : undefined;
+    if (!bctx || !bpend || !useId) return; // not a tracked board tool
+    bpend.delete(useId);
+    const ref = resolveBoardRef(bctx, result, isError);
+    if (ref) this.#pushCapturedBoardRef(pid, ref);
+  }
+
+  /** Append a captured board ref, collapsing duplicate board_id so asking about the
+   *  same board twice in one turn renders one card. */
+  #pushCapturedBoardRef(pid: number, ref: BoardRef): void {
+    const refs = this.#capturedBoardRefs.get(pid) ?? [];
+    if (refs.some((r) => r.board_id === ref.board_id)) return;
+    refs.push(ref);
+    this.#capturedBoardRefs.set(pid, refs);
+  }
+
+  /** Flush the turn's captured ticket-action + artifact + agent + board refs as
+   *  structured card message(s). The server bounds each message's ticket_refs /
+   *  artifact_refs at TICKET_REFS_PER_MESSAGE and agent_refs / board_refs at the lower
+   *  AGENT_BOARD_REFS_PER_MESSAGE, so a turn with more successful actions than that is
+   *  split across MULTIPLE cards (never truncated — acceptance #1 "누락 없이"). Non-empty
+   *  Korean content is the fallback for surfaces
+   *  that don't render metadata (history replay, notifications, legacy clients); the
+   *  metadata.{ticket_refs,artifact_refs,agent_refs,board_refs} drives the rich card.
+   *  Every channel flushes independently — any subset present is enough to emit.
    *  Fire-and-forget; clears per-pid state so it is idempotent (a second call after
    *  turn-end is a no-op). */
   #flushTicketRefs(sess: SessionRecord): void {
     const refs = this.#capturedTicketRefs.get(sess.pid);
     const artifactRefs = this.#capturedArtifactRefs.get(sess.pid);
+    const agentRefs = this.#capturedAgentRefs.get(sess.pid);
+    const boardRefs = this.#capturedBoardRefs.get(sess.pid);
     this.#capturedTicketRefs.delete(sess.pid);
     this.#pendingTicketTools.delete(sess.pid);
     this.#capturedArtifactRefs.delete(sess.pid);
     this.#pendingArtifactTools.delete(sess.pid);
+    this.#capturedAgentRefs.delete(sess.pid);
+    this.#pendingAgentTools.delete(sess.pid);
+    this.#capturedBoardRefs.delete(sess.pid);
+    this.#pendingBoardTools.delete(sess.pid);
     const hasTicket = !!refs && refs.length > 0;
     const hasArtifact = !!artifactRefs && artifactRefs.length > 0;
-    if (!hasTicket && !hasArtifact) return;
+    const hasAgent = !!agentRefs && agentRefs.length > 0;
+    const hasBoard = !!boardRefs && boardRefs.length > 0;
+    if (!hasTicket && !hasArtifact && !hasAgent && !hasBoard) return;
     const roomId: string | undefined = sess.roomId;
     const agentId: string | undefined = sess.agentId;
     if (!roomId || !agentId) return;
 
     const cfg = { ...this._config, apiKey: sess._effectiveApiKey || this._config.apiKey };
-    // Split into ≤TICKET_REFS_PER_MESSAGE-ref chunks so each survives the server
-    // sanitizer whole, then emit EVERY chunk — no message-count ceiling. A hard cap
-    // here (even one that logs) would drop successful refs past it, breaking acceptance
-    // #1 ("누락 없이"). The turn itself already bounds the volume: refs are deduped and
-    // only successful tracked mutations are captured, so the chunk count tracks real
-    // actions, not runaway input.
+    // Split into chunks sized to each channel's server-side per-message bound (so every
+    // chunk survives the sanitizer whole), then emit EVERY chunk — no message-count
+    // ceiling. A hard cap here (even one that logs) would drop successful refs past it,
+    // breaking acceptance #1 ("누락 없이"). The turn itself already bounds the volume:
+    // refs are deduped and only successful tracked mutations are captured, so the chunk
+    // count tracks real actions, not runaway input.
     // Fire-and-forget per chunk — postChatRoomMessage swallows + logs errors, so a
     // failed card post never blocks stdout parsing. type defaults to 'message'
     // (persistent, included in history replay); metadata carries that chunk's refs.
@@ -945,6 +1047,18 @@ export class ChatSessionManager
       for (const chunk of chunkArtifactRefs(artifactRefs!, TICKET_REFS_PER_MESSAGE)) {
         const content = formatArtifactRefsContent(chunk);
         void postChatRoomMessage(cfg, roomId, agentId, content, { metadata: { artifact_refs: chunk } });
+      }
+    }
+    if (hasAgent) {
+      for (const chunk of chunkAgentRefs(agentRefs!, AGENT_BOARD_REFS_PER_MESSAGE)) {
+        const content = formatAgentRefsContent(chunk);
+        void postChatRoomMessage(cfg, roomId, agentId, content, { metadata: { agent_refs: chunk } });
+      }
+    }
+    if (hasBoard) {
+      for (const chunk of chunkBoardRefs(boardRefs!, AGENT_BOARD_REFS_PER_MESSAGE)) {
+        const content = formatBoardRefsContent(chunk);
+        void postChatRoomMessage(cfg, roomId, agentId, content, { metadata: { board_refs: chunk } });
       }
     }
   }
