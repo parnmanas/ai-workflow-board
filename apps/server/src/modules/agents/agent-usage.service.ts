@@ -183,6 +183,9 @@ export class AgentUsageService {
       .sort((a, b) => (b.input_tokens + b.output_tokens) - (a.input_tokens + a.output_tokens))
       .slice(0, limit);
 
+    // Covered by idx_activity_logs_action_created (migration 1760000000063) —
+    // action_field alone (added for getSuppressionStats' lifetime counts)
+    // can't serve this query's created_at range past its leading column.
     const suppressedQb = this.dataSource
       .getRepository(ActivityLog)
       .createQueryBuilder('a')

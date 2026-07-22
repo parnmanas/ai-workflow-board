@@ -33,11 +33,26 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, Index } from 
 // `getSuppressionStats()` runs all three on every workflow-health dashboard
 // poll (15s) — without this index each one was a full sequential scan of the
 // same unbounded table described above.
+//
+// A sixth index was added in migration 1760000000063 for ticket 6dd3f968's
+// windowed suppression-savings query (AgentUsageService.getTokenUsageStats):
+//
+//   - `WHERE action IN (...) AND created_at BETWEEN ? AND ?` — suppressed-
+//                                                        attempts-in-window count
+//
+// Unlike getSuppressionStats() (lifetime-cumulative, no time bound, so
+// `idx_activity_logs_action_field` alone already satisfies it), this query
+// adds a created_at range that index can't serve past its leading `action`
+// column — without a dedicated (action, created_at) index it degrades to an
+// index-scan-then-filter over EVERY row that ever had a suppression action
+// rather than just the window, on the SAME 15s-polled endpoint the P1 above
+// already flagged once.
 @Index('idx_activity_logs_ticket_created', ['ticket_id', 'created_at'])
 @Index('idx_activity_logs_workspace_created', ['workspace_id', 'created_at'])
 @Index('idx_activity_logs_entity', ['entity_type', 'entity_id', 'created_at'])
 @Index('idx_activity_logs_actor_created', ['actor_id', 'created_at'])
 @Index('idx_activity_logs_action_field', ['action', 'field_changed'])
+@Index('idx_activity_logs_action_created', ['action', 'created_at'])
 @Entity('activity_logs')
 export class ActivityLog {
   @PrimaryGeneratedColumn('uuid')
