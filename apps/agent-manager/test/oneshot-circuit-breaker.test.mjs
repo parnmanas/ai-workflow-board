@@ -8,7 +8,11 @@
 //   ② the circuit-breaker counts one-shot failures and, once open, blocks
 //      re-spawn and pends the ticket;
 //   ③ a codex usage-limit (non-retryable) opens the breaker on the FIRST
-//      failure rather than after the full threshold.
+//      failure rather than after the full threshold;
+//   ④ (ticket b2e88390) a successful probe against an already-OPEN breaker
+//      does NOT auto-close it — only an operator's resetAgent()
+//      (restart_agent) may fully clear a breaker that already pended a
+//      ticket for a human.
 //
 // We mock globalThis.fetch to capture both the MCP tool surface (add_comment /
 // pend_ticket go through the JSON-RPC /mcp endpoint) and the REST silent-exit
@@ -250,12 +254,13 @@ test('FP regression: clean exit-0 answer mentioning 403/quota → agent comment,
   assert.equal(cb.shouldBlock(key), null, 'breaker untouched by a successful answer');
 });
 
-test('successful answer resets a partially-tripped breaker', async () => {
+test('successful answer resets a NOT-yet-open (partially-tripped) breaker', async () => {
   const cb = new CircuitBreaker();
   const mgr = new SubagentManager(makeConfig(), cb);
   const key = CircuitBreaker.key('agent-rolf', 'ticket-loop', 'assignee');
 
-  // Two bare-codex-error failures (retryable) — count toward threshold.
+  // Two bare-codex-error failures (retryable) — count toward threshold, but
+  // 2 < the default threshold of 5, so the breaker never actually opened.
   for (let i = 0; i < 2; i++) {
     const rec = makeCodexRecord({
       outLines: [JSON.stringify({ type: 'turn.failed', error: { message: 'stream disconnected' } })],
@@ -264,10 +269,45 @@ test('successful answer resets a partially-tripped breaker', async () => {
   }
   assert.equal(cb.size, 1, 'breaker is tracking the key');
 
-  // Now a clean success → reset clears the key.
+  // Now a clean success → recordSuccess() clears the (never-open) key, same
+  // as the old unconditional reset() did.
   const ok = makeCodexRecord({ outLines: codexCleanLines('Done.') });
   await mgr._handleOneshotExit(ok, 0);
   assert.equal(cb.shouldBlock(key), null);
+});
+
+test('ticket b2e88390: a successful answer does NOT auto-close an already-OPEN breaker', async () => {
+  // Contrast with the test above: here the breaker already tripped (crossed
+  // threshold) and pend_ticket already fired for a human. A single lucky
+  // half-open probe succeeding must not silently undo that — only an
+  // operator's resetAgent() (restart_agent) may fully close it.
+  const cb = new CircuitBreaker({ threshold: 2, cooldownMs: 60_000 });
+  const mgr = new SubagentManager(makeConfig(), cb);
+  const key = CircuitBreaker.key('agent-rolf', 'ticket-loop', 'assignee');
+
+  for (let i = 0; i < 2; i++) {
+    const rec = makeCodexRecord({
+      outLines: [JSON.stringify({ type: 'turn.failed', error: { message: 'stream disconnected' } })],
+    });
+    await mgr._handleOneshotExit(rec, 1);
+  }
+  assert.ok(cb.shouldBlock(key), 'breaker is open after crossing the (lowered) threshold');
+  assert.ok(mcpToolCalls.includes('pend_ticket'), 'the open crossing already pended the ticket for a human');
+
+  mcpToolCalls.length = 0; // isolate the success dispatch below
+
+  const ok = makeCodexRecord({ outLines: codexCleanLines('Half-open probe: done.') });
+  await mgr._handleOneshotExit(ok, 0);
+
+  assert.ok(
+    cb.shouldBlock(key),
+    'a single successful probe must NOT silently close an already-open breaker',
+  );
+  assert.equal(
+    mcpToolCalls.includes('pend_ticket'),
+    false,
+    'no NEW pend on a probe success either — the ticket is already parked',
+  );
 });
 
 test('post-comment crash (ticket 7e7e23bf): commentSent + non-zero exit → NO silent-exit, breaker reset, no pend', async () => {

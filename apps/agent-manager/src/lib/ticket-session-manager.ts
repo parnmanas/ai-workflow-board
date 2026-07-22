@@ -901,10 +901,13 @@ export class TicketSessionManager
           //      `_onChildExit` fallback skips this pid.
           if (this.#isCommentTool(block.name)) {
             this.#commentSent.add(sess.pid);
-            // Agent successfully left an audit trail — reset circuit-breaker
-            // so future dispatches aren't blocked by stale failure counts.
+            // Agent successfully left an audit trail. recordSuccess() (not
+            // reset()) — a sub-threshold streak clears same as before, but an
+            // already-OPEN breaker stays open until a human/operator closes
+            // it (ticket b2e88390); one probe succeeding isn't proof the
+            // underlying problem is fixed.
             if (sess.agentId && sess.ticketId) {
-              this.circuitBreaker.reset(
+              this.circuitBreaker.recordSuccess(
                 CircuitBreaker.key(sess.agentId, sess.ticketId, sess.role || ''),
               );
             }
@@ -1130,7 +1133,10 @@ export class TicketSessionManager
     // fresh forward progress), never a single post-hoc exit after work landed.
     if (commented) {
       if (sess.agentId && ticketId) {
-        this.circuitBreaker.reset(
+        // recordSuccess() (not reset()) — ticket b2e88390: leaves an
+        // already-OPEN breaker open for human/operator close, only fully
+        // clearing a streak that hadn't tripped yet.
+        this.circuitBreaker.recordSuccess(
           CircuitBreaker.key(sess.agentId, ticketId, role),
         );
       }

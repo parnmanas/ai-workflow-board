@@ -1051,13 +1051,15 @@ export class SubagentManager implements SubagentManagerContract {
       const role = record.role || '';
       const cbKey = CircuitBreaker.key(record.agent_id, record.ticket_id, role);
       // ticket 7e7e23bf: a subagent that surfaced an audit-trail comment did
-      // real work; a post-hoc non-zero exit is NOT a failure to count. Reset
-      // the breaker even on a non-zero exit — UNLESS the tail carries a
+      // real work; a post-hoc non-zero exit is NOT a failure to count. Record
+      // the success even on a non-zero exit — UNLESS the tail carries a
       // non-retryable fatal signature (usage-limit / auth), where the immediate
       // pend still protects against burning respawns on a hard external block
-      // (ticket ac958c06).
+      // (ticket ac958c06). recordSuccess() (not reset()) so an already-OPEN
+      // breaker stays open for a human/operator to close (ticket b2e88390) —
+      // it only fully clears a streak that hadn't tripped yet.
       if (record.commentSent && !errClass.nonRetryable) {
-        this.circuitBreaker.reset(cbKey);
+        this.circuitBreaker.recordSuccess(cbKey);
       } else if (
         !record.commentSent ||
         !CircuitBreaker.isTransientExit(code) ||
