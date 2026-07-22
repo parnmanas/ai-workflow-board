@@ -313,6 +313,16 @@ export class RespawnStormDetectorService implements OnModuleInit, OnModuleDestro
       d.exit_code != null ? String(d.exit_code) : (d.signal || 'signal')))).join(',');
     const windowMin = Math.round(cfg.windowMs / 60_000);
     const tail = await this._lastOutputTail(quickDeaths);
+    // Loop 시작점 — 이 그룹에서 가장 먼저 죽은 시각(quickDeaths는 전부
+    // ended_at이 있음이 보장됨, _isQuickAbnormalDeath 필터 참고).
+    const firstDeathMs = quickDeaths.reduce(
+      (min, d) => (d.ended_at != null && d.ended_at.getTime() < min ? d.ended_at.getTime() : min),
+      now.getTime(),
+    );
+    const firstDeathAt = new Date(firstDeathMs).toISOString();
+    // 참여 agent 전체 목록 — Subagent.agent_id는 이미 존재하나 지금까지 halt
+    // 이벤트에 전파되지 않았음(role만 기록).
+    const agentIds = Array.from(new Set(quickDeaths.map(d => d.agent_id).filter(Boolean)));
     const summary =
       `Respawn-storm: role=${role} — ${quickDeaths.length} quick deaths ` +
       `in ${windowMin}m (exit ${exitCodes}), zero forward progress. ` +
@@ -350,6 +360,8 @@ export class RespawnStormDetectorService implements OnModuleInit, OnModuleDestro
         exit_codes: exitCodes,
         auto_pended: cfg.autoPend,
         subagent_ids: quickDeaths.map(d => d.subagent_id).slice(0, 10),
+        agent_ids: agentIds.slice(0, 10),
+        first_death_at: firstDeathAt,
         last_output_tail: tail,
       }),
       ticket_id: ticket.id, actor_id: 'system', actor_name: 'RespawnStormDetector',
@@ -392,6 +404,9 @@ export class RespawnStormDetectorService implements OnModuleInit, OnModuleDestro
     // Latest-started strand is the "late" twin (the echo).
     const sorted = [...live].sort((a, b) => a.started_at.getTime() - b.started_at.getTime());
     const lateTwin = sorted[sorted.length - 1];
+    // Loop 시작점 — 가장 먼저 시작된(=최초) strand의 시각. 참여 agent 전체 목록도
+    // 함께 노출(기존에는 role만 기록).
+    const agentIds = Array.from(new Set(sorted.map(s => s.agent_id).filter(Boolean)));
 
     await this.activityService.logActivity({
       entity_type: 'ticket', entity_id: ticket.id, action: 'respawn_twin_detected',
@@ -399,6 +414,8 @@ export class RespawnStormDetectorService implements OnModuleInit, OnModuleDestro
       old_value: '', new_value: JSON.stringify({
         role, live_count: live.length,
         subagent_ids: sorted.map(s => s.subagent_id),
+        agent_ids: agentIds,
+        first_seen_at: sorted[0].started_at.toISOString(),
         late_twin_id: lateTwin.subagent_id,
       }),
       ticket_id: ticket.id, actor_id: 'system', actor_name: 'RespawnStormDetector',
@@ -535,6 +552,7 @@ export class RespawnStormDetectorService implements OnModuleInit, OnModuleDestro
   async listActiveStorms(): Promise<Array<{
     ticket_id: string; title: string; board_id: string; board_name: string;
     workspace_id: string; pending_reason: string; pending_set_at: Date | null;
+    agent_ids: string[]; first_death_at: string | null;
   }>> {
     const ticketRepo = this.dataSource.getRepository(Ticket);
     const halted = await ticketRepo.find({
@@ -545,15 +563,52 @@ export class RespawnStormDetectorService implements OnModuleInit, OnModuleDestro
     const boardNames = await this._boardNameMap(
       Array.from(withBoard.values()).map(v => v.boardId).filter(Boolean) as string[],
     );
+    const haltSnapshotByTicket = await this._haltEventSnapshotByTicket(halted.map(t => t.id));
     return halted.map(t => {
       const boardId = withBoard.get(t.id)?.boardId ?? '';
+      const snapshot = haltSnapshotByTicket.get(t.id);
       return {
         ticket_id: t.id, title: t.title,
         board_id: boardId || '', board_name: boardId ? (boardNames.get(boardId) ?? '(unknown)') : '(no board)',
         workspace_id: t.workspace_id, pending_reason: t.pending_reason,
         pending_set_at: t.pending_set_at,
+        agent_ids: snapshot?.agentIds ?? [],
+        first_death_at: snapshot?.firstDeathAt ?? null,
       };
     });
+  }
+
+  /**
+   * Loop 시작점(`first_death_at`) + 참여 agent 전체 목록(`agent_ids`), 티켓별로
+   * 가장 최근 `respawn_storm_halted` 이벤트에서 읽어온다(halt 시점에 남긴 durable
+   * 스냅샷 — `_haltStorm` 참고). 현재 halt 중인(작은 규모) 티켓 집합으로 한정되므로
+   * created_at DESC 정렬 + JS에서 티켓당 첫 히트만 채택하는 방식이 DISTINCT ON
+   * (sqlite/Postgres 듀얼백엔드에서 이식성이 없음)만큼 저렴하면서 더 간단하다.
+   */
+  private async _haltEventSnapshotByTicket(
+    ticketIds: string[],
+  ): Promise<Map<string, { agentIds: string[]; firstDeathAt: string | null }>> {
+    const map = new Map<string, { agentIds: string[]; firstDeathAt: string | null }>();
+    if (ticketIds.length === 0) return map;
+    const rows = await this.dataSource.getRepository(ActivityLog)
+      .createQueryBuilder('a')
+      .where('a.ticket_id IN (:...ids)', { ids: ticketIds })
+      .andWhere("a.action = 'respawn_storm_halted'")
+      .orderBy('a.created_at', 'DESC')
+      .getMany();
+    for (const row of rows) {
+      if (map.has(row.ticket_id)) continue; // first hit per ticket = most recent (DESC order)
+      try {
+        const parsed = JSON.parse(row.new_value || '{}');
+        map.set(row.ticket_id, {
+          agentIds: Array.isArray(parsed.agent_ids) ? parsed.agent_ids : [],
+          firstDeathAt: typeof parsed.first_death_at === 'string' ? parsed.first_death_at : null,
+        });
+      } catch {
+        map.set(row.ticket_id, { agentIds: [], firstDeathAt: null });
+      }
+    }
+    return map;
   }
 
   /**
@@ -562,6 +617,7 @@ export class RespawnStormDetectorService implements OnModuleInit, OnModuleDestro
    */
   async topRespawnCounts(opts: { windowMs?: number; limit?: number; boardId?: string; now?: Date } = {}): Promise<Array<{
     ticket_id: string; title: string; role: string; board_id: string; board_name: string; deaths: number;
+    agent_ids: string[];
   }>> {
     const now = opts.now ?? new Date();
     const windowMs = opts.windowMs ?? this.baseline.windowMs;
@@ -574,12 +630,13 @@ export class RespawnStormDetectorService implements OnModuleInit, OnModuleDestro
       .andWhere("s.role IS NOT NULL AND s.role != ''")
       .getMany();
 
-    const counts = new Map<string, { ticketId: string; role: string; deaths: number }>();
+    const counts = new Map<string, { ticketId: string; role: string; deaths: number; agentIds: Set<string> }>();
     for (const r of rows) {
       if (!this._isQuickAbnormalDeath(r, this.baseline.quickDeathMs, since)) continue;
       const key = `${r.ticket_id} ${r.role}`;
-      const c = counts.get(key) ?? { ticketId: r.ticket_id as string, role: r.role as string, deaths: 0 };
+      const c = counts.get(key) ?? { ticketId: r.ticket_id as string, role: r.role as string, deaths: 0, agentIds: new Set<string>() };
       c.deaths += 1;
+      if (r.agent_id) c.agentIds.add(r.agent_id);
       counts.set(key, c);
     }
     if (counts.size === 0) return [];
@@ -598,6 +655,7 @@ export class RespawnStormDetectorService implements OnModuleInit, OnModuleDestro
         board_id: boardId || '',
         board_name: boardId ? (boardNames.get(boardId) ?? '(unknown)') : '(no board)',
         deaths: c.deaths,
+        agent_ids: Array.from(c.agentIds),
       };
     });
     if (opts.boardId) list = list.filter(x => x.board_id === opts.boardId);
@@ -610,6 +668,43 @@ export class RespawnStormDetectorService implements OnModuleInit, OnModuleDestro
     if (ids.length === 0) return new Map();
     const boards = await this.dataSource.getRepository(Board).findByIds(ids);
     return new Map(boards.map(b => [b.id, b.name]));
+  }
+
+  /**
+   * Lifetime cumulative counts of dispatch/trigger suppression, read straight
+   * back off `ActivityLog` (ticket 3970db66 — until now these only ever hit the
+   * ephemeral LogService ring or, for 2 of 3 comment-pingpong reasons, nothing
+   * durable at all). Workspace-wide; not board-scoped (v1 — the dashboard tile
+   * this powers doesn't need a per-board breakdown yet).
+   */
+  async getSuppressionStats(): Promise<{
+    respawn_storm: { total_halts: number; total_twins: number };
+    comment_pingpong: { total: number; by_reason: Record<string, number> };
+  }> {
+    const activityRepo = this.dataSource.getRepository(ActivityLog);
+    const [totalHalts, totalTwins, pingpongRows] = await Promise.all([
+      activityRepo.count({ where: { action: 'respawn_storm_halted' } }),
+      activityRepo.count({ where: { action: 'respawn_twin_detected' } }),
+      activityRepo.createQueryBuilder('a')
+        .select('a.field_changed', 'reason')
+        .addSelect('COUNT(*)', 'count')
+        .where("a.action = 'comment_pingpong_suppressed'")
+        .groupBy('a.field_changed')
+        .getRawMany<{ reason: string; count: string }>(),
+    ]);
+
+    const byReason: Record<string, number> = {};
+    let total = 0;
+    for (const row of pingpongRows) {
+      const n = parseInt(row.count, 10) || 0;
+      byReason[row.reason || 'unknown'] = n;
+      total += n;
+    }
+
+    return {
+      respawn_storm: { total_halts: totalHalts, total_twins: totalTwins },
+      comment_pingpong: { total, by_reason: byReason },
+    };
   }
 
   /**
@@ -627,12 +722,17 @@ export class RespawnStormDetectorService implements OnModuleInit, OnModuleDestro
     pending_tickets: number;
     avg_cycle_time_ms: number | null;
     qa_pass_trend: { passed: number; failed: number; error: number; total: number };
+    suppression_stats: Awaited<ReturnType<RespawnStormDetectorService['getSuppressionStats']>>;
   }> {
     const now = opts.now ?? new Date();
     const windowMs = this.baseline.windowMs;
 
     const activeStorms = await this.listActiveStorms().catch(() => []);
     const topRespawns = await this.topRespawnCounts({ now, boardId: opts.boardId }).catch(() => []);
+    const suppressionStats = await this.getSuppressionStats().catch(() => ({
+      respawn_storm: { total_halts: 0, total_twins: 0 },
+      comment_pingpong: { total: 0, by_reason: {} },
+    }));
 
     // Scope helper: which ticket column_ids belong to boardId (if scoped).
     const scopedColIds = opts.boardId
@@ -710,6 +810,7 @@ export class RespawnStormDetectorService implements OnModuleInit, OnModuleDestro
       pending_tickets: pending,
       avg_cycle_time_ms: avgCycleMs,
       qa_pass_trend: qaTrend,
+      suppression_stats: suppressionStats,
     };
   }
 }

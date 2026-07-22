@@ -127,9 +127,15 @@ test('registered add_comment boundary atomically pends concurrent third waits wi
   });
   const input = { ticket_id: 't1', author_type: 'agent', author_id: 'assignee', author: 'Assignee', author_role: 'assignee', content: '대기 유지: planner 구현 계획 없음' };
   await Promise.all([harness.addComment({ ...input }, {}), harness.addComment({ ...input }, {})]);
-  assert.deepEqual(harness.counters, { commentSaves: 0, activities: 1, mentionResolves: 0, pendingUpdates: 1 });
+  // activities: 1 (winning CAS's pending_user_action field-change audit) + 2
+  // (ticket 3970db66 — every suppressed attempt now writes its own
+  // comment_pingpong_suppressed row, attributed to the real agent; both
+  // concurrent calls see guard.suppressed=true regardless of which won the CAS).
+  assert.deepEqual(harness.counters, { commentSaves: 0, activities: 3, mentionResolves: 0, pendingUpdates: 1 });
   await harness.addComment({ ...input }, {});
-  assert.deepEqual(harness.counters, { commentSaves: 0, activities: 1, mentionResolves: 0, pendingUpdates: 1 });
+  // +1 more: the ticket is now pending, so the 3rd call short-circuits at the
+  // guard's "already pending" branch (reason='pending_user_action') — also logged.
+  assert.deepEqual(harness.counters, { commentSaves: 0, activities: 4, mentionResolves: 0, pendingUpdates: 1 });
 });
 
 test('registered add_comment Review to Merging boundary saves/emits one concurrent approval and zero later receipts', async () => {
@@ -145,7 +151,12 @@ test('registered add_comment Review to Merging boundary saves/emits one concurre
       harness.addComment({ ...base, content: '@[role:reviewer|Reviewer] 6bd700c9 approved; no blockers' }, {}),
     ]);
     await harness.addComment({ ...base, content: '@[role:reviewer|Reviewer] 6bd700c9 승인 확인, blocker 없음' }, {});
-    assert.deepEqual(harness.counters, { commentSaves: 1, activities: 1, mentionResolves: 1, pendingUpdates: 0 });
+    // activities: 1 (winner's "comment created" audit, pre-existing) + 1 (loser's
+    // duplicate_terminal_acknowledgement suppression, from the unique-constraint
+    // catch path) + 1 (3rd call's duplicate_terminal_acknowledgement, this time
+    // caught by the in-memory shouldSuppressTerminalAck against the winner's
+    // stored row) — ticket 3970db66, both suppression paths now logged.
+    assert.deepEqual(harness.counters, { commentSaves: 1, activities: 3, mentionResolves: 1, pendingUpdates: 0 });
     assert.equal(sseMentions, 1);
   } finally {
     activityEvents.off('comment_mention', onMention);
@@ -178,7 +189,9 @@ test('add_comment blocks the save when pending_user_action flips true after the 
 
   assert.equal(findOneCalls, 2, 'must re-read the ticket exactly once more, right before the save');
   assert.deepEqual(parsed, { suppressed: true, reason: 'pending_user_action' });
-  assert.deepEqual(harness.counters, { commentSaves: 0, activities: 0, mentionResolves: 0, pendingUpdates: 0 });
+  // activities: 1 — the TOCTOU recheck's suppression is now logged too (ticket
+  // 3970db66), attributed to the real agent instead of leaving no trail at all.
+  assert.deepEqual(harness.counters, { commentSaves: 0, activities: 1, mentionResolves: 0, pendingUpdates: 0 });
 });
 
 test('add_comment saves normally when nothing pends the ticket in the load-to-save window (regression baseline)', async () => {

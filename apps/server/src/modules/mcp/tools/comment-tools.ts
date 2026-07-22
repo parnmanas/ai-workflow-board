@@ -181,6 +181,21 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       );
       const finalMetadata = mergeAuthorRoleIntoMetadata(metadata, resolvedAuthorRole);
 
+      // 억제 사유 3종(repeated_waiting_without_work_target / pending_user_action /
+      // duplicate_terminal_acknowledgement) 전부를 실제 차단된 agent 귀속으로
+      // ActivityLog에 남긴다 (ticket 3970db66). 이전에는 repeated_waiting만
+      // pend() 콜백을 통해 'pending_user_action' 필드 변경 로그로 간접 노출됐고
+      // (그마저 actor는 guard 자신), 나머지 2종은 MCP 응답 JSON에만 존재해
+      // 로그/UI 어디에도 남지 않았다. best-effort — 로깅 실패로 댓글 흐름을
+      // 막지 않는다.
+      const logPingPongSuppression = (reason: string) =>
+        activityService.logActivity({
+          entity_type: 'ticket', entity_id: ticket.id, action: 'comment_pingpong_suppressed',
+          field_changed: reason, ticket_id: ticket.id,
+          actor_id: resolvedAuthorId, actor_name: authorName,
+          role: resolvedAuthorRole || '', trigger_source: 'comment_pingpong_guard',
+        }).catch(() => {});
+
       // Server-side primary guard. Pending tickets accept no further agent
       // comments; repeated terminal receipts are dropped before comment/SSE
       // creation. The manager repeats the terminal check as a replay safety net.
@@ -217,6 +232,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         },
       });
       if (guard.suppressed) {
+        await logPingPongSuppression(guard.reason || 'unknown');
         return ok(guard);
       }
 
@@ -300,6 +316,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       if (resolvedAuthorType === 'agent') {
         const freshForGate = await ticketRepo.findOne({ where: { id: ticket.id } });
         if (freshForGate?.pending_user_action) {
+          await logPingPongSuppression('pending_user_action');
           return ok({ suppressed: true, reason: 'pending_user_action' });
         }
       }
@@ -324,6 +341,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         }));
       } catch (error) {
         if (ackKey && isUniqueConstraintError(error)) {
+          await logPingPongSuppression('duplicate_terminal_acknowledgement');
           return ok({ suppressed: true, reason: 'duplicate_terminal_acknowledgement' });
         }
         throw error;

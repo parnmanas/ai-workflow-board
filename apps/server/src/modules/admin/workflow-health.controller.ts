@@ -11,9 +11,12 @@ import { RespawnStormDetectorService } from '../agents/respawn-storm-detector.se
  * the-service shape of `/api/admin/stuck-tickets`.
  *
  * Endpoints:
- *   - GET /api/admin/workflow-health            → full rollup (optional ?board_id=)
- *   - GET /api/admin/workflow-health/storms     → tickets currently halted by a storm
- *   - GET /api/admin/workflow-health/respawns   → top (ticket,role) by quick-death count
+ *   - GET /api/admin/workflow-health              → full rollup (optional ?board_id=)
+ *   - GET /api/admin/workflow-health/storms       → tickets currently halted by a storm
+ *   - GET /api/admin/workflow-health/respawns     → top (ticket,role) by quick-death count
+ *   - GET /api/admin/workflow-health/suppressions → cumulative respawn-storm halts +
+ *                                                    comment-pingpong suppressions by reason
+ *                                                    (ticket 3970db66)
  *
  * Shares the AdminGuard used by the rest of the /api/admin/* surface.
  */
@@ -45,5 +48,11 @@ export class WorkflowHealthController {
     const parsedLimit = limit ? Math.max(1, Math.min(100, parseInt(limit, 10) || 10)) : 10;
     const rows = await this.detector.topRespawnCounts({ boardId: boardId || undefined, limit: parsedLimit });
     return res.json({ respawns: rows });
+  }
+
+  @Get('suppressions')
+  async suppressions(@Res() res: Response): Promise<Response> {
+    const stats = await this.detector.getSuppressionStats();
+    return res.json(stats);
   }
 }
