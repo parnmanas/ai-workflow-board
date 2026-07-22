@@ -127,8 +127,15 @@ export class ClaudeCliAdapter extends CliAdapter {
         ...(model ? ['--model', model] : []),
         ...(effortArg ? ['--effort', effortArg] : []),
         '--print',
+        // 배치 전용 `json` 모드가 아니라 stream-json — 매니저의 #wireStdioCapture가
+        // 실행 중에 turn별 `assistant`/tool_use 이벤트를 보게 하기 위함이다.
+        // _scanForCommentTool은 그 shape만 인식하는데, NATIVE_MCP라 배치 모드의
+        // 단일 종료 시점 블롭이 유일한 대안 소스이고 그마저도 exit 핸들러가 이미
+        // 답을 필요로 하는 시점 이후에나 도착한다(ticket 3feaf80f). --print와
+        // --output-format=stream-json을 같이 쓸 때는 CLI가 --verbose를 요구한다.
+        '--verbose',
         '--output-format',
-        'json',
+        'stream-json',
         '--mcp-config',
         mcpConfigPath ?? '',
         '--strict-mcp-config',

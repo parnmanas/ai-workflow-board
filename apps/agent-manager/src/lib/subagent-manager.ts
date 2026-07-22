@@ -1265,14 +1265,12 @@ export class SubagentManager implements SubagentManagerContract {
     }
   }
 
-  /** Append a stdout/stderr line to the silent-exit tail ring. Plain-text
-   *  lines are kept verbatim; stream-json events are condensed to a short
-   *  prose summary (assistant text / tool_use / result subtype+error) rather
-   *  than dropped — the one-shot path runs `--output-format json`, so on a
-   *  failed turn the only output is a single JSON result line; dropping it
-   *  left the silent-exit fallback with an empty tail (ticket ac958c06).
-   *  Noise events summarize to null and are skipped. Bounded to
-   *  TAIL_RING_MAX_LINES. */
+  /** stdout/stderr 한 줄을 silent-exit tail 링에 추가한다. 일반 텍스트 줄은
+   *  그대로 보존하고, stream-json 이벤트는 버리지 않고 짧은 프로즈 요약으로
+   *  압축한다(assistant 텍스트 / tool_use / result subtype+error) — stream-json
+   *  모드에서는 stdout의 거의 모든 줄이 JSON이라, 요약 없이 버리면 silent-exit
+   *  fallback의 tail이 거의 항상 비어 있었다(ticket ac958c06). 노이즈 이벤트는
+   *  null로 요약되어 스킵된다. TAIL_RING_MAX_LINES로 상한이 걸린다. */
   #bufferTail(record: SubagentRecord, line: string): void {
     const trimmed = line.trim();
     if (!trimmed) return;
