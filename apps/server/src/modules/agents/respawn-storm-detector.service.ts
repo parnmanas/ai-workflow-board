@@ -66,6 +66,7 @@ import {
   respawnStormDefaultsFromEnv,
   resolveRespawnStormConfig,
 } from '../../common/respawn-storm-config';
+import { sinceBoundaryParam } from '../../common/created-at-since-param';
 
 // Global operational knob (not per-board): how often the background sweep runs.
 // Storms are acute, so we sweep faster than the stuck detector (15 min).
@@ -272,7 +273,7 @@ export class RespawnStormDetectorService implements OnModuleInit, OnModuleDestro
       .createQueryBuilder('c')
       .where('c.ticket_id = :tid', { tid: ticketId })
       .andWhere("c.type != 'system'")
-      .andWhere('c.created_at >= :from', { from: windowStart })
+      .andWhere('c.created_at >= :from', { from: sinceBoundaryParam(this.dataSource, windowStart) })
       .getCount();
     if (freshComments > 0) return true;
 
@@ -280,7 +281,7 @@ export class RespawnStormDetectorService implements OnModuleInit, OnModuleDestro
     const moves = await activityRepo
       .createQueryBuilder('a')
       .where('a.ticket_id = :tid', { tid: ticketId })
-      .andWhere('a.created_at >= :from', { from: windowStart })
+      .andWhere('a.created_at >= :from', { from: sinceBoundaryParam(this.dataSource, windowStart) })
       .andWhere("a.action = 'moved' AND a.field_changed = 'column'")
       .getCount();
     return moves > 0;
@@ -292,7 +293,7 @@ export class RespawnStormDetectorService implements OnModuleInit, OnModuleDestro
       .createQueryBuilder('a')
       .where('a.ticket_id = :tid', { tid: ticketId })
       .andWhere('a.action = :action', { action })
-      .andWhere('a.created_at >= :since', { since })
+      .andWhere('a.created_at >= :since', { since: sinceBoundaryParam(this.dataSource, since) })
       .getCount();
     return count > 0;
   }

@@ -221,11 +221,15 @@ test('enforceAutoResponseBudget: a human unpend actually clears the ceiling — 
   // ('...:55.000') — a same-second stored row is then a lexicographic PREFIX
   // of the bound parameter, so `created_at >= :since` treats it as "before".
   // This is a sql.js/dev-only artifact (Postgres — the actual production DB
-  // — has no such mismatch) and its failure direction is safe (it can only
-  // under-count right at the epoch boundary, never resurrect stale
-  // pre-epoch comments), but it means a same-second comparison in THIS test
-  // would be racing the artifact rather than testing the epoch logic. Cross
-  // a full second boundary first so the assertion is deterministic.
+  // — has no such mismatch). Investigated in ticket 8fc94adf: this same-
+  // second EXCLUSION is actually load-bearing for THIS epoch-anchored
+  // ceiling (it guarantees pre-unpend comments never leak into the
+  // post-unpend count — see hard-budget-guard.ts's doc comments on
+  // countAutoResponses/countWindowDispatches) and is deliberately left as-is
+  // rather than "fixed" to be same-second-inclusive. It means a same-second
+  // comparison in THIS test would be racing the artifact rather than testing
+  // the epoch logic. Cross a full second boundary first so the assertion is
+  // deterministic.
   await new Promise((resolve) => setTimeout(resolve, 1100));
   await addAgentComment(t.id);
   await addAgentComment(t.id);

@@ -92,7 +92,32 @@ export async function lastHumanUnpendAt(dataSource: DataSource, ticketId: string
   return row?.created_at ? new Date(row.created_at) : null;
 }
 
-/** (a) Lifetime count of agent-authored, non-system comments on a ticket since `since`. */
+/**
+ * (a) Lifetime count of agent-authored, non-system comments on a ticket
+ * since `since`.
+ *
+ * DELIBERATELY NOT "fixed" for sql.js same-second precision (ticket 8fc94adf
+ * investigated this): sql.js's DB-level `datetime('now')` default (used
+ * whenever a Comment is saved without an explicit `created_at`) has no
+ * fractional seconds, while a bound `Date` parameter always does, so
+ * `created_at >= :since` lexicographically excludes any row landing in the
+ * same wall-clock second as `since` — same wall-clock second as `since` is
+ * ALWAYS treated as "before" regardless of the real sub-second order.
+ *
+ * For every OTHER consumer of this pattern that would be a pure under-count
+ * (safe: see created-at-since-param.ts). But `since` here is
+ * `lastHumanUnpendAt` — the epoch a human unpend resets the ceiling to (see
+ * file header) — and this function's whole reason to exist is guaranteeing
+ * old, already-counted comments from BEFORE that epoch never leak into the
+ * post-unpend count. The current same-second exclusion is exactly the
+ * property that guarantee needs: a comment stored in the same truncated
+ * second as the unpend epoch is (correctly, for this purpose) treated as
+ * pre-epoch. Making the comparison same-second-inclusive (which is what a
+ * naive "fix" would do) reopens the exact permanent-death loop ticket
+ * a940d75b closed — pinned by hard-budget-guard.test.mjs's "a human unpend
+ * actually clears the ceiling" test, which fails under an inclusive
+ * comparison. Do not apply `sinceBoundaryParam` here.
+ */
 export async function countAutoResponses(dataSource: DataSource, ticketId: string, since: Date): Promise<number> {
   return dataSource.getRepository(Comment).createQueryBuilder('c')
     .where('c.ticket_id = :tid', { tid: ticketId })
@@ -110,6 +135,12 @@ export async function countAutoResponses(dataSource: DataSource, ticketId: strin
  * advance the workflow; already bypasses the ticket-pending gate) are
  * excluded so they can't be blocked by — or count toward — this ceiling.
  */
+// Same sql.js same-second exclusion as countAutoResponses above, and same
+// reason it is left as-is: trigger-loop.service.ts anchors `since` to
+// `max(lastHumanUnpendAt, windowStart)`, so this is epoch-anchored too —
+// making the comparison same-second-inclusive would let pre-unpend dispatches
+// leak back into the post-unpend window count. See countAutoResponses' doc
+// comment for the full rationale (ticket 8fc94adf).
 export async function countWindowDispatches(dataSource: DataSource, ticketId: string, since: Date): Promise<number> {
   return dataSource.getRepository(ActivityLog).createQueryBuilder('a')
     .where('a.ticket_id = :tid', { tid: ticketId })
