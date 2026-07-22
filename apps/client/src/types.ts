@@ -1579,9 +1579,22 @@ export interface ChatMessageArtifactRef {
   commit?: string;  // 커밋 SHA
   url?: string;     // 배포 base_url 등
 }
+// F-3 (ticket 3ca88253): agent/board 상태 카드 ref. server 의 stream-events.ts 와
+// 동일 shape — id(+표시용 라벨)만 싣고, 카드 클릭 시 클라이언트가 최신 상세를 다시
+// fetch 한다(TicketRefCard/TicketArtifact 와 동일 패턴).
+export interface ChatMessageAgentRef {
+  agent_id: string;
+  name?: string;
+}
+export interface ChatMessageBoardRef {
+  board_id: string;
+  title?: string;
+}
 export interface ChatRoomMessageMetadata {
   ticket_refs?: ChatMessageTicketRef[];
   artifact_refs?: ChatMessageArtifactRef[];
+  agent_refs?: ChatMessageAgentRef[];
+  board_refs?: ChatMessageBoardRef[];
 }
 
 export interface ChatRoomMessageItem {
