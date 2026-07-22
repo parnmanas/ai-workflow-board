@@ -10,7 +10,7 @@ import ArtifactPanel, { ArtifactToggleButton } from './ArtifactPanel';
 import TicketArtifactController from './TicketArtifactController';
 import { useMediaQuery } from '../hooks/useMediaQuery';
 import { useWorkspaces } from '../hooks/useBoard';
-import { api, setActiveWorkspaceId } from '../api';
+import { api, setActiveWorkspaceId, bootstrapActiveWorkspaceId } from '../api';
 import { BoardStreamProvider } from '../contexts/BoardStreamContext';
 import { NotificationProvider } from '../contexts/NotificationContext';
 import { TicketMetaProvider } from '../contexts/TicketMetaContext';
@@ -56,10 +56,11 @@ export default function AppLayout() {
     refresh: refreshWorkspaces,
   } = useWorkspaces();
 
-  const [currentWorkspaceId, setCurrentWorkspaceId] = useState<string | null>(() => {
-    if (typeof window === 'undefined') return null;
-    return localStorage.getItem('currentWorkspaceId');
-  });
+  // Seeded from the same URL→sessionStorage→localStorage bootstrap api.ts uses
+  // for the X-Workspace-Id header, not localStorage alone — otherwise this tab's
+  // state could disagree with its own per-tab active workspace right from mount
+  // (ticket dc5c0813, see bootstrapActiveWorkspaceId's doc comment).
+  const [currentWorkspaceId, setCurrentWorkspaceId] = useState<string | null>(() => bootstrapActiveWorkspaceId());
 
   const [currentBoardId, setCurrentBoardId] = useState<string | null>(null);
   const [currentBoardName, setCurrentBoardName] = useState<string | undefined>(undefined);

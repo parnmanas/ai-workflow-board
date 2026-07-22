@@ -5,6 +5,7 @@ import { tokens } from '../tokens';
 import { renderMarkdown } from './chat/utils/markdown';
 import { ErrorState } from './common';
 import { useBoardStream, useBoardStreamEvent } from '../contexts/BoardStreamContext';
+import { canOpenTicketOnBoard, ticketBoardPath } from '../utils/ticketBoardLink';
 
 /**
  * 티켓 Artifact 상세 (에픽 bf65ca00 · Phase 1 · S3).
@@ -140,7 +141,7 @@ export function TicketArtifactView({
   // "보드에서 열기" 활성/비활성 — board_id 를 못 찾았거나(고아 column/삭제된 column)
   // 티켓이 아카이브돼 있으면(보드 컬럼 조회가 기본적으로 archived_at IS NULL 만 보여줘
   // 이동해도 아무것도 열리지 않는다) 비활성 + 안내 문구로 대체한다(완료기준 #4).
-  const canOpenOnBoard = !!t.board_id && !t.archived_at;
+  const canOpenOnBoard = canOpenTicketOnBoard(t);
   const openOnBoardHint = !t.board_id
     ? '이 티켓이 속한 보드를 찾을 수 없습니다.'
     : t.archived_at
@@ -346,8 +347,8 @@ export default function TicketArtifact({ ticketId }: { ticketId: string }) {
   const openOnBoard = useCallback(() => {
     if (state.status !== 'loaded') return;
     const t = state.ticket || {};
-    if (!t.board_id || t.archived_at) return;
-    navigate(`/ws/${t.workspace_id}/boards/${t.board_id}?ticket=${encodeURIComponent(t.id)}`);
+    if (!canOpenTicketOnBoard(t)) return;
+    navigate(ticketBoardPath(t));
   }, [state, navigate]);
 
   return (

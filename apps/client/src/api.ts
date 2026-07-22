@@ -88,7 +88,13 @@ const BASE = '/api';
 // is NEVER consulted at request time — each tab is self-contained.
 const SESSION_WS_KEY = 'awb.activeWorkspaceId';
 
-function bootstrapActiveWorkspaceId(): string | null {
+// Exported so AppLayout's initial state and AuthContext.resolveWorkspaceState
+// resolve the same per-tab candidate instead of each reading localStorage
+// directly — that split let a tab's boot state disagree with the sessionStorage
+// value this module already uses for X-Workspace-Id, and the disagreement then
+// got "fixed" by overwriting sessionStorage with the wrong (shared) value
+// (ticket dc5c0813).
+export function bootstrapActiveWorkspaceId(): string | null {
   if (typeof window === 'undefined') return null;
   // 1) URL — most accurate, per-tab, survives initial render before AppLayout mounts.
   const m = window.location.pathname.match(/^\/ws\/([^/]+)/);
