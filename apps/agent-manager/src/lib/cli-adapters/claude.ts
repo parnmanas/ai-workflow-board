@@ -11,6 +11,7 @@ import {
   type AdapterCredential,
   type AgentCredentialMeta,
   CliAdapter,
+  type CliUsageSnapshot,
   HARNESS_SPEC_KEYS,
   type HarnessSpec,
   PARSE_STAGE,
@@ -229,6 +230,33 @@ export class ClaudeCliAdapter extends CliAdapter {
 
   collectOneshotResult(_lines: string[]): string | null {
     return null;
+  }
+
+  /**
+   * Extract usage from a Claude `result` event — the SAME shape whether it
+   * came from `--output-format json` (one-shot) or the final event of a
+   * `stream-json` turn (persistent session; ticket 6dd3f968 confirmed this
+   * fires once per TURN, not once per process — `base-session-manager.ts`'s
+   * turn-end detection already keys off `isResult` for exactly this reason).
+   * Real captured shape (auth-failure sample, all-zero but structurally
+   * identical to a priced success):
+   *   {"type":"result",...,"total_cost_usd":0,"usage":{"input_tokens":0,
+   *    "cache_creation_input_tokens":0,"cache_read_input_tokens":0,
+   *    "output_tokens":0,...}}
+   * `total_cost_usd` lives at the TOP level of the event, not inside `usage`.
+   */
+  extractUsage(raw: any): CliUsageSnapshot | null {
+    if (!raw || typeof raw !== 'object' || raw.type !== 'result') return null;
+    const usage = raw.usage;
+    if (!usage || typeof usage !== 'object') return null;
+    const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+    return {
+      input_tokens: num(usage.input_tokens),
+      output_tokens: num(usage.output_tokens),
+      cache_read_input_tokens: num(usage.cache_read_input_tokens),
+      cache_creation_input_tokens: num(usage.cache_creation_input_tokens),
+      total_cost_usd: num(raw.total_cost_usd),
+    };
   }
 
   /**

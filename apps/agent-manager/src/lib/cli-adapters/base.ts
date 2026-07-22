@@ -282,6 +282,22 @@ export interface TurnImage {
   data: string;
 }
 
+/** Token/cost usage extracted from a single CLI result event (ticket 6dd3f968).
+ *  All fields are nullable — a CLI that doesn't report a given figure (Codex has
+ *  no cost concept; Antigravity has no structured usage at all) omits it rather
+ *  than guessing. Numbers are per-EVENT (one turn / one query), not cumulative —
+ *  callers accumulate across turns themselves (see cli-usage-accumulator.ts). */
+export interface CliUsageSnapshot {
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cache_read_input_tokens: number | null;
+  cache_creation_input_tokens: number | null;
+  /** USD, as reported by the CLI itself. null when the CLI has no cost concept
+   *  (Codex/Gemini-family) or the underlying backend isn't priced in Anthropic
+   *  terms (DeepSeek — see deepseek.ts override). */
+  total_cost_usd: number | null;
+}
+
 /** Normalized "what the CLI is doing right now" signal, extracted from a single
  *  one-shot stdout event by {@link CliAdapter.parseProgressEvent}. The subagent
  *  manager renders these into `type='progress'` chat-room heartbeats for chat
@@ -356,6 +372,21 @@ export abstract class CliAdapter {
    * anything unrecognized and NEVER throw (it runs inside a stdout line handler).
    */
   parseProgressEvent(_raw: any): CliProgressEvent | null {
+    return null;
+  }
+
+  /**
+   * Extract token/cost usage from a single already-parsed CLI stdout event —
+   * the object `parseStdoutLine` put on `ParseResult.raw`, or a freshly
+   * `JSON.parse`d line. Called on EVERY stdout line (both oneshot and
+   * persistent-session paths, ticket 6dd3f968) so it MUST be pure, best-effort,
+   * and NEVER throw — a bad line returns null rather than breaking capture.
+   *
+   * Default returns null (no usage surface). Antigravity's plain-text output
+   * has nothing structured to extract and inherits this as its permanent
+   * answer; Claude/Codex override with their own event shapes.
+   */
+  extractUsage(_raw: any): CliUsageSnapshot | null {
     return null;
   }
 

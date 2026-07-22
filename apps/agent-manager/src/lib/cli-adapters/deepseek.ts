@@ -21,6 +21,7 @@ import type {
   AdapterCredential,
   AdapterMcpContext,
   AgentCredentialMeta,
+  CliUsageSnapshot,
   HarnessSpec,
 } from './base.js';
 
@@ -71,6 +72,22 @@ export class DeepSeekCliAdapter extends ClaudeCliAdapter {
    */
   async listModels(): Promise<string[]> {
     return [DEEPSEEK_DEFAULT_MODEL, 'deepseek-reasoner'];
+  }
+
+  /**
+   * Token counts inherited from ClaudeCliAdapter are still meaningful — the
+   * `usage` object is DeepSeek's own reported figures, just relayed through the
+   * claude binary's stream-json shape. `total_cost_usd`, however, is computed
+   * CLIENT-SIDE by the claude binary against ANTHROPIC's price table keyed by
+   * model id — meaningless (and misleading if aggregated) for a
+   * `deepseek-chat`/`deepseek-reasoner` model the binary doesn't actually
+   * price. Null it out so a DeepSeek run never pollutes a cost average with a
+   * number that isn't real DeepSeek billing.
+   */
+  extractUsage(raw: any): CliUsageSnapshot | null {
+    const snap = super.extractUsage(raw);
+    if (!snap) return snap;
+    return { ...snap, total_cost_usd: null };
   }
 
   /**

@@ -19,6 +19,7 @@ import {
   type AdapterMcpContext,
   CliAdapter,
   type CliProgressEvent,
+  type CliUsageSnapshot,
   PARSE_STAGE,
   type OneshotSpec,
   type ParseResult,
@@ -386,6 +387,32 @@ export class CodexCliAdapter extends CliAdapter {
       default:
         return null;
     }
+  }
+
+  /**
+   * Extract usage from a `codex exec --json` `turn.completed` event. Real
+   * captured shape (ticket 6dd3f968):
+   *   {"type":"turn.completed","usage":{"input_tokens":12437,
+   *    "cached_input_tokens":9984,"output_tokens":5,"reasoning_output_tokens":0}}
+   * `cached_input_tokens` is Codex's name for what Claude calls
+   * `cache_read_input_tokens` — Codex has no cache-WRITE concept, so
+   * `cache_creation_input_tokens` is always null. Codex never reports a
+   * dollar cost, so `total_cost_usd` is always null (v1 accepted limitation —
+   * see ticket plan). `reasoning_output_tokens` is a breakdown of
+   * `output_tokens`, not additive — only `output_tokens` is recorded.
+   */
+  extractUsage(raw: any): CliUsageSnapshot | null {
+    if (!raw || typeof raw !== 'object' || raw.type !== 'turn.completed') return null;
+    const usage = raw.usage;
+    if (!usage || typeof usage !== 'object') return null;
+    const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+    return {
+      input_tokens: num(usage.input_tokens),
+      output_tokens: num(usage.output_tokens),
+      cache_read_input_tokens: num(usage.cached_input_tokens),
+      cache_creation_input_tokens: null,
+      total_cost_usd: null,
+    };
   }
 
   #codexFileDetail(item: any): string {
