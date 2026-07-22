@@ -1,23 +1,50 @@
-// Pi CLI adapter — stateless one-shot, credential-free (ticket d72282ad).
+// Pi CLI adapter — stateless one-shot, credential-free (ticket d72282ad),
+// now with a first-party AWB MCP bridge (ticket d5a6100d).
 // Pi (`pi`, https://pi.dev, npm `@earendil-works/pi-coding-agent`) is a
 // terminal coding agent in the same family as Claude Code / Codex /
-// Antigravity, but its README states an explicit design philosophy: "No
-// MCP. Build CLI tools with READMEs (see Skills), or build an extension
-// that adds MCP support." Verified against the CHANGELOG through v0.81.1
-// (2026-07-21) — no release has ever mentioned MCP. So unlike codex /
-// antigravity, the spawned `pi` process cannot call AWB MCP tools
-// (get_ticket / add_comment / move_ticket) itself today: we deliberately do
-// NOT write a speculative mcp.json, because no schema for it is verified
-// against anything pi actually parses yet (the upstream MCP proposal,
-// github.com/earendil-works/pi/issues/563, is still open/unimplemented, and
-// third-party bridge extensions have unconfirmed transport support) —
-// shipping a guessed config here would repeat the exact codex `transport`
-// regression this ticket was warned about, just one layer further out. Chat
-// one-shots still work end-to-end (the manager relays pi's reply via REST,
-// same as any non-native-MCP adapter); ticket dispatch can run the work but
-// won't self-progress the ticket. See the ticket comment on d72282ad and its
-// follow-up for revisiting this once pi (or a verified extension) ships a
-// real MCP client.
+// Antigravity. Its README states an explicit design philosophy: "No MCP.
+// Build CLI tools with READMEs (see Skills), or build an extension that adds
+// MCP support." — confirmed (through v0.81.1, 2026-07-21) that pi itself has
+// no native MCP client and no `--mcp-config`-style flag. But pi's own
+// extension API (`docs/extensions.md`) is exactly what that README line
+// points at: `pi.registerTool()` takes a plain JSON-schema `parameters`
+// object (no typebox construction required — verified directly against an
+// installed 0.81.1), extensions auto-load from `~/.pi/agent/extensions/*.ts`
+// with ZERO project-trust gate (global scope, unlike `.pi/extensions/`), and
+// Node's built-in `fetch` is available inside them. That's the complete
+// surface needed to hand-roll an MCP client — no `@modelcontextprotocol/sdk`
+// or any other npm dependency required, so there is no extension-local
+// `npm install` step (and no per-spawn network-fetch failure mode from a
+// third-party package — the exact risk that made this ticket avoid guessing
+// a schema for the community `pi-mcp-adapter` extension, which exists and is
+// maintained but has unverified Streamable HTTP support).
+//
+// prepareCliHome now writes `<piAgentDir>/extensions/awb-mcp-bridge.ts`
+// (regenerated every call — see #writeMcpBridgeExtension) whenever the
+// manager has an AWB endpoint. That extension performs the MCP
+// initialize/tools-list/tools-call handshake itself against AWB's real
+// Streamable HTTP transport, verified directly (not guessed) against
+// apps/server's actual behavior:
+//   - responses are plain `application/json` (enableJsonResponse: true on
+//     the server transport) — no SSE parsing needed in the client.
+//   - `X-AWB-Client-Type: managed-subagent` bypasses the `awb/schemaVersion`
+//     initialize gate (mcp.controller.ts), so no experimental-capability
+//     dance is required, matching antigravity/codex's own header.
+//   - the per-agent `AWB_API_KEY` env var (injected on every spawn by
+//     subagent-manager.ts / base-session-manager.ts, same as codex's
+//     `bearer_token_env_var` reference) is read at request time, never
+//     baked into the generated file — only the URL is a spawn_agent-time
+//     constant, mirroring codex's own "gate on url only" reasoning.
+// End-to-end verified manually against a live local AWB instance: a real
+// spawned `pi` process (driven through a deterministic local test model so
+// the tool-calling decision itself didn't need a paid provider) called
+// get_ticket → add_comment → move_ticket, and get_ticket afterward confirmed
+// both the comment and the column move actually persisted. See the ticket
+// comment on d5a6100d for the full transcript. Because of this, `capabilities`
+// below now includes NATIVE_MCP — same meaning as claude/codex: the spawned
+// process calls AWB MCP tools itself, so the manager stops treating pi's
+// stdout as the deliverable (captureOutput flips off, chat replies switch to
+// `send_chat_room_message`, exactly like claude/codex already do).
 //
 // Pi also has no credential concept AWB manages — no per-agent credential
 // kind exists to select in the UI. Its own provider auth (API key / OAuth /
@@ -38,6 +65,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { resolveCliBin } from '../cli-resolver.js';
 import {
+  ADAPTER_CAPABILITIES,
   type AdapterCredential,
   type AdapterMcpContext,
   CliAdapter,
@@ -61,11 +89,12 @@ export class PiCliAdapter extends CliAdapter {
   constructor() {
     super();
     // Stateless one-shot — pi has no stream-json-style persistent session
-    // protocol to drive — and no native MCP client (see file banner), so
-    // both capability bits stay off. The SubagentManager handles the
-    // one-shot spawn, collects stdout via collectOneshotResult(), and posts
-    // the result to AWB on this adapter's behalf.
-    this.capabilities = new Set();
+    // protocol to drive, so PERSISTENT_SESSION stays off. NATIVE_MCP is now
+    // on (see file banner): the awb-mcp-bridge extension prepareCliHome
+    // writes gives the spawned pi process real get_ticket/add_comment/
+    // move_ticket/etc. tools, so it calls AWB itself instead of the manager
+    // capturing stdout on its behalf.
+    this.capabilities = new Set([ADAPTER_CAPABILITIES.NATIVE_MCP]);
   }
 
   resolveBin(configured?: string | null): string {
@@ -131,7 +160,7 @@ export class PiCliAdapter extends CliAdapter {
   async prepareCliHome(
     cliHomeDir: string,
     _credential?: AdapterCredential | null,
-    _mcp?: AdapterMcpContext | null,
+    mcp?: AdapterMcpContext | null,
   ): Promise<{ extraEnv: Record<string, string> }> {
     const piAgentDir = join(cliHomeDir, '.pi', 'agent');
     await fsp.mkdir(piAgentDir, { recursive: true, mode: 0o700 });
@@ -166,6 +195,143 @@ export class PiCliAdapter extends CliAdapter {
       }
     }
 
+    // Gate on url only (mirrors codex's #prepareConfig reasoning) — the
+    // per-agent apiKey rides the AWB_API_KEY env var subagent-manager.ts /
+    // base-session-manager.ts already inject on every spawn, so a missing
+    // apiKey here is never a reason to skip wiring the endpoint.
+    if (mcp?.url) {
+      await this.#writeMcpBridgeExtension(piAgentDir, mcp.url);
+    }
+
     return { extraEnv: {} };
   }
+
+  /**
+   * Write `<piAgentDir>/extensions/awb-mcp-bridge.ts` — a dependency-free pi
+   * extension that hand-rolls the minimal MCP client surface pi needs
+   * (initialize / tools-list / tools-call) against AWB's Streamable HTTP
+   * `/mcp` endpoint, using only Node's built-in `fetch` (verified available
+   * inside pi extensions — see file banner). Auto-discovered from
+   * `~/.pi/agent/extensions/*.ts` on every pi invocation once `configDirEnv`
+   * points HOME at `cliHomeDir` — no `-e` flag or trust prompt needed (global
+   * scope, unlike project-local `.pi/extensions/`).
+   *
+   * Regenerated unconditionally on every prepareCliHome call (spawn_agent) —
+   * not meant to be hand-edited, mirrors antigravity's #writeMcpConfig.
+   */
+  async #writeMcpBridgeExtension(piAgentDir: string, awbUrl: string): Promise<void> {
+    const extensionsDir = join(piAgentDir, 'extensions');
+    await fsp.mkdir(extensionsDir, { recursive: true, mode: 0o700 });
+    const mcpUrl = `${awbUrl.replace(/\/$/, '')}/mcp`;
+    const content = buildAwbMcpBridgeSource(mcpUrl);
+    await fsp.writeFile(join(extensionsDir, 'awb-mcp-bridge.ts'), content, { mode: 0o600 });
+  }
+}
+
+/**
+ * Build the awb-mcp-bridge.ts source (see #writeMcpBridgeExtension). Kept as
+ * a plain string template rather than a checked-in template file — same
+ * reasoning as antigravity's inline `mcpServers` object literal: the only
+ * variable is the URL, and generating it here keeps the single source of
+ * truth for "what pi actually needs" next to the adapter that verified it.
+ *
+ * Wire details verified directly against apps/server (not guessed):
+ *   - AWB's Streamable HTTP transport responds with plain `application/json`
+ *     (enableJsonResponse: true — see mcp.controller.ts), never SSE, so this
+ *     client never needs an event-stream parser.
+ *   - `X-AWB-Client-Type: managed-subagent` bypasses the `awb/schemaVersion`
+ *     experimental-capability gate on `initialize` (mcp.controller.ts) — the
+ *     same header antigravity/codex already send.
+ *   - The session id AWB returns on `initialize` (`Mcp-Session-Id` response
+ *     header) must ride every subsequent request on the SAME header name, or
+ *     the server responds 404 "Session not found. Please re-initialize."
+ */
+function buildAwbMcpBridgeSource(mcpUrl: string): string {
+  return `// AUTO-GENERATED by apps/agent-manager's pi CLI adapter (ticket d5a6100d) —
+// regenerated on every spawn_agent. Do not hand-edit; edit
+// apps/agent-manager/src/lib/cli-adapters/pi.ts#buildAwbMcpBridgeSource instead.
+//
+// Bridges AWB's Streamable HTTP MCP server into pi's own tool system. pi has
+// no native MCP client, so this hand-rolls the minimal client surface pi
+// needs (initialize, tools/list, tools/call) using only Node's built-in
+// fetch — no extension-local npm install (and its per-spawn network-failure
+// risk) required.
+
+const AWB_MCP_URL = ${JSON.stringify(mcpUrl)};
+
+let sessionId = null;
+let nextId = 1;
+
+async function mcpRequest(method, params) {
+  const apiKey = process.env.AWB_API_KEY || '';
+  const headers = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json, text/event-stream',
+    'X-AWB-Client-Type': 'managed-subagent',
+  };
+  if (apiKey) headers.Authorization = \`Bearer \${apiKey}\`;
+  if (sessionId) headers['Mcp-Session-Id'] = sessionId;
+
+  const isNotification = method.startsWith('notifications/');
+  const body = isNotification
+    ? { jsonrpc: '2.0', method, params }
+    : { jsonrpc: '2.0', id: nextId++, method, params };
+
+  const res = await fetch(AWB_MCP_URL, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+  });
+
+  const sid = res.headers.get('mcp-session-id');
+  if (sid) sessionId = sid;
+  if (isNotification) return null;
+
+  if (!res.ok) throw new Error(\`AWB MCP \${method} failed: HTTP \${res.status}\`);
+  const json = await res.json();
+  if (json.error) {
+    throw new Error(\`AWB MCP \${method} error: \${json.error.message || JSON.stringify(json.error)}\`);
+  }
+  return json.result;
+}
+
+export default async function (pi) {
+  let tools = [];
+  try {
+    await mcpRequest('initialize', {
+      protocolVersion: '2024-11-05',
+      capabilities: {},
+      clientInfo: { name: 'awb-pi-mcp-bridge', version: '1.0.0' },
+    });
+    await mcpRequest('notifications/initialized', {});
+    const listResult = await mcpRequest('tools/list', {});
+    tools = Array.isArray(listResult && listResult.tools) ? listResult.tools : [];
+  } catch (err) {
+    console.error(\`[awb-mcp-bridge] failed to connect to AWB MCP server: \${(err && err.message) || err}\`);
+    return;
+  }
+
+  for (const tool of tools) {
+    pi.registerTool({
+      name: tool.name,
+      label: tool.name,
+      description: tool.description || tool.name,
+      parameters: tool.inputSchema || { type: 'object', properties: {} },
+      async execute(_toolCallId, params) {
+        const result = await mcpRequest('tools/call', { name: tool.name, arguments: params || {} });
+        const content =
+          Array.isArray(result && result.content) && result.content.length
+            ? result.content
+            : [{ type: 'text', text: JSON.stringify(result === undefined ? null : result) }];
+        if (result && result.isError) {
+          throw new Error(content.map((c) => c.text || '').join('\\n') || \`\${tool.name} failed\`);
+        }
+        return { content, details: {} };
+      },
+    });
+  }
+
+  console.error(\`[awb-mcp-bridge] registered \${tools.length} AWB MCP tool(s)\`);
+}
+`;
 }

@@ -202,7 +202,7 @@ The server-side ack endpoint enforces:
 | `stop_agent`         | Real — drops context + erases on-disk secrets                          |
 | `restart_agent`      | Real — `stop` + `spawn` composition                                    |
 | `update_plugins`     | Real — `git pull --ff-only` on every claude marketplace under `<cli-home>/plugins/marketplaces/*` |
-| `refresh_mcp_config` | Real — rewrites `mcp-config.json` and refreshes CLI-native MCP config (including Codex) with the current AWB URL + existing apiKey |
+| `refresh_mcp_config` | Real — rewrites `mcp-config.json` and refreshes CLI-native MCP config (including Codex, and pi's `awb-mcp-bridge.ts` extension) with the current AWB URL + existing apiKey |
 | `pull_working_dir`   | Real — `git pull --ff-only` inside `Agent.working_dir` (30s timeout)    |
 | `update_manager`     | Real — `git pull` + `npm install` + build, then detached re-exec       |
 | `restart_manager`    | Real — re-exec in place (no pull/install/build); takes over the lockfile |

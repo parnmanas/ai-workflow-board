@@ -142,14 +142,19 @@ After redeeming, the manager stores its API key and agent identity in
    **PI has no credential concept at all** (not even the optional per-agent
    credential every other adapter supports) — every spawn simply inherits
    whatever the operator already configured on the manager host via `pi
-   /login` (including a credential-free local llama.cpp server). **PI also has
-   no native MCP client as of this writing** (its own upstream philosophy is
-   "No MCP" — see `cli-adapters/pi.ts`), so a managed PI agent can run chat
-   one-shots end-to-end, but on a ticket dispatch it can do the requested work
-   without being able to call `add_comment` / `move_ticket` itself; the
-   existing "subagent exited without a comment" system fallback still surfaces
-   its raw output on the ticket. Revisit once pi (or a verified MCP-bridging
-   extension) ships a real MCP client.
+   /login` (including a credential-free local llama.cpp server). **PI has no
+   *native* MCP client** — its own upstream philosophy is "No MCP, build an
+   extension that adds MCP support" — so instead of a native `mcp.json`,
+   `prepareCliHome` writes a small dependency-free pi extension
+   (`~/.pi/agent/extensions/awb-mcp-bridge.ts`, regenerated on every
+   spawn_agent) that hand-rolls the MCP `initialize`/`tools/list`/`tools/call`
+   handshake against AWB's Streamable HTTP endpoint using only pi's own
+   `pi.registerTool()` API and Node's built-in `fetch` — no
+   `@modelcontextprotocol/sdk` or other npm dependency, so there is no
+   per-spawn `npm install` network-failure mode. A managed PI agent therefore
+   calls `get_ticket` / `add_comment` / `move_ticket` itself, same as
+   claude/codex (see `cli-adapters/pi.ts` for the verified wire details and
+   ticket d5a6100d for the end-to-end transcript).
 
    On manager restart, agents previously spawned this way auto-rehydrate
    from disk — no need to re-click Spawn.
