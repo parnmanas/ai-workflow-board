@@ -40,11 +40,11 @@ export class Board {
   // Per-board abstract "effort preset" catalog (ticket-level effort option).
   // JSON text of EffortPresetsConfig (see common/effort-presets.ts):
   // { default: <preset id>, presets: [{ id, label, claude?, codex?,
-  // antigravity? }] }. A Ticket carries an ABSTRACT preset id (Ticket.
+  // antigravity?, pi? }] }. A Ticket carries an ABSTRACT preset id (Ticket.
   // effort_preset); dispatch resolves it against this catalog via
   // resolveEffortPreset and ships the matched preset on the agent_trigger
   // payload, where agent-manager maps it onto per-CLI options (claude
-  // --effort + the "ultracode" prompt keyword + --model; codex/antigravity
+  // --effort + the "ultracode" prompt keyword + --model; codex/antigravity/pi
   // model-only). null = no stored catalog → the built-in catalog
   // (BUILTIN_EFFORT_PRESETS) is used.
   @Column({ type: 'text', nullable: true, default: null })

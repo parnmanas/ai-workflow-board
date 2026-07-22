@@ -53,7 +53,7 @@ export class Ticket {
   // this against the board's `effort_presets` via resolveEffortPreset and
   // ships the matched preset on the agent_trigger payload; agent-manager maps
   // it onto per-CLI options at spawn (claude --effort + ultracode keyword +
-  // --model; codex/antigravity model-only).
+  // --model; codex/antigravity/pi model-only).
   @Column({ type: 'varchar', nullable: true, default: null })
   effort_preset: string | null;
 

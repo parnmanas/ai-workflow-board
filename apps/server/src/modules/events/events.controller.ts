@@ -87,7 +87,7 @@ interface SseSessionDetail {
   instance_id?: string;        // InstanceRecord.instance_id of the manager
   manager_agent_id?: string;   // Agent.id of the supervising manager
   manager_name?: string;       // Display name of the manager (for row label)
-  cli?: string;                // 'claude' | 'codex' | 'antigravity' | custom
+  cli?: string;                // 'claude' | 'codex' | 'antigravity' | 'pi' | custom
   cli_adapters?: string[];     // additional adapter identifiers known to the manager
   hostname?: string;           // host running the manager
   pid?: number;                // pid of the manager process

@@ -13,7 +13,7 @@ export class Agent {
 
   // CLI selector for the agent-manager spawn pipeline. Valid assignable
   // values live in common/types/cli-types.ts (CLI_TYPES): claude / deepseek /
-  // codex / antigravity / custom. `manager` is also stored here for
+  // codex / antigravity / pi / custom. `manager` is also stored here for
   // pairing-minted manager identities. Legacy `gpt` / `gemini` are retired —
   // any surviving rows are orphans pending migration to a real CLI type.
   @Column({ type: 'varchar', default: 'custom' })
