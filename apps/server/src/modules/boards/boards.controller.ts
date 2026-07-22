@@ -30,6 +30,7 @@ import { validateEffortPresetsInput, serializeEffortPresets } from '../../common
 import { validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../../common/environment-config';
 import { validateMergeGateConfigInput, serializeMergeGateConfig } from '../../common/merge-gate-config';
 import { validateRespawnStormConfigInput, serializeRespawnStormConfig } from '../../common/respawn-storm-config';
+import { validateHardBudgetConfigInput, serializeHardBudgetConfig } from '../../common/hard-budget-config';
 import { validateDefaultRoleAssignmentsInput, serializeDefaultRoleAssignments } from '../../common/default-role-assignments-config';
 import { validateWorktreeModeInput, validateUsePrInput } from '../../common/worktree-config';
 import { validateQaPhasesInput, serializeQaPhases } from '../qa/qa-phases';
@@ -467,7 +468,7 @@ export class BoardsController {
   async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     const board = await findOrFail(this.boardRepo, { where: { id } }, 'Board not found');
 
-    const { name, description, routing_config, column_prompts, max_concurrent_tickets_per_agent, self_improvement_mode, benchmark_mode, auto_archive_days, harness_config, effort_presets, language, environment_config, qa_phases, merge_gate_config, respawn_storm_config, default_role_assignments, worktree_mode, use_pr } = body;
+    const { name, description, routing_config, column_prompts, max_concurrent_tickets_per_agent, self_improvement_mode, benchmark_mode, auto_archive_days, harness_config, effort_presets, language, environment_config, qa_phases, merge_gate_config, respawn_storm_config, hard_budget_config, default_role_assignments, worktree_mode, use_pr } = body;
     if (name !== undefined) board.name = name;
     if (description !== undefined) board.description = description;
     // Board output language (i18n, ticket ae28dcaf). Human-readable name that
@@ -612,6 +613,19 @@ export class BoardsController {
         const checked = validateRespawnStormConfigInput(respawn_storm_config);
         if (!checked.ok) return res.status(400).json({ error: checked.error });
         board.respawn_storm_config = serializeRespawnStormConfig(checked.value);
+      }
+    }
+
+    // Per-board hard-budget ceiling (ticket a940d75b). Same shape as
+    // respawn_storm_config: null clears the override back to the env-folded
+    // baseline; an object is zod-validated (strict keys) so a typo'd field 400s.
+    if (hard_budget_config !== undefined) {
+      if (hard_budget_config === null) {
+        board.hard_budget_config = null;
+      } else {
+        const checked = validateHardBudgetConfigInput(hard_budget_config);
+        if (!checked.ok) return res.status(400).json({ error: checked.error });
+        board.hard_budget_config = serializeHardBudgetConfig(checked.value);
       }
     }
 

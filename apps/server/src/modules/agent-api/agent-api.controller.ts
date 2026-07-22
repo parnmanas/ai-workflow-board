@@ -40,6 +40,7 @@ import { isReviewToMerging, hasReviewerApproval, ReviewApprovalRequiredError } f
 import { evaluateMergeGate, MergeGateBlockedError } from '../mcp/shared/merge-gate';
 import { findOrFail } from '../../common/find-or-fail';
 import { resolveAgentDisplayName } from '../../utils/agent-name';
+import { enforceAutoResponseBudget } from '../../common/hard-budget-guard';
 import { createHash } from 'node:crypto';
 
 @ApiSecurity('agent-api-key')
@@ -747,9 +748,26 @@ export class AgentApiController {
                 results.push(scopeDenied); continue;
               }
               if (t.archived_at) { results.push(archivedRejection(ticketId)); continue; }
+              // Hard-budget guard (ticket a940d75b). This batch surface
+              // defaults author_type to 'agent' and — unlike the MCP
+              // add_comment tool — has neither the ping-pong guard nor a
+              // pending_user_action check, so it was a wide-open bypass of
+              // any per-ticket auto-response ceiling. Reads against
+              // this.dataSource (not the batch's transaction manager),
+              // mirroring the merge-gate pre-pass above — a hard-budget trip
+              // is a fact about the ticket's accumulated history, independent
+              // of whether other ops in this same batch call commit or roll back.
+              const authorType = op.authorType || 'agent';
+              if (authorType === 'agent') {
+                const budget = await enforceAutoResponseBudget(
+                  { dataSource: this.dataSource, activityService: this.activityService, roomMessagingService: this.messaging, logger: this.logService },
+                  t,
+                );
+                if (budget.blocked) { results.push({ suppressed: true, reason: budget.reason }); continue; }
+              }
               const r = await cRepo.save(cRepo.create({
                 ticket_id: ticketId,
-                author_type: op.authorType || 'agent',
+                author_type: authorType,
                 author_id: String(op.authorId || ''),
                 author: op.author || '',
                 content: op.content,

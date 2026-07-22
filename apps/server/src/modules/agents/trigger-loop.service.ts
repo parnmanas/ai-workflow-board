@@ -30,6 +30,9 @@ import { appendBoardLessons, MAX_INJECTED_LESSONS } from '../../common/board-les
 import { pickBaseRepoResourceId, shouldBlockDispatchForMissingRepo } from '../../common/base-repo-binding';
 import { BoardLesson } from '../../entities/BoardLesson';
 import { isConsensusVoteComment } from '../../common/consensus-meta';
+import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
+import { ResolvedHardBudget, hardBudgetDefaultsFromEnv, resolveHardBudgetConfig } from '../../common/hard-budget-config';
+import { lastHumanUnpendAt, countWindowDispatches, pendTicketForHardBudget, postHardBudgetAlert } from '../../common/hard-budget-guard';
 
 // Sentinel actor written onto auto-advance `moved` activities. Deliberately
 // non-'system' so the trigger loop re-enters and processes the destination
@@ -184,7 +187,18 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
     // 보류" feedback. Same module; it never injects TriggerLoopService, so
     // cycle-free.
     private readonly autostart: AgentAutostartService,
-  ) {}
+    // Hard-budget breach alerts (ticket a940d75b). Same DI shape as
+    // RespawnStormDetectorService's `messaging` — ChatRoomsModule is already
+    // imported by AgentsModule, no cycle.
+    private readonly roomMessaging: RoomMessagingService,
+  ) {
+    this._hardBudgetBaseline = hardBudgetDefaultsFromEnv();
+  }
+
+  // Env-folded hard-budget baseline (ticket a940d75b), resolved once at
+  // construction — mirrors RespawnStormDetectorService's `baseline` field.
+  // A per-board `Board.hard_budget_config` overrides this per-key at gate time.
+  private readonly _hardBudgetBaseline: ResolvedHardBudget;
 
   onModuleInit() {
     this._activityListener = (log: ActivityLog) => {
@@ -1774,6 +1788,111 @@ candidate's branch or move the ticket.
     return true;
   }
 
+  /**
+   * Hard-budget window gate (ticket a940d75b). Content-agnostic companion to
+   * the pending-user gate above: even a ticket that is dispatching and
+   * completing NORMALLY (so nothing else here would ever drop it) can still
+   * be a runaway loop by sheer frequency. Counts successful dispatches off
+   * the EXISTING `trigger_emitted` ActivityLog row every emit below already
+   * writes (ticket 4a6cdfd7 acceptance #8) — no new observability write, per
+   * Planner cross-verification on this ticket.
+   *
+   * `manual` and `comment_summary` are exempt (a human explicitly asked, or
+   * the dispatch doesn't advance the workflow) — same exclusion
+   * `countWindowDispatches` applies, so the gate and its count source always
+   * agree on what "counts".
+   *
+   * Epoch rule mirrors `enforceAutoResponseBudget` (common/hard-budget-guard.ts):
+   * only dispatches after the ticket's last HUMAN unpend count, so a cleared
+   * breach isn't immediately re-tripped by the window still looking "full"
+   * from before the pend.
+   */
+  private async _checkHardBudgetGate(
+    ticket: Ticket,
+    agentId: string,
+    role: string,
+    triggerSource: string,
+    boardId: string,
+  ): Promise<boolean> {
+    if (triggerSource === 'manual' || triggerSource === 'comment_summary') return false;
+
+    // Availability-first (same posture as common/hard-budget-guard.ts's
+    // enforceAutoResponseBudget): a failure evaluating the ceiling — config
+    // resolution, epoch lookup, the count query — must never block a
+    // legitimate dispatch. Only the DETECTION step is guarded here; once a
+    // real breach is confirmed below, the drop always applies even if the
+    // audit-write or notify sub-steps individually fail (their own try/catch).
+    let cfg: ResolvedHardBudget;
+    let count: number;
+    let windowMin: number;
+    try {
+      const board = boardId
+        ? await this.dataSource.getRepository(Board).findOne({ where: { id: boardId } })
+        : null;
+      cfg = resolveHardBudgetConfig(board?.hard_budget_config ?? null, this._hardBudgetBaseline);
+      if (!cfg.enabled) return false;
+
+      const now = new Date();
+      const windowStart = new Date(now.getTime() - cfg.windowMs);
+      const epoch = await lastHumanUnpendAt(this.dataSource, ticket.id);
+      const since = epoch && epoch.getTime() > windowStart.getTime() ? epoch : windowStart;
+      count = await countWindowDispatches(this.dataSource, ticket.id, since);
+      windowMin = Math.round(cfg.windowMs / 60_000);
+      if (count < cfg.maxDispatchesPerWindow) return false;
+    } catch (e) {
+      this.logService.warn('MCP', 'hard-budget gate evaluation failed (fail-open, dispatch allowed)', {
+        err: String(e), ticket_id: ticket.id,
+      });
+      return false;
+    }
+
+    this.logService.info('MCP', 'agent_trigger dropped (hard budget window)', {
+      ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource,
+      count, limit: cfg.maxDispatchesPerWindow, window_minutes: windowMin,
+    });
+    try {
+      const activityLogRepo = this.dataSource.getRepository(ActivityLog);
+      await activityLogRepo.save(activityLogRepo.create({
+        entity_type: 'ticket',
+        entity_id: ticket.id,
+        ticket_id: ticket.id,
+        actor_id: 'system',
+        actor_name: 'TriggerLoopService',
+        action: 'agent_trigger_dropped_hard_budget',
+        new_value: `agent=${agentId} count=${count} limit=${cfg.maxDispatchesPerWindow} window_minutes=${windowMin}`,
+        role,
+        trigger_source: triggerSource,
+      }));
+    } catch (e) {
+      this.logService.warn('MCP', 'hard-budget-drop audit write failed (drop still applied)', {
+        err: String(e), ticket_id: ticket.id,
+      });
+    }
+
+    if (cfg.autoPend) {
+      const reason =
+        `이 티켓의 dispatch 빈도가 ${windowMin}분 내 하드 상한(${cfg.maxDispatchesPerWindow}회)을 초과해 자동 중지되었습니다. ` +
+        `폭주 여부를 확인한 뒤 pending을 해제하세요.`;
+      await pendTicketForHardBudget(this.dataSource, this.activityService, ticket, reason, 'hard_budget_dispatch_guard');
+    }
+    if (cfg.notify) {
+      await postHardBudgetAlert(
+        { dataSource: this.dataSource, activityService: this.activityService, roomMessagingService: this.roomMessaging, logger: this.logService },
+        ticket,
+        [
+          `🚦 **Hard budget 초과 (dispatch 빈도)** — \`${ticket.id}\``,
+          `**${ticket.title}**`,
+          `dispatch 수: ${count}회 / ${windowMin}분 (상한 ${cfg.maxDispatchesPerWindow})`,
+          cfg.autoPend
+            ? '티켓 자동 pend됨 — 사람이 해제하기 전까지 추가 트리거가 차단됩니다.'
+            : 'notify-only (auto-pend off for this board).',
+        ].join('\n\n'),
+      );
+    }
+
+    return true;
+  }
+
   private async _emitTrigger(
     ticket: Ticket,
     agentId: string,
@@ -1947,6 +2066,17 @@ candidate's branch or move the ticket.
     // 구간이 열어 두는 잔여 TOCTOU 창은 실제 SSE emit 직전의 두 번째 호출이
     // 닫는다(해당 지점 주석 참조).
     if (await this._checkPendingUserGate(ticket, agentId, role, triggerSource, opts?.bypassTicketPending)) {
+      return '';
+    }
+
+    // Hard-budget window gate (ticket a940d75b). Placed alongside the other
+    // hard ticket-state gates (paused/archived/pending) rather than after the
+    // focus-window gate below — an over-budget ticket must not dispatch even
+    // when it's the agent's top-ranked focus ticket. A single early check is
+    // enough (no late re-check like the pending gate): the count source
+    // (`trigger_emitted`) is a fail-open observability write, so this is
+    // already a best-effort safety-net ceiling, not a hard real-time cap.
+    if (await this._checkHardBudgetGate(ticket, agentId, role, triggerSource, boardId)) {
       return '';
     }
 

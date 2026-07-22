@@ -36,6 +36,7 @@ import type { ToolContext } from './context';
 import { applyAgentCommentPingPongGuard, terminalAckKey } from '../../../common/agent-comment-pingpong';
 import { computeTicketCommentChainDepth } from '../../../common/agent-chain-depth';
 import { computeLoopScore } from '../../../common/loop-score';
+import { enforceAutoResponseBudget } from '../../../common/hard-budget-guard';
 
 function isUniqueConstraintError(error: unknown): boolean {
   const value = error as { code?: string; errno?: number; message?: string } | null;
@@ -46,7 +47,8 @@ function isUniqueConstraintError(error: unknown): boolean {
 }
 
 export function registerCommentTools(server: McpServer, ctx: ToolContext): void {
-  const { dataSource, activityService, mentionService, logger, ticketRoleAssignmentService } = ctx;
+  const { dataSource, activityService, mentionService, logger, ticketRoleAssignmentService, roomMessagingService } = ctx;
+  const hardBudgetDeps = { dataSource, activityService, roomMessagingService, logger };
 
   // `resolveAuthorRole` / `mergeAuthorRoleIntoMetadata` live in ./author-role
   // so their resolution-order contract is unit-testable (ticket ed07eeeb).
@@ -216,6 +218,18 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       });
       if (guard.suppressed) {
         return ok(guard);
+      }
+
+      // Hard-budget guard (ticket a940d75b): content-agnostic ceiling on top
+      // of the pattern-based guard above — a ticket that keeps getting
+      // DIFFERENT-looking agent comments (so the ping-pong guard never fires)
+      // still trips once the lifetime count crosses the board's configured
+      // (or env-baseline) max_auto_responses.
+      if (resolvedAuthorType === 'agent') {
+        const budget = await enforceAutoResponseBudget(hardBudgetDeps, ticket);
+        if (budget.blocked) {
+          return ok({ suppressed: true, reason: budget.reason });
+        }
       }
 
       // Deferral-to-terminal guard (ticket 9f2adfd0): FLAG — never block — when
@@ -498,6 +512,14 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       const resolved = await resolveAuthor(author_type, author_id, author, extra);
       if ('error' in resolved) return err(resolved.error);
 
+      // Hard-budget guard (ticket a940d75b) — see add_comment for the full
+      // rationale. ask_question has no ping-pong guard of its own, so this is
+      // its only volume ceiling.
+      if (resolved.authorType === 'agent') {
+        const budget = await enforceAutoResponseBudget(hardBudgetDeps, ticket);
+        if (budget.blocked) return ok({ suppressed: true, reason: budget.reason });
+      }
+
       content = sanitizeHarnessMarkers(content, { logger, toolName: 'ask_question', fieldName: 'content', agentId: resolved.authorId });
 
       const commentRepo = dataSource.getRepository(Comment);
@@ -607,6 +629,13 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       const resolved = await resolveAuthor(author_type, author_id, author, extra);
       if ('error' in resolved) return err(resolved.error);
 
+      // Hard-budget guard (ticket a940d75b) — see add_comment for the full
+      // rationale.
+      if (resolved.authorType === 'agent' && answerTicket) {
+        const budget = await enforceAutoResponseBudget(hardBudgetDeps, answerTicket);
+        if (budget.blocked) return ok({ suppressed: true, reason: budget.reason });
+      }
+
       content = sanitizeHarnessMarkers(content, { logger, toolName: 'answer_question', fieldName: 'content', agentId: resolved.authorId });
 
       const callerCtx = getCallerAgent(extra);
@@ -662,6 +691,13 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
 
       const resolved = await resolveAuthor(author_type, author_id, author, extra);
       if ('error' in resolved) return err(resolved.error);
+
+      // Hard-budget guard (ticket a940d75b) — see add_comment for the full
+      // rationale.
+      if (resolved.authorType === 'agent') {
+        const budget = await enforceAutoResponseBudget(hardBudgetDeps, ticket);
+        if (budget.blocked) return ok({ suppressed: true, reason: budget.reason });
+      }
 
       content = sanitizeHarnessMarkers(content, { logger, toolName: 'record_decision', fieldName: 'content', agentId: resolved.authorId });
 
@@ -1035,6 +1071,15 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
 
       const resolved = await resolveAuthor(author_type, author_id, author, extra);
       if ('error' in resolved) return err(resolved.error);
+
+      // Hard-budget guard (ticket a940d75b) — see add_comment for the full
+      // rationale. Blocks the whole handoff (reassignment included), not
+      // just the comment: an over-budget ticket should stop taking further
+      // automated actions until a human clears it.
+      if (resolved.authorType === 'agent') {
+        const budget = await enforceAutoResponseBudget(hardBudgetDeps, ticket);
+        if (budget.blocked) return ok({ suppressed: true, reason: budget.reason });
+      }
 
       content = sanitizeHarnessMarkers(content, { logger, toolName: 'handoff_to_agent', fieldName: 'content', agentId: resolved.authorId });
 

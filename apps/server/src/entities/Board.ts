@@ -94,6 +94,27 @@ export class Board {
   @Column({ type: 'text', nullable: true, default: null })
   respawn_storm_config: string | null;
 
+  // Per-board hard-budget ceiling (ticket a940d75b). JSON text of a
+  // HardBudgetConfig (see common/hard-budget-config.ts): { enabled?,
+  // max_auto_responses?, window_minutes?, max_dispatches_per_window?,
+  // auto_pend?, notify? }. Two independent, content-agnostic ceilings on top
+  // of the pattern-based `applyAgentCommentPingPongGuard`: (a) a lifetime cap
+  // on agent-authored non-system comments per ticket, enforced at every
+  // MCP/REST comment-creation surface (common/hard-budget-guard.ts); (c) a
+  // rolling-window cap on successful `_emitTrigger` dispatches per ticket
+  // (trigger-loop.service.ts), sourced from the existing `trigger_emitted`
+  // ActivityLog rows — no new observability write. Both counters anchor to
+  // the ticket's last human-driven unpend (`lastHumanUnpendAt`) so a breach's
+  // auto-pend can be cleared without the very next event re-tripping the same
+  // already-over-limit count. Token/cost usage is deliberately out of scope
+  // here (Planner decision) — AWB does not yet capture per-dispatch token
+  // usage from any CLI, so that ceiling needs its own instrumentation chain
+  // and ships as a separate follow-up ticket. null = inherit the (env-folded)
+  // baseline; the baseline is ON by default but conservative, mirroring
+  // respawn_storm_config's posture.
+  @Column({ type: 'text', nullable: true, default: null })
+  hard_budget_config: string | null;
+
   // Per-board DEFAULT role holders (ticket d94a1b87). JSON text of a
   // DefaultRoleAssignments map (see common/default-role-assignments-config.ts):
   //   { "assignee": [{ "agent_id": "…" }], "reviewer": [{ "agent_id": "…" }],
