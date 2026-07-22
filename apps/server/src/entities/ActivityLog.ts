@@ -21,10 +21,23 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, Index } from 
 // ORDER-BY-DESC tail reads both walk the index in order. Without these
 // every query above degenerated to a sequential scan that page-faulted
 // against the NAS's spinning disk on each cold ring eviction.
+//
+// A fifth index was added in migration 1760000000062 for a read pattern
+// introduced by ticket 3970db66 (workflow-health suppression stats):
+//
+//   - `WHERE action = ?`                               — respawn_storm_halted /
+//                                                        respawn_twin_detected counts
+//   - `WHERE action = ? GROUP BY field_changed`        — comment_pingpong_suppressed
+//                                                        by-reason rollup
+//
+// `getSuppressionStats()` runs all three on every workflow-health dashboard
+// poll (15s) — without this index each one was a full sequential scan of the
+// same unbounded table described above.
 @Index('idx_activity_logs_ticket_created', ['ticket_id', 'created_at'])
 @Index('idx_activity_logs_workspace_created', ['workspace_id', 'created_at'])
 @Index('idx_activity_logs_entity', ['entity_type', 'entity_id', 'created_at'])
 @Index('idx_activity_logs_actor_created', ['actor_id', 'created_at'])
+@Index('idx_activity_logs_action_field', ['action', 'field_changed'])
 @Entity('activity_logs')
 export class ActivityLog {
   @PrimaryGeneratedColumn('uuid')

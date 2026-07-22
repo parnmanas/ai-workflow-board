@@ -674,8 +674,9 @@ export class RespawnStormDetectorService implements OnModuleInit, OnModuleDestro
    * Lifetime cumulative counts of dispatch/trigger suppression, read straight
    * back off `ActivityLog` (ticket 3970db66 — until now these only ever hit the
    * ephemeral LogService ring or, for 2 of 3 comment-pingpong reasons, nothing
-   * durable at all). Workspace-wide; not board-scoped (v1 — the dashboard tile
-   * this powers doesn't need a per-board breakdown yet).
+   * durable at all). Instance-wide (no workspace/board filter, same as the
+   * sibling admin rollups below) — v1, the dashboard tile this powers doesn't
+   * need a per-workspace/per-board breakdown yet.
    */
   async getSuppressionStats(): Promise<{
     respawn_storm: { total_halts: number; total_twins: number };
