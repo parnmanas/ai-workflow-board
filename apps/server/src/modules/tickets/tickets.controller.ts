@@ -855,10 +855,14 @@ export class TicketsController {
     // `field_changed='pending_user_action'` activity row above does NOT
     // route through column-based dispatch on its own, and before this
     // flip the focus-selector + trigger-loop gates would have dropped
-    // any incidental wake-up anyway. Mirrors the MCP `unpend_ticket`
-    // tool. Focus selector inside `_emitTrigger` still applies — if the
-    // assignee is already focused on another ticket, this stays silent
-    // and the focus model decides when this ticket comes back in.
+    // any incidental wake-up anyway. This REST path is authenticated by
+    // AuthGuard (a human session) — since ticket b2e88390 it is the ONLY
+    // surface that can perform this flip; the MCP `unpend_ticket` tool
+    // (and an `update_ticket` false-flip) now reject unconditionally
+    // instead of mirroring this dispatch. Focus selector inside
+    // `_emitTrigger` still applies — if the assignee is already focused
+    // on another ticket, this stays silent and the focus model decides
+    // when this ticket comes back in.
     if (pendingChanged && oldPending && !ticket.pending_user_action) {
       try {
         await this.triggerLoop.dispatchCurrentColumn(ticket.id, 'unpend', actorId || '');

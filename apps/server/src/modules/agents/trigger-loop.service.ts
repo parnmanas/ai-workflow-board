@@ -1169,13 +1169,16 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
    * paths that are NOT activity-driven and shouldn't be made to fake a
    * `system`-actor activity row (which `_handleActivity` would early-return
    * on anyway). Currently used by the unpend path (ticket a57517be) — the
-   * MCP `unpend_ticket` tool and the REST PATCH that clears
-   * `pending_user_action` need an explicit wake, because the
-   * `field_changed='pending_user_action'` activity row that the unpend
-   * writes does not by itself route to the column's role holders (it's a
-   * field-update, but `_handleActivity` is keyed off comments / moves /
-   * any update — and on a previously-pending ticket the focus gate would
-   * have dropped activity-driven triggers up until this moment).
+   * REST PATCH that clears `pending_user_action` needs an explicit wake,
+   * because the `field_changed='pending_user_action'` activity row that the
+   * unpend writes does not by itself route to the column's role holders
+   * (it's a field-update, but `_handleActivity` is keyed off comments /
+   * moves / any update — and on a previously-pending ticket the focus gate
+   * would have dropped activity-driven triggers up until this moment). The
+   * MCP `unpend_ticket` tool used to call this too, but ticket b2e88390 made
+   * it reject unconditionally (human-only clear — MCP has no authenticated
+   * user session to prove a human made the call), so REST PATCH is now the
+   * only caller.
    *
    * Skip cases (silent, one info log each):
    *   - ticket missing / has no column_id
