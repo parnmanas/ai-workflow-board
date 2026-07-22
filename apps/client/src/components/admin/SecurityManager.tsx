@@ -144,7 +144,7 @@ export default function SecurityManager({ workspaceId, boardId }: SecurityManage
     try {
       const [list, agentList, scheduleList] = await Promise.all([
         api.listSecurityProfiles(effectiveWorkspaceId, boardId !== undefined ? (boardId || '') : undefined),
-        api.getAgents().catch(() => []),
+        api.getAgents(effectiveWorkspaceId).catch(() => []),
         api.listSecuritySchedules(effectiveWorkspaceId, boardId !== undefined ? (boardId || '') : undefined).catch(() => []),
       ]);
       // Enrich each profile with pass_rate + worst severity from its run history.

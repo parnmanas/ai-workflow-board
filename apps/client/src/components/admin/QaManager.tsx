@@ -69,7 +69,7 @@ export default function QaManager({ workspaceId, boardId }: QaManagerProps) {
     try {
       const [list, agentList, scheduleList, deploymentList] = await Promise.all([
         api.listQaScenarios(effectiveWorkspaceId, boardId !== undefined ? (boardId || '') : undefined),
-        api.getAgents().catch(() => []),
+        api.getAgents(effectiveWorkspaceId).catch(() => []),
         api.listQaSchedules(effectiveWorkspaceId, boardId !== undefined ? (boardId || '') : undefined).catch(() => []),
         api.listDeployments(effectiveWorkspaceId).catch(() => []),
       ]);

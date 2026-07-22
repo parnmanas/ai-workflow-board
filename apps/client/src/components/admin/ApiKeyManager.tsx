@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '../../api';
 import { ApiKey, Agent } from '../../types';
 import { tokens } from '../../tokens';
@@ -28,16 +28,16 @@ export default function ApiKeyManager({ workspaceId }: { workspaceId?: string } 
   const [createdKey, setCreatedKey] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     const [keysData, agentsData] = await Promise.all([
-      api.getApiKeys(),
-      api.getAgents(),
+      api.getApiKeys(workspaceId),
+      api.getAgents(workspaceId),
     ]);
     setKeys(keysData);
     setAgents(agentsData);
-  };
+  }, [workspaceId]);
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, [load]);
 
   const resetForm = () => {
     setForm({ name: '', scope: 'full', agent_id: '', expires_in_days: '' });

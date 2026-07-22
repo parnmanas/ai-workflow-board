@@ -68,7 +68,7 @@ export default function BoardSettingsPage() {
   const [agents, setAgents] = useState<Array<{ id: string; name: string; manager_name?: string }>>([]);
   useEffect(() => {
     let cancelled = false;
-    api.getAgents()
+    api.getAgents(wsId)
       // Agent Manager(type='manager')는 기본 역할 담당자가 될 수 없다 (ticket 941c72d3) — 후보에서 숨김.
       .then((rows) => { if (!cancelled) setAgents((rows || []).filter((a: any) => a.type !== 'manager').map((a: any) => ({ id: a.id, name: a.name, manager_name: a.manager_name }))); })
       .catch(() => { if (!cancelled) setAgents([]); });

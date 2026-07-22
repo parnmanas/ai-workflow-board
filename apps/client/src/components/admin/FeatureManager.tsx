@@ -61,11 +61,11 @@ export default function FeatureManager({ workspaceId, boardId }: { workspaceId?:
   useEffect(() => {
     (async () => {
       try {
-        const list = await api.getAgents();
+        const list = await api.getAgents(workspaceId);
         setAgents((list || []).map((a: any) => ({ id: a.id, name: a.name })));
       } catch { /* non-fatal — planner defaults server-side */ }
     })();
-  }, []);
+  }, [workspaceId]);
 
   const loadDetail = useCallback(async (id: string) => {
     setSelectedId(id);

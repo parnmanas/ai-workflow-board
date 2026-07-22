@@ -694,7 +694,14 @@ export const api = {
     request<any>(`/users/${id}`, { method: 'DELETE' }),
 
   // ─── Agents ────────────────────────────────────────────
-  getAgents: () => request<any[]>('/agents'),
+  // workspaceId overrides the ambient X-Workspace-Id header for this one call —
+  // see getChannels above for why callers reacting to a workspaceId prop change
+  // need this instead of relying on the ambient header.
+  getAgents: (workspaceId?: string) => {
+    const init: RequestInit = {};
+    if (workspaceId) init.headers = { ...getAuthHeaders(), 'X-Workspace-Id': workspaceId };
+    return request<any[]>('/agents', init);
+  },
   getAgentsAll: () => request<any[]>('/agents?scope=all'),
   // Phase 3 Plan 03-02: dashboard snapshot with current_task + bool-coerced is_online
   getAgentDashboard: (workspaceId: string): Promise<DashboardAgent[]> =>
@@ -789,7 +796,15 @@ export const api = {
     request<any>(`/agents/${id}`, { method: 'DELETE' }),
 
   // ─── Channels ──────────────────────────────────────────
-  getChannels: () => request<any[]>('/channels'),
+  // workspaceId overrides the ambient X-Workspace-Id header for this one call
+  // (same pattern as createAgent below) — callers that re-fetch the instant a
+  // workspaceId prop changes can't rely on the ambient header having caught up
+  // yet (it's synced from a sibling effect that may run after theirs).
+  getChannels: (workspaceId?: string) => {
+    const init: RequestInit = {};
+    if (workspaceId) init.headers = { ...getAuthHeaders(), 'X-Workspace-Id': workspaceId };
+    return request<any[]>('/channels', init);
+  },
   createChannel: (data: {
     name: string; type?: string; bot_token?: string; guild_id?: string;
     channel_id?: string; board_id?: string;
@@ -825,7 +840,14 @@ export const api = {
     request<{ success: boolean; error?: string }>(`/me/channels/${id}/test`, { method: 'POST' }),
 
   // ─── API Keys ──────────────────────────────────────────
-  getApiKeys: () => request<any[]>('/keys'),
+  // workspaceId overrides the ambient X-Workspace-Id header for this one call —
+  // see getChannels above for why callers reacting to a workspaceId prop change
+  // need this instead of relying on the ambient header.
+  getApiKeys: (workspaceId?: string) => {
+    const init: RequestInit = {};
+    if (workspaceId) init.headers = { ...getAuthHeaders(), 'X-Workspace-Id': workspaceId };
+    return request<any[]>('/keys', init);
+  },
   getApiKey: (id: string) => request<any>(`/keys/${id}`),
   createApiKey: (data: { name: string; agent_id?: string | null; scope?: string; expires_in_days?: number }) =>
     request<any>('/keys', { method: 'POST', body: JSON.stringify(data) }),
@@ -1712,8 +1734,14 @@ export const api = {
     }),
 
   // ── Phase 7: Chat Rooms ─────────────────────────
-  listChatRooms: (scope?: 'workspace') =>
-    request<ChatRoomListItem[]>(scope === 'workspace' ? '/chat-rooms?scope=workspace' : '/chat-rooms'),
+  // workspaceId overrides the ambient X-Workspace-Id header for this one call —
+  // see getChannels above for why callers reacting to a workspaceId prop change
+  // need this instead of relying on the ambient header.
+  listChatRooms: (scope?: 'workspace', workspaceId?: string) => {
+    const init: RequestInit = {};
+    if (workspaceId) init.headers = { ...getAuthHeaders(), 'X-Workspace-Id': workspaceId };
+    return request<ChatRoomListItem[]>(scope === 'workspace' ? '/chat-rooms?scope=workspace' : '/chat-rooms', init);
+  },
 
   // Server returns `{ room: ChatRoomDetail, existing: boolean }` — unwrap so
   // callers can dereference `room.id` directly. (Pre-dedup-removal the

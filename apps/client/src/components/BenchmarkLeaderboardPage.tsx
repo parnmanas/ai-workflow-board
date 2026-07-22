@@ -111,7 +111,7 @@ export default function BenchmarkLeaderboardPage() {
       const [agg, full, pool] = await Promise.all([
         api.getBenchmarkLeaderboard(wid),
         api.getBoard(boardId).catch(() => null),
-        api.getAgents().catch(() => [] as Agent[]),
+        api.getAgents(wid).catch(() => [] as Agent[]),
       ]);
       setAgents(Array.isArray(agg?.agents) ? agg.agents : []);
       setAgentPool(Array.isArray(pool) ? pool : []);
