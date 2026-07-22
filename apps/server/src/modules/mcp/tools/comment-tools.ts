@@ -35,6 +35,7 @@ import { buildConsensusUpdatePayload, autoExecuteConsensusMove } from '../../../
 import type { ToolContext } from './context';
 import { applyAgentCommentPingPongGuard, terminalAckKey } from '../../../common/agent-comment-pingpong';
 import { computeTicketCommentChainDepth } from '../../../common/agent-chain-depth';
+import { computeLoopScore } from '../../../common/loop-score';
 
 function isUniqueConstraintError(error: unknown): boolean {
   const value = error as { code?: string; errno?: number; message?: string } | null;
@@ -326,6 +327,35 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         new_value: content,
         field_changed: resolvedType,
       });
+
+      // ticket 24df8677 — generalized loop-score observability. Compute +
+      // log only (WARN/TRIP classification, no action) — same scope boundary
+      // the sibling ping-pong guard above uses (agent-authored writes via
+      // add_comment only), and the same "never fail the comment write on a
+      // detector hiccup" idiom the deferral-guard try/catch above follows.
+      // Reuses `recentAgentComments` (already fetched for the ping-pong guard)
+      // plus the just-saved `comment` instead of a second query.
+      if (resolvedAuthorType === 'agent') {
+        try {
+          const grouped = ticketRoleAssignmentService
+            ? await ticketRoleAssignmentService.resolveGroupedForTicket(ticket_id)
+            : [];
+          const holderKeys = new Set<string>();
+          for (const g of grouped) for (const h of g.holders) holderKeys.add(`${h.type}:${h.id}`);
+          const ascending = recentAgentComments.slice().reverse();
+          ascending.push(comment);
+          const loopScore = computeLoopScore(ascending, holderKeys);
+          if (loopScore.warn) {
+            logger.warn(
+              'LoopScore',
+              loopScore.trip ? 'loop-risk TRIP threshold reached' : 'loop-risk WARN threshold reached',
+              { ticket_id, ...loopScore },
+            );
+          }
+        } catch (e) {
+          logger.warn('LoopScore', `loop-score computation failed (continuing): ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
 
       // Dispatch @-mentions just like the REST path
       // (tickets.controller._dispatchCommentMentions). Without this, a
