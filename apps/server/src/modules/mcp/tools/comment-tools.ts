@@ -33,7 +33,7 @@ import { buildConsensusMetadata, buildProposalMetadata } from '../../../common/c
 import { getConsensusState, findOpenProposal } from '../../../services/consensus.service';
 import { buildConsensusUpdatePayload, autoExecuteConsensusMove } from '../../../services/consensus-actions';
 import type { ToolContext } from './context';
-import { applyAgentCommentPingPongGuard, terminalAckKey } from '../../../common/agent-comment-pingpong';
+import { applyAgentCommentPingPongGuard, terminalAckKey, isPendingUserActionBlocked } from '../../../common/agent-comment-pingpong';
 import { computeTicketCommentChainDepth } from '../../../common/agent-chain-depth';
 import { computeLoopScore } from '../../../common/loop-score';
 import { enforceAutoResponseBudget } from '../../../common/hard-budget-guard';
@@ -530,6 +530,13 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       const resolved = await resolveAuthor(author_type, author_id, author, extra);
       if ('error' in resolved) return err(resolved.error);
 
+      // pending_user_action gate (ticket 8fc94adf) — same short-circuit
+      // add_comment applies via applyAgentCommentPingPongGuard, ported here so
+      // a pend()'d ticket can't be advanced through a question either.
+      if (isPendingUserActionBlocked(ticket, resolved.authorType)) {
+        return ok({ suppressed: true, reason: 'pending_user_action' });
+      }
+
       // Hard-budget guard (ticket a940d75b) — see add_comment for the full
       // rationale. ask_question has no ping-pong guard of its own, so this is
       // its only volume ceiling.
@@ -647,6 +654,12 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       const resolved = await resolveAuthor(author_type, author_id, author, extra);
       if ('error' in resolved) return err(resolved.error);
 
+      // pending_user_action gate (ticket 8fc94adf) — see ask_question for the
+      // full rationale.
+      if (answerTicket && isPendingUserActionBlocked(answerTicket, resolved.authorType)) {
+        return ok({ suppressed: true, reason: 'pending_user_action' });
+      }
+
       // Hard-budget guard (ticket a940d75b) — see add_comment for the full
       // rationale.
       if (resolved.authorType === 'agent' && answerTicket) {
@@ -709,6 +722,12 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
 
       const resolved = await resolveAuthor(author_type, author_id, author, extra);
       if ('error' in resolved) return err(resolved.error);
+
+      // pending_user_action gate (ticket 8fc94adf) — see ask_question for the
+      // full rationale.
+      if (isPendingUserActionBlocked(ticket, resolved.authorType)) {
+        return ok({ suppressed: true, reason: 'pending_user_action' });
+      }
 
       // Hard-budget guard (ticket a940d75b) — see add_comment for the full
       // rationale.
@@ -1089,6 +1108,13 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
 
       const resolved = await resolveAuthor(author_type, author_id, author, extra);
       if ('error' in resolved) return err(resolved.error);
+
+      // pending_user_action gate (ticket 8fc94adf) — see ask_question for the
+      // full rationale. Blocks the whole handoff (reassignment included), same
+      // as the hard-budget guard below.
+      if (isPendingUserActionBlocked(ticket, resolved.authorType)) {
+        return ok({ suppressed: true, reason: 'pending_user_action' });
+      }
 
       // Hard-budget guard (ticket a940d75b) — see add_comment for the full
       // rationale. Blocks the whole handoff (reassignment included), not
