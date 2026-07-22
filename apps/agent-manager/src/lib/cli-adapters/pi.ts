@@ -79,6 +79,29 @@
 // configDirEnv() returns 'HOME' (like antigravity) because pi has no
 // dedicated config-dir env var of its own — paths always resolve under
 // `~/.pi/agent/` (docs/settings.md).
+//
+// pi chat E2E 검증 (ticket 2a912376): send_chat_room_message가 실제로 방에
+// 도착하는지 별도로 라이브 검증했다 — 로컬 샌드박스 AWB 서버 + 로컬 fake
+// OpenAI-호환 LLM provider(pi 확장으로 등록) + 실제 pi 0.81.1 바이너리로,
+// event-dispatcher.ts#handleChatRequest의 legacy one-shot 경로가 실제로
+// 호출하는 것과 동일한 프로덕션 함수(prepareCliHome / composeChatPrompt /
+// buildOneshotSpawn)를 그대로 태웠다. 결과: fake LLM이 send_chat_room_message
+// 호출을 지시하면 실제로 방에 메시지가 도착함을 별도 get_chat_room_messages
+// 호출로 독립 확인했고, fake LLM이 tool을 전혀 호출하지 않으면 방에 아무
+// 메시지도 도착하지 않음(REST relay 안전망 부재가 설계대로 동작 — round-2가
+// codex 패리티로 수용한 바로 그 트레이드오프)도 확인했다.
+//
+// 이 검증 중 별개의 버그를 하나 발견했다(ticket 68cda8eb로 추적): 브릿지의
+// tool-call-success sentinel은 console.log()로 작성돼 있지만, 실제 pi
+// 런타임을 거치면 자식 프로세스의 stdout이 아니라 stderr로 나간다(순수 셸
+// 1>/2> 리다이렉션으로 확인 — pi의 -p 모드가 최종 응답 텍스트만 stdout에
+// 남기고 확장의 로그 출력은 전부 stderr로 합치는 것으로 보인다). child.stdout
+// 만 읽는 _scanForCommentTool은 그 sentinel을 볼 수 없어, 위 "Review
+// regression fix" 문단이 고쳐졌다고 서술한 ticket-dispatch 경로의
+// commentSent/서킷브레이커 회계는 실제로는 고쳐지지 않았을 가능성이 높다.
+// chat 경로(send_chat_room_message)의 메시지 전달 자체는 이 버그와 무관하게
+// 정상 동작한다 — 영향 범위는 sentinel을 관측해 commentSent를 세팅하는 회계
+// 로직으로 한정된다.
 
 import { promises as fsp } from 'node:fs';
 import { homedir } from 'node:os';
