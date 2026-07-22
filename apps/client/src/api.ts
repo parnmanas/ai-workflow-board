@@ -71,9 +71,6 @@ import type {
   RepoTreeEntry,
   RepoFileContent,
   WorkflowHealthRollup,
-  WorkflowHealthActiveStorm,
-  WorkflowHealthRespawnCount,
-  WorkflowHealthSuppressionStats,
 } from './types';
 
 const BASE = '/api';
@@ -1737,25 +1734,14 @@ export const api = {
       body: JSON.stringify(patch),
     }),
 
-  // ─── Admin Workflow Health (ticket 3970db66) ───────────
+  // ─── Admin Workflow Health ───────────
+  // The rollup embeds active_storms/top_respawns/suppression_stats, so the
+  // controller's narrower /storms, /respawns, /suppressions endpoints are
+  // intentionally left without a dedicated client wrapper here.
   getWorkflowHealth: (params?: { boardId?: string }) => {
     const q = params?.boardId ? `?board_id=${encodeURIComponent(params.boardId)}` : '';
     return request<WorkflowHealthRollup>(`/admin/workflow-health${q}`);
   },
-
-  getWorkflowHealthStorms: () =>
-    request<{ storms: WorkflowHealthActiveStorm[] }>('/admin/workflow-health/storms'),
-
-  getWorkflowHealthRespawns: (params?: { boardId?: string; limit?: number }) => {
-    const parts: string[] = [];
-    if (params?.boardId) parts.push(`board_id=${encodeURIComponent(params.boardId)}`);
-    if (params?.limit) parts.push(`limit=${params.limit}`);
-    const q = parts.length ? `?${parts.join('&')}` : '';
-    return request<{ respawns: WorkflowHealthRespawnCount[] }>(`/admin/workflow-health/respawns${q}`);
-  },
-
-  getWorkflowHealthSuppressions: () =>
-    request<WorkflowHealthSuppressionStats>('/admin/workflow-health/suppressions'),
 
   // ── Phase 7: Chat Rooms ─────────────────────────
   // workspaceId overrides the ambient X-Workspace-Id header for this one call —
