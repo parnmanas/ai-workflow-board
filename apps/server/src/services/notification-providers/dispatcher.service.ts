@@ -6,6 +6,7 @@ import { LogService } from '../log.service';
 import { decrypt } from '../encryption.service';
 import { UserChannel } from '../../entities/UserChannel';
 import { Ticket } from '../../entities/Ticket';
+import { BoardColumn } from '../../entities/BoardColumn';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { NotificationProviderRegistry } from './registry.service';
@@ -59,6 +60,7 @@ export class UserChannelDispatcherService implements OnModuleInit, OnModuleDestr
   constructor(
     @InjectRepository(UserChannel) private readonly userChannelRepo: Repository<UserChannel>,
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
+    @InjectRepository(BoardColumn) private readonly colRepo: Repository<BoardColumn>,
     @InjectRepository(TicketRoleAssignment) private readonly assignRepo: Repository<TicketRoleAssignment>,
     private readonly registry: NotificationProviderRegistry,
     private readonly logService: LogService,
@@ -228,8 +230,9 @@ export class UserChannelDispatcherService implements OnModuleInit, OnModuleDestr
     ));
     if (userIds.length === 0) return;
 
-    const url = process.env.AWB_PUBLIC_URL
-      ? `${process.env.AWB_PUBLIC_URL.replace(/\/$/, '')}/?ticket=${ticketId}`
+    const boardId = await this._resolveBoardId(ticket);
+    const url = process.env.AWB_PUBLIC_URL && boardId
+      ? `${process.env.AWB_PUBLIC_URL.replace(/\/$/, '')}/ws/${ticket.workspace_id}/boards/${boardId}?ticket=${ticketId}`
       : undefined;
 
     const action = log.action.replace('_', ' ');
@@ -287,6 +290,32 @@ export class UserChannelDispatcherService implements OnModuleInit, OnModuleDestr
     if (ev.ticket_id && ev.board_id) {
       const params = new URLSearchParams({ ticket: ev.ticket_id, comment: ev.source_id });
       return `${base}/ws/${ev.workspace_id}/boards/${ev.board_id}?${params.toString()}`;
+    }
+    return null;
+  }
+
+  /**
+   * Root tickets carry column_id directly; child/grandchild tickets store it
+   * on the nearest ancestor (same walk as EventsController.resolveBoardId).
+   */
+  private async _resolveBoardId(ticket: Ticket): Promise<string | null> {
+    if (ticket.column_id) {
+      const col = await this.colRepo.findOne({ where: { id: ticket.column_id } });
+      return col?.board_id || null;
+    }
+    if (ticket.parent_id) {
+      const parent = await this.ticketRepo.findOne({ where: { id: ticket.parent_id } });
+      if (parent?.column_id) {
+        const col = await this.colRepo.findOne({ where: { id: parent.column_id } });
+        return col?.board_id || null;
+      }
+      if (parent?.parent_id) {
+        const grandparent = await this.ticketRepo.findOne({ where: { id: parent.parent_id } });
+        if (grandparent?.column_id) {
+          const col = await this.colRepo.findOne({ where: { id: grandparent.column_id } });
+          return col?.board_id || null;
+        }
+      }
     }
     return null;
   }

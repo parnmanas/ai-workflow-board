@@ -11,6 +11,11 @@
 // `Set<string>` for `member_ids`. Pre-fix: throws. Post-fix:
 // `Array.from()` normalizes the Set so the listener proceeds and our
 // stub `userChannelRepo.find` is consulted for each non-sender member.
+//
+// Also covers `_handleActivity` (ticket f57dcfbc): it used to build a
+// workspace-less `/?ticket=<id>` notification link — the same legacy
+// pattern removed from the client's admin fallbacks — instead of the
+// board-scoped shape `_buildDeepLink` already uses for mentions.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -40,6 +45,7 @@ function makeService(UserChannelDispatcherService, { findCalls }) {
     },
   };
   const ticketRepo = { async findOne() { return null; } };
+  const colRepo = { async findOne() { return null; } };
   const assignRepo = { async find() { return []; } };
   const registry = { get() { return null; } };
   const logService = {
@@ -50,6 +56,7 @@ function makeService(UserChannelDispatcherService, { findCalls }) {
   return new UserChannelDispatcherService(
     userChannelRepo,
     ticketRepo,
+    colRepo,
     assignRepo,
     registry,
     logService,
@@ -125,4 +132,101 @@ test('_handleChat skips when content is only @-mentions (delegated to mention di
   });
 
   assert.equal(findCalls.length, 0, 'pure-mention message should not trigger ambient dispatch');
+});
+
+function makeActivityService(UserChannelDispatcherService, { tickets, columns, assignments, sentPayloads }) {
+  const ticketRepo = {
+    async findOne({ where: { id } }) {
+      return tickets[id] || null;
+    },
+  };
+  const colRepo = {
+    async findOne({ where: { id } }) {
+      return columns[id] || null;
+    },
+  };
+  const assignRepo = { async find() { return assignments; } };
+  const userChannelRepo = {
+    async find({ where: { user_id } }) {
+      return [{ id: `uc-${user_id}`, user_id, is_active: 1, notify_ticket: 1, provider: 'stub', target: user_id, credentials: null }];
+    },
+  };
+  const provider = {
+    async send(target, creds, payload) {
+      sentPayloads.push({ target, payload });
+      return { ok: true };
+    },
+  };
+  const registry = { get: () => provider };
+  const logService = { info: () => {}, warn: () => {}, error: () => {} };
+  return new UserChannelDispatcherService(
+    userChannelRepo,
+    ticketRepo,
+    colRepo,
+    assignRepo,
+    registry,
+    logService,
+  );
+}
+
+test("_handleActivity links to the ticket's own board — not the legacy workspace-less /?ticket= fallback", async () => {
+  const UserChannelDispatcherService = await loadDispatcher();
+  const prevUrl = process.env.AWB_PUBLIC_URL;
+  process.env.AWB_PUBLIC_URL = 'https://awb.example.com';
+  try {
+    const sentPayloads = [];
+    const svc = makeActivityService(UserChannelDispatcherService, {
+      tickets: { 'tk-1': { id: 'tk-1', workspace_id: 'ws-1', column_id: 'col-1', parent_id: null, title: 'Fix the thing' } },
+      columns: { 'col-1': { id: 'col-1', board_id: 'board-1' } },
+      assignments: [{ user_id: 'u-alice', ticket_id: 'tk-1' }],
+      sentPayloads,
+    });
+
+    await svc._handleActivity({
+      entity_type: 'ticket',
+      entity_id: 'tk-1',
+      action: 'moved',
+      actor_id: 'u-other',
+      actor_name: 'Other',
+      field_changed: 'column',
+      old_value: 'To Do',
+      new_value: 'In Progress',
+    });
+
+    assert.equal(sentPayloads.length, 1);
+    assert.equal(sentPayloads[0].payload.url, 'https://awb.example.com/ws/ws-1/boards/board-1?ticket=tk-1');
+  } finally {
+    if (prevUrl === undefined) delete process.env.AWB_PUBLIC_URL;
+    else process.env.AWB_PUBLIC_URL = prevUrl;
+  }
+});
+
+test("_handleActivity omits the url when the ticket's board can't be resolved (no broken fallback link)", async () => {
+  const UserChannelDispatcherService = await loadDispatcher();
+  const prevUrl = process.env.AWB_PUBLIC_URL;
+  process.env.AWB_PUBLIC_URL = 'https://awb.example.com';
+  try {
+    const sentPayloads = [];
+    const svc = makeActivityService(UserChannelDispatcherService, {
+      tickets: { 'tk-2': { id: 'tk-2', workspace_id: 'ws-1', column_id: null, parent_id: null, title: 'Orphan column ticket' } },
+      columns: {},
+      assignments: [{ user_id: 'u-alice', ticket_id: 'tk-2' }],
+      sentPayloads,
+    });
+
+    await svc._handleActivity({
+      entity_type: 'ticket',
+      entity_id: 'tk-2',
+      action: 'updated',
+      actor_id: 'u-other',
+      actor_name: 'Other',
+      field_changed: '',
+    });
+
+    assert.equal(sentPayloads.length, 1);
+    assert.equal(sentPayloads[0].payload.url, undefined);
+  } finally {
+    if (prevUrl === undefined) delete process.env.AWB_PUBLIC_URL;
+    else process.env.AWB_PUBLIC_URL = prevUrl;
+  }
 });
