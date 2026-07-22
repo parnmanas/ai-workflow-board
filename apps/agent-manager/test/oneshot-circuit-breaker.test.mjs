@@ -94,6 +94,22 @@ function codexMcpToolCompletedLine(tool) {
   });
 }
 
+// Claude `--print --output-format stream-json`가 내는 turn별 assistant
+// 이벤트로 MCP tool_use를 담고 있다 — ticket 3feaf80f의 수정이 oneshot에서
+// 실제로 내보내게 만드는 shape이다(이전에는 `--output-format json`이라 stdout에
+// 최종 `result` 한 줄만 나왔고, one-shot 실행에서는 `assistant`/tool_use가
+// 전혀 나타나지 않았다).
+function claudeAssistantToolUseLine(toolName) {
+  return JSON.stringify({
+    type: 'assistant',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'tool_use', id: 'tu-1', name: toolName, input: {} }],
+    },
+    session_id: 'sess-1',
+  });
+}
+
 let originalFetch;
 let mcpToolCalls; // names of tools/call invoked over /mcp
 let restPosts; // { url, body } for non-MCP REST endpoints
@@ -380,6 +396,72 @@ test('Codex native MCP add_comment completion suppresses the silent-exit fallbac
   await mgr._handleOneshotExit(rec, 0);
 
   assert.equal(silentExit(), undefined, 'no false system comment after Codex add_comment succeeds');
+});
+
+// ── ticket 3feaf80f: Claude one-shot의 commentSent는 구조적으로 항상 false
+// 였다(NATIVE_MCP + 배치 `--output-format json` 조합이라 #wireStdioCapture가
+// tool_use 이벤트를 아예 보지 못했다) — 그래서 실제로 성공한 티켓-멘션
+// dispatch조차 (a) "exited without leaving a ticket comment" 오탐 경고를
+// 받았고 (b) circuit breaker의 recordSuccess() 대신 실패 경로로 계상됐다.
+// buildOneshotSpawn을 stream-json으로 전환해 고쳤다 — 아래 테스트들은 CLI가
+// 이제 실제로 내보내는 이벤트 shape을 받았을 때 _scanForCommentTool + exit
+// 핸들러가 올바르게 동작함을 증명한다.
+
+test('Claude native MCP add_comment tool_use (stream-json) suppresses the silent-exit fallback', async () => {
+  const mgr = new SubagentManager(makeConfig());
+  const rec = makeCodexRecord({ cli_type: 'claude', captureOutput: false, outLines: [], tailLines: [] });
+
+  mgr._scanForCommentTool(rec, claudeAssistantToolUseLine('mcp__awb__add_comment'));
+  assert.equal(rec.commentSent, true, 'Claude stream-json assistant tool_use counts as a persisted comment');
+
+  await mgr._handleOneshotExit(rec, 0);
+
+  assert.equal(silentExit(), undefined, 'no false system comment after Claude add_comment succeeds');
+});
+
+test('Claude native MCP move_ticket alone does NOT count (only comment-creating tools do)', async () => {
+  const mgr = new SubagentManager(makeConfig());
+  const rec = makeCodexRecord({ cli_type: 'claude', captureOutput: false, outLines: [], tailLines: [] });
+
+  mgr._scanForCommentTool(rec, claudeAssistantToolUseLine('mcp__awb__move_ticket'));
+  assert.equal(rec.commentSent, false, 'move_ticket is not in TICKET_COMMENT_TOOL_SUFFIXES');
+});
+
+test('regression (ticket 3feaf80f): a full Claude oneshot turn sequence resets the breaker via recordSuccess, not the failure path', async () => {
+  // 실제 `--print --output-format stream-json --verbose` 실행에서
+  // #wireStdioCapture가 _scanForCommentTool에 한 줄씩 먹이는 것을 그대로
+  // 재현한다: init 배너, add_comment를 호출하는 assistant turn, 이어서
+  // move_ticket, 마지막 result. recordSuccess()의 효과를 관찰할 수 있도록
+  // 수정 전과 동일한 shape의 silent failure 2회로 미리 breaker를 트립시켜 둔다.
+  const cb = new CircuitBreaker();
+  const mgr = new SubagentManager(makeConfig(), cb);
+  const key = CircuitBreaker.key('agent-rolf', 'ticket-loop', 'assignee');
+
+  for (let i = 0; i < 2; i++) {
+    const rec = makeCodexRecord({ cli_type: 'claude', captureOutput: false, outLines: [], tailLines: [] });
+    await mgr._handleOneshotExit(rec, 0); // clean exit, no comment tool seen — counts as silent failure
+  }
+  assert.equal(cb.size, 1, 'breaker is tracking the key after two silent (pre-fix-shaped) exits');
+
+  restPosts.length = 0;
+  mcpToolCalls.length = 0;
+
+  const rec = makeCodexRecord({ cli_type: 'claude', captureOutput: false, outLines: [], tailLines: [] });
+  for (const line of [
+    JSON.stringify({ type: 'system', subtype: 'init' }),
+    claudeAssistantToolUseLine('mcp__awb__add_comment'),
+    claudeAssistantToolUseLine('mcp__awb__move_ticket'),
+    JSON.stringify({ type: 'result', subtype: 'success', is_error: false, num_turns: 3, result: 'Done.' }),
+  ]) {
+    mgr._scanForCommentTool(rec, line);
+  }
+  assert.equal(rec.commentSent, true);
+
+  await mgr._handleOneshotExit(rec, 0);
+
+  assert.equal(silentExit(), undefined, 'no false silent-exit warning on the successful dispatch');
+  assert.equal(cb.shouldBlock(key), null, 'recordSuccess() cleared the streak — NOT counted as a 3rd failure');
+  assert.equal(mcpToolCalls.includes('pend_ticket'), false, 'a genuinely successful dispatch must never pend');
 });
 
 test('respawn-storm regression (ticket c555fbb6): silent exit_code=null opens the breaker + pends', async () => {
