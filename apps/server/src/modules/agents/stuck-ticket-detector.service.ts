@@ -47,6 +47,7 @@ import { StuckTicketAlert } from '../../entities/StuckTicketAlert';
 import { Ticket } from '../../entities/Ticket';
 import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { Workspace } from '../../entities/Workspace';
+import { sinceBoundaryParam } from '../../common/created-at-since-param';
 import { LogService } from '../../services/log.service';
 import { ActivityService } from '../../services/activity.service';
 import { AgentStatusService } from './agent-status.service';
@@ -808,6 +809,18 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
    * false positives from unrelated `updated` rows (e.g. assignee
    * reassign) so a benign edit doesn't accidentally mark a ticket
    * "not stuck".
+   *
+   * 두 경계 모두 `sinceBoundaryParam()`을 통과시킨다(ticket 7200396a,
+   * 8fc94adf 후속). 이전의 인라인 `floorSec`/`ceilSec` 쌍은 sql.js
+   * 동일-초 사전식 비교 문제를 고친 것처럼 보였지만 실제로는 무효했다 —
+   * `fromTime`/`toTime`은 `Comment.created_at`을 DB에서 재조회한 Date라
+   * 이미 밀리초=0이어서 floor/ceil 자체가 no-op이었고, 진짜 문제는
+   * TypeORM sqlite 드라이버가 바인딩되는 Date 파라미터를 포맷팅할 때 실제
+   * 값과 무관하게 항상 밀리초를 붙인다는 점이다(`>=`만 실제로 깨졌고
+   * `<=`는 사전식 prefix 비교 특성상 원래도 안전했다 — 자세한 내용은
+   * `created-at-since-param.ts` 참조). `sinceBoundaryParam`은 파라미터를
+   * sqlite 자체 포맷(밀리초 없는 문자열)에 맞춰 이 간극을 없앤다
+   * (postgres에서는 no-op이라 두 경계 모두 그대로 적용해도 안전하다).
    */
   private async _countLifecycleEvents(
     ticketId: string,
@@ -815,22 +828,11 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     toTime: Date,
   ): Promise<number> {
     const repo = this.dataSource.getRepository(ActivityLog);
-    // Precision-mismatch guard. ActivityLog.created_at is populated by
-    // @CreateDateColumn — which on SQLite uses SQL `CURRENT_TIMESTAMP`
-    // and stores second-precision values (e.g. "2026-05-14 15:23:23").
-    // The detector, however, writes `last_alerted_at` from a JS Date
-    // with millisecond precision (e.g. "2026-05-14 15:23:23.483").
-    // A strict `created_at > from` would then drop a same-second move
-    // (15:23:23.000 > 15:23:23.483 is false) and silently leave the
-    // alert sticky. Floor `from` and ceiling `to` to second boundaries
-    // so any activity that landed in those bounding seconds is caught.
-    const floorSec = (d: Date) => new Date(Math.floor(d.getTime() / 1000) * 1000);
-    const ceilSec = (d: Date) => new Date(Math.ceil(d.getTime() / 1000) * 1000);
     return repo
       .createQueryBuilder('a')
       .where('a.ticket_id = :tid', { tid: ticketId })
-      .andWhere('a.created_at >= :from', { from: floorSec(fromTime) })
-      .andWhere('a.created_at <= :to', { to: ceilSec(toTime) })
+      .andWhere('a.created_at >= :from', { from: sinceBoundaryParam(this.dataSource, fromTime) })
+      .andWhere('a.created_at <= :to', { to: sinceBoundaryParam(this.dataSource, toTime) })
       .andWhere(
         "((a.action = 'moved' AND a.field_changed = 'column') " +
         "OR (a.action = 'updated' AND a.field_changed = 'locked_by_agent_id'))",
