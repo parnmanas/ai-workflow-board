@@ -2108,6 +2108,38 @@ export interface WorkflowHealthSuppressionStats {
   };
 }
 
+export interface WorkflowHealthTicketUsage {
+  ticket_id: string;
+  ticket_title: string;
+  input_tokens: number;
+  output_tokens: number;
+  total_cost_usd: number;
+  runs: number;
+}
+
+/** Token/cost usage rollup (ticket 6dd3f968) — see server AgentUsageService.
+ *  All money/token figures are a LOWER BOUND: only Claude-family CLIs report
+ *  a dollar cost (Codex has no cost concept, DeepSeek's is deliberately
+ *  nulled — see `coverage` / `priced_runs` to gauge how much of the window
+ *  is actually instrumented). `null` on the two derived fields means "no
+ *  priced runs in this window to estimate from", not zero. */
+export interface WorkflowHealthTokenUsage {
+  window_minutes: number;
+  coverage: { runs_with_usage: number; runs_total: number };
+  totals: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_input_tokens: number;
+    cache_creation_input_tokens: number;
+    total_cost_usd: number;
+  };
+  priced_runs: number;
+  avg_cost_per_run_usd_priced_only: number | null;
+  top_tickets: WorkflowHealthTicketUsage[];
+  suppressed_attempts_in_window: number;
+  estimated_saved_usd: number | null;
+}
+
 export interface WorkflowHealthRollup {
   generated_at: string;
   window_minutes: number;
@@ -2118,4 +2150,7 @@ export interface WorkflowHealthRollup {
   avg_cycle_time_ms: number | null;
   qa_pass_trend: { passed: number; failed: number; error: number; total: number };
   suppression_stats: WorkflowHealthSuppressionStats;
+  // null when the usage sub-query itself failed (controller-level defensive
+  // catch) — the tile must render an empty/unavailable state, not a zeroed one.
+  token_usage: WorkflowHealthTokenUsage | null;
 }

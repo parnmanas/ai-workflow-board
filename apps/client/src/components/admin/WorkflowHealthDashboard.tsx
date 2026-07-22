@@ -34,6 +34,21 @@ function formatTime(ts: string | null | undefined): string {
   }
 }
 
+// null → "no priced runs to estimate from" (never rendered as $0 — see
+// WorkflowHealthTokenUsage docstring). Sub-$1 figures need more precision
+// than a flat 2-decimal format to stay legible (a $0.03 run would print as
+// "$0.00").
+function formatUsd(v: number | null): string {
+  if (v == null) return '—';
+  return `$${v.toFixed(v < 1 ? 4 : 2)}`;
+}
+
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
+}
+
 function SummaryTile({ label, value, accent }: { label: string; value: string; accent?: string }) {
   return (
     <div style={{
@@ -124,7 +139,7 @@ export default function WorkflowHealthDashboard() {
 
   if (!rollup) return null;
 
-  const { active_storms, top_respawns, suppression_stats, qa_pass_trend } = rollup;
+  const { active_storms, top_respawns, suppression_stats, qa_pass_trend, token_usage } = rollup;
 
   return (
     <div>
@@ -216,6 +231,66 @@ export default function WorkflowHealthDashboard() {
             </div>
           ))}
         </div>
+      </Section>
+
+      {/* Token/cost usage — 실측 토큰·비용 + 억제 절감 추정 (ticket 6dd3f968) */}
+      <Section title="토큰/비용 사용량 (추정)">
+        {!token_usage ? (
+          <EmptyState title="사용량 데이터를 불러올 수 없음" description="집계 쿼리가 실패했습니다. 새로고침 후에도 반복되면 서버 로그를 확인하세요." />
+        ) : (
+          <div>
+            <div style={{ padding: '12px 14px', display: 'flex', gap: 32, flexWrap: 'wrap' }}>
+              <div>
+                <div style={{ fontSize: '11px', color: tokens.colors.textSecondary }}>입력 토큰 ({token_usage.window_minutes}분)</div>
+                <div style={{ fontSize: '18px', fontWeight: 700, color: tokens.colors.textPrimary }}>
+                  {formatTokens(token_usage.totals.input_tokens)}
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize: '11px', color: tokens.colors.textSecondary }}>출력 토큰 ({token_usage.window_minutes}분)</div>
+                <div style={{ fontSize: '18px', fontWeight: 700, color: tokens.colors.textPrimary }}>
+                  {formatTokens(token_usage.totals.output_tokens)}
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize: '11px', color: tokens.colors.textSecondary }}>비용 — CLI 보고 기준</div>
+                <div style={{ fontSize: '18px', fontWeight: 700, color: tokens.colors.textPrimary }}>
+                  {formatUsd(token_usage.totals.total_cost_usd)}
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize: '11px', color: tokens.colors.textSecondary }}>억제 절감 추정</div>
+                <div style={{ fontSize: '18px', fontWeight: 700, color: tokens.colors.successLight }}>
+                  {formatUsd(token_usage.estimated_saved_usd)}
+                </div>
+              </div>
+            </div>
+            <div style={{
+              padding: '4px 14px 14px 14px', fontSize: '11px', color: tokens.colors.textMuted,
+              borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 8,
+            }}>
+              계측된 run: {token_usage.coverage.runs_with_usage}/{token_usage.coverage.runs_total}
+              {' · '}비용 계측 run(avg {formatUsd(token_usage.avg_cost_per_run_usd_priced_only)}/run): {token_usage.priced_runs}
+              {' · '}윈도우 내 억제 이벤트: {token_usage.suppressed_attempts_in_window}건
+              {' · '}Codex/Antigravity/DeepSeek 등 미계측·비계측 CLI는 위 비용에서 제외됨(하한 추정)
+            </div>
+            {token_usage.top_tickets.length > 0 && (
+              <div style={{ borderTop: `1px solid ${tokens.colors.border}` }}>
+                {token_usage.top_tickets.map(t => (
+                  <Row key={t.ticket_id}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                      <div style={{ fontWeight: 600, color: tokens.colors.textPrimary, fontSize: '13px' }}>{t.ticket_title}</div>
+                      <div style={{ color: tokens.colors.textStrong, fontWeight: 700, fontSize: '13px' }}>
+                        {formatTokens(t.input_tokens + t.output_tokens)} 토큰
+                      </div>
+                    </div>
+                    <div style={metaRowStyle}>run {t.runs}회 · {formatUsd(t.total_cost_usd)}</div>
+                  </Row>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </Section>
 
       {/* Active storms — 현재 halt 중 */}
