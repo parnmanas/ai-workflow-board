@@ -19,6 +19,7 @@ import { BacklogPromotionService } from './backlog-promotion.service';
 import { ClaimVerificationService } from './claim-verification.service';
 import { StuckTicketDetectorService } from './stuck-ticket-detector.service';
 import { RespawnStormDetectorService } from './respawn-storm-detector.service';
+import { AgentUsageService } from './agent-usage.service';
 import { DispatchIntentService } from './dispatch-intent.service';
 import { DispatchReconcilerService } from './dispatch-reconciler.service';
 import { AgentAutostartService } from './agent-autostart.service';
@@ -60,6 +61,7 @@ import { ColumnPoliciesModule } from '../column-policies/column-policies.module'
     AgentWorkloadService,
     StuckTicketDetectorService,
     RespawnStormDetectorService,
+    AgentUsageService,
     ClaimVerificationService,
     TicketPrerequisitesService,
     FsBrowserService, SubagentMonitorService,
@@ -74,6 +76,7 @@ import { ColumnPoliciesModule } from '../column-policies/column-policies.module'
     AgentWorkloadService,
     StuckTicketDetectorService,
     RespawnStormDetectorService,
+    AgentUsageService,
     ClaimVerificationService,
     TicketPrerequisitesService,
     FsBrowserService, SubagentMonitorService,
