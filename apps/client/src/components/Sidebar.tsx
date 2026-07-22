@@ -144,6 +144,7 @@ export default function Sidebar({ overlay, isOpen, onClose, wsId, boards, contai
     { key: 'admin-agent-logs', path: '/admin/agent-logs', label: 'Agent Logs',  icon: 'G', badge: counts.agentErrors },
     { key: 'admin-agent-manager', path: '/admin/agent-manager', label: 'Agent Manager', icon: 'M' },
     { key: 'admin-column-policies', path: '/admin/column-policies', label: 'Column Policies', icon: 'P' },
+    { key: 'admin-workflow-health', path: '/admin/workflow-health', label: 'Workflow Health', icon: 'H' },
     { key: 'admin-global-credentials', path: '/admin/global-credentials', label: 'Global Credentials', icon: 'K' },
     { key: 'admin-settings', path: '/admin/settings', label: 'Settings',    icon: 'S' },
   ];

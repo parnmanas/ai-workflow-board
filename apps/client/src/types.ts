@@ -2072,3 +2072,50 @@ export interface AgentMovePreview {
   /** false for a dry-run preview, true once the transaction has committed. */
   committed: boolean;
 }
+
+// ─── Workflow Health (ticket 3970db66 — /admin/workflow-health/*) ──────────
+
+export interface WorkflowHealthActiveStorm {
+  ticket_id: string;
+  title: string;
+  board_id: string;
+  board_name: string;
+  workspace_id: string;
+  pending_reason: string;
+  pending_set_at: string | null;
+  /** Participating agent_ids, read back from the halt event's snapshot. */
+  agent_ids: string[];
+  /** Loop 시작점 — 이 스톰의 최초 사망 시각(halt 이벤트 스냅샷에서 역산). */
+  first_death_at: string | null;
+}
+
+export interface WorkflowHealthRespawnCount {
+  ticket_id: string;
+  title: string;
+  role: string;
+  board_id: string;
+  board_name: string;
+  deaths: number;
+  agent_ids: string[];
+}
+
+export interface WorkflowHealthSuppressionStats {
+  respawn_storm: { total_halts: number; total_twins: number };
+  comment_pingpong: {
+    total: number;
+    /** Keyed by reason: repeated_waiting_without_work_target | pending_user_action | duplicate_terminal_acknowledgement */
+    by_reason: Record<string, number>;
+  };
+}
+
+export interface WorkflowHealthRollup {
+  generated_at: string;
+  window_minutes: number;
+  active_storms: WorkflowHealthActiveStorm[];
+  top_respawns: WorkflowHealthRespawnCount[];
+  stale_wait_alerts: number;
+  pending_tickets: number;
+  avg_cycle_time_ms: number | null;
+  qa_pass_trend: { passed: number; failed: number; error: number; total: number };
+  suppression_stats: WorkflowHealthSuppressionStats;
+}
