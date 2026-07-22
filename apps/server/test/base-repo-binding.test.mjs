@@ -138,8 +138,18 @@ test('_emitTrigger pends (does not emit) when a branch-work dispatch has no reso
   // is what let the both-empty acceptance scenario slip through (reviewer P1). It
   // must be gone so a branch-work dispatch with no repo always pends.
   assert.doesNotMatch(src, /repoWasExpected/, 'the repoWasExpected gate must be removed (literal block)');
-  // The guard must SKIP the emit — pend then return before activityEvents.emit.
-  assert.match(src, /await this\._pendForMissingBaseRepo\(ticket, agentId, role, triggerSource\);\s*return '';/, 'guard must pend and return without emitting');
+  // The guard must SKIP the emit — pend first. A comment_summary dispatch then
+  // throws a diagnosable SUMMARY_DISPATCH_REPOSITORY_MISSING error instead of a
+  // silent drop (tickets.controller.ts reads `.code` off the caught error into
+  // CommentSummaryRun.error_code so the caller can diagnose it — mirrors the
+  // MANAGER_AGENT/BOARD_PAUSED/TICKET_ARCHIVED/LIVE_STRAND guards elsewhere in
+  // this same function); every other trigger source falls straight through to
+  // `return ''`. Either branch reaches the emit — nothing does.
+  assert.match(
+    src,
+    /await this\._pendForMissingBaseRepo\(ticket, agentId, role, triggerSource\);\s*(?:if \(triggerSource === 'comment_summary'\) \{\s*throw Object\.assign\(new Error\([^)]+\), \{\s*status: 503, code: 'SUMMARY_DISPATCH_REPOSITORY_MISSING',\s*\}\);\s*\}\s*)?return '';/,
+    'guard must pend, then either return without emitting or (comment_summary only) throw SUMMARY_DISPATCH_REPOSITORY_MISSING before returning',
+  );
 });
 
 test('_pendForMissingBaseRepo sets pending_user_action + is idempotent', () => {
