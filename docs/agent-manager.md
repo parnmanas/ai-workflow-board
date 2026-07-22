@@ -639,9 +639,14 @@ Minimum manual smoke pass before each version bump:
 
 ## Versioning + sync rules
 
-- `apps/agent-manager/package.json#version` — bump on any behavior or contract
-  change; published artefacts (npm tarball / Docker image) are tagged from
-  this number.
+- `apps/agent-manager/package.json#version` — **do not bump by hand.** Landing
+  on `main` triggers `.github/workflows/publish-agent-manager.yml`, which
+  computes the next version from the npm registry (latest + patch, via
+  `apps/agent-manager/scripts/compute-publish-version.mjs`) and publishes
+  from that number; `package.json#version` is only the first-release seed
+  floor and is never read again once published. See
+  `.claude/skills/awb-agent-manager-release/SKILL.md` for the full release
+  procedure.
 - Changes to the SSE contract (new `type`, new fields, semantics) require a
   matching server change in `apps/server/src/modules/agent-manager/` and
   must include a smoke-test of the new event end-to-end.
