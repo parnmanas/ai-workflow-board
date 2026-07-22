@@ -1221,12 +1221,24 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         metadata: JSON.stringify(handoffMetadata),
       }));
 
-      // 2. Reassign ticket. Skip the write if it would be a no-op so we
-      //    don't fire a spurious assignee_changed activity.
+      // 2. Reassign ticket. stale 엔티티 전체를 쓰는 ticketRepo.save(ticket)
+      //    대신 조건부 원자 update(ticket f63b5805, L216 ping-pong guard와
+      //    동일 패턴) — WHERE 에 pending_user_action:false 를 걸어, 바로 위
+      //    recheck(L1210) 이후 이 순간 사이의 극미 창에 사람이 pend 하면
+      //    WHERE 불일치로 재배정이 no-op(affected 0)이 되어 pend 가 보존된다.
+      //    isSameAssignee 면 원래도 쓸 필요가 없어 no-op activity 를 피한다.
+      let reassigned = false;
       if (!isSameAssignee) {
+        const updateResult = await ticketRepo.update(
+          { id: ticket.id, pending_user_action: false },
+          { assignee_id: target_agent_id, assignee: targetAgentDisplay },
+        );
+        reassigned = updateResult.affected === 1;
+      }
+
+      if (reassigned) {
         ticket.assignee_id = target_agent_id;
         ticket.assignee = targetAgentDisplay;
-        await ticketRepo.save(ticket);
 
         // v0.34: mirror the new assignee onto the assignment table so the
         // trigger loop sees it on the next activity event.

@@ -30,13 +30,20 @@ import { Ticket } from '../dist/entities/Ticket.js';
 import { Comment } from '../dist/entities/Comment.js';
 import { Agent } from '../dist/entities/Agent.js';
 
-function harness({ ticket, comments = [], agents = [], findOneImpl = null }) {
+function harness({ ticket, comments = [], agents = [], findOneImpl = null, liveTicketState = null }) {
   const handlers = new Map();
   const server = { tool(name, _description, _schema, handler) { handlers.set(name, handler); } };
   const commentsById = new Map(comments.map((c) => [c.id, c]));
   const agentsById = new Map(agents.map((a) => [a.id, a]));
-  const counters = { commentSaves: 0, ticketSaves: 0, activities: 0 };
+  const counters = { commentSaves: 0, ticketSaves: 0, ticketUpdateCalls: 0, ticketUpdatesApplied: 0, activities: 0 };
   let ticketFindOneCalls = 0;
+  // handoff_to_agent의 재배정(ticket f63b5805)은 findOne 재조회가 아니라 WHERE
+  // pending_user_action:false 조건부 update 로 이뤄진다. live 는 그 update
+  // 시점의 "실제 DB 로우" pending 상태 — 기본은 초기 ticket 값과 동기화되고,
+  // findOneImpl 이 반환하는 스냅샷(얼리 가드/recheck 가 읽는 값)과 독립적으로
+  // 테스트가 직접 바꿀 수 있어 recheck 통과 *직후* pend 가 끼어드는 시나리오도
+  // 모델링할 수 있다.
+  const live = liveTicketState || { pending_user_action: ticket.pending_user_action };
 
   const commentRepo = {
     async findOne({ where: { id } }) { return commentsById.get(id) || null; },
@@ -69,8 +76,30 @@ function harness({ ticket, comments = [], agents = [], findOneImpl = null }) {
       ticketFindOneCalls += 1;
       return findOneImpl ? findOneImpl(ticketFindOneCalls) : ticket;
     },
-    async save(value) { counters.ticketSaves++; return value; },
-    async update() { return { affected: 0 }; },
+    // 실제 TypeORM save()는 엔티티에 실린 필드를 전부 UPDATE 한다 — stale
+    // 엔티티가 들고 있던 pending_user_action 값도 함께 DB에 쓰여, 그 사이 다른
+    // 요청이 반영해 둔 live 상태를 덮어쓴다(ticket f63b5805가 고치는 그 버그
+    // 메커니즘 자체를 목이 재현해야 회귀 테스트가 의미를 가짐).
+    async save(value) {
+      counters.ticketSaves++;
+      if (Object.prototype.hasOwnProperty.call(value, 'pending_user_action')) {
+        live.pending_user_action = value.pending_user_action;
+      }
+      return value;
+    },
+    // 재배정(handoff_to_agent L1226~)이 쓰는 조건부 원자 update 목(ticket
+    // f63b5805) — WHERE 의 pending_user_action 이 live 의 현재 값과 다르면
+    // 실제 DB 처럼 no-op(affected 0)으로 응답하고 patch 를 적용하지 않는다.
+    async update(where, patch) {
+      counters.ticketUpdateCalls++;
+      if (Object.prototype.hasOwnProperty.call(where, 'pending_user_action')
+          && where.pending_user_action !== live.pending_user_action) {
+        return { affected: 0 };
+      }
+      Object.assign(ticket, patch);
+      counters.ticketUpdatesApplied++;
+      return { affected: 1 };
+    },
   };
   const agentRepo = {
     async findOne({ where: { id } }) { return agentsById.get(id) || null; },
@@ -91,7 +120,7 @@ function harness({ ticket, comments = [], agents = [], findOneImpl = null }) {
     ticketRoleAssignmentService: null,
   };
   registerCommentTools(server, ctx);
-  return { handlers, counters, ticket, commentsById, agentsById, getTicketFindOneCalls: () => ticketFindOneCalls };
+  return { handlers, counters, ticket, commentsById, agentsById, live, getTicketFindOneCalls: () => ticketFindOneCalls };
 }
 
 // 1번째 호출(얼리 가드)은 원래 상태, 2번째 이후(저장 직전 재확인)는 그
@@ -100,6 +129,22 @@ function pendsAfterFirstLoad(baseTicket) {
   return (callNo) => (callNo === 1
     ? { ...baseTicket, pending_user_action: false }
     : { ...baseTicket, pending_user_action: true });
+}
+
+// recheck(L1210, freshPendingGateBlocked) 통과 "이후" ~ 재배정 update 사이의
+// 잔여 창(ticket f63b5805) — pendsAfterFirstLoad 와 달리 얼리 가드/recheck
+// 둘 다 pending=false 스냅샷을 보고 통과시키지만, recheck 직후 실제 DB 로우는
+// 이미 pend 된 상태다(live 를 별도로 갱신). 조건부 update(WHERE
+// pending_user_action:false) 없이 stale 엔티티 전체를 쓰는 구 코드
+// (ticketRepo.save(ticket))라면 이 케이스에서 사람의 pend 를 덮어쓰고
+// 재배정을 완료시켰다.
+function pendsRightAfterRecheck(baseTicket) {
+  const live = { pending_user_action: false };
+  const findOneImpl = (callNo) => {
+    if (callNo === 2) live.pending_user_action = true;
+    return { ...baseTicket, pending_user_action: false };
+  };
+  return { findOneImpl, live };
 }
 
 const AGENT_INPUT = { author_type: 'agent', author_id: 'a1', author: 'A' };
@@ -208,7 +253,7 @@ test('handoff_to_agent: blocks the save AND the reassignment when pending_user_a
   assert.equal(h.getTicketFindOneCalls(), 2);
   assert.deepEqual(parsed, { suppressed: true, reason: 'pending_user_action' });
   assert.equal(h.counters.commentSaves, 0, '핸드오프 코멘트가 저장되면 안 됨');
-  assert.equal(h.counters.ticketSaves, 0, '재배정도 함께 막혀야 함 — 얼리 가드와 동일 스코프');
+  assert.equal(h.counters.ticketUpdateCalls, 0, '재배정 update 조차 호출되면 안 됨 — recheck에서 이미 막힘');
   assert.equal(ticket.assignee_id, 'orig', '원래 담당자가 유지돼야 함');
 });
 
@@ -224,5 +269,29 @@ test('handoff_to_agent: succeeds normally when nothing pends in the load-to-save
 
   assert.equal(parsed.suppressed, undefined);
   assert.equal(h.counters.commentSaves, 1);
-  assert.equal(h.counters.ticketSaves, 1);
+  assert.equal(h.counters.ticketUpdatesApplied, 1, '조건부 update 가 WHERE 매치로 정상 적용돼야 함');
+  assert.equal(ticket.assignee_id, 'target2');
+  assert.equal(parsed.ticket.assignee_id, 'target2');
+});
+
+test('handoff_to_agent: comment saves but reassignment is skipped when pending_user_action flips true between the recheck and the update (ticket f63b5805)', async () => {
+  const ticket = { id: 't10', workspace_id: 'w1', pending_user_action: false, assignee_id: 'orig', assignee: 'Original' };
+  const targetAgent = { id: 'target3', name: 'Target3', workspace_id: 'w1', role_prompt: '' };
+  const { findOneImpl, live } = pendsRightAfterRecheck(ticket);
+  const h = harness({ ticket, agents: [targetAgent], findOneImpl, liveTicketState: live });
+
+  const res = await h.handlers.get('handoff_to_agent')(
+    { ticket_id: 't10', target_agent_id: 'target3', content: '인계', ...AGENT_INPUT }, {},
+  );
+  const parsed = JSON.parse(res.content[0].text);
+
+  assert.equal(h.getTicketFindOneCalls(), 2, '얼리 가드 + recheck, 총 2회 조회');
+  assert.equal(parsed.suppressed, undefined, '코멘트 자체는 recheck 통과 — 억제되면 안 됨');
+  assert.equal(h.counters.commentSaves, 1, '핸드오프 코멘트는 정상 저장돼야 함');
+  assert.equal(h.counters.ticketUpdateCalls, 1, '재배정 update 는 시도돼야 함');
+  assert.equal(h.counters.ticketUpdatesApplied, 0, 'WHERE 불일치로 재배정은 no-op 이어야 함');
+  assert.equal(ticket.assignee_id, 'orig', '(a) 재배정이 취소되고 원래 담당자가 유지돼야 함');
+  assert.equal(parsed.ticket.assignee_id, 'orig', '응답도 실제(미변경) 담당자를 반영해야 함');
+  assert.equal(live.pending_user_action, true, '(b) pending_user_action 이 되돌려지지 않고 유지돼야 함');
+  assert.equal(h.counters.activities, 1, 'assignee_changed activity 는 발화하면 안 됨 — 핸드오프 코멘트 activity 1건만');
 });
