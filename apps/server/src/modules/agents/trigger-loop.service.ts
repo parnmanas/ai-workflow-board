@@ -1710,6 +1710,67 @@ candidate's branch or move the ticket.
     return 1;
   }
 
+  /**
+   * Pending-user-action 게이트 판정 (ticket be934f61). `_emitTrigger` 안에서
+   * 완전히 동일한 재조회+드롭+감사로그 로직을 두 지점에서 재사용하기 위해
+   * 추출했다: (1) 기존 위치(아카이브 게이트 직후) — 이미 pending이면 이후의
+   * harness/effort/environment/board-lessons 해석을 아예 건너뛰는 얼리 드롭,
+   * (2) 실제 SSE emit 바로 직전 — (1)과 emit 사이의 십여 개 await가 열어 둔
+   * TOCTOU 창을 닫기 위한 마지막 순간 재확인. 신선한 조회 결과 ticket이
+   * pending이라 트리거를 드롭해야 하면 true를 반환한다.
+   */
+  private async _checkPendingUserGate(
+    ticket: Ticket,
+    agentId: string,
+    role: string,
+    triggerSource: string,
+    bypassTicketPending: boolean | undefined,
+  ): Promise<boolean> {
+    if (bypassTicketPending) return false;
+    const freshForGate = await this.dataSource
+      .getRepository(Ticket)
+      .findOne({ where: { id: ticket.id } });
+    // Two distinct pending flavors funnel through this one gate (ticket
+    // 48d14fff): `pending_user_action` (waiting on a human) and
+    // `pending_on_tickets` (blocked behind prerequisite tickets). Either
+    // drops the trigger. The audit action is suffixed so a grep can tell the
+    // two apart — `_pending_user` vs `_pending_tickets`.
+    if (!freshForGate?.pending_user_action && !freshForGate?.pending_on_tickets) return false;
+
+    const onTickets = !freshForGate.pending_user_action && !!freshForGate.pending_on_tickets;
+    const dropAction = onTickets
+      ? 'agent_trigger_dropped_pending_tickets'
+      : 'agent_trigger_dropped_pending_user';
+    this.logService.info('MCP', 'agent_trigger dropped (ticket pending)', {
+      ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource,
+      pending_user_action: !!freshForGate.pending_user_action,
+      pending_on_tickets: !!freshForGate.pending_on_tickets,
+      pending_set_at: freshForGate.pending_set_at
+        ? new Date(freshForGate.pending_set_at).toISOString()
+        : null,
+      pending_set_by: freshForGate.pending_set_by || '',
+    });
+    try {
+      const activityLogRepo = this.dataSource.getRepository(ActivityLog);
+      await activityLogRepo.save(activityLogRepo.create({
+        entity_type: 'ticket',
+        entity_id: ticket.id,
+        ticket_id: ticket.id,
+        actor_id: 'system',
+        actor_name: 'TriggerLoopService',
+        action: dropAction,
+        new_value: `agent=${agentId} reason=${(freshForGate.pending_reason || '').slice(0, 200)}`,
+        role,
+        trigger_source: triggerSource,
+      }));
+    } catch (e) {
+      this.logService.warn('MCP', 'pending-drop audit write failed (drop still applied)', {
+        err: String(e), ticket_id: ticket.id,
+      });
+    }
+    return true;
+  }
+
   private async _emitTrigger(
     ticket: Ticket,
     agentId: string,
@@ -1876,49 +1937,14 @@ candidate's branch or move the ticket.
     // and undo the pause). Operator-grade override: clearing the flag is the
     // documented way out. Audit row uses `agent_trigger_dropped_pending_user`
     // so it's grepable separately from the board_paused drop.
-    {
-      const freshForGate = await this.dataSource
-        .getRepository(Ticket)
-        .findOne({ where: { id: ticket.id } });
-      // Two distinct pending flavors funnel through this one gate (ticket
-      // 48d14fff): `pending_user_action` (waiting on a human) and
-      // `pending_on_tickets` (blocked behind prerequisite tickets). Either
-      // drops the trigger. The audit action is suffixed so a grep can tell the
-      // two apart — `_pending_user` vs `_pending_tickets`.
-      if (!opts?.bypassTicketPending && (freshForGate?.pending_user_action || freshForGate?.pending_on_tickets)) {
-        const onTickets = !freshForGate.pending_user_action && !!freshForGate.pending_on_tickets;
-        const dropAction = onTickets
-          ? 'agent_trigger_dropped_pending_tickets'
-          : 'agent_trigger_dropped_pending_user';
-        this.logService.info('MCP', 'agent_trigger dropped (ticket pending)', {
-          ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource,
-          pending_user_action: !!freshForGate.pending_user_action,
-          pending_on_tickets: !!freshForGate.pending_on_tickets,
-          pending_set_at: freshForGate.pending_set_at
-            ? new Date(freshForGate.pending_set_at).toISOString()
-            : null,
-          pending_set_by: freshForGate.pending_set_by || '',
-        });
-        try {
-          const activityLogRepo = this.dataSource.getRepository(ActivityLog);
-          await activityLogRepo.save(activityLogRepo.create({
-            entity_type: 'ticket',
-            entity_id: ticket.id,
-            ticket_id: ticket.id,
-            actor_id: 'system',
-            actor_name: 'TriggerLoopService',
-            action: dropAction,
-            new_value: `agent=${agentId} reason=${(freshForGate.pending_reason || '').slice(0, 200)}`,
-            role,
-            trigger_source: triggerSource,
-          }));
-        } catch (e) {
-          this.logService.warn('MCP', 'pending-drop audit write failed (drop still applied)', {
-            err: String(e), ticket_id: ticket.id,
-          });
-        }
-        return '';
-      }
+    //
+    // 얼리 드롭 지점 (ticket be934f61): 판정/로깅/감사 로직은
+    // `_checkPendingUserGate`로 추출했다 — 여기서 이미 pending이면 아래의
+    // harness/effort/environment/board-lessons 해석을 아예 건너뛴다. 그 해석
+    // 구간이 열어 두는 잔여 TOCTOU 창은 실제 SSE emit 직전의 두 번째 호출이
+    // 닫는다(해당 지점 주석 참조).
+    if (await this._checkPendingUserGate(ticket, agentId, role, triggerSource, opts?.bypassTicketPending)) {
+      return '';
     }
 
     // Focus-window gate (ticket 701e5e36 — generalizes the old top-1
@@ -2428,6 +2454,18 @@ candidate's branch or move the ticket.
     const triggerId = randomUUID();
 
     const forceRespawn = opts?.forceRespawn === true;
+
+    // 마지막 순간 재확인 (ticket be934f61 — TOCTOU race). 위쪽 얼리 드롭
+    // (_checkPendingUserGate 최초 호출) 이후 여기까지 오는 동안 agent/role
+    // 조회, base-repo/column-prompt/harness/effort/environment 해석,
+    // board-lessons 주입, chain-target 조회 등 십여 개의 await가 더 지나갔다
+    // — 그 창 안에서 걸린 pend_ticket은 얼리 드롭에는 보이지 않는다. 동일
+    // 헬퍼로(판정 로직 중복 없이) 실제 emit 바로 앞에서 한 번 더 신선 조회한다.
+    // 이 호출과 아래 emit 사이에는 다른 await가 없다 — 그것이 이 재확인의
+    // 존재 이유다.
+    if (await this._checkPendingUserGate(ticket, agentId, role, triggerSource, opts?.bypassTicketPending)) {
+      return '';
+    }
 
     activityEvents.emit('agent_trigger', {
       trigger_id: triggerId,

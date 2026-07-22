@@ -272,6 +272,22 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       }
 
       const ackKey = terminalAckKey(nextGuardComment);
+
+      // 저장 직전 재확인 (ticket be934f61 — TOCTOU race). 위 187행의 ping-pong
+      // 가드는 96행에서 핸들러 시작 시 1회 로드한 stale in-memory `ticket`
+      // 객체의 pending_user_action을 검사한다. 그 로드~저장 사이(멘션/편입
+      // 경고 조회 등 다수의 await)에 별도 요청의 pend_ticket이 끼어들면
+      // stale 객체에는 반영되지 않아 가드를 그대로 통과해버린다. 실제 쓰기
+      // (commentRepo.save) 직전에 한 번 더 가볍게 재조회해 창을 최소화한다.
+      // 가드 자체가 agent 작성자에만 적용되므로(applyAgentCommentPingPongGuard
+      // 최상단 얼리리턴) 재확인도 동일하게 agent 작성자로 한정한다.
+      if (resolvedAuthorType === 'agent') {
+        const freshForGate = await ticketRepo.findOne({ where: { id: ticket.id } });
+        if (freshForGate?.pending_user_action) {
+          return ok({ suppressed: true, reason: 'pending_user_action' });
+        }
+      }
+
       let comment: Comment;
       try {
         comment = await commentRepo.save(commentRepo.create({

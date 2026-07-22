@@ -45,7 +45,7 @@ test('third waiting comment without a work target pends; actionable tickets do n
   assert.equal(shouldPendRepeatedWaiting({ next, recent, ticketDescription: 'apps/server/src/a.ts 구현' }), false);
 });
 
-function registeredAddCommentHarness({ ticket, recent = [], concurrentReads = 0 }) {
+function registeredAddCommentHarness({ ticket, recent = [], concurrentReads = 0, findOneImpl = null }) {
   const handlers = new Map();
   const server = { tool(name, _description, _schema, handler) { handlers.set(name, handler); } };
   const stored = [...recent];
@@ -81,7 +81,13 @@ function registeredAddCommentHarness({ ticket, recent = [], concurrentReads = 0 
     async update() {},
   };
   const ticketRepo = {
-    async findOne() { return ticket; },
+    // `findOneImpl` lets a test model the load-to-save TOCTOU window (ticket
+    // be934f61): a per-call override that can report a DIFFERENT pending
+    // state on the fix's re-check than on the handler's initial load, the
+    // same way a concurrent pend_ticket() would race a real DB round-trip.
+    // Every other test relies on the default (the live `ticket` reference,
+    // mutated in place by `update` below) and is unaffected.
+    async findOne() { return findOneImpl ? findOneImpl() : ticket; },
     async update(where, patch) {
       if (where.pending_user_action === false && ticket.pending_user_action === false) {
         Object.assign(ticket, patch);
@@ -144,4 +150,60 @@ test('registered add_comment Review to Merging boundary saves/emits one concurre
   } finally {
     activityEvents.off('comment_mention', onMention);
   }
+});
+
+// ── TOCTOU re-check before the write (ticket be934f61) ─────────────────────
+//
+// The handler loads `ticket` ONCE at entry and the ping-pong guard tests that
+// SAME stale object's `pending_user_action`. A concurrent pend_ticket() (or
+// the CAS pend() above) landing between that load and `commentRepo.save()`
+// was invisible to it. The fix re-reads `pending_user_action` immediately
+// before the save. `findOneImpl` below reports the ORIGINAL (not-pending)
+// state on the handler's initial load (call #1) and a freshly-pending state
+// on every call after that — modelling a pend that lands in the window.
+
+test('add_comment blocks the save when pending_user_action flips true after the initial load (TOCTOU fix)', async () => {
+  const ticket = { id: 't3', workspace_id: 'w1', title: '작업', description: 'apps/server/src/a.ts', pending_user_action: false };
+  let findOneCalls = 0;
+  const harness = registeredAddCommentHarness({
+    ticket,
+    findOneImpl: () => {
+      findOneCalls += 1;
+      return findOneCalls === 1 ? { ...ticket, pending_user_action: false } : { ...ticket, pending_user_action: true };
+    },
+  });
+  const input = { ticket_id: 't3', author_type: 'agent', author_id: 'assignee', author: 'Assignee', author_role: 'assignee', content: '진행 상황 업데이트 — 계속 작업 중' };
+  const res = await harness.addComment(input, {});
+  const parsed = JSON.parse(res.content[0].text);
+
+  assert.equal(findOneCalls, 2, 'must re-read the ticket exactly once more, right before the save');
+  assert.deepEqual(parsed, { suppressed: true, reason: 'pending_user_action' });
+  assert.deepEqual(harness.counters, { commentSaves: 0, activities: 0, mentionResolves: 0, pendingUpdates: 0 });
+});
+
+test('add_comment saves normally when nothing pends the ticket in the load-to-save window (regression baseline)', async () => {
+  const ticket = { id: 't4', workspace_id: 'w1', title: '작업', description: 'apps/server/src/a.ts', pending_user_action: false };
+  const harness = registeredAddCommentHarness({ ticket });
+  const input = { ticket_id: 't4', author_type: 'agent', author_id: 'assignee', author: 'Assignee', author_role: 'assignee', content: '진행 상황 업데이트 — 계속 작업 중' };
+  const res = await harness.addComment(input, {});
+  const parsed = JSON.parse(res.content[0].text);
+
+  assert.equal(parsed.suppressed, undefined, 'an unpended ticket must not be suppressed');
+  assert.equal(harness.counters.commentSaves, 1);
+});
+
+test('add_comment does NOT re-check pending_user_action for user-authored comments (gate never applied to users)', async () => {
+  const ticket = { id: 't5', workspace_id: 'w1', title: '작업', description: 'apps/server/src/a.ts', pending_user_action: false };
+  let findOneCalls = 0;
+  const harness = registeredAddCommentHarness({
+    ticket,
+    findOneImpl: () => { findOneCalls += 1; return ticket; },
+  });
+  const input = { ticket_id: 't5', author_type: 'user', author_id: 'human1', author: 'Human', content: '사람 코멘트' };
+  const res = await harness.addComment(input, {});
+  const parsed = JSON.parse(res.content[0].text);
+
+  assert.equal(findOneCalls, 1, 'user-authored comments skip the agent-only re-check — only the initial load reads the ticket');
+  assert.equal(parsed.suppressed, undefined);
+  assert.equal(harness.counters.commentSaves, 1);
 });
