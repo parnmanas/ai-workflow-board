@@ -1827,9 +1827,13 @@ candidate's branch or move the ticket.
     // Availability-first (same posture as common/hard-budget-guard.ts's
     // enforceAutoResponseBudget): a failure evaluating either ceiling —
     // config resolution, epoch lookup, either count query — must never block
-    // a legitimate dispatch. Only the DETECTION step is guarded here; once a
-    // real breach is confirmed below, the drop always applies even if the
-    // audit-write or notify sub-steps individually fail (their own try/catch).
+    // a legitimate dispatch. Only the DETECTION step is guarded here. Once a
+    // real breach is confirmed below, the audit-write and notify sub-steps
+    // each have their own try/catch, so either one failing never un-does the
+    // drop. The auto-pend UPDATE is NOT individually guarded, though — if it
+    // throws, the exception reaches this same catch and fails the WHOLE gate
+    // open for that call (dispatch allowed, breach left un-pended); the next
+    // dispatch attempt re-evaluates from scratch (review note, ticket ef53fdf4).
     try {
       const board = boardId
         ? await this.dataSource.getRepository(Board).findOne({ where: { id: boardId } })
