@@ -25,6 +25,7 @@ import { Subagent } from '../../entities/Subagent';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { Ticket } from '../../entities/Ticket';
 import { BoardColumn } from '../../entities/BoardColumn';
+import { AgentUsageDailyRollup } from '../../entities/AgentUsageDailyRollup';
 
 const DEFAULT_WINDOW_HOURS = 24;
 const DEFAULT_TOP_TICKETS_LIMIT = 5;
@@ -91,6 +92,23 @@ export interface TokenUsageStats {
   // null whenever avg_cost_per_run_usd_priced_only is null (no priced runs to
   // estimate from) — never silently rendered as 0.
   estimated_saved_usd: number | null;
+}
+
+export interface LongTermUsageStats {
+  // 실제로 조회한 UTC-day 경계(양끝 포함), 'YYYY-MM-DD'. `from: null`은
+  // 하한 없음(all-time)을 뜻한다.
+  from: string | null;
+  to: string;
+  coverage: { runs_with_usage: number; runs_total: number };
+  totals: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_input_tokens: number;
+    cache_creation_input_tokens: number;
+    total_cost_usd: number;
+  };
+  priced_runs: number;
+  avg_cost_per_run_usd_priced_only: number | null;
 }
 
 @Injectable()
@@ -210,6 +228,96 @@ export class AgentUsageService {
       top_tickets: topTickets,
       suppressed_attempts_in_window: suppressedCount,
       estimated_saved_usd: avgCostPerRun != null ? avgCostPerRun * suppressedCount : null,
+    };
+  }
+
+  /**
+   * All-time / 장기 usage (ticket 8d5c6f5d, 6dd3f968 후속) — `AgentUsageDailyRollup`
+   * (영속 쪽) + 같은 구간에 아직 `subagents`에 남아있는 live 쪽을 합산한다.
+   * 마진/cutoff 없이 정확하다: `SubagentMonitorService._sweepEnded`/
+   * `_rollupBeforeDelete`가 run을 롤업에 접어 넣는 것과 `subagents`에서
+   * 지우는 것을 하나의 트랜잭션으로 처리하므로, 어떤 순간에도 run은 두
+   * 테이블 중 정확히 하나에만 있다 — 같은 구간에 대해 둘을 합산해도
+   * 이중집계도, gap도 생기지 않는다.
+   *
+   * 구간은 UTC-DAY 단위만 지원한다 — `from`/`to`는 timestamp가 아니라
+   * 달력 날짜이고, 두 서브쿼리 모두 경계 날짜의 하루 전체로 넓혀진다. 롤업
+   * 테이블은 애초에 "어느 날인지"만 알기 때문에, sub-day 구간을 허용하면
+   * 경계 날짜의 24시간 전체를 롤업 쪽에서 끌어오면서 live 쪽은 그 날의
+   * 일부만 커버해 조용히 과다집계된다. 최근 데이터에 sub-day 정밀도가
+   * 필요한 호출부는 대신 `getTokenUsageStats`의 윈도우 쿼리를 쓸 것(100%
+   * live-table 기반이라 롤업이 관여하지 않으므로 day-정렬 제약도 없다).
+   *
+   * workspace 스코프만 지원하고 board 스코프는 없다: 롤업 grain이
+   * (workspace_id, usage_date, agent_id)라 ticket/board 차원이 없다
+   * (8d5c6f5d에서의 planner 판단 — 그쪽은 위 `top_tickets`처럼
+   * live-window 전용으로 남는다). `from` 생략 = all-time(하한 없음).
+   */
+  async getLongTermUsageStats(opts: {
+    workspaceId: string;
+    from?: Date;
+    to?: Date;
+  }): Promise<LongTermUsageStats> {
+    const { workspaceId } = opts;
+    const toDay = (opts.to ?? new Date()).toISOString().slice(0, 10);
+    const fromDay = opts.from ? opts.from.toISOString().slice(0, 10) : null;
+
+    // live 테이블 경계: [fromDay, toDay]의 UTC 하루 전체 범위로 잡아
+    // live 슬라이스가 롤업 슬라이스와 정확히 같은 달력 날짜들을 커버하게 한다.
+    const liveUpperBound = new Date(`${toDay}T23:59:59.999Z`);
+    const liveLowerBound = fromDay ? new Date(`${fromDay}T00:00:00.000Z`) : new Date(0);
+
+    const rollupQb = this.dataSource
+      .getRepository(AgentUsageDailyRollup)
+      .createQueryBuilder('r')
+      .select('COALESCE(SUM(r.runs_total), 0)', 'runs_total')
+      .addSelect('COALESCE(SUM(r.runs_with_usage), 0)', 'runs_with_usage')
+      .addSelect('COALESCE(SUM(r.priced_runs), 0)', 'priced_runs')
+      .addSelect('COALESCE(SUM(r.input_tokens), 0)', 'input_tokens')
+      .addSelect('COALESCE(SUM(r.output_tokens), 0)', 'output_tokens')
+      .addSelect('COALESCE(SUM(r.cache_read_input_tokens), 0)', 'cache_read_input_tokens')
+      .addSelect('COALESCE(SUM(r.cache_creation_input_tokens), 0)', 'cache_creation_input_tokens')
+      .addSelect('COALESCE(SUM(r.total_cost_usd), 0)', 'total_cost_usd')
+      .where('r.workspace_id = :workspaceId', { workspaceId })
+      .andWhere('r.usage_date <= :toDay', { toDay });
+    if (fromDay) rollupQb.andWhere('r.usage_date >= :fromDay', { fromDay });
+    const rollupRow = await rollupQb.getRawOne<Record<string, string | number>>();
+
+    const liveRow = await this.dataSource
+      .getRepository(Subagent)
+      .createQueryBuilder('s')
+      .select('COUNT(*)', 'runs_total')
+      .addSelect('COUNT(s.input_tokens)', 'runs_with_usage')
+      .addSelect('COUNT(s.total_cost_usd)', 'priced_runs')
+      .addSelect('COALESCE(SUM(s.input_tokens), 0)', 'input_tokens')
+      .addSelect('COALESCE(SUM(s.output_tokens), 0)', 'output_tokens')
+      .addSelect('COALESCE(SUM(s.cache_read_input_tokens), 0)', 'cache_read_input_tokens')
+      .addSelect('COALESCE(SUM(s.cache_creation_input_tokens), 0)', 'cache_creation_input_tokens')
+      .addSelect('COALESCE(SUM(s.total_cost_usd), 0)', 'total_cost_usd')
+      .where('s.workspace_id = :workspaceId', { workspaceId })
+      .andWhere('s.started_at >= :liveLowerBound', { liveLowerBound })
+      .andWhere('s.started_at <= :liveUpperBound', { liveUpperBound })
+      .getRawOne<Record<string, string | number>>();
+
+    const pricedRuns = num(rollupRow?.priced_runs) + num(liveRow?.priced_runs);
+    const totalCostUsd = num(rollupRow?.total_cost_usd) + num(liveRow?.total_cost_usd);
+
+    return {
+      from: fromDay,
+      to: toDay,
+      coverage: {
+        runs_with_usage: num(rollupRow?.runs_with_usage) + num(liveRow?.runs_with_usage),
+        runs_total: num(rollupRow?.runs_total) + num(liveRow?.runs_total),
+      },
+      totals: {
+        input_tokens: num(rollupRow?.input_tokens) + num(liveRow?.input_tokens),
+        output_tokens: num(rollupRow?.output_tokens) + num(liveRow?.output_tokens),
+        cache_read_input_tokens: num(rollupRow?.cache_read_input_tokens) + num(liveRow?.cache_read_input_tokens),
+        cache_creation_input_tokens: num(rollupRow?.cache_creation_input_tokens) + num(liveRow?.cache_creation_input_tokens),
+        total_cost_usd: totalCostUsd,
+      },
+      priced_runs: pricedRuns,
+      avg_cost_per_run_usd_priced_only: pricedRuns > 0 ? totalCostUsd / pricedRuns : null,
     };
   }
 
