@@ -1298,7 +1298,15 @@ export class SubagentManager implements SubagentManagerContract {
       rlErr.on('line', (line) => {
         const rec = this.#map.get(pid);
         const record = rec && rec.kind !== 'reservation' ? (rec as SubagentRecord) : undefined;
-        if (record) this.#bufferTail(record, line);
+        if (record) {
+          this.#bufferTail(record, line);
+          // pi's print mode reserves stdout for the final answer and routes
+          // extension console output (including awb-mcp-bridge's successful
+          // tool-call sentinel) to stderr. Other adapters already expose
+          // their structured tool events on stdout, so keep this extra scan
+          // pi-specific instead of treating arbitrary diagnostics as events.
+          if (record.cli_type === 'pi') this._scanForCommentTool(record, line);
+        }
         log(`${tagFor(record)}[err] ${line}`);
       });
     }
@@ -1365,10 +1373,10 @@ export class SubagentManager implements SubagentManagerContract {
       return;
     }
 
-    // pi's awb-mcp-bridge.ts extension (ticket d5a6100d) — pi's `-p` mode has
-    // no structured turn events of its own, so the bridge prints this
-    // sentinel to real stdout on every successful AWB tool call it makes on
-    // pi's behalf (see cli-adapters/pi.ts#buildAwbMcpBridgeSource).
+    // pi's awb-mcp-bridge.ts extension (tickets d5a6100d, 68cda8eb) — pi's
+    // `-p` mode has no structured turn events of its own. The bridge emits
+    // this sentinel after each successful AWB tool call; pi routes extension
+    // console output to stderr, which #wireStdioCapture scans for pi only.
     if (parsed?.type === 'awb_mcp_bridge_tool_call') {
       if (parsed.server === 'awb' && parsed.error == null && isCommentTool(parsed.tool)) {
         record.commentSent = true;

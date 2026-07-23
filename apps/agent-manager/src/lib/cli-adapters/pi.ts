@@ -58,13 +58,15 @@
 // leaving a ticket comment" system comment fired despite a real comment
 // having been posted, and the breaker never saw a recordSuccess() reset —
 // eventually pending the ticket and defeating this ticket's entire goal. The
-// fix: the bridge's `execute()` now prints one `awb_mcp_bridge_tool_call`
-// JSON line to REAL stdout (console.log, not the console.error/stderr the
-// rest of the bridge's own diagnostics use — `_scanForCommentTool` only
-// reads `child.stdout`) on every successful AWB tool call, and
-// `_scanForCommentTool` gained a matching branch. Verified against a real
-// spawned `pi` process that the line survives intermixed with pi's own
-// plain-text turn output and reaches the manager's stdout reader unbroken.
+// initial fix: the bridge's `execute()` prints one `awb_mcp_bridge_tool_call`
+// JSON line with console.log on every successful AWB tool call, and
+// `_scanForCommentTool` gained a matching branch.
+//
+// Runtime correction (ticket 68cda8eb): real pi 0.81.1 `-p` runs with shell
+// fd 1/2 separated proved that pi routes extension console.log output to
+// stderr; stdout contains only the final answer. #wireStdioCapture therefore
+// scans pi stderr as well as stdout for the sentinel. The scan is pi-only so
+// diagnostics from other CLIs cannot affect their comment accounting.
 //
 // Pi also has no credential concept AWB manages — no per-agent credential
 // kind exists to select in the UI. Its own provider auth (API key / OAuth /
@@ -369,15 +371,10 @@ export default async function (pi) {
         if (result && result.isError) {
           throw new Error(content.map((c) => c.text || '').join('\\n') || \`\${tool.name} failed\`);
         }
-        // Sentinel line on REAL stdout (not console.error/stderr) so
-        // subagent-manager.ts's _scanForCommentTool — which only reads
-        // child.stdout — can observe that this tool call actually happened.
-        // pi's own -p mode prints plain prose, not structured events, so
-        // without this line every successful add_comment/move_ticket call
-        // is invisible to the manager: commentSent never flips true, the
-        // silent-exit fallback fires on every dispatch even though the
-        // ticket comment was posted, and the circuit-breaker never sees a
-        // recordSuccess() reset (ticket d5a6100d review regression).
+        // Sentinel after a successful tool call. pi's -p runtime routes
+        // extension console output to stderr even when the extension uses
+        // console.log; subagent-manager scans pi's stderr for this exact JSON
+        // shape (ticket 68cda8eb).
         console.log(JSON.stringify({ type: 'awb_mcp_bridge_tool_call', server: 'awb', tool: tool.name, error: null }));
         return { content, details: {} };
       },

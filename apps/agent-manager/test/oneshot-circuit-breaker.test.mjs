@@ -22,6 +22,7 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 
 import { SubagentManager } from '../dist/lib/subagent-manager.js';
 import { CircuitBreaker } from '../dist/lib/circuit-breaker.js';
@@ -662,6 +663,41 @@ test('regression (ticket 3feaf80f): a full Claude oneshot turn sequence resets t
   assert.equal(silentExit(), undefined, 'no false silent-exit warning on the successful dispatch');
   assert.equal(cb.shouldBlock(key), null, 'recordSuccess() cleared the streak — NOT counted as a 3rd failure');
   assert.equal(mcpToolCalls.includes('pend_ticket'), false, 'a genuinely successful dispatch must never pend');
+});
+
+test('regression (ticket 68cda8eb): pi stderr sentinel suppresses silent exit and resets the breaker', async () => {
+  const cb = new CircuitBreaker();
+  const mgr = new SubagentManager(makeConfig(), cb);
+  const key = CircuitBreaker.key('agent-rolf', 'ticket-loop', 'assignee');
+
+  for (let i = 0; i < 2; i++) {
+    await mgr._handleOneshotExit(makePiRecord(), 0);
+  }
+  assert.equal(cb.size, 1, 'precondition: two silent pi exits are tracked');
+
+  restPosts.length = 0;
+  mcpToolCalls.length = 0;
+
+  const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  const rec = makePiRecord({ process_handle: child });
+  mgr._wireStdioForTest(rec);
+
+  // Literal stream split observed from real pi 0.81.1 `-p`: only the final
+  // response reaches stdout; extension console.log and diagnostics are on
+  // stderr. Feed the true stdio path rather than calling the scanner seam.
+  child.stdout.write('작업을 완료했습니다.\n');
+  child.stderr.write('[awb-mcp-bridge] registered 174 AWB MCP tool(s)\n');
+  child.stderr.write(`${piBridgeToolCallLine('add_comment')}\n`);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(rec.commentSent, true, 'pi stderr sentinel must reach the comment scanner');
+  await mgr._handleOneshotExit(rec, 0);
+
+  assert.equal(silentExit(), undefined, 'successful pi dispatch must not get a false fallback comment');
+  assert.equal(cb.shouldBlock(key), null, 'recordSuccess() resets the prior silent-exit streak');
+  assert.equal(mcpToolCalls.includes('pend_ticket'), false, 'successful pi dispatch must not pend');
 });
 
 test('respawn-storm regression (ticket c555fbb6): silent exit_code=null opens the breaker + pends', async () => {

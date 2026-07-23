@@ -205,14 +205,10 @@ test('prepareCliHome writes awb-mcp-bridge.ts with the AWB /mcp URL when mcp ctx
   assert.match(content, /export default async function/);
 });
 
-test('generated awb-mcp-bridge.ts prints a stdout sentinel on tool-call success (ticket d5a6100d review round-2 fix)', async () => {
-  // Without this, subagent-manager.ts's _scanForCommentTool — which only
-  // reads child.stdout — can never observe a successful pi tool call: pi's
-  // `-p` mode prints plain prose, not codex-style structured events, so
-  // commentSent stays false forever and every dispatch trips the silent-exit
-  // fallback + circuit-breaker even when the bridge actually posted the
-  // comment. See test/oneshot-circuit-breaker.test.mjs for the manager-side
-  // regression coverage.
+test('generated awb-mcp-bridge.ts emits the pi tool-call sentinel after success', async () => {
+  // The extension uses console.log, but real pi 0.81.1 `-p` routes extension
+  // console output to child.stderr while reserving stdout for the final
+  // answer. The manager-side test covers that literal stderr behavior.
   const a = new PiCliAdapter();
   const home = freshHome();
   await a.prepareCliHome(home, null, { url: 'http://localhost:7701', apiKey: 'k' });
@@ -221,8 +217,6 @@ test('generated awb-mcp-bridge.ts prints a stdout sentinel on tool-call success 
     'utf8',
   );
   assert.match(content, /console\.log\(JSON\.stringify\(\{\s*type:\s*'awb_mcp_bridge_tool_call'/);
-  // Must be console.log (real stdout), never console.error (stderr) — the
-  // manager's stdout scanner can't see stderr.
   const successLineIdx = content.indexOf("type: 'awb_mcp_bridge_tool_call'");
   const precedingLine = content.slice(0, successLineIdx).split('\n').pop();
   assert.match(precedingLine, /console\.log\(/);
