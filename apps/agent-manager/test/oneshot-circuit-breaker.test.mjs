@@ -30,6 +30,7 @@ function makeConfig() {
   return {
     url: 'http://127.0.0.1:0',
     apiKey: 'test-key',
+    silentExitVerifyDelayMs: 0, // skip the real grace delay (ticket 2fd06686) in tests
     delegation: { enabled: true, maxConcurrent: 10, ttlMinutes: 15 },
   };
 }
@@ -152,6 +153,43 @@ afterEach(() => {
 });
 
 const silentExit = () => restPosts.find((r) => r.url.endsWith('/silent-exit-comment'));
+
+/** Routes the GET ticket-context fetch (`fetchTicketContext` /
+ *  `hasAuditTrailSince`) to `ticketPayload` while keeping the same /mcp +
+ *  REST recording behavior as the shared beforeEach handler. */
+function mockTicketFetch(ticketPayload) {
+  globalThis.fetch = async (url, init) => {
+    const u = String(url);
+    const method = init?.method || 'GET';
+    if (u.endsWith('/mcp')) {
+      if (method === 'DELETE') return new Response('{}', { status: 200 });
+      const body = init?.body ? JSON.parse(init.body) : {};
+      if (body.method === 'initialize') {
+        return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }), {
+          status: 200,
+          headers: { 'mcp-session-id': 'sid-test', 'content-type': 'application/json' },
+        });
+      }
+      if (body.method === 'tools/call') {
+        mcpToolCalls.push(body.params?.name);
+        return new Response(
+          JSON.stringify({ jsonrpc: '2.0', id: 2, result: { content: [{ type: 'text', text: '{}' }] } }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return new Response('', { status: 202 });
+    }
+    const body = init?.body ? JSON.parse(init.body) : null;
+    restPosts.push({ url: u, method, body });
+    if (u.includes('/api/agent/tickets/') && !u.endsWith('/silent-exit-comment')) {
+      return new Response(JSON.stringify(ticketPayload), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response('{}', { status: 201, headers: { 'content-type': 'application/json' } });
+  };
+}
 
 test('① codex usage-limit exit 1: NO agent add_comment, only system silent-exit', async () => {
   const mgr = new SubagentManager(makeConfig());
@@ -419,12 +457,89 @@ test('Claude native MCP add_comment tool_use (stream-json) suppresses the silent
   assert.equal(silentExit(), undefined, 'no false system comment after Claude add_comment succeeds');
 });
 
-test('Claude native MCP move_ticket alone does NOT count (only comment-creating tools do)', async () => {
+test('Claude native MCP move_ticket alone counts as audit trail (ticket 2fd06686)', async () => {
+  // Was "does NOT count" pre-fix — a session that only moved the ticket (no
+  // add_comment) was always misflagged as silent. move_ticket generates a
+  // system "moved from X to Y" Comment row server-side, so it is not silent.
   const mgr = new SubagentManager(makeConfig());
   const rec = makeCodexRecord({ cli_type: 'claude', captureOutput: false, outLines: [], tailLines: [] });
 
   mgr._scanForCommentTool(rec, claudeAssistantToolUseLine('mcp__awb__move_ticket'));
-  assert.equal(rec.commentSent, false, 'move_ticket is not in TICKET_COMMENT_TOOL_SUFFIXES');
+  assert.equal(rec.commentSent, true, 'move_ticket is now in TICKET_COMMENT_TOOL_SUFFIXES');
+});
+
+test('silent-exit: server re-verification finds a comment the local scan missed → suppressed (ticket 2fd06686)', async () => {
+  // The local `_scanForCommentTool` never ran (simulating whatever race left
+  // `commentSent` false despite real work happening), but the ticket's actual
+  // comments — fetched by `_handleOneshotExit`'s new grace re-verification —
+  // show a comment posted during this spawn's lifetime.
+  const mgr = new SubagentManager(makeConfig());
+  const rec = makeCodexRecord({
+    cli_type: 'claude',
+    captureOutput: false,
+    outLines: [],
+    tailLines: [],
+    commentSent: false,
+  });
+  mockTicketFetch({
+    comments: [
+      {
+        id: 'c1',
+        content: 'landing comment',
+        created_at: new Date(rec.started_at + 5_000).toISOString(),
+        metadata: {},
+      },
+    ],
+  });
+
+  await mgr._handleOneshotExit(rec, 0);
+
+  assert.equal(
+    silentExit(),
+    undefined,
+    'server-verified comment suppresses the fallback even when the local scan missed it',
+  );
+});
+
+test('silent-exit: server re-verification ALSO finds nothing → fallback still fires (genuine silent exit, no regression)', async () => {
+  const mgr = new SubagentManager(makeConfig());
+  const rec = makeCodexRecord({
+    cli_type: 'claude',
+    captureOutput: false,
+    outLines: [],
+    tailLines: [],
+    commentSent: false,
+  });
+  mockTicketFetch({ comments: [] });
+
+  await mgr._handleOneshotExit(rec, 0);
+
+  assert.ok(silentExit(), 'a genuinely silent exit must still be detected after the grace re-verification');
+});
+
+test('silent-exit: a comment from BEFORE this spawn started does not count (stale, ticket 2fd06686)', async () => {
+  const mgr = new SubagentManager(makeConfig());
+  const rec = makeCodexRecord({
+    cli_type: 'claude',
+    captureOutput: false,
+    outLines: [],
+    tailLines: [],
+    commentSent: false,
+  });
+  mockTicketFetch({
+    comments: [
+      {
+        id: 'c-old',
+        content: 'earlier unrelated ticket activity',
+        created_at: new Date(rec.started_at - 60_000).toISOString(),
+        metadata: {},
+      },
+    ],
+  });
+
+  await mgr._handleOneshotExit(rec, 0);
+
+  assert.ok(silentExit(), 'a stale comment predating this spawn must not suppress the fallback');
 });
 
 test('regression (ticket 3feaf80f): a full Claude oneshot turn sequence resets the breaker via recordSuccess, not the failure path', async () => {

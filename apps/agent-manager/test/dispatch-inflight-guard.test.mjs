@@ -63,6 +63,7 @@ function makeConfig(delegation = {}) {
   return {
     url: 'http://127.0.0.1:0', // never reached — fetch is mocked to fail-closed
     apiKey: 'test-key',
+    silentExitVerifyDelayMs: 0, // skip the real grace delay (ticket 2fd06686) in tests
     delegation: {
       enabled: true,
       persistentTicketSessions: true,

@@ -20,7 +20,7 @@ import type { ParseResult } from './cli-adapters/base.js';
 import { composeTriggerPrompt } from './prompts.js';
 import { fireAndForgetTool } from './mcp-client.js';
 import { log } from './logging.js';
-import { postSilentExitSystemComment, postOutputLiveness } from './rest.js';
+import { hasAuditTrailSince, postSilentExitSystemComment, postOutputLiveness } from './rest.js';
 import { OUTPUT_LIVENESS_MIN_INTERVAL_MS } from './constants.js';
 import { CircuitBreaker } from './circuit-breaker.js';
 import { classifyCliError, isFallbackEligible } from './cli-error-signatures.js';
@@ -58,15 +58,21 @@ const SILENT_EXIT_TAIL_MAX_CHARS = 4096;
 
 /** MCP tool name suffixes that count as the subagent leaving a real
  *  audit-trail entry. If at least one of these tools fires during the
- *  session, we skip the silent-exit fallback. ALL of them resolve to a
- *  Comment row server-side (add_comment + the four typed variants), so any
- *  of them satisfies the "did the subagent surface anything?" contract. */
+ *  session, we skip the silent-exit fallback. The first five resolve to a
+ *  Comment row server-side (add_comment + the four typed variants);
+ *  `move_ticket` resolves to a system "moved from X to Y" Comment row
+ *  instead (ticket 2fd06686 — a session that only moved the ticket, with no
+ *  add_comment, is not "silent"). Any of them satisfies the "did the
+ *  subagent surface anything?" contract. This is a fast-path optimization
+ *  only — `_onChildExit`'s server-side re-verification (`hasAuditTrailSince`)
+ *  is the correctness backstop when this local scan misses something. */
 const TICKET_COMMENT_TOOL_SUFFIXES = [
   'add_comment',
   'ask_question',
   'answer_question',
   'record_decision',
   'handoff_to_agent',
+  'move_ticket',
 ];
 
 /** Sentinel a running subagent emits in its own output to request that the
@@ -1015,10 +1021,24 @@ export class TicketSessionManager
 
     // Snapshot silent-exit decision inputs BEFORE state cleanup so we can
     // dispatch the fallback after deleting the tracking entries.
-    const commented = this.#commentSent.has(sess.pid);
+    let commented = this.#commentSent.has(sess.pid);
     const triggerId = this.#lastTriggerId.get(sess.pid) || '';
     const ticketId: string = sess.ticketId || '';
     const role: string = sess.role || '';
+
+    // Grace re-verification (ticket 2fd06686): the local scan above is a
+    // live read of the CLI's OWN stdout, which can race the child's `exit`
+    // event and, before this ticket, never recognized `move_ticket` as
+    // audit trail either. Before trusting a "nothing seen" verdict, re-check
+    // the ticket's ACTUAL comments (server-side ground truth, includes the
+    // system row a `move_ticket` call generates) for anything created since
+    // this session started. Skipped entirely when the local scan already
+    // said yes — this is a last-chance double-check, not a replacement for
+    // the fast path.
+    if (!commented && ticketId) {
+      commented = await hasAuditTrailSince(this._config, ticketId, sess.startedAt);
+    }
+
     // Only collect a tail for a genuine silent/dead exit — a strand that left an
     // audit-trail comment already surfaced its work, so we never surface a tail.
     const tail = commented

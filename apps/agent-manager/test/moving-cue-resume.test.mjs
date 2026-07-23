@@ -18,6 +18,7 @@ function makeConfig() {
   return {
     url: 'http://127.0.0.1:0',
     apiKey: 'test-key',
+    silentExitVerifyDelayMs: 0, // skip the real grace delay (ticket 2fd06686) in tests
     delegation: {
       enabled: true,
       maxConcurrent: 10,

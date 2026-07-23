@@ -49,6 +49,7 @@ import {
   type ProcNode,
 } from './process-tree.js';
 import {
+  hasAuditTrailSince,
   postChatRoomMessage,
   postSilentExitSystemComment,
   type AwbConfig,
@@ -83,14 +84,20 @@ const CHAT_PROGRESS_MAX_PER_SESSION = 30;
 const CHAT_PROGRESS_DETAIL_MAX = 80;
 const CHAT_PROGRESS_LABEL_MAX = 40;
 /** MCP tool name suffixes that count as the subagent leaving a real
- *  ticket comment. Matched by suffix so a future MCP prefix rename
- *  doesn't break detection. Keep aligned with the ticket-session list. */
+ *  audit-trail entry. Matched by suffix so a future MCP prefix rename
+ *  doesn't break detection. Keep aligned with the ticket-session list.
+ *  `move_ticket` resolves to a system "moved from X to Y" Comment row
+ *  instead of an agent-authored one (ticket 2fd06686) — a one-shot that
+ *  only moved the ticket is not "silent". This is a fast-path optimization
+ *  only — `#postSilentExitFallback`'s caller re-verifies against the
+ *  server when this local scan comes up empty. */
 const TICKET_COMMENT_TOOL_SUFFIXES = [
   'add_comment',
   'ask_question',
   'answer_question',
   'record_decision',
   'handoff_to_agent',
+  'move_ticket',
 ];
 
 /** Minimal identity shape the dedup scan reads off both live SubagentRecords
@@ -911,6 +918,19 @@ export class SubagentManager implements SubagentManagerContract {
    */
   async _handleOneshotExit(record: SubagentRecord, code: number | null): Promise<void> {
     const pid = record.pid;
+
+    // Grace re-verification (ticket 2fd06686): `_scanForCommentTool`'s local
+    // scan of the CLI's own stdout can race the child's `exit` event, and
+    // before this ticket never recognized `move_ticket` as audit trail
+    // either. Before trusting a "nothing seen" verdict, re-check the
+    // ticket's ACTUAL comments (server-side ground truth, includes the
+    // system row a `move_ticket` call generates) for anything created since
+    // this spawn started. Corrects `record.commentSent` in place so every
+    // downstream reader below (model-fallback gate, circuit breaker, the
+    // fallback dispatch itself) sees the same corrected verdict.
+    if (!record.commentSent && record.ticket_id) {
+      record.commentSent = await hasAuditTrailSince(this.#config, record.ticket_id, record.started_at);
+    }
 
     // Classification of the aggregated one-shot result. Defaults to non-fatal;
     // only set for non-NATIVE_MCP adapters (codex / antigravity) whose stdout

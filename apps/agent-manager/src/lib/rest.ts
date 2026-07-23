@@ -7,6 +7,11 @@ export interface AwbConfig {
   workspace_id?: string;
   agent_id?: string;
   cli?: string;
+  /** Override for `hasAuditTrailSince`'s grace delay (ticket 2fd06686).
+   *  Production leaves this unset (real 2s grace); tests set it to 0 so the
+   *  re-verification path they're exercising doesn't add real wall-clock
+   *  time to every "no local comment seen" case. */
+  silentExitVerifyDelayMs?: number;
   [key: string]: unknown;
 }
 
@@ -41,6 +46,56 @@ export async function fetchTicketContext(
     log(`Ticket fetch error: ${err?.message ?? err} (ticket=${ticketId})`);
     return null;
   }
+}
+
+/** Grace delay before the silent-exit re-verification fetch below (ticket
+ *  2fd06686) — gives a comment/move POSTed right as the child exited a
+ *  moment to actually land before we re-check for it. */
+const SILENT_EXIT_VERIFY_DELAY_MS = 2_000;
+/** Buffer subtracted from the session-start lower bound so a manager clock
+ *  running a few seconds ahead of the server's doesn't cause a genuine
+ *  audit-trail comment posted right at session start to be missed. */
+const SILENT_EXIT_VERIFY_BUFFER_MS = 5_000;
+
+/**
+ * Re-verify against the ticket's ACTUAL comments before trusting a subagent
+ * exit handler's local "no audit trail seen" verdict (ticket 2fd06686). The
+ * local verdict comes from a live scan of the CLI's own stdout for a
+ * comment-creating tool call; that scan can race the child's `exit` event
+ * and — before this ticket — never recognized `move_ticket` as audit trail
+ * at all. A `move_ticket` call makes the server post a system "moved from X
+ * to Y" Comment row, so checking the real rows (not just the local tool-call
+ * scan) catches both gaps in one pass, regardless of which one actually
+ * caused a given false positive.
+ *
+ * Only comments created at/after `sinceMs` (minus the clock-skew buffer)
+ * count — this is meant to answer "did THIS session's run produce
+ * anything", not "does this ticket have any history at all". Comments
+ * carrying `metadata.reason === 'silent_exit'` are excluded: those are the
+ * manager's OWN prior fallback rows, not evidence of subagent work.
+ *
+ * Fails CLOSED (returns false — "no evidence found") on any fetch error, so
+ * a flaky verification call falls back to the pre-existing behavior instead
+ * of silently swallowing a genuine silent exit.
+ */
+export async function hasAuditTrailSince(
+  config: AwbConfig,
+  ticketId: string | undefined,
+  sinceMs: number,
+): Promise<boolean> {
+  if (!ticketId) return false;
+  const graceDelayMs = config.silentExitVerifyDelayMs ?? SILENT_EXIT_VERIFY_DELAY_MS;
+  if (graceDelayMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, graceDelayMs));
+  }
+  const ticket = await fetchTicketContext(config, ticketId);
+  const comments = Array.isArray(ticket?.comments) ? ticket.comments : [];
+  const cutoff = sinceMs - SILENT_EXIT_VERIFY_BUFFER_MS;
+  return comments.some((c: any) => {
+    if (c?.metadata?.reason === 'silent_exit') return false;
+    const createdAt = new Date(c?.created_at).getTime();
+    return Number.isFinite(createdAt) && createdAt >= cutoff;
+  });
 }
 
 /**
