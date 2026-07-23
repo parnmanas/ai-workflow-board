@@ -17,6 +17,14 @@
 //     getSuppressionStats()).
 //   Controller wiring: the combined workflow-health rollup embeds token_usage,
 //     and the standalone /token-usage endpoint returns the same shape.
+//   일별 롤업(ticket 8d5c6f5d, 후속): SubagentMonitorService의 sweep이 곧
+//     reap될 usage를 (workspace_id, usage_date, agent_id)로 묶어
+//     AgentUsageDailyRollup에 접어 넣은 뒤, 원본 row와 log line을 지운다 —
+//     이 전부가 하나의 트랜잭션. 아직 live인 row는 같은 sweep에서 손대지
+//     않고 살아남고, 두 번째 sweep tick은 기존 롤업 row를 덮어쓰지 않고
+//     증분하며, AgentUsageService.getLongTermUsageStats(롤업 SUM + live
+//     SUM, day-aligned)는 sweep 경계 전후로 정확히 같은 합산 총합을
+//     돌려준다 — 전체 설계가 기대는 disjoint 불변식.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -58,6 +66,12 @@ let subCounter = 0;
 async function seedSubagent(subRepo, {
   workspaceId, ticketId = null, ticketTitle = null, role = null,
   startedAt, endedAt = null, usage = {}, agentId = 'agent-usage-fixture',
+  // Group 1/2/2.5 호출부는 전부 null로 남긴다(sweep 대상 안 됨: NULL은
+  // 두 dialect 모두에서 `expires_at < now`를 만족 못함). Group 4(ticket
+  // 8d5c6f5d)는 row를 sweep 대상으로 만들려고 과거 Date를 넘기거나,
+  // sweep을 거쳐도 살아있어야 하는 아직-만료 안 된 row를 흉내내려고
+  // 미래 Date를 넘긴다.
+  expiresAt = null,
 }) {
   subCounter += 1;
   return subRepo.save(subRepo.create({
@@ -72,6 +86,7 @@ async function seedSubagent(subRepo, {
     ticket_title: ticketTitle,
     role,
     ended_at: endedAt,
+    expires_at: expiresAt,
     input_tokens: usage.input_tokens ?? null,
     output_tokens: usage.output_tokens ?? null,
     cache_read_input_tokens: usage.cache_read_input_tokens ?? null,
@@ -382,6 +397,153 @@ test('Agent usage stats — end() round-trip + windowed aggregation + controller
     await controller.tokenUsage('non-existent-board-id', scopedRes);
     assert.equal(scopedRes.body.coverage.runs_total, 0, 'a board_id matching no board resolves to zero tickets, same as AgentUsageService directly');
     assert.deepEqual(scopedRes.body.top_tickets, []);
+  });
+
+  // ── Group 4: sweep 시 일별 롤업 접기(ticket 8d5c6f5d) ─────────────────────
+  await t.test('_sweepEnded folds expired usage into AgentUsageDailyRollup, deletes originals + lines, and getLongTermUsageStats stays invariant across the sweep boundary', async () => {
+    const monitorModule = await import(
+      'file://' + path.join(DIST_ROOT, 'services', 'subagent-monitor.service.js')
+    );
+    const monitorSvc = app.get(monitorModule.SubagentMonitorService);
+    const rollupRepo = ds.getRepository('AgentUsageDailyRollup');
+    const linesRepo = ds.getRepository('SubagentLogLine');
+
+    // "now"로부터 수년 떨어진 고정 달력 날짜 — 같은 workspace 안 다른
+    // 그룹들의 now()-상대적 시드 row와 완전히 격리된다.
+    const day = '2020-01-15';
+    const dayStart = new Date(`${day}T10:00:00.000Z`);
+    const past = new Date(Date.now() - 60_000); // 이미 retention을 넘김 → sweep 대상
+    const future = new Date(Date.now() + 60 * 60_000); // 아직 안 만료 → sweep에서도 살아남아야 함
+
+    step('seed 2 expired rows for agent A (same day), 1 expired uninstrumented row for agent B, 1 still-live row');
+    const a1 = await seedSubagent(subRepo, {
+      workspaceId: ws.id, agentId: 'rollup-agent-A',
+      startedAt: dayStart, endedAt: dayStart, expiresAt: past,
+      usage: { input_tokens: 1000, output_tokens: 100, cache_read_input_tokens: 50, cache_creation_input_tokens: 0, total_cost_usd: 0.01 },
+    });
+    const a2 = await seedSubagent(subRepo, {
+      workspaceId: ws.id, agentId: 'rollup-agent-A',
+      startedAt: new Date(dayStart.getTime() + HOUR), endedAt: new Date(dayStart.getTime() + HOUR), expiresAt: past,
+      usage: { input_tokens: 2000, output_tokens: 200, cache_read_input_tokens: 0, cache_creation_input_tokens: 75, total_cost_usd: 0.02 },
+    });
+    const b1 = await seedSubagent(subRepo, {
+      workspaceId: ws.id, agentId: 'rollup-agent-B',
+      startedAt: dayStart, endedAt: dayStart, expiresAt: past,
+      usage: {}, // 계측 안 됨 — runs_total엔 잡히지만 runs_with_usage/priced_runs엔 안 잡힘
+    });
+    const live1 = await seedSubagent(subRepo, {
+      workspaceId: ws.id, agentId: 'rollup-agent-A',
+      startedAt: dayStart, endedAt: dayStart, expiresAt: future,
+      usage: { input_tokens: 300, output_tokens: 30, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, total_cost_usd: 0.005 },
+    });
+    await linesRepo.save(linesRepo.create({ subagent_id: a1.subagent_id, seq: 1, direction: 'out', line: 'hello', ts: dayStart }));
+
+    step('getLongTermUsageStats BEFORE sweep — all 4 rows still live, nothing rolled up yet');
+    const before = await usageSvc.getLongTermUsageStats({ workspaceId: ws.id, from: dayStart, to: dayStart });
+    assert.equal(before.coverage.runs_total, 4);
+    assert.equal(before.coverage.runs_with_usage, 3, 'b1 is uninstrumented');
+    assert.equal(before.totals.input_tokens, 1000 + 2000 + 300);
+    assert.equal(before.priced_runs, 3);
+
+    step('run the sweep');
+    await monitorSvc._sweepEnded();
+
+    step('the 3 expired rows (a1, a2, b1) and a1’s log line are gone; the still-live row survives untouched');
+    assert.equal(await subRepo.findOne({ where: { subagent_id: a1.subagent_id } }), null);
+    assert.equal(await subRepo.findOne({ where: { subagent_id: a2.subagent_id } }), null);
+    assert.equal(await subRepo.findOne({ where: { subagent_id: b1.subagent_id } }), null);
+    assert.notEqual(await subRepo.findOne({ where: { subagent_id: live1.subagent_id } }), null, 'not-yet-expired row must survive the sweep');
+    assert.deepEqual(await linesRepo.find({ where: { subagent_id: a1.subagent_id } }), [], 'log line deleted alongside its subagent row');
+
+    step('AgentUsageDailyRollup has one row per (workspace, day, agent) — a1+a2 folded into agent A’s row, b1 into its own');
+    const rollupA = await rollupRepo.findOne({ where: { workspace_id: ws.id, usage_date: day, agent_id: 'rollup-agent-A' } });
+    assert.ok(rollupA, 'agent A rollup row created');
+    assert.equal(rollupA.runs_total, 2);
+    assert.equal(rollupA.runs_with_usage, 2);
+    assert.equal(rollupA.priced_runs, 2);
+    assert.equal(rollupA.input_tokens, 1000 + 2000);
+    assert.equal(rollupA.output_tokens, 100 + 200);
+    assert.equal(rollupA.cache_read_input_tokens, 50 + 0);
+    assert.equal(rollupA.cache_creation_input_tokens, 0 + 75);
+    assert.ok(Math.abs(rollupA.total_cost_usd - 0.03) < 1e-9, `got ${rollupA.total_cost_usd}`);
+
+    const rollupB = await rollupRepo.findOne({ where: { workspace_id: ws.id, usage_date: day, agent_id: 'rollup-agent-B' } });
+    assert.ok(rollupB, 'agent B gets its own row, not merged with agent A');
+    assert.equal(rollupB.runs_total, 1);
+    assert.equal(rollupB.runs_with_usage, 0, 'uninstrumented row');
+    assert.equal(rollupB.priced_runs, 0);
+
+    step('getLongTermUsageStats AFTER sweep — merged (rollup + still-live) total unchanged from BEFORE (the core invariant)');
+    const after = await usageSvc.getLongTermUsageStats({ workspaceId: ws.id, from: dayStart, to: dayStart });
+    assert.equal(after.coverage.runs_total, before.coverage.runs_total);
+    assert.equal(after.coverage.runs_with_usage, before.coverage.runs_with_usage);
+    assert.equal(after.totals.input_tokens, before.totals.input_tokens);
+    assert.equal(after.totals.output_tokens, before.totals.output_tokens);
+    assert.equal(after.totals.cache_read_input_tokens, before.totals.cache_read_input_tokens);
+    assert.equal(after.totals.cache_creation_input_tokens, before.totals.cache_creation_input_tokens);
+    assert.equal(after.priced_runs, before.priced_runs);
+    // float 필드는 epsilon으로 비교한다 — before/after가 서로 다른 계산
+    // 경로를 타므로(before는 live 테이블 하나의 SQL SUM, after는 롤업 컬럼
+    // SUM + 더 작아진 두 row-set에 대한 live 테이블 SUM) 수치적으로는
+    // 같아도 bit 단위까지 같으리란 보장은 없다.
+    assert.ok(
+      Math.abs(after.totals.total_cost_usd - before.totals.total_cost_usd) < 1e-9,
+      `cost invariant broken: before=${before.totals.total_cost_usd} after=${after.totals.total_cost_usd}`,
+    );
+    assert.ok(
+      Math.abs(after.avg_cost_per_run_usd_priced_only - before.avg_cost_per_run_usd_priced_only) < 1e-9,
+    );
+
+    step('a second sweep tick on a NEW batch for the same (workspace, day, agent) increments the existing rollup row instead of overwriting it');
+    await seedSubagent(subRepo, {
+      workspaceId: ws.id, agentId: 'rollup-agent-A',
+      startedAt: dayStart, endedAt: dayStart, expiresAt: past,
+      usage: { input_tokens: 500, output_tokens: 50, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, total_cost_usd: 0.005 },
+    });
+    await monitorSvc._sweepEnded();
+    const rollupAAfter2ndSweep = await rollupRepo.findOne({ where: { workspace_id: ws.id, usage_date: day, agent_id: 'rollup-agent-A' } });
+    assert.equal(rollupAAfter2ndSweep.id, rollupA.id, 'same row, incremented — not a fresh row');
+    assert.equal(rollupAAfter2ndSweep.runs_total, 3);
+    assert.equal(rollupAAfter2ndSweep.input_tokens, 1000 + 2000 + 500);
+    assert.ok(Math.abs(rollupAAfter2ndSweep.total_cost_usd - 0.035) < 1e-9, `got ${rollupAAfter2ndSweep.total_cost_usd}`);
+
+    await subRepo.delete({ subagent_id: live1.subagent_id });
+    await rollupRepo.delete({ workspace_id: ws.id, usage_date: day });
+  });
+
+  await t.test('getLongTermUsageStats — unbounded `from` sums all-time, an empty range returns zeros/nulls without crashing', async () => {
+    const isolatedDay = '2019-06-01';
+    const startedAt = new Date(`${isolatedDay}T00:00:00.000Z`);
+    const seeded = await seedSubagent(subRepo, {
+      workspaceId: ws.id, agentId: 'rollup-agent-alltime',
+      startedAt, endedAt: startedAt, expiresAt: new Date(Date.now() - 60_000),
+      usage: { input_tokens: 42, output_tokens: 7, total_cost_usd: 0.001 },
+    });
+    const monitorModule = await import(
+      'file://' + path.join(DIST_ROOT, 'services', 'subagent-monitor.service.js')
+    );
+    const monitorSvc = app.get(monitorModule.SubagentMonitorService);
+    await monitorSvc._sweepEnded();
+
+    step('from omitted = all-time — the 2019 row is included with no lower bound');
+    const allTime = await usageSvc.getLongTermUsageStats({ workspaceId: ws.id, to: startedAt });
+    assert.equal(allTime.from, null);
+    assert.ok(allTime.totals.input_tokens >= 42, 'includes the 2019 row');
+
+    step('a date range matching nothing returns zeros, not a crash — null avg cost since priced_runs is 0');
+    const empty = await usageSvc.getLongTermUsageStats({
+      workspaceId: ws.id,
+      from: new Date('2015-01-01T00:00:00.000Z'),
+      to: new Date('2015-01-02T00:00:00.000Z'),
+    });
+    assert.equal(empty.coverage.runs_total, 0);
+    assert.equal(empty.priced_runs, 0);
+    assert.equal(empty.avg_cost_per_run_usd_priced_only, null);
+    assert.equal(empty.totals.input_tokens, 0);
+
+    const rollupRepo = ds.getRepository('AgentUsageDailyRollup');
+    await rollupRepo.delete({ workspace_id: ws.id, usage_date: isolatedDay });
+    await subRepo.delete({ subagent_id: seeded.subagent_id }); // sweep이 이미 reap했으면 no-op — 어느 쪽이든 무해
   });
 });
 
