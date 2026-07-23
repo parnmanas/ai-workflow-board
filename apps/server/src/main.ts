@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import 'reflect-metadata';
+import { join } from 'path';
 import compression from 'compression';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
@@ -12,6 +13,7 @@ import { LogService } from './services/log.service';
 import { preSyncPostgres } from './database/pre-sync-postgres';
 import { ensureSqljsDbHealthy, preSyncSqljsOpenIntents } from './db';
 import { applyHttpBodyParsers } from './common/http-body-parsers';
+import { applySpaFallback } from './common/spa-fallback';
 
 async function bootstrap() {
   // Runs BEFORE NestFactory so TypeORM's auto-synchronize doesn't trip on
@@ -46,6 +48,13 @@ async function bootstrap() {
   // in-process test app parses bodies exactly like production. See ff3e7337
   // (base64→raw media upload) and 5e5959ef (test harness missing these parsers).
   applyHttpBodyParsers(app);
+
+  // SPA fallback for deep React Router links (e.g. /admin/workflow-health,
+  // /board/:ticketId) refreshed against a single-port deployment — see
+  // spa-fallback.ts for why this must be mounted here (before Nest finishes
+  // initializing) rather than after ServeStaticModule/app.listen(), which is
+  // where it would conceptually belong (ticket 7ba057fb).
+  applySpaFallback(app, join(__dirname, '..', '..', 'client', 'dist'));
 
   // Gzip everything over 1KB. The MCP tools/list response alone is ~59KB
   // uncompressed; compression cuts it ~10x and stacks on top of the
