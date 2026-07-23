@@ -27,6 +27,10 @@ export { TicketRoleAssignment } from './TicketRoleAssignment';
 export { TicketAttachment } from './TicketAttachment';
 export { Subagent } from './Subagent';
 export { SubagentLogLine } from './SubagentLogLine';
+// Persistent daily usage accumulation (ticket 8d5c6f5d, follow-up to 6dd3f968) —
+// survives the 48h Subagent retention sweep; see the entity docstring for the
+// disjoint-with-live invariant this table depends on.
+export { AgentUsageDailyRollup } from './AgentUsageDailyRollup';
 export { Action } from './Action';
 export { ActionRun } from './ActionRun';
 export { ActionApproval } from './ActionApproval';

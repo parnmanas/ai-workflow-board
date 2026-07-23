@@ -4,6 +4,7 @@ import { Agent } from '../../entities/Agent';
 import { Ticket } from '../../entities/Ticket';
 import { Subagent } from '../../entities/Subagent';
 import { SubagentLogLine } from '../../entities/SubagentLogLine';
+import { AgentUsageDailyRollup } from '../../entities/AgentUsageDailyRollup';
 import { StuckTicketAlert } from '../../entities/StuckTicketAlert';
 import { DispatchIntent } from '../../entities/DispatchIntent';
 import { AgentsController } from './agents.controller';
@@ -41,7 +42,7 @@ import { ColumnPoliciesModule } from '../column-policies/column-policies.module'
   // and now AgentsModule needs InstanceRegistryService from AgentManagerModule
   // to enrich /api/agents responses with live heartbeat data.
   imports: [
-    TypeOrmModule.forFeature([Agent, Ticket, Subagent, SubagentLogLine, StuckTicketAlert, DispatchIntent]),
+    TypeOrmModule.forFeature([Agent, Ticket, Subagent, SubagentLogLine, AgentUsageDailyRollup, StuckTicketAlert, DispatchIntent]),
     forwardRef(() => AgentManagerModule),
     // ChatRoomsModule is the home of RoomMessagingService, which
     // StuckTicketDetectorService uses to post in-process alerts via
