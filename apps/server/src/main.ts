@@ -49,19 +49,25 @@ async function bootstrap() {
   // (base64→raw media upload) and 5e5959ef (test harness missing these parsers).
   applyHttpBodyParsers(app);
 
+  // Gzip everything over 1KB. The MCP tools/list response alone is ~59KB
+  // uncompressed; compression cuts it ~10x and stacks on top of the
+  // tools/list cache (cache avoids re-serialization, gzip avoids
+  // re-transmission). Threshold ignores tiny responses where the
+  // compression overhead would outweigh the savings.
+  //
+  // Must be mounted BEFORE applySpaFallback below — compression patches
+  // res.write/res.end to gzip on the way out, so it only affects responses
+  // from middleware registered *after* it. Mounting it after the fallback
+  // would leave every fallback-served index.html uncompressed (ticket
+  // 7ba057fb review).
+  app.use(compression({ threshold: 1024 }));
+
   // SPA fallback for deep React Router links (e.g. /admin/workflow-health,
   // /board/:ticketId) refreshed against a single-port deployment — see
   // spa-fallback.ts for why this must be mounted here (before Nest finishes
   // initializing) rather than after ServeStaticModule/app.listen(), which is
   // where it would conceptually belong (ticket 7ba057fb).
   applySpaFallback(app, join(__dirname, '..', '..', 'client', 'dist'));
-
-  // Gzip everything over 1KB. The MCP tools/list response alone is ~59KB
-  // uncompressed; compression cuts it ~10x and stacks on top of the
-  // tools/list cache (cache avoids re-serialization, gzip avoids
-  // re-transmission). Threshold ignores tiny responses where the
-  // compression overhead would outweigh the savings.
-  app.use(compression({ threshold: 1024 }));
 
   app.enableCors({
     origin: process.env.CORS_ORIGIN || true, // true = reflect request origin (dev); set CORS_ORIGIN in production
