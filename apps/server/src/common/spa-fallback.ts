@@ -3,16 +3,25 @@ import type { NextFunction, Request, Response } from 'express';
 import type { INestApplication } from '@nestjs/common';
 
 // A client-side (React Router) route refresh — e.g. /admin/workflow-health or
-// /board/:ticketId — has no file extension and isn't under /api or /mcp. Every
-// real route in this server lives under one of those two prefixes (see
-// app.module.ts's ServeStaticModule exclude list), so this predicate can't
-// shadow a real controller. A missing static asset (has an extension, e.g.
-// /assets/old-hash.js after a redeploy) still falls through to a normal 404
-// instead of silently returning HTML.
+// /board/:ticketId — has no file extension and isn't under /api, /mcp, or
+// /api-docs. Every real route in this server lives under one of those
+// prefixes (see app.module.ts's ServeStaticModule exclude list for /api and
+// /mcp; /api-docs is Swagger, mounted separately in main.ts), so this
+// predicate can't shadow a real controller. A missing static asset (has an
+// extension, e.g. /assets/old-hash.js after a redeploy) still falls through
+// to a normal 404 instead of silently returning HTML.
+//
+// /api-docs is a SIBLING of /api, not a child of it — 'startsWith(\'/api/\')'
+// (with the trailing slash) doesn't catch it, so it needs its own exclusion.
+// Without this, GET /api-docs and /api-docs-json pass the predicate (no
+// extension) and the fallback mounted ahead of SwaggerModule.setup() in
+// main.ts swallows both, returning index.html instead of the Swagger UI /
+// OpenAPI spec (caught in review, ticket 7ba057fb).
 export function shouldServeIndexFallback(method: string, path: string): boolean {
   if (method !== 'GET') return false;
   if (path === '/api' || path.startsWith('/api/')) return false;
   if (path === '/mcp' || path.startsWith('/mcp/')) return false;
+  if (path === '/api-docs' || path.startsWith('/api-docs')) return false;
   return extname(path) === '';
 }
 
