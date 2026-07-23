@@ -106,6 +106,14 @@ const EFFORT_LEVELS = new Set<EffortLevel>(['low', 'medium', 'high', 'max']);
  *  dropped. */
 const LEGACY_EFFORT_ALIASES: Record<string, EffortLevel> = { xhigh: 'max' };
 
+export const PI_TICKET_DISPATCH_BLOCK_REASON = 'pi_ticket_mcp_unsupported';
+export const PI_TICKET_DISPATCH_BLOCK_COMMENT =
+  '⚠️ **PI 티켓 디스패치 차단** — PI CLI는 현재 MCP를 지원하지 않아 AWB의 ' +
+  '`get_ticket`, `add_comment`, `move_ticket` 도구를 호출할 수 없고, 티켓을 자율적으로 진행할 수 없습니다. ' +
+  '조용히 정체되는 세션을 만들지 않도록 spawn 전에 디스패치를 중단하고 티켓을 대기 상태로 전환했습니다.\n\n' +
+  'PI는 현재 **chat 전용**으로 사용하세요. 이 티켓을 진행하려면 Claude/Codex 등 AWB MCP 지원 agent에 ' +
+  '배정한 뒤 User 탭에서 Resume 하세요.';
+
 /**
  * Defensive parse of the `effort_preset` field on a flattened agent_trigger
  * event (ticket-level abstract effort preset). The server ships the resolved,
@@ -1554,6 +1562,32 @@ export class EventDispatcher {
     raw: string,
     opts?: { onDispatched?: (pid: number | null) => void },
   ): Promise<void> {
+    // Stock pi intentionally has no MCP client. A ticket session therefore
+    // cannot read its ticket or leave the add_comment / move_ticket audit trail
+    // that advances AWB. Fail before worktree provisioning or process spawn so
+    // this capability gap is visible and cannot degrade into the generic
+    // "subagent exited without a comment" fallback. Chat dispatch is handled by
+    // separate entry points and remains supported through stdout harvesting.
+    if (agentContext?.cli === 'pi' && ev.ticket_id) {
+      if (this.#dispatchBlockers.shouldComment(ev.ticket_id, PI_TICKET_DISPATCH_BLOCK_REASON)) {
+        await fireAndForgetTool(this.#config, 'add_comment', {
+          ticket_id: ev.ticket_id,
+          content: PI_TICKET_DISPATCH_BLOCK_COMMENT,
+        });
+      }
+      await fireAndForgetTool(this.#config, 'pend_ticket', {
+        ticket_id: ev.ticket_id,
+        reason:
+          'PI는 현재 MCP 미지원으로 티켓을 자율 진행할 수 없습니다. ' +
+          'Claude/Codex 등 AWB MCP 지원 agent로 재배정한 뒤 Resume 하세요 (PI는 chat만 지원).',
+      });
+      log(
+        `Trigger blocked before spawn — PI has no MCP ticket support: ticket=${ev.ticket_id} role=${ev.action}`,
+      );
+      this.#ackDispatch(ev, 'nack', PI_TICKET_DISPATCH_BLOCK_REASON);
+      return;
+    }
+
     // ticket 9f26f091: route this ticket into its own git worktree so a branch
     // switch here can't contaminate another ticket sharing the agent's
     // working_dir. worktree 규약 ②: the worktree lands under
