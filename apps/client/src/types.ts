@@ -2154,3 +2154,22 @@ export interface WorkflowHealthRollup {
   // catch) — the tile must render an empty/unavailable state, not a zeroed one.
   token_usage: WorkflowHealthTokenUsage | null;
 }
+
+/** All-time/장기 구간 누적 사용량 (ticket 8d5c6f5d 설계 → 090abc77 노출) — server
+ *  AgentUsageService.getLongTermUsageStats. `from: null`은 하한 없음(all-time)을
+ *  뜻한다. 롤업(영속) + 아직 reap 안 된 live 구간을 day-aligned로 합산한 값이라
+ *  WorkflowHealthTokenUsage(윈도우)와 달리 마진/gap이 없다. */
+export interface WorkflowHealthLongTermUsage {
+  from: string | null;
+  to: string;
+  coverage: { runs_with_usage: number; runs_total: number };
+  totals: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_input_tokens: number;
+    cache_creation_input_tokens: number;
+    total_cost_usd: number;
+  };
+  priced_runs: number;
+  avg_cost_per_run_usd_priced_only: number | null;
+}

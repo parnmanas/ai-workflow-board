@@ -71,6 +71,7 @@ import type {
   RepoTreeEntry,
   RepoFileContent,
   WorkflowHealthRollup,
+  WorkflowHealthLongTermUsage,
 } from './types';
 
 const BASE = '/api';
@@ -1741,6 +1742,19 @@ export const api = {
   getWorkflowHealth: (params?: { boardId?: string }) => {
     const q = params?.boardId ? `?board_id=${encodeURIComponent(params.boardId)}` : '';
     return request<WorkflowHealthRollup>(`/admin/workflow-health${q}`);
+  },
+
+  // All-time/장기 구간 누적 (ticket 090abc77) — workspace는 getAuthHeaders()의
+  // ambient X-Workspace-Id 헤더로 해결되므로 여기서 별도로 넘기지 않는다.
+  // 별도 엔드포인트로 둔 이유는 getWorkflowHealth의 15초 폴링에 all-time
+  // 집계까지 얹지 않기 위함(컨트롤러 docstring 참고) — 호출부가 직접
+  // 원하는 시점에만 불러야 한다.
+  getLongTermUsage: (params?: { from?: string; to?: string }) => {
+    const q = new URLSearchParams();
+    if (params?.from) q.set('from', params.from);
+    if (params?.to) q.set('to', params.to);
+    const qs = q.toString();
+    return request<WorkflowHealthLongTermUsage>(`/admin/workflow-health/long-term-usage${qs ? `?${qs}` : ''}`);
   },
 
   // ── Phase 7: Chat Rooms ─────────────────────────

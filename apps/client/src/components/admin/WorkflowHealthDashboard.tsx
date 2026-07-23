@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
 import { EmptyState, ErrorState } from '../common';
-import type { WorkflowHealthRollup } from '../../types';
+import type { WorkflowHealthRollup, WorkflowHealthLongTermUsage } from '../../types';
 
 const POLL_INTERVAL = 15000;
 
@@ -94,6 +94,11 @@ export default function WorkflowHealthDashboard() {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // All-time 누적(ticket 090abc77) — 별도 state/fetch로 분리해 15초
+  // autoRefresh 폴링에 얹지 않는다(all-time 집계는 그 정도 신선도가 불요).
+  const [longTerm, setLongTerm] = useState<WorkflowHealthLongTermUsage | null>(null);
+  const [longTermError, setLongTermError] = useState<string | null>(null);
+
   const fetchRollup = useCallback(async () => {
     try {
       const data = await api.getWorkflowHealth();
@@ -106,10 +111,21 @@ export default function WorkflowHealthDashboard() {
     }
   }, []);
 
+  const fetchLongTerm = useCallback(async () => {
+    try {
+      const data = await api.getLongTermUsage();
+      setLongTerm(data);
+      setLongTermError(null);
+    } catch (err: any) {
+      setLongTermError(err?.message || '전체 기간 사용량을 불러오지 못했습니다.');
+    }
+  }, []);
+
   useEffect(() => {
     setLoading(true);
     fetchRollup();
-  }, [fetchRollup]);
+    fetchLongTerm();
+  }, [fetchRollup, fetchLongTerm]);
 
   useEffect(() => {
     if (intervalRef.current) {
@@ -127,6 +143,7 @@ export default function WorkflowHealthDashboard() {
   const handleRefresh = () => {
     setLoading(true);
     fetchRollup();
+    fetchLongTerm();
   };
 
   if (loading && !rollup) {
@@ -289,6 +306,55 @@ export default function WorkflowHealthDashboard() {
                 ))}
               </div>
             )}
+          </div>
+        )}
+      </Section>
+
+      {/* All-time 누적 사용량 (ticket 8d5c6f5d 설계 → 090abc77 노출) — rollup+live
+          merge, 마진/gap 없음. 15초 autoRefresh 폴링과 무관하게 mount 시/수동
+          새로고침 시에만 갱신된다(위 fetchLongTerm 참고). */}
+      <Section title="전체 기간 누적 사용량 (all-time)">
+        {longTermError ? (
+          <EmptyState title="전체 기간 사용량을 불러올 수 없음" description={longTermError} />
+        ) : !longTerm ? (
+          <div style={{ padding: '12px 14px', fontSize: '13px', color: tokens.colors.textSecondary }}>불러오는 중…</div>
+        ) : (
+          <div>
+            <div style={{ padding: '12px 14px', display: 'flex', gap: 32, flexWrap: 'wrap' }}>
+              <div>
+                <div style={{ fontSize: '11px', color: tokens.colors.textSecondary }}>입력 토큰 (전체 기간)</div>
+                <div style={{ fontSize: '18px', fontWeight: 700, color: tokens.colors.textPrimary }}>
+                  {formatTokens(longTerm.totals.input_tokens)}
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize: '11px', color: tokens.colors.textSecondary }}>출력 토큰 (전체 기간)</div>
+                <div style={{ fontSize: '18px', fontWeight: 700, color: tokens.colors.textPrimary }}>
+                  {formatTokens(longTerm.totals.output_tokens)}
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize: '11px', color: tokens.colors.textSecondary }}>비용 — CLI 보고 기준 (전체 기간)</div>
+                <div style={{ fontSize: '18px', fontWeight: 700, color: tokens.colors.textPrimary }}>
+                  {formatUsd(longTerm.totals.total_cost_usd)}
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize: '11px', color: tokens.colors.textSecondary }}>run당 평균 비용(비용 계측분)</div>
+                <div style={{ fontSize: '18px', fontWeight: 700, color: tokens.colors.textPrimary }}>
+                  {formatUsd(longTerm.avg_cost_per_run_usd_priced_only)}
+                </div>
+              </div>
+            </div>
+            <div style={{
+              padding: '4px 14px 14px 14px', fontSize: '11px', color: tokens.colors.textMuted,
+              borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 8,
+            }}>
+              구간: {longTerm.from ? `${longTerm.from} ~ ${longTerm.to}` : `전체 ~ ${longTerm.to}`}
+              {' · '}계측된 run: {longTerm.coverage.runs_with_usage}/{longTerm.coverage.runs_total}
+              {' · '}비용 계측 run: {longTerm.priced_runs}
+              {' · '}영속 롤업(rollup) + 아직 reap 안 된 최근 run(live)을 합산한 값 — 위 윈도우 타일과 달리 마진 없이 정확함
+            </div>
           </div>
         )}
       </Section>
