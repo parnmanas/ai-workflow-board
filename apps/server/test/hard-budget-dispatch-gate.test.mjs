@@ -1,4 +1,7 @@
-// Hard-budget dispatch-window gate — call-site/ordering guard (ticket a940d75b).
+// Hard-budget window gate — call-site/ordering guard (ticket a940d75b;
+// extended with a token-sum ceiling by ticket ef53fdf4). Both the dispatch-
+// count and token-sum ceilings live in the SAME `_checkHardBudgetGate`
+// method/call site, so every ordering assertion below covers both.
 //
 // `_emitTrigger` has 9 injected NestJS dependencies and touches ~10
 // repositories before it reaches the emit — not cheaply bootable in
@@ -71,4 +74,28 @@ test('_checkHardBudgetGate exempts manual and comment_summary trigger sources (m
   const body = match[0];
   assert.match(body, /triggerSource === 'manual'/, 'must exempt manual triggers');
   assert.match(body, /triggerSource === 'comment_summary'/, 'must exempt comment_summary triggers');
+});
+
+// ── Token ceiling (ticket ef53fdf4) — shares _checkHardBudgetGate/its call
+// site with the dispatch ceiling above, so it inherits every ordering
+// guarantee already asserted (single call site, after pending gate, before
+// focus-window gate and SSE emit). These assertions cover what's NEW: the
+// token check itself exists, and its breach action string is independently
+// grep-able (distinct from, and not a duplicate of, the dispatch one).
+test('_checkHardBudgetGate also enforces a token-sum ceiling via countWindowTokens', () => {
+  const src = code(SRC_PATH);
+  const match = src.match(/private async _checkHardBudgetGate\([\s\S]*?\n  \}\n/);
+  assert.ok(match, 'could not isolate the _checkHardBudgetGate method body');
+  const body = match[0];
+  assert.match(body, /countWindowTokens\(/, '_checkHardBudgetGate must call countWindowTokens');
+  assert.match(body, /cfg\.maxTokensPerWindow/, '_checkHardBudgetGate must compare against cfg.maxTokensPerWindow');
+});
+
+test('the token hard-budget drop action string appears exactly once and is distinct from the dispatch one', () => {
+  const src = code(SRC_PATH);
+  const tokenDropMentions = (src.match(/'agent_trigger_dropped_hard_budget_tokens'/g) || []).length;
+  assert.equal(tokenDropMentions, 1, 'the token hard-budget drop action string must appear exactly once');
+
+  const dispatchDropMentions = (src.match(/'agent_trigger_dropped_hard_budget'/g) || []).length;
+  assert.equal(dispatchDropMentions, 1, 'adding the token ceiling must not duplicate the dispatch drop action string');
 });

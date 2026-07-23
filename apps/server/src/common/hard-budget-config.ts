@@ -12,22 +12,32 @@ import { z } from 'zod';
  * only fires on a narrow waiting/no-target pattern repeated 3x; a slow-burn
  * loop that keeps posting DIFFERENT-looking agent comments, or a dispatch
  * storm of organically-completing (non-crashing) subagent runs, sails through
- * untouched. This config adds two independent ceilings:
+ * untouched. This config adds three independent ceilings:
  *   (a) max_auto_responses — lifetime cap on agent-authored, non-system
  *       comments on a single ticket (common/hard-budget-guard.ts,
  *       enforced at every MCP/REST comment-creation surface).
+ *   (b) max_tokens_per_window — rolling-window cap on summed
+ *       input_tokens+output_tokens across a ticket's `subagents` rows
+ *       (ticket ef53fdf4, trigger-loop.service.ts). Deliberately shares
+ *       window_minutes/the epoch rule with (c) below rather than getting its
+ *       own token_window_minutes — one rolling window is simpler to reason
+ *       about than two, and this feature is an emergency brake against acute
+ *       runaway loops, not a long-term cost dashboard (that's
+ *       AgentUsageService / WorkflowHealthDashboard, ticket 6dd3f968). See
+ *       hard-budget-guard.ts's `countWindowTokens` for why
+ *       cache_read/cache_creation tokens are excluded from the sum. A CLI
+ *       that never reports usage (Antigravity, pre-6dd3f968 manager builds)
+ *       leaves its `subagents` row's token columns NULL, so those dispatches
+ *       are naturally excluded from the sum rather than counted as zero —
+ *       this ceiling only ever sees CLIs that actually report usage.
  *   (c) max_dispatches_per_window — rolling-window cap on successful
  *       `_emitTrigger` dispatches for a single ticket (trigger-loop.service.ts).
  *
- * Both counters share one "epoch" rule: only events AFTER the ticket's most
- * recent human-driven unpend count (see `lastHumanUnpendAt` in
+ * All three counters share one "epoch" rule: only events AFTER the ticket's
+ * most recent human-driven unpend count (see `lastHumanUnpendAt` in
  * hard-budget-guard.ts). Without this, a breach auto-pends the ticket, a
- * human clears it, and the very next agent comment/dispatch re-triggers the
- * same already-over-limit count — permanently killing the ticket. Token
- * usage is deliberately NOT modeled here (Planner decision on ticket
- * a940d75b): AWB does not yet capture token/cost usage from any CLI's result
- * event, so a token ceiling needs its own instrumentation chain and ships as
- * a separate follow-up ticket once that capture exists.
+ * human clears it, and the very next agent comment/dispatch/token re-trips
+ * the same already-over-limit count — permanently killing the ticket.
  *
  * DEFAULT ON, but conservative — same safety-net posture as respawn-storm.
  * Thresholds are deliberately higher than respawn-storm's (5 deaths/30min)
@@ -44,6 +54,8 @@ export const HardBudgetConfigSchema = z
     window_minutes: z.number().int().positive().max(1440).optional(),
     /** (c) Successful-dispatch count inside the window that trips the breaker. */
     max_dispatches_per_window: z.number().int().positive().max(1000).optional(),
+    /** (b) Summed input+output tokens inside the SAME window (window_minutes above) that trips the breaker. */
+    max_tokens_per_window: z.number().int().positive().max(100_000_000).optional(),
     /** On breach: auto-pend the ticket (surfaces on the User tab, drops future triggers). */
     auto_pend: z.boolean().optional(),
     /** On breach: post a chat-room alert to the workspace. */
@@ -58,6 +70,7 @@ export const HARD_BUDGET_CONFIG_KEYS = [
   'max_auto_responses',
   'window_minutes',
   'max_dispatches_per_window',
+  'max_tokens_per_window',
   'auto_pend',
   'notify',
 ] as const;
@@ -68,6 +81,7 @@ export interface ResolvedHardBudget {
   maxAutoResponses: number;
   windowMs: number;
   maxDispatchesPerWindow: number;
+  maxTokensPerWindow: number;
   autoPend: boolean;
   notify: boolean;
 }
@@ -78,6 +92,7 @@ export const DEFAULT_HARD_BUDGET: ResolvedHardBudget = {
   maxAutoResponses: 100,
   windowMs: 60 * 60_000,
   maxDispatchesPerWindow: 30,
+  maxTokensPerWindow: 2_000_000,
   autoPend: true,
   notify: true,
 };
@@ -108,6 +123,7 @@ export function hardBudgetDefaultsFromEnv(
     maxAutoResponses: num(env.HARD_BUDGET_MAX_AUTO_RESPONSES, DEFAULT_HARD_BUDGET.maxAutoResponses),
     windowMs: num(env.HARD_BUDGET_WINDOW_MINUTES, DEFAULT_HARD_BUDGET.windowMs / 60_000) * 60_000,
     maxDispatchesPerWindow: num(env.HARD_BUDGET_MAX_DISPATCHES_PER_WINDOW, DEFAULT_HARD_BUDGET.maxDispatchesPerWindow),
+    maxTokensPerWindow: num(env.HARD_BUDGET_MAX_TOKENS_PER_WINDOW, DEFAULT_HARD_BUDGET.maxTokensPerWindow),
     autoPend: bool(env.HARD_BUDGET_AUTO_PEND, DEFAULT_HARD_BUDGET.autoPend),
     notify: bool(env.HARD_BUDGET_NOTIFY, DEFAULT_HARD_BUDGET.notify),
   };
@@ -146,6 +162,7 @@ export function resolveHardBudgetConfig(
     maxAutoResponses: cfg.max_auto_responses ?? base.maxAutoResponses,
     windowMs: cfg.window_minutes != null ? cfg.window_minutes * 60_000 : base.windowMs,
     maxDispatchesPerWindow: cfg.max_dispatches_per_window ?? base.maxDispatchesPerWindow,
+    maxTokensPerWindow: cfg.max_tokens_per_window ?? base.maxTokensPerWindow,
     autoPend: cfg.auto_pend ?? base.autoPend,
     notify: cfg.notify ?? base.notify,
   };

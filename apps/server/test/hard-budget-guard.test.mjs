@@ -37,12 +37,14 @@ const { BoardColumn } = await import('file://' + path.join(DIST, 'entities', 'Bo
 const { Ticket } = await import('file://' + path.join(DIST, 'entities', 'Ticket.js'));
 const { Comment } = await import('file://' + path.join(DIST, 'entities', 'Comment.js'));
 const { ActivityLog } = await import('file://' + path.join(DIST, 'entities', 'ActivityLog.js'));
+const { Subagent } = await import('file://' + path.join(DIST, 'entities', 'Subagent.js'));
 const { Agent } = await import('file://' + path.join(DIST, 'entities', 'Agent.js'));
 const { ActivityService } = await import('file://' + path.join(DIST, 'services', 'activity.service.js'));
 const {
   lastHumanUnpendAt,
   countAutoResponses,
   countWindowDispatches,
+  countWindowTokens,
   pendTicketForHardBudget,
   enforceAutoResponseBudget,
 } = await import('file://' + path.join(DIST, 'common', 'hard-budget-guard.js'));
@@ -59,6 +61,7 @@ const colRepo = ds.getRepository(BoardColumn);
 const ticketRepo = ds.getRepository(Ticket);
 const commentRepo = ds.getRepository(Comment);
 const activityRepo = ds.getRepository(ActivityLog);
+const subagentRepo = ds.getRepository(Subagent);
 
 async function makeBoard(hardBudgetConfig) {
   return boardRepo.save(boardRepo.create({ name: 'B', hard_budget_config: hardBudgetConfig ?? null }));
@@ -88,6 +91,20 @@ async function recordTriggerEmitted(ticketId, triggerSource = 'comment') {
   await activityRepo.save(activityRepo.create({
     entity_type: 'ticket', entity_id: ticketId, ticket_id: ticketId, action: 'trigger_emitted',
     trigger_source: triggerSource, actor_id: 'system', actor_name: 'TriggerLoopService',
+  }));
+}
+/** Write a `subagents` row shaped like the `end` POST leaves it (ticket 6dd3f968). */
+let subagentSeq = 0;
+async function seedSubagent(ticketId, overrides = {}) {
+  subagentSeq += 1;
+  return subagentRepo.save(subagentRepo.create({
+    subagent_id: `sa-${subagentSeq}`,
+    agent_id: 'agent1',
+    workspace_id: 'w1',
+    kind: 'ticket',
+    started_at: new Date(),
+    ticket_id: ticketId,
+    ...overrides,
   }));
 }
 
@@ -127,6 +144,44 @@ test('countWindowDispatches excludes manual/comment_summary trigger sources', as
   await recordTriggerEmitted(t.id, 'comment_summary');
   await recordTriggerEmitted(t.id, 'column_move');
   assert.equal(await countWindowDispatches(ds, t.id, since), 2);
+});
+
+// ── countWindowTokens (ticket ef53fdf4) ─────────────────────────────────────
+test('countWindowTokens sums only input_tokens + output_tokens, excluding cache fields', async () => {
+  const t = await makeTicket(null);
+  const since = new Date(Date.now() - 1000);
+  await seedSubagent(t.id, {
+    input_tokens: 100, output_tokens: 50,
+    cache_read_input_tokens: 99999, cache_creation_input_tokens: 88888,
+  });
+  assert.equal(await countWindowTokens(ds, t.id, since), 150, 'cache fields must not be folded into the sum');
+});
+
+test('countWindowTokens sums multiple rows for the same ticket and ignores a different ticket', async () => {
+  const t1 = await makeTicket(null);
+  const t2 = await makeTicket(null);
+  const since = new Date(Date.now() - 1000);
+  await seedSubagent(t1.id, { input_tokens: 10, output_tokens: 5 });
+  await seedSubagent(t1.id, { input_tokens: 20, output_tokens: 15 });
+  await seedSubagent(t2.id, { input_tokens: 1000, output_tokens: 1000 });
+  assert.equal(await countWindowTokens(ds, t1.id, since), 50);
+});
+
+test('countWindowTokens: an uninstrumented row (NULL usage columns, e.g. Antigravity) contributes zero, not an error', async () => {
+  const t = await makeTicket(null);
+  const since = new Date(Date.now() - 1000);
+  await seedSubagent(t.id, { input_tokens: null, output_tokens: null });
+  await seedSubagent(t.id, { input_tokens: 40, output_tokens: 10 });
+  assert.equal(await countWindowTokens(ds, t.id, since), 50);
+});
+
+test('countWindowTokens: a future `since` sees nothing yet; a ticket with zero subagent rows returns 0', async () => {
+  const t = await makeTicket(null);
+  await seedSubagent(t.id, { input_tokens: 100, output_tokens: 100 });
+  assert.equal(await countWindowTokens(ds, t.id, new Date(Date.now() + 60_000)), 0);
+
+  const bare = await makeTicket(null);
+  assert.equal(await countWindowTokens(ds, bare.id, new Date(0)), 0);
 });
 
 test('pendTicketForHardBudget: CAS is idempotent — concurrent breaches pend exactly once', async () => {

@@ -1,17 +1,18 @@
 /**
  * Shared runtime logic for the per-ticket hard-budget ceilings (ticket
- * a940d75b). Two independent enforcement points share this module:
+ * a940d75b). Three independent enforcement points share this module:
  *
  *   (a) apps/server/src/modules/mcp/tools/comment-tools.ts (5 tools) +
  *       apps/server/src/modules/agent-api/agent-api.controller.ts (batch
  *       add-comment op) call `enforceAutoResponseBudget` before saving an
  *       agent-authored comment.
- *   (c) apps/server/src/modules/agents/trigger-loop.service.ts's
+ *   (b)+(c) apps/server/src/modules/agents/trigger-loop.service.ts's
  *       `_emitTrigger` calls `lastHumanUnpendAt` + `countWindowDispatches` +
- *       `pendTicketForHardBudget` directly (the window arithmetic is
- *       specific to that single call site, see the gate there).
+ *       `countWindowTokens` (ticket ef53fdf4) + `pendTicketForHardBudget`
+ *       directly (the window arithmetic is specific to that single call
+ *       site, see the gate there).
  *
- * Epoch rule (both ceilings): only events strictly after the ticket's most
+ * Epoch rule (all three ceilings): only events strictly after the ticket's most
  * recent HUMAN-driven unpend count. Since ticket b2e88390, the only surface
  * that can flip `pending_user_action` true → false is the human-session-gated
  * REST `PATCH /api/tickets/:id` (MCP `unpend_ticket` and an MCP
@@ -31,6 +32,7 @@ import { Board } from '../entities/Board';
 import { BoardColumn } from '../entities/BoardColumn';
 import { ChatRoom } from '../entities/ChatRoom';
 import { Comment } from '../entities/Comment';
+import { Subagent } from '../entities/Subagent';
 import { Ticket } from '../entities/Ticket';
 import { Workspace } from '../entities/Workspace';
 import {
@@ -148,6 +150,48 @@ export async function countWindowDispatches(dataSource: DataSource, ticketId: st
     .andWhere('a.trigger_source NOT IN (:...excluded)', { excluded: ['manual', 'comment_summary'] })
     .andWhere('a.created_at >= :since', { since })
     .getCount();
+}
+
+/**
+ * (b) Summed input+output tokens inside the window, sourced from the
+ * `subagents` table's usage columns (ticket 6dd3f968 — populated on the
+ * agent-manager's `end` POST). Deliberately sums only `input_tokens` +
+ * `output_tokens`, NOT `cache_read_input_tokens`/`cache_creation_input_tokens`:
+ * a cache read is cheap reuse of already-processed context, not fresh
+ * consumption, and folding it in at full weight would make a long, WELL-
+ * cached session (cheap, not a problem) look just as "over budget" as an
+ * uncached one that reprocesses the same context at full price every turn
+ * (the actual failure mode this ceiling exists to catch). This is a token-
+ * COUNT ceiling, not a dollar-cost one — see AgentUsageService/`bb2794cb` for
+ * pricing-aware cost estimation, out of scope here.
+ *
+ * A CLI whose adapter never populates usage (Antigravity, or any manager
+ * build predating ticket 6dd3f968) leaves both columns NULL on its
+ * `subagents` row — SQL SUM ignores NULL, so those dispatches fall out of
+ * the sum entirely rather than contributing 0 (ticket ef53fdf4's "특정 CLI가
+ * usage를 노출하지 않으면 해당 CLI의 dispatch는 토큰 카운트에서 자연 제외"
+ * requirement, satisfied for free by SUM's NULL handling — no CLI allowlist
+ * needed here).
+ *
+ * `since` is filtered against `started_at` (matching AgentUsageService's
+ * windowing, not `ended_at` — usage lands on `end`, but a long-running
+ * dispatch should count against the window it started in). Same sql.js
+ * same-second exclusion / epoch-anchoring rationale as countWindowDispatches
+ * above applies here too (`since` is `max(lastHumanUnpendAt, windowStart)`
+ * in the caller) — do not "fix" this to be same-second-inclusive.
+ *
+ * pg returns SUM over an int column as a STRING (bigint precision safety)
+ * while sql.js returns a plain number — `Number()` coerces both uniformly,
+ * same pattern as AgentUsageService's `num()` helper.
+ */
+export async function countWindowTokens(dataSource: DataSource, ticketId: string, since: Date): Promise<number> {
+  const row = await dataSource.getRepository(Subagent).createQueryBuilder('s')
+    .select('COALESCE(SUM(s.input_tokens), 0)', 'input_tokens')
+    .addSelect('COALESCE(SUM(s.output_tokens), 0)', 'output_tokens')
+    .where('s.ticket_id = :tid', { tid: ticketId })
+    .andWhere('s.started_at >= :since', { since })
+    .getRawOne<{ input_tokens: string | number; output_tokens: string | number }>();
+  return Number(row?.input_tokens ?? 0) + Number(row?.output_tokens ?? 0);
 }
 
 /**

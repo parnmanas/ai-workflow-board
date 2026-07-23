@@ -32,7 +32,7 @@ import { BoardLesson } from '../../entities/BoardLesson';
 import { isConsensusVoteComment } from '../../common/consensus-meta';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { ResolvedHardBudget, hardBudgetDefaultsFromEnv, resolveHardBudgetConfig } from '../../common/hard-budget-config';
-import { lastHumanUnpendAt, countWindowDispatches, pendTicketForHardBudget, postHardBudgetAlert } from '../../common/hard-budget-guard';
+import { lastHumanUnpendAt, countWindowDispatches, countWindowTokens, pendTicketForHardBudget, postHardBudgetAlert } from '../../common/hard-budget-guard';
 
 // Sentinel actor written onto auto-advance `moved` activities. Deliberately
 // non-'system' so the trigger loop re-enters and processes the destination
@@ -1789,13 +1789,21 @@ candidate's branch or move the ticket.
   }
 
   /**
-   * Hard-budget window gate (ticket a940d75b). Content-agnostic companion to
-   * the pending-user gate above: even a ticket that is dispatching and
-   * completing NORMALLY (so nothing else here would ever drop it) can still
-   * be a runaway loop by sheer frequency. Counts successful dispatches off
-   * the EXISTING `trigger_emitted` ActivityLog row every emit below already
-   * writes (ticket 4a6cdfd7 acceptance #8) — no new observability write, per
-   * Planner cross-verification on this ticket.
+   * Hard-budget window gate (ticket a940d75b; token ceiling added by ticket
+   * ef53fdf4). Content-agnostic companion to the pending-user gate above:
+   * even a ticket that is dispatching and completing NORMALLY (so nothing
+   * else here would ever drop it) can still be a runaway loop by sheer
+   * dispatch frequency OR by token burn. Two independent ceilings share this
+   * one gate and the SAME window/epoch (see hard-budget-config.ts's module
+   * docstring for why one shared window rather than two):
+   *   - dispatch count, off the EXISTING `trigger_emitted` ActivityLog row
+   *     every emit below already writes (ticket 4a6cdfd7 acceptance #8) — no
+   *     new observability write, per Planner cross-verification on ticket
+   *     a940d75b.
+   *   - summed input+output tokens, off the `subagents` table's usage
+   *     columns (ticket 6dd3f968) — see `countWindowTokens` for why cache
+   *     tokens are excluded and why an uninstrumented CLI's dispatches fall
+   *     out of the sum naturally instead of being blocked outright.
    *
    * `manual` and `comment_summary` are exempt (a human explicitly asked, or
    * the dispatch doesn't advance the workflow) — same exclusion
@@ -1817,38 +1825,85 @@ candidate's branch or move the ticket.
     if (triggerSource === 'manual' || triggerSource === 'comment_summary') return false;
 
     // Availability-first (same posture as common/hard-budget-guard.ts's
-    // enforceAutoResponseBudget): a failure evaluating the ceiling — config
-    // resolution, epoch lookup, the count query — must never block a
-    // legitimate dispatch. Only the DETECTION step is guarded here; once a
+    // enforceAutoResponseBudget): a failure evaluating either ceiling —
+    // config resolution, epoch lookup, either count query — must never block
+    // a legitimate dispatch. Only the DETECTION step is guarded here; once a
     // real breach is confirmed below, the drop always applies even if the
     // audit-write or notify sub-steps individually fail (their own try/catch).
-    let cfg: ResolvedHardBudget;
-    let count: number;
-    let windowMin: number;
     try {
       const board = boardId
         ? await this.dataSource.getRepository(Board).findOne({ where: { id: boardId } })
         : null;
-      cfg = resolveHardBudgetConfig(board?.hard_budget_config ?? null, this._hardBudgetBaseline);
+      const cfg = resolveHardBudgetConfig(board?.hard_budget_config ?? null, this._hardBudgetBaseline);
       if (!cfg.enabled) return false;
 
       const now = new Date();
       const windowStart = new Date(now.getTime() - cfg.windowMs);
       const epoch = await lastHumanUnpendAt(this.dataSource, ticket.id);
       const since = epoch && epoch.getTime() > windowStart.getTime() ? epoch : windowStart;
-      count = await countWindowDispatches(this.dataSource, ticket.id, since);
-      windowMin = Math.round(cfg.windowMs / 60_000);
-      if (count < cfg.maxDispatchesPerWindow) return false;
+      const windowMin = Math.round(cfg.windowMs / 60_000);
+
+      const dispatchCount = await countWindowDispatches(this.dataSource, ticket.id, since);
+      if (dispatchCount >= cfg.maxDispatchesPerWindow) {
+        return await this._tripHardBudgetGate(ticket, agentId, role, triggerSource, cfg, windowMin, {
+          kind: 'dispatch', count: dispatchCount, limit: cfg.maxDispatchesPerWindow,
+        });
+      }
+
+      // Token-sum ceiling — only reached when the dispatch-count check above
+      // didn't already trip, so one over-budget dispatch never produces two
+      // breach audit rows.
+      const tokenCount = await countWindowTokens(this.dataSource, ticket.id, since);
+      if (tokenCount >= cfg.maxTokensPerWindow) {
+        return await this._tripHardBudgetGate(ticket, agentId, role, triggerSource, cfg, windowMin, {
+          kind: 'tokens', count: tokenCount, limit: cfg.maxTokensPerWindow,
+        });
+      }
+      return false;
     } catch (e) {
       this.logService.warn('MCP', 'hard-budget gate evaluation failed (fail-open, dispatch allowed)', {
         err: String(e), ticket_id: ticket.id,
       });
       return false;
     }
+  }
 
-    this.logService.info('MCP', 'agent_trigger dropped (hard budget window)', {
+  /**
+   * Shared breach tail for both `_checkHardBudgetGate` ceilings — audit-log
+   * write, auto-pend, and chat alert, differing only in wording/action so
+   * `agent_trigger_dropped_hard_budget` (dispatch) and
+   * `agent_trigger_dropped_hard_budget_tokens` (tokens, ticket ef53fdf4) stay
+   * independently grep-able. hard-budget-dispatch-gate.test.mjs asserts the
+   * dispatch action string appears exactly once in this file — keep it that
+   * way; do not requote it elsewhere.
+   */
+  private async _tripHardBudgetGate(
+    ticket: Ticket,
+    agentId: string,
+    role: string,
+    triggerSource: string,
+    cfg: ResolvedHardBudget,
+    windowMin: number,
+    breach: { kind: 'dispatch' | 'tokens'; count: number; limit: number },
+  ): Promise<boolean> {
+    const { kind, count, limit } = breach;
+    const isTokens = kind === 'tokens';
+    const auditAction = isTokens ? 'agent_trigger_dropped_hard_budget_tokens' : 'agent_trigger_dropped_hard_budget';
+    const pendGuardActor = isTokens ? 'hard_budget_token_guard' : 'hard_budget_dispatch_guard';
+    const logLabel = isTokens ? 'hard budget token window' : 'hard budget window';
+    const alertTitle = isTokens ? 'Hard budget 초과 (토큰 사용량)' : 'Hard budget 초과 (dispatch 빈도)';
+    const countLabel = isTokens
+      ? `토큰 사용량: ${count.toLocaleString('ko-KR')} / ${windowMin}분 (상한 ${limit.toLocaleString('ko-KR')})`
+      : `dispatch 수: ${count}회 / ${windowMin}분 (상한 ${limit})`;
+    const reason = isTokens
+      ? `이 티켓의 ${windowMin}분 내 토큰 사용량이 하드 상한(${limit.toLocaleString('ko-KR')} 토큰)을 초과해 자동 중지되었습니다. ` +
+        `토큰 소모 원인을 확인한 뒤 pending을 해제하세요.`
+      : `이 티켓의 dispatch 빈도가 ${windowMin}분 내 하드 상한(${limit}회)을 초과해 자동 중지되었습니다. ` +
+        `폭주 여부를 확인한 뒤 pending을 해제하세요.`;
+
+    this.logService.info('MCP', `agent_trigger dropped (${logLabel})`, {
       ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource,
-      count, limit: cfg.maxDispatchesPerWindow, window_minutes: windowMin,
+      count, limit, window_minutes: windowMin,
     });
     try {
       const activityLogRepo = this.dataSource.getRepository(ActivityLog);
@@ -1858,8 +1913,8 @@ candidate's branch or move the ticket.
         ticket_id: ticket.id,
         actor_id: 'system',
         actor_name: 'TriggerLoopService',
-        action: 'agent_trigger_dropped_hard_budget',
-        new_value: `agent=${agentId} count=${count} limit=${cfg.maxDispatchesPerWindow} window_minutes=${windowMin}`,
+        action: auditAction,
+        new_value: `agent=${agentId} count=${count} limit=${limit} window_minutes=${windowMin}`,
         role,
         trigger_source: triggerSource,
       }));
@@ -1870,19 +1925,16 @@ candidate's branch or move the ticket.
     }
 
     if (cfg.autoPend) {
-      const reason =
-        `이 티켓의 dispatch 빈도가 ${windowMin}분 내 하드 상한(${cfg.maxDispatchesPerWindow}회)을 초과해 자동 중지되었습니다. ` +
-        `폭주 여부를 확인한 뒤 pending을 해제하세요.`;
-      await pendTicketForHardBudget(this.dataSource, this.activityService, ticket, reason, 'hard_budget_dispatch_guard');
+      await pendTicketForHardBudget(this.dataSource, this.activityService, ticket, reason, pendGuardActor);
     }
     if (cfg.notify) {
       await postHardBudgetAlert(
         { dataSource: this.dataSource, activityService: this.activityService, roomMessagingService: this.roomMessaging, logger: this.logService },
         ticket,
         [
-          `🚦 **Hard budget 초과 (dispatch 빈도)** — \`${ticket.id}\``,
+          `🚦 **${alertTitle}** — \`${ticket.id}\``,
           `**${ticket.title}**`,
-          `dispatch 수: ${count}회 / ${windowMin}분 (상한 ${cfg.maxDispatchesPerWindow})`,
+          countLabel,
           cfg.autoPend
             ? '티켓 자동 pend됨 — 사람이 해제하기 전까지 추가 트리거가 차단됩니다.'
             : 'notify-only (auto-pend off for this board).',
