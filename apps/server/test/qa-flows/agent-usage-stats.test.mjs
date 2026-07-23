@@ -25,6 +25,10 @@
 //     증분하며, AgentUsageService.getLongTermUsageStats(롤업 SUM + live
 //     SUM, day-aligned)는 sweep 경계 전후로 정확히 같은 합산 총합을
 //     돌려준다 — 전체 설계가 기대는 disjoint 불변식.
+//   재진입 가드(ticket 3c6422f1, 후속): 겹친 두 _sweepEnded() 호출 중
+//     두 번째는 DB를 아예 건드리지 않고 skip되고(스캔 호출 횟수로 증명),
+//     같은 배치가 롤업에 두 번 접히지 않으며, isSweeping 플래그는 항상
+//     false로 복귀한다(영구 lockout 없음).
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -509,6 +513,62 @@ test('Agent usage stats — end() round-trip + windowed aggregation + controller
 
     await subRepo.delete({ subagent_id: live1.subagent_id });
     await rollupRepo.delete({ workspace_id: ws.id, usage_date: day });
+  });
+
+  // ── Group 5: _sweepEnded() 재진입 가드 (ticket 3c6422f1) ─────────────────
+  await t.test('_sweepEnded() re-entrancy guard — an overlapping second tick is skipped before touching the DB, not double-folded into the rollup', async () => {
+    const monitorModule = await import(
+      'file://' + path.join(DIST_ROOT, 'services', 'subagent-monitor.service.js')
+    );
+    const monitorSvc = app.get(monitorModule.SubagentMonitorService);
+    const rollupRepo = ds.getRepository('AgentUsageDailyRollup');
+
+    assert.equal(monitorSvc.isSweeping, false, 'guard starts clear');
+
+    // 다른 그룹들과 격리된 고정 날짜 + 전용 agent_id.
+    const day = '2021-03-09';
+    const dayStart = new Date(`${day}T09:00:00.000Z`);
+    const past = new Date(Date.now() - 60_000);
+
+    step('seed exactly 1 expired row — without the guard, an overlapping second tick would fold it into the rollup twice (222 tokens instead of 111)');
+    const seeded = await seedSubagent(subRepo, {
+      workspaceId: ws.id, agentId: 'rollup-agent-reentrancy',
+      startedAt: dayStart, endedAt: dayStart, expiresAt: past,
+      usage: { input_tokens: 111, output_tokens: 11, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, total_cost_usd: 0.001 },
+    });
+
+    step('spy on the repo scan the guard is supposed to prevent — call count proves the 2nd tick never reached the DB, not just "coincidentally found nothing"');
+    const origFind = monitorSvc.subagents.find.bind(monitorSvc.subagents);
+    let findCalls = 0;
+    monitorSvc.subagents.find = (...args) => { findCalls += 1; return origFind(...args); };
+
+    step('fire two _sweepEnded() calls with no await between them — the exact overlap the ticket describes (one tick running past 5min into the next)');
+    const p1 = monitorSvc._sweepEnded();
+    const p2 = monitorSvc._sweepEnded();
+    await Promise.all([p1, p2]);
+    monitorSvc.subagents.find = origFind;
+
+    assert.equal(findCalls, 1, 'the overlapping call returned before its first DB read — only the winning call scanned for stale rows');
+    assert.equal(monitorSvc.isSweeping, false, 'flag resets to false once the winning call finishes — no permanent lockout');
+
+    step('the row was folded into the rollup exactly once — no lost-update / double-count from the overlap');
+    assert.equal(await subRepo.findOne({ where: { subagent_id: seeded.subagent_id } }), null, 'swept exactly once');
+    const rollup = await rollupRepo.findOne({ where: { workspace_id: ws.id, usage_date: day, agent_id: 'rollup-agent-reentrancy' } });
+    assert.ok(rollup, 'rollup row created by the winning call');
+    assert.equal(rollup.runs_total, 1, 'exactly 1 run folded in — the guarded call contributed 0');
+    assert.equal(rollup.input_tokens, 111, 'not double-counted (would be 222 without the guard)');
+
+    step('a later, non-overlapping call still runs normally — the guard only blocks true overlap, not future ticks');
+    await seedSubagent(subRepo, {
+      workspaceId: ws.id, agentId: 'rollup-agent-reentrancy',
+      startedAt: dayStart, endedAt: dayStart, expiresAt: past,
+      usage: { input_tokens: 5, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, total_cost_usd: 0 },
+    });
+    await monitorSvc._sweepEnded();
+    const rollupAfter3rd = await rollupRepo.findOne({ where: { workspace_id: ws.id, usage_date: day, agent_id: 'rollup-agent-reentrancy' } });
+    assert.equal(rollupAfter3rd.runs_total, 2, 'sequential (non-overlapping) call still increments normally');
+
+    await rollupRepo.delete({ workspace_id: ws.id, usage_date: day, agent_id: 'rollup-agent-reentrancy' });
   });
 
   await t.test('getLongTermUsageStats — unbounded `from` sums all-time, an empty range returns zeros/nulls without crashing', async () => {

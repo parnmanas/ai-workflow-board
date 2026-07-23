@@ -101,6 +101,9 @@ export class SubagentMonitorService {
   // future change shipping concurrent posts and corrupting `seq`.
   private readonly appendLocks = new Map<string, Promise<unknown>>();
 
+  // _sweepEnded()용 재진입 가드 — 근거는 해당 메서드 docstring 참고.
+  private isSweeping = false;
+
   constructor(
     @InjectRepository(Subagent) private readonly subagents: Repository<Subagent>,
     @InjectRepository(SubagentLogLine) private readonly lines: Repository<SubagentLogLine>,
@@ -436,41 +439,62 @@ export class SubagentMonitorService {
     }
   }
 
+  /**
+   * 재진입 가드 — 한 번의 실행이 5분 tick 주기를 넘기면 다음 setInterval
+   * 콜백이 겹쳐 발동할 수 있다(ticket 3c6422f1, 8d5c6f5d 리뷰 관찰). insert
+   * 경로는 롤업 테이블의 `(workspace_id, usage_date, agent_id)` unique
+   * 제약이 막아주지만(경합한 쪽이 충돌로 롤백 후 다음 tick이 재시도 —
+   * 시끄럽지만 무손실), update 경로(같은 grain에 기존 row가 있을 때
+   * `_rollupBeforeDelete`의 read-modify-write 증분)는 두 트랜잭션이 동시에
+   * 돌면 격리 수준에 따라 한쪽 증분이 유실될 수 있다(과다가 아니라
+   * **과소집계** 방향). `isSweeping`으로 겹친 두 번째 실행을 통째로 skip해
+   * 이 창을 없앤다 — 그 배치는 아직 stale 상태 그대로 남아 다음 tick이
+   * 마저 reap한다(유실이 아니라 지연일 뿐).
+   */
   private async _sweepEnded() {
-    const now = new Date();
-    // expires_at < now 필터를 SQL에서 걸어 매 tick마다 풀-테이블 읽기가
-    // 앱 메모리로 번지지 않게 한다. expires_at은 live record에서 null이므로
-    // 인덱스 히트는 reap/ended row만 건드린다. usage + 귀속 컬럼들도 id와
-    // 함께 끌어와서 아래 롤업 접기(ticket 8d5c6f5d)가 별도 쿼리 없이
-    // 필요한 걸 갖도록 한다.
-    const stale = await this.subagents.find({
-      where: { expires_at: LessThan(now) },
-      select: [
-        'subagent_id', 'workspace_id', 'agent_id', 'started_at',
-        'input_tokens', 'output_tokens', 'cache_read_input_tokens',
-        'cache_creation_input_tokens', 'total_cost_usd',
-      ],
-    });
-    if (stale.length === 0) return;
-    const ids = stale.map((r) => r.subagent_id);
+    if (this.isSweeping) {
+      this.logService.warn('SubagentMonitor', 'sweep: previous run still in progress, skipping this tick');
+      return;
+    }
+    this.isSweeping = true;
+    try {
+      const now = new Date();
+      // expires_at < now 필터를 SQL에서 걸어 매 tick마다 풀-테이블 읽기가
+      // 앱 메모리로 번지지 않게 한다. expires_at은 live record에서 null이므로
+      // 인덱스 히트는 reap/ended row만 건드린다. usage + 귀속 컬럼들도 id와
+      // 함께 끌어와서 아래 롤업 접기(ticket 8d5c6f5d)가 별도 쿼리 없이
+      // 필요한 걸 갖도록 한다.
+      const stale = await this.subagents.find({
+        where: { expires_at: LessThan(now) },
+        select: [
+          'subagent_id', 'workspace_id', 'agent_id', 'started_at',
+          'input_tokens', 'output_tokens', 'cache_read_input_tokens',
+          'cache_creation_input_tokens', 'total_cost_usd',
+        ],
+      });
+      if (stale.length === 0) return;
+      const ids = stale.map((r) => r.subagent_id);
 
-    // 삭제 예정인 usage를 일별 롤업에 접어 넣은 뒤, lines를 지우고, 그 다음
-    // subagent row를 지운다 — 이 세 write를 전부 **하나의 트랜잭션**으로
-    // 묶는다(ticket 8d5c6f5d). tick 전체가 커밋되거나(롤업 증분 + lines
-    // 삭제 + subagents 삭제) 아무것도 안 되거나 둘 중 하나라서, 어떤 row도
-    // "live도 아니고 rolled up도 아닌" 상태로 관측될 수 없고 중간에 크래시가
-    // 나도 재시도 시 이중 카운트가 안 된다(다음 tick이 여전히 live인 같은
-    // row들을 다시 읽을 뿐이다). lines를 subagents보다 먼저 지우는 순서는
-    // 그대로 유지 — 기존과 같은 FK 안전성 이유(fresh-sync 스키마에서 CASCADE가
-    // 지연될 수 있음)이고, 이제 두 개의 단순 statement가 아니라 트랜잭션
-    // 안에서 실행된다는 점만 다르다.
-    await this.dataSource.transaction(async (manager) => {
-      await this._rollupBeforeDelete(manager, stale);
-      await manager.delete(SubagentLogLine, { subagent_id: In(ids) });
-      await manager.delete(Subagent, { subagent_id: In(ids) });
-    });
+      // 삭제 예정인 usage를 일별 롤업에 접어 넣은 뒤, lines를 지우고, 그 다음
+      // subagent row를 지운다 — 이 세 write를 전부 **하나의 트랜잭션**으로
+      // 묶는다(ticket 8d5c6f5d). tick 전체가 커밋되거나(롤업 증분 + lines
+      // 삭제 + subagents 삭제) 아무것도 안 되거나 둘 중 하나라서, 어떤 row도
+      // "live도 아니고 rolled up도 아닌" 상태로 관측될 수 없고 중간에 크래시가
+      // 나도 재시도 시 이중 카운트가 안 된다(다음 tick이 여전히 live인 같은
+      // row들을 다시 읽을 뿐이다). lines를 subagents보다 먼저 지우는 순서는
+      // 그대로 유지 — 기존과 같은 FK 안전성 이유(fresh-sync 스키마에서 CASCADE가
+      // 지연될 수 있음)이고, 이제 두 개의 단순 statement가 아니라 트랜잭션
+      // 안에서 실행된다는 점만 다르다.
+      await this.dataSource.transaction(async (manager) => {
+        await this._rollupBeforeDelete(manager, stale);
+        await manager.delete(SubagentLogLine, { subagent_id: In(ids) });
+        await manager.delete(Subagent, { subagent_id: In(ids) });
+      });
 
-    this.logService.info('SubagentMonitor', `sweep: deleted ${ids.length} expired subagent record(s)`);
+      this.logService.info('SubagentMonitor', `sweep: deleted ${ids.length} expired subagent record(s)`);
+    } finally {
+      this.isSweeping = false;
+    }
   }
 
   /**
