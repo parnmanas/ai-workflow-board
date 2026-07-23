@@ -21,6 +21,7 @@ import { EffortPresetsConfigSchema, validateEffortPresetsInput, serializeEffortP
 import { EnvironmentConfigSchema, validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../../../common/environment-config';
 import { MergeGateConfigSchema, serializeMergeGateConfig } from '../../../common/merge-gate-config';
 import { RespawnStormConfigSchema, serializeRespawnStormConfig } from '../../../common/respawn-storm-config';
+import { HardBudgetConfigSchema, serializeHardBudgetConfig } from '../../../common/hard-budget-config';
 import { DefaultRoleAssignmentsSchema, validateDefaultRoleAssignmentsInput, serializeDefaultRoleAssignments } from '../../../common/default-role-assignments-config';
 import { WORKTREE_MODES } from '../../../common/worktree-config';
 import { LivenessPolicySchema, serializeLivenessPolicy } from '../../qa/qa-liveness-policy';
@@ -261,6 +262,8 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
         .describe('Per-board merge/integration gate: { enabled?: bool, require_fresh_base?: bool, require_full_merge?: bool }. When enabled the server mechanically checks git invariants on the Merging boundary — Review→Merging is blocked when the feature branch is BEHIND base (stale-base; require_fresh_base), Merging→Done is blocked when the feature branch is not fully merged into base (partial-merge; require_full_merge). Each check is ON unless explicitly set false. The check degrades to a pass when the repo/branch can\'t be resolved (never a false block). Pass null (or enabled:false) to disable — board reverts to prompt-driven merge with no server checks.'),
       respawn_storm_config: RespawnStormConfigSchema.nullable().optional()
         .describe('Per-board respawn-storm circuit breaker (ticket ab06eac2): { enabled?: bool, window_minutes?: int, min_deaths?: int, quick_death_seconds?: int, auto_pend?: bool, notify?: bool, detect_twins?: bool, auto_stop_late_twin?: bool }. The server counts abnormal QUICK subagent deaths per (ticket,role) off the durable subagents table; past min_deaths inside window_minutes with ZERO forward progress (no fresh comment / column move) it auto-pends the ticket + alerts + writes a respawn_storm_halted activity. Cause-agnostic last line of defence against death-loops / twin-echo. Conservative defaults are ON (30m window, 5 quick deaths, 120s quick-death) so an untouched board is protected. Pass null (or {}) to clear the override back to the env baseline; enabled:false opts the board out.'),
+      hard_budget_config: HardBudgetConfigSchema.nullable().optional()
+        .describe('Per-board hard-budget ceiling (ticket a940d75b; token ceiling added by ef53fdf4): { enabled?: bool, max_auto_responses?: int, window_minutes?: int, max_dispatches_per_window?: int, max_tokens_per_window?: int, auto_pend?: bool, notify?: bool }. Three content-agnostic ceilings on top of the pattern-based ping-pong guard: max_auto_responses caps the lifetime count of agent-authored non-system comments on a ticket; max_dispatches_per_window and max_tokens_per_window (summed input+output tokens off the subagents table\'s usage columns — CLIs that don\'t report usage are naturally excluded, not blocked) share the SAME rolling window_minutes window. All three counters anchor to the ticket\'s last human-driven unpend, so clearing a breach never immediately re-trips. On breach: auto-pend (if auto_pend) + a chat alert (if notify). Conservative defaults are ON (100 responses, 60m window, 30 dispatches, 2,000,000 tokens) so an untouched board is protected. Pass null (or {}) to clear the override back to the env baseline; enabled:false opts the board out.'),
       default_role_assignments: DefaultRoleAssignmentsSchema.nullable().optional()
         .describe('Per-board DEFAULT role holders (ticket d94a1b87): { "<role slug>": [ { "agent_id": "…" } | { "user_id": "…" }, … ], … } e.g. { "assignee": [{ "agent_id": "a1" }], "reviewer": [{ "agent_id": "a2" }] }. At ticket-creation time — across create_ticket (MCP/REST) and QA/Security/Feature auto-tickets — every role the caller did NOT explicitly staff is filled from this map so a fresh ticket lands on the loop without a human wiring assignee/reviewer/reporter each time (the single most-repeated manual step in the board logs). Priority: explicit holder > board default > unassigned; a caller passes skip_default_assignments=true on create to opt out (true zero-holder, e.g. QA orphan probes). Each slug must be a real workspace role and each id a real agent/user (400 otherwise). A holder sets at most one of agent_id / user_id. Applied to NEW tickets only — never retroactively. Pass null or {} to clear.'),
       worktree_mode: z.enum(WORKTREE_MODES).optional()
@@ -268,7 +271,7 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
       use_pr: z.boolean().optional()
         .describe('Per-board PR usage (worktree 규약 chain, ticket 4ba844ea): false (default) does a direct fast-forward merge on the Merging boundary; true opts into the PR create/merge path. Omit to leave unchanged.'),
     },
-    async ({ board_id, name, description, routing_config, column_prompts, auto_archive_days, harness_config, effort_presets, language, environment_config, paused, liveness_policy, qa_phases, merge_gate_config, respawn_storm_config, default_role_assignments, worktree_mode, use_pr }) => {
+    async ({ board_id, name, description, routing_config, column_prompts, auto_archive_days, harness_config, effort_presets, language, environment_config, paused, liveness_policy, qa_phases, merge_gate_config, respawn_storm_config, hard_budget_config, default_role_assignments, worktree_mode, use_pr }) => {
       const boardRepo = dataSource.getRepository(Board);
       const board = await boardRepo.findOne({ where: { id: board_id } });
       if (!board) return err('Board not found');
@@ -369,6 +372,12 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
       // (or an empty object) clears the override back to the env baseline.
       if (respawn_storm_config !== undefined) {
         board.respawn_storm_config = serializeRespawnStormConfig(respawn_storm_config);
+      }
+      // Hard-budget ceiling (ticket a940d75b). Args already passed the strict
+      // HardBudgetConfigSchema, so storage is a straight serialize; null (or an
+      // empty object) clears the override back to the env baseline.
+      if (hard_budget_config !== undefined) {
+        board.hard_budget_config = serializeHardBudgetConfig(hard_budget_config);
       }
       // Board default role holders (ticket d94a1b87). null / {} clears the
       // config. The JSON shape is validated by DefaultRoleAssignmentsSchema

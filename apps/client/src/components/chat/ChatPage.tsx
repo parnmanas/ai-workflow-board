@@ -6,15 +6,16 @@ import {
   useMemo,
 } from 'react';
 import { Group, Panel, Separator } from 'react-resizable-panels';
-import { useSearchParams } from 'react-router-dom';
-import { api, getActiveWorkspaceId } from '../../api';
+import { useParams, useSearchParams } from 'react-router-dom';
+import { api } from '../../api';
 import { useAuth } from '../../contexts/AuthContext';
 import { useBoardStreamEvent } from '../../contexts/BoardStreamContext';
 import { useToast } from '../../contexts/ToastContext';
 import { useNotifications } from '../../contexts/NotificationContext';
 import { useMediaQuery } from '../../hooks/useMediaQuery';
 import { tokens } from '../../tokens';
-import type { ChatRoomListItem, ChatRoomDetail, ChatRoomMessageItem } from '../../types';
+import type { ChatRoomListItem, ChatRoomDetail, ChatRoomMessageItem, DashboardAgent } from '../../types';
+import { useOpenTicketArtifact } from '../../contexts/ticketArtifactOpener';
 import { type MentionParticipant } from './utils/markdown';
 import {
   projectParticipants,
@@ -26,6 +27,7 @@ import {
 import NewChatModal from './ParticipantPicker';
 import ChatRoomListPanel from './RoomListPanel';
 import ChatRoomView from './RoomDetailPanel';
+import { getDmAgentPartnerId, normalizeAgentTasks } from './utils/agentTasks';
 
 /**
  * ChatPage — Phase 7 room-based chat surface.
@@ -87,6 +89,7 @@ function ProtocolUpgradeBanner() {
 }
 
 export default function ChatPage() {
+  const { wsId } = useParams<{ wsId: string }>();
   const { user } = useAuth();
   const { showToast, playNotifySound } = useToast();
   // Keep sidebar chat badge in lockstep: whenever we POST mark-read we
@@ -94,6 +97,7 @@ export default function ChatPage() {
   // waiting for the 60 s refresh. Room-scoped (per-room unread zeros).
   const { markRead: markBadgeRead } = useNotifications();
   const isMobile = useMediaQuery('(max-width: 767px)');
+  const openTicketArtifact = useOpenTicketArtifact();
 
   const [rooms, setRooms] = useState<ChatRoomListItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -117,6 +121,7 @@ export default function ChatPage() {
   // possible when showAllRooms is on). Used to skip mark-read calls that
   // would 403 server-side for non-members.
   const [isObserver, setIsObserver] = useState<boolean>(false);
+  const [dashboardAgents, setDashboardAgents] = useState<DashboardAgent[]>([]);
   const originalTitleRef = useRef(document.title);
   const activeRoomIdRef = useRef<string | null>(null);
   const isObserverRef = useRef<boolean>(false);
@@ -165,10 +170,21 @@ export default function ChatPage() {
     try { localStorage.setItem('chat:showAllRooms', String(v)); } catch { /* noop */ }
   }, []);
 
-  // Load rooms on mount + when scope toggles
+  // Workspace 전환 시 이전 workspace 의 활성 방을 들고 있지 않도록 초기화한다.
+  // activeRoomId 가 null 이 되면 아래 "Load messages on room change" effect 가
+  // messages/roomParticipants/isObserver 도 함께 정리한다 (티켓 28258c75).
+  useEffect(() => {
+    setActiveRoomId(null);
+  }, [wsId]);
+
+  // Load rooms on mount + when scope toggles + when workspace changes.
+  // Pass wsId explicitly (instead of relying on the ambient X-Workspace-Id
+  // header) — this effect fires the instant the URL's wsId changes, which can
+  // beat the sibling AppLayout effect that syncs the ambient header to the new
+  // workspace, so relying on it here could re-fetch under the old workspace.
   useEffect(() => {
     setLoading(true);
-    api.listChatRooms(showAllRooms ? 'workspace' : undefined)
+    api.listChatRooms(showAllRooms ? 'workspace' : undefined, wsId)
       .then((list) => {
         setRooms(list);
         setRoomsError(null);
@@ -186,7 +202,7 @@ export default function ChatPage() {
         setRoomsError('Could not load chats.');
       })
       .finally(() => setLoading(false));
-  }, [showAllRooms]);
+  }, [showAllRooms, wsId]);
 
   // Mention deep link: `?room=<id>&message=<id>` selects the room and queues
   // a scroll-and-highlight on the targeted message. We strip both params from
@@ -444,13 +460,13 @@ export default function ChatPage() {
       {
         currentUserId: user?.id,
         getActiveRoomId: () => activeRoomIdRef.current,
-        listChatRooms: () => api.listChatRooms(showAllRooms ? 'workspace' : undefined),
+        listChatRooms: () => api.listChatRooms(showAllRooms ? 'workspace' : undefined, wsId),
         setRooms,
         refreshActiveRoomParticipants,
       },
       data,
     );
-  }, [user?.id, showAllRooms, refreshActiveRoomParticipants]));
+  }, [user?.id, showAllRooms, refreshActiveRoomParticipants, wsId]));
 
   function selectRoom(roomId: string) {
     setActiveRoomId(roomId);
@@ -562,7 +578,7 @@ export default function ChatPage() {
     // 방 목록 + (열려 있으면) 활성 방 로스터를 함께 갱신 — SSE 경로와 동일 반응.
     reflectParticipantChange(
       {
-        listChatRooms: () => api.listChatRooms(showAllRooms ? 'workspace' : undefined),
+        listChatRooms: () => api.listChatRooms(showAllRooms ? 'workspace' : undefined, wsId),
         setRooms,
         getActiveRoomId: () => activeRoomIdRef.current,
         refreshActiveRoomParticipants,
@@ -575,7 +591,7 @@ export default function ChatPage() {
     setShowNewChat(false);
     if (!room || !room.id) {
       // Add-people mode — just refresh
-      api.listChatRooms().then(setRooms).catch(() => {});
+      api.listChatRooms(undefined, wsId).then(setRooms).catch(() => {});
       return;
     }
     // Immediately add the room to the list and select it (avoids race condition).
@@ -601,7 +617,7 @@ export default function ChatPage() {
     });
     selectRoom(room.id);
     // Refresh in background to get full data (unread_count, etc.)
-    api.listChatRooms().then(setRooms).catch(() => {});
+    api.listChatRooms(undefined, wsId).then(setRooms).catch(() => {});
   }
 
   const activeRoom = useMemo(
@@ -609,7 +625,32 @@ export default function ChatPage() {
     [rooms, activeRoomId],
   );
 
-  const workspaceId = getActiveWorkspaceId() || '';
+  // URL 의 wsId 를 직접 쓴다(ambient getActiveWorkspaceId() 대신) — workspace 전환
+  // 직후의 첫 렌더에서는 AppLayout 의 setActiveWorkspaceId() 이펙트가 아직 커밋 전이라
+  // ambient 값이 이전 workspace 를 가리켜, 이 값에 의존하는 agent dashboard(활성
+  // task 배지)와 RoomListPanel 의 채팅 검색(searchChatMessages)이 구 workspace
+  // 기준으로 동작하는 race 가 있었다 (티켓 28258c75).
+  const workspaceId = wsId || '';
+  useEffect(() => {
+    if (!workspaceId) return;
+    let cancelled = false;
+    api.getAgentDashboard(workspaceId).then((agents) => { if (!cancelled) setDashboardAgents(agents); }).catch(() => { if (!cancelled) setDashboardAgents([]); });
+    return () => { cancelled = true; };
+  }, [workspaceId]);
+
+  useBoardStreamEvent('agent_status', useCallback((event: any) => {
+    const payload = event?.payload ?? event;
+    const agentId = payload?.agent_id ?? event?.scope?.agent_id;
+    if (!agentId) return;
+    setDashboardAgents((agents) => agents.map((agent) => agent.id !== agentId ? agent : {
+      ...agent,
+      current_task: payload.current_task,
+      active_tasks: payload.active_tasks !== undefined ? payload.active_tasks : agent.active_tasks,
+    }));
+  }, []));
+
+  const dmAgentId = getDmAgentPartnerId({ roomType: activeRoom?.type, participants: roomParticipants, currentUserId: user?.id, isObserver });
+  const activeAgentTasks = normalizeAgentTasks(dashboardAgents.find((agent) => agent.id === dmAgentId));
   const showUpgradeBanner = chatProtocolVersion !== null && chatProtocolVersion < 2;
 
   // Mobile layout: single panel
@@ -653,6 +694,8 @@ export default function ChatPage() {
             participants={roomParticipants}
             typingAgents={typingAgents}
             currentUserId={user?.id}
+            activeTasks={activeAgentTasks}
+            onSelectTask={openTicketArtifact}
           />
         )}
         <NewChatModal
@@ -703,6 +746,8 @@ export default function ChatPage() {
             participants={roomParticipants}
             typingAgents={typingAgents}
             currentUserId={user?.id}
+            activeTasks={activeAgentTasks}
+            onSelectTask={openTicketArtifact}
           />
         </Panel>
       </Group>

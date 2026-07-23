@@ -7,6 +7,7 @@ import { Button, Input, Select, Modal, Card, Badge, ConfirmDialog } from '../com
 import { relativeTime } from '../../utils/time';
 import { QaPhaseRowsEditor, parseQaPhasesValue, qaPhasesError, formatDuration } from '../QaPhasesEditor';
 import { formatAgentDisplayName } from '../../utils/agentName';
+import { canOpenTicketOnBoard, ticketBoardPath } from '../../utils/ticketBoardLink';
 import {
   WorkspaceFolderOptions,
   initWorkspaceFolderState,
@@ -69,7 +70,7 @@ export default function QaManager({ workspaceId, boardId }: QaManagerProps) {
     try {
       const [list, agentList, scheduleList, deploymentList] = await Promise.all([
         api.listQaScenarios(effectiveWorkspaceId, boardId !== undefined ? (boardId || '') : undefined),
-        api.getAgents().catch(() => []),
+        api.getAgents(effectiveWorkspaceId).catch(() => []),
         api.listQaSchedules(effectiveWorkspaceId, boardId !== undefined ? (boardId || '') : undefined).catch(() => []),
         api.listDeployments(effectiveWorkspaceId).catch(() => []),
       ]);
@@ -857,6 +858,9 @@ function RunDetail({ run, phases, onPreview }: { run: QaRun; phases: QaPhasesCon
     (run.step_results ?? []).flatMap((sr) => sr.artifact_resource_ids ?? []),
   );
   const runLevelArtifactIds = (run.artifact_resource_ids ?? []).filter((id) => !stepArtifactIds.has(id));
+  const ticketRef = run.auto_ticket_id
+    ? { id: run.auto_ticket_id, board_id: run.board_id, workspace_id: run.workspace_id }
+    : null;
 
   return (
     <div>
@@ -887,16 +891,23 @@ function RunDetail({ run, phases, onPreview }: { run: QaRun; phases: QaPhasesCon
             </Badge>
           </span>
         )}
-        {run.auto_ticket_id && (
-          <a
-            href={run.board_id
-              ? `/ws/${run.workspace_id}/boards/${run.board_id}?ticket=${encodeURIComponent(run.auto_ticket_id)}`
-              : `/?ticket=${encodeURIComponent(run.auto_ticket_id)}`}
-            style={{ fontSize: 12, fontWeight: 600, color: tokens.colors.danger, textDecoration: 'none', border: `1px solid ${tokens.colors.danger}`, borderRadius: tokens.radii.sm, padding: '2px 8px' }}
-            title="이 실패 run 이 자동 생성한 수정 티켓으로 이동"
-          >
-            → 생성된 티켓 #{run.auto_ticket_id.slice(0, 8)}
-          </a>
+        {ticketRef && (
+          canOpenTicketOnBoard(ticketRef) ? (
+            <a
+              href={ticketBoardPath(ticketRef)}
+              style={{ fontSize: 12, fontWeight: 600, color: tokens.colors.danger, textDecoration: 'none', border: `1px solid ${tokens.colors.danger}`, borderRadius: tokens.radii.sm, padding: '2px 8px' }}
+              title="이 실패 run 이 자동 생성한 수정 티켓으로 이동"
+            >
+              → 생성된 티켓 #{ticketRef.id.slice(0, 8)}
+            </a>
+          ) : (
+            <span
+              style={{ fontSize: 12, fontWeight: 600, color: tokens.colors.textMuted, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.sm, padding: '2px 8px' }}
+              title="이 티켓이 속한 보드를 찾을 수 없어 이동할 수 없습니다"
+            >
+              생성된 티켓 #{ticketRef.id.slice(0, 8)} (보드 없음)
+            </span>
+          )
         )}
       </div>
       <PhaseTimeline run={run} phases={phases} />

@@ -22,6 +22,7 @@ function makeConfig() {
   return {
     url: 'http://127.0.0.1:0',
     apiKey: 'test-key',
+    silentExitVerifyDelayMs: 0, // skip the real grace delay (ticket 2fd06686) in tests
     delegation: {
       enabled: true,
       maxConcurrent: 10,
@@ -93,6 +94,24 @@ beforeEach(() => {
 afterEach(() => {
   globalThis.fetch = originalFetch;
 });
+
+/** Routes the GET ticket-context fetch (`fetchTicketContext` /
+ *  `hasAuditTrailSince`) to `ticketPayload` while still recording every call
+ *  (including the silent-exit-comment POST) into `recordedRequests`. */
+function mockTicketFetch(ticketPayload) {
+  globalThis.fetch = async (url, init) => {
+    const body = init?.body ? JSON.parse(init.body) : null;
+    const urlStr = String(url);
+    recordedRequests.push({ url: urlStr, method: init?.method || 'GET', body });
+    if (urlStr.includes('/api/agent/tickets/') && !urlStr.endsWith('/silent-exit-comment')) {
+      return new Response(JSON.stringify(ticketPayload), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response('{}', { status: 201, headers: { 'content-type': 'application/json' } });
+  };
+}
 
 test('silent-exit: exit code 0 + no comment tool fired → posts system comment', async () => {
   const mgr = new TicketSessionManager(makeConfig());
@@ -251,4 +270,109 @@ test('silent-exit: empty buffer still posts a placeholder note', async () => {
   const fallback = recordedRequests.find((r) => r.url.endsWith('/silent-exit-comment'));
   assert.ok(fallback, 'fallback still fires with empty tail');
   assert.match(fallback.body.content, /no buffered CLI output captured/);
+});
+
+// ── ticket 2fd06686: false-positive silent-exit fixes ────────────────────────
+// Two field reproductions: a session that posted a real comment and/or moved
+// the ticket was still flagged "exited without leaving a ticket comment"
+// 5-27s later. Root cause was two-fold: (1) `move_ticket` was never in the
+// audit-trail tool list at all, and (2) the exit-time local stdout scan is
+// the only signal consulted, with no re-check against the ticket's actual
+// comments. Both are fixed below.
+
+test('silent-exit: move_ticket alone (no add_comment) counts as audit trail — ticket 2fd06686', async () => {
+  const mgr = new TicketSessionManager(makeConfig());
+  const sess = makeFakeSession(12001);
+  // Reviewer approved the move with NO comment-creating tool call at all —
+  // this used to always misflag as silent (request #2 of ticket 2fd06686).
+  mgr._onStdoutParsed(sess, makeAssistantToolUseLine('mcp__awb__move_ticket', { target_column_name: 'Merging' }), '');
+
+  await mgr._onChildExit(sess, 0, null);
+
+  const fallback = recordedRequests.find((r) => r.url.endsWith('/silent-exit-comment'));
+  assert.equal(fallback, undefined, 'move_ticket alone is not a silent exit');
+});
+
+test('silent-exit: server re-verification finds a comment the local scan missed → suppressed (ticket 3c6422f1 repro)', async () => {
+  const mgr = new TicketSessionManager(makeConfig());
+  const sess = makeFakeSession(12002);
+  // Reproduces ticket 3c6422f1: the reviewer's approval comment landed on
+  // the server (created 5s into the session) but the local stdout scan
+  // never flipped `commentSent` — the exact race this ticket is about. The
+  // grace re-verification fetch must find the real comment and suppress the
+  // fallback even though the local signal alone would have fired it.
+  mockTicketFetch({
+    comments: [
+      {
+        id: 'c1',
+        content: 'LGTM — moving to Merging',
+        created_at: new Date(sess.startedAt + 5_000).toISOString(),
+        metadata: {},
+      },
+    ],
+  });
+
+  await mgr._onChildExit(sess, 0, null);
+
+  const fallback = recordedRequests.find((r) => r.url.endsWith('/silent-exit-comment'));
+  assert.equal(
+    fallback,
+    undefined,
+    'server-verified comment suppresses the fallback even when the local scan missed it',
+  );
+});
+
+test('silent-exit: server re-verification ALSO finds nothing → fallback still fires (genuine silent exit, no regression)', async () => {
+  const mgr = new TicketSessionManager(makeConfig());
+  const sess = makeFakeSession(12003);
+  mockTicketFetch({ comments: [] });
+
+  await mgr._onChildExit(sess, 0, null);
+
+  const fallback = recordedRequests.find((r) => r.url.endsWith('/silent-exit-comment'));
+  assert.ok(fallback, 'a genuinely silent exit must still be detected after the grace re-verification');
+});
+
+test('silent-exit: a comment from BEFORE this session started does not count (stale, ticket 2fd06686)', async () => {
+  const mgr = new TicketSessionManager(makeConfig());
+  const sess = makeFakeSession(12004);
+  // A comment from an EARLIER turn of a long-lived persistent session must
+  // not excuse a genuinely silent LATER exit.
+  mockTicketFetch({
+    comments: [
+      {
+        id: 'c-old',
+        content: 'earlier unrelated turn',
+        created_at: new Date(sess.startedAt - 60_000).toISOString(),
+        metadata: {},
+      },
+    ],
+  });
+
+  await mgr._onChildExit(sess, 0, null);
+
+  const fallback = recordedRequests.find((r) => r.url.endsWith('/silent-exit-comment'));
+  assert.ok(fallback, 'a stale comment predating this session must not suppress the fallback');
+});
+
+test('silent-exit: a prior silent-exit system comment does not itself count as audit trail', async () => {
+  const mgr = new TicketSessionManager(makeConfig());
+  const sess = makeFakeSession(12005);
+  // Guards against a self-referential loop: the manager's OWN earlier
+  // fallback row must not be read back as "evidence of subagent work".
+  mockTicketFetch({
+    comments: [
+      {
+        id: 'c-prior-fallback',
+        content: 'earlier fallback',
+        created_at: new Date(sess.startedAt + 1_000).toISOString(),
+        metadata: { reason: 'silent_exit' },
+      },
+    ],
+  });
+
+  await mgr._onChildExit(sess, 0, null);
+
+  const fallback = recordedRequests.find((r) => r.url.endsWith('/silent-exit-comment'));
+  assert.ok(fallback, 'a prior silent-exit fallback row must not suppress a new genuine silent-exit detection');
 });

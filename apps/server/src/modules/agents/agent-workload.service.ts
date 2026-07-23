@@ -78,6 +78,7 @@ import { ActivityLog } from '../../entities/ActivityLog';
 import { Ticket } from '../../entities/Ticket';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { priorityIndex } from './priority';
+import { sinceBoundaryParam } from '../../common/created-at-since-param';
 
 /**
  * Parse the `Ticket.labels` JSON string defensively. Returns `[]` on any
@@ -440,13 +441,20 @@ export class AgentWorkloadService {
         nonBlockedTickets.push(t);
         continue;
       }
-      // Count column moves between claim and release.
+      // Count column moves between claim and release. `claimAt` lower bound
+      // goes through sinceBoundaryParam() (ticket 7200396a, 리뷰 코멘트에서
+      // 지목된 3번째 사이트, 8fc94adf 후속) — sql.js에서 claimAt과 동일
+      // wall-clock 초에 있었던 이동이 사전식 비교로 배제되면 heartbeat-only
+      // BLOCKED로 오판해 실제로 진행 중인 티켓을 focus 후보에서 제외한다.
+      // `releaseAt` 상단 경계는 그대로 둔다 — 사전식 prefix 비교 특성상
+      // 이미 동일-초를 올바르게 포함한다(자세한 내용은
+      // created-at-since-param.ts 참조).
       const moveCount = await activityRepo
         .createQueryBuilder('a')
         .where('a.ticket_id = :tid', { tid: t.id })
         .andWhere("a.action = 'moved'")
         .andWhere("a.field_changed = 'column'")
-        .andWhere('a.created_at >= :claimAt', { claimAt: lastClaim.created_at })
+        .andWhere('a.created_at >= :claimAt', { claimAt: sinceBoundaryParam(this.dataSource, lastClaim.created_at) })
         .andWhere('a.created_at <= :releaseAt', { releaseAt: lastRelease.created_at })
         .getCount();
       if (moveCount > 0) {

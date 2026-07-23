@@ -10,10 +10,11 @@ import ArtifactPanel, { ArtifactToggleButton } from './ArtifactPanel';
 import TicketArtifactController from './TicketArtifactController';
 import { useMediaQuery } from '../hooks/useMediaQuery';
 import { useWorkspaces } from '../hooks/useBoard';
-import { api, setActiveWorkspaceId } from '../api';
+import { api, setActiveWorkspaceId, bootstrapActiveWorkspaceId } from '../api';
 import { BoardStreamProvider } from '../contexts/BoardStreamContext';
 import { NotificationProvider } from '../contexts/NotificationContext';
 import { TicketMetaProvider } from '../contexts/TicketMetaContext';
+import { useAuth } from '../contexts/AuthContext';
 import { tokens } from '../tokens';
 
 /**
@@ -44,6 +45,7 @@ export default function AppLayout() {
   const params = useParams<{ wsId?: string }>();
   const location = useLocation();
   const isAdminRoute = location.pathname.startsWith('/admin');
+  const { currentWorkspaceId: authWorkspaceId, setCurrentWorkspace: setAuthWorkspace } = useAuth();
 
   // Workspace state — AppLayout is the single writer to localStorage.currentWorkspaceId.
   // Workspace changes navigate to /ws/:wsId/boards via React Router instead of
@@ -56,10 +58,11 @@ export default function AppLayout() {
     refresh: refreshWorkspaces,
   } = useWorkspaces();
 
-  const [currentWorkspaceId, setCurrentWorkspaceId] = useState<string | null>(() => {
-    if (typeof window === 'undefined') return null;
-    return localStorage.getItem('currentWorkspaceId');
-  });
+  // Seeded from the same URL→sessionStorage→localStorage bootstrap api.ts uses
+  // for the X-Workspace-Id header, not localStorage alone — otherwise this tab's
+  // state could disagree with its own per-tab active workspace right from mount
+  // (ticket dc5c0813, see bootstrapActiveWorkspaceId's doc comment).
+  const [currentWorkspaceId, setCurrentWorkspaceId] = useState<string | null>(() => bootstrapActiveWorkspaceId());
 
   const [currentBoardId, setCurrentBoardId] = useState<string | null>(null);
   const [currentBoardName, setCurrentBoardName] = useState<string | undefined>(undefined);
@@ -98,6 +101,20 @@ export default function AppLayout() {
   useEffect(() => {
     setActiveWorkspaceId(currentWorkspaceId);
   }, [currentWorkspaceId]);
+
+  // AuthContext also exposes a currentWorkspaceId (read by ViewModeToggle's
+  // Chat/Advanced toggle, the legacy WorkspacedRedirect/WorkspaceDefaultRedirect
+  // routes, and NotificationContext's unread-badge fetch), but its only setter
+  // (setCurrentWorkspace) is called exclusively from the login workspace picker.
+  // That left it as the one drift source the sync above (comment block up top)
+  // never closed: switching workspaces from the top nav updated everything
+  // except this, so those consumers kept acting on the workspace active at
+  // login. Mirror our authoritative currentWorkspaceId into it too (티켓 28258c75).
+  useEffect(() => {
+    if (currentWorkspaceId && currentWorkspaceId !== authWorkspaceId) {
+      setAuthWorkspace(currentWorkspaceId);
+    }
+  }, [currentWorkspaceId, authWorkspaceId, setAuthWorkspace]);
 
   // Auto-select first workspace if none saved AND the URL doesn't already
   // dictate one. Without the URL check this effect would fight the
@@ -152,6 +169,10 @@ export default function AppLayout() {
   const handleSelectWorkspace = useCallback((wsId: string) => {
     setCurrentWorkspaceId(wsId);
     try { localStorage.setItem('currentWorkspaceId', wsId); } catch {}
+    // Admin 화면은 workspace 비종속(글로벌) 화면이므로 전환 시 그대로 유지하고
+    // 이동하지 않는다 — currentWorkspaceId 상태만 갱신해 이후 workspace-scoped
+    // 화면으로 이동할 때 새 workspace 를 사용하도록 한다.
+    if (isAdminRoute) return;
     // Preserve the current top-level menu (boards / chat / agents / users / ...)
     // when switching workspaces. Deeper segments (e.g. boards/:boardId,
     // agents/:agentId) are scoped to the old workspace and won't resolve in
@@ -159,7 +180,7 @@ export default function AppLayout() {
     const m = location.pathname.match(/^\/ws\/[^/]+\/([^/]+)/);
     const section = m?.[1] ?? 'boards';
     navigate(`/ws/${wsId}/${section}`);
-  }, [navigate, location.pathname]);
+  }, [navigate, location.pathname, isAdminRoute]);
 
   const handleCreateWorkspace = useCallback(async (name: string, description?: string, boardName?: string) => {
     const ws = await createWorkspace(name, description, boardName);
@@ -272,8 +293,9 @@ export default function AppLayout() {
             <div style={{ fontSize: '15px', fontWeight: 700, color: tokens.colors.textPrimary }}>AWB</div>
             <div style={{ flex: 1 }} />
             {/* 데스크톱 Chat-first 는 상시 톱스트립이 없으므로 여기서 워크스페이스 전환을
-                유지한다. 모바일은 폭 절약을 위해 기존대로 셀렉터를 톱바에 넣지 않는다. */}
-            {!isMobile && !isAdminRoute && (
+                유지한다. 모바일은 폭 절약을 위해 기존대로 셀렉터를 톱바에 넣지 않는다.
+                Admin 라우트에서도 항상 표시(티켓 28258c75). */}
+            {!isMobile && (
               <WorkspaceSelector
                 workspaces={workspaces}
                 currentWorkspaceId={currentWorkspaceId}
@@ -292,9 +314,10 @@ export default function AppLayout() {
         )}
 
         {/* Advanced 데스크톱 상시 톱스트립 — WorkspaceSelector(writer)를 소유. admin
-            라우트에선 숨김(ws 컨텍스트 없음). Chat-first·모바일에선 위 드로어 톱바가
-            대신하므로 여기선 렌더하지 않는다(!drawerMode). */}
-        {!drawerMode && !isAdminRoute && (
+            라우트에서도 항상 표시한다(티켓 28258c75 — Admin 은 ws 컨텍스트가 없을 뿐,
+            워크스페이스 전환 자체는 여전히 필요). Chat-first·모바일에선 위 드로어
+            톱바가 대신하므로 여기선 렌더하지 않는다(!drawerMode). */}
+        {!drawerMode && (
           <div
             style={{
               display: 'flex',

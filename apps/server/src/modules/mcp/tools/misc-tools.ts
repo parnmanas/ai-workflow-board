@@ -15,10 +15,12 @@ import { Ticket } from '../../../entities/Ticket';
 import { ok, err } from '../shared/helpers';
 import { findColumnByName, maxTicketPosition, maxChildPosition, shiftTicketPositions } from '../shared/ticket-helpers';
 import { evaluateConsensusMoveGate } from '../../../services/consensus.service';
+import { enforceAutoResponseBudget } from '../../../common/hard-budget-guard';
 import type { ToolContext } from './context';
 
 export function registerMiscTools(server: McpServer, ctx: ToolContext): void {
-  const { dataSource, ticketRoleAssignmentService, logger } = ctx;
+  const { dataSource, ticketRoleAssignmentService, activityService, roomMessagingService, logger } = ctx;
+  const hardBudgetDeps = { dataSource, activityService, roomMessagingService, logger };
 
   // ─── Channels ──────────────────────────────────────────
 
@@ -115,7 +117,8 @@ Supported actions:
   - move-ticket: { action, boardId?, ticketId, toColumn, position?, force? }
   - add-child: { action, ticketId, title } (also accepts legacy "add-subtask")
   - update-child: { action, ticketId, title?, status? } (also accepts legacy "update-subtask" with subtaskId)
-  - add-comment: { action, ticketId, author, content }
+  - add-comment: { action, ticketId, author, content, authorType?, authorId? } (authorType defaults to 'agent' —
+    hard-budget ceiling applies same as add_comment/ask_question/etc; pass authorType:'user' for a human-authored note)
 
 CONSENSUS GATE — a move-ticket op that takes a MULTI-HOLDER ticket (its current column's routing
 role has >=2 holders) OUT of its column (toColumn != current column) is rejected with a
@@ -221,8 +224,28 @@ human/operator escape hatch, not an agent's way around consensus.`,
                 break;
               }
               case 'add-comment': {
+                const ticketId = String(op.ticketId);
+                const t = await tRepo.findOne({ where: { id: ticketId } });
+                if (!t) { results.push({ error: 'Ticket not found' }); continue; }
+
+                // Hard-budget guard (티켓 a940d75b, 잔여 우회 경로 50b92d71). 이 MCP
+                // batch 경로는 REST agent-api.controller.ts 의 batch add-comment op 과
+                // 동일하게 author_type 미지정 시 Comment 컬럼 기본값('user')으로 저장되어
+                // agent 댓글이 사람 댓글로 오분류 → (a) 자동응답 캡을 완전히 우회했다.
+                // ctx.dataSource(트랜잭션의 manager 아님)로 조회 — 하드버짓 초과 여부는
+                // 이 배치 호출의 commit/rollback 과 무관하게 티켓의 누적 이력에 대한
+                // 사실이므로, REST 배치 add-comment 와 동일하게 외부 dataSource 기준.
+                const authorType = String(op.authorType || 'agent');
+                if (authorType === 'agent') {
+                  const budget = await enforceAutoResponseBudget(hardBudgetDeps, t);
+                  if (budget.blocked) { results.push({ suppressed: true, reason: budget.reason }); continue; }
+                }
                 const r = await cRepo.save(cRepo.create({
-                  ticket_id: String(op.ticketId), author: String(op.author), content: String(op.content),
+                  ticket_id: ticketId,
+                  author_type: authorType,
+                  author_id: String(op.authorId || ''),
+                  author: String(op.author || ''),
+                  content: String(op.content),
                 }));
                 results.push({ success: true, commentId: r.id });
                 break;

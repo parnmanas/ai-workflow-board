@@ -550,6 +550,11 @@ export const EVENT_TYPES: EventDefinition[] = [
         role_prompt: event.role_prompt || '',
         mention_source: event.mention_source === 'role' ? 'role' : 'direct',
         role_shortcut: event.role_shortcut,
+        // Ticket-comment analog of chat_room_message's agent_chain_depth —
+        // see CommentMentionPayload doc comment.
+        agent_chain_depth: typeof event.agent_chain_depth === 'number'
+          ? event.agent_chain_depth
+          : undefined,
       };
       return {
         payload,
@@ -580,6 +585,10 @@ export const EVENT_TYPES: EventDefinition[] = [
         role_prompt: p.role_prompt,
         mention_source: p.mention_source,
         role_shortcut: p.role_shortcut || '',
+        // agent-manager's handleCommentMention reads this to cap agent
+        // mention-chain ping-pong, mirroring handleChatRoomMessage's
+        // agent_chain_depth check.
+        agent_chain_depth: p.agent_chain_depth,
         timestamp: env.timestamp,
       };
     },

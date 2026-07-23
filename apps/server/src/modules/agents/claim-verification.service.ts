@@ -56,6 +56,7 @@ import { Workspace } from '../../entities/Workspace';
 import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { Agent } from '../../entities/Agent';
 import { User } from '../../entities/User';
+import { sinceBoundaryParam } from '../../common/created-at-since-param';
 import { ActivityService } from '../../services/activity.service';
 import { LogService } from '../../services/log.service';
 import { listRepoBranches, resolveGitCredential } from '../mcp/shared/git-branches';
@@ -334,14 +335,17 @@ export class ClaimVerificationService implements OnModuleInit, OnModuleDestroy {
     // closed out the cycle — explicit AC #2 (or someone else moved it,
     // either way we no longer have a stale claim).
     //
-    // Floor to seconds for the same precision-mismatch reason
-    // StuckTicketDetector documents — sqlite stores activity_log
-    // timestamps at second precision, comments at ms precision.
-    const floorSec = (d: Date) => new Date(Math.floor(d.getTime() / 1000) * 1000);
+    // sinceBoundaryParam()으로 sql.js 동일-초 사전식 비교 간극을 없앤다
+    // (ticket 7200396a, 8fc94adf 후속) — 기존 인라인 floorSec은 commentAt이
+    // 이미 밀리초=0인 DB 재조회 Date라 no-op이었고, 실제 문제는 TypeORM이
+    // 파라미터 바인딩 시 값과 무관하게 항상 밀리초를 붙이는 포맷팅 쪽이었다.
+    // 이 경계를 놓치면 "컬럼 이동이 없었다"고 오판해 거짓 auto-pend로
+    // 이어지므로(hard-budget-guard.ts의 epoch-anchored 배제와는 반대로
+    // 과소카운트가 안전하지 않다) 자세한 내용은 created-at-since-param.ts 참조.
     const moveCount = await (repos.activityRepo as any)
       .createQueryBuilder('a')
       .where('a.ticket_id = :tid', { tid: ticket.id })
-      .andWhere('a.created_at >= :from', { from: floorSec(commentAt) })
+      .andWhere('a.created_at >= :from', { from: sinceBoundaryParam(this.dataSource, commentAt) })
       .andWhere("a.action = 'moved'")
       .andWhere("a.field_changed = 'column'")
       .getCount();

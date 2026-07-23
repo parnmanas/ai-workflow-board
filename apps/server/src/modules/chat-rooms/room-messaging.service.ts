@@ -17,7 +17,8 @@ import { RoomMembershipService } from './room-membership.service';
 import { resolveAgentDisplayName } from '../../utils/agent-name';
 import { projectChatAttachment } from '../mcp/shared/ticket-helpers';
 import { RunProvision } from '../../common/workspace-folder-options';
-import { ChatRoomMessageMetadata, ChatMessageTicketRef, ChatMessageArtifactRef } from '../../common/types/stream-events';
+import { ChatRoomMessageMetadata, ChatMessageTicketRef, ChatMessageArtifactRef, ChatMessageAgentRef, ChatMessageBoardRef } from '../../common/types/stream-events';
+import { computeChainDepth } from '../../common/agent-chain-depth';
 
 const CONTENT_MAX = 10000;
 
@@ -57,6 +58,11 @@ function makeError(status: number, message: string): Error & { status: number } 
 // 한쪽만 있어도(예: 빌드 결과물만) metadata 는 유지되고, 둘 다 없을 때만 null.
 const MAX_TICKET_REFS = 20;
 const MAX_ARTIFACT_REFS = 20;
+// F-3 (ticket 3ca88253): agent/board refs share the same string bound. Capped lower
+// than ticket/artifact refs — a turn realistically surfaces at most a handful of
+// agent-status or board-summary cards, never a batch-mutation-sized burst.
+const MAX_AGENT_REFS = 10;
+const MAX_BOARD_REFS = 10;
 const TICKET_REF_STR_MAX = 300;
 
 function sanitizeTicketRefs(refsRaw: unknown): ChatMessageTicketRef[] {
@@ -101,14 +107,53 @@ function sanitizeArtifactRefs(refsRaw: unknown): ChatMessageArtifactRef[] {
   return refs;
 }
 
+// F-3 (ticket 3ca88253): agent ref 정제. `agent_id` 는 필수(없으면 카드가 무의미),
+// `name` 은 있으면 클릭 전 표시용 라벨로 보존(상세는 클릭 시 다시 fetch).
+function sanitizeAgentRefs(refsRaw: unknown): ChatMessageAgentRef[] {
+  if (!Array.isArray(refsRaw)) return [];
+  const refs: ChatMessageAgentRef[] = [];
+  for (const r of refsRaw) {
+    if (refs.length >= MAX_AGENT_REFS) break;
+    if (!r || typeof r !== 'object') continue;
+    const rec = r as Record<string, unknown>;
+    const agentId = typeof rec.agent_id === 'string' ? rec.agent_id.slice(0, TICKET_REF_STR_MAX) : '';
+    if (!agentId) continue;
+    const ref: ChatMessageAgentRef = { agent_id: agentId };
+    if (typeof rec.name === 'string' && rec.name) ref.name = rec.name.slice(0, TICKET_REF_STR_MAX);
+    refs.push(ref);
+  }
+  return refs;
+}
+
+// F-3 (ticket 3ca88253): board ref 정제. `board_id` 는 필수, `title` 은 있으면 보존.
+function sanitizeBoardRefs(refsRaw: unknown): ChatMessageBoardRef[] {
+  if (!Array.isArray(refsRaw)) return [];
+  const refs: ChatMessageBoardRef[] = [];
+  for (const r of refsRaw) {
+    if (refs.length >= MAX_BOARD_REFS) break;
+    if (!r || typeof r !== 'object') continue;
+    const rec = r as Record<string, unknown>;
+    const boardId = typeof rec.board_id === 'string' ? rec.board_id.slice(0, TICKET_REF_STR_MAX) : '';
+    if (!boardId) continue;
+    const ref: ChatMessageBoardRef = { board_id: boardId };
+    if (typeof rec.title === 'string' && rec.title) ref.title = rec.title.slice(0, TICKET_REF_STR_MAX);
+    refs.push(ref);
+  }
+  return refs;
+}
+
 function sanitizeChatMessageMetadata(raw: unknown): ChatRoomMessageMetadata | null {
   if (!raw || typeof raw !== 'object') return null;
   const ticketRefs = sanitizeTicketRefs((raw as { ticket_refs?: unknown }).ticket_refs);
   const artifactRefs = sanitizeArtifactRefs((raw as { artifact_refs?: unknown }).artifact_refs);
-  if (ticketRefs.length === 0 && artifactRefs.length === 0) return null;
+  const agentRefs = sanitizeAgentRefs((raw as { agent_refs?: unknown }).agent_refs);
+  const boardRefs = sanitizeBoardRefs((raw as { board_refs?: unknown }).board_refs);
+  if (ticketRefs.length === 0 && artifactRefs.length === 0 && agentRefs.length === 0 && boardRefs.length === 0) return null;
   const meta: ChatRoomMessageMetadata = {};
   if (ticketRefs.length > 0) meta.ticket_refs = ticketRefs;
   if (artifactRefs.length > 0) meta.artifact_refs = artifactRefs;
+  if (agentRefs.length > 0) meta.agent_refs = agentRefs;
+  if (boardRefs.length > 0) meta.board_refs = boardRefs;
   return meta;
 }
 
@@ -820,17 +865,12 @@ export class RoomMessagingService {
       .limit(AGENT_CHAIN_LOOKBACK)
       .getMany();
 
-    let depth = 0;
-    let prevSenderId: string | null = null;
-    for (const m of recent) {
-      if (m.sender_type !== 'agent') break;
-      // Same agent in a row: still part of the same chain step.
-      if (m.sender_id !== prevSenderId) {
-        depth++;
-        prevSenderId = m.sender_id;
-      }
-    }
-    return depth;
+    // Counting rule lives in common/agent-chain-depth so the ticket-comment
+    // mention path (tickets.controller.ts / comment-tools.ts) agrees with
+    // this room-chat path on one algorithm.
+    return computeChainDepth(
+      recent.map((m) => ({ isAgent: m.sender_type === 'agent', authorKey: m.sender_id })),
+    );
   }
 
   private async _loadAttachmentsForMessages(messageIds: string[]): Promise<Map<string, any[]>> {

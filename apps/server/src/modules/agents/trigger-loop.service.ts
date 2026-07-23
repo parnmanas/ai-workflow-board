@@ -30,6 +30,9 @@ import { appendBoardLessons, MAX_INJECTED_LESSONS } from '../../common/board-les
 import { pickBaseRepoResourceId, shouldBlockDispatchForMissingRepo } from '../../common/base-repo-binding';
 import { BoardLesson } from '../../entities/BoardLesson';
 import { isConsensusVoteComment } from '../../common/consensus-meta';
+import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
+import { ResolvedHardBudget, hardBudgetDefaultsFromEnv, resolveHardBudgetConfig } from '../../common/hard-budget-config';
+import { lastHumanUnpendAt, countWindowDispatches, countWindowTokens, pendTicketForHardBudget, postHardBudgetAlert } from '../../common/hard-budget-guard';
 
 // Sentinel actor written onto auto-advance `moved` activities. Deliberately
 // non-'system' so the trigger loop re-enters and processes the destination
@@ -184,7 +187,18 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
     // 보류" feedback. Same module; it never injects TriggerLoopService, so
     // cycle-free.
     private readonly autostart: AgentAutostartService,
-  ) {}
+    // Hard-budget breach alerts (ticket a940d75b). Same DI shape as
+    // RespawnStormDetectorService's `messaging` — ChatRoomsModule is already
+    // imported by AgentsModule, no cycle.
+    private readonly roomMessaging: RoomMessagingService,
+  ) {
+    this._hardBudgetBaseline = hardBudgetDefaultsFromEnv();
+  }
+
+  // Env-folded hard-budget baseline (ticket a940d75b), resolved once at
+  // construction — mirrors RespawnStormDetectorService's `baseline` field.
+  // A per-board `Board.hard_budget_config` overrides this per-key at gate time.
+  private readonly _hardBudgetBaseline: ResolvedHardBudget;
 
   onModuleInit() {
     this._activityListener = (log: ActivityLog) => {
@@ -1169,13 +1183,16 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
    * paths that are NOT activity-driven and shouldn't be made to fake a
    * `system`-actor activity row (which `_handleActivity` would early-return
    * on anyway). Currently used by the unpend path (ticket a57517be) — the
-   * MCP `unpend_ticket` tool and the REST PATCH that clears
-   * `pending_user_action` need an explicit wake, because the
-   * `field_changed='pending_user_action'` activity row that the unpend
-   * writes does not by itself route to the column's role holders (it's a
-   * field-update, but `_handleActivity` is keyed off comments / moves /
-   * any update — and on a previously-pending ticket the focus gate would
-   * have dropped activity-driven triggers up until this moment).
+   * REST PATCH that clears `pending_user_action` needs an explicit wake,
+   * because the `field_changed='pending_user_action'` activity row that the
+   * unpend writes does not by itself route to the column's role holders
+   * (it's a field-update, but `_handleActivity` is keyed off comments /
+   * moves / any update — and on a previously-pending ticket the focus gate
+   * would have dropped activity-driven triggers up until this moment). The
+   * MCP `unpend_ticket` tool used to call this too, but ticket b2e88390 made
+   * it reject unconditionally (human-only clear — MCP has no authenticated
+   * user session to prove a human made the call), so REST PATCH is now the
+   * only caller.
    *
    * Skip cases (silent, one info log each):
    *   - ticket missing / has no column_id
@@ -1710,6 +1727,228 @@ candidate's branch or move the ticket.
     return 1;
   }
 
+  /**
+   * Pending-user-action 게이트 판정 (ticket be934f61). `_emitTrigger` 안에서
+   * 완전히 동일한 재조회+드롭+감사로그 로직을 두 지점에서 재사용하기 위해
+   * 추출했다: (1) 기존 위치(아카이브 게이트 직후) — 이미 pending이면 이후의
+   * harness/effort/environment/board-lessons 해석을 아예 건너뛰는 얼리 드롭,
+   * (2) 실제 SSE emit 바로 직전 — (1)과 emit 사이의 십여 개 await가 열어 둔
+   * TOCTOU 창을 닫기 위한 마지막 순간 재확인. 신선한 조회 결과 ticket이
+   * pending이라 트리거를 드롭해야 하면 true를 반환한다.
+   */
+  private async _checkPendingUserGate(
+    ticket: Ticket,
+    agentId: string,
+    role: string,
+    triggerSource: string,
+    bypassTicketPending: boolean | undefined,
+  ): Promise<boolean> {
+    if (bypassTicketPending) return false;
+    const freshForGate = await this.dataSource
+      .getRepository(Ticket)
+      .findOne({ where: { id: ticket.id } });
+    // Two distinct pending flavors funnel through this one gate (ticket
+    // 48d14fff): `pending_user_action` (waiting on a human) and
+    // `pending_on_tickets` (blocked behind prerequisite tickets). Either
+    // drops the trigger. The audit action is suffixed so a grep can tell the
+    // two apart — `_pending_user` vs `_pending_tickets`.
+    if (!freshForGate?.pending_user_action && !freshForGate?.pending_on_tickets) return false;
+
+    const onTickets = !freshForGate.pending_user_action && !!freshForGate.pending_on_tickets;
+    const dropAction = onTickets
+      ? 'agent_trigger_dropped_pending_tickets'
+      : 'agent_trigger_dropped_pending_user';
+    this.logService.info('MCP', 'agent_trigger dropped (ticket pending)', {
+      ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource,
+      pending_user_action: !!freshForGate.pending_user_action,
+      pending_on_tickets: !!freshForGate.pending_on_tickets,
+      pending_set_at: freshForGate.pending_set_at
+        ? new Date(freshForGate.pending_set_at).toISOString()
+        : null,
+      pending_set_by: freshForGate.pending_set_by || '',
+    });
+    try {
+      const activityLogRepo = this.dataSource.getRepository(ActivityLog);
+      await activityLogRepo.save(activityLogRepo.create({
+        entity_type: 'ticket',
+        entity_id: ticket.id,
+        ticket_id: ticket.id,
+        actor_id: 'system',
+        actor_name: 'TriggerLoopService',
+        action: dropAction,
+        new_value: `agent=${agentId} reason=${(freshForGate.pending_reason || '').slice(0, 200)}`,
+        role,
+        trigger_source: triggerSource,
+      }));
+    } catch (e) {
+      this.logService.warn('MCP', 'pending-drop audit write failed (drop still applied)', {
+        err: String(e), ticket_id: ticket.id,
+      });
+    }
+    return true;
+  }
+
+  /**
+   * Hard-budget window gate (ticket a940d75b; token ceiling added by ticket
+   * ef53fdf4). Content-agnostic companion to the pending-user gate above:
+   * even a ticket that is dispatching and completing NORMALLY (so nothing
+   * else here would ever drop it) can still be a runaway loop by sheer
+   * dispatch frequency OR by token burn. Two independent ceilings share this
+   * one gate and the SAME window/epoch (see hard-budget-config.ts's module
+   * docstring for why one shared window rather than two):
+   *   - dispatch count, off the EXISTING `trigger_emitted` ActivityLog row
+   *     every emit below already writes (ticket 4a6cdfd7 acceptance #8) — no
+   *     new observability write, per Planner cross-verification on ticket
+   *     a940d75b.
+   *   - summed input+output tokens, off the `subagents` table's usage
+   *     columns (ticket 6dd3f968) — see `countWindowTokens` for why cache
+   *     tokens are excluded and why an uninstrumented CLI's dispatches fall
+   *     out of the sum naturally instead of being blocked outright.
+   *
+   * `manual` and `comment_summary` are exempt (a human explicitly asked, or
+   * the dispatch doesn't advance the workflow) — same exclusion
+   * `countWindowDispatches` applies, so the gate and its count source always
+   * agree on what "counts".
+   *
+   * Epoch rule mirrors `enforceAutoResponseBudget` (common/hard-budget-guard.ts):
+   * only dispatches after the ticket's last HUMAN unpend count, so a cleared
+   * breach isn't immediately re-tripped by the window still looking "full"
+   * from before the pend.
+   */
+  private async _checkHardBudgetGate(
+    ticket: Ticket,
+    agentId: string,
+    role: string,
+    triggerSource: string,
+    boardId: string,
+  ): Promise<boolean> {
+    if (triggerSource === 'manual' || triggerSource === 'comment_summary') return false;
+
+    // Availability-first (same posture as common/hard-budget-guard.ts's
+    // enforceAutoResponseBudget): a failure evaluating either ceiling —
+    // config resolution, epoch lookup, either count query — must never block
+    // a legitimate dispatch. Only the DETECTION step is guarded here. Once a
+    // real breach is confirmed below, the audit-write and notify sub-steps
+    // each have their own try/catch, so either one failing never un-does the
+    // drop. The auto-pend UPDATE is NOT individually guarded, though — if it
+    // throws, the exception reaches this same catch and fails the WHOLE gate
+    // open for that call (dispatch allowed, breach left un-pended); the next
+    // dispatch attempt re-evaluates from scratch (review note, ticket ef53fdf4).
+    try {
+      const board = boardId
+        ? await this.dataSource.getRepository(Board).findOne({ where: { id: boardId } })
+        : null;
+      const cfg = resolveHardBudgetConfig(board?.hard_budget_config ?? null, this._hardBudgetBaseline);
+      if (!cfg.enabled) return false;
+
+      const now = new Date();
+      const windowStart = new Date(now.getTime() - cfg.windowMs);
+      const epoch = await lastHumanUnpendAt(this.dataSource, ticket.id);
+      const since = epoch && epoch.getTime() > windowStart.getTime() ? epoch : windowStart;
+      const windowMin = Math.round(cfg.windowMs / 60_000);
+
+      const dispatchCount = await countWindowDispatches(this.dataSource, ticket.id, since);
+      if (dispatchCount >= cfg.maxDispatchesPerWindow) {
+        return await this._tripHardBudgetGate(ticket, agentId, role, triggerSource, cfg, windowMin, {
+          kind: 'dispatch', count: dispatchCount, limit: cfg.maxDispatchesPerWindow,
+        });
+      }
+
+      // Token-sum ceiling — only reached when the dispatch-count check above
+      // didn't already trip, so one over-budget dispatch never produces two
+      // breach audit rows.
+      const tokenCount = await countWindowTokens(this.dataSource, ticket.id, since);
+      if (tokenCount >= cfg.maxTokensPerWindow) {
+        return await this._tripHardBudgetGate(ticket, agentId, role, triggerSource, cfg, windowMin, {
+          kind: 'tokens', count: tokenCount, limit: cfg.maxTokensPerWindow,
+        });
+      }
+      return false;
+    } catch (e) {
+      this.logService.warn('MCP', 'hard-budget gate evaluation failed (fail-open, dispatch allowed)', {
+        err: String(e), ticket_id: ticket.id,
+      });
+      return false;
+    }
+  }
+
+  /**
+   * Shared breach tail for both `_checkHardBudgetGate` ceilings — audit-log
+   * write, auto-pend, and chat alert, differing only in wording/action so
+   * `agent_trigger_dropped_hard_budget` (dispatch) and
+   * `agent_trigger_dropped_hard_budget_tokens` (tokens, ticket ef53fdf4) stay
+   * independently grep-able. hard-budget-dispatch-gate.test.mjs asserts the
+   * dispatch action string appears exactly once in this file — keep it that
+   * way; do not requote it elsewhere.
+   */
+  private async _tripHardBudgetGate(
+    ticket: Ticket,
+    agentId: string,
+    role: string,
+    triggerSource: string,
+    cfg: ResolvedHardBudget,
+    windowMin: number,
+    breach: { kind: 'dispatch' | 'tokens'; count: number; limit: number },
+  ): Promise<boolean> {
+    const { kind, count, limit } = breach;
+    const isTokens = kind === 'tokens';
+    const auditAction = isTokens ? 'agent_trigger_dropped_hard_budget_tokens' : 'agent_trigger_dropped_hard_budget';
+    const pendGuardActor = isTokens ? 'hard_budget_token_guard' : 'hard_budget_dispatch_guard';
+    const logLabel = isTokens ? 'hard budget token window' : 'hard budget window';
+    const alertTitle = isTokens ? 'Hard budget 초과 (토큰 사용량)' : 'Hard budget 초과 (dispatch 빈도)';
+    const countLabel = isTokens
+      ? `토큰 사용량: ${count.toLocaleString('ko-KR')} / ${windowMin}분 (상한 ${limit.toLocaleString('ko-KR')})`
+      : `dispatch 수: ${count}회 / ${windowMin}분 (상한 ${limit})`;
+    const reason = isTokens
+      ? `이 티켓의 ${windowMin}분 내 토큰 사용량이 하드 상한(${limit.toLocaleString('ko-KR')} 토큰)을 초과해 자동 중지되었습니다. ` +
+        `토큰 소모 원인을 확인한 뒤 pending을 해제하세요.`
+      : `이 티켓의 dispatch 빈도가 ${windowMin}분 내 하드 상한(${limit}회)을 초과해 자동 중지되었습니다. ` +
+        `폭주 여부를 확인한 뒤 pending을 해제하세요.`;
+
+    this.logService.info('MCP', `agent_trigger dropped (${logLabel})`, {
+      ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource,
+      count, limit, window_minutes: windowMin,
+    });
+    try {
+      const activityLogRepo = this.dataSource.getRepository(ActivityLog);
+      await activityLogRepo.save(activityLogRepo.create({
+        entity_type: 'ticket',
+        entity_id: ticket.id,
+        ticket_id: ticket.id,
+        actor_id: 'system',
+        actor_name: 'TriggerLoopService',
+        action: auditAction,
+        new_value: `agent=${agentId} count=${count} limit=${limit} window_minutes=${windowMin}`,
+        role,
+        trigger_source: triggerSource,
+      }));
+    } catch (e) {
+      this.logService.warn('MCP', 'hard-budget-drop audit write failed (drop still applied)', {
+        err: String(e), ticket_id: ticket.id,
+      });
+    }
+
+    if (cfg.autoPend) {
+      await pendTicketForHardBudget(this.dataSource, this.activityService, ticket, reason, pendGuardActor);
+    }
+    if (cfg.notify) {
+      await postHardBudgetAlert(
+        { dataSource: this.dataSource, activityService: this.activityService, roomMessagingService: this.roomMessaging, logger: this.logService },
+        ticket,
+        [
+          `🚦 **${alertTitle}** — \`${ticket.id}\``,
+          `**${ticket.title}**`,
+          countLabel,
+          cfg.autoPend
+            ? '티켓 자동 pend됨 — 사람이 해제하기 전까지 추가 트리거가 차단됩니다.'
+            : 'notify-only (auto-pend off for this board).',
+        ].join('\n\n'),
+      );
+    }
+
+    return true;
+  }
+
   private async _emitTrigger(
     ticket: Ticket,
     agentId: string,
@@ -1876,49 +2115,25 @@ candidate's branch or move the ticket.
     // and undo the pause). Operator-grade override: clearing the flag is the
     // documented way out. Audit row uses `agent_trigger_dropped_pending_user`
     // so it's grepable separately from the board_paused drop.
-    {
-      const freshForGate = await this.dataSource
-        .getRepository(Ticket)
-        .findOne({ where: { id: ticket.id } });
-      // Two distinct pending flavors funnel through this one gate (ticket
-      // 48d14fff): `pending_user_action` (waiting on a human) and
-      // `pending_on_tickets` (blocked behind prerequisite tickets). Either
-      // drops the trigger. The audit action is suffixed so a grep can tell the
-      // two apart — `_pending_user` vs `_pending_tickets`.
-      if (!opts?.bypassTicketPending && (freshForGate?.pending_user_action || freshForGate?.pending_on_tickets)) {
-        const onTickets = !freshForGate.pending_user_action && !!freshForGate.pending_on_tickets;
-        const dropAction = onTickets
-          ? 'agent_trigger_dropped_pending_tickets'
-          : 'agent_trigger_dropped_pending_user';
-        this.logService.info('MCP', 'agent_trigger dropped (ticket pending)', {
-          ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource,
-          pending_user_action: !!freshForGate.pending_user_action,
-          pending_on_tickets: !!freshForGate.pending_on_tickets,
-          pending_set_at: freshForGate.pending_set_at
-            ? new Date(freshForGate.pending_set_at).toISOString()
-            : null,
-          pending_set_by: freshForGate.pending_set_by || '',
-        });
-        try {
-          const activityLogRepo = this.dataSource.getRepository(ActivityLog);
-          await activityLogRepo.save(activityLogRepo.create({
-            entity_type: 'ticket',
-            entity_id: ticket.id,
-            ticket_id: ticket.id,
-            actor_id: 'system',
-            actor_name: 'TriggerLoopService',
-            action: dropAction,
-            new_value: `agent=${agentId} reason=${(freshForGate.pending_reason || '').slice(0, 200)}`,
-            role,
-            trigger_source: triggerSource,
-          }));
-        } catch (e) {
-          this.logService.warn('MCP', 'pending-drop audit write failed (drop still applied)', {
-            err: String(e), ticket_id: ticket.id,
-          });
-        }
-        return '';
-      }
+    //
+    // 얼리 드롭 지점 (ticket be934f61): 판정/로깅/감사 로직은
+    // `_checkPendingUserGate`로 추출했다 — 여기서 이미 pending이면 아래의
+    // harness/effort/environment/board-lessons 해석을 아예 건너뛴다. 그 해석
+    // 구간이 열어 두는 잔여 TOCTOU 창은 실제 SSE emit 직전의 두 번째 호출이
+    // 닫는다(해당 지점 주석 참조).
+    if (await this._checkPendingUserGate(ticket, agentId, role, triggerSource, opts?.bypassTicketPending)) {
+      return '';
+    }
+
+    // Hard-budget window gate (ticket a940d75b). Placed alongside the other
+    // hard ticket-state gates (paused/archived/pending) rather than after the
+    // focus-window gate below — an over-budget ticket must not dispatch even
+    // when it's the agent's top-ranked focus ticket. A single early check is
+    // enough (no late re-check like the pending gate): the count source
+    // (`trigger_emitted`) is a fail-open observability write, so this is
+    // already a best-effort safety-net ceiling, not a hard real-time cap.
+    if (await this._checkHardBudgetGate(ticket, agentId, role, triggerSource, boardId)) {
+      return '';
     }
 
     // Focus-window gate (ticket 701e5e36 — generalizes the old top-1
@@ -2428,6 +2643,18 @@ candidate's branch or move the ticket.
     const triggerId = randomUUID();
 
     const forceRespawn = opts?.forceRespawn === true;
+
+    // 마지막 순간 재확인 (ticket be934f61 — TOCTOU race). 위쪽 얼리 드롭
+    // (_checkPendingUserGate 최초 호출) 이후 여기까지 오는 동안 agent/role
+    // 조회, base-repo/column-prompt/harness/effort/environment 해석,
+    // board-lessons 주입, chain-target 조회 등 십여 개의 await가 더 지나갔다
+    // — 그 창 안에서 걸린 pend_ticket은 얼리 드롭에는 보이지 않는다. 동일
+    // 헬퍼로(판정 로직 중복 없이) 실제 emit 바로 앞에서 한 번 더 신선 조회한다.
+    // 이 호출과 아래 emit 사이에는 다른 await가 없다 — 그것이 이 재확인의
+    // 존재 이유다.
+    if (await this._checkPendingUserGate(ticket, agentId, role, triggerSource, opts?.bypassTicketPending)) {
+      return '';
+    }
 
     activityEvents.emit('agent_trigger', {
       trigger_id: triggerId,

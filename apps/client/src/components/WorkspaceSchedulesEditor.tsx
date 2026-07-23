@@ -62,7 +62,7 @@ export default function WorkspaceSchedulesEditor({ workspaceId }: WorkspaceSched
     try {
       const [scheduleList, agentList] = await Promise.all([
         api.listWorkspaceSchedules(workspaceId).catch(() => []),
-        api.getAgents().catch(() => []),
+        api.getAgents(workspaceId).catch(() => []),
       ]);
       setSchedules(scheduleList || []);
       setAgents((agentList || []).map((a: any) => ({ id: a.id, name: a.name, manager_name: a.manager_name })));

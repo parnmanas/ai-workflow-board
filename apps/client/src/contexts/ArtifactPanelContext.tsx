@@ -48,3 +48,17 @@ export function useArtifactPanel(): ArtifactPanelContextValue {
   if (!ctx) throw new Error('useArtifactPanel must be used within an ArtifactPanelProvider');
   return ctx;
 }
+
+const noopOpenArtifact: ArtifactPanelContextValue['openArtifact'] = () => {};
+
+/**
+ * F-3 (ticket 3ca88253) — openArtifact 만 필요한 리프 카드(AgentRefCard/BoardRefCard)용
+ * 안전 접근자. 프로바이더 밖에서는 throw 대신 no-op 을 돌려준다 — useOpenTicketArtifact
+ * 와 동일한 안전 계약이라 카드가 어느 표면(SSR 계약 테스트 포함)에서도 안전히 렌더된다.
+ * 패널 자체를 그리는 셸 컴포넌트(ArtifactPanel/TicketArtifactController)는 프로바이더
+ * 부재가 곧 배선 오류이므로 계속 useArtifactPanel() 의 throw 를 쓴다.
+ */
+export function useOpenArtifactPanel(): ArtifactPanelContextValue['openArtifact'] {
+  const ctx = useContext(ArtifactPanelContext);
+  return ctx ? ctx.openArtifact : noopOpenArtifact;
+}

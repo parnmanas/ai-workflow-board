@@ -63,7 +63,7 @@ export default function ActionManager({ workspaceId, boardId }: ActionManagerPro
     try {
       const [list, agentList, boardList] = await Promise.all([
         api.listActions(effectiveWorkspaceId, boardId !== undefined ? (boardId || '') : undefined),
-        api.getAgents().catch(() => [] as any[]),
+        api.getAgents(effectiveWorkspaceId).catch(() => [] as any[]),
         api.getBoards(effectiveWorkspaceId).catch(() => [] as any[]),
       ]);
       setActions(list);

@@ -36,7 +36,15 @@ export interface LogActivityParams {
     // 'activity' SSE (board update) AND SystemCommentService projects it into a
     // visible ticket comment. `new_value` carries the human-readable reason +
     // the auto-start outcome; `field_changed` carries the lifecycle state.
-    | 'dispatch_deferred';
+    | 'dispatch_deferred'
+    // 'comment_pingpong_suppressed' (ticket 3970db66): agent-comment-pingpong
+    // guard (common/agent-comment-pingpong.ts) suppressed an agent's comment —
+    // `field_changed` carries which of the 3 reasons (repeated_waiting_without_
+    // work_target | pending_user_action | duplicate_terminal_acknowledgement),
+    // `actor_id`/`actor_name` the REAL agent whose comment was blocked (prior to
+    // this, only the internal auto-pend's field-change row existed, and it
+    // always attributed to the guard itself, never the suppressed agent).
+    | 'comment_pingpong_suppressed';
   field_changed?: string;
   old_value?: string;
   new_value?: string;

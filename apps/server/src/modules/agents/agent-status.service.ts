@@ -430,23 +430,39 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Full non-stale ActiveTask list for this agent (concurrency N), newest-first.
-   * Same stale cutoff as getActiveTicketIds — mirrors what the sweep would keep.
-   * Powers the multi-task dashboard surfaces (the SSE active_tasks list + the
-   * REST /dashboard and /:id rollups). getActiveTicketIds stays the id-only
-   * concurrency-gate input, untouched.
+   * Full LIVE ActiveTask list for this agent (concurrency N), newest-first by
+   * claimed_at. Powers the multi-task dashboard surfaces (the SSE active_tasks
+   * list + the REST /dashboard and /:id rollups).
+   *
+   * "Live" (ticket 2de718d3) now means exactly what the in-flight dispatch
+   * gate means — see _nonStaleTaskList. Before this fix the UI projection
+   * used a claimed_at-ONLY cutoff while hasLiveRoleStrand also honored
+   * output-liveness, so a session producing tokens past CURRENT_TASK_STALE_MS
+   * without a ticket-write vanished from the dashboard even while the server
+   * was dropping its re-triggers as agent_trigger_dropped_inflight_strand
+   * (proof it still considered the strand alive). getActiveTicketIds is
+   * intentionally left on the old claimed_at-only definition — nothing gates
+   * dispatch on it (workflow-state-cap-guard.test.mjs asserts trigger-loop
+   * never calls it), so there is no live inconsistency to fix there.
    */
   getActiveTasks(agent_id: string): ActiveTask[] {
-    return this._nonStaleTaskList(this.state.get(agent_id)?.active_tasks);
+    return this._nonStaleTaskList(agent_id, this.state.get(agent_id)?.active_tasks);
   }
 
-  /** Non-stale entries (CURRENT_TASK_STALE_MS cutoff) of a task Map, newest-first. */
-  private _nonStaleTaskList(tasks?: Map<string, ActiveTask>): ActiveTask[] {
+  /**
+   * Live entries of a task Map, newest-first by claimed_at. A task survives
+   * iff `hasLiveRoleStrand(agent_id, task.ticket_id, task.role || '')` is
+   * true — i.e. EITHER its own claimed_at is within CURRENT_TASK_STALE_MS OR
+   * its (agent, ticket, role) seat has fresh output-liveness (ticket
+   * 2de718d3). Delegating to hasLiveRoleStrand (rather than re-deriving the
+   * OR locally) is what guarantees the UI and the in-flight gate can never
+   * drift onto different ticket sets again.
+   */
+  private _nonStaleTaskList(agent_id: string, tasks?: Map<string, ActiveTask>): ActiveTask[] {
     if (!tasks || tasks.size === 0) return [];
-    const cutoff = new Date(Date.now() - CURRENT_TASK_STALE_MS);
     const out: ActiveTask[] = [];
     for (const t of tasks.values()) {
-      if (t.claimed_at >= cutoff) out.push(t);
+      if (this.hasLiveRoleStrand(agent_id, t.ticket_id, t.role || '')) out.push(t);
     }
     out.sort((a, b) => b.claimed_at.getTime() - a.claimed_at.getTime());
     return out;
@@ -455,8 +471,12 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
   /**
    * Is there a LIVE (non-stale) subagent strand for this exact (agent,
    * ticket, role) right now? Used by TriggerLoopService's in-flight gate
-   * (ticket c9622a40) to serialize same-(ticket, role) strands: the focus
-   * selector already caps the agent to ONE focus ticket per (board, role),
+   * (ticket c9622a40) to serialize same-(ticket, role) strands, AND by
+   * _nonStaleTaskList / _sweep (ticket 2de718d3) as the SAME liveness
+   * predicate behind the UI-facing active_tasks projection — so the AI
+   * Agents dashboard can never show a different ticket set than the one the
+   * dispatch gate treats as in-flight. The focus selector already caps the
+   * agent to ONE focus ticket per (board, role),
    * but two distinct events (column_move + comment_mention + supervisor
    * tick) for the SAME (ticket, role) both pass the focus gate (same ticket
    * id) and spawn racing strands. On a review gate that produces the
@@ -621,7 +641,7 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
       // it conditionally so the wire stays clean otherwise.
       lifecycle_detail: this.lifecycleDetailFor(status.agent_id, lifecycle_state),
       active_tasks: [
-        ...this._nonStaleTaskList(status.active_tasks),
+        ...this._nonStaleTaskList(status.agent_id, status.active_tasks),
         ...this._qaTaskList(status.agent_id),
       ],
     });
@@ -936,7 +956,6 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
    */
   private async _sweep(): Promise<void> {
     const threshold = new Date(Date.now() - OFFLINE_THRESHOLD_MS);
-    const staleTaskCutoff = new Date(Date.now() - CURRENT_TASK_STALE_MS);
     const agents = await this.agentRepo.find();
     const seen = new Set<string>();
     for (const a of agents) {
@@ -956,15 +975,21 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
       const markerChanged = hadMarker !== markerLive;
 
       // Stale-task auto-clear: covers plugin crashes that skipped
-      // clearCurrentTask. Never blocks legitimate long work — sweep just
-      // forgets the badge after CURRENT_TASK_STALE_MS, the next setCurrentTask
-      // re-establishes it. With multi-task tracking we filter the Map and
-      // keep entries newer than the cutoff (offline agents drop everything).
+      // clearCurrentTask. Never blocks legitimate long work — sweep keeps
+      // exactly what hasLiveRoleStrand would call live (fresh claimed_at OR
+      // fresh output-liveness, ticket 2de718d3), so a session that only
+      // produces tokens for >CURRENT_TASK_STALE_MS without a ticket-write is
+      // NOT deleted out from under the UI projection (_nonStaleTaskList /
+      // getActiveTasks read this same Map — a read-side liveness fix alone
+      // would be moot if the sweep had already erased the entry). Offline
+      // agents still drop everything: an unreachable agent's last-known
+      // output-liveness can't be trusted as "still producing". The next
+      // setCurrentTask re-establishes a plain entry regardless.
       let nextTasks: Map<string, ActiveTask> | undefined;
       if (is_online && prev?.active_tasks) {
         const kept = new Map<string, ActiveTask>();
         for (const [tid, t] of prev.active_tasks) {
-          if (t.claimed_at >= staleTaskCutoff) kept.set(tid, t);
+          if (this.hasLiveRoleStrand(a.id, tid, t.role || '')) kept.set(tid, t);
         }
         if (kept.size > 0) nextTasks = kept;
       }

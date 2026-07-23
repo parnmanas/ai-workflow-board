@@ -43,9 +43,9 @@ export function useBoard(boardId: string = '') {
       // alongside the board state.
       const wsId = (boardData as any)?.workspace_id || '';
       const [usersData, agentsData, channelsData, rolesData, focusData] = await Promise.all([
-        api.getUsers().catch(() => []),
-        api.getAgents().catch(() => []),
-        api.getChannels().catch(() => []),
+        api.getUsers(wsId || undefined).catch(() => []),
+        api.getAgents(wsId || undefined).catch(() => []),
+        api.getChannels(wsId || undefined).catch(() => []),
         wsId ? api.listWorkspaceRoles(wsId).catch(() => []) : Promise.resolve([] as any[]),
         api.getBoardFocusTickets(boardId).catch(() => ({ focus_tickets: [] })),
       ]);

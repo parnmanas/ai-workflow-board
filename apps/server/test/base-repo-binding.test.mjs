@@ -138,8 +138,22 @@ test('_emitTrigger pends (does not emit) when a branch-work dispatch has no reso
   // is what let the both-empty acceptance scenario slip through (reviewer P1). It
   // must be gone so a branch-work dispatch with no repo always pends.
   assert.doesNotMatch(src, /repoWasExpected/, 'the repoWasExpected gate must be removed (literal block)');
-  // The guard must SKIP the emit — pend then return before activityEvents.emit.
-  assert.match(src, /await this\._pendForMissingBaseRepo\(ticket, agentId, role, triggerSource\);\s*return '';/, 'guard must pend and return without emitting');
+  // The guard must SKIP the emit — pend, then exit before activityEvents.emit.
+  // Isolate the block between the pend call and its terminating `return '';`
+  // rather than asserting the two are adjacent: a branch may sit between them
+  // (e.g. the comment_summary early-throw) as long as it never reaches emit.
+  const pendCall = 'await this._pendForMissingBaseRepo(ticket, agentId, role, triggerSource);';
+  const pendIdx = src.indexOf(pendCall);
+  assert.ok(pendIdx !== -1, 'pend call must exist verbatim');
+  const afterPend = src.slice(pendIdx + pendCall.length);
+  const returnMatch = /return '';/.exec(afterPend);
+  assert.ok(returnMatch, "a return ''; must terminate the guard block after the pend call");
+  const guardBlock = afterPend.slice(0, returnMatch.index);
+  assert.doesNotMatch(
+    guardBlock,
+    /activityEvents\.emit/,
+    'guard must not emit between pend and return — every early exit (e.g. the comment_summary throw) must skip emit too',
+  );
 });
 
 test('_pendForMissingBaseRepo sets pending_user_action + is idempotent', () => {

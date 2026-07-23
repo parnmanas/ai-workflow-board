@@ -12,10 +12,10 @@
  * (mcp__awb__… / mcp__ai-workflow-board__…).
  *
  * CONTRACT (ticket 24694916, acceptance #1 "누락 없이") — the MCP tool surface is
- * classified EXHAUSTIVELY across four buckets so a newly-added tool is a deliberate
- * decision, never a silent gap. tool-surface-parity.test.mjs asserts the server's
- * registered tools equal EMIT ∪ BATCH ∪ REJECT ∪ EXCLUDE, failing CI on any
- * unclassified (or stale) tool:
+ * classified EXHAUSTIVELY across every bucket below so a newly-added tool is a
+ * deliberate decision, never a silent gap. tool-surface-parity.test.mjs asserts the
+ * server's registered tools equal EMIT ∪ BATCH ∪ REJECT ∪ ARTIFACT ∪ AGENT ∪ BOARD ∪
+ * EXCLUDE, failing CI on any unclassified (or stale) tool:
  *
  *   EMIT (this map) — create / move (incl. cross-board) / update (incl. child),
  *     comment plus the typed-comment mutations (ask_question / answer_question /
@@ -25,6 +25,10 @@
  *   BATCH (BATCH_TICKET_TOOL) — batch_operations: ONE result fans out to MANY refs.
  *   REJECT (REJECT_HANDOFF_TOOL) — reject_handoff: ONE result → the newly-filed 반려
  *     defect ticket + the re-blocked follow-up (bespoke shape → resolveRejectHandoffRefs).
+ *   ARTIFACT (ARTIFACT_ACTION_TOOLS, F2-4 ⓒ) — build/deploy result cards, independent
+ *     of the ticket_refs channel (see the bucket's own doc comment below).
+ *   AGENT (AGENT_ACTION_TOOLS, F-3 ticket 3ca88253) — get_agent → agent-status card.
+ *   BOARD (BOARD_ACTION_TOOLS, F-3 ticket 3ca88253) — get_board_summary → board card.
  *   EXCLUDE (TICKET_TOOL_EXCLUSIONS) — reads, ticket deletes (404 deep-link),
  *     ticket-attachment I/O, the assistant's own send_chat_room_message, the
  *     current-task focus seat, remote improvement tickets (off-instance → 404), and
@@ -69,6 +73,24 @@ export const ARTIFACT_ACTION_TOOLS: Record<string, string> = {
   register_build_artifact: 'build',
   report_build_failure: 'build',
   report_deployment: 'deploy',
+};
+/**
+ * F-3 (ticket 3ca88253) — agent-status 카드 캡처면. 채팅에서 "이 agent 뭐하고 있어"
+ * 류 질문에 답할 때 모델이 get_agent(단건 조회)를 호출하면 그 결과를 카드로 캡처한다.
+ * list_agents(다건 조회)는 캡처하지 않는다 — "특정 agent" 상태 카드이지 전체 목록
+ * 나열용이 아니라서 캡처하면 노이즈만 늘어난다(read 로 그대로 둠).
+ */
+export const AGENT_ACTION_TOOLS: Record<string, string> = {
+  get_agent: 'status',
+};
+/**
+ * F-3 (ticket 3ca88253) — board 현황 카드 캡처면. get_board_summary 는 서버 설명대로
+ * "compact LLM-friendly board summary" 전용 tool 이라 이것만 캡처한다. get_board(전체
+ * 상세: children/comments 포함)는 다른 목적(티켓 상세 조회 등)으로도 널리 쓰이므로
+ * 캡처 대상에서 제외 — 캡처하면 매 호출마다 대형 결과가 카드 후보가 되어버린다.
+ */
+export const BOARD_ACTION_TOOLS: Record<string, string> = {
+  get_board_summary: 'summary',
 };
 
 /** Tools whose NEW ticket id is only in the tool RESULT (not the input). For every
@@ -322,6 +344,94 @@ export function chunkArtifactRefs(refs: ArtifactRef[], size: number): ArtifactRe
   return out;
 }
 
+// ─── F-3 (ticket 3ca88253): agent-status ref capture ──────────────────────
+// Deliberately minimal — unlike TicketRef (create/existing/batch/reject) an agent
+// card has exactly one shape: capture the id (+ best-effort name) from a get_agent
+// result. The client re-fetches full AgentDetail on open, so the ref itself stays
+// tiny (mirrors ticket_refs carrying only {ticket_id,title}, not the whole ticket).
+export interface AgentRef {
+  agent_id: string;
+  name?: string;
+}
+export interface AgentToolContext {
+  /** bare tool name — kept for parity with the other *ToolContext shapes even
+   *  though AGENT_ACTION_TOOLS currently has a single member. */
+  tool: string;
+}
+export function trackedAgentTool(name: unknown): AgentToolContext | null {
+  if (typeof name !== 'string') return null;
+  const bare = bareToolName(name);
+  if (!AGENT_ACTION_TOOLS[bare]) return null;
+  return { tool: bare };
+}
+/** get_agent returns the raw Agent entity ({id,name,...}) directly as the result —
+ *  no nesting, no input fallback needed (unlike ticket refs, whose id sometimes
+ *  only lives in the input). Fail-closed: no id, no card. */
+export function resolveAgentRef(_ctx: AgentToolContext, result: any, isError: boolean): AgentRef | null {
+  if (isError) return null;
+  const obj = result && typeof result === 'object' && !Array.isArray(result) ? result : null;
+  if (!obj || typeof obj.id !== 'string' || !obj.id) return null;
+  const ref: AgentRef = { agent_id: obj.id };
+  if (typeof obj.name === 'string' && obj.name) ref.name = obj.name;
+  return ref;
+}
+export function chunkAgentRefs(refs: AgentRef[], size: number): AgentRef[][] {
+  if (!Array.isArray(refs) || refs.length === 0) return [];
+  if (!Number.isFinite(size) || size <= 0) return [refs.slice()];
+  const out: AgentRef[][] = [];
+  for (let i = 0; i < refs.length; i += size) out.push(refs.slice(i, i + size));
+  return out;
+}
+export function formatAgentRefsContent(refs: AgentRef[]): string {
+  return refs.map((r) => `🧑‍💻 Agent: ${r.name || r.agent_id}`).join('\n');
+}
+
+// ─── F-3 (ticket 3ca88253): board-summary ref capture ─────────────────────
+// Same minimal shape as AgentRef: capture the board id (+ name) only. The client
+// re-fetches the full board (GET /api/boards/:id) on open and renders a condensed
+// version of the SAME data Board.tsx uses — no ticket list travels through chat
+// metadata, which matters here because a board's Done column alone can hold 100+
+// tickets (would otherwise bloat every board-status turn).
+export interface BoardRef {
+  board_id: string;
+  title?: string;
+}
+export interface BoardToolContext {
+  tool: string;
+  /** get_board_summary's INPUT carries board_id; its RESULT only carries the
+   *  board's `name` (as `board`), not the id — so the id must ride along from
+   *  the tool_use input, captured here at track time. */
+  inputBoardId?: string;
+}
+export function trackedBoardTool(name: unknown, input: any): BoardToolContext | null {
+  if (typeof name !== 'string') return null;
+  const bare = bareToolName(name);
+  if (!BOARD_ACTION_TOOLS[bare]) return null;
+  const inp = input && typeof input === 'object' ? input : {};
+  return { tool: bare, inputBoardId: typeof inp.board_id === 'string' ? inp.board_id : undefined };
+}
+/** get_board_summary's result is `{board: <name>, description, columns: [...]}` —
+ *  no id. The input board_id (captured at tracking time) is authoritative; without
+ *  it the ref can't deep-link anywhere, so fail-closed. */
+export function resolveBoardRef(ctx: BoardToolContext, result: any, isError: boolean): BoardRef | null {
+  if (isError) return null;
+  if (!ctx.inputBoardId) return null;
+  const obj = result && typeof result === 'object' && !Array.isArray(result) ? result : null;
+  const ref: BoardRef = { board_id: ctx.inputBoardId };
+  if (obj && typeof obj.board === 'string' && obj.board) ref.title = obj.board;
+  return ref;
+}
+export function chunkBoardRefs(refs: BoardRef[], size: number): BoardRef[][] {
+  if (!Array.isArray(refs) || refs.length === 0) return [];
+  if (!Number.isFinite(size) || size <= 0) return [refs.slice()];
+  const out: BoardRef[][] = [];
+  for (let i = 0; i < refs.length; i += size) out.push(refs.slice(i, i + size));
+  return out;
+}
+export function formatBoardRefsContent(refs: BoardRef[]): string {
+  return refs.map((r) => `📊 보드: ${r.title || r.board_id}`).join('\n');
+}
+
 /** Resolve a batch_operations call into MANY ticket refs — the multi-ref path the
  *  1-result→1-ref resolveTicketRef can't cover. Zips the captured input
  *  `operations[]` with the result `results[]` (parallel arrays, same index):
@@ -469,10 +579,11 @@ export function chunkTicketRefs(refs: TicketRef[], size: number): TicketRef[][] 
  *                 tool 은 F2-4 ⓒ 로 ARTIFACT_ACTION_TOOLS 로 이관 — EXCLUDE 아님.)
  */
 export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
-  // read (60)
-  fetch_github_info: 'read', get_action: 'read', get_agent: 'read',
+  // read (58) — get_agent 및 get_board_summary 는 F-3(ticket 3ca88253)로 AGENT_ACTION_TOOLS
+  // / BOARD_ACTION_TOOLS 로 이관됨(EXCLUDE 아님). list_agents/get_board 는 여전히 read.
+  fetch_github_info: 'read', get_action: 'read',
   get_allocated_tickets: 'read', get_api_key: 'read', get_benchmark_leaderboard: 'read',
-  get_board: 'read', get_board_summary: 'read', get_chat_room_messages: 'read',
+  get_board: 'read', get_chat_room_messages: 'read',
   get_feature: 'read', get_handoff_pipeline: 'read', get_latest_artifact: 'read',
   get_my_tickets: 'read', get_qa_batch: 'read', get_qa_run: 'read', get_qa_scenario: 'read',
   get_qa_schedule: 'read', get_recent_activity: 'read', get_resource: 'read',
@@ -499,13 +610,14 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   clear_current_task: 'agent-state', set_current_task: 'agent-state',
   // remote (1)
   create_remote_improvement_ticket: 'remote',
-  // non-ticket (79) — 빌드/배포(register_build_artifact·report_build_failure·
+  // non-ticket (80) — 빌드/배포(register_build_artifact·report_build_failure·
   // report_deployment)는 F2-4 ⓒ 로 ARTIFACT_ACTION_TOOLS 로 이관됨(EXCLUDE 아님).
   // non-ticket
   add_board_lesson: 'non-ticket', add_chat_message_attachment: 'non-ticket',
   add_chat_participants: 'non-ticket', approve_feature: 'non-ticket',
   attach_qa_artifact: 'non-ticket', attach_security_artifact: 'non-ticket',
-  complete_action_run: 'non-ticket', complete_qa_run: 'non-ticket',
+  complete_action_run: 'non-ticket', complete_comment_summary: 'non-ticket',
+  complete_qa_run: 'non-ticket',
   complete_security_run: 'non-ticket', create_agent: 'non-ticket',
   create_api_key: 'non-ticket', create_benchmark_run: 'non-ticket', create_board: 'non-ticket',
   create_channel: 'non-ticket', create_chat_room: 'non-ticket', create_column: 'non-ticket',
@@ -550,6 +662,8 @@ export function classifiedToolNames(): Set<string> {
     BATCH_TICKET_TOOL,
     REJECT_HANDOFF_TOOL,
     ...Object.keys(ARTIFACT_ACTION_TOOLS),
+    ...Object.keys(AGENT_ACTION_TOOLS),
+    ...Object.keys(BOARD_ACTION_TOOLS),
     ...Object.keys(TICKET_TOOL_EXCLUSIONS),
   ]);
 }

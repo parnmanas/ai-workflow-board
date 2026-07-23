@@ -1,10 +1,15 @@
 // Regression-grep — ticket a57517be finding 2 (unpend must wake current
-// column). The behavioural test (test/qa-flows/unpend-emits-trigger.test.mjs)
-// boots NestJS and asserts the SSE wake-up arrives. This file is the cheap
-// static check: it greps both surfaces (MCP `unpend_ticket` tool and REST
-// PATCH /api/tickets/:id) and fails fast if a future refactor strips the
-// `dispatchCurrentColumn` call from either path. Catches accidental reverts
-// in PR-review-without-flow-tests scenarios.
+// column) AND ticket b2e88390 (clearing pending_user_action is human-only).
+// The behavioural test (test/qa-flows/unpend-emits-trigger.test.mjs) boots
+// NestJS and asserts the SSE wake-up / rejection. This file is the cheap
+// static check:
+//   - REST PATCH /api/tickets/:id (the human path, AuthGuard-protected) must
+//     still call `dispatchCurrentColumn` on a true→false flip.
+//   - The two MCP paths that used to ALSO perform that flip — `unpend_ticket`
+//     and `update_ticket` — must instead reject it outright (ticket b2e88390:
+//     MCP has no authenticated user session to prove a human made the call).
+//     A `dispatchCurrentColumn` call surviving inside either MCP block would
+//     mean the human-only guard got reverted/bypassed.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -45,11 +50,10 @@ test('TriggerLoopService exposes dispatchCurrentColumn as a public async method'
   );
 });
 
-test('MCP unpend_ticket calls TriggerLoopService.dispatchCurrentColumn after clearing the flag', () => {
+test('ticket b2e88390: MCP unpend_ticket always rejects — never flips the flag, never dispatches', () => {
   const src = read(MCP_TOOL_FILE);
-  // Find the unpend_ticket registration block, then assert the call appears
-  // inside the same block. Two-step so a stray dispatchCurrentColumn in some
-  // other tool can't satisfy the check.
+  // Find the unpend_ticket registration block, then assert inside that same
+  // block. Two-step so a stray match in some other tool can't satisfy it.
   const blockStart = src.indexOf("'unpend_ticket'");
   assert.notEqual(blockStart, -1, "expected 'unpend_ticket' tool registration block");
   // Next `server.tool(` after the start bounds the block.
@@ -58,13 +62,18 @@ test('MCP unpend_ticket calls TriggerLoopService.dispatchCurrentColumn after cle
 
   assert.match(
     block,
-    /triggerLoopService\?\.\s*dispatchCurrentColumn\(|triggerLoopService\.dispatchCurrentColumn\(/,
-    'unpend_ticket tool must call triggerLoopService.dispatchCurrentColumn(...)',
+    /HUMAN_ONLY_UNPEND_MESSAGE/,
+    'unpend_ticket must reject with HUMAN_ONLY_UNPEND_MESSAGE — MCP has no human session to clear on behalf of',
   );
-  assert.match(
+  assert.doesNotMatch(
     block,
-    /['"]unpend['"]/,
-    'unpend_ticket dispatch call must label the trigger source as "unpend"',
+    /ticket\.pending_user_action\s*=\s*false/,
+    'unpend_ticket must never itself clear pending_user_action — that would defeat the human-only guard',
+  );
+  assert.doesNotMatch(
+    block,
+    /dispatchCurrentColumn/,
+    'unpend_ticket must not dispatch — there is no successful-clear path left to wake anyone from',
   );
 });
 
@@ -85,12 +94,10 @@ test('REST PATCH /api/tickets/:id wakes the current column after clearing pendin
   );
 });
 
-test('MCP update_ticket dispatches when it flips pending_user_action true → false', () => {
-  // Same bug class as unpend_ticket — update_ticket can also flip the
-  // flag (via `pending_user_action: false` in the body), and the same
-  // activity-row-only path does not route through column dispatch on
-  // its own. Make sure all three flip surfaces (REST PATCH, MCP
-  // unpend_ticket, MCP update_ticket) call dispatchCurrentColumn.
+test('ticket b2e88390: MCP update_ticket rejects a true → false pending_user_action flip', () => {
+  // Same bug class as unpend_ticket — update_ticket could also flip the
+  // flag (via `pending_user_action: false` in the body). Same fix: reject
+  // the clear outright instead of applying + dispatching it.
   const src = read(MCP_TOOL_FILE);
   const blockStart = src.indexOf("'update_ticket'");
   assert.notEqual(blockStart, -1, "expected 'update_ticket' tool registration block");
@@ -99,15 +106,12 @@ test('MCP update_ticket dispatches when it flips pending_user_action true → fa
 
   assert.match(
     block,
-    /triggerLoopService\?\.\s*dispatchCurrentColumn\(|triggerLoopService\.dispatchCurrentColumn\(/,
-    'update_ticket tool must call triggerLoopService.dispatchCurrentColumn(...) on pending true → false',
+    /pending_user_action\s*===\s*false\s*&&\s*ticket\.pending_user_action[\s\S]{0,120}HUMAN_ONLY_UNPEND_MESSAGE/,
+    'update_ticket must reject `pending_user_action: false` while the ticket is pending, with HUMAN_ONLY_UNPEND_MESSAGE',
   );
-  // Gate must check both the pending_user_action change AND the
-  // direction (oldPending && !ticket.pending_user_action) so an update
-  // that toggles other fields without touching the flag stays silent.
-  assert.match(
+  assert.doesNotMatch(
     block,
-    /changes\.includes\(\s*['"]pending_user_action['"]\s*\)[\s\S]{0,400}oldPending[\s\S]{0,400}!ticket\.pending_user_action/,
-    'update_ticket dispatch must be gated by `changes.includes("pending_user_action") && oldPending && !ticket.pending_user_action`',
+    /dispatchCurrentColumn/,
+    'update_ticket must not dispatch — the true→false flip it used to wake up after is now rejected, never applied',
   );
 });

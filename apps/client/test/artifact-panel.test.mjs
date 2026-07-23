@@ -11,6 +11,10 @@ import assert from 'node:assert/strict';
 import {
   artifactPanelReducer,
   initialArtifactPanelState,
+  clampArtifactPanelWidth,
+  ARTIFACT_PANEL_MIN_WIDTH,
+  ARTIFACT_PANEL_MAX_WIDTH,
+  ARTIFACT_PANEL_DEFAULT_WIDTH,
 } from '../src/contexts/artifactPanel.ts';
 
 const TICKET = { key: 'ticket:abc', title: 'ABC 티켓' };
@@ -71,4 +75,29 @@ test('toggle: 열림→닫힘 (내용 유지)', () => {
 test('리듀서는 입력 상태를 변조하지 않는다', () => {
   const frozen = Object.freeze({ ...initialArtifactPanelState });
   assert.doesNotThrow(() => artifactPanelReducer(frozen, { type: 'open', artifact: TICKET }));
+});
+
+// ─── 6. 폭 clamp (티켓 7815a958) ───────────────────────────────────────────────
+
+test('clamp: 범위 내 값은 반올림만 적용', () => {
+  assert.equal(clampArtifactPanelWidth(400), 400);
+  assert.equal(clampArtifactPanelWidth(400.4), 400);
+  assert.equal(clampArtifactPanelWidth(400.6), 401);
+});
+
+test('clamp: 최소치 미만은 최소치로', () => {
+  assert.equal(clampArtifactPanelWidth(0), ARTIFACT_PANEL_MIN_WIDTH);
+  assert.equal(clampArtifactPanelWidth(-100), ARTIFACT_PANEL_MIN_WIDTH);
+  assert.equal(clampArtifactPanelWidth(ARTIFACT_PANEL_MIN_WIDTH - 1), ARTIFACT_PANEL_MIN_WIDTH);
+});
+
+test('clamp: 최대치 초과는 최대치로', () => {
+  assert.equal(clampArtifactPanelWidth(9999), ARTIFACT_PANEL_MAX_WIDTH);
+  assert.equal(clampArtifactPanelWidth(ARTIFACT_PANEL_MAX_WIDTH + 1), ARTIFACT_PANEL_MAX_WIDTH);
+});
+
+test('clamp: NaN/Infinity 등 비유한값은 기본폭으로 폴백', () => {
+  assert.equal(clampArtifactPanelWidth(NaN), ARTIFACT_PANEL_DEFAULT_WIDTH);
+  assert.equal(clampArtifactPanelWidth(Infinity), ARTIFACT_PANEL_DEFAULT_WIDTH);
+  assert.equal(clampArtifactPanelWidth(-Infinity), ARTIFACT_PANEL_DEFAULT_WIDTH);
 });

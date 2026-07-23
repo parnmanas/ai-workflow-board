@@ -70,6 +70,8 @@ import type {
   RepoCommitDetail,
   RepoTreeEntry,
   RepoFileContent,
+  WorkflowHealthRollup,
+  WorkflowHealthLongTermUsage,
 } from './types';
 
 const BASE = '/api';
@@ -88,7 +90,13 @@ const BASE = '/api';
 // is NEVER consulted at request time — each tab is self-contained.
 const SESSION_WS_KEY = 'awb.activeWorkspaceId';
 
-function bootstrapActiveWorkspaceId(): string | null {
+// Exported so AppLayout's initial state and AuthContext.resolveWorkspaceState
+// resolve the same per-tab candidate instead of each reading localStorage
+// directly — that split let a tab's boot state disagree with the sessionStorage
+// value this module already uses for X-Workspace-Id, and the disagreement then
+// got "fixed" by overwriting sessionStorage with the wrong (shared) value
+// (ticket dc5c0813).
+export function bootstrapActiveWorkspaceId(): string | null {
   if (typeof window === 'undefined') return null;
   // 1) URL — most accurate, per-tab, survives initial render before AppLayout mounts.
   const m = window.location.pathname.match(/^\/ws\/([^/]+)/);
@@ -688,7 +696,14 @@ export const api = {
     request<any>(`/users/${id}`, { method: 'DELETE' }),
 
   // ─── Agents ────────────────────────────────────────────
-  getAgents: () => request<any[]>('/agents'),
+  // workspaceId overrides the ambient X-Workspace-Id header for this one call —
+  // see getChannels above for why callers reacting to a workspaceId prop change
+  // need this instead of relying on the ambient header.
+  getAgents: (workspaceId?: string) => {
+    const init: RequestInit = {};
+    if (workspaceId) init.headers = { ...getAuthHeaders(), 'X-Workspace-Id': workspaceId };
+    return request<any[]>('/agents', init);
+  },
   getAgentsAll: () => request<any[]>('/agents?scope=all'),
   // Phase 3 Plan 03-02: dashboard snapshot with current_task + bool-coerced is_online
   getAgentDashboard: (workspaceId: string): Promise<DashboardAgent[]> =>
@@ -783,7 +798,15 @@ export const api = {
     request<any>(`/agents/${id}`, { method: 'DELETE' }),
 
   // ─── Channels ──────────────────────────────────────────
-  getChannels: () => request<any[]>('/channels'),
+  // workspaceId overrides the ambient X-Workspace-Id header for this one call
+  // (same pattern as createAgent below) — callers that re-fetch the instant a
+  // workspaceId prop changes can't rely on the ambient header having caught up
+  // yet (it's synced from a sibling effect that may run after theirs).
+  getChannels: (workspaceId?: string) => {
+    const init: RequestInit = {};
+    if (workspaceId) init.headers = { ...getAuthHeaders(), 'X-Workspace-Id': workspaceId };
+    return request<any[]>('/channels', init);
+  },
   createChannel: (data: {
     name: string; type?: string; bot_token?: string; guild_id?: string;
     channel_id?: string; board_id?: string;
@@ -819,7 +842,14 @@ export const api = {
     request<{ success: boolean; error?: string }>(`/me/channels/${id}/test`, { method: 'POST' }),
 
   // ─── API Keys ──────────────────────────────────────────
-  getApiKeys: () => request<any[]>('/keys'),
+  // workspaceId overrides the ambient X-Workspace-Id header for this one call —
+  // see getChannels above for why callers reacting to a workspaceId prop change
+  // need this instead of relying on the ambient header.
+  getApiKeys: (workspaceId?: string) => {
+    const init: RequestInit = {};
+    if (workspaceId) init.headers = { ...getAuthHeaders(), 'X-Workspace-Id': workspaceId };
+    return request<any[]>('/keys', init);
+  },
   getApiKey: (id: string) => request<any>(`/keys/${id}`),
   createApiKey: (data: { name: string; agent_id?: string | null; scope?: string; expires_in_days?: number }) =>
     request<any>('/keys', { method: 'POST', body: JSON.stringify(data) }),
@@ -1705,9 +1735,37 @@ export const api = {
       body: JSON.stringify(patch),
     }),
 
+  // ─── Admin Workflow Health ───────────
+  // The rollup embeds active_storms/top_respawns/suppression_stats, so the
+  // controller's narrower /storms, /respawns, /suppressions endpoints are
+  // intentionally left without a dedicated client wrapper here.
+  getWorkflowHealth: (params?: { boardId?: string }) => {
+    const q = params?.boardId ? `?board_id=${encodeURIComponent(params.boardId)}` : '';
+    return request<WorkflowHealthRollup>(`/admin/workflow-health${q}`);
+  },
+
+  // All-time/장기 구간 누적 (ticket 090abc77) — workspace는 getAuthHeaders()의
+  // ambient X-Workspace-Id 헤더로 해결되므로 여기서 별도로 넘기지 않는다.
+  // 별도 엔드포인트로 둔 이유는 getWorkflowHealth의 15초 폴링에 all-time
+  // 집계까지 얹지 않기 위함(컨트롤러 docstring 참고) — 호출부가 직접
+  // 원하는 시점에만 불러야 한다.
+  getLongTermUsage: (params?: { from?: string; to?: string }) => {
+    const q = new URLSearchParams();
+    if (params?.from) q.set('from', params.from);
+    if (params?.to) q.set('to', params.to);
+    const qs = q.toString();
+    return request<WorkflowHealthLongTermUsage>(`/admin/workflow-health/long-term-usage${qs ? `?${qs}` : ''}`);
+  },
+
   // ── Phase 7: Chat Rooms ─────────────────────────
-  listChatRooms: (scope?: 'workspace') =>
-    request<ChatRoomListItem[]>(scope === 'workspace' ? '/chat-rooms?scope=workspace' : '/chat-rooms'),
+  // workspaceId overrides the ambient X-Workspace-Id header for this one call —
+  // see getChannels above for why callers reacting to a workspaceId prop change
+  // need this instead of relying on the ambient header.
+  listChatRooms: (scope?: 'workspace', workspaceId?: string) => {
+    const init: RequestInit = {};
+    if (workspaceId) init.headers = { ...getAuthHeaders(), 'X-Workspace-Id': workspaceId };
+    return request<ChatRoomListItem[]>(scope === 'workspace' ? '/chat-rooms?scope=workspace' : '/chat-rooms', init);
+  },
 
   // Server returns `{ room: ChatRoomDetail, existing: boolean }` — unwrap so
   // callers can dereference `room.id` directly. (Pre-dedup-removal the

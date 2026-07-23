@@ -33,7 +33,10 @@ import { buildConsensusMetadata, buildProposalMetadata } from '../../../common/c
 import { getConsensusState, findOpenProposal } from '../../../services/consensus.service';
 import { buildConsensusUpdatePayload, autoExecuteConsensusMove } from '../../../services/consensus-actions';
 import type { ToolContext } from './context';
-import { applyAgentCommentPingPongGuard, terminalAckKey } from '../../../common/agent-comment-pingpong';
+import { applyAgentCommentPingPongGuard, terminalAckKey, isPendingUserActionBlocked } from '../../../common/agent-comment-pingpong';
+import { computeTicketCommentChainDepth } from '../../../common/agent-chain-depth';
+import { computeLoopScore } from '../../../common/loop-score';
+import { enforceAutoResponseBudget } from '../../../common/hard-budget-guard';
 
 function isUniqueConstraintError(error: unknown): boolean {
   const value = error as { code?: string; errno?: number; message?: string } | null;
@@ -44,7 +47,8 @@ function isUniqueConstraintError(error: unknown): boolean {
 }
 
 export function registerCommentTools(server: McpServer, ctx: ToolContext): void {
-  const { dataSource, activityService, mentionService, logger, ticketRoleAssignmentService } = ctx;
+  const { dataSource, activityService, mentionService, logger, ticketRoleAssignmentService, roomMessagingService } = ctx;
+  const hardBudgetDeps = { dataSource, activityService, roomMessagingService, logger };
 
   // `resolveAuthorRole` / `mergeAuthorRoleIntoMetadata` live in ./author-role
   // so their resolution-order contract is unit-testable (ticket ed07eeeb).
@@ -177,6 +181,21 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       );
       const finalMetadata = mergeAuthorRoleIntoMetadata(metadata, resolvedAuthorRole);
 
+      // 억제 사유 3종(repeated_waiting_without_work_target / pending_user_action /
+      // duplicate_terminal_acknowledgement) 전부를 실제 차단된 agent 귀속으로
+      // ActivityLog에 남긴다 (ticket 3970db66). 이전에는 repeated_waiting만
+      // pend() 콜백을 통해 'pending_user_action' 필드 변경 로그로 간접 노출됐고
+      // (그마저 actor는 guard 자신), 나머지 2종은 MCP 응답 JSON에만 존재해
+      // 로그/UI 어디에도 남지 않았다. best-effort — 로깅 실패로 댓글 흐름을
+      // 막지 않는다.
+      const logPingPongSuppression = (reason: string) =>
+        activityService.logActivity({
+          entity_type: 'ticket', entity_id: ticket.id, action: 'comment_pingpong_suppressed',
+          field_changed: reason, ticket_id: ticket.id,
+          actor_id: resolvedAuthorId, actor_name: authorName,
+          role: resolvedAuthorRole || '', trigger_source: 'comment_pingpong_guard',
+        }).catch(() => {});
+
       // Server-side primary guard. Pending tickets accept no further agent
       // comments; repeated terminal receipts are dropped before comment/SSE
       // creation. The manager repeats the terminal check as a replay safety net.
@@ -213,7 +232,20 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         },
       });
       if (guard.suppressed) {
+        await logPingPongSuppression(guard.reason || 'unknown');
         return ok(guard);
+      }
+
+      // Hard-budget guard (ticket a940d75b): content-agnostic ceiling on top
+      // of the pattern-based guard above — a ticket that keeps getting
+      // DIFFERENT-looking agent comments (so the ping-pong guard never fires)
+      // still trips once the lifetime count crosses the board's configured
+      // (or env-baseline) max_auto_responses.
+      if (resolvedAuthorType === 'agent') {
+        const budget = await enforceAutoResponseBudget(hardBudgetDeps, ticket);
+        if (budget.blocked) {
+          return ok({ suppressed: true, reason: budget.reason });
+        }
       }
 
       // Deferral-to-terminal guard (ticket 9f2adfd0): FLAG — never block — when
@@ -272,6 +304,23 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       }
 
       const ackKey = terminalAckKey(nextGuardComment);
+
+      // 저장 직전 재확인 (ticket be934f61 — TOCTOU race). 위 187행의 ping-pong
+      // 가드는 96행에서 핸들러 시작 시 1회 로드한 stale in-memory `ticket`
+      // 객체의 pending_user_action을 검사한다. 그 로드~저장 사이(멘션/편입
+      // 경고 조회 등 다수의 await)에 별도 요청의 pend_ticket이 끼어들면
+      // stale 객체에는 반영되지 않아 가드를 그대로 통과해버린다. 실제 쓰기
+      // (commentRepo.save) 직전에 한 번 더 가볍게 재조회해 창을 최소화한다.
+      // 가드 자체가 agent 작성자에만 적용되므로(applyAgentCommentPingPongGuard
+      // 최상단 얼리리턴) 재확인도 동일하게 agent 작성자로 한정한다.
+      if (resolvedAuthorType === 'agent') {
+        const freshForGate = await ticketRepo.findOne({ where: { id: ticket.id } });
+        if (freshForGate?.pending_user_action) {
+          await logPingPongSuppression('pending_user_action');
+          return ok({ suppressed: true, reason: 'pending_user_action' });
+        }
+      }
+
       let comment: Comment;
       try {
         comment = await commentRepo.save(commentRepo.create({
@@ -292,6 +341,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         }));
       } catch (error) {
         if (ackKey && isUniqueConstraintError(error)) {
+          await logPingPongSuppression('duplicate_terminal_acknowledgement');
           return ok({ suppressed: true, reason: 'duplicate_terminal_acknowledgement' });
         }
         throw error;
@@ -309,6 +359,35 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         new_value: content,
         field_changed: resolvedType,
       });
+
+      // ticket 24df8677 — generalized loop-score observability. Compute +
+      // log only (WARN/TRIP classification, no action) — same scope boundary
+      // the sibling ping-pong guard above uses (agent-authored writes via
+      // add_comment only), and the same "never fail the comment write on a
+      // detector hiccup" idiom the deferral-guard try/catch above follows.
+      // Reuses `recentAgentComments` (already fetched for the ping-pong guard)
+      // plus the just-saved `comment` instead of a second query.
+      if (resolvedAuthorType === 'agent') {
+        try {
+          const grouped = ticketRoleAssignmentService
+            ? await ticketRoleAssignmentService.resolveGroupedForTicket(ticket_id)
+            : [];
+          const holderKeys = new Set<string>();
+          for (const g of grouped) for (const h of g.holders) holderKeys.add(`${h.type}:${h.id}`);
+          const ascending = recentAgentComments.slice().reverse();
+          ascending.push(comment);
+          const loopScore = computeLoopScore(ascending, holderKeys);
+          if (loopScore.warn) {
+            logger.warn(
+              'LoopScore',
+              loopScore.trip ? 'loop-risk TRIP threshold reached' : 'loop-risk WARN threshold reached',
+              { ticket_id, ...loopScore },
+            );
+          }
+        } catch (e) {
+          logger.warn('LoopScore', `loop-score computation failed (continuing): ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
 
       // Dispatch @-mentions just like the REST path
       // (tickets.controller._dispatchCommentMentions). Without this, a
@@ -329,6 +408,11 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
           const preview = (content || '').slice(0, 500);
           const ts = (comment.created_at instanceof Date ? comment.created_at : new Date()).toISOString();
           const userMentionRepo = dataSource.getRepository(UserMention);
+          // ticket 07402c57: chain-depth stamp for the agent-mention ping-pong
+          // cap (event-dispatcher.ts). Computed once and reused across every
+          // fan-out target — it reflects this ticket's comment history, not
+          // the recipient.
+          const agentChainDepth = await computeTicketCommentChainDepth(commentRepo, ticket.id);
           for (const m of resolved) {
             if (m.type === 'agent') {
               const agent = await dataSource.getRepository(Agent).findOne({ where: { id: m.id } });
@@ -348,6 +432,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
                 mention_source: m.roleShortcut ? 'role' : 'direct',
                 role_shortcut: m.roleShortcut,
                 timestamp: ts,
+                agent_chain_depth: agentChainDepth,
               });
               logger.info('Mentions', `Agent @-mention routed via MCP add_comment: ${agent.name} (${agent.id}) on ticket ${ticket.id}`);
             } else {
@@ -423,6 +508,27 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
     return { authorType, authorId, authorName };
   }
 
+  // ─── Helper: 저장 직전 pending_user_action 재확인 (ticket be934f61 패턴,
+  // ticket 4f99a9f5로 4개 툴에 이식) ───────────────────────────────────────
+  // 아래 4개 핸들러(ask_question/answer_question/record_decision/
+  // handoff_to_agent)의 얼리 가드(isPendingUserActionBlocked, ticket
+  // 8fc94adf)는 핸들러 상단에서 1회 로드한 stale in-memory ticket 만
+  // 검사한다. 그 로드~저장 사이(resolveAuthor/hard-budget/resolveAuthorRole
+  // 등 다수의 await)에 별도 요청의 pend_ticket 이 끼어들면 stale 객체에는
+  // 반영되지 않아 얼리 가드를 그대로 통과한다. add_comment(~317행
+  // freshForGate)가 저장 직전 재조회로 이 창을 닫은 것과 동일하게, 각
+  // 핸들러의 저장 직전에 한 번 더 호출한다. agent 저작 한정 — 얼리 가드와
+  // 동일 스코프. optional chaining으로 ticket 이 동시에 삭제된 극단적
+  // 경우까지 안전하게 처리한다.
+  const freshPendingGateBlocked = async (
+    ticketId: string,
+    authorType: 'user' | 'agent',
+  ): Promise<boolean> => {
+    if (authorType !== 'agent') return false;
+    const freshForGate = await dataSource.getRepository(Ticket).findOne({ where: { id: ticketId } });
+    return !!freshForGate?.pending_user_action;
+  };
+
   // ─── ask_question ────────────────────────────────────────────────
   server.tool(
     'ask_question',
@@ -445,6 +551,21 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       const resolved = await resolveAuthor(author_type, author_id, author, extra);
       if ('error' in resolved) return err(resolved.error);
 
+      // pending_user_action gate (ticket 8fc94adf) — same short-circuit
+      // add_comment applies via applyAgentCommentPingPongGuard, ported here so
+      // a pend()'d ticket can't be advanced through a question either.
+      if (isPendingUserActionBlocked(ticket, resolved.authorType)) {
+        return ok({ suppressed: true, reason: 'pending_user_action' });
+      }
+
+      // Hard-budget guard (ticket a940d75b) — see add_comment for the full
+      // rationale. ask_question has no ping-pong guard of its own, so this is
+      // its only volume ceiling.
+      if (resolved.authorType === 'agent') {
+        const budget = await enforceAutoResponseBudget(hardBudgetDeps, ticket);
+        if (budget.blocked) return ok({ suppressed: true, reason: budget.reason });
+      }
+
       content = sanitizeHarnessMarkers(content, { logger, toolName: 'ask_question', fieldName: 'content', agentId: resolved.authorId });
 
       const commentRepo = dataSource.getRepository(Comment);
@@ -454,6 +575,13 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         callerCtx?.subagentRole, callerCtx?.subagentTicketId,
       );
       const askMetadata = mergeAuthorRoleIntoMetadata(undefined, resolvedAuthorRole);
+
+      // 저장 직전 재확인 (ticket be934f61 패턴, ticket 4f99a9f5) — 위 얼리
+      // 가드 이후의 await 들이 여는 TOCTOU 창을 닫는다. freshPendingGateBlocked 참고.
+      if (await freshPendingGateBlocked(ticket_id, resolved.authorType)) {
+        return ok({ suppressed: true, reason: 'pending_user_action' });
+      }
+
       const comment = await commentRepo.save(commentRepo.create({
         ticket_id,
         author_type: resolved.authorType,
@@ -484,6 +612,8 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
           const preview = (content || '').slice(0, 500);
           const ts = (comment.created_at instanceof Date ? comment.created_at : new Date()).toISOString();
           const userMentionRepo = dataSource.getRepository(UserMention);
+          // ticket 07402c57: same chain-depth stamp as add_comment above.
+          const agentChainDepth = await computeTicketCommentChainDepth(commentRepo, ticket.id);
           for (const m of resolvedRefs) {
             if (m.type === 'agent') {
               const agent = await dataSource.getRepository(Agent).findOne({ where: { id: m.id } });
@@ -496,6 +626,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
                 content, role_prompt: agent.role_prompt || '',
                 mention_source: m.roleShortcut ? 'role' : 'direct', role_shortcut: m.roleShortcut,
                 timestamp: ts,
+                agent_chain_depth: agentChainDepth,
               });
             } else {
               const row = await userMentionRepo.save(userMentionRepo.create({
@@ -551,6 +682,19 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       const resolved = await resolveAuthor(author_type, author_id, author, extra);
       if ('error' in resolved) return err(resolved.error);
 
+      // pending_user_action gate (ticket 8fc94adf) — see ask_question for the
+      // full rationale.
+      if (answerTicket && isPendingUserActionBlocked(answerTicket, resolved.authorType)) {
+        return ok({ suppressed: true, reason: 'pending_user_action' });
+      }
+
+      // Hard-budget guard (ticket a940d75b) — see add_comment for the full
+      // rationale.
+      if (resolved.authorType === 'agent' && answerTicket) {
+        const budget = await enforceAutoResponseBudget(hardBudgetDeps, answerTicket);
+        if (budget.blocked) return ok({ suppressed: true, reason: budget.reason });
+      }
+
       content = sanitizeHarnessMarkers(content, { logger, toolName: 'answer_question', fieldName: 'content', agentId: resolved.authorId });
 
       const callerCtx = getCallerAgent(extra);
@@ -559,6 +703,13 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         callerCtx?.subagentRole, callerCtx?.subagentTicketId,
       );
       const answerMetadata = mergeAuthorRoleIntoMetadata(undefined, resolvedAuthorRole);
+
+      // 저장 직전 재확인 (ticket be934f61 패턴, ticket 4f99a9f5) — 위 얼리
+      // 가드 이후의 await 들이 여는 TOCTOU 창을 닫는다. freshPendingGateBlocked 참고.
+      if (await freshPendingGateBlocked(question.ticket_id, resolved.authorType)) {
+        return ok({ suppressed: true, reason: 'pending_user_action' });
+      }
+
       const answer = await commentRepo.save(commentRepo.create({
         ticket_id: question.ticket_id,
         author_type: resolved.authorType,
@@ -607,6 +758,19 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       const resolved = await resolveAuthor(author_type, author_id, author, extra);
       if ('error' in resolved) return err(resolved.error);
 
+      // pending_user_action gate (ticket 8fc94adf) — see ask_question for the
+      // full rationale.
+      if (isPendingUserActionBlocked(ticket, resolved.authorType)) {
+        return ok({ suppressed: true, reason: 'pending_user_action' });
+      }
+
+      // Hard-budget guard (ticket a940d75b) — see add_comment for the full
+      // rationale.
+      if (resolved.authorType === 'agent') {
+        const budget = await enforceAutoResponseBudget(hardBudgetDeps, ticket);
+        if (budget.blocked) return ok({ suppressed: true, reason: budget.reason });
+      }
+
       content = sanitizeHarnessMarkers(content, { logger, toolName: 'record_decision', fieldName: 'content', agentId: resolved.authorId });
 
       const commentRepo = dataSource.getRepository(Comment);
@@ -619,6 +783,13 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         references && references.length > 0 ? { references } : undefined,
         resolvedAuthorRole,
       );
+
+      // 저장 직전 재확인 (ticket be934f61 패턴, ticket 4f99a9f5) — 위 얼리
+      // 가드 이후의 await 들이 여는 TOCTOU 창을 닫는다. freshPendingGateBlocked 참고.
+      if (await freshPendingGateBlocked(ticket_id, resolved.authorType)) {
+        return ok({ suppressed: true, reason: 'pending_user_action' });
+      }
+
       const comment = await commentRepo.save(commentRepo.create({
         ticket_id,
         author_type: resolved.authorType,
@@ -980,6 +1151,22 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       const resolved = await resolveAuthor(author_type, author_id, author, extra);
       if ('error' in resolved) return err(resolved.error);
 
+      // pending_user_action gate (ticket 8fc94adf) — see ask_question for the
+      // full rationale. Blocks the whole handoff (reassignment included), same
+      // as the hard-budget guard below.
+      if (isPendingUserActionBlocked(ticket, resolved.authorType)) {
+        return ok({ suppressed: true, reason: 'pending_user_action' });
+      }
+
+      // Hard-budget guard (ticket a940d75b) — see add_comment for the full
+      // rationale. Blocks the whole handoff (reassignment included), not
+      // just the comment: an over-budget ticket should stop taking further
+      // automated actions until a human clears it.
+      if (resolved.authorType === 'agent') {
+        const budget = await enforceAutoResponseBudget(hardBudgetDeps, ticket);
+        if (budget.blocked) return ok({ suppressed: true, reason: budget.reason });
+      }
+
       content = sanitizeHarnessMarkers(content, { logger, toolName: 'handoff_to_agent', fieldName: 'content', agentId: resolved.authorId });
 
       // Snapshot the previous assignee BEFORE the swap so the handoff
@@ -1016,6 +1203,14 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         previous_assignee_name: previousAssigneeName || null,
         role: 'assignee',
       }, resolvedAuthorRole);
+
+      // 저장 직전 재확인 (ticket be934f61 패턴, ticket 4f99a9f5) — 위 얼리
+      // 가드 이후의 await 들이 여는 TOCTOU 창을 닫는다. 코멘트 저장뿐 아니라
+      // 재배정까지 함께 막는다(얼리 가드와 동일 스코프). freshPendingGateBlocked 참고.
+      if (await freshPendingGateBlocked(ticket_id, resolved.authorType)) {
+        return ok({ suppressed: true, reason: 'pending_user_action' });
+      }
+
       const comment = await commentRepo.save(commentRepo.create({
         ticket_id,
         author_type: resolved.authorType,
@@ -1026,12 +1221,24 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         metadata: JSON.stringify(handoffMetadata),
       }));
 
-      // 2. Reassign ticket. Skip the write if it would be a no-op so we
-      //    don't fire a spurious assignee_changed activity.
+      // 2. Reassign ticket. stale 엔티티 전체를 쓰는 ticketRepo.save(ticket)
+      //    대신 조건부 원자 update(ticket f63b5805, L216 ping-pong guard와
+      //    동일 패턴) — WHERE 에 pending_user_action:false 를 걸어, 바로 위
+      //    recheck(L1210) 이후 이 순간 사이의 극미 창에 사람이 pend 하면
+      //    WHERE 불일치로 재배정이 no-op(affected 0)이 되어 pend 가 보존된다.
+      //    isSameAssignee 면 원래도 쓸 필요가 없어 no-op activity 를 피한다.
+      let reassigned = false;
       if (!isSameAssignee) {
+        const updateResult = await ticketRepo.update(
+          { id: ticket.id, pending_user_action: false },
+          { assignee_id: target_agent_id, assignee: targetAgentDisplay },
+        );
+        reassigned = updateResult.affected === 1;
+      }
+
+      if (reassigned) {
         ticket.assignee_id = target_agent_id;
         ticket.assignee = targetAgentDisplay;
-        await ticketRepo.save(ticket);
 
         // v0.34: mirror the new assignee onto the assignment table so the
         // trigger loop sees it on the next activity event.
@@ -1063,6 +1270,8 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       //    subagent NOW with the handoff content rather than waiting for
       //    the next assignee-trigger cycle.
       const ts = (comment.created_at instanceof Date ? comment.created_at : new Date()).toISOString();
+      // ticket 07402c57: same chain-depth stamp as add_comment/ask_question.
+      const agentChainDepth = await computeTicketCommentChainDepth(commentRepo, ticket.id);
       activityEvents.emit('comment_mention', {
         ticket_id: ticket.id,
         comment_id: comment.id,
@@ -1075,6 +1284,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         role_prompt: targetAgent.role_prompt || '',
         mention_source: 'direct',
         timestamp: ts,
+        agent_chain_depth: agentChainDepth,
       });
       logger.info('Handoff', `Ticket ${ticket.id} handed to agent ${targetAgent.name} (${targetAgent.id}) by ${resolved.authorName}`);
 

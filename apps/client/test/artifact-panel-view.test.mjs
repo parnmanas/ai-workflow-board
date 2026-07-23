@@ -52,3 +52,33 @@ test('열림·제목 없는 대상: aria-label 이 기본값으로 폴백', () =
   const html = render({ open: true, artifact: { key: 'x', title: '' }, isMobile: false, onClose() {} });
   assert.match(html, /aria-label="Artifact 패널"/);
 });
+
+// ─── 창 크기 조절 (티켓 7815a958) ─────────────────────────────────────────────
+
+test('데스크톱·리사이즈 콜백 있음: role=separator 핸들 노출 + 폭 반영', () => {
+  const html = render({
+    open: true, artifact: null, isMobile: false, onClose() {},
+    width: 500, onResizeHandleMouseDown() {},
+  });
+  assert.match(html, /role="separator"/);
+  assert.match(html, /width:500px/);
+});
+
+test('데스크톱·리사이즈 콜백 없음: 핸들 미노출(닫기 버튼만 role=complementary 유지)', () => {
+  const html = render({ open: true, artifact: null, isMobile: false, onClose() {} });
+  assert.doesNotMatch(html, /role="separator"/);
+  assert.match(html, /role="complementary"/);
+});
+
+test('모바일: 리사이즈 콜백을 줘도 핸들 미노출(오버레이 시트는 대상 아님)', () => {
+  const html = render({
+    open: true, artifact: null, isMobile: true, onClose() {},
+    onResizeHandleMouseDown() {},
+  });
+  assert.doesNotMatch(html, /role="separator"/);
+});
+
+test('width 생략 시 기본폭(380px)으로 렌더', () => {
+  const html = render({ open: true, artifact: null, isMobile: false, onClose() {} });
+  assert.match(html, /width:380px/);
+});

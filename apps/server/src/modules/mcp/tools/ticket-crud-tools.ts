@@ -32,7 +32,7 @@ import {
   deleteCommentAttachmentsForTicket,
   validateNextTicketId,
 } from '../shared/ticket-helpers';
-import { getCallerAgent } from '../shared/session-auth';
+import { getCallerAgent, HUMAN_ONLY_UNPEND_MESSAGE } from '../shared/session-auth';
 import { isTerminalColumn, TicketArchivedError } from '../shared/archive-helpers';
 import { parseDefaultRoleAssignments, type DefaultRoleAssignments } from '../../../common/default-role-assignments-config';
 import { validateHandoffSpecInput } from '../../../common/handoff-spec-config';
@@ -385,7 +385,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       on_done_action_ids: z.array(z.string()).optional().describe('Action ids to dispatch once when this ticket lands on a terminal column (on-ticket-done hook, method "a"). The finished ticket is exposed to each Action prompt as {{ticket.*}}. enabled=false actions are skipped. Empty array clears the per-ticket binding.'),
       effort_preset: z.string().optional().describe('Abstract effort preset id (NOT a CLI flag) referencing one of the board\'s effort_presets[].id. Empty string clears (board default preset applies). Resolved against the board catalog at dispatch; agent-manager maps the matched preset onto per-CLI options.'),
       handoff_spec: HandoffSpecInputSchema.optional().describe('Cross-board handoff relay (ticket ac21a745). `{ hops: [{ target_board_id, target_column_name?, ... }] }` — on terminal-column entry HandoffService creates a follow-up on the first hop\'s board carrying this ticket\'s deliverable context and passes remaining hops down (multi-board relay). null / { hops: [] } clears the handoff.'),
-      pending_user_action: z.boolean().optional().describe('Park the ticket for user intervention. While true, TriggerLoopService drops every agent_trigger for this ticket, AgentWorkloadService.getFocusTicket skips it, and BacklogPromotionService refuses to promote into its column slot. Pair with `pending_reason` so the user can see why. Use this when a decision genuinely needs a human and would otherwise loop the ticket between System and Agent columns. Prefer the dedicated `pend_ticket` / `unpend_ticket` tools when the call is single-purpose.'),
+      pending_user_action: z.boolean().optional().describe('Set true to self-park the ticket for user intervention (same effect as pend_ticket). While true, TriggerLoopService drops every agent_trigger for this ticket, AgentWorkloadService.getFocusTicket skips it, and BacklogPromotionService refuses to promote into its column slot. Pair with `pending_reason` so the user can see why. Setting `false` to CLEAR an existing park is HUMAN ONLY — always rejected while the ticket is pending, since MCP has no authenticated user session to prove a human made that call (ticket b2e88390); clear it via the AWB web UI or REST PATCH /api/tickets/:id instead. Prefer the dedicated `pend_ticket` tool when only parking is needed.'),
       pending_reason: z.string().optional().describe('Free-text explanation rendered verbatim on the ticket detail panel\'s "User" tab. Cleared automatically when pending_user_action transitions to false.'),
     },
     async ({ ticket_id, title, description, priority, assignee, reporter, assignee_id, reporter_id, reviewer_id, role_assignments, labels, channel_ids, base_repo_resource_id, base_branch, next_ticket_id, on_done_action_ids, effort_preset, handoff_spec, pending_user_action, pending_reason }, extra: { sessionId?: string }) => {
@@ -393,6 +393,17 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       const ticket = await ticketRepo.findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Ticket not found');
       if (ticket.archived_at) return err(new TicketArchivedError(ticket.id).message);
+
+      // HUMAN ONLY (ticket b2e88390): clearing pending_user_action asserts "a
+      // human made the call" — MCP has no authenticated user session to prove
+      // that (see unpend_ticket, which always rejects for the same reason).
+      // Reject the false-flip attempt outright, before any other field in
+      // this same call is applied, so an agent can't smuggle the clear in
+      // alongside an innocuous field edit. Setting it TRUE (self-park) is
+      // unaffected — that's the normal pend_ticket path.
+      if (pending_user_action === false && ticket.pending_user_action) {
+        return err(HUMAN_ONLY_UNPEND_MESSAGE);
+      }
 
       const caller = getCallerAgent(extra);
 
@@ -526,24 +537,19 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
 
       // Pending-user-action toggle (ticket a57517be). Tracked separately so
       // the activity log says "pending" instead of being lumped into a
-      // generic `updated`. The reason / set_at / set_by trio always moves
-      // together with the boolean — flipping false clears them; flipping
-      // true stamps them from the caller / now / caller name.
+      // generic `updated`. Only a false→true (self-park) transition can
+      // reach here — the guard above already rejected true→false (the
+      // human-only clear), so `next` is always `true` whenever it differs
+      // from `oldPending`.
       const oldPending = !!ticket.pending_user_action;
       if (pending_user_action !== undefined) {
         const next = !!pending_user_action;
         if (next !== oldPending) {
           ticket.pending_user_action = next;
-          if (next) {
-            ticket.pending_set_at = new Date();
-            ticket.pending_set_by = await resolveCallerDisplayName(dataSource, caller);
-            if (pending_reason !== undefined) {
-              ticket.pending_reason = pending_reason || '';
-            }
-          } else {
-            ticket.pending_set_at = null;
-            ticket.pending_set_by = '';
-            ticket.pending_reason = '';
+          ticket.pending_set_at = new Date();
+          ticket.pending_set_by = await resolveCallerDisplayName(dataSource, caller);
+          if (pending_reason !== undefined) {
+            ticket.pending_reason = pending_reason || '';
           }
           changes.push('pending_user_action');
         } else if (next && pending_reason !== undefined && pending_reason !== ticket.pending_reason) {
@@ -611,28 +617,6 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           field_changed: otherChanges.join(', '), ticket_id: ticket.id,
           actor_id: caller?.agentId, actor_name: caller?.agentName,
         });
-      }
-
-      // Ticket a57517be finding 2: an update_ticket call that flips
-      // `pending_user_action` true → false must explicitly wake the
-      // current column's role-holders. Mirrors the dedicated
-      // `unpend_ticket` tool and the REST PATCH path — the activity row
-      // alone does not route through column-based dispatch.
-      if (
-        triggerLoopService &&
-        changes.includes('pending_user_action') &&
-        oldPending &&
-        !ticket.pending_user_action
-      ) {
-        try {
-          await triggerLoopService.dispatchCurrentColumn(
-            ticket.id, 'unpend', caller?.agentId || '',
-          );
-        } catch (e) {
-          logger.warn('MCP', 'update_ticket unpend dispatch failed (continuing)', {
-            err: String(e), ticket_id: ticket.id,
-          });
-        }
       }
 
       const updated = await loadTicketFull(dataSource, ticket.id);
@@ -711,53 +695,16 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
 
   server.tool(
     'unpend_ticket',
-    'Clear a ticket\'s `pending_user_action` flag. Wakes the dispatch path back up — the focus selector reconsiders the ticket and the next column move (or supervisor re-push) triggers the relevant role holders. Use after the human decision is recorded or after a follow-up ticket has been filed and the original ticket can proceed.',
+    'HUMAN ONLY — this call always rejects over MCP. Clearing a ticket\'s `pending_user_action` flag ' +
+    'asserts "a human made the call"; MCP is an agent-only connection surface with no authenticated ' +
+    'user session to prove that (ticket b2e88390). A human clears the park from the AWB web UI ' +
+    '(ticket panel → User tab → Resume) or an authenticated REST call to PATCH /api/tickets/:id — ' +
+    'never this tool. If a human already left their answer as a comment, do not call this: stop and ' +
+    'wait, the dispatch loop wakes you once they (or an operator) unpend it.',
     {
-      ticket_id: z.string().describe('Ticket ID to unpark'),
+      ticket_id: z.string().describe('Ticket ID (unused — this call always rejects; see tool description)'),
     },
-    async ({ ticket_id }, extra: { sessionId?: string }) => {
-      const ticketRepo = dataSource.getRepository(Ticket);
-      const ticket = await ticketRepo.findOne({ where: { id: ticket_id } });
-      if (!ticket) return err('Ticket not found');
-      if (ticket.archived_at) return err(new TicketArchivedError(ticket.id).message);
-      const caller = getCallerAgent(extra);
-      const wasPending = !!ticket.pending_user_action;
-      ticket.pending_user_action = false;
-      ticket.pending_reason = '';
-      ticket.pending_set_at = null;
-      ticket.pending_set_by = '';
-      await ticketRepo.save(ticket);
-      if (wasPending) {
-        await activityService.logActivity({
-          entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
-          field_changed: 'pending_user_action',
-          old_value: 'true', new_value: 'false',
-          ticket_id: ticket.id,
-          actor_id: caller?.agentId, actor_name: caller?.agentName,
-        });
-        // Ticket a57517be finding 2: clearing the flag must explicitly wake
-        // the current column's role-holders. The `pending_user_action` field
-        // activity above does NOT route through column-based dispatch (and
-        // even if it did, `_handleActivity`'s focus-selector gate would still
-        // need the flag flipped first — which it now is). Goes through the
-        // focus selector inside `_emitTrigger` so if the agent is already
-        // focused on another ticket, this stays silent and the focus model
-        // decides when this ticket comes back into rotation.
-        if (triggerLoopService) {
-          try {
-            await triggerLoopService.dispatchCurrentColumn(
-              ticket.id, 'unpend', caller?.agentId || '',
-            );
-          } catch (e) {
-            logger.warn('MCP', 'unpend_ticket dispatch failed (continuing)', {
-              err: String(e), ticket_id: ticket.id,
-            });
-          }
-        }
-      }
-      const updated = await loadTicketFull(dataSource, ticket.id);
-      return ok(updated);
-    }
+    async () => err(HUMAN_ONLY_UNPEND_MESSAGE)
   );
 
   server.tool(

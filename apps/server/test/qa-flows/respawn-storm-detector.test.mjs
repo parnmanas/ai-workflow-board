@@ -43,11 +43,12 @@ let subCounter = 0;
 async function seedSubagent(subRepo, {
   workspaceId, ticketId, role, startedAt, endedAt = null,
   exitCode = null, signal = null, durationMs = null, lineCount = 0,
+  agentId = 'agent-fixture',
 }) {
   subCounter += 1;
   return subRepo.save(subRepo.create({
     subagent_id: `sub-fixture-${subCounter}-${Math.floor(startedAt.getTime())}`,
-    agent_id: 'agent-fixture',
+    agent_id: agentId,
     workspace_id: workspaceId,
     kind: 'ticket',
     session_key: `${ticketId}:${role}`,
@@ -122,24 +123,38 @@ test('RespawnStormDetectorService — storm halt + false-positive regression + t
   const MIN = 60_000;
 
   // Seed N deaths for a (ticket,'assignee') spread across the last ~25 min.
-  async function seedDeaths(ticketId, { count, durationMs, exitCode = 143 }) {
+  // `agentIds` (optional) assigns a distinct agent_id per index (cycled) so
+  // callers can assert the detector's agent_ids aggregation; returns the
+  // saved rows so callers can read back the exact ended_at/agent_id it wrote.
+  async function seedDeaths(ticketId, { count, durationMs, exitCode = 143, agentIds = null }) {
+    const saved = [];
     for (let i = 0; i < count; i++) {
       const startedAt = new Date(now.getTime() - (25 - i * 4) * MIN);
       const endedAt = new Date(startedAt.getTime() + durationMs);
-      await seedSubagent(subRepo, {
+      const row = await seedSubagent(subRepo, {
         workspaceId: ws.id, ticketId, role: 'assignee',
         startedAt, endedAt, exitCode, durationMs,
+        ...(agentIds ? { agentId: agentIds[i % agentIds.length] } : {}),
       });
+      saved.push(row);
     }
+    return saved;
   }
+
+  // Populated by DoD-1 below; reused by the listActiveStorms test so it does
+  // not need to re-seed + re-sweep an entire second storm scenario.
+  let dod1TicketId = null;
 
   // ── DoD-1: storm reproducer ────────────────────────────────────────────
   await t.test('DoD-1: 5 quick abnormal deaths, zero progress → auto-pend + alert + activity', async () => {
-    step('Create ticket on In Progress + 5 quick (30s) exit-143 deaths');
+    step('Create ticket on In Progress + 5 quick (30s) exit-143 deaths across 2 distinct agents');
     const ticket = await createTicket(app, getDataSourceToken, {
       columnId: inProgress.id, workspaceId: ws.id, title: 'storm victim', assigneeId: alice.id,
     });
-    await seedDeaths(ticket.id, { count: 5, durationMs: 30_000 });
+    const deaths = await seedDeaths(ticket.id, {
+      count: 5, durationMs: 30_000, agentIds: ['agent-alpha', 'agent-beta'],
+    });
+    dod1TicketId = ticket.id;
 
     const beforeMsgs = countSystemMessages(await messageRepo.find({ where: { room_id: room.id } }));
 
@@ -163,6 +178,16 @@ test('RespawnStormDetectorService — storm halt + false-positive regression + t
     const payload = JSON.parse(halted[0].new_value);
     assert.equal(payload.deaths, 5, 'activity payload records the death count');
     assert.equal(payload.role, 'assignee', 'activity payload records the role');
+    assert.deepEqual(
+      [...payload.agent_ids].sort(),
+      ['agent-alpha', 'agent-beta'],
+      'activity payload records every distinct participating agent_id (ticket 3970db66)',
+    );
+    assert.equal(
+      payload.first_death_at,
+      deaths[0].ended_at.toISOString(),
+      'activity payload records the loop start (earliest death timestamp in the group)',
+    );
 
     step('Chat alert posted to the workspace room');
     const afterMsgs = await messageRepo.find({ where: { room_id: room.id } });
@@ -170,6 +195,21 @@ test('RespawnStormDetectorService — storm halt + false-positive regression + t
     const alert = afterMsgs.find(m => m.sender_type === 'system' && m.content.includes(ticket.id));
     assert.ok(alert, 'alert references the ticket');
     assert.match(alert.content, /Respawn-storm halted/, 'alert labels itself');
+  });
+
+  // ── Dashboard surface: listActiveStorms() ───────────────────────────────
+  await t.test('listActiveStorms exposes agent_ids + first_death_at for the halted ticket', async () => {
+    step('Read back the DoD-1 halted ticket via the dashboard-facing rollup');
+    const active = await detector.listActiveStorms();
+    const entry = active.find(s => s.ticket_id === dod1TicketId);
+    assert.ok(entry, 'listActiveStorms includes the DoD-1 halted ticket');
+    assert.deepEqual(
+      [...entry.agent_ids].sort(),
+      ['agent-alpha', 'agent-beta'],
+      'listActiveStorms surfaces the full participating agent_id list (ticket 3970db66)',
+    );
+    assert.ok(entry.first_death_at, 'listActiveStorms surfaces a loop-start timestamp');
+    assert.match(entry.pending_reason, /Respawn-storm/, 'pending_reason still carries the storm summary');
   });
 
   // ── DoD-1 idempotency: a second sweep does not re-pend / re-alert ────────
@@ -225,17 +265,18 @@ test('RespawnStormDetectorService — storm halt + false-positive regression + t
 
   // ── Twin detection ──────────────────────────────────────────────────────
   await t.test('Twin: 2 concurrently-live strands → respawn_twin_detected activity', async () => {
-    step('Create ticket + 2 live subagents (ended_at null) for the same role');
+    step('Create ticket + 2 live subagents (ended_at null) for the same role, 2 distinct agents');
     const ticket = await createTicket(app, getDataSourceToken, {
       columnId: inProgress.id, workspaceId: ws.id, title: 'twin echo', assigneeId: alice.id,
     });
+    const firstStrandStartedAt = new Date(now.getTime() - 3 * MIN);
     await seedSubagent(subRepo, {
       workspaceId: ws.id, ticketId: ticket.id, role: 'assignee',
-      startedAt: new Date(now.getTime() - 3 * MIN), endedAt: null,
+      startedAt: firstStrandStartedAt, endedAt: null, agentId: 'agent-twin-early',
     });
     await seedSubagent(subRepo, {
       workspaceId: ws.id, ticketId: ticket.id, role: 'assignee',
-      startedAt: new Date(now.getTime() - 1 * MIN), endedAt: null,
+      startedAt: new Date(now.getTime() - 1 * MIN), endedAt: null, agentId: 'agent-twin-late',
     });
 
     const stats = await detector.sweep(now);
@@ -247,6 +288,16 @@ test('RespawnStormDetectorService — storm halt + false-positive regression + t
     assert.equal(twinAct.length, 1, 'exactly one respawn_twin_detected activity');
     const payload = JSON.parse(twinAct[0].new_value);
     assert.equal(payload.live_count, 2, 'twin payload records the live strand count');
+    assert.deepEqual(
+      [...payload.agent_ids].sort(),
+      ['agent-twin-early', 'agent-twin-late'],
+      'twin payload records every distinct participating agent_id (ticket 3970db66)',
+    );
+    assert.equal(
+      payload.first_seen_at,
+      firstStrandStartedAt.toISOString(),
+      'twin payload records the loop start (earliest-started live strand)',
+    );
   });
 
   // ── Kill-switch: per-board enabled:false opts out ───────────────────────
@@ -272,6 +323,66 @@ test('RespawnStormDetectorService — storm halt + false-positive regression + t
       where: { ticket_id: ticket.id, action: 'respawn_storm_halted' },
     });
     assert.equal(halted, 0, 'no storm activity on a disabled board');
+  });
+
+  // ── Dashboard surface: topRespawnCounts() ───────────────────────────────
+  await t.test('topRespawnCounts includes agent_ids for a (ticket, role) group', async () => {
+    step('Create ticket + 3 quick deaths across 2 distinct agents (no auto-pend needed)');
+    const ticket = await createTicket(app, getDataSourceToken, {
+      columnId: inProgress.id, workspaceId: ws.id, title: 'top-respawns probe', assigneeId: alice.id,
+    });
+    await seedDeaths(ticket.id, {
+      count: 3, durationMs: 30_000, agentIds: ['agent-top-a', 'agent-top-b'],
+    });
+
+    const top = await detector.topRespawnCounts({ now });
+    const entry = top.find(x => x.ticket_id === ticket.id);
+    assert.ok(entry, 'topRespawnCounts includes the seeded (ticket, role) group');
+    assert.equal(entry.role, 'assignee', 'entry records the role');
+    assert.equal(entry.deaths, 3, 'entry records the death count');
+    assert.deepEqual(
+      [...entry.agent_ids].sort(),
+      ['agent-top-a', 'agent-top-b'],
+      'entry records every distinct participating agent_id (ticket 3970db66)',
+    );
+  });
+
+  // ── Dashboard surface: getSuppressionStats() ────────────────────────────
+  await t.test('getSuppressionStats aggregates halt/twin/pingpong ActivityLog rows', async () => {
+    // Delta-based: earlier sub-tests in this file already wrote real
+    // respawn_storm_halted/respawn_twin_detected rows, and this rollup is
+    // intentionally workspace-wide (v1, see service docblock) rather than
+    // ticket-scoped, so an absolute count would be order-dependent. Snapshot
+    // before seeding synthetic rows and assert the exact delta instead.
+    step('Snapshot getSuppressionStats before seeding synthetic activity rows');
+    const before = await detector.getSuppressionStats();
+
+    step('Seed 2 halts + 1 twin + 3 comment_pingpong_suppressed rows (all 3 reasons)');
+    const ticket = await createTicket(app, getDataSourceToken, {
+      columnId: inProgress.id, workspaceId: ws.id, title: 'suppression-stats probe', assigneeId: alice.id,
+    });
+    const seedActivity = (action, fieldChanged) => activityRepo.save(activityRepo.create({
+      entity_type: 'ticket', entity_id: ticket.id, action, field_changed: fieldChanged,
+      old_value: '', new_value: '{}', ticket_id: ticket.id,
+      actor_id: 'system', actor_name: 'test-seed', role: 'assignee', trigger_source: 'respawn_storm',
+    }));
+    await seedActivity('respawn_storm_halted', 'respawn_storm');
+    await seedActivity('respawn_storm_halted', 'respawn_storm');
+    await seedActivity('respawn_twin_detected', 'respawn_twin');
+    await seedActivity('comment_pingpong_suppressed', 'repeated_waiting_without_work_target');
+    await seedActivity('comment_pingpong_suppressed', 'pending_user_action');
+    await seedActivity('comment_pingpong_suppressed', 'duplicate_terminal_acknowledgement');
+
+    step('getSuppressionStats reflects the seeded delta exactly');
+    const after = await detector.getSuppressionStats();
+    assert.equal(after.respawn_storm.total_halts - before.respawn_storm.total_halts, 2, 'total_halts delta');
+    assert.equal(after.respawn_storm.total_twins - before.respawn_storm.total_twins, 1, 'total_twins delta');
+    assert.equal(after.comment_pingpong.total - before.comment_pingpong.total, 3, 'comment_pingpong.total delta');
+    for (const reason of ['repeated_waiting_without_work_target', 'pending_user_action', 'duplicate_terminal_acknowledgement']) {
+      const beforeCount = before.comment_pingpong.by_reason[reason] || 0;
+      const afterCount = after.comment_pingpong.by_reason[reason] || 0;
+      assert.equal(afterCount - beforeCount, 1, `by_reason.${reason} delta`);
+    }
   });
 });
 

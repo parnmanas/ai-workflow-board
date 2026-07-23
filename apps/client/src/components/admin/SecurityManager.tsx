@@ -10,6 +10,7 @@ import { tokens } from '../../tokens';
 import { Button, Input, Select, Modal, Card, ConfirmDialog } from '../common';
 import { relativeTime } from '../../utils/time';
 import { formatAgentDisplayName } from '../../utils/agentName';
+import { canOpenTicketOnBoard, ticketBoardPath } from '../../utils/ticketBoardLink';
 import {
   WorkspaceFolderOptions,
   initWorkspaceFolderState,
@@ -144,7 +145,7 @@ export default function SecurityManager({ workspaceId, boardId }: SecurityManage
     try {
       const [list, agentList, scheduleList] = await Promise.all([
         api.listSecurityProfiles(effectiveWorkspaceId, boardId !== undefined ? (boardId || '') : undefined),
-        api.getAgents().catch(() => []),
+        api.getAgents(effectiveWorkspaceId).catch(() => []),
         api.listSecuritySchedules(effectiveWorkspaceId, boardId !== undefined ? (boardId || '') : undefined).catch(() => []),
       ]);
       // Enrich each profile with pass_rate + worst severity from its run history.
@@ -988,6 +989,9 @@ function RunDetail({ run, onPreview }: { run: SecurityRun; onPreview: (src: stri
   // Group findings by severity, ordered critical → info.
   const grouped = SEVERITY_ORDER.map((sev) => ({ sev, items: findings.filter((f) => f.severity === sev) }))
     .filter((g) => g.items.length > 0);
+  const ticketRef = run.auto_ticket_id
+    ? { id: run.auto_ticket_id, board_id: run.board_id, workspace_id: run.workspace_id }
+    : null;
 
   return (
     <div>
@@ -997,16 +1001,23 @@ function RunDetail({ run, onPreview }: { run: SecurityRun; onPreview: (src: stri
         <span style={{ fontSize: 12, color: tokens.colors.textMuted }}>
           {findings.length} finding{findings.length === 1 ? '' : 's'} · {artifacts.length} artifact{artifacts.length === 1 ? '' : 's'}
         </span>
-        {run.auto_ticket_id && (
-          <a
-            href={run.board_id
-              ? `/ws/${run.workspace_id}/boards/${run.board_id}?ticket=${encodeURIComponent(run.auto_ticket_id)}`
-              : `/?ticket=${encodeURIComponent(run.auto_ticket_id)}`}
-            style={{ fontSize: 12, fontWeight: 600, color: tokens.colors.danger, textDecoration: 'none', border: `1px solid ${tokens.colors.danger}`, borderRadius: tokens.radii.sm, padding: '2px 8px' }}
-            title="이 실패 run 이 자동 생성한 수정 티켓으로 이동"
-          >
-            → 티켓 #{run.auto_ticket_id.slice(0, 8)}
-          </a>
+        {ticketRef && (
+          canOpenTicketOnBoard(ticketRef) ? (
+            <a
+              href={ticketBoardPath(ticketRef)}
+              style={{ fontSize: 12, fontWeight: 600, color: tokens.colors.danger, textDecoration: 'none', border: `1px solid ${tokens.colors.danger}`, borderRadius: tokens.radii.sm, padding: '2px 8px' }}
+              title="이 실패 run 이 자동 생성한 수정 티켓으로 이동"
+            >
+              → 티켓 #{ticketRef.id.slice(0, 8)}
+            </a>
+          ) : (
+            <span
+              style={{ fontSize: 12, fontWeight: 600, color: tokens.colors.textMuted, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.sm, padding: '2px 8px' }}
+              title="이 티켓이 속한 보드를 찾을 수 없어 이동할 수 없습니다"
+            >
+              티켓 #{ticketRef.id.slice(0, 8)} (보드 없음)
+            </span>
+          )
         )}
       </div>
 

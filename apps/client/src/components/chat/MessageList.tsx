@@ -7,6 +7,8 @@ import { renderMarkdown, handleMentionAwareCopy, type MentionParticipant } from 
 import { base64ToBlob, formatBytes, isImageMime, triggerBlobDownload } from './utils/attachments';
 import TicketRefCard from './TicketRefCard';
 import ArtifactRefCard from './ArtifactRefCard';
+import AgentRefCard from './AgentRefCard';
+import BoardRefCard from './BoardRefCard';
 
 // ─── MessageList ──────────────────────────────────────────────────────────────
 
@@ -342,6 +344,30 @@ export default function MessageList({ messages, participantCount, participants =
               >
                 {msg.metadata!.artifact_refs!.map((ref, idx) => (
                   <ArtifactRefCard key={`${ref.kind}:${ref.title}:${ref.commit || ''}:${idx}`} artifact={ref} />
+                ))}
+              </div>
+            )}
+            {/* F-3 (ticket 3ca88253): agent 상태 카드. 다른 refs 채널과 독립적으로
+             *  방출되므로 별도 블록으로 렌더한다. */}
+            {Array.isArray(msg.metadata?.agent_refs) && msg.metadata!.agent_refs!.length > 0 && (
+              <div
+                data-agent-refs=""
+                style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}
+              >
+                {msg.metadata!.agent_refs!.map((ref, idx) => (
+                  <AgentRefCard key={`${ref.agent_id}:${idx}`} id={ref.agent_id} name={ref.name} />
+                ))}
+              </div>
+            )}
+            {/* F-3 (ticket 3ca88253): 보드 현황 카드. 다른 refs 채널과 독립적으로
+             *  방출되므로 별도 블록으로 렌더한다. */}
+            {Array.isArray(msg.metadata?.board_refs) && msg.metadata!.board_refs!.length > 0 && (
+              <div
+                data-board-refs=""
+                style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}
+              >
+                {msg.metadata!.board_refs!.map((ref, idx) => (
+                  <BoardRefCard key={`${ref.board_id}:${idx}`} id={ref.board_id} title={ref.title} />
                 ))}
               </div>
             )}

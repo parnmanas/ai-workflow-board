@@ -9,8 +9,10 @@ import { SubagentLogLine } from './SubagentLogLine';
  * Lifecycle:
  *   - register POST  → INSERT (ended_at = null, expires_at = null)
  *   - line POSTs     → INSERT into subagent_log_lines, line_count++
- *   - end POST       → UPDATE ended_at + exit_code + signal + duration_ms,
- *                      expires_at = now + retentionMs
+ *   - end POST       → UPDATE ended_at + exit_code + signal + duration_ms +
+ *                      optional usage (input/output/cache tokens, cost,
+ *                      model — ticket 6dd3f968, validated/clamped in
+ *                      SubagentMonitorService.end), expires_at = now + retentionMs
  *   - reconcile POST → for any subagent of this agent NOT in the plugin's
  *                      live list, set ended_at + expires_at if not already.
  *                      Signal is set to 'disappeared' so the UI can tell the
@@ -22,6 +24,11 @@ import { SubagentLogLine } from './SubagentLogLine';
 @Index(['workspace_id', 'started_at'])
 @Index(['agent_id'])
 @Index(['expires_at'])
+// Ticket ef53fdf4's hard-budget token gate runs countWindowTokens on EVERY
+// dispatch attempt (not a 15s poll like AgentUsageService), filtering by
+// ticket_id + started_at — index it so a busy workspace's subagents table
+// doesn't force a full scan on that hot path.
+@Index(['ticket_id', 'started_at'])
 export class Subagent {
   // Plugin-generated UUID; not server-generated. Stored as varchar to match the
   // project-wide convention of plain string IDs (no FK metadata required).
@@ -76,6 +83,32 @@ export class Subagent {
 
   @Column({ type: 'int', default: 0 })
   line_count: number;
+
+  // Token/cost usage (ticket 6dd3f968) — populated from the `end` POST body
+  // when the agent-manager's adapter layer could extract a `CliUsageSnapshot`
+  // (Claude/DeepSeek/Codex; null for Antigravity and any pre-6dd3f968 manager
+  // build that doesn't send `usage` at all). Nullable rather than 0 so
+  // aggregation can tell "reported zero" apart from "never instrumented".
+  @Column({ type: 'int', nullable: true, default: null })
+  input_tokens: number | null;
+
+  @Column({ type: 'int', nullable: true, default: null })
+  output_tokens: number | null;
+
+  @Column({ type: 'int', nullable: true, default: null })
+  cache_read_input_tokens: number | null;
+
+  @Column({ type: 'int', nullable: true, default: null })
+  cache_creation_input_tokens: number | null;
+
+  @Column({ type: 'float', nullable: true, default: null })
+  total_cost_usd: number | null;
+
+  // Best-effort model attribution — the spawn's resolved `--model` value when
+  // known (harness/effort/agent-default precedence already resolved it before
+  // spawn), independent of whether numeric usage was captured.
+  @Column({ type: 'varchar', nullable: true, default: null })
+  usage_model: string | null;
 
   @CreateDateColumn()
   created_at: Date;

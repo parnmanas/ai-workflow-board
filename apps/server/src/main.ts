@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import 'reflect-metadata';
+import { join } from 'path';
 import compression from 'compression';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
@@ -12,6 +13,7 @@ import { LogService } from './services/log.service';
 import { preSyncPostgres } from './database/pre-sync-postgres';
 import { ensureSqljsDbHealthy, preSyncSqljsOpenIntents } from './db';
 import { applyHttpBodyParsers } from './common/http-body-parsers';
+import { applySpaFallback } from './common/spa-fallback';
 
 async function bootstrap() {
   // Runs BEFORE NestFactory so TypeORM's auto-synchronize doesn't trip on
@@ -52,7 +54,20 @@ async function bootstrap() {
   // tools/list cache (cache avoids re-serialization, gzip avoids
   // re-transmission). Threshold ignores tiny responses where the
   // compression overhead would outweigh the savings.
+  //
+  // Must be mounted BEFORE applySpaFallback below — compression patches
+  // res.write/res.end to gzip on the way out, so it only affects responses
+  // from middleware registered *after* it. Mounting it after the fallback
+  // would leave every fallback-served index.html uncompressed (ticket
+  // 7ba057fb review).
   app.use(compression({ threshold: 1024 }));
+
+  // SPA fallback for deep React Router links (e.g. /admin/workflow-health,
+  // /board/:ticketId) refreshed against a single-port deployment — see
+  // spa-fallback.ts for why this must be mounted here (before Nest finishes
+  // initializing) rather than after ServeStaticModule/app.listen(), which is
+  // where it would conceptually belong (ticket 7ba057fb).
+  applySpaFallback(app, join(__dirname, '..', '..', 'client', 'dist'));
 
   app.enableCors({
     origin: process.env.CORS_ORIGIN || true, // true = reflect request origin (dev); set CORS_ORIGIN in production

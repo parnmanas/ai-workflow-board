@@ -9,6 +9,7 @@ import type { Agent, AgentDetail, ActivityRow, AgentLiveSession, AgentManagerIns
 import { tokens } from '../tokens';
 import { formatAgentDisplayName } from '../utils/agentName';
 import { credentialFallbackCopy } from '../utils/credentialFallback';
+import { canOpenTicketOnBoard, ticketBoardPath } from '../utils/ticketBoardLink';
 import AgentFileBrowser from './AgentFileBrowser';
 import AgentSubagentsPanel from './AgentSubagentsPanel';
 import AgentMoveToWorkspaceSection from './AgentMoveToWorkspaceSection';
@@ -526,8 +527,28 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
     fontWeight: 400,
   };
 
-  const handleTaskClick = (ticketId: string) => {
-    navigate('/?ticket=' + encodeURIComponent(ticketId));
+  // Navigates to the ticket's own workspace/board rather than the legacy
+  // workspace-less `/` route — that redirect resolves its target from
+  // localStorage, which is shared across tabs and can point at whatever
+  // workspace another tab last touched (ticket dc5c0813). active_tasks
+  // doesn't carry board/workspace context, so fetch the ticket first
+  // (same "보드에서 열기" contract as ticket 7815a958).
+  const handleTaskClick = async (ticketId: string) => {
+    try {
+      const ticket = await api.getTicket(ticketId);
+      if (canOpenTicketOnBoard(ticket)) {
+        navigate(ticketBoardPath(ticket));
+      } else {
+        showToast(
+          ticket?.archived_at
+            ? 'This ticket is archived and cannot be opened on its board.'
+            : 'Could not find the board this ticket belongs to.',
+          'error',
+        );
+      }
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to load ticket', 'error');
+    }
   };
 
   return (

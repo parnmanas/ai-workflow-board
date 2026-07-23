@@ -7,6 +7,18 @@ const TARGET_RE = /(?:^|[\s`'"(])(?:apps|src|test|packages)\/[\w./-]+|\b[\w./-]+
 
 export type PingPongComment = { content?: string; metadata?: unknown; author_type?: string };
 
+// 티켓 8fc94adf — pending_user_action 게이트를 add_comment 전용이 아니라
+// ask_question/answer_question/record_decision/handoff_to_agent 도 공유하는
+// 진입 조건으로 추출. 사람이 unpend 하기 전까지 이 4개 툴도 agent 저작
+// 코멘트/핸드오프를 생성하지 못하게 막는다(user 저작은 항상 통과 — pend 해제
+// 자체가 사람의 행동이므로).
+export function isPendingUserActionBlocked(
+  ticket: { pending_user_action?: boolean },
+  authorType: string,
+): boolean {
+  return authorType === 'agent' && !!ticket.pending_user_action;
+}
+
 function metadataOf(value: unknown): Record<string, unknown> {
   if (value && typeof value === 'object') return value as Record<string, unknown>;
   if (typeof value === 'string') { try { return JSON.parse(value); } catch {} }

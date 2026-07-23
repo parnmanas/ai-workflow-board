@@ -53,6 +53,7 @@ import {
 import { findOrFail } from '../../common/find-or-fail';
 import { parseDefaultRoleAssignments, type DefaultRoleAssignments } from '../../common/default-role-assignments-config';
 import { validateHandoffSpecInput } from '../../common/handoff-spec-config';
+import { computeTicketCommentChainDepth } from '../../common/agent-chain-depth';
 
 @ApiBearerAuth('user-session')
 @ApiTags('tickets')
@@ -560,7 +561,21 @@ export class TicketsController {
     // 직렬화하고 있었다.
     const ticket = await loadTicketFull(this.dataSource, id, { commentLimit: DETAIL_COMMENT_PAGE });
     if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
-    return res.json(ticket);
+    // 채팅 ticket 아티팩트의 "보드에서 열기" 버튼(티켓 7815a958)이 쓸 board_id.
+    // Ticket 엔티티엔 board_id 컬럼이 없다(column_id 만 저장) — child/grandchild 는
+    // column_id 가 null 이라 column 을 가진 조상까지 올라간다(addComment 첨부 라우팅의
+    // resolveBoardId 와 동일 패턴). 이 REST 응답에만 붙이고 공유 loadTicketFull/MCP
+    // get_ticket 계약은 그대로 둔다.
+    let cursorColumnId = ticket.column_id as string | null;
+    let cursorParentId = ticket.parent_id as string | null;
+    while (!cursorColumnId && cursorParentId) {
+      const parent: Ticket | null = await this.ticketRepo.findOne({ where: { id: cursorParentId } });
+      if (!parent) break;
+      cursorColumnId = parent.column_id;
+      cursorParentId = parent.parent_id;
+    }
+    const board_id = cursorColumnId ? (await this.colRepo.findOne({ where: { id: cursorColumnId } }))?.board_id ?? null : null;
+    return res.json({ ...ticket, board_id });
   }
 
   // 단일 티켓(root/하위)의 커서 페이지네이션 코멘트. chat 메시지 엔드포인트
@@ -841,10 +856,14 @@ export class TicketsController {
     // `field_changed='pending_user_action'` activity row above does NOT
     // route through column-based dispatch on its own, and before this
     // flip the focus-selector + trigger-loop gates would have dropped
-    // any incidental wake-up anyway. Mirrors the MCP `unpend_ticket`
-    // tool. Focus selector inside `_emitTrigger` still applies — if the
-    // assignee is already focused on another ticket, this stays silent
-    // and the focus model decides when this ticket comes back in.
+    // any incidental wake-up anyway. This REST path is authenticated by
+    // AuthGuard (a human session) — since ticket b2e88390 it is the ONLY
+    // surface that can perform this flip; the MCP `unpend_ticket` tool
+    // (and an `update_ticket` false-flip) now reject unconditionally
+    // instead of mirroring this dispatch. Focus selector inside
+    // `_emitTrigger` still applies — if the assignee is already focused
+    // on another ticket, this stays silent and the focus model decides
+    // when this ticket comes back in.
     if (pendingChanged && oldPending && !ticket.pending_user_action) {
       try {
         await this.triggerLoop.dispatchCurrentColumn(ticket.id, 'unpend', actorId || '');
@@ -2267,6 +2286,12 @@ export class TicketsController {
       boardId = col?.board_id ?? null;
     }
 
+    // Ticket-comment analog of room-messaging.service.ts's chat chain-depth
+    // stamp (ticket 07402c57) — computed once per comment and reused across
+    // every fan-out target below, since it reflects this ticket's comment
+    // history, not the recipient.
+    const agentChainDepth = await computeTicketCommentChainDepth(this.commentRepo, ticket.id);
+
     for (const m of resolved) {
       if (m.type === 'agent') {
         const agent = await this.agentRepo.findOne({ where: { id: m.id } });
@@ -2287,6 +2312,7 @@ export class TicketsController {
           mention_source: m.roleShortcut ? 'role' : 'direct',
           role_shortcut: m.roleShortcut,
           timestamp: ts,
+          agent_chain_depth: agentChainDepth,
         });
         this.logService.info('Mentions', `Agent @-mention routed: ${agent.name} (${agent.id}) on ticket ${ticket.id}`);
       } else {

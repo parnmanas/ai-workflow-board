@@ -268,11 +268,13 @@ export function validateWorktreeProvisioningInputs(args: {
   return null;
 }
 
-// Hard cap on consecutive agent-to-agent turns within a single chat room.
-// Server stamps `agent_chain_depth` on every chat_room_message; when the depth
-// reaches the cap we record into history but stop delegating — the chain
-// resets when a user sends the next message.
-const AGENT_CHAIN_DEPTH_CAP = 3;
+// Hard cap on consecutive agent-to-agent turns within a single chat room OR
+// a single ticket's comment-mention chain. Server stamps `agent_chain_depth`
+// on every chat_room_message AND comment_mention (ticket 07402c57 ported the
+// chat-room mechanism to the ticket-comment `@[...]` mention path); when the
+// depth reaches the cap we record into history but stop delegating — the
+// chain resets once a human sends/comments next.
+export const AGENT_CHAIN_DEPTH_CAP = 3;
 
 // ticket d34075b5 — one-time comment posted when a shared warm-pool `pool_exhausted`
 // dispatch is queued for the manager-owned backoff retry (the on-demand reclaim
@@ -2135,6 +2137,24 @@ export class EventDispatcher {
           `actor=${(ev.actor_id || '').slice(0, 8) || '_'}`,
       );
       return;
+    }
+
+    // Loop guard (ticket 07402c57): server-stamped `agent_chain_depth` on an
+    // agent-authored mention reached the cap — mirrors handleChatRoomMessage's
+    // identical check. A user comment resets the chain (server recomputes
+    // depth from scratch off the comment's own author, so it never reaches
+    // the cap), so this only ever fires for genuine agent-mention ping-pong.
+    if (ev.actor_type === 'agent') {
+      const depth = typeof ev.agent_chain_depth === 'number' ? ev.agent_chain_depth : 0;
+      if (depth >= AGENT_CHAIN_DEPTH_CAP) {
+        log(
+          `Comment mention suppressed — agent_chain_depth=${depth} >= cap ${AGENT_CHAIN_DEPTH_CAP}: ` +
+            `ticket=${(ev.ticket_id || '').slice(0, 8) || '_'} ` +
+            `comment=${(ev.comment_id || '').slice(0, 8) || '_'} ` +
+            `actor=${(ev.actor_id || '').slice(0, 8) || '_'}`,
+        );
+        return;
+      }
     }
 
     const ticketId = ev.ticket_id || '';

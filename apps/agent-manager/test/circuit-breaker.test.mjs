@@ -7,6 +7,9 @@
 //   (c) An open breaker blocks dispatch (shouldBlock returns reason string).
 //   (d) reset() / resetAgent() clears the breaker.
 //   (e) After cooldown, a half-open probe is allowed through.
+//   (f) recordSuccess() (ticket b2e88390) only auto-clears a streak that
+//       hadn't tripped yet — an already-OPEN breaker stays open until a
+//       human/operator calls resetAgent() (restart_agent).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -102,6 +105,65 @@ test('reset clears the breaker', () => {
 
   cb.reset(key);
   assert.equal(cb.shouldBlock(key), null, 'after reset, dispatch is allowed');
+});
+
+// ---------------------------------------------------------------------------
+// ticket b2e88390 — a lucky success must not silently fully close a breaker
+// that already tripped and surfaced to a human via pend_ticket. recordSuccess()
+// is what the real "agent succeeded" call sites use (subagent-manager.ts,
+// ticket-session-manager.ts) — reset() itself stays available but is now
+// reserved for explicit human/operator paths (resetAgent() / restart_agent).
+// ---------------------------------------------------------------------------
+
+test('recordSuccess on a sub-threshold (not-yet-open) streak clears it — same as reset()', () => {
+  const cb = new CircuitBreaker(); // default threshold = 5
+  const key = CircuitBreaker.key('agent-1', 'ticket-1', 'assignee');
+
+  for (let i = 0; i < 4; i++) cb.record(key, 41, 'boom'); // below threshold, still closed
+  cb.recordSuccess(key);
+
+  // Streak restarted — 4 more failures still don't open it.
+  for (let i = 1; i <= 4; i++) {
+    const r = cb.record(key, 41, 'boom');
+    assert.equal(r.justOpened, false, `post-recordSuccess failure ${i} should not open the breaker`);
+  }
+  assert.equal(cb.shouldBlock(key), null, 'still not blocked — only 4 consecutive since recordSuccess');
+});
+
+test('recordSuccess on a key with no entry at all is a harmless no-op', () => {
+  const cb = new CircuitBreaker();
+  const key = CircuitBreaker.key('agent-1', 'never-failed', 'assignee');
+  assert.doesNotThrow(() => cb.recordSuccess(key));
+  assert.equal(cb.shouldBlock(key), null);
+});
+
+test('recordSuccess on an OPEN breaker does NOT clear it — stays open for a human/operator', () => {
+  const cb = new CircuitBreaker({ threshold: 2, cooldownMs: 60_000 });
+  const key = CircuitBreaker.key('agent-1', 'ticket-1', 'assignee');
+
+  cb.record(key, 0);
+  cb.record(key, 0); // opens — this is what pend_ticket fired against
+  assert.ok(cb.shouldBlock(key), 'open right after threshold');
+
+  // A half-open probe (or a mid-run comment) succeeds...
+  cb.recordSuccess(key);
+
+  // ...but the breaker is still open — one success is not a human sign-off.
+  assert.ok(cb.shouldBlock(key), 'still blocked after a single success — recordSuccess must not auto-close an open breaker');
+  assert.equal(cb.getOpenBreakers().length, 1, 'entry is still tracked as open');
+});
+
+test('recordSuccess on an OPEN breaker leaves it clearable only via resetAgent (operator path)', () => {
+  const cb = new CircuitBreaker({ threshold: 2, cooldownMs: 60_000 });
+  const key = CircuitBreaker.key('agent-1', 'ticket-1', 'assignee');
+
+  cb.record(key, 0);
+  cb.record(key, 0); // opens
+  cb.recordSuccess(key); // probe succeeded, stays open (see prior test)
+  assert.ok(cb.shouldBlock(key));
+
+  cb.resetAgent('agent-1'); // the restart_agent (human/operator) path
+  assert.equal(cb.shouldBlock(key), null, 'operator resetAgent() still fully closes it');
 });
 
 test('resetAgent clears all entries for that agent', () => {

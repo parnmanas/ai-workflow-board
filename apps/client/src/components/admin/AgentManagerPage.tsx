@@ -628,22 +628,6 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
                   </dd>
                 </div>
               )}
-              <div style={{ gridColumn: '1 / -1' }}>
-                <dt style={{ color: tokens.colors.textMuted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                  Live worktrees ({inst.active_worktrees?.length ?? 0})
-                </dt>
-                <dd style={{ margin: '4px 0 0' }}>
-                  {inst.active_worktrees && inst.active_worktrees.length > 0 ? (
-                    <WorktreeStatusList entries={inst.active_worktrees} />
-                  ) : (
-                    <span style={{ color: tokens.colors.textMuted, fontSize: 12, fontStyle: 'italic' }}>
-                      {inst.active_worktrees
-                        ? 'no live worktrees (all slots idle / worktree isolation off)'
-                        : 'no worktree telemetry (pre-worktree-visibility manager)'}
-                    </span>
-                  )}
-                </dd>
-              </div>
               {/* ticket d34075b5 — durable, server-visible dispatch-block signal.
                   Cumulative per-reason count of dispatches dropped at the manager's
                   worktree / push-credential preflight gate (a shared-pool

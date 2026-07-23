@@ -29,11 +29,13 @@ import {
   ADAPTER_CAPABILITIES,
   type CliAdapter,
   type CliProgressEvent,
+  type CliUsageSnapshot,
   buildModelChain,
   describeHarness,
   partitionHarness,
   selectEffortSlice,
 } from './cli-adapters/base.js';
+import { accumulateUsage } from './cli-usage-accumulator.js';
 import { CircuitBreaker } from './circuit-breaker.js';
 import { writeMcpConfig } from './managed-agent-store.js';
 import { classifyCliError, isFallbackEligible } from './cli-error-signatures.js';
@@ -47,6 +49,7 @@ import {
   type ProcNode,
 } from './process-tree.js';
 import {
+  hasAuditTrailSince,
   postChatRoomMessage,
   postSilentExitSystemComment,
   type AwbConfig,
@@ -81,14 +84,20 @@ const CHAT_PROGRESS_MAX_PER_SESSION = 30;
 const CHAT_PROGRESS_DETAIL_MAX = 80;
 const CHAT_PROGRESS_LABEL_MAX = 40;
 /** MCP tool name suffixes that count as the subagent leaving a real
- *  ticket comment. Matched by suffix so a future MCP prefix rename
- *  doesn't break detection. Keep aligned with the ticket-session list. */
+ *  audit-trail entry. Matched by suffix so a future MCP prefix rename
+ *  doesn't break detection. Keep aligned with the ticket-session list.
+ *  `move_ticket` resolves to a system "moved from X to Y" Comment row
+ *  instead of an agent-authored one (ticket 2fd06686) — a one-shot that
+ *  only moved the ticket is not "silent". This is a fast-path optimization
+ *  only — `#postSilentExitFallback`'s caller re-verifies against the
+ *  server when this local scan comes up empty. */
 const TICKET_COMMENT_TOOL_SUFFIXES = [
   'add_comment',
   'ask_question',
   'answer_question',
   'record_decision',
   'handoff_to_agent',
+  'move_ticket',
 ];
 
 /** Minimal identity shape the dedup scan reads off both live SubagentRecords
@@ -254,6 +263,13 @@ interface SubagentRecord {
    *  fallback when this is true keeps clean cycles quiet. */
   commentSent: boolean;
   tap: SubagentTapHandle | null;
+  /** Running token/cost total accumulated across every `result` /
+   *  `turn.completed` stdout line observed for this run (ticket 6dd3f968).
+   *  A one-shot normally sees at most one such event, but accumulation is
+   *  the same fold used by persistent sessions — see `#captureUsageLine`.
+   *  Plain data (survives #persist, unlike the function-valued fields
+   *  below), sent on the tap's `end()` call in the exit handler. */
+  usage: CliUsageSnapshot | null;
   /** 폴백 모델 체인 (ticket 61f4dd18). head=주 모델(null=CLI 기본), 이후는
    *  우선순위 순 폴백. 길이 1 이면 폴백 없음. */
   modelChain?: (string | null)[];
@@ -770,6 +786,7 @@ export class SubagentManager implements SubagentManagerContract {
         tailLines: [],
         commentSent: false,
         tap: null,
+        usage: null,
         modelChain,
         chainAttempt,
         respawnSpec: spec,
@@ -853,7 +870,15 @@ export class SubagentManager implements SubagentManagerContract {
           /* best-effort */
         }
       }
-      record.tap?.end({ exit_code: code, signal });
+      // Model attribution rides on `usage` only when we also have real numeric
+      // usage to report — an all-null usage object solely to carry a model
+      // string isn't worth the wire noise (ticket 6dd3f968).
+      const resolvedModel = record.modelChain?.[record.chainAttempt ?? 0] ?? null;
+      record.tap?.end({
+        exit_code: code,
+        signal,
+        usage: record.usage ? { ...record.usage, model: resolvedModel } : undefined,
+      });
 
       // Answer-posting, circuit-breaker and silent-exit fallback. Extracted to
       // a named method so it can be unit-tested without forking a real child.
@@ -893,6 +918,19 @@ export class SubagentManager implements SubagentManagerContract {
    */
   async _handleOneshotExit(record: SubagentRecord, code: number | null): Promise<void> {
     const pid = record.pid;
+
+    // Grace re-verification (ticket 2fd06686): `_scanForCommentTool`'s local
+    // scan of the CLI's own stdout can race the child's `exit` event, and
+    // before this ticket never recognized `move_ticket` as audit trail
+    // either. Before trusting a "nothing seen" verdict, re-check the
+    // ticket's ACTUAL comments (server-side ground truth, includes the
+    // system row a `move_ticket` call generates) for anything created since
+    // this spawn started. Corrects `record.commentSent` in place so every
+    // downstream reader below (model-fallback gate, circuit breaker, the
+    // fallback dispatch itself) sees the same corrected verdict.
+    if (!record.commentSent && record.ticket_id) {
+      record.commentSent = await hasAuditTrailSince(this.#config, record.ticket_id, record.started_at);
+    }
 
     // Classification of the aggregated one-shot result. Defaults to non-fatal;
     // only set for non-NATIVE_MCP adapters (codex / antigravity) whose stdout
@@ -1051,13 +1089,15 @@ export class SubagentManager implements SubagentManagerContract {
       const role = record.role || '';
       const cbKey = CircuitBreaker.key(record.agent_id, record.ticket_id, role);
       // ticket 7e7e23bf: a subagent that surfaced an audit-trail comment did
-      // real work; a post-hoc non-zero exit is NOT a failure to count. Reset
-      // the breaker even on a non-zero exit — UNLESS the tail carries a
+      // real work; a post-hoc non-zero exit is NOT a failure to count. Record
+      // the success even on a non-zero exit — UNLESS the tail carries a
       // non-retryable fatal signature (usage-limit / auth), where the immediate
       // pend still protects against burning respawns on a hard external block
-      // (ticket ac958c06).
+      // (ticket ac958c06). recordSuccess() (not reset()) so an already-OPEN
+      // breaker stays open for a human/operator to close (ticket b2e88390) —
+      // it only fully clears a streak that hadn't tripped yet.
       if (record.commentSent && !errClass.nonRetryable) {
-        this.circuitBreaker.reset(cbKey);
+        this.circuitBreaker.recordSuccess(cbKey);
       } else if (
         !record.commentSent ||
         !CircuitBreaker.isTransientExit(code) ||
@@ -1248,6 +1288,7 @@ export class SubagentManager implements SubagentManagerContract {
           this.#bufferTail(record, line);
           this._scanForCommentTool(record, line);
           this.#maybeEmitChatProgress(record, line);
+          this.#captureUsageLine(record, line);
         }
         log(`${tagFor(record)} ${line}`);
       });
@@ -1263,14 +1304,12 @@ export class SubagentManager implements SubagentManagerContract {
     }
   }
 
-  /** Append a stdout/stderr line to the silent-exit tail ring. Plain-text
-   *  lines are kept verbatim; stream-json events are condensed to a short
-   *  prose summary (assistant text / tool_use / result subtype+error) rather
-   *  than dropped — the one-shot path runs `--output-format json`, so on a
-   *  failed turn the only output is a single JSON result line; dropping it
-   *  left the silent-exit fallback with an empty tail (ticket ac958c06).
-   *  Noise events summarize to null and are skipped. Bounded to
-   *  TAIL_RING_MAX_LINES. */
+  /** stdout/stderr 한 줄을 silent-exit tail 링에 추가한다. 일반 텍스트 줄은
+   *  그대로 보존하고, stream-json 이벤트는 버리지 않고 짧은 프로즈 요약으로
+   *  압축한다(assistant 텍스트 / tool_use / result subtype+error) — stream-json
+   *  모드에서는 stdout의 거의 모든 줄이 JSON이라, 요약 없이 버리면 silent-exit
+   *  fallback의 tail이 거의 항상 비어 있었다(ticket ac958c06). 노이즈 이벤트는
+   *  null로 요약되어 스킵된다. TAIL_RING_MAX_LINES로 상한이 걸린다. */
   #bufferTail(record: SubagentRecord, line: string): void {
     const trimmed = line.trim();
     if (!trimmed) return;
@@ -1281,6 +1320,25 @@ export class SubagentManager implements SubagentManagerContract {
     }
     record.tailLines.push(entry);
     while (record.tailLines.length > TAIL_RING_MAX_LINES) record.tailLines.shift();
+  }
+
+  /** Best-effort per-line usage capture (ticket 6dd3f968). Only result-shaped
+   *  lines carry usage, so this re-parses via the SAME adapter that spawned
+   *  the child (never claude's parser against a codex line, etc.) and folds
+   *  any snapshot into the record's running total. Usage is a nice-to-have
+   *  observability signal, never a dispatch/comment/circuit-breaker input —
+   *  any failure here is caught and logged, never rethrown. */
+  #captureUsageLine(record: SubagentRecord, line: string): void {
+    try {
+      const adapter = this.#adapterFor(record.cli_type);
+      const parsed = adapter.parseStdoutLine(line);
+      if (!parsed.isResult || !parsed.raw) return;
+      const snapshot = adapter.extractUsage(parsed.raw);
+      if (!snapshot) return;
+      record.usage = accumulateUsage(record.usage, snapshot);
+    } catch (err: any) {
+      log(`[subagent] usage capture failed pid=${record.pid}: ${err?.message ?? err}`);
+    }
   }
 
   /** Watch parsed JSONL for successful Claude or Codex MCP calls that create

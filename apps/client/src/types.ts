@@ -1579,9 +1579,22 @@ export interface ChatMessageArtifactRef {
   commit?: string;  // 커밋 SHA
   url?: string;     // 배포 base_url 등
 }
+// F-3 (ticket 3ca88253): agent/board 상태 카드 ref. server 의 stream-events.ts 와
+// 동일 shape — id(+표시용 라벨)만 싣고, 카드 클릭 시 클라이언트가 최신 상세를 다시
+// fetch 한다(TicketRefCard/TicketArtifact 와 동일 패턴).
+export interface ChatMessageAgentRef {
+  agent_id: string;
+  name?: string;
+}
+export interface ChatMessageBoardRef {
+  board_id: string;
+  title?: string;
+}
 export interface ChatRoomMessageMetadata {
   ticket_refs?: ChatMessageTicketRef[];
   artifact_refs?: ChatMessageArtifactRef[];
+  agent_refs?: ChatMessageAgentRef[];
+  board_refs?: ChatMessageBoardRef[];
 }
 
 export interface ChatRoomMessageItem {
@@ -2058,4 +2071,105 @@ export interface AgentMovePreview {
   cross_ref_policy: AgentCrossRefPolicy;
   /** false for a dry-run preview, true once the transaction has committed. */
   committed: boolean;
+}
+
+// ─── Workflow Health (ticket 3970db66 — /admin/workflow-health/*) ──────────
+
+export interface WorkflowHealthActiveStorm {
+  ticket_id: string;
+  title: string;
+  board_id: string;
+  board_name: string;
+  workspace_id: string;
+  pending_reason: string;
+  pending_set_at: string | null;
+  /** Participating agent_ids, read back from the halt event's snapshot. */
+  agent_ids: string[];
+  /** Loop 시작점 — 이 스톰의 최초 사망 시각(halt 이벤트 스냅샷에서 역산). */
+  first_death_at: string | null;
+}
+
+export interface WorkflowHealthRespawnCount {
+  ticket_id: string;
+  title: string;
+  role: string;
+  board_id: string;
+  board_name: string;
+  deaths: number;
+  agent_ids: string[];
+}
+
+export interface WorkflowHealthSuppressionStats {
+  respawn_storm: { total_halts: number; total_twins: number };
+  comment_pingpong: {
+    total: number;
+    /** Keyed by reason: repeated_waiting_without_work_target | pending_user_action | duplicate_terminal_acknowledgement */
+    by_reason: Record<string, number>;
+  };
+}
+
+export interface WorkflowHealthTicketUsage {
+  ticket_id: string;
+  ticket_title: string;
+  input_tokens: number;
+  output_tokens: number;
+  total_cost_usd: number;
+  runs: number;
+}
+
+/** Token/cost usage rollup (ticket 6dd3f968) — see server AgentUsageService.
+ *  All money/token figures are a LOWER BOUND: only Claude-family CLIs report
+ *  a dollar cost (Codex has no cost concept, DeepSeek's is deliberately
+ *  nulled — see `coverage` / `priced_runs` to gauge how much of the window
+ *  is actually instrumented). `null` on the two derived fields means "no
+ *  priced runs in this window to estimate from", not zero. */
+export interface WorkflowHealthTokenUsage {
+  window_minutes: number;
+  coverage: { runs_with_usage: number; runs_total: number };
+  totals: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_input_tokens: number;
+    cache_creation_input_tokens: number;
+    total_cost_usd: number;
+  };
+  priced_runs: number;
+  avg_cost_per_run_usd_priced_only: number | null;
+  top_tickets: WorkflowHealthTicketUsage[];
+  suppressed_attempts_in_window: number;
+  estimated_saved_usd: number | null;
+}
+
+export interface WorkflowHealthRollup {
+  generated_at: string;
+  window_minutes: number;
+  active_storms: WorkflowHealthActiveStorm[];
+  top_respawns: WorkflowHealthRespawnCount[];
+  stale_wait_alerts: number;
+  pending_tickets: number;
+  avg_cycle_time_ms: number | null;
+  qa_pass_trend: { passed: number; failed: number; error: number; total: number };
+  suppression_stats: WorkflowHealthSuppressionStats;
+  // null when the usage sub-query itself failed (controller-level defensive
+  // catch) — the tile must render an empty/unavailable state, not a zeroed one.
+  token_usage: WorkflowHealthTokenUsage | null;
+}
+
+/** All-time/장기 구간 누적 사용량 (ticket 8d5c6f5d 설계 → 090abc77 노출) — server
+ *  AgentUsageService.getLongTermUsageStats. `from: null`은 하한 없음(all-time)을
+ *  뜻한다. 롤업(영속) + 아직 reap 안 된 live 구간을 day-aligned로 합산한 값이라
+ *  WorkflowHealthTokenUsage(윈도우)와 달리 마진/gap이 없다. */
+export interface WorkflowHealthLongTermUsage {
+  from: string | null;
+  to: string;
+  coverage: { runs_with_usage: number; runs_total: number };
+  totals: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_input_tokens: number;
+    cache_creation_input_tokens: number;
+    total_cost_usd: number;
+  };
+  priced_runs: number;
+  avg_cost_per_run_usd_priced_only: number | null;
 }

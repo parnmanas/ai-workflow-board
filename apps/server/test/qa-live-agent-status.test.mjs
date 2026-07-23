@@ -96,9 +96,15 @@ test('_emit merges QA tasks into the wire active_tasks, tagged kind:qa, after th
   // … and one QA run in the QA registry for the same agent.
   service.qaTasks.set('agentX', new Map([['run1', { ticket_id: 'run1', ticket_title: 'Scenario A', claimed_at: now, kind: 'qa' }]]));
 
-  const seen = captureAgentStatus(activityEvents, () =>
-    service._emit({ agent_id: 'agentX', is_online: true, last_seen_at: now, active_tasks: ticketMap }),
-  );
+  // ticket 2de718d3: _emit's ticket-task filter now delegates to
+  // hasLiveRoleStrand, which re-derives freshness from `state` rather than
+  // trusting the map handed to it — exactly like every real caller (setCurrentTask
+  // / clearCurrentTask / _sweep all `state.set` before `_emit`). Seed `state` the
+  // same way so this direct _emit() call is representative.
+  const status = { agent_id: 'agentX', is_online: true, last_seen_at: now, active_tasks: ticketMap };
+  service.state.set('agentX', status);
+
+  const seen = captureAgentStatus(activityEvents, () => service._emit(status));
 
   assert.equal(seen.length, 1, 'exactly one agent_status emitted');
   const list = seen[0].active_tasks;

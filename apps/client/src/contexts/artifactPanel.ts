@@ -54,3 +54,17 @@ export function artifactPanelReducer(
       return state;
   }
 }
+
+/**
+ * Artifact 패널 폭 조절(티켓 7815a958) — 순수 clamp 로직만 여기 둔다. 드래그
+ * 이벤트·localStorage I/O 는 컴포넌트(ArtifactPanel.tsx)가 담당(컨테이너/뷰 분리 선례).
+ */
+export const ARTIFACT_PANEL_MIN_WIDTH = 280;
+export const ARTIFACT_PANEL_MAX_WIDTH = 720;
+export const ARTIFACT_PANEL_DEFAULT_WIDTH = 380;
+
+/** 유효하지 않은 값(NaN·Infinity 등)은 기본폭으로, 그 외엔 min/max 사이로 clamp. */
+export function clampArtifactPanelWidth(width: number): number {
+  if (!Number.isFinite(width)) return ARTIFACT_PANEL_DEFAULT_WIDTH;
+  return Math.min(ARTIFACT_PANEL_MAX_WIDTH, Math.max(ARTIFACT_PANEL_MIN_WIDTH, Math.round(width)));
+}

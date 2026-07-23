@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { api, setActiveWorkspaceId } from '../api';
+import { api, setActiveWorkspaceId, bootstrapActiveWorkspaceId } from '../api';
 import { User } from '../types';
 
 interface WorkspaceEntry {
@@ -60,8 +60,11 @@ function resolveWorkspaceState(workspaces: WorkspaceEntry[], userStatus: string)
   }
 
   // Multiple workspaces — show picker
-  // Restore previously selected workspace if still in the list
-  const saved = localStorage.getItem('currentWorkspaceId');
+  // Restore previously selected workspace if still in the list. Prefer this
+  // tab's own URL/sessionStorage over the cross-tab localStorage default —
+  // otherwise a legacy route redirect (e.g. `/`) resolves to whatever
+  // workspace another tab last touched (ticket dc5c0813).
+  const saved = bootstrapActiveWorkspaceId();
   if (saved && workspaces.some(ws => ws.id === saved)) {
     return { currentWorkspaceId: saved, availableWorkspaces: workspaces, isAuthenticated: true };
   }

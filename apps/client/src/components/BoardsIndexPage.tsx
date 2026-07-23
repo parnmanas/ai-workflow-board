@@ -88,6 +88,16 @@ export default function BoardsIndexPage() {
     }
   };
 
+  // Workspace 전환 시 이전 workspace 의 archived boards 캐시가 남아있지
+  // 않도록 지운다. 패널이 열려 있었다면 새 workspace 기준으로 즉시 다시
+  // 불러오고, 닫혀 있었다면 다음 확장 때 loadArchivedBoards 의
+  // length===0 가드가 새로 불러오게 둔다 (티켓 28258c75).
+  useEffect(() => {
+    setArchivedBoards([]);
+    if (showArchived) loadArchivedBoards();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wsId]);
+
   const handleRestore = async (board: any) => {
     try {
       await api.restoreBoard(board.id);

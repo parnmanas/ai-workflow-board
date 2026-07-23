@@ -8,7 +8,11 @@
 //   ② the circuit-breaker counts one-shot failures and, once open, blocks
 //      re-spawn and pends the ticket;
 //   ③ a codex usage-limit (non-retryable) opens the breaker on the FIRST
-//      failure rather than after the full threshold.
+//      failure rather than after the full threshold;
+//   ④ (ticket b2e88390) a successful probe against an already-OPEN breaker
+//      does NOT auto-close it — only an operator's resetAgent()
+//      (restart_agent) may fully clear a breaker that already pended a
+//      ticket for a human.
 //
 // We mock globalThis.fetch to capture both the MCP tool surface (add_comment /
 // pend_ticket go through the JSON-RPC /mcp endpoint) and the REST silent-exit
@@ -26,6 +30,7 @@ function makeConfig() {
   return {
     url: 'http://127.0.0.1:0',
     apiKey: 'test-key',
+    silentExitVerifyDelayMs: 0, // skip the real grace delay (ticket 2fd06686) in tests
     delegation: { enabled: true, maxConcurrent: 10, ttlMinutes: 15 },
   };
 }
@@ -90,6 +95,22 @@ function codexMcpToolCompletedLine(tool) {
   });
 }
 
+// Claude `--print --output-format stream-json`가 내는 turn별 assistant
+// 이벤트로 MCP tool_use를 담고 있다 — ticket 3feaf80f의 수정이 oneshot에서
+// 실제로 내보내게 만드는 shape이다(이전에는 `--output-format json`이라 stdout에
+// 최종 `result` 한 줄만 나왔고, one-shot 실행에서는 `assistant`/tool_use가
+// 전혀 나타나지 않았다).
+function claudeAssistantToolUseLine(toolName) {
+  return JSON.stringify({
+    type: 'assistant',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'tool_use', id: 'tu-1', name: toolName, input: {} }],
+    },
+    session_id: 'sess-1',
+  });
+}
+
 let originalFetch;
 let mcpToolCalls; // names of tools/call invoked over /mcp
 let restPosts; // { url, body } for non-MCP REST endpoints
@@ -132,6 +153,43 @@ afterEach(() => {
 });
 
 const silentExit = () => restPosts.find((r) => r.url.endsWith('/silent-exit-comment'));
+
+/** Routes the GET ticket-context fetch (`fetchTicketContext` /
+ *  `hasAuditTrailSince`) to `ticketPayload` while keeping the same /mcp +
+ *  REST recording behavior as the shared beforeEach handler. */
+function mockTicketFetch(ticketPayload) {
+  globalThis.fetch = async (url, init) => {
+    const u = String(url);
+    const method = init?.method || 'GET';
+    if (u.endsWith('/mcp')) {
+      if (method === 'DELETE') return new Response('{}', { status: 200 });
+      const body = init?.body ? JSON.parse(init.body) : {};
+      if (body.method === 'initialize') {
+        return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }), {
+          status: 200,
+          headers: { 'mcp-session-id': 'sid-test', 'content-type': 'application/json' },
+        });
+      }
+      if (body.method === 'tools/call') {
+        mcpToolCalls.push(body.params?.name);
+        return new Response(
+          JSON.stringify({ jsonrpc: '2.0', id: 2, result: { content: [{ type: 'text', text: '{}' }] } }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return new Response('', { status: 202 });
+    }
+    const body = init?.body ? JSON.parse(init.body) : null;
+    restPosts.push({ url: u, method, body });
+    if (u.includes('/api/agent/tickets/') && !u.endsWith('/silent-exit-comment')) {
+      return new Response(JSON.stringify(ticketPayload), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response('{}', { status: 201, headers: { 'content-type': 'application/json' } });
+  };
+}
 
 test('① codex usage-limit exit 1: NO agent add_comment, only system silent-exit', async () => {
   const mgr = new SubagentManager(makeConfig());
@@ -250,12 +308,13 @@ test('FP regression: clean exit-0 answer mentioning 403/quota → agent comment,
   assert.equal(cb.shouldBlock(key), null, 'breaker untouched by a successful answer');
 });
 
-test('successful answer resets a partially-tripped breaker', async () => {
+test('successful answer resets a NOT-yet-open (partially-tripped) breaker', async () => {
   const cb = new CircuitBreaker();
   const mgr = new SubagentManager(makeConfig(), cb);
   const key = CircuitBreaker.key('agent-rolf', 'ticket-loop', 'assignee');
 
-  // Two bare-codex-error failures (retryable) — count toward threshold.
+  // Two bare-codex-error failures (retryable) — count toward threshold, but
+  // 2 < the default threshold of 5, so the breaker never actually opened.
   for (let i = 0; i < 2; i++) {
     const rec = makeCodexRecord({
       outLines: [JSON.stringify({ type: 'turn.failed', error: { message: 'stream disconnected' } })],
@@ -264,10 +323,45 @@ test('successful answer resets a partially-tripped breaker', async () => {
   }
   assert.equal(cb.size, 1, 'breaker is tracking the key');
 
-  // Now a clean success → reset clears the key.
+  // Now a clean success → recordSuccess() clears the (never-open) key, same
+  // as the old unconditional reset() did.
   const ok = makeCodexRecord({ outLines: codexCleanLines('Done.') });
   await mgr._handleOneshotExit(ok, 0);
   assert.equal(cb.shouldBlock(key), null);
+});
+
+test('ticket b2e88390: a successful answer does NOT auto-close an already-OPEN breaker', async () => {
+  // Contrast with the test above: here the breaker already tripped (crossed
+  // threshold) and pend_ticket already fired for a human. A single lucky
+  // half-open probe succeeding must not silently undo that — only an
+  // operator's resetAgent() (restart_agent) may fully close it.
+  const cb = new CircuitBreaker({ threshold: 2, cooldownMs: 60_000 });
+  const mgr = new SubagentManager(makeConfig(), cb);
+  const key = CircuitBreaker.key('agent-rolf', 'ticket-loop', 'assignee');
+
+  for (let i = 0; i < 2; i++) {
+    const rec = makeCodexRecord({
+      outLines: [JSON.stringify({ type: 'turn.failed', error: { message: 'stream disconnected' } })],
+    });
+    await mgr._handleOneshotExit(rec, 1);
+  }
+  assert.ok(cb.shouldBlock(key), 'breaker is open after crossing the (lowered) threshold');
+  assert.ok(mcpToolCalls.includes('pend_ticket'), 'the open crossing already pended the ticket for a human');
+
+  mcpToolCalls.length = 0; // isolate the success dispatch below
+
+  const ok = makeCodexRecord({ outLines: codexCleanLines('Half-open probe: done.') });
+  await mgr._handleOneshotExit(ok, 0);
+
+  assert.ok(
+    cb.shouldBlock(key),
+    'a single successful probe must NOT silently close an already-open breaker',
+  );
+  assert.equal(
+    mcpToolCalls.includes('pend_ticket'),
+    false,
+    'no NEW pend on a probe success either — the ticket is already parked',
+  );
 });
 
 test('post-comment crash (ticket 7e7e23bf): commentSent + non-zero exit → NO silent-exit, breaker reset, no pend', async () => {
@@ -340,6 +434,149 @@ test('Codex native MCP add_comment completion suppresses the silent-exit fallbac
   await mgr._handleOneshotExit(rec, 0);
 
   assert.equal(silentExit(), undefined, 'no false system comment after Codex add_comment succeeds');
+});
+
+// ── ticket 3feaf80f: Claude one-shot의 commentSent는 구조적으로 항상 false
+// 였다(NATIVE_MCP + 배치 `--output-format json` 조합이라 #wireStdioCapture가
+// tool_use 이벤트를 아예 보지 못했다) — 그래서 실제로 성공한 티켓-멘션
+// dispatch조차 (a) "exited without leaving a ticket comment" 오탐 경고를
+// 받았고 (b) circuit breaker의 recordSuccess() 대신 실패 경로로 계상됐다.
+// buildOneshotSpawn을 stream-json으로 전환해 고쳤다 — 아래 테스트들은 CLI가
+// 이제 실제로 내보내는 이벤트 shape을 받았을 때 _scanForCommentTool + exit
+// 핸들러가 올바르게 동작함을 증명한다.
+
+test('Claude native MCP add_comment tool_use (stream-json) suppresses the silent-exit fallback', async () => {
+  const mgr = new SubagentManager(makeConfig());
+  const rec = makeCodexRecord({ cli_type: 'claude', captureOutput: false, outLines: [], tailLines: [] });
+
+  mgr._scanForCommentTool(rec, claudeAssistantToolUseLine('mcp__awb__add_comment'));
+  assert.equal(rec.commentSent, true, 'Claude stream-json assistant tool_use counts as a persisted comment');
+
+  await mgr._handleOneshotExit(rec, 0);
+
+  assert.equal(silentExit(), undefined, 'no false system comment after Claude add_comment succeeds');
+});
+
+test('Claude native MCP move_ticket alone counts as audit trail (ticket 2fd06686)', async () => {
+  // Was "does NOT count" pre-fix — a session that only moved the ticket (no
+  // add_comment) was always misflagged as silent. move_ticket generates a
+  // system "moved from X to Y" Comment row server-side, so it is not silent.
+  const mgr = new SubagentManager(makeConfig());
+  const rec = makeCodexRecord({ cli_type: 'claude', captureOutput: false, outLines: [], tailLines: [] });
+
+  mgr._scanForCommentTool(rec, claudeAssistantToolUseLine('mcp__awb__move_ticket'));
+  assert.equal(rec.commentSent, true, 'move_ticket is now in TICKET_COMMENT_TOOL_SUFFIXES');
+});
+
+test('silent-exit: server re-verification finds a comment the local scan missed → suppressed (ticket 2fd06686)', async () => {
+  // The local `_scanForCommentTool` never ran (simulating whatever race left
+  // `commentSent` false despite real work happening), but the ticket's actual
+  // comments — fetched by `_handleOneshotExit`'s new grace re-verification —
+  // show a comment posted during this spawn's lifetime.
+  const mgr = new SubagentManager(makeConfig());
+  const rec = makeCodexRecord({
+    cli_type: 'claude',
+    captureOutput: false,
+    outLines: [],
+    tailLines: [],
+    commentSent: false,
+  });
+  mockTicketFetch({
+    comments: [
+      {
+        id: 'c1',
+        content: 'landing comment',
+        created_at: new Date(rec.started_at + 5_000).toISOString(),
+        metadata: {},
+      },
+    ],
+  });
+
+  await mgr._handleOneshotExit(rec, 0);
+
+  assert.equal(
+    silentExit(),
+    undefined,
+    'server-verified comment suppresses the fallback even when the local scan missed it',
+  );
+});
+
+test('silent-exit: server re-verification ALSO finds nothing → fallback still fires (genuine silent exit, no regression)', async () => {
+  const mgr = new SubagentManager(makeConfig());
+  const rec = makeCodexRecord({
+    cli_type: 'claude',
+    captureOutput: false,
+    outLines: [],
+    tailLines: [],
+    commentSent: false,
+  });
+  mockTicketFetch({ comments: [] });
+
+  await mgr._handleOneshotExit(rec, 0);
+
+  assert.ok(silentExit(), 'a genuinely silent exit must still be detected after the grace re-verification');
+});
+
+test('silent-exit: a comment from BEFORE this spawn started does not count (stale, ticket 2fd06686)', async () => {
+  const mgr = new SubagentManager(makeConfig());
+  const rec = makeCodexRecord({
+    cli_type: 'claude',
+    captureOutput: false,
+    outLines: [],
+    tailLines: [],
+    commentSent: false,
+  });
+  mockTicketFetch({
+    comments: [
+      {
+        id: 'c-old',
+        content: 'earlier unrelated ticket activity',
+        created_at: new Date(rec.started_at - 60_000).toISOString(),
+        metadata: {},
+      },
+    ],
+  });
+
+  await mgr._handleOneshotExit(rec, 0);
+
+  assert.ok(silentExit(), 'a stale comment predating this spawn must not suppress the fallback');
+});
+
+test('regression (ticket 3feaf80f): a full Claude oneshot turn sequence resets the breaker via recordSuccess, not the failure path', async () => {
+  // 실제 `--print --output-format stream-json --verbose` 실행에서
+  // #wireStdioCapture가 _scanForCommentTool에 한 줄씩 먹이는 것을 그대로
+  // 재현한다: init 배너, add_comment를 호출하는 assistant turn, 이어서
+  // move_ticket, 마지막 result. recordSuccess()의 효과를 관찰할 수 있도록
+  // 수정 전과 동일한 shape의 silent failure 2회로 미리 breaker를 트립시켜 둔다.
+  const cb = new CircuitBreaker();
+  const mgr = new SubagentManager(makeConfig(), cb);
+  const key = CircuitBreaker.key('agent-rolf', 'ticket-loop', 'assignee');
+
+  for (let i = 0; i < 2; i++) {
+    const rec = makeCodexRecord({ cli_type: 'claude', captureOutput: false, outLines: [], tailLines: [] });
+    await mgr._handleOneshotExit(rec, 0); // clean exit, no comment tool seen — counts as silent failure
+  }
+  assert.equal(cb.size, 1, 'breaker is tracking the key after two silent (pre-fix-shaped) exits');
+
+  restPosts.length = 0;
+  mcpToolCalls.length = 0;
+
+  const rec = makeCodexRecord({ cli_type: 'claude', captureOutput: false, outLines: [], tailLines: [] });
+  for (const line of [
+    JSON.stringify({ type: 'system', subtype: 'init' }),
+    claudeAssistantToolUseLine('mcp__awb__add_comment'),
+    claudeAssistantToolUseLine('mcp__awb__move_ticket'),
+    JSON.stringify({ type: 'result', subtype: 'success', is_error: false, num_turns: 3, result: 'Done.' }),
+  ]) {
+    mgr._scanForCommentTool(rec, line);
+  }
+  assert.equal(rec.commentSent, true);
+
+  await mgr._handleOneshotExit(rec, 0);
+
+  assert.equal(silentExit(), undefined, 'no false silent-exit warning on the successful dispatch');
+  assert.equal(cb.shouldBlock(key), null, 'recordSuccess() cleared the streak — NOT counted as a 3rd failure');
+  assert.equal(mcpToolCalls.includes('pend_ticket'), false, 'a genuinely successful dispatch must never pend');
 });
 
 test('respawn-storm regression (ticket c555fbb6): silent exit_code=null opens the breaker + pends', async () => {
