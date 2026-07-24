@@ -441,8 +441,13 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     }
 
     if (existingAlert) {
-      const cooldownAt = existingAlert.delivered_at || existingAlert.last_alerted_at;
-      if (now.getTime() - new Date(cooldownAt).getTime() < this.config.realertMs) return;
+      // Only a successful delivery starts the cooldown.  An alert row is
+      // persisted before posting so a missing room / messaging failure is
+      // durable, but that failed attempt must remain owed on every sweep.
+      if (
+        existingAlert.delivered_at
+        && now.getTime() - new Date(existingAlert.delivered_at).getTime() < this.config.realertMs
+      ) return;
       existingAlert.last_alerted_at = now;
       existingAlert.delivery_attempts = (existingAlert.delivery_attempts || 0) + 1;
       await alertRepo.save(existingAlert);
@@ -736,10 +741,17 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
         { ticket_id: ticket.id, action: 'trigger_emitted' },
         { ticket_id: ticket.id, action: 'trigger_dispatched' },
         { ticket_id: ticket.id, action: 'updated', field_changed: 'locked_by_agent_id' },
+        { ticket_id: ticket.id, action: 'updated', field_changed: 'assignee' },
       ],
       order: { created_at: 'DESC' },
       take: 100,
     });
+    // Reassignment is a hard epoch boundary. In particular, A -> B -> A must
+    // not resurrect A's original dispatch (or comments attributed to it)
+    // before A receives a new dispatch/claim after the latest reassignment.
+    const reassignedAtMs = rows
+      .filter(row => row.action === 'updated' && row.field_changed === 'assignee')
+      .reduce((latest, row) => Math.max(latest, new Date(row.created_at).getTime()), 0);
     for (const row of rows) {
       let agentId = '';
       if (row.action === 'updated' && row.trigger_source === 'agent_claim') {
@@ -747,13 +759,16 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
       } else if (row.action === 'trigger_emitted' || row.action === 'trigger_dispatched') {
         agentId = dispatchTargetAgent(row.new_value);
       }
-      if (agentId) evidence.push({ agentId, startedAt: new Date(row.created_at) });
+      const startedAt = new Date(row.created_at);
+      if (agentId && startedAt.getTime() >= reassignedAtMs) {
+        evidence.push({ agentId, startedAt });
+      }
     }
     if (ticket.locked_by_agent_id && ticket.locked_at && this._isLockLive(ticket, now)) {
-      evidence.push({
-        agentId: ticket.locked_by_agent_id,
-        startedAt: new Date(ticket.locked_at),
-      });
+      const startedAt = new Date(ticket.locked_at);
+      if (startedAt.getTime() >= reassignedAtMs) {
+        evidence.push({ agentId: ticket.locked_by_agent_id, startedAt });
+      }
     } else if (ticket.locked_by_agent_id) {
       this.logService.warn('StuckDetector', 'ignoring stale lock as dispatch evidence', {
         ticket_id: ticket.id, lock_agent_id: ticket.locked_by_agent_id,

@@ -81,6 +81,22 @@ async function seedDispatch(activityRepo, ticket, agentId, createdAt) {
   await backdate(activityRepo, saved.id, { created_at: createdAt });
 }
 
+async function seedAssigneeChange(activityRepo, ticket, oldName, newName, createdAt) {
+  const saved = await activityRepo.save(activityRepo.create({
+    workspace_id: ticket.workspace_id,
+    entity_type: 'ticket',
+    entity_id: ticket.id,
+    ticket_id: ticket.id,
+    actor_id: 'operator',
+    actor_name: 'qa',
+    action: 'updated',
+    field_changed: 'assignee',
+    old_value: oldName,
+    new_value: newName,
+  }));
+  await backdate(activityRepo, saved.id, { created_at: createdAt });
+}
+
 async function seedChatRoom(roomRepo, workspaceId) {
   return roomRepo.save(roomRepo.create({
     workspace_id: workspaceId,
@@ -400,6 +416,62 @@ test('StuckTicketDetectorService — acceptance bullets 1..5', async (t) => {
     assert.equal(await alertRepo.findOne({ where: { ticket_id: ticket.id } }), null);
   });
 
+  await t.test('(A) undelivered promotion_delay retries next sweep and only delivery starts cooldown', async () => {
+    const noRoomWs = await createWorkspace(app, getDataSourceToken, 'promotion-retry');
+    const noRoomBoard = await createBoard(app, getDataSourceToken, noRoomWs.id, { name: 'promotion-retry' });
+    const noRoomIntake = await createColumn(app, getDataSourceToken, noRoomBoard.id, {
+      name: 'Intake', position: 0, workspaceId: noRoomWs.id, kind: 'intake', roleRouting: [],
+    });
+    const ticket = await createTicket(app, getDataSourceToken, {
+      columnId: noRoomIntake.id, workspaceId: noRoomWs.id, title: 'durable promotion alert',
+    });
+    await backdate(ticketRepo, ticket.id, { created_at: new Date(now.getTime() - 3 * HOUR) });
+
+    await detector.sweep(now);
+    let alert = await alertRepo.findOne({ where: { ticket_id: ticket.id } });
+    assert.equal(alert?.delivered_at, null, 'missing alert room leaves delivery owed');
+    assert.equal(alert?.delivery_attempts, 1);
+
+    const retryRoom = await seedChatRoom(roomRepo, noRoomWs.id);
+    await detector.sweep(new Date(now.getTime() + 1_000));
+    alert = await alertRepo.findOne({ where: { ticket_id: ticket.id } });
+    assert.ok(alert?.delivered_at, 'next sweep retries and records successful delivery');
+    assert.equal(alert?.delivery_attempts, 2);
+    assert.equal(
+      countSystemMessages(await messageRepo.find({ where: { room_id: retryRoom.id } })),
+      1,
+      'retry posts exactly one promotion-delay alert',
+    );
+
+    await detector.sweep(new Date(now.getTime() + 2_000));
+    assert.equal(
+      (await alertRepo.findOne({ where: { ticket_id: ticket.id } }))?.delivery_attempts,
+      2,
+      'successful delivered_at, not the failed attempt, starts cooldown',
+    );
+
+    const exceptionTicket = await createTicket(app, getDataSourceToken, {
+      columnId: noRoomIntake.id, workspaceId: noRoomWs.id, title: 'promotion send exception',
+    });
+    await backdate(ticketRepo, exceptionTicket.id, {
+      created_at: new Date(now.getTime() - 3 * HOUR),
+    });
+    const originalSend = detector.messaging.sendSystemMessage.bind(detector.messaging);
+    detector.messaging.sendSystemMessage = async () => { throw new Error('qa send failure'); };
+    try {
+      await detector.sweep(new Date(now.getTime() + 3_000));
+    } finally {
+      detector.messaging.sendSystemMessage = originalSend;
+    }
+    let exceptionAlert = await alertRepo.findOne({ where: { ticket_id: exceptionTicket.id } });
+    assert.equal(exceptionAlert?.delivered_at, null, 'send exception also leaves delivery owed');
+
+    await detector.sweep(new Date(now.getTime() + 4_000));
+    exceptionAlert = await alertRepo.findOne({ where: { ticket_id: exceptionTicket.id } });
+    assert.ok(exceptionAlert?.delivered_at, 'send exception is retried successfully next sweep');
+    assert.equal(exceptionAlert?.delivery_attempts, 2);
+  });
+
   await t.test('(B) only comments attributed to the current dispatch epoch are progress', async () => {
     const ticket = await createTicket(app, getDataSourceToken, {
       columnId: todoCol.id, workspaceId: ws.id, title: 'operator comment false progress',
@@ -418,6 +490,47 @@ test('StuckTicketDetectorService — acceptance bullets 1..5', async (t) => {
     await seedAgentComment(commentRepo, ticket.id, ws.id, 'alice', 'work started', now, aliceAgent.id);
     await detector.sweep(new Date(now.getTime() + 2_000));
     assert.equal(await alertRepo.findOne({ where: { ticket_id: ticket.id } }), null);
+  });
+
+  await t.test('(B) A→B→A reassignment does not resurrect A dispatch or old comments', async () => {
+    const ticket = await createTicket(app, getDataSourceToken, {
+      columnId: todoCol.id, workspaceId: ws.id, title: 'reassignment epoch boundary',
+      assigneeId: aliceAgent.id,
+    });
+    const fiveHoursAgo = new Date(now.getTime() - 5 * HOUR);
+    await backdate(ticketRepo, ticket.id, { created_at: fiveHoursAgo });
+    await seedDispatch(activityRepo, ticket, aliceAgent.id, fiveHoursAgo);
+    await seedAgentComment(
+      commentRepo, ticket.id, ws.id, 'alice', 'progress in original A epoch',
+      new Date(now.getTime() - 4 * HOUR), aliceAgent.id,
+    );
+    await seedAssigneeChange(
+      activityRepo, ticket, 'alice', 'bob', new Date(now.getTime() - 2 * HOUR),
+    );
+    await seedAssigneeChange(
+      activityRepo, ticket, 'bob', 'alice', new Date(now.getTime() - HOUR),
+    );
+    await ticketRepo.update(ticket.id, { assignee_id: aliceAgent.id, assignee: 'alice' });
+
+    await detector.sweep(now);
+    let alert = await alertRepo.findOne({ where: { ticket_id: ticket.id } });
+    assert.equal(alert?.cause, 'no_progress');
+    assert.equal(alert?.last_cycle_count, 0, 'returning A has no dispatch epoch yet');
+    const firstAlertMessage = (await messageRepo.find({ where: { room_id: room.id } }))
+      .find(message => message.content.includes(ticket.id));
+    assert.match(
+      firstAlertMessage?.content || '',
+      /never dispatched/i,
+      'A→B→A without a new A dispatch is classified as never dispatched',
+    );
+
+    await seedAgentComment(
+      commentRepo, ticket.id, ws.id, 'alice', 'comment after return but before dispatch',
+      new Date(now.getTime() + 1_000), aliceAgent.id,
+    );
+    await detector.sweep(new Date(now.getTime() + 2_000));
+    alert = await alertRepo.findOne({ where: { ticket_id: ticket.id } });
+    assert.ok(alert, 'old or pre-dispatch A comments must not produce unstuck');
   });
 
   await t.test('(C) exact benchmark-run parent with candidate child is excluded', async () => {
