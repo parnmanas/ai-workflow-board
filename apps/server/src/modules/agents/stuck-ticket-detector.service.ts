@@ -37,7 +37,7 @@
  */
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, IsNull, LessThan } from 'typeorm';
+import { DataSource, IsNull, LessThan, MoreThanOrEqual } from 'typeorm';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { Board } from '../../entities/Board';
 import { BoardColumn, NON_TERMINAL_KINDS } from '../../entities/BoardColumn';
@@ -735,13 +735,38 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     const assigneeId = ticket.assignee_id || '';
     if (!assigneeId) return null;
 
+    const activityRepo = this.dataSource.getRepository(ActivityLog);
+    // ActivityLog.ticket_id identifies the root conversation for child
+    // tickets. The changed entity is the authoritative reassignment target.
+    // Fetch this boundary separately so a busy ticket cannot push it beyond
+    // the bounded dispatch-evidence window.
+    const latestReassignment = await activityRepo.findOne({
+      where: {
+        entity_type: 'ticket',
+        entity_id: ticket.id,
+        action: 'updated',
+        field_changed: 'assignee',
+      },
+      order: { created_at: 'DESC' },
+    });
+    const reassignedAtMs = latestReassignment
+      ? new Date(latestReassignment.created_at).getTime()
+      : 0;
+    const afterReassignment = latestReassignment
+      ? MoreThanOrEqual(new Date(reassignedAtMs))
+      : undefined;
+
     const evidence: Array<{ agentId: string; startedAt: Date }> = [];
-    const rows = await this.dataSource.getRepository(ActivityLog).find({
+    const rows = await activityRepo.find({
       where: [
-        { ticket_id: ticket.id, action: 'trigger_emitted' },
-        { ticket_id: ticket.id, action: 'trigger_dispatched' },
-        { ticket_id: ticket.id, action: 'updated', field_changed: 'locked_by_agent_id' },
-        { ticket_id: ticket.id, action: 'updated', field_changed: 'assignee' },
+        { ticket_id: ticket.id, action: 'trigger_emitted', created_at: afterReassignment },
+        { ticket_id: ticket.id, action: 'trigger_dispatched', created_at: afterReassignment },
+        {
+          ticket_id: ticket.id,
+          action: 'updated',
+          field_changed: 'locked_by_agent_id',
+          created_at: afterReassignment,
+        },
       ],
       order: { created_at: 'DESC' },
       take: 100,
@@ -749,9 +774,6 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     // Reassignment is a hard epoch boundary. In particular, A -> B -> A must
     // not resurrect A's original dispatch (or comments attributed to it)
     // before A receives a new dispatch/claim after the latest reassignment.
-    const reassignedAtMs = rows
-      .filter(row => row.action === 'updated' && row.field_changed === 'assignee')
-      .reduce((latest, row) => Math.max(latest, new Date(row.created_at).getTime()), 0);
     for (const row of rows) {
       let agentId = '';
       if (row.action === 'updated' && row.trigger_source === 'agent_claim') {

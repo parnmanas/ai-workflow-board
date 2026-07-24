@@ -81,12 +81,12 @@ async function seedDispatch(activityRepo, ticket, agentId, createdAt) {
   await backdate(activityRepo, saved.id, { created_at: createdAt });
 }
 
-async function seedAssigneeChange(activityRepo, ticket, oldName, newName, createdAt) {
+async function seedAssigneeChange(activityRepo, ticket, oldName, newName, createdAt, rootTicketId = ticket.id) {
   const saved = await activityRepo.save(activityRepo.create({
     workspace_id: ticket.workspace_id,
     entity_type: 'ticket',
     entity_id: ticket.id,
-    ticket_id: ticket.id,
+    ticket_id: rootTicketId,
     actor_id: 'operator',
     actor_name: 'qa',
     action: 'updated',
@@ -514,9 +514,13 @@ test('StuckTicketDetectorService — acceptance bullets 1..5', async (t) => {
   });
 
   await t.test('(B) A→B→A reassignment does not resurrect A dispatch or old comments', async () => {
+    const parent = await createTicket(app, getDataSourceToken, {
+      columnId: todoCol.id, workspaceId: ws.id, title: 'benchmark run parent',
+    });
     const ticket = await createTicket(app, getDataSourceToken, {
       columnId: todoCol.id, workspaceId: ws.id, title: 'reassignment epoch boundary',
       assigneeId: aliceAgent.id,
+      parentId: parent.id, depth: 1,
     });
     const fiveHoursAgo = new Date(now.getTime() - 5 * HOUR);
     await backdate(ticketRepo, ticket.id, { created_at: fiveHoursAgo });
@@ -526,11 +530,19 @@ test('StuckTicketDetectorService — acceptance bullets 1..5', async (t) => {
       new Date(now.getTime() - 4 * HOUR), aliceAgent.id,
     );
     await seedAssigneeChange(
-      activityRepo, ticket, 'alice', 'bob', new Date(now.getTime() - 2 * HOUR),
+      activityRepo, ticket, 'alice', 'bob', new Date(now.getTime() - 2 * HOUR), parent.id,
     );
     await seedAssigneeChange(
-      activityRepo, ticket, 'bob', 'alice', new Date(now.getTime() - HOUR),
+      activityRepo, ticket, 'bob', 'alice', new Date(now.getTime() - HOUR), parent.id,
     );
+    // More than the dispatch query's bounded window must not hide the
+    // separately queried child reassignment boundary.
+    for (let i = 0; i < 101; i += 1) {
+      await seedDispatch(
+        activityRepo, ticket, 'prior-agent',
+        new Date(now.getTime() - 3 * HOUR + i),
+      );
+    }
     await ticketRepo.update(ticket.id, { assignee_id: aliceAgent.id, assignee: 'alice' });
 
     await detector.sweep(now);
