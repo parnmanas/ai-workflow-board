@@ -97,6 +97,23 @@ async function seedAssigneeChange(activityRepo, ticket, oldName, newName, create
   await backdate(activityRepo, saved.id, { created_at: createdAt });
 }
 
+async function seedLockChange(activityRepo, ticket, agentId, createdAt, releasing = false) {
+  const saved = await activityRepo.save(activityRepo.create({
+    workspace_id: ticket.workspace_id,
+    entity_type: 'ticket',
+    entity_id: ticket.id,
+    ticket_id: ticket.id,
+    actor_id: agentId,
+    actor_name: 'qa',
+    action: 'updated',
+    field_changed: 'locked_by_agent_id',
+    old_value: releasing ? agentId : '',
+    new_value: releasing ? '' : agentId,
+    trigger_source: releasing ? 'agent_release' : 'agent_claim',
+  }));
+  await backdate(activityRepo, saved.id, { created_at: createdAt });
+}
+
 async function seedChatRoom(roomRepo, workspaceId) {
   return roomRepo.save(roomRepo.create({
     workspace_id: workspaceId,
@@ -132,6 +149,10 @@ test('StuckTicketDetectorService — acceptance bullets 1..5', async (t) => {
     'file://' + path.join(DIST_ROOT, 'modules', 'agents', 'stuck-ticket-detector.service.js')
   );
   const detector = app.get(detectorModule.StuckTicketDetectorService);
+  const agentStatusModule = await import(
+    'file://' + path.join(DIST_ROOT, 'modules', 'agents', 'agent-status.service.js')
+  );
+  const agentStatus = app.get(agentStatusModule.AgentStatusService);
 
   // ── Common workspace + board + columns + chat room ──────────────────
   step('Seed workspace + board + columns + chat alerts room');
@@ -531,6 +552,49 @@ test('StuckTicketDetectorService — acceptance bullets 1..5', async (t) => {
     await detector.sweep(new Date(now.getTime() + 2_000));
     alert = await alertRepo.findOne({ where: { ticket_id: ticket.id } });
     assert.ok(alert, 'old or pre-dispatch A comments must not produce unstuck');
+  });
+
+  await t.test('(B) post-alert lock lifecycle is attributed to the current epoch', async () => {
+    const ticket = await createTicket(app, getDataSourceToken, {
+      columnId: todoCol.id, workspaceId: ws.id, title: 'lock attribution',
+      assigneeId: aliceAgent.id,
+    });
+    await backdate(ticketRepo, ticket.id, { created_at: new Date(now.getTime() - 5 * HOUR) });
+    await detector.sweep(now);
+    assert.ok(await alertRepo.findOne({ where: { ticket_id: ticket.id } }));
+
+    await seedLockChange(activityRepo, ticket, 'wrong-agent', new Date(now.getTime() + 1_000));
+    await seedLockChange(activityRepo, ticket, 'wrong-agent', new Date(now.getTime() + 2_000), true);
+    await detector.sweep(new Date(now.getTime() + 3_000));
+    assert.ok(await alertRepo.findOne({ where: { ticket_id: ticket.id } }),
+      'wrong-agent claim/release must leave the alert row in place');
+
+    await seedLockChange(activityRepo, ticket, aliceAgent.id, new Date(now.getTime() + 4_000));
+    await detector.sweep(new Date(now.getTime() + 5_000));
+    assert.equal(await alertRepo.findOne({ where: { ticket_id: ticket.id } }), null,
+      'current-assignee claim starts the current epoch and resolves the alert');
+  });
+
+  await t.test('(B) output liveness is scoped to the current dispatch epoch', async () => {
+    const ticket = await createTicket(app, getDataSourceToken, {
+      columnId: todoCol.id, workspaceId: ws.id, title: 'output attribution',
+      assigneeId: aliceAgent.id,
+    });
+    const fiveHoursAgo = new Date(now.getTime() - 5 * HOUR);
+    await backdate(ticketRepo, ticket.id, { created_at: fiveHoursAgo });
+    await seedDispatch(activityRepo, ticket, aliceAgent.id, fiveHoursAgo);
+    await detector.sweep(now);
+    assert.ok(await alertRepo.findOne({ where: { ticket_id: ticket.id } }));
+
+    agentStatus.recordOutputLiveness('wrong-agent', ticket.id, 'reviewer');
+    await detector.sweep(new Date(Date.now() + 1_000));
+    assert.ok(await alertRepo.findOne({ where: { ticket_id: ticket.id } }),
+      'wrong-agent/reviewer output must leave the alert row in place');
+
+    agentStatus.recordOutputLiveness(aliceAgent.id, ticket.id, 'assignee');
+    await detector.sweep(new Date(Date.now() + 1_000));
+    assert.equal(await alertRepo.findOne({ where: { ticket_id: ticket.id } }), null,
+      'current-epoch assignee output resolves the alert');
   });
 
   await t.test('(C) exact benchmark-run parent with candidate child is excluded', async () => {

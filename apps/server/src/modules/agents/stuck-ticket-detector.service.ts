@@ -511,32 +511,28 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     const commentRepo = this.dataSource.getRepository(Comment);
     const alertRepo   = this.dataSource.getRepository(StuckTicketAlert);
 
-    // Fast-path for the resolution signal: any lifecycle event newer
-    // than the existing alert means the operator (or another agent)
-    // intervened — column move, claim, or release. This catches the
-    // three resolution paths from the spec without re-checking the
-    // comment shape (the shape may still match if the move happened
-    // AFTER the last comment, which would otherwise leave the alert
-    // row sticky forever).
+    const epoch = await this._dispatchEpoch(ticket, now);
+
+    // Fast-path for resolution signals. A real column move is workflow
+    // progress regardless of actor. Lock activity, however, is progress only
+    // when it belongs to the current assignee's dispatch epoch; a reviewer,
+    // operator, or prior assignee claiming/releasing the ticket must not clear
+    // somebody else's alert.
     if (existingAlert) {
-      // A lifecycle event (column move / claim / release) newer than the alert
-      // means the operator or another agent intervened → unstuck. Compare the
-      // TZ-safe `_latestLifecycleAtMs` (entity-hydrated Date) against the alert
-      // timestamp rather than the bounded `_countLifecycleEvents` COUNT: the
-      // latter serializes Date params against sql.js's naive-UTC stored strings
-      // and silently misses a post-alert move under a non-UTC dev TZ (ticket
-      // e7c87517) — the exact reason a column-moved ticket stayed flagged once
-      // the candidate gate moved to the immutable created_at (blocker #5).
-      const latestLifecycleMs = await this._latestLifecycleAtMs(ticket.id);
-      const lifecycleAfterAlert = latestLifecycleMs > new Date(existingAlert.last_alerted_at).getTime();
-      // Lock state change also counts: an in-process claim that
-      // bypassed the activity log (defensive — the canonical path
-      // writes one, but a future code path that doesn't would
-      // otherwise leave the row sticky). Only a LIVE lock counts as the
-      // "someone picked it up" unstuck signal (ticket e7c87517, blocker #2):
-      // a STALE leaked lock is not progress, so it must not silently resolve
-      // an existing no-progress alert — the ticket stays flagged.
-      if (lifecycleAfterAlert || (ticket.locked_by_agent_id && this._isLockLive(ticket, now))) {
+      const alertAtMs = new Date(existingAlert.last_alerted_at).getTime();
+      const latestColumnMoveMs = await this._latestColumnMoveAtMs(ticket.id);
+      const latestEpochLockMs = epoch
+        ? await this._latestEpochLockAtMs(ticket.id, epoch)
+        : 0;
+      const liveEpochLock = !!epoch
+        && ticket.locked_by_agent_id === epoch.agentId
+        && this._isLockLive(ticket, now)
+        && new Date(ticket.locked_at!).getTime() >= epoch.startedAt.getTime();
+      if (
+        latestColumnMoveMs > alertAtMs
+        || latestEpochLockMs > alertAtMs
+        || (liveEpochLock && new Date(ticket.locked_at!).getTime() > alertAtMs)
+      ) {
         await this._emitUnstuck(ticket, existingAlert, now, stats, 'lifecycle_after_alert');
         return;
       }
@@ -552,7 +548,6 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
       order: { created_at: 'DESC' },
       take: Math.max(window + 1, 100),
     });
-    const epoch = await this._dispatchEpoch(ticket, now);
     const attributedComments = epoch
       ? recentComments.filter(c =>
           c.author_type === 'agent'
@@ -606,7 +601,7 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     // Lifecycle activity between oldest and latest comment — any
     // column move, claim, or release breaks the stale-WAIT shape.
     const intervening = await this._countLifecycleEvents(
-      ticket.id, oldest.created_at, latest.created_at,
+      ticket.id, oldest.created_at, latest.created_at, epoch,
     );
     if (intervening > 0) {
       return this._resolveNonStaleWait(ticket, existingAlert, now, stats, 'lifecycle_event', attributedComments, epoch);
@@ -703,8 +698,13 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     const latestCommentMs = latestRealComment ? latestRealComment.created_at.getTime() : 0;
     const everDispatched = !!epoch;
 
-    const latestLifecycleMs = await this._latestLifecycleAtMs(ticket.id);
-    const outputMs = this.agentStatus?.getLatestOutputLivenessForTicket(ticket.id) ?? 0;
+    const latestLifecycleMs = await this._latestAttributedLifecycleAtMs(ticket.id, epoch);
+    const epochOutputMs = epoch
+      ? this.agentStatus?.getOutputLivenessAt(epoch.agentId, ticket.id, 'assignee') ?? 0
+      : 0;
+    const outputMs = epochOutputMs >= (epoch?.startedAt.getTime() ?? Infinity)
+      ? epochOutputMs
+      : 0;
     // Baseline is the IMMUTABLE created_at (ticket e7c87517, reviewer blocker
     // #5) — NOT updated_at. A label / assignee / metadata write bumps updated_at
     // without advancing the actual work, so folding it in would reset the
@@ -803,19 +803,43 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
    * a hard stall and leaving its alert row sticky (never unstuck). The reconciler's
    * `_latestForwardProgressMs` avoids the same trap the same way.
    */
-  private async _latestLifecycleAtMs(ticketId: string): Promise<number> {
+  private async _latestColumnMoveAtMs(ticketId: string): Promise<number> {
     const repo = this.dataSource.getRepository(ActivityLog);
     const row = await repo.findOne({
-      where: [
-        { ticket_id: ticketId, action: 'moved', field_changed: 'column' },
-        { ticket_id: ticketId, action: 'updated', field_changed: 'locked_by_agent_id' },
-      ],
+      where: { ticket_id: ticketId, action: 'moved', field_changed: 'column' },
       order: { created_at: 'DESC' },
       select: ['id', 'created_at'],
     });
     if (!row?.created_at) return 0;
     const ts = new Date(row.created_at).getTime();
     return Number.isFinite(ts) ? ts : 0;
+  }
+
+  private async _latestEpochLockAtMs(
+    ticketId: string,
+    epoch: { agentId: string; startedAt: Date },
+  ): Promise<number> {
+    const rows = await this.dataSource.getRepository(ActivityLog).find({
+      where: { ticket_id: ticketId, action: 'updated', field_changed: 'locked_by_agent_id' },
+      order: { created_at: 'DESC' },
+      take: 100,
+    });
+    for (const row of rows) {
+      const atMs = new Date(row.created_at).getTime();
+      if (atMs < epoch.startedAt.getTime()) continue;
+      const lockAgentId = row.new_value || row.old_value || row.actor_id || '';
+      if (lockAgentId === epoch.agentId) return atMs;
+    }
+    return 0;
+  }
+
+  private async _latestAttributedLifecycleAtMs(
+    ticketId: string,
+    epoch: { agentId: string; startedAt: Date } | null,
+  ): Promise<number> {
+    const columnMoveMs = await this._latestColumnMoveAtMs(ticketId);
+    const epochLockMs = epoch ? await this._latestEpochLockAtMs(ticketId, epoch) : 0;
+    return Math.max(columnMoveMs, epochLockMs);
   }
 
   /**
@@ -1053,9 +1077,10 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     ticketId: string,
     fromTime: Date,
     toTime: Date,
+    epoch: { agentId: string; startedAt: Date } | null,
   ): Promise<number> {
     const repo = this.dataSource.getRepository(ActivityLog);
-    return repo
+    const rows = await repo
       .createQueryBuilder('a')
       .where('a.ticket_id = :tid', { tid: ticketId })
       .andWhere('a.created_at >= :from', { from: sinceBoundaryParam(this.dataSource, fromTime) })
@@ -1064,7 +1089,13 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
         "((a.action = 'moved' AND a.field_changed = 'column') " +
         "OR (a.action = 'updated' AND a.field_changed = 'locked_by_agent_id'))",
       )
-      .getCount();
+      .getMany();
+    return rows.filter(row => {
+      if (row.action === 'moved') return true;
+      if (!epoch || row.created_at.getTime() < epoch.startedAt.getTime()) return false;
+      const lockAgentId = row.new_value || row.old_value || row.actor_id || '';
+      return lockAgentId === epoch.agentId;
+    }).length;
   }
 
   /**
