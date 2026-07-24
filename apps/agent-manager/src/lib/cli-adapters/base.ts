@@ -59,6 +59,30 @@ export interface HarnessSpec {
   permission_mode?: string;
 }
 
+export interface RuntimeProfileSpec {
+  id: string;
+  provider: string;
+  type?: string;
+  model: string;
+  command?: string;
+  module?: string;
+  executable?: string;
+  python?: string;
+  venv?: string;
+  cwd?: string;
+  env?: Record<string, string>;
+  extra_args?: string[];
+  base_url?: string;
+  port?: number;
+  startup_timeout_ms?: number;
+  health_check?: string;
+  shutdown_policy?: 'on_release' | 'manager_exit' | 'reuse';
+  credential_required?: boolean;
+  credential_ref?: string;
+  capabilities?: string[];
+  claude?: { env?: Record<string, string>; args?: string[] };
+}
+
 // Per-CLI FLAG keys only — the subset partitionHarness() maps onto adapter
 // arguments. `fallback_models` is intentionally excluded (retry policy, not a
 // flag); it rides on HarnessSpec but is consumed at the spawn site directly.

@@ -29,7 +29,7 @@ import { injectWorkFolder } from './prompts.js';
 import { DispatchBlockerTracker, DispatchBlockTracker, InflightDispatchTracker, PendingDispatchRetry, RoleSpawnSuppressor, classifyWorktreeOutcome, managedWorktreePath, provisioningPendReason } from './dispatch-preflight.js';
 import type { PendingRetryEntry, RetryScheduler } from './dispatch-preflight.js';
 import { SessionLimitDeferStore } from './session-limit-defer.js';
-import type { HarnessSpec, ResolvedEffortPreset, EffortLevel } from './cli-adapters/base.js';
+import type { HarnessSpec, RuntimeProfileSpec, ResolvedEffortPreset, EffortLevel } from './cli-adapters/base.js';
 import { createAdapter, ADAPTER_CAPABILITIES } from './cli-adapters/index.js';
 import {
   parseRunProvision,
@@ -92,6 +92,13 @@ export function parseHarnessConfig(raw: unknown): HarnessSpec | null {
     if (list.length > 0) out.fallback_models = list;
   }
   return Object.keys(out).length > 0 ? out : null;
+}
+
+export function parseRuntimeProfile(raw: unknown): RuntimeProfileSpec | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const value = raw as any;
+  if (typeof value.id !== 'string' || typeof value.provider !== 'string' || typeof value.model !== 'string') return null;
+  return value as RuntimeProfileSpec;
 }
 
 /** Valid claude `--effort` levels (current AWB vocabulary). A preset slice
@@ -375,6 +382,7 @@ export interface SubagentSpawnArgs {
   /** Resolved board/workspace harness from the trigger event (e9c7a896).
    *  Null/absent → spawn exactly as before. */
   harness?: HarnessSpec | null;
+  runtimeProfile?: RuntimeProfileSpec | null;
   /** Ticket-level abstract effort preset, resolved server-side and shipped on
    *  the trigger event (`effort_preset`). SEPARATE channel from `harness`; the
    *  spawn site picks the per-CLI slice via selectEffortSlice. Null/absent →
@@ -503,6 +511,7 @@ export interface TicketTriggerArgs {
    *  fixed at spawn; follow-up turns into an existing pid keep the
    *  harness the session was born with. Null/absent → spawn as before. */
   harness?: HarnessSpec | null;
+  runtimeProfile?: RuntimeProfileSpec | null;
   /** Ticket-level abstract effort preset (`effort_preset`). Like harness it is
    *  applied at SESSION CREATION only — a live session's `--effort` flag is
    *  fixed at spawn. Null/absent → no effort override. */
@@ -1848,6 +1857,7 @@ export class EventDispatcher {
     // event (e9c7a896). Parsed once here; both the persistent-session and
     // one-shot paths below ship it to their spawn site.
     const harness = parseHarnessConfig(ev.harness_config);
+    const runtimeProfile = parseRuntimeProfile(ev.cli_runtime_profile);
     if (harness) {
       log(
         `Trigger carries harness_config: ticket=${ev.ticket_id} keys=${Object.keys(harness).join(',')}`,
@@ -1905,6 +1915,7 @@ export class EventDispatcher {
           triggerSource: ev.trigger_source || '',
           agentContext,
           harness,
+          runtimeProfile,
           effortPreset,
           envVars,
           maxConcurrentTicketsPerAgent:
@@ -1983,6 +1994,7 @@ export class EventDispatcher {
           triggerSource: ev.trigger_source || '',
           agentContext,
           harness,
+          runtimeProfile,
           effortPreset,
           envVars,
         });

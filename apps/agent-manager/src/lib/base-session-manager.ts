@@ -38,6 +38,8 @@ import { accumulateUsage } from './cli-usage-accumulator.js';
 import type { AwbConfig } from './rest.js';
 import { writeMcpConfig } from './managed-agent-store.js';
 import type { SubagentMonitor, SubagentTapHandle } from './subagent-monitor.js';
+import { startRuntimeProfile, type RuntimeLease } from './runtime-profiles.js';
+import type { RuntimeProfileSpec } from './cli-adapters/base.js';
 
 const { PERSISTENT_SESSION } = ADAPTER_CAPABILITIES;
 
@@ -127,6 +129,7 @@ export interface SpawnOpts {
    *  Applied at session CREATION only — CLI flags are fixed at spawn, so
    *  follow-up turns keep the harness the session was born with. */
   harness?: HarnessSpec | null;
+  runtimeProfile?: RuntimeProfileSpec | null;
   /** Ticket-level abstract effort preset from the trigger (separate channel
    *  from harness). The spawn site picks this CLI's slice via
    *  selectEffortSlice; claude maps it to `--effort` + the ultracode keyword
@@ -177,6 +180,7 @@ export interface SessionRecord {
    *  and must not be unlinked on session teardown. */
   configPathIsTemp: boolean;
   pidPath: string | null;
+  runtimeLease?: RuntimeLease | null;
   turnCount: number;
   startedAt: number;
   lastTouchedAt: number;
@@ -479,7 +483,7 @@ export class BaseSessionManager {
     sessionKey: string,
     rolePrompt: string,
     firstTurnText: string,
-    { onProgress, monitorMeta, agentContext, firstTurnImages, harness: rawHarness, effortPreset, envVars, chainAttempt: chainAttemptOpt }: SpawnOpts = {},
+    { onProgress, monitorMeta, agentContext, firstTurnImages, harness: rawHarness, runtimeProfile, effortPreset, envVars, chainAttempt: chainAttemptOpt }: SpawnOpts = {},
   ): Promise<SessionRecord | null> {
     // ST-7: pick the adapter for this agent's CLI choice (claude/codex/antigravity)
     // and bind it to the session record so future turns formatTurn /
@@ -523,7 +527,8 @@ export class BaseSessionManager {
     // applied at session CREATION only — a live session's --effort flag and
     // the ultracode first-turn keyword are fixed at spawn.
     const slice = selectEffortSlice(adapter.cliType, effortPreset);
-    const effectiveModel = slice?.model ?? harness?.model ?? agentContext?.model ?? null;
+    const effectiveModel =
+      slice?.model ?? harness?.model ?? agentContext?.model ?? runtimeProfile?.model ?? null;
     const effortFlag = slice?.effort ?? null;
     const ultracode = !!slice?.ultracode;
     if (slice && (effortFlag || ultracode || slice.model)) {
@@ -550,7 +555,14 @@ export class BaseSessionManager {
     let configPath: string | null = null;
     let configPathIsTemp = false;
     let pidPath: string | null = null;
+    let runtimeLease: RuntimeLease | null = null;
     try {
+      if (adapter.cliType === 'claude' && runtimeProfile) {
+        runtimeLease = await startRuntimeProfile(runtimeProfile, agentContext?.extra_env ?? {});
+        log(
+          `${this.#logTag} runtime ready: profile=${runtimeProfile.id} provider=${runtimeProfile.provider}`,
+        );
+      }
       let descriptor = adapter.buildSessionSpawn({
         rolePrompt: rolePrompt || '',
         mcpConfigPath: null,
@@ -618,6 +630,9 @@ export class BaseSessionManager {
           ultracode,
         });
       }
+      if (adapter.cliType === 'claude' && runtimeProfile?.claude?.args?.length) {
+        descriptor.args.push(...runtimeProfile.claude.args);
+      }
 
       // `delegation.claudeBin` is the legacy operator override for the
       // claude binary path only — passing it to non-claude adapters
@@ -681,6 +696,7 @@ export class BaseSessionManager {
           ...cliHomeEnv,
           ...credentialEnv,
           ...adapter.harnessEnv(harness),
+          ...(runtimeLease?.claudeEnv() ?? {}),
         },
       }) as ChildProcessByStdio<Writable, Readable, Readable>;
       child.once('error', (err: any) => {
@@ -720,6 +736,7 @@ export class BaseSessionManager {
         configPath,
         configPathIsTemp,
         pidPath,
+        runtimeLease,
         turnCount: 0,
         startedAt: Date.now(),
         lastTouchedAt: Date.now(),
@@ -773,6 +790,7 @@ export class BaseSessionManager {
     } catch (err: any) {
       log(`${this.#logTag} spawn error ${this.#keyField}=${sessionKey}: ${err?.message ?? err}`);
       if (configPath && configPathIsTemp) await fsp.unlink(configPath).catch(() => {});
+      await runtimeLease?.close();
       return null;
     }
   }
@@ -1018,6 +1036,7 @@ export class BaseSessionManager {
       } catch (err: any) {
         log(`${this.#logTag} _onChildExit error: ${err?.message ?? err}`);
       }
+      await sess.runtimeLease?.close();
       // Drop the buffered output AFTER the subclass hook so a silent-exit
       // detector can read it; safe to no-op when the subclass already
       // cleared it.

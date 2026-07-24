@@ -42,6 +42,7 @@ import { classifyCliError, isFallbackEligible } from './cli-error-signatures.js'
 import { detectHarnessSessionLimit, resolveDeferUntil } from './session-limit-defer.js';
 import type { HarnessSessionLimitDetection } from './session-limit-defer.js';
 import { summarizeCliJsonLine } from './cli-output-summary.js';
+import { startRuntimeProfile, type RuntimeLease } from './runtime-profiles.js';
 import { callMcpTool, fireAndForgetTool, unwrapToolResult } from './mcp-client.js';
 import {
   findLiveGroupBackgroundTasks,
@@ -548,7 +549,8 @@ export class SubagentManager implements SubagentManagerContract {
     // them); they ride into buildOneshotSpawn and are ignored by adapters that
     // don't destructure them.
     const slice = selectEffortSlice(adapter.cliType, spec.effortPreset);
-    const effectiveModel = slice?.model ?? harness?.model ?? ctx?.model ?? null;
+    const effectiveModel =
+      slice?.model ?? harness?.model ?? ctx?.model ?? spec.runtimeProfile?.model ?? null;
     const effortFlag = slice?.effort ?? null;
     const ultracode = !!slice?.ultracode;
     if (slice && (effortFlag || ultracode || slice.model)) {
@@ -573,7 +575,14 @@ export class SubagentManager implements SubagentManagerContract {
     }
     let configPath: string | null = null;
     let configPathIsTemp = false;
+    let runtimeLease: RuntimeLease | null = null;
     try {
+      if (adapter.cliType === 'claude' && spec.runtimeProfile) {
+        runtimeLease = await startRuntimeProfile(spec.runtimeProfile, ctx?.extra_env ?? {});
+        log(
+          `[subagent] runtime ready: profile=${spec.runtimeProfile.id} provider=${spec.runtimeProfile.provider}`,
+        );
+      }
       const descriptor = adapter.buildOneshotSpawn({
         rolePrompt: spec.rolePrompt || '',
         taskText: spec.taskText,
@@ -653,6 +662,9 @@ export class SubagentManager implements SubagentManagerContract {
           }),
         );
       }
+      if (adapter.cliType === 'claude' && spec.runtimeProfile?.claude?.args?.length) {
+        descriptor.args.push(...spec.runtimeProfile.claude.args);
+      }
 
       // See base-session-manager: `delegation.claudeBin` is claude-only;
       // forwarding it to codex / antigravity spawned the wrong binary.
@@ -722,8 +734,10 @@ export class SubagentManager implements SubagentManagerContract {
           ...cliHomeEnv,
           ...credentialEnv,
           ...adapter.harnessEnv(harness),
+          ...(runtimeLease?.claudeEnv() ?? {}),
         },
       });
+      if (runtimeLease) child.once('close', () => void runtimeLease?.close());
       child.once('error', (err: any) => {
         log(
           `Subagent spawn error: code=${err?.code || ''} cli=${adapter.cliType} bin=${resolvedBin} msg=${err?.message}`,
@@ -822,6 +836,7 @@ export class SubagentManager implements SubagentManagerContract {
       if (configPath && configPathIsTemp) {
         await fsp.unlink(configPath).catch(() => {});
       }
+      await runtimeLease?.close();
       log(`Subagent spawn error: ${err?.message ?? err}`);
       return { spawned: false, reason: 'exception' };
     }

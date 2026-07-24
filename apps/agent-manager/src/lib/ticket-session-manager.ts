@@ -529,6 +529,7 @@ export class TicketSessionManager
           monitorMeta,
           agentContext: spec.agentContext,
           harness: spec.harness ?? null,
+          runtimeProfile: spec.runtimeProfile ?? null,
           // Ticket-level effort preset reaches buildSessionSpawn the same way
           // harness does, so persistent ticket sessions get --effort + the
           // ultracode first-turn keyword at session creation.
@@ -567,6 +568,7 @@ export class TicketSessionManager
             monitorMeta,
             agentContext: spec.agentContext,
             harness: spec.harness ?? null,
+            runtimeProfile: spec.runtimeProfile ?? null,
             effortPreset: spec.effortPreset ?? null,
             envVars: spec.envVars,
             chainAttempt: nextAttempt,
