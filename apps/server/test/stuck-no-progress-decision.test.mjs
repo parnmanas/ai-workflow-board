@@ -63,3 +63,14 @@ test('config clamp: a tiny env value clamps up to the 30min floor', () => {
   const lo = __test__.readConfigFromEnv({ STUCK_DETECTOR_NO_PROGRESS_MS: '1000' });
   assert.ok(lo.noProgressMs >= 30 * 60_000, 'clamps up to the 30min floor');
 });
+
+test('config: promotion delay uses explicit env, then min-age, then 2h', () => {
+  assert.equal(__test__.readConfigFromEnv({}).promotionDelayMs, 2 * 60 * 60_000);
+  assert.equal(__test__.readConfigFromEnv({
+    STUCK_DETECTOR_MIN_AGE_MS: '1234567',
+  }).promotionDelayMs, 1234567);
+  assert.equal(__test__.readConfigFromEnv({
+    STUCK_DETECTOR_MIN_AGE_MS: '1234567',
+    STUCK_DETECTOR_PROMOTION_DELAY_MS: '7654321',
+  }).promotionDelayMs, 7654321);
+});

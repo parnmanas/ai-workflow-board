@@ -52,12 +52,12 @@ async function backdate(repo, id, fields) {
   if (Object.keys(updates).length > 0) await repo.update(id, updates);
 }
 
-async function seedAgentComment(commentRepo, ticketId, workspaceId, agentName, content, createdAt) {
+async function seedAgentComment(commentRepo, ticketId, workspaceId, agentName, content, createdAt, agentId = 'agent-fixture') {
   const saved = await commentRepo.save(commentRepo.create({
     ticket_id: ticketId,
     workspace_id: workspaceId,
     author_type: 'agent',
-    author_id: 'agent-fixture',
+    author_id: agentId,
     author: agentName,
     content,
     type: 'note',
@@ -65,6 +65,20 @@ async function seedAgentComment(commentRepo, ticketId, workspaceId, agentName, c
   await backdate(commentRepo, saved.id, { created_at: createdAt });
   // Re-read so the returned row reflects the backdated timestamp.
   return commentRepo.findOne({ where: { id: saved.id } });
+}
+
+async function seedDispatch(activityRepo, ticket, agentId, createdAt) {
+  const saved = await activityRepo.save(activityRepo.create({
+    workspace_id: ticket.workspace_id,
+    entity_type: 'ticket',
+    entity_id: ticket.id,
+    ticket_id: ticket.id,
+    actor_id: 'system',
+    actor_name: 'qa',
+    action: 'trigger_emitted',
+    new_value: JSON.stringify({ target_agent_id: agentId }),
+  }));
+  await backdate(activityRepo, saved.id, { created_at: createdAt });
 }
 
 async function seedChatRoom(roomRepo, workspaceId) {
@@ -133,6 +147,7 @@ test('StuckTicketDetectorService — acceptance bullets 1..5', async (t) => {
   const ticketRepo = ds.getRepository('Ticket');
   const commentRepo = ds.getRepository('Comment');
   const alertRepo = ds.getRepository('StuckTicketAlert');
+  const activityRepo = ds.getRepository('ActivityLog');
 
   const now = new Date();
   const HOUR = 3_600_000;
@@ -156,13 +171,14 @@ test('StuckTicketDetectorService — acceptance bullets 1..5', async (t) => {
       created_at: new Date(now.getTime() - 5 * HOUR),
       updated_at: new Date(now.getTime() - 5 * HOUR),
     });
+    await seedDispatch(activityRepo, ticket, aliceAgent.id, new Date(now.getTime() - 5 * HOUR));
 
     step('Seed 5 agent WAIT comments, spaced 1h apart over 4h span');
     for (let i = 4; i >= 0; i--) {
       // Latest (i=0) is "now - 0h", oldest (i=4) is "now - 4h".
       await seedAgentComment(commentRepo, ticket.id, ws.id, 'alice',
         `WAIT stands — re-check ${5 - i}`,
-        new Date(now.getTime() - i * HOUR));
+        new Date(now.getTime() - i * HOUR), aliceAgent.id);
     }
 
     step('Run one sweep');
@@ -255,10 +271,11 @@ test('StuckTicketDetectorService — acceptance bullets 1..5', async (t) => {
       created_at: new Date(now.getTime() - 5 * HOUR),
       updated_at: new Date(now.getTime() - 5 * HOUR),
     });
+    await seedDispatch(activityRepo, ticket, aliceAgent.id, new Date(now.getTime() - 5 * HOUR));
     for (let i = 3; i >= 0; i--) {
       await seedAgentComment(commentRepo, ticket.id, ws.id, 'alice',
         `WAIT stands — disabled check ${4 - i}`,
-        new Date(now.getTime() - i * HOUR));
+        new Date(now.getTime() - i * HOUR), aliceAgent.id);
     }
 
     // Detector config is loaded at construction; instantiate a fresh
@@ -310,11 +327,12 @@ test('StuckTicketDetectorService — acceptance bullets 1..5', async (t) => {
       created_at: new Date(now.getTime() - 5 * HOUR),
       updated_at: new Date(now.getTime() - 5 * HOUR),
     });
+    await seedDispatch(activityRepo, ticket, aliceAgent.id, new Date(now.getTime() - 5 * HOUR));
     // All comments in the last 30s — well under the 2h min-span guard.
     for (let i = 3; i >= 0; i--) {
       await seedAgentComment(commentRepo, ticket.id, ws.id, 'alice',
         `fast loop ${4 - i}`,
-        new Date(now.getTime() - i * 7_000)); // 0s, 7s, 14s, 21s ago
+        new Date(now.getTime() - i * 7_000), aliceAgent.id); // 0s, 7s, 14s, 21s ago
     }
 
     const beforeAlert = await alertRepo.findOne({ where: { ticket_id: ticket.id } });
@@ -337,10 +355,11 @@ test('StuckTicketDetectorService — acceptance bullets 1..5', async (t) => {
       created_at: new Date(now.getTime() - 5 * HOUR),
       updated_at: new Date(now.getTime() - 5 * HOUR),
     });
+    await seedDispatch(activityRepo, ticket, aliceAgent.id, new Date(now.getTime() - 5 * HOUR));
     for (let i = 3; i >= 0; i--) {
       await seedAgentComment(commentRepo, ticket.id, ws.id, 'alice',
         `WAIT stands — dedup check ${4 - i}`,
-        new Date(now.getTime() - i * HOUR));
+        new Date(now.getTime() - i * HOUR), aliceAgent.id);
     }
 
     const beforeMsgs = (await messageRepo.find({ where: { room_id: room.id } })).length;
@@ -355,6 +374,91 @@ test('StuckTicketDetectorService — acceptance bullets 1..5', async (t) => {
     const alert = await alertRepo.findOne({ where: { ticket_id: ticket.id } });
     assert.ok(alert, 'first sweep should have created the alert row');
     assert.equal(alert.last_cycle_count, 4, 'cycle count unchanged across dedup');
+  });
+
+  await t.test('(A) intake uses promotion_delay and comments do not resolve it', async () => {
+    const ticket = await createTicket(app, getDataSourceToken, {
+      columnId: intake.id, workspaceId: ws.id, title: 'delayed promotion',
+    });
+    await backdate(ticketRepo, ticket.id, { created_at: new Date(now.getTime() - 3 * HOUR) });
+    await detector.sweep(now);
+    let alert = await alertRepo.findOne({ where: { ticket_id: ticket.id } });
+    assert.equal(alert?.cause, 'promotion_delay');
+
+    await seedAgentComment(commentRepo, ticket.id, ws.id, 'operator', 'triage only', now);
+    await detector.sweep(new Date(now.getTime() + 1_000));
+    alert = await alertRepo.findOne({ where: { ticket_id: ticket.id } });
+    assert.equal(alert?.cause, 'promotion_delay', 'intake comment must not produce unstuck');
+
+    await ticketRepo.update(ticket.id, { column_id: todoCol.id });
+    const move = await activityRepo.save(activityRepo.create({
+      workspace_id: ws.id, entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id,
+      action: 'moved', field_changed: 'column', old_value: intake.id, new_value: todoCol.id,
+    }));
+    void move;
+    await detector.sweep(new Date());
+    assert.equal(await alertRepo.findOne({ where: { ticket_id: ticket.id } }), null);
+  });
+
+  await t.test('(B) only comments attributed to the current dispatch epoch are progress', async () => {
+    const ticket = await createTicket(app, getDataSourceToken, {
+      columnId: todoCol.id, workspaceId: ws.id, title: 'operator comment false progress',
+      assigneeId: aliceAgent.id,
+    });
+    await backdate(ticketRepo, ticket.id, { created_at: new Date(now.getTime() - 5 * HOUR) });
+    await detector.sweep(now);
+    assert.equal((await alertRepo.findOne({ where: { ticket_id: ticket.id } }))?.cause, 'no_progress');
+
+    await seedAgentComment(commentRepo, ticket.id, ws.id, 'operator', 'triage note', now, 'other-agent');
+    await detector.sweep(new Date(now.getTime() + 1_000));
+    assert.ok(await alertRepo.findOne({ where: { ticket_id: ticket.id } }),
+      'non-epoch agent comment must not resolve the alert');
+
+    await seedDispatch(activityRepo, ticket, aliceAgent.id, now);
+    await seedAgentComment(commentRepo, ticket.id, ws.id, 'alice', 'work started', now, aliceAgent.id);
+    await detector.sweep(new Date(now.getTime() + 2_000));
+    assert.equal(await alertRepo.findOne({ where: { ticket_id: ticket.id } }), null);
+  });
+
+  await t.test('(C) exact benchmark-run parent with candidate child is excluded', async () => {
+    const parent = await createTicket(app, getDataSourceToken, {
+      columnId: todoCol.id, workspaceId: ws.id, title: 'benchmark container',
+    });
+    await ticketRepo.update(parent.id, {
+      labels: JSON.stringify(['benchmark-run']),
+      created_at: new Date(now.getTime() - 5 * HOUR),
+    });
+    const child = await createTicket(app, getDataSourceToken, {
+      columnId: todoCol.id, workspaceId: ws.id, title: 'candidate',
+      parentId: parent.id, depth: 1,
+    });
+    await ticketRepo.update(child.id, { labels: JSON.stringify(['benchmark-candidate']) });
+    await detector.sweep(now);
+    assert.equal(await alertRepo.findOne({ where: { ticket_id: parent.id } }), null);
+  });
+
+  await t.test('(D) open prerequisite excludes; stale pending flag does not', async () => {
+    const blocked = await createTicket(app, getDataSourceToken, {
+      columnId: todoCol.id, workspaceId: ws.id, title: 'blocked on prerequisite',
+    });
+    const dependency = await createTicket(app, getDataSourceToken, {
+      columnId: todoCol.id, workspaceId: ws.id, title: 'dependency',
+    });
+    await ticketRepo.update(blocked.id, {
+      pending_on_tickets: true,
+      created_at: new Date(now.getTime() - 5 * HOUR),
+    });
+    const prerequisiteRepo = ds.getRepository('TicketPrerequisite');
+    await prerequisiteRepo.save(prerequisiteRepo.create({
+      ticket_id: blocked.id, prerequisite_ticket_id: dependency.id,
+    }));
+    await detector.sweep(now);
+    assert.equal(await alertRepo.findOne({ where: { ticket_id: blocked.id } }), null);
+
+    await ticketRepo.update(dependency.id, { column_id: done.id });
+    await detector.sweep(new Date(now.getTime() + 1_000));
+    assert.equal((await alertRepo.findOne({ where: { ticket_id: blocked.id } }))?.cause, 'no_progress',
+      'stale pending flag without open prerequisite must not hide a stall');
   });
 });
 
