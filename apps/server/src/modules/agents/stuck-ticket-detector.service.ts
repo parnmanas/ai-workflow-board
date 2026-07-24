@@ -37,7 +37,7 @@
  */
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, IsNull, LessThan, MoreThanOrEqual } from 'typeorm';
+import { DataSource, In, IsNull, LessThan, MoreThanOrEqual } from 'typeorm';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { Board } from '../../entities/Board';
 import { BoardColumn, NON_TERMINAL_KINDS } from '../../entities/BoardColumn';
@@ -292,7 +292,7 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
         continue;
       }
       if (column?.kind === 'intake') {
-        await this._evaluatePromotionDelay(ticket, existing, now, stats);
+        await this._evaluatePromotionDelay(ticket, column, existing, now, stats);
         continue;
       }
       if (existing?.cause === 'promotion_delay') {
@@ -406,6 +406,7 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
 
   private async _evaluatePromotionDelay(
     ticket: Ticket,
+    currentColumn: BoardColumn,
     existingAlert: StuckTicketAlert | null,
     now: Date,
     stats: SweepStats,
@@ -413,10 +414,14 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     const alertRepo = this.dataSource.getRepository(StuckTicketAlert);
     const move = await this.dataSource.getRepository(ActivityLog).findOne({
       where: {
-        ticket_id: ticket.id,
+        entity_type: 'ticket',
+        entity_id: ticket.id,
         action: 'moved',
         field_changed: 'column',
-        new_value: ticket.column_id,
+        // Production move paths persist the destination column name. Keep the
+        // UUID form readable for older/synthetic rows created before that
+        // convention was made consistent.
+        new_value: In([currentColumn.name, currentColumn.id]),
       },
       order: { created_at: 'DESC' },
       select: ['id', 'created_at'],

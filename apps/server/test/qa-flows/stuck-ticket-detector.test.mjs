@@ -437,6 +437,37 @@ test('StuckTicketDetectorService — acceptance bullets 1..5', async (t) => {
     assert.equal(await alertRepo.findOne({ where: { ticket_id: ticket.id } }), null);
   });
 
+  await t.test('(A) promotion_delay restarts from a production-shaped intake re-entry', async () => {
+    const ticket = await createTicket(app, getDataSourceToken, {
+      columnId: intake.id, workspaceId: ws.id, title: 'recent intake re-entry',
+    });
+    await backdate(ticketRepo, ticket.id, { created_at: new Date(now.getTime() - 5 * HOUR) });
+
+    const enteredAt = new Date(now.getTime() - HOUR);
+    const move = await activityRepo.save(activityRepo.create({
+      workspace_id: ws.id,
+      entity_type: 'ticket',
+      entity_id: ticket.id,
+      ticket_id: ticket.id,
+      action: 'moved',
+      field_changed: 'column',
+      old_value: todoCol.name,
+      new_value: intake.name,
+    }));
+    await backdate(activityRepo, move.id, { created_at: enteredAt });
+
+    await detector.sweep(now);
+    assert.equal(
+      await alertRepo.findOne({ where: { ticket_id: ticket.id } }),
+      null,
+      'old ticket must not alert before the re-entry promotion threshold',
+    );
+
+    await detector.sweep(new Date(enteredAt.getTime() + 2 * HOUR + 1));
+    const alert = await alertRepo.findOne({ where: { ticket_id: ticket.id } });
+    assert.equal(alert?.cause, 'promotion_delay', 're-entry alerts only after its own threshold');
+  });
+
   await t.test('(A) undelivered promotion_delay retries next sweep and only delivery starts cooldown', async () => {
     const noRoomWs = await createWorkspace(app, getDataSourceToken, 'promotion-retry');
     const noRoomBoard = await createBoard(app, getDataSourceToken, noRoomWs.id, { name: 'promotion-retry' });
