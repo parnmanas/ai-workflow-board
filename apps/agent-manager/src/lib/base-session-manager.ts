@@ -1076,6 +1076,17 @@ export class BaseSessionManager {
     _signal: NodeJS.Signals | null,
   ): Promise<void> {}
 
+  /**
+   * Test seam: attach the real stdio and child-close lifecycle to a caller-built
+   * session. This lets regression tests deliver output in the narrow window
+   * between `exit` and `close` without forking a real CLI.
+   */
+  _trackSessionForTest(sessionKey: string, sess: SessionRecord): void {
+    this._sessions.set(sessionKey, sess);
+    this.#wireStdio(sess);
+    this.#wireExit(sess);
+  }
+
   #ensureHealthSweep(): void {
     if (this.#healthTimer) return;
     this.#healthTimer = setInterval(() => this.#healthSweep(), HEALTH_SWEEP_INTERVAL_MS);
