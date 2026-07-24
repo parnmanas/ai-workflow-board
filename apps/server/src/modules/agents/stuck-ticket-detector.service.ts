@@ -45,6 +45,7 @@ import { ChatRoom } from '../../entities/ChatRoom';
 import { Comment } from '../../entities/Comment';
 import { StuckTicketAlert } from '../../entities/StuckTicketAlert';
 import { Ticket } from '../../entities/Ticket';
+import { TicketPrerequisite } from '../../entities/TicketPrerequisite';
 import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { Workspace } from '../../entities/Workspace';
 import { sinceBoundaryParam } from '../../common/created-at-since-param';
@@ -66,6 +67,7 @@ const DEFAULTS = {
   MIN_AGE_MS: 2 * 60 * 60_000,       // 2 h — brand-new ticket grace period
   REALERT_MS: 24 * 60 * 60_000,      // 24 h — cooldown between re-alerts
   NO_PROGRESS_MS: 3 * 60 * 60_000,   // 3 h — cause-agnostic hard-stall threshold
+  PROMOTION_DELAY_MS: 2 * 60 * 60_000,
   // Lock is trusted as "an agent is actively working, skip evaluation" only
   // while `locked_at` is within this window (ticket e7c87517, reviewer blocker
   // #2). Mirrors agent-connection.service's LOCK_TTL_MS (30 min) — the same
@@ -99,6 +101,7 @@ export interface StuckDetectorConfig {
   minAgeMs: number;
   realertMs: number;
   noProgressMs: number;
+  promotionDelayMs: number;
   staleLockMs: number;
 }
 
@@ -153,6 +156,10 @@ function readConfigFromEnv(env: NodeJS.ProcessEnv = process.env): StuckDetectorC
     minAgeMs:     parseInt(env.STUCK_DETECTOR_MIN_AGE_MS,   DEFAULTS.MIN_AGE_MS),
     realertMs:    parseInt(env.STUCK_DETECTOR_REALERT_MS,   DEFAULTS.REALERT_MS),
     noProgressMs: clampNoProgress(parseInt(env.STUCK_DETECTOR_NO_PROGRESS_MS, DEFAULTS.NO_PROGRESS_MS)),
+    promotionDelayMs: parseInt(
+      env.STUCK_DETECTOR_PROMOTION_DELAY_MS,
+      parseInt(env.STUCK_DETECTOR_MIN_AGE_MS, DEFAULTS.PROMOTION_DELAY_MS),
+    ),
     staleLockMs:  parseInt(env.STUCK_DETECTOR_STALE_LOCK_MS, DEFAULTS.STALE_LOCK_MS),
   };
 }
@@ -251,7 +258,8 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     if (candidateCols.length === 0) return stats;
     const colIds = candidateCols.map(c => c.id);
 
-    const ageThreshold = new Date(now.getTime() - this.config.minAgeMs);
+    const candidateAgeMs = Math.min(this.config.minAgeMs, this.config.promotionDelayMs);
+    const ageThreshold = new Date(now.getTime() - candidateAgeMs);
     const tickets = await ticketRepo
       .createQueryBuilder('t')
       .where('t.column_id IN (:...colIds)', { colIds })
@@ -268,11 +276,32 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     // but ticket no longer matches stale-WAIT shape).
     const allAlerts = await alertRepo.find();
     const alertByTicketId = new Map(allAlerts.map(a => [a.ticket_id, a]));
+    const columnById = new Map(candidateCols.map(c => [c.id, c]));
 
     // Step 2 — per-ticket evaluation.
     for (const ticket of tickets) {
       stats.scanned += 1;
       const existing = alertByTicketId.get(ticket.id) ?? null;
+      const column = columnById.get(ticket.column_id);
+      const excluded = await this._intentionalWaitReason(ticket);
+      if (excluded) {
+        if (existing) {
+          await alertRepo.delete({ ticket_id: ticket.id });
+          stats.unstuck += 1;
+        }
+        continue;
+      }
+      if (column?.kind === 'intake') {
+        await this._evaluatePromotionDelay(ticket, existing, now, stats);
+        continue;
+      }
+      if (existing?.cause === 'promotion_delay') {
+        await this._emitUnstuck(ticket, existing, now, stats, 'promoted_from_intake');
+        continue;
+      }
+      // Active dispatch stalls keep the original grace period even when the
+      // promotion-delay threshold is configured lower.
+      if (now.getTime() - new Date(ticket.created_at).getTime() < this.config.minAgeMs) continue;
       // A LIVE lock is "someone is actively working on it" — excluded from new
       // flags even if the last comment was a WAIT. But a STALE lock (ticket
       // e7c87517, reviewer blocker #2) — one whose `locked_at` is older than the
@@ -320,7 +349,7 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
       if (scannedIds.has(alert.ticket_id)) continue;
       const liveTicket = await ticketRepo.findOne({ where: { id: alert.ticket_id } });
       if (liveTicket) {
-        if (liveTicket.archived_at) {
+        if (liveTicket.archived_at || liveTicket.pending_user_action || liveTicket.pending_on_tickets) {
           // Manual archive after the alert landed. The archive itself was a
           // deliberate operator action — no need to spam an unstuck chat post
           // to announce that we agree. Drop the row silently so the next
@@ -329,8 +358,11 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
           stats.unstuck += 1;
           continue;
         }
-        // Resolution-side delete + unstuck post.
-        await this._emitUnstuck(liveTicket, alert, now, stats, 'fell_out_of_window');
+        // Promotion-delay has one meaningful resolution: leaving intake.
+        const reason = alert.cause === 'promotion_delay'
+          ? 'promoted_from_intake'
+          : 'fell_out_of_window';
+        await this._emitUnstuck(liveTicket, alert, now, stats, reason);
       } else {
         // Silent prune — no consumer to notify.
         await alertRepo.delete({ ticket_id: alert.ticket_id });
@@ -340,6 +372,120 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
 
     this.logService.info('StuckDetector', 'sweep complete', { stats });
     return stats;
+  }
+
+  private async _intentionalWaitReason(ticket: Ticket): Promise<string | null> {
+    if (ticket.archived_at || ticket.pending_user_action) return 'parked';
+
+    if (ticket.pending_on_tickets) {
+      const openCount = await this.dataSource.getRepository(TicketPrerequisite)
+        .createQueryBuilder('p')
+        .innerJoin(Ticket, 'dependency', 'dependency.id = p.prerequisite_ticket_id')
+        .innerJoin(BoardColumn, 'dependency_column', 'dependency_column.id = dependency.column_id')
+        .where('p.ticket_id = :ticketId', { ticketId: ticket.id })
+        .andWhere("dependency_column.kind != 'terminal'")
+        .getCount();
+      if (openCount > 0) return 'open_prerequisite';
+      this.logService.warn('StuckDetector', 'stale pending_on_tickets flag has no open prerequisite', {
+        ticket_id: ticket.id,
+      });
+    }
+
+    const labels = parseTicketLabels(ticket.labels);
+    if (!ticket.parent_id && labels.includes('benchmark-run')) {
+      const candidateChildren = await this.dataSource.getRepository(Ticket)
+        .createQueryBuilder('child')
+        .where('child.parent_id = :ticketId', { ticketId: ticket.id })
+        .getMany();
+      if (candidateChildren.some(child =>
+        parseTicketLabels(child.labels).includes('benchmark-candidate')
+      )) return 'benchmark_run_parent';
+    }
+    return null;
+  }
+
+  private async _evaluatePromotionDelay(
+    ticket: Ticket,
+    existingAlert: StuckTicketAlert | null,
+    now: Date,
+    stats: SweepStats,
+  ): Promise<void> {
+    const alertRepo = this.dataSource.getRepository(StuckTicketAlert);
+    const move = await this.dataSource.getRepository(ActivityLog).findOne({
+      where: {
+        ticket_id: ticket.id,
+        action: 'moved',
+        field_changed: 'column',
+        new_value: ticket.column_id,
+      },
+      order: { created_at: 'DESC' },
+      select: ['id', 'created_at'],
+    });
+    const enteredAt = move?.created_at
+      ? new Date(move.created_at)
+      : new Date(ticket.created_at);
+    const ageMs = now.getTime() - enteredAt.getTime();
+
+    // A row from a previous active-column stall must not leak into a new intake
+    // cycle. Intake comments and ordinary edits never resolve/reset this clock.
+    if (existingAlert && existingAlert.cause !== 'promotion_delay') {
+      await alertRepo.delete({ ticket_id: ticket.id });
+      existingAlert = null;
+    }
+    if (ageMs < this.config.promotionDelayMs) {
+      if (existingAlert?.cause === 'promotion_delay') {
+        await alertRepo.delete({ ticket_id: ticket.id });
+        stats.unstuck += 1;
+      }
+      return;
+    }
+
+    if (existingAlert) {
+      const cooldownAt = existingAlert.delivered_at || existingAlert.last_alerted_at;
+      if (now.getTime() - new Date(cooldownAt).getTime() < this.config.realertMs) return;
+      existingAlert.last_alerted_at = now;
+      existingAlert.delivery_attempts = (existingAlert.delivery_attempts || 0) + 1;
+      await alertRepo.save(existingAlert);
+    } else {
+      existingAlert = await alertRepo.save(alertRepo.create({
+        ticket_id: ticket.id,
+        cause: 'promotion_delay',
+        last_alerted_at: now,
+        last_cycle_count: 0,
+        last_comment_id: '',
+        delivered_at: null,
+        delivery_attempts: 1,
+      }));
+      stats.flagged += 1;
+    }
+
+    const delivered = await this._postPromotionDelayAlert(ticket, ageMs);
+    if (delivered) {
+      const wasDelivered = !!existingAlert.delivered_at;
+      existingAlert.delivered_at = now;
+      await alertRepo.save(existingAlert);
+      if (wasDelivered) stats.realerted += 1;
+    }
+  }
+
+  private async _postPromotionDelayAlert(ticket: Ticket, ageMs: number): Promise<boolean> {
+    const targetRoomId = await this._resolveAlertRoomId(ticket.workspace_id);
+    if (!targetRoomId) return false;
+    const ageH = Math.max(0, ageMs / 3_600_000);
+    try {
+      await this.messaging.sendSystemMessage(targetRoomId, ticket.workspace_id, [
+        `⛔ **Promotion-delay detected** — \`${ticket.id}\``,
+        `**${ticket.title}**`,
+        `Cause: promotion-delay · waiting in intake for ${ageH.toFixed(1)}h`,
+        `[Open ticket](/ws/${ticket.workspace_id}/ticket/${ticket.id})`,
+      ].join('\n\n'));
+      return true;
+    } catch (e) {
+      this.logService.error('StuckDetector', 'promotion-delay alert post failed — will retry', {
+        err: String(e), ticket_id: ticket.id,
+      });
+      return false;
+    }
   }
 
   /**
@@ -399,8 +545,16 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     const recentComments = await commentRepo.find({
       where: { ticket_id: ticket.id },
       order: { created_at: 'DESC' },
-      take: window + 1,
+      take: Math.max(window + 1, 100),
     });
+    const epoch = await this._dispatchEpoch(ticket, now);
+    const attributedComments = epoch
+      ? recentComments.filter(c =>
+          c.author_type === 'agent'
+          && c.author_id === epoch.agentId
+          && c.created_at.getTime() >= epoch.startedAt.getTime()
+        )
+      : [];
 
     // Exclude `type='system'` housekeeping rows (reviewer / assignee
     // changes, etc.) from the count — those are not author activity.
@@ -411,9 +565,9 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     // evaluates the no-progress shape BEFORE deciding the ticket is resolved
     // (ticket e7c87517). `recentComments` is shared so the no-progress path
     // reuses the same fetch instead of re-querying.
-    const realComments = recentComments.filter(c => c.type !== 'system');
+    const realComments = attributedComments.filter(c => c.type !== 'system');
     if (realComments.length === 0) {
-      return this._resolveNonStaleWait(ticket, existingAlert, now, stats, 'no_real_comments', recentComments);
+      return this._resolveNonStaleWait(ticket, existingAlert, now, stats, 'no_real_comments', attributedComments, epoch);
     }
 
     // The most recent real comment determines the "is the agent still
@@ -422,17 +576,17 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     // definition unstuck even if older comments still match.
     const latestIsAgent = realComments[0].author_type === 'agent';
     if (!latestIsAgent) {
-      return this._resolveNonStaleWait(ticket, existingAlert, now, stats, 'non_agent_comment', recentComments);
+      return this._resolveNonStaleWait(ticket, existingAlert, now, stats, 'non_agent_comment', attributedComments, epoch);
     }
 
     if (realComments.length < window) {
-      return this._resolveNonStaleWait(ticket, existingAlert, now, stats, 'short_window', recentComments);
+      return this._resolveNonStaleWait(ticket, existingAlert, now, stats, 'short_window', attributedComments, epoch);
     }
 
     // Top `window` comments — verify they're all agent-authored.
     const windowSlice = realComments.slice(0, window);
     if (!windowSlice.every(c => c.author_type === 'agent')) {
-      return this._resolveNonStaleWait(ticket, existingAlert, now, stats, 'window_mixed_authors', recentComments);
+      return this._resolveNonStaleWait(ticket, existingAlert, now, stats, 'window_mixed_authors', attributedComments, epoch);
     }
 
     // Time span guard — fast-loop comments (e.g. 4 in 30 seconds) are
@@ -441,7 +595,7 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     const oldest = windowSlice[window - 1];
     const spanMs = latest.created_at.getTime() - oldest.created_at.getTime();
     if (spanMs < this.config.minSpanMs) {
-      return this._resolveNonStaleWait(ticket, existingAlert, now, stats, 'short_span', recentComments);
+      return this._resolveNonStaleWait(ticket, existingAlert, now, stats, 'short_span', attributedComments, epoch);
     }
 
     // Lifecycle activity between oldest and latest comment — any
@@ -450,7 +604,7 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
       ticket.id, oldest.created_at, latest.created_at,
     );
     if (intervening > 0) {
-      return this._resolveNonStaleWait(ticket, existingAlert, now, stats, 'lifecycle_event', recentComments);
+      return this._resolveNonStaleWait(ticket, existingAlert, now, stats, 'lifecycle_event', attributedComments, epoch);
     }
 
     // === Stale-WAIT confirmed. ===
@@ -474,6 +628,7 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     } else {
       await alertRepo.save(alertRepo.create({
         ticket_id: ticket.id,
+        cause: 'stale_wait',
         last_alerted_at: now,
         last_cycle_count: cycleCount,
         last_comment_id: latestCommentId,
@@ -503,8 +658,9 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     stats: SweepStats,
     staleWaitReason: string,
     recentComments: Comment[],
+    epoch: { agentId: string; startedAt: Date } | null,
   ): Promise<void> {
-    const noProgress = await this._matchNoProgress(ticket, now, recentComments);
+    const noProgress = await this._matchNoProgress(ticket, now, recentComments, epoch);
     if (noProgress.stalled) {
       await this._applyNoProgressAlert(ticket, existingAlert, now, stats, noProgress);
       return;
@@ -532,12 +688,15 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     ticket: Ticket,
     now: Date,
     recentComments: Comment[],
+    epoch: { agentId: string; startedAt: Date } | null,
   ): Promise<{ stalled: boolean; ageMs: number; hasAgentHolder: boolean; everDispatched: boolean }> {
-    const pending = !!((ticket as any).pending_user_action || (ticket as any).pending_on_tickets);
+    // Open prerequisite waits are filtered by `_intentionalWaitReason` before
+    // evaluation. A stale pending_on_tickets flag intentionally falls through.
+    const pending = !!ticket.pending_user_action;
 
     const latestRealComment = recentComments.find(c => c.type !== 'system');
     const latestCommentMs = latestRealComment ? latestRealComment.created_at.getTime() : 0;
-    const everDispatched = recentComments.some(c => c.author_type === 'agent');
+    const everDispatched = !!epoch;
 
     const latestLifecycleMs = await this._latestLifecycleAtMs(ticket.id);
     const outputMs = this.agentStatus?.getLatestOutputLivenessForTicket(ticket.id) ?? 0;
@@ -549,7 +708,8 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     // lifecycle event (move / claim / release), or output-liveness. created_at
     // is the floor so a never-touched ticket's stall age counts from creation.
     const createdMs = new Date((ticket as any).created_at || now).getTime();
-    const lastProgressAtMs = Math.max(createdMs, latestCommentMs, latestLifecycleMs, outputMs);
+    const dispatchMs = epoch?.startedAt.getTime() ?? 0;
+    const lastProgressAtMs = Math.max(createdMs, dispatchMs, latestCommentMs, latestLifecycleMs, outputMs);
 
     const { stalled, ageMs } = decideNoProgress({
       lastProgressAtMs,
@@ -561,6 +721,56 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     // Holder lookup only matters (and only queried) when we're about to alert.
     const hasAgentHolder = stalled ? await this._ticketHasAgentHolder(ticket.id) : false;
     return { stalled, ageMs, hasAgentHolder, everDispatched };
+  }
+
+  private async _dispatchEpoch(
+    ticket: Ticket,
+    now: Date,
+  ): Promise<{ agentId: string; startedAt: Date } | null> {
+    const assigneeId = ticket.assignee_id || '';
+    if (!assigneeId) return null;
+
+    const evidence: Array<{ agentId: string; startedAt: Date }> = [];
+    const rows = await this.dataSource.getRepository(ActivityLog).find({
+      where: [
+        { ticket_id: ticket.id, action: 'trigger_emitted' },
+        { ticket_id: ticket.id, action: 'trigger_dispatched' },
+        { ticket_id: ticket.id, action: 'updated', field_changed: 'locked_by_agent_id' },
+      ],
+      order: { created_at: 'DESC' },
+      take: 100,
+    });
+    for (const row of rows) {
+      let agentId = '';
+      if (row.action === 'updated' && row.trigger_source === 'agent_claim') {
+        agentId = row.new_value || row.actor_id || '';
+      } else if (row.action === 'trigger_emitted' || row.action === 'trigger_dispatched') {
+        agentId = dispatchTargetAgent(row.new_value);
+      }
+      if (agentId) evidence.push({ agentId, startedAt: new Date(row.created_at) });
+    }
+    if (ticket.locked_by_agent_id && ticket.locked_at && this._isLockLive(ticket, now)) {
+      evidence.push({
+        agentId: ticket.locked_by_agent_id,
+        startedAt: new Date(ticket.locked_at),
+      });
+    } else if (ticket.locked_by_agent_id) {
+      this.logService.warn('StuckDetector', 'ignoring stale lock as dispatch evidence', {
+        ticket_id: ticket.id, lock_agent_id: ticket.locked_by_agent_id,
+      });
+    }
+
+    const mismatched = evidence.find(e => e.agentId !== assigneeId);
+    if (mismatched) {
+      this.logService.warn('StuckDetector', 'ignoring stale dispatch evidence for prior assignee', {
+        ticket_id: ticket.id,
+        evidence_agent_id: mismatched.agentId,
+        assignee_id: assigneeId,
+      });
+    }
+    return evidence
+      .filter(e => e.agentId === assigneeId)
+      .sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime())[0] ?? null;
   }
 
   /**
@@ -666,6 +876,7 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     if (!alertRow) {
       alertRow = alertRepo.create({
         ticket_id: ticket.id,
+        cause: 'no_progress',
         last_alerted_at: now,
         last_cycle_count: 0,
         last_comment_id: '',
@@ -675,6 +886,7 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
       stats.flagged += 1;
     }
     alertRow.last_alerted_at = now;
+    alertRow.cause = 'no_progress';
     alertRow.last_cycle_count = 0;
     alertRow.last_comment_id = '';
     alertRow.delivery_attempts = (alertRow.delivery_attempts || 0) + 1;
@@ -1296,8 +1508,23 @@ function parseTicketLabels(raw: string | null | undefined): string[] {
   }
 }
 
+/** Read both new structured trigger evidence and legacy `agent=<id>` rows. */
+function dispatchTargetAgent(raw: string | null | undefined): string {
+  if (!raw) return '';
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') {
+      const value = parsed.target_agent_id ?? parsed.agent_id ?? parsed.agent;
+      return typeof value === 'string' ? value : '';
+    }
+  } catch {
+    // Legacy rows are deliberately plain key=value text.
+  }
+  return raw.match(/(?:^|\s)agent=([^\s]+)/)?.[1] ?? '';
+}
+
 // Exported helpers for unit tests
-export const __test_helpers__ = { oneLineExcerpt, parseTicketLabels };
+export const __test_helpers__ = { oneLineExcerpt, parseTicketLabels, dispatchTargetAgent };
 
 // Suppress unused-import warnings in builds where these are only
 // referenced from query strings (TypeORM operator imports kept for

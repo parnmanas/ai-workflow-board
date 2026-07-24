@@ -2723,13 +2723,14 @@ candidate's branch or move the ticket.
         actor_id: 'system',
         actor_name: 'TriggerLoopService',
         action: 'trigger_emitted',
-        new_value:
-          `agent=${agentId} ` +
-          `column_position=${col?.position ?? -1} ` +
-          `chain_target=${chainTarget} ` +
-          `priority_index=${priorityIndex(ticket.priority)} ` +
-          `created_at=${createdAtIso} ` +
-          `force_respawn=${forceRespawn}`,
+        new_value: JSON.stringify({
+          target_agent_id: agentId,
+          column_position: col?.position ?? -1,
+          chain_target: chainTarget,
+          priority_index: priorityIndex(ticket.priority),
+          ticket_created_at: createdAtIso,
+          force_respawn: forceRespawn,
+        }),
         role,
         trigger_source: triggerSource,
       }));

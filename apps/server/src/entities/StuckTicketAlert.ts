@@ -38,6 +38,10 @@ export class StuckTicketAlert {
   @Column({ type: 'varchar', default: '' })
   last_comment_id: string;
 
+  /** Detector state-machine branch that owns this row. */
+  @Column({ type: 'varchar', default: 'stale_wait' })
+  cause: 'stale_wait' | 'no_progress' | 'promotion_delay';
+
   // Durable delivery state (ticket e7c87517, reviewer blocker #3). The row is
   // persisted BEFORE the chat post is attempted (crash-safe recovery pointer),
   // and `delivered_at` is stamped ONLY after a chat post actually succeeds. The
