@@ -5,6 +5,7 @@ import { constants as fsConstants } from 'node:fs';
 import type { ChildProcess } from 'node:child_process';
 import crossSpawn from 'cross-spawn';
 import type { RuntimeProfileSpec } from './cli-adapters/base.js';
+import { terminateDetachedProcessTree } from './process-tree.js';
 
 export interface RuntimeLaunch {
   bin: string;
@@ -20,7 +21,11 @@ export interface RuntimeProvider {
   capabilities: readonly string[];
   validate(profile: RuntimeProfileSpec): string[];
   build(profile: RuntimeProfileSpec): RuntimeLaunch;
-  claudeEnv(profile: RuntimeProfileSpec, launch: RuntimeLaunch): Record<string, string>;
+  claudeEnv(
+    profile: RuntimeProfileSpec,
+    launch: RuntimeLaunch,
+    credentialEnv: Record<string, string>,
+  ): Record<string, string>;
 }
 
 const providers = new Map<string, RuntimeProvider>();
@@ -72,7 +77,7 @@ function baseUrl(profile: RuntimeProfileSpec): string {
   return (profile.base_url || `http://127.0.0.1:${profile.port || 8000}`).replace(/\/$/, '');
 }
 
-function buildGeneric(profile: RuntimeProfileSpec, credentialEnv: Record<string, string> = {}): RuntimeLaunch {
+function buildGeneric(profile: RuntimeProfileSpec): RuntimeLaunch {
   const cwd = profile.cwd ? resolveFrom(profile, profile.cwd) : undefined;
   let bin: string;
   let args: string[];
@@ -104,7 +109,6 @@ function buildGeneric(profile: RuntimeProfileSpec, credentialEnv: Record<string,
       ...process.env,
       ...(binDir ? { VIRTUAL_ENV: resolveFrom(profile, profile.venv!), PATH: `${binDir}${delimiter}${process.env.PATH ?? ''}` } : {}),
       ...(profile.env ?? {}),
-      ...credentialEnv,
     },
     baseUrl: url,
     healthUrl: profile.health_check
@@ -127,6 +131,11 @@ function genericValidation(profile: RuntimeProfileSpec): string[] {
   if (profile.credential_required && !profile.credential_ref) {
     issues.push('credential_ref is required when credential_required is true');
   }
+  for (const key of Object.keys({ ...(profile.env ?? {}), ...(profile.claude?.env ?? {}) })) {
+    if (/(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|PRIVATE_?KEY|CREDENTIAL)/i.test(key)) {
+      issues.push(`${key} is sensitive; use credential_ref instead of plaintext env`);
+    }
+  }
   return issues;
 }
 
@@ -135,8 +144,11 @@ const genericProvider: RuntimeProvider = {
   capabilities: ['openai_compatible', 'managed_process'],
   validate: genericValidation,
   build: buildGeneric,
-  claudeEnv: (profile, launch) => ({
+  claudeEnv: (profile, launch, credentialEnv) => ({
     ANTHROPIC_BASE_URL: launch.baseUrl,
+    ...(credentialEnv.ANTHROPIC_API_KEY
+      ? { ANTHROPIC_AUTH_TOKEN: credentialEnv.ANTHROPIC_API_KEY }
+      : {}),
     ...(profile.claude?.env ?? {}),
   }),
 };
@@ -199,13 +211,18 @@ export class RuntimeLease {
     readonly profile: RuntimeProfileSpec,
     readonly launch: RuntimeLaunch,
     readonly child: ChildProcess | null,
+    readonly credentialEnv: Record<string, string> = {},
     release: (() => Promise<void>) | null = null,
   ) {
     this.#release = release;
   }
 
   claudeEnv(): Record<string, string> {
-    return getRuntimeProvider(this.profile.provider).claudeEnv(this.profile, this.launch);
+    return getRuntimeProvider(this.profile.provider).claudeEnv(
+      this.profile,
+      this.launch,
+      this.credentialEnv,
+    );
   }
 
   async close(): Promise<void> {
@@ -215,22 +232,20 @@ export class RuntimeLease {
       await this.#release();
       return;
     }
-    await this.terminate();
+    await this.terminate(false);
   }
 
-  async terminate(): Promise<void> {
-    if (!this.child || this.profile.shutdown_policy === 'reuse' || this.profile.shutdown_policy === 'manager_exit' || this.child.exitCode !== null) return;
-    const exited = new Promise<void>((resolveExit) => this.child!.once('exit', () => resolveExit()));
-    if (process.platform !== 'win32' && this.child.pid) {
-      try { process.kill(-this.child.pid, 'SIGTERM'); } catch { this.child.kill('SIGTERM'); }
-    } else {
-      this.child.kill('SIGTERM');
-    }
-    await Promise.race([exited, new Promise<void>((resolveWait) => setTimeout(resolveWait, 5_000))]);
-    if (this.child.exitCode === null && this.child.signalCode === null) {
-      this.child.kill('SIGKILL');
-      await Promise.race([exited, new Promise<void>((resolveWait) => setTimeout(resolveWait, 1_000))]);
-    }
+  async terminate(managerDrain = false): Promise<void> {
+    if (!this.child || this.profile.shutdown_policy === 'reuse') return;
+    if (!managerDrain && this.profile.shutdown_policy === 'manager_exit') return;
+    const exited = this.child.exitCode !== null || this.child.signalCode !== null
+      ? Promise.resolve()
+      : new Promise<void>((resolveExit) => this.child!.once('exit', () => resolveExit()));
+    if (this.child.pid) await terminateDetachedProcessTree(this.child.pid);
+    await Promise.race([
+      exited,
+      new Promise<void>((resolveWait) => setTimeout(resolveWait, 1_000)),
+    ]);
   }
 }
 
@@ -267,14 +282,13 @@ async function startRuntimeProfileUnshared(
     if (!(await healthy(launch.healthUrl))) {
       throw new Error(`Runtime endpoint is not healthy: ${launch.healthUrl}`);
     }
-    return new RuntimeLease(profile, launch, null);
+    return new RuntimeLease(profile, launch, null, credentialEnv);
   }
 
   const launch = provider.build(profile);
-  Object.assign(launch.env, credentialEnv);
   await assertRuntimeExecutable(launch);
   if (await healthy(launch.healthUrl)) {
-    return new RuntimeLease({ ...profile, shutdown_policy: 'reuse' }, launch, null);
+    return new RuntimeLease({ ...profile, shutdown_policy: 'reuse' }, launch, null, credentialEnv);
   }
   const child = crossSpawn(launch.bin, launch.args, {
     cwd: launch.cwd,
@@ -293,11 +307,13 @@ async function startRuntimeProfileUnshared(
     if (child.exitCode !== null) {
       throw new Error(`Runtime exited before becoming ready (exit code ${child.exitCode})`);
     }
-    if (await healthy(launch.healthUrl)) return new RuntimeLease(profile, launch, child);
+    if (await healthy(launch.healthUrl)) return new RuntimeLease(profile, launch, child, credentialEnv);
     await new Promise((resolveWait) => setTimeout(resolveWait, 250));
   }
-  const lease = new RuntimeLease(profile, launch, child);
-  await lease.close();
+  const lease = new RuntimeLease(profile, launch, child, credentialEnv);
+  // Startup failure always cleans up an owned child, regardless of the
+  // steady-state manager_exit lease policy.
+  await lease.terminate(true);
   throw new Error(
     `Runtime startup timed out after ${profile.startup_timeout_ms ?? 120_000}ms; health check: ${launch.healthUrl}`,
   );
@@ -316,7 +332,7 @@ export async function startRuntimeProfile(
   }
   shared.refs += 1;
   const owned = await shared.lease;
-  return new RuntimeLease(profile, owned.launch, owned.child, async () => {
+  return new RuntimeLease(profile, owned.launch, owned.child, credentialEnv, async () => {
     const current = sharedRuntimes.get(key);
     if (!current) return;
     current.refs = Math.max(0, current.refs - 1);
@@ -326,11 +342,36 @@ export async function startRuntimeProfile(
   });
 }
 
+/** Select only the credential explicitly referenced by the profile. */
+export function runtimeCredentialEnv(
+  profile: RuntimeProfileSpec,
+  credentialId: string | null | undefined,
+  agentCredentialEnv: Record<string, string> | undefined,
+): Record<string, string> {
+  if (!profile.credential_ref) return {};
+  if (!credentialId || credentialId !== profile.credential_ref) {
+    throw new Error(
+      `Runtime profile "${profile.id}" references credential ${profile.credential_ref}, ` +
+      'but the selected agent credential does not match',
+    );
+  }
+  const apiKey = agentCredentialEnv?.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    if (profile.credential_required) {
+      throw new Error(
+        `Runtime profile "${profile.id}" requires an Anthropic API-key credential`,
+      );
+    }
+    return {};
+  }
+  return { ANTHROPIC_API_KEY: apiKey };
+}
+
 export async function shutdownRuntimeProfiles(): Promise<void> {
   const entries = [...sharedRuntimes.values()];
   sharedRuntimes.clear();
   await Promise.allSettled(entries.map(async entry => {
     const lease = await entry.lease;
-    await lease.terminate();
+    await lease.terminate(true);
   }));
 }

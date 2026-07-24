@@ -42,7 +42,7 @@ import { classifyCliError, isFallbackEligible } from './cli-error-signatures.js'
 import { detectHarnessSessionLimit, resolveDeferUntil } from './session-limit-defer.js';
 import type { HarnessSessionLimitDetection } from './session-limit-defer.js';
 import { summarizeCliJsonLine } from './cli-output-summary.js';
-import { startRuntimeProfile, type RuntimeLease } from './runtime-profiles.js';
+import { runtimeCredentialEnv, startRuntimeProfile, type RuntimeLease } from './runtime-profiles.js';
 import { callMcpTool, fireAndForgetTool, unwrapToolResult } from './mcp-client.js';
 import {
   findLiveGroupBackgroundTasks,
@@ -578,7 +578,10 @@ export class SubagentManager implements SubagentManagerContract {
     let runtimeLease: RuntimeLease | null = null;
     try {
       if (adapter.cliType === 'claude' && spec.runtimeProfile) {
-        runtimeLease = await startRuntimeProfile(spec.runtimeProfile, ctx?.extra_env ?? {});
+        runtimeLease = await startRuntimeProfile(
+          spec.runtimeProfile,
+          runtimeCredentialEnv(spec.runtimeProfile, ctx?.credential_id, ctx?.extra_env),
+        );
         log(
           `[subagent] runtime ready: profile=${spec.runtimeProfile.id} provider=${spec.runtimeProfile.provider}`,
         );

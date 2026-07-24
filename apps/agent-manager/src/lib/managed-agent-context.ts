@@ -57,6 +57,9 @@ export interface ManagedAgentContext {
    *  the strip, an inherited env var silently overrides the per-agent
    *  .credentials.json / auth.json / oauth_creds.json file. */
   credential_provider?: string | null;
+  /** Credential row selected for this agent. Runtime profiles may consume
+   * secrets only when their credential_ref exactly matches this id. */
+  credential_id?: string | null;
   /** Spawn-time auth mode for this managed agent. Stamped here (rather
    *  than re-derived per heartbeat) because it's authoritative regardless
    *  of whether the OAuth file currently exists on disk:

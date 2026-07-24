@@ -308,3 +308,34 @@ export async function reapProcessTrees(pids: number[], graceMs = 2000): Promise<
   }
   return signalled;
 }
+
+/**
+ * Drain a detached runtime and its complete process tree.  POSIX runtimes are
+ * spawned as process-group leaders, so group signalling remains valid after
+ * the leader exits and its children are reparented.  Windows uses taskkill's
+ * native tree traversal.
+ */
+export async function terminateDetachedProcessTree(rootPid: number, graceMs = 5000): Promise<void> {
+  if (!Number.isInteger(rootPid) || rootPid <= 0) return;
+  if (hostPlatform() === 'win32') {
+    await runCommand('taskkill', ['/PID', String(rootPid), '/T'], { timeoutMs: 10_000 });
+    await delay(graceMs);
+    await runCommand('taskkill', ['/PID', String(rootPid), '/T', '/F'], { timeoutMs: 10_000 });
+    return;
+  }
+
+  try { process.kill(-rootPid, 'SIGTERM'); } catch { /* group already gone */ }
+  await delay(graceMs);
+
+  // Do not key completion on the leader: it may have obeyed SIGTERM while a
+  // grandchild ignored it. The process group survives reparenting.
+  const survivors = await findLiveGroupBackgroundTasks(rootPid, []);
+  try { process.kill(-rootPid, 'SIGKILL'); } catch { /* group raced to exit */ }
+  if (survivors.length > 0) {
+    for (const survivor of survivors) {
+      if (!isPidAlive(survivor.pid)) continue;
+      try { process.kill(survivor.pid, 'SIGKILL'); } catch { /* raced to exit */ }
+    }
+    await delay(100);
+  }
+}

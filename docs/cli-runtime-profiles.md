@@ -8,7 +8,7 @@ override, effort preset, harness, Agent model, then profile model.
 ## vLLM in a virtual environment
 
 ```json
-{
+[
   {
     "id": "local-vllm",
     "provider": "vllm",
@@ -23,13 +23,18 @@ override, effort preset, harness, Agent model, then profile model.
     "extra_args": ["--dtype", "auto"],
     "shutdown_policy": "on_release"
   }
-}
+]
 ```
 
 The manager executes `.venv/bin/python -m ...` (or
 `.venv/Scripts/python.exe` on Windows) directly. It never runs `source` or a
 shell activation script. It waits for the health endpoint before starting
 Claude and terminates the owned process group when Claude exits.
+
+For a non-persistent run override, save one profile object as JSON and start
+the manager with `--runtime-profile ./profile.json`. Use
+`--runtime-profile none` to disable the server-selected profile. This does not
+modify Workspace, Board, or Agent settings.
 
 Use `"shutdown_policy": "reuse"` with `base_url` to require an already-running
 endpoint. If an owned profile finds a healthy endpoint, it reuses it and does
@@ -70,3 +75,16 @@ provider is also usable declaratively for a second server or model:
 Invalid providers, virtual environments, executables, ports, missing secrets,
 early exits, unhealthy endpoints, and startup timeouts fail before Claude is
 spawned with a field-specific error.
+
+## Live vLLM verification
+
+The default suite uses a hermetic HTTP fixture. On a GPU host with vLLM and a
+model available, run the opt-in compatibility test:
+
+```sh
+AWB_TEST_VLLM_VENV=/models/vllm/.venv \
+AWB_TEST_VLLM_MODEL=Qwen/Qwen3-8B \
+npm run test --workspace apps/agent-manager
+```
+
+`AWB_TEST_VLLM_PORT` may be set when the default test port is unavailable.

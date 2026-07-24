@@ -38,7 +38,7 @@ import { accumulateUsage } from './cli-usage-accumulator.js';
 import type { AwbConfig } from './rest.js';
 import { writeMcpConfig } from './managed-agent-store.js';
 import type { SubagentMonitor, SubagentTapHandle } from './subagent-monitor.js';
-import { startRuntimeProfile, type RuntimeLease } from './runtime-profiles.js';
+import { runtimeCredentialEnv, startRuntimeProfile, type RuntimeLease } from './runtime-profiles.js';
 import type { RuntimeProfileSpec } from './cli-adapters/base.js';
 
 const { PERSISTENT_SESSION } = ADAPTER_CAPABILITIES;
@@ -120,6 +120,7 @@ export interface SpawnOpts {
      *  before merging extra_env so the agent's credential isn't silently
      *  overridden by the operator's shell environment. */
     credential_provider?: string | null;
+    credential_id?: string | null;
   };
   /** Per-turn image attachments for chat sessions. Only honored by adapters
    *  that support inline image content blocks (Claude); other adapters
@@ -558,7 +559,14 @@ export class BaseSessionManager {
     let runtimeLease: RuntimeLease | null = null;
     try {
       if (adapter.cliType === 'claude' && runtimeProfile) {
-        runtimeLease = await startRuntimeProfile(runtimeProfile, agentContext?.extra_env ?? {});
+        runtimeLease = await startRuntimeProfile(
+          runtimeProfile,
+          runtimeCredentialEnv(
+            runtimeProfile,
+            agentContext?.credential_id,
+            agentContext?.extra_env,
+          ),
+        );
         log(
           `${this.#logTag} runtime ready: profile=${runtimeProfile.id} provider=${runtimeProfile.provider}`,
         );

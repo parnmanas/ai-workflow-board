@@ -4,6 +4,7 @@ export const CLI_RUNTIME_NONE = 'none';
 export const RESERVED_RUNTIME_ENV = new Set([
   'AWB_API_KEY', 'HOME', 'USERPROFILE', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME',
 ]);
+export const SENSITIVE_RUNTIME_ENV = /(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|PRIVATE_?KEY|CREDENTIAL)/i;
 
 const ClaudeMappingSchema = z.object({
   env: z.record(z.string(), z.string()).optional(),
@@ -46,6 +47,13 @@ export const CliRuntimeProfileSchema = z.object({
   for (const key of Object.keys({ ...(value.env ?? {}), ...(value.claude?.env ?? {}) })) {
     if (RESERVED_RUNTIME_ENV.has(key.toUpperCase())) {
       ctx.addIssue({ code: 'custom', path: ['env', key], message: `${key} is reserved and cannot be overridden` });
+    }
+    if (SENSITIVE_RUNTIME_ENV.test(key)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['env', key],
+        message: `${key} is sensitive; use credential_ref instead of a plaintext env value`,
+      });
     }
   }
 });

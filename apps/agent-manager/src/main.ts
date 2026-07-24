@@ -54,13 +54,15 @@ import {
 } from './lib/managed-agent-store.js';
 import type { SessionAwareConfig } from './lib/base-session-manager.js';
 import type { SubagentAwareConfig } from './lib/subagent-manager.js';
-import { shutdownRuntimeProfiles } from './lib/runtime-profiles.js';
+import { shutdownRuntimeProfiles, validateRuntimeProfile } from './lib/runtime-profiles.js';
+import type { RuntimeProfileSpec } from './lib/cli-adapters/base.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 interface CliFlags {
   config?: string;
   workspace?: string;
+  runtimeProfile?: string;
   dryRun: boolean;
   help: boolean;
   version: boolean;
@@ -85,6 +87,7 @@ function parseFlags(argv: string[]): CliFlags {
       options: {
         config: { type: 'string', short: 'c' },
         workspace: { type: 'string', short: 'w' },
+        'runtime-profile': { type: 'string' },
         'dry-run': { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
         version: { type: 'boolean', short: 'v' },
@@ -102,6 +105,7 @@ function parseFlags(argv: string[]): CliFlags {
   return {
     config: values.config as string | undefined,
     workspace: values.workspace as string | undefined,
+    runtimeProfile: values['runtime-profile'] as string | undefined,
     dryRun: Boolean(values['dry-run']),
     help: Boolean(values.help),
     version: Boolean(values.version),
@@ -124,6 +128,8 @@ Usage:
 Options:
   -c, --config <path>     Path to config.json (default: ${CONFIG_PATH})
   -w, --workspace <id>    Override workspace_id from config
+      --runtime-profile <path|none>
+                            Use a JSON profile for this manager run, without DB changes
   -f, --force             Take over the lockfile from a stale or running owner
       --dry-run           Load config and exit without starting runtime
   -h, --help              Show this help text
@@ -318,6 +324,19 @@ async function main(): Promise<void> {
 
   installCrashHandlers();
 
+  let runtimeProfileOverride: RuntimeProfileSpec | null | undefined;
+  if (flags.runtimeProfile === 'none') {
+    runtimeProfileOverride = null;
+  } else if (flags.runtimeProfile) {
+    const path = resolve(flags.runtimeProfile);
+    try {
+      runtimeProfileOverride = JSON.parse(readFileSync(path, 'utf8')) as RuntimeProfileSpec;
+      validateRuntimeProfile(runtimeProfileOverride);
+    } catch (err: any) {
+      throw new Error(`Invalid --runtime-profile ${path}: ${err?.message ?? err}`);
+    }
+  }
+
   const version = readPkgVersion();
   process.stdout.write(`awb-agent-manager v${version}\n`);
   process.stdout.write(`  home:        ${AGENT_MANAGER_HOME}\n`);
@@ -377,7 +396,13 @@ async function main(): Promise<void> {
     return;
   }
 
-  await runRuntime(config as SessionAwareConfig & SubagentAwareConfig, version, flags, argv);
+  await runRuntime(
+    config as SessionAwareConfig & SubagentAwareConfig,
+    version,
+    flags,
+    argv,
+    runtimeProfileOverride,
+  );
 }
 
 async function runRuntime(
@@ -385,6 +410,7 @@ async function runRuntime(
   version: string,
   flags: CliFlags,
   argv: string[],
+  runtimeProfileOverride: RuntimeProfileSpec | null | undefined,
 ): Promise<void> {
   void argv; // reserved for future re-exec hook
 
@@ -657,6 +683,7 @@ async function runRuntime(
         // wrote at last bootstrap. Lets spawn sites strip operator-inherited
         // auth env vars after a manager restart without re-fetching from AWB.
         credential_provider: credential?.provider ?? null,
+        credential_id: credential?.credential_id ?? null,
         credential_kind: credentialKind,
         registered_at: new Date().toISOString(),
       });
@@ -692,6 +719,7 @@ async function runRuntime(
       inflightDispatchTracker,
       dispatchBlockTracker,
       sessionLimitDeferStore,
+      runtimeProfileOverride,
       poolReclaimTrigger: () =>
         reconcilePoolLeasesAll ? reconcilePoolLeasesAll('pool_exhausted') : Promise.resolve(0),
     },

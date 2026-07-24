@@ -344,6 +344,7 @@ export interface AgentExecutionContext {
    *  read this to decide whether to strip operator-inherited auth env vars
    *  (ANTHROPIC_API_KEY etc.) before merging the agent's credential. */
   credential_provider?: string | null;
+  credential_id?: string | null;
   /** Per-agent default model (Agent.model). Passed into the adapter build
    *  spec so the spawned subagent / session runs under `--model <id>`.
    *  null/undefined = the CLI's own default (no flag). */
@@ -636,6 +637,9 @@ export interface EventDispatcherDeps {
   subagentManager?: SubagentManager | null;
   chatSessionManager?: ChatSessionManager | null;
   ticketSessionManager?: TicketSessionManager | null;
+  /** Process-lifetime CLI override. undefined inherits the event snapshot;
+   * null explicitly disables runtimes. Never persists to the server. */
+  runtimeProfileOverride?: RuntimeProfileSpec | null;
   fsBrowser?: FsBrowser | null;
   prompts?: PromptComposer | null;
   // ST-5b — handler for agent_manager_command SSE events. Optional so the
@@ -693,6 +697,7 @@ export class EventDispatcher {
   #agentManagerCommandHandler: AgentManagerCommandSink | null;
   #managedAgentContexts: ManagedAgentContextRegistry | null;
   #worktreeManager: WorktreeManager | null;
+  #runtimeProfileOverride: RuntimeProfileSpec | null | undefined;
   // ticket a3047a86: per-ticket de-dup for dispatch-preflight blocker comments
   // (broken worktree / missing push credential). The abort already suppresses
   // the spawn; this keeps the SAME blocker from re-posting a ticket comment on
@@ -895,6 +900,7 @@ export class EventDispatcher {
     this.#agentManagerCommandHandler = deps.agentManagerCommandHandler ?? null;
     this.#managedAgentContexts = deps.managedAgentContexts ?? null;
     this.#worktreeManager = deps.worktreeManager ?? null;
+    this.#runtimeProfileOverride = deps.runtimeProfileOverride;
     this.#inflightDispatch = deps.inflightDispatchTracker ?? new InflightDispatchTracker();
     this.#dispatchBlockTracker = deps.dispatchBlockTracker ?? new DispatchBlockTracker();
     this.#poolReclaimTrigger = deps.poolReclaimTrigger ?? null;
@@ -1189,6 +1195,7 @@ export class EventDispatcher {
       cli_home_dir: ctx.cli_home_dir,
       extra_env: ctx.extra_env,
       credential_provider: ctx.credential_provider ?? null,
+      credential_id: ctx.credential_id ?? null,
       model: ctx.model ?? null,
     };
   }
@@ -1857,7 +1864,9 @@ export class EventDispatcher {
     // event (e9c7a896). Parsed once here; both the persistent-session and
     // one-shot paths below ship it to their spawn site.
     const harness = parseHarnessConfig(ev.harness_config);
-    const runtimeProfile = parseRuntimeProfile(ev.cli_runtime_profile);
+    const runtimeProfile = this.#runtimeProfileOverride !== undefined
+      ? this.#runtimeProfileOverride
+      : parseRuntimeProfile(ev.cli_runtime_profile);
     if (harness) {
       log(
         `Trigger carries harness_config: ticket=${ev.ticket_id} keys=${Object.keys(harness).join(',')}`,

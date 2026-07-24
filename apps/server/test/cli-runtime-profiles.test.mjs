@@ -47,3 +47,16 @@ test('missing selected profile fails with source instead of silently falling bac
     /"deleted".*agent.*does not exist/,
   );
 });
+
+test('rejects plaintext secrets in runtime and Claude env mappings', () => {
+  const checked = validateCliRuntimeProfiles([{
+    id: 'leaky',
+    provider: 'generic',
+    model: 'demo',
+    command: 'server',
+    env: { OPENAI_API_KEY: 'plaintext' },
+    claude: { env: { PROXY_TOKEN: 'plaintext' } },
+  }]);
+  assert.equal(checked.ok, false);
+  assert.match(checked.error, /sensitive.*credential_ref/s);
+});

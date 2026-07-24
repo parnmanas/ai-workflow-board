@@ -444,6 +444,7 @@ export class AgentManagerCommandHandler {
         // has its own credential — without this, the operator's shell env
         // silently overrides the per-agent .credentials.json/auth.json.
         credential_provider: credential?.provider ?? null,
+        credential_id: credential?.credential_id ?? null,
         // Credential expiry monitoring needs to know the auth mode without
         // re-running the resolver each heartbeat. Stamp it here from the
         // resolved credential's provider suffix (after the cli prefix).
