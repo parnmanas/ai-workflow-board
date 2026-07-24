@@ -554,11 +554,10 @@ test('Claude native MCP move_ticket alone counts as audit trail (ticket 2fd06686
   assert.equal(rec.commentSent, true, 'move_ticket is now in TICKET_COMMENT_TOOL_SUFFIXES');
 });
 
-test('silent-exit: server re-verification finds a comment the local scan missed → suppressed (ticket 2fd06686)', async () => {
-  // The local `_scanForCommentTool` never ran (simulating whatever race left
-  // `commentSent` false despite real work happening), but the ticket's actual
-  // comments — fetched by `_handleOneshotExit`'s new grace re-verification —
-  // show a comment posted during this spawn's lifetime.
+test('silent-exit: another concurrent spawn comment does not excuse this silent cycle', async () => {
+  // The local scanner saw nothing for this spawn while another same-ticket
+  // strand posted during its lifetime. Server time-window evidence is not
+  // cycle attribution and must not suppress this spawn's warning.
   const mgr = new SubagentManager(makeConfig());
   const rec = makeCodexRecord({
     cli_type: 'claude',
@@ -580,11 +579,7 @@ test('silent-exit: server re-verification finds a comment the local scan missed 
 
   await mgr._handleOneshotExit(rec, 0);
 
-  assert.equal(
-    silentExit(),
-    undefined,
-    'server-verified comment suppresses the fallback even when the local scan missed it',
-  );
+  assert.ok(silentExit(), 'the spawn must not borrow another strand comment');
 });
 
 test('silent-exit: server re-verification ALSO finds nothing → fallback still fires (genuine silent exit, no regression)', async () => {

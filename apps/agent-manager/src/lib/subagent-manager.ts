@@ -49,7 +49,6 @@ import {
   type ProcNode,
 } from './process-tree.js';
 import {
-  hasAuditTrailSince,
   postChatRoomMessage,
   postSilentExitSystemComment,
   type AwbConfig,
@@ -846,7 +845,10 @@ export class SubagentManager implements SubagentManagerContract {
     // idempotent (FolderMutex release), so a double-fire is harmless.
     const rec0 = this.#map.get(pid);
     const onSpawnExit = rec0 && rec0.kind !== 'reservation' ? rec0.onSpawnExit : undefined;
-    child.once('exit', async (code, signal) => {
+    // `exit` may precede the final stdout/stderr `data` callbacks. `close`
+    // runs after both streams drain, so this spawn's comment scanner has
+    // consumed its final MCP event before silent-exit accounting begins.
+    child.once('close', async (code, signal) => {
       if (onSpawnExit) {
         try {
           onSpawnExit();
@@ -918,19 +920,6 @@ export class SubagentManager implements SubagentManagerContract {
    */
   async _handleOneshotExit(record: SubagentRecord, code: number | null): Promise<void> {
     const pid = record.pid;
-
-    // Grace re-verification (ticket 2fd06686): `_scanForCommentTool`'s local
-    // scan of the CLI's own stdout can race the child's `exit` event, and
-    // before this ticket never recognized `move_ticket` as audit trail
-    // either. Before trusting a "nothing seen" verdict, re-check the
-    // ticket's ACTUAL comments (server-side ground truth, includes the
-    // system row a `move_ticket` call generates) for anything created since
-    // this spawn started. Corrects `record.commentSent` in place so every
-    // downstream reader below (model-fallback gate, circuit breaker, the
-    // fallback dispatch itself) sees the same corrected verdict.
-    if (!record.commentSent && record.ticket_id) {
-      record.commentSent = await hasAuditTrailSince(this.#config, record.ticket_id, record.started_at);
-    }
 
     // Classification of the aggregated one-shot result. Defaults to non-fatal;
     // only set for non-NATIVE_MCP adapters (codex / antigravity) whose stdout

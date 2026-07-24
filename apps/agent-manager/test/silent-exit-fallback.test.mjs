@@ -293,14 +293,12 @@ test('silent-exit: move_ticket alone (no add_comment) counts as audit trail — 
   assert.equal(fallback, undefined, 'move_ticket alone is not a silent exit');
 });
 
-test('silent-exit: server re-verification finds a comment the local scan missed → suppressed (ticket 3c6422f1 repro)', async () => {
+test('silent-exit: another concurrent strand comment does not excuse this silent cycle', async () => {
   const mgr = new TicketSessionManager(makeConfig());
   const sess = makeFakeSession(12002);
-  // Reproduces ticket 3c6422f1: the reviewer's approval comment landed on
-  // the server (created 5s into the session) but the local stdout scan
-  // never flipped `commentSent` — the exact race this ticket is about. The
-  // grace re-verification fetch must find the real comment and suppress the
-  // fallback even though the local signal alone would have fired it.
+  // Another strand using the same agent and ticket posts during this
+  // session. This cycle emitted no comment tool event of its own, so it must
+  // remain silent instead of borrowing the sibling's server-side comment.
   mockTicketFetch({
     comments: [
       {
@@ -315,11 +313,7 @@ test('silent-exit: server re-verification finds a comment the local scan missed 
   await mgr._onChildExit(sess, 0, null);
 
   const fallback = recordedRequests.find((r) => r.url.endsWith('/silent-exit-comment'));
-  assert.equal(
-    fallback,
-    undefined,
-    'server-verified comment suppresses the fallback even when the local scan missed it',
-  );
+  assert.ok(fallback, 'the cycle-local scanner must not borrow another strand comment');
 });
 
 test('silent-exit: server re-verification ALSO finds nothing → fallback still fires (genuine silent exit, no regression)', async () => {

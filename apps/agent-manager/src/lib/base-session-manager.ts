@@ -992,7 +992,9 @@ export class BaseSessionManager {
   }
 
   #wireExit(sess: SessionRecord): void {
-    sess.child.once('exit', async (code, signal) => {
+    // `exit` can precede the final stdout/stderr `data` callbacks. Waiting for
+    // `close` makes the subclass exit hook observe the fully drained stream.
+    sess.child.once('close', async (code, signal) => {
       if (sess.idleTimer) {
         clearTimeout(sess.idleTimer);
         sess.idleTimer = null;
