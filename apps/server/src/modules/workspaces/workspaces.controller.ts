@@ -26,6 +26,7 @@ import { parseComments, expandCommentAttachments } from '../mcp/shared/ticket-pa
 import { writeRoutingConfigThrough } from '../boards/routing-config.helper';
 import { validateHarnessConfigInput, serializeHarnessConfig } from '../../common/harness-config';
 import { validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../../common/environment-config';
+import { validateCliRuntimeProfiles } from '../../common/cli-runtime-profiles';
 import { hasPermission } from '../../common/types/permissions';
 import { PERMISSIONS } from '../../common/types/permissions';
 import { InjectDataSource } from '@nestjs/typeorm';
@@ -164,6 +165,7 @@ export class WorkspacesController {
       supervisor_stale_ms, supervisor_resend_ms, dispatch_queue_depth,
       claim_verification_enabled, claim_verification_grace_ms,
       harness_config, environment_config, assistant_agent_id,
+      cli_runtime_profiles, default_cli_runtime_profile,
     } = body;
     if (name !== undefined) ws.name = name;
     if (description !== undefined) ws.description = description;
@@ -214,6 +216,21 @@ export class WorkspacesController {
         if (!checked.ok) return res.status(400).json({ error: checked.error });
         ws.harness_config = serializeHarnessConfig(checked.value);
       }
+    }
+
+    if (cli_runtime_profiles !== undefined) {
+      const checked = validateCliRuntimeProfiles(cli_runtime_profiles ?? []);
+      if (!checked.ok) return res.status(400).json({ error: checked.error });
+      ws.cli_runtime_profiles = checked.value.length ? JSON.stringify(checked.value) : null;
+    }
+    if (default_cli_runtime_profile !== undefined) {
+      const selected = default_cli_runtime_profile == null ? null : String(default_cli_runtime_profile);
+      const checked = validateCliRuntimeProfiles(JSON.parse(ws.cli_runtime_profiles || '[]'));
+      if (!checked.ok) return res.status(400).json({ error: checked.error });
+      if (selected && selected !== 'none' && !checked.value.some(profile => profile.id === selected)) {
+        return res.status(400).json({ error: `default_cli_runtime_profile "${selected}" does not exist` });
+      }
+      ws.default_cli_runtime_profile = selected;
     }
 
     // Workspace-wide default environment setup (ticket 354d336b; simplified in

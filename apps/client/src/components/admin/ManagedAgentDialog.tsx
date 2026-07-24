@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { api, getActiveWorkspaceId } from '../../api';
 import { tokens } from '../../tokens';
-import type { Agent, Credential } from '../../types';
+import type { Agent, Credential, RuntimeProfileConfig } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { Button, Input, Modal, Select } from '../common';
 import DirectoryPicker from './DirectoryPicker';
@@ -86,6 +86,8 @@ export default function ManagedAgentDialog({
   // and per-install dynamic; when a CLI has no enumeration we fall back to a
   // free-text input so the operator can still type a model id.
   const [model, setModel] = useState<string>('');
+  const [runtimeProfile, setRuntimeProfile] = useState<string>('');
+  const [runtimeProfiles, setRuntimeProfiles] = useState<RuntimeProfileConfig[]>([]);
   const [availableModelsByCli, setAvailableModelsByCli] = useState<Record<string, string[]>>({});
 
   useEffect(() => {
@@ -100,6 +102,7 @@ export default function ManagedAgentDialog({
       setAutoSpawn(false);
       setCredentialId(agent.credential_id || '');
       setModel(agent.model || '');
+      setRuntimeProfile(agent.cli_runtime_profile || '');
     } else {
       setName('');
       setWorkingDir('');
@@ -107,6 +110,7 @@ export default function ManagedAgentDialog({
       setAutoSpawn(true);
       setCredentialId('');
       setModel('');
+      setRuntimeProfile('');
       // Default CLI tracks the manager's primary CLI, but the operator can
       // override it (e.g., spawn an Antigravity agent under a Claude-default manager).
       const defaulted = MANAGED_CLI_OPTIONS.find((o) => o.value === defaultCli)?.value || 'claude';
@@ -129,6 +133,11 @@ export default function ManagedAgentDialog({
     api.listCredentials(wsId)
       .then((rows) => { if (alive) setCredentials(rows); })
       .catch(() => { if (alive) setCredentials([]); });
+    api.getWorkspace(wsId).then(workspace => {
+      if (!alive) return;
+      try { setRuntimeProfiles(JSON.parse(workspace.cli_runtime_profiles || '[]')); }
+      catch { setRuntimeProfiles([]); }
+    }).catch(() => { if (alive) setRuntimeProfiles([]); });
     return () => { alive = false; };
   }, [isOpen, mode, agent?.workspace_id]);
 
@@ -205,6 +214,7 @@ export default function ManagedAgentDialog({
           credential_id: supportsCredential && credentialId ? credentialId : null,
           // null clears (CLI default); custom CLIs have no model concept.
           model: cli !== 'custom' && model.trim() ? model.trim() : null,
+          cli_runtime_profile: cli === 'claude' ? (runtimeProfile || null) : 'none',
         });
         showToast(`Agent "${trimmedName}" updated`, 'success');
 
@@ -388,6 +398,21 @@ export default function ManagedAgentDialog({
                 ? 'Candidates are read live from the CLI installed on the manager host. The list reflects what that CLI build accepts — not necessarily what this account can access.'
                 : 'This manager reported no model list for this CLI — type a model id the CLI accepts, or leave blank for its default.'}
               {' '}A running agent must be restarted (restart_agent) to pick up a model change.
+            </div>
+          </div>
+        )}
+        {mode === 'edit' && cli === 'claude' && (
+          <div>
+            <label style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 4 }}>
+              CLI runtime profile
+            </label>
+            <Select value={runtimeProfile} options={[
+              { value: '', label: 'Inherit board/workspace' },
+              { value: 'none', label: 'None — disable runtime' },
+              ...runtimeProfiles.map(profile => ({ value: profile.id, label: profile.id })),
+            ]} onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setRuntimeProfile(e.target.value)} />
+            <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2 }}>
+              Applies after restart. Profiles are managed in Workspace Settings.
             </div>
           </div>
         )}

@@ -28,6 +28,8 @@ import { resolveAgentDisplayMap } from '../../utils/agent-name';
 import { validateHarnessConfigInput, serializeHarnessConfig } from '../../common/harness-config';
 import { validateEffortPresetsInput, serializeEffortPresets } from '../../common/effort-presets';
 import { validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../../common/environment-config';
+import { parseCliRuntimeProfiles } from '../../common/cli-runtime-profiles';
+import { Workspace } from '../../entities/Workspace';
 import { validateMergeGateConfigInput, serializeMergeGateConfig } from '../../common/merge-gate-config';
 import { validateRespawnStormConfigInput, serializeRespawnStormConfig } from '../../common/respawn-storm-config';
 import { validateHardBudgetConfigInput, serializeHardBudgetConfig } from '../../common/hard-budget-config';
@@ -468,7 +470,7 @@ export class BoardsController {
   async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     const board = await findOrFail(this.boardRepo, { where: { id } }, 'Board not found');
 
-    const { name, description, routing_config, column_prompts, max_concurrent_tickets_per_agent, self_improvement_mode, benchmark_mode, auto_archive_days, harness_config, effort_presets, language, environment_config, qa_phases, merge_gate_config, respawn_storm_config, hard_budget_config, default_role_assignments, worktree_mode, use_pr } = body;
+    const { name, description, routing_config, column_prompts, max_concurrent_tickets_per_agent, self_improvement_mode, benchmark_mode, auto_archive_days, harness_config, effort_presets, language, environment_config, qa_phases, merge_gate_config, respawn_storm_config, hard_budget_config, default_role_assignments, worktree_mode, use_pr, cli_runtime_profile } = body;
     if (name !== undefined) board.name = name;
     if (description !== undefined) board.description = description;
     // Board output language (i18n, ticket ae28dcaf). Human-readable name that
@@ -530,6 +532,15 @@ export class BoardsController {
         if (!checked.ok) return res.status(400).json({ error: checked.error });
         board.harness_config = serializeHarnessConfig(checked.value);
       }
+    }
+    if (cli_runtime_profile !== undefined) {
+      const selected = cli_runtime_profile == null ? null : String(cli_runtime_profile);
+      const workspace = await this.dataSource.getRepository(Workspace).findOne({ where: { id: board.workspace_id } });
+      const profiles = parseCliRuntimeProfiles(workspace?.cli_runtime_profiles);
+      if (selected && selected !== 'none' && !profiles.some(profile => profile.id === selected)) {
+        return res.status(400).json({ error: `cli_runtime_profile "${selected}" does not exist in workspace ${board.workspace_id}` });
+      }
+      board.cli_runtime_profile = selected;
     }
 
     // Per-board effort preset catalog (abstract ticket effort option). null

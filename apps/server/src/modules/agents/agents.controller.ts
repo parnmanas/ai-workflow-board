@@ -26,6 +26,7 @@ import { InstanceRegistryService, InstanceRecord } from '../agent-manager/instan
 import { LogService } from '../../services/log.service';
 import { ApiOperation, ApiParam, ApiQuery, ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { findOrFail } from '../../common/find-or-fail';
+import { parseCliRuntimeProfiles } from '../../common/cli-runtime-profiles';
 
 /** Subset of InstanceRecord surfaced on /api/agents responses so the AI Agents
  *  admin UI can render the same heartbeat / version / supervision metadata that
@@ -561,7 +562,7 @@ export class AgentsController {
       (req as any).currentUser?.id || (req as any).currentAgentId || (req as any).apiKey?.agent_id || null;
     const actorRole = (req as any).currentUser?.role || null;
 
-    const { name, description, type, avatar_url, is_active, role_prompt, role_prompt_meta, working_dir, manager_agent_id, credential_id, model } = body;
+    const { name, description, type, avatar_url, is_active, role_prompt, role_prompt_meta, working_dir, manager_agent_id, credential_id, model, cli_runtime_profile } = body;
     if (name !== undefined) {
       const trimmed = typeof name === 'string' ? name.trim() : '';
       if (!trimmed) return res.status(400).json({ error: 'name cannot be empty' });
@@ -607,6 +608,17 @@ export class AgentsController {
     // restarted (restart_agent) for the new --model to apply.
     if (model !== undefined) {
       agent.model = typeof model === 'string' && model.trim() ? model.trim() : null;
+    }
+    if (cli_runtime_profile !== undefined) {
+      const selected = cli_runtime_profile == null ? null : String(cli_runtime_profile);
+      const workspace = agent.workspace_id
+        ? await this.dataSource.getRepository(Workspace).findOne({ where: { id: agent.workspace_id } })
+        : null;
+      const profiles = parseCliRuntimeProfiles(workspace?.cli_runtime_profiles);
+      if (selected && selected !== 'none' && !profiles.some(profile => profile.id === selected)) {
+        return res.status(400).json({ error: `cli_runtime_profile "${selected}" does not exist in agent workspace` });
+      }
+      agent.cli_runtime_profile = selected;
     }
 
     // Operator invariant: manager-type agents are workspace-less. Catches

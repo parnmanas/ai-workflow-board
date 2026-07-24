@@ -82,6 +82,7 @@ export interface Agent {
    *  default (no --model flag). Candidates come from the manager's reported
    *  available_models; free-text is also accepted. */
   model?: string | null;
+  cli_runtime_profile?: string | null;
   /** ST-7: name of the manager Agent that supervises this agent. Populated
    *  by the server's agent listing endpoints (one DB lookup per request).
    *  Drives the `<ManagerName>/<AgentName>` display format used everywhere
@@ -1141,6 +1142,7 @@ export interface Board {
   workspace_id: string; // GUID — references Workspace.id
   name: string;
   description: string;
+  cli_runtime_profile?: string | null;
   routing_config: string; // JSON: { [columnName]: 'assignee' | 'reporter' | 'reviewer' }
   column_prompts?: string | null; // JSON: { [columnId: string]: promptTemplateId: string }
   // Max distinct tickets one agent can be actively working on at once
@@ -1285,6 +1287,30 @@ export interface HarnessConfig {
   permission_mode?: string;      // --permission-mode
 }
 
+export interface RuntimeProfileConfig {
+  id: string;
+  provider: string;
+  type?: string;
+  model: string;
+  command?: string;
+  module?: string;
+  executable?: string;
+  python?: string;
+  venv?: string;
+  cwd?: string;
+  env?: Record<string, string>;
+  extra_args?: string[];
+  base_url?: string;
+  port?: number;
+  startup_timeout_ms?: number;
+  health_check?: string;
+  shutdown_policy?: 'on_release' | 'manager_exit' | 'reuse';
+  credential_required?: boolean;
+  credential_ref?: string;
+  capabilities?: string[];
+  claude?: { env?: Record<string, string>; args?: string[] };
+}
+
 // ─── Board-GET card projections ──────────────────────────────
 // The board GET (GET /api/boards/:id) ships a *lightened* payload for the
 // kanban cards: each ticket's `comments` relation is projected down to only
@@ -1368,6 +1394,8 @@ export interface Workspace {
   // Workspace-wide default agent harness. Raw JSON string of HarnessConfig;
   // boards override it per key via Board.harness_config.
   harness_config?: string | null;
+  cli_runtime_profiles?: string | null;
+  default_cli_runtime_profile?: string | null;
   // AWB 어시스턴트 에이전트 id (에픽 bf65ca00 · S2). null/미포함 = 미지정 —
   // Chat-first 랜딩은 임의 에이전트를 고르지 않고 관리자에게 지정을 안내하는 empty
   // state 를 렌더한다. 설정은 관리자 전용 workspace PATCH 로만 가능.

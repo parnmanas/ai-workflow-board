@@ -33,6 +33,7 @@ import { isConsensusVoteComment } from '../../common/consensus-meta';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { ResolvedHardBudget, hardBudgetDefaultsFromEnv, resolveHardBudgetConfig } from '../../common/hard-budget-config';
 import { lastHumanUnpendAt, countWindowDispatches, countWindowTokens, pendTicketForHardBudget, postHardBudgetAlert } from '../../common/hard-budget-guard';
+import { CliRuntimeProfile, parseCliRuntimeProfiles, resolveCliRuntimeProfile } from '../../common/cli-runtime-profiles';
 
 // Sentinel actor written onto auto-advance `moved` activities. Deliberately
 // non-'system' so the trigger loop re-enters and processes the destination
@@ -2427,6 +2428,7 @@ candidate's branch or move the ticket.
     // provisioning" and spawns exactly as before. Reuses the same board/
     // workspace rows loaded for harness so there's no extra round-trip.
     let environmentConfig: ResolvedEnvironmentConfig | null = null;
+    let runtimeProfile: CliRuntimeProfile | null = null;
     // Merged board+workspace environment repositories, captured for the base_repo
     // backfill below (goal 1, ticket 8c3befa8). Populated inside the resolve
     // try so a base-repo-less ticket can inherit the board's default repo.
@@ -2456,6 +2458,14 @@ candidate's branch or move the ticket.
       harnessConfig = resolveHarnessConfig(
         workspaceForHarness?.harness_config,
         boardForHarness?.harness_config,
+      );
+      runtimeProfile = resolveCliRuntimeProfile(
+        parseCliRuntimeProfiles(workspaceForHarness?.cli_runtime_profiles),
+        [
+          { source: 'agent', value: agent?.cli_runtime_profile },
+          { source: 'board', value: boardForHarness?.cli_runtime_profile },
+          { source: 'workspace', value: workspaceForHarness?.default_cli_runtime_profile },
+        ],
       );
       effortPreset = resolveEffortPreset(boardForHarness?.effort_presets, ticket.effort_preset);
 
@@ -2670,6 +2680,9 @@ candidate's branch or move the ticket.
       // Resolved workspace+board harness — agent-manager applies it as CLI
       // flags at subagent spawn (ticket e9c7a896). Null = no harness.
       harness_config: harnessConfig,
+      // Immutable declarative snapshot resolved Agent > Board > Workspace.
+      // Secrets remain Credential references and are resolved manager-side.
+      cli_runtime_profile: runtimeProfile,
       // Resolved abstract effort preset (board catalog × ticket effort_preset).
       // agent-manager maps it onto per-CLI options at spawn (claude --effort +
       // "ultracode" prompt keyword + --model; codex/antigravity model-only).

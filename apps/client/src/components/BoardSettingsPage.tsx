@@ -5,6 +5,7 @@ import {
   Board, BoardWithCards, PromptTemplate, BoardMovePreview, MoveBlocker, MoveRemedy,
   EffortPreset, EffortPresetsConfig, EffortLevel, BUILTIN_EFFORT_PRESETS, Resource,
   BoardLesson,
+  Workspace, RuntimeProfileConfig,
 } from '../types';
 import MoveBlockerList from './MoveBlockerList';
 import { useBoard } from '../hooks/useBoard';
@@ -39,12 +40,14 @@ export default function BoardSettingsPage() {
   // silently to an empty list so non-privileged users can still view
   // settings without a crash.
   const [promptTemplates, setPromptTemplates] = useState<PromptTemplate[]>([]);
+  const [workspace, setWorkspace] = useState<Workspace | null>(null);
   useEffect(() => {
     if (!wsId) return;
     let cancelled = false;
     api.listPromptTemplates(wsId)
       .then((list) => { if (!cancelled) setPromptTemplates(list); })
       .catch(() => { if (!cancelled) setPromptTemplates([]); });
+    api.getWorkspace(wsId).then(value => { if (!cancelled) setWorkspace(value); }).catch(() => {});
     return () => { cancelled = true; };
   }, [wsId]);
 
@@ -211,6 +214,27 @@ export default function BoardSettingsPage() {
             }
           }}
         />
+        <section style={{ border: `1px solid ${tokens.colors.border}`, borderRadius: 8, padding: 16, marginBottom: 20 }}>
+          <h3 style={{ marginTop: 0 }}>CLI runtime profile</h3>
+          <p style={{ color: tokens.colors.textMuted, fontSize: 13 }}>
+            Board default. “Inherit” uses the workspace default; “None” explicitly disables a runtime.
+          </p>
+          <select value={board.cli_runtime_profile || ''} onChange={async event => {
+            try {
+              await api.updateBoard(board.id, { cli_runtime_profile: event.target.value || null });
+              await refresh();
+              showToast('Board runtime profile saved', 'success');
+            } catch (err: any) { showToast(err?.message || 'Failed to save runtime profile', 'error'); }
+          }}>
+            <option value="">Inherit workspace</option><option value="none">None</option>
+            {(() => {
+              try {
+                return (JSON.parse(workspace?.cli_runtime_profiles || '[]') as RuntimeProfileConfig[])
+                  .map(profile => <option key={profile.id} value={profile.id}>{profile.id}</option>);
+              } catch { return null; }
+            })()}
+          </select>
+        </section>
         <EffortPresetsSetting
           board={board}
           onSave={async (config) => {

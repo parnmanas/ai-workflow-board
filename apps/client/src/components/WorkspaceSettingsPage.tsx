@@ -6,6 +6,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 import PageHeader from './PageHeader';
 import HarnessConfigEditor from './HarnessConfigEditor';
+import CliRuntimeProfilesEditor from './CliRuntimeProfilesEditor';
 import WorkspaceSchedulesEditor from './WorkspaceSchedulesEditor';
 import AssistantAgentSetting from './chat/AssistantAgentSetting';
 import { PermissionNotice } from './common';
@@ -66,6 +67,22 @@ export default function WorkspaceSettingsPage() {
         ) : (
           <>
             <AssistantAgentSetting workspace={workspace} onSaved={load} />
+            <CliRuntimeProfilesEditor
+              raw={workspace.cli_runtime_profiles}
+              selected={workspace.default_cli_runtime_profile}
+              onSave={async (profiles, selected) => {
+                try {
+                  await api.updateWorkspace(workspace.id, {
+                    cli_runtime_profiles: profiles,
+                    default_cli_runtime_profile: selected,
+                  });
+                  await load();
+                  showToast('CLI runtime profiles saved', 'success');
+                } catch (err: any) {
+                  showToast(err?.message || 'Failed to save runtime profiles', 'error');
+                }
+              }}
+            />
             <HarnessConfigEditor
               raw={workspace.harness_config}
               title="Agent Harness (workspace default)"

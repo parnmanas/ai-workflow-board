@@ -37,6 +37,9 @@ export class Board {
   @Column({ type: 'text', nullable: true, default: null })
   harness_config: string | null;
 
+  @Column({ type: 'varchar', nullable: true, default: null })
+  cli_runtime_profile: string | null;
+
   // Per-board abstract "effort preset" catalog (ticket-level effort option).
   // JSON text of EffortPresetsConfig (see common/effort-presets.ts):
   // { default: <preset id>, presets: [{ id, label, claude?, codex?,

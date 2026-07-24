@@ -96,6 +96,9 @@ export class Agent {
   @Column({ type: 'varchar', nullable: true, default: null })
   model: string | null;
 
+  @Column({ type: 'varchar', nullable: true, default: null })
+  cli_runtime_profile: string | null;
+
   @CreateDateColumn()
   created_at: Date;
 
