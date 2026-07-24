@@ -54,6 +54,7 @@ import {
 } from './lib/managed-agent-store.js';
 import type { SessionAwareConfig } from './lib/base-session-manager.js';
 import type { SubagentAwareConfig } from './lib/subagent-manager.js';
+import { shutdownRuntimeProfiles } from './lib/runtime-profiles.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -1035,6 +1036,11 @@ async function runRuntime(
       await ticketSessionManager.stop();
     } catch (err: any) {
       log(`shutdown (ticket): ${err?.message ?? err}`);
+    }
+    try {
+      await shutdownRuntimeProfiles();
+    } catch (err: any) {
+      log(`shutdown (runtime profiles): ${err?.message ?? err}`);
     }
     try {
       subagentMonitor.stop();

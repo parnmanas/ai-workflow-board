@@ -56,7 +56,7 @@ test('resolves module Python directly from .venv without shell activation', asyn
 
 test('waits for health and reaps the owned runtime process', async () => {
   const port = 41_000 + (process.pid % 10_000);
-  const lease = await startRuntimeProfile({
+  const profile = {
     id: 'generic-fixture',
     provider: 'generic',
     model: 'fixture-model',
@@ -67,14 +67,18 @@ test('waits for health and reaps the owned runtime process', async () => {
     ],
     base_url: `http://127.0.0.1:${port}`,
     startup_timeout_ms: 10_000,
-  });
+  };
+  const lease = await startRuntimeProfile(profile);
+  const secondLease = await startRuntimeProfile(profile);
   assert.ok(lease.child?.pid);
   assert.equal(lease.claudeEnv().ANTHROPIC_BASE_URL, `http://127.0.0.1:${port}`);
   const pid = lease.child.pid;
   try {
     assert.ok(pid);
-  } finally {
     await lease.close();
+    assert.doesNotThrow(() => process.kill(pid, 0), 'first release must not reap a shared runtime');
+  } finally {
+    await secondLease.close();
   }
   assert.ok(lease.child.exitCode !== null || lease.child.signalCode !== null);
   assert.throws(() => process.kill(pid, 0), /ESRCH/);

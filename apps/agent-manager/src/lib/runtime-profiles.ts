@@ -192,17 +192,33 @@ export async function assertRuntimeExecutable(launch: RuntimeLaunch): Promise<vo
 }
 
 export class RuntimeLease {
+  #release: (() => Promise<void>) | null;
+  #closed = false;
+
   constructor(
     readonly profile: RuntimeProfileSpec,
     readonly launch: RuntimeLaunch,
     readonly child: ChildProcess | null,
-  ) {}
+    release: (() => Promise<void>) | null = null,
+  ) {
+    this.#release = release;
+  }
 
   claudeEnv(): Record<string, string> {
     return getRuntimeProvider(this.profile.provider).claudeEnv(this.profile, this.launch);
   }
 
   async close(): Promise<void> {
+    if (this.#closed) return;
+    this.#closed = true;
+    if (this.#release) {
+      await this.#release();
+      return;
+    }
+    await this.terminate();
+  }
+
+  async terminate(): Promise<void> {
     if (!this.child || this.profile.shutdown_policy === 'reuse' || this.profile.shutdown_policy === 'manager_exit' || this.child.exitCode !== null) return;
     const exited = new Promise<void>((resolveExit) => this.child!.once('exit', () => resolveExit()));
     if (process.platform !== 'win32' && this.child.pid) {
@@ -218,6 +234,17 @@ export class RuntimeLease {
   }
 }
 
+interface SharedRuntime {
+  refs: number;
+  lease: Promise<RuntimeLease>;
+}
+
+const sharedRuntimes = new Map<string, SharedRuntime>();
+
+function profileFingerprint(profile: RuntimeProfileSpec): string {
+  return JSON.stringify(profile);
+}
+
 async function healthy(url: string): Promise<boolean> {
   try {
     const response = await fetch(url, { signal: AbortSignal.timeout(2_000) });
@@ -227,7 +254,7 @@ async function healthy(url: string): Promise<boolean> {
   }
 }
 
-export async function startRuntimeProfile(
+async function startRuntimeProfileUnshared(
   profile: RuntimeProfileSpec,
   credentialEnv: Record<string, string> = {},
 ): Promise<RuntimeLease> {
@@ -274,4 +301,36 @@ export async function startRuntimeProfile(
   throw new Error(
     `Runtime startup timed out after ${profile.startup_timeout_ms ?? 120_000}ms; health check: ${launch.healthUrl}`,
   );
+}
+
+export async function startRuntimeProfile(
+  profile: RuntimeProfileSpec,
+  credentialEnv: Record<string, string> = {},
+): Promise<RuntimeLease> {
+  const key = profileFingerprint(profile);
+  let shared = sharedRuntimes.get(key);
+  if (!shared) {
+    shared = { refs: 0, lease: startRuntimeProfileUnshared(profile, credentialEnv) };
+    sharedRuntimes.set(key, shared);
+    shared.lease.catch(() => sharedRuntimes.delete(key));
+  }
+  shared.refs += 1;
+  const owned = await shared.lease;
+  return new RuntimeLease(profile, owned.launch, owned.child, async () => {
+    const current = sharedRuntimes.get(key);
+    if (!current) return;
+    current.refs = Math.max(0, current.refs - 1);
+    if (current.refs > 0 || profile.shutdown_policy === 'manager_exit') return;
+    sharedRuntimes.delete(key);
+    await owned.terminate();
+  });
+}
+
+export async function shutdownRuntimeProfiles(): Promise<void> {
+  const entries = [...sharedRuntimes.values()];
+  sharedRuntimes.clear();
+  await Promise.allSettled(entries.map(async entry => {
+    const lease = await entry.lease;
+    await lease.terminate();
+  }));
 }
