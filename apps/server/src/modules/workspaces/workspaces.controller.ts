@@ -31,6 +31,7 @@ import { hasPermission } from '../../common/types/permissions';
 import { PERMISSIONS } from '../../common/types/permissions';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import { Credential } from '../../entities/Credential';
 
 @ApiBearerAuth('user-session')
 @ApiTags('workspaces')
@@ -221,6 +222,13 @@ export class WorkspacesController {
     if (cli_runtime_profiles !== undefined) {
       const checked = validateCliRuntimeProfiles(cli_runtime_profiles ?? []);
       if (!checked.ok) return res.status(400).json({ error: checked.error });
+      for (const profile of checked.value) {
+        if (!profile.credential_ref) continue;
+        const credential = await this.dataSource.getRepository(Credential).findOne({ where: { id: profile.credential_ref } });
+        if (!credential || (credential.workspace_id !== null && credential.workspace_id !== ws.id)) {
+          return res.status(400).json({ error: `credential_ref for profile "${profile.id}" is not owned by this workspace` });
+        }
+      }
       ws.cli_runtime_profiles = checked.value.length ? JSON.stringify(checked.value) : null;
     }
     if (default_cli_runtime_profile !== undefined) {

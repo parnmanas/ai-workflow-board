@@ -2459,14 +2459,6 @@ candidate's branch or move the ticket.
         workspaceForHarness?.harness_config,
         boardForHarness?.harness_config,
       );
-      runtimeProfile = resolveCliRuntimeProfile(
-        parseCliRuntimeProfiles(workspaceForHarness?.cli_runtime_profiles),
-        [
-          { source: 'agent', value: agent?.cli_runtime_profile },
-          { source: 'board', value: boardForHarness?.cli_runtime_profile },
-          { source: 'workspace', value: workspaceForHarness?.default_cli_runtime_profile },
-        ],
-      );
       effortPreset = resolveEffortPreset(boardForHarness?.effort_presets, ticket.effort_preset);
 
       // Merge workspace default ⊕ board override, then expand repository
@@ -2512,6 +2504,29 @@ candidate's branch or move the ticket.
       this.logService.warn('MCP', 'harness_config / effort_preset / environment_config resolve failed (continuing without)', {
         err: String(e), ticket_id: ticket.id, board_id: boardId,
       });
+    }
+    // Runtime selection is fail-closed and intentionally outside the legacy
+    // harness/environment availability catch: a stale id must never silently
+    // fall back to the default Claude endpoint.
+    const runtimeBoard = boardId
+      ? await this.dataSource.getRepository(Board).findOne({ where: { id: boardId } })
+      : null;
+    const runtimeWorkspace = ticket.workspace_id
+      ? await this.dataSource.getRepository(Workspace).findOne({ where: { id: ticket.workspace_id } })
+      : null;
+    runtimeProfile = resolveCliRuntimeProfile(
+      parseCliRuntimeProfiles(runtimeWorkspace?.cli_runtime_profiles),
+      [
+        { source: 'agent', value: agent?.cli_runtime_profile },
+        { source: 'board', value: runtimeBoard?.cli_runtime_profile },
+        { source: 'workspace', value: runtimeWorkspace?.default_cli_runtime_profile },
+      ],
+    );
+    if (runtimeProfile?.credential_required && runtimeProfile.credential_ref !== agent?.credential_id) {
+      throw new Error(
+        `CLI runtime profile "${runtimeProfile.id}" requires credential ${runtimeProfile.credential_ref}; ` +
+        `agent ${agent?.id ?? agentId} must select that credential before dispatch`,
+      );
     }
 
     // ── base repo binding (ticket 8c3befa8) ──────────────────────────────────
