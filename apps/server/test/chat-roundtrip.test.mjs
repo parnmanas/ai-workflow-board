@@ -241,6 +241,13 @@ test('chat round-trip: user REST POST → SSE echo → agent MCP reply → SSE',
     content: 'durable before post-commit failure',
   });
   assert.ok(failedAfterCommit.isError, 'post-commit injected failure is observable to the tool caller');
+  assert.equal(failedAfterCommit.error.message_persisted, true, 'post-commit error carries a durable ack');
+  assert.ok(failedAfterCommit.error.message_id, 'post-commit error identifies the durable message row');
+  assert.deepEqual(
+    failedAfterCommit.error.metadata?.ticket_refs,
+    [{ action: 'create', ticket_id: postCommitTicket.id, title: 'post-commit artifact exactly once' }],
+    'post-commit error echoes the artifact binding for manager suppression',
+  );
   const retryAfterCommit = await agentMcp.callTool('send_chat_room_message', {
     room_id: room.id,
     content: 'retry after post-commit failure',

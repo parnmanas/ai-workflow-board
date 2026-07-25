@@ -154,6 +154,69 @@ test('server-bound send metadata suppresses the legacy duplicate card post', asy
   );
 });
 
+test('post-commit send failure ack suppresses turn-end duplicate; pre-commit failure still flushes', async () => {
+  const durableRef = {
+    action: 'create',
+    ticket_id: 'post-commit-ticket',
+    title: 'post-commit-ticket',
+  };
+  const persistedHistory = [{
+    id: 'durable-message-1',
+    metadata: { ticket_refs: [durableRef] },
+  }];
+
+  const postCommitMgr = new ChatSessionManager(makeConfig());
+  const postCommitSess = makeSess();
+  driveTurn(postCommitMgr, postCommitSess, [
+    createAction(durableRef.ticket_id),
+    {
+      tool: 'send_chat_room_message',
+      input: { room_id: postCommitSess.roomId, content: 'created' },
+      result: {
+        error: 'injected post-commit room update failure',
+        message_id: 'durable-message-1',
+        room_id: postCommitSess.roomId,
+        metadata: { ticket_refs: [durableRef] },
+        message_persisted: true,
+      },
+      isError: true,
+    },
+  ]);
+  await settle();
+
+  const allPostCommitRefs = [
+    ...persistedHistory.flatMap((row) => row.metadata.ticket_refs),
+    ...cardPosts().flatMap((post) => post.body.metadata.ticket_refs),
+  ].filter((ref) => ref.ticket_id === durableRef.ticket_id);
+  assert.deepEqual(
+    allPostCommitRefs,
+    [durableRef],
+    'create → post-commit send failure → turn end leaves exactly one artifact in complete history',
+  );
+  assert.equal(cardPosts().length, 0, 'durable error ack prevents a standalone manager flush');
+
+  posts = [];
+  const preCommitMgr = new ChatSessionManager(makeConfig());
+  const preCommitSess = makeSess();
+  driveTurn(preCommitMgr, preCommitSess, [
+    createAction('pre-commit-ticket'),
+    {
+      tool: 'send_chat_room_message',
+      input: { room_id: preCommitSess.roomId, content: 'not saved' },
+      result: { error: 'injected pre-commit save failure' },
+      isError: true,
+    },
+  ]);
+  await settle();
+
+  assert.deepEqual(
+    cardPosts().flatMap((post) => post.body.metadata.ticket_refs)
+      .map((ref) => ref.ticket_id),
+    ['pre-commit-ticket'],
+    'a pre-commit failure has no durable ack, so turn-end fallback remains intact',
+  );
+});
+
 test('only SUCCESSFUL, tracked actions count toward the chunks (errors + reads excluded)', async () => {
   const mgr = new ChatSessionManager(makeConfig());
   const sess = makeSess();

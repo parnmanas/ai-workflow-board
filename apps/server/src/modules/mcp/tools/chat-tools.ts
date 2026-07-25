@@ -115,6 +115,7 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
         // workspace-scoped — but fall back to '' so the typed contract holds.
         const pendingTicketRefs = ctx.pendingTicketRefs?.drain() ?? [];
         let messagePersisted = false;
+        let persistedMessageId: string | undefined;
         let msg: any;
         try {
           msg = await roomMessagingService.sendMessage(
@@ -130,9 +131,17 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
             pendingTicketRefs.length > 0
               ? {
                   metadata: { ticket_refs: pendingTicketRefs },
-                  onPersisted: () => { messagePersisted = true; },
+                  onPersisted: (messageId) => {
+                    messagePersisted = true;
+                    persistedMessageId = messageId;
+                  },
                 }
-              : { onPersisted: () => { messagePersisted = true; } },
+              : {
+                  onPersisted: (messageId) => {
+                    messagePersisted = true;
+                    persistedMessageId = messageId;
+                  },
+                },
           );
         } catch (sendError) {
           if (!messagePersisted) ctx.pendingTicketRefs?.restore(pendingTicketRefs);
@@ -148,6 +157,25 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
               message_persisted: messagePersisted,
               error: sendError instanceof Error ? sendError.message : String(sendError),
             });
+          }
+          // The row and its artifact metadata already exist when a failure
+          // occurs after onPersisted. Echo that durable binding even on the
+          // MCP error result so agent-manager can acknowledge its captured
+          // refs instead of flushing a second artifact-only message at turn
+          // end. Pre-commit failures intentionally carry no ack and restore
+          // the refs for retry / legacy flush.
+          if (messagePersisted) {
+            return err(
+              sendError instanceof Error ? sendError.message : String(sendError),
+              {
+                message_id: persistedMessageId,
+                room_id,
+                metadata: pendingTicketRefs.length > 0
+                  ? { ticket_refs: pendingTicketRefs }
+                  : undefined,
+                message_persisted: true,
+              },
+            );
           }
           throw sendError;
         }
