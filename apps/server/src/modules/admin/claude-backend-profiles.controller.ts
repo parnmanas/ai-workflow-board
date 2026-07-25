@@ -58,7 +58,7 @@ export class ClaudeBackendProfilesController {
       this.defaultId(),
     ]);
     return {
-      profiles: rows.map(row => ({ ...profileEntityToRuntime(row), name: row.name })),
+      profiles: rows.map(publicProfile),
       default_profile_id,
     };
   }
@@ -78,7 +78,7 @@ export class ClaudeBackendProfilesController {
       const saved = await this.dataSource.getRepository(ClaudeBackendProfile).save(
         this.dataSource.getRepository(ClaudeBackendProfile).create(runtimeToProfileEntity(runtime, name)),
       );
-      return res.status(201).json({ ...profileEntityToRuntime(saved), name: saved.name });
+      return res.status(201).json(publicProfile(saved));
     } catch (error) {
       return res.status(409).json({ error: `profile id/name already exists: ${(error as Error).message}` });
     }
@@ -114,7 +114,7 @@ export class ClaudeBackendProfilesController {
     Object.assign(current, runtimeToProfileEntity(checked.value[0], name));
     try {
       const saved = await repo.save(current);
-      return res.json({ ...profileEntityToRuntime(saved), name: saved.name, impact: await this.impact(id) });
+      return res.json({ ...publicProfile(saved), impact: await this.impact(id) });
     } catch (error) {
       return res.status(409).json({ error: `profile name already exists: ${(error as Error).message}` });
     }

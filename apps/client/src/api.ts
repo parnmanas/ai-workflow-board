@@ -250,6 +250,8 @@ export const api = {
     request<any>(`/workspaces/${wsId}/members/${userId}`, { method: 'DELETE' }),
   getWorkspaceClaudeBackendProfiles: (wsId: string) =>
     request<WorkspaceClaudeBackendProfiles>(`/workspaces/${wsId}/claude-backend-profiles`),
+  getWorkspaceClaudeBackendProfileCatalog: (wsId: string) =>
+    request<{ profiles: ClaudeBackendProfile[] }>(`/workspaces/${wsId}/claude-backend-profiles/catalog`),
   updateWorkspaceClaudeBackendProfiles: (
     wsId: string,
     data: { allowed_profile_ids: string[]; default_profile_id: string | null },

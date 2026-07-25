@@ -8,7 +8,10 @@ import { tokens } from '../tokens';
 export default function WorkspaceClaudeBackendProfilesEditor({ workspaceId }: { workspaceId: string }) {
   const { showToast } = useToast();
   const [data, setData] = useState<WorkspaceClaudeBackendProfiles | null>(null);
-  const load = () => api.getWorkspaceClaudeBackendProfiles(workspaceId).then(setData);
+  const load = () => Promise.all([
+    api.getWorkspaceClaudeBackendProfiles(workspaceId),
+    api.getWorkspaceClaudeBackendProfileCatalog(workspaceId),
+  ]).then(([assigned, catalog]) => setData({ ...assigned, profiles: catalog.profiles }));
   useEffect(() => { load().catch(e => showToast(e.message, 'error')); }, [workspaceId]);
   if (!data) return null;
   const allowed = new Set(data.allowed_profile_ids);

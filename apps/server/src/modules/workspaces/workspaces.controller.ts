@@ -85,15 +85,29 @@ export class WorkspacesController {
   ) {
     if (!(await this.requireWorkspaceAccess(user, id, res))) return;
     const links = await this.dataSource.getRepository(WorkspaceClaudeBackendProfile).find({ where: { workspace_id: id } });
-    // Workspace users may discover safe display metadata for selection;
-    // credential refs and secret-bearing configuration are stripped.
-    const rows = await this.dataSource.getRepository(ClaudeBackendProfile).find({ order: { name: 'ASC' } });
+    const rows = links.length
+      ? await this.dataSource.getRepository(ClaudeBackendProfile).find({
+          where: { id: In(links.map(link => link.profile_id)) },
+          order: { name: 'ASC' },
+        })
+      : [];
     const workspace = await findOrFail(this.wsRepo, { where: { id } }, 'Workspace not found');
     return res.json({
       profiles: rows.map(publicProfile),
       allowed_profile_ids: links.map(link => link.profile_id),
       default_profile_id: workspace.default_claude_backend_profile_id,
     });
+  }
+
+  @Get(':id/claude-backend-profiles/catalog')
+  async listClaudeProfileCatalog(
+    @Param('id') id: string,
+    @Res() res: Response,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    if (!(await this.requireOwner(user, id, res))) return;
+    const rows = await this.dataSource.getRepository(ClaudeBackendProfile).find({ order: { name: 'ASC' } });
+    return res.json({ profiles: rows.map(publicProfile) });
   }
 
   @Patch(':id/claude-backend-profiles')
@@ -124,6 +138,7 @@ export class WorkspacesController {
         ));
       }
       workspace.default_claude_backend_profile_id = selected;
+      workspace.claude_backend_profiles_migrated = true;
       // Keep the old selector populated for one-release read compatibility.
       workspace.default_cli_runtime_profile = selected;
       await manager.save(workspace);

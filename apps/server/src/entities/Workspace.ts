@@ -107,6 +107,11 @@ export class Workspace {
   @Column({ type: 'varchar', nullable: true, default: null })
   default_claude_backend_profile_id: string | null;
 
+  // Distinguishes an intentionally empty registry allow-set from a database
+  // that has not run the legacy JSON backfill yet.
+  @Column({ type: 'boolean', default: false })
+  claude_backend_profiles_migrated: boolean;
+
   // Workspace-wide default environment setup (ticket 354d336b). Same JSON shape
   // as Board.environment_config; boards override it per top-level key via
   // mergeEnvironmentConfig (common/environment-config.ts). null = no default —

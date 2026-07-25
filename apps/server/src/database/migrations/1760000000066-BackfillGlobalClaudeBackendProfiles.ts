@@ -27,6 +27,7 @@ export class BackfillGlobalClaudeBackendProfiles1760000000066 implements Migrati
     }
 
     for (const workspace of await workspaces.find()) {
+      if (workspace.claude_backend_profiles_migrated) continue;
       const legacy = parseCliRuntimeProfiles(workspace.cli_runtime_profiles);
       const idMap = new Map<string, string>();
       for (const runtime of legacy) {
@@ -55,6 +56,7 @@ export class BackfillGlobalClaudeBackendProfiles1760000000066 implements Migrati
       const legacyDefault = workspace.default_cli_runtime_profile;
       workspace.default_claude_backend_profile_id =
         legacyDefault && legacyDefault !== 'none' ? (idMap.get(legacyDefault) ?? legacyDefault) : legacyDefault;
+      workspace.claude_backend_profiles_migrated = true;
       await workspaces.save(workspace);
       // A stable legacy id can name different payloads in different
       // workspaces. When that forces a deterministic global-id suffix, remap
@@ -82,6 +84,9 @@ export class BackfillGlobalClaudeBackendProfiles1760000000066 implements Migrati
   async down(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.manager.getRepository(WorkspaceClaudeBackendProfile).clear();
     await queryRunner.manager.getRepository(ClaudeBackendProfile).clear();
-    await queryRunner.manager.getRepository(Workspace).update({}, { default_claude_backend_profile_id: null });
+    await queryRunner.manager.getRepository(Workspace).update(
+      {},
+      { default_claude_backend_profile_id: null, claude_backend_profiles_migrated: false },
+    );
   }
 }

@@ -1,7 +1,8 @@
 import { DataSource, In } from 'typeorm';
 import { ClaudeBackendProfile } from '../entities/ClaudeBackendProfile';
 import { WorkspaceClaudeBackendProfile } from '../entities/WorkspaceClaudeBackendProfile';
-import { CliRuntimeProfile, ClaudeBackendProfileSchema } from './cli-runtime-profiles';
+import { Workspace } from '../entities/Workspace';
+import { CliRuntimeProfile, ClaudeBackendProfileSchema, parseCliRuntimeProfiles } from './cli-runtime-profiles';
 
 const CORE_KEYS = new Set(['id', 'name', 'protocol', 'base_url', 'model', 'credential_ref']);
 
@@ -54,4 +55,15 @@ export async function workspaceRuntimeProfiles(dataSource: DataSource, workspace
     where: { id: In(links.map(link => link.profile_id)) },
   });
   return rows.map(profileEntityToRuntime);
+}
+
+export async function authoritativeWorkspaceRuntimeProfiles(
+  dataSource: DataSource,
+  workspace: Workspace | null | undefined,
+) {
+  if (!workspace) return [];
+  const registryProfiles = await workspaceRuntimeProfiles(dataSource, workspace.id);
+  return workspace.claude_backend_profiles_migrated
+    ? registryProfiles
+    : parseCliRuntimeProfiles(workspace.cli_runtime_profiles);
 }

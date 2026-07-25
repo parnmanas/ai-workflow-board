@@ -34,8 +34,8 @@ import { isConsensusVoteComment } from '../../common/consensus-meta';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { ResolvedHardBudget, hardBudgetDefaultsFromEnv, resolveHardBudgetConfig } from '../../common/hard-budget-config';
 import { lastHumanUnpendAt, countWindowDispatches, countWindowTokens, pendTicketForHardBudget, postHardBudgetAlert } from '../../common/hard-budget-guard';
-import { CliRuntimeProfile, parseCliRuntimeProfiles, resolveCliRuntimeProfile } from '../../common/cli-runtime-profiles';
-import { workspaceRuntimeProfiles } from '../../common/claude-backend-registry';
+import { CliRuntimeProfile, resolveCliRuntimeProfile } from '../../common/cli-runtime-profiles';
+import { authoritativeWorkspaceRuntimeProfiles } from '../../common/claude-backend-registry';
 import { SystemSetting } from '../../entities/SystemSetting';
 import { ClaudeBackendProfile } from '../../entities/ClaudeBackendProfile';
 import { profileEntityToRuntime } from '../../common/claude-backend-registry';
@@ -2599,15 +2599,7 @@ candidate's branch or move the ticket.
     // particular, a workspace/board default must not alter Codex/Antigravity
     // spawn model/cwd or make their dispatch depend on a Claude credential.
     if (agent?.type === 'claude') {
-      const registryProfiles = runtimeWorkspace
-        ? await workspaceRuntimeProfiles(this.dataSource, runtimeWorkspace.id)
-        : [];
-      // No links means a pre-migration/synchronize-only database: retain the
-      // legacy JSON read for one release. Once links exist, registry is source
-      // of truth and stale legacy profiles cannot escape the allow-set.
-      const profiles = registryProfiles.length
-        ? registryProfiles
-        : parseCliRuntimeProfiles(runtimeWorkspace?.cli_runtime_profiles);
+      const profiles = await authoritativeWorkspaceRuntimeProfiles(this.dataSource, runtimeWorkspace);
       const globalDefault = (await this.dataSource.getRepository(SystemSetting).findOne({
         where: { key: 'claude_backend_profiles.default' },
       }))?.value || null;
