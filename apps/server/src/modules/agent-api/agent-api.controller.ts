@@ -41,6 +41,7 @@ import { evaluateMergeGate, MergeGateBlockedError } from '../mcp/shared/merge-ga
 import { findOrFail } from '../../common/find-or-fail';
 import { resolveAgentDisplayName } from '../../utils/agent-name';
 import { enforceAutoResponseBudget } from '../../common/hard-budget-guard';
+import { lockTicketCommentWrites } from '../../common/ticket-comment-write-lock';
 import { createHash } from 'node:crypto';
 
 @ApiSecurity('agent-api-key')
@@ -196,7 +197,14 @@ export class AgentApiController {
       author_role: role || null,
     };
 
-    const commentRepo = this.dataSource.getRepository(Comment);
+    return this.dataSource.transaction(async (manager) => {
+      // This ticket-row lock is shared by MCP agent-comment writes. Re-read
+      // comments only after acquiring it, then create/dedupe the warning in the
+      // same transaction. Thus a comment writer either commits before this
+      // authoritative read (and suppresses the warning), or starts after the
+      // warning transaction has linearized; there is no SELECT->INSERT gap.
+      await lockTicketCommentWrites(manager, ticketId);
+      const commentRepo = manager.getRepository(Comment);
 
     // The manager deliberately waits a short grace before calling this
     // endpoint. Re-check the authoritative rows here, immediately before the
@@ -342,6 +350,7 @@ export class AgentApiController {
       { ticket_id: ticketId, comment_id: comment.id, exit_code: exitCode, cycle_trigger_id: cycleTriggerId },
     );
     return res.status(201).json(comment);
+    });
   }
 
   private safeParseMetadata(raw: string | null | undefined): Record<string, unknown> {

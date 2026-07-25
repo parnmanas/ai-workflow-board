@@ -37,6 +37,7 @@ import { applyAgentCommentPingPongGuard, terminalAckKey, isPendingUserActionBloc
 import { computeTicketCommentChainDepth } from '../../../common/agent-chain-depth';
 import { computeLoopScore } from '../../../common/loop-score';
 import { enforceAutoResponseBudget } from '../../../common/hard-budget-guard';
+import { lockTicketCommentWrites } from '../../../common/ticket-comment-write-lock';
 
 function isUniqueConstraintError(error: unknown): boolean {
   const value = error as { code?: string; errno?: number; message?: string } | null;
@@ -326,22 +327,30 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
 
       let comment: Comment;
       try {
-        comment = await commentRepo.save(commentRepo.create({
-        ticket_id,
-        author_type: resolvedAuthorType,
-        author_id: resolvedAuthorId,
-        author: authorName,
-        content,
-        attachment_resource_ids: JSON.stringify(resolvedAttachmentIds),
-        type: resolvedType,
-        status: resolvedType === 'question' ? 'open' : null,
-        parent_id: resolvedParentId,
-        metadata: JSON.stringify(finalMetadata),
-        // Reuse the existing nullable unique idempotency column. The prefix
-        // keeps this namespace disjoint from operational fallback recurrence
-        // keys while the DB unique index makes concurrent receipts atomic.
-        operational_recurrence_key: ackKey ? `agent-terminal-ack:${ticket_id}:${ackKey}` : null,
-        }));
+        comment = await dataSource.transaction(async (manager) => {
+          await lockTicketCommentWrites(manager, ticket_id);
+          const lockedRepo = manager.getRepository(Comment);
+          const saved = await lockedRepo.save(lockedRepo.create({
+            ticket_id,
+            author_type: resolvedAuthorType,
+            author_id: resolvedAuthorId,
+            author: authorName,
+            content,
+            attachment_resource_ids: JSON.stringify(resolvedAttachmentIds),
+            type: resolvedType,
+            status: resolvedType === 'question' ? 'open' : null,
+            parent_id: resolvedParentId,
+            metadata: JSON.stringify(finalMetadata),
+            // Reuse the existing nullable unique idempotency column. The prefix
+            // keeps this namespace disjoint from operational fallback recurrence
+            // keys while the DB unique index makes concurrent receipts atomic.
+            operational_recurrence_key: ackKey ? `agent-terminal-ack:${ticket_id}:${ackKey}` : null,
+          }));
+          if (resolvedType === 'answer' && resolvedParentId) {
+            await lockedRepo.update({ id: resolvedParentId }, { status: 'resolved' });
+          }
+          return saved;
+        });
       } catch (error) {
         if (ackKey && isUniqueConstraintError(error)) {
           await logPingPongSuppression('duplicate_terminal_acknowledgement');
@@ -352,10 +361,6 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
 
       // Auto-resolve parent question on answer — same idempotent flip the REST
       // endpoint and answer_question tool perform, so all three surfaces agree.
-      if (resolvedType === 'answer' && resolvedParentId) {
-        await commentRepo.update({ id: resolvedParentId }, { status: 'resolved' });
-      }
-
       await activityService.logActivity({
         entity_type: 'comment', entity_id: comment.id, action: 'created',
         ticket_id, actor_id: resolvedAuthorId, actor_name: authorName,
