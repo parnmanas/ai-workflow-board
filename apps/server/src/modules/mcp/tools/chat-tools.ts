@@ -114,6 +114,7 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
         // need an apiKey with workspace_id='', and the chat domain is
         // workspace-scoped — but fall back to '' so the typed contract holds.
         const pendingTicketRefs = ctx.pendingTicketRefs?.drain() ?? [];
+        let messagePersisted = false;
         let msg: any;
         try {
           msg = await roomMessagingService.sendMessage(
@@ -127,18 +128,24 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
             attachment_ids,
             'message',
             pendingTicketRefs.length > 0
-              ? { metadata: { ticket_refs: pendingTicketRefs } }
-              : undefined,
+              ? {
+                  metadata: { ticket_refs: pendingTicketRefs },
+                  onPersisted: () => { messagePersisted = true; },
+                }
+              : { onPersisted: () => { messagePersisted = true; } },
           );
         } catch (sendError) {
-          ctx.pendingTicketRefs?.restore(pendingTicketRefs);
+          if (!messagePersisted) ctx.pendingTicketRefs?.restore(pendingTicketRefs);
           if (pendingTicketRefs.length > 0) {
-            logger.error('TicketArtifact', 'Chat message save failed with pending ticket artifacts', {
+            logger.error('TicketArtifact', messagePersisted
+              ? 'Chat message post-commit delivery failed; ticket artifacts remain durably bound'
+              : 'Chat message save failed with pending ticket artifacts', {
               room_id,
               agent_id: agent.id,
               session_id: extra?.sessionId,
               ticket_ids: pendingTicketRefs.map((ref) => ref.ticket_id),
-              stage: 'message_persist',
+              stage: messagePersisted ? 'message_post_commit' : 'message_persist',
+              message_persisted: messagePersisted,
               error: sendError instanceof Error ? sendError.message : String(sendError),
             });
           }

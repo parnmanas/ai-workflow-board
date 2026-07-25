@@ -39,6 +39,51 @@ import { validateHandoffSpecInput } from '../../../common/handoff-spec-config';
 import type { ToolContext } from './context';
 
 /**
+ * Stable projection of the mutable ticket state that can produce an update
+ * artifact. TypeORM may execute an UPDATE for an idempotent payload, and the
+ * request-level `changes` list is also used for audit wording, so neither is a
+ * reliable mutation signal. Compare the canonical persisted projection,
+ * including holder identities, before recording the chat ref.
+ */
+function ticketArtifactState(ticket: any): string {
+  if (!ticket) return '';
+  const roles = Array.isArray(ticket.role_assignments)
+    ? ticket.role_assignments
+      .map((entry: any) => ({
+        role_id: entry?.role_id || '',
+        slug: entry?.slug || '',
+        holder_type: entry?.holder?.type || '',
+        holder_id: entry?.holder?.id || '',
+      }))
+      .sort((a: any, b: any) =>
+        `${a.role_id}\0${a.holder_type}\0${a.holder_id}`.localeCompare(
+          `${b.role_id}\0${b.holder_type}\0${b.holder_id}`,
+        ))
+    : [];
+  return JSON.stringify({
+    title: ticket.title ?? '',
+    description: ticket.description ?? '',
+    priority: ticket.priority ?? '',
+    assignee_id: ticket.assignee_id ?? '',
+    reporter_id: ticket.reporter_id ?? '',
+    reviewer_id: ticket.reviewer_id ?? '',
+    labels: Array.isArray(ticket.labels) ? ticket.labels : safeJsonParse(ticket.labels),
+    channel_ids: Array.isArray(ticket.channel_ids) ? ticket.channel_ids : safeJsonParse(ticket.channel_ids),
+    base_repo_resource_id: ticket.base_repo_resource_id ?? '',
+    base_branch: ticket.base_branch ?? '',
+    next_ticket_id: ticket.next_ticket_id ?? '',
+    on_done_action_ids: Array.isArray(ticket.on_done_action_ids)
+      ? ticket.on_done_action_ids
+      : safeJsonParse(ticket.on_done_action_ids),
+    effort_preset: ticket.effort_preset ?? '',
+    handoff_spec: ticket.handoff_spec ?? '',
+    pending_user_action: !!ticket.pending_user_action,
+    pending_reason: ticket.pending_reason ?? '',
+    roles,
+  });
+}
+
+/**
  * Cross-board handoff relay spec accepted by create/update tools (ticket
  * ac21a745). Shape doc only — the authoritative validation/normalization is
  * `validateHandoffSpecInput` (common/handoff-spec-config.ts), which the handlers
@@ -419,6 +464,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       }
 
       const caller = getCallerAgent(extra);
+      const artifactStateBefore = ticketArtifactState(await loadTicketFull(dataSource, ticket.id));
 
       // Track old values before updating
       const oldAssignee = ticket.assignee;
@@ -633,13 +679,14 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       }
 
       const updated = await loadTicketFull(dataSource, ticket.id);
-      if (changes.length > 0 && updated) {
+      const actuallyMutated = !!updated && ticketArtifactState(updated) !== artifactStateBefore;
+      if (actuallyMutated && updated) {
         ctx.pendingTicketRefs?.record({
           action: 'update',
           ticket_id: ticket.id,
           title: updated.title || ticket.title,
         });
-      } else if (changes.length > 0) {
+      } else if (changes.length > 0 && !updated) {
         logger.error('TicketArtifact', 'Updated ticket could not be projected for chat artifact', {
           ticket_id: ticket.id,
           session_id: extra?.sessionId,

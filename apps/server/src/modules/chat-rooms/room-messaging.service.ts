@@ -343,7 +343,13 @@ export class RoomMessagingService {
     // `metadata` (ticket 24694916): structured ticket-action refs the agent-manager
     // captured from mcp__awb__* tool results. Sanitized + bounded before persist so
     // an external caller can't stuff arbitrary JSON onto the row / SSE wire.
-    opts?: { runProvision?: RunProvision | null; bypassContentLimit?: boolean; metadata?: ChatRoomMessageMetadata | null },
+    opts?: {
+      runProvision?: RunProvision | null;
+      bypassContentLimit?: boolean;
+      metadata?: ChatRoomMessageMetadata | null;
+      /** Internal commit boundary hook; never exposed by REST/MCP payloads. */
+      onPersisted?: (messageId: string) => void;
+    },
   ): Promise<any> {
     await this.membership.requireActiveParticipant(roomId, senderId, senderType);
 
@@ -454,6 +460,10 @@ export class RoomMessagingService {
 
       return { savedMsg: created, attachments: projected };
     });
+    // Everything below is post-commit enrichment / dispatch. Let integrated
+    // callers distinguish a durable message from a transaction failure so a
+    // retry cannot bind the same pending artifact to a second row.
+    opts?.onPersisted?.(savedMsg.id);
 
     // Progress messages are ephemeral tool-call heartbeats; they update
     // last_message_at so the room list sort reflects activity but skip

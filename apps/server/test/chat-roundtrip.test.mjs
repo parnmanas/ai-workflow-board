@@ -30,6 +30,7 @@ import { bootApp } from './helpers/boot.mjs';
 import { setupKanbanScene, createAgent, createApiKey, createUser } from './helpers/fixtures.mjs';
 import { openSseStream } from './helpers/sse-listener.mjs';
 import { McpClient } from './helpers/mcp-client.mjs';
+import { RoomMessagingService } from '../dist/modules/chat-rooms/room-messaging.service.js';
 
 process.env.PORT = process.env.TEST_SERVER_PORT || '7792';
 
@@ -175,6 +176,77 @@ test('chat round-trip: user REST POST → SSE echo → agent MCP reply → SSE',
     'the next reply carries one update artifact despite a following no-op update',
   );
 
+  // Establish canonical values (including an assignment row), drain that real
+  // update, then prove each same-value payload independently produces no ref.
+  await agentMcp.callTool('update_ticket', {
+    ticket_id: createdTicket.id,
+    title: 'chat artifact updated',
+    priority: 'medium',
+    labels: ['artifact'],
+    channel_ids: [],
+    reviewer_id: responder.id,
+    on_done_action_ids: [],
+    role_assignments: [{ role_slug: 'assignee', agent_id: responder.id }],
+  });
+  await agentMcp.callTool('send_chat_room_message', {
+    room_id: room.id,
+    content: 'canonical update drained',
+  });
+  const sameValuePayloads = [
+    { title: 'chat artifact updated' },
+    { priority: 'medium' },
+    { labels: ['artifact'] },
+    { channel_ids: [] },
+    { reviewer_id: responder.id },
+    { on_done_action_ids: [] },
+    { role_assignments: [{ role_slug: 'assignee', agent_id: responder.id }] },
+  ];
+  for (const [index, payload] of sameValuePayloads.entries()) {
+    const updateResult = await agentMcp.callTool('update_ticket', {
+      ticket_id: createdTicket.id,
+      ...payload,
+    });
+    assert.ok(!updateResult.isError, `same-value update ${index} succeeds`);
+    const noOpSend = await agentMcp.callTool('send_chat_room_message', {
+      room_id: room.id,
+      content: `same-value update ${index}`,
+    });
+    assert.equal(
+      noOpSend.metadata?.ticket_refs,
+      undefined,
+      `same-value payload ${JSON.stringify(payload)} must not create an artifact`,
+    );
+  }
+
+  // Inject a failure immediately after the transaction commits. The first tool
+  // call reports failure, but its ref is already durable and must not be
+  // restored onto the retry message.
+  const postCommitTicket = await agentMcp.callTool('create_ticket', {
+    title: 'post-commit artifact exactly once',
+    column_id: columns.todo.id,
+  });
+  const messaging = app.get(RoomMessagingService);
+  const originalRoomUpdate = messaging.roomRepo.update.bind(messaging.roomRepo);
+  let failOnce = true;
+  messaging.roomRepo.update = async (...args) => {
+    if (failOnce) {
+      failOnce = false;
+      throw new Error('injected post-commit room update failure');
+    }
+    return originalRoomUpdate(...args);
+  };
+  t.after(() => { messaging.roomRepo.update = originalRoomUpdate; });
+  const failedAfterCommit = await agentMcp.callTool('send_chat_room_message', {
+    room_id: room.id,
+    content: 'durable before post-commit failure',
+  });
+  assert.ok(failedAfterCommit.isError, 'post-commit injected failure is observable to the tool caller');
+  const retryAfterCommit = await agentMcp.callTool('send_chat_room_message', {
+    room_id: room.id,
+    content: 'retry after post-commit failure',
+  });
+  assert.equal(retryAfterCommit.metadata?.ticket_refs, undefined, 'retry does not re-bind a committed ref');
+
   const historyRows = await ds.getRepository('ChatRoomMessage').find({
     where: { room_id: room.id },
     order: { created_at: 'ASC' },
@@ -185,9 +257,11 @@ test('chat round-trip: user REST POST → SSE echo → agent MCP reply → SSE',
     })
     .filter((metadata) => Array.isArray(metadata?.ticket_refs));
   assert.deepEqual(
-    artifactRows.map((metadata) => metadata.ticket_refs),
-    [replyData.metadata.ticket_refs, updateData.metadata.ticket_refs],
-    'the same create/update metadata is durable for history reload with no duplicate artifact row',
+    artifactRows
+      .flatMap((metadata) => metadata.ticket_refs)
+      .filter((ref) => ref.ticket_id === postCommitTicket.id),
+    [{ action: 'create', ticket_id: postCommitTicket.id, title: 'post-commit artifact exactly once' }],
+    'post-commit failure + retry leaves exactly one durable artifact row',
   );
 
   // No process.exit: the suite runs with --test-force-exit, which hands the real
