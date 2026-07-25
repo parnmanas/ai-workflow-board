@@ -32,6 +32,9 @@ import { PERMISSIONS } from '../../common/types/permissions';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { Credential } from '../../entities/Credential';
+import { WorkspaceClaudeBackendProfile } from '../../entities/WorkspaceClaudeBackendProfile';
+import { ClaudeBackendProfile } from '../../entities/ClaudeBackendProfile';
+import { publicProfile } from '../../common/claude-backend-registry';
 
 @ApiBearerAuth('user-session')
 @ApiTags('workspaces')
@@ -51,6 +54,82 @@ export class WorkspacesController {
     private readonly promptTemplatesService: PromptTemplatesService,
     private readonly activityService: ActivityService,
   ) {}
+
+  private async requireOwner(user: CurrentUserData, workspaceId: string, res: Response) {
+    if (user?.role === 'admin') return true;
+    const owner = await this.rebacService.check(
+      { type: 'user', id: user.id },
+      'owner',
+      { type: 'workspace', id: workspaceId },
+    );
+    if (!owner) res.status(403).json({ error: 'workspace_owner_required' });
+    return owner;
+  }
+
+  private async requireWorkspaceAccess(user: CurrentUserData, workspaceId: string, res: Response) {
+    if (user?.role === 'admin') return true;
+    const subject = { type: 'user', id: user.id };
+    const object = { type: 'workspace', id: workspaceId };
+    const allowed =
+      await this.rebacService.check(subject, 'owner', object) ||
+      await this.rebacService.check(subject, 'member', object);
+    if (!allowed) res.status(403).json({ error: 'workspace_access_denied' });
+    return allowed;
+  }
+
+  @Get(':id/claude-backend-profiles')
+  async listClaudeProfiles(
+    @Param('id') id: string,
+    @Res() res: Response,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    if (!(await this.requireWorkspaceAccess(user, id, res))) return;
+    const links = await this.dataSource.getRepository(WorkspaceClaudeBackendProfile).find({ where: { workspace_id: id } });
+    // Workspace users may discover safe display metadata for selection;
+    // credential refs and secret-bearing configuration are stripped.
+    const rows = await this.dataSource.getRepository(ClaudeBackendProfile).find({ order: { name: 'ASC' } });
+    const workspace = await findOrFail(this.wsRepo, { where: { id } }, 'Workspace not found');
+    return res.json({
+      profiles: rows.map(publicProfile),
+      allowed_profile_ids: links.map(link => link.profile_id),
+      default_profile_id: workspace.default_claude_backend_profile_id,
+    });
+  }
+
+  @Patch(':id/claude-backend-profiles')
+  async setClaudeProfiles(
+    @Param('id') id: string,
+    @Body() body: any,
+    @Res() res: Response,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    if (!(await this.requireOwner(user, id, res))) return;
+    const workspace = await findOrFail(this.wsRepo, { where: { id } }, 'Workspace not found');
+    const allowed: string[] = Array.from(new Set<string>(
+      (Array.isArray(body?.allowed_profile_ids) ? body.allowed_profile_ids : []).map(String),
+    ));
+    const selected = body?.default_profile_id == null ? null : String(body.default_profile_id);
+    const existing = allowed.length
+      ? await this.dataSource.getRepository(ClaudeBackendProfile).findByIds(allowed)
+      : [];
+    if (existing.length !== allowed.length) return res.status(400).json({ error: 'allowed_profile_ids contains an unknown profile' });
+    if (selected && selected !== 'none' && !allowed.includes(selected)) {
+      return res.status(400).json({ error: 'Workspace default must be in the allow-set' });
+    }
+    await this.dataSource.transaction(async manager => {
+      await manager.delete(WorkspaceClaudeBackendProfile, { workspace_id: id });
+      if (allowed.length) {
+        await manager.save(WorkspaceClaudeBackendProfile, allowed.map(profile_id =>
+          manager.create(WorkspaceClaudeBackendProfile, { workspace_id: id, profile_id }),
+        ));
+      }
+      workspace.default_claude_backend_profile_id = selected;
+      // Keep the old selector populated for one-release read compatibility.
+      workspace.default_cli_runtime_profile = selected;
+      await manager.save(workspace);
+    });
+    return res.json({ allowed_profile_ids: allowed, default_profile_id: selected });
+  }
 
   @Get()
   async list(@Res() res: Response) {

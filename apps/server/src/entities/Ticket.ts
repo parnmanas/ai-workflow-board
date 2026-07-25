@@ -71,6 +71,11 @@ export class Ticket {
   @Column({ type: 'varchar', nullable: true, default: null })
   effort_preset: string | null;
 
+  // Per-execution Claude backend override. null inherits Agent/Board/
+  // Workspace/Global; "none" explicitly uses native Anthropic.
+  @Column({ type: 'varchar', nullable: true, default: null })
+  cli_runtime_profile: string | null;
+
   @Column({ type: 'varchar', default: '' })
   assignee: string;
 

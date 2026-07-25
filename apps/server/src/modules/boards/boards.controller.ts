@@ -30,6 +30,7 @@ import { validateEffortPresetsInput, serializeEffortPresets } from '../../common
 import { validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../../common/environment-config';
 import { parseCliRuntimeProfiles } from '../../common/cli-runtime-profiles';
 import { Workspace } from '../../entities/Workspace';
+import { workspaceRuntimeProfiles } from '../../common/claude-backend-registry';
 import { validateMergeGateConfigInput, serializeMergeGateConfig } from '../../common/merge-gate-config';
 import { validateRespawnStormConfigInput, serializeRespawnStormConfig } from '../../common/respawn-storm-config';
 import { validateHardBudgetConfigInput, serializeHardBudgetConfig } from '../../common/hard-budget-config';
@@ -536,7 +537,10 @@ export class BoardsController {
     if (cli_runtime_profile !== undefined) {
       const selected = cli_runtime_profile == null ? null : String(cli_runtime_profile);
       const workspace = await this.dataSource.getRepository(Workspace).findOne({ where: { id: board.workspace_id } });
-      const profiles = parseCliRuntimeProfiles(workspace?.cli_runtime_profiles);
+      const registryProfiles = workspace
+        ? await workspaceRuntimeProfiles(this.dataSource, workspace.id)
+        : [];
+      const profiles = registryProfiles.length ? registryProfiles : parseCliRuntimeProfiles(workspace?.cli_runtime_profiles);
       if (selected && selected !== 'none' && !profiles.some(profile => profile.id === selected)) {
         return res.status(400).json({ error: `cli_runtime_profile "${selected}" does not exist in workspace ${board.workspace_id}` });
       }

@@ -32,7 +32,7 @@ const AdapterSchema = z.object({
   }
 });
 
-const ClaudeBackendProfileSchema = z.object({
+export const ClaudeBackendProfileSchema = z.object({
   id: z.string().regex(/^[a-z0-9][a-z0-9._-]*$/i, 'must be a stable profile id'),
   kind: z.literal('claude-backend').default('claude-backend'),
   protocol: z.enum(['anthropic-compatible', 'openai-compatible']),
@@ -154,6 +154,11 @@ export const CliRuntimeProfilesSchema = z.array(ClaudeBackendProfileSchema).supe
 });
 
 export type CliRuntimeProfile = z.infer<typeof ClaudeBackendProfileSchema>;
+
+/** API/storage DTOs are rebuilt from this allow-list, never spread from input. */
+export function sanitizeCliRuntimeProfile(profile: CliRuntimeProfile): CliRuntimeProfile {
+  return ClaudeBackendProfileSchema.parse(profile);
+}
 
 export function validateCliRuntimeProfiles(raw: unknown):
   | { ok: true; value: CliRuntimeProfile[] }

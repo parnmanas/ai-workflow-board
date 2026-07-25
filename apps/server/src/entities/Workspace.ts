@@ -102,6 +102,11 @@ export class Workspace {
   @Column({ type: 'varchar', nullable: true, default: null })
   default_cli_runtime_profile: string | null;
 
+  // Global-registry selector. null inherits the instance default; "none"
+  // explicitly selects the native Anthropic endpoint.
+  @Column({ type: 'varchar', nullable: true, default: null })
+  default_claude_backend_profile_id: string | null;
+
   // Workspace-wide default environment setup (ticket 354d336b). Same JSON shape
   // as Board.environment_config; boards override it per top-level key via
   // mergeEnvironmentConfig (common/environment-config.ts). null = no default —

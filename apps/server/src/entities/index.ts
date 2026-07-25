@@ -61,3 +61,5 @@ export { Feature } from './Feature';
 // Board knowledge base (ticket 9d0d6ac4) — per-board Lessons/Runbook entries
 // injected into dispatch prompts.
 export { BoardLesson } from './BoardLesson';
+export { ClaudeBackendProfile } from './ClaudeBackendProfile';
+export { WorkspaceClaudeBackendProfile } from './WorkspaceClaudeBackendProfile';

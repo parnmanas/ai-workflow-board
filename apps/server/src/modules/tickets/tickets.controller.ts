@@ -55,6 +55,7 @@ import { parseDefaultRoleAssignments, type DefaultRoleAssignments } from '../../
 import { validateHandoffSpecInput } from '../../common/handoff-spec-config';
 import { computeTicketCommentChainDepth } from '../../common/agent-chain-depth';
 import { TicketDuplicateService } from './ticket-duplicate.service';
+import { workspaceRuntimeProfiles } from '../../common/claude-backend-registry';
 
 @ApiBearerAuth('user-session')
 @ApiTags('tickets')
@@ -643,7 +644,7 @@ export class TicketsController {
     const actorId = currentUser?.id || undefined;
     const actorName = currentUser?.name || currentUser?.email || undefined;
 
-    const { title, description, priority, assignee, reporter, reviewer_id, assignee_id, reporter_id, labels, channel_ids, status, prompt_text, base_repo_resource_id, base_branch, role_assignments, next_ticket_id, on_done_action_ids, handoff_spec, pending_user_action, pending_reason, effort_preset } = body;
+    const { title, description, priority, assignee, reporter, reviewer_id, assignee_id, reporter_id, labels, channel_ids, status, prompt_text, base_repo_resource_id, base_branch, role_assignments, next_ticket_id, on_done_action_ids, handoff_spec, pending_user_action, pending_reason, effort_preset, cli_runtime_profile } = body;
     const oldAssignee = ticket.assignee;
     const oldReporter = ticket.reporter;
     const oldReviewerId = ticket.reviewer_id;
@@ -755,6 +756,16 @@ export class TicketsController {
     const oldEffortPreset = ticket.effort_preset;
     if (effort_preset !== undefined) {
       ticket.effort_preset = typeof effort_preset === 'string' && effort_preset.trim() ? effort_preset.trim() : null;
+    }
+    if (cli_runtime_profile !== undefined) {
+      const selected = cli_runtime_profile == null ? null : String(cli_runtime_profile);
+      const profiles = ticket.workspace_id
+        ? await workspaceRuntimeProfiles(this.dataSource, ticket.workspace_id)
+        : [];
+      if (selected && selected !== 'none' && !profiles.some(profile => profile.id === selected)) {
+        return res.status(400).json({ error: `cli_runtime_profile "${selected}" is not allowed in this workspace` });
+      }
+      ticket.cli_runtime_profile = selected;
     }
 
     // Pending-user-action toggle (ticket a57517be). Mirrors the MCP

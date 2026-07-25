@@ -27,6 +27,7 @@ import { LogService } from '../../services/log.service';
 import { ApiOperation, ApiParam, ApiQuery, ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { findOrFail } from '../../common/find-or-fail';
 import { parseCliRuntimeProfiles } from '../../common/cli-runtime-profiles';
+import { workspaceRuntimeProfiles } from '../../common/claude-backend-registry';
 
 /** Subset of InstanceRecord surfaced on /api/agents responses so the AI Agents
  *  admin UI can render the same heartbeat / version / supervision metadata that
@@ -614,7 +615,10 @@ export class AgentsController {
       const workspace = agent.workspace_id
         ? await this.dataSource.getRepository(Workspace).findOne({ where: { id: agent.workspace_id } })
         : null;
-      const profiles = parseCliRuntimeProfiles(workspace?.cli_runtime_profiles);
+      const registryProfiles = workspace
+        ? await workspaceRuntimeProfiles(this.dataSource, workspace.id)
+        : [];
+      const profiles = registryProfiles.length ? registryProfiles : parseCliRuntimeProfiles(workspace?.cli_runtime_profiles);
       if (selected && selected !== 'none' && !profiles.some(profile => profile.id === selected)) {
         return res.status(400).json({ error: `cli_runtime_profile "${selected}" does not exist in agent workspace` });
       }
