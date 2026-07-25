@@ -197,7 +197,7 @@ export class AgentApiController {
       author_role: role || null,
     };
 
-    return this.dataSource.transaction(async (manager) => {
+    const outcome = await this.dataSource.transaction(async (manager) => {
       // This ticket-row lock is shared by MCP agent-comment writes. Re-read
       // comments only after acquiring it, then create/dedupe the warning in the
       // same transaction. Thus a comment writer either commits before this
@@ -241,7 +241,7 @@ export class AgentApiController {
           `Silent-exit suppressed by persisted cycle comment: ticket=${ticketId.slice(0, 8)} comment=${persisted.id.slice(0, 8)}`,
           { ticket_id: ticketId, comment_id: persisted.id, cycle_trigger_id: cycleTriggerId },
         );
-        return res.status(200).json({ suppressed: true, comment_id: persisted.id });
+        return { status: 200, body: { suppressed: true, comment_id: persisted.id } };
       }
     }
 
@@ -309,7 +309,7 @@ export class AgentApiController {
       );
 
       const refreshed = await commentRepo.findOne({ where: { id: lastComment.id } });
-      return res.status(200).json(refreshed);
+      return { status: 200, body: refreshed };
     }
 
     const comment = await commentRepo.save(commentRepo.create({
@@ -349,11 +349,19 @@ export class AgentApiController {
       `Silent-exit system comment posted: ticket=${ticketId.slice(0, 8)} exit=${exitCode ?? '-'} trigger=${cycleTriggerId.slice(0, 8) || '-'}`,
       { ticket_id: ticketId, comment_id: comment.id, exit_code: exitCode, cycle_trigger_id: cycleTriggerId },
     );
-    return res.status(201).json(comment);
+    return { status: 201, body: comment };
     });
+    // Do not expose success until the transaction has committed. In
+    // PostgreSQL, writing the HTTP response inside the callback lets a caller
+    // immediately recheck on another connection before the warning/comment is
+    // durable, recreating the persistence-vs-exit ordering race.
+    return res.status(outcome.status).json(outcome.body);
   }
 
-  private safeParseMetadata(raw: string | null | undefined): Record<string, unknown> {
+  private safeParseMetadata(raw: unknown): Record<string, unknown> {
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      return raw as Record<string, unknown>;
+    }
     if (!raw || typeof raw !== 'string') return {};
     try {
       const parsed = JSON.parse(raw);
