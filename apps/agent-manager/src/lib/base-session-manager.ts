@@ -528,8 +528,11 @@ export class BaseSessionManager {
     // applied at session CREATION only — a live session's --effort flag and
     // the ultracode first-turn keyword are fixed at spawn.
     const slice = selectEffortSlice(adapter.cliType, effortPreset);
+    // A selected Claude backend profile is an endpoint+model pair. Its model
+    // must travel with that endpoint rather than being replaced by an
+    // Anthropic-oriented Agent/harness default.
     const effectiveModel =
-      slice?.model ?? harness?.model ?? agentContext?.model ?? runtimeProfile?.model ?? null;
+      runtimeProfile?.model ?? slice?.model ?? harness?.model ?? agentContext?.model ?? null;
     const effortFlag = slice?.effort ?? null;
     const ultracode = !!slice?.ultracode;
     if (slice && (effortFlag || ultracode || slice.model)) {
@@ -568,7 +571,7 @@ export class BaseSessionManager {
           ),
         );
         log(
-          `${this.#logTag} runtime ready: profile=${runtimeProfile.id} provider=${runtimeProfile.provider}`,
+          `${this.#logTag} Claude backend ready: profile=${runtimeProfile.id} protocol=${runtimeProfile.protocol}`,
         );
       }
       let descriptor = adapter.buildSessionSpawn({
@@ -638,16 +641,17 @@ export class BaseSessionManager {
           ultracode,
         });
       }
-      if (adapter.cliType === 'claude' && runtimeProfile?.claude?.args?.length) {
-        descriptor.args.push(...runtimeProfile.claude.args);
+      if (adapter.cliType === 'claude' && runtimeProfile?.args?.length) {
+        descriptor.args.push(...runtimeProfile.args);
       }
 
       // `delegation.claudeBin` is the legacy operator override for the
       // claude binary path only — passing it to non-claude adapters
       // caused codex / antigravity spawns to launch the literal "claude" bin
       // (resolver short-circuits on `configured`, returning it verbatim).
-      const binOverride =
-        adapter.cliType === 'claude' ? this._config.delegation.claudeBin : null;
+      const binOverride = adapter.cliType === 'claude'
+        ? runtimeLease?.claudeExecutable() ?? this._config.delegation.claudeBin
+        : null;
       const resolvedBin = adapter.resolveBin(binOverride);
       // ST-7 follow-up: per-agent CLI home isolation (see SubagentManager).
       const cliHomeEnvKey = adapter.configDirEnv();
@@ -691,7 +695,7 @@ export class BaseSessionManager {
         stdio: descriptor.stdio || ['pipe', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',
         windowsHide: true,
-        cwd: effectiveCwd,
+        cwd: runtimeProfile?.cwd || effectiveCwd,
         // harnessEnv merges LAST — see SubagentManager.spawn for why a
         // per-dispatch harness model must beat the per-agent extra_env.
         // Board env_vars (ticket 354d336b) merge right after baseEnv so they

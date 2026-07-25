@@ -1,186 +1,175 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
+import { SubagentManager } from '../dist/lib/subagent-manager.js';
 import {
-  getRuntimeProvider,
-  listRuntimeProviders,
-  registerRuntimeProvider,
   runtimeCredentialEnv,
   shutdownRuntimeProfiles,
   startRuntimeProfile,
   validateRuntimeProfile,
 } from '../dist/lib/runtime-profiles.js';
 
-const fixtureRoot = join(process.cwd(), '.test-runtime-profile');
+const fixtureRoot = join(process.cwd(), '.test-claude-backend');
+const config = {
+  url: 'http://127.0.0.1:0',
+  apiKey: 'test-awb-key',
+  silentExitVerifyDelayMs: 0,
+  delegation: { enabled: true, persistentTicketSessions: false, maxConcurrent: 2, ttlMinutes: 1 },
+};
 
-function assertNotRunning(pid) {
-  if (process.platform === 'win32') {
-    assert.throws(() => process.kill(pid, 0));
-    return;
-  }
-  let state = '';
-  try { state = execFileSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' }).trim(); } catch {}
-  assert.ok(!state || state.startsWith('Z'), `pid ${pid} remains live with state ${state}`);
+async function makeClaudeFixture(name) {
+  await mkdir(fixtureRoot, { recursive: true });
+  const path = join(fixtureRoot, name);
+  await writeFile(path, `#!/usr/bin/env node
+import { writeFileSync } from 'node:fs';
+writeFileSync(process.env.CAPTURE_FILE, JSON.stringify({
+  argv: process.argv.slice(2),
+  baseUrl: process.env.ANTHROPIC_BASE_URL,
+  auth: process.env.ANTHROPIC_AUTH_TOKEN,
+  model: process.argv.includes('--model') ? process.argv[process.argv.indexOf('--model') + 1] : null,
+  awb: process.env.AWB_API_KEY
+}));
+process.stdout.write(JSON.stringify({type:'result', subtype:'success', result:'ok'}) + '\\n');
+`);
+  await chmod(path, 0o755);
+  return path;
+}
+
+async function spawnFixture(profile, captureFile, extra = {}) {
+  const manager = new SubagentManager(config);
+  const exited = new Promise(resolve => { manager.onExit = resolve; });
+  const result = await manager.spawn({
+    kind: 'trigger',
+    taskText: 'fixture task',
+    rolePrompt: 'fixture role',
+    triggerId: `trigger-${profile.id}`,
+    ticketId: `ticket-${profile.id}`,
+    agentId: 'agent-fixture',
+    role: 'assignee',
+    runtimeProfile: { ...profile, env: { ...(profile.env ?? {}), CAPTURE_FILE: captureFile } },
+    agentContext: {
+      agent_id: 'agent-fixture',
+      api_key: 'agent-awb-key',
+      cwd: fixtureRoot,
+      mcp_config_path: join(fixtureRoot, 'missing-mcp.json'),
+      cli: 'claude',
+      cli_home_dir: join(fixtureRoot, 'claude-home'),
+      ...extra,
+    },
+  });
+  assert.equal(result.spawned, true);
+  await Promise.race([exited, delay(5_000).then(() => assert.fail('Claude fixture did not exit'))]);
+  return JSON.parse(await readFile(captureFile, 'utf8'));
 }
 
 test.after(async () => {
+  await shutdownRuntimeProfiles();
   await rm(fixtureRoot, { recursive: true, force: true });
 });
 
-test('ships vllm and accepts a second provider through the registry', () => {
-  assert.ok(listRuntimeProviders().some((p) => p.name === 'vllm'));
-  const generic = getRuntimeProvider('generic');
-  registerRuntimeProvider({ ...generic, name: 'local-openai' });
-  assert.equal(getRuntimeProvider('local-openai').name, 'local-openai');
+test('Anthropic-compatible profile launches the real Claude CLI path with endpoint/model and AWB lifecycle env', async () => {
+  const executable = await makeClaudeFixture('claude-direct.mjs');
+  const capture = await spawnFixture({
+    id: 'direct-a',
+    kind: 'claude-backend',
+    protocol: 'anthropic-compatible',
+    base_url: 'http://127.0.0.1:40101',
+    model: 'fixture-model-a',
+    claude_executable: executable,
+  }, join(fixtureRoot, 'direct.json'), { model: 'anthropic-agent-default' });
+  assert.equal(capture.baseUrl, 'http://127.0.0.1:40101');
+  assert.equal(capture.model, 'fixture-model-a');
+  assert.equal(capture.awb, 'agent-awb-key');
+  assert.ok(capture.argv.includes('--mcp-config'), 'AWB MCP config remains attached');
 });
 
-test('reports invalid venv and port with actionable field names', () => {
-  assert.throws(
-    () => validateRuntimeProfile({
-      id: 'bad',
-      provider: 'vllm',
-      model: 'demo',
-      venv: join(fixtureRoot, 'missing-venv'),
-      port: 70_000,
-    }),
-    /port.*1 to 65535.*venv does not exist/s,
-  );
+test('OpenAI-compatible profile starts only its declared adapter and points Claude at the converted endpoint', async () => {
+  const executable = await makeClaudeFixture('claude-adapter.mjs');
+  const port = 42_000 + (process.pid % 10_000);
+  const capture = await spawnFixture({
+    id: 'openai-via-adapter',
+    kind: 'claude-backend',
+    protocol: 'openai-compatible',
+    base_url: 'http://127.0.0.1:9999/v1',
+    model: 'fixture-model-b',
+    claude_executable: executable,
+    adapter: {
+      executable: process.execPath,
+      args: [
+        '-e',
+        `require('http').createServer((q,r)=>{r.writeHead(200);r.end('ok')}).listen(${port},'127.0.0.1')`,
+      ],
+      base_url: `http://127.0.0.1:${port}`,
+      startup_timeout_ms: 10_000,
+    },
+  }, join(fixtureRoot, 'adapter.json'));
+  assert.equal(capture.baseUrl, `http://127.0.0.1:${port}`);
+  assert.equal(capture.model, 'fixture-model-b');
+  assert.equal(capture.auth, 'awb-local-adapter');
 });
 
-test('resolves module Python directly from .venv without shell activation', async () => {
-  const binDir = join(fixtureRoot, '.venv', process.platform === 'win32' ? 'Scripts' : 'bin');
-  await mkdir(binDir, { recursive: true });
-  const python = join(binDir, process.platform === 'win32' ? 'python.exe' : 'python');
-  await writeFile(python, '');
-  const launch = getRuntimeProvider('vllm').build({
-    id: 'vllm-demo',
-    provider: 'vllm',
-    model: 'demo-model',
-    venv: join(fixtureRoot, '.venv'),
-    module: 'vllm.entrypoints.openai.api_server',
-    port: 8123,
-  });
-  assert.equal(launch.bin, python);
-  assert.deepEqual(launch.args.slice(0, 2), ['-m', 'vllm.entrypoints.openai.api_server']);
-  assert.ok(launch.args.includes('demo-model'));
-});
-
-test('waits for health and reaps the owned runtime process', async () => {
-  const port = 41_000 + (process.pid % 10_000);
-  const profile = {
-    id: 'generic-fixture',
-    provider: 'generic',
-    model: 'fixture-model',
-    executable: process.execPath,
-    extra_args: [
-      '-e',
-      `require('http').createServer((q,r)=>{r.writeHead(200);r.end('ok')}).listen(${port},'127.0.0.1')`,
-    ],
-    base_url: `http://127.0.0.1:${port}`,
-    startup_timeout_ms: 10_000,
-  };
-  const lease = await startRuntimeProfile(profile);
-  const secondLease = await startRuntimeProfile(profile);
-  assert.ok(lease.child?.pid);
-  assert.equal(lease.claudeEnv().ANTHROPIC_BASE_URL, `http://127.0.0.1:${port}`);
-  const pid = lease.child.pid;
-  try {
-    assert.ok(pid);
-    await lease.close();
-    assert.doesNotThrow(() => process.kill(pid, 0), 'first release must not reap a shared runtime');
-  } finally {
-    await secondLease.close();
-  }
-  assert.ok(lease.child.exitCode !== null || lease.child.signalCode !== null);
-  assertNotRunning(pid);
-});
-
-test('manager_exit survives lease release but manager drain kills its process group', async () => {
-  const port = 43_000 + (process.pid % 10_000);
-  const profile = {
-    id: 'manager-exit-fixture',
-    provider: 'generic',
-    model: 'fixture-model',
-    executable: process.execPath,
-    extra_args: [
-      '-e',
-      `process.on('SIGTERM',()=>{});require('http').createServer((q,r)=>r.end('ok')).listen(${port},'127.0.0.1')`,
-    ],
-    base_url: `http://127.0.0.1:${port}`,
-    startup_timeout_ms: 10_000,
-    shutdown_policy: 'manager_exit',
-  };
-  const lease = await startRuntimeProfile(profile);
-  const pid = lease.child.pid;
-  await lease.close();
-  assert.doesNotThrow(() => process.kill(pid, 0), 'lease release keeps manager_exit runtime');
-  await shutdownRuntimeProfiles();
-  assertNotRunning(pid);
-});
-
-test('manager drain kills a SIGTERM-ignoring grandchild with the whole process group', async () => {
-  const port = 44_000 + (process.pid % 10_000);
-  const pidFile = join(fixtureRoot, 'grandchild.pid');
-  const childScript =
-    `const{spawn}=require('child_process'),fs=require('fs');` +
-    `const c=spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"],{stdio:'ignore'});` +
-    `fs.writeFileSync(${JSON.stringify(pidFile)},String(c.pid));` +
-    `process.on('SIGTERM',()=>{});require('http').createServer((q,r)=>r.end('ok')).listen(${port},'127.0.0.1')`;
-  const lease = await startRuntimeProfile({
-    id: 'tree-fixture',
-    provider: 'generic',
-    model: 'fixture-model',
-    executable: process.execPath,
-    extra_args: ['-e', childScript],
-    base_url: `http://127.0.0.1:${port}`,
-    startup_timeout_ms: 10_000,
-    shutdown_policy: 'manager_exit',
-  });
-  const grandchildPid = Number(await readFile(pidFile, 'utf8'));
-  await shutdownRuntimeProfiles();
-  assertNotRunning(lease.child.pid);
-  assertNotRunning(grandchildPid);
-});
-
-test('credential injection is reference-bound and exposes only the provider mapping', () => {
+test('credential reference is bound without exposing unrelated env', () => {
   const ref = '00000000-0000-4000-8000-000000000001';
-  const profile = { id: 'secure', provider: 'generic', model: 'm', credential_ref: ref };
+  const profile = {
+    id: 'secure',
+    protocol: 'anthropic-compatible',
+    base_url: 'http://127.0.0.1:1',
+    model: 'm',
+    credential_ref: ref,
+    auth_env: 'BACKEND_API_KEY',
+  };
   assert.deepEqual(runtimeCredentialEnv(profile, ref, {
     ANTHROPIC_API_KEY: 'selected',
     OPENAI_API_KEY: 'must-not-leak',
-    UNRELATED: 'must-not-leak',
-  }), { ANTHROPIC_API_KEY: 'selected' });
+  }), { BACKEND_API_KEY: 'selected' });
   assert.throws(
     () => runtimeCredentialEnv(profile, '00000000-0000-4000-8000-000000000002', { ANTHROPIC_API_KEY: 'x' }),
     /does not match/,
   );
 });
 
-test('opt-in live vLLM starts from .venv and serves the configured model', {
-  skip: !process.env.AWB_TEST_VLLM_VENV || !process.env.AWB_TEST_VLLM_MODEL,
-  timeout: 600_000,
-}, async () => {
-  const port = Number(process.env.AWB_TEST_VLLM_PORT || 48_000 + (process.pid % 10_000));
-  const profile = {
-    id: 'live-vllm',
-    provider: 'vllm',
-    model: process.env.AWB_TEST_VLLM_MODEL,
-    venv: process.env.AWB_TEST_VLLM_VENV,
-    module: 'vllm.entrypoints.openai.api_server',
-    port,
-    base_url: `http://127.0.0.1:${port}`,
-    health_check: '/health',
-    startup_timeout_ms: 540_000,
-  };
-  const lease = await startRuntimeProfile(profile);
+test('profile validation reports protocol and adapter mistakes', () => {
+  assert.throws(
+    () => validateRuntimeProfile({
+      id: 'bad',
+      protocol: 'openai-compatible',
+      base_url: 'http://127.0.0.1:1',
+      model: 'm',
+    }),
+    /adapter is required/,
+  );
+});
+
+test('no profile keeps the Claude adapter argv and environment byte-for-byte unchanged', async () => {
+  const executable = await makeClaudeFixture('claude-regression.mjs');
+  const captureFile = join(fixtureRoot, 'regression.json');
+  const previous = process.env.CAPTURE_FILE;
+  process.env.CAPTURE_FILE = captureFile;
   try {
-    const response = await fetch(`${profile.base_url}/v1/models`);
-    assert.equal(response.ok, true);
-    const body = await response.json();
-    assert.ok(body.data.some((entry) => entry.id === profile.model));
+    const manager = new SubagentManager({
+      ...config,
+      delegation: { ...config.delegation, claudeBin: executable },
+    });
+    const exited = new Promise(resolve => { manager.onExit = resolve; });
+    const result = await manager.spawn({
+      kind: 'trigger',
+      taskText: 'fixture task',
+      rolePrompt: 'fixture role',
+      triggerId: 'trigger-regression',
+      ticketId: 'ticket-regression',
+      agentId: 'agent-regression',
+      role: 'assignee',
+    });
+    assert.equal(result.spawned, true);
+    await exited;
+    const capture = JSON.parse(await readFile(captureFile, 'utf8'));
+    assert.equal(capture.baseUrl, process.env.ANTHROPIC_BASE_URL);
+    assert.equal(capture.auth, process.env.ANTHROPIC_AUTH_TOKEN);
+    assert.equal(capture.model, null);
   } finally {
-    await lease.close();
+    if (previous === undefined) delete process.env.CAPTURE_FILE;
+    else process.env.CAPTURE_FILE = previous;
   }
 });

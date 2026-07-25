@@ -61,26 +61,31 @@ export interface HarnessSpec {
 
 export interface RuntimeProfileSpec {
   id: string;
-  provider: string;
-  type?: string;
+  kind?: 'claude-backend';
+  protocol: 'anthropic-compatible' | 'openai-compatible';
+  base_url: string;
   model: string;
-  command?: string;
-  module?: string;
-  executable?: string;
-  python?: string;
-  venv?: string;
+  claude_executable?: string;
   cwd?: string;
   env?: Record<string, string>;
-  extra_args?: string[];
-  base_url?: string;
-  port?: number;
-  startup_timeout_ms?: number;
-  health_check?: string;
-  shutdown_policy?: 'on_release' | 'manager_exit' | 'reuse';
+  args?: string[];
   credential_required?: boolean;
   credential_ref?: string;
-  capabilities?: string[];
-  claude?: { env?: Record<string, string>; args?: string[] };
+  auth_env?: string;
+  adapter?: {
+    command?: string;
+    module?: string;
+    executable?: string;
+    python?: string;
+    venv?: string;
+    cwd?: string;
+    env?: Record<string, string>;
+    args?: string[];
+    base_url: string;
+    startup_timeout_ms?: number;
+    health_check?: string;
+    lifecycle?: 'on_release' | 'manager_exit' | 'reuse';
+  };
 }
 
 // Per-CLI FLAG keys only — the subset partitionHarness() maps onto adapter

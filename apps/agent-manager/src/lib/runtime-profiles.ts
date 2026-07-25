@@ -1,13 +1,12 @@
-import { existsSync } from 'node:fs';
+import { constants as fsConstants } from 'node:fs';
 import { access } from 'node:fs/promises';
 import { delimiter, isAbsolute, join, resolve } from 'node:path';
-import { constants as fsConstants } from 'node:fs';
 import type { ChildProcess } from 'node:child_process';
 import crossSpawn from 'cross-spawn';
 import type { RuntimeProfileSpec } from './cli-adapters/base.js';
 import { terminateDetachedProcessTree } from './process-tree.js';
 
-export interface RuntimeLaunch {
+interface AdapterLaunch {
   bin: string;
   args: string[];
   cwd?: string;
@@ -16,190 +15,99 @@ export interface RuntimeLaunch {
   healthUrl: string;
 }
 
-export interface RuntimeProvider {
-  name: string;
-  capabilities: readonly string[];
-  validate(profile: RuntimeProfileSpec): string[];
-  build(profile: RuntimeProfileSpec): RuntimeLaunch;
-  claudeEnv(
-    profile: RuntimeProfileSpec,
-    launch: RuntimeLaunch,
-    credentialEnv: Record<string, string>,
-  ): Record<string, string>;
-}
-
-const providers = new Map<string, RuntimeProvider>();
-
-export function registerRuntimeProvider(provider: RuntimeProvider): void {
-  const name = provider.name.trim().toLowerCase();
-  if (!name) throw new Error('Runtime provider name must not be empty');
-  providers.set(name, provider);
-}
-
-export function listRuntimeProviders(): Array<{ name: string; capabilities: readonly string[] }> {
-  return [...providers.values()].map(({ name, capabilities }) => ({ name, capabilities }));
-}
-
-export function getRuntimeProvider(name: string): RuntimeProvider {
-  const provider = providers.get(String(name).trim().toLowerCase());
-  if (!provider) {
-    throw new Error(
-      `Unknown runtime provider "${name}". Registered providers: ${[...providers.keys()].join(', ') || '(none)'}`,
-    );
-  }
-  return provider;
-}
-
-function platformBinDir(venv: string): string {
-  return join(venv, process.platform === 'win32' ? 'Scripts' : 'bin');
-}
-
-function resolveFrom(profile: RuntimeProfileSpec, value: string): string {
+function resolveFrom(cwd: string | undefined, value: string): string {
   if (isAbsolute(value)) return value;
-  return resolve(profile.cwd || process.cwd(), value);
+  return resolve(cwd || process.cwd(), value);
 }
 
-function venvExecutable(profile: RuntimeProfileSpec, name: string): string {
-  if (!profile.venv) return name;
+function venvBin(venv: string, name: string): string {
   return join(
-    platformBinDir(resolveFrom(profile, profile.venv)),
+    venv,
+    process.platform === 'win32' ? 'Scripts' : 'bin',
     process.platform === 'win32' ? `${name}.exe` : name,
   );
 }
 
-function resolvePython(profile: RuntimeProfileSpec): string {
-  if (profile.python) return resolveFrom(profile, profile.python);
-  if (profile.venv) return venvExecutable(profile, 'python');
-  return process.platform === 'win32' ? 'python.exe' : 'python3';
+function expand(value: string, profile: RuntimeProfileSpec): string {
+  return value
+    .replaceAll('{backend_base_url}', profile.base_url)
+    .replaceAll('{model}', profile.model)
+    .replaceAll('{adapter_base_url}', profile.adapter?.base_url ?? '');
 }
 
-function baseUrl(profile: RuntimeProfileSpec): string {
-  return (profile.base_url || `http://127.0.0.1:${profile.port || 8000}`).replace(/\/$/, '');
-}
-
-function buildGeneric(profile: RuntimeProfileSpec): RuntimeLaunch {
-  const cwd = profile.cwd ? resolveFrom(profile, profile.cwd) : undefined;
+function buildAdapter(profile: RuntimeProfileSpec, credentialEnv: Record<string, string>): AdapterLaunch {
+  const adapter = profile.adapter!;
+  const cwd = adapter.cwd ? resolveFrom(profile.cwd, adapter.cwd) : profile.cwd;
+  const venv = adapter.venv ? resolveFrom(cwd, adapter.venv) : undefined;
   let bin: string;
   let args: string[];
-  if (profile.module) {
-    bin = resolvePython(profile);
-    args = ['-m', profile.module, ...(profile.extra_args ?? [])];
-  } else if (profile.executable) {
-    bin = profile.venv && !isAbsolute(profile.executable)
-      ? venvExecutable(profile, profile.executable)
-      : resolveFrom(profile, profile.executable);
-    args = [...(profile.extra_args ?? [])];
-  } else if (profile.command) {
-    const [head, ...tail] = profile.command.trim().split(/\s+/);
-    bin = profile.venv && !isAbsolute(head) ? venvExecutable(profile, head) : head;
-    args = [...tail, ...(profile.extra_args ?? [])];
+  if (adapter.module) {
+    bin = adapter.python
+      ? resolveFrom(cwd, adapter.python)
+      : venv
+        ? venvBin(venv, 'python')
+        : process.platform === 'win32' ? 'python.exe' : 'python3';
+    args = ['-m', adapter.module, ...(adapter.args ?? []).map(value => expand(value, profile))];
+  } else if (adapter.executable) {
+    bin = venv && !isAbsolute(adapter.executable)
+      ? venvBin(venv, adapter.executable)
+      : resolveFrom(cwd, adapter.executable);
+    args = (adapter.args ?? []).map(value => expand(value, profile));
+  } else if (adapter.command) {
+    const [head, ...tail] = adapter.command.trim().split(/\s+/);
+    bin = venv && !isAbsolute(head) ? venvBin(venv, head) : head;
+    args = [...tail, ...(adapter.args ?? [])].map(value => expand(value, profile));
   } else {
-    throw new Error(
-      `Runtime profile "${profile.provider}" has no command, module, or executable. ` +
-      'Set one launch field, or use shutdown_policy="reuse" with an existing endpoint.',
-    );
+    bin = '';
+    args = [];
   }
-  const url = baseUrl(profile);
-  const binDir = profile.venv ? platformBinDir(resolveFrom(profile, profile.venv)) : null;
+  const baseUrl = adapter.base_url.replace(/\/$/, '');
+  const authEnv = profile.auth_env || 'ANTHROPIC_AUTH_TOKEN';
+  const secret = credentialEnv[authEnv] || credentialEnv.ANTHROPIC_API_KEY || '';
+  const binDir = venv ? join(venv, process.platform === 'win32' ? 'Scripts' : 'bin') : '';
   return {
     bin,
     args,
     cwd,
     env: {
       ...process.env,
-      ...(binDir ? { VIRTUAL_ENV: resolveFrom(profile, profile.venv!), PATH: `${binDir}${delimiter}${process.env.PATH ?? ''}` } : {}),
-      ...(profile.env ?? {}),
+      ...(binDir ? { VIRTUAL_ENV: venv, PATH: `${binDir}${delimiter}${process.env.PATH ?? ''}` } : {}),
+      AWB_BACKEND_BASE_URL: profile.base_url,
+      AWB_BACKEND_MODEL: profile.model,
+      ...(adapter.env
+        ? Object.fromEntries(Object.entries(adapter.env).map(([key, value]) => [key, expand(value, profile)]))
+        : {}),
+      ...(secret ? { [authEnv]: secret } : {}),
     },
-    baseUrl: url,
-    healthUrl: profile.health_check
-      ? new URL(profile.health_check, `${url}/`).toString()
-      : `${url}/health`,
+    baseUrl,
+    healthUrl: new URL(adapter.health_check || '/health', `${baseUrl}/`).toString(),
   };
 }
 
-function genericValidation(profile: RuntimeProfileSpec): string[] {
-  const issues: string[] = [];
-  if (!profile.model?.trim()) issues.push('model is required');
-  const launchCount = [profile.command, profile.module, profile.executable].filter(Boolean).length;
-  if (launchCount > 1) issues.push('set only one of command, module, or executable');
-  if (profile.shutdown_policy !== 'reuse' && launchCount === 0) {
-    issues.push('command, module, or executable is required unless shutdown_policy is "reuse"');
-  }
-  if (profile.port !== undefined && (!Number.isInteger(profile.port) || profile.port < 1 || profile.port > 65535)) {
-    issues.push('port must be an integer from 1 to 65535');
-  }
-  if (profile.credential_required && !profile.credential_ref) {
-    issues.push('credential_ref is required when credential_required is true');
-  }
-  for (const key of Object.keys({ ...(profile.env ?? {}), ...(profile.claude?.env ?? {}) })) {
-    if (/(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|PRIVATE_?KEY|CREDENTIAL)/i.test(key)) {
-      issues.push(`${key} is sensitive; use credential_ref instead of plaintext env`);
-    }
-  }
-  return issues;
-}
-
-const genericProvider: RuntimeProvider = {
-  name: 'generic',
-  capabilities: ['openai_compatible', 'managed_process'],
-  validate: genericValidation,
-  build: buildGeneric,
-  claudeEnv: (profile, launch, credentialEnv) => ({
-    ANTHROPIC_BASE_URL: launch.baseUrl,
-    ...(credentialEnv.ANTHROPIC_API_KEY
-      ? { ANTHROPIC_AUTH_TOKEN: credentialEnv.ANTHROPIC_API_KEY }
-      : {}),
-    ...(profile.claude?.env ?? {}),
-  }),
-};
-
-registerRuntimeProvider(genericProvider);
-registerRuntimeProvider({
-  ...genericProvider,
-  name: 'vllm',
-  capabilities: ['openai_compatible', 'managed_process', 'venv'],
-  validate(profile) {
-    return genericValidation({
-      ...profile,
-      module: profile.module || (!profile.command && !profile.executable ? 'vllm.entrypoints.openai.api_server' : undefined),
-    });
-  },
-  build(profile) {
-    const normalized = profile.module || profile.command || profile.executable
-      ? profile
-      : { ...profile, module: 'vllm.entrypoints.openai.api_server' };
-    const launch = buildGeneric(normalized);
-    const hasModel = launch.args.some((arg) => arg === '--model');
-    const hasPort = launch.args.some((arg) => arg === '--port');
-    return {
-      ...launch,
-      args: [
-        ...launch.args,
-        ...(hasModel ? [] : ['--model', profile.model]),
-        ...(hasPort || !profile.port ? [] : ['--port', String(profile.port)]),
-      ],
-    };
-  },
-});
-
 export function validateRuntimeProfile(profile: RuntimeProfileSpec): void {
-  if (!profile || typeof profile !== 'object') throw new Error('Runtime profile must be an object');
-  const issues = getRuntimeProvider(profile.provider).validate(profile);
-  if (profile.venv) {
-    const venv = resolveFrom(profile, profile.venv);
-    if (!existsSync(venv)) issues.push(`venv does not exist: ${venv}`);
-    const python = resolvePython(profile);
-    if (profile.module && !existsSync(python)) issues.push(`venv Python does not exist: ${python}`);
+  const issues: string[] = [];
+  if (profile.kind && profile.kind !== 'claude-backend') issues.push('kind must be "claude-backend"');
+  if (!['anthropic-compatible', 'openai-compatible'].includes(profile.protocol)) {
+    issues.push('protocol must be anthropic-compatible or openai-compatible');
   }
-  if (issues.length) throw new Error(`Invalid runtime profile (${profile.provider}): ${issues.join('; ')}`);
+  if (!profile.base_url) issues.push('base_url is required');
+  if (!profile.model) issues.push('model is required');
+  if (profile.protocol === 'openai-compatible' && !profile.adapter) issues.push('adapter is required');
+  if (profile.protocol === 'anthropic-compatible' && profile.adapter) issues.push('adapter must be omitted');
+  if (profile.credential_required && !profile.credential_ref) issues.push('credential_ref is required');
+  if (profile.adapter) {
+    const count = [profile.adapter.command, profile.adapter.module, profile.adapter.executable].filter(Boolean).length;
+    if (count > 1) issues.push('adapter must set only one of command, module, or executable');
+    if (profile.adapter.lifecycle !== 'reuse' && count === 0) issues.push('adapter launch command is required unless lifecycle is reuse');
+  }
+  if (issues.length) throw new Error(`Invalid Claude backend profile (${profile.id}): ${issues.join('; ')}`);
 }
 
-export async function assertRuntimeExecutable(launch: RuntimeLaunch): Promise<void> {
-  if (!isAbsolute(launch.bin)) return;
+async function healthy(url: string): Promise<boolean> {
   try {
-    await access(launch.bin, fsConstants.X_OK);
+    return (await fetch(url, { signal: AbortSignal.timeout(2_000) })).ok;
   } catch {
-    throw new Error(`Runtime executable is missing or not executable: ${launch.bin}`);
+    return false;
   }
 }
 
@@ -209,43 +117,46 @@ export class RuntimeLease {
 
   constructor(
     readonly profile: RuntimeProfileSpec,
-    readonly launch: RuntimeLaunch,
+    readonly launch: AdapterLaunch | null,
     readonly child: ChildProcess | null,
-    readonly credentialEnv: Record<string, string> = {},
+    readonly credentialEnv: Record<string, string>,
     release: (() => Promise<void>) | null = null,
   ) {
     this.#release = release;
   }
 
   claudeEnv(): Record<string, string> {
-    return getRuntimeProvider(this.profile.provider).claudeEnv(
-      this.profile,
-      this.launch,
-      this.credentialEnv,
-    );
+    const secret = this.credentialEnv[this.profile.auth_env || 'ANTHROPIC_AUTH_TOKEN']
+      || this.credentialEnv.ANTHROPIC_API_KEY;
+    return {
+      ...(this.profile.env ?? {}),
+      ANTHROPIC_BASE_URL: this.launch?.baseUrl ?? this.profile.base_url.replace(/\/$/, ''),
+      ...(secret ? { ANTHROPIC_AUTH_TOKEN: secret } : {}),
+      ...(this.profile.protocol === 'openai-compatible' && !secret
+        ? { ANTHROPIC_AUTH_TOKEN: 'awb-local-adapter' }
+        : {}),
+    };
+  }
+
+  claudeExecutable(): string | null {
+    return this.profile.claude_executable ?? null;
   }
 
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
-    if (this.#release) {
-      await this.#release();
-      return;
-    }
+    if (this.#release) return this.#release();
     await this.terminate(false);
   }
 
   async terminate(managerDrain = false): Promise<void> {
-    if (!this.child || this.profile.shutdown_policy === 'reuse') return;
-    if (!managerDrain && this.profile.shutdown_policy === 'manager_exit') return;
+    if (!this.child || this.profile.adapter?.lifecycle === 'reuse') return;
+    if (!managerDrain && this.profile.adapter?.lifecycle === 'manager_exit') return;
     const exited = this.child.exitCode !== null || this.child.signalCode !== null
       ? Promise.resolve()
-      : new Promise<void>((resolveExit) => this.child!.once('exit', () => resolveExit()));
+      : new Promise<void>(resolveExit => this.child!.once('exit', () => resolveExit()));
     if (this.child.pid) await terminateDetachedProcessTree(this.child.pid);
-    await Promise.race([
-      exited,
-      new Promise<void>((resolveWait) => setTimeout(resolveWait, 1_000)),
-    ]);
+    await Promise.race([exited, new Promise<void>(resolveWait => setTimeout(resolveWait, 1_000))]);
   }
 }
 
@@ -253,43 +164,27 @@ interface SharedRuntime {
   refs: number;
   lease: Promise<RuntimeLease>;
 }
-
 const sharedRuntimes = new Map<string, SharedRuntime>();
 
-function profileFingerprint(profile: RuntimeProfileSpec): string {
-  return JSON.stringify(profile);
-}
-
-async function healthy(url: string): Promise<boolean> {
-  try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(2_000) });
-    return response.ok;
-  } catch {
-    return false;
-  }
-}
-
-async function startRuntimeProfileUnshared(
+async function startUnshared(
   profile: RuntimeProfileSpec,
-  credentialEnv: Record<string, string> = {},
+  credentialEnv: Record<string, string>,
 ): Promise<RuntimeLease> {
   validateRuntimeProfile(profile);
-  const provider = getRuntimeProvider(profile.provider);
-  if (profile.shutdown_policy === 'reuse') {
-    const launch = profile.command || profile.module || profile.executable
-      ? provider.build(profile)
-      : { ...buildGeneric({ ...profile, command: process.execPath }), bin: '', args: [] };
-    if (!(await healthy(launch.healthUrl))) {
-      throw new Error(`Runtime endpoint is not healthy: ${launch.healthUrl}`);
-    }
+  if (!profile.adapter) return new RuntimeLease(profile, null, null, credentialEnv);
+  const launch = buildAdapter(profile, credentialEnv);
+  if (profile.adapter.lifecycle === 'reuse') {
+    if (!(await healthy(launch.healthUrl))) throw new Error(`Adapter endpoint is not healthy: ${launch.healthUrl}`);
     return new RuntimeLease(profile, launch, null, credentialEnv);
   }
-
-  const launch = provider.build(profile);
-  await assertRuntimeExecutable(launch);
-  if (await healthy(launch.healthUrl)) {
-    return new RuntimeLease({ ...profile, shutdown_policy: 'reuse' }, launch, null, credentialEnv);
+  if (isAbsolute(launch.bin)) {
+    try {
+      await access(launch.bin, fsConstants.X_OK);
+    } catch {
+      throw new Error(`Adapter executable is missing or not executable: ${launch.bin}`);
+    }
   }
+  if (await healthy(launch.healthUrl)) return new RuntimeLease(profile, launch, null, credentialEnv);
   const child = crossSpawn(launch.bin, launch.args, {
     cwd: launch.cwd,
     env: launch.env,
@@ -298,35 +193,29 @@ async function startRuntimeProfileUnshared(
     windowsHide: true,
   });
   let spawnError: Error | null = null;
-  child.once('error', (error) => { spawnError = error; });
-  const deadline = Date.now() + (profile.startup_timeout_ms ?? 120_000);
+  child.once('error', error => { spawnError = error; });
+  const timeout = profile.adapter.startup_timeout_ms ?? 120_000;
+  const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
-    if (spawnError) {
-      throw new Error(`Runtime failed to start (${launch.bin}): ${(spawnError as Error).message}`);
-    }
-    if (child.exitCode !== null) {
-      throw new Error(`Runtime exited before becoming ready (exit code ${child.exitCode})`);
-    }
+    if (spawnError) throw new Error(`Adapter failed to start (${launch.bin}): ${(spawnError as Error).message}`);
+    if (child.exitCode !== null) throw new Error(`Adapter exited before becoming ready (exit code ${child.exitCode})`);
     if (await healthy(launch.healthUrl)) return new RuntimeLease(profile, launch, child, credentialEnv);
-    await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+    await new Promise(resolveWait => setTimeout(resolveWait, 250));
   }
   const lease = new RuntimeLease(profile, launch, child, credentialEnv);
-  // Startup failure always cleans up an owned child, regardless of the
-  // steady-state manager_exit lease policy.
   await lease.terminate(true);
-  throw new Error(
-    `Runtime startup timed out after ${profile.startup_timeout_ms ?? 120_000}ms; health check: ${launch.healthUrl}`,
-  );
+  throw new Error(`Adapter startup timed out after ${timeout}ms; health check: ${launch.healthUrl}`);
 }
 
 export async function startRuntimeProfile(
   profile: RuntimeProfileSpec,
   credentialEnv: Record<string, string> = {},
 ): Promise<RuntimeLease> {
-  const key = profileFingerprint(profile);
+  if (!profile.adapter) return startUnshared(profile, credentialEnv);
+  const key = JSON.stringify(profile);
   let shared = sharedRuntimes.get(key);
   if (!shared) {
-    shared = { refs: 0, lease: startRuntimeProfileUnshared(profile, credentialEnv) };
+    shared = { refs: 0, lease: startUnshared(profile, credentialEnv) };
     sharedRuntimes.set(key, shared);
     shared.lease.catch(() => sharedRuntimes.delete(key));
   }
@@ -336,13 +225,12 @@ export async function startRuntimeProfile(
     const current = sharedRuntimes.get(key);
     if (!current) return;
     current.refs = Math.max(0, current.refs - 1);
-    if (current.refs > 0 || profile.shutdown_policy === 'manager_exit') return;
+    if (current.refs > 0 || profile.adapter?.lifecycle === 'manager_exit') return;
     sharedRuntimes.delete(key);
     await owned.terminate();
   });
 }
 
-/** Select only the credential explicitly referenced by the profile. */
 export function runtimeCredentialEnv(
   profile: RuntimeProfileSpec,
   credentialId: string | null | undefined,
@@ -351,27 +239,20 @@ export function runtimeCredentialEnv(
   if (!profile.credential_ref) return {};
   if (!credentialId || credentialId !== profile.credential_ref) {
     throw new Error(
-      `Runtime profile "${profile.id}" references credential ${profile.credential_ref}, ` +
+      `Claude backend profile "${profile.id}" references credential ${profile.credential_ref}, ` +
       'but the selected agent credential does not match',
     );
   }
-  const apiKey = agentCredentialEnv?.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    if (profile.credential_required) {
-      throw new Error(
-        `Runtime profile "${profile.id}" requires an Anthropic API-key credential`,
-      );
-    }
+  const secret = agentCredentialEnv?.ANTHROPIC_API_KEY;
+  if (!secret) {
+    if (profile.credential_required) throw new Error(`Claude backend profile "${profile.id}" requires an API-key credential`);
     return {};
   }
-  return { ANTHROPIC_API_KEY: apiKey };
+  return { [profile.auth_env || 'ANTHROPIC_AUTH_TOKEN']: secret };
 }
 
 export async function shutdownRuntimeProfiles(): Promise<void> {
   const entries = [...sharedRuntimes.values()];
   sharedRuntimes.clear();
-  await Promise.allSettled(entries.map(async entry => {
-    const lease = await entry.lease;
-    await lease.terminate(true);
-  }));
+  await Promise.allSettled(entries.map(async entry => (await entry.lease).terminate(true)));
 }
