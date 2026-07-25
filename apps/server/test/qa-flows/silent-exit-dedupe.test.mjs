@@ -140,7 +140,7 @@ test('silent-exit dedupe collapses identical retries into one row', async (t) =>
     title: 'silent-exit grace race test',
   });
   const cycleStartedAt = new Date(Date.now() - 1_000);
-  await commentRepo.save(commentRepo.create({
+  const agentComment = {
     ticket_id: raceTicket.id,
     author_type: 'agent',
     author_id: 'agent-race',
@@ -152,8 +152,8 @@ test('silent-exit dedupe collapses identical retries into one row', async (t) =>
       cycle_trigger_id: 'trigger-race',
       subagent_session_id: 'session-race',
     }),
-  }));
-  const suppressed = await postSilentExit(port, raceTicket.id, {
+  };
+  const auditBody = {
     content: 'must not be created',
     exit_code: 0,
     role: 'assignee',
@@ -161,7 +161,46 @@ test('silent-exit dedupe collapses identical retries into one row', async (t) =>
     agent_id: 'agent-race',
     subagent_session_id: 'session-race',
     cycle_started_at: cycleStartedAt.toISOString(),
-  });
+  };
+
+  let suppressed;
+  if ((process.env.DB_TYPE || 'sqlite') === 'postgres') {
+    // Hold the shared ticket-row lock on the comment writer's connection,
+    // start the exit audit on another pooled connection, then commit the
+    // comment. Before the fix the audit's SELECT could finish and later insert
+    // a warning alongside this comment. Now the audit cannot cross the lock:
+    // after the writer commits, its in-transaction recheck sees the row.
+    let writerLocked;
+    let releaseWriter;
+    const locked = new Promise((resolve) => { writerLocked = resolve; });
+    const release = new Promise((resolve) => { releaseWriter = resolve; });
+    const writer = ds.transaction(async (manager) => {
+      await manager.getRepository('Ticket').findOne({
+        where: { id: raceTicket.id },
+        lock: { mode: 'pessimistic_write' },
+      });
+      writerLocked();
+      await release;
+      await manager.getRepository('Comment').save(
+        manager.getRepository('Comment').create(agentComment),
+      );
+    });
+    await locked;
+    const audit = postSilentExit(port, raceTicket.id, auditBody);
+    let auditSettled = false;
+    void audit.finally(() => { auditSettled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(auditSettled, false, 'audit waits behind the concurrent comment writer');
+    releaseWriter();
+    await writer;
+    suppressed = await audit;
+  } else {
+    // sql.js owns one connection and cannot model two independently committing
+    // transactions; keep the authoritative persisted-row assertion here while
+    // the Postgres matrix exercises the real cross-connection interleaving.
+    await commentRepo.save(commentRepo.create(agentComment));
+    suppressed = await postSilentExit(port, raceTicket.id, auditBody);
+  }
   assert.equal(suppressed.status, 200);
   assert.equal(suppressed.body.suppressed, true);
   assert.equal(
