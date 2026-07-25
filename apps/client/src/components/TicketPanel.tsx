@@ -946,6 +946,8 @@ export default function TicketPanel({
   // refreshed via api.listTicketAttachments after each mutation so concurrent
   // edits across tabs converge.
   const [ticketAttachments, setTicketAttachments] = useState<TicketAttachmentMeta[]>(activeTicket.attachments || []);
+  const [duplicateDecisionBusy, setDuplicateDecisionBusy] = useState(false);
+  const [duplicateDecisionDone, setDuplicateDecisionDone] = useState(false);
   const [attachmentBusy, setAttachmentBusy] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
 
@@ -972,6 +974,7 @@ export default function TicketPanel({
     setCommentContent('');
     setCommentAttachments([]);
     setPendingReasonDraft(activeTicket.pending_reason || '');
+    setDuplicateDecisionDone(false);
     setUserResponseDraft('');
     // Auto-switch to the User tab when opening a pending ticket so the human
     // sees the ask immediately. Skipped when scrollToCommentId is set (a
@@ -979,6 +982,24 @@ export default function TicketPanel({
     // tab and the dedicated effect below routes there).
     setActiveTab(activeTicket.pending_user_action ? 'user' : 'detail');
   }, [activeTicket.id]);
+
+  const handleDuplicateDecision = useCallback(async (candidateId: string | null) => {
+    if (duplicateDecisionBusy) return;
+    setDuplicateDecisionBusy(true);
+    try {
+      await api.decideTicketDuplicate(activeTicket.id, candidateId
+        ? { action: 'link', candidate_ticket_id: candidateId }
+        : { action: 'keep_independent' });
+      setDuplicateDecisionDone(true);
+      showToast(candidateId
+        ? 'Linked to the selected canonical ticket. Independent dispatch remains suppressed.'
+        : 'Kept as an independent ticket and resumed normal dispatch.', 'success');
+    } catch (error: any) {
+      showToast(error?.message || 'Could not save the duplicate decision.', 'error');
+    } finally {
+      setDuplicateDecisionBusy(false);
+    }
+  }, [activeTicket.id, duplicateDecisionBusy, showToast]);
 
   // Mention deep-link override — when a comment id is queued (at panel mount
   // or arriving on the currently-open ticket), jump to the comments tab so
@@ -3854,6 +3875,72 @@ export default function TicketPanel({
                   )}
                 </div>
 
+                {!!activeTicket.duplicate_candidates?.length && !duplicateDecisionDone ? (
+                  <div style={{
+                    background: tokens.colors.surfaceCard,
+                    border: `1px solid ${tokens.colors.border}`,
+                    borderRadius: tokens.radii.lg,
+                    padding: '12px 14px',
+                  }}>
+                    <div style={{ fontSize: '13px', fontWeight: 700, color: tokens.colors.textStrong, marginBottom: 8 }}>
+                      Is this report a duplicate?
+                    </div>
+                    <div style={{ fontSize: '12px', color: tokens.colors.textSecondary, lineHeight: 1.5, marginBottom: 10 }}>
+                      Choose the canonical ticket to link. This report will follow its outcome without waking an assignee or reviewer independently.
+                    </div>
+                    {activeTicket.duplicate_candidates.map(candidate => (
+                      <div key={candidate.ticket_id} style={{
+                        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                        gap: 12, padding: '9px 0', borderTop: `1px solid ${tokens.colors.border}`,
+                      }}>
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ color: tokens.colors.textStrong, fontSize: '13px', fontWeight: 600 }}>
+                            {candidate.title}
+                          </div>
+                          <div style={{ color: tokens.colors.textSecondary, fontSize: '11px', marginTop: 3 }}>
+                            {candidate.ticket_id} · {candidate.matched_signals.join(', ').replaceAll('_', ' ')}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={duplicateDecisionBusy}
+                          onClick={() => handleDuplicateDecision(candidate.ticket_id)}
+                          style={{
+                            flexShrink: 0, background: tokens.colors.surfaceSubtle,
+                            border: `1px solid ${tokens.colors.info}`, borderRadius: tokens.radii.md,
+                            color: tokens.colors.info, padding: '6px 10px', fontSize: '12px',
+                            fontWeight: 600, cursor: 'pointer', opacity: duplicateDecisionBusy ? 0.5 : 1,
+                          }}
+                        >Link here</button>
+                      </div>
+                    ))}
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 10 }}>
+                      <button
+                        type="button"
+                        disabled={duplicateDecisionBusy}
+                        onClick={() => handleDuplicateDecision(null)}
+                        style={{
+                          background: 'transparent', border: `1px solid ${tokens.colors.border}`,
+                          borderRadius: tokens.radii.md, color: tokens.colors.textSecondary,
+                          padding: '6px 10px', fontSize: '12px', fontWeight: 600,
+                          cursor: 'pointer', opacity: duplicateDecisionBusy ? 0.5 : 1,
+                        }}
+                      >Keep independent</button>
+                    </div>
+                  </div>
+                ) : duplicateDecisionDone ? (
+                  <div style={{
+                    background: tokens.colors.successBg,
+                    border: `1px solid ${tokens.colors.successLight}`,
+                    borderRadius: tokens.radii.md,
+                    color: tokens.colors.successLight,
+                    padding: '10px 12px',
+                    fontSize: '12px',
+                  }}>
+                    Duplicate decision saved.
+                  </div>
+                ) : (
+                  <>
                 <label style={labelStyle}>Your response (optional)</label>
                 <textarea
                   value={userResponseDraft}
@@ -3890,6 +3977,8 @@ export default function TicketPanel({
                     }}
                   >{userResponseDraft.trim() ? '▶ Post & Resume' : '▶ Resume (Unpend)'}</button>
                 </div>
+                  </>
+                )}
 
                 <h4 style={{
                   fontSize: '12px', fontWeight: 700,

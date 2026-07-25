@@ -542,6 +542,9 @@ export const api = {
   updateTicket: (id: string, data: Record<string, any>) =>
     request<any>(`/tickets/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
 
+  decideTicketDuplicate: (id: string, data: { action: 'link' | 'keep_independent'; candidate_ticket_id?: string }) =>
+    request<any>(`/tickets/${id}/duplicate-decision`, { method: 'POST', body: JSON.stringify(data) }),
+
   moveTicket: (id: string, targetColumnId: string, targetPosition: number) =>
     request<any>(`/tickets/${id}/move`, { method: 'PATCH', body: JSON.stringify({ targetColumnId, targetPosition }) }),
 

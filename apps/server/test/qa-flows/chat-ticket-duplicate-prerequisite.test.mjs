@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { setupKanbanScene, createAgent, createApiKey, createTicket } from '../helpers/fixtures.mjs';
+import { setupKanbanScene, createAgent, createApiKey, createTicket, createUser } from '../helpers/fixtures.mjs';
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
 process.env.PORT = process.env.QA_CHAT_DUPLICATE_PORT || '7861';
@@ -20,16 +20,12 @@ test('prerequisite completion cannot redispatch a linked chat duplicate', async 
   const prerequisites = app.get(TicketPrerequisitesService);
   const duplicateService = app.get(TicketDuplicateService);
 
-  step('Seed canonical A, linked duplicate B, and prerequisite C');
+  step('Seed prerequisite C and lifecycle sentinels');
   const { ws, columns } = await setupKanbanScene(app, modules.getDataSourceToken, { workspaceName: 'chat-dedupe-prereq' });
   const assignee = await createAgent(app, modules.getDataSourceToken, ws.id, { name: 'duplicate-assignee' });
   const key = await createApiKey(app, modules.getDataSourceToken, assignee.id, { workspaceId: ws.id });
-  const canonical = await createTicket(app, modules.getDataSourceToken, {
-    columnId: columns.inProgress.id, workspaceId: ws.id, title: 'Artifact pipeline regression', assigneeId: assignee.id,
-  });
-  const duplicate = await createTicket(app, modules.getDataSourceToken, {
-    columnId: columns.inProgress.id, workspaceId: ws.id, title: '[Bug] Artifact pipeline regression', assigneeId: assignee.id,
-  });
+  const operator = await createUser(app, modules.getDataSourceToken, { name: 'duplicate-intake-operator' });
+  const userToken = app.get(modules.AuthService).createSession(operator.id);
   const prerequisite = await createTicket(app, modules.getDataSourceToken, {
     columnId: columns.inProgress.id, workspaceId: ws.id, title: 'Prerequisite', assigneeId: assignee.id,
   });
@@ -40,17 +36,68 @@ test('prerequisite completion cannot redispatch a linked chat duplicate', async 
     columnId: columns.inProgress.id, workspaceId: ws.id, title: 'Must not resume from duplicate resolution', assigneeId: assignee.id,
   });
   const ticketRepo = ds.getRepository('Ticket');
-  await ticketRepo.update(canonical.id, {
-    source_kind: 'chat', source_chat_room_id: 'room-r', related_ticket_id: prerequisite.id,
-  });
-  await ticketRepo.update(duplicate.id, {
+  const va = new VirtualAgent({ name: assignee.name, agentId: assignee.id, apiKey: key.raw_key, port });
+  await va.start();
+  t.after(() => va.stop());
+  const createRestTicket = async (body) => {
+    const response = await fetch(`http://localhost:${port}/api/columns/${columns.inProgress.id}/tickets`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${userToken}`,
+        'X-Workspace-Id': ws.id,
+      },
+      body: JSON.stringify({ assignee_id: assignee.id, ...body }),
+    });
+    if (response.status !== 201) {
+      assert.fail(`REST ticket intake failed (${response.status}): ${await response.text()}`);
+    }
+    return response.json();
+  };
+  const consumeCreatedActivity = async (ticketId) => {
+    const activity = await ds.getRepository('ActivityLog').findOne({
+      where: { ticket_id: ticketId, entity_type: 'ticket', action: 'created' },
+      order: { created_at: 'DESC' },
+    });
+    assert.ok(activity, 'real intake must persist a created activity');
+    return triggerLoop.dispatchCurrentColumn(ticketId, 'ticket_created', activity.actor_id || 'qa');
+  };
+
+  step('Create canonical A through REST and observe exactly one initial assignee trigger');
+  const canonical = await createRestTicket({
+    title: 'Artifact pipeline regression',
+    labels: ['artifact', 'pipeline'],
     source_kind: 'chat',
     source_chat_room_id: 'room-r',
     related_ticket_id: prerequisite.id,
-    canonical_ticket_id: canonical.id,
-    pending_on_tickets: true,
+  });
+  assert.deepEqual(await consumeCreatedActivity(canonical.id), { emitted: 1 });
+
+  step('Create equivalent B through REST; intake must persist and suppress it before dispatch');
+  const duplicate = await createRestTicket({
+    title: '[Bug] Artifact pipeline regression',
+    labels: ['artifact', 'pipeline'],
+    source_kind: 'chat',
+    source_chat_room_id: 'room-r',
+    related_ticket_id: prerequisite.id,
     next_ticket_id: nextTicket.id,
   });
+  assert.equal(duplicate.canonical_ticket_id, canonical.id);
+  assert.equal(duplicate.pending_user_action, false);
+  const persistedDuplicate = await ticketRepo.findOne({ where: { id: duplicate.id } });
+  assert.equal(persistedDuplicate.canonical_ticket_id, canonical.id);
+  const decisionRepo = ds.getRepository('TicketDuplicateDecision');
+  assert.equal(await decisionRepo.count({
+    where: { report_ticket_id: duplicate.id, candidate_ticket_id: canonical.id, outcome: 'auto_linked' },
+  }), 1, 'REST intake must persist the auto-link audit decision');
+  const commentRepo = ds.getRepository('Comment');
+  assert.equal(await commentRepo.count({ where: { ticket_id: duplicate.id, author: 'Duplicate intake' } }), 1);
+  assert.equal(await commentRepo.count({ where: { ticket_id: canonical.id, author: 'Duplicate intake' } }), 1);
+  assert.deepEqual(await consumeCreatedActivity(duplicate.id), { emitted: 0 });
+  await new Promise(resolve => setTimeout(resolve, 250));
+  assert.equal(va.triggersFor(duplicate.id).length, 0, 'duplicate create activity must not emit an independent trigger');
+
+  await ticketRepo.update(duplicate.id, { pending_on_tickets: true });
   const prereqRepo = ds.getRepository('TicketPrerequisite');
   await prereqRepo.save(prereqRepo.create({
     ticket_id: duplicate.id,
@@ -98,11 +145,6 @@ test('prerequisite completion cannot redispatch a linked chat duplicate', async 
   assert.equal(conflictingRoom.canonical_ticket_id, null);
   assert.ok(conflictingRoom.candidates.find(c => c.ticket_id === canonical.id)?.matched_signals.includes('conflicting_source_room'));
 
-  const va = new VirtualAgent({ name: assignee.name, agentId: assignee.id, apiKey: key.raw_key, port });
-  await va.start();
-  t.after(() => va.stop());
-  await new Promise(resolve => setTimeout(resolve, 200));
-
   step('The root dispatch gate suppresses the duplicate before prerequisite completion');
   assert.deepEqual(await triggerLoop.dispatchCurrentColumn(duplicate.id, 'ticket_created', 'qa'), { emitted: 0 });
 
@@ -148,7 +190,6 @@ test('prerequisite completion cannot redispatch a linked chat duplicate', async 
   await triggerLoop._resolveCanonicalDuplicates(completedCanonical, columns.done, 'qa');
   const resolved = await ticketRepo.findOne({ where: { id: duplicate.id } });
   assert.equal(resolved.column_id, columns.done.id);
-  const decisionRepo = ds.getRepository('TicketDuplicateDecision');
   assert.equal(await decisionRepo.count({
     where: { report_ticket_id: duplicate.id, outcome: 'resolved_from_canonical' },
   }), 1, 'canonical completion resolves the duplicate exactly once');
@@ -182,6 +223,13 @@ test('prerequisite completion cannot redispatch a linked chat duplicate', async 
   });
   const linkReport = await ticketRepo.findOne({ where: { id: ambiguousLink.id } });
   await duplicateService.record(linkReport, linkAssessment, 'qa', 'qa');
+  const reopenedResponse = await fetch(`http://localhost:${port}/api/tickets/${ambiguousLink.id}`, {
+    headers: { Authorization: `Bearer ${userToken}`, 'X-Workspace-Id': ws.id },
+  });
+  assert.equal(reopenedResponse.status, 200);
+  const reopenedReport = await reopenedResponse.json();
+  assert.ok(reopenedReport.duplicate_candidates.length >= 2,
+    'reopened ticket reads must project every persisted ambiguous candidate');
   await assert.rejects(
     duplicateService.confirm(ambiguousLink.id, dependent.id, 'qa', 'qa'),
     /not offered/,

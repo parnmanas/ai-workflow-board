@@ -1084,6 +1084,15 @@ export interface Ticket {
   pending_reason?: string;
   pending_set_at?: string | null;
   pending_set_by?: string;
+  // Persisted ambiguous chat-duplicate choices. Hydrated by full ticket reads
+  // so a report reopened after intake can still be explicitly linked or kept
+  // independent.
+  duplicate_candidates?: Array<{
+    ticket_id: string;
+    title: string;
+    confidence: number;
+    matched_signals: string[];
+  }>;
   // "Blocked by another ticket" flag (ticket 48d14fff) — distinct from
   // pending_user_action so the board/panel render a separate badge and the
   // trigger loop auto-resumes when every prerequisite lands on a terminal

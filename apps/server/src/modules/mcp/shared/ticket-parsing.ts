@@ -18,6 +18,7 @@ import { Ticket } from '../../../entities/Ticket';
 import { TicketRoleAssignment } from '../../../entities/TicketRoleAssignment';
 import { Resource } from '../../../entities/Resource';
 import { TicketAttachment } from '../../../entities/TicketAttachment';
+import { TicketDuplicateDecision } from '../../../entities/TicketDuplicateDecision';
 import { parseHandoffSpec } from '../../../common/handoff-spec-config';
 import { User } from '../../../entities/User';
 import { WorkspaceRole } from '../../../entities/WorkspaceRole';
@@ -251,6 +252,34 @@ export async function loadTicketFull(
     comments: parseComments(ticket.comments),
     attachments: [] as any[],
   };
+
+  // Ambiguous chat-duplicate choices are durable decision rows, not merely a
+  // create-response hint. Project the still-pending candidates on every full
+  // ticket read so REST, MCP, and a reopened detail panel expose the same
+  // human decision surface.
+  if (ticket.pending_user_action) {
+    const decisions = await scope.getRepository(TicketDuplicateDecision).find({
+      where: { report_ticket_id: ticket.id, outcome: 'ambiguous_pending' },
+      order: { confidence: 'DESC', created_at: 'ASC' },
+    });
+    if (decisions.length > 0) {
+      const candidateIds = Array.from(new Set(decisions.map(row => row.candidate_ticket_id)));
+      const candidates = await ticketRepo.find({ where: { id: In(candidateIds) } });
+      const candidateById = new Map(candidates.map(candidate => [candidate.id, candidate]));
+      out.duplicate_candidates = decisions.flatMap((row) => {
+        const candidate = candidateById.get(row.candidate_ticket_id);
+        if (!candidate) return [];
+        return [{
+          ticket_id: candidate.id,
+          title: candidate.title,
+          confidence: row.confidence,
+          matched_signals: safeJsonParse(row.matched_signals),
+        }];
+      });
+    } else {
+      out.duplicate_candidates = [];
+    }
+  }
 
   // bounded 모드: 위 구성에서 각 노드의 `comments` 는 빈 배열로 남았다(관계를
   // 로드 안 했으므로). load-older 엔드포인트와 같은 복합 커서 쿼리로 각 노드를
