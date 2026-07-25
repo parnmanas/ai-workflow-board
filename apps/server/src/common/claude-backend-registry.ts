@@ -2,9 +2,13 @@ import { DataSource, In } from 'typeorm';
 import { ClaudeBackendProfile } from '../entities/ClaudeBackendProfile';
 import { WorkspaceClaudeBackendProfile } from '../entities/WorkspaceClaudeBackendProfile';
 import { Workspace } from '../entities/Workspace';
-import { CliRuntimeProfile, ClaudeBackendProfileSchema, parseCliRuntimeProfiles } from './cli-runtime-profiles';
+import { SystemSetting } from '../entities/SystemSetting';
+import {
+  CliRuntimeProfile, ClaudeBackendProfileSchema, parseCliRuntimeProfiles, resolveCliRuntimeProfile,
+} from './cli-runtime-profiles';
 
 const CORE_KEYS = new Set(['id', 'name', 'protocol', 'base_url', 'model', 'credential_ref']);
+export const CLAUDE_BACKEND_DEFAULT_KEY = 'claude_backend_profiles.default';
 
 export function profileEntityToRuntime(row: ClaudeBackendProfile): CliRuntimeProfile {
   const config = JSON.parse(row.config || '{}');
@@ -66,4 +70,29 @@ export async function authoritativeWorkspaceRuntimeProfiles(
   return workspace.claude_backend_profiles_migrated
     ? registryProfiles
     : parseCliRuntimeProfiles(workspace.cli_runtime_profiles);
+}
+
+export async function resolveClaudeBackendProfileForDispatch(
+  dataSource: DataSource,
+  workspace: Workspace | null | undefined,
+  selectors: Array<{ source: string; value: string | null | undefined }>,
+) {
+  const profiles = await authoritativeWorkspaceRuntimeProfiles(dataSource, workspace);
+  const globalDefault = (await dataSource.getRepository(SystemSetting).findOne({
+    where: { key: CLAUDE_BACKEND_DEFAULT_KEY },
+  }))?.value || null;
+  if (globalDefault && globalDefault !== 'none' && !profiles.some(profile => profile.id === globalDefault)) {
+    const globalRow = await dataSource.getRepository(ClaudeBackendProfile).findOne({
+      where: { id: globalDefault },
+    });
+    if (globalRow) profiles.push(profileEntityToRuntime(globalRow));
+  }
+  return resolveCliRuntimeProfile(profiles, [
+    ...selectors,
+    {
+      source: 'workspace',
+      value: workspace?.default_claude_backend_profile_id ?? workspace?.default_cli_runtime_profile,
+    },
+    { source: 'global', value: globalDefault },
+  ]);
 }

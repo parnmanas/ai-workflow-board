@@ -171,10 +171,10 @@ test('legacy backend-launch rows fail with an actionable migration error', () =>
 
 test('trigger dispatch resolves and validates Claude backend profiles only for Claude agents', () => {
   const guard = triggerSource.match(
-    /if \(agent\?\.type === 'claude'\) \{[\s\S]*?runtimeProfile = resolveCliRuntimeProfile\([\s\S]*?credential_required[\s\S]*?\n    \}/,
+    /if \(agent\?\.type === 'claude'\) \{[\s\S]*?runtimeProfile = await resolveClaudeBackendProfileForDispatch\([\s\S]*?credential_required[\s\S]*?\n    \}/,
   );
   assert.ok(guard, 'profile resolution and credential validation must share an agent.type === claude guard');
-  assert.match(guard[0], /\{ source: 'run', value: ticket\.cli_runtime_profile \}[\s\S]*source: 'agent'[\s\S]*source: 'board'[\s\S]*source: 'workspace'[\s\S]*source: 'global'/);
+  assert.match(guard[0], /\{ source: 'run', value: ticket\.cli_runtime_profile \}[\s\S]*source: 'agent'[\s\S]*source: 'board'/);
   assert.match(
     triggerSource,
     /let runtimeProfile: CliRuntimeProfile \| null = null;/,
@@ -182,7 +182,7 @@ test('trigger dispatch resolves and validates Claude backend profiles only for C
   );
   assert.doesNotMatch(
     triggerSource.slice(guard.index + guard[0].length),
-    /runtimeProfile = resolveCliRuntimeProfile/,
+    /runtimeProfile = await resolveClaudeBackendProfileForDispatch/,
     'profile resolution must not have an unguarded fallback',
   );
 });

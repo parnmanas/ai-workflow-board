@@ -209,6 +209,7 @@ describe('Claude backend profile integration', () => {
     assert.equal(replaced.status, 200, JSON.stringify(replaced.data));
     assert.equal(await ds.getRepository('ClaudeBackendProfile').countBy({ id: profileA.id }), 0);
     assert.equal((await ds.getRepository('Workspace').findOneByOrFail({ id: workspace.id })).default_claude_backend_profile_id, profileB.id);
+    assert.equal((await ds.getRepository('Workspace').findOneByOrFail({ id: workspace.id })).default_cli_runtime_profile, profileB.id);
     assert.equal((await ds.getRepository('Board').findOneByOrFail({ id: board.id })).cli_runtime_profile, profileB.id);
     assert.equal((await ds.getRepository('Agent').findOneByOrFail({ id: agent.id })).cli_runtime_profile, profileB.id);
     assert.equal((await ds.getRepository('Ticket').findOneByOrFail({ id: ticket.id })).cli_runtime_profile, profileB.id);
@@ -219,11 +220,20 @@ describe('Claude backend profile integration', () => {
       key: 'claude_backend_profiles.default',
     })).value, profileB.id);
 
+    const response = await createProfile(adminToken, 'profile-global', 'Profile Global');
+    assert.equal(response.status, 201, JSON.stringify(response.data));
+    const globalProfile = response.data;
+    await apiRequest(baseUrl, '/admin/claude-backend-profiles/default', {
+      token: adminToken, method: 'PATCH', body: { profile_id: globalProfile.id },
+    });
+
     const detached = await apiRequest(baseUrl, `/admin/claude-backend-profiles/${profileB.id}`, {
       token: adminToken, method: 'DELETE', body: { detach: true },
     });
     assert.equal(detached.status, 200, JSON.stringify(detached.data));
-    assert.equal((await ds.getRepository('Workspace').findOneByOrFail({ id: workspace.id })).default_claude_backend_profile_id, null);
+    const detachedWorkspace = await ds.getRepository('Workspace').findOneByOrFail({ id: workspace.id });
+    assert.equal(detachedWorkspace.default_claude_backend_profile_id, null);
+    assert.equal(detachedWorkspace.default_cli_runtime_profile, null);
     assert.equal((await ds.getRepository('Board').findOneByOrFail({ id: board.id })).cli_runtime_profile, null);
     assert.equal((await ds.getRepository('Agent').findOneByOrFail({ id: agent.id })).cli_runtime_profile, null);
     assert.equal((await ds.getRepository('Ticket').findOneByOrFail({ id: ticket.id })).cli_runtime_profile, null);
@@ -232,7 +242,15 @@ describe('Claude backend profile integration', () => {
     }), 0);
     assert.equal((await ds.getRepository('SystemSetting').findOneByOrFail({
       key: 'claude_backend_profiles.default',
-    })).value, '');
+    })).value, globalProfile.id);
+
+    const { resolveClaudeBackendProfileForDispatch } = await import('../dist/common/claude-backend-registry.js');
+    const resolved = await resolveClaudeBackendProfileForDispatch(ds, detachedWorkspace, [
+      { source: 'run', value: null },
+      { source: 'agent', value: null },
+      { source: 'board', value: null },
+    ]);
+    assert.equal(resolved?.id, globalProfile.id);
   });
 
   it('migrates identical legacy ids with different payloads without loss and never exposes credential identity', async () => {

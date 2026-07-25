@@ -34,11 +34,8 @@ import { isConsensusVoteComment } from '../../common/consensus-meta';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { ResolvedHardBudget, hardBudgetDefaultsFromEnv, resolveHardBudgetConfig } from '../../common/hard-budget-config';
 import { lastHumanUnpendAt, countWindowDispatches, countWindowTokens, pendTicketForHardBudget, postHardBudgetAlert } from '../../common/hard-budget-guard';
-import { CliRuntimeProfile, resolveCliRuntimeProfile } from '../../common/cli-runtime-profiles';
-import { authoritativeWorkspaceRuntimeProfiles } from '../../common/claude-backend-registry';
-import { SystemSetting } from '../../entities/SystemSetting';
-import { ClaudeBackendProfile } from '../../entities/ClaudeBackendProfile';
-import { profileEntityToRuntime } from '../../common/claude-backend-registry';
+import { CliRuntimeProfile } from '../../common/cli-runtime-profiles';
+import { resolveClaudeBackendProfileForDispatch } from '../../common/claude-backend-registry';
 
 // Sentinel actor written onto auto-advance `moved` activities. Deliberately
 // non-'system' so the trigger loop re-enters and processes the destination
@@ -2599,29 +2596,13 @@ candidate's branch or move the ticket.
     // particular, a workspace/board default must not alter Codex/Antigravity
     // spawn model/cwd or make their dispatch depend on a Claude credential.
     if (agent?.type === 'claude') {
-      const profiles = await authoritativeWorkspaceRuntimeProfiles(this.dataSource, runtimeWorkspace);
-      const globalDefault = (await this.dataSource.getRepository(SystemSetting).findOne({
-        where: { key: 'claude_backend_profiles.default' },
-      }))?.value || null;
-      // The instance default is an intentional fallback even when a workspace
-      // has not added it to its editable allow-set. Explicit Board/Agent values
-      // are still write-validated against that allow-set.
-      if (globalDefault && globalDefault !== 'none' && !profiles.some(profile => profile.id === globalDefault)) {
-        const globalRow = await this.dataSource.getRepository(ClaudeBackendProfile).findOne({ where: { id: globalDefault } });
-        if (globalRow) profiles.push(profileEntityToRuntime(globalRow));
-      }
-      runtimeProfile = resolveCliRuntimeProfile(
-        profiles,
+      runtimeProfile = await resolveClaudeBackendProfileForDispatch(
+        this.dataSource,
+        runtimeWorkspace,
         [
           { source: 'run', value: ticket.cli_runtime_profile },
           { source: 'agent', value: agent.cli_runtime_profile },
           { source: 'board', value: runtimeBoard?.cli_runtime_profile },
-          {
-            source: 'workspace',
-            value: runtimeWorkspace?.default_claude_backend_profile_id
-              ?? runtimeWorkspace?.default_cli_runtime_profile,
-          },
-          { source: 'global', value: globalDefault },
         ],
       );
       if (runtimeProfile?.credential_required && runtimeProfile.credential_ref !== agent.credential_id) {

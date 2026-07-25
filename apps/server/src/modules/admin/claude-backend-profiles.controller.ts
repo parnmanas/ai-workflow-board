@@ -28,9 +28,10 @@ export class ClaudeBackendProfilesController {
   }
 
   private async impact(id: string) {
-    const [links, workspaces, boards, agents, runs, defaultId] = await Promise.all([
+    const [links, workspaces, legacyWorkspaces, boards, agents, runs, defaultId] = await Promise.all([
       this.dataSource.getRepository(WorkspaceClaudeBackendProfile).find({ where: { profile_id: id } }),
       this.dataSource.getRepository(Workspace).find({ where: { default_claude_backend_profile_id: id } }),
+      this.dataSource.getRepository(Workspace).find({ where: { default_cli_runtime_profile: id } }),
       this.dataSource.getRepository(Board).find({ where: { cli_runtime_profile: id } }),
       this.dataSource.getRepository(Agent).find({ where: { cli_runtime_profile: id } }),
       this.dataSource.getRepository(Ticket).find({ where: { cli_runtime_profile: id } }),
@@ -41,6 +42,7 @@ export class ClaudeBackendProfilesController {
       workspaces: Array.from(new Set([
         ...links.map(x => x.workspace_id),
         ...workspaces.map(x => x.id),
+        ...legacyWorkspaces.map(x => x.id),
         ...boards.map(x => x.workspace_id).filter(Boolean),
         ...agents.map(x => x.workspace_id).filter((value): value is string => Boolean(value)),
         ...runs.map(x => x.workspace_id).filter(Boolean),
@@ -136,6 +138,7 @@ export class ClaudeBackendProfilesController {
     await this.dataSource.transaction(async manager => {
       const next = replacement || null; // detach means inherit
       await manager.update(Workspace, { default_claude_backend_profile_id: id }, { default_claude_backend_profile_id: next });
+      await manager.update(Workspace, { default_cli_runtime_profile: id }, { default_cli_runtime_profile: next });
       await manager.update(Board, { cli_runtime_profile: id }, { cli_runtime_profile: next });
       await manager.update(Agent, { cli_runtime_profile: id }, { cli_runtime_profile: next });
       await manager.update(Ticket, { cli_runtime_profile: id }, { cli_runtime_profile: next });
