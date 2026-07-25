@@ -136,7 +136,9 @@ export class CodexCliAdapter extends CliAdapter {
     const hasAttribution = !!(
       mcpAttribution?.ticketId ||
       mcpAttribution?.role ||
-      mcpAttribution?.triggerSource
+      mcpAttribution?.triggerSource ||
+      mcpAttribution?.triggerId ||
+      mcpAttribution?.sessionId
     );
     const attributionArgs: string[] = [];
     if (hasAttribution) {
@@ -149,6 +151,12 @@ export class CodexCliAdapter extends CliAdapter {
       if (mcpAttribution?.role) headers['X-AWB-Subagent-Role'] = mcpAttribution.role;
       if (mcpAttribution?.triggerSource) {
         headers['X-AWB-Subagent-Trigger-Source'] = mcpAttribution.triggerSource;
+      }
+      if (mcpAttribution?.triggerId) {
+        headers['X-AWB-Subagent-Trigger-Id'] = mcpAttribution.triggerId;
+      }
+      if (mcpAttribution?.sessionId) {
+        headers['X-AWB-Subagent-Session-Id'] = mcpAttribution.sessionId;
       }
       attributionArgs.push(
         '-c',

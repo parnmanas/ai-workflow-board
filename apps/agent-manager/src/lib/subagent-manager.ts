@@ -233,6 +233,7 @@ interface SubagentRecord {
   pid: number;
   cli_type: string;
   trigger_id: string | null;
+  audit_session_id?: string;
   chat_request_id: string | null;
   ticket_id: string | null;
   agent_id: string | null;
@@ -598,7 +599,7 @@ export class SubagentManager implements SubagentManagerContract {
         mcpConfigPath: null,
         cwd: effectiveCwd,
         cliHomeDir: ctx?.cli_home_dir ?? null,
-        mcpAttribution: this.#mcpAttribution(spec, !!ctx),
+        mcpAttribution: this.#mcpAttribution(spec, !!ctx, String(reservationId)),
         model: attemptModel,
         harness,
         effort: effortFlag,
@@ -643,6 +644,8 @@ export class SubagentManager implements SubagentManagerContract {
           if (spec.ticketId) headers['X-AWB-Subagent-Ticket-Id'] = spec.ticketId;
           if (spec.role) headers['X-AWB-Subagent-Role'] = spec.role;
           if (spec.triggerSource) headers['X-AWB-Subagent-Trigger-Source'] = spec.triggerSource;
+          if (spec.triggerId) headers['X-AWB-Subagent-Trigger-Id'] = spec.triggerId;
+          headers['X-AWB-Subagent-Session-Id'] = String(reservationId);
           const mcpConfig = {
             mcpServers: {
               awb: {
@@ -663,7 +666,7 @@ export class SubagentManager implements SubagentManagerContract {
             mcpConfigPath: configPath,
             cwd: effectiveCwd,
             cliHomeDir: ctx?.cli_home_dir ?? null,
-            mcpAttribution: this.#mcpAttribution(spec, !!ctx),
+            mcpAttribution: this.#mcpAttribution(spec, !!ctx, String(reservationId)),
             model: attemptModel,
             harness,
             effort: effortFlag,
@@ -793,6 +796,7 @@ export class SubagentManager implements SubagentManagerContract {
         kind: spec.kind,
         cli_type: adapter.cliType,
         trigger_id: spec.triggerId || null,
+        audit_session_id: String(reservationId),
         chat_request_id: spec.chatRequestId || null,
         ticket_id: spec.ticketId || null,
         agent_id: spec.agentId || null,
@@ -852,13 +856,15 @@ export class SubagentManager implements SubagentManagerContract {
     }
   }
 
-  #mcpAttribution(spec: SubagentSpawnArgs, managed: boolean) {
-    if (!spec.ticketId && !spec.role && !spec.triggerSource) return undefined;
+  #mcpAttribution(spec: SubagentSpawnArgs, managed: boolean, sessionId: string) {
+    if (!spec.ticketId && !spec.role && !spec.triggerSource && !spec.triggerId) return undefined;
     return {
       clientType: managed ? 'managed-subagent' as const : 'subagent' as const,
       ticketId: spec.ticketId || undefined,
       role: spec.role || undefined,
       triggerSource: spec.triggerSource || undefined,
+      triggerId: spec.triggerId || undefined,
+      sessionId,
     };
   }
 
@@ -1093,6 +1099,19 @@ export class SubagentManager implements SubagentManagerContract {
       }
     }
 
+    if (record.kind === 'trigger' && record.ticket_id && !record.commentSent) {
+      const auditOutcome = await this.#postSilentExitFallback(record, code);
+      if (auditOutcome === 'suppressed') {
+        record.commentSent = true;
+        if (record.agent_id) {
+          this.circuitBreaker.recordSuccess(
+            CircuitBreaker.key(record.agent_id, record.ticket_id, record.role || ''),
+          );
+        }
+        return;
+      }
+    }
+
     // Circuit-breaker (ticket 27806095, defect ②/③). Ticket triggers only —
     // count non-transient exits per (agent, ticket, role); open + pend when the
     // threshold is crossed, OR immediately for a non-retryable signature
@@ -1172,13 +1191,7 @@ export class SubagentManager implements SubagentManagerContract {
     // room_id branch above and by ChatSessionManager's fallback, so we skip
     // them here. This system-attributed comment is what the server trigger-loop
     // guard drops, so it never re-fires the loop.
-    if (record.ticket_id && !record.commentSent) {
-      try {
-        await this.#postSilentExitFallback(record, code);
-      } catch (err: any) {
-        log(`Subagent silent-exit fallback failed pid=${pid}: ${err?.message ?? err}`);
-      }
-    } else if (record.ticket_id && code !== 0) {
+    if (record.ticket_id && record.commentSent && code !== 0) {
       log(
         `Subagent post-comment exit (exit=${code ?? 'null'}) — deliverable already persisted, ` +
           `suppressing silent-exit fallback ticket=${record.ticket_id.slice(0, 8)}`,
@@ -1433,9 +1446,12 @@ export class SubagentManager implements SubagentManagerContract {
    *  `TicketSessionManager#postSilentExitFallback` so the board sees
    *  identical fallback rows whether the subagent ran one-shot or in a
    *  persistent CLI child. Best-effort: a failed POST is logged. */
-  async #postSilentExitFallback(record: SubagentRecord, code: number | null): Promise<void> {
+  async #postSilentExitFallback(
+    record: SubagentRecord,
+    code: number | null,
+  ): Promise<'created' | 'suppressed' | 'failed'> {
     const ticketId = record.ticket_id || '';
-    if (!ticketId) return;
+    if (!ticketId) return 'failed';
     const tail = this.#collectTail(record);
     const exitLabel = code === null ? 'null' : String(code);
     const reasonLabel = code === 0
@@ -1462,11 +1478,15 @@ export class SubagentManager implements SubagentManagerContract {
       `Subagent silent-exit fallback dispatched ticket=${ticketId.slice(0, 8)} pid=${record.pid} ` +
         `cli=${record.cli_type} exit=${exitLabel} trigger=${triggerId.slice(0, 8) || '-'} outputLen=${tail.length}`,
     );
-    await postSilentExitSystemComment(this.#config, ticketId, {
+    return postSilentExitSystemComment(this.#config, ticketId, {
       content: body,
       exit_code: code,
       cycle_trigger_id: triggerId,
+      role: record.role || '',
       actor_name: 'agent-manager',
+      agent_id: record.agent_id || undefined,
+      subagent_session_id: record.audit_session_id || String(record.pid),
+      cycle_started_at: new Date(record.started_at).toISOString(),
     });
   }
 

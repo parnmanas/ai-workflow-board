@@ -492,9 +492,16 @@ export async function postSilentExitSystemComment(
     cycle_trigger_id?: string;
     role?: string;
     actor_name?: string;
+    agent_id?: string;
+    subagent_session_id?: string;
+    cycle_started_at?: string;
   },
-): Promise<boolean> {
-  if (!ticketId || !body.content) return false;
+): Promise<'created' | 'suppressed' | 'failed'> {
+  if (!ticketId || !body.content) return 'failed';
+  const graceDelayMs = config.silentExitVerifyDelayMs ?? 500;
+  if (graceDelayMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, graceDelayMs));
+  }
   try {
     const url = `${trimSlash(config.url)}/api/agent/tickets/${encodeURIComponent(ticketId)}/silent-exit-comment`;
     const resp = await fetch(url, {
@@ -511,12 +518,13 @@ export async function postSilentExitSystemComment(
       log(
         `silent-exit comment POST failed: ${resp.status} ${resp.statusText} (ticket=${ticketId})`,
       );
-      return false;
+      return 'failed';
     }
-    return true;
+    const result = await resp.json().catch(() => null);
+    return result?.suppressed === true ? 'suppressed' : 'created';
   } catch (err: any) {
     log(`silent-exit comment POST error: ${err?.message ?? err} (ticket=${ticketId})`);
-    return false;
+    return 'failed';
   }
 }
 

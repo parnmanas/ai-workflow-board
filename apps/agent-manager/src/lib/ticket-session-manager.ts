@@ -143,6 +143,7 @@ export class TicketSessionManager
    *  the system comment can correlate it with the AWB trigger that
    *  produced the dead cycle. */
   #lastTriggerId = new Map<number, string>();
+  #lastTriggerStartedAt = new Map<number, number>();
   /** sessionKey 별 연속 억제 횟수(ticket 7c3ba9cf). `tryReserveDispatch` 가
    *  살아있는(비-stale) 예약 때문에 dispatch 를 억제할 때마다 증가하고, 예약이
    *  새로 서거나(fresh reserve) evict(TTL/valve)되거나 `releaseDispatch` 로
@@ -473,6 +474,7 @@ export class TicketSessionManager
       // metadata should point at THIS trigger, not the one that started
       // the session.
       if (spec.triggerId) this.#lastTriggerId.set(sess.pid, spec.triggerId);
+      this.#lastTriggerStartedAt.set(sess.pid, Date.now());
       this._sendFollowUp(sess, this.#composeTriggerTurn(spec));
       if (spec.agentId && !sess.agentId) sess.agentId = spec.agentId;
       return { dispatched: true, pid: sess.pid };
@@ -555,6 +557,7 @@ export class TicketSessionManager
         // fallback can correlate the dead cycle back to its origin in
         // ticket activity / manager logs.
         if (spec.triggerId) this.#lastTriggerId.set(spawned.pid, spec.triggerId);
+        this.#lastTriggerStartedAt.set(spawned.pid, Date.now());
         // 폴백 모델 respawn 클로저 (ticket 61f4dd18). 주 모델이 폴백-적격
         // 실패(usage cap / model unavailable)로 산출물 없이 죽으면 _onChildExit
         // 이 다음 체인 인덱스로 이걸 호출한다. dispatchTrigger 를 재진입하지
@@ -1018,6 +1021,7 @@ export class TicketSessionManager
       this.#movingCue.delete(sess.pid);
       this.#commentSent.delete(sess.pid);
       this.#lastTriggerId.delete(sess.pid);
+      this.#lastTriggerStartedAt.delete(sess.pid);
       return;
     }
 
@@ -1025,6 +1029,7 @@ export class TicketSessionManager
     // dispatch the fallback after deleting the tracking entries.
     let commented = this.#commentSent.has(sess.pid);
     const triggerId = this.#lastTriggerId.get(sess.pid) || '';
+    const cycleStartedAt = this.#lastTriggerStartedAt.get(sess.pid) ?? sess.startedAt;
     const ticketId: string = sess.ticketId || '';
     const role: string = sess.role || '';
 
@@ -1041,6 +1046,7 @@ export class TicketSessionManager
     this.#movingCue.delete(sess.pid);
     this.#commentSent.delete(sess.pid);
     this.#lastTriggerId.delete(sess.pid);
+    this.#lastTriggerStartedAt.delete(sess.pid);
 
     // Watchdog UNHEALTHY respawn (ticket 54a66701). When the health watchdog
     // SIGTERM'd this session for going unresponsive (#killUnhealthy set
@@ -1227,6 +1233,21 @@ export class TicketSessionManager
       }
     }
 
+    const auditOutcome = await this.#postSilentExitFallback(
+      sess,
+      code,
+      triggerId,
+      role,
+      tail,
+      cycleStartedAt,
+    );
+    if (auditOutcome === 'suppressed') {
+      if (sess.agentId) {
+        this.circuitBreaker.recordSuccess(CircuitBreaker.key(sess.agentId, ticketId, role));
+      }
+      return;
+    }
+
     // Circuit-breaker: record non-transient exits. Transient signals
     // (143/SIGTERM, 137/SIGKILL) are the zombie-reap / restart path and
     // must NOT count — the agent will be re-dispatched normally. A harness
@@ -1252,7 +1273,6 @@ export class TicketSessionManager
       }
     }
 
-    await this.#postSilentExitFallback(sess, code, triggerId, role, tail);
   }
 
   /** Post the silent-exit `system` comment via the agent-key REST endpoint.
@@ -1264,7 +1284,8 @@ export class TicketSessionManager
     triggerId: string,
     role: string,
     tail: string,
-  ): Promise<void> {
+    cycleStartedAt: number,
+  ): Promise<'created' | 'suppressed' | 'failed'> {
     const ticketId: string = sess.ticketId || '';
     const exitLabel = code === null ? 'null' : String(code);
     const reasonLabel = code === 0
@@ -1293,12 +1314,15 @@ export class TicketSessionManager
     // attributes the system comment to the agent that owned this session.
     // Falls back to the manager's own apiKey otherwise.
     const cfg = { ...this._config, apiKey: sess._effectiveApiKey || this._config.apiKey };
-    await postSilentExitSystemComment(cfg, ticketId, {
+    return postSilentExitSystemComment(cfg, ticketId, {
       content: body,
       exit_code: code,
       cycle_trigger_id: triggerId,
       role,
       actor_name: 'agent-manager',
+      agent_id: sess.agentId || undefined,
+      subagent_session_id: sess.sessionKey,
+      cycle_started_at: new Date(cycleStartedAt).toISOString(),
     });
   }
 

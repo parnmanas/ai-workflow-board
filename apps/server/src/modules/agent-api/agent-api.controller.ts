@@ -2,7 +2,7 @@ import { ApiTags, ApiSecurity } from '@nestjs/swagger';
 import { Controller, Get, Post, Body, Param, Query, Req, Res, UseGuards } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
-import { Repository, DataSource, EntityManager, IsNull } from 'typeorm';
+import { Repository, DataSource, EntityManager, IsNull, MoreThanOrEqual } from 'typeorm';
 import { Board } from '../../entities/Board';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { Ticket } from '../../entities/Ticket';
@@ -183,6 +183,11 @@ export class AgentApiController {
     const actorName = typeof body?.actor_name === 'string' && body.actor_name
       ? body.actor_name
       : 'agent-manager';
+    const agentId = typeof body?.agent_id === 'string' ? body.agent_id : '';
+    const subagentSessionId = typeof body?.subagent_session_id === 'string'
+      ? body.subagent_session_id
+      : '';
+    const cycleStartedAt = new Date(body?.cycle_started_at || 0);
 
     const metadata = {
       reason: 'silent_exit',
@@ -192,6 +197,45 @@ export class AgentApiController {
     };
 
     const commentRepo = this.dataSource.getRepository(Comment);
+
+    // The manager deliberately waits a short grace before calling this
+    // endpoint. Re-check the authoritative rows here, immediately before the
+    // conditional warning write, so a comment whose MCP response/output drain
+    // raced the child exit suppresses both the warning and breaker accounting.
+    // Exact trigger provenance wins. Persistent sessions cannot change their
+    // MCP headers between turns, so comments without a trigger id use the
+    // narrower session + dispatch-window fallback.
+    if (agentId && role && Number.isFinite(cycleStartedAt.getTime())) {
+      const candidates = await commentRepo.find({
+        where: {
+          ticket_id: ticketId,
+          author_type: 'agent',
+          author_id: agentId,
+          created_at: MoreThanOrEqual(cycleStartedAt),
+        },
+        order: { created_at: 'DESC' },
+        take: 50,
+      });
+      const persisted = candidates.find((candidate) => {
+        const candidateMetadata = this.safeParseMetadata(candidate.metadata);
+        if (candidateMetadata.author_role !== role) return false;
+        const candidateTrigger = typeof candidateMetadata.cycle_trigger_id === 'string'
+          ? candidateMetadata.cycle_trigger_id
+          : '';
+        if (cycleTriggerId && candidateTrigger === cycleTriggerId) return true;
+        if (candidateTrigger) return false;
+        return !!subagentSessionId &&
+          candidateMetadata.subagent_session_id === subagentSessionId;
+      });
+      if (persisted) {
+        this.logService.info(
+          'AgentApi',
+          `Silent-exit suppressed by persisted cycle comment: ticket=${ticketId.slice(0, 8)} comment=${persisted.id.slice(0, 8)}`,
+          { ticket_id: ticketId, comment_id: persisted.id, cycle_trigger_id: cycleTriggerId },
+        );
+        return res.status(200).json({ suppressed: true, comment_id: persisted.id });
+      }
+    }
 
     // Dedupe rule: if the most recent comment on this ticket already has the
     // same fingerprint (type='system' + reason + exit_code + author_role),

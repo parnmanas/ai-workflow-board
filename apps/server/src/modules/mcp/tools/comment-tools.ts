@@ -179,7 +179,10 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         caller?.subagentRole,
         caller?.subagentTicketId,
       );
-      const finalMetadata = mergeAuthorRoleIntoMetadata(metadata, resolvedAuthorRole);
+      const finalMetadata = stampCycleProvenance(
+        mergeAuthorRoleIntoMetadata(metadata, resolvedAuthorRole),
+        caller,
+      );
 
       // 억제 사유 3종(repeated_waiting_without_work_target / pending_user_action /
       // duplicate_terminal_acknowledgement) 전부를 실제 차단된 agent 귀속으로
@@ -574,7 +577,10 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         ticket_id, author_role, resolved.authorType, resolved.authorId,
         callerCtx?.subagentRole, callerCtx?.subagentTicketId,
       );
-      const askMetadata = mergeAuthorRoleIntoMetadata(undefined, resolvedAuthorRole);
+      const askMetadata = stampCycleProvenance(
+        mergeAuthorRoleIntoMetadata(undefined, resolvedAuthorRole),
+        callerCtx,
+      );
 
       // 저장 직전 재확인 (ticket be934f61 패턴, ticket 4f99a9f5) — 위 얼리
       // 가드 이후의 await 들이 여는 TOCTOU 창을 닫는다. freshPendingGateBlocked 참고.
@@ -702,7 +708,10 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         question.ticket_id, author_role, resolved.authorType, resolved.authorId,
         callerCtx?.subagentRole, callerCtx?.subagentTicketId,
       );
-      const answerMetadata = mergeAuthorRoleIntoMetadata(undefined, resolvedAuthorRole);
+      const answerMetadata = stampCycleProvenance(
+        mergeAuthorRoleIntoMetadata(undefined, resolvedAuthorRole),
+        callerCtx,
+      );
 
       // 저장 직전 재확인 (ticket be934f61 패턴, ticket 4f99a9f5) — 위 얼리
       // 가드 이후의 await 들이 여는 TOCTOU 창을 닫는다. freshPendingGateBlocked 참고.
@@ -779,10 +788,10 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         ticket_id, author_role, resolved.authorType, resolved.authorId,
         callerCtx?.subagentRole, callerCtx?.subagentTicketId,
       );
-      const decisionMetadata = mergeAuthorRoleIntoMetadata(
+      const decisionMetadata = stampCycleProvenance(mergeAuthorRoleIntoMetadata(
         references && references.length > 0 ? { references } : undefined,
         resolvedAuthorRole,
-      );
+      ), callerCtx);
 
       // 저장 직전 재확인 (ticket be934f61 패턴, ticket 4f99a9f5) — 위 얼리
       // 가드 이후의 await 들이 여는 TOCTOU 창을 닫는다. freshPendingGateBlocked 참고.
@@ -884,10 +893,10 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         ticket_id, author_role, resolved.authorType, resolved.authorId,
         callerCtx?.subagentRole, callerCtx?.subagentTicketId,
       );
-      const metadata = mergeAuthorRoleIntoMetadata(
+      const metadata = stampCycleProvenance(mergeAuthorRoleIntoMetadata(
         buildConsensusMetadata({ status, proposalId, by, override: effectiveOverride }),
         resolvedAuthorRole,
-      );
+      ), callerCtx);
 
       const commentRepo = dataSource.getRepository(Comment);
       const comment = await commentRepo.save(commentRepo.create({
@@ -1057,10 +1066,10 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         ticket_id, author_role, resolved.authorType, resolved.authorId,
         callerCtx?.subagentRole, callerCtx?.subagentTicketId,
       );
-      const metadata = mergeAuthorRoleIntoMetadata(
+      const metadata = stampCycleProvenance(mergeAuthorRoleIntoMetadata(
         buildProposalMetadata({ targetColumnId: destCol.id, targetColumnName: destCol.name, by }),
         resolvedAuthorRole,
-      );
+      ), callerCtx);
 
       const commentRepo = dataSource.getRepository(Comment);
       const comment = await commentRepo.save(commentRepo.create({
@@ -1196,13 +1205,13 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         ticket_id, author_role, resolved.authorType, resolved.authorId,
         callerCtx?.subagentRole, callerCtx?.subagentTicketId,
       );
-      const handoffMetadata = mergeAuthorRoleIntoMetadata({
+      const handoffMetadata = stampCycleProvenance(mergeAuthorRoleIntoMetadata({
         target_agent_id,
         target_agent_name: targetAgentDisplay,
         previous_assignee_id: previousAssigneeId || null,
         previous_assignee_name: previousAssigneeName || null,
         role: 'assignee',
-      }, resolvedAuthorRole);
+      }, resolvedAuthorRole), callerCtx);
 
       // 저장 직전 재확인 (ticket be934f61 패턴, ticket 4f99a9f5) — 위 얼리
       // 가드 이후의 await 들이 여는 TOCTOU 창을 닫는다. 코멘트 저장뿐 아니라
@@ -1291,4 +1300,13 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       return ok({ comment, ticket: { id: ticket.id, assignee_id: ticket.assignee_id, assignee: ticket.assignee } });
     }
   );
+}
+function stampCycleProvenance<T extends Record<string, unknown>>(
+  metadata: T,
+  caller: { subagentTriggerId?: string; subagentSessionId?: string } | null | undefined,
+): T {
+  return Object.assign(metadata, {
+    ...(caller?.subagentTriggerId ? { cycle_trigger_id: caller.subagentTriggerId } : {}),
+    ...(caller?.subagentSessionId ? { subagent_session_id: caller.subagentSessionId } : {}),
+  });
 }

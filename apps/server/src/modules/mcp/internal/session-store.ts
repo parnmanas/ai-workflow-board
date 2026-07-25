@@ -41,6 +41,8 @@ export interface McpAgentContext {
   // alongside role + ticket. Lets sensitive tools distinguish the post-Done
   // retrospective path from other reviewer wake-ups on the same ticket.
   subagentTriggerSource?: string;
+  subagentTriggerId?: string;
+  subagentSessionId?: string;
 }
 
 interface SessionEntry {

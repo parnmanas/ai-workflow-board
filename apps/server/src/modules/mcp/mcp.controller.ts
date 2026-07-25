@@ -509,6 +509,8 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       const subagentRoleHeader = String(req.headers['x-awb-subagent-role'] || '').toLowerCase().trim() || undefined;
       const subagentTicketIdHeader = String(req.headers['x-awb-subagent-ticket-id'] || '').trim() || undefined;
       const subagentTriggerSourceHeader = String(req.headers['x-awb-subagent-trigger-source'] || '').trim() || undefined;
+      const subagentTriggerIdHeader = String(req.headers['x-awb-subagent-trigger-id'] || '').trim() || undefined;
+      const subagentSessionIdHeader = String(req.headers['x-awb-subagent-session-id'] || '').trim() || undefined;
 
       // New session (initialization request — no session ID)
       if (req.method === 'POST') {
@@ -525,6 +527,8 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
               subagentRole: subagentRoleHeader,
               subagentTicketId: subagentTicketIdHeader,
               subagentTriggerSource: subagentTriggerSourceHeader,
+              subagentTriggerId: subagentTriggerIdHeader,
+              subagentSessionId: subagentSessionIdHeader,
             });
             // No separate agentId → server map: the push path derives the
             // live server from sessionStore on demand (getLatestServerForAgent),

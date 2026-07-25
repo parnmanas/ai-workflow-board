@@ -624,6 +624,7 @@ export class BaseSessionManager {
           if (monitorMeta?.ticket_id) headers['X-AWB-Subagent-Ticket-Id'] = monitorMeta.ticket_id;
           if (monitorMeta?.role) headers['X-AWB-Subagent-Role'] = monitorMeta.role;
           if (monitorMeta?.trigger_source) headers['X-AWB-Subagent-Trigger-Source'] = monitorMeta.trigger_source;
+          headers['X-AWB-Subagent-Session-Id'] = sessionKey;
           const mcpConfig = {
             mcpServers: {
               awb: {

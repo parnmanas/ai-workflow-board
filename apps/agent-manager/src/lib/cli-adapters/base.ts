@@ -277,6 +277,8 @@ export interface McpAttribution {
   ticketId?: string;
   role?: string;
   triggerSource?: string;
+  triggerId?: string;
+  sessionId?: string;
 }
 
 export interface SessionSpec {
