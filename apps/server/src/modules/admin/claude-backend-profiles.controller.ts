@@ -113,7 +113,11 @@ export class ClaudeBackendProfilesController {
     const name = String(body?.name ?? current.name).trim();
     if (!name) return res.status(400).json({ error: 'name is required' });
     if (!checked.ok) return res.status(400).json({ error: checked.error });
-    Object.assign(current, runtimeToProfileEntity(checked.value[0], name));
+    const runtime = checked.value[0];
+    if (runtime.credential_ref && !(await this.dataSource.getRepository(Credential).findOne({ where: { id: runtime.credential_ref } }))) {
+      return res.status(400).json({ error: 'credential_ref does not exist' });
+    }
+    Object.assign(current, runtimeToProfileEntity(runtime, name));
     try {
       const saved = await repo.save(current);
       return res.json({ ...publicProfile(saved), impact: await this.impact(id) });

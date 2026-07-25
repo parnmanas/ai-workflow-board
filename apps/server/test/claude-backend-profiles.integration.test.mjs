@@ -182,6 +182,41 @@ describe('Claude backend profile integration', () => {
     assert.deepEqual(await authoritativeWorkspaceRuntimeProfiles(ds, refreshed), []);
   });
 
+  it('rejects a missing credential_ref on update without changing the profile and accepts an existing credential', async () => {
+    const missingCredentialId = randomUUID();
+    const rejected = await apiRequest(baseUrl, `/admin/claude-backend-profiles/${profileA.id}`, {
+      token: adminToken,
+      method: 'PATCH',
+      body: { credential_ref: missingCredentialId, credential_required: true },
+    });
+    assert.equal(rejected.status, 400, JSON.stringify(rejected.data));
+    assert.equal(rejected.data.error, 'credential_ref does not exist');
+    assert.equal(
+      (await ds.getRepository('ClaudeBackendProfile').findOneByOrFail({ id: profileA.id })).credential_ref,
+      secretCredentialId,
+    );
+
+    const replacementCredentialId = randomUUID();
+    await ds.getRepository('Credential').save(ds.getRepository('Credential').create({
+      id: replacementCredentialId,
+      workspace_id: null,
+      name: 'replacement credential',
+      provider: 'anthropic',
+      encrypted_data: 'REPLACEMENT-CIPHERTEXT',
+    }));
+    const accepted = await apiRequest(baseUrl, `/admin/claude-backend-profiles/${profileA.id}`, {
+      token: adminToken,
+      method: 'PATCH',
+      body: { credential_ref: replacementCredentialId, credential_required: true },
+    });
+    assert.equal(accepted.status, 200, JSON.stringify(accepted.data));
+    assert.equal(JSON.stringify(accepted.data).includes(replacementCredentialId), false);
+    assert.equal(
+      (await ds.getRepository('ClaudeBackendProfile').findOneByOrFail({ id: profileA.id })).credential_ref,
+      replacementCredentialId,
+    );
+  });
+
   it('converges legacy-only and mismatched workspace defaults when replacing a profile', async () => {
     let response = await createProfile(adminToken, 'profile-legacy-b', 'Profile Legacy B');
     assert.equal(response.status, 201, JSON.stringify(response.data));
