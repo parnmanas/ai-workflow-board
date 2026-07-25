@@ -305,6 +305,13 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
     // wakes a different ticket's roles.
     const isTerminal = (col as any).is_terminal === true || (col as any).kind === 'terminal';
     if (isTerminal) {
+      // A duplicate mirrored here by its canonical ticket is an audit object,
+      // not an independently completed workflow. In particular, do not let
+      // its terminal activity wake next_ticket, prerequisite dependents,
+      // reviewers, on-done actions, or QA. Keep this guard independent of the
+      // activity actor: imported/replayed activity can lose the original
+      // system attribution while the durable canonical link remains reliable.
+      if (ticket.canonical_ticket_id) return;
       if (log.action === 'moved') {
         await this._resolveCanonicalDuplicates(ticket, col, log.actor_id || '');
       }

@@ -75,6 +75,12 @@ export class TicketDuplicateService {
       const signals: string[] = [];
       const sameRoom = !!provenance.source_chat_room_id && candidate.source_chat_room_id === provenance.source_chat_room_id;
       const sameRelated = !!provenance.related_ticket_id && candidate.related_ticket_id === provenance.related_ticket_id;
+      const conflictingRoom = !!provenance.source_chat_room_id
+        && !!candidate.source_chat_room_id
+        && candidate.source_chat_room_id !== provenance.source_chat_room_id;
+      const conflictingRelated = !!provenance.related_ticket_id
+        && !!candidate.related_ticket_id
+        && candidate.related_ticket_id !== provenance.related_ticket_id;
       const sameTitle = !!normalized && this.normalizeTitle(candidate.title) === normalized;
       let overlap = 0;
       try {
@@ -85,9 +91,16 @@ export class TicketDuplicateService {
       if (sameRelated) signals.push('same_related_ticket');
       if (sameTitle) signals.push('normalized_title');
       if (overlap) signals.push('overlapping_scope');
+      if (conflictingRoom) signals.push('conflicting_source_room');
+      if (conflictingRelated) signals.push('conflicting_related_ticket');
       const anchor = sameRoom || sameRelated;
       const corroborated = sameTitle || overlap > 0;
-      const confidence = anchor && corroborated ? 100 : anchor || (sameTitle && overlap > 0) ? 60 : 0;
+      const hasStrongConflict = conflictingRoom || conflictingRelated;
+      const confidence = anchor && corroborated && !hasStrongConflict
+        ? 100
+        : anchor || (sameTitle && overlap > 0)
+          ? 60
+          : 0;
       if (confidence) matches.push({ ticket_id: candidate.id, title: candidate.title, confidence, matched_signals: signals });
     }
     const high = matches.filter(m => m.confidence >= 100);
@@ -135,6 +148,14 @@ export class TicketDuplicateService {
       if (!report.pending_user_action) throw new Error('Ticket has no duplicate decision pending');
       let canonical: Ticket | null = null;
       if (candidateId) {
+        const pendingCandidate = await manager.getRepository(TicketDuplicateDecision).findOne({
+          where: {
+            report_ticket_id: report.id,
+            candidate_ticket_id: candidateId,
+            outcome: 'ambiguous_pending',
+          },
+        });
+        if (!pendingCandidate) throw new Error('Canonical candidate was not offered for this duplicate decision');
         canonical = await tickets.findOne({ where: { id: candidateId, workspace_id: report.workspace_id, canonical_ticket_id: IsNull() } });
         if (!canonical || canonical.id === report.id) throw new Error('Invalid canonical candidate');
       }
