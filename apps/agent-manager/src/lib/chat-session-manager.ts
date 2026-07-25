@@ -896,6 +896,24 @@ export class ChatSessionManager
     const useId = typeof block?.tool_use_id === 'string' ? block.tool_use_id : undefined;
     const ctx = pend && useId ? pend.get(useId) : undefined;
     if (!ctx || !pend || !useId) {
+      // The server now binds successful create/update refs directly to the
+      // final send_chat_room_message row. Its tool result echoes the persisted
+      // metadata so this legacy stream-capture fallback can discard only the
+      // refs that are already durable, preventing a second standalone card.
+      const boundRefs = Array.isArray(result?.metadata?.ticket_refs)
+        ? result.metadata.ticket_refs
+        : [];
+      if (boundRefs.length > 0) {
+        const boundKeys = new Set(
+          boundRefs.map((ref: any) => `${String(ref?.ticket_id || '')}\u0000${String(ref?.action || '')}`),
+        );
+        const captured = this.#capturedTicketRefs.get(pid) ?? [];
+        const remaining = captured.filter(
+          (ref) => !boundKeys.has(`${ref.ticket_id}\u0000${ref.action}`),
+        );
+        if (remaining.length > 0) this.#capturedTicketRefs.set(pid, remaining);
+        else this.#capturedTicketRefs.delete(pid);
+      }
       // Not a tracked ticket action — try the other tracked channels (each is a
       // no-op if useId isn't in ITS pending map, so calling all three is safe: a
       // given tool_use_id can only ever be pending in at most one of them).

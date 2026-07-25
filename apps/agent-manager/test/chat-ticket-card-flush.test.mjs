@@ -129,6 +129,31 @@ test('the common case (≤ per-message bound) still emits exactly one coalesced 
   assert.equal(cards[0].body.metadata.ticket_refs.length, 20, 'all 20 in the single card');
 });
 
+test('server-bound send metadata suppresses the legacy duplicate card post', async () => {
+  const mgr = new ChatSessionManager(makeConfig());
+  const sess = makeSess();
+  driveTurn(mgr, sess, [
+    createAction('bound-ticket'),
+    {
+      tool: 'send_chat_room_message',
+      input: { room_id: sess.roomId, content: 'created' },
+      result: {
+        message_id: 'message-1',
+        metadata: {
+          ticket_refs: [{ action: 'create', ticket_id: 'bound-ticket', title: 'bound-ticket' }],
+        },
+      },
+    },
+  ]);
+  await settle();
+
+  assert.equal(
+    cardPosts().length,
+    0,
+    'the manager must not post a second card after the server persisted it on the final reply',
+  );
+});
+
 test('only SUCCESSFUL, tracked actions count toward the chunks (errors + reads excluded)', async () => {
   const mgr = new ChatSessionManager(makeConfig());
   const sess = makeSess();
