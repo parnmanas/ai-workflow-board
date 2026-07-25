@@ -2514,19 +2514,24 @@ candidate's branch or move the ticket.
     const runtimeWorkspace = ticket.workspace_id
       ? await this.dataSource.getRepository(Workspace).findOne({ where: { id: ticket.workspace_id } })
       : null;
-    runtimeProfile = resolveCliRuntimeProfile(
-      parseCliRuntimeProfiles(runtimeWorkspace?.cli_runtime_profiles),
-      [
-        { source: 'agent', value: agent?.cli_runtime_profile },
-        { source: 'board', value: runtimeBoard?.cli_runtime_profile },
-        { source: 'workspace', value: runtimeWorkspace?.default_cli_runtime_profile },
-      ],
-    );
-    if (runtimeProfile?.credential_required && runtimeProfile.credential_ref !== agent?.credential_id) {
-      throw new Error(
-        `Claude backend profile "${runtimeProfile.id}" requires credential ${runtimeProfile.credential_ref}; ` +
-        `agent ${agent?.id ?? agentId} must select that credential before dispatch`,
+    // Claude backend profiles must be invisible to every other CLI. In
+    // particular, a workspace/board default must not alter Codex/Antigravity
+    // spawn model/cwd or make their dispatch depend on a Claude credential.
+    if (agent?.type === 'claude') {
+      runtimeProfile = resolveCliRuntimeProfile(
+        parseCliRuntimeProfiles(runtimeWorkspace?.cli_runtime_profiles),
+        [
+          { source: 'agent', value: agent.cli_runtime_profile },
+          { source: 'board', value: runtimeBoard?.cli_runtime_profile },
+          { source: 'workspace', value: runtimeWorkspace?.default_cli_runtime_profile },
+        ],
       );
+      if (runtimeProfile?.credential_required && runtimeProfile.credential_ref !== agent.credential_id) {
+        throw new Error(
+          `Claude backend profile "${runtimeProfile.id}" requires credential ${runtimeProfile.credential_ref}; ` +
+          `agent ${agent.id} must select that credential before dispatch`,
+        );
+      }
     }
 
     // ── base repo binding (ticket 8c3befa8) ──────────────────────────────────

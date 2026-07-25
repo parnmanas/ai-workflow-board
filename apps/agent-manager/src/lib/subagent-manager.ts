@@ -549,10 +549,14 @@ export class SubagentManager implements SubagentManagerContract {
     // them); they ride into buildOneshotSpawn and are ignored by adapters that
     // don't destructure them.
     const slice = selectEffortSlice(adapter.cliType, spec.effortPreset);
+    // Server-side resolution is Claude-only, but retain this guard for
+    // compatibility with older servers and hand-built dispatch events.
+    const claudeRuntimeProfile =
+      adapter.cliType === 'claude' ? spec.runtimeProfile : null;
     // Backend profile model is inseparable from its endpoint and therefore
     // wins over Anthropic-oriented per-agent/harness model defaults.
     const effectiveModel =
-      spec.runtimeProfile?.model ?? slice?.model ?? harness?.model ?? ctx?.model ?? null;
+      claudeRuntimeProfile?.model ?? slice?.model ?? harness?.model ?? ctx?.model ?? null;
     const effortFlag = slice?.effort ?? null;
     const ultracode = !!slice?.ultracode;
     if (slice && (effortFlag || ultracode || slice.model)) {
@@ -579,13 +583,13 @@ export class SubagentManager implements SubagentManagerContract {
     let configPathIsTemp = false;
     let runtimeLease: RuntimeLease | null = null;
     try {
-      if (adapter.cliType === 'claude' && spec.runtimeProfile) {
+      if (claudeRuntimeProfile) {
         runtimeLease = await startRuntimeProfile(
-          spec.runtimeProfile,
-          runtimeCredentialEnv(spec.runtimeProfile, ctx?.credential_id, ctx?.extra_env),
+          claudeRuntimeProfile,
+          runtimeCredentialEnv(claudeRuntimeProfile, ctx?.credential_id, ctx?.extra_env),
         );
         log(
-          `[subagent] Claude backend ready: profile=${spec.runtimeProfile.id} protocol=${spec.runtimeProfile.protocol}`,
+          `[subagent] Claude backend ready: profile=${claudeRuntimeProfile.id} protocol=${claudeRuntimeProfile.protocol}`,
         );
       }
       const descriptor = adapter.buildOneshotSpawn({
@@ -667,8 +671,8 @@ export class SubagentManager implements SubagentManagerContract {
           }),
         );
       }
-      if (adapter.cliType === 'claude' && spec.runtimeProfile?.args?.length) {
-        descriptor.args.push(...spec.runtimeProfile.args);
+      if (claudeRuntimeProfile?.args?.length) {
+        descriptor.args.push(...claudeRuntimeProfile.args);
       }
 
       // See base-session-manager: `delegation.claudeBin` is claude-only;
@@ -726,7 +730,7 @@ export class SubagentManager implements SubagentManagerContract {
         stdio: descriptor.stdio || ['ignore', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',
         windowsHide: true,
-        cwd: spec.runtimeProfile?.cwd || effectiveCwd,
+        cwd: claudeRuntimeProfile?.cwd || effectiveCwd,
         // harnessEnv merges LAST: a per-dispatch harness model must beat the
         // per-agent extra_env baked at spawn_agent time (deepseek's
         // ANTHROPIC_MODEL — flag/env agreement, see DeepSeekCliAdapter).

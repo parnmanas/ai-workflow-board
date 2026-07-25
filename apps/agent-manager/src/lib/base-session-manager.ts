@@ -528,11 +528,15 @@ export class BaseSessionManager {
     // applied at session CREATION only — a live session's --effort flag and
     // the ultracode first-turn keyword are fixed at spawn.
     const slice = selectEffortSlice(adapter.cliType, effortPreset);
+    // The server normally filters Claude backend profiles before emitting the
+    // dispatch event. Keep the manager boundary defensive as older/mixed
+    // servers may still send one for a non-Claude agent.
+    const claudeRuntimeProfile = adapter.cliType === 'claude' ? runtimeProfile : null;
     // A selected Claude backend profile is an endpoint+model pair. Its model
     // must travel with that endpoint rather than being replaced by an
     // Anthropic-oriented Agent/harness default.
     const effectiveModel =
-      runtimeProfile?.model ?? slice?.model ?? harness?.model ?? agentContext?.model ?? null;
+      claudeRuntimeProfile?.model ?? slice?.model ?? harness?.model ?? agentContext?.model ?? null;
     const effortFlag = slice?.effort ?? null;
     const ultracode = !!slice?.ultracode;
     if (slice && (effortFlag || ultracode || slice.model)) {
@@ -561,17 +565,17 @@ export class BaseSessionManager {
     let pidPath: string | null = null;
     let runtimeLease: RuntimeLease | null = null;
     try {
-      if (adapter.cliType === 'claude' && runtimeProfile) {
+      if (claudeRuntimeProfile) {
         runtimeLease = await startRuntimeProfile(
-          runtimeProfile,
+          claudeRuntimeProfile,
           runtimeCredentialEnv(
-            runtimeProfile,
+            claudeRuntimeProfile,
             agentContext?.credential_id,
             agentContext?.extra_env,
           ),
         );
         log(
-          `${this.#logTag} Claude backend ready: profile=${runtimeProfile.id} protocol=${runtimeProfile.protocol}`,
+          `${this.#logTag} Claude backend ready: profile=${claudeRuntimeProfile.id} protocol=${claudeRuntimeProfile.protocol}`,
         );
       }
       let descriptor = adapter.buildSessionSpawn({
@@ -641,8 +645,8 @@ export class BaseSessionManager {
           ultracode,
         });
       }
-      if (adapter.cliType === 'claude' && runtimeProfile?.args?.length) {
-        descriptor.args.push(...runtimeProfile.args);
+      if (claudeRuntimeProfile?.args?.length) {
+        descriptor.args.push(...claudeRuntimeProfile.args);
       }
 
       // `delegation.claudeBin` is the legacy operator override for the
@@ -695,7 +699,7 @@ export class BaseSessionManager {
         stdio: descriptor.stdio || ['pipe', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',
         windowsHide: true,
-        cwd: runtimeProfile?.cwd || effectiveCwd,
+        cwd: claudeRuntimeProfile?.cwd || effectiveCwd,
         // harnessEnv merges LAST — see SubagentManager.spawn for why a
         // per-dispatch harness model must beat the per-agent extra_env.
         // Board env_vars (ticket 354d336b) merge right after baseEnv so they

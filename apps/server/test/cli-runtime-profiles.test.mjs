@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import {
   resolveCliRuntimeProfile,
@@ -25,6 +28,12 @@ const profiles = [
     },
   },
 ];
+
+const here = dirname(fileURLToPath(import.meta.url));
+const triggerSource = await readFile(
+  join(here, '..', 'src', 'modules', 'agents', 'trigger-loop.service.ts'),
+  'utf8',
+);
 
 test('validates a configuration-only backend catalog and resolves Agent > Board > Workspace', () => {
   const checked = validateCliRuntimeProfiles(profiles);
@@ -67,5 +76,22 @@ test('missing selected profile fails with its inheritance source', () => {
   assert.throws(
     () => resolveCliRuntimeProfile(profiles, [{ source: 'agent', value: 'deleted' }]),
     /Claude backend profile "deleted".*agent.*does not exist/,
+  );
+});
+
+test('trigger dispatch resolves and validates Claude backend profiles only for Claude agents', () => {
+  const guard = triggerSource.match(
+    /if \(agent\?\.type === 'claude'\) \{[\s\S]*?runtimeProfile = resolveCliRuntimeProfile\([\s\S]*?credential_required[\s\S]*?\n    \}/,
+  );
+  assert.ok(guard, 'profile resolution and credential validation must share an agent.type === claude guard');
+  assert.match(
+    triggerSource,
+    /let runtimeProfile: CliRuntimeProfile \| null = null;/,
+    'non-Claude SSE payload must retain a null cli_runtime_profile',
+  );
+  assert.doesNotMatch(
+    triggerSource.slice(guard.index + guard[0].length),
+    /runtimeProfile = resolveCliRuntimeProfile/,
+    'profile resolution must not have an unguarded fallback',
   );
 });
