@@ -73,6 +73,8 @@ import type {
   RepoFileContent,
   WorkflowHealthRollup,
   WorkflowHealthLongTermUsage,
+  ClaudeBackendProfile,
+  WorkspaceClaudeBackendProfiles,
 } from './types';
 
 const BASE = '/api';
@@ -246,6 +248,26 @@ export const api = {
     }),
   removeWorkspaceMember: (wsId: string, userId: string) =>
     request<any>(`/workspaces/${wsId}/members/${userId}`, { method: 'DELETE' }),
+  getWorkspaceClaudeBackendProfiles: (wsId: string) =>
+    request<WorkspaceClaudeBackendProfiles>(`/workspaces/${wsId}/claude-backend-profiles`),
+  updateWorkspaceClaudeBackendProfiles: (
+    wsId: string,
+    data: { allowed_profile_ids: string[]; default_profile_id: string | null },
+  ) => request<WorkspaceClaudeBackendProfiles>(`/workspaces/${wsId}/claude-backend-profiles`, {
+    method: 'PATCH', body: JSON.stringify(data),
+  }),
+  getClaudeBackendProfiles: () =>
+    request<{ profiles: ClaudeBackendProfile[]; default_profile_id: string | null }>('/admin/claude-backend-profiles'),
+  createClaudeBackendProfile: (data: ClaudeBackendProfile) =>
+    request<ClaudeBackendProfile>('/admin/claude-backend-profiles', { method: 'POST', body: JSON.stringify(data) }),
+  updateClaudeBackendProfile: (id: string, data: Partial<ClaudeBackendProfile>) =>
+    request<ClaudeBackendProfile>(`/admin/claude-backend-profiles/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  getClaudeBackendProfileImpact: (id: string) =>
+    request<any>(`/admin/claude-backend-profiles/${id}/impact`),
+  deleteClaudeBackendProfile: (id: string, options?: { replacement_profile_id?: string; detach?: boolean }) =>
+    request<any>(`/admin/claude-backend-profiles/${id}`, { method: 'DELETE', body: JSON.stringify(options || {}) }),
+  setDefaultClaudeBackendProfile: (profile_id: string | null) =>
+    request<any>('/admin/claude-backend-profiles/default', { method: 'PATCH', body: JSON.stringify({ profile_id }) }),
 
   // ─── Workspace Roles (v0.34) ───────────────────────────
   // Workspace-scoped workflow role catalog. The three legacy slugs

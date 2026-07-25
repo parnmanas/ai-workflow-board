@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Ticket, Agent, Channel, ActivityLog, Comment, CommentType, User, TicketAttachmentMeta, Resource, RepoBranch, TicketPrerequisiteRow, Action, EffortPreset, EffortPresetsConfig, BUILTIN_EFFORT_PRESETS, HandoffSpec } from '../types';
+import { Ticket, Agent, Channel, ActivityLog, Comment, CommentType, User, TicketAttachmentMeta, Resource, RepoBranch, TicketPrerequisiteRow, Action, EffortPreset, EffortPresetsConfig, BUILTIN_EFFORT_PRESETS, HandoffSpec, ClaudeBackendProfile } from '../types';
 import { api, TicketRoleAssignmentRow, ConsensusView, ConsensusParty, getActiveWorkspaceId, rawResourceUrl } from '../api';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
@@ -850,6 +850,16 @@ export default function TicketPanel({
   // Abstract effort preset id ('' = board default / no override). Resolved
   // per-CLI on the server at dispatch; here it's just the preset slug.
   const [effortPreset, setEffortPreset] = useState<string>(activeTicket.effort_preset || '');
+  const [runtimeProfile, setRuntimeProfile] = useState<string>(activeTicket.cli_runtime_profile || '');
+  const [runtimeProfiles, setRuntimeProfiles] = useState<ClaudeBackendProfile[]>([]);
+  useEffect(() => {
+    if (!workspaceId) { setRuntimeProfiles([]); return; }
+    let alive = true;
+    api.getWorkspaceClaudeBackendProfiles(workspaceId).then(data => {
+      if (alive) setRuntimeProfiles(data.profiles.filter(profile => data.allowed_profile_ids.includes(profile.id)));
+    }).catch(() => { if (alive) setRuntimeProfiles([]); });
+    return () => { alive = false; };
+  }, [workspaceId]);
   const [reviewerId, setReviewerId] = useState(activeTicket.reviewer_id || '');
   const [selectedChannelIds, setSelectedChannelIds] = useState<string[]>(activeTicket.channel_ids || []);
   // Base repository / branch picker state. The repo list is filtered to
@@ -960,6 +970,7 @@ export default function TicketPanel({
     setDescription(activeTicket.description);
     setPriority(activeTicket.priority);
     setEffortPreset(activeTicket.effort_preset || '');
+    setRuntimeProfile(activeTicket.cli_runtime_profile || '');
     setSelectedChannelIds(activeTicket.channel_ids || []);
     setBaseRepoId(activeTicket.base_repo_resource_id || '');
     setBaseBranch(activeTicket.base_branch || '');
@@ -1281,6 +1292,9 @@ export default function TicketPanel({
       // null/'' as "use the board default at dispatch").
       out.effort_preset = effortPreset || null;
     }
+    if ((runtimeProfile || '') !== (activeTicket.cli_runtime_profile || '')) {
+      out.cli_runtime_profile = runtimeProfile || null;
+    }
     if (!channelIdsEqual(selectedChannelIds, activeTicket.channel_ids || [])) {
       out.channel_ids = selectedChannelIds;
     }
@@ -1308,9 +1322,9 @@ export default function TicketPanel({
     }
     return out;
   }, [
-    title, description, priority, effortPreset, selectedChannelIds, baseRepoId, baseBranch, nextTicketId,
+    title, description, priority, effortPreset, runtimeProfile, selectedChannelIds, baseRepoId, baseBranch, nextTicketId,
     onDoneActionIds, handoffSpec,
-    activeTicket.title, activeTicket.description, activeTicket.priority, activeTicket.effort_preset,
+    activeTicket.title, activeTicket.description, activeTicket.priority, activeTicket.effort_preset, activeTicket.cli_runtime_profile,
     activeTicket.channel_ids, activeTicket.base_repo_resource_id, activeTicket.base_branch,
     activeTicket.next_ticket_id, activeTicket.on_done_action_ids, activeTicket.handoff_spec,
   ]);
@@ -1366,6 +1380,7 @@ export default function TicketPanel({
     setDescription(activeTicket.description);
     setPriority(activeTicket.priority);
     setEffortPreset(activeTicket.effort_preset || '');
+    setRuntimeProfile(activeTicket.cli_runtime_profile || '');
     setSelectedChannelIds(activeTicket.channel_ids || []);
     setBaseRepoId(activeTicket.base_repo_resource_id || '');
     setBaseBranch(activeTicket.base_branch || '');
@@ -1376,7 +1391,7 @@ export default function TicketPanel({
     );
     setRoleDrafts({});
   }, [
-    activeTicket.title, activeTicket.description, activeTicket.priority, activeTicket.effort_preset,
+    activeTicket.title, activeTicket.description, activeTicket.priority, activeTicket.effort_preset, activeTicket.cli_runtime_profile,
     activeTicket.channel_ids, activeTicket.base_repo_resource_id, activeTicket.base_branch,
     activeTicket.next_ticket_id, activeTicket.on_done_action_ids, activeTicket.handoff_spec,
   ]);
@@ -2588,6 +2603,20 @@ export default function TicketPanel({
                   <option value="medium">Medium</option>
                   <option value="high">High</option>
                   <option value="critical">Critical</option>
+                </select>
+              </div>
+
+              <div>
+                <label style={labelStyle}>Claude backend (run override)</label>
+                <select value={runtimeProfile} onChange={e => setRuntimeProfile(e.target.value)}
+                  style={{
+                    background: tokens.colors.surfaceCard, border: `2px solid ${tokens.colors.border}`,
+                    borderRadius: tokens.radii.md, padding: '5px 8px',
+                    color: tokens.colors.textStrong, fontSize: '12px', fontWeight: 600, width: '100%',
+                  }}>
+                  <option value="">Inherit Agent / Board / Workspace</option>
+                  <option value="none">Anthropic default (explicit)</option>
+                  {runtimeProfiles.map(profile => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
                 </select>
               </div>
 

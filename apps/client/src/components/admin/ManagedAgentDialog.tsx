@@ -133,10 +133,8 @@ export default function ManagedAgentDialog({
     api.listCredentials(wsId)
       .then((rows) => { if (alive) setCredentials(rows); })
       .catch(() => { if (alive) setCredentials([]); });
-    api.getWorkspace(wsId).then(workspace => {
-      if (!alive) return;
-      try { setRuntimeProfiles(JSON.parse(workspace.cli_runtime_profiles || '[]')); }
-      catch { setRuntimeProfiles([]); }
+    api.getWorkspaceClaudeBackendProfiles(wsId).then(data => {
+      if (alive) setRuntimeProfiles(data.profiles.filter(profile => data.allowed_profile_ids.includes(profile.id)));
     }).catch(() => { if (alive) setRuntimeProfiles([]); });
     return () => { alive = false; };
   }, [isOpen, mode, agent?.workspace_id]);

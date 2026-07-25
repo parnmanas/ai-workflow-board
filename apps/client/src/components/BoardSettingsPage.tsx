@@ -5,7 +5,7 @@ import {
   Board, BoardWithCards, PromptTemplate, BoardMovePreview, MoveBlocker, MoveRemedy,
   EffortPreset, EffortPresetsConfig, EffortLevel, BUILTIN_EFFORT_PRESETS, Resource,
   BoardLesson,
-  Workspace, RuntimeProfileConfig,
+  Workspace, ClaudeBackendProfile,
 } from '../types';
 import MoveBlockerList from './MoveBlockerList';
 import { useBoard } from '../hooks/useBoard';
@@ -41,6 +41,7 @@ export default function BoardSettingsPage() {
   // settings without a crash.
   const [promptTemplates, setPromptTemplates] = useState<PromptTemplate[]>([]);
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
+  const [runtimeProfiles, setRuntimeProfiles] = useState<ClaudeBackendProfile[]>([]);
   useEffect(() => {
     if (!wsId) return;
     let cancelled = false;
@@ -48,6 +49,9 @@ export default function BoardSettingsPage() {
       .then((list) => { if (!cancelled) setPromptTemplates(list); })
       .catch(() => { if (!cancelled) setPromptTemplates([]); });
     api.getWorkspace(wsId).then(value => { if (!cancelled) setWorkspace(value); }).catch(() => {});
+    api.getWorkspaceClaudeBackendProfiles(wsId)
+      .then(value => { if (!cancelled) setRuntimeProfiles(value.profiles.filter(p => value.allowed_profile_ids.includes(p.id))); })
+      .catch(() => { if (!cancelled) setRuntimeProfiles([]); });
     return () => { cancelled = true; };
   }, [wsId]);
 
@@ -227,12 +231,7 @@ export default function BoardSettingsPage() {
             } catch (err: any) { showToast(err?.message || 'Failed to save Claude backend profile', 'error'); }
           }}>
             <option value="">Inherit workspace</option><option value="none">None</option>
-            {(() => {
-              try {
-                return (JSON.parse(workspace?.cli_runtime_profiles || '[]') as RuntimeProfileConfig[])
-                  .map(profile => <option key={profile.id} value={profile.id}>{profile.id}</option>);
-              } catch { return null; }
-            })()}
+            {runtimeProfiles.map(profile => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
           </select>
         </section>
         <EffortPresetsSetting

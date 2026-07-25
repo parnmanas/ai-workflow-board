@@ -1065,6 +1065,9 @@ export interface Ticket {
   // dispatch into per-CLI options). null/empty = "no effort override", spawn
   // exactly as before. Not a CLI flag — the server maps it per CLI.
   effort_preset?: string | null;
+  // Per-run Claude backend override. null inherits; "none" is explicit
+  // native Anthropic; otherwise an allowed global profile id.
+  cli_runtime_profile?: string | null;
   // Cross-board handoff relay (ticket ac21a745). Decoded to an object on every
   // read path (loadTicketFull / parseTicket / board projection). When it has
   // hops, completing this ticket auto-creates a follow-up on the first hop's
@@ -1410,12 +1413,24 @@ export interface Workspace {
   harness_config?: string | null;
   cli_runtime_profiles?: string | null;
   default_cli_runtime_profile?: string | null;
+  default_claude_backend_profile_id?: string | null;
   // AWB 어시스턴트 에이전트 id (에픽 bf65ca00 · S2). null/미포함 = 미지정 —
   // Chat-first 랜딩은 임의 에이전트를 고르지 않고 관리자에게 지정을 안내하는 empty
   // state 를 렌더한다. 설정은 관리자 전용 workspace PATCH 로만 가능.
   assistant_agent_id?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface ClaudeBackendProfile extends RuntimeProfileConfig {
+  name: string;
+  credential_status?: 'configured' | 'missing';
+}
+
+export interface WorkspaceClaudeBackendProfiles {
+  profiles: ClaudeBackendProfile[];
+  allowed_profile_ids: string[];
+  default_profile_id: string | null;
 }
 
 // Phase 2 chat types — backed by server ChatMessage entity and ChatService aggregations.

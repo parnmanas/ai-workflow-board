@@ -130,6 +130,7 @@ export default function Sidebar({ overlay, isOpen, onClose, wsId, boards, contai
     { key: 'channels',         path: `/ws/${wsId}/channels`,         label: 'Channels',         icon: 'H' },
     { key: 'api-keys',         path: `/ws/${wsId}/api-keys`,         label: 'API Keys',         icon: 'K' },
     { key: 'roles',            path: `/ws/${wsId}/roles`,            label: 'Roles',            icon: 'O' },
+    { key: 'claude-backend-profiles', path: `/ws/${wsId}/claude-backend-profiles`, label: 'Claude Profiles', icon: 'B' },
   ];
   // Workspace Settings hosts the workspace-default agent harness — operator
   // surface, so it only renders for admins (the page itself also gates).
@@ -146,6 +147,7 @@ export default function Sidebar({ overlay, isOpen, onClose, wsId, boards, contai
     { key: 'admin-column-policies', path: '/admin/column-policies', label: 'Column Policies', icon: 'P' },
     { key: 'admin-workflow-health', path: '/admin/workflow-health', label: 'Workflow Health', icon: 'H' },
     { key: 'admin-global-credentials', path: '/admin/global-credentials', label: 'Global Credentials', icon: 'K' },
+    { key: 'admin-claude-backend-profiles', path: '/admin/claude-backend-profiles', label: 'Claude Backend Profiles', icon: 'B' },
     { key: 'admin-settings', path: '/admin/settings', label: 'Settings',    icon: 'S' },
   ];
 

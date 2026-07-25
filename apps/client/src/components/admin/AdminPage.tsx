@@ -10,6 +10,7 @@ import SettingsManager from './SettingsManager';
 import ColumnPoliciesManager from './ColumnPoliciesManager';
 import WorkflowHealthDashboard from './WorkflowHealthDashboard';
 import CredentialManager from './CredentialManager';
+import ClaudeBackendProfilesManager from './ClaudeBackendProfilesManager';
 import { tokens } from '../../tokens';
 
 const pageTitles: Record<string, { title: string; description?: string }> = {
@@ -21,6 +22,7 @@ const pageTitles: Record<string, { title: string; description?: string }> = {
   'column-policies': { title: 'Column Policies', description: 'Declarative column×role enforcement that catches stuck tickets' },
   'workflow-health': { title: 'Workflow Health', description: 'Respawn-storm halts, twins, and comment-pingpong suppression stats' },
   'global-credentials': { title: 'Global Credentials', description: 'Instance-level credentials shared across all workspaces' },
+  'claude-backend-profiles': { title: 'Claude Backend Profiles', description: 'Instance-wide Claude endpoints, models, credentials, and adapters' },
   settings: { title: 'Settings', description: 'System configuration' },
 };
 
@@ -48,6 +50,7 @@ export default function AdminPage() {
       <Route path="column-policies" element={<AdminRoute page="column-policies"><ColumnPoliciesManager /></AdminRoute>} />
       <Route path="workflow-health" element={<AdminRoute page="workflow-health"><WorkflowHealthDashboard /></AdminRoute>} />
       <Route path="global-credentials" element={<AdminRoute page="global-credentials"><CredentialManager globalMode /></AdminRoute>} />
+      <Route path="claude-backend-profiles" element={<AdminRoute page="claude-backend-profiles"><ClaudeBackendProfilesManager /></AdminRoute>} />
       <Route path="settings" element={<AdminRoute page="settings"><SettingsManager /></AdminRoute>} />
       <Route path="*" element={<Navigate to="/admin/users" replace />} />
     </Routes>

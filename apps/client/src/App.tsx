@@ -33,6 +33,7 @@ const WorkspaceActionsPage = lazy(() => import('./components/WorkspaceActionsPag
 const WorkspaceCredentialsPage = lazy(() => import('./components/WorkspaceCredentialsPage'));
 const WorkspaceRolesPage = lazy(() => import('./components/WorkspaceRolesPage'));
 const WorkspaceSettingsPage = lazy(() => import('./components/WorkspaceSettingsPage'));
+const WorkspaceClaudeBackendProfilesPage = lazy(() => import('./components/WorkspaceClaudeBackendProfilesPage'));
 const AgentDetailPage = lazy(() => import('./components/AgentDetailPage'));
 const ChatFirstHome = lazy(() => import('./components/ChatFirstHome'));
 
@@ -217,6 +218,7 @@ function AppContent() {
             <Route path="credentials" element={<WorkspaceCredentialsPage />} />
             <Route path="roles" element={<WorkspaceRolesPage />} />
             <Route path="settings" element={<WorkspaceSettingsPage />} />
+            <Route path="claude-backend-profiles" element={<WorkspaceClaudeBackendProfilesPage />} />
           </Route>
         </Route>
       </Routes>
